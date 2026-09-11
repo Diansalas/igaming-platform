@@ -219,9 +219,110 @@ when their owning stage (3–4) does.
 ### Specialist review pass
 
 `architect`, `identity-compliance`, `security`, `backend`, `qa`, and
-`code-reviewer` independently reviewed the Stage 2 diff (findings and
-resolutions to be appended here once reconciled — see the Stage 2
-completion report for the itemized outcome).
+`code-reviewer` each independently reviewed the Stage 2 diff. Full
+itemized findings are in the Stage 2 completion report; summary of what
+was found and fixed:
+
+- **Blocking, fixed**: migration `0008`'s *up* script (not just its
+  down script — see below) enabled `FORCE ROW LEVEL SECURITY` on `brands`
+  and read `tenant_config` (which has its own RLS) before backfilling
+  data between them, so on any real upgrade with existing `tenant_config`
+  rows the backfill silently copied zero rows before dropping the source
+  table — reproduced empirically by `code-reviewer` with seeded data.
+  Fixed by disabling `tenant_config`'s RLS immediately before the
+  backfill (it's dropped moments later anyway) and moving `brands`' own
+  RLS enablement to after the backfill, mirroring the down script's
+  already-fixed ordering. Re-verified by seeding a real `tenant_config`
+  row, running the migration, and confirming the row survived as a
+  `brands` row.
+- **Blocking, fixed**: `persons` (migration `0009`) had no RLS at all,
+  reasoned about as "platform-level like `jurisdictions`/`assets`" — but
+  unlike those, it's mutated by unauthenticated registration inside a
+  tenant-scoped transaction, so any tenant could read/modify another
+  tenant's `persons` rows, including the platform-level self-exclusion
+  status this table exists to protect. Fixed via migration `0015` (RLS:
+  unconditional `INSERT`, platform-scope-only `SELECT`/`UPDATE`/`DELETE`)
+  — see `docs/decisions/0015-persons-platform-scope-access-control.md`.
+- **Blocking, fixed**: `POST /v1/admin/tenants` created its tenant and
+  wrote its audit record in two *separate* transactions (only `CreateBrand`/
+  `CreateStaffUser` correctly did this atomically), so a failed audit
+  write was only logged while the handler still returned `201` — directly
+  contradicting ADR 0013's atomicity claim, caught independently by both
+  `architect` and `backend`. Fixed by giving `identity.CreateTenant` the
+  same `pgx.Tx`-based signature the other two already used.
+- **Blocking, fixed**: staff login's lockout identifier was built from the
+  *raw* request email while the actual account lookup normalized it
+  (lowercase + trim), so case/whitespace variants of the same address each
+  got a fresh `login_attempts` bucket — lockout never tripped against a
+  `platform_admin` account attacked this way. Fixed by normalizing once,
+  up front, and using that value everywhere; regression test
+  `TestStaffLogin_LockoutHoldsAcrossEmailCaseVariants` added.
+- **Blocking, fixed**: `audit_log`'s immutability trigger was `BEFORE
+  UPDATE OR DELETE FOR EACH ROW` only — Postgres row-level triggers never
+  fire on `TRUNCATE`, so the same non-superuser application role that
+  owns the table could have erased the entire trail with one statement.
+  Fixed via migration `0016` (a statement-level `BEFORE TRUNCATE`
+  trigger reusing the same deny function); manually verified `TRUNCATE
+  audit_log` now raises.
+- **Blocking, fixed**: `RotateSession`'s concurrent-refresh re-check read
+  `replaced_by_session_id`/`revoked_at` without a row lock under READ
+  COMMITTED, so two simultaneous refreshes of the same stolen token could
+  both succeed, producing two live chains with reuse detection never
+  triggering — flagged independently by both `architect` and
+  `code-reviewer`. Fixed by adding `FOR UPDATE` to the re-check;
+  regression test `TestRefreshRotation_ConcurrentRequestsRaceSafely`
+  (8-way concurrent refresh of one token, exactly 1 success) added.
+- **Should-fix, fixed**: `identity.CreateTenant`/`CreateBrand` didn't map
+  a unique-slug-violation to a domain error, so a duplicate slug returned
+  `500` instead of `409` (inconsistent with `RegisterPlayer`/
+  `CreateStaffUser`'s existing `ErrEmailTaken` pattern). Fixed with a new
+  `ErrSlugTaken`, wired into both handlers and the OpenAPI spec.
+- **Should-fix, fixed**: login responses were correctly indistinguishable
+  by status code between "unknown email" and "wrong password", but the
+  unknown-email branch returned before the Argon2 check, creating a
+  timing side-channel that could reveal account existence. Fixed with
+  `auth.DummyPasswordHash` — a fixed, valid hash with no real account —
+  verified against on the miss path so both branches pay the same cost.
+- **Should-fix, fixed**: refresh-token reuse (the platform's strongest
+  credential-theft signal) was only `logger.Warn`'d, landing solely in a
+  mutable application log despite ADR 0013's explicit stance against
+  that. Fixed by writing an `auth.session_reuse_detected` audit record
+  atomically with the chain revocation.
+- **Should-fix, fixed**: the login-failure audit entry for an email with
+  no matching account embedded that raw email in `metadata`, logging a
+  non-user's address — narrowed to drop it, documented in
+  `docs/architecture/16-privacy.md`.
+- **Should-fix, fixed**: `0007`'s `tenants.expected_licensee` `CASE`
+  expression had no `ELSE`, and a `NULL` referencing column silently
+  satisfies a composite FK — currently unreachable (the column-level
+  `CHECK` on `licensing_model` prevents a third value), but a future
+  migration adding one without updating the `CASE` would silently stop
+  enforcing. Closed with a defense-in-depth `CHECK` via migration `0017`.
+- **Should-fix, fixed**: the ADR-0013-documented `staff.login_failed`
+  scope-mismatch branch skipped `recordAttempt`, unlike every sibling
+  failure branch (currently unreachable given RLS, but inconsistent).
+- **Test-coverage gaps, closed**: `qa` found `GET /v1/me/sessions`/
+  `DELETE /v1/me/sessions/{id}` (including the session-ownership IDOR
+  guard) and every `audit.Record` call site had zero test coverage, and
+  no test exercised the refresh-rotation concurrency race. Closed with
+  `TestSessionManagement_ListAndRevoke`, `TestAuditLog_RecordsSecurityEvents`,
+  and `TestRefreshRotation_ConcurrentRequestsRaceSafely`; two integration
+  assertions tightened to specific Postgres SQLSTATEs
+  (`identity_integration_test.go`).
+- **Documented, not code-changed**: `sessions`' public-read RLS policy
+  (necessary — a refresh token carries no tenant hint to scope a lookup
+  by) gives any tenant-scoped connection read access to every tenant's
+  session metadata (IPs, user agents), safe today only because
+  `ListActiveSessions`/`RevokeSession` filter by `principal_id` in
+  application code. `security` and `code-reviewer` both flagged this as
+  should-fix, not blocking; documented explicitly in ADR 0013 as accepted
+  technical debt rather than silently left unmentioned. `architect` also
+  flagged `brands`' public-read policy as broader than strictly needed
+  (cross-tenant brand enumeration) — same disposition, tracked as debt,
+  not fixed this stage.
+- No specialist found scope creep against the Stage 2 DO-NOT-BUILD list,
+  no fake-completion claims, and no contradiction between the new ADRs
+  and Stage 0/1 decisions.
 
 ### Explicitly NOT built in Stage 2 (by design, per the Stage 2 DO-NOT-BUILD list)
 

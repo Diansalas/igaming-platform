@@ -16,7 +16,22 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
+// errSlugTaken wraps a unique-violation error from a slug-conflicting
+// insert into ErrSlugTaken, or passes through a wrapped generic error
+// otherwise. Shared by CreateTenant and CreateBrand.
+func errSlugTaken(op string, err error) error {
+	if db.IsUniqueViolation(err) {
+		return ErrSlugTaken
+	}
+	return fmt.Errorf("identity: %s: %w", op, err)
+}
+
 var ErrNotFound = errors.New("identity: not found")
+
+// ErrSlugTaken is returned when a tenant or brand slug collides with an
+// existing row's UNIQUE constraint - a plain client input conflict, not
+// a server fault (see db.IsUniqueViolation).
+var ErrSlugTaken = errors.New("identity: this slug is already in use")
 
 // Brand is the consumer-facing product a player registers/logs into.
 // Distinct from Tenant - see package doc.
@@ -65,7 +80,7 @@ func CreateBrand(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, name, slug 
 		b.ID, b.TenantID, b.Name, b.Slug, b.Status,
 	)
 	if err != nil {
-		return Brand{}, fmt.Errorf("identity: create brand: %w", err)
+		return Brand{}, errSlugTaken("create brand", err)
 	}
 	return b, nil
 }

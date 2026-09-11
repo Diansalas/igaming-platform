@@ -67,22 +67,28 @@ func newCreateTenantHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		t, err := identity.CreateTenant(r.Context(), deps.DB, req.Name, req.Slug, req.LicensingModel)
-		if err != nil {
-			logger.Error("create_tenant_failed", "error", err)
-			apierror.Write(w, requestID, apierror.CodeInternal, "failed to create tenant")
-			return
-		}
-
-		if err := deps.DB.WithoutTenant(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
-			subjectID, _ := uuid.Parse(tc.Subject)
+		var t identity.Tenant
+		subjectID, _ := uuid.Parse(tc.Subject)
+		err = deps.DB.WithoutTenant(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			t, err = identity.CreateTenant(ctx, tx, req.Name, req.Slug, req.LicensingModel)
+			if err != nil {
+				return err
+			}
 			return audit.Record(ctx, tx, audit.Entry{
 				ActorType: audit.ActorStaff, ActorID: subjectID,
 				Action: "tenant.created", TargetType: "tenant", TargetID: t.ID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
 			})
-		}); err != nil {
-			logger.Error("audit_record_failed", "error", err)
+		})
+		if errors.Is(err, identity.ErrSlugTaken) {
+			apierror.Write(w, requestID, apierror.CodeConflict, "a tenant with this slug already exists")
+			return
+		}
+		if err != nil {
+			logger.Error("create_tenant_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to create tenant")
+			return
 		}
 
 		writeJSON(w, http.StatusCreated, tenantResponse{
@@ -153,6 +159,10 @@ func newCreateBrandHandler(deps Deps) http.HandlerFunc {
 				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
 			})
 		})
+		if errors.Is(err, identity.ErrSlugTaken) {
+			apierror.Write(w, requestID, apierror.CodeConflict, "a brand with this slug already exists")
+			return
+		}
 		if err != nil {
 			logger.Error("create_brand_failed", "error", err)
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to create brand")

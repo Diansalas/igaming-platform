@@ -91,8 +91,12 @@ Migration `0007_tenant_slug_and_licence_consistency` adds a
 composite foreign key
 `tenants (licence_id, expected_licensee) REFERENCES licences (id, licensee)`.
 A contradictory state is now a constraint violation, not just a bug some
-future service could introduce — see
-`docs/decisions/0011-platform-scoped-identity-tokens.md` and the Stage 2
+future service could introduce — see migration
+`0007_tenant_slug_and_licence_consistency`'s own comments (there is no
+dedicated ADR for this fix), migration `0017_tenant_licence_consistency_
+guard` (a defense-in-depth `CHECK` closing a theoretical silent-bypass
+edge case flagged in Stage 2 architect review — see that migration's
+comments for why the FK alone wasn't quite enough), and the Stage 2
 completion report for the verifying test
 (`TestTenant_LicensingModelMustMatchLicenceLicensee`).
 

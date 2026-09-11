@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
@@ -167,8 +168,24 @@ func RotateSession(ctx context.Context, pool *db.Pool, rawToken string, ttl time
 	}
 
 	if row.replacedBySessionID != nil {
+		// Refresh-token reuse is the platform's strongest credential-
+		// theft signal - it must not land only in a mutable application
+		// log (Warn-level in the HTTP handler), since ADR 0013's whole
+		// premise is that security-relevant history must not depend on
+		// mutable logs. Recorded atomically with the chain revocation.
 		if err := withResolvedScope(ctx, pool, row, func(ctx context.Context, tx pgx.Tx) error {
-			return revokeChainFrom(ctx, tx, row.id)
+			if err := revokeChainFrom(ctx, tx, row.id); err != nil {
+				return err
+			}
+			tenantID := uuid.Nil
+			if row.tenantID != nil {
+				tenantID = *row.tenantID
+			}
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorType(row.principalType), ActorID: row.principalID,
+				Action: "auth.session_reuse_detected", TargetType: "session", TargetID: row.id.String(),
+				Outcome: audit.OutcomeDenied, IPAddress: ipAddress, UserAgent: userAgent,
+			})
 		}); err != nil {
 			return Session{}, fmt.Errorf("auth: revoke reused session chain: %w", err)
 		}
@@ -187,11 +204,20 @@ func RotateSession(ctx context.Context, pool *db.Pool, rawToken string, ttl time
 	err = withResolvedScope(ctx, pool, row, func(ctx context.Context, tx pgx.Tx) error {
 		// Re-check under the properly-scoped transaction: the row could
 		// have been revoked or rotated by a concurrent request between
-		// the lookup above and this point.
+		// the lookup above and this point. FOR UPDATE is load-bearing,
+		// not defensive dressing: without it, two concurrent refreshes of
+		// the same token both read "not yet replaced" here, both mint a
+		// new session, and the second UPDATE below silently overwrites
+		// the first's replaced_by_session_id - producing two live chains
+		// from one token with reuse detection never triggering (a
+		// confirmed race, not a theoretical one - see Stage 2 code
+		// review). The row lock makes the second concurrent caller block
+		// here until the first transaction commits, then observe
+		// stillReplaced set and correctly return ErrSessionReused.
 		var stillReplaced *uuid.UUID
 		var stillRevoked *time.Time
 		if err := tx.QueryRow(ctx,
-			`SELECT replaced_by_session_id, revoked_at FROM sessions WHERE id = $1`, row.id,
+			`SELECT replaced_by_session_id, revoked_at FROM sessions WHERE id = $1 FOR UPDATE`, row.id,
 		).Scan(&stillReplaced, &stillRevoked); err != nil {
 			return err
 		}

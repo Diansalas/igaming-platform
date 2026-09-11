@@ -60,6 +60,26 @@ func TestHashPassword_ProducesUniqueSaltPerCall(t *testing.T) {
 	}
 }
 
+func TestDummyPasswordHash_IsWellFormedAndRejectsOrdinaryInput(t *testing.T) {
+	// DummyPasswordHash exists so login handlers can pay the same Argon2
+	// cost on the "no such account" branch as a real wrong-password
+	// check, closing a timing side-channel that would otherwise reveal
+	// account existence. It must parse successfully (a parse error would
+	// short-circuit before paying that cost) and must reject any
+	// candidate a login request could plausibly submit - it is not
+	// associated with any real account, so nothing should ever need to
+	// verify against it.
+	for _, candidate := range []string{"", "password", "correct-horse-battery-staple", "anything at all"} {
+		ok, err := VerifyPassword(candidate, DummyPasswordHash)
+		if err != nil {
+			t.Fatalf("expected DummyPasswordHash to parse without error, got: %v", err)
+		}
+		if ok {
+			t.Errorf("expected DummyPasswordHash to reject %q, but it verified", candidate)
+		}
+	}
+}
+
 func TestVerifyPassword_RejectsMalformedHash(t *testing.T) {
 	cases := []string{
 		"",

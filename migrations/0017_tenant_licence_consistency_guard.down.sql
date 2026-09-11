@@ -1,0 +1,1 @@
+ALTER TABLE tenants DROP CONSTRAINT IF EXISTS tenants_expected_licensee_not_null_when_linked;

@@ -35,7 +35,12 @@ func testPool(t *testing.T) *db.Pool {
 func createTestTenant(t *testing.T, pool *db.Pool) Tenant {
 	t.Helper()
 	suffix := uuid.New().String()
-	tenant, err := CreateTenant(context.Background(), pool, "Test Tenant "+suffix, "tenant-"+suffix, "under_platform_licence")
+	var tenant Tenant
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		tenant, err = CreateTenant(ctx, tx, "Test Tenant "+suffix, "tenant-"+suffix, "under_platform_licence")
+		return err
+	})
 	if err != nil {
 		t.Fatalf("failed to create test tenant: %v", err)
 	}
@@ -299,8 +304,13 @@ func TestCreateStaffUser_PlatformAdminMustBeTenantless(t *testing.T) {
 		)
 		return err
 	})
-	if err == nil {
-		t.Fatal("expected an error creating a tenant-scoped platform_admin, got nil")
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Fatalf("expected a *pgconn.PgError creating a tenant-scoped platform_admin, got %T: %v", err, err)
+	}
+	const pgCheckViolationCode = "23514"
+	if pgErr.Code != pgCheckViolationCode {
+		t.Fatalf("expected SQLSTATE %s (check violation), got %s: %v", pgCheckViolationCode, pgErr.Code, err)
 	}
 }
 

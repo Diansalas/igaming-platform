@@ -2,9 +2,8 @@
 
 ## Stage 2 — Identity + Tenancy + Security
 
-Status: **Implementation and local verification complete, pending
-specialist-review reconciliation and human approval to authorize Stage
-3.**
+Status: **Implementation, local verification, and specialist-review
+reconciliation complete, pending human approval to authorize Stage 3.**
 
 ### Objectives (as instructed at the Stage 1→2 gate)
 
@@ -41,9 +40,19 @@ new ADRs (0011–0014); and a new privacy architecture document
 (`docs/architecture/16-privacy.md`).
 
 A six-specialist review pass (`architect`, `identity-compliance`,
-`security`, `backend`, `qa`, `code-reviewer`) is running; findings and
-their resolutions will be reconciled and reflected here and in
-`docs/progress.md` before the Stage 2 completion report is finalized.
+`security`, `backend`, `qa`, `code-reviewer`) is complete. It found and
+this session fixed six blocking defects (a silent-data-loss bug in
+migration 0008's up script mirroring the down-script bug already fixed
+this session, a genuine RLS gap on `persons`, non-atomic audit writes on
+tenant creation, a staff-lockout bypass via email case variation, an
+audit-log `TRUNCATE` gap, and a refresh-rotation concurrency race) plus
+several should-fix items (slug-conflict error mapping, a login-timing
+side-channel, unaudited refresh-token reuse, and more) and three
+test-coverage gaps (session self-service, audit-write verification,
+rotation concurrency) — all fixed and re-verified. One item was reviewed
+and deliberately left as documented technical debt rather than fixed:
+`sessions`' necessarily-public-read RLS policy. See `docs/progress.md`
+for the itemized list.
 
 ### Verification performed (all against a real local PostgreSQL 16, not mocked)
 
@@ -66,9 +75,6 @@ their resolutions will be reconciled and reflected here and in
 
 ### Pending (to close out Stage 2)
 
-- Reconcile the six specialist reviews (in progress) — apply any
-  blocking/should-fix findings, document any specialist disagreement as
-  an ADR rather than silently choosing.
 - Commit and push this work to `claude/focused-wright-jw88w9`.
 - Stage 2 Completion Report delivered to the human, ending with the
   required approval question. No Stage 3 work begins until that approval

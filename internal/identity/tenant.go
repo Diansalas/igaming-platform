@@ -47,18 +47,21 @@ func GetTenantBySlug(ctx context.Context, pool *db.Pool, slug string) (Tenant, e
 
 // CreateTenant provisions a new tenant. Platform-admin-only (see
 // PermTenantWrite) - tenant provisioning is inherently a platform-level
-// action, never tenant-scoped, so this runs via WithoutTenant.
-func CreateTenant(ctx context.Context, pool *db.Pool, name, slug, licensingModel string) (Tenant, error) {
+// action, never tenant-scoped. Takes a pgx.Tx (rather than opening its
+// own transaction) so the caller can write the insert and its audit
+// record atomically in one WithoutTenant transaction - see
+// CreateBrand/CreateStaffUser for the same pattern, and the Stage 2
+// backend review finding this fixes: a tenant could previously be
+// created with its audit-record write silently failing in a separate
+// transaction.
+func CreateTenant(ctx context.Context, tx pgx.Tx, name, slug, licensingModel string) (Tenant, error) {
 	t := Tenant{ID: uuid.New(), Name: name, Slug: slug, LicensingModel: licensingModel, Status: "active"}
-	err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
-			`INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, $2, $3, $4)`,
-			t.ID, t.Name, t.Slug, t.LicensingModel,
-		)
-		return err
-	})
+	_, err := tx.Exec(ctx,
+		`INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, $2, $3, $4)`,
+		t.ID, t.Name, t.Slug, t.LicensingModel,
+	)
 	if err != nil {
-		return Tenant{}, fmt.Errorf("identity: create tenant: %w", err)
+		return Tenant{}, errSlugTaken("create tenant", err)
 	}
 	return t, nil
 }

@@ -400,6 +400,12 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A tenant with this slug already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/admin/tenants/{tenantID}/brands:
@@ -439,6 +445,12 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           description: Caller lacks brand:write, or is a tenant_admin targeting a different tenant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: A brand with this slug already exists
           content:
             application/json:
               schema:

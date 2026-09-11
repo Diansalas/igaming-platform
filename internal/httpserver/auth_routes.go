@@ -192,15 +192,26 @@ func newLoginHandler(deps Deps) http.HandlerFunc {
 
 			account, err := identity.GetPlayerAccountByEmail(ctx, tx, brand.ID, email)
 			if errors.Is(err, identity.ErrNotFound) {
+				// Spend the same Argon2 cost as a real wrong-password
+				// check would, so this branch isn't distinguishable from
+				// one by response timing (see auth.DummyPasswordHash).
+				_, _ = auth.VerifyPassword(req.Password, auth.DummyPasswordHash)
 				outcome = outcomeInvalidCredentials
 				if err := identity.RecordLoginAttempt(ctx, tx, &brand.TenantID, "player", identifier, ip, false); err != nil {
 					return err
 				}
+				// Deliberately no "identifier" in metadata here (unlike
+				// the branches below): this email never had an account,
+				// so logging it would put a non-user's email address into
+				// a record tenant compliance staff can read - see
+				// docs/architecture/16-privacy.md's data-minimization
+				// stance. The action name, tenant, and timestamp are
+				// enough to spot a credential-stuffing pattern.
 				return audit.Record(ctx, tx, audit.Entry{
 					TenantID: brand.TenantID, ActorType: audit.ActorSystem,
 					Action: "player.login_failed", Outcome: audit.OutcomeFailure,
 					IPAddress: ip, UserAgent: ua, RequestID: requestID,
-					Metadata: map[string]any{"reason": "unknown_email", "identifier": identifier},
+					Metadata: map[string]any{"reason": "unknown_email"},
 				})
 			}
 			if err != nil {

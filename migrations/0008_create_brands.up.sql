@@ -21,6 +21,26 @@ CREATE TABLE brands (
 
 CREATE INDEX idx_brands_tenant ON brands (tenant_id);
 
+-- Backfill BEFORE enabling RLS on brands, and with tenant_config's own
+-- RLS temporarily disabled (it's dropped at the end of this migration
+-- anyway). The migration runner connects without app.tenant_id set (by
+-- design - it is not, and must never be, a superuser/BYPASSRLS role), so
+-- with tenant_config's FORCE ROW LEVEL SECURITY still active, its own
+-- SELECT policy (migration 0004, single-scope) would silently filter
+-- this backfill's source rows to zero - the INSERT would then report
+-- success having copied nothing, silently discarding every tenant's
+-- pre-Stage-2 config on any real upgrade. Caught (and reproduced against
+-- seeded data) in Stage 2 code review; same failure class as the fix
+-- already applied to this migration's down script.
+ALTER TABLE tenant_config DISABLE ROW LEVEL SECURITY;
+
+INSERT INTO brands (tenant_id, name, slug, default_locale, theme)
+SELECT tc.tenant_id, tc.display_name, t.slug, tc.default_locale, tc.theme
+FROM tenant_config tc
+JOIN tenants t ON t.id = tc.tenant_id;
+
+DROP TABLE tenant_config;
+
 ALTER TABLE brands ENABLE ROW LEVEL SECURITY;
 ALTER TABLE brands FORCE ROW LEVEL SECURITY;
 
@@ -45,12 +65,3 @@ CREATE POLICY brand_tenant_update ON brands
 CREATE POLICY brand_tenant_delete ON brands
     FOR DELETE
     USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
-
--- Migrate any existing tenant_config rows into a brand per tenant (a
--- no-op on today's empty table, written correctly for the general case).
-INSERT INTO brands (tenant_id, name, slug, default_locale, theme)
-SELECT tc.tenant_id, tc.display_name, t.slug, tc.default_locale, tc.theme
-FROM tenant_config tc
-JOIN tenants t ON t.id = tc.tenant_id;
-
-DROP TABLE tenant_config;

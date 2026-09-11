@@ -57,12 +57,18 @@ instructions' explicit requirement not to collapse Person/PlayerAccount/
 Tenant/Brand for convenience:
 
 - `Person` (`internal/identity/person.go`, `persons` table) — platform-
-  wide, no `tenant_id`, no RLS (not tenant-owned data). Carries only a
-  partial-unique `person_key_hash` hook for the future post-KYC
-  cross-brand resolution described above; Stage 2 does not populate or
-  resolve it (`NOT IMPLEMENTED` — no KYC document data exists yet to hash).
-  Each registration currently creates one `Person` per `PlayerAccount`;
-  linking two `PlayerAccount`s to the same `Person` is Stage 4 work.
+  wide, no `tenant_id` (not tenant-owned data), but NOT unprotected:
+  RLS restricts `SELECT`/`UPDATE`/`DELETE` to the platform scope
+  (`WithoutTenant`) while allowing `INSERT` from any scope, since
+  registration creates a person from within a tenant-scoped transaction —
+  see `docs/decisions/0015-persons-platform-scope-access-control.md`
+  (this corrects an earlier Stage 2 gap where `persons` had no RLS at
+  all). Carries only a partial-unique `person_key_hash` hook for the
+  future post-KYC cross-brand resolution described above; Stage 2 does
+  not populate or resolve it (`NOT IMPLEMENTED` — no KYC document data
+  exists yet to hash). Each registration currently creates one `Person`
+  per `PlayerAccount`; linking two `PlayerAccount`s to the same `Person`
+  is Stage 4 work.
 - `PlayerAccount` (`internal/identity/player_account.go`,
   `player_accounts` table) — the "player" row above: one per
   `(brand_id, email)`, `tenant_id`-owned, RLS-protected. This is the

@@ -35,6 +35,17 @@ var defaultArgon2Params = argon2Params{
 	keyLen:      32,
 }
 
+// DummyPasswordHash is a valid, fixed argon2id hash with no corresponding
+// real account. Login handlers call VerifyPassword against this on the
+// "no such account" branch before returning invalid-credentials, so that
+// branch costs the same Argon2 time as a real wrong-password check -
+// otherwise the unknown-account branch returns near-instantly while a
+// real account's wrong-password check pays the full ~100ms hash cost,
+// letting a timing difference distinguish "this email exists" from "this
+// email doesn't" even though both return the same HTTP status and body.
+// Caught in Stage 2 security review.
+const DummyPasswordHash = "argon2id$v=19$m=65536,t=1,p=4$nV+Z5J46dNiX9Qi0HCx3fw$9lj7SoFW20aS1wmd58UGjm6V5RJHRmRHoz4ttuT0+R4"
+
 // HashPassword hashes a plaintext password for storage. The returned
 // string embeds the algorithm parameters and salt, so
 // VerifyPassword needs nothing but the stored string and the candidate

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -60,7 +61,14 @@ func newStaffLoginHandler(deps Deps) http.HandlerFunc {
 			tenantID = t.ID
 		}
 
-		email, ip, ua := req.Email, clientIP(r), r.UserAgent()
+		// Normalize BEFORE building the lockout identifier -
+		// GetStaffUserByEmail normalizes internally for its lookup, but
+		// building the identifier from the raw request email let
+		// case/whitespace variants of the same address (admin@x.com,
+		// Admin@x.com, " admin@x.com") each get their own login_attempts
+		// bucket, making lockout trivially bypassable. Caught in Stage 2
+		// security review.
+		email, ip, ua := strings.ToLower(strings.TrimSpace(req.Email)), clientIP(r), r.UserAgent()
 		identifier := "staff:" + email
 		if tenantID != uuid.Nil {
 			identifier = tenantID.String() + ":" + email
@@ -97,6 +105,9 @@ func newStaffLoginHandler(deps Deps) http.HandlerFunc {
 
 			staff, err := identity.GetStaffUserByEmail(ctx, tx, email)
 			if errors.Is(err, identity.ErrNotFound) {
+				// Spend the same Argon2 cost as a real wrong-password
+				// check would (see auth.DummyPasswordHash).
+				_, _ = auth.VerifyPassword(req.Password, auth.DummyPasswordHash)
 				outcome = outcomeInvalidCredentials
 				if err := recordAttempt(ctx, tx, tenantID, "staff", identifier, ip, false); err != nil {
 					return err
@@ -120,6 +131,9 @@ func newStaffLoginHandler(deps Deps) http.HandlerFunc {
 			// rather than relying solely on that.
 			if staff.TenantID != tenantID {
 				outcome = outcomeInvalidCredentials
+				if err := recordAttempt(ctx, tx, tenantID, "staff", identifier, ip, false); err != nil {
+					return err
+				}
 				return audit.Record(ctx, tx, audit.Entry{
 					TenantID: tenantID, ActorType: audit.ActorSystem,
 					Action: "staff.login_failed", Outcome: audit.OutcomeFailure,
