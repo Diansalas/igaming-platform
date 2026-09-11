@@ -1,7 +1,12 @@
 # 02 — Domain and Service Boundary Proposal
 
-Status: Stage 0 proposal, owned by `architect`, subject to revision at the
-Stage 1 gate once scaffolding decisions are locked.
+Status: Stage 0 proposal, owned by `architect`. **This document describes
+the target shape for later stages, not what exists after Stage 1.** Per
+`docs/decisions/0010-stage1-single-service-foundation.md`, Stage 1 ships
+exactly one deployable (`platform-api`) organized internally by package
+along these same lines; services below are split out into their own
+deployables only as real domain logic is built and a concrete ownership/
+scaling reason exists, not preemptively.
 
 ## Principle
 

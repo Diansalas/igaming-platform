@@ -1,58 +1,51 @@
-# ADR 0005 — Open Business Decisions That Block Detailed Design
+# ADR 0005 — Open Business Decisions That Blocked Detailed Design
 
-Status: OPEN — requires Fernando's decision, not Claude's. Source:
-Blueprint §10. Architecture proceeds provisionally (pluggable/config-first)
-on all six axes until answered; each answer materially changes downstream
-design, so treat any schema/service built against a default assumption
-below as provisional until confirmed.
+Status: **RESOLVED** — answered by the human at the Stage 0→1 gate. Source:
+Blueprint §10. Kept as a historical record; see the linked ADRs for the
+resolutions, which now drive architecture.
 
-## Q1 — Crypto-first or fiat-first?
+## Q1 — Crypto-first or fiat-first? → RESOLVED: both, simultaneously
 
-Changes ledger numeric precision, the entire payment layer, KYC
-thresholds, and the PSP shortlist. Given Anjouan's banking reality this
-leans crypto-first, but the Blueprint is explicit that it should be a
-decision, not a default. **Provisional assumption for Stage 0–3 design:**
-support both, ledger uses `NUMERIC(38,0)` + exponent (crypto-capable)
-regardless of which is prioritized first commercially.
+Not a sequencing choice — the platform supports multi-currency,
+multi-asset wallets per player from the model level up (fiat and crypto
+alike). See `docs/decisions/0007-multi-wallet-per-player-model.md` and
+`docs/architecture/06-wallet-ledger-architecture.md`.
 
-## Q2 — Do B2B partners sit under our licence, or bring their own?
+## Q2 — Do B2B partners sit under our licence, or bring their own? → RESOLVED: hybrid, both
 
-Determines aggregator contract shape, whether provider credentials are
-per-platform or per-tenant, how provider cost is attributed, and how
-strictly tenants must be isolated. The single highest-leverage commercial
-question per the Blueprint. **Get this answered before the game-gateway
-credential-storage schema is finalized** (Stage 3/4).
+Both models are supported per tenant. See
+`docs/decisions/0006-hybrid-licensing-and-jurisdiction-model.md` and
+`docs/architecture/15-jurisdiction-and-licensing-model.md`.
 
-## Q3 — Which markets in year one?
+## Q3 — Which markets in year one? → RESOLVED: Europe + LATAM, jurisdiction-aware
 
-Drives languages, currencies, PSP selection, KYC vendor coverage, game
-jurisdiction blocklists, and RG defaults. "Everywhere that isn't blocked"
-is not an answer a payment provider will accept.
+Modeled as multiple distinct `Jurisdiction` rows, never one ruleset per
+region. See `docs/decisions/0006-hybrid-licensing-and-jurisdiction-model.md`.
 
-## Q4 — Self-custody crypto, or a custodian?
+## Q4 — Self-custody crypto, or a custodian? → RESOLVED: custodian abstraction
 
-A security/insurance decision more than a technical one. Blueprint's read:
-at year one with a small team, a custodian (Fireblocks/BitGo) is usually
-right despite the cost, because it removes an entire category of
-existential risk. **Must be answered before crypto-rail implementation
-begins** (see `docs/architecture/07-payments-architecture.md`).
+Institutional custody provider behind a `CryptoCustodyProvider`
+interface; no private-key management in the core platform. See
+`docs/decisions/0008-crypto-custody-provider-abstraction.md`. Specific
+custodian vendor selection remains a separate, still-open human/legal
+decision, not blocking Stage 1–3 engineering.
 
-## Q5 — Is the own B2C brand confirmed as part of the plan?
+## Q5 — Is the own B2C brand confirmed as part of the plan? → RESOLVED: yes
 
-Blueprint §1 argues strongly yes — the master project instructions confirm
-this is the plan (own brand first, then B2B). **Treated as answered: yes**,
-unless the human says otherwise.
+Confirmed at Stage 0 and reaffirmed by proceeding to Stage 1.
 
-## Q6 — Which host has confirmed in writing that it permits gambling activity?
+## Q6 — Which host has confirmed in writing that it permits gambling activity? → PARTIALLY RESOLVED
 
-Cheap to check now, expensive to discover after certification. No
-infrastructure work should target a specific host before this is
-confirmed in writing (Blueprint §7 hosting row: "VERIFY FIRST").
+Hosting **strategy** is resolved: a major hyperscale cloud provider (see
+`docs/decisions/0009-hosting-hyperscale-cloud.md`), superseding the Stage 0
+Hetzner/OVH recommendation. The specific provider and its **written**
+gambling-AUP confirmation remain outstanding — no production deployment
+happens until that confirmation exists and is documented. This does not
+block Stage 1 (development-only scaffolding).
 
-## Disposition
+## Residual open item
 
-Q1, Q3, Q4, Q6 are commercial/legal/vendor decisions outside engineering's
-authority to make — surfaced to the human via the Stage 0 completion
-report. Q2 is the highest-leverage one and should be prioritized for an
-answer before Stage 3/4 schema work locks in an assumption. Q5 is treated
-as resolved (yes) per the master project brief.
+Specific hyperscale provider selection (AWS/GCP/Azure) and its written
+AUP confirmation, and specific custodian vendor selection (Q4 follow-up).
+Both are commercial/legal tracks that run alongside engineering, not
+blockers to Stage 1–3 work.

@@ -8,12 +8,20 @@ the start of every session before touching code.
 ## What this project is
 
 A multi-tenant iGaming platform. First tenant: our own B2C casino brand
-(Anjouan-licensed). Later tenants: external B2B operators running under
-their own licences on the same platform core. The platform owns identity,
-wallet/ledger, bonus engine, tenant configuration, back office, partner
-console, audit and reporting. It does **not** own games, odds/trading, card
-acquiring, or KYC document verification — those are licensed from vendors
-behind internal provider interfaces.
+(Anjouan-licensed). Later tenants: external B2B operators, under a
+**hybrid licensing model** — some operate under our own platform licence,
+others bring their own licence in their own jurisdiction — on the same
+platform core (see `docs/decisions/0006-hybrid-licensing-and-jurisdiction-
+model.md`). Target markets are Europe and LATAM, each modeled as distinct
+jurisdictions with their own regulatory configuration, never one ruleset
+per region. The platform owns identity, wallet/ledger (multi-wallet,
+multi-currency/asset per player — see `docs/decisions/0007-multi-wallet-
+per-player-model.md`), bonus engine, tenant configuration, back office,
+partner console, audit and reporting. It does **not** own games,
+odds/trading, card acquiring, KYC document verification, or crypto private-
+key custody — those are licensed/delegated to vendors (including an
+institutional crypto custodian, see ADR 0008) behind internal provider
+interfaces.
 
 Primary source of truth for product/architecture requirements:
 `iGaming-Platform-Blueprint.pdf` (repo root). Do not assume a requirement
@@ -66,8 +74,13 @@ unprompted, even if it seems obviously next.
   entries; recompute and diff against the projection on a schedule
   (target: hourly). Any non-zero drift is a P1 incident.
 - Never use floating-point for money. Integer minor units with a
-  per-currency exponent; if crypto is in scope, `NUMERIC(38,0)` plus a
-  per-asset exponent (8 or 18), not `BIGINT` cents.
+  per-currency exponent looked up from the `Asset` registry; if crypto is
+  in scope, `NUMERIC(38,0)` plus a per-asset exponent (8 or 18), not
+  `BIGINT` cents. A player holds a distinct wallet per asset (multi-wallet
+  model, `docs/decisions/0007-multi-wallet-per-player-model.md`) — never
+  one generic balance row with a currency field. Moving value between two
+  wallets of different assets is an explicit, auditable
+  `ConversionOperation`, never a direct balance mutation.
 - Every financial write is idempotent via a unique constraint on
   `(provider_id, provider_tx_id)` (or equivalent), enforced by the database,
   not "check then insert" application logic.
@@ -84,9 +97,14 @@ unprompted, even if it seems obviously next.
 
 ## Provider abstraction
 
-- External capabilities (casino, sportsbook, payments, KYC/AML, custody)
-  are accessed through internal provider interfaces/adapters. Provider
-  specifics never leak into core domain logic.
+- External capabilities (casino, sportsbook, payments, KYC/AML, crypto
+  custody) are accessed through internal provider interfaces/adapters.
+  Provider specifics never leak into core domain logic.
+- Crypto private keys and blockchain signing never enter the core
+  platform — they live with an institutional custody provider behind a
+  `CryptoCustodyProvider` interface (ADR 0008). The platform owns the
+  wallet representation, ledger, balances, and orchestration; the
+  custodian owns the keys.
 - Each integration is treated as a subsystem, not a connector: the vendor
   supplies the API; the platform still owns the adapter, idempotency/retry
   semantics, per-tenant credentials, the state machine (pending/settled/

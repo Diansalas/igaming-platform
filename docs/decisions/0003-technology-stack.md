@@ -1,6 +1,9 @@
 # ADR 0003 — Technology Stack Baseline
 
-Status: Proposed (RECOMMENDATION — confirm explicitly at the Stage 1 gate)
+Status: **Approved as Stage 1 baseline by the human**, with the explicit
+instruction to validate each element during Stage 1 rather than adopt the
+full list mechanically — see "Stage 1 validation" below. Hosting row is
+**superseded** by `docs/decisions/0009-hosting-hyperscale-cloud.md`.
 
 ## Context
 
@@ -22,7 +25,7 @@ it can still be changed cheaply.
 | Cache/sessions | Redis (never balances) |
 | Brand frontend | Next.js |
 | Back office / partner console | React + a virtualized, server-filtered data grid |
-| Hosting | Hetzner/OVH/Leaseweb-class, contingent on written gambling-AUP confirmation |
+| Hosting | ~~Hetzner/OVH/Leaseweb-class~~ — **superseded**: major hyperscale cloud, see ADR 0009 |
 | Secrets | Vault or a cloud KMS |
 | Observability | OpenTelemetry |
 
@@ -33,15 +36,27 @@ it can still be changed cheaply.
 - Choosing Kafka over NATS JetStream trades lower ops simplicity for
   per-player event ordering guarantees the bonus engine depends on;
   revisit if ops capacity proves to be the actual binding constraint.
-- The hosting choice is gated on Blueprint §10 Q6 (written AUP
-  confirmation) — see `0005-open-business-decisions.md`. No infrastructure
-  is provisioned against a host that hasn't confirmed in writing.
+  **Stage 1 does not deploy either** — it defines the event-bus interface
+  only (see `docs/architecture/02-domain-and-service-boundaries.md`),
+  deferring the concrete broker choice until there's a concrete ordering/
+  throughput need to validate against, per the human's explicit "do not
+  create distributed systems complexity without a concrete reason"
+  instruction.
+- Hosting choice updated per ADR 0009; written AUP confirmation for the
+  specific hyperscale provider is still outstanding and still blocks
+  production deployment only, not Stage 1 development work.
 
-## Status of confirmation
+## Stage 1 validation
 
-Not yet confirmed by the human. Treated as the working default for Stage 1
-scaffolding; flag any deviation as a new ADR rather than silently drifting
-from this baseline.
+Per the human's explicit instruction, this list is a baseline to validate,
+not a mandate to build out fully. Stage 1 determines, per element: what's
+required immediately (Postgres, Go, structured logging/OTel, basic CI),
+what should be introduced later (Kafka/NATS, ClickHouse — no concrete need
+yet), what can remain modular (event bus behind an interface, custody/PSP
+behind interfaces), and where a simpler architecture is preferable (one
+foundation service, not a microservice per domain, until real scaling/
+ownership needs appear). See the Stage 1 completion report for what was
+actually introduced vs. deferred.
 
 ## Owner
 

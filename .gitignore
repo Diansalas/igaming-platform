@@ -1,0 +1,17 @@
+# Go
+/bin/
+*.exe
+*.test
+*.out
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store

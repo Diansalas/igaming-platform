@@ -82,25 +82,36 @@ service (tail-latency critical, contractual p99); Go or Kotlin for other
 backend services; Next.js for the brand frontend; React + a virtualized
 data grid for back office; Kafka (or NATS JetStream if ops capacity is
 tighter) for the event bus; ClickHouse fed by CDC (Debezium) for
-analytics; Redis for sessions/config/rate-limits only, never balances;
-Vault or a cloud KMS for secrets; OpenTelemetry for observability. Hosting
-must be confirmed in writing to permit gambling activity before committing
-(Hetzner/OVH/Leaseweb-class, not AWS/GCP by default — see Blueprint §7,
-§10 Q6).
+analytics once there's a concrete reporting need; Redis for
+sessions/config/rate-limits only, never balances; Vault or a cloud KMS for
+secrets; OpenTelemetry for observability. Hosting is a major hyperscale
+cloud provider (AWS/GCP/Azure — ADR 0009, superseding the Blueprint's
+Hetzner/OVH-first recommendation), with written gambling-AUP confirmation
+still required before any production deployment. Stage 1 validates each
+element rather than adopting the full list mechanically — see ADR 0003's
+"Stage 1 validation" section and the human's explicit instruction to avoid
+unnecessary microservices/distributed complexity.
 
-## Open business decisions that block detailed design
+## Business decisions (resolved at the Stage 0→1 gate)
 
-Tracked in `docs/decisions/0005-open-business-decisions.md`. Architecture
-proceeds provisionally (pluggable/config-first) on these axes until
-answered:
+Tracked in `docs/decisions/0005-open-business-decisions.md` (historical
+record) and the ADRs it links to. Resolutions now drive architecture:
 
-1. Crypto-first or fiat-first payment posture.
-2. Do B2B partners sit under our licence, or bring their own?
-3. Which markets/jurisdictions in year one?
-4. Self-custody crypto or a custodian?
-5. Is the own B2C brand confirmed as part of the plan? (Blueprint
-   recommends yes — treated as confirmed unless told otherwise.)
-6. Which host has confirmed in writing it permits gambling activity?
+1. **Crypto and fiat, simultaneously** — multi-wallet, multi-asset model
+   per player (ADR 0007), not a sequencing choice.
+2. **Hybrid licensing** — tenants may operate under our platform licence
+   or their own, selected per tenant (ADR 0006).
+3. **Europe + LATAM**, modeled as distinct jurisdictions with their own
+   regulatory configuration (ADR 0006, `docs/architecture/15-jurisdiction-
+   and-licensing-model.md`).
+4. **Institutional custodian abstraction** for crypto — no self-custody or
+   private keys in the core platform (ADR 0008). Specific vendor still
+   open.
+5. Own B2C brand confirmed as part of the plan (unchanged from Stage 0).
+6. **Major hyperscale cloud** hosting strategy (ADR 0009), superseding the
+   Stage 0 Hetzner/OVH recommendation. Specific provider and written
+   gambling-AUP confirmation remain open and block production only, not
+   development.
 
 ## Specialist roster
 

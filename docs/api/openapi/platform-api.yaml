@@ -1,0 +1,152 @@
+openapi: 3.0.3
+info:
+  title: platform-api (Stage 1 foundation)
+  version: "0.1.0"
+  description: >
+    Stage 1 foundation endpoints only: health/readiness and the tenant-
+    isolation demonstration endpoint. This is NOT the full platform API -
+    identity, wallet, bonus, payments, casino, sportsbook, and compliance
+    APIs are added in their owning stages (see docs/active-stage.md and
+    docs/architecture/04-api-architecture.md for the conventions those
+    additions must follow: versioned paths, the shared error envelope
+    below, idempotency-key support on mutating endpoints).
+servers:
+  - url: http://localhost:8080
+    description: Local development
+paths:
+  /healthz:
+    get:
+      summary: Liveness probe
+      description: >
+        Reports whether the process is up. Never checks the database -
+        see /readyz for that - so a database outage does not cause an
+        orchestrator to kill and restart an otherwise-healthy process.
+      security: []
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+  /readyz:
+    get:
+      summary: Readiness probe
+      description: Reports whether the instance can serve traffic (checks database connectivity).
+      security: []
+      responses:
+        "200":
+          description: Ready to serve traffic
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+        "503":
+          description: Not ready (e.g. database unreachable)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: unavailable
+                  reason:
+                    type: string
+                    example: database unreachable
+  /v1/tenant-config:
+    get:
+      summary: Get the authenticated caller's tenant configuration
+      description: >
+        Stage 1 foundation demonstration endpoint proving the full chain
+        of JWT verification, tenant-context extraction, and row-level-
+        security-enforced, tenant-scoped database access. The tenant is
+        always derived from the verified bearer token - never from a
+        header, query parameter, or path segment.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The caller's tenant configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No configuration exists for this tenant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Stage 1 foundation uses HMAC-signed JWTs (see internal/auth). This
+        is explicitly PROVIDER DEPENDENT / foundation-only - production
+        authentication is expected to move to a real identity provider or
+        KMS-managed asymmetric signing before go-live.
+  schemas:
+    TenantConfig:
+      type: object
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+        display_name:
+          type: string
+        theme:
+          type: string
+          description: Raw JSON theme configuration, opaque at this layer.
+        default_locale:
+          type: string
+          example: en
+      required: [tenant_id, display_name, theme, default_locale]
+    Error:
+      type: object
+      description: Platform-wide error envelope (internal/apierror.Error).
+      properties:
+        code:
+          type: string
+          enum:
+            - validation_error
+            - unauthorized
+            - forbidden
+            - not_found
+            - conflict
+            - internal_error
+            - service_unavailable
+            - tenant_mismatch
+        message:
+          type: string
+        request_id:
+          type: string
+      required: [code, message]
+  responses:
+    Unauthorized:
+      description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

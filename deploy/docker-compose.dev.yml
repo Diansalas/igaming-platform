@@ -1,0 +1,38 @@
+# Local development dependency stack. This is intentionally minimal
+# (Postgres only) per the Stage 1 instruction to avoid unnecessary
+# distributed-systems complexity - no Kafka/NATS/ClickHouse container
+# until a concrete need for them exists (see
+# docs/decisions/0003-technology-stack.md "Stage 1 validation").
+#
+# In this sandboxed development environment, Postgres runs as a native
+# service (see Makefile's dev-db-up/dev-db-down) rather than via Docker,
+# because the container runtime here has no accessible daemon. This
+# compose file is for contributors on a normal workstation where Docker
+# is available, and documents the same shape platform-api expects.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      # POSTGRES_USER is left at its default ("postgres") deliberately:
+      # whatever role this variable names becomes the cluster's initdb
+      # bootstrap SUPERUSER, and superusers always bypass row-level
+      # security regardless of FORCE ROW LEVEL SECURITY. platform-api and
+      # its tests must never connect as that role - see
+      # init-app-role.sql, which creates a separate, ordinary "igaming"
+      # role and hands it ownership of the database. Only manual/
+      # administrative access should ever use the postgres superuser.
+      POSTGRES_PASSWORD: igaming_dev_superuser_password
+      POSTGRES_DB: igaming_platform_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - igaming_postgres_data:/var/lib/postgresql/data
+      - ./init-app-role.sql:/docker-entrypoint-initdb.d/01-init-app-role.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d igaming_platform_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  igaming_postgres_data:

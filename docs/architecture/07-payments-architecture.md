@@ -1,7 +1,10 @@
 # 07 — Payments Architecture Proposal
 
-Status: Stage 0 proposal. Source: Blueprint §4.6, §1 ("Payments are the
-hard part, from day one").
+Status: Core orchestration principles accepted from Stage 0 (Blueprint
+§4.6, §1 "Payments are the hard part, from day one"); custody model and
+tokenization priority **updated** per human-approved Stage 0 business
+decisions (see `docs/decisions/0008-crypto-custody-provider-abstraction.md`
+and `docs/decisions/0009-hosting-hyperscale-cloud.md`).
 
 ## Why this is phase one, not a refinement
 
@@ -26,15 +29,46 @@ This must be modeled explicitly as a `psp_reserve` ledger account
 (`ledger-finance`-owned) with a defined release schedule — if it sits
 outside the ledger, the cash position is a fiction.
 
-## Crypto
+## Crypto custody (resolved — see ADR 0008)
 
-Custody model (self-custody with HD wallets/hot-cold split, vs. a
-custodian like Fireblocks/BitGo) is an open business decision (Blueprint
-§10 Q4) — tracked in `docs/decisions/0005-open-business-decisions.md`.
-Either way, the platform must handle: per-asset confirmation thresholds,
-chain reorganizations, dust, memo/tag chains, and deposits sent on the
-wrong network (a weekly occurrence needing a support workflow, not just an
-error log).
+Custody model is **decided**: an institutional/professional custody
+provider abstraction, not self-custody, not private-key management inside
+the core platform. Private keys, HD wallet derivation, and blockchain
+signing never enter the platform's trust boundary.
+
+```
+Wallet / Ledger (platform-owned)
+        │
+        ▼
+CryptoCustodyProvider interface (platform-owned abstraction)
+        │
+        ├── Custodian A adapter (e.g. Fireblocks-shaped)
+        ├── Custodian B adapter (e.g. BitGo-shaped)
+        └── future custodians — swappable behind the same interface
+```
+
+**Platform owns**: the player's crypto wallet/account *representation* (a
+`Wallet` per crypto asset, see `06-wallet-ledger-architecture.md`), the
+ledger, balances, transaction state (pending/confirmed/reversed), deposit/
+withdrawal orchestration, reconciliation against custodian statements,
+audit, and the custodian provider references.
+
+**Custodian owns**: private-key custody, blockchain signing, secure key
+management, and the underlying custody infrastructure.
+
+The `CryptoCustodyProvider` interface is designed so a second or
+replacement custodian can be added without a core-platform rewrite — no
+single-custodian assumption is baked into the ledger or wallet model.
+Regardless of custodian, the platform still handles: per-asset
+confirmation thresholds, chain reorganizations, dust, memo/tag chains, and
+deposits sent on the wrong network (a weekly occurrence needing a support
+workflow, not just an error log).
+
+**This architecture does not by itself satisfy every jurisdiction's
+regulatory requirements for holding customer crypto assets** —
+requirements vary by jurisdiction and service model and remain a
+legal/compliance determination, not a software claim (see `CLAUDE.md`
+compliance section).
 
 ## Withdrawals as a workflow
 
@@ -42,15 +76,24 @@ Not an endpoint. Required: approval thresholds, KYC gating, velocity/
 pattern checks, a manual review queue, and four-eyes approval above a
 configurable amount. Never auto-pay above an operator-set threshold.
 
-## PCI scope
+## PCI scope and tokenized processing
 
-Hosted fields or redirect only. Our servers never see a card PAN. Touching
-a PAN inherits PCI-DSS obligations that cost more than the feature is
-worth — this is a hard boundary, not a tradeoff to weigh per feature.
+Hosted payment pages, redirect flows, and iframe/tokenized flows are
+prioritized wherever a provider supports them — our servers never see a
+card PAN. Provider adapters are built against whichever of these flows
+the provider offers, plus webhooks/callbacks for state updates. Touching
+a PAN directly inherits PCI-DSS obligations that cost more than the
+feature is worth — this is a hard boundary, not a tradeoff to weigh per
+feature. **Outsourcing card handling to a hosted/tokenized flow reduces,
+but does not eliminate, our PCI/security responsibility** — webhook
+authenticity, provider credential security, and payment-state integrity
+remain ours regardless of flow.
 
 ## Stage mapping
 
-One PSP adapter + orchestration skeleton is Stage 3 (alongside the
-ledger). Full withdrawal-approval workflow and crypto rails mature through
-Stage 4. Custody decision (Q4) should be made before crypto rail work
-begins in earnest.
+Stage 1 defines the `PaymentProvider` and `CryptoCustodyProvider`
+interfaces and where they sit in the codebase (foundation only — no real
+adapter, no real custodian contract). One real PSP adapter + orchestration
+skeleton is Stage 3 (alongside the ledger). Full withdrawal-approval
+workflow and crypto rails mature through Stage 4, against the custodian
+abstraction decided here.

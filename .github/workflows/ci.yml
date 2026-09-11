@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  build-test-lint:
+    runs-on: ubuntu-latest
+
+    services:
+      # POSTGRES_USER is deliberately left at its default ("postgres"):
+      # whatever role this variable names becomes the initdb bootstrap
+      # SUPERUSER, and superusers always bypass row-level security even
+      # with FORCE ROW LEVEL SECURITY. The app never connects as this
+      # role - see the "Create non-superuser application role" step
+      # below, which mirrors deploy/init-app-role.sql. An earlier version
+      # of this workflow connected as the bootstrap superuser directly,
+      # which silently made every RLS tenant-isolation test pass for the
+      # wrong reason (RLS was never actually being enforced); caught in
+      # Stage 1 specialist review.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: igaming_ci_superuser_password
+          POSTGRES_DB: igaming_platform_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d igaming_platform_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://igaming:igaming_ci_password@localhost:5432/igaming_platform_test?sslmode=disable
+      TEST_DATABASE_URL: postgres://igaming:igaming_ci_password@localhost:5432/igaming_platform_test?sslmode=disable
+      JWT_SIGNING_SECRET: ci-signing-secret-at-least-32-characters-long
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Create non-superuser application role
+        env:
+          PGPASSWORD: igaming_ci_superuser_password
+        run: |
+          psql -h localhost -U postgres -d igaming_platform_test -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE igaming LOGIN PASSWORD 'igaming_ci_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+          ALTER DATABASE igaming_platform_test OWNER TO igaming;
+          ALTER SCHEMA public OWNER TO igaming;
+          SQL
+
+      - name: Verify gofmt
+        run: |
+          test -z "$(gofmt -l .)" || (echo "gofmt needs to be run on:"; gofmt -l .; exit 1)
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci-lint/golangci-lint-action@v6
+        with:
+          version: latest
+
+      - name: Build
+        run: go build ./...
+
+      - name: Run migrations (up)
+        run: go run ./cmd/migrate up
+
+      - name: Unit tests
+        run: go test ./...
+
+      - name: Integration tests (RLS, HTTP foundation)
+        run: go test -tags=integration -v ./...
+
+      - name: Migration reversibility (down then up)
+        run: |
+          go run ./cmd/migrate -steps=4 down
+          go run ./cmd/migrate up

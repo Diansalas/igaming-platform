@@ -53,10 +53,23 @@ every service gets the same guarantees rather than reimplementing them.
 
 ## Migrations
 
-`RECOMMENDATION`: one migration tool used platform-wide (not per service
-ad hoc), forward-only migrations in version control, no manual schema
-changes against any shared environment. Certification readiness (Blueprint
-§8) depends on this discipline existing before it's needed.
+`IMPLEMENTED` (Stage 1): one small, dependency-light migration tool used
+platform-wide (`internal/db/migrate.go` + `cmd/migrate`), not per-service
+ad hoc, with no manual schema changes against any shared environment.
+Every migration is written as a reversible `up`/`down` SQL pair — this
+corrects an earlier draft of this document, which called for forward-only
+migrations; reversibility was chosen instead so `down` can be exercised in
+CI and local development as a genuine correctness check (a migration that
+can't be described in reverse usually reveals a hidden assumption).
+**Applied direction remains forward-only in staging/production**: `down`
+is a development/CI verification tool, never run against an environment
+holding real data without an explicit, recorded decision — a correction
+there is a new forward migration (a compensating change), not a rollback,
+for the same reason the ledger itself never edits history. Concurrent
+migration runs are serialized with a Postgres advisory lock so two
+processes can't apply the same migration set at once. Certification
+readiness (Blueprint §8) depends on this discipline existing before it's
+needed.
 
 ## Analytics separation
 
