@@ -14,6 +14,11 @@ import (
 // is derived for a request - nothing downstream reads a tenant id from a
 // header, path parameter, or body, satisfying CLAUDE.md's "tenant_id is
 // authoritative from server-side authenticated context only" rule.
+//
+// Note that claims.TenantID may be uuid.Nil (a platform-scoped
+// principal) - this middleware attaches it as-is; RequireTenantScope (or
+// a handler's own check) is what denies a nil-tenant caller from a
+// tenant-scoped operation, per docs/decisions/0011.
 func Middleware(issuer *Issuer) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -39,42 +44,14 @@ func Middleware(issuer *Issuer) func(http.Handler) http.Handler {
 			}
 
 			ctx := tenant.WithContext(r.Context(), tenant.Context{
-				TenantID: claims.TenantID,
-				Role:     string(claims.Role),
-				Subject:  claims.Subject,
+				TenantID:      claims.TenantID,
+				Role:          string(claims.Role),
+				PrincipalType: string(claims.PrincipalType),
+				Subject:       claims.Subject,
 			})
 			observability.SetTenantIDForLogging(ctx, claims.TenantID.String())
 
 			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	}
-}
-
-// RequireRole is the Stage 1 RBAC skeleton: it denies a request unless
-// the authenticated caller's role is one of allowed. Fine-grained,
-// per-action permission checks (beyond "is this role allowed to call this
-// endpoint at all") belong to the back office/partner console work in
-// later stages - this establishes the enforcement point and the pattern
-// every future permission check follows: server-side, never inferred
-// from what the UI shows.
-func RequireRole(allowed ...Role) func(http.Handler) http.Handler {
-	allowedSet := make(map[Role]bool, len(allowed))
-	for _, r := range allowed {
-		allowedSet[r] = true
-	}
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			requestID := observability.RequestIDFromContext(r.Context())
-			tc, err := tenant.FromContext(r.Context())
-			if err != nil {
-				apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated tenant context")
-				return
-			}
-			if !allowedSet[Role(tc.Role)] {
-				apierror.Write(w, requestID, apierror.CodeForbidden, "role not permitted for this operation")
-				return
-			}
-			next.ServeHTTP(w, r)
 		})
 	}
 }

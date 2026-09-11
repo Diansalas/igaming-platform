@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-11 (Stage 1)
+Last updated: 2026-09-11 (Stage 2)
 
-## Status: Stage 1 (Architecture + engineering foundation) — complete, pending human approval to start Stage 2
+## Status: Stage 2 (Identity + tenancy + security) — implementation and verification complete, pending specialist review reconciliation and human approval to start Stage 3
 
 ## Stage 0 — complete (approved)
 
@@ -116,7 +116,123 @@ console, production deployment, live-money operations. `PaymentProvider`/
 (`docs/architecture/07`) but not yet implemented in code — that begins
 when their owning stage (3–4) does.
 
+## Stage 2 — implementation and local verification complete
+
+### Delivered (`IMPLEMENTED`, verified by real tests against a live Postgres)
+
+- **Migrations 0007–0014** (all reversible, round-tripped up→down→up
+  cleanly): tenant slug + a database-enforced
+  `tenants.licensing_model`/`licences.licensee` consistency constraint
+  (composite FK via a generated `expected_licensee` column — closes the
+  Stage 1-flagged gap, see `docs/architecture/15`); `brands` (replaces
+  `tenant_config`, public-read + tenant-scoped-write RLS,
+  `docs/decisions/0012`); `persons` (platform-wide, no RLS); RLS-protected
+  `player_accounts`, `staff_users` (dual-scope RLS), `sessions` (three-
+  policy RLS: public SELECT by token possession + tenant-scoped
+  INSERT/UPDATE, required because a refresh token carries no tenant hint
+  — see `docs/decisions/0013`), `login_attempts` (dual-scope RLS),
+  `audit_log` (dual-scope RLS + an unconditional `BEFORE UPDATE OR DELETE`
+  trigger enforcing append-only, even against the application's own
+  non-superuser database role).
+- `internal/audit`: `Record(ctx, tx, Entry)` — writes atomically inside
+  the caller's transaction, never a separate/best-effort log.
+- `internal/auth` rewrite: Argon2id password hashing
+  (`password.go`); `KeyRegistry` for `kid`-based key rotation
+  (`keys.go`); JWT reissued with `kid`/issuer/audience validation and a
+  legitimately-nilable `tenant_id` claim for platform-scoped principals
+  (`jwt.go`, `docs/decisions/0011`); single-use rotating refresh tokens
+  with reuse detection that revokes the full session chain
+  (`session.go`); permission-based RBAC (`permission.go`) replacing
+  Stage 1's role-list `RequireRole` (deleted); `RequireTenantScope`
+  middleware enforcing "must have a real tenant" per-route rather than
+  at token verification.
+- `internal/identity`: `Brand`, `Tenant`, `Person`, `PlayerAccount`,
+  `StaffUser`, `login_attempt` (Postgres-backed lockout, 5 failures / 15
+  min window).
+- `internal/httpserver`: player auth (register/login/refresh/logout),
+  player self-service (`/v1/me`, session listing/revocation), staff auth,
+  platform-admin tenant/brand/staff provisioning
+  (`docs/decisions/0011`'s `canActOnTenant` rule), tenant-scoped player
+  administration (list/get/suspend), tenant-scoped audit-log read.
+- `cmd/seed-admin`: CLI bootstrapping the first `platform_admin`, avoiding
+  the chicken-and-egg problem of needing an admin to create the first
+  admin (`docs/decisions/0014`).
+- `docs/api/openapi/platform-api.yaml` rewritten for all 15 new Stage 2
+  endpoints (17 paths total); validated (parses, every `$ref` resolves).
+- Four new ADRs: `0011` (platform-scoped identity tokens), `0012` (Brand
+  distinct from Tenant), `0013` (audit-log immutability + dual-scope
+  RLS), `0014` (service-identity pattern for platform CLIs).
+- `docs/architecture/16-privacy.md`: sensitive-field inventory, access
+  controls, audit requirements, data-minimization notes, and a retention
+  posture that deliberately defers to future jurisdiction-dependent
+  configuration rather than inventing a legal retention period.
+  `docs/architecture/05` and `15` updated with Stage 2
+  implementation-status sections.
+
+### Verification performed (all against a real local PostgreSQL 16, not mocked)
+
+- `gofmt`, `go build` (including `-tags=integration`), `go vet`
+  (including `-tags=integration`), `golangci-lint run ./...`: all clean,
+  0 issues.
+- Unit test suite: all passing (`internal/auth`'s password/permission/JWT/
+  middleware tests, `internal/apierror`, `internal/config`, migration
+  file-pairing logic, etc.).
+- Integration test suite (build tag `integration`, real Postgres): all
+  passing —
+  - `internal/db/tenant_rls_integration_test.go`: general RLS proof,
+    repointed from the now-dropped `tenant_config` table to
+    `tenant_jurisdiction_configs` (same single-scope RLS pattern) after
+    migration 0008 removed `tenant_config`.
+  - `internal/audit/audit_integration_test.go`: tenant-scoped vs.
+    platform-level entry visibility, system-actor validation, and the
+    load-bearing immutability proof (`UPDATE`/`DELETE` against
+    `audit_log` fail with a real Postgres error even for the owning
+    role).
+  - `internal/identity/identity_integration_test.go`: brand public-read/
+    cross-tenant-write-denied, player registration + duplicate-email
+    rejection + cross-tenant-read-denied, staff-user platform-vs-tenant
+    visibility, login lockout threshold/reset, and the licensing-model/
+    licence consistency constraint.
+  - `internal/httpserver/identity_flow_integration_test.go`: full
+    HTTP-level flows — player lifecycle end-to-end, login lockout,
+    staff login for both `platform_admin` (no `tenant_slug`) and
+    tenant-scoped roles, RBAC role-distinction enforcement (`support`
+    denied on suspend, `tenant_admin` allowed), cross-tenant player
+    access denied, tenant+brand creation restricted to `platform_admin`.
+- All 8 new migrations (0007–0014) applied, fully rolled back, and
+  re-applied cleanly. One real bug was found and fixed during this
+  round-trip: migration 0008's down script tried to backfill
+  `tenant_config` data via `INSERT` *after* enabling
+  `FORCE ROW LEVEL SECURITY` on it, so its own insert failed the `WITH
+  CHECK` policy (the migration runner connects without `app.tenant_id`
+  set, by design — it is not a superuser/`BYPASSRLS` role). Fixed by
+  reordering: backfill first, enable+force RLS second.
+- Manual end-to-end smoke testing against the live `platform-api` binary
+  (prior to writing the formal test suite, later formalized into the
+  tests above): staff/platform-admin login and tenant/brand provisioning;
+  player registration with duplicate rejection; `GET /v1/me`; refresh
+  rotation; refresh-reuse detection revoking the full session chain;
+  `tenant_admin` vs. `support` RBAC distinction; `platform_admin`
+  correctly denied on tenant-scoped endpoints; login lockout after 5
+  failures including "correct password, still locked out."
+
+### Specialist review pass
+
+`architect`, `identity-compliance`, `security`, `backend`, `qa`, and
+`code-reviewer` independently reviewed the Stage 2 diff (findings and
+resolutions to be appended here once reconciled — see the Stage 2
+completion report for the itemized outcome).
+
+### Explicitly NOT built in Stage 2 (by design, per the Stage 2 DO-NOT-BUILD list)
+
+Wallet/ledger, deposits, withdrawals, real payment providers, casino
+providers, sportsbook, bonus engine, production KYC provider, production
+AML provider, complete responsible-gaming engine, complete B2C frontend,
+Partner Console. `kyc_tier`/`person_key_hash`/`verified_at` are hooks
+only — unpopulated and uninterpreted by any Stage 2 code.
+
 ## Next stage
 
-Stage 2 — Identity + tenancy + security. Not started; requires explicit
-human authorization per the stage-gate rule in `CLAUDE.md`.
+Stage 3 — not started; requires explicit human authorization per the
+stage-gate rule in `CLAUDE.md`, and Stage 2's specialist-review
+reconciliation and human approval first.

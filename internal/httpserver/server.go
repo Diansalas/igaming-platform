@@ -10,6 +10,7 @@ package httpserver
 import (
 	"log/slog"
 	"net/http"
+	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -25,6 +26,14 @@ type Deps struct {
 	DB          *db.Pool
 	AuthIssuer  *auth.Issuer
 	ServiceName string
+
+	// AccessTokenTTL/RefreshTokenTTL control session lifetime. Short
+	// access tokens limit the blast radius of a leaked one (nothing to
+	// revoke - it just expires); the longer refresh token is what
+	// actually gets revoked on logout/reuse-detection (internal/auth/
+	// session.go).
+	AccessTokenTTL  time.Duration
+	RefreshTokenTTL time.Duration
 }
 
 // New builds the fully-wired http.Handler for platform-api: global
@@ -36,13 +45,7 @@ func New(deps Deps) http.Handler {
 	mux.HandleFunc("GET /healthz", livezHandler)
 	mux.HandleFunc("GET /readyz", readyzHandler(deps.DB))
 
-	// /v1/tenant-config is the Stage 1 foundation demonstration endpoint:
-	// it proves the full chain - JWT verification, tenant-context
-	// extraction, and RLS-enforced, tenant-scoped database access - works
-	// end to end. It is not a Stage 4+ backoffice feature; see
-	// docs/architecture/03-database-architecture.md.
-	tenantConfigHandler := newTenantConfigHandler(deps.DB, deps.Logger)
-	mux.Handle("GET /v1/tenant-config", auth.Middleware(deps.AuthIssuer)(tenantConfigHandler))
+	registerIdentityRoutes(mux, deps)
 
 	instrumented := otelhttp.NewHandler(mux, deps.ServiceName)
 

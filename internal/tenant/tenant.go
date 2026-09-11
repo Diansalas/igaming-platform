@@ -20,17 +20,23 @@ var ErrNoTenant = errors.New("tenant: no tenant in context")
 
 type contextKey struct{}
 
-// Context is the resolved, authenticated tenant identity for a request.
-// It is populated exclusively by the auth middleware after verifying the
+// Context is the resolved, authenticated identity for a request. It is
+// populated exclusively by the auth middleware after verifying the
 // caller's JWT - see internal/auth.
+//
+// TenantID may legitimately be uuid.Nil for a platform-scoped principal
+// (see docs/decisions/0011-platform-scoped-identity-tokens.md) - callers
+// that require a specific tenant must check for this explicitly (or use
+// auth.RequireTenantScope) rather than assume TenantID is always usable.
 type Context struct {
 	TenantID uuid.UUID
-	// Role is the caller's role within the tenant (platform_admin,
-	// partner_admin, brand_operator, player). See internal/auth for the
-	// RBAC skeleton this feeds.
+	// Role is the caller's role (see internal/auth.Role).
 	Role string
-	// Subject is the authenticated principal id (player id or staff user
-	// id) from the JWT "sub" claim.
+	// PrincipalType distinguishes a player, staff, or service caller
+	// (see internal/auth.PrincipalType).
+	PrincipalType string
+	// Subject is the authenticated principal id (player_account id,
+	// staff_user id, or service id) from the JWT "sub" claim.
 	Subject string
 }
 

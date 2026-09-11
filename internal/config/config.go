@@ -15,8 +15,8 @@ import (
 // Config is the full set of configuration platform-api needs to start.
 // Every field is sourced from an environment variable; there are no
 // hidden defaults for anything security- or correctness-relevant (the
-// JWT signing secret and database URL have no default and fail startup
-// if unset).
+// JWT signing keys and database URL have no default and fail startup if
+// unset).
 type Config struct {
 	// Environment is "development", "staging", or "production". It is
 	// informational (used in logs/traces) and must never gate a security
@@ -29,17 +29,38 @@ type Config struct {
 	DatabaseMaxConns    int32
 	DatabaseConnTimeout time.Duration
 
-	// JWTSigningSecret is a Stage 1 foundation mechanism (HMAC shared
-	// secret). It is explicitly PROVIDER DEPENDENT / STUB: production
-	// authentication is expected to move to asymmetric signing backed by
-	// a real identity provider or KMS-managed key before go-live. See
-	// docs/architecture/04-api-architecture.md.
-	JWTSigningSecret string
-	// JWTIssuer is a dedicated identity for token issuance/verification,
-	// intentionally independent of OTelServiceName - reusing a telemetry
-	// setting here would mean renaming OTEL_SERVICE_NAME silently
-	// invalidates every outstanding token.
-	JWTIssuer string
+	// JWTActiveKID/JWTSigningSecret are the current signing key and its
+	// id, used for every new token. JWTPreviousKID/JWTPreviousSecret are
+	// optional: when set, tokens signed with the previous key still
+	// verify (so already-issued tokens don't break) while every new token
+	// is signed with the active key - this is what key rotation looks
+	// like operationally: introduce a new active key, keep the old one
+	// registered as "previous" until its longest-lived outstanding token
+	// expires, then drop it. See internal/auth/keys.go.
+	//
+	// This is a Stage 2 foundation mechanism (HMAC shared secrets managed
+	// by this process's own config). It is explicitly PROVIDER DEPENDENT:
+	// production authentication is expected to move to asymmetric signing
+	// backed by a KMS-managed key or a real identity provider before
+	// go-live - see docs/security/security-architecture.md's production
+	// authentication evaluation.
+	JWTActiveKID      string
+	JWTSigningSecret  string
+	JWTPreviousKID    string
+	JWTPreviousSecret string
+	// JWTIssuer/JWTAudience are dedicated identities for token issuance/
+	// verification, intentionally independent of OTelServiceName -
+	// reusing a telemetry setting here would mean renaming
+	// OTEL_SERVICE_NAME silently invalidates every outstanding token.
+	JWTIssuer   string
+	JWTAudience string
+
+	// AccessTokenTTL/RefreshTokenTTL control session lifetime - short
+	// access tokens limit a leak's blast radius (nothing to revoke, it
+	// just expires); the longer refresh token is what actually gets
+	// revoked on logout/reuse-detection (internal/auth/session.go).
+	AccessTokenTTL  time.Duration
+	RefreshTokenTTL time.Duration
 
 	OTelServiceName string
 	// OTelExporter selects the telemetry exporter. "stdout" (default) is
@@ -60,8 +81,14 @@ func Load() (Config, error) {
 		DatabaseURL:         os.Getenv("DATABASE_URL"),
 		DatabaseMaxConns:    10,
 		DatabaseConnTimeout: 5 * time.Second,
+		JWTActiveKID:        getEnvDefault("JWT_ACTIVE_KID", "k1"),
 		JWTSigningSecret:    os.Getenv("JWT_SIGNING_SECRET"),
+		JWTPreviousKID:      getEnvDefault("JWT_PREVIOUS_KID", "k0"),
+		JWTPreviousSecret:   os.Getenv("JWT_PREVIOUS_SECRET"),
 		JWTIssuer:           getEnvDefault("JWT_ISSUER", "igaming-platform"),
+		JWTAudience:         getEnvDefault("JWT_AUDIENCE", "platform-api"),
+		AccessTokenTTL:      15 * time.Minute,
+		RefreshTokenTTL:     30 * 24 * time.Hour,
 		OTelServiceName:     getEnvDefault("OTEL_SERVICE_NAME", "platform-api"),
 		OTelExporter:        getEnvDefault("OTEL_EXPORTER", "stdout"),
 	}
@@ -73,6 +100,20 @@ func Load() (Config, error) {
 		}
 		cfg.DatabaseMaxConns = int32(n)
 	}
+	if v := os.Getenv("ACCESS_TOKEN_TTL_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid ACCESS_TOKEN_TTL_SECONDS: %w", err)
+		}
+		cfg.AccessTokenTTL = time.Duration(n) * time.Second
+	}
+	if v := os.Getenv("REFRESH_TOKEN_TTL_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid REFRESH_TOKEN_TTL_SECONDS: %w", err)
+		}
+		cfg.RefreshTokenTTL = time.Duration(n) * time.Second
+	}
 
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("config: DATABASE_URL is required")
@@ -82,6 +123,12 @@ func Load() (Config, error) {
 	}
 	if len(cfg.JWTSigningSecret) < 32 {
 		return Config{}, fmt.Errorf("config: JWT_SIGNING_SECRET must be at least 32 characters")
+	}
+	if cfg.JWTPreviousSecret != "" && len(cfg.JWTPreviousSecret) < 32 {
+		return Config{}, fmt.Errorf("config: JWT_PREVIOUS_SECRET must be at least 32 characters")
+	}
+	if cfg.JWTPreviousSecret != "" && cfg.JWTPreviousKID == cfg.JWTActiveKID {
+		return Config{}, fmt.Errorf("config: JWT_PREVIOUS_KID must differ from JWT_ACTIVE_KID")
 	}
 
 	return cfg, nil

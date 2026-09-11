@@ -1,70 +1,91 @@
 # Active Stage
 
-## Stage 1 — Architecture + Engineering Foundation
+## Stage 2 — Identity + Tenancy + Security
 
-Status: **Complete, pending human approval to authorize Stage 2.**
+Status: **Implementation and local verification complete, pending
+specialist-review reconciliation and human approval to authorize Stage
+3.**
 
-### Objectives (as instructed at the Stage 0→1 gate)
+### Objectives (as instructed at the Stage 1→2 gate)
 
-Build the technical foundation only: repo/service structure, database
-foundation + migrations, API foundation, tenant-context foundation,
-auth/authz foundations, logging/metrics/tracing, health checks, error
-handling, validation, event infrastructure foundation, testing
-infrastructure, CI, linting, formatting, dev environment. Explicitly not
-wallet/ledger, payments, casino, sportsbook, bonus engine, KYC/AML,
-frontend, back office, partner console, or production deployment.
+Build the real identity/tenancy/security foundation: a distinct Person/
+PlayerAccount/Tenant/Brand/Wallet-hook model; a production-oriented
+authentication design (not just Stage 1's HMAC JWT proof-of-concept) with
+key rotation, refresh/revocation, session tracking, and lockout;
+foundational (not deferred) tenancy including the licensing-model/licence
+consistency fix; a structural jurisdiction foundation (not every
+jurisdiction's rules); a permission-oriented RBAC expansion; least-
+privilege service-identity handling; an immutable audit foundation; a
+meaningfully-tested set of security controls; a privacy architecture
+document; API/OpenAPI updates; and strong security-focused testing
+against real PostgreSQL for RLS/tenant-isolation proofs. Explicitly not
+wallet/ledger, payments, casino/sportsbook providers, bonus engine,
+production KYC/AML, complete RG engine, B2C frontend, back office, or
+Partner Console.
 
 ### Completed work
 
-See `docs/progress.md` for the full, labeled inventory. Summary: one Go
-deployable (`platform-api`) with config/observability/db/auth/tenant/
-http/eventbus foundations, 6 reversible migrations establishing the
-tenant/jurisdiction/licensing/asset schema with row-level-security-
-enforced tenant isolation, a CI pipeline that runs unit and integration
-tests (the latter against a real Postgres service container), an OpenAPI
-foundation spec, and full local dev tooling.
+See `docs/progress.md` for the full, labeled inventory. Summary: 8 new
+reversible migrations (0007–0014) establishing brands/persons/
+player_accounts/staff_users/sessions/login_attempts/audit_log with RLS
+(three distinct patterns depending on the table's actual access shape)
+plus a database-enforced tenant-licence consistency constraint; a new
+`internal/audit` package; a rewritten `internal/auth` package (Argon2id,
+key-rotation registry, kid/aud-validated JWTs with a legitimately-nilable
+tenant claim, single-use rotating refresh tokens with reuse detection,
+permission-based RBAC); a new `internal/identity` domain package; 15 new
+HTTP endpoints across player auth/self-service, staff auth, and
+platform-admin/tenant-admin provisioning and administration; a
+`cmd/seed-admin` bootstrap CLI; an updated OpenAPI spec (17 paths); four
+new ADRs (0011–0014); and a new privacy architecture document
+(`docs/architecture/16-privacy.md`).
 
-A five-specialist review pass (`architect`, `security`, `qa`, `devops`,
-`code-reviewer`) found and this session fixed two blocking, empirically-
-verified defects (a Postgres-superuser RLS bypass in CI/dev config, and a
-Postgres custom-GUC lifecycle bug that could turn a clean RLS denial into
-an unrelated cast error) plus one missing RLS policy
-(`tenant_jurisdiction_configs`), several smaller correctness/hardening
-fixes, and documentation drift between what was built and what the docs
-claimed. All fixes are applied and re-verified; see `docs/progress.md`
-for the itemized list.
+A six-specialist review pass (`architect`, `identity-compliance`,
+`security`, `backend`, `qa`, `code-reviewer`) is running; findings and
+their resolutions will be reconciled and reflected here and in
+`docs/progress.md` before the Stage 2 completion report is finalized.
 
 ### Verification performed (all against a real local PostgreSQL 16, not mocked)
 
-- `go build`, `go vet`, `gofmt`, `golangci-lint`: clean.
+- `go build`/`go vet` (including `-tags=integration`), `gofmt`,
+  `golangci-lint`: all clean, 0 issues.
 - Unit test suite: all passing.
-- Integration test suite (build tag `integration`, real Postgres):
-  all passing, including the RLS tenant-isolation proofs (cross-tenant
-  read denied, cross-tenant insert denied with the correct SQLSTATE,
-  no-tenant-context denied, connected role confirmed non-superuser/
-  non-bypassrls) and the same proof again at the full HTTP layer.
-- All 6 migrations applied, fully rolled back, and re-applied cleanly
-  (reversibility round-trip).
-- The compiled `platform-api` binary manually smoke-tested: health/
-  readiness endpoints, unauthenticated and malformed-token rejection on
-  the protected endpoint, and graceful shutdown on SIGTERM.
+- Integration test suite (build tag `integration`, real Postgres): all
+  passing, including RLS tenant-isolation proofs on every new
+  tenant-owned table (specific Postgres SQLSTATEs asserted, not "any
+  error"), the audit-log immutability trigger proof, the licensing-model/
+  licence consistency constraint proof, and full HTTP-level identity
+  flows (registration, login/lockout, refresh rotation + reuse
+  detection, RBAC role-distinction, cross-tenant denial,
+  platform-admin-only provisioning).
+- All 14 migrations (0001–0014) applied, fully rolled back, and
+  re-applied cleanly — one real bug (migration 0008's down script
+  ordering RLS enforcement before its own backfill insert) was found and
+  fixed during this round-trip.
+- OpenAPI spec validated: parses, every `$ref` resolves, 17 paths.
 
-### Pending (to close out Stage 1)
+### Pending (to close out Stage 2)
 
+- Reconcile the six specialist reviews (in progress) — apply any
+  blocking/should-fix findings, document any specialist disagreement as
+  an ADR rather than silently choosing.
 - Commit and push this work to `claude/focused-wright-jw88w9`.
-- Stage 1 Completion Report delivered to the human, ending with the
-  required approval question. No Stage 2 work begins until that approval
+- Stage 2 Completion Report delivered to the human, ending with the
+  required approval question. No Stage 3 work begins until that approval
   is given.
 
 ### Blockers
 
-None technical. Two items remain open business/commercial tracks that
-don't block engineering: the specific hyperscale cloud provider and its
-written gambling-AUP confirmation, and the specific crypto custodian
-vendor (`docs/decisions/0005-open-business-decisions.md`).
+None technical. The same two non-blocking open business/commercial
+tracks from Stage 1 remain open (cloud provider AUP confirmation, crypto
+custodian vendor selection — `docs/decisions/0005`), plus retention-
+period decisions flagged in the new `docs/architecture/16-privacy.md`
+(deliberately not invented, deferred to a future human/legal decision;
+does not block Stage 2 or Stage 3 engineering work).
 
-### Decisions/input still useful from the human (non-blocking for Stage 2 start)
+### Decisions/input still useful from the human (non-blocking for Stage 3 start)
 
-1. Approve Stage 1 and authorize Stage 2.
-2. No new business decisions surfaced this stage beyond the residual
-   items already tracked in ADR 0005.
+1. Approve Stage 2 and authorize Stage 3.
+2. No new *business* decisions surfaced this stage beyond the residual
+   items already tracked in ADR 0005 and the retention-period question in
+   `docs/architecture/16-privacy.md` (neither blocks engineering work).

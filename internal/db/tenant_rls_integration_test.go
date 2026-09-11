@@ -55,7 +55,8 @@ func testPool(t *testing.T) *Pool {
 }
 
 // createTestTenant inserts a row into the (non-RLS) tenants table so a
-// tenant_config row can legally reference it via the foreign key.
+// tenant_jurisdiction_configs row can legally reference it via the
+// foreign key.
 func createTestTenant(t *testing.T, pool *Pool) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
@@ -78,6 +79,31 @@ func createTestTenant(t *testing.T, pool *Pool) uuid.UUID {
 	return id
 }
 
+// createTestJurisdiction inserts a row into the (non-RLS, platform-wide)
+// jurisdictions lookup table so tenant_jurisdiction_configs rows can
+// legally reference it via the foreign key.
+func createTestJurisdiction(t *testing.T, pool *Pool) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, $3)`,
+			id, "TEST-"+id.String()[:8], "Test Jurisdiction "+id.String(),
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("failed to create test jurisdiction: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `DELETE FROM jurisdictions WHERE id = $1`, id)
+			return err
+		})
+	})
+	return id
+}
+
 // TestTenantIsolation_RLSBlocksCrossTenantAccess is the load-bearing
 // proof for docs/decisions/0002-multi-tenancy-isolation-strategy.md: a
 // transaction scoped to tenant A must never be able to read tenant B's
@@ -90,35 +116,36 @@ func TestTenantIsolation_RLSBlocksCrossTenantAccess(t *testing.T) {
 
 	tenantA := createTestTenant(t, pool)
 	tenantB := createTestTenant(t, pool)
+	jurisdiction := createTestJurisdiction(t, pool)
 
-	// Seed one tenant_config row per tenant, each inserted while scoped
-	// to its own tenant (as a real provisioning flow would do - see
-	// docs/architecture/03-database-architecture.md).
-	seed := func(tenantID uuid.UUID, name string) {
+	// Seed one tenant_jurisdiction_configs row per tenant, each inserted
+	// while scoped to its own tenant (as a real provisioning flow would
+	// do - see docs/architecture/03-database-architecture.md).
+	seed := func(tenantID uuid.UUID, rulesetID string) {
 		err := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx,
-				`INSERT INTO tenant_config (tenant_id, display_name) VALUES ($1, $2)`,
-				tenantID, name,
+				`INSERT INTO tenant_jurisdiction_configs (tenant_id, jurisdiction_id, kyc_ruleset_id) VALUES ($1, $2, $3)`,
+				tenantID, jurisdiction, rulesetID,
 			)
 			return err
 		})
 		if err != nil {
-			t.Fatalf("failed to seed tenant_config for %s: %v", tenantID, err)
+			t.Fatalf("failed to seed tenant_jurisdiction_configs for %s: %v", tenantID, err)
 		}
 	}
-	seed(tenantA, "Tenant A Brand")
-	seed(tenantB, "Tenant B Brand")
+	seed(tenantA, "tenant-a-ruleset")
+	seed(tenantB, "tenant-b-ruleset")
 
 	// Tenant A's own row is readable within its own tenant context.
-	var ownName string
+	var ownRuleset string
 	err := pool.WithTenant(ctx, tenantA, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT display_name FROM tenant_config WHERE tenant_id = $1`, tenantA).Scan(&ownName)
+		return tx.QueryRow(ctx, `SELECT kyc_ruleset_id FROM tenant_jurisdiction_configs WHERE tenant_id = $1`, tenantA).Scan(&ownRuleset)
 	})
 	if err != nil {
 		t.Fatalf("tenant A failed to read its own config: %v", err)
 	}
-	if ownName != "Tenant A Brand" {
-		t.Errorf("expected tenant A's own name, got %q", ownName)
+	if ownRuleset != "tenant-a-ruleset" {
+		t.Errorf("expected tenant A's own ruleset, got %q", ownRuleset)
 	}
 
 	// The core assertion: scoped to tenant A, an EXPLICIT query for
@@ -126,8 +153,8 @@ func TestTenantIsolation_RLSBlocksCrossTenantAccess(t *testing.T) {
 	// regardless of the WHERE clause, proving the isolation does not
 	// depend on application code remembering to filter correctly.
 	err = pool.WithTenant(ctx, tenantA, func(ctx context.Context, tx pgx.Tx) error {
-		var name string
-		return tx.QueryRow(ctx, `SELECT display_name FROM tenant_config WHERE tenant_id = $1`, tenantB).Scan(&name)
+		var rulesetID string
+		return tx.QueryRow(ctx, `SELECT kyc_ruleset_id FROM tenant_jurisdiction_configs WHERE tenant_id = $1`, tenantB).Scan(&rulesetID)
 	})
 	if err == nil {
 		t.Fatal("expected no rows when tenant A queries tenant B's config, but a row was returned")
@@ -139,7 +166,7 @@ func TestTenantIsolation_RLSBlocksCrossTenantAccess(t *testing.T) {
 	// Also prove an unfiltered SELECT scoped to tenant A never returns
 	// tenant B's row mixed in.
 	err = pool.WithTenant(ctx, tenantA, func(ctx context.Context, tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT tenant_id FROM tenant_config`)
+		rows, err := tx.Query(ctx, `SELECT tenant_id FROM tenant_jurisdiction_configs`)
 		if err != nil {
 			return err
 		}
@@ -169,11 +196,12 @@ func TestTenantIsolation_InsertRequiresMatchingTenantContext(t *testing.T) {
 
 	tenantA := createTestTenant(t, pool)
 	tenantB := createTestTenant(t, pool)
+	jurisdiction := createTestJurisdiction(t, pool)
 
 	err := pool.WithTenant(ctx, tenantA, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO tenant_config (tenant_id, display_name) VALUES ($1, $2)`,
-			tenantB, "Forged row",
+			`INSERT INTO tenant_jurisdiction_configs (tenant_id, jurisdiction_id, kyc_ruleset_id) VALUES ($1, $2, $3)`,
+			tenantB, jurisdiction, "Forged row",
 		)
 		return err
 	})
@@ -181,17 +209,19 @@ func TestTenantIsolation_InsertRequiresMatchingTenantContext(t *testing.T) {
 }
 
 // TestWithoutTenant_DeniesRLSProtectedTable proves WithoutTenant cannot
-// be used to bypass RLS on tenant_config - it exists only for genuinely
-// platform-level, non-RLS tables (tenants, jurisdictions, assets).
+// be used to bypass RLS on tenant_jurisdiction_configs - it exists only
+// for genuinely platform-level, non-RLS tables (tenants, jurisdictions,
+// assets, persons).
 func TestWithoutTenant_DeniesRLSProtectedTable(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
 	tenantA := createTestTenant(t, pool)
+	jurisdiction := createTestJurisdiction(t, pool)
 
 	err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO tenant_config (tenant_id, display_name) VALUES ($1, $2)`,
-			tenantA, "Should not be allowed",
+			`INSERT INTO tenant_jurisdiction_configs (tenant_id, jurisdiction_id, kyc_ruleset_id) VALUES ($1, $2, $3)`,
+			tenantA, jurisdiction, "Should not be allowed",
 		)
 		return err
 	})

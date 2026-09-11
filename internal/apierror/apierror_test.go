@@ -19,6 +19,7 @@ func TestWrite_StatusCodeMapping(t *testing.T) {
 		{CodeNotFound, http.StatusNotFound},
 		{CodeConflict, http.StatusConflict},
 		{CodeUnavailable, http.StatusServiceUnavailable},
+		{CodeRateLimited, http.StatusTooManyRequests},
 		{CodeInternal, http.StatusInternalServerError},
 		{Code("something_unrecognized"), http.StatusInternalServerError}, // safe default
 	}

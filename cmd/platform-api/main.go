@@ -73,13 +73,23 @@ func run() error {
 	defer pool.Close()
 	logger.Info("database connected")
 
-	issuer := auth.NewIssuer(cfg.JWTSigningSecret, cfg.JWTIssuer)
+	keys := map[string]string{cfg.JWTActiveKID: cfg.JWTSigningSecret}
+	if cfg.JWTPreviousSecret != "" {
+		keys[cfg.JWTPreviousKID] = cfg.JWTPreviousSecret
+	}
+	keyRegistry, err := auth.NewKeyRegistry(cfg.JWTActiveKID, keys)
+	if err != nil {
+		return fmt.Errorf("build JWT key registry: %w", err)
+	}
+	issuer := auth.NewIssuer(keyRegistry, cfg.JWTIssuer, cfg.JWTAudience)
 
 	handler := httpserver.New(httpserver.Deps{
-		Logger:      logger,
-		DB:          pool,
-		AuthIssuer:  issuer,
-		ServiceName: cfg.OTelServiceName,
+		Logger:          logger,
+		DB:              pool,
+		AuthIssuer:      issuer,
+		ServiceName:     cfg.OTelServiceName,
+		AccessTokenTTL:  cfg.AccessTokenTTL,
+		RefreshTokenTTL: cfg.RefreshTokenTTL,
 	})
 
 	server := &http.Server{

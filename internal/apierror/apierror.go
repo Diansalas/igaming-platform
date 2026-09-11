@@ -22,6 +22,7 @@ const (
 	CodeInternal       Code = "internal_error"
 	CodeUnavailable    Code = "service_unavailable"
 	CodeTenantMismatch Code = "tenant_mismatch"
+	CodeRateLimited    Code = "rate_limited"
 )
 
 // Error is the wire format for an API error response.
@@ -51,6 +52,8 @@ func httpStatus(c Code) int {
 		return http.StatusConflict
 	case CodeUnavailable:
 		return http.StatusServiceUnavailable
+	case CodeRateLimited:
+		return http.StatusTooManyRequests
 	default:
 		return http.StatusInternalServerError
 	}

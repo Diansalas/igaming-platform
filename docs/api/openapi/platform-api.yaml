@@ -1,15 +1,24 @@
 openapi: 3.0.3
 info:
-  title: platform-api (Stage 1 foundation)
-  version: "0.1.0"
+  title: "platform-api (Stage 2: identity + tenancy + security)"
+  version: "0.2.0"
   description: >
-    Stage 1 foundation endpoints only: health/readiness and the tenant-
-    isolation demonstration endpoint. This is NOT the full platform API -
-    identity, wallet, bonus, payments, casino, sportsbook, and compliance
-    APIs are added in their owning stages (see docs/active-stage.md and
-    docs/architecture/04-api-architecture.md for the conventions those
-    additions must follow: versioned paths, the shared error envelope
-    below, idempotency-key support on mutating endpoints).
+    Health/readiness, player identity/auth, staff auth, and tenant/brand/
+    staff/player administration endpoints through Stage 2. This is NOT the
+    full platform API - wallet/ledger, bonus, payments, casino, sportsbook,
+    and production KYC/AML APIs are added in their owning stages (see
+    docs/active-stage.md and docs/architecture/04-api-architecture.md for
+    the conventions those additions must follow: versioned paths, the
+    shared error envelope below, idempotency-key support on mutating
+    endpoints).
+
+
+    Authentication is HMAC-signed JWTs with key-id-based rotation support
+    (see the bearerAuth security scheme below and docs/decisions/0011).
+    This remains explicitly PROVIDER DEPENDENT / foundation-only -
+    production authentication may move to a real identity provider or
+    KMS-managed asymmetric signing before go-live; see
+    docs/architecture/05-identity-architecture.md.
 servers:
   - url: http://localhost:8080
     description: Local development
@@ -62,34 +71,546 @@ paths:
                   reason:
                     type: string
                     example: database unreachable
-  /v1/tenant-config:
-    get:
-      summary: Get the authenticated caller's tenant configuration
+
+  # --- Player auth ---
+  /v1/auth/register:
+    post:
+      summary: Register a new player account
       description: >
-        Stage 1 foundation demonstration endpoint proving the full chain
-        of JWT verification, tenant-context extraction, and row-level-
-        security-enforced, tenant-scoped database access. The tenant is
-        always derived from the verified bearer token - never from a
-        header, query parameter, or path segment.
-      security:
-        - bearerAuth: []
+        Creates a Person, a PlayerAccount under the given brand, and an
+        initial session in one atomic transaction. tenant_id is always
+        derived server-side from the resolved brand - never accepted from
+        the client (CLAUDE.md's absolute multi-tenancy rule).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                brand_slug: { type: string }
+                email: { type: string, format: email }
+                password: { type: string, format: password, minLength: 8 }
+              required: [brand_slug, email, password]
       responses:
-        "200":
-          description: The caller's tenant configuration
+        "201":
+          description: Account created; returns an initial token pair
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/TenantConfig"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
+                $ref: "#/components/schemas/TokenPair"
+        "400":
+          $ref: "#/components/responses/ValidationError"
         "404":
-          description: No configuration exists for this tenant
+          description: Unknown brand_slug
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: An account with this email already exists for this brand
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/auth/login:
+    post:
+      summary: Log in as a player
+      description: >
+        Verifies credentials against the brand-scoped player account.
+        Subject to Postgres-backed lockout after repeated failures (see
+        docs/architecture/05-identity-architecture.md's login_attempts
+        design) - locked-out requests return 429 even with a correct
+        password, matching the documented threshold/window.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                brand_slug: { type: string }
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+              required: [brand_slug, email, password]
+      responses:
+        "200":
+          description: Authenticated; returns a token pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          description: Invalid email or password
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Account exists but cannot currently log in (suspended/self-excluded/closed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown brand_slug
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/auth/refresh:
+    post:
+      summary: Rotate a refresh token for a new access/refresh token pair
+      description: >
+        Single-use refresh tokens: presenting one rotates it for a new
+        pair and revokes the old one. Presenting an already-rotated
+        (reused) token revokes the entire session chain from that point
+        forward and returns 401 - see docs/decisions and
+        internal/auth/session.go's RotateSession. The principal's CURRENT
+        role/status is re-checked on every refresh, never trusted from
+        the prior token.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token: { type: string }
+              required: [refresh_token]
+      responses:
+        "200":
+          description: Rotated; returns a new token pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          description: Invalid, expired, or reused refresh token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Principal is no longer active (e.g. suspended since last login)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/auth/logout:
+    post:
+      summary: Revoke a session by its refresh token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token: { type: string }
+              required: [refresh_token]
+      responses:
+        "204":
+          description: Session revoked (idempotent - also returned if the token was already invalid)
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # --- Player self-service ---
+  /v1/me:
+    get:
+      summary: Get the authenticated player's own profile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The caller's own player account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerProfile"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Token is not a player-principal token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/me/sessions:
+    get:
+      summary: List the authenticated principal's active sessions
+      description: >
+        Available to both player and staff principals. Scoped to the
+        caller's own principal_id - never returns another principal's
+        sessions, even within the same tenant.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Active sessions for the caller
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/me/sessions/{id}:
+    delete:
+      summary: Revoke one of the authenticated principal's own sessions
+      description: >
+        Ownership-checked server-side (the session's principal_id must
+        match the caller's) - a caller cannot revoke another principal's
+        session by guessing its id, even within the same tenant.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "204":
+          description: Session revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No such session owned by the caller
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # --- Staff auth ---
+  /v1/staff/auth/login:
+    post:
+      summary: Log in as a staff user (back-office/admin principal)
+      description: >
+        Separate credential store and endpoint from player login.
+        tenant_slug is omitted entirely for a platform_admin login (there
+        is no tenant to resolve - see docs/decisions/0011); every other
+        staff role must supply it.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tenant_slug:
+                  type: string
+                  description: Omit only for a platform_admin login.
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+              required: [email, password]
+      responses:
+        "200":
+          description: Authenticated; returns a token pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenPair"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          description: Invalid email or password
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: Account exists but cannot currently log in
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown tenant_slug
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # --- Tenant/brand/staff administration ---
+  /v1/admin/tenants:
+    post:
+      summary: Provision a new tenant
+      description: >
+        platform_admin only (tenant:write). Never tenant-scoped by design
+        - provisioning a tenant is inherently a platform-level action, so
+        this route deliberately does not require an existing tenant
+        context (see docs/decisions/0011).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                slug: { type: string }
+                licensing_model:
+                  type: string
+                  enum: [under_platform_licence, own_licence]
+              required: [name, slug, licensing_model]
+      responses:
+        "201":
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/brands:
+    post:
+      summary: Provision a new brand under a tenant
+      description: >
+        Requires brand:write. platform_admin may target any tenant;
+        tenant_admin may only target their own tenant (checked explicitly
+        against the path parameter, per ADR 0011).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                slug: { type: string }
+              required: [name, slug]
+      responses:
+        "201":
+          description: Brand created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Brand"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Caller lacks brand:write, or is a tenant_admin targeting a different tenant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/staff:
+    post:
+      summary: Create a staff user for a tenant
+      description: >
+        Requires staff:manage. platform_admin may target any tenant;
+        tenant_admin may only target their own. Cannot create a
+        platform_admin - that role is bootstrapped only via
+        cmd/seed-admin (see docs/decisions/0014).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password, minLength: 8 }
+                role:
+                  type: string
+                  enum: [tenant_admin, support, compliance, finance]
+              required: [email, password, role]
+      responses:
+        "201":
+          description: Staff user created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StaffUser"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: A staff user with this email already exists for this tenant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # --- Player administration (tenant-scoped) ---
+  /v1/admin/players:
+    get:
+      summary: List player accounts for the caller's tenant
+      description: >
+        Requires player:read, and a real (non-nil) tenant context -
+        platform_admin's platform-scoped token is rejected here by
+        RequireTenantScope (browsing an arbitrary tenant's players is
+        deferred - see docs/decisions/0011's "Consequences").
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Player accounts in the caller's tenant
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PlayerAccount"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/players/{id}:
+    get:
+      summary: Get a single player account in the caller's tenant
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The player account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerAccount"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/players/{id}/suspend:
+    post:
+      summary: Suspend a player account
+      description: >
+        Requires player:suspend (compliance/tenant_admin/platform_admin -
+        support explicitly does not have this permission). Requires a
+        reason code, recorded on the audit entry.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+              required: [reason]
+      responses:
+        "204":
+          description: Player suspended
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # --- Audit trail (read-only) ---
+  /v1/admin/audit-log:
+    get:
+      summary: List audit log entries for the caller's tenant
+      description: >
+        Requires audit:read and a real tenant context. Entries are
+        immutable (append-only, enforced by a database trigger - see
+        docs/decisions/0013) and ordered newest first, capped at 100 rows
+        per request in Stage 2 (no pagination yet - deferred, see the
+        Stage 2 completion report's technical debt section).
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -97,26 +618,106 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: >
-        Stage 1 foundation uses HMAC-signed JWTs (see internal/auth). This
-        is explicitly PROVIDER DEPENDENT / foundation-only - production
-        authentication is expected to move to a real identity provider or
-        KMS-managed asymmetric signing before go-live.
+        HMAC-signed (HS256) JWTs, verified against a key registry keyed
+        by the token's own `kid` header claim - this is what allows an
+        old and a new signing key to be valid simultaneously during
+        rotation (see internal/auth/keys.go). Tokens also carry a
+        possibly-nil tenant_id claim: platform_admin tokens are
+        legitimately platform-scoped (see docs/decisions/0011) - routes
+        that require a real tenant reject a nil one via the
+        RequireTenantScope middleware, not at token-verification time.
+        This remains PROVIDER DEPENDENT / foundation-only for Stage 2 -
+        see docs/architecture/05-identity-architecture.md.
   schemas:
-    TenantConfig:
+    TokenPair:
       type: object
       properties:
-        tenant_id:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer, description: Access token lifetime in seconds }
+      required: [access_token, refresh_token, token_type, expires_in]
+    PlayerProfile:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        status:
           type: string
-          format: uuid
-        display_name:
+          enum: [pending_verification, active, suspended, self_excluded, closed]
+        kyc_tier: { type: integer }
+        tenant_id: { type: string, format: uuid }
+        brand_id: { type: string, format: uuid }
+      required: [id, email, status, kyc_tier, tenant_id, brand_id]
+    PlayerAccount:
+      type: object
+      description: Player account as seen by tenant staff (no cross-brand/cross-tenant identifiers exposed).
+      properties:
+        id: { type: string, format: uuid }
+        brand_id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        status:
           type: string
-        theme:
+          enum: [pending_verification, active, suspended, self_excluded, closed]
+        kyc_tier: { type: integer }
+      required: [id, brand_id, email, status, kyc_tier]
+    Session:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        expires_at: { type: string, format: date-time }
+      required: [id, expires_at]
+    Tenant:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        licensing_model:
           type: string
-          description: Raw JSON theme configuration, opaque at this layer.
-        default_locale:
+          enum: [under_platform_licence, own_licence]
+        status: { type: string }
+      required: [id, name, slug, licensing_model, status]
+    Brand:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        status: { type: string }
+      required: [id, tenant_id, name, slug, status]
+    StaffUser:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        role:
           type: string
-          example: en
-      required: [tenant_id, display_name, theme, default_locale]
+          enum: [platform_admin, tenant_admin, support, compliance, finance]
+        status: { type: string }
+      required: [id, email, role, status]
+    AuditEntry:
+      type: object
+      description: >
+        Append-only audit record (internal/audit.Entry / the audit_log
+        table). Immutable at the database level - see
+        docs/decisions/0013.
+      properties:
+        id: { type: string, format: uuid }
+        actor_type:
+          type: string
+          enum: [player, staff, system]
+        actor_id: { type: string, format: uuid }
+        action: { type: string, example: player.suspended }
+        target_type: { type: string, example: player_account }
+        target_id: { type: string }
+        outcome:
+          type: string
+          enum: [success, failure, denied]
+        created_at: { type: string, format: date-time }
+      required: [id, actor_type, action, outcome, created_at]
     Error:
       type: object
       description: Platform-wide error envelope (internal/apierror.Error).
@@ -132,14 +733,39 @@ components:
             - internal_error
             - service_unavailable
             - tenant_mismatch
+            - rate_limited
         message:
           type: string
         request_id:
           type: string
       required: [code, message]
   responses:
+    ValidationError:
+      description: Request failed validation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     Unauthorized:
       description: Missing or invalid bearer token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Authenticated, but lacking the required permission or tenant scope
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: No such resource (or not visible to the caller's tenant scope)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: Too many failed attempts; locked out for a window
       content:
         application/json:
           schema:

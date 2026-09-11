@@ -78,25 +78,37 @@ hardcoding either region's rules into business logic.
   in `TenantJurisdictionConfig` for platform-licensed tenants, replaceable
   per tenant.
 
-## Known gap (tracked, not yet enforced)
+## Licensing-model/licence consistency (closed in Stage 2)
 
-Nothing in the Stage 1 schema ties `tenants.licensing_model` to
-`licences.licensee` — a tenant marked `own_licence` could technically be
-pointed at a licence row marked `licensee = 'platform'`, or vice versa.
-Enforcing this cross-table invariant needs either a trigger or
-application-level validation; deferred to the Stage 2 tenant-config
-service (where tenant provisioning actually happens) rather than added as
-a database trigger now, to avoid encoding business logic in SQL before
-the owning service exists. Flagged in Stage 1 specialist review so it
-isn't silently forgotten.
+The Stage 1 gap noted here — nothing tied `tenants.licensing_model` to
+`licences.licensee`, so a tenant marked `own_licence` could technically
+point at a licence row marked `licensee = 'platform'`, or vice versa — is
+now enforced at the database layer, not just in application code.
+Migration `0007_tenant_slug_and_licence_consistency` adds a
+`UNIQUE (id, licensee)` constraint on `licences`, a generated
+`tenants.expected_licensee` column (`'platform'` when
+`licensing_model = 'under_platform_licence'`, else `'tenant'`), and a
+composite foreign key
+`tenants (licence_id, expected_licensee) REFERENCES licences (id, licensee)`.
+A contradictory state is now a constraint violation, not just a bug some
+future service could introduce — see
+`docs/decisions/0011-platform-scoped-identity-tokens.md` and the Stage 2
+completion report for the verifying test
+(`TestTenant_LicensingModelMustMatchLicenceLicensee`).
 
 ## Stage mapping
 
 Stage 1 establishes the `tenants`, `jurisdictions`, and licensing schema
 skeleton plus the tenant-context/RLS foundation these tables rely on.
-Full `TenantJurisdictionConfig`-driven enforcement (geo-gating, KYC/AML/RG
+Stage 2 closes the licensing-model/licence consistency gap (above), adds
+the `Brand` concept as distinct from `Tenant`
+(`docs/decisions/0012-brand-distinct-from-tenant.md`), and exposes tenant/
+brand provisioning via the admin API — `TenantJurisdictionConfig` itself
+is untouched structurally in Stage 2 (still Stage 1's schema; no new
+jurisdiction rows or ruleset content added). Full
+`TenantJurisdictionConfig`-driven enforcement (geo-gating, KYC/AML/RG
 ruleset resolution, payment filtering) is implemented as each owning
-subsystem is built (Stages 2–4).
+subsystem is built (Stages 3–4).
 
 ## Ownership
 
