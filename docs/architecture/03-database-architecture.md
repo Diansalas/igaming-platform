@@ -24,6 +24,19 @@ not something every query call site needs to know about.
 
 ## Ledger schema (see `06-wallet-ledger-architecture.md` for full detail)
 
+**Superseded in detail by Stage 3A.** The sketch below is the Stage 0
+proposal and is retained for history; the authoritative column/constraint
+shape is now `docs/architecture/ledger-accounting-model.md` (with
+`docs/decisions/0019` and `0021`). Three specific differences matter,
+because the Stage 0 text below states them the other way round:
+entries carry a `direction` ('debit'/'credit') plus a strictly positive
+`amount`, **not** a signed amount; entries are grouped by
+`ledger_transaction_id` (a first-class `LedgerTransaction` row), **not** a
+bare `transaction_group_id`; and the idempotency constraints are
+tenant-scoped, `(tenant_id, provider_id, provider_tx_id)` and
+`(tenant_id, idempotency_key)`. The Stage 3A account-type list also adds
+`player_withdrawal_hold`.
+
 - Append-only `ledger_entries` table: never updated, never deleted.
 - Account types: `player_cash`, `player_bonus`, `player_locked`,
   `house_gaming`, `provider_payable`, `psp_clearing`, `psp_reserve`,

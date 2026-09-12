@@ -1,104 +1,107 @@
 # Active Stage
 
-## Security Hardening Pass (pre-Stage-3) — Complete
+## Stage 3A — Financial Architecture Freeze — Complete
 
-Status: **Complete, pending human approval to authorize Stage 3.** Stage
-2 (Identity + Tenancy + Security) was completed, reviewed, and approved
-by the human. Before authorizing Stage 3, the human directed a focused
-security hardening pass addressing the Stage 2 completion report's
-flagged debt. This is explicitly NOT Stage 3 — no wallet, ledger,
-payments, PSP integrations, casino, sportsbook, bonus engine, KYC/AML,
-responsible gaming, frontend, or back office work is in scope.
+Status: **Complete, pending human approval to authorize Stage 3B
+implementation.** Stage 2 (Identity + Tenancy + Security) and the
+pre-Stage-3 security hardening pass were both completed and approved by
+the human. The human then directed Stage 3A: freeze the complete wallet/
+ledger/payments/withdrawal/crypto-custody/reconciliation architecture and
+put it through independent specialist review *before* any implementation
+begins. This is explicitly NOT Stage 3B — no wallet, ledger, payment,
+PSP, casino-wallet-callback, sportsbook, bonus-posting, or crypto
+integration code, schema, or migration exists.
 
-### Objectives (as instructed at the hardening-pass gate)
+### Objectives (as instructed at the Stage 3A gate)
 
-1. Fix the sessions RLS exposure identified as the most significant
-   remaining Stage 2 debt, preferring database-enforced isolation over
-   application-level `principal_id` filtering, while preserving
-   authentication/session-lookup, self-service listing/revocation, and
-   any genuinely-required platform-admin operations.
-2. Define (architecture only, not implementation) the production design
-   for staff MFA and step-up authentication.
-3. Define (architecture only, not implementation) the production
-   authentication signing model: platform-owned identity with KMS/HSM-
-   managed asymmetric signing, keeping dev/test on the current simpler
-   mechanism.
-4. Run an independent security + code-reviewer regression review of the
-   changes.
-5. Full test suite (unit, integration, RLS, HTTP-security, auth, session,
-   authorization, migration round-trip), lint, format, build.
+1. Re-read the Blueprint's full financial model and the existing Stage
+   0-2 architecture/decisions, and design (not implement) the complete
+   financial domain model, ledger/accounting model, canonical transaction
+   flows, payment orchestration, withdrawal state machine, crypto custody
+   boundary, and reconciliation model.
+2. Preserve the Blueprint's terminology and intent; mark anything not
+   literally specified as an architectural decision, and anything the
+   Blueprint is silent on as an explicit open decision — never invent a
+   business/policy resolution.
+3. Design multi-wallet/multi-asset accounting, database-enforced
+   idempotency and concurrency control, and balance-projection/
+   reconciliation architecture consistent with CLAUDE.md's financial
+   invariants.
+4. Run independent specialist review (financial-domain, ledger/
+   accounting, payments, crypto/custody, security, multi-tenancy,
+   backend, QA, architecture/code review) and fix documentation/design
+   defects directly; escalate anything requiring a business decision as
+   an explicit open decision.
+5. Produce a formal list of Mandatory Financial Invariants Stage 3B must
+   enforce.
+6. Change no application code — documentation and architecture only.
 
 ### Completed work
 
-See `docs/progress.md`'s "Security Hardening Pass (pre-Stage-3)" section
-for the full itemized inventory. Summary:
+See `docs/progress.md`'s "Stage 3A — Financial Architecture Freeze"
+section for the full itemized inventory. Summary:
 
-- **Sessions RLS (migration 0018)**: the `FOR SELECT USING (true)` policy
-  on `sessions` is replaced by three narrower policies (exact-token-hash
-  match, tenant+principal match, tenant-scoped internal-operation-id
-  match), each gated by a Postgres session variable set only by trusted
-  code for the lifetime of one transaction — no new database role, no
-  `BYPASSRLS`. Full design: `docs/decisions/0016-sessions-rls-hardening.md`.
-- **Two architecture-only ADRs**, both explicitly `NOT IMPLEMENTED`:
-  `docs/decisions/0017-staff-mfa-and-step-up-authentication.md` and
-  `docs/decisions/0018-production-authentication-signing-architecture.md`.
-- An independent `security` + `code-reviewer` pass on the sessions RLS
-  change found **one blocking defect** (`revokeChainFrom`, the
-  refresh-token-reuse chain-revocation walk, stopped early at an
-  already-revoked mid-chain node, leaving live sessions further down an
-  otherwise-compromised chain) and several should-fix items (an ignored
-  `RowsAffected` on the chain-link write, no audit trail on the
-  rotation-race-loser path, a missing tenant conjunct on one new policy,
-  duplicated GUC-setting SQL, and test-coverage gaps for cross-principal
-  writes and GUC isolation/leakage) — all fixed and re-verified, with new
-  regression tests for each. Full itemized list:
-  `docs/decisions/0016`'s "Corrections" section and `docs/progress.md`.
+- **Seven new architecture documents** (`docs/architecture/`):
+  `financial-domain-model.md`, `ledger-accounting-model.md`,
+  `financial-transaction-flows.md` (20 canonical flows),
+  `payment-orchestration.md`, `withdrawal-state-machine.md`,
+  `crypto-custody-boundary.md`, `reconciliation-model.md`.
+- **Three new ADRs** (`docs/decisions/`): `0019` (authoritative ledger/
+  balance-projection architecture, including the concrete RLS/tenancy
+  shape and actor-authorization matrix), `0020` (financial idempotency
+  and concurrency control), `0021` (multi-asset accounting).
+- **One 13-line addendum** to `docs/architecture/03-database-architecture.md`
+  pointing to the documents above where Stage 3A supersedes an earlier
+  Stage 0 sketch (signed amounts, global idempotency keys). No other
+  existing file was changed.
+- **Independent specialist review** by `ledger-finance`, `payments`,
+  `security`, `architect`, `backend`, `qa`, and `code-reviewer`, each
+  reviewing the full document set and authorized to fix non-business
+  defects directly. This pass found and fixed several genuine accounting
+  defects (unbalanced/inverted entries in multiple flows), a real
+  multi-tenancy defect (platform-global idempotency keys on tenant-
+  partitioned RLS-protected tables), a self-inflicted RLS/P1-drift risk
+  that reproduced ADR 0016's own discovered gotcha before it could ever
+  ship, an unimplementable Postgres idempotency pattern (missing
+  `SAVEPOINT`), and several withdrawal four-eyes bypass paths — full
+  itemized list in `docs/progress.md`.
 
-### Verification performed (all against a real local PostgreSQL 16, not mocked)
+### Verification performed
 
-- `gofmt`/`go build`/`go vet` (including `-tags=integration`)/
-  `golangci-lint`: all clean, 0 issues.
-- Full unit and integration suite passing, including new direct-SQL RLS
-  proofs (cross-tenant and cross-principal read AND write denial, exact
-  token-hash-only visibility, internal-op-id single-row visibility, GUC
-  non-leakage across transactions on a reused pooled connection, a 4-hop
-  chain revocation with a pre-revoked mid-chain node) and the full
-  pre-existing Stage 2 regression suite (unaffected).
-- All 18 migrations (0001–0018) applied, fully rolled back, and
-  re-applied cleanly.
+Documentation-only stage — no build/test/migration verification applies.
+`git status`/`git diff --stat` confirmed by the independent
+`code-reviewer` pass: exactly ten new documentation files plus the one
+13-line addendum above changed; no `.go` file, migration, or config file
+touched. Cross-reference integrity (every `§`-reference across all ten
+new documents resolves) was checked and confirmed.
 
-### Pending (to close out this pass)
+### Pending (to close out this stage)
 
 - Commit and push this work to `claude/focused-wright-jw88w9`.
-- Security Hardening Completion Report delivered to the human, ending
-  with the required closing statement. No Stage 3 work begins until
-  Stage 3 is explicitly authorized.
+- Stage 3A Completion Report delivered to the human, ending with the
+  required closing statement. No Stage 3B work begins until explicitly
+  authorized.
 
 ### Blockers
 
-None technical. The same non-blocking open business/commercial tracks
-from Stage 0/1/2 remain open (`docs/decisions/0005`; retention-period
-decisions in `docs/architecture/16-privacy.md`). New from this pass, also
-non-blocking for engineering: the open human/compliance decisions listed
-in ADRs 0017 and 0018 (which specific operations require step-up and
-their thresholds; TOTP vs. WebAuthn; KMS/HSM provider and migration
-timeline).
+None technical — this is a documentation-only stage and it is complete.
+Three of the open decisions below block implementing *specific* Stage 3B
+flows (not the stage as a whole): the `promo_liability` accounting
+framing (blocks bonus grant/conversion/forfeiture), the missing bank-
+treasury ledger account for PSP settlement batching (blocks that flow
+balancing inside the ledger), and the missing crypto-custodian ledger
+account (blocks crypto deposit/withdrawal postings). Core ledger, wallet
+model, withdrawal-workflow shell, PSP-orchestrator shell, and
+reconciliation-job implementation are not blocked by any of the three and
+can proceed once Stage 3B is authorized.
 
-### Remaining security debt after this pass
+### Decisions/input still useful from the human before Stage 3B
 
-- `brands`' public-read RLS policy remains broader than strictly needed
-  (cross-tenant brand enumeration) — flagged in Stage 2 review, out of
-  this pass's scope.
-- The refresh-rotation race-loser path is now audited but deliberately
-  does not revoke the winner's chain (see `docs/decisions/0016`'s
-  reasoning) — worth revisiting if production data shows this path
-  correlating with confirmed theft.
-- MFA/step-up and KMS-based signing remain architecture only.
-
-### Decisions/input still useful from the human
-
-1. Approve this hardening pass and authorize Stage 3.
-2. The open human/compliance decisions listed in ADRs 0017 (MFA policy)
-   and 0018 (KMS/HSM provider, migration timeline) — non-blocking for
-   Stage 3 engineering start, but worth resolving before either is
-   actually built.
+1. Approve Stage 3A and authorize Stage 3B implementation.
+2. Resolve, or explicitly accept a stated default for, the three blocking
+   open decisions above (`docs/progress.md` lists all open decisions with
+   pointers to where each is discussed).
+3. The already-open, non-blocking business/compliance tracks carried
+   forward from Stage 0-2 and the hardening pass remain open
+   (`docs/decisions/0005`; ADRs 0017/0018's open items; `brands`' public-
+   read RLS breadth).

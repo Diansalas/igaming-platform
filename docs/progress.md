@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-11 (Stage 2)
+Last updated: 2026-09-12 (Stage 3A)
 
-## Status: Stage 2 (Identity + tenancy + security) — implementation and verification complete, pending specialist review reconciliation and human approval to start Stage 3
+## Status: Stage 3A (Financial Architecture Freeze) — documentation and specialist review complete, pending human approval to start Stage 3B implementation
 
 ## Stage 0 — complete (approved)
 
@@ -429,8 +429,195 @@ regression tests; all 18 migrations round-tripped up/down/up cleanly.
 - MFA/step-up and KMS-based signing are architecture only; no
   implementation timeline is set (both ADRs list open human decisions).
 
+## Stage 3A — Financial Architecture Freeze — complete
+
+Human-directed design-only stage: freeze the full wallet/ledger/payments/
+withdrawal/crypto-custody/reconciliation architecture and put it through
+independent specialist review *before* any Stage 3B implementation
+begins. Explicitly NOT Stage 3B — no wallet, ledger, payment, PSP, or
+crypto tables/migrations/services were created; `git diff --stat` for
+this pass shows exactly one non-new-file change (`docs/architecture/
+03-database-architecture.md`, a 13-line "superseded in detail by Stage
+3A" pointer) plus ten new documentation files. No `.go` file, migration,
+or config file was touched.
+
+### Delivered (`NOT IMPLEMENTED` — architecture/design documents only)
+
+- `docs/architecture/financial-domain-model.md` — fixes `Wallet` as
+  scoped to `PlayerAccount` (not `Person`), the full Person/Tenant/Brand/
+  PlayerAccount/Asset/Wallet/LedgerAccount/LedgerTransaction/LedgerEntry
+  scoping table, and why house-level accounts are tenant-scoped rather
+  than brand-scoped.
+- `docs/architecture/ledger-accounting-model.md` — the full
+  `LedgerAccount`/`LedgerTransaction`/`LedgerEntry` object model,
+  per-account-type modeling for all ten Blueprint account types plus one
+  architectural addition (`player_withdrawal_hold`), the tombstone
+  mechanism, and the 15-item Mandatory Financial Invariants table.
+- `docs/architecture/financial-transaction-flows.md` — all 20 canonical
+  flows (deposit through jackpot contribution), each with accounts,
+  idempotency key, failure/retry/compensation behavior, and which
+  invariants apply.
+- `docs/architecture/payment-orchestration.md` — `PaymentProvider`/
+  `PaymentOrchestrator` interfaces, routing dimensions, cascade-on-decline,
+  provider health, no real or mock PSP integrated.
+- `docs/architecture/withdrawal-state-machine.md` — the full withdrawal
+  workflow state machine, four-eyes approval design and its bypass-closure
+  requirements, and the ADR-0017 step-up hook point.
+- `docs/architecture/crypto-custody-boundary.md` — `CryptoCustodyProvider`
+  interface, deposit-address/confirmation/withdrawal-instruction shapes,
+  reaffirming ADR 0008's no-private-keys boundary; no custodian selected
+  or integrated.
+- `docs/architecture/reconciliation-model.md` — eight reconciliation
+  streams (ledger↔projection, wallet↔PSP, wallet↔casino/sportsbook
+  provider, provider payable, PSP clearing/reserve, crypto custodian),
+  balance-projection rebuild procedure, mismatch investigation workflow.
+- `docs/decisions/0019-authoritative-ledger-and-balance-projection-architecture.md`
+  — the concrete RLS/tenancy shape for every new financial table, the
+  append-only enforcement mechanism (trigger pair, not `REVOKE`), the
+  actor-authorization matrix for who may originate which posting, and the
+  authorization/isolation test floor Stage 3B must implement.
+- `docs/decisions/0020-financial-idempotency-and-concurrency-control.md`
+  — idempotency key scope and retry/concurrency semantics, including the
+  Postgres `SAVEPOINT` requirement for the idempotent-insert pattern.
+- `docs/decisions/0021-multi-asset-accounting.md` — re-confirms
+  `NUMERIC(38,0)` + per-asset exponent, the asset-identity/precision/
+  display-amount distinction, and the `ConversionOperation` cross-asset
+  design (not implemented; no flow in Stage 3B produces one).
+
+### Specialist review pass
+
+`ledger-finance`, `payments`, `security`, `architect`, `backend`, `qa`,
+and `code-reviewer` each independently reviewed the ten documents above
+(documentation-only review — no application code exists in this domain
+yet). Each was authorized to edit the documents directly to fix
+non-business defects, and to add explicit `OPEN DECISION` markers rather
+than invent business/policy resolutions. Summary of what was found and
+fixed (see each document's own text for full detail — this pass generated
+substantially more cross-file rework than either the Stage 1 or Stage 2
+review passes):
+
+- **Real accounting defects, fixed**: several flows in
+  `financial-transaction-flows.md` were unbalanced or had inverted
+  debit/credit direction as originally drafted — Flow 9 (sportsbook win
+  settlement debited `house_gaming` for winnings-only against a
+  stake-plus-winnings credit), Flow 11 (partial cash-out didn't handle a
+  payout exceeding the released stake), Flow 12 (bonus grant posted two
+  same-direction entries), Flow 18 and Flow 19 (`psp_clearing`/
+  `psp_reserve` entries were on the wrong side, and `ledger-accounting-
+  model.md` §2's stated normal-balance directions for those two accounts
+  contradicted their own purpose). All corrected with the general
+  (not just the common-case) entries spelled out.
+- **A real multi-tenancy defect, fixed**: idempotency/uniqueness keys
+  (`(provider_id, provider_tx_id)`, `idempotency_key`) were specified as
+  platform-global on RLS-protected, tenant-partitioned tables — found
+  independently by both the `architect` and `backend` reviews. This
+  allows cross-tenant key collision/denial and, under RLS, turns a unique
+  violation against an invisible row into a cross-tenant existence
+  oracle. Fixed by namespacing every such key by `tenant_id` (and, at the
+  workflow layer, by `player_account_id` too, for client-supplied keys)
+  across `ledger-accounting-model.md`, both new ADRs, and the withdrawal
+  document.
+- **A real RLS self-inflicted-P1 risk, found and fixed before it could
+  ever ship**: the `security` review recognized that ADR 0016's own
+  hard-won discovery — Postgres requires a row to be visible under some
+  `SELECT` policy before an `UPDATE`/`DELETE` can affect it, `RETURNING`
+  or not — was about to be silently reintroduced on
+  `wallet_balance_projection` and `withdrawal_requests`. A provider-
+  callback posting (no player session, hence no player-scope GUC) doing
+  its same-transaction projection `UPDATE` under a player-scope-ANDed
+  policy would affect zero rows: entries commit, the projection silently
+  doesn't, manufacturing exactly the P1 drift the design otherwise exists
+  to prevent. Fixed in ADR 0019 with the OR'd-permissive-policy pattern
+  and a mandatory `RowsAffected()` check, generalizing ADR 0016's fix
+  rather than repeating its discovery process in Stage 3B.
+- **An unimplementable Postgres pattern, fixed**: the `backend` review
+  found that the idempotent-insert helper's "catch the unique-violation,
+  then look up and return the original result" pattern is not achievable
+  in the same outer transaction without a `SAVEPOINT` — Postgres aborts
+  the rest of a transaction after any statement error. Documented
+  explicitly in ADR 0020, including the pgx nested-`Tx` mechanics.
+- **Withdrawal four-eyes bypass paths, closed**: the `security` review
+  found the original design's `UNIQUE(withdrawal_request_id,
+  approver_principal_id)` alone did not deliver four-eyes — a mutable
+  request amount (approve low, raise after), no requirement that the
+  approver be distinct from the beneficiary or hold the right permission
+  in the right tenant, self-service threshold manipulation by a dual-
+  permission principal, and no requirement that the two-approver check
+  run inside the same transaction as the state transition it gates. All
+  closed in `withdrawal-state-machine.md` §5; the threshold-manipulation
+  and sub-threshold-structuring risks are recorded as explicit `OPEN
+  DECISION`s for business/compliance policy, not invented.
+- **Two blocking accounting gaps surfaced, not invented resolutions
+  for**: (1) `promo_liability`'s normal-balance direction cannot be made
+  to work as a credit-normal liability given how bonus grant/forfeiture
+  must post it — found independently by `ledger-finance` and `architect`
+  — leaving either "reinterpret `promo_liability` as debit-normal" or "add
+  an eleventh `bonus_expense` account" as the two coherent resolutions,
+  neither invented here; (2) no ledger account exists for the crypto
+  custodian leg (`psp_clearing` is fiat-only by its own stated
+  definition) and no ledger account exists for the bank-treasury leg of
+  PSP settlement batching (Flow 18) — both flagged as blocking Stage 3B
+  implementation of the affected flows specifically, not the whole
+  design.
+- **A missing actor-authorization statement, added**: nothing in the
+  original draft stated which actor class (player session, verified
+  provider callback, internal service, staff principal) may originate
+  which `transaction_type` — the `security` review added the binding
+  matrix to ADR 0019, closing a privilege-escalation gap the design would
+  otherwise have left implicit.
+- Numerous smaller defects across every document: broken/stale cross-
+  references (a `§8` pointing nowhere, section renumbering left behind by
+  earlier edits), a fabricated CLAUDE.md quotation removed, an
+  unenforceable composite foreign key (`MATCH SIMPLE` with a nullable
+  column silently disabling the check it claimed to make), a stored
+  `LedgerTransaction.status` column contradicting its own "never
+  mutated" prose, `WithdrawalApproval`/`ReconciliationRun`/
+  `ReconciliationMismatch` tables originally missing `tenant_id` entirely
+  despite prose claiming tenant-scoped RLS, and a double-subtracted
+  withdrawal hold in the available-balance formula.
+- No specialist found scope creep against the Stage 3A DO-NOT-BUILD list
+  (no wallet/ledger/payment table, migration, or service code exists),
+  and no document claims implementation status beyond `NOT IMPLEMENTED`/
+  `ARCHITECTURAL DECISION`/`OPEN DECISION`.
+
+### Open decisions requiring human/business/finance input before the affected Stage 3B flows can be implemented
+
+The full list lives in each document's own `OPEN DECISION` markers;
+the ones that actually block implementing a specific flow (not just
+refine it) are:
+
+1. `promo_liability` framing (debit-normal contra-liability vs. a new
+   `bonus_expense` account) — blocks Flows 12/14/15.
+2. Bank-treasury ledger account for PSP settlement batching — blocks
+   Flow 18 balancing inside the ledger at all.
+3. Ledger account for the crypto custodian leg — blocks crypto deposit/
+   withdrawal postings (`crypto-custody-boundary.md`).
+4. FX/conversion clearing account for `ConversionOperation` — blocks
+   implementing cross-asset conversion (not required for any Stage 3B
+   flow currently designed).
+5. Jackpot liability-vs-expense framing, provider-fee expense account
+   (Flow 17), negative-cash-balance policy after a deposit reversal
+   (Flow 2), four-eyes/step-up threshold values and role-disjointness,
+   sub-threshold-structuring window (AML), PSP rounding tolerance,
+   deposit-address reuse model — all recorded, none blocking a specific
+   flow's implementability the way 1–3 do.
+
+### Verification performed
+
+Documentation-only stage: no build/test/migration verification applies.
+Verification performed was `git status`/`git diff --stat` confirmation
+(by the independent `code-reviewer` pass) that only the ten new documents
+plus one 13-line addendum to an existing document changed — no `.go`
+file, migration, or config file. Cross-reference integrity (every
+`§`-reference across all ten documents resolves to a real section) was
+checked and confirmed.
+
 ## Next stage
 
-Stage 3 — not started; requires explicit human authorization per the
-stage-gate rule in `CLAUDE.md`, and Stage 2's specialist-review
-reconciliation and human approval first.
+Stage 3B (wallet/ledger/payments implementation) — not started; requires
+explicit human authorization per the stage-gate rule in `CLAUDE.md`, and
+resolution (or an explicit decision to proceed with a stated default) of
+the three blocking open decisions above before the affected flows can be
+built. The rest of Stage 3B (core ledger, wallet model, withdrawal
+workflow shell, PSP orchestrator shell, reconciliation jobs) is not
+blocked by those three and can proceed once authorized.
