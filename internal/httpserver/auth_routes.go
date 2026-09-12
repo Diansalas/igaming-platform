@@ -471,13 +471,8 @@ func newListSessionsHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		scopeFn := deps.DB.WithoutTenant
-		if tc.TenantID != uuid.Nil {
-			scopeFn = func(ctx context.Context, fn db.TxFunc) error { return deps.DB.WithTenant(ctx, tc.TenantID, fn) }
-		}
-
 		var resp []sessionResponse
-		err = scopeFn(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+		err = deps.DB.WithPrincipalScope(r.Context(), tc.TenantID, subjectID, func(ctx context.Context, tx pgx.Tx) error {
 			sessions, err := auth.ListActiveSessions(ctx, tx, auth.PrincipalType(tc.PrincipalType), subjectID)
 			if err != nil {
 				return err
@@ -518,11 +513,7 @@ func newRevokeSessionHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		scopeFn := deps.DB.WithoutTenant
-		if tc.TenantID != uuid.Nil {
-			scopeFn = func(ctx context.Context, fn db.TxFunc) error { return deps.DB.WithTenant(ctx, tc.TenantID, fn) }
-		}
-		err = scopeFn(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+		err = deps.DB.WithPrincipalScope(r.Context(), tc.TenantID, subjectID, func(ctx context.Context, tx pgx.Tx) error {
 			return auth.RevokeSession(ctx, tx, sessionID, subjectID)
 		})
 		if errors.Is(err, auth.ErrSessionNotFound) {

@@ -101,12 +101,15 @@ func IssueSession(ctx context.Context, tx pgx.Tx, principalType PrincipalType, p
 	}, nil
 }
 
-// sessionRow is the raw, unscoped read of a session by token hash - see
-// the package-level note on why SELECT on sessions has a public RLS
-// policy (migration 0012): a refresh token carries no tenant hint, so
-// there is no way to know which tenant scope to query with before
-// reading the row that would tell us. Finding a specific row still
-// requires already possessing the exact, unguessable token.
+// sessionRow is the read of a session by token hash - see
+// docs/decisions/0016-sessions-rls-hardening.md: a refresh token carries
+// no tenant hint, so there is no way to know which tenant scope to query
+// with before reading the row that would tell us. Finding a specific row
+// still requires already possessing the exact, unguessable token - and,
+// as of migration 0018, the database itself (not just application logic)
+// grants visibility to at most that one row, via
+// db.Pool.WithSessionLookup setting app.session_lookup_hash to this exact
+// hash for the lifetime of the transaction.
 type sessionRow struct {
 	id                  uuid.UUID
 	principalType       PrincipalType
@@ -120,7 +123,7 @@ type sessionRow struct {
 func lookupSessionByToken(ctx context.Context, pool *db.Pool, rawToken string) (sessionRow, error) {
 	hash := hashRefreshToken(rawToken)
 	var row sessionRow
-	err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+	err := pool.WithSessionLookup(ctx, hash, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
 			`SELECT id, principal_type, principal_id, tenant_id, expires_at, revoked_at, replaced_by_session_id
 			 FROM sessions WHERE refresh_token_hash = $1`,
@@ -139,12 +142,29 @@ func lookupSessionByToken(ctx context.Context, pool *db.Pool, rawToken string) (
 // withResolvedScope runs fn in a transaction scoped to row's tenant
 // (WithTenant if the session belongs to a specific tenant, WithoutTenant
 // if it's a platform-scoped principal's session) - the second phase of
-// the two-phase pattern every session-mutating function below uses.
+// the two-phase pattern every session-mutating function below uses. It
+// also sets app.session_internal_op_id to row.id before calling fn:
+// Postgres requires a row to be visible under SOME SELECT policy before
+// permitting an UPDATE/DELETE against it at all - not merely satisfying
+// the UPDATE/DELETE policy's own USING clause - a requirement confirmed
+// empirically while fixing this (see docs/decisions/0016-sessions-rls-
+// hardening.md). None of migration 0018's other SELECT policies apply in
+// this tenant-only-scoped, system-driven context (no token hash, no
+// caller-asserted principal_id), so every caller of withResolvedScope
+// needs this to be able to touch row.id at all. revokeChainFrom
+// separately re-sets this per-iteration for the rows it walks beyond
+// row.id itself.
 func withResolvedScope(ctx context.Context, pool *db.Pool, row sessionRow, fn db.TxFunc) error {
-	if row.tenantID != nil {
-		return pool.WithTenant(ctx, *row.tenantID, fn)
+	wrapped := func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.session_internal_op_id', $1, true)`, row.id.String()); err != nil {
+			return fmt.Errorf("auth: set session internal-op context: %w", err)
+		}
+		return fn(ctx, tx)
 	}
-	return pool.WithoutTenant(ctx, fn)
+	if row.tenantID != nil {
+		return pool.WithTenant(ctx, *row.tenantID, wrapped)
+	}
+	return pool.WithoutTenant(ctx, wrapped)
 }
 
 // RotateSession validates rawToken against the sessions table (a
@@ -204,28 +224,44 @@ func RotateSession(ctx context.Context, pool *db.Pool, rawToken string, ttl time
 	err = withResolvedScope(ctx, pool, row, func(ctx context.Context, tx pgx.Tx) error {
 		// Re-check under the properly-scoped transaction: the row could
 		// have been revoked or rotated by a concurrent request between
-		// the lookup above and this point. FOR UPDATE is load-bearing,
-		// not defensive dressing: without it, two concurrent refreshes of
-		// the same token both read "not yet replaced" here, both mint a
-		// new session, and the second UPDATE below silently overwrites
-		// the first's replaced_by_session_id - producing two live chains
-		// from one token with reuse detection never triggering (a
-		// confirmed race, not a theoretical one - see Stage 2 code
-		// review). The row lock makes the second concurrent caller block
-		// here until the first transaction commits, then observe
-		// stillReplaced set and correctly return ErrSessionReused.
-		var stillReplaced *uuid.UUID
-		var stillRevoked *time.Time
-		if err := tx.QueryRow(ctx,
-			`SELECT replaced_by_session_id, revoked_at FROM sessions WHERE id = $1 FOR UPDATE`, row.id,
-		).Scan(&stillReplaced, &stillRevoked); err != nil {
+		// the lookup above and this point. The row lock this acquires is
+		// load-bearing, not defensive dressing: without it, two
+		// concurrent refreshes of the same token both read "not yet
+		// replaced" here, both mint a new session, and the second UPDATE
+		// below silently overwrites the first's replaced_by_session_id -
+		// producing two live chains from one token with reuse detection
+		// never triggering (a confirmed race, not a theoretical one - see
+		// Stage 2 code review). Implemented as a conditional UPDATE
+		// (WHERE ... AND replaced_by_session_id IS NULL AND revoked_at IS
+		// NULL) checked via RowsAffected, rather than SELECT ... FOR
+		// UPDATE or UPDATE ... RETURNING: both of those need the touched
+		// row to also satisfy the table's SELECT policy to see anything
+		// back (Postgres filters RETURNING output through SELECT
+		// policies, same as a plain SELECT would be) - which this
+		// internal, principal-derived-from-the-row re-check has no way to
+		// satisfy under migration 0018's narrower policies (no token hash,
+		// no caller-asserted principal_id in scope here). A conditional
+		// UPDATE sidesteps that entirely: RowsAffected reveals the outcome
+		// without needing to read the row back at all, and the UPDATE
+		// still acquires the same row lock via the (unchanged,
+		// tenant-scoped) UPDATE policy. See
+		// docs/decisions/0016-sessions-rls-hardening.md.
+		tag, err := tx.Exec(ctx,
+			`UPDATE sessions SET last_used_at = now()
+			 WHERE id = $1 AND replaced_by_session_id IS NULL AND revoked_at IS NULL`,
+			row.id,
+		)
+		if err != nil {
 			return err
 		}
-		if stillReplaced != nil || stillRevoked != nil {
+		if tag.RowsAffected() == 0 {
+			// Either replaced_by_session_id or revoked_at became non-NULL
+			// since the initial lookup - a concurrent rotation or
+			// revocation won the race. Treat identically to detecting
+			// reuse via the first read.
 			return ErrSessionReused
 		}
 
-		var err error
 		next, err = IssueSession(ctx, tx, row.principalType, row.principalID, tenantID, ttl, userAgent, ipAddress)
 		if err != nil {
 			return err
@@ -251,9 +287,20 @@ func RotateSession(ctx context.Context, pool *db.Pool, rawToken string, ttl time
 // in an attacker's hands. Assumes tx is already scoped to every session
 // in the chain's tenant - true here because a chain never crosses
 // tenants (each rotation reuses the same principal/tenant).
+//
+// Each iteration sets app.session_internal_op_id to the row it's about to
+// touch before running its UPDATE ... RETURNING - Postgres filters
+// RETURNING output through the table's SELECT policies, same as a plain
+// SELECT would be, and this function walks multiple different row ids
+// within one transaction (unlike RotateSession's single-row re-check),
+// so a single fixed GUC value wouldn't cover every hop. See migration
+// 0018 and docs/decisions/0016-sessions-rls-hardening.md.
 func revokeChainFrom(ctx context.Context, tx pgx.Tx, startID uuid.UUID) error {
 	currentID := startID
 	for {
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.session_internal_op_id', $1, true)`, currentID.String()); err != nil {
+			return fmt.Errorf("auth: set session internal-op context: %w", err)
+		}
 		var nextID *uuid.UUID
 		err := tx.QueryRow(ctx,
 			`UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL RETURNING replaced_by_session_id`,

@@ -552,6 +552,18 @@ func TestSessionManagement_ListAndRevoke(t *testing.T) {
 		t.Fatalf("expected player B to see exactly 1 active session, got %d", len(sessionsB))
 	}
 
+	// Explicit cross-principal read check: none of A's session ids may
+	// appear in B's list, and vice versa - not just a count coincidence.
+	aIDs := map[string]bool{}
+	for _, s := range sessionsA {
+		aIDs[s.ID] = true
+	}
+	for _, s := range sessionsB {
+		if aIDs[s.ID] {
+			t.Errorf("player B's session list contained player A's session id %s", s.ID)
+		}
+	}
+
 	// IDOR check: player B must NOT be able to revoke player A's session
 	// by id, even though both are in the same tenant and B can legally
 	// list their own sessions via the same endpoint shape.

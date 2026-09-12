@@ -70,3 +70,72 @@ func (p *Pool) WithoutTenant(ctx context.Context, fn TxFunc) error {
 	}
 	return tx.Commit(ctx)
 }
+
+// WithSessionLookup runs fn in a platform-scoped transaction (no
+// app.tenant_id) with the Postgres session variable
+// "app.session_lookup_hash" set, for the lifetime of the transaction, to
+// hash. This is the ONLY sanctioned way to read a `sessions` row before
+// any tenant/principal context is known - a refresh token carries no
+// tenant hint, so the sessions table's SELECT policy for this path
+// (migration 0018) grants visibility to at most the one row whose
+// refresh_token_hash exactly equals this value, never a blanket read.
+// hash must be the SHA-256 hex digest of the actual, unguessable refresh
+// token presented by the caller - never anything derived from
+// unauthenticated free-form input beyond the token itself. See
+// docs/decisions/0016-sessions-rls-hardening.md.
+func (p *Pool) WithSessionLookup(ctx context.Context, hash string, fn TxFunc) error {
+	if hash == "" {
+		return fmt.Errorf("db: WithSessionLookup called with empty hash")
+	}
+
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("db: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.session_lookup_hash', $1, true)`, hash); err != nil {
+		return fmt.Errorf("db: set session lookup context: %w", err)
+	}
+
+	if err := fn(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// WithPrincipalScope runs fn in a transaction scoped to tenantID (or
+// platform scope if uuid.Nil, via the same rules as WithTenant/
+// WithoutTenant) AND to principalID via the Postgres session variable
+// "app.principal_id". This is the ONLY sanctioned way to read a caller's
+// own `sessions` rows (e.g. "list my active sessions") - migration
+// 0018's SELECT policy requires both the tenant/platform scope AND the
+// exact principal_id to match, so no principal - even one legitimately
+// scoped to the right tenant - can read another principal's session
+// metadata through this table. See
+// docs/decisions/0016-sessions-rls-hardening.md.
+func (p *Pool) WithPrincipalScope(ctx context.Context, tenantID, principalID uuid.UUID, fn TxFunc) error {
+	if principalID == uuid.Nil {
+		return fmt.Errorf("db: WithPrincipalScope called with nil principal id")
+	}
+
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("db: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if tenantID != uuid.Nil {
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID.String()); err != nil {
+			return fmt.Errorf("db: set tenant context: %w", err)
+		}
+	}
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.principal_id', $1, true)`, principalID.String()); err != nil {
+		return fmt.Errorf("db: set principal context: %w", err)
+	}
+
+	if err := fn(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}

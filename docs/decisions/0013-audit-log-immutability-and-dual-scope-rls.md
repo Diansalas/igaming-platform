@@ -63,27 +63,24 @@ sees only platform-wide (`tenant_id IS NULL`) rows. Neither can see the
 other's rows.
 
 **`sessions` is a deliberate exception, not an instance of this pattern -
-correction (Stage 2 architect/security review):** migration `0012` gives
-`sessions` a THIRD, distinct shape: `FOR SELECT USING (true)` (public
-read) plus tenant-scoped `INSERT`/`UPDATE` policies, not the dual-scope
-`FOR ALL` expression above. This was necessary, not accidental: a refresh
-token carries no tenant hint, so `RotateSession`'s first phase
-(`lookupSessionByToken`) has no `app.tenant_id` to scope a `SELECT` by -
-finding the row *is* how the tenant is learned, and only then does a
-second, properly-scoped transaction perform any mutation (see
-`internal/auth/session.go`). The real access control on read is
-possession of the exact, cryptographically-random, unguessable token, not
-row visibility. The cost, flagged in review and accepted rather than
-fixed for Stage 2, is that this also makes `sessions.ip_address` and
-`user_agent` readable by any tenant-scoped connection for any row, not
-just the caller's own - `internal/auth.ListActiveSessions` and the
-ownership check in `RevokeSession` are therefore safe only because they
-filter by `principal_id` in application code, which is exactly the kind
-of isolation `CLAUDE.md` otherwise asks RLS, not discipline, to provide.
-A future tightening (e.g. a `SECURITY DEFINER` lookup function, or
-scoping `SELECT` to a session-token GUC set only by
-`lookupSessionByToken`) is deferred, not forgotten - see the Stage 2
-completion report's technical debt section.
+correction (Stage 2 architect/security review), closed (pre-Stage-3
+hardening pass):** migration `0012` originally gave `sessions` a THIRD,
+distinct shape - `FOR SELECT USING (true)` (public read) plus
+tenant-scoped `INSERT`/`UPDATE` policies, not the dual-scope `FOR ALL`
+expression above - necessary because a refresh token carries no tenant
+hint, so `RotateSession`'s first phase has no `app.tenant_id` to scope a
+`SELECT` by. That blanket `SELECT` policy made `sessions.ip_address`,
+`user_agent`, `principal_id`, and `tenant_id` readable by any
+tenant-scoped connection for ANY row, not just the caller's own -
+isolation depended entirely on `internal/auth.ListActiveSessions`/
+`RevokeSession` filtering in application code, exactly the kind of
+isolation `CLAUDE.md` asks RLS, not discipline, to provide. This was
+flagged as the most significant remaining Stage 2 debt and is now closed:
+see `docs/decisions/0016-sessions-rls-hardening.md` for the narrower
+per-token-hash and per-principal `SELECT` policies (migration `0018`)
+that replaced the blanket one, and why a new database role/`BYPASSRLS`
+approach was considered and rejected in favor of the same
+`set_config`-based GUC pattern this schema already uses everywhere.
 
 ## Consequences
 
