@@ -44,20 +44,38 @@ CREATE POLICY session_select_own_principal ON sessions
         AND principal_id = NULLIF(current_setting('app.principal_id', true), '')::uuid
     );
 
--- Internal system operations that walk/touch a specific, already-
--- resolved session row (internal/auth's revokeChainFrom, revoking a
--- refresh-token-reuse chain one hop at a time): Postgres filters
--- UPDATE ... RETURNING output through the table's SELECT policies,
--- exactly as it would a plain SELECT, so a row can be legitimately
--- updated (passing the UPDATE policy) yet return nothing via RETURNING
--- if no SELECT policy matches it. app.session_internal_op_id is set,
--- per statement, ONLY by trusted internal code that already resolved
--- the row through a legitimate path (the phase-1 token-hash lookup, in
--- every current caller) - this grants RETURNING visibility to at most
--- that one specific row, never a blanket read.
+-- Internal system operations that touch a specific, already-resolved
+-- session row without a caller-asserted tenant/principal in scope: both
+-- internal/auth's withResolvedScope (every rotation/logout mutation,
+-- keyed to row.id) and revokeChainFrom (the refresh-token-reuse chain
+-- walk, re-keyed to each hop's own id) rely on this. Two things make
+-- this necessary, not merely convenient: (1) Postgres requires a row to
+-- be visible under SOME SELECT policy before permitting ANY UPDATE
+-- against it at all - not only for RETURNING output, and not satisfied
+-- merely by the UPDATE policy's own USING clause - confirmed empirically
+-- while building this; (2) these code paths run in a transaction scoped
+-- only to the row's tenant (via WithTenant/WithoutTenant), which carries
+-- no token hash and no caller-asserted principal_id, so neither of the
+-- other two SELECT policies above would apply. app.session_internal_op_id
+-- is set, per statement, ONLY by trusted internal code that already
+-- resolved the row through a legitimate path (the phase-1 token-hash
+-- lookup, in every current caller) - this grants visibility to at most
+-- that one specific row, never a blanket read. It is additionally
+-- ANDed with the same tenant/platform-scope check every other policy
+-- here uses: every current caller already has the matching tenant scope
+-- active in the same transaction (set by WithTenant/WithoutTenant), so
+-- this costs nothing today and removes a one-line future footgun - any
+-- code that ever set this GUC from request-supplied input, without this
+-- conjunct, would grant a single-row cross-tenant read.
 CREATE POLICY session_select_internal_op ON sessions
     FOR SELECT
-    USING (id = NULLIF(current_setting('app.session_internal_op_id', true), '')::uuid);
+    USING (
+        id = NULLIF(current_setting('app.session_internal_op_id', true), '')::uuid
+        AND (
+            (tenant_id IS NOT NULL AND tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+            OR (tenant_id IS NULL AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL)
+        )
+    );
 
 -- INSERT/UPDATE policies (session_scoped_insert, session_scoped_update)
 -- are unchanged - they were already tenant-scoped, not the exposure this

@@ -101,7 +101,10 @@ func (p *Pool) WithSessionLookup(ctx context.Context, hash string, fn TxFunc) er
 	if err := fn(ctx, tx); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("db: commit tx: %w", err)
+	}
+	return nil
 }
 
 // WithPrincipalScope runs fn in a transaction scoped to tenantID (or
@@ -137,5 +140,29 @@ func (p *Pool) WithPrincipalScope(ctx context.Context, tenantID, principalID uui
 	if err := fn(ctx, tx); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("db: commit tx: %w", err)
+	}
+	return nil
+}
+
+// SetSessionInternalOpID sets the Postgres session variable
+// "app.session_internal_op_id" for the lifetime of the CURRENT
+// transaction (tx must already be open - this does not begin or commit
+// one) to sessionID. This is the only sanctioned way internal system
+// code (e.g. refresh-token rotation, reuse-chain revocation in
+// internal/auth) grants itself visibility into a specific, already-
+// resolved `sessions` row when neither a token hash nor a caller-
+// asserted principal_id is available in the current scope - see
+// migration 0018 and docs/decisions/0016-sessions-rls-hardening.md.
+// Callers must have already established, through some other trusted
+// mechanism (a prior token-hash lookup, in every current caller), that
+// they are entitled to act on this exact row - this function grants no
+// authorization of its own, it only makes the row visible to Postgres's
+// row-level security policies once that authorization already holds.
+func SetSessionInternalOpID(ctx context.Context, tx pgx.Tx, sessionID uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.session_internal_op_id', $1, true)`, sessionID.String()); err != nil {
+		return fmt.Errorf("db: set session internal-op context: %w", err)
+	}
+	return nil
 }

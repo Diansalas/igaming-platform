@@ -127,10 +127,11 @@ when their owning stage (3–4) does.
   Stage 1-flagged gap, see `docs/architecture/15`); `brands` (replaces
   `tenant_config`, public-read + tenant-scoped-write RLS,
   `docs/decisions/0012`); `persons` (platform-wide, no RLS); RLS-protected
-  `player_accounts`, `staff_users` (dual-scope RLS), `sessions` (three-
-  policy RLS: public SELECT by token possession + tenant-scoped
-  INSERT/UPDATE, required because a refresh token carries no tenant hint
-  — see `docs/decisions/0013`), `login_attempts` (dual-scope RLS),
+  `player_accounts`, `staff_users` (dual-scope RLS), `sessions` (as
+  originally shipped in Stage 2: public SELECT by token possession +
+  tenant-scoped INSERT/UPDATE — **superseded by the pre-Stage-3 security
+  hardening pass below, which closed this exposure**; see
+  `docs/decisions/0016`), `login_attempts` (dual-scope RLS),
   `audit_log` (dual-scope RLS + an unconditional `BEFORE UPDATE OR DELETE`
   trigger enforcing append-only, even against the application's own
   non-superuser database role).
@@ -309,17 +310,19 @@ was found and fixed:
   and `TestRefreshRotation_ConcurrentRequestsRaceSafely`; two integration
   assertions tightened to specific Postgres SQLSTATEs
   (`identity_integration_test.go`).
-- **Documented, not code-changed**: `sessions`' public-read RLS policy
-  (necessary — a refresh token carries no tenant hint to scope a lookup
-  by) gives any tenant-scoped connection read access to every tenant's
-  session metadata (IPs, user agents), safe today only because
-  `ListActiveSessions`/`RevokeSession` filter by `principal_id` in
-  application code. `security` and `code-reviewer` both flagged this as
-  should-fix, not blocking; documented explicitly in ADR 0013 as accepted
-  technical debt rather than silently left unmentioned. `architect` also
-  flagged `brands`' public-read policy as broader than strictly needed
-  (cross-tenant brand enumeration) — same disposition, tracked as debt,
-  not fixed this stage.
+- **Documented at the time, since CLOSED**: `sessions`' public-read RLS
+  policy (necessary — a refresh token carries no tenant hint to scope a
+  lookup by) gave any tenant-scoped connection read access to every
+  tenant's session metadata (IPs, user agents), safe at the time only
+  because `ListActiveSessions`/`RevokeSession` filtered by `principal_id`
+  in application code. `security` and `code-reviewer` both flagged this
+  as should-fix, not blocking, and it was documented as accepted
+  technical debt in ADR 0013 rather than silently left unmentioned — **this
+  was fixed in the pre-Stage-3 security hardening pass; see the section
+  below and `docs/decisions/0016`.** `architect` also flagged `brands`'
+  public-read policy as broader than strictly needed (cross-tenant brand
+  enumeration) — that one remains open debt, not fixed by the hardening
+  pass either (out of its scope).
 - No specialist found scope creep against the Stage 2 DO-NOT-BUILD list,
   no fake-completion claims, and no contradiction between the new ADRs
   and Stage 0/1 decisions.
@@ -331,6 +334,100 @@ providers, sportsbook, bonus engine, production KYC provider, production
 AML provider, complete responsible-gaming engine, complete B2C frontend,
 Partner Console. `kyc_tier`/`person_key_hash`/`verified_at` are hooks
 only — unpopulated and uninterpreted by any Stage 2 code.
+
+## Security Hardening Pass (pre-Stage-3) — complete
+
+Human-directed hardening pass addressing the Stage 2 completion report's
+flagged debt, before authorizing Stage 3. Explicitly NOT Stage 3 — no
+wallet/ledger/payments/casino/sportsbook/bonus/KYC/frontend/back-office
+work.
+
+### 1. Sessions RLS — closed
+
+`sessions`' `FOR SELECT USING (true)` policy (Stage 2's accepted debt,
+above) is replaced by three narrower policies (migration `0018`):
+exact-token-hash match for the pre-auth lookup, tenant+principal match
+for self-service session listing/revocation, and a tenant-scoped
+internal-operation-id match for system code that already resolved a
+specific row and needs to touch it without a caller-asserted principal.
+Two new `internal/db.Pool` methods (`WithSessionLookup`,
+`WithPrincipalScope`) and one helper (`SetSessionInternalOpID`) set the
+corresponding Postgres session variables, mirroring `WithTenant`'s
+existing `set_config(..., true)` pattern — no new database role, no
+`BYPASSRLS`, no elevated privilege. Full design and the alternatives
+considered/rejected: `docs/decisions/0016-sessions-rls-hardening.md`.
+
+A follow-up `security`/`code-reviewer` pass on this exact change (before
+treating it as final) found and this session fixed:
+
+- **Blocking**: `revokeChainFrom` (the refresh-token-reuse chain-
+  revocation walk) stopped early at the first already-revoked mid-chain
+  node, silently leaving every session further down the chain live
+  despite a confirmed theft signal. Fixed (unconditional `COALESCE`-based
+  revoke so the walk always learns where the chain continues) and
+  regression-tested with a 4-hop chain, one node pre-revoked.
+- **Should-fix**: the chain-link `UPDATE` that marks a rotated-out
+  session's successor discarded its result, so a 0-row outcome (should be
+  unreachable, but silently possible had the SELECT-visibility fix above
+  been missing/wrong) would mint an unlinked session with reuse detection
+  defeated for that token. Fixed: `RowsAffected` is now checked, loud
+  error on zero.
+- **Should-fix**: the refresh-rotation concurrency race-loser branch
+  produced no audit record. Fixed: writes `auth.refresh_rotation_race_lost`
+  (deliberately does not also revoke the winner's chain — see the ADR for
+  the reasoning and "Remaining security debt" below).
+- **Should-fix**: the internal-op-id SELECT policy had no tenant
+  conjunct (unexploitable today, a one-line future footgun). Fixed.
+- **Should-fix**: GUC-setting SQL was duplicated inline in
+  `internal/auth` instead of centralized in `internal/db`. Fixed.
+- **Test gap, closed**: added direct-SQL (not HTTP-level) proofs that a
+  cross-principal *write* (not just read) is denied at the database
+  layer, that the internal-op-id scope sees only its one named row, and
+  that none of the new GUCs leak across transactions on a reused pooled
+  connection.
+
+Full details, including the migration-0018 text corrections this
+uncovered, are in `docs/decisions/0016`'s "Corrections" section.
+
+### 2. Staff MFA / step-up authentication — architecture only
+
+`docs/decisions/0017-staff-mfa-and-step-up-authentication.md`. Explicitly
+`NOT IMPLEMENTED` — no code, schema, or endpoint. Documents session
+assurance level (`amr`/`mfa_at` JWT claims), a `RequireStepUp` middleware
+mirroring `RequireTenantScope`'s per-route pattern, enrollment/
+verification/recovery flow shape, and the audit events it will produce.
+Which operations require step-up and their thresholds are left as open
+human/compliance decisions, not invented.
+
+### 3. Production authentication signing architecture — architecture only
+
+`docs/decisions/0018-production-authentication-signing-architecture.md`.
+Explicitly `NOT IMPLEMENTED` — dev/test keeps the current
+`internal/auth.KeyRegistry` (HS256, env-supplied secrets) unchanged.
+Documents the recommended production model: platform-owned identity
+issuance (no managed identity provider) with KMS/HSM-managed asymmetric
+signing (RS256/ES256), private key never leaving the KMS/HSM boundary,
+`kid`-based rotation generalizing the existing `KeyRegistry` design to
+KMS key versions. No cloud provider named or required.
+
+### Verification performed (real PostgreSQL, not mocked)
+
+`gofmt`/`build`/`vet`/`golangci-lint` clean throughout; full unit and
+integration suite passing after every fix, including the newly-written
+regression tests; all 18 migrations round-tripped up/down/up cleanly.
+
+### Remaining security debt after this pass
+
+- `brands`' public-read RLS policy remains broader than strictly needed
+  (cross-tenant brand enumeration) — flagged in Stage 2 review, out of
+  this pass's scope, not fixed.
+- The refresh-rotation race-loser path is now audited but does not
+  revoke the winner's chain, a deliberate trade-off (see
+  `docs/decisions/0016`) rather than an oversight — worth revisiting if
+  production data ever shows this path correlating with confirmed theft
+  rather than benign retries.
+- MFA/step-up and KMS-based signing are architecture only; no
+  implementation timeline is set (both ADRs list open human decisions).
 
 ## Next stage
 

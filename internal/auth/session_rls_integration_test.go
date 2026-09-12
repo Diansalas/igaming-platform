@@ -296,3 +296,246 @@ func TestSessionRLS_PlatformScopedPrincipalCanAccessOwnSessions(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// TestSessionRLS_PrincipalCannotRevokeAnotherPrincipalsSessionDirectly
+// proves the write side (not just read) of cross-principal isolation
+// directly at the database level: a raw UPDATE against another
+// principal's session, issued under a WithPrincipalScope transaction
+// legitimately scoped to a DIFFERENT principal in the same tenant, must
+// affect zero rows. This closes the gap the HTTP-level IDOR test alone
+// leaves open - that test also passes if RevokeSession's own
+// "AND principal_id = $2" SQL clause is doing all the work while RLS
+// permits the write outright, which is exactly the "isolation via
+// application code, not the database" pattern this hardening pass exists
+// to eliminate.
+func TestSessionRLS_PrincipalCannotRevokeAnotherPrincipalsSessionDirectly(t *testing.T) {
+	pool := sessionRLSTestPool(t)
+	tenant := createSessionRLSTestTenant(t, pool)
+	principalA := uuid.New()
+	principalB := uuid.New()
+	sessionB := issueTestSession(t, pool, tenant, principalB)
+
+	err := pool.WithPrincipalScope(context.Background(), tenant, principalA, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE sessions SET revoked_at = now() WHERE id = $1`, sessionB.ID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 0 {
+			t.Errorf("expected principal A's raw UPDATE against principal B's session to affect 0 rows, got %d", tag.RowsAffected())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Confirm B's session is genuinely untouched (not just that the
+	// UPDATE reported 0 rows for some unrelated reason).
+	err = pool.WithPrincipalScope(context.Background(), tenant, principalB, func(ctx context.Context, tx pgx.Tx) error {
+		var revokedAt *time.Time
+		if err := tx.QueryRow(ctx, `SELECT revoked_at FROM sessions WHERE id = $1`, sessionB.ID).Scan(&revokedAt); err != nil {
+			return err
+		}
+		if revokedAt != nil {
+			t.Error("expected principal B's session to remain unrevoked after A's denied attempt")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestSessionRLS_InternalOpScopeSeesOnlyThatOneRow proves
+// db.SetSessionInternalOpID grants visibility to exactly the one row it
+// names - not a blanket read, and not visibility into a sibling row in
+// the same tenant.
+func TestSessionRLS_InternalOpScopeSeesOnlyThatOneRow(t *testing.T) {
+	pool := sessionRLSTestPool(t)
+	tenant := createSessionRLSTestTenant(t, pool)
+	sessionA := issueTestSession(t, pool, tenant, uuid.New())
+	sessionB := issueTestSession(t, pool, tenant, uuid.New())
+
+	err := pool.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
+		if err := db.SetSessionInternalOpID(ctx, tx, sessionA.ID); err != nil {
+			return err
+		}
+		visibleA, err := sessionVisible(ctx, tx, sessionA.ID)
+		if err != nil {
+			return err
+		}
+		if !visibleA {
+			t.Error("expected the internal-op-scoped row to be visible")
+		}
+		visibleB, err := sessionVisible(ctx, tx, sessionB.ID)
+		if err != nil {
+			return err
+		}
+		if visibleB {
+			t.Error("expected a sibling row in the same tenant to NOT be visible when internal-op-id names a different row")
+		}
+		n, err := countVisibleSessions(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			t.Errorf("expected exactly 1 row visible (the internal-op-scoped one), got %d", n)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestSessionRLS_ScopeGUCsDoNotLeakAcrossTransactions proves that the
+// per-transaction GUCs (app.session_lookup_hash, app.principal_id,
+// app.session_internal_op_id, app.tenant_id) set via set_config(...,
+// true) - the "is_local" form - do not survive past the transaction that
+// set them, even when a later, unrelated transaction happens to reuse
+// the same underlying pooled physical connection. Run several iterations
+// against a small pool to make connection reuse likely, not merely
+// possible.
+func TestSessionRLS_ScopeGUCsDoNotLeakAcrossTransactions(t *testing.T) {
+	pool := sessionRLSTestPool(t)
+	tenant := createSessionRLSTestTenant(t, pool)
+	session := issueTestSession(t, pool, tenant, uuid.New())
+	hash := hashRefreshToken(session.RefreshToken)
+
+	for i := 0; i < 10; i++ {
+		// First: a hash-scoped transaction that legitimately sees the row.
+		err := pool.WithSessionLookup(context.Background(), hash, func(ctx context.Context, tx pgx.Tx) error {
+			visible, err := sessionVisible(ctx, tx, session.ID)
+			if err != nil {
+				return err
+			}
+			if !visible {
+				t.Fatal("expected the session to be visible under its own token-hash scope")
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("unexpected error on hash-scoped transaction: %v", err)
+		}
+
+		// Immediately after (maximizing the chance of landing on the same
+		// pooled connection): a completely unscoped transaction must NOT
+		// see the row, proving app.session_lookup_hash reset at commit
+		// rather than leaking into this new transaction.
+		err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			visible, err := sessionVisible(ctx, tx, session.ID)
+			if err != nil {
+				return err
+			}
+			if visible {
+				t.Fatalf("iteration %d: session was visible in an unscoped transaction immediately after a hash-scoped one - app.session_lookup_hash leaked across transactions", i)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("unexpected error on unscoped transaction: %v", err)
+		}
+	}
+}
+
+// createChainedTestSession inserts a raw sessions row (bypassing
+// IssueSession, since this test needs full control over
+// replaced_by_session_id linkage to build a specific chain shape) and
+// returns its id.
+func createChainedTestSession(t *testing.T, pool *db.Pool, tenantID, principalID uuid.UUID) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO sessions (id, principal_type, principal_id, tenant_id, refresh_token_hash, expires_at)
+			 VALUES ($1, 'player', $2, $3, $4, now() + interval '1 hour')`,
+			id, principalID, tenantID, hashRefreshToken(uuid.NewString()),
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("failed to create chained test session: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, id)
+			return err
+		})
+	})
+	return id
+}
+
+// TestRevokeChainFrom_ContinuesPastAlreadyRevokedMidChainNode is the
+// regression test for the pre-Stage-3 security review finding: the
+// original revokeChainFrom stopped its walk the moment it hit a hop that
+// was ALREADY revoked (e.g. because the session's own owner had
+// logged out of that one device before the reuse was detected),
+// silently leaving every session further down the chain live despite a
+// confirmed token-theft signal. A→B→C→D, with B pre-revoked before the
+// walk starts: all four must end up revoked, not just A and B.
+func TestRevokeChainFrom_ContinuesPastAlreadyRevokedMidChainNode(t *testing.T) {
+	pool := sessionRLSTestPool(t)
+	tenant := createSessionRLSTestTenant(t, pool)
+	principal := uuid.New()
+
+	a := createChainedTestSession(t, pool, tenant, principal)
+	b := createChainedTestSession(t, pool, tenant, principal)
+	c := createChainedTestSession(t, pool, tenant, principal)
+	d := createChainedTestSession(t, pool, tenant, principal)
+
+	// All four rows share one principal, so WithPrincipalScope's SELECT
+	// visibility (session_select_own_principal) covers every row in this
+	// setup without needing to set the internal-op-id GUC per row - a
+	// plain UPDATE still needs SOME SELECT policy to match for these
+	// setup writes to actually take effect, same as the production code
+	// under test.
+	err := pool.WithPrincipalScope(context.Background(), tenant, principal, func(ctx context.Context, tx pgx.Tx) error {
+		for _, link := range [][2]uuid.UUID{{a, b}, {b, c}, {c, d}} {
+			if _, err := tx.Exec(ctx, `UPDATE sessions SET replaced_by_session_id = $1 WHERE id = $2`, link[1], link[0]); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed to link chain: %v", err)
+	}
+
+	// Simulate the session's own owner logging out of device B before
+	// the reuse of A is ever detected.
+	err = pool.WithPrincipalScope(context.Background(), tenant, principal, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE sessions SET revoked_at = now() WHERE id = $1`, b)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("failed to pre-revoke B: %v", err)
+	}
+
+	// Now walk the chain from A, as RotateSession's reuse-detection
+	// branch would.
+	err = pool.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
+		return revokeChainFrom(ctx, tx, a)
+	})
+	if err != nil {
+		t.Fatalf("revokeChainFrom returned an error: %v", err)
+	}
+
+	err = pool.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
+		for name, id := range map[string]uuid.UUID{"A": a, "B": b, "C": c, "D": d} {
+			if err := db.SetSessionInternalOpID(ctx, tx, id); err != nil {
+				return err
+			}
+			var revokedAt *time.Time
+			if err := tx.QueryRow(ctx, `SELECT revoked_at FROM sessions WHERE id = $1`, id).Scan(&revokedAt); err != nil {
+				return err
+			}
+			if revokedAt == nil {
+				t.Errorf("expected session %s to be revoked after the chain walk, but it wasn't", name)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error verifying revocation: %v", err)
+	}
+}

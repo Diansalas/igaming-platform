@@ -1,97 +1,104 @@
 # Active Stage
 
-## Stage 2 — Identity + Tenancy + Security
+## Security Hardening Pass (pre-Stage-3) — Complete
 
-Status: **Implementation, local verification, and specialist-review
-reconciliation complete, pending human approval to authorize Stage 3.**
+Status: **Complete, pending human approval to authorize Stage 3.** Stage
+2 (Identity + Tenancy + Security) was completed, reviewed, and approved
+by the human. Before authorizing Stage 3, the human directed a focused
+security hardening pass addressing the Stage 2 completion report's
+flagged debt. This is explicitly NOT Stage 3 — no wallet, ledger,
+payments, PSP integrations, casino, sportsbook, bonus engine, KYC/AML,
+responsible gaming, frontend, or back office work is in scope.
 
-### Objectives (as instructed at the Stage 1→2 gate)
+### Objectives (as instructed at the hardening-pass gate)
 
-Build the real identity/tenancy/security foundation: a distinct Person/
-PlayerAccount/Tenant/Brand/Wallet-hook model; a production-oriented
-authentication design (not just Stage 1's HMAC JWT proof-of-concept) with
-key rotation, refresh/revocation, session tracking, and lockout;
-foundational (not deferred) tenancy including the licensing-model/licence
-consistency fix; a structural jurisdiction foundation (not every
-jurisdiction's rules); a permission-oriented RBAC expansion; least-
-privilege service-identity handling; an immutable audit foundation; a
-meaningfully-tested set of security controls; a privacy architecture
-document; API/OpenAPI updates; and strong security-focused testing
-against real PostgreSQL for RLS/tenant-isolation proofs. Explicitly not
-wallet/ledger, payments, casino/sportsbook providers, bonus engine,
-production KYC/AML, complete RG engine, B2C frontend, back office, or
-Partner Console.
+1. Fix the sessions RLS exposure identified as the most significant
+   remaining Stage 2 debt, preferring database-enforced isolation over
+   application-level `principal_id` filtering, while preserving
+   authentication/session-lookup, self-service listing/revocation, and
+   any genuinely-required platform-admin operations.
+2. Define (architecture only, not implementation) the production design
+   for staff MFA and step-up authentication.
+3. Define (architecture only, not implementation) the production
+   authentication signing model: platform-owned identity with KMS/HSM-
+   managed asymmetric signing, keeping dev/test on the current simpler
+   mechanism.
+4. Run an independent security + code-reviewer regression review of the
+   changes.
+5. Full test suite (unit, integration, RLS, HTTP-security, auth, session,
+   authorization, migration round-trip), lint, format, build.
 
 ### Completed work
 
-See `docs/progress.md` for the full, labeled inventory. Summary: 8 new
-reversible migrations (0007–0014) establishing brands/persons/
-player_accounts/staff_users/sessions/login_attempts/audit_log with RLS
-(three distinct patterns depending on the table's actual access shape)
-plus a database-enforced tenant-licence consistency constraint; a new
-`internal/audit` package; a rewritten `internal/auth` package (Argon2id,
-key-rotation registry, kid/aud-validated JWTs with a legitimately-nilable
-tenant claim, single-use rotating refresh tokens with reuse detection,
-permission-based RBAC); a new `internal/identity` domain package; 15 new
-HTTP endpoints across player auth/self-service, staff auth, and
-platform-admin/tenant-admin provisioning and administration; a
-`cmd/seed-admin` bootstrap CLI; an updated OpenAPI spec (17 paths); four
-new ADRs (0011–0014); and a new privacy architecture document
-(`docs/architecture/16-privacy.md`).
+See `docs/progress.md`'s "Security Hardening Pass (pre-Stage-3)" section
+for the full itemized inventory. Summary:
 
-A six-specialist review pass (`architect`, `identity-compliance`,
-`security`, `backend`, `qa`, `code-reviewer`) is complete. It found and
-this session fixed six blocking defects (a silent-data-loss bug in
-migration 0008's up script mirroring the down-script bug already fixed
-this session, a genuine RLS gap on `persons`, non-atomic audit writes on
-tenant creation, a staff-lockout bypass via email case variation, an
-audit-log `TRUNCATE` gap, and a refresh-rotation concurrency race) plus
-several should-fix items (slug-conflict error mapping, a login-timing
-side-channel, unaudited refresh-token reuse, and more) and three
-test-coverage gaps (session self-service, audit-write verification,
-rotation concurrency) — all fixed and re-verified. One item was reviewed
-and deliberately left as documented technical debt rather than fixed:
-`sessions`' necessarily-public-read RLS policy. See `docs/progress.md`
-for the itemized list.
+- **Sessions RLS (migration 0018)**: the `FOR SELECT USING (true)` policy
+  on `sessions` is replaced by three narrower policies (exact-token-hash
+  match, tenant+principal match, tenant-scoped internal-operation-id
+  match), each gated by a Postgres session variable set only by trusted
+  code for the lifetime of one transaction — no new database role, no
+  `BYPASSRLS`. Full design: `docs/decisions/0016-sessions-rls-hardening.md`.
+- **Two architecture-only ADRs**, both explicitly `NOT IMPLEMENTED`:
+  `docs/decisions/0017-staff-mfa-and-step-up-authentication.md` and
+  `docs/decisions/0018-production-authentication-signing-architecture.md`.
+- An independent `security` + `code-reviewer` pass on the sessions RLS
+  change found **one blocking defect** (`revokeChainFrom`, the
+  refresh-token-reuse chain-revocation walk, stopped early at an
+  already-revoked mid-chain node, leaving live sessions further down an
+  otherwise-compromised chain) and several should-fix items (an ignored
+  `RowsAffected` on the chain-link write, no audit trail on the
+  rotation-race-loser path, a missing tenant conjunct on one new policy,
+  duplicated GUC-setting SQL, and test-coverage gaps for cross-principal
+  writes and GUC isolation/leakage) — all fixed and re-verified, with new
+  regression tests for each. Full itemized list:
+  `docs/decisions/0016`'s "Corrections" section and `docs/progress.md`.
 
 ### Verification performed (all against a real local PostgreSQL 16, not mocked)
 
-- `go build`/`go vet` (including `-tags=integration`), `gofmt`,
+- `gofmt`/`go build`/`go vet` (including `-tags=integration`)/
   `golangci-lint`: all clean, 0 issues.
-- Unit test suite: all passing.
-- Integration test suite (build tag `integration`, real Postgres): all
-  passing, including RLS tenant-isolation proofs on every new
-  tenant-owned table (specific Postgres SQLSTATEs asserted, not "any
-  error"), the audit-log immutability trigger proof, the licensing-model/
-  licence consistency constraint proof, and full HTTP-level identity
-  flows (registration, login/lockout, refresh rotation + reuse
-  detection, RBAC role-distinction, cross-tenant denial,
-  platform-admin-only provisioning).
-- All 14 migrations (0001–0014) applied, fully rolled back, and
-  re-applied cleanly — one real bug (migration 0008's down script
-  ordering RLS enforcement before its own backfill insert) was found and
-  fixed during this round-trip.
-- OpenAPI spec validated: parses, every `$ref` resolves, 17 paths.
+- Full unit and integration suite passing, including new direct-SQL RLS
+  proofs (cross-tenant and cross-principal read AND write denial, exact
+  token-hash-only visibility, internal-op-id single-row visibility, GUC
+  non-leakage across transactions on a reused pooled connection, a 4-hop
+  chain revocation with a pre-revoked mid-chain node) and the full
+  pre-existing Stage 2 regression suite (unaffected).
+- All 18 migrations (0001–0018) applied, fully rolled back, and
+  re-applied cleanly.
 
-### Pending (to close out Stage 2)
+### Pending (to close out this pass)
 
 - Commit and push this work to `claude/focused-wright-jw88w9`.
-- Stage 2 Completion Report delivered to the human, ending with the
-  required approval question. No Stage 3 work begins until that approval
-  is given.
+- Security Hardening Completion Report delivered to the human, ending
+  with the required closing statement. No Stage 3 work begins until
+  Stage 3 is explicitly authorized.
 
 ### Blockers
 
-None technical. The same two non-blocking open business/commercial
-tracks from Stage 1 remain open (cloud provider AUP confirmation, crypto
-custodian vendor selection — `docs/decisions/0005`), plus retention-
-period decisions flagged in the new `docs/architecture/16-privacy.md`
-(deliberately not invented, deferred to a future human/legal decision;
-does not block Stage 2 or Stage 3 engineering work).
+None technical. The same non-blocking open business/commercial tracks
+from Stage 0/1/2 remain open (`docs/decisions/0005`; retention-period
+decisions in `docs/architecture/16-privacy.md`). New from this pass, also
+non-blocking for engineering: the open human/compliance decisions listed
+in ADRs 0017 and 0018 (which specific operations require step-up and
+their thresholds; TOTP vs. WebAuthn; KMS/HSM provider and migration
+timeline).
 
-### Decisions/input still useful from the human (non-blocking for Stage 3 start)
+### Remaining security debt after this pass
 
-1. Approve Stage 2 and authorize Stage 3.
-2. No new *business* decisions surfaced this stage beyond the residual
-   items already tracked in ADR 0005 and the retention-period question in
-   `docs/architecture/16-privacy.md` (neither blocks engineering work).
+- `brands`' public-read RLS policy remains broader than strictly needed
+  (cross-tenant brand enumeration) — flagged in Stage 2 review, out of
+  this pass's scope.
+- The refresh-rotation race-loser path is now audited but deliberately
+  does not revoke the winner's chain (see `docs/decisions/0016`'s
+  reasoning) — worth revisiting if production data shows this path
+  correlating with confirmed theft.
+- MFA/step-up and KMS-based signing remain architecture only.
+
+### Decisions/input still useful from the human
+
+1. Approve this hardening pass and authorize Stage 3.
+2. The open human/compliance decisions listed in ADRs 0017 (MFA policy)
+   and 0018 (KMS/HSM provider, migration timeline) — non-blocking for
+   Stage 3 engineering start, but worth resolving before either is
+   actually built.

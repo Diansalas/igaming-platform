@@ -156,8 +156,8 @@ func lookupSessionByToken(ctx context.Context, pool *db.Pool, rawToken string) (
 // row.id itself.
 func withResolvedScope(ctx context.Context, pool *db.Pool, row sessionRow, fn db.TxFunc) error {
 	wrapped := func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `SELECT set_config('app.session_internal_op_id', $1, true)`, row.id.String()); err != nil {
-			return fmt.Errorf("auth: set session internal-op context: %w", err)
+		if err := db.SetSessionInternalOpID(ctx, tx, row.id); err != nil {
+			return err
 		}
 		return fn(ctx, tx)
 	}
@@ -221,31 +221,31 @@ func RotateSession(ctx context.Context, pool *db.Pool, rawToken string, ttl time
 	}
 
 	var next Session
+	var raceLost bool
 	err = withResolvedScope(ctx, pool, row, func(ctx context.Context, tx pgx.Tx) error {
 		// Re-check under the properly-scoped transaction: the row could
 		// have been revoked or rotated by a concurrent request between
-		// the lookup above and this point. The row lock this acquires is
-		// load-bearing, not defensive dressing: without it, two
-		// concurrent refreshes of the same token both read "not yet
-		// replaced" here, both mint a new session, and the second UPDATE
-		// below silently overwrites the first's replaced_by_session_id -
-		// producing two live chains from one token with reuse detection
-		// never triggering (a confirmed race, not a theoretical one - see
-		// Stage 2 code review). Implemented as a conditional UPDATE
-		// (WHERE ... AND replaced_by_session_id IS NULL AND revoked_at IS
-		// NULL) checked via RowsAffected, rather than SELECT ... FOR
-		// UPDATE or UPDATE ... RETURNING: both of those need the touched
-		// row to also satisfy the table's SELECT policy to see anything
-		// back (Postgres filters RETURNING output through SELECT
-		// policies, same as a plain SELECT would be) - which this
-		// internal, principal-derived-from-the-row re-check has no way to
-		// satisfy under migration 0018's narrower policies (no token hash,
-		// no caller-asserted principal_id in scope here). A conditional
-		// UPDATE sidesteps that entirely: RowsAffected reveals the outcome
-		// without needing to read the row back at all, and the UPDATE
-		// still acquires the same row lock via the (unchanged,
-		// tenant-scoped) UPDATE policy. See
-		// docs/decisions/0016-sessions-rls-hardening.md.
+		// the lookup above and this point. This conditional UPDATE (WHERE
+		// ... AND replaced_by_session_id IS NULL AND revoked_at IS NULL,
+		// checked via RowsAffected) is what makes that re-check race-safe
+		// - without it, two concurrent refreshes of the same token both
+		// see "not yet replaced," both mint a new session, and the second
+		// UPDATE further down silently overwrites the first's
+		// replaced_by_session_id, producing two live chains from one
+		// token with reuse detection never triggering (a confirmed race,
+		// not a theoretical one - see Stage 2 code review).
+		//
+		// This is a plain UPDATE with no RETURNING, but it still needs
+		// db.SetSessionInternalOpID (set by withResolvedScope, above) to
+		// have been called for row.id in THIS transaction: Postgres
+		// requires a row to be visible under some SELECT policy before
+		// permitting ANY UPDATE against it, RETURNING or not - confirmed
+		// empirically while building this (see
+		// docs/decisions/0016-sessions-rls-hardening.md). Without that
+		// GUC set, this UPDATE affects zero rows regardless of whether
+		// the row is actually eligible, which is indistinguishable here
+		// from "lost the race" - a real bug caught in review, not merely
+		// a hypothetical.
 		tag, err := tx.Exec(ctx,
 			`UPDATE sessions SET last_used_at = now()
 			 WHERE id = $1 AND replaced_by_session_id IS NULL AND revoked_at IS NULL`,
@@ -257,29 +257,68 @@ func RotateSession(ctx context.Context, pool *db.Pool, rawToken string, ttl time
 		if tag.RowsAffected() == 0 {
 			// Either replaced_by_session_id or revoked_at became non-NULL
 			// since the initial lookup - a concurrent rotation or
-			// revocation won the race. Treat identically to detecting
-			// reuse via the first read.
-			return ErrSessionReused
+			// revocation won the race. Record this rather than silently
+			// dropping it (a losing racer is, in the worst case,
+			// indistinguishable from a genuine reuse attempt racing the
+			// legitimate client) - but do NOT revoke the winner's chain
+			// here: unlike a confirmed already-rotated-token reuse
+			// (handled above), this branch cannot tell a malicious replay
+			// apart from a benign client-side double-submit/retry, and
+			// the winner's session is, by construction, legitimate.
+			// Set the flag and return nil (commit) rather than an error,
+			// so this audit record isn't rolled back along with it - see
+			// the raceLost check after withResolvedScope returns.
+			raceLost = true
+			tenantID := uuid.Nil
+			if row.tenantID != nil {
+				tenantID = *row.tenantID
+			}
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorType(row.principalType), ActorID: row.principalID,
+				Action: "auth.refresh_rotation_race_lost", TargetType: "session", TargetID: row.id.String(),
+				Outcome: audit.OutcomeDenied, IPAddress: ipAddress, UserAgent: userAgent,
+			})
 		}
 
 		next, err = IssueSession(ctx, tx, row.principalType, row.principalID, tenantID, ttl, userAgent, ipAddress)
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx,
+		linkTag, err := tx.Exec(ctx,
 			`UPDATE sessions SET replaced_by_session_id = $1, last_used_at = now() WHERE id = $2`,
 			next.ID, row.id,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		if linkTag.RowsAffected() == 0 {
+			// Should be unreachable: the conditional UPDATE above just
+			// proved row.id was live and updatable in THIS transaction,
+			// and nothing between there and here changes the scope. Fail
+			// loudly rather than silently minting a session whose
+			// predecessor was never marked replaced - that would leave a
+			// broken chain link, defeating reuse detection for exactly
+			// the token this rotation was meant to retire. Caught in
+			// review: the original code discarded this error entirely.
+			return fmt.Errorf("auth: failed to link rotated session %s -> %s: no rows updated", row.id, next.ID)
+		}
+		return nil
 	})
-	if errors.Is(err, ErrSessionReused) {
-		return Session{}, ErrSessionReused
-	}
 	if err != nil {
 		return Session{}, fmt.Errorf("auth: rotate session: %w", err)
 	}
+	if raceLost {
+		return Session{}, ErrSessionReused
+	}
 	return next, nil
 }
+
+// maxChainHops bounds revokeChainFrom's walk as a defensive guard against
+// an unexpected cycle or corrupted replaced_by_session_id chain turning
+// a security-critical revocation into an infinite loop. Real chains are
+// expected to be tiny (single digits); this is headroom, not a
+// realistic limit.
+const maxChainHops = 1000
 
 // revokeChainFrom marks the named session, and every session reachable by
 // following replaced_by_session_id forward from it, as revoked. Used
@@ -295,20 +334,35 @@ func RotateSession(ctx context.Context, pool *db.Pool, rawToken string, ttl time
 // within one transaction (unlike RotateSession's single-row re-check),
 // so a single fixed GUC value wouldn't cover every hop. See migration
 // 0018 and docs/decisions/0016-sessions-rls-hardening.md.
+//
+// The UPDATE unconditionally sets revoked_at via COALESCE (rather than
+// only WHERE revoked_at IS NULL) so that RETURNING still reveals where
+// the chain continues even for a hop that was ALREADY revoked before
+// this walk reached it - e.g. the session's own owner logged out of one
+// device mid-chain via DELETE /v1/me/sessions/{id} before the reuse was
+// detected. The original version's WHERE revoked_at IS NULL clause
+// treated "already revoked" as "chain fully handled" and returned early,
+// silently leaving every session BEYOND that hop live despite a
+// confirmed theft signal - a real, exploitable gap caught in the
+// pre-Stage-3 security hardening review, not merely theoretical. See
+// TestRevokeChainFrom_ContinuesPastAlreadyRevokedMidChainNode.
 func revokeChainFrom(ctx context.Context, tx pgx.Tx, startID uuid.UUID) error {
 	currentID := startID
-	for {
-		if _, err := tx.Exec(ctx, `SELECT set_config('app.session_internal_op_id', $1, true)`, currentID.String()); err != nil {
-			return fmt.Errorf("auth: set session internal-op context: %w", err)
+	for i := 0; i < maxChainHops; i++ {
+		if err := db.SetSessionInternalOpID(ctx, tx, currentID); err != nil {
+			return err
 		}
 		var nextID *uuid.UUID
 		err := tx.QueryRow(ctx,
-			`UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL RETURNING replaced_by_session_id`,
+			`UPDATE sessions SET revoked_at = COALESCE(revoked_at, now()) WHERE id = $1 RETURNING replaced_by_session_id`,
 			currentID,
 		).Scan(&nextID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			// Already revoked (or doesn't exist) - nothing more to do on
-			// this branch.
+			// The row genuinely doesn't exist (or, in principle, isn't
+			// visible under this scope) - nothing more to do on this
+			// branch. No longer reachable merely because a row was
+			// already revoked, since the UPDATE above matches and
+			// RETURNs for those too.
 			return nil
 		}
 		if err != nil {
@@ -319,6 +373,7 @@ func revokeChainFrom(ctx context.Context, tx pgx.Tx, startID uuid.UUID) error {
 		}
 		currentID = *nextID
 	}
+	return fmt.Errorf("auth: session chain exceeded %d hops without terminating - possible cycle or corrupted data", maxChainHops)
 }
 
 // RevokeSession revokes one session by id, within an already-scoped tx

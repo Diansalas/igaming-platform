@@ -53,17 +53,18 @@ application code").
 ## Decision
 
 Migration `0018_harden_sessions_select_rls` replaces the single
-`session_read_by_token` policy with two narrower ones (Postgres OR's
-multiple permissive policies for the same command together):
+`session_read_by_token` policy with **three** narrower ones (Postgres
+OR's multiple permissive policies for the same command together):
 
 ```sql
--- Phase 1: exact-token-hash lookup only.
+-- Phase 1: exact-token-hash lookup only (no tenant/principal context
+-- exists yet - see Context above).
 CREATE POLICY session_select_by_token_hash ON sessions
     FOR SELECT
     USING (refresh_token_hash = NULLIF(current_setting('app.session_lookup_hash', true), ''));
 
 -- Phase 2: an authenticated principal's own sessions, in their own
--- tenant/platform scope.
+-- tenant/platform scope (self-service listing/revocation).
 CREATE POLICY session_select_own_principal ON sessions
     FOR SELECT
     USING (
@@ -73,25 +74,47 @@ CREATE POLICY session_select_own_principal ON sessions
         )
         AND principal_id = NULLIF(current_setting('app.principal_id', true), '')::uuid
     );
+
+-- Phase 3: internal system operations (refresh rotation, reuse-chain
+-- revocation) that already resolved a specific row via phase 1 and need
+-- to touch it in a tenant-only-scoped transaction, with no
+-- caller-asserted principal_id available.
+CREATE POLICY session_select_internal_op ON sessions
+    FOR SELECT
+    USING (
+        id = NULLIF(current_setting('app.session_internal_op_id', true), '')::uuid
+        AND (
+            (tenant_id IS NOT NULL AND tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+            OR (tenant_id IS NULL AND NULLIF(current_setting('app.tenant_id', true), '') IS NULL)
+        )
+    );
 ```
 
-Two new `internal/db.Pool` methods set the corresponding GUCs, exactly
-mirroring `WithTenant`'s existing pattern:
+Three new `internal/db` functions set the corresponding GUCs, mirroring
+`WithTenant`'s existing pattern:
 
-- **`WithSessionLookup(ctx, hash, fn)`** — sets `app.session_lookup_hash`
+- **`Pool.WithSessionLookup(ctx, hash, fn)`** — sets `app.session_lookup_hash`
   to the SHA-256 hex digest of the actual refresh token being looked up
   (never anything else). Used only by
   `internal/auth.lookupSessionByToken`. Visibility under this scope is at
   most the one row whose `refresh_token_hash` equals that exact value -
   possession of the unguessable token remains the real credential, but
   now the database itself enforces "at most one row," not "every row."
-- **`WithPrincipalScope(ctx, tenantID, principalID, fn)`** — sets both
+- **`Pool.WithPrincipalScope(ctx, tenantID, principalID, fn)`** — sets both
   `app.tenant_id` (if non-nil) and `app.principal_id`. Used by
   `GET /v1/me/sessions` and `DELETE /v1/me/sessions/{id}` (both wired to
   the caller's own verified `principalID` from their JWT, never a
   path/body parameter). Now the database, not just
   `ListActiveSessions`'s `WHERE principal_id = $2` clause, refuses to
   return another principal's row.
+- **`SetSessionInternalOpID(ctx, tx, sessionID)`** — sets
+  `app.session_internal_op_id` within an ALREADY-OPEN transaction (it
+  does not begin or commit one, unlike the two above). Called by
+  `internal/auth.withResolvedScope` for every rotation/logout mutation
+  (keyed to the row phase 1 already resolved), and re-called by
+  `revokeChainFrom` on each hop of the reuse-detection chain walk, since
+  that function touches a different row id every iteration and a single
+  fixed value wouldn't cover every hop.
 
 **INSERT/UPDATE policies (`session_scoped_insert`, `session_scoped_update`)
 are unchanged** - tenant-scoped only, as before. They were never the
@@ -102,17 +125,87 @@ principal-match requirement to them would break `RotateSession`'s and
 session's own already-verified principal rather than an externally
 asserted one.
 
-One internal query changed shape without changing behavior:
-`RotateSession`'s concurrency re-check (added during Stage 2 review to
-close a rotation race) was `SELECT ... FOR UPDATE`, which is now denied
-by the narrower SELECT policy in the exact context it runs in (a
-tenant-only-scoped, not principal-scoped, transaction, since at that
-point the code is acting as the *system* on the row's own already-known
-principal, not on a caller-asserted one). Rewritten as
-`UPDATE sessions SET last_used_at = now() ... RETURNING replaced_by_session_id, revoked_at`,
-which acquires the identical row lock through the UPDATE policy (already
-correctly tenant-scoped, unaffected by this change) instead of the
-SELECT policy - same concurrency guarantee, no RLS policy conflict.
+**A Postgres behavior discovered while building this, load-bearing for
+the whole design**: an `UPDATE`/`DELETE` against a row requires that row
+to be visible under SOME `SELECT` policy, not merely to satisfy the
+`UPDATE`/`DELETE` policy's own `USING` clause - and this applies whether
+or not the statement uses `RETURNING`. Confirmed empirically (see
+`internal/auth/session_rls_integration_test.go` and the commit history of
+this fix). This is *why* phase 3 (`session_select_internal_op`) exists at
+all: without it, `RotateSession`'s concurrency re-check and
+`revokeChainFrom`'s chain walk - both plain `UPDATE`s against a
+tenant-only-scoped transaction with no token hash and no caller-asserted
+`principal_id` in scope - would silently affect zero rows regardless of
+the row's actual eligibility, indistinguishable from "lost a race" or
+"already revoked." `RotateSession`'s concurrency re-check itself remains
+a plain conditional `UPDATE ... WHERE id = $1 AND replaced_by_session_id
+IS NULL AND revoked_at IS NULL`, checked via `RowsAffected()` (no
+`RETURNING`) - unchanged in shape from before this ADR, but it only works
+because phase 3 now grants it the SELECT visibility this behavior
+requires.
+
+## Corrections made during this hardening pass's own review
+
+An independent `security` and `code-reviewer` pass on this exact change
+(before it was considered final) found and this fixed:
+
+- **Blocking**: `revokeChainFrom`'s walk used `WHERE revoked_at IS NULL`
+  to decide whether to continue, so a chain with an already-revoked
+  MID-chain node (e.g. the session's own owner logged out of that one
+  device before a reuse of an earlier link was ever detected) stopped
+  the walk there, leaving every session further down the chain live
+  despite a confirmed theft signal. Fixed: the `UPDATE` now uses
+  `revoked_at = COALESCE(revoked_at, now())` with no `WHERE` filter on
+  `revoked_at`, so an already-revoked hop is still touched (a no-op on
+  that column) and still `RETURNING`s where the chain continues. A
+  defensive `maxChainHops` cap was added against an unexpected cycle.
+  Regression test:
+  `TestRevokeChainFrom_ContinuesPastAlreadyRevokedMidChainNode`.
+- **Should-fix**: the `UPDATE sessions SET replaced_by_session_id = $1
+  ... WHERE id = $2` that links a rotated-out session to its successor
+  discarded its result, so a 0-row outcome (which should be unreachable,
+  but previously would have been silently possible had phase 3's SELECT
+  visibility been missing or wrong) would mint a new session without
+  ever marking its predecessor replaced - breaking reuse detection for
+  that exact token with no error raised anywhere. Fixed: the write's
+  `RowsAffected()` is now checked and a loud error returned if it's zero.
+- **Should-fix**: the concurrency re-check's race-loser branch
+  (`RowsAffected() == 0`, meaning a concurrent request won the race)
+  returned `ErrSessionReused` with no audit record and no chain
+  revocation - a real gap, since this branch is reachable by a genuine
+  concurrent replay attempt, not only a benign client-side double-submit.
+  Fixed by writing an `auth.refresh_rotation_race_lost` audit entry on
+  this path. Deliberately NOT also revoking the chain here: unlike a
+  confirmed already-rotated-token reuse (handled separately, chain
+  revoked), this branch cannot distinguish a malicious replay from an
+  ordinary retry, and the transaction's winner is - by construction - a
+  legitimate rotation; revoking it too would be a needless, uninvestigated
+  session termination for what is very often just a network retry. This
+  is a considered trade-off, not an oversight left unaddressed - see
+  "Remaining security debt" in the Security Hardening Completion Report.
+- **Should-fix**: `session_select_internal_op`'s `USING` clause matched
+  only `id = app.session_internal_op_id`, with no tenant conjunct -
+  unexploitable today (every setter already resolved the row's own
+  tenant via `withResolvedScope`/`revokeChainFrom`'s own transaction
+  scope), but a future caller setting this GUC from any less-trusted
+  input would get a single-row cross-tenant read with no isolation
+  backstop. Fixed by ANDing in the same tenant/platform-scope check every
+  other policy here uses, at zero cost to any current caller.
+- **Should-fix**: the three GUC-setting call sites duplicated raw
+  `set_config` SQL directly in `internal/auth/session.go` instead of
+  going through `internal/db`, the package this schema's convention says
+  owns these session-variable names. Fixed by adding
+  `db.SetSessionInternalOpID`, used by both call sites.
+- **Test gap, closed**: the original test suite proved cross-principal
+  and cross-tenant *reads* were denied but had no test proving a
+  cross-principal *write* (`UPDATE`) was denied at the database level -
+  the one HTTP-level IDOR test alone would pass identically whether RLS
+  or `RevokeSession`'s own `AND principal_id = $2` clause was doing the
+  work. Closed with
+  `TestSessionRLS_PrincipalCannotRevokeAnotherPrincipalsSessionDirectly`,
+  plus `TestSessionRLS_InternalOpScopeSeesOnlyThatOneRow` and
+  `TestSessionRLS_ScopeGUCsDoNotLeakAcrossTransactions` proving the two
+  properties above by direct, adversarial SQL rather than by inference.
 
 ## What this does NOT yet do
 

@@ -683,7 +683,7 @@ func TestAuditLog_RecordsSecurityEvents(t *testing.T) {
 // --- Refresh rotation under concurrency: the reuse-detection race fix ---
 
 // TestRefreshRotation_ConcurrentRequestsRaceSafely proves the RotateSession
-// FOR UPDATE fix: firing two concurrent refreshes of the exact same
+// conditional-UPDATE fix: firing two concurrent refreshes of the exact same
 // refresh token must result in exactly one success. Before the fix, both
 // could observe "not yet replaced" and both succeed, producing two live
 // chains from one token with reuse detection never triggering.
