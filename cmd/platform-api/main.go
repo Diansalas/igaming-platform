@@ -21,6 +21,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/httpserver"
 	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/payments"
 )
 
 func main() {
@@ -83,13 +84,25 @@ func run() error {
 	}
 	issuer := auth.NewIssuer(keyRegistry, cfg.JWTIssuer, cfg.JWTAudience)
 
+	// Stage 3B ships a mock PSP only (CLAUDE.md's Stage 3B scope gate) -
+	// registered exactly like a future real adapter would be, via the
+	// same PaymentProvider interface and provider_id-keyed registry
+	// (docs/decisions/0022 §2.1). A tenant must still write its own
+	// ProviderCapability row (PUT /v1/admin/providers/mock/capability)
+	// before any deposit can route to it - registering the adapter here
+	// does not itself enable it for any tenant.
+	orchestrator := payments.NewOrchestrator(map[string]payments.PaymentProvider{
+		"mock": payments.NewMockProvider("mock", "EUR", "USD", "GBP", "BRL", "MXN"),
+	})
+
 	handler := httpserver.New(httpserver.Deps{
-		Logger:          logger,
-		DB:              pool,
-		AuthIssuer:      issuer,
-		ServiceName:     cfg.OTelServiceName,
-		AccessTokenTTL:  cfg.AccessTokenTTL,
-		RefreshTokenTTL: cfg.RefreshTokenTTL,
+		Logger:              logger,
+		DB:                  pool,
+		AuthIssuer:          issuer,
+		ServiceName:         cfg.OTelServiceName,
+		AccessTokenTTL:      cfg.AccessTokenTTL,
+		RefreshTokenTTL:     cfg.RefreshTokenTTL,
+		PaymentOrchestrator: orchestrator,
 	})
 
 	server := &http.Server{

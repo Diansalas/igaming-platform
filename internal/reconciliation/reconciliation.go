@@ -1,0 +1,197 @@
+// Package reconciliation implements the ledger-vs-projection
+// reconciliation stream (docs/architecture/reconciliation-model.md §2.1)
+// - the minimum reconciliation framework Stage 3B's approved scope
+// requires. The other seven streams in that document (wallet<->PSP,
+// wallet<->casino/sportsbook provider, provider payable, PSP clearing/
+// reserve, crypto custodian) are explicitly out of scope this stage:
+// they either depend on providers/domains not yet implemented (casino,
+// sportsbook, crypto) or on a real PSP settlement feed this stage
+// deliberately does not integrate (CLAUDE.md's Stage 3B scope gate). This
+// package's Run/Mismatch model is designed so those streams slot into
+// the same ReconciliationRun/ReconciliationMismatch tables later without
+// a schema change - see docs/decisions/0019's enumerated table list.
+//
+// Per reconciliation-model.md §1: no financial tolerance is introduced
+// where the Blueprint expects drift to be zero. Every mismatch found here
+// is recorded, never silently corrected - "the projection is rebuilt
+// from the ledger, never the reverse" (§2.1's own correction mechanism).
+package reconciliation
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/ledger"
+)
+
+// Stream identifies which reconciliation stream a Run belongs to.
+type Stream string
+
+// StreamLedgerVsProjection is the only stream Stage 3B implements.
+const StreamLedgerVsProjection Stream = "ledger_vs_projection"
+
+// Status is a ReconciliationRun's outcome.
+type Status string
+
+const (
+	StatusClean             Status = "clean"
+	StatusMismatchesFound   Status = "mismatches_found"
+	investigationStatusOpen        = "open"
+)
+
+// Run is one execution of a reconciliation stream over a period.
+type Run struct {
+	ID          uuid.UUID
+	TenantID    uuid.UUID
+	Stream      Stream
+	PeriodStart time.Time
+	PeriodEnd   time.Time
+	RunAt       time.Time
+	Status      Status
+}
+
+// Mismatch is one discrepancy a Run found, per
+// reconciliation-model.md §5. ReconciliationKey/ExpectedValue/ActualValue
+// are rendered as text since different streams compare different kinds
+// of values (a ledger_account_id here; a (provider_id, provider_tx_id)
+// pair for a future PSP stream).
+type Mismatch struct {
+	ID                  uuid.UUID
+	TenantID            uuid.UUID
+	RunID               uuid.UUID
+	ReconciliationKey   string
+	ExpectedValue       string
+	ActualValue         string
+	InvestigationStatus string
+}
+
+// RunLedgerVsProjection recomputes every ledger_account's balance
+// directly from ledger_entries (the authoritative source,
+// ledger.RebuildBalance) and compares it against the materialized
+// wallet_balance_projection row for the same account
+// (ledger.GetProjectedBalance), for every ledger_account belonging to
+// tenantID. It records exactly one ReconciliationRun and zero or more
+// ReconciliationMismatch rows, atomically, inside tx - the caller opens
+// tx via db.Pool.WithTenant(ctx, tenantID, ...), matching every other
+// tenant-scoped write in this codebase.
+//
+// Per the Blueprint's own explicit example of a P1-triggering drift
+// (reconciliation-model.md §2.1), ANY non-zero difference is a mismatch -
+// there is no tolerance band. In the design this stage ships (the
+// projection trigger runs in the SAME transaction as the ledger_entries
+// insert - see migration 0023), a real mismatch here can only mean the
+// trigger was bypassed, disabled, or a manual/administrative write
+// touched wallet_balance_projection directly - i.e. exactly the class of
+// bug this reconciliation stream exists to catch structurally, not
+// speculatively.
+func RunLedgerVsProjection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, periodStart, periodEnd time.Time) (Run, []Mismatch, error) {
+	run := Run{
+		ID:          uuid.New(),
+		TenantID:    tenantID,
+		Stream:      StreamLedgerVsProjection,
+		PeriodStart: periodStart,
+		PeriodEnd:   periodEnd,
+		RunAt:       time.Now().UTC(),
+	}
+
+	accountIDs, err := ledgerAccountIDsForTenant(ctx, tx, tenantID)
+	if err != nil {
+		return Run{}, nil, fmt.Errorf("reconciliation: list ledger accounts: %w", err)
+	}
+
+	var mismatches []Mismatch
+	for _, accountID := range accountIDs {
+		rebuilt, err := ledger.RebuildBalance(ctx, tx, accountID)
+		if err != nil {
+			return Run{}, nil, fmt.Errorf("reconciliation: rebuild balance for account %s: %w", accountID, err)
+		}
+		projected, err := ledger.GetProjectedBalance(ctx, tx, accountID)
+		if err != nil {
+			return Run{}, nil, fmt.Errorf("reconciliation: get projected balance for account %s: %w", accountID, err)
+		}
+		if rebuilt.DebitTotal != projected.DebitTotal || rebuilt.CreditTotal != projected.CreditTotal {
+			mismatches = append(mismatches, Mismatch{
+				ID:                  uuid.New(),
+				TenantID:            tenantID,
+				ReconciliationKey:   accountID.String(),
+				ExpectedValue:       fmt.Sprintf("debit=%d credit=%d", rebuilt.DebitTotal, rebuilt.CreditTotal),
+				ActualValue:         fmt.Sprintf("debit=%d credit=%d", projected.DebitTotal, projected.CreditTotal),
+				InvestigationStatus: investigationStatusOpen,
+			})
+		}
+	}
+
+	if len(mismatches) > 0 {
+		run.Status = StatusMismatchesFound
+	} else {
+		run.Status = StatusClean
+	}
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO reconciliation_runs (id, tenant_id, stream, period_start, period_end, run_at, status)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		run.ID, run.TenantID, run.Stream, run.PeriodStart, run.PeriodEnd, run.RunAt, run.Status,
+	); err != nil {
+		return Run{}, nil, fmt.Errorf("reconciliation: insert run: %w", err)
+	}
+
+	for i := range mismatches {
+		m := &mismatches[i]
+		m.RunID = run.ID
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO reconciliation_mismatches
+				(id, tenant_id, reconciliation_run_id, reconciliation_key, expected_value, actual_value, investigation_status)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			m.ID, m.TenantID, m.RunID, m.ReconciliationKey, m.ExpectedValue, m.ActualValue, m.InvestigationStatus,
+		); err != nil {
+			return Run{}, nil, fmt.Errorf("reconciliation: insert mismatch: %w", err)
+		}
+	}
+
+	return run, mismatches, nil
+}
+
+func ledgerAccountIDsForTenant(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := tx.Query(ctx, `SELECT id FROM ledger_accounts WHERE tenant_id = $1`, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ResolveMismatch marks a mismatch investigated/resolved with a note and
+// resolver, per reconciliation-model.md §5 - it never itself mutates
+// ledger data; a resolution that requires a ledger correction does so via
+// a separate, ordinary compensating ledger.Post call (a manual_adjustment
+// transaction), whose id the caller then records via
+// correctionLedgerTransactionID.
+func ResolveMismatch(ctx context.Context, tx pgx.Tx, mismatchID uuid.UUID, resolvedBy uuid.UUID, note string, correctionLedgerTransactionID *uuid.UUID) error {
+	tag, err := tx.Exec(ctx,
+		`UPDATE reconciliation_mismatches
+		 SET investigation_status = 'resolved', resolution_note = $2, resolved_by = $3, resolved_at = now(),
+		     correction_ledger_transaction_id = $4
+		 WHERE id = $1`,
+		mismatchID, note, resolvedBy, correctionLedgerTransactionID,
+	)
+	if err != nil {
+		return fmt.Errorf("reconciliation: resolve mismatch: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("reconciliation: mismatch %s not found", mismatchID)
+	}
+	return nil
+}

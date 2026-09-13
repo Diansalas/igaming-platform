@@ -166,10 +166,18 @@ keys and blockchain signing never enter this ledger's trust boundary.
 Stage 1 establishes only the `Asset` registry schema (migrations 0003 and
 0006) and the general tenant/RLS foundation (`tenants`,
 `tenant_jurisdiction_configs`, `tenant_config`) that any future
-tenant-owned table, wallets included, will sit on top of. **No `wallets`
-or ledger table exists yet** — an earlier draft of this document
-overstated Stage 1's scope here; corrected after Stage 1 specialist
-review. The `Wallet` identity table, the full ledger schema, idempotent
-postings, and reconciliation jobs remain Stage 3, and gate every other
-financial flow (payments, bonus, sportsbook, casino wallet-callbacks) —
-nothing downstream can be trusted without it existing first.
+tenant-owned table, wallets included, will sit on top of. (An earlier
+draft of this document overstated Stage 1's scope by implying wallets
+existed there; corrected after Stage 1 specialist review.)
+
+**Stage 3B implemented the wallet and ledger core**: the `Wallet` identity
+table (migration `0019`, `internal/wallet`), the full ledger schema and
+idempotent postings (migrations `0020`–`0023`, `internal/ledger`), and the
+balance projection maintained in the same transaction as the entries that
+change it. See `ledger-accounting-model.md` and `docs/decisions/0019` for
+the implemented shape. Reconciliation is only partly there: the
+ledger-vs-projection stream exists (`internal/reconciliation`) but no
+scheduler runs it yet, and every other stream in `reconciliation-model.md`
+is still architecture only. Casino, sportsbook and bonus flows — the
+downstream consumers this gates — remain unbuilt and belong to their own
+later stages.

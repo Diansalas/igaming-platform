@@ -146,6 +146,58 @@ func (p *Pool) WithPrincipalScope(ctx context.Context, tenantID, principalID uui
 	return nil
 }
 
+// WithPlayerScope runs fn in a transaction scoped to BOTH tenantID (via
+// "app.tenant_id") AND playerAccountID (via "app.player_account_id").
+// This is the ONLY sanctioned way to run a player-self-service financial
+// read/write - the wallet/ledger RLS policies (migrations 0019-0026) are
+// deliberately split into two permissive policies per table: a
+// tenant_staff_scope policy that requires app.player_account_id to be
+// UNSET (used by WithTenant for provider callbacks, staff/admin
+// handlers, and the posting engine itself), and a player_self_scope
+// policy that requires app.player_account_id to match exactly (used only
+// here). This mirrors WithPrincipalScope's role for `sessions`
+// (docs/decisions/0016) but uses a distinct GUC name, per
+// docs/decisions/0019 ("The player scope GUC is app.player_account_id,
+// set only by trusted server code from the authenticated player
+// principal's own resolved account - never from a path, query, or body
+// parameter").
+//
+// Splitting tenant_staff_scope on "is app.player_account_id unset" is
+// what actually makes the isolation hold: without it, a player-scoped
+// connection would ALSO satisfy a plain tenant-match policy (Postgres
+// OR's every applicable permissive policy together), defeating the
+// per-player isolation this function exists to provide. See the Stage 3B
+// migrations' own comments for the same reasoning repeated per table.
+func (p *Pool) WithPlayerScope(ctx context.Context, tenantID, playerAccountID uuid.UUID, fn TxFunc) error {
+	if tenantID == uuid.Nil {
+		return fmt.Errorf("db: WithPlayerScope called with nil tenant id")
+	}
+	if playerAccountID == uuid.Nil {
+		return fmt.Errorf("db: WithPlayerScope called with nil player account id")
+	}
+
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("db: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID.String()); err != nil {
+		return fmt.Errorf("db: set tenant context: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.player_account_id', $1, true)`, playerAccountID.String()); err != nil {
+		return fmt.Errorf("db: set player account context: %w", err)
+	}
+
+	if err := fn(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("db: commit tx: %w", err)
+	}
+	return nil
+}
+
 // SetSessionInternalOpID sets the Postgres session variable
 // "app.session_internal_op_id" for the lifetime of the CURRENT
 // transaction (tx must already be open - this does not begin or commit

@@ -1,7 +1,20 @@
 # Reconciliation Model
 
-Status: Stage 3A (Financial Architecture Freeze) — architecture only,
-`NOT IMPLEMENTED`. Source: Blueprint §4.2 (hourly reconciliation, zero
+Status: `PARTIALLY IMPLEMENTED` (Stage 3B). **Only the ledger ↔ balance
+projection stream (§2.1) is implemented and tested**
+(`internal/reconciliation.RunLedgerVsProjection`, over the
+`reconciliation_runs` / `reconciliation_mismatches` tables of migration
+`0027`, RLS tightened by `0028`). Every other stream in §2 — wallet ↔ PSP,
+wallet ↔ casino, wallet ↔ sportsbook, provider payable, PSP clearing/
+reserve, crypto custodian — is `NOT IMPLEMENTED` and remains architecture
+only: no real PSP, casino, sportsbook or custodian relationship exists yet
+to reconcile against, so there is no counterparty statement to diff. Also
+`NOT IMPLEMENTED`: any scheduler. Nothing currently invokes
+`RunLedgerVsProjection` automatically — §2.1's "runs every hour" is the
+design target, not current behaviour; the function exists and is tested but
+must be called by a caller that does not yet exist. (The open-hold check
+`withdrawal-state-machine.md` §3 refers to this document for is likewise
+not built.) Source: Blueprint §4.2 (hourly reconciliation, zero
 drift is P1), §6 (NFR table: reconciliation drift target = 0), extending
 `ledger-accounting-model.md` §5 and `06-wallet-ledger-architecture.md`.
 Owner: `ledger-finance`.

@@ -1,7 +1,12 @@
 # Withdrawal State Machine
 
-Status: Stage 3A (Financial Architecture Freeze) — architecture only,
-`NOT IMPLEMENTED`. Source: Blueprint §4.6 ("withdrawals as a workflow, not
+Status: `IMPLEMENTED` (Stage 3B), with one documented exception noted in
+§3 (the invariant-#12 open-hold reconciliation check is `NOT IMPLEMENTED`).
+Designed in Stage 3A (Financial Architecture Freeze) and built in Stage 3B:
+migration `0026` (`withdrawal_requests`, `withdrawal_approvals`; RLS
+tightened by `0028`), `internal/withdrawal`, and the player/staff HTTP
+handlers in `internal/httpserver/withdrawal_handlers.go`. Source:
+Blueprint §4.6 ("withdrawals as a workflow, not
 an endpoint"), extending `07-payments-architecture.md`'s "Withdrawals as a
 workflow" section and `financial-transaction-flows.md` Flows 3–4. Owner:
 `payments`, with `ledger-finance` on the ledger-visible transitions and
@@ -77,6 +82,8 @@ WithdrawalRequest
   amount             NUMERIC(38,0) NOT NULL
   state              TEXT NOT NULL   -- per §1
   idempotency_key    TEXT NOT NULL   -- client/session-supplied, deduplicates double-submits; UNIQUE (tenant_id, player_account_id, idempotency_key) per §4 — namespaced by tenant *and* player because the value is client-supplied (a tenant-only namespace would let one player's guessed key block another's request)
+  provider_id        TEXT NULL       -- set on `approved` -> `submitted`; the adapter the payout was routed to
+  provider_reference TEXT NULL       -- set on `approved` -> `submitted`; that adapter's own reference for the payout
   hold_ledger_transaction_id     UUID NULL  -- Flow 3 Step A's transaction, once posted
   release_ledger_transaction_id  UUID NULL  -- whichever of Flow 3 Step B / Flow 4 resolves the hold
   requested_at, updated_at        TIMESTAMPTZ NOT NULL
@@ -94,7 +101,10 @@ denormalization rule").
 `LedgerTransaction` (§1.2 of `ledger-accounting-model.md` — the ledger
 itself has no "pending" concept). This table is the thing
 `pending_review`/`approved` actually live on; the ledger only sees the two
-or three atomic postings that correspond to specific transitions. This
+or three atomic postings that correspond to specific transitions. There is
+no separate `WithdrawalIntent` table: `provider_id`/`provider_reference`
+sit on this row directly (migration `0026`), carrying the role
+`payment-orchestration.md`'s `DepositIntent` plays for deposits. This
 mirrors the general principle stated in `ledger-accounting-model.md` §4:
 provider/workflow state machines track pending state externally and call
 into the ledger only when there is a fact to post.
@@ -116,11 +126,15 @@ into the ledger only when there is a fact to post.
   still has a hold that must be released back to `player_cash` via Flow 4's
   pre-submission variant. Leaving it unset would break invariant #12's
   requirement that every hold has a tracked release.
-- Invariant #12 (`ledger-accounting-model.md` §6) is enforced structurally:
-  every open `player_withdrawal_hold` credit must correspond to exactly one
-  `WithdrawalRequest` row in a non-terminal state with a matching amount —
-  this is a Stage 3B reconciliation check (`reconciliation-model.md`), not
-  merely a hopeful convention.
+- Invariant #12 (`ledger-accounting-model.md` §6): every open
+  `player_withdrawal_hold` credit must correspond to exactly one
+  `WithdrawalRequest` row in a non-terminal state with a matching amount.
+  **`NOT IMPLEMENTED`** — Stage 3B's transition code sets
+  `release_ledger_transaction_id` on every terminal state, but no
+  reconciliation stream verifies the invariant independently:
+  `internal/reconciliation` implements only `ledger_vs_projection`
+  (`reconciliation-model.md` §2.1). Until that check exists, a permanently
+  stranded hold left by a code defect would not be detected automatically.
 - The four-eyes count check in §5 (two distinct `approve` decisions before
   `approved` is reachable) and the `submitted`-state stuck-transaction case
   (a request that never receives a provider/custodian confirmation either

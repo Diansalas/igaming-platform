@@ -27,6 +27,18 @@ const (
 	PermPlayerSuspend Permission = "player:suspend"
 	PermAuditRead     Permission = "audit:read"
 	PermStaffManage   Permission = "staff:manage"
+
+	// PermWithdrawalApprove gates the withdrawal four-eyes approval/
+	// rejection endpoints and the staff withdrawal queue (Stage 3B). The
+	// approving PRINCIPAL still has to satisfy internal/withdrawal's own
+	// distinct-approver/non-beneficiary checks - this permission only
+	// answers "may this role approve withdrawals at all", not "may this
+	// specific call succeed" (withdrawal-state-machine.md §5).
+	PermWithdrawalApprove Permission = "withdrawal:approve"
+	// PermProviderConfigWrite gates writing a tenant's ProviderCapability
+	// configuration rows (docs/decisions/0022 §2.1 - a platform-level
+	// administrative action, always audited).
+	PermProviderConfigWrite Permission = "provider_config:write"
 )
 
 // rolePermissions is a static, in-code role -> permission-set mapping.
@@ -41,6 +53,7 @@ var rolePermissions = map[Role]map[Permission]bool{
 	RoleTenantAdmin: permSet(
 		PermTenantRead, PermBrandRead, PermBrandWrite,
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead, PermStaffManage,
+		PermWithdrawalApprove, PermProviderConfigWrite,
 	),
 	RoleSupport: permSet(
 		PermPlayerRead,
@@ -48,12 +61,13 @@ var rolePermissions = map[Role]map[Permission]bool{
 	RoleCompliance: permSet(
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead,
 	),
-	// finance has no permissions of its own yet - Stage 3's wallet/ledger
-	// work is what this role exists for. Defined now (not invented later)
-	// so the RBAC shape doesn't change when that work lands, per the
-	// Stage 2 instructions' explicit list of roles to consider.
-	RoleFinance: permSet(),
-	RolePlayer:  permSet(),
+	// finance is Stage 3B's own role: withdrawal four-eyes approval is
+	// exactly the capability the Stage 2 instructions predicted this role
+	// would need.
+	RoleFinance: permSet(
+		PermWithdrawalApprove,
+	),
+	RolePlayer: permSet(),
 }
 
 func permSet(perms ...Permission) map[Permission]bool {

@@ -759,12 +759,316 @@ Cross-reference integrity re-checked after all four reviewers' concurrent
 edits: every `docs/decisions/0022 §N` reference across the four edited
 architecture documents resolves to a real section.
 
+## Stage 3B — Core Financial Infrastructure Implementation
+
+The human issued the Stage 3B Final Approval directive: implement the
+frozen Stage 3A/3A-addendum architecture under a controlled 25-item
+scope, behind a mock PSP only, with bonus/crypto financial posting and
+any flow needing an unresolved accounting counter-account explicitly
+blocked. This section records what was built, every specialist-review
+finding, and its resolution — honestly, including the defects found in
+this session's own work, per CLAUDE.md's "record important implementation
+decisions honestly" rule.
+
+### Migrations (`migrations/0019`-`0028`)
+
+`0019_create_wallets` — `wallets` table (one row per player/asset),
+two-policy RLS (`tenant_staff_scope` FOR ALL requiring the player GUC
+unset, OR'd with a SELECT-only `player_self_scope`) — the pattern every
+subsequent Stage 3B player-owned table follows, and the one three tables
+initially got wrong (see 0028 below).
+
+`0020_create_ledger_accounts` — `ledger_accounts`, with
+`ledger_accounts_populate_from_wallet()` trigger-based denormalization
+(never a nullable composite FK) and partial unique indexes distinguishing
+player-owned from house-level accounts.
+
+`0021_create_ledger_transactions` — `ledger_transactions` (status is
+derived, never a stored/mutated column), `ledger_deny_mutation()` +
+triggers for append-only enforcement, tenant-scoped unique constraints
+including `(tenant_id, provider_id, provider_tx_id)`.
+
+`0022_create_ledger_entries` — `ledger_entries`,
+`ledger_entries_populate_from_account()` trigger, the deferred
+`ledger_entries_balanced` constraint trigger enforcing debits=credits per
+transaction/asset, composite FKs, two-policy RLS, append-only triggers.
+
+`0023_create_wallet_balance_projection` — `wallet_balance_projection`
+maintained exclusively by an `AFTER INSERT` trigger on `ledger_entries`,
+in the same transaction as the posting — structurally prevents the
+"forgot to update the projection" bug class.
+
+`0024_create_provider_capabilities` — `provider_capabilities` +
+`provider_capability_amount_limits`. **Known gap, not fixed this stage**:
+the amount-limits child table has no `tenant_id` column of its own and
+its RLS policy is a subquery into `provider_capabilities` — ADR 0019
+otherwise forbids this shape. Not currently exploitable (the subquery
+inherits the parent's tenant check, which is itself now correctly
+restrictive after 0028), but structurally fragile; closing it needs a
+column addition and backfill.
+
+`0025_create_deposit_intents` — `deposit_intents`, two-policy RLS.
+
+`0026_create_withdrawal_requests_and_approvals` — `withdrawal_requests`
+(immutable-after-insert trigger on identifying fields including
+`amount`, closing the raise-after-approval bypass) + `withdrawal_approvals`
+(append-only).
+
+`0027_create_reconciliation_tables` — `reconciliation_runs` +
+`reconciliation_mismatches`.
+
+`0028_harden_stage3b_staff_only_tables_rls` — **security-review fix**:
+`ledger_transactions`, `provider_capabilities`, `withdrawal_approvals`,
+`reconciliation_runs`, and `reconciliation_mismatches` originally carried
+a bare `tenant_id = app.tenant_id` policy with no guard excluding a
+player-scoped connection (unlike every other Stage 3B table's two-policy
+pattern). `db.Pool.WithPlayerScope` sets BOTH `app.tenant_id` and
+`app.player_account_id`, so a player-scoped connection satisfied these
+five tables' policy completely — full tenant-wide read/write, despite
+each table's own comment claiming staff/system-only. Not exploited by any
+code path that existed (every query against these tables ran under
+`WithTenant`), which is exactly the latent-trap character this closes:
+the natural next feature (a player-facing "transaction history" endpoint
+joining `ledger_entries` to `ledger_transactions` under player scope)
+would have silently leaked every player's data tenant-wide. Fixed by
+adding the same `AND app.player_account_id IS NULL` guard every other
+table already had. Migration round-trip verified; a dedicated test
+(`TestLedgerTransactions_PlayerScopeSeesNoRows`) proves a player-scoped
+connection now sees zero rows and cannot forge an INSERT, for the exact
+tenant/player that legitimately owns the underlying wallet.
+
+### Go packages
+
+`internal/ledger` — posting engine (`Post`, `GetOrCreateAccount`,
+`RebuildBalance`/`RebuildProjectionRow`), `AccountType`/`TransactionType`/
+`Direction` model, SAVEPOINT-based idempotent insert
+(`db.IdempotentInsert`), `SET CONSTRAINTS ... IMMEDIATE` forcing the
+deferred balance check synchronously inside `Post` (and, after a
+code-review finding, explicitly reset to `DEFERRED` afterward — Postgres's
+constraint-mode change otherwise lasts the whole transaction, which would
+break a second `Post` call in the same caller-supplied transaction).
+
+`internal/wallet` — `GetOrCreate`/`GetByPlayerAndAsset`/`GetSummary`,
+multi-asset, no floating point anywhere.
+
+`internal/payments` — `PaymentProvider` interface, `Orchestrator`
+(routing, cascade-on-decline, ambiguous-outcome resolution via
+`QueryStatus`, callback processing), `MockProvider`, the capability
+model (`LoadCapability`/`WriteCapability`/`ListRoutingCandidates`, narrow
+-never-widen enforcement). **Security-review P0 fixed**: `MockProvider`
+previously performed no webhook signature verification at all — since
+the webhook route (`POST /v1/webhooks/payments/{tenantSlug}/{providerID}`)
+has no bearer-auth middleware by design (a provider callback isn't an
+authenticated platform principal), and provider references are
+sequential and even returned to the player in `InitiateDeposit`'s
+`redirect_url`, anyone could forge a "succeeded" callback for any
+reference and mint an arbitrary ledger credit. Fixed by giving
+`MockProvider` a randomly-generated per-instance HMAC-SHA256 secret;
+`HandleCallback` now verifies a constant-time signature over the
+callback's effect-bearing fields before acting on anything else, exactly
+as `payment-orchestration.md` §3 already specified ("webhook signature
+verification happens inside `HandleCallback` before any payload field is
+used"). Four dedicated tests prove forged/unsigned/wrong-secret/tampered
+payloads are all rejected, and a genuinely-signed one is accepted.
+**P1s fixed**: (1) a deposit-reversal callback's `amount`/`asset_code`
+were payload-controlled and uncapped — a reversal declaring an amount
+far exceeding the original deposit would debit `player_cash` arbitrarily
+into deeply negative territory; fixed by rejecting any reversal whose
+amount/asset don't exactly match the original, and by rejecting a second,
+distinctly-referenced reversal of an already-reversed deposit (the
+ledger's own `(tenant_id, provider_id, provider_tx_id)` uniqueness only
+catches a *redelivery* of the identical reversal, not a second, different
+one) — new `ErrDepositAlreadyReversed` sentinel, three new adversarial
+tests. (2) A late/out-of-order decline callback for an intent that had
+already succeeded had no terminal-state guard — it would flip a succeeded
+intent's status to declined while the ledger credit stayed posted
+(permanent disagreement between the intent row and the ledger), null out
+`provider_id`/`provider_reference` via the cascade-exhausted path, and
+with a second provider configured could even trigger a *fresh*
+`provider.Deposit` call for a deposit that already succeeded; fixed with
+a terminal-state short-circuit mirroring `postDepositSuccess`'s own
+redelivered-success handling, with a dedicated test. (3) The ledger
+idempotency key for deposit success/reversal postings was the bare
+provider reference, with nothing requiring reference uniqueness *across*
+providers (the `PaymentProvider` contract never promises that); with a
+second real PSP configured, a colliding reference could silently
+misattribute one provider's deposit to another's ledger transaction.
+Fixed by namespacing the key with `providerID + ":" + reference`,
+matching the DB-enforced `(tenant_id, provider_id, provider_tx_id)`
+index's own scoping.
+
+`internal/withdrawal` — state machine (`requested` → `pending_review` →
+`approved` → `submitted` → `completed`/`rejected`/`cancelled`/`failed`),
+four-eyes `Approve`/`Reject` (`is_automated_approval` excludes
+service-identity auto-approvals from the two-human count;
+`threshold_amount_at_decision`/`request_amount_at_decision` snapshot each
+decision for audit even though threshold manipulation prevention at
+write time remains an open policy decision). **P1 fixed**: the original
+HTTP submission handler took no row lock before calling out to a
+PaymentProvider — two concurrent submit attempts (a staff double-click,
+or a client retry) could both observe `approved` via a plain read and
+both call the provider, a real double payout, with the loser's evidence
+lost to its own rolled-back transaction. Fixed by adding
+`LockApprovedForSubmission` (takes the row lock and verifies `approved`
+as the FIRST database operation, before the provider is ever called,
+mirroring how the deposit orchestrator's own idempotent insert serializes
+concurrent deposit attempts) and wiring the HTTP handler to use it in
+place of a plain `GetByID`. A dedicated concurrency test
+(`TestLockApprovedForSubmission_ConcurrentSubmitsOnlyOneReachesProvider`,
+5 concurrent goroutines) proves the simulated "provider call" happens
+exactly once.
+
+`internal/reconciliation` — `RunLedgerVsProjection`/`ResolveMismatch`,
+tested against both a clean state and injected drift. Not yet wired to
+any scheduler (CLAUDE.md's hourly target is not automated this stage).
+
+### HTTP layer (`internal/httpserver`)
+
+Wallet/deposit/withdrawal player self-service routes, staff four-eyes
+review queue (`GET /v1/admin/withdrawals` promotes `requested` rows to
+`pending_review` on open — the actual wiring of the
+`requested`→`pending_review` transition, since no automated KYC/risk
+engine exists yet to trigger it, and doing so at request time instead
+would have collapsed the documented player-cancellation window to zero)
++ approve/reject/submit routes, the provider webhook route, and a
+provider-capability admin route.
+
+**Runtime bug fixed before any specialist review** (found via live HTTP
+smoke testing, not by any unit/integration test — those call the
+packages directly with correctly-scoped transactions and could never
+have caught an HTTP-layer wiring mistake): three handlers
+(`newGetWalletHandler`, `newInitiateDepositHandler`,
+`newRequestWithdrawalHandler`) used `db.Pool.WithPlayerScope` for
+operations that WRITE to RLS-protected financial tables. By design,
+every financial table's `player_self_scope` policy is SELECT-only, and
+`tenant_staff_scope`'s `WITH CHECK` requires the player GUC to be unset —
+so a write under `WithPlayerScope` satisfied neither policy and failed
+with a raw Postgres RLS violation. Fixed by switching all three to
+`WithTenant`, matching how `internal/ledger`/`internal/withdrawal`/
+`internal/payments` always write under tenant-only scope internally, even
+for player-triggered actions (isolation comes from the server-derived
+`playerAccountID` being threaded explicitly as a parameter, never from
+RLS row-filtering, for writes).
+
+**Withdrawal PSP submission added this stage**
+(`POST /v1/admin/withdrawals/{id}/submit`) — deliberately narrower than
+the deposit orchestrator: routes through `PaymentOrchestrator.RouteProvider`
+and calls `provider.Withdraw` once, no cascade-on-decline, and an
+`OutcomePending`/`OutcomeAmbiguous` result leaves the request at
+`submitted` with no further automated ledger effect (per
+`payment-orchestration.md`'s "never automatically resubmit on timeout/
+ambiguity if it could duplicate effect" — resolving those requires a
+withdrawal callback path `internal/payments` does not implement yet, a
+genuine, labeled Stage 3B scope boundary, not a silent gap).
+
+**Security-review P2 fixed**: `withdrawal.Approve`/`Reject`/`MarkSubmitted`
+'s own internal audit records are `ActorSystem` (they have no access to
+the `*http.Request`), so CLAUDE.md's "every mutating administrative/
+financial action writes an audit record (actor... IP... reason code)"
+requirement wasn't fully met — worst for the submit action, where the
+audit log couldn't answer "which staff member pushed this money out the
+door" at all. Fixed by adding a supplementary `audit.Record` call inside
+each handler's own transaction (same atomicity guarantee), carrying the
+authenticated staff principal, IP, user-agent, and request id — without
+changing `internal/withdrawal`'s already-tested exported signatures.
+
+**Also fixed**: the payment webhook now rejects callbacks for a
+suspended tenant (previously `identity.GetTenantBySlug`'s `status` field
+was never checked), with the same not-found response as an unknown slug
+for enumeration resistance; a new `ErrCallbackSignatureInvalid` maps to a
+4xx rather than a 500, so a real PSP retrying a bad signature learns it's
+wrong instead of retrying forever.
+
+### Mandatory 26-item adversarial test suite
+
+All 26 items from the Stage 3B directive verified against real
+PostgreSQL 16, split across three specialist passes (`ledger-finance` for
+ledger/wallet items, `payments` for provider items, `backend` for
+withdrawal/cross-tenant items) plus the security/architecture/code-review
+findings above, each with its own dedicated test:
+
+1 double spend, 2 duplicate provider callback, 3 concurrent duplicate
+idempotency, 4 same-key-different-payload, 5 cross-tenant financial
+access, 6/7 direct ledger UPDATE/DELETE rejection, 8 compensation
+(reversal is a new transaction, history untouched), 9 withdrawal
+self-approval (package-level mechanism proven; HTTP-layer gap honestly
+documented, see `active-stage.md`), 10 withdrawal amount mutation, 11
+duplicate approval (both `Approve` and `Reject` paths), 12 approval
+substitution (approver id always server-derived from the JWT, never
+client-suppliable), 13 threshold manipulation (the recording mechanism
+proven; the underlying policy question remains open by design), 14
+projection rebuild (including recreating a fully-deleted projection
+row), 15 provider timeout, 16 ambiguous provider outcome (never
+auto-cascaded without `QueryStatus` first, for both the synchronous and
+callback-triggered paths), 17 provider retry, 18 provider swap, 19 asset
+precision (independently-tracked exponents across EUR/USDT/BTC,
+including a value at the float64-precision boundary), 20 insufficient
+funds, 21 unbalanced transaction (including a same-transaction,
+cross-asset variant a naive check would wrongly accept), 22 provider
+capability mismatch, 23 custodian-shaped capability never enters payment
+routing (including a direct-SQL attempt against the DB's own
+`provider_kind` CHECK constraint), 24 key-material boundary at multiple
+injection points, 25/26 dual-role vendor separation (architecturally
+confirmed closed — no `CryptoCustodyProvider` code exists yet for a
+credential to dual-acquire a role from).
+
+One genuine bug was found and fixed while writing item 4's test:
+`InitiateDeposit`'s idempotency-conflict branch unconditionally returned
+the original intent on any key collision, never checking whether the
+retried parameters actually matched — inconsistent with the identical,
+already-tested pattern in `internal/ledger.Post` and
+`internal/withdrawal.RequestWithdrawal`. Fixed with a new
+`ErrIdempotencyKeyReused` sentinel and a parameter-match check mirroring
+the sibling packages exactly.
+
+### Specialist review (post-implementation)
+
+`ledger-finance` and `payments` performed their review as part of the
+adversarial-test pass above (no invariant violation found in either
+domain beyond the one idempotency bug already listed). `security`,
+`architect`, and `code-reviewer` performed independent reviews of the
+full diff; `qa` independently assessed testing-strategy completeness
+against CLAUDE.md's mandatory financial test matrix. Every P0/P1 finding
+across all four reviews is fixed and tested, listed above by package.
+Findings NOT fixed this stage, and why, are recorded honestly in
+`active-stage.md`'s "Blockers / genuine scope boundaries" section rather
+than silently dropped: the withdrawal self-approval HTTP-layer gap
+(needs a Stage 2 schema change), `provider_capability_amount_limits`'
+missing `tenant_id` (needs a column addition + backfill), the withdrawal
+PSP-submission narrowing (needs a withdrawal callback path), and the
+reconciliation-stream scope reduction (needs real PSP/casino/sportsbook
+relationships that don't exist yet). `qa` additionally identified and
+closed a zero-coverage gap in `internal/auth`'s own role-permission
+tests for the two new Stage 3B permissions.
+
+### Verification performed
+
+`gofmt -l .`, `go build ./...`, `go vet ./...` clean throughout. Full
+integration suite (`go test -tags=integration -count=1 ./...`) green
+after every fix, re-run fresh (not cached) multiple times across the
+session. `go test -race -tags=integration` clean on
+`internal/ledger`/`internal/wallet`/`internal/withdrawal`. Migration
+round-trip (`up`→`down`→`up`) verified for migrations 0019-0028. Live
+HTTP smoke test performed end-to-end (register→login→configure mock
+provider capability→deposit→webhook callback→wallet balance→withdrawal
+request→four-eyes approve/reject→submit) before and after the RLS-scope
+bug fix, which is what caught that bug in the first place.
+
+### Not claimed
+
+Per CLAUDE.md's "No fake completion" rule: this stage does NOT claim
+production financial readiness, regulatory certification, real-PSP
+integration readiness, real-crypto readiness, or production KMS/HSM
+readiness. "Mock PSP success" is explicitly not "production PSP
+integration readiness." Bonus financial posting, crypto deposit/
+withdrawal financial posting, crypto-custodian ledger settlement, and any
+PSP batch-settlement flow remain **NOT IMPLEMENTED** — no accounting
+treatment was invented for any of them to make code compile.
+
 ## Next stage
 
-Stage 3B (wallet/ledger/payments implementation) — not started; requires
-explicit human authorization per the stage-gate rule in `CLAUDE.md`, and
-resolution (or an explicit decision to proceed with a stated default) of
-the three blocking open decisions above before the affected flows can be
-built. The rest of Stage 3B (core ledger, wallet model, withdrawal
-workflow shell, PSP orchestrator shell, reconciliation jobs) is not
-blocked by those three and can proceed once authorized.
+Not started; requires explicit human authorization per the stage-gate
+rule in `CLAUDE.md`. Candidates named in the Stage 3B directive
+(casino, sportsbook, bonus, B2C frontend, partner console, production
+deployment, real PSP integrations, real crypto integrations) do not
+begin automatically.

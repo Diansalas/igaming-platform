@@ -1,7 +1,13 @@
 # Ledger Accounting Model
 
-Status: Stage 3A (Financial Architecture Freeze) — architecture only,
-`NOT IMPLEMENTED`. No ledger table or migration exists yet. Source:
+Status: `IMPLEMENTED` (Stage 3B). Designed in Stage 3A (Financial
+Architecture Freeze) and built in Stage 3B: migrations `0020`–`0023`
+(`ledger_accounts`, `ledger_transactions`, `ledger_entries`,
+`wallet_balance_projection`) plus `internal/ledger`. Note that
+`ledger_transactions.transaction_type` is deliberately constrained to the
+deposit/withdrawal/manual-adjustment/tombstone types Stage 3B actually
+posts; casino/sportsbook/bonus/crypto types listed in §1.2 and
+`financial-transaction-flows.md` are added by their own stage. Source:
 Blueprint §4.2 ("Wallet and ledger"), extending `docs/decisions/0001`,
 `0007`, and `docs/architecture/06-wallet-ledger-architecture.md`, and
 consistent with `financial-domain-model.md`'s scoping table. Owner:
@@ -31,6 +37,9 @@ LedgerAccount
   id                 UUID (PK)
   tenant_id          UUID NOT NULL
   wallet_id          UUID NULL      -- set for player-owned types; NULL for house-level types
+  player_account_id  UUID NULL      -- denormalized from the owning Wallet, NULL for house-level types.
+                                  -- This is the column the player-scoped RLS policy keys on (migration 0020);
+                                  -- kept in lockstep with wallet_id by CHECK ((wallet_id IS NULL) = (player_account_id IS NULL))
   account_type       TEXT NOT NULL  -- see §2
   asset_code         TEXT NOT NULL  -- FK to assets.code
   status             TEXT NULL      -- house-level accounts only ('active' | 'frozen' | 'closed'); NULL for
@@ -146,6 +155,8 @@ LedgerEntry
   wallet_id          UUID NULL         -- denormalized from ledger_account; NULL for house-level accounts.
                                        -- Required so ADR 0019's player-scoped RLS policy can be written
                                        -- against a column ON THIS ROW rather than via a join (see below).
+  player_account_id  UUID NULL         -- denormalized from ledger_account; NULL for house-level accounts.
+                                       -- The column the player-scoped RLS policy actually keys on (migration 0022).
   asset_code         TEXT NOT NULL     -- denormalized from ledger_account; must match it (composite FK)
   direction          TEXT NOT NULL     -- 'debit' | 'credit'
   amount             NUMERIC(38,0) NOT NULL CHECK (amount > 0)  -- minor units, scaled by asset's decimal_exponent

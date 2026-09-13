@@ -1,7 +1,14 @@
 # Financial Domain Model
 
-Status: Stage 3A (Financial Architecture Freeze) — architecture only,
-`NOT IMPLEMENTED`. No wallet, ledger, or financial migration exists yet.
+Status: `PARTIALLY IMPLEMENTED` (Stage 3B). Designed in Stage 3A
+(Financial Architecture Freeze); migrations `0019`–`0028` built `Wallet`,
+both `LedgerAccount` families, `LedgerTransaction`, `LedgerEntry`,
+`wallet_balance_projection`, `ProviderCapability`,
+`WithdrawalRequest`, `WithdrawalApproval` and
+`ReconciliationRun`/`ReconciliationMismatch`. Two objects in the scoping
+table below remain `NOT IMPLEMENTED` and are flagged as such in their own
+rows: `ConversionOperation` (ADR 0021) and `DepositAddress`
+(`crypto-custody-boundary.md` — crypto is out of scope this stage).
 Source: Blueprint §4.2 ("Wallet and ledger"), §4.6 ("Payments and PSP
 orchestration"), extending the Stage 0/1/2 foundation already built —
 `docs/decisions/0001`, `0007`, `0008`, `docs/architecture/06`, `07`, and
@@ -143,9 +150,10 @@ it is discharged by posted entries.
 | `wallet_balance_projection` (`docs/decisions/0019`, `reconciliation-model.md` §3) | Same scope as the `LedgerAccount` it projects (tenant + brand + player + asset for player-owned; tenant + asset for house-level) | New this stage. Subordinate projection, one row per `ledger_account_id`, `wallet_id` NULL for house-level accounts; carries `tenant_id NOT NULL` like every other table here. |
 | `WithdrawalRequest` (`withdrawal-state-machine.md` §2) | Tenant + Brand + Player + Asset (via `wallet_id`) | New this stage. Workflow state, not ledger state. |
 | `WithdrawalApproval` (`withdrawal-state-machine.md` §5) | Tenant (via its `WithdrawalRequest`) | New this stage. Staff decisions, not player-owned; carries `tenant_id NOT NULL` for RLS on the row itself, matching its parent request. |
-| `DepositAddress` (`crypto-custody-boundary.md` §3) | Tenant + Brand + Player + Asset (via `wallet_id`) | New this stage. Brand is derived through `wallet_id`, not stored (see brand rule below). |
+| `DepositAddress` (`crypto-custody-boundary.md` §3) | Tenant + Brand + Player + Asset (via `wallet_id`) | `NOT IMPLEMENTED` — crypto rails are out of scope this stage; no migration exists. Brand is derived through `wallet_id`, not stored (see brand rule below). |
 | `ConversionOperation` (ADR 0021, and below) | Tenant + Player + Asset pair (via two wallets of one `player_account_id`) | Designed this stage, not implemented (ADR 0021). Both wallets belong to the same `PlayerAccount`, so brand is implicitly single-valued and no `brand_id` column is carried; it produces exactly one `LedgerTransaction` whose entries balance *per asset*. |
-| `ProviderCapability` (`docs/decisions/0022` §2/§3) | Tenant, optionally narrowed to Brand | Designed this stage, not implemented (ADR 0022). Payment-provider routing configuration, not ledger state. The one Stage 3A table that carries `brand_id` without a `wallet_id` — it is configuration that exists before any wallet does — and the only one where `brand_id` is *nullable* (NULL = every brand under that tenant; a brand-specific row replaces it for that brand). Constrained by `(brand_id, tenant_id) REFERENCES brands(id, tenant_id)` per ADR 0012; `tenant_id NOT NULL`, never platform-scoped. |
+| `ProviderCapability` (`docs/decisions/0022` §2/§3) | Tenant, optionally narrowed to Brand | Implemented as `provider_capabilities` (migration `0024`; RLS tightened by `0028`). Payment-provider routing configuration, not ledger state. The one Stage 3A table that carries `brand_id` without a `wallet_id` — it is configuration that exists before any wallet does — and the only one where `brand_id` is *nullable* (NULL = every brand under that tenant; a brand-specific row replaces it for that brand). Constrained by `(brand_id, tenant_id) REFERENCES brands(id, tenant_id)` per ADR 0012; `tenant_id NOT NULL`, never platform-scoped. |
+| `provider_capability_amount_limits` (`docs/decisions/0022` §2) | Tenant, via its parent `provider_capabilities` row | Implemented as a child table of `provider_capabilities` (migration `0024`), one `(asset_code, min_amount, max_amount)` row per declared asset. **Known gap**: it carries no `tenant_id` column of its own, so its RLS policy is a subquery into `provider_capabilities` rather than a direct `tenant_id` match — the one Stage 3B table that departs from the `tenant_id`-on-the-protected-row rule. It inherits `0028`'s player-scope exclusion transitively through that subquery. Documented follow-up (adding the column needs a backfill), not fixed in `0028`. |
 | `ReconciliationRun` / `ReconciliationMismatch` (`reconciliation-model.md` §5) | Tenant | New this stage. Every stream in `reconciliation-model.md` §2 belongs to exactly one tenant; `tenant_id NOT NULL`, never platform-scoped (ADR 0019). Platform-wide drift dashboards read through the reporting layer, not through relaxed RLS. |
 
 ### Brand denormalization rule for new financial tables

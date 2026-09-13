@@ -1,0 +1,352 @@
+package httpserver
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/apierror"
+	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
+	"github.com/Diansalas/igaming-platform/internal/validation"
+	"github.com/Diansalas/igaming-platform/internal/wallet"
+)
+
+// maxWebhookBodyBytes bounds an inbound provider callback body - a
+// webhook has no session/auth to rate-limit by, so a caller-controlled
+// unbounded body is a resource-exhaustion vector in a way an
+// authenticated JSON request already isn't (decodeJSON's
+// maxRequestBodyBytes covers those).
+const maxWebhookBodyBytes = 1 << 20 // 1 MiB
+
+type initiateDepositRequest struct {
+	AssetCode      string `json:"asset_code"`
+	Amount         int64  `json:"amount"`
+	PaymentMethod  string `json:"payment_method"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type depositIntentResponse struct {
+	ID                string `json:"id"`
+	AssetCode         string `json:"asset_code"`
+	Amount            int64  `json:"amount"`
+	PaymentMethod     string `json:"payment_method"`
+	Status            string `json:"status"`
+	ProviderID        string `json:"provider_id,omitempty"`
+	RedirectURL       string `json:"redirect_url,omitempty"`
+	HostedFieldToken  string `json:"hosted_field_token,omitempty"`
+	LedgerTransaction string `json:"ledger_transaction_id,omitempty"`
+}
+
+func toDepositIntentResponse(d payments.DepositIntent) depositIntentResponse {
+	resp := depositIntentResponse{
+		ID: d.ID.String(), AssetCode: d.AssetCode, Amount: d.Amount, PaymentMethod: d.PaymentMethod,
+		Status: string(d.Status), RedirectURL: d.RedirectURL, HostedFieldToken: d.HostedFieldToken,
+	}
+	if d.ProviderID != nil {
+		resp.ProviderID = *d.ProviderID
+	}
+	if d.LedgerTransactionID != nil {
+		resp.LedgerTransaction = d.LedgerTransactionID.String()
+	}
+	return resp
+}
+
+// newInitiateDepositHandler resolves the player's own wallet (creating it
+// on first use for this asset) and drives PaymentOrchestrator.InitiateDeposit.
+// Per payment-orchestration.md §3, every identifying field (tenant, brand,
+// player, wallet) is resolved server-side from the authenticated session -
+// the request body supplies only asset_code, amount, payment_method, and
+// the client's own idempotency key.
+//
+// Runs under db.Pool.WithTenant, NOT WithPlayerScope - see
+// newGetWalletHandler's identical rationale in wallet_handlers.go: this
+// handler writes (wallet.GetOrCreate, InitiateDeposit's deposit_intents
+// insert and ledger posting), and deposit_intents' player_self_scope
+// policy (migration 0025) is SELECT-only by design.
+func newInitiateDepositHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		if deps.PaymentOrchestrator == nil {
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "deposits are not enabled on this deployment")
+			return
+		}
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		playerAccountID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid player identity")
+			return
+		}
+
+		var req initiateDepositRequest
+		if err := decodeJSON(r, &req); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			return
+		}
+		v := validation.New()
+		v.RequireNonEmpty("asset_code", req.AssetCode)
+		v.RequireNonEmpty("payment_method", req.PaymentMethod)
+		v.RequireNonEmpty("idempotency_key", req.IdempotencyKey)
+		if req.Amount <= 0 {
+			v.Add("amount", "must be a positive integer (minor units)")
+		}
+		if v.HasErrors() {
+			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+			return
+		}
+
+		var intent payments.DepositIntent
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
+			if err != nil {
+				return err
+			}
+			wl, err := wallet.GetOrCreate(ctx, tx, tc.TenantID, account.BrandID, playerAccountID, req.AssetCode)
+			if err != nil {
+				return err
+			}
+			intent, err = deps.PaymentOrchestrator.InitiateDeposit(ctx, tx, payments.InitiateDepositParams{
+				Scope: payments.DepositScope{
+					TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID, WalletID: wl.ID,
+				},
+				AssetCode: req.AssetCode, Amount: req.Amount, PaymentMethod: req.PaymentMethod, IdempotencyKey: req.IdempotencyKey,
+			})
+			return err
+		})
+		if errors.Is(err, identity.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "player account not found")
+			return
+		}
+		if db.IsForeignKeyViolation(err) {
+			apierror.Write(w, requestID, apierror.CodeValidation, "unknown asset code")
+			return
+		}
+		if errors.Is(err, payments.ErrIdempotencyKeyReused) {
+			apierror.Write(w, requestID, apierror.CodeConflict, "idempotency key already used with different parameters")
+			return
+		}
+		if err != nil {
+			logger.Error("initiate_deposit_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to initiate deposit")
+			return
+		}
+		writeJSON(w, http.StatusCreated, toDepositIntentResponse(intent))
+	}
+}
+
+// newGetDepositHandler returns the status of one of the player's own
+// deposit intents - read under db.Pool.WithPlayerScope, per deposit_intents'
+// player_self_scope RLS policy (migration 0025).
+func newGetDepositHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		playerAccountID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid player identity")
+			return
+		}
+		intentID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid deposit id")
+			return
+		}
+
+		var intent payments.DepositIntent
+		err = deps.DB.WithPlayerScope(r.Context(), tc.TenantID, playerAccountID, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			intent, err = payments.GetDepositIntentByID(ctx, tx, intentID)
+			return err
+		})
+		if errors.Is(err, payments.ErrDepositIntentNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "deposit not found")
+			return
+		}
+		if err != nil {
+			logger.Error("get_deposit_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to load deposit")
+			return
+		}
+		// player_self_scope's own RLS already filtered this SELECT to the
+		// caller's own rows at the database level - this equality check is
+		// belt-and-braces defense in depth, not the actual isolation
+		// mechanism, matching the pattern used throughout this codebase's
+		// financial RLS policies.
+		if intent.PlayerAccountID != playerAccountID {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "deposit not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, toDepositIntentResponse(intent))
+	}
+}
+
+// newListDepositsHandler lists the player's own deposit intents.
+func newListDepositsHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		playerAccountID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid player identity")
+			return
+		}
+
+		var resp []depositIntentResponse
+		err = deps.DB.WithPlayerScope(r.Context(), tc.TenantID, playerAccountID, func(ctx context.Context, tx pgx.Tx) error {
+			intents, err := payments.ListDepositIntentsForPlayer(ctx, tx, playerAccountID)
+			if err != nil {
+				return err
+			}
+			resp = make([]depositIntentResponse, 0, len(intents))
+			for _, in := range intents {
+				resp = append(resp, toDepositIntentResponse(in))
+			}
+			return nil
+		})
+		if err != nil {
+			logger.Error("list_deposits_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to list deposits")
+			return
+		}
+		if resp == nil {
+			resp = []depositIntentResponse{}
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// newPaymentWebhookHandler receives a provider callback and dispatches it
+// via PaymentOrchestrator.ReceiveCallback. There is no bearer-token
+// middleware on this route - a provider webhook is not an authenticated
+// platform principal - so tenant resolution and payload-signature
+// verification are this handler's own responsibility, per
+// docs/decisions/0022 §3's own still-open question on exactly how a
+// webhook selects its verification key: this implementation uses a
+// per-tenant path segment (the tenant's slug), the first candidate
+// resolution that ADR names, so the URL itself - never any field inside
+// rawPayload - determines which tenant's scope this callback runs under.
+// Signature verification of rawPayload itself happens inside the named
+// adapter's own HandleCallback, before any payload field is used
+// (payment-orchestration.md §10) - this handler never inspects the body.
+func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		if deps.PaymentOrchestrator == nil {
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "payment webhooks are not enabled on this deployment")
+			return
+		}
+
+		tenantSlug := r.PathValue("tenantSlug")
+		providerID := r.PathValue("providerID")
+		if tenantSlug == "" || providerID == "" {
+			apierror.Write(w, requestID, apierror.CodeValidation, "tenant slug and provider id are required")
+			return
+		}
+
+		t, err := identity.GetTenantBySlug(r.Context(), deps.DB, tenantSlug)
+		if errors.Is(err, identity.ErrNotFound) {
+			// Deliberately the SAME response as "we don't recognize this
+			// tenant slug" for any other reason - a webhook endpoint must
+			// not let an unauthenticated caller enumerate valid tenant
+			// slugs by observing a different status code.
+			apierror.Write(w, requestID, apierror.CodeNotFound, "not found")
+			return
+		}
+		if err != nil {
+			logger.Error("payment_webhook_tenant_lookup_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to process callback")
+			return
+		}
+		if t.Status != "active" {
+			// Same not-found response as an unknown slug, for the same
+			// enumeration-resistance reason - a suspended tenant must not
+			// keep accepting financial callbacks just because its slug is
+			// still routable.
+			apierror.Write(w, requestID, apierror.CodeNotFound, "not found")
+			return
+		}
+
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBodyBytes+1))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "failed to read request body")
+			return
+		}
+		if len(body) > maxWebhookBodyBytes {
+			apierror.Write(w, requestID, apierror.CodeValidation, "request body too large")
+			return
+		}
+
+		var result payments.ReceiveCallbackResult
+		err = deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			result, err = deps.PaymentOrchestrator.ReceiveCallback(ctx, tx, t.ID, providerID, body)
+			return err
+		})
+		if errors.Is(err, payments.ErrInboundKeyMaterial) {
+			// Never echo err's own text or the payload back to the caller -
+			// docs/decisions/0022 §4.1's rejection is silent from the
+			// provider's point of view beyond a generic failure; the
+			// security alert this ADR requires is the logger.Error call
+			// below, which itself never includes body's bytes.
+			logger.Error("payment_webhook_rejected_key_material", "provider_id", providerID, "tenant_id", t.ID.String())
+			apierror.Write(w, requestID, apierror.CodeValidation, "callback rejected")
+			return
+		}
+		if errors.Is(err, payments.ErrCallbackSignatureInvalid) {
+			// A 4xx here, not a 500 - an unsigned/mis-signed callback is a
+			// caller/authentication error, not a platform failure, and a
+			// real PSP retrying a 500 forever would otherwise never learn
+			// its signature is wrong.
+			logger.Error("payment_webhook_signature_invalid", "provider_id", providerID, "tenant_id", t.ID.String())
+			apierror.Write(w, requestID, apierror.CodeValidation, "callback rejected")
+			return
+		}
+		if errors.Is(err, payments.ErrUnknownProvider) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "not found")
+			return
+		}
+		if errors.Is(err, payments.ErrDepositIntentNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "no matching deposit for this reference")
+			return
+		}
+		if err != nil {
+			logger.Error("payment_webhook_failed", "error", err, "provider_id", providerID)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to process callback")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"deposit_intent_id": result.DepositIntentID.String(),
+			"status":            string(result.Status),
+			"tombstoned":        result.Tombstoned,
+		})
+	}
+}

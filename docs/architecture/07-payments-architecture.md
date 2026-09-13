@@ -93,7 +93,20 @@ remain ours regardless of flow.
 
 Stage 1 defines the `PaymentProvider` and `CryptoCustodyProvider`
 interfaces and where they sit in the codebase (foundation only — no real
-adapter, no real custodian contract). One real PSP adapter + orchestration
-skeleton is Stage 3 (alongside the ledger). Full withdrawal-approval
-workflow and crypto rails mature through Stage 4, against the custodian
-abstraction decided here.
+adapter, no real custodian contract).
+
+**Stage 3B built the orchestration layer** (alongside the ledger): the
+`PaymentProvider` interface and its adapter-conformance suite, deposit
+orchestration with capability-based routing, cascade-on-decline and
+ambiguous-outcome handling, the deposit/deposit-reversal callback path,
+and the withdrawal approval/submission workflow (`internal/payments`,
+`internal/withdrawal`, migrations `0024`–`0026`). What it deliberately did
+**not** build: **no real PSP is integrated** — the only adapter is a
+`MOCK` fiat adapter — and **no production provider credential storage
+exists**; the callback path is authenticated by the mock adapter's own
+signature check, and the tenant comes from a per-tenant webhook URL slug,
+not from a stored per-tenant credential. Withdrawal-direction
+orchestration beyond the staff-triggered submit handler, PSP settlement
+reconciliation, and crypto rails are all still unbuilt and mature through
+Stage 4, against the custodian abstraction decided here. See
+`payment-orchestration.md` for the implemented-versus-designed breakdown.

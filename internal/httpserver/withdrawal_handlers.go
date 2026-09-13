@@ -1,0 +1,737 @@
+package httpserver
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/apierror"
+	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
+	"github.com/Diansalas/igaming-platform/internal/validation"
+	"github.com/Diansalas/igaming-platform/internal/wallet"
+	"github.com/Diansalas/igaming-platform/internal/withdrawal"
+)
+
+func withdrawalApprovalThreshold(deps Deps) int64 {
+	if deps.WithdrawalApprovalThreshold > 0 {
+		return deps.WithdrawalApprovalThreshold
+	}
+	return defaultWithdrawalApprovalThreshold
+}
+
+type requestWithdrawalRequest struct {
+	AssetCode      string `json:"asset_code"`
+	Amount         int64  `json:"amount"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type withdrawalRequestResponse struct {
+	ID                string `json:"id"`
+	AssetCode         string `json:"asset_code"`
+	Amount            int64  `json:"amount"`
+	State             string `json:"state"`
+	RequestedAt       string `json:"requested_at"`
+	LedgerTransaction string `json:"hold_ledger_transaction_id,omitempty"`
+}
+
+func toWithdrawalRequestResponse(wr withdrawal.WithdrawalRequest) withdrawalRequestResponse {
+	resp := withdrawalRequestResponse{
+		ID: wr.ID.String(), AssetCode: wr.AssetCode, Amount: wr.Amount,
+		State: string(wr.State), RequestedAt: wr.RequestedAt.UTC().Format(rfc3339),
+	}
+	if wr.HoldLedgerTransactionID != nil {
+		resp.LedgerTransaction = wr.HoldLedgerTransactionID.String()
+	}
+	return resp
+}
+
+const rfc3339 = "2006-01-02T15:04:05Z07:00"
+
+// newRequestWithdrawalHandler resolves the player's own wallet (never
+// accepting a client-supplied wallet id, per withdrawal-state-machine.md
+// §7) and calls withdrawal.RequestWithdrawal, which posts the Flow 3 Step
+// A hold atomically with creating the request row.
+//
+// Runs under db.Pool.WithTenant, NOT WithPlayerScope - see
+// wallet_handlers.go's newGetWalletHandler for the identical rationale:
+// this handler writes (RequestWithdrawal's insert plus ledger.Post), and
+// withdrawal_requests' player_self_scope policy (migration 0026) is
+// SELECT-only by design.
+//
+// Deliberately does NOT also call withdrawal.MoveToPendingReview here.
+// withdrawal-state-machine.md §1 documents `requested` -> `pending_review`
+// as firing "once automated KYC/velocity/risk checks are queued" (owned by
+// identity-compliance, not Stage 3B scope), and §7's ARCHITECTURAL
+// DECISION is explicit that a request stays player-cancellable for a real
+// window "before pending_review resolves" specifically to avoid a
+// cancel-vs-approve race. Promoting synchronously on every request would
+// collapse that window to zero and silently remove the cancellation
+// feature. See newListPendingWithdrawalsHandler for where the promotion
+// actually happens.
+func newRequestWithdrawalHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		playerAccountID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid player identity")
+			return
+		}
+
+		var req requestWithdrawalRequest
+		if err := decodeJSON(r, &req); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			return
+		}
+		v := validation.New()
+		v.RequireNonEmpty("asset_code", req.AssetCode)
+		v.RequireNonEmpty("idempotency_key", req.IdempotencyKey)
+		if req.Amount <= 0 {
+			v.Add("amount", "must be a positive integer (minor units)")
+		}
+		if v.HasErrors() {
+			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+			return
+		}
+
+		var wr withdrawal.WithdrawalRequest
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
+			if err != nil {
+				return err
+			}
+			wl, err := wallet.GetByPlayerAndAsset(ctx, tx, playerAccountID, req.AssetCode)
+			if err != nil {
+				return err
+			}
+			wr, err = withdrawal.RequestWithdrawal(ctx, tx, withdrawal.RequestParams{
+				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: playerAccountID, WalletID: wl.ID,
+				AssetCode: req.AssetCode, Amount: req.Amount, IdempotencyKey: req.IdempotencyKey,
+			})
+			return err
+		})
+		if errors.Is(err, identity.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "player account not found")
+			return
+		}
+		if errors.Is(err, wallet.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeValidation, "no wallet for this asset - deposit first")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrInsufficientFunds) {
+			apierror.Write(w, requestID, apierror.CodeConflict, "insufficient available balance")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrIdempotencyKeyReused) {
+			apierror.Write(w, requestID, apierror.CodeConflict, "idempotency key already used with different parameters")
+			return
+		}
+		if err != nil {
+			logger.Error("request_withdrawal_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to request withdrawal")
+			return
+		}
+		writeJSON(w, http.StatusCreated, toWithdrawalRequestResponse(wr))
+	}
+}
+
+// newListWithdrawalsHandler lists the player's own withdrawal requests.
+func newListWithdrawalsHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		playerAccountID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid player identity")
+			return
+		}
+
+		var resp []withdrawalRequestResponse
+		err = deps.DB.WithPlayerScope(r.Context(), tc.TenantID, playerAccountID, func(ctx context.Context, tx pgx.Tx) error {
+			requests, err := withdrawal.ListForPlayer(ctx, tx, playerAccountID)
+			if err != nil {
+				return err
+			}
+			resp = make([]withdrawalRequestResponse, 0, len(requests))
+			for _, wr := range requests {
+				resp = append(resp, toWithdrawalRequestResponse(wr))
+			}
+			return nil
+		})
+		if err != nil {
+			logger.Error("list_withdrawals_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to list withdrawals")
+			return
+		}
+		if resp == nil {
+			resp = []withdrawalRequestResponse{}
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// newGetWithdrawalHandler returns one of the player's own withdrawal
+// requests.
+func newGetWithdrawalHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		playerAccountID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid player identity")
+			return
+		}
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid withdrawal id")
+			return
+		}
+
+		var wr withdrawal.WithdrawalRequest
+		err = deps.DB.WithPlayerScope(r.Context(), tc.TenantID, playerAccountID, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			wr, err = withdrawal.GetByID(ctx, tx, id)
+			return err
+		})
+		if errors.Is(err, withdrawal.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
+			return
+		}
+		if err != nil {
+			logger.Error("get_withdrawal_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to load withdrawal")
+			return
+		}
+		if wr.PlayerAccountID != playerAccountID {
+			// Belt-and-braces on top of player_self_scope's own RLS filter
+			// (migration 0026) - see deposit_handlers.go's identical
+			// comment for why this is defense in depth, not the mechanism.
+			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, toWithdrawalRequestResponse(wr))
+	}
+}
+
+// --- Staff four-eyes approval queue ---
+
+type staffWithdrawalResponse struct {
+	withdrawalRequestResponse
+	PlayerAccountID string `json:"player_account_id"`
+}
+
+// newListPendingWithdrawalsHandler is the staff review queue - tenant-
+// scoped, no player restriction (staff legitimately see every player's
+// pending withdrawals in their own tenant, same tenant-wide-staff-access
+// pattern already used for admin/players).
+//
+// Before querying, promotes every `requested` row in this tenant to
+// `pending_review` via withdrawal.MoveToPendingReview. This is the actual
+// Stage 3B wiring of the `requested` -> `pending_review` transition
+// (withdrawal-state-machine.md §1's "automated KYC/velocity/risk checks
+// queued", owned by identity-compliance and not implemented this stage -
+// see newRequestWithdrawalHandler's comment for why the promotion is
+// deliberately NOT done at request time instead): opening the review
+// queue is the first point in Stage 3B's implementation at which a
+// reviewer could otherwise race a player's cancellation, so it is also
+// the natural point at which the documented cancellable window closes.
+// Each promotion is independently best-effort (a row already moved by a
+// concurrent list call is simply skipped, never an error).
+func newListPendingWithdrawalsHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+
+		var resp []staffWithdrawalResponse
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			requestedIDs, err := tx.Query(ctx, `SELECT id FROM withdrawal_requests WHERE state = 'requested'`)
+			if err != nil {
+				return err
+			}
+			var ids []uuid.UUID
+			for requestedIDs.Next() {
+				var id uuid.UUID
+				if err := requestedIDs.Scan(&id); err != nil {
+					requestedIDs.Close()
+					return err
+				}
+				ids = append(ids, id)
+			}
+			if err := requestedIDs.Err(); err != nil {
+				return err
+			}
+			requestedIDs.Close()
+			for _, id := range ids {
+				if err := withdrawal.MoveToPendingReview(ctx, tx, id); err != nil && !errors.Is(err, withdrawal.ErrStateConflict) {
+					return err
+				}
+			}
+
+			rows, err := tx.Query(ctx,
+				`SELECT id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, state,
+					idempotency_key, provider_id, provider_reference, hold_ledger_transaction_id, release_ledger_transaction_id,
+					requested_at, updated_at
+				 FROM withdrawal_requests WHERE state = 'pending_review' ORDER BY requested_at ASC`,
+			)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var wr withdrawal.WithdrawalRequest
+				if err := rows.Scan(
+					&wr.ID, &wr.TenantID, &wr.BrandID, &wr.PlayerAccountID, &wr.WalletID, &wr.AssetCode, &wr.Amount, &wr.State,
+					&wr.IdempotencyKey, &wr.ProviderID, &wr.ProviderReference, &wr.HoldLedgerTransactionID, &wr.ReleaseLedgerTransactionID,
+					&wr.RequestedAt, &wr.UpdatedAt,
+				); err != nil {
+					return err
+				}
+				resp = append(resp, staffWithdrawalResponse{
+					withdrawalRequestResponse: toWithdrawalRequestResponse(wr),
+					PlayerAccountID:           wr.PlayerAccountID.String(),
+				})
+			}
+			return rows.Err()
+		})
+		if err != nil {
+			logger.Error("list_pending_withdrawals_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to list pending withdrawals")
+			return
+		}
+		if resp == nil {
+			resp = []staffWithdrawalResponse{}
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+type approveWithdrawalResponse struct {
+	Approved bool `json:"approved"`
+}
+
+// newApproveWithdrawalHandler records a four-eyes 'approve' decision.
+// approverPrincipalID is ALWAYS the calling staff member's own
+// authenticated subject id - never anything from the request body - per
+// withdrawal-state-machine.md §5 bypass #1; RequirePermission(
+// PermWithdrawalApprove) has already confirmed the caller's ROLE may
+// approve at all before this handler runs, and internal/withdrawal.Approve
+// itself enforces the distinct-approver/threshold/duplicate invariants.
+//
+// beneficiaryCheck is passed as nil: this codebase's schema has no link
+// from staff_users to persons (Stage 2's identity model keeps staff and
+// player identity entirely separate tables with no person_id column on
+// staff_users), so there is no data this handler could check a "same
+// Person" self-approval bypass (#2) against. This is a genuine, currently
+// unclosed gap - flagged in the Stage 3B completion report, not silently
+// assumed closed, and not something this handler pretends to solve.
+func newApproveWithdrawalHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		approverID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid staff identity")
+			return
+		}
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid withdrawal id")
+			return
+		}
+
+		var approved bool
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			approved, err = withdrawal.Approve(ctx, tx, id, approverID, withdrawalApprovalThreshold(deps), false, nil)
+			if err != nil {
+				return err
+			}
+			// Supplementary to withdrawal.Approve's own internal audit
+			// record (which has no access to the *http.Request and so
+			// cannot carry IP/user-agent/request-id - CLAUDE.md requires
+			// them on every mutating admin/financial action). This record
+			// is what actually answers "which staff member, from where"
+			// for a four-eyes decision; the package-level one only
+			// answers "what changed".
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: approverID,
+				Action: "withdrawal.approve.http", TargetType: "withdrawal_request", TargetID: id.String(),
+				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+				Metadata: map[string]any{"approved": approved},
+			})
+		})
+		if errors.Is(err, withdrawal.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrStateConflict) {
+			apierror.Write(w, requestID, apierror.CodeConflict, "withdrawal is not awaiting review")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrDuplicateApproval) {
+			apierror.Write(w, requestID, apierror.CodeConflict, "you have already recorded a decision for this withdrawal")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrSelfApproval) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "cannot approve your own withdrawal")
+			return
+		}
+		if err != nil {
+			logger.Error("approve_withdrawal_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to approve withdrawal")
+			return
+		}
+		writeJSON(w, http.StatusOK, approveWithdrawalResponse{Approved: approved})
+	}
+}
+
+type rejectWithdrawalRequest struct {
+	ReasonCode string `json:"reason_code"`
+}
+
+// newRejectWithdrawalHandler records a 'reject' decision and reverses the
+// hold. Same approverPrincipalID sourcing rule as approve.
+func newRejectWithdrawalHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		approverID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid staff identity")
+			return
+		}
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid withdrawal id")
+			return
+		}
+
+		var req rejectWithdrawalRequest
+		if err := decodeJSON(r, &req); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			return
+		}
+		v := validation.New()
+		v.RequireNonEmpty("reason_code", req.ReasonCode)
+		if v.HasErrors() {
+			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+			return
+		}
+
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			if err := withdrawal.Reject(ctx, tx, id, approverID, withdrawalApprovalThreshold(deps), req.ReasonCode); err != nil {
+				return err
+			}
+			// See newApproveWithdrawalHandler's identical rationale.
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: approverID,
+				Action: "withdrawal.reject.http", TargetType: "withdrawal_request", TargetID: id.String(),
+				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+				Metadata: map[string]any{"reason_code": req.ReasonCode},
+			})
+		})
+		if errors.Is(err, withdrawal.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrStateConflict) {
+			apierror.Write(w, requestID, apierror.CodeConflict, "withdrawal is not awaiting review")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrDuplicateApproval) {
+			apierror.Write(w, requestID, apierror.CodeConflict, "you have already recorded a decision for this withdrawal")
+			return
+		}
+		if err != nil {
+			logger.Error("reject_withdrawal_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to reject withdrawal")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+type submitWithdrawalRequest struct {
+	PaymentMethod string `json:"payment_method"`
+}
+
+type submitWithdrawalResponse struct {
+	withdrawalRequestResponse
+	ProviderID        string `json:"provider_id,omitempty"`
+	ProviderReference string `json:"provider_reference,omitempty"`
+}
+
+// newSubmitWithdrawalHandler is staff's explicit trigger to send an
+// `approved` withdrawal to a PaymentProvider for payout, driving it
+// through MarkSubmitted and (for the mock adapter's deterministic
+// outcomes) Complete/Fail. PaymentMethod is supplied here rather than
+// stored on the request, since RouteProvider needs a concrete rail to
+// route on and Stage 3B's withdrawal-state-machine.md never fixed one at
+// request time (unlike deposits, whose payment_method is chosen by the
+// player up front).
+//
+// Deliberately narrower than the deposit orchestrator: no cascade-on-
+// decline across a chain of providers, and an OutcomePending/OutcomeAmbiguous
+// result leaves the request at `submitted` with no further automated
+// ledger effect - per payment-orchestration.md's "never automatically
+// resubmit on timeout/ambiguity if it could duplicate effect", resolving
+// those requires a withdrawal callback/reconciliation path this stage's
+// internal/payments package does not yet implement (its CallbackEventType
+// only covers deposit/deposit-reversal events - see internal/payments'
+// package doc comment). This is a genuine, documented Stage 3B scope
+// boundary, not a silent gap: a withdrawal stuck at `submitted` is a safe
+// state (no incorrect ledger effect), not an incorrect one.
+func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		if deps.PaymentOrchestrator == nil {
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "withdrawal submission is not enabled on this deployment")
+			return
+		}
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		submitterID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid staff identity")
+			return
+		}
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid withdrawal id")
+			return
+		}
+
+		var req submitWithdrawalRequest
+		if err := decodeJSON(r, &req); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			return
+		}
+		v := validation.New()
+		v.RequireNonEmpty("payment_method", req.PaymentMethod)
+		if v.HasErrors() {
+			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+			return
+		}
+
+		var wr withdrawal.WithdrawalRequest
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			// LockApprovedForSubmission, not a plain GetByID, and the lock
+			// held for the rest of this transaction (through the provider
+			// call and MarkSubmitted) - see its own doc comment. A staff
+			// double-click or client retry racing this same request now
+			// serializes on this row lock instead of both reaching
+			// provider.Withdraw below.
+			wr, err = withdrawal.LockApprovedForSubmission(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+
+			provider, capability, err := deps.PaymentOrchestrator.RouteProvider(ctx, tx, payments.RoutingRequest{
+				TenantID: tc.TenantID, BrandID: wr.BrandID, AssetCode: wr.AssetCode,
+				PaymentMethod: req.PaymentMethod, Amount: wr.Amount, Operation: payments.OperationWithdrawal,
+			})
+			if err != nil {
+				return err
+			}
+
+			result, err := provider.Withdraw(ctx, payments.WithdrawRequest{
+				MerchantReference: id.String(), Amount: wr.Amount, AssetCode: wr.AssetCode, PaymentMethod: req.PaymentMethod,
+			})
+			if err != nil {
+				return fmt.Errorf("payments: withdraw: %w", err)
+			}
+			if result.ProviderReference == "" {
+				return fmt.Errorf("payments: withdraw: provider %s returned no provider reference", capability.ProviderID)
+			}
+
+			if err := withdrawal.MarkSubmitted(ctx, tx, id, capability.ProviderID, result.ProviderReference); err != nil {
+				return err
+			}
+			// MarkSubmitted's own internal audit record is deliberately
+			// ActorSystem (it has no request context) - this is the ONLY
+			// record anywhere that attributes the actual payout-triggering
+			// action to a human. Without it, the audit log cannot answer
+			// "which staff member pushed this money out the door", which
+			// makes four-eyes approval far less valuable as a control -
+			// see the Stage 3B security review's P2-4 finding.
+			if err := audit.Record(ctx, tx, audit.Entry{
+				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: submitterID,
+				Action: "withdrawal.submit.http", TargetType: "withdrawal_request", TargetID: id.String(),
+				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+				Metadata: map[string]any{
+					"provider_id": capability.ProviderID, "provider_reference": result.ProviderReference,
+					"outcome": string(result.Outcome),
+				},
+			}); err != nil {
+				return err
+			}
+
+			switch result.Outcome {
+			case payments.OutcomeSucceeded:
+				if err := withdrawal.Complete(ctx, tx, id, capability.ProviderID, result.ProviderReference); err != nil {
+					return err
+				}
+			case payments.OutcomeDeclined:
+				reason := result.DeclineReason
+				if reason == "" {
+					reason = "provider_declined"
+				}
+				if err := withdrawal.Fail(ctx, tx, id, reason); err != nil {
+					return err
+				}
+			case payments.OutcomePending, payments.OutcomeAmbiguous:
+				// Left at `submitted` - see doc comment above.
+			}
+
+			wr, err = withdrawal.GetByID(ctx, tx, id)
+			return err
+		})
+		if errors.Is(err, withdrawal.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrStateConflict) {
+			apierror.Write(w, requestID, apierror.CodeConflict, "withdrawal is not approved and ready for submission")
+			return
+		}
+		if errors.Is(err, payments.ErrNoRoutableProvider) {
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "no payment provider available for this withdrawal")
+			return
+		}
+		if err != nil {
+			logger.Error("submit_withdrawal_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to submit withdrawal")
+			return
+		}
+		resp := submitWithdrawalResponse{withdrawalRequestResponse: toWithdrawalRequestResponse(wr)}
+		if wr.ProviderID != nil {
+			resp.ProviderID = *wr.ProviderID
+		}
+		if wr.ProviderReference != nil {
+			resp.ProviderReference = *wr.ProviderReference
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// newCancelWithdrawalHandler lets a player cancel their own withdrawal
+// while it is still in `requested` state (withdrawal-state-machine.md
+// §1). Uses WithPlayerScope for the lookup-and-ownership guarantee, then
+// re-opens a tenant-only scoped transaction to perform the actual
+// transition, since Cancel's own ledger postings/audit writes are system-
+// scoped operations, exactly like every other withdrawal state
+// transition in this codebase - a player's session never directly holds
+// the tenant-only scope withdrawal.Cancel's internal ledger.Post/audit.Record
+// calls run under.
+func newCancelWithdrawalHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		playerAccountID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid player identity")
+			return
+		}
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid withdrawal id")
+			return
+		}
+
+		// Ownership check first, under the player's own restricted scope -
+		// a player must never be able to cancel another player's request
+		// merely by guessing its id.
+		var owned bool
+		err = deps.DB.WithPlayerScope(r.Context(), tc.TenantID, playerAccountID, func(ctx context.Context, tx pgx.Tx) error {
+			wr, err := withdrawal.GetByID(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			owned = wr.PlayerAccountID == playerAccountID
+			return nil
+		})
+		if errors.Is(err, withdrawal.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
+			return
+		}
+		if err != nil {
+			logger.Error("cancel_withdrawal_ownership_check_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to cancel withdrawal")
+			return
+		}
+		if !owned {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
+			return
+		}
+
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return withdrawal.Cancel(ctx, tx, id)
+		})
+		if errors.Is(err, withdrawal.ErrStateConflict) {
+			apierror.Write(w, requestID, apierror.CodeConflict, "withdrawal can no longer be cancelled")
+			return
+		}
+		if err != nil {
+			logger.Error("cancel_withdrawal_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to cancel withdrawal")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}

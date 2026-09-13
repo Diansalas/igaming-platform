@@ -16,7 +16,17 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/payments"
 )
+
+// defaultWithdrawalApprovalThreshold is the four-eyes threshold (EUR-
+// equivalent minor units, applied uniformly per asset for Stage 3B)
+// above which a withdrawal requires two distinct human approvals rather
+// than one (withdrawal-state-machine.md §5). Per-tenant/per-asset
+// configurable thresholds are an explicit OPEN DECISION in that document,
+// not resolved here - this is a safe, conservative default, not a final
+// business policy.
+const defaultWithdrawalApprovalThreshold = 100000 // e.g. EUR 1,000.00 at a 2-decimal exponent
 
 // Deps are the dependencies routes need. Kept as one small struct so
 // New's signature doesn't grow a parameter per handler as endpoints are
@@ -34,6 +44,16 @@ type Deps struct {
 	// session.go).
 	AccessTokenTTL  time.Duration
 	RefreshTokenTTL time.Duration
+
+	// PaymentOrchestrator resolves/routes deposits and dispatches provider
+	// callbacks (Stage 3B). Nil is treated as "financial routes
+	// disabled" by registerFinancialRoutes, so services that don't need
+	// them (e.g. a future read-only reporting deployment) aren't forced
+	// to wire one up.
+	PaymentOrchestrator *payments.Orchestrator
+	// WithdrawalApprovalThreshold overrides defaultWithdrawalApprovalThreshold
+	// when non-zero.
+	WithdrawalApprovalThreshold int64
 }
 
 // New builds the fully-wired http.Handler for platform-api: global
@@ -46,6 +66,7 @@ func New(deps Deps) http.Handler {
 	mux.HandleFunc("GET /readyz", readyzHandler(deps.DB))
 
 	registerIdentityRoutes(mux, deps)
+	registerFinancialRoutes(mux, deps)
 
 	instrumented := otelhttp.NewHandler(mux, deps.ServiceName)
 

@@ -1,7 +1,14 @@
 # ADR 0022 — Payment Provider Agnosticism and Capability Model
 
-Status: Accepted (Stage 3A, architecture only — `NOT IMPLEMENTED`),
-issued directly by the business owner as a core commercial requirement,
+Status: Accepted (Stage 3A) and `PARTIALLY IMPLEMENTED` (Stage 3B). The
+`PaymentProvider` interface, its canonical request/result shapes, the
+adapter-conformance suite, and the `ProviderCapability` model (migration
+`0024`; RLS tightened by `0028`) are built in `internal/payments`. What
+exercises them is a **`MOCK` fiat adapter only** — no real PSP integration,
+no per-tenant provider credential storage, and no `crypto_payment` adapter
+exists. §3 carries one known gap against the shape decided here (see the
+note in its table-shape constraints).
+Issued directly by the business owner as a core commercial requirement,
 extending `payment-orchestration.md` and `crypto-custody-boundary.md`
 with the formal provider-independence and capability-model design those
 documents referenced but had not yet made mandatory/explicit.
@@ -213,8 +220,14 @@ migration design; the constraints themselves are not deferrable):
   ADR 0012's own pattern — so a capability row can never name a brand
   belonging to a different tenant. With `brand_id` NULL that FK is not
   checked at all (Postgres `MATCH SIMPLE`), so `tenant_id`'s own FK is
-  what binds a tenant-wide row; the migration carries both, not only the
-  composite.
+  what binds a tenant-wide row. **Known gap (Stage 3B):** migration `0024`
+  as written carries only the composite `(brand_id, tenant_id)` FK — there
+  is no direct `tenant_id REFERENCES tenants(id)` FK on
+  `provider_capabilities`. For a tenant-wide row (`brand_id IS NULL`)
+  `MATCH SIMPLE` skips the composite entirely, so nothing at the database
+  level currently verifies that such a row's `tenant_id` names a real
+  tenant. Recorded here rather than patched in place; adding the direct FK
+  is an additive follow-up migration.
 - `ProviderCapability` is the **second** Stage 3A table permitted to
   carry `brand_id` under `financial-domain-model.md`'s brand-
   denormalization rule (the first being `WithdrawalRequest`). It is the

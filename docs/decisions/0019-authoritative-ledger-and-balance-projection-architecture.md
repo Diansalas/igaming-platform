@@ -1,8 +1,12 @@
 # ADR 0019 — Authoritative Ledger and Balance Projection Architecture
 
-Status: Accepted (Stage 3A, architecture only — `NOT IMPLEMENTED`),
-derived from Blueprint §4.2 and ADR 0001, formalizing the concrete schema/
-RLS shape ADR 0001 left at the principle level.
+Status: Accepted (Stage 3A) and `IMPLEMENTED` (Stage 3B) by migrations
+`0019`–`0028` and `internal/ledger`. One item decided here is still
+outstanding: the hourly reconciliation job under "Balance serving" exists
+as `internal/reconciliation.RunLedgerVsProjection` but has no scheduler
+invoking it (`reconciliation-model.md` status). Derived from Blueprint §4.2
+and ADR 0001, formalizing the concrete schema/RLS shape ADR 0001 left at
+the principle level.
 
 ## Context
 
@@ -68,18 +72,26 @@ the mixed tenant/brand/player/house scoping established in
   `app.tenant_id` setting — the same idiom Stage 2 established for
   `player_accounts`/`sessions`/`audit_log` (`03-database-architecture.md`,
   ADR 0016).
-- Player-owned account types additionally scope by `wallet_id` →
-  `player_account_id`, giving a player-principal-scoped RLS policy
+- Player-owned account types additionally scope by player, giving a
+  player-principal-scoped RLS policy
   analogous to the hardened `sessions` design (ADR 0016) — a player reads
   only ledger entries for their own wallets, never another player's, even
-  within the same tenant. **This requires `wallet_id` to be a column on
-  every row the policy protects** (`ledger_entries`,
-  `wallet_balance_projection`), not reachable only by joining
+  within the same tenant. **This requires the scoping column to be on
+  every row the policy protects**, not reachable only by joining
   `ledger_accounts`: a policy written as a subquery into another RLS-
   protected table produces a policy whose deny behaviour depends on that
   second table's policy set, which is exactly the indirection ADR 0016 had
-  to unwind. `ledger-accounting-model.md` §1.3 carries the denormalized
-  `wallet_id` plus a composite FK so it cannot drift. The player scope GUC
+  to unwind. As implemented (migrations `0019`/`0020`/`0022`/`0023`), the
+  column the policies actually key on is **`player_account_id`**, not
+  `wallet_id`: `wallets` carries it natively, and `ledger_accounts`,
+  `ledger_entries` and `wallet_balance_projection` each carry it
+  denormalized (`ledger_entries` and `wallet_balance_projection` carry
+  `wallet_id` too, but only for indexing/joins, never as the policy
+  predicate). Denormalization is populated and cross-checked by a
+  `BEFORE INSERT` trigger rather than a composite FK, because a nullable
+  column in a `MATCH SIMPLE` composite FK would disable the check for
+  exactly the house-level rows (`ledger-accounting-model.md` §1.3). The
+  player scope GUC
   is `app.player_account_id`, set only by trusted server code from the
   authenticated player principal's own resolved account — never from a path,
   query, or body parameter (same rule `Pool.WithPrincipalScope` follows in
@@ -115,11 +127,23 @@ the mixed tenant/brand/player/house scoping established in
 `wallets`, `ledger_accounts`, `ledger_transactions`, `ledger_entries`,
 `wallet_balance_projection`, `withdrawal_requests`, `withdrawal_approvals`,
 `reconciliation_runs`, `reconciliation_mismatches`, and the payment-
-orchestration state tables (`deposit_intents`, `withdrawal_intents`,
-`provider_capabilities` (ADR 0022 §2 — the tenant/brand-scoped provider
-capability and routing-priority rows), provider-health rows, and
-provider-credential-configuration rows) each carry `tenant_id NOT NULL` with
-`FORCE ROW LEVEL SECURITY`. `provider_capabilities` is named explicitly
+orchestration state tables (`deposit_intents` and `provider_capabilities`
+(ADR 0022 §2 — the tenant/brand-scoped provider capability and
+routing-priority rows)) each carry `tenant_id NOT NULL` with
+`FORCE ROW LEVEL SECURITY`. As built, this list has three corrections from
+its Stage 3A form: there is **no `withdrawal_intents` table** (withdrawal
+provider state sits on `withdrawal_requests` itself —
+`withdrawal-state-machine.md` §2), **no provider-health rows**
+(`ProviderHealth` is an in-memory `PaymentProvider.HealthStatus()` call, not
+storage — `payment-orchestration.md` §6), and **no
+provider-credential-configuration table** (none was needed this stage; the
+only adapter is a mock with no per-tenant credential). The one table that
+does exist and does *not* satisfy the `tenant_id NOT NULL` rule above is
+`provider_capability_amount_limits` (migration `0024`), which has no
+`tenant_id` column of its own and is protected by a subquery into
+`provider_capabilities` — a known, documented gap, not a silent one
+(`financial-domain-model.md` scoping table).
+`provider_capabilities` is named explicitly
 because ADR 0022 §3 makes provider routing configuration per-
 `(tenant_id, brand_id)`: even with no secret material in the row, a missed
 policy leaks which providers, limits, priorities and enabled assets another

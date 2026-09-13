@@ -1,11 +1,17 @@
 # Payment Orchestration Architecture
 
-Status: Stage 3A (Financial Architecture Freeze) — architecture only,
-`NOT IMPLEMENTED`. No `PaymentProvider` adapter, no orchestrator code, no
-real or mock PSP integration exists yet — Stage 1 established only the
-interface's *place* in the codebase, per `07-payments-architecture.md`'s
-own "Stage mapping." This document designs the orchestrator itself. Owner:
-`payments`, with `ledger-finance` on anything that posts to the ledger.
+Status: `PARTIALLY IMPLEMENTED` (Stage 3B). The `PaymentProvider`
+interface, the deposit-direction orchestrator (`InitiateDeposit`,
+`RouteProvider`, `ReceiveCallback`, cascade and ambiguous-outcome
+handling), the `ProviderCapability` model (migration `0024`), and
+`deposit_intents` (migration `0025`) are implemented in `internal/payments`
+against a **`MOCK` PSP adapter only** — no real PSP is integrated and no
+production provider credential storage exists. Withdrawal-direction
+orchestration, `ListSettledTransactions` (§9), and PSP reconciliation
+(§9, `reconciliation-model.md`) remain `NOT IMPLEMENTED`; see §3 and §6
+for the specific shapes that changed between design and implementation.
+Owner: `payments`, with `ledger-finance` on anything that posts to the
+ledger.
 
 ## 1. Scope
 
@@ -58,12 +64,36 @@ review.
 ```
 PaymentOrchestrator
   InitiateDeposit(ctx, tenant_id, brand_id, player_account_id, wallet_id, amount, asset_code, method) (DepositIntent, error)
-  InitiateWithdrawalRequest(ctx, ...) (WithdrawalIntent, error)   -- delegates to withdrawal-state-machine.md, does not itself post ledger entries. Distinct from CryptoCustodyProvider.InitiateWithdrawal (crypto-custody-boundary.md §2) and PaymentProvider.Withdraw (§2 above), which the orchestrator calls only on the withdrawal state machine's `approved` -> `submitted` transition — naming clarified here to avoid the two being read as the same call at two different layers
   RouteProvider(RoutingRequest) (PaymentProvider, error)
   ReceiveCallback(ctx, provider_id, rawPayload) error       -- dispatches to the right adapter's HandleCallback, then to ledger-finance's posting API
-                                                            -- tenant/player/wallet are resolved from the VERIFIED callback credential
-                                                            -- and the platform's own intent record, never from identifiers in rawPayload
+                                                            -- tenant/player/wallet are resolved OUTSIDE the payload — never from identifiers in rawPayload
 ```
+
+**No `InitiateWithdrawalRequest` orchestrator method was built** (Stage 3B
+correction to this sketch). Withdrawal submission is instead a narrower,
+staff-triggered HTTP handler
+(`internal/httpserver/withdrawal_handlers.go`, `newSubmitWithdrawalHandler`)
+that calls `RouteProvider` and then `PaymentProvider.Withdraw` directly on
+the withdrawal state machine's `approved` -> `submitted` transition — no
+shared orchestrator method, no cascade across providers, and no
+`WithdrawalIntent` table (`withdrawal-state-machine.md` §2). That call is
+still distinct from `CryptoCustodyProvider.InitiateWithdrawal`
+(`crypto-custody-boundary.md` §2), which is out of scope entirely this
+stage.
+
+**`ReceiveCallback`'s implemented signature** is
+`ReceiveCallback(ctx, tx, tenant_id, provider_id, rawPayload)`: it takes an
+already-tenant-scoped `pgx.Tx` like every other DB-touching function in
+this codebase. The tenant is resolved by the HTTP layer from a **per-tenant
+URL path slug** (`POST /v1/webhooks/payments/{tenantSlug}/{providerID}`),
+which is `docs/decisions/0022` §3's own first candidate resolution for that
+open question, and the payload is authenticated inside the named adapter's
+`HandleCallback` signature verification. There is no stored "verified
+callback credential" concept backing this — no per-tenant provider
+credential table exists this stage, and the mock adapter has no per-tenant
+credential at all. §10's binding rule is still satisfied (the tenant never
+comes from the body), but the mechanism is the URL plus the adapter's own
+verification, not a credential lookup.
 
 The orchestrator never posts ledger entries itself — it resolves *which
 provider* handles a request and translates provider callbacks into calls
@@ -129,10 +159,18 @@ rejection) and the decline reason is provider-specific rather than
 player-specific (e.g. not "insufficient funds," which no other provider
 would resolve either), the orchestrator retries against the next-ranked
 candidate from §4 step 6's ordering, up to a configurable cascade depth.
-Each cascade attempt is a distinct `DepositIntent` attempt row (not a
-ledger transaction — no ledger row exists until one attempt actually
-succeeds, per `financial-transaction-flows.md` Flow 1's "no
-`LedgerTransaction` for a declined attempt").
+No cascade attempt is a ledger transaction — no ledger row exists until one
+attempt actually succeeds, per `financial-transaction-flows.md` Flow 1's
+"no `LedgerTransaction` for a declined attempt". As implemented (Stage 3B
+correction to this section's original "a distinct `DepositIntent` attempt
+row" wording): a cascade reuses **one** `deposit_intents` row for the whole
+chain, overwriting `provider_id`/`provider_reference` on each attempt, and
+the per-attempt **audit records** (`deposit.attempt_declined` and
+friends) are the attempt history. A consequence worth knowing: because the
+row keeps only the latest attempted provider, a cascade continued from an
+asynchronously-arriving callback can exclude only the most recently tried
+provider, not every provider tried across the intent's lifetime (a
+per-attempt history table is the follow-up if that is ever needed).
 
 `OPEN DECISION`: the exact taxonomy of "retriable-elsewhere" vs.
 "player-specific, no cascade" decline reasons is provider-specific and not
@@ -170,6 +208,13 @@ ProviderHealth
   circuit_state           -- 'closed' | 'open' | 'half_open'
   last_updated
 ```
+
+**This is not a stored table.** As implemented, `ProviderHealth` is the
+return value of an in-memory `PaymentProvider.HealthStatus(ctx)` call the
+orchestrator makes per routing decision — no `provider_health` table,
+migration, or persisted rolling window exists (Stage 3B correction; a
+durable, cross-instance health store is a future consideration, not
+something built here).
 
 A provider whose `circuit_state = 'open'` is excluded from routing
 entirely (not just deprioritized) until health checks and/or a cooldown
@@ -259,8 +304,10 @@ credentials being *per-tenant configuration* and are binding on Stage 3B
   and overlap-window length per provider — a `devops`/contract decision,
   not fixed here.
 
-Orchestrator-level state (`DepositIntent`, `WithdrawalIntent` rows,
-provider health, and provider configuration — including the
+Orchestrator-level state (as built: `deposit_intents` and
+`withdrawal_requests` — there is no `WithdrawalIntent` table, and provider
+health is not stored at all, see §3 and §6 — plus provider configuration,
+including the
 `provider_capabilities` / routing-priority rows of `docs/decisions/0022`
 §2, which are per-`(tenant_id, brand_id)` and therefore leak another
 tenant's provider set, limits and priorities if their policy is missed) is
