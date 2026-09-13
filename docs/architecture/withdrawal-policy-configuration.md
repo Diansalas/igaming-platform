@@ -51,12 +51,24 @@ policy dimensions:
 Selection (`ResolveApprovalPolicy`'s query) prefers the most specific
 matching row — an exact `brand_id` match over a tenant-wide `NULL`, then
 an exact `jurisdiction_code` match over a tenant-wide `NULL` — then the
-most recently effective row (`effective_from DESC, policy_version DESC`)
-among ties. `asset_code` is never a wildcard: a policy row always
-belongs to exactly one asset, which is what makes the precision bug
-structurally impossible once any row exists — `Approve`/`Reject` can no
-longer compare a request's amount against a threshold that was never
-meant for that asset.
+most recently effective row (`effective_from DESC, policy_version DESC`,
+then `created_at DESC, id DESC` as a final deterministic tiebreaker,
+added after specialist review found two rows tying on every other key
+made the outcome unspecified) among ties. `asset_code` is never a
+wildcard: a policy row always belongs to exactly one asset, which is
+what makes the precision bug structurally impossible once any row
+exists — `Approve`/`Reject` can no longer compare a request's amount
+against a threshold that was never meant for that asset. `brand_id`
+uses a composite `(brand_id, tenant_id)` FK against `brands(id,
+tenant_id)` (migration `0033`, matching every sibling table) rather than
+a single-column FK, so a policy row can never silently name a brand
+belonging to a different tenant.
+
+Note: the distinct-human-approver COUNT itself (a separate mechanism
+from policy resolution) dedupes by `staff_users.person_id` when linked,
+not just by `approver_principal_id` — see ADR 0023 §1 for why (a
+specialist-review finding: two staff logins sharing a person could
+otherwise supply both required approvals for someone else's withdrawal).
 
 `internal/withdrawal.Approve`/`Reject` no longer take a threshold
 parameter. They resolve their own `ApprovalPolicy` internally (using the
@@ -65,39 +77,42 @@ immediately after locking the row, inside the same transaction as the
 decision itself — a caller can never apply one asset's or one tenant's
 policy to a different asset's or tenant's withdrawal.
 
-## 3. The zero-config fallback — explicitly `NOT` a production policy
+## 3. The zero-config fallback — fails closed, explicitly `NOT` a production policy
 
-When no `withdrawal_policies` row matches, `defaultApprovalPolicy`
-derives a threshold from the asset's own `decimal_exponent` (the same
-Asset registry the ledger itself reads): **1000 major units of THIS
-asset**, not the flat, asset-blind Stage 3B constant.
+**Revised after specialist review.** The original design derived a
+default threshold from the asset's own `decimal_exponent` alone — "1000
+major units of THIS asset" — intending that to represent a comparable
+real-world magnitude across assets. `ledger-finance` rejected this on
+sign-off: decimal precision (how many digits an asset uses) says nothing
+about that asset's actual market value, so "1000 major units" of EUR and
+"1000 major units" of BTC are not comparable amounts. For BTC
+specifically (`decimal_exponent = 8`) that design computed a default of
+100,000,000,000 minor units — **1000 BTC** — which would have raised the
+effective four-eyes bar to roughly 1000 BTC per decision, a large
+WEAKENING of protection relative to even the flat Stage 3B constant it
+replaced. Building a genuinely value-equivalent default across assets
+requires FX/market-price data, which is explicitly out of this stage's
+scope (no FX/conversion accounting).
 
-| Asset | Exponent | Default threshold (minor units) |
-|---|---|---|
-| EUR / USD / GBP / BRL / MXN | 2 | 100,000 (= 1,000.00) |
-| USDT | 6 | 1,000,000,000 (= 1,000.000000) |
-| BTC | 8 | 100,000,000,000 (= 1,000.00000000) |
-
-This is a **test/development stand-in**, not a business decision — see
-§5's open decisions. `RequiredApprovals` defaults to `2` (Stage 3B's
-original "two distinct human approvers above threshold" rule, carried
-forward unchanged) and `RequireStepUp` always defaults to `false` (§7).
-
-If the multiplication needed to compute a default would overflow
-`int64` (possible for an asset with a very high `decimal_exponent`, up
-to 18 per migration `0003`'s own constraint — no asset seeded in this
-platform today has one that high), the fallback returns a threshold of
-`0` rather than a silently wrong number: every non-zero withdrawal in
-that hypothetical asset would require the full `RequiredApprovals`,
-erring toward stricter approval, never looser.
+The fallback (`defaultApprovalPolicy`) now fails closed instead:
+**`ThresholdAmount` is always `0`**, for every asset, when no
+`withdrawal_policies` row matches — so any non-zero withdrawal in an
+unconfigured asset requires the full `RequiredApprovals` (defaults to
+`2`, Stage 3B's original "two distinct human approvers" rule carried
+forward). `RequireStepUp` always defaults to `false` (§7 — MFA doesn't
+exist yet, so the fallback must never default to a policy this platform
+cannot enforce). This is a deliberately maximally-conservative
+**test/development stand-in**, not a business decision — see §5's open
+decisions. A tenant that wants a lighter-touch, asset-appropriate
+threshold must configure one explicitly via a `withdrawal_policies` row.
 
 ## 4. Adversarial test coverage
 
 `internal/withdrawal/policy_integration_test.go` (real PostgreSQL 16):
 
-- `TestResolveApprovalPolicy_DefaultFallbackIsAssetPrecisionAware` —
-  the same tenant resolves a different, asset-derived threshold per
-  asset with no configuration at all.
+- `TestResolveApprovalPolicy_DefaultFallbackFailsClosedForEveryAsset` —
+  the same tenant resolves ThresholdAmount 0 for every asset with no
+  configuration at all (revised after the §3 fail-closed redesign).
 - `TestResolveApprovalPolicy_ConfiguredPolicyNeverBleedsAcrossAssets` —
   two explicit policy rows for the same tenant (EUR, BTC) never leak
   into each other or into a third, unconfigured asset (USD).
@@ -116,19 +131,22 @@ resolution mechanism.
 ## 5. Remaining open business decisions
 
 1. **The real approval threshold(s), per tenant/brand/asset, are not
-   decided.** §3's default is a placeholder chosen for continuity with
-   Stage 3B's test value, not a risk/compliance/business decision.
-   Nothing in this stage should be read as proposing EUR 1,000 (or its
-   asset-scaled equivalents) as the actual production policy.
-2. **Jurisdiction-scoped policy rows cannot be selected today.** No
-   per-player/per-withdrawal jurisdiction assignment exists in the
-   platform (a `player_account` belongs to a `brand`; a `tenant`, not a
-   brand, resolves to a set of jurisdictions via
-   `tenant_jurisdiction_configs`, and can serve several at once — see
-   `15-jurisdiction-and-licensing-model.md`). A `jurisdiction_code` row
-   can be written but will never match until that assignment exists.
-   This is a schema-readiness decision, not a functional gap in this
-   stage's own scope.
+   decided.** §3's default (fail closed, threshold 0) is a deliberately
+   conservative placeholder, not a risk/compliance/business decision.
+   Nothing in this stage should be read as proposing any specific
+   production threshold.
+2. **Jurisdiction-scoped policy rows cannot be selected today, and are
+   now schema-blocked from being written.** No per-player/per-withdrawal
+   jurisdiction assignment exists in the platform (a `player_account`
+   belongs to a `brand`; a `tenant`, not a brand, resolves to a set of
+   jurisdictions via `tenant_jurisdiction_configs`, and can serve several
+   at once — see `15-jurisdiction-and-licensing-model.md`). Migration
+   `0033` added `CHECK (jurisdiction_code IS NULL)` after specialist
+   review flagged the original free-`TEXT`, no-FK column as a
+   false-sense-of-enforcement risk (a compliance officer could configure
+   a jurisdiction-scoped policy that silently never matched anything).
+   This remains a schema-readiness decision for a future stage, now
+   structurally enforced rather than merely documented.
 3. **Whether policy-config-edit and withdrawal-approval permissions must
    be held by disjoint roles remains open** — unchanged from Stage 3B
    (`withdrawal-state-machine.md` §5 bypass #3): a staff member who can
@@ -152,7 +170,11 @@ e.g., "at least one approval from `tenant_admin`, not just `finance`".
 requirements interact with `RequiredApprovals` (e.g., "2 approvals, at
 least 1 of which must be `tenant_admin`" vs. "2 approvals, each from a
 distinct required role"). Left as an explicit open decision rather than
-guessed at, per CLAUDE.md's "no uncontrolled scope expansion."
+guessed at, per CLAUDE.md's "no uncontrolled scope expansion." Migration
+`0033` added `CHECK (required_approver_roles IS NULL)` after specialist
+review flagged the same false-sense-of-enforcement risk as
+`jurisdiction_code` above: a value could be written and silently ignored
+by every current caller.
 
 ## 7. Step-up/MFA enforcement boundary — `IMPLEMENTED` (boundary only)
 

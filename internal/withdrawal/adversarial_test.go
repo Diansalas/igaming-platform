@@ -241,6 +241,7 @@ func TestWithdrawalApprovals_ApproverPrincipalIdImmutableAndAccurate(t *testing.
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return MoveToPendingReview(ctx, tx, wr.ID)
 	})
+	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 1_000_000, 2, time.Now().Add(-time.Hour))
 
 	approver := uuid.New()
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -431,6 +432,7 @@ func TestLockApprovedForSubmission_ConcurrentSubmitsOnlyOneReachesProvider(t *te
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return MoveToPendingReview(ctx, tx, wr.ID)
 	})
+	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 1_000_000, 2, time.Now().Add(-time.Hour))
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		approved, err := Approve(ctx, tx, wr.ID, uuid.New(), false, nil)
 		if err != nil {

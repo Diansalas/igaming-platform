@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-12 (Stage 3A)
+Last updated: 2026-09-13 (Stage 3C)
 
-## Status: Stage 3A (Financial Architecture Freeze) — documentation and specialist review complete, pending human approval to start Stage 3B implementation
+## Status: Stage 3C (Financial Hardening & Operational Controls) — complete, pending human approval to start Stage 4
 
 ## Stage 0 — complete (approved)
 
@@ -1065,10 +1065,185 @@ withdrawal financial posting, crypto-custodian ledger settlement, and any
 PSP batch-settlement flow remain **NOT IMPLEMENTED** — no accounting
 treatment was invented for any of them to make code compile.
 
+## Stage 3C — Financial Hardening & Operational Controls — complete (approved-pending)
+
+Stage 3B was substantively approved by the human, who issued a focused
+Stage 3C directive: close five specific gaps Stage 3B's own specialist
+review left documented but open, run a fresh specialist review
+specifically attempting to break each fix, and fix every P0/P1 that
+review found — before Stage 4 domain implementation begins. Full detail
+of every decision: ADR 0023 (`docs/decisions/0023-stage3c-financial-
+hardening-decisions.md`).
+
+### 1. Withdrawal self-approval — closed, authoritatively, with a documented residual gap
+
+- Migration `0029`: `staff_users.person_id` (nullable FK into the
+  existing cross-tenant `persons` identity — no new identity model
+  invented) plus a `BEFORE INSERT` trigger on `withdrawal_approvals`
+  (`withdrawal_approvals_deny_self_approval`) denying any approval whose
+  approver resolves to the same person as the withdrawing player.
+  Authoritative at the database itself, not merely audit-detectable —
+  proven by a direct-SQL-bypass test going around the HTTP/service
+  layers entirely.
+- `newApproveWithdrawalHandler` gained a real `BeneficiaryCheck` closure
+  (defense-in-depth pairing with the trigger, for a clean HTTP 403
+  instead of a raw Postgres exception).
+- **Specialist review (code-reviewer) found a related, distinct P1**:
+  the four-eyes *distinct-approver count* (separate from the
+  self-approval check) was keyed on `approver_principal_id` alone, so
+  one person holding two staff logins sharing a `person_id` could supply
+  BOTH required approvals for a THIRD PARTY's withdrawal — the
+  self-approval trigger never fires for this case (neither login is the
+  beneficiary). Fixed: the count now dedupes via
+  `COALESCE(staff_users.person_id, approver_principal_id)`. Proven by a
+  new adversarial test (`TestWithdrawalApprove_MultiAccountIdentityBypassRejected`)
+  covering exactly this "multi-account identity bypass" attack the
+  Stage 3C directive named.
+- Migration `0033` (specialist-review fixes) removed a redundant
+  `is_automated_approval` trust-flag shortcut from the trigger (security
+  review: it added no real protection and weakened the "purely
+  data-driven" guarantee).
+- **Documented residual gap, not closed this stage**: `person_id`
+  linkage is optional, admin-asserted at staff creation, unverified, and
+  has no update path. A staff account created without it (the default)
+  is invisible to both enforcement layers. Labeled `PARTIALLY
+  IMPLEMENTED` per CLAUDE.md's "no fake completion" rule — see ADR 0023
+  §1 for the two paths (verified identity binding, or disjoint
+  staff-management/approval permissions) that would close it fully.
+
+### 2. `provider_capability_amount_limits` tenancy — resolved as tenant-owned
+
+Migration `0030`: added `tenant_id NOT NULL` (backfilled from the parent
+`provider_capabilities` row, requiring a temporary, transaction-scoped,
+DDL-level RLS disable/enable — documented as safe and not a role-level
+bypass), a composite `(provider_capability_id, tenant_id)` FK, and a
+direct `tenant_isolation` RLS policy replacing the prior
+ADR-0019-violating subquery-based one. Cross-tenant routing-isolation
+and write-forgery adversarial tests both pass against real PostgreSQL
+16. **Specialist review (security, ledger-finance) found this new
+direct policy — and the sibling new `withdrawal_policies` table's —
+omitted the player-scope exclusion guard every other staff/system-only
+financial table has carried since migration `0028`.** Fixed in migration
+`0033` on both tables.
+
+### 3. Withdrawal stranded-hold resolution — bounded, query-only recovery
+
+`LockSubmittedForResolution` + a single `provider.QueryStatus` call,
+exposed via `POST /v1/admin/withdrawals/{id}/resolve` and `GET
+/v1/admin/withdrawals/submitted`. Never resubmits (no `Withdraw` call)
+and never re-routes to a different provider than `MarkSubmitted`
+originally recorded. Idempotent — a duplicate or delayed resolve call
+after the request already completed is a safe no-op (proven by counting
+DISTINCT ledger transactions, not just reading the current state
+column). **Specialist review (payments, ledger-finance) found the
+handler did not cross-check the provider's confirmed `Amount`/
+`AssetCode` against the original request before completing** — the same
+class of check the deposit-reversal path already makes via
+`payments.ErrCallbackProviderMismatch`. Fixed: the resolve handler now
+makes the identical check and refuses (409) rather than completing on
+mismatched data, proven by a new test using a new `MockProvider.
+SetConfirmedAmount` test knob. This is a **manual, staff-triggered**
+recovery path — no scheduler currently drives it automatically.
+
+### 4. Reconciliation scheduling — operationalized, per-tenant-isolated
+
+`internal/reconciliation.RunSchedulerLoop` (started in
+`cmd/platform-api/main.go`, configurable via
+`RECONCILIATION_INTERVAL_SECONDS`, default hourly) sweeps every active
+tenant, each in its own transaction with a transaction-scoped advisory
+lock. `reconciliation_mismatches` gained a `mismatch_kind` column
+(migration `0031`) distinguishing a missing projection row from a
+present-but-wrong one. **Specialist review found and fixed**: (a) the
+scheduler goroutine had no panic recovery (backend, P0 — a panic inside
+a sweep would have crashed the entire API process, not just
+reconciliation); (b) graceful shutdown didn't actually wait for the
+scheduler, only accidentally via `pool.Close()`'s blocking semantics
+(backend, P1) — now a bounded, explicit wait; (c) the advisory lock used
+a 32-bit `hashtext`, collision-prone at scale — switched to 64-bit
+`hashtextextended` (architect/ledger-finance); (d) a mismatch found was
+logged at `Info` level — CLAUDE.md treats non-zero drift as a P1
+incident, now logged at `Error`; (e) the comparison covered only debit/
+credit totals, missing a possible `AssetCode`/`AccountType` corruption
+in the same projection row — now compared too; (f) a skipped (lock-
+contention) tick's audit record showed an ambiguous empty status —
+now explicit; (g) a suspended/closed tenant was swept identically to an
+active one — now filtered out. Adversarial tests K-N (concurrent runs,
+failure-and-retry, projection corruption-and-rebuild, mismatch detection
+without ledger mutation) all pass against real PostgreSQL 16.
+
+### 5. Withdrawal policy configuration — real boundary, fails closed
+
+`internal/withdrawal/policy.go` + migration `0032`
+(`withdrawal_policies`) replace the Stage 3B flat, asset-blind threshold
+constant with a tenant/brand/asset/effective-time-scoped configuration
+boundary. **Specialist review (ledger-finance) rejected the original
+design on sign-off**: a "1000 major units of this asset" default
+conflated decimal precision with real-world value — for BTC specifically
+it computed a ~1000 BTC threshold, dramatically WEAKENING protection
+relative to even the constant it replaced, and a genuinely
+value-equivalent default requires FX/market-price data explicitly out of
+scope. **Redesigned to fail closed instead**: the zero-config default is
+now `ThresholdAmount = 0` for every asset, requiring full approval
+scrutiny for any non-zero withdrawal until a tenant configures a real
+threshold. Additional specialist findings fixed: a non-deterministic
+final tiebreaker in the resolution query's `ORDER BY` (architect/
+backend); a single-column `brand_id` FK inconsistent with every sibling
+table's composite form, allowing a cross-tenant-dead policy row
+(architect, fixed via migration `0033`); `required_approver_roles` and
+`jurisdiction_code` writable but unenforced, a false-sense-of-protection
+risk (security/architect) — both now `CHECK`-constrained to `NULL` until
+real enforcement/resolution exists. A clean, fail-closed enforcement
+boundary for a future step-up/MFA requirement
+(`ApprovalPolicy.RequireStepUp`/`ErrStepUpRequired`) was added without
+implementing MFA itself (ADR 0017 preserved).
+
+### Adversarial tests (directive items A-O, plus specialist-review additions)
+
+All items A-O pass against real PostgreSQL 16 (`internal/httpserver/
+stage3c_self_approval_test.go`, `internal/withdrawal/adversarial_test.go`,
+`internal/payments/capability_integration_test.go`,
+`internal/httpserver/stage3c_withdrawal_resolution_test.go`,
+`internal/reconciliation/scheduler_integration_test.go`,
+`internal/withdrawal/policy_integration_test.go`), independently
+verified letter-by-letter by the `qa` specialist against the actual test
+bodies and a fresh, uncached, `-race` test run (209 tests passed).
+Additional tests written in direct response to specialist findings:
+`TestWithdrawalApprove_MultiAccountIdentityBypassRejected`,
+`TestWithdrawalResolve_ProviderAmountMismatchRejected`.
+
+### Specialist review
+
+Seven specialists ran in parallel against the full Stage 3C diff:
+`ledger-finance`, `payments`, `security`, `architect`, `backend`, `qa`,
+`code-reviewer`. Confirmed findings and fixes are itemized above and in
+ADR 0023. `ledger-finance` explicitly withheld sign-off pending three
+findings (the value-blind default threshold, the RLS gap, the
+`Info`-level drift logging) — all three fixed and re-verified.
+
+### Verification performed
+
+`gofmt -l .`, `go build ./...`, `go vet -tags=integration ./...` clean
+throughout (one pre-existing, unrelated `errcheck` finding in
+`internal/payments/mock.go` predates this stage). Full integration suite
+(`go test -tags=integration ./...`) green after every fix, including a
+full re-run after the complete 5-migration chain (`0029`-`0033`)
+round-tripped down and back up together. `git status`/`git diff --stat`
+confirmed no production credentials and no unrelated scope creep.
+
+### Not claimed
+
+Per CLAUDE.md's "No fake completion" rule: this stage does NOT claim
+production PSP readiness, regulatory certification, production MFA
+readiness, or real crypto readiness. Self-approval enforcement is
+labeled `PARTIALLY IMPLEMENTED`, not `IMPLEMENTED` — see §1's residual
+gap. Withdrawal resolution is a manual recovery path, not an automated
+sweep. No production withdrawal approval threshold is proposed anywhere
+in this stage's code, migrations, or documentation.
+
 ## Next stage
 
 Not started; requires explicit human authorization per the stage-gate
-rule in `CLAUDE.md`. Candidates named in the Stage 3B directive
+rule in `CLAUDE.md`. Candidates named in the Stage 3C directive
 (casino, sportsbook, bonus, B2C frontend, partner console, production
 deployment, real PSP integrations, real crypto integrations) do not
 begin automatically.

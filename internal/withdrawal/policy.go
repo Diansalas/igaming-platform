@@ -48,19 +48,6 @@ type ApprovalPolicy struct {
 	RequireStepUp bool
 }
 
-// defaultApprovalThresholdMajorUnits is the Stage 3C placeholder
-// approval-threshold policy, expressed in MAJOR units of whatever asset
-// it is applied to - so it represents "the same real-world magnitude"
-// for every asset, not "the same raw minor-unit number" (Stage 3B's
-// bug). This is explicitly NOT a final production threshold: CLAUDE.md's
-// "no fake completion" rule means this must be labeled, not silently
-// treated as business policy. It exists only so withdrawals can be
-// exercised and tested before any tenant configures a real
-// withdrawal_policies row. Business/risk/compliance own the real number
-// (docs/architecture/withdrawal-policy-configuration.md's open decision
-// list) - this stage does not invent it.
-const defaultApprovalThresholdMajorUnits = 1000
-
 // defaultRequiredApprovals mirrors Stage 3B's existing "two distinct
 // human approvers above threshold" rule - carried forward as the
 // fallback's value, not re-litigated here.
@@ -88,7 +75,11 @@ const defaultRequiredApprovals = 2
 // Selection prefers the most specific matching row - an exact brand_id
 // match over a tenant-wide NULL, then an exact jurisdiction_code match
 // over a tenant-wide NULL - then the most recently effective row (and,
-// among those, the highest policy_version) among ties. When no row
+// among those, the highest policy_version, then the most recently
+// created row as a final deterministic tiebreaker - specialist review
+// finding: without one, two rows tying on every other key make which
+// policy "wins" unspecified across query re-executions, which is not
+// acceptable for a control that gates four-eyes approval). When no row
 // matches at all, the caller gets defaultApprovalPolicy.
 func ResolveApprovalPolicy(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, jurisdictionCode *string, assetCode string, at time.Time) (ApprovalPolicy, error) {
 	if assetCode == "" {
@@ -107,7 +98,7 @@ func ResolveApprovalPolicy(ctx context.Context, tx pgx.Tx, tenantID, brandID uui
 		   AND (brand_id IS NULL OR brand_id = $4)
 		   AND (jurisdiction_code IS NULL OR jurisdiction_code = $5)
 		 ORDER BY (brand_id IS NOT NULL) DESC, (jurisdiction_code IS NOT NULL) DESC,
-		          effective_from DESC, policy_version DESC
+		          effective_from DESC, policy_version DESC, created_at DESC, id DESC
 		 LIMIT 1`,
 		tenantID, assetCode, at, brandID, jurisdictionCode,
 	).Scan(&threshold, &requiredApprovals, &requireStepUp)
@@ -121,46 +112,40 @@ func ResolveApprovalPolicy(ctx context.Context, tx pgx.Tx, tenantID, brandID uui
 }
 
 // defaultApprovalPolicy is the Stage 3C fallback used only when no
-// withdrawal_policies row matches. It derives an asset-precision-aware
-// threshold from the asset's own decimal_exponent (the same Asset
-// registry the ledger itself reads - internal/ledger's own "never assume
-// an exponent" rule applies here too), rather than reusing Stage 3B's
-// flat, asset-blind constant: "1000 major units of THIS asset", never
-// "100000 of whatever minor unit happens to be in play".
+// withdrawal_policies row matches.
+//
+// It was originally designed to derive a per-asset threshold from the
+// asset's own decimal_exponent ("1000 major units of THIS asset").
+// Specialist review (ledger-finance) rejected that design: decimal
+// precision and real-world VALUE are different things a decimal exponent
+// says nothing about market price, so "1000 major units" of BTC and
+// "1000 major units" of EUR do not represent comparable real value -
+// for BTC specifically it would have raised the effective four-eyes
+// bar to roughly 1000 BTC, dramatically WEAKENING protection relative to
+// Stage 3B's flat constant. Building a genuinely value-equivalent
+// default would require FX/market-price data, which is explicitly out
+// of this stage's scope (directive: no FX/conversion accounting).
+//
+// The fallback therefore fails CLOSED instead: ThresholdAmount is always
+// 0, so every non-zero withdrawal in an asset with no configured policy
+// requires the full RequiredApprovals - the maximally conservative
+// behavior, and the same direction the overflow guard on a
+// value-scaled default already failed toward. A tenant that wants a
+// lighter-touch, asset-appropriate threshold must configure one
+// explicitly via a withdrawal_policies row.
 func defaultApprovalPolicy(ctx context.Context, tx pgx.Tx, assetCode string) (ApprovalPolicy, error) {
-	var exponent int
-	if err := tx.QueryRow(ctx, `SELECT decimal_exponent FROM assets WHERE code = $1`, assetCode).Scan(&exponent); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ApprovalPolicy{}, fmt.Errorf("withdrawal: resolve approval policy: unknown asset %q", assetCode)
-		}
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM assets WHERE code = $1)`, assetCode).Scan(&exists); err != nil {
 		return ApprovalPolicy{}, fmt.Errorf("withdrawal: read asset registry for default policy: %w", err)
 	}
+	if !exists {
+		return ApprovalPolicy{}, fmt.Errorf("withdrawal: resolve approval policy: unknown asset %q", assetCode)
+	}
 	return ApprovalPolicy{
-		ThresholdAmount:   defaultThresholdMinorUnits(exponent),
+		ThresholdAmount:   0,
 		RequiredApprovals: defaultRequiredApprovals,
 		// MFA does not exist yet (ADR 0017) - the fallback must never
 		// default to a policy this platform cannot actually enforce.
 		RequireStepUp: false,
 	}, nil
-}
-
-// defaultThresholdMinorUnits computes defaultApprovalThresholdMajorUnits
-// in exponent's minor units, failing toward STRICTER approval (threshold
-// 0, so every non-zero withdrawal needs the full RequiredApprovals)
-// rather than toward a silently wrong huge number, if the multiplication
-// would overflow int64. assets.decimal_exponent allows up to 18
-// (migration 0003's own CHECK constraint), which for a 1000-major-unit
-// default CAN overflow int64 (1000 * 10^18 > math.MaxInt64) - no asset
-// actually seeded in this platform has an exponent that large today, but
-// this function must not silently produce a wrong answer if one ever is.
-func defaultThresholdMinorUnits(exponent int) int64 {
-	threshold := int64(defaultApprovalThresholdMajorUnits)
-	for i := 0; i < exponent; i++ {
-		next := threshold * 10
-		if next/10 != threshold {
-			return 0
-		}
-		threshold = next
-	}
-	return threshold
 }

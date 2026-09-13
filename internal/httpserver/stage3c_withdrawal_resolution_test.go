@@ -75,6 +75,22 @@ func setupStage3CResolutionFixture(t *testing.T, amount int64) stage3CResolution
 	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 1_000_000)
 	wr := mustCreateWithdrawalRequest(t, pool, tenant.ID, brand.ID, player.ID, walletIDFor(t, pool, tenant.ID, player.ID, "EUR"), "EUR", amount)
 
+	// The zero-config policy fallback fails closed (threshold 0, always
+	// requiring 2 approvals - internal/withdrawal/policy.go) until a
+	// tenant configures a real threshold; these tests are about
+	// resolution, not approval-count policy, so configure one high
+	// enough for a single finance approval to suffice.
+	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO withdrawal_policies (tenant_id, asset_code, approval_threshold_minor_units, required_approvals, effective_from)
+			 VALUES ($1, 'EUR', 1000000, 2, now() - interval '1 hour')`,
+			tenant.ID,
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("configure withdrawal policy: %v", err)
+	}
+
 	mustOpenReviewQueue(t, srv, financeToken.AccessToken)
 	resp := postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/approve", financeToken.AccessToken, nil)
 	resp.Body.Close()
@@ -175,6 +191,48 @@ func TestWithdrawalResolve_DuplicateStatusResponsesIdempotent(t *testing.T) {
 
 	if got := releaseLedgerTransactionCount(t, f.pool, f.tenant.ID, f.withdrawalID); got != 1 {
 		t.Fatalf("expected exactly 1 release ledger transaction after two completion-adjacent resolve attempts, got %d", got)
+	}
+}
+
+// TestWithdrawalResolve_ProviderAmountMismatchRejected is a Stage 3C
+// specialist review fix (payments/ledger-finance P1): completing a
+// withdrawal on a succeeded provider outcome must cross-check the
+// provider's own confirmed amount/asset against what was originally
+// requested, never trust the reference match alone. A provider that
+// reports a different confirmed amount for the same reference (partial
+// settlement, a fee-adjusted figure, a provider-side data error) must
+// be refused - never silently completed with the ORIGINALLY REQUESTED
+// amount released against a payout whose provider-confirmed facts don't
+// match it.
+func TestWithdrawalResolve_ProviderAmountMismatchRejected(t *testing.T) {
+	f := setupStage3CResolutionFixture(t, 10000)
+	submitted := mustSubmitWithdrawal(t, f.srv, f.financeToken.AccessToken, f.withdrawalID)
+
+	f.mock.Resolve(submitted.ProviderReference, payments.OutcomeSucceeded, "", false)
+	f.mock.SetConfirmedAmount(submitted.ProviderReference, submitted.Amount+1, submitted.AssetCode)
+
+	resp := postJSON(t, f.srv, "/v1/admin/withdrawals/"+f.withdrawalID+"/resolve", f.financeToken.AccessToken, nil)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		var apiErr apierror.Error
+		decodeBody(t, resp, &apiErr)
+		t.Fatalf("expected 409 for a provider-confirmed amount mismatch, got %d: %+v", resp.StatusCode, apiErr)
+	}
+
+	// The request must remain `submitted` - never completed on
+	// mismatched data, and no release ledger transaction posted.
+	var state string
+	err := f.pool.WithTenant(context.Background(), f.tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT state FROM withdrawal_requests WHERE id = $1`, f.withdrawalID).Scan(&state)
+	})
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	if state != "submitted" {
+		t.Fatalf("expected state to remain 'submitted' after a rejected amount mismatch, got %q", state)
+	}
+	if got := releaseLedgerTransactionCount(t, f.pool, f.tenant.ID, f.withdrawalID); got != 0 {
+		t.Fatalf("expected zero release ledger transactions after a rejected amount mismatch, got %d", got)
 	}
 }
 

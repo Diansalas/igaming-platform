@@ -148,13 +148,26 @@ func RunLedgerVsProjection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p
 				MismatchKind:        MismatchKindMissingProjection,
 				InvestigationStatus: investigationStatusOpen,
 			})
-		case rebuilt.DebitTotal != projected.DebitTotal || rebuilt.CreditTotal != projected.CreditTotal:
+		case rebuilt.DebitTotal != projected.DebitTotal || rebuilt.CreditTotal != projected.CreditTotal ||
+			rebuilt.AssetCode != projected.AssetCode || rebuilt.AccountType != projected.AccountType:
+			// Specialist review (ledger-finance): the comparison
+			// originally covered only the two totals. AssetCode/
+			// AccountType are part of the SAME projection row and can
+			// drift independently of the totals (e.g. a direct
+			// administrative UPDATE touching the wrong column) - a
+			// corrupted account_type specifically would previously have
+			// gone undetected here while still feeding wallet.GetSummary
+			// elsewhere, mis-reporting what kind of balance a player's
+			// funds actually represent (e.g. a withdrawal hold reported
+			// as spendable cash).
 			mismatches = append(mismatches, Mismatch{
-				ID:                  uuid.New(),
-				TenantID:            tenantID,
-				ReconciliationKey:   accountID.String(),
-				ExpectedValue:       fmt.Sprintf("debit=%d credit=%d", rebuilt.DebitTotal, rebuilt.CreditTotal),
-				ActualValue:         fmt.Sprintf("debit=%d credit=%d", projected.DebitTotal, projected.CreditTotal),
+				ID:                uuid.New(),
+				TenantID:          tenantID,
+				ReconciliationKey: accountID.String(),
+				ExpectedValue: fmt.Sprintf("asset=%s type=%s debit=%d credit=%d",
+					rebuilt.AssetCode, rebuilt.AccountType, rebuilt.DebitTotal, rebuilt.CreditTotal),
+				ActualValue: fmt.Sprintf("asset=%s type=%s debit=%d credit=%d",
+					projected.AssetCode, projected.AccountType, projected.DebitTotal, projected.CreditTotal),
 				MismatchKind:        MismatchKindBalanceMismatch,
 				InvestigationStatus: investigationStatusOpen,
 			})

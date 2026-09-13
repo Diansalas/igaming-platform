@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -111,8 +112,22 @@ func run() error {
 	// scheduled - every tenant is swept on cfg.ReconciliationInterval
 	// (default hourly, the Blueprint's target cadence) until shutdown.
 	// See internal/reconciliation/scheduler.go for the per-tenant
-	// isolation/idempotency/observability guarantees.
-	go reconciliation.RunSchedulerLoop(ctx, pool, logger, cfg.ReconciliationInterval)
+	// isolation/idempotency/observability guarantees, and its own
+	// panic-recovery (this goroutine has no other backstop - unlike the
+	// HTTP path, there is no recoverMiddleware wrapping it).
+	//
+	// reconcilerDone lets graceful shutdown below actually wait
+	// (bounded) for the current tick to finish, rather than relying on
+	// pool.Close()'s incidental blocking behavior - specialist review
+	// (backend): an unbounded wait on a stuck query would otherwise hang
+	// shutdown indefinitely, unlike the HTTP server's own bounded
+	// Shutdown call just below.
+	var reconcilerWG sync.WaitGroup
+	reconcilerWG.Add(1)
+	go func() {
+		defer reconcilerWG.Done()
+		reconciliation.RunSchedulerLoop(ctx, pool, logger, cfg.ReconciliationInterval)
+	}()
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -144,6 +159,25 @@ func run() error {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("graceful shutdown: %w", err)
 	}
+
+	// The OS signal that got us here already canceled ctx (that's what
+	// unblocked the <-ctx.Done() case above), so RunSchedulerLoop's own
+	// ctx.Done() case is already unblocking its loop too - this is a
+	// bounded wait for whatever sweep tick was already in flight to
+	// actually finish, matching the HTTP server's own bounded Shutdown
+	// above rather than the previous, undocumented reliance on
+	// pool.Close()'s incidental blocking-until-idle behavior.
+	reconcilerDone := make(chan struct{})
+	go func() {
+		reconcilerWG.Wait()
+		close(reconcilerDone)
+	}()
+	select {
+	case <-reconcilerDone:
+	case <-time.After(10 * time.Second):
+		logger.Error("reconciliation scheduler did not stop within the shutdown timeout")
+	}
+
 	logger.Info("shutdown complete")
 	return nil
 }

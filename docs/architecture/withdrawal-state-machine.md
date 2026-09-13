@@ -1,14 +1,21 @@
 # Withdrawal State Machine
 
-Status: `IMPLEMENTED` (Stage 3B), with one documented exception noted in
-§3 (the invariant-#12 open-hold reconciliation check is `NOT IMPLEMENTED`).
-Designed in Stage 3A (Financial Architecture Freeze) and built in Stage 3B:
-migration `0026` (`withdrawal_requests`, `withdrawal_approvals`; RLS
-tightened by `0028`), `internal/withdrawal`, and the player/staff HTTP
-handlers in `internal/httpserver/withdrawal_handlers.go`. Source:
-Blueprint §4.6 ("withdrawals as a workflow, not
-an endpoint"), extending `07-payments-architecture.md`'s "Withdrawals as a
-workflow" section and `financial-transaction-flows.md` Flows 3–4. Owner:
+Status: `IMPLEMENTED` (Stage 3B core state machine) /
+`PARTIALLY IMPLEMENTED` (self-approval enforcement, hardened in Stage
+3C but dependent on optional staff identity linkage - §5 item 2; the
+`submitted`-stuck recovery path, manual not automated - §3), with one
+documented exception noted in §3 (the invariant-#12 open-hold
+reconciliation check is `NOT IMPLEMENTED`). Designed in Stage 3A
+(Financial Architecture Freeze), built in Stage 3B (migration `0026`:
+`withdrawal_requests`, `withdrawal_approvals`; RLS tightened by `0028`;
+`internal/withdrawal`; player/staff HTTP handlers in
+`internal/httpserver/withdrawal_handlers.go`), and hardened in Stage 3C
+(migrations `0029`/`0033`: self-approval trigger, four-eyes person-dedup;
+stranded-hold resolution; asset/tenant-aware approval policy
+configuration - see ADR 0023 and `withdrawal-policy-configuration.md`).
+Source: Blueprint §4.6 ("withdrawals as a workflow, not an endpoint"),
+extending `07-payments-architecture.md`'s "Withdrawals as a workflow"
+section and `financial-transaction-flows.md` Flows 3–4. Owner:
 `payments`, with `ledger-finance` on the ledger-visible transitions and
 `security` on the ADR-0017 step-up question (§6).
 
@@ -141,7 +148,15 @@ into the ledger only when there is a fact to post.
   way) are both **application-logic** invariants, not DB constraints —
   unlike the idempotency/uniqueness invariants elsewhere in this document,
   nothing at the database layer prevents a code defect from transitioning
-  `approved` on a single approval or leaving `submitted` unmonitored
+  `approved` on a single approval or leaving `submitted` unmonitored.
+  **Stage 3C** gave the `submitted`-stuck case a bounded, manual recovery
+  path: `LockSubmittedForResolution` + a single `provider.QueryStatus`
+  call (`POST /v1/admin/withdrawals/{id}/resolve`), which cross-checks the
+  provider's confirmed amount/asset before completing (never resubmits,
+  never re-routes to a different provider). This is staff-triggered, not
+  an automated sweep - `ListSubmittedForTenant` exists but nothing
+  currently schedules a call to it, so a stuck request still needs a human
+  to notice and invoke `/resolve`
   forever. Stage 3B must treat the four-eyes count check as a
   `code-reviewer`/`ledger-finance`-gated code path (same rigor as the
   idempotent-insert helper in ADR 0020), and `OPEN DECISION`: the
@@ -218,24 +233,47 @@ originally written (Stage 3A `security` review):
    authenticated session, never from the request body, and that principal
    must hold the withdrawal-approval RBAC permission **in the tenant that
    owns the request**. Otherwise "two distinct approver ids" is satisfiable
-   by one actor supplying two ids.
+   by one actor supplying two ids. **`IMPLEMENTED` (Stage 3C, hardened by
+   its own specialist review)**: "two distinct approver ids" alone was
+   insufficient - one person holding two staff logins linked to the same
+   `Person` could supply both. The distinct-approver count now dedupes
+   via `COALESCE(staff_users.person_id, approver_principal_id)`, so two
+   logins resolving to the same person count once - see ADR 0023 §1.
 2. **The approver is never the beneficiary.** A principal linked to the
    withdrawing `player_account_id` — or, where a staff member and a player
    can resolve to the same `Person` (realistic for our own B2C brand), any
    principal resolving to that `Person` — is rejected as an approver.
    Without this, a staff member who is also a player self-approves their
-   own payout.
-3. **Threshold mutation is itself a bypass.** If the four-eyes threshold
-   lives in tenant configuration, a single principal holding both
-   config-edit and approval permissions can raise the threshold above the
-   amount, single-approve, and lower it back — no constraint here would
-   notice. `threshold_amount_at_decision`/`request_amount_at_decision`
-   above make it detectable after the fact; *preventing* it requires the
-   two permissions to be separable, and every threshold change to write an
-   audit record naming the actor. `OPEN DECISION` (business/policy, not
-   invented here): whether config-edit and withdrawal-approval permissions
-   must be held by disjoint roles, and whether a threshold change applies
-   to already-open requests or only to ones created after it.
+   own payout. **`PARTIALLY IMPLEMENTED` (Stage 3C)**: `staff_users.
+   person_id` (migration `0029`) plus an authoritative `BEFORE INSERT`
+   trigger on `withdrawal_approvals` (migration `0029`/`0033`) enforce
+   this rule at the database itself, not merely the application layer,
+   for any staff/player pair where the linkage is established. The
+   linkage itself is optional, admin-asserted at staff-creation time,
+   unverified, and has no update path - a staff account created without
+   it (the default) is invisible to this check. Closing this fully needs
+   either verified staff identity binding (KYC-adjacent, out of current
+   scope) or disjoint staff-management/withdrawal-approval permissions -
+   see ADR 0023 §1 and §6.
+3. **Threshold mutation is itself a bypass.** The four-eyes threshold now
+   lives in tenant configuration (`withdrawal_policies`, Stage 3C - see
+   `withdrawal-policy-configuration.md`), so this is no longer
+   hypothetical: a single principal holding both config-write and
+   approval permissions can raise the threshold above the amount,
+   single-approve, and lower it back — no constraint here would notice.
+   `threshold_amount_at_decision`/`request_amount_at_decision` above make
+   it detectable after the fact; *preventing* it requires the two
+   permissions to be separable, and (once a write path exists - no admin
+   API writes `withdrawal_policies` yet, see `withdrawal-policy-
+   configuration.md` §5) every policy write to carry an audit record
+   naming the actor, per CLAUDE.md's standing rule for any admin/
+   financial mutation. `OPEN DECISION`
+   (business/policy, not invented here, unchanged by Stage 3C): whether
+   config-edit and withdrawal-approval permissions must be held by
+   disjoint roles, and whether a threshold change applies to already-open
+   requests or only to ones created after it - `effective_from` currently
+   applies uniformly to any decision made after that timestamp,
+   regardless of when the request itself was created.
 4. **Structuring below the threshold.** Nothing here stops one large payout
    being split into N sub-threshold requests, each needing a single
    approval. The mechanism hook is recorded now so Stage 3B need not

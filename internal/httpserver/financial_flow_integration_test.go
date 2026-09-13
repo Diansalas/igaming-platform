@@ -651,6 +651,23 @@ func TestFinancialHappyPath_EndToEnd(t *testing.T) {
 		t.Fatalf("expected withdrawal %s to appear in the staff review queue", wr.ID)
 	}
 
+	// The zero-config withdrawal policy fallback fails closed (threshold
+	// 0, always requiring 2 approvals - see internal/withdrawal/policy.go)
+	// specifically because no tenant has configured a real,
+	// asset-appropriate threshold yet. Configure one here so this
+	// end-to-end happy path exercises the below-threshold, single-
+	// approval branch it's actually testing.
+	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO withdrawal_policies (tenant_id, asset_code, approval_threshold_minor_units, required_approvals, effective_from)
+			 VALUES ($1, 'EUR', 1000000, 2, now() - interval '1 hour')`,
+			tenant.ID,
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("configure withdrawal policy: %v", err)
+	}
+
 	resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID+"/approve", financeTokens.AccessToken, map[string]string{})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 approving withdrawal, got %d", resp.StatusCode)

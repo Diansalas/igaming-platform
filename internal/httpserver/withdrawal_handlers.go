@@ -803,6 +803,25 @@ func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
 				return fmt.Errorf("payments: query status: %w", err)
 			}
 
+			// Stage 3C specialist review (payments/ledger-finance P1):
+			// QueryStatus's own contract (payments.StatusResult's doc
+			// comment) is that Amount/AssetCode let a caller cross-check
+			// the provider's own confirmed facts against what was
+			// requested, rather than trusting the reference match alone -
+			// exactly what the deposit-reversal path already does via
+			// ErrCallbackProviderMismatch. Completing on a succeeded
+			// outcome without this check would release the withdrawal
+			// hold and post the ORIGINALLY REQUESTED amount even if the
+			// provider is now reporting a different confirmed amount/asset
+			// for that reference (partial settlement, a fee-adjusted
+			// figure, or a provider-side data error) - a silent ledger/
+			// provider drift, never surfaced or reconciled.
+			if status.Outcome == payments.OutcomeSucceeded &&
+				(status.Amount != wr.Amount || status.AssetCode != wr.AssetCode) {
+				return fmt.Errorf("%w: withdrawal %s requested amount=%d asset=%s, provider confirmed amount=%d asset=%s",
+					payments.ErrCallbackProviderMismatch, id, wr.Amount, wr.AssetCode, status.Amount, status.AssetCode)
+			}
+
 			switch status.Outcome {
 			case payments.OutcomeSucceeded:
 				if err := withdrawal.Complete(ctx, tx, id, *wr.ProviderID, *wr.ProviderReference); err != nil {
@@ -841,6 +860,27 @@ func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 		if errors.Is(err, withdrawal.ErrStateConflict) {
 			apierror.Write(w, requestID, apierror.CodeConflict, "withdrawal is not submitted and awaiting resolution")
+			return
+		}
+		if errors.Is(err, payments.ErrCallbackProviderMismatch) {
+			// A real data-integrity conflict requiring investigation, not
+			// a routine retry - see the amount/asset cross-check above.
+			// The request is deliberately left at `submitted` (this error
+			// is returned before either Complete or Fail runs), so a
+			// human can resolve it once the discrepancy is understood.
+			logger.Error("resolve_withdrawal_provider_amount_mismatch", "error", err)
+			apierror.Write(w, requestID, apierror.CodeConflict, "provider-confirmed amount/asset does not match the withdrawal request")
+			return
+		}
+		if errors.Is(err, payments.ErrUnknownProvider) {
+			// Realistic ops scenario (a provider deregistered/renamed
+			// between submission and resolution) rather than the
+			// structurally-unreachable nil-reference case above - mapped
+			// the same way the analogous submit-path routing failure is
+			// (newSubmitWithdrawalHandler's ErrNoRoutableProvider ->
+			// CodeUnavailable), not a generic 500.
+			logger.Error("resolve_withdrawal_unknown_provider", "error", err)
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "the provider recorded on this withdrawal is not available on this deployment")
 			return
 		}
 		if err != nil {

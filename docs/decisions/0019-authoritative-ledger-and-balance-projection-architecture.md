@@ -137,12 +137,17 @@ provider state sits on `withdrawal_requests` itself —
 (`ProviderHealth` is an in-memory `PaymentProvider.HealthStatus()` call, not
 storage — `payment-orchestration.md` §6), and **no
 provider-credential-configuration table** (none was needed this stage; the
-only adapter is a mock with no per-tenant credential). The one table that
-does exist and does *not* satisfy the `tenant_id NOT NULL` rule above is
-`provider_capability_amount_limits` (migration `0024`), which has no
-`tenant_id` column of its own and is protected by a subquery into
-`provider_capabilities` — a known, documented gap, not a silent one
-(`financial-domain-model.md` scoping table).
+only adapter is a mock with no per-tenant credential).
+`provider_capability_amount_limits` (migration `0024`) originally had no
+`tenant_id` column of its own and was protected by a subquery into
+`provider_capabilities` instead — a known, documented gap, not a silent
+one (`financial-domain-model.md` scoping table). Stage 3C (migration
+`0030`) resolved this: the table now carries its own `tenant_id NOT
+NULL`, a composite `(provider_capability_id, tenant_id)` FK, and a
+direct `tenant_isolation` policy, satisfying the rule above like every
+other tenant-owned table (migration `0033` additionally added the
+player-scope exclusion guard every other staff/system-only financial
+table already carried — see ADR 0023 §2).
 `provider_capabilities` is named explicitly
 because ADR 0022 §3 makes provider routing configuration per-
 `(tenant_id, brand_id)`: even with no secret material in the row, a missed

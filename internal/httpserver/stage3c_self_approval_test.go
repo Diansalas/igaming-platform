@@ -24,6 +24,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
 // mustGetPlayerPersonID resolves a player_account's own person_id -
@@ -284,4 +285,99 @@ func walletIDFor(t *testing.T, pool *db.Pool, tenantID, playerAccountID uuid.UUI
 		t.Fatalf("resolve wallet id: %v", err)
 	}
 	return id
+}
+
+// TestWithdrawalApprove_MultiAccountIdentityBypassRejected closes a P1
+// finding from this stage's own specialist review pass (code-reviewer):
+// counting DISTINCT approver_principal_id alone let one human, holding
+// two staff logins linked to the SAME person, supply BOTH of the two
+// required approvals for a THIRD PARTY's withdrawal. Migration 0029's
+// self-approval trigger never fires here - neither login is the
+// withdrawing player's own beneficiary - so this is a distinct bypass
+// from A/B/C above ("multi-account identity bypass" as its own named
+// attack in the Stage 3C directive, not the self-approval case).
+// internal/withdrawal.Approve's readiness count now collapses two staff
+// logins sharing a person_id into one via
+// COALESCE(staff_users.person_id, approver_principal_id), closing it.
+func TestWithdrawalApprove_MultiAccountIdentityBypassRejected(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, mock := newMockOrchestrator()
+	srv := newFinancialTestServer(t, pool, issuer, orchestrator)
+
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	mustRegisterCapability(t, pool, tenant.ID, mock)
+
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	mallory := uuid.New()
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, mallory)
+		return err
+	}); err != nil {
+		t.Fatalf("seed colluding person: %v", err)
+	}
+	staffA := mustCreateStaffWithPerson(t, pool, tenant.ID, identity.StaffRoleFinance, "a-decent-password-1", &mallory)
+	staffB := mustCreateStaffWithPerson(t, pool, tenant.ID, identity.StaffRoleFinance, "a-decent-password-2", &mallory)
+	tokenA := mustLoginStaff(t, srv, tenant.Slug, staffA.Email, "a-decent-password-1")
+	tokenB := mustLoginStaff(t, srv, tenant.Slug, staffB.Email, "a-decent-password-2")
+
+	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 100000)
+	wr := mustCreateWithdrawalRequest(t, pool, tenant.ID, brand.ID, player.ID, walletIDFor(t, pool, tenant.ID, player.ID, "EUR"), "EUR", 5000)
+
+	mustOpenReviewQueue(t, srv, tokenA.AccessToken)
+
+	resp := postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/approve", tokenA.AccessToken, nil)
+	var first approveWithdrawalResponse
+	decodeBody(t, resp, &first)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("first approval (staffA): status %d", resp.StatusCode)
+	}
+	if first.Approved {
+		t.Fatal("expected a single approval not to satisfy the two-approval requirement")
+	}
+
+	resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/approve", tokenB.AccessToken, nil)
+	var second approveWithdrawalResponse
+	decodeBody(t, resp, &second)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("second approval (staffB, same person as staffA): status %d", resp.StatusCode)
+	}
+	if second.Approved {
+		t.Fatal("expected a second staff login resolving to the SAME person as the first to NOT satisfy the two-approval requirement - that is one human approving twice, not two humans")
+	}
+	if count := countWithdrawalApprovals(t, pool, tenant.ID, wr.ID); count != 2 {
+		t.Fatalf("expected exactly 2 recorded approval rows (both decisions ARE recorded, just not both counted toward readiness), got %d", count)
+	}
+
+	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		got, err := withdrawal.GetByID(ctx, tx, wr.ID)
+		if err != nil {
+			return err
+		}
+		if got.State != withdrawal.StatePendingReview {
+			t.Fatalf("expected state to remain pending_review after two same-person approvals, got %q", got.State)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("verify still pending: %v", err)
+	}
+
+	// A genuinely different, third person's approval DOES complete it -
+	// proving the fix rejects only the same-person collusion attempt,
+	// not approvals in general.
+	genuineFinance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleFinance, "a-decent-password-3")
+	genuineToken := mustLoginStaff(t, srv, tenant.Slug, genuineFinance.Email, "a-decent-password-3")
+	resp = postJSON(t, srv, "/v1/admin/withdrawals/"+wr.ID.String()+"/approve", genuineToken.AccessToken, nil)
+	var third approveWithdrawalResponse
+	decodeBody(t, resp, &third)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("third approval (genuinely different person): status %d", resp.StatusCode)
+	}
+	if !third.Approved {
+		t.Fatal("expected a genuinely different second person's approval to complete the two-approval requirement")
+	}
 }

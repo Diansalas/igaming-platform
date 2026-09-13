@@ -1,20 +1,34 @@
 # Reconciliation Model
 
-Status: `PARTIALLY IMPLEMENTED` (Stage 3B). **Only the ledger ↔ balance
-projection stream (§2.1) is implemented and tested**
-(`internal/reconciliation.RunLedgerVsProjection`, over the
-`reconciliation_runs` / `reconciliation_mismatches` tables of migration
-`0027`, RLS tightened by `0028`). Every other stream in §2 — wallet ↔ PSP,
-wallet ↔ casino, wallet ↔ sportsbook, provider payable, PSP clearing/
-reserve, crypto custodian — is `NOT IMPLEMENTED` and remains architecture
-only: no real PSP, casino, sportsbook or custodian relationship exists yet
-to reconcile against, so there is no counterparty statement to diff. Also
-`NOT IMPLEMENTED`: any scheduler. Nothing currently invokes
-`RunLedgerVsProjection` automatically — §2.1's "runs every hour" is the
-design target, not current behaviour; the function exists and is tested but
-must be called by a caller that does not yet exist. (The open-hold check
-`withdrawal-state-machine.md` §3 refers to this document for is likewise
-not built.) Source: Blueprint §4.2 (hourly reconciliation, zero
+Status: `PARTIALLY IMPLEMENTED` (Stage 3B core stream; Stage 3C
+scheduling). **Only the ledger ↔ balance projection stream (§2.1) is
+implemented and tested** (`internal/reconciliation.RunLedgerVsProjection`,
+over the `reconciliation_runs` / `reconciliation_mismatches` tables of
+migration `0027`, RLS tightened by `0028`, mismatch classification added
+by `0031`). Every other stream in §2 — wallet ↔ PSP, wallet ↔ casino,
+wallet ↔ sportsbook, provider payable, PSP clearing/reserve, crypto
+custodian — is `NOT IMPLEMENTED` and remains architecture only: no real
+PSP, casino, sportsbook or custodian relationship exists yet to
+reconcile against, so there is no counterparty statement to diff.
+
+**Scheduling is now `IMPLEMENTED` (Stage 3C)**:
+`internal/reconciliation.RunSchedulerLoop` (started in
+`cmd/platform-api/main.go`) invokes a sweep every
+`RECONCILIATION_INTERVAL_SECONDS` (default: hourly, matching §2.1's
+design target below) over every active tenant, each isolated in its own
+transaction with a transaction-scoped advisory lock
+(`internal/reconciliation/scheduler.go`). Every attempt (clean, mismatch
+found, lock-skipped, or failed) is recorded to `audit_log`; a mismatch
+found is logged at `Error` level, not merely inserted as a row -
+CLAUDE.md treats non-zero drift as a P1 incident and the runtime signal
+now says so. Known limitations, not yet closed: `reconciliation_runs`'
+`period_start`/`period_end` are recorded but do not actually bound the
+comparison (every run compares all-time ledger vs. projection totals),
+and an unresolved mismatch is re-detected as a new `open` row on every
+subsequent sweep with no deduplication against an existing open mismatch
+for the same key - see ADR 0023 §4 for the full account. (The open-hold
+check `withdrawal-state-machine.md` §3 refers to this document for is
+likewise not built.) Source: Blueprint §4.2 (hourly reconciliation, zero
 drift is P1), §6 (NFR table: reconciliation drift target = 0), extending
 `ledger-accounting-model.md` §5 and `06-wallet-ledger-architecture.md`.
 Owner: `ledger-finance`.

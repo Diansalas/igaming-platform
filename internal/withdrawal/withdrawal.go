@@ -47,8 +47,10 @@ const (
 )
 
 // Sentinel errors. Callers (HTTP handlers) are expected to map these to
-// specific HTTP statuses (e.g. ErrStateConflict/ErrDuplicateApproval/
-// ErrSelfApproval -> 409, ErrInsufficientFunds -> 422, ErrNotFound -> 404).
+// specific HTTP statuses (see internal/httpserver/withdrawal_handlers.go's
+// error-mapping switch on each handler for the exact, current mapping -
+// e.g. ErrStateConflict/ErrDuplicateApproval/ErrInsufficientFunds -> 409,
+// ErrSelfApproval/ErrStepUpRequired -> 403, ErrNotFound -> 404).
 var (
 	// ErrInvalidInput is returned for a structurally invalid call (missing
 	// required id, non-positive amount, empty reason code, etc.) caught
@@ -88,10 +90,12 @@ var (
 	ErrSelfApproval = errors.New("withdrawal: an approver cannot approve their own withdrawal")
 
 	// ErrStepUpRequired is returned by Approve when the resolved
-	// ApprovalPolicy (policy.go) requires a step-up/MFA challenge for
-	// this decision and none exists yet - see ErrStepUpRequired's use in
-	// policy.go for the full Stage 3C directive item 6 rationale (ADR
-	// 0017 preserved: MFA itself is not implemented here).
+	// ApprovalPolicy.RequireStepUp (policy.go) is true for a decision at
+	// or above threshold and no step-up/MFA challenge exists yet (ADR
+	// 0017 preserved: MFA itself is not implemented here). Approve's own
+	// doc comment below has the full Stage 3C directive item 6
+	// rationale and the exact point a real MFA integration should hook
+	// in.
 	ErrStepUpRequired = errors.New("withdrawal: this decision requires a step-up/MFA challenge, which is not yet implemented (ADR 0017)")
 
 	// ErrIdempotencyKeyReused is returned when a retried RequestWithdrawal
@@ -580,9 +584,23 @@ func Approve(
 	ready := !requiresMultipleApprovals
 	if requiresMultipleApprovals {
 		var distinctHumanApprovers int
+		// Stage 3C specialist review (code-reviewer P1): counting distinct
+		// approver_principal_id alone lets ONE human, holding two staff
+		// logins linked to the same person, supply both of the required
+		// approvals for someone ELSE's withdrawal - the self-approval
+		// guard (migration 0029/0033) never fires here since neither
+		// login is the withdrawing player's own beneficiary. Migration
+		// 0029 already added staff_users.person_id for exactly this class
+		// of identity - counting COALESCE(su.person_id,
+		// wa.approver_principal_id) collapses two logins resolving to the
+		// same person into one, while a staff row with no person_id
+		// linkage (the common case) still counts by its own principal id,
+		// unchanged from before.
 		if err := tx.QueryRow(ctx,
-			`SELECT COUNT(DISTINCT approver_principal_id) FROM withdrawal_approvals
-			 WHERE withdrawal_request_id = $1 AND decision = 'approve' AND is_automated_approval = false`,
+			`SELECT COUNT(DISTINCT COALESCE(su.person_id, wa.approver_principal_id))
+			 FROM withdrawal_approvals wa
+			 LEFT JOIN staff_users su ON su.id = wa.approver_principal_id
+			 WHERE wa.withdrawal_request_id = $1 AND wa.decision = 'approve' AND wa.is_automated_approval = false`,
 			requestID,
 		).Scan(&distinctHumanApprovers); err != nil {
 			return false, fmt.Errorf("withdrawal: count approvals: %w", err)

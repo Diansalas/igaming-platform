@@ -30,8 +30,14 @@ import (
 // holds the lock for this tenant; the caller treats that as "skip this
 // tick for this tenant", never as a failure.
 func TryRunLedgerVsProjectionForTenant(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, periodStart, periodEnd time.Time) (run Run, mismatches []Mismatch, acquired bool, err error) {
+	// hashtextextended (not hashtext) deliberately: hashtext returns a
+	// 32-bit int4, so with enough tenants two could hash to the same
+	// advisory-lock key and silently skip each other's sweep (specialist
+	// review: architect/ledger-finance). hashtextextended(_, 0) returns
+	// the full 64-bit hash pg_try_advisory_xact_lock(bigint) accepts,
+	// making an accidental collision astronomically less likely.
 	if err := tx.QueryRow(ctx,
-		`SELECT pg_try_advisory_xact_lock(hashtext('reconciliation:' || $1::text))`,
+		`SELECT pg_try_advisory_xact_lock(hashtextextended('reconciliation:' || $1::text, 0))`,
 		tenantID,
 	).Scan(&acquired); err != nil {
 		return Run{}, nil, false, fmt.Errorf("reconciliation: acquire tenant advisory lock: %w", err)
@@ -64,7 +70,11 @@ type SweepOutcome struct {
 func allTenantIDs(ctx context.Context, pool *db.Pool) ([]uuid.UUID, error) {
 	var ids []uuid.UUID
 	err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT id FROM tenants`)
+		// Specialist review (architect): a suspended/closed tenant has no
+		// legitimate reason to be swept - reconciling a closed tenant's
+		// (presumably frozen) books every hour forever is pure waste, not
+		// a safety measure.
+		rows, err := tx.Query(ctx, `SELECT id FROM tenants WHERE status = 'active'`)
 		if err != nil {
 			return err
 		}
@@ -110,12 +120,21 @@ func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodSta
 			if err != nil {
 				return err
 			}
+			// Specialist review (architect/ledger-finance): when skipped
+			// by lock contention, run is the zero value, so "status"
+			// would otherwise be an empty string - indistinguishable at a
+			// glance from a genuinely clean run whose Status field was
+			// somehow blank. Record "skipped" explicitly instead.
+			status := string(run.Status)
+			if !acquired {
+				status = "skipped"
+			}
 			return audit.Record(ctx, tx, audit.Entry{
 				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run",
 				TargetType: "reconciliation_run", TargetID: run.ID.String(), Outcome: audit.OutcomeSuccess,
 				Metadata: map[string]any{
 					"stream": string(StreamLedgerVsProjection), "skipped_lock_contention": !acquired,
-					"status": string(run.Status),
+					"status": status,
 				},
 			})
 		})
@@ -143,6 +162,17 @@ func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodSta
 			}); auditErr != nil && logger != nil {
 				logger.Error("reconciliation sweep: failed to audit tenant failure", "tenant_id", tenantID, "error", auditErr)
 			}
+		case outcome.Run.Status == StatusMismatchesFound:
+			// CLAUDE.md: "Any non-zero drift is a P1 incident." Logged at
+			// Error level (specialist review: ledger-finance), not Info -
+			// a mismatch found is not routine sweep telemetry, it is the
+			// exact condition this job exists to surface. The
+			// reconciliation_mismatches rows themselves are the durable
+			// record; this is the runtime signal an operator/alerting
+			// pipeline can act on without polling the table.
+			if logger != nil {
+				logger.Error("reconciliation sweep: MISMATCH FOUND", "tenant_id", tenantID, "run_id", outcome.Run.ID)
+			}
 		case logger != nil:
 			logger.Info("reconciliation sweep: tenant run complete",
 				"tenant_id", tenantID, "skipped_lock_contention", outcome.Skipped, "status", string(outcome.Run.Status))
@@ -166,6 +196,19 @@ func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodSta
 // never take down the platform it exists to protect.
 func RunSchedulerLoop(ctx context.Context, pool *db.Pool, logger *slog.Logger, interval time.Duration) {
 	runOnce := func() {
+		// Specialist review (backend, P0): this loop runs in a bare `go`
+		// statement (cmd/platform-api/main.go) with no equivalent of the
+		// HTTP path's recoverMiddleware. Without this recover, a panic
+		// anywhere in RunSweep - a future refactor's nil-pointer, a
+		// driver-level panic - would crash the ENTIRE platform-api
+		// process, not just reconciliation, defeating the very
+		// "reconciliation failing must never take down the platform it
+		// exists to protect" guarantee this package documents elsewhere.
+		defer func() {
+			if r := recover(); r != nil && logger != nil {
+				logger.Error("reconciliation sweep: recovered from panic", "panic", r)
+			}
+		}()
 		now := time.Now().UTC()
 		if _, err := RunSweep(ctx, pool, logger, now.Add(-interval), now); err != nil && logger != nil {
 			logger.Error("reconciliation sweep: failed to list tenants", "error", err)

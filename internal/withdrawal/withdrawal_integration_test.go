@@ -338,12 +338,18 @@ func TestFullHappyPath_RequestPendingReviewApproveSubmitComplete(t *testing.T) {
 		return MoveToPendingReview(ctx, tx, wr.ID)
 	})
 
+	// Explicit policy: the zero-config default requires 2 approvals for
+	// ANY non-zero withdrawal (fail-closed - see policy.go's
+	// defaultApprovalPolicy), so a single-approval happy path needs a
+	// configured threshold above the request amount.
+	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 1_000_000, 2, time.Now().Add(-time.Hour))
+
 	approverID := uuid.New()
 	var approved bool
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		// Below the (default, EUR 1,000.00) policy threshold - a single
-		// approval suffices.
+		// Below the configured policy threshold - a single approval
+		// suffices.
 		approved, err = Approve(ctx, tx, wr.ID, approverID, false, nil)
 		return err
 	})
@@ -513,6 +519,7 @@ func TestFail_PostSubmissionFailureRestoresPlayerCashBalance(t *testing.T) {
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return MoveToPendingReview(ctx, tx, wr.ID)
 	})
+	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 1_000_000, 2, time.Now().Add(-time.Hour))
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := Approve(ctx, tx, wr.ID, uuid.New(), false, nil)
 		return err

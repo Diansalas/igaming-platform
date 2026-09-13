@@ -21,45 +21,45 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
-// TestResolveApprovalPolicy_DefaultFallbackIsAssetPrecisionAware proves
+// TestResolveApprovalPolicy_DefaultFallbackFailsClosedForEveryAsset proves
 // the zero-config default (used when no withdrawal_policies row exists)
-// derives its threshold from each asset's OWN decimal_exponent - "1000
-// major units of THIS asset" - rather than reusing Stage 3B's flat,
-// asset-blind raw minor-unit constant. EUR/USD/GBP/BRL/MXN (exponent 2)
-// get 100,000; USDT (6) gets 1,000,000,000; BTC (8) gets
-// 100,000,000,000 - three different raw numbers for the same conceptual
-// "1000 units" policy, which is the whole point.
-func TestResolveApprovalPolicy_DefaultFallbackIsAssetPrecisionAware(t *testing.T) {
+// requires full approval scrutiny (ThresholdAmount == 0, so
+// wr.Amount >= 0 is always true) for every asset, regardless of that
+// asset's decimal_exponent.
+//
+// An earlier design derived a per-asset "1000 major units" default from
+// decimal_exponent alone. Specialist review (ledger-finance) rejected
+// that: decimal precision is not real-world value - "1000 major units"
+// of BTC and "1000 major units" of EUR are not comparable amounts, and
+// for BTC specifically that design would have raised the effective
+// four-eyes bar to roughly 1000 BTC, weakening protection relative to
+// even Stage 3B's flat constant. A genuinely value-equivalent default
+// would need FX/market-price data, which this stage explicitly excludes
+// (docs/architecture/withdrawal-policy-configuration.md §3) - so the
+// fallback fails closed instead, identically for every asset, until a
+// tenant configures a real, asset-appropriate withdrawal_policies row.
+func TestResolveApprovalPolicy_DefaultFallbackFailsClosedForEveryAsset(t *testing.T) {
 	pool := testPool(t)
 	tenantID := uuid.New() // no withdrawal_policies row will ever match this tenant - every asset below resolves via the fallback.
 
-	for _, c := range []struct {
-		assetCode     string
-		wantThreshold int64
-	}{
-		{"EUR", 100_000},
-		{"USD", 100_000},
-		{"USDT", 1_000_000_000},
-		{"BTC", 100_000_000_000},
-	} {
+	for _, assetCode := range []string{"EUR", "USD", "USDT", "BTC"} {
 		var policy ApprovalPolicy
 		err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			policy, err = ResolveApprovalPolicy(ctx, tx, tenantID, uuid.New(), nil, c.assetCode, time.Now())
+			policy, err = ResolveApprovalPolicy(ctx, tx, tenantID, uuid.New(), nil, assetCode, time.Now())
 			return err
 		})
 		if err != nil {
-			t.Fatalf("%s: ResolveApprovalPolicy: %v", c.assetCode, err)
+			t.Fatalf("%s: ResolveApprovalPolicy: %v", assetCode, err)
 		}
-		if policy.ThresholdAmount != c.wantThreshold {
-			t.Fatalf("%s: expected default threshold %d, got %d - the fallback is not asset-precision-aware",
-				c.assetCode, c.wantThreshold, policy.ThresholdAmount)
+		if policy.ThresholdAmount != 0 {
+			t.Fatalf("%s: expected the fail-closed default threshold 0, got %d", assetCode, policy.ThresholdAmount)
 		}
 		if policy.RequiredApprovals != defaultRequiredApprovals {
-			t.Fatalf("%s: expected default RequiredApprovals %d, got %d", c.assetCode, defaultRequiredApprovals, policy.RequiredApprovals)
+			t.Fatalf("%s: expected default RequiredApprovals %d, got %d", assetCode, defaultRequiredApprovals, policy.RequiredApprovals)
 		}
 		if policy.RequireStepUp {
-			t.Fatalf("%s: default policy must never require step-up (MFA does not exist yet)", c.assetCode)
+			t.Fatalf("%s: default policy must never require step-up (MFA does not exist yet)", assetCode)
 		}
 	}
 }
@@ -103,7 +103,7 @@ func TestResolveApprovalPolicy_ConfiguredPolicyNeverBleedsAcrossAssets(t *testin
 	if btcPolicy.ThresholdAmount != 5_000_000 || btcPolicy.RequiredApprovals != 3 {
 		t.Fatalf("BTC policy bled or was lost: got %+v", btcPolicy)
 	}
-	if usdPolicy.ThresholdAmount != 100_000 || usdPolicy.RequiredApprovals != defaultRequiredApprovals {
+	if usdPolicy.ThresholdAmount != 0 || usdPolicy.RequiredApprovals != defaultRequiredApprovals {
 		t.Fatalf("expected USD (unconfigured) to resolve its own default, got %+v - it must never inherit EUR's or BTC's configured row", usdPolicy)
 	}
 }

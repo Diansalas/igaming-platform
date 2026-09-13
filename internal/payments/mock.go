@@ -155,6 +155,23 @@ func (m *MockProvider) Resolve(providerReference string, outcome Outcome, declin
 	}
 }
 
+// SetConfirmedAmount lets a test simulate a provider whose QueryStatus
+// response reports a DIFFERENT amount/asset than what was originally
+// submitted (partial settlement, a fee-adjusted figure, a provider-side
+// data error) - the synthetic equivalent of a real PSP's confirmed
+// facts disagreeing with the request that was sent. Stage 3C hardening:
+// this is what proves newResolveWithdrawalHandler's amount/asset
+// cross-check (payments.ErrCallbackProviderMismatch) actually fires
+// rather than blindly trusting the reference match.
+func (m *MockProvider) SetConfirmedAmount(providerReference string, amount int64, assetCode string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if a, ok := m.attempts[providerReference]; ok {
+		a.amount = amount
+		a.assetCode = assetCode
+	}
+}
+
 // CallbackPayload builds a synthetic webhook body for providerReference,
 // as JSON, in the shape MockProvider.HandleCallback parses - test helper
 // standing in for "the provider's real webhook delivery", since Stage 3B
