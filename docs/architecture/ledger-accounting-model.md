@@ -106,6 +106,19 @@ never spans tenants — a database constraint (§6, invariant #5) ensures every 
 owns belongs to an account whose `tenant_id` matches the transaction's own
 `tenant_id`.
 
+**`provider_id`/`provider_tx_id` are opaque strings, never a provider
+type or enum.** This is what already makes the ledger provider-agnostic
+(per the business owner's multi-provider fiat/crypto requirement,
+formalized in `docs/decisions/0022-payment-provider-agnosticism-and-
+capability-model.md`): the ledger records *which adapter, which external
+reference*, and nothing about how that provider works. No table or
+invariant in this document may ever branch on a specific provider's
+identity — provider-specific behavior lives exclusively in that
+provider's `PaymentProvider`/`CryptoCustodyProvider` adapter
+(`payment-orchestration.md`, `crypto-custody-boundary.md`), translated
+into the same canonical flow shapes (`financial-transaction-flows.md`)
+before it ever reaches this model.
+
 `status`: `'posted'` is the only state a completed `LedgerTransaction` has
 — per principle 2 (append-only, no `UPDATE`/`DELETE` of historical
 entries), a posted transaction's entries are never edited or unposted.

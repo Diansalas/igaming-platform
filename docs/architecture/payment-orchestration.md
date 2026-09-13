@@ -23,7 +23,8 @@ PaymentProvider (per-adapter implementation)
   Withdraw(ctx, WithdrawRequest) (WithdrawResult, error)
   QueryStatus(ctx, provider_tx_id) (StatusResult, error)
   HandleCallback(ctx, rawPayload) (CallbackEvent, error)   -- verifies signature, parses provider-specific shape into a canonical CallbackEvent
-  Capabilities() ProviderCapabilities                       -- countries, currencies/assets, methods, min/max amounts
+  Capabilities() ProviderCapability                         -- adapter-declared layer only (no tenant/brand/priority/status,
+                                                            --   which are tenant-config data): docs/decisions/0022 §2
   HealthStatus(ctx) (ProviderHealth, error)
 ```
 
@@ -31,7 +32,15 @@ No PSP SDK or vendor-specific type ever appears above this interface —
 unchanged from `07-payments-architecture.md`. Each adapter is a
 `PaymentProvider` implementation; the mock PSP used in Stage 3B
 implementation is itself just another `PaymentProvider` implementation
-with synthetic success/decline/timeout behavior, not a special code path.
+with synthetic success/decline/timeout behavior, not a special code path,
+and must pass the same provider-conformance suite every real adapter
+does (`docs/decisions/0022` §6). **This interface, and every routing
+decision built on it, must remain payment-provider-agnostic**: the
+business owner has stated multi-provider fiat and crypto integration as a
+core commercial requirement (`docs/decisions/0022`), so nothing below may
+assume a single provider, a fixed provider list, or a fixed set of
+currencies/methods — every provider-specific fact is data
+(`ProviderCapability`, `docs/decisions/0022` §2), never a code branch.
 
 ## 3. `PaymentOrchestrator` — `ARCHITECTURAL DECISION`
 
@@ -92,7 +101,15 @@ next):
 Configuration for dimensions 1–4 lives in per-tenant provider
 configuration rows (consistent with CLAUDE.md's "nothing brand-specific
 may become a code path" — routing rules are configuration, not `if`
-statements keyed on tenant/brand identity).
+statements keyed on tenant/brand identity). Concretely, this means every
+candidate considered here is a `ProviderCapability` row
+(`docs/decisions/0022` §2) scoped by `(tenant_id, brand_id)`: **different
+brands under different or the same tenant may route the identical
+currency/asset to different providers simultaneously** — e.g. Brand A
+routes EUR to Provider A while Brand B routes EUR to Provider D, both
+live at once — and adding a provider that only one brand uses never
+touches another brand's configuration or the orchestrator's code
+(`docs/decisions/0022` §3, §5).
 
 `OPEN DECISION`: this routing order is written for deposits and is applied
 to withdrawals as-is, but a common gambling-AML control is "return to
@@ -243,10 +260,15 @@ credentials being *per-tenant configuration* and are binding on Stage 3B
   not fixed here.
 
 Orchestrator-level state (`DepositIntent`, `WithdrawalIntent` rows,
-provider health and provider configuration) is tenant-scoped and RLS-
-protected identically to every other tenant-owned table: `tenant_id NOT
-NULL` under `FORCE ROW LEVEL SECURITY`, and each of these tables is named
-in ADR 0019's enumerated table list so none is missed at migration time.
+provider health, and provider configuration — including the
+`provider_capabilities` / routing-priority rows of `docs/decisions/0022`
+§2, which are per-`(tenant_id, brand_id)` and therefore leak another
+tenant's provider set, limits and priorities if their policy is missed) is
+tenant-scoped and RLS-protected identically to every other tenant-owned
+table: `tenant_id NOT NULL` under `FORCE ROW LEVEL SECURITY`, and each of
+these tables is named in ADR 0019's enumerated table list so none is
+missed at migration time. None of them is platform-global, so none gets a
+dual-scope (ADR 0013) `tenant_id IS NULL` policy.
 Exact columns are deferred to Stage 3B migration design; the
 `tenant_id`-plus-`FORCE`-RLS requirement is not deferred.
 
@@ -257,12 +279,29 @@ column. A guessed key in a shared namespace would let one caller deny
 another's deposit, and under RLS the resulting unique violation against an
 invisible row is a cross-tenant existence oracle.
 
+## 11. Provider independence and agnosticism — `docs/decisions/0022`
+
+The full `ProviderCapability` model, the multi-tenant/brand routing
+requirement, the Crypto-Payment-Provider-vs-Crypto-Custodian distinction,
+the provider-addition checklist, and the provider-agnosticism test
+obligations Stage 3B must satisfy are specified once, canonically, in
+`docs/decisions/0022-payment-provider-agnosticism-and-capability-model.md`
+— not duplicated here. In short: adding a payment provider (fiat or
+crypto) is an adapter + a capability declaration + routing configuration
++ that adapter's own tests, and must never require changing `Wallet`,
+the ledger, the balance projection, any Mandatory Financial Invariant, or
+`financial-transaction-flows.md`.
+
 ## Cross-references
 
 - Ledger posting this orchestrator calls into: `financial-transaction-flows.md`
   Flows 1–4, `ledger-accounting-model.md`.
 - Withdrawal-specific workflow (approval, four-eyes): `withdrawal-state-machine.md`.
-- Crypto rail specifics: `crypto-custody-boundary.md`.
+- Crypto rail specifics, and the Crypto Payment Provider vs. Crypto
+  Custodian distinction: `crypto-custody-boundary.md`,
+  `docs/decisions/0022` §4.
+- Provider capability model, multi-tenant routing, provider independence,
+  test obligations: `docs/decisions/0022-payment-provider-agnosticism-and-capability-model.md`.
 - Reconciliation: `reconciliation-model.md`.
 - Existing orchestration/custody principles this document extends:
   `07-payments-architecture.md`.

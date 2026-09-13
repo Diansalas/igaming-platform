@@ -612,6 +612,153 @@ file, migration, or config file. Cross-reference integrity (every
 `§`-reference across all ten documents resolves to a real section) was
 checked and confirmed.
 
+## Stage 3A addendum — Payment Provider Agnosticism and Capability Model
+
+The business owner directed, as a core commercial requirement, that the
+platform integrate multiple replaceable fiat and crypto payment
+providers, with no core financial-system rewrite needed to add one. Still
+documentation-only — no wallet/ledger/orchestrator/adapter code exists.
+
+### Delivered (`NOT IMPLEMENTED` — architecture/design documents only)
+
+- `docs/decisions/0022-payment-provider-agnosticism-and-capability-model.md`
+  (new ADR) — the full `ProviderCapability` model (fiat currencies, crypto
+  assets, payment methods, countries, deposit/withdrawal/refund support,
+  min/max amount, settlement behavior, callback capability, priority,
+  tenant/brand availability, status), the multi-tenant/brand routing
+  requirement (different brands may route the same currency to different
+  providers simultaneously, entirely via configuration), the explicit
+  separation of **Crypto Payment Provider** (a `PaymentProvider`
+  implementation, routed like any fiat rail) from **Crypto Custodian** (a
+  `CryptoCustodyProvider` implementation, ADR 0008) — never collapsed into
+  one object even when one vendor performs both roles — a six-item
+  provider-addition checklist proving the core (`Wallet`, ledger, balance
+  projection, invariants, transaction flows) never needs to change to add
+  a provider, and a provider-agnosticism test plan for Stage 3B (provider-
+  conformance suite including the mock adapter, a provider-swap test, a
+  routing-matrix test, a no-provider-branch code-review gate, and a
+  custody-boundary-preserved test).
+- `payment-orchestration.md` updated: `Capabilities()` now returns the
+  full `ProviderCapability` shape rather than an unspecified placeholder;
+  §4's routing dimensions explicitly state that different brands may
+  route the same currency to different providers; new §11 points to
+  ADR 0022 as the canonical source rather than duplicating it.
+- `crypto-custody-boundary.md` updated: new §1.1 restates the Crypto-
+  Payment-Provider-vs-Crypto-Custodian separation as binding (with a
+  Mermaid diagram showing both paths into Wallet/Ledger), specifically
+  because this is the boundary most likely to be silently broken by a
+  future "it's just a payment gateway" integration that quietly acquires
+  custody-boundary trust.
+- `ledger-accounting-model.md` and `financial-domain-model.md`: brief
+  cross-reference additions confirming the ledger was already
+  provider-agnostic (`provider_id`/`provider_tx_id` are opaque strings,
+  never a provider type or enum) and pointing to ADR 0022 as the binding
+  statement of that property going forward.
+
+### Specialist review pass
+
+`payments`, `architect`, `security`, and `code-reviewer` independently
+reviewed this addendum (documentation-only — no application code exists
+in this domain). This pass found and fixed more substantive defects than
+the volume of new text might suggest — two reviewers independently caught
+the same high-severity issue, and `security` found two further real
+privilege-boundary gaps:
+
+- **Blocking, fixed (found independently by both `payments` and
+  `code-reviewer`)**: `ProviderCapability.provider_kind` originally
+  included `'crypto_custodian'` as a valid value on a row read by
+  `RouteProvider` — directly contradicting §4's own rule that a custodian
+  implements `CryptoCustodyProvider`, not `PaymentProvider`, and is never
+  a routing candidate. As written, a custodian row could enter the
+  routing pool and be selected for a deposit/withdrawal rail: exactly the
+  custody-boundary collapse this whole addendum exists to prevent.
+  Restricted to `'fiat' | 'crypto_payment'`.
+- **Blocking, fixed (`security`)**: the Crypto-Payment-Provider-vs-
+  Custodian separation was interface-shaped only — "never implements
+  `CryptoCustodyProvider`" constrains what an adapter is *declared as*,
+  not what a vendor *hands it at runtime*. A non-custodial-mode crypto
+  gateway can return a private key, seed phrase, spend-capable extended
+  key, or a signing handle in an ordinary API response or webhook; an
+  adapter that merely accepts/logs/persists it breaks ADR 0008 without
+  the interface rule ever being violated. Fixed with a new §4.1: such
+  material is rejected at parse time, never persisted or logged (not even
+  hashed), the operation fails, and a security alert fires; the canonical
+  request/response/callback shapes have no free-form passthrough field
+  that could carry it.
+- **Blocking, fixed (`security`)**: §4's "may share a vendor SDK/client
+  internally if convenient" for a dual-role vendor was a privilege-
+  escalation path — a shared authenticated client or API key gives the
+  payment adapter transitive custody scope. Fixed with a new §4.2:
+  sharing limited to stateless library code only, separate `provider_id`s
+  and separately-scoped credentials (the payment credential carries no
+  key-export/signing/transfer scope), independent rotation.
+- **Should-fix, fixed (`security`)**: ADR 0019's actor-authorization
+  matrix treated every "verified provider callback" as one undifferentiated
+  class; with N replaceable providers, any verified webhook key gained
+  the union of everything any provider could originate. Refined so a
+  provider's credential may only originate what its own
+  `ProviderCapability` declares, for the tenant/brand it's bound to.
+- **Should-fix, fixed (`security`)**: the new `provider_capabilities`
+  table was missing from ADR 0019's deliberately-enumerated RLS table
+  list and had no stated `tenant_id`/RLS shape of its own. Added, with
+  handle-not-material/CDC-exclusion/fingerprint-only-audit rules
+  mirroring `payment-orchestration.md` §10.
+- **Should-fix, fixed (`architect`)**: ADR 0022 §3 cited
+  `02-domain-and-service-boundaries.md` as already establishing the
+  nullable-`brand_id`-fallback configuration-override pattern it uses —
+  that document establishes no such pattern, and ADR 0012 actually went
+  the opposite way. Rewritten to state the pattern is established here
+  (justified by the same tenant-vs-brand split `financial-domain-model.md`
+  already uses for house-level accounts), with a composite FK added and
+  an `OPEN DECISION` on whether to generalize it platform-wide.
+- **Should-fix, fixed (`architect`, `payments`)**: the checklist's "adding
+  a provider never touches the ledger" claim was overstated — the *first*
+  crypto rail of either kind (custodian or crypto payment provider) has
+  nowhere valid to post its in-flight clearing leg, since `psp_clearing`
+  is fiat-only by definition. Recorded as a bounded, one-time exception
+  tied to the existing `crypto-custody-boundary.md` §4.1 open decision,
+  not a new one.
+- **Should-fix, fixed (`architect`)**: `ProviderCapability` silently
+  carried a `brand_id` column in violation of `financial-domain-model.md`'s
+  own brand-denormalization rule (only `Wallet`/`WithdrawalRequest` were
+  permitted to). That document's rule and scoping table are updated to
+  name it as the second permitted exception, with the reasoning stated
+  rather than a silent carve-out.
+- Several smaller fixes: an unfalsifiable "byte-identical ledger effects"
+  test claim narrowed to an enumerated field-level comparison; the mock-
+  conformance suite (§6) given concrete minimum assertions (decline-vs-
+  ambiguous distinguishability, callback idempotency, capability-shape
+  validation) after `payments` found it too vague to build a real suite
+  against; a stale reference to a `LedgerTransaction.status` column that
+  doesn't exist (§1.2 has none, by design) corrected to compare the
+  derived posted/reversed label instead; a per-asset `min_amount`/
+  `max_amount` bug fixed (was two scalar columns on a multi-asset row,
+  which would apply BTC satoshi limits to EUR cents).
+- Open decisions correctly recorded rather than invented: whether one
+  vendor may hold both payment and custody roles for a tenant at all
+  (concentration/blast-radius — a business/risk call); whether raw
+  provider payloads are retained at all and for how long; how a single
+  adapter serving many tenants selects the correct webhook-verification
+  key without trial-verifying against every tenant's key (a real gap in
+  the existing `payment-orchestration.md` §10 design, sharpened rather
+  than introduced by this addendum); where a crypto-payment-provider's
+  self-issued deposit addresses live, since `DepositAddress.custodian_ref`
+  is currently `NOT NULL`.
+- No specialist found scope creep — no vendor name, no hardcoded
+  currency/method/provider, and no credential-like value appears anywhere
+  in the new content; provider selection and integration remain
+  explicitly out of scope.
+
+### Verification performed
+
+Documentation-only: `git status`/`git diff --stat` confirmed only
+documentation files changed (one new ADR, edits to five existing
+documents including `docs/decisions/0019` for the RLS-table-list and
+actor-matrix refinements) — no `.go` file, migration, or config file.
+Cross-reference integrity re-checked after all four reviewers' concurrent
+edits: every `docs/decisions/0022 §N` reference across the four edited
+architecture documents resolves to a real section.
+
 ## Next stage
 
 Stage 3B (wallet/ledger/payments implementation) — not started; requires

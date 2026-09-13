@@ -116,8 +116,18 @@ the mixed tenant/brand/player/house scoping established in
 `wallet_balance_projection`, `withdrawal_requests`, `withdrawal_approvals`,
 `reconciliation_runs`, `reconciliation_mismatches`, and the payment-
 orchestration state tables (`deposit_intents`, `withdrawal_intents`,
-provider-health/provider-config rows) each carry `tenant_id NOT NULL` with
-`FORCE ROW LEVEL SECURITY`. This list is enumerated rather than left to
+`provider_capabilities` (ADR 0022 §2 — the tenant/brand-scoped provider
+capability and routing-priority rows), provider-health rows, and
+provider-credential-configuration rows) each carry `tenant_id NOT NULL` with
+`FORCE ROW LEVEL SECURITY`. `provider_capabilities` is named explicitly
+because ADR 0022 §3 makes provider routing configuration per-
+`(tenant_id, brand_id)`: even with no secret material in the row, a missed
+policy leaks which providers, limits, priorities and enabled assets another
+tenant runs on — commercially sensitive configuration, and a map of which
+rail to attack. A `brand_id IS NULL` row means "all brands **of that
+tenant**" and never "all tenants"; there is no platform-global capability
+row (ADR 0022 §2), so no `tenant_id IS NULL` dual-scope policy (ADR 0013)
+applies to this table either. This list is enumerated rather than left to
 "every table in this model" because the Stage 3A security review found
 `WithdrawalApproval` (`withdrawal-state-machine.md` §5) and
 `ReconciliationRun`/`ReconciliationMismatch` (`reconciliation-model.md` §5)
@@ -206,6 +216,17 @@ Non-negotiable, per the `security` specialist's testing responsibility:
 - A player principal cannot cause a `LedgerTransaction` of a
   staff/system-only `transaction_type` (`manual_adjustment`, any direct
   `house_gaming` credit, `bonus_grant`) — see the actor matrix below.
+- A **signature-verified callback from provider X** that (a) names a
+  `transaction_type` outside X's declared `ProviderCapability`, (b)
+  references an intent/`provider_tx_id` belonging to provider Y, (c) is a
+  `crypto_payment` provider emitting a custodian event, or (d) is a payments
+  credential emitting a gaming posting, is rejected and posts nothing —
+  proving the per-provider scoping in the actor matrix, not just the
+  per-actor-class one.
+- A `provider_capabilities` row for tenant A is invisible and unwritable
+  under tenant B's `app.tenant_id`, and no connection scope (including a
+  `WithoutTenant`/platform connection) returns capability rows across
+  tenants.
 
 ### Who may originate which posting (privilege-escalation boundary)
 
@@ -218,7 +239,7 @@ API that accepts an arbitrary `transaction_type`. The binding rule:
 | Actor class | May originate |
 |---|---|
 | Player session (brand frontend) | Only `deposit` *initiation* (no posting — the posting is the PSP callback), `withdrawal_requested` (hold), and withdrawal cancellation. A player action never directly produces a credit to `player_cash`/`player_bonus`. |
-| Verified provider callback (signature-verified adapter) | `deposit`, casino/sportsbook bet/win/settlement/void/rollback, `psp_*`, custodian events — scoped to the tenant resolved from the *credential the callback authenticated with*, never from a tenant/player identifier in the payload. |
+| Verified provider callback (signature-verified adapter) | `deposit`, casino/sportsbook bet/win/settlement/void/rollback, `psp_*`, custodian events — scoped to the tenant resolved from the *credential the callback authenticated with*, never from a tenant/player identifier in the payload, **and further scoped to the originating provider** (see below). |
 | Internal service (bonus engine, settlement job) | `bonus_grant`, `bonus_conversion`, `bonus_forfeiture`, `provider_settlement` — under a service identity (ADR 0014), not a player or staff identity. |
 | Staff principal with explicit RBAC permission | `manual_adjustment` only, four-eyes-gated above the configured threshold, `reason_code` mandatory. |
 
@@ -227,6 +248,36 @@ Enforcement is server-side at the posting API boundary (a per-
 inferred from which HTTP handler happened to call it. `OPEN DECISION`: the
 exact permission names for the staff row are Stage 3B RBAC detail; the
 *existence* of the check is not optional.
+
+**"Verified provider callback" is not one undifferentiated actor class**
+(added in the ADR 0022 multi-provider review). With a single mock PSP the
+row above was harmless; once the platform runs N replaceable providers
+(ADR 0022) plus a custodian, reading the row as "any signature-verified
+provider credential may originate any of these types" grants every adapter
+the *union* of all provider-originable postings. A low-trust local-method
+crypto/fiat gateway's webhook key would then be able to post a game
+settlement, a `psp_*` reversal, or a custodian withdrawal-completion event.
+The binding refinement, enforced at the posting API boundary:
+
+1. A callback authenticated with provider X's credential may originate only
+   the `transaction_type`s consistent with **X's own declared
+   `ProviderCapability`** (ADR 0022 §2 — `provider_kind`,
+   `supports_deposit`/`supports_withdrawal`/`supports_refund_reversal`,
+   supported assets) for the tenant/brand that credential is bound to.
+2. The posting must reference an intent/transaction the platform itself
+   created **for that same `provider_id`**. Provider X can never settle,
+   reverse, or complete a transaction belonging to provider Y, and
+   `(provider_id, provider_tx_id)` idempotency is keyed on the provider
+   resolved from the credential, never on a `provider_id` field in the
+   payload.
+3. A `provider_kind = 'crypto_payment'` adapter may **never** originate a
+   custodian event, and no `PaymentProvider` of any kind may originate a
+   posting attributed to the `CryptoCustodyProvider` leg
+   (`crypto-custody-boundary.md` §1.1, ADR 0022 §4). The reverse also
+   holds: a custodian credential does not gain PSP-callback privileges.
+4. Game-provider callbacks (casino/sportsbook bet/win/settlement) and
+   payment-provider callbacks are disjoint originator sets; a payments
+   credential never originates gaming postings and vice versa.
 
 ## Consequences
 
@@ -260,6 +311,17 @@ correctness of policies that do not exist yet. Nothing here may be read as
 "the financial subsystem is secure" — only as "this design, as documented,
 has no *known* isolation or escalation gap as of Stage 3A". Stage 3B
 requires its own review against the actual migrations and code.
+
+**Second pass (ADR 0022, multi-provider).** A follow-up `security` review
+covered the payment-provider-agnosticism addendum: the Crypto Payment
+Provider vs. Crypto Custodian separation, `ProviderCapability` credential
+and RLS handling, and this ADR's actor matrix under N providers. It added
+the per-provider scoping of the "verified provider callback" actor class
+above, `provider_capabilities` to the enumerated table list, and the
+inbound-key-material / shared-credential rules in ADR 0022 §4.1–§4.2.
+**Not in scope of that pass**: vendor due diligence, whether any specific
+provider's API in fact returns key material, custodian contract terms, and
+— as before — any code or migration, none of which exists.
 
 ## Owner
 

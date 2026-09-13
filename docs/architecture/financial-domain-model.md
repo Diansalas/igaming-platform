@@ -145,20 +145,31 @@ it is discharged by posted entries.
 | `WithdrawalApproval` (`withdrawal-state-machine.md` §5) | Tenant (via its `WithdrawalRequest`) | New this stage. Staff decisions, not player-owned; carries `tenant_id NOT NULL` for RLS on the row itself, matching its parent request. |
 | `DepositAddress` (`crypto-custody-boundary.md` §3) | Tenant + Brand + Player + Asset (via `wallet_id`) | New this stage. Brand is derived through `wallet_id`, not stored (see brand rule below). |
 | `ConversionOperation` (ADR 0021, and below) | Tenant + Player + Asset pair (via two wallets of one `player_account_id`) | Designed this stage, not implemented (ADR 0021). Both wallets belong to the same `PlayerAccount`, so brand is implicitly single-valued and no `brand_id` column is carried; it produces exactly one `LedgerTransaction` whose entries balance *per asset*. |
+| `ProviderCapability` (`docs/decisions/0022` §2/§3) | Tenant, optionally narrowed to Brand | Designed this stage, not implemented (ADR 0022). Payment-provider routing configuration, not ledger state. The one Stage 3A table that carries `brand_id` without a `wallet_id` — it is configuration that exists before any wallet does — and the only one where `brand_id` is *nullable* (NULL = every brand under that tenant; a brand-specific row replaces it for that brand). Constrained by `(brand_id, tenant_id) REFERENCES brands(id, tenant_id)` per ADR 0012; `tenant_id NOT NULL`, never platform-scoped. |
 | `ReconciliationRun` / `ReconciliationMismatch` (`reconciliation-model.md` §5) | Tenant | New this stage. Every stream in `reconciliation-model.md` §2 belongs to exactly one tenant; `tenant_id NOT NULL`, never platform-scoped (ADR 0019). Platform-wide drift dashboards read through the reporting layer, not through relaxed RLS. |
 
 ### Brand denormalization rule for new financial tables
 
 `brand_id` is denormalized **only** onto `Wallet` (with the composite FK
-above) and onto workflow tables that need to be listed/authorized per brand
-in the back office (`WithdrawalRequest`). Every other table introduced in
+above), onto workflow tables that need to be listed/authorized per brand
+in the back office (`WithdrawalRequest`), and onto per-brand
+*configuration* tables that have no wallet to reach brand through
+(`ProviderCapability`, ADR 0022 — payment routing configuration exists
+before and independently of any wallet). Every other table introduced in
 Stage 3A reaches brand through `wallet_id` and must **not** carry its own
 `brand_id` column — a second, independently-writable copy of brand is a
 drift risk with no RLS benefit, since all Stage 3A RLS policies key on
 `tenant_id` (plus player-principal scope via `wallet_id`), never on
 `brand_id`. Where a table does carry `brand_id`, it is constrained by a
-composite FK back to `wallets`/`player_accounts` so it can never disagree
-with the wallet it points at (exact key shape: Stage 3B migration design).
+composite FK so it can never disagree with what it points at: back to
+`wallets`/`player_accounts` for the wallet-derived cases, and directly to
+`brands (id, tenant_id)` (ADR 0012's own pattern) for the configuration
+case, which has no wallet ancestor (exact key shape: Stage 3B migration
+design). `ProviderCapability` is also the only one of these where
+`brand_id` is **nullable**, carrying the tenant-wide-default meaning
+defined in ADR 0022 §3; note that a NULL there means the composite FK is
+not checked at all (Postgres `MATCH SIMPLE`), so `tenant_id`'s own FK is
+what binds such a row.
 
 ## Cross-asset movement: `ConversionOperation`
 
@@ -193,7 +204,10 @@ brand-scope.
 - Ledger account types, transaction/entry shape, idempotency keys:
   `ledger-accounting-model.md`.
 - Canonical transaction flows: `financial-transaction-flows.md`.
-- Payment/PSP routing: `payment-orchestration.md`.
+- Payment/PSP routing, multi-provider fiat+crypto capability model,
+  provider independence:
+  `payment-orchestration.md`,
+  `docs/decisions/0022-payment-provider-agnosticism-and-capability-model.md`.
 - Withdrawal workflow: `withdrawal-state-machine.md`.
 - Crypto custody boundary: `crypto-custody-boundary.md`.
 - Reconciliation: `reconciliation-model.md`.

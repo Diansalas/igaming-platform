@@ -105,3 +105,28 @@ can proceed once Stage 3B is authorized.
    forward from Stage 0-2 and the hardening pass remain open
    (`docs/decisions/0005`; ADRs 0017/0018's open items; `brands`' public-
    read RLS breadth).
+
+## Stage 3A addendum — Payment Provider Agnosticism and Capability Model
+
+The business owner added a core commercial requirement mid-gate (before
+Stage 3B was authorized): the platform must integrate multiple
+replaceable fiat and crypto payment providers, with adding a provider
+never requiring a core financial-system rewrite. Addressed as a Stage 3A
+addendum (still documentation-only): new `docs/decisions/0022-payment-
+provider-agnosticism-and-capability-model.md`, plus updates to
+`payment-orchestration.md`, `crypto-custody-boundary.md`,
+`ledger-accounting-model.md`, and `financial-domain-model.md`. Full
+inventory in `docs/progress.md`'s "Stage 3A addendum" section.
+
+Independent specialist review (`payments`, `architect`, `security`,
+`code-reviewer`) of this addendum is complete. It found and fixed a
+blocking defect two reviewers caught independently (a `provider_kind`
+value that would have let a crypto custodian enter the payment-routing
+candidate pool — the exact custody-boundary collapse the addendum exists
+to prevent) plus two further `security`-found privilege-boundary gaps
+(inbound key material arriving in an ordinary payment-adapter API
+response; a shared-SDK path that would have given a payment adapter
+transitive custody scope). Full itemized findings:
+`docs/progress.md`'s "Stage 3A addendum" section. No wallet/ledger/
+orchestrator/adapter code exists; no real provider is integrated; no
+production credentials requested or stored; no specific vendor selected.
