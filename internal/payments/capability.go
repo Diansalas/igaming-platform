@@ -269,9 +269,9 @@ func WriteCapability(ctx context.Context, tx pgx.Tx, provider PaymentProvider, t
 	}
 	for _, lim := range cfg.AmountLimits {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO provider_capability_amount_limits (provider_capability_id, asset_code, min_amount, max_amount)
-			 VALUES ($1, $2, $3, $4)`,
-			written.ID, lim.AssetCode, lim.MinAmount, lim.MaxAmount,
+			`INSERT INTO provider_capability_amount_limits (provider_capability_id, tenant_id, asset_code, min_amount, max_amount)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			written.ID, tenantID, lim.AssetCode, lim.MinAmount, lim.MaxAmount,
 		); err != nil {
 			return uuid.Nil, fmt.Errorf("payments: write amount limit for %s: %w", lim.AssetCode, err)
 		}

@@ -38,6 +38,15 @@ type StaffUser struct {
 	PasswordHash string
 	Role         StaffRole
 	Status       string
+	// PersonID is nil for the overwhelming majority of staff accounts,
+	// which have no corresponding player account. It is set only for
+	// the rare, deliberately identified case of a real person who is
+	// both a platform/tenant staff member and a player at some brand -
+	// see migration 0029's own doc comment. It is what
+	// internal/withdrawal's BeneficiaryCheck (wired in
+	// internal/httpserver) compares against a withdrawal's own player
+	// account to authoritatively prevent self-approval.
+	PersonID *uuid.UUID
 }
 
 // GetStaffUserByEmail looks up a staff user. If tenantID is uuid.Nil, tx
@@ -50,9 +59,9 @@ func GetStaffUserByEmail(ctx context.Context, tx pgx.Tx, email string) (StaffUse
 	var s StaffUser
 	var tenantID *uuid.UUID
 	err := tx.QueryRow(ctx,
-		`SELECT id, tenant_id, email, password_hash, role, status FROM staff_users WHERE email = $1`,
+		`SELECT id, tenant_id, email, password_hash, role, status, person_id FROM staff_users WHERE email = $1`,
 		email,
-	).Scan(&s.ID, &tenantID, &s.Email, &s.PasswordHash, &s.Role, &s.Status)
+	).Scan(&s.ID, &tenantID, &s.Email, &s.PasswordHash, &s.Role, &s.Status, &s.PersonID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return StaffUser{}, ErrNotFound
 	}
@@ -75,9 +84,9 @@ func GetStaffUserByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (StaffUser, 
 	var s StaffUser
 	var tenantID *uuid.UUID
 	err := tx.QueryRow(ctx,
-		`SELECT id, tenant_id, email, password_hash, role, status FROM staff_users WHERE id = $1`,
+		`SELECT id, tenant_id, email, password_hash, role, status, person_id FROM staff_users WHERE id = $1`,
 		id,
-	).Scan(&s.ID, &tenantID, &s.Email, &s.PasswordHash, &s.Role, &s.Status)
+	).Scan(&s.ID, &tenantID, &s.Email, &s.PasswordHash, &s.Role, &s.Status, &s.PersonID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return StaffUser{}, ErrNotFound
 	}
@@ -97,17 +106,26 @@ func GetStaffUserByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (StaffUser, 
 // mismatch fails at the database, not silently. Callers (cmd/seed-admin,
 // the admin staff-creation endpoint) write the corresponding audit
 // record in the same tx.
-func CreateStaffUser(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, email, passwordHash string, role StaffRole) (StaffUser, error) {
+//
+// personID is nil for the overwhelming majority of staff accounts - see
+// StaffUser.PersonID's doc comment. Pass a non-nil value only when this
+// staff member is a KNOWN, deliberately identified dual-role individual
+// (also a player at some brand); the caller is responsible for having
+// actually verified that, since this function does not and cannot
+// (there is no reliable automatic way to detect it - see migration
+// 0029). An unknown/invalid person id fails with the same foreign-key
+// error Postgres would give for any other bad reference.
+func CreateStaffUser(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, email, passwordHash string, role StaffRole, personID *uuid.UUID) (StaffUser, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
-	s := StaffUser{ID: uuid.New(), TenantID: tenantID, Email: email, PasswordHash: passwordHash, Role: role, Status: "active"}
+	s := StaffUser{ID: uuid.New(), TenantID: tenantID, Email: email, PasswordHash: passwordHash, Role: role, Status: "active", PersonID: personID}
 
 	var tid *uuid.UUID
 	if tenantID != uuid.Nil {
 		tid = &tenantID
 	}
 	_, err := tx.Exec(ctx,
-		`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status) VALUES ($1, $2, $3, $4, $5, $6)`,
-		s.ID, tid, s.Email, s.PasswordHash, s.Role, s.Status,
+		`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		s.ID, tid, s.Email, s.PasswordHash, s.Role, s.Status, s.PersonID,
 	)
 	if err != nil {
 		if db.IsUniqueViolation(err) {

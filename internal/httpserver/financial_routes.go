@@ -52,6 +52,14 @@ func registerFinancialRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("POST /v1/admin/withdrawals/{id}/submit",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalApprove)(newSubmitWithdrawalHandler(deps)))))
 
+	// Stage 3C stranded-hold recovery - same permission as submit, since
+	// resolving a submitted withdrawal is the same class of action
+	// (deciding what happens to money already in flight).
+	mux.Handle("GET /v1/admin/withdrawals/submitted",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalApprove)(newListSubmittedWithdrawalsHandler(deps)))))
+	mux.Handle("POST /v1/admin/withdrawals/{id}/resolve",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalApprove)(newResolveWithdrawalHandler(deps)))))
+
 	// Provider capability configuration - tenant-scoped administrative
 	// action, gated by PermProviderConfigWrite.
 	mux.Handle("PUT /v1/admin/providers/{providerID}/capability",

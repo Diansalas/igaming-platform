@@ -20,13 +20,6 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/withdrawal"
 )
 
-func withdrawalApprovalThreshold(deps Deps) int64 {
-	if deps.WithdrawalApprovalThreshold > 0 {
-		return deps.WithdrawalApprovalThreshold
-	}
-	return defaultWithdrawalApprovalThreshold
-}
-
 type requestWithdrawalRequest struct {
 	AssetCode      string `json:"asset_code"`
 	Amount         int64  `json:"amount"`
@@ -349,13 +342,22 @@ type approveWithdrawalResponse struct {
 // approve at all before this handler runs, and internal/withdrawal.Approve
 // itself enforces the distinct-approver/threshold/duplicate invariants.
 //
-// beneficiaryCheck is passed as nil: this codebase's schema has no link
-// from staff_users to persons (Stage 2's identity model keeps staff and
-// player identity entirely separate tables with no person_id column on
-// staff_users), so there is no data this handler could check a "same
-// Person" self-approval bypass (#2) against. This is a genuine, currently
-// unclosed gap - flagged in the Stage 3B completion report, not silently
-// assumed closed, and not something this handler pretends to solve.
+// beneficiaryCheck (Stage 3C): closes withdrawal-state-machine.md §5
+// bypass #2 - "a staff member who is also a player self-approves their
+// own payout". migration 0029 added staff_users.person_id, so this
+// handler can now resolve both sides of the comparison and pass a real
+// check to withdrawal.Approve, which was already designed to accept one
+// (see BeneficiaryCheck's own doc comment in internal/withdrawal). This
+// is the SERVICE-LAYER half of a defense-in-depth pair: the same
+// migration also added an authoritative BEFORE INSERT trigger on
+// withdrawal_approvals that rejects the exact same condition at the
+// database itself, regardless of whether this check is ever bypassed,
+// disabled, or has a bug - see migration 0029's own doc comment for why
+// that trigger, not this closure, is what actually makes the rule
+// "authoritative, not merely audit-detectable" (the Stage 3C directive's
+// own phrase). This closure exists so a genuine self-approval attempt
+// fails with a clean ErrSelfApproval/409 instead of a raw Postgres
+// exception surfacing as a 500.
 func newApproveWithdrawalHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -379,8 +381,31 @@ func newApproveWithdrawalHandler(deps Deps) http.HandlerFunc {
 
 		var approved bool
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			beneficiaryCheck := func(approverPrincipalID uuid.UUID) (bool, error) {
+				var isBeneficiary bool
+				err := tx.QueryRow(ctx, `
+					SELECT pa.person_id IS NOT NULL
+						AND su.person_id IS NOT NULL
+						AND pa.person_id = su.person_id
+					FROM withdrawal_requests wr
+					JOIN player_accounts pa ON pa.id = wr.player_account_id
+					LEFT JOIN staff_users su ON su.id = $2
+					WHERE wr.id = $1`,
+					id, approverPrincipalID,
+				).Scan(&isBeneficiary)
+				if errors.Is(err, pgx.ErrNoRows) {
+					// The withdrawal itself doesn't exist (or isn't
+					// visible in this tenant scope) - Approve's own
+					// lockRequestForUpdate, called before this check runs,
+					// already returns ErrNotFound for that case; reaching
+					// here with no row is unexpected, so fail closed
+					// rather than silently reporting "not a beneficiary".
+					return false, fmt.Errorf("withdrawal: beneficiary check: request not found")
+				}
+				return isBeneficiary, err
+			}
 			var err error
-			approved, err = withdrawal.Approve(ctx, tx, id, approverID, withdrawalApprovalThreshold(deps), false, nil)
+			approved, err = withdrawal.Approve(ctx, tx, id, approverID, false, beneficiaryCheck)
 			if err != nil {
 				return err
 			}
@@ -412,6 +437,13 @@ func newApproveWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 		if errors.Is(err, withdrawal.ErrSelfApproval) {
 			apierror.Write(w, requestID, apierror.CodeForbidden, "cannot approve your own withdrawal")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrStepUpRequired) {
+			// Stage 3C directive item 6: the resolved policy requires a
+			// step-up/MFA challenge this platform cannot yet perform
+			// (ADR 0017) - fail closed rather than silently approve.
+			apierror.Write(w, requestID, apierror.CodeForbidden, "this withdrawal requires a step-up/MFA challenge that is not yet available")
 			return
 		}
 		if err != nil {
@@ -463,7 +495,7 @@ func newRejectWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			if err := withdrawal.Reject(ctx, tx, id, approverID, withdrawalApprovalThreshold(deps), req.ReasonCode); err != nil {
+			if err := withdrawal.Reject(ctx, tx, id, approverID, req.ReasonCode); err != nil {
 				return err
 			}
 			// See newApproveWithdrawalHandler's identical rationale.
@@ -651,6 +683,169 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 		if err != nil {
 			logger.Error("submit_withdrawal_failed", "error", err)
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to submit withdrawal")
+			return
+		}
+		resp := submitWithdrawalResponse{withdrawalRequestResponse: toWithdrawalRequestResponse(wr)}
+		if wr.ProviderID != nil {
+			resp.ProviderID = *wr.ProviderID
+		}
+		if wr.ProviderReference != nil {
+			resp.ProviderReference = *wr.ProviderReference
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// newListSubmittedWithdrawalsHandler is the staff-facing stranded-hold
+// recovery queue (Stage 3C): every withdrawal currently at `submitted`
+// with no automated path forward on its own (see LockSubmittedForResolution's
+// doc comment) - what a real operations team would need to see to know
+// which payouts need a manual status check.
+func newListSubmittedWithdrawalsHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+
+		var resp []staffWithdrawalResponse
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			requests, err := withdrawal.ListSubmittedForTenant(ctx, tx)
+			if err != nil {
+				return err
+			}
+			resp = make([]staffWithdrawalResponse, 0, len(requests))
+			for _, wr := range requests {
+				resp = append(resp, staffWithdrawalResponse{
+					withdrawalRequestResponse: toWithdrawalRequestResponse(wr),
+					PlayerAccountID:           wr.PlayerAccountID.String(),
+				})
+			}
+			return nil
+		})
+		if err != nil {
+			logger.Error("list_submitted_withdrawals_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to list submitted withdrawals")
+			return
+		}
+		if resp == nil {
+			resp = []staffWithdrawalResponse{}
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// newResolveWithdrawalHandler is the Stage 3C stranded-hold recovery
+// mechanism: for a `submitted` withdrawal, queries the SAME provider and
+// reference MarkSubmitted already recorded - never a second Withdraw
+// call (no resubmission) and never a different provider (no cascade) -
+// and transitions to `completed`/`failed` accordingly, or leaves the
+// request at `submitted` if the provider itself is still unresolved.
+// Safe to call any number of times, by any number of concurrent callers,
+// for the same request: LockSubmittedForResolution's row lock serializes
+// concurrent attempts exactly like LockApprovedForSubmission does for
+// submission (see that function's doc comment for the identical race
+// this closes), QueryStatus is a pure read with no side effect of its
+// own to duplicate, and Complete/Fail each re-check state == `submitted`
+// before acting, so a resolution that already happened (by a concurrent
+// caller, or a prior call once the provider later confirms) is reported
+// back accurately rather than double-posted.
+func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		if deps.PaymentOrchestrator == nil {
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "withdrawal resolution is not enabled on this deployment")
+			return
+		}
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		resolverID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid staff identity")
+			return
+		}
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid withdrawal id")
+			return
+		}
+
+		var wr withdrawal.WithdrawalRequest
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			wr, err = withdrawal.LockSubmittedForResolution(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			if wr.ProviderID == nil || wr.ProviderReference == nil {
+				// Structurally unreachable: MarkSubmitted always sets both
+				// atomically with the transition to `submitted` - fail
+				// closed rather than calling QueryStatus with an empty
+				// reference if this invariant is ever violated.
+				return fmt.Errorf("withdrawal: resolve: submitted request %s has no provider reference recorded", id)
+			}
+			provider, ok := deps.PaymentOrchestrator.Provider(*wr.ProviderID)
+			if !ok {
+				return fmt.Errorf("%w: provider %s", payments.ErrUnknownProvider, *wr.ProviderID)
+			}
+
+			status, err := provider.QueryStatus(ctx, *wr.ProviderReference)
+			if err != nil {
+				return fmt.Errorf("payments: query status: %w", err)
+			}
+
+			switch status.Outcome {
+			case payments.OutcomeSucceeded:
+				if err := withdrawal.Complete(ctx, tx, id, *wr.ProviderID, *wr.ProviderReference); err != nil {
+					return err
+				}
+			case payments.OutcomeDeclined:
+				reason := status.DeclineReason
+				if reason == "" {
+					reason = "provider_declined"
+				}
+				if err := withdrawal.Fail(ctx, tx, id, reason); err != nil {
+					return err
+				}
+			case payments.OutcomePending, payments.OutcomeAmbiguous:
+				// Still unresolved at the provider - left at `submitted`.
+				// Deliberately NOT a retry (no Withdraw call) and NOT a
+				// cascade (no other provider considered) - see this
+				// handler's own doc comment.
+			}
+
+			if err := audit.Record(ctx, tx, audit.Entry{
+				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: resolverID,
+				Action: "withdrawal.resolve_attempted.http", TargetType: "withdrawal_request", TargetID: id.String(),
+				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+				Metadata: map[string]any{"provider_outcome": string(status.Outcome)},
+			}); err != nil {
+				return err
+			}
+
+			wr, err = withdrawal.GetByID(ctx, tx, id)
+			return err
+		})
+		if errors.Is(err, withdrawal.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrStateConflict) {
+			apierror.Write(w, requestID, apierror.CodeConflict, "withdrawal is not submitted and awaiting resolution")
+			return
+		}
+		if err != nil {
+			logger.Error("resolve_withdrawal_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to resolve withdrawal")
 			return
 		}
 		resp := submitWithdrawalResponse{withdrawalRequestResponse: toWithdrawalRequestResponse(wr)}

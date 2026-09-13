@@ -69,6 +69,15 @@ type Config struct {
 	// tests). A real OTLP exporter is introduced when there's a concrete
 	// observability backend to send to.
 	OTelExporter string
+
+	// ReconciliationInterval is the cadence of the ledger-vs-projection
+	// reconciliation sweep (internal/reconciliation.RunSchedulerLoop,
+	// Stage 3C directive item 4). Defaults to the Blueprint's target
+	// cadence, hourly - reconciliation-model.md names no other cadence.
+	// Configurable only so tests and local development don't have to
+	// wait an hour to observe a sweep; production is expected to run at
+	// the default.
+	ReconciliationInterval time.Duration
 }
 
 // Load reads configuration from the process environment. It returns an
@@ -76,21 +85,22 @@ type Config struct {
 // misconfigured environment explicitly.
 func Load() (Config, error) {
 	cfg := Config{
-		Environment:         getEnvDefault("APP_ENV", "development"),
-		HTTPAddr:            getEnvDefault("HTTP_ADDR", ":8080"),
-		DatabaseURL:         os.Getenv("DATABASE_URL"),
-		DatabaseMaxConns:    10,
-		DatabaseConnTimeout: 5 * time.Second,
-		JWTActiveKID:        getEnvDefault("JWT_ACTIVE_KID", "k1"),
-		JWTSigningSecret:    os.Getenv("JWT_SIGNING_SECRET"),
-		JWTPreviousKID:      getEnvDefault("JWT_PREVIOUS_KID", "k0"),
-		JWTPreviousSecret:   os.Getenv("JWT_PREVIOUS_SECRET"),
-		JWTIssuer:           getEnvDefault("JWT_ISSUER", "igaming-platform"),
-		JWTAudience:         getEnvDefault("JWT_AUDIENCE", "platform-api"),
-		AccessTokenTTL:      15 * time.Minute,
-		RefreshTokenTTL:     30 * 24 * time.Hour,
-		OTelServiceName:     getEnvDefault("OTEL_SERVICE_NAME", "platform-api"),
-		OTelExporter:        getEnvDefault("OTEL_EXPORTER", "stdout"),
+		Environment:            getEnvDefault("APP_ENV", "development"),
+		HTTPAddr:               getEnvDefault("HTTP_ADDR", ":8080"),
+		DatabaseURL:            os.Getenv("DATABASE_URL"),
+		DatabaseMaxConns:       10,
+		DatabaseConnTimeout:    5 * time.Second,
+		JWTActiveKID:           getEnvDefault("JWT_ACTIVE_KID", "k1"),
+		JWTSigningSecret:       os.Getenv("JWT_SIGNING_SECRET"),
+		JWTPreviousKID:         getEnvDefault("JWT_PREVIOUS_KID", "k0"),
+		JWTPreviousSecret:      os.Getenv("JWT_PREVIOUS_SECRET"),
+		JWTIssuer:              getEnvDefault("JWT_ISSUER", "igaming-platform"),
+		JWTAudience:            getEnvDefault("JWT_AUDIENCE", "platform-api"),
+		AccessTokenTTL:         15 * time.Minute,
+		RefreshTokenTTL:        30 * 24 * time.Hour,
+		OTelServiceName:        getEnvDefault("OTEL_SERVICE_NAME", "platform-api"),
+		OTelExporter:           getEnvDefault("OTEL_EXPORTER", "stdout"),
+		ReconciliationInterval: time.Hour,
 	}
 
 	if v := os.Getenv("DATABASE_MAX_CONNS"); v != "" {
@@ -113,6 +123,16 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config: invalid REFRESH_TOKEN_TTL_SECONDS: %w", err)
 		}
 		cfg.RefreshTokenTTL = time.Duration(n) * time.Second
+	}
+	if v := os.Getenv("RECONCILIATION_INTERVAL_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid RECONCILIATION_INTERVAL_SECONDS: %w", err)
+		}
+		if n <= 0 {
+			return Config{}, fmt.Errorf("config: RECONCILIATION_INTERVAL_SECONDS must be positive")
+		}
+		cfg.ReconciliationInterval = time.Duration(n) * time.Second
 	}
 
 	if cfg.DatabaseURL == "" {

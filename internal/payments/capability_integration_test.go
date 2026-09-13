@@ -5,6 +5,7 @@ package payments
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 
@@ -238,5 +239,144 @@ func TestListRoutingCandidates_TenantIsolation(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("verify isolation: %v", err)
+	}
+}
+
+// TestProviderCapabilityAmountLimits_CrossTenantRoutingIsolation is
+// Stage 3C adversarial test 8.E ("provider amount limits from Tenant A
+// cannot affect Tenant B"). Both tenants configure the SAME provider_id
+// with deliberately DIFFERENT amount limits; an amount that would be
+// rejected under tenant A's own (narrow) limit must still route
+// successfully under tenant B's (wide) limit, proving RouteProvider
+// never consults another tenant's amount_limits row - if it did, this
+// would either wrongly reject tenant B's routable amount or wrongly
+// accept tenant A's unroutable one.
+func TestProviderCapabilityAmountLimits_CrossTenantRoutingIsolation(t *testing.T) {
+	pool := testPool(t)
+	fA := seedCapFixture(t, pool)
+	fB := seedCapFixture(t, pool)
+	providerA := NewMockProvider("shared-psp", "EUR")
+	providerB := NewMockProvider("shared-psp", "EUR")
+
+	err := pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := WriteCapability(ctx, tx, providerA, fA.tenantID, nil, CapabilityConfig{
+			SupportedFiatCurrencies: []string{"EUR"}, SupportedPaymentMethods: []string{"card"},
+			SupportsDeposit: true, AmountLimits: []AmountLimit{{AssetCode: "EUR", MinAmount: 100, MaxAmount: 5000}},
+			Status: CapabilityActive,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("write tenant A capability (narrow limit): %v", err)
+	}
+
+	err = pool.WithTenant(context.Background(), fB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := WriteCapability(ctx, tx, providerB, fB.tenantID, nil, CapabilityConfig{
+			SupportedFiatCurrencies: []string{"EUR"}, SupportedPaymentMethods: []string{"card"},
+			SupportsDeposit: true, AmountLimits: []AmountLimit{{AssetCode: "EUR", MinAmount: 100, MaxAmount: 100_000_000}},
+			Status: CapabilityActive,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("write tenant B capability (wide limit): %v", err)
+	}
+
+	orch := NewOrchestrator(map[string]PaymentProvider{"shared-psp": providerB})
+	const amountAboveTenantALimitButWithinTenantB = 50000
+
+	// Under tenant B's own scope, an amount tenant A's limit would reject
+	// must still route successfully - proving tenant B's routing decision
+	// used tenant B's own limit row, never tenant A's.
+	err = pool.WithTenant(context.Background(), fB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, capability, err := orch.RouteProvider(ctx, tx, RoutingRequest{
+			TenantID: fB.tenantID, BrandID: fB.brandID, AssetCode: "EUR", PaymentMethod: "card",
+			Amount: amountAboveTenantALimitButWithinTenantB, Operation: OperationDeposit,
+		})
+		if err != nil {
+			return fmt.Errorf("expected tenant B to route this amount under its own wide limit: %w", err)
+		}
+		if capability.ProviderID != "shared-psp" {
+			t.Fatalf("expected shared-psp to be selected, got %q", capability.ProviderID)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Under tenant A's own scope, the SAME amount must be refused -
+	// proving tenant A's routing decision is still governed by its own
+	// narrow limit and was never widened by tenant B's row existing.
+	orchA := NewOrchestrator(map[string]PaymentProvider{"shared-psp": providerA})
+	err = pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, _, err := orchA.RouteProvider(ctx, tx, RoutingRequest{
+			TenantID: fA.tenantID, BrandID: fA.brandID, AssetCode: "EUR", PaymentMethod: "card",
+			Amount: amountAboveTenantALimitButWithinTenantB, Operation: OperationDeposit,
+		})
+		return err
+	})
+	if !errors.Is(err, ErrNoRoutableProvider) {
+		t.Fatalf("expected ErrNoRoutableProvider for tenant A (amount exceeds its own narrow limit), got %v", err)
+	}
+}
+
+// TestProviderCapabilityAmountLimits_CrossTenantWriteRejected is Stage
+// 3C adversarial test 8.F ("provider amount-limit writes cannot cross
+// tenant boundary"). A connection scoped to tenant B attempting to
+// INSERT an amount-limit row against tenant A's own provider_capability_id
+// - even supplying tenant A's real, valid id - must be rejected: either
+// by RLS's WITH CHECK (tenant_id must equal the connection's own
+// app.tenant_id) or by the composite FK (provider_capability_id,
+// tenant_id) requiring the two to actually agree, whichever fires first.
+func TestProviderCapabilityAmountLimits_CrossTenantWriteRejected(t *testing.T) {
+	pool := testPool(t)
+	fA := seedCapFixture(t, pool)
+	fB := seedCapFixture(t, pool)
+	providerA := NewMockProvider("mock-psp", "EUR")
+
+	var capabilityAID uuid.UUID
+	err := pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		capabilityAID, err = WriteCapability(ctx, tx, providerA, fA.tenantID, nil, CapabilityConfig{
+			SupportedFiatCurrencies: []string{"EUR"}, SupportedPaymentMethods: []string{"card"},
+			SupportsDeposit: true, AmountLimits: nil, Status: CapabilityActive,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("write tenant A capability: %v", err)
+	}
+
+	// Attempt 1: forged tenant_id matching the connection's own scope
+	// (fB.tenantID) but a provider_capability_id that belongs to tenant
+	// A - the composite FK must reject this, since no row of
+	// provider_capabilities has (id=capabilityAID, tenant_id=fB.tenantID).
+	err = pool.WithTenant(context.Background(), fB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO provider_capability_amount_limits (provider_capability_id, tenant_id, asset_code, min_amount, max_amount)
+			 VALUES ($1, $2, 'EUR', 100, 1000)`,
+			capabilityAID, fB.tenantID,
+		)
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected the composite FK to reject a provider_capability_id/tenant_id pair that doesn't match any real capability row")
+	}
+
+	// Attempt 2: the honest tenant_id (fA.tenantID) alongside tenant A's
+	// real capability id, but issued from a connection scoped to tenant
+	// B - RLS's WITH CHECK must reject this regardless of the FK being
+	// satisfiable, since app.tenant_id is fB.tenantID here.
+	err = pool.WithTenant(context.Background(), fB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO provider_capability_amount_limits (provider_capability_id, tenant_id, asset_code, min_amount, max_amount)
+			 VALUES ($1, $2, 'EUR', 100, 1000)`,
+			capabilityAID, fA.tenantID,
+		)
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected RLS's WITH CHECK to reject an INSERT naming a different tenant_id than the connection's own scope")
 	}
 }

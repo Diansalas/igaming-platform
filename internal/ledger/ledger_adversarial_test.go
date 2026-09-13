@@ -584,12 +584,18 @@ func TestPost_AssetsWithDifferentExponentsAreAccountedIndependently(t *testing.T
 				t.Fatalf("%s: expected asset %s, got %s", c.name, c.assetCode, projected.AssetCode)
 			}
 			// The projection is only a cache - the ledger itself must
-			// carry the same exact integers.
+			// carry the same exact integers. Compared field-by-field,
+			// not via struct equality: RebuildBalance never sets Found
+			// (Stage 3C addition, meaningful only for a
+			// GetProjectedBalance read - see its own doc comment), so a
+			// whole-struct comparison against a found GetProjectedBalance
+			// result would always spuriously differ on that field alone.
 			rebuilt, err := RebuildBalance(ctx, tx, c.accountID)
 			if err != nil {
 				return err
 			}
-			if rebuilt != projected {
+			if rebuilt.AssetCode != projected.AssetCode || rebuilt.AccountType != projected.AccountType ||
+				rebuilt.DebitTotal != projected.DebitTotal || rebuilt.CreditTotal != projected.CreditTotal {
 				t.Fatalf("%s: ledger-derived balance %+v differs from projection %+v", c.name, rebuilt, projected)
 			}
 		}

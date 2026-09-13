@@ -22,6 +22,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/httpserver"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/reconciliation"
 )
 
 func main() {
@@ -104,6 +105,14 @@ func run() error {
 		RefreshTokenTTL:     cfg.RefreshTokenTTL,
 		PaymentOrchestrator: orchestrator,
 	})
+
+	// Stage 3C directive item 4: operationalize the ledger-vs-projection
+	// reconciliation stream, which Stage 3B built but never actually
+	// scheduled - every tenant is swept on cfg.ReconciliationInterval
+	// (default hourly, the Blueprint's target cadence) until shutdown.
+	// See internal/reconciliation/scheduler.go for the per-tenant
+	// isolation/idempotency/observability guarantees.
+	go reconciliation.RunSchedulerLoop(ctx, pool, logger, cfg.ReconciliationInterval)
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,

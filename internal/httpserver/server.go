@@ -19,15 +19,6 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payments"
 )
 
-// defaultWithdrawalApprovalThreshold is the four-eyes threshold (EUR-
-// equivalent minor units, applied uniformly per asset for Stage 3B)
-// above which a withdrawal requires two distinct human approvals rather
-// than one (withdrawal-state-machine.md §5). Per-tenant/per-asset
-// configurable thresholds are an explicit OPEN DECISION in that document,
-// not resolved here - this is a safe, conservative default, not a final
-// business policy.
-const defaultWithdrawalApprovalThreshold = 100000 // e.g. EUR 1,000.00 at a 2-decimal exponent
-
 // Deps are the dependencies routes need. Kept as one small struct so
 // New's signature doesn't grow a parameter per handler as endpoints are
 // added.
@@ -51,9 +42,6 @@ type Deps struct {
 	// them (e.g. a future read-only reporting deployment) aren't forced
 	// to wire one up.
 	PaymentOrchestrator *payments.Orchestrator
-	// WithdrawalApprovalThreshold overrides defaultWithdrawalApprovalThreshold
-	// when non-zero.
-	WithdrawalApprovalThreshold int64
 }
 
 // New builds the fully-wired http.Handler for platform-api: global

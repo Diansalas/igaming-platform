@@ -12,6 +12,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -182,9 +183,11 @@ func TestReject_DuplicateDecisionBySameApproverRejected(t *testing.T) {
 	})
 
 	approver := uuid.New()
-	const threshold = int64(50_000) // amount (100,000) >= threshold: two humans required, so one approval leaves the request open to a second decision attempt.
+	// amount (100,000) >= the default policy threshold (EUR 1,000.00 =
+	// 100,000 minor units, via ">="): two humans required, so one
+	// approval leaves the request open to a second decision attempt.
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, approver, threshold, false, nil)
+		approved, err := Approve(ctx, tx, wr.ID, approver, false, nil)
 		if err != nil {
 			return err
 		}
@@ -195,7 +198,7 @@ func TestReject_DuplicateDecisionBySameApproverRejected(t *testing.T) {
 	})
 
 	err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return Reject(ctx, tx, wr.ID, approver, threshold, "changed_my_mind")
+		return Reject(ctx, tx, wr.ID, approver, "changed_my_mind")
 	})
 	if !errors.Is(err, ErrDuplicateApproval) {
 		t.Fatalf("expected ErrDuplicateApproval when the same approver who approved then attempts to reject, got %v", err)
@@ -241,7 +244,7 @@ func TestWithdrawalApprovals_ApproverPrincipalIdImmutableAndAccurate(t *testing.
 
 	approver := uuid.New()
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, approver, 1_000_000, false, nil)
+		approved, err := Approve(ctx, tx, wr.ID, approver, false, nil)
 		if err != nil {
 			return err
 		}
@@ -320,11 +323,13 @@ func TestApprove_ThresholdAmountRecordedPerDecisionAndCurrentThresholdGovernsRea
 		return MoveToPendingReview(ctx, tx, wr.ID)
 	})
 
-	// Decision 1: threshold below the request amount -> requiresTwoHumans
-	// is true, and a single human approval must not be enough.
+	// Decision 1: an explicit policy row, threshold below the request
+	// amount -> requiresMultipleApprovals is true, and a single human
+	// approval must not be enough.
+	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 50_000, 2, time.Now().Add(-time.Hour))
 	approver1 := uuid.New()
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, approver1, 50_000, false, nil)
+		approved, err := Approve(ctx, tx, wr.ID, approver1, false, nil)
 		if err != nil {
 			return err
 		}
@@ -334,13 +339,15 @@ func TestApprove_ThresholdAmountRecordedPerDecisionAndCurrentThresholdGovernsRea
 		return nil
 	})
 
-	// Decision 2: a DIFFERENT threshold, now above the request amount -
-	// requiresTwoHumans is false for THIS call, so this second approval
-	// alone satisfies readiness (the mechanism reads its own call's
-	// threshold input, never a value memoized from decision 1).
+	// Decision 2: a second, later-effective policy row raises the
+	// threshold above the request amount - requiresMultipleApprovals is
+	// false for THIS call, so this second approval alone satisfies
+	// readiness (the mechanism resolves its own call's policy fresh
+	// every time, never a value memoized from decision 1).
+	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 200_000, 2, time.Now())
 	approver2 := uuid.New()
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, approver2, 200_000, false, nil)
+		approved, err := Approve(ctx, tx, wr.ID, approver2, false, nil)
 		if err != nil {
 			return err
 		}
@@ -425,7 +432,7 @@ func TestLockApprovedForSubmission_ConcurrentSubmitsOnlyOneReachesProvider(t *te
 		return MoveToPendingReview(ctx, tx, wr.ID)
 	})
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, uuid.New(), 1_000_000, false, nil)
+		approved, err := Approve(ctx, tx, wr.ID, uuid.New(), false, nil)
 		if err != nil {
 			return err
 		}
@@ -488,5 +495,116 @@ func TestLockApprovedForSubmission_ConcurrentSubmitsOnlyOneReachesProvider(t *te
 	})
 	if final.State != StateSubmitted {
 		t.Fatalf("expected final state %q, got %q", StateSubmitted, final.State)
+	}
+}
+
+// TestApprove_ConcurrentDistinctApproversOnlyRequiredCountSatisfiesReadiness
+// is Stage 3C adversarial test 8.D: "two simultaneous approval requests -
+// only valid required approvals count". Three DISTINCT human approvers
+// call Approve for the SAME above-threshold (RequiredApprovals=2) request
+// at once. lockRequestForUpdate (withdrawal.go) must serialize them: the
+// request transitions to `approved` exactly once, driven by exactly the
+// first two approvals to acquire the row lock, in whatever order the
+// scheduler happens to run them - never zero, never both simultaneously
+// reporting `approved`, and the third (superfluous) approver's decision
+// must still be recorded (a valid, distinct human approval is never
+// silently dropped) but must see ErrStateConflict, never a phantom
+// second `approved` transition, once the request has already left
+// pending_review.
+func TestApprove_ConcurrentDistinctApproversOnlyRequiredCountSatisfiesReadiness(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 1_000_000)
+
+	wr := mustRequestWithdrawal(t, pool, f, 100_000, "wd-concurrent-approvals") // >= the default 100,000 threshold: 2 approvals required.
+	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return MoveToPendingReview(ctx, tx, wr.ID)
+	})
+
+	const n = 3
+	approvers := make([]uuid.UUID, n)
+	for i := range approvers {
+		approvers[i] = uuid.New()
+	}
+
+	results := make([]bool, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				approved, err := Approve(ctx, tx, wr.ID, approvers[i], false, nil)
+				results[i] = approved
+				return err
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	var succeededApproved, stateConflicts, otherErrors int
+	for i, err := range errs {
+		switch {
+		case err == nil && results[i]:
+			succeededApproved++
+		case err == nil && !results[i]:
+			// This approver's decision was recorded (no error) but
+			// didn't itself trigger the transition - valid when it was
+			// one of the first two to be recorded, whichever those turn
+			// out to be under the race.
+		case errors.Is(err, ErrStateConflict):
+			stateConflicts++
+		default:
+			otherErrors++
+			t.Errorf("goroutine %d: unexpected error: %v", i, err)
+		}
+	}
+	if otherErrors != 0 {
+		t.Fatalf("expected only nil or ErrStateConflict outcomes, got %d unexpected error(s)", otherErrors)
+	}
+	// Exactly one goroutine's call is the one that observes and causes
+	// the pending_review -> approved transition (Approve returns
+	// approved=true only on that call).
+	if succeededApproved != 1 {
+		t.Fatalf("expected exactly 1 goroutine to observe approved=true, got %d", succeededApproved)
+	}
+	// The remaining n-1 calls each either recorded a (superfluous but
+	// valid) decision with approved=false, or - if it lost the row-lock
+	// race until AFTER the transition already committed - got
+	// ErrStateConflict. Both are acceptable serializations of the same
+	// underlying race; what matters is neither corrupted state nor
+	// silently vanished. The precise split is verified below via the
+	// actual recorded-approvals count.
+
+	// However the race resolved, the request must have ended up
+	// deterministically approved - never stuck in pending_review, never
+	// double-approved.
+	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		got, err := GetByID(ctx, tx, wr.ID)
+		if err != nil {
+			return err
+		}
+		if got.State != StateApproved {
+			t.Fatalf("expected final state %q, got %q", StateApproved, got.State)
+		}
+		return nil
+	})
+
+	// Only genuinely distinct human approvals were ever counted -
+	// exactly as many withdrawal_approvals rows exist as approvers that
+	// got a nil error (a decision was actually recorded for them).
+	var recordedCount int
+	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT COUNT(DISTINCT approver_principal_id) FROM withdrawal_approvals WHERE withdrawal_request_id = $1 AND decision = 'approve'`,
+			wr.ID,
+		).Scan(&recordedCount)
+	})
+	wantRecorded := n - stateConflicts
+	if recordedCount != wantRecorded {
+		t.Fatalf("expected %d recorded distinct approvals (n=%d minus %d state conflicts), got %d", wantRecorded, n, stateConflicts, recordedCount)
+	}
+	if recordedCount < 2 {
+		t.Fatalf("expected at least the required 2 distinct approvals to have been recorded, got %d", recordedCount)
 	}
 }

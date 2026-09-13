@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -156,6 +157,29 @@ func requestWithdrawal(t *testing.T, pool *db.Pool, f fixture, amount int64, ide
 		return err
 	})
 	return wr, err
+}
+
+// mustSetWithdrawalPolicy writes a tenant-wide (brand_id/jurisdiction_code
+// NULL), single-asset withdrawal_policies row so a test can control
+// exactly which ApprovalPolicy Approve/Reject resolve, instead of the
+// Stage 3C test/development default (policy.go's defaultApprovalPolicy).
+// effectiveFrom lets a test install a SECOND, later-effective row to
+// prove a policy change between two decisions on the same request is
+// picked up per-call, never memoized (mirroring Stage 3B's original
+// per-call thresholdAmount parameter this replaced).
+func mustSetWithdrawalPolicy(t *testing.T, pool *db.Pool, tenantID uuid.UUID, assetCode string, thresholdAmount int64, requiredApprovals int, effectiveFrom time.Time) {
+	t.Helper()
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO withdrawal_policies (tenant_id, asset_code, approval_threshold_minor_units, required_approvals, effective_from)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			tenantID, assetCode, thresholdAmount, requiredApprovals, effectiveFrom,
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("set withdrawal policy: %v", err)
+	}
 }
 
 func mustRequestWithdrawal(t *testing.T, pool *db.Pool, f fixture, amount int64, idemKey string) WithdrawalRequest {
@@ -318,8 +342,9 @@ func TestFullHappyPath_RequestPendingReviewApproveSubmitComplete(t *testing.T) {
 	var approved bool
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		// Below-threshold single approval suffices.
-		approved, err = Approve(ctx, tx, wr.ID, approverID, 1_000_000, false, nil)
+		// Below the (default, EUR 1,000.00) policy threshold - a single
+		// approval suffices.
+		approved, err = Approve(ctx, tx, wr.ID, approverID, false, nil)
 		return err
 	})
 	if !approved {
@@ -364,14 +389,17 @@ func TestApprove_AboveThresholdRequiresTwoDistinctHumanApprovers(t *testing.T) {
 		return MoveToPendingReview(ctx, tx, wr.ID)
 	})
 
-	const threshold = int64(50_000) // request amount (100,000) >= threshold: two humans required.
+	// Below the request amount (100,000): the default policy's EUR
+	// 1,000.00 (100,000 minor-unit) threshold is met via ">=", so this
+	// still requires two humans, matching Stage 3B's original 50,000
+	// test threshold's outcome exactly.
 
 	// An automated approval never counts toward the two human approvals.
 	serviceIdentity := uuid.New()
 	var approved bool
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		approved, err = Approve(ctx, tx, wr.ID, serviceIdentity, threshold, true, nil)
+		approved, err = Approve(ctx, tx, wr.ID, serviceIdentity, true, nil)
 		return err
 	})
 	if approved {
@@ -381,7 +409,7 @@ func TestApprove_AboveThresholdRequiresTwoDistinctHumanApprovers(t *testing.T) {
 	firstApprover := uuid.New()
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		approved, err = Approve(ctx, tx, wr.ID, firstApprover, threshold, false, nil)
+		approved, err = Approve(ctx, tx, wr.ID, firstApprover, false, nil)
 		return err
 	})
 	if approved {
@@ -390,7 +418,7 @@ func TestApprove_AboveThresholdRequiresTwoDistinctHumanApprovers(t *testing.T) {
 
 	// The same approver cannot supply the second approval.
 	err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := Approve(ctx, tx, wr.ID, firstApprover, threshold, false, nil)
+		_, err := Approve(ctx, tx, wr.ID, firstApprover, false, nil)
 		return err
 	})
 	if !errors.Is(err, ErrDuplicateApproval) {
@@ -401,7 +429,7 @@ func TestApprove_AboveThresholdRequiresTwoDistinctHumanApprovers(t *testing.T) {
 	secondApprover := uuid.New()
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		approved, err = Approve(ctx, tx, wr.ID, secondApprover, threshold, false, nil)
+		approved, err = Approve(ctx, tx, wr.ID, secondApprover, false, nil)
 		return err
 	})
 	if !approved {
@@ -432,7 +460,7 @@ func TestApprove_BeneficiaryCannotApproveOwnWithdrawal(t *testing.T) {
 	approverIsBeneficiary := func(uuid.UUID) (bool, error) { return true, nil }
 
 	err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := Approve(ctx, tx, wr.ID, uuid.New(), 1_000_000, false, approverIsBeneficiary)
+		_, err := Approve(ctx, tx, wr.ID, uuid.New(), false, approverIsBeneficiary)
 		return err
 	})
 	if !errors.Is(err, ErrSelfApproval) {
@@ -454,7 +482,7 @@ func TestReject_RestoresPlayerCashBalance(t *testing.T) {
 	}
 
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return Reject(ctx, tx, wr.ID, uuid.New(), 1_000_000, "failed_kyc_check")
+		return Reject(ctx, tx, wr.ID, uuid.New(), "failed_kyc_check")
 	})
 
 	var final WithdrawalRequest
@@ -486,7 +514,7 @@ func TestFail_PostSubmissionFailureRestoresPlayerCashBalance(t *testing.T) {
 		return MoveToPendingReview(ctx, tx, wr.ID)
 	})
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := Approve(ctx, tx, wr.ID, uuid.New(), 1_000_000, false, nil)
+		_, err := Approve(ctx, tx, wr.ID, uuid.New(), false, nil)
 		return err
 	})
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

@@ -12,6 +12,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
@@ -181,6 +182,12 @@ type createStaffRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 	Role     string `json:"role"`
+	// PersonID is optional and almost always omitted - see
+	// identity.StaffUser.PersonID's doc comment. Pass it only when this
+	// staff member is a KNOWN, deliberately identified dual-role
+	// individual (also a player at some brand) - it must name an
+	// existing persons.id or the request fails validation.
+	PersonID string `json:"person_id,omitempty"`
 }
 
 type staffResponse struct {
@@ -189,6 +196,7 @@ type staffResponse struct {
 	Email    string `json:"email"`
 	Role     string `json:"role"`
 	Status   string `json:"status"`
+	PersonID string `json:"person_id,omitempty"`
 }
 
 // newCreateStaffHandler creates a staff user for a specific tenant.
@@ -230,6 +238,15 @@ func newCreateStaffHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		v.RequireOneOf("role", req.Role, "tenant_admin", "support", "compliance", "finance")
+		var personID *uuid.UUID
+		if req.PersonID != "" {
+			parsed, err := uuid.Parse(req.PersonID)
+			if err != nil {
+				v.Add("person_id", "must be a valid UUID")
+			} else {
+				personID = &parsed
+			}
+		}
 		if v.HasErrors() {
 			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
 			return
@@ -246,7 +263,7 @@ func newCreateStaffHandler(deps Deps) http.HandlerFunc {
 		subjectID, _ := uuid.Parse(tc.Subject)
 		err = deps.DB.WithTenant(r.Context(), targetTenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			staff, err = identity.CreateStaffUser(ctx, tx, targetTenantID, req.Email, passwordHash, identity.StaffRole(req.Role))
+			staff, err = identity.CreateStaffUser(ctx, tx, targetTenantID, req.Email, passwordHash, identity.StaffRole(req.Role), personID)
 			if err != nil {
 				return err
 			}
@@ -254,11 +271,15 @@ func newCreateStaffHandler(deps Deps) http.HandlerFunc {
 				TenantID: targetTenantID, ActorType: audit.ActorStaff, ActorID: subjectID,
 				Action: "staff.created", TargetType: "staff_user", TargetID: staff.ID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
-				Metadata: map[string]any{"role": req.Role},
+				Metadata: map[string]any{"role": req.Role, "person_id": req.PersonID},
 			})
 		})
 		if errors.Is(err, identity.ErrEmailTaken) {
 			apierror.Write(w, requestID, apierror.CodeConflict, "a staff user with this email already exists for this tenant")
+			return
+		}
+		if db.IsForeignKeyViolation(err) {
+			apierror.Write(w, requestID, apierror.CodeValidation, "person_id does not reference an existing person")
 			return
 		}
 		if err != nil {
@@ -267,9 +288,13 @@ func newCreateStaffHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		writeJSON(w, http.StatusCreated, staffResponse{
+		resp := staffResponse{
 			ID: staff.ID.String(), TenantID: targetTenantID.String(), Email: staff.Email, Role: string(staff.Role), Status: staff.Status,
-		})
+		}
+		if staff.PersonID != nil {
+			resp.PersonID = staff.PersonID.String()
+		}
+		writeJSON(w, http.StatusCreated, resp)
 	}
 }
 

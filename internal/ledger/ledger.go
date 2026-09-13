@@ -292,6 +292,16 @@ type Balance struct {
 	AccountType     AccountType
 	DebitTotal      int64
 	CreditTotal     int64
+	// Found is true only when GetProjectedBalance actually read a
+	// wallet_balance_projection row. A zero-valued Balance with
+	// Found == false means the row is genuinely absent, which the
+	// Stage 3C reconciliation sweep (internal/reconciliation) must
+	// distinguish from "a row exists whose totals happen to be zero" -
+	// the two are different failure modes (a missing projection can mean
+	// the projection trigger never ran; a present zero-balance row is
+	// entirely ordinary for an account with no activity yet). Unused by
+	// every pre-Stage-3C caller, which only ever read the totals.
+	Found bool
 }
 
 // Signed returns CreditTotal - DebitTotal.
@@ -300,7 +310,8 @@ func (b Balance) Signed() int64 { return b.CreditTotal - b.DebitTotal }
 // GetProjectedBalance reads the subordinate, materialized balance
 // projection - the ordinary read path (docs/decisions/0019 "Balance
 // serving"). Returns a zero Balance (not an error) if the account has
-// never been posted to.
+// never been posted to - check Found to tell that apart from a present
+// row whose totals are zero.
 func GetProjectedBalance(ctx context.Context, tx pgx.Tx, ledgerAccountID uuid.UUID) (Balance, error) {
 	var b Balance
 	b.LedgerAccountID = ledgerAccountID
@@ -315,6 +326,7 @@ func GetProjectedBalance(ctx context.Context, tx pgx.Tx, ledgerAccountID uuid.UU
 	if err != nil {
 		return Balance{}, fmt.Errorf("ledger: get projected balance: %w", err)
 	}
+	b.Found = true
 	return b, nil
 }
 

@@ -75,7 +75,7 @@ func mustCreateStaff(t *testing.T, pool *db.Pool, tenantID uuid.UUID, role ident
 	}
 	err = scope(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		staff, err = identity.CreateStaffUser(ctx, tx, tenantID, fmt.Sprintf("staff-%s@test.com", suffix), hash, role)
+		staff, err = identity.CreateStaffUser(ctx, tx, tenantID, fmt.Sprintf("staff-%s@test.com", suffix), hash, role, nil)
 		return err
 	})
 	if err != nil {

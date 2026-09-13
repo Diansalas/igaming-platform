@@ -73,7 +73,7 @@ func run() error {
 	var staff identity.StaffUser
 	err = pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		staff, err = identity.CreateStaffUser(ctx, tx, uuid.Nil, *email, passwordHash, identity.StaffRolePlatformAdmin)
+		staff, err = identity.CreateStaffUser(ctx, tx, uuid.Nil, *email, passwordHash, identity.StaffRolePlatformAdmin, nil)
 		if err != nil {
 			return err
 		}

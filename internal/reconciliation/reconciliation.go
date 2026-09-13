@@ -43,6 +43,19 @@ const (
 	investigationStatusOpen        = "open"
 )
 
+// MismatchKind classifies what kind of discrepancy a Mismatch records -
+// Stage 3C directive item 4 requires "missing projection" be detected as
+// its own condition, distinct from "unexpected projection balance" /
+// "ledger/projection mismatch" (both represented here as
+// MismatchKindBalanceMismatch, since both are "a projection row exists
+// but its totals are wrong" from this stream's point of view).
+type MismatchKind string
+
+const (
+	MismatchKindMissingProjection MismatchKind = "missing_projection"
+	MismatchKindBalanceMismatch   MismatchKind = "balance_mismatch"
+)
+
 // Run is one execution of a reconciliation stream over a period.
 type Run struct {
 	ID          uuid.UUID
@@ -66,6 +79,7 @@ type Mismatch struct {
 	ReconciliationKey   string
 	ExpectedValue       string
 	ActualValue         string
+	MismatchKind        MismatchKind
 	InvestigationStatus string
 }
 
@@ -113,13 +127,35 @@ func RunLedgerVsProjection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p
 		if err != nil {
 			return Run{}, nil, fmt.Errorf("reconciliation: get projected balance for account %s: %w", accountID, err)
 		}
-		if rebuilt.DebitTotal != projected.DebitTotal || rebuilt.CreditTotal != projected.CreditTotal {
+
+		switch {
+		case !projected.Found && (rebuilt.DebitTotal != 0 || rebuilt.CreditTotal != 0):
+			// Directive item 4's first detection case: no
+			// wallet_balance_projection row exists at all, yet
+			// ledger_entries show real activity for this account. An
+			// account that has genuinely never been posted to also has
+			// no projection row (the projection trigger only ever fires
+			// alongside the first ledger_entries insert - migration
+			// 0023) - that case is ordinary and not a mismatch. Only a
+			// non-zero rebuild with a missing row means the trigger was
+			// bypassed, disabled, or the row was deleted after the fact.
+			mismatches = append(mismatches, Mismatch{
+				ID:                  uuid.New(),
+				TenantID:            tenantID,
+				ReconciliationKey:   accountID.String(),
+				ExpectedValue:       fmt.Sprintf("debit=%d credit=%d", rebuilt.DebitTotal, rebuilt.CreditTotal),
+				ActualValue:         "no wallet_balance_projection row",
+				MismatchKind:        MismatchKindMissingProjection,
+				InvestigationStatus: investigationStatusOpen,
+			})
+		case rebuilt.DebitTotal != projected.DebitTotal || rebuilt.CreditTotal != projected.CreditTotal:
 			mismatches = append(mismatches, Mismatch{
 				ID:                  uuid.New(),
 				TenantID:            tenantID,
 				ReconciliationKey:   accountID.String(),
 				ExpectedValue:       fmt.Sprintf("debit=%d credit=%d", rebuilt.DebitTotal, rebuilt.CreditTotal),
 				ActualValue:         fmt.Sprintf("debit=%d credit=%d", projected.DebitTotal, projected.CreditTotal),
+				MismatchKind:        MismatchKindBalanceMismatch,
 				InvestigationStatus: investigationStatusOpen,
 			})
 		}
@@ -144,9 +180,9 @@ func RunLedgerVsProjection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p
 		m.RunID = run.ID
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO reconciliation_mismatches
-				(id, tenant_id, reconciliation_run_id, reconciliation_key, expected_value, actual_value, investigation_status)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-			m.ID, m.TenantID, m.RunID, m.ReconciliationKey, m.ExpectedValue, m.ActualValue, m.InvestigationStatus,
+				(id, tenant_id, reconciliation_run_id, reconciliation_key, expected_value, actual_value, mismatch_kind, investigation_status)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+			m.ID, m.TenantID, m.RunID, m.ReconciliationKey, m.ExpectedValue, m.ActualValue, m.MismatchKind, m.InvestigationStatus,
 		); err != nil {
 			return Run{}, nil, fmt.Errorf("reconciliation: insert mismatch: %w", err)
 		}

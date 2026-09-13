@@ -87,6 +87,13 @@ var (
 	// same Person as the withdrawing player_account_id (bypass #2).
 	ErrSelfApproval = errors.New("withdrawal: an approver cannot approve their own withdrawal")
 
+	// ErrStepUpRequired is returned by Approve when the resolved
+	// ApprovalPolicy (policy.go) requires a step-up/MFA challenge for
+	// this decision and none exists yet - see ErrStepUpRequired's use in
+	// policy.go for the full Stage 3C directive item 6 rationale (ADR
+	// 0017 preserved: MFA itself is not implemented here).
+	ErrStepUpRequired = errors.New("withdrawal: this decision requires a step-up/MFA challenge, which is not yet implemented (ADR 0017)")
+
 	// ErrIdempotencyKeyReused is returned when a retried RequestWithdrawal
 	// call's idempotency_key matches an existing request whose wallet,
 	// asset, or amount differs from the one now requested - the
@@ -461,41 +468,49 @@ type BeneficiaryCheck func(approverPrincipalID uuid.UUID) (isBeneficiary bool, e
 // threshold/duplicate/append-only invariants given a trustworthy id; it
 // does not authenticate the approver.
 //
-// thresholdAmount is the tenant's four-eyes threshold (in the wallet
-// asset's minor units) in force at the moment of this decision, resolved
-// by the caller from tenant configuration - never invented here. It is
-// recorded verbatim on the WithdrawalApproval row
-// (threshold_amount_at_decision) specifically so a later threshold
-// mutation is detectable after the fact (bypass #3); this package cannot
-// prevent that bypass on its own (that requires config-edit and
-// withdrawal-approval permissions to be held by disjoint roles - an
-// `OPEN DECISION` per withdrawal-state-machine.md §5, not resolved here).
+// The ApprovalPolicy in force is resolved internally, from
+// ResolveApprovalPolicy (policy.go), using the locked request's own
+// tenant/brand/asset - never passed in by the caller, so a caller can
+// never (accidentally or otherwise) apply one asset's policy to another
+// asset's withdrawal. Its ThresholdAmount is recorded verbatim on the
+// WithdrawalApproval row (threshold_amount_at_decision) specifically so
+// a later policy mutation is detectable after the fact (bypass #3); this
+// package cannot prevent that bypass on its own (that requires
+// policy-config-edit and withdrawal-approval permissions to be held by
+// disjoint roles - an `OPEN DECISION` per withdrawal-state-machine.md §5
+// and docs/architecture/withdrawal-policy-configuration.md, not resolved
+// here).
 //
 // isAutomated must be true ONLY when approverPrincipalID identifies a
 // risk-engine/service identity (ADR 0014) auto-approving a below-
-// threshold request. Such a decision can never count toward the two
-// human approvals an above-threshold request requires (bypass #6) - this
-// is enforced by filtering on is_automated_approval = false when counting
-// distinct approvers below, not merely by convention.
+// threshold request. Such a decision can never count toward the
+// RequiredApprovals human approvals an above-threshold request requires
+// (bypass #6) - this is enforced by filtering on
+// is_automated_approval = false when counting distinct approvers below,
+// not merely by convention.
 //
 // beneficiaryCheck implements bypass #2 - see BeneficiaryCheck's doc.
 //
-// The two-distinct-approvers count and the threshold comparison run
-// inside the same transaction (tx) as the approval insert and the
-// conditional state UPDATE (bypass #5 - no TOCTOU window). A row lock on
-// the WithdrawalRequest itself (lockRequestForUpdate) additionally
-// serializes concurrent Approve calls against the SAME request, beyond
-// what a single-transaction check alone would guarantee for genuinely
-// simultaneous calls.
+// If the resolved policy requires a step-up/MFA challenge for a request
+// at or above threshold (ApprovalPolicy.RequireStepUp - directive item
+// 6), this returns ErrStepUpRequired before recording anything: MFA is
+// not implemented (ADR 0017 preserved), so a policy that asks for it
+// must fail closed, never silently approve as if the challenge had
+// happened.
+//
+// The policy resolution, distinct-approvers count, and the threshold
+// comparison all run inside the same transaction (tx) as the approval
+// insert and the conditional state UPDATE (bypass #5 - no TOCTOU
+// window). A row lock on the WithdrawalRequest itself
+// (lockRequestForUpdate) additionally serializes concurrent Approve
+// calls against the SAME request, beyond what a single-transaction check
+// alone would guarantee for genuinely simultaneous calls.
 func Approve(
 	ctx context.Context, tx pgx.Tx, requestID, approverPrincipalID uuid.UUID,
-	thresholdAmount int64, isAutomated bool, beneficiaryCheck BeneficiaryCheck,
+	isAutomated bool, beneficiaryCheck BeneficiaryCheck,
 ) (approved bool, err error) {
 	if approverPrincipalID == uuid.Nil {
 		return false, fmt.Errorf("%w: approver principal id is required", ErrInvalidInput)
-	}
-	if thresholdAmount < 0 {
-		return false, fmt.Errorf("%w: threshold amount must not be negative", ErrInvalidInput)
 	}
 
 	wr, err := lockRequestForUpdate(ctx, tx, requestID)
@@ -504,6 +519,14 @@ func Approve(
 	}
 	if wr.State != StatePendingReview {
 		return false, fmt.Errorf("%w: request %s is in state %q, expected %q", ErrStateConflict, requestID, wr.State, StatePendingReview)
+	}
+
+	policy, err := ResolveApprovalPolicy(ctx, tx, wr.TenantID, wr.BrandID, nil, wr.AssetCode, time.Now())
+	if err != nil {
+		return false, err
+	}
+	if policy.RequiredApprovals < 1 {
+		return false, fmt.Errorf("%w: resolved policy requires at least 1 approval, got %d", ErrInvalidInput, policy.RequiredApprovals)
 	}
 
 	if beneficiaryCheck != nil {
@@ -516,13 +539,18 @@ func Approve(
 		}
 	}
 
+	requiresMultipleApprovals := wr.Amount >= policy.ThresholdAmount
+	if requiresMultipleApprovals && policy.RequireStepUp {
+		return false, ErrStepUpRequired
+	}
+
 	approvalID := uuid.New()
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO withdrawal_approvals
 			(id, tenant_id, withdrawal_request_id, approver_principal_id, is_automated_approval, decision,
 			 threshold_amount_at_decision, request_amount_at_decision)
 		 VALUES ($1, $2, $3, $4, $5, 'approve', $6, $7)`,
-		approvalID, wr.TenantID, requestID, approverPrincipalID, isAutomated, thresholdAmount, wr.Amount,
+		approvalID, wr.TenantID, requestID, approverPrincipalID, isAutomated, policy.ThresholdAmount, wr.Amount,
 	); err != nil {
 		if db.IsUniqueViolation(err) {
 			return false, ErrDuplicateApproval
@@ -541,16 +569,16 @@ func Approve(
 		Metadata: map[string]any{
 			"decision":              "approve",
 			"is_automated_approval": isAutomated,
-			"threshold_amount":      thresholdAmount,
+			"threshold_amount":      policy.ThresholdAmount,
+			"required_approvals":    policy.RequiredApprovals,
 			"request_amount":        wr.Amount,
 		},
 	}); err != nil {
 		return false, fmt.Errorf("withdrawal: audit: %w", err)
 	}
 
-	requiresTwoHumans := wr.Amount >= thresholdAmount
-	ready := !requiresTwoHumans
-	if requiresTwoHumans {
+	ready := !requiresMultipleApprovals
+	if requiresMultipleApprovals {
 		var distinctHumanApprovers int
 		if err := tx.QueryRow(ctx,
 			`SELECT COUNT(DISTINCT approver_principal_id) FROM withdrawal_approvals
@@ -559,7 +587,7 @@ func Approve(
 		).Scan(&distinctHumanApprovers); err != nil {
 			return false, fmt.Errorf("withdrawal: count approvals: %w", err)
 		}
-		ready = distinctHumanApprovers >= 2
+		ready = distinctHumanApprovers >= policy.RequiredApprovals
 	}
 
 	if !ready {
@@ -585,7 +613,7 @@ func Approve(
 		TargetID:   requestID.String(),
 		Outcome:    audit.OutcomeSuccess,
 		Metadata: map[string]any{
-			"threshold_amount": thresholdAmount,
+			"threshold_amount": policy.ThresholdAmount,
 			"request_amount":   wr.Amount,
 		},
 	}); err != nil {
@@ -610,20 +638,20 @@ func approverActorType(isAutomated bool) audit.ActorType {
 //
 // approverPrincipalID has the same caller-responsibility contract as
 // Approve's (server-derived from the authenticated session, RBAC-checked
-// by the caller). thresholdAmount is recorded on the WithdrawalApproval
-// row for the same audit-completeness reason Approve's doc explains -
+// by the caller). The ApprovalPolicy in force is resolved internally
+// (ResolveApprovalPolicy, policy.go, using the locked request's own
+// tenant/brand/asset - the same reasoning as Approve's) and its
+// ThresholdAmount is recorded on the WithdrawalApproval row for the same
+// audit-completeness reason Approve's doc explains -
 // withdrawal-state-machine.md §7 requires "the threshold and amount in
 // force at the time" on every approval decision, including rejections,
 // even though a rejection is not itself threshold-gated.
-func Reject(ctx context.Context, tx pgx.Tx, requestID, approverPrincipalID uuid.UUID, thresholdAmount int64, reasonCode string) error {
+func Reject(ctx context.Context, tx pgx.Tx, requestID, approverPrincipalID uuid.UUID, reasonCode string) error {
 	if approverPrincipalID == uuid.Nil {
 		return fmt.Errorf("%w: approver principal id is required", ErrInvalidInput)
 	}
 	if reasonCode == "" {
 		return fmt.Errorf("%w: reason code is required to reject a withdrawal", ErrInvalidInput)
-	}
-	if thresholdAmount < 0 {
-		return fmt.Errorf("%w: threshold amount must not be negative", ErrInvalidInput)
 	}
 
 	wr, err := lockRequestForUpdate(ctx, tx, requestID)
@@ -634,13 +662,18 @@ func Reject(ctx context.Context, tx pgx.Tx, requestID, approverPrincipalID uuid.
 		return fmt.Errorf("%w: request %s is in state %q, expected %q", ErrStateConflict, requestID, wr.State, StatePendingReview)
 	}
 
+	policy, err := ResolveApprovalPolicy(ctx, tx, wr.TenantID, wr.BrandID, nil, wr.AssetCode, time.Now())
+	if err != nil {
+		return err
+	}
+
 	approvalID := uuid.New()
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO withdrawal_approvals
 			(id, tenant_id, withdrawal_request_id, approver_principal_id, is_automated_approval, decision, reason_code,
 			 threshold_amount_at_decision, request_amount_at_decision)
 		 VALUES ($1, $2, $3, $4, false, 'reject', $5, $6, $7)`,
-		approvalID, wr.TenantID, requestID, approverPrincipalID, reasonCode, thresholdAmount, wr.Amount,
+		approvalID, wr.TenantID, requestID, approverPrincipalID, reasonCode, policy.ThresholdAmount, wr.Amount,
 	); err != nil {
 		if db.IsUniqueViolation(err) {
 			return ErrDuplicateApproval
@@ -694,7 +727,7 @@ func Reject(ctx context.Context, tx pgx.Tx, requestID, approverPrincipalID uuid.
 		Outcome:    audit.OutcomeSuccess,
 		Metadata: map[string]any{
 			"reason_code":      reasonCode,
-			"threshold_amount": thresholdAmount,
+			"threshold_amount": policy.ThresholdAmount,
 			"request_amount":   wr.Amount,
 		},
 	})
@@ -732,6 +765,58 @@ func LockApprovedForSubmission(ctx context.Context, tx pgx.Tx, requestID uuid.UU
 		return WithdrawalRequest{}, fmt.Errorf("%w: request %s is in state %q, expected %q", ErrStateConflict, requestID, wr.State, StateApproved)
 	}
 	return wr, nil
+}
+
+// LockSubmittedForResolution takes the row lock on requestID and
+// verifies it is in state `submitted`, returning ErrStateConflict
+// otherwise. Stage 3C hardening: a `submitted` withdrawal has no
+// automated path forward without this - the mock adapter's default
+// behavior (and, for a real PSP, an entirely ordinary async settlement
+// window) is to return OutcomePending from Withdraw, and Stage 3B never
+// implemented a withdrawal callback path, so without an explicit
+// resolution mechanism a submitted request could remain financially
+// stranded (money held, no ledger release) indefinitely with no
+// observable recovery path. The caller (internal/httpserver's resolve
+// handler, or a scheduled sweep) is expected to follow this with a
+// PaymentProvider.QueryStatus call and then Complete or Fail based on
+// the result - NEVER a second Withdraw call (that would be resubmission,
+// which risks a duplicate payout) and NEVER routing to a different
+// provider (the request is already bound to the provider/reference
+// MarkSubmitted recorded - see withdrawal-state-machine.md's own
+// "never automatically resubmit on timeout/ambiguity" rule, carried over
+// from the deposit orchestrator's identical rule).
+func LockSubmittedForResolution(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) (WithdrawalRequest, error) {
+	wr, err := lockRequestForUpdate(ctx, tx, requestID)
+	if err != nil {
+		return WithdrawalRequest{}, err
+	}
+	if wr.State != StateSubmitted {
+		return WithdrawalRequest{}, fmt.Errorf("%w: request %s is in state %q, expected %q", ErrStateConflict, requestID, wr.State, StateSubmitted)
+	}
+	return wr, nil
+}
+
+// ListSubmittedForTenant returns every WithdrawalRequest currently in
+// `submitted` state, tenant-wide - the staff review-queue equivalent for
+// stranded-hold recovery (see newListSubmittedWithdrawalsHandler) and
+// the input to a scheduled resolution sweep. Intended to run under
+// db.Pool.WithTenant, same as every other staff/system withdrawal query.
+func ListSubmittedForTenant(ctx context.Context, tx pgx.Tx) ([]WithdrawalRequest, error) {
+	rows, err := tx.Query(ctx, `SELECT `+requestColumns+` FROM withdrawal_requests WHERE state = $1 ORDER BY requested_at ASC`, StateSubmitted)
+	if err != nil {
+		return nil, fmt.Errorf("withdrawal: list submitted: %w", err)
+	}
+	defer rows.Close()
+
+	var out []WithdrawalRequest
+	for rows.Next() {
+		wr, err := scanRequest(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, wr)
+	}
+	return out, rows.Err()
 }
 
 // MarkSubmitted transitions a request from `approved` to `submitted` once

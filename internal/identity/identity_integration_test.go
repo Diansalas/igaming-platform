@@ -232,7 +232,7 @@ func TestStaffUser_PlatformAdminOnlyVisibleWithoutTenant(t *testing.T) {
 	var admin StaffUser
 	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		admin, err = CreateStaffUser(ctx, tx, uuid.Nil, "admin-"+suffix+"@platform.test", "hash", StaffRolePlatformAdmin)
+		admin, err = CreateStaffUser(ctx, tx, uuid.Nil, "admin-"+suffix+"@platform.test", "hash", StaffRolePlatformAdmin, nil)
 		return err
 	})
 	if err != nil {
@@ -274,7 +274,7 @@ func TestStaffUser_TenantScopedNotVisibleFromOtherTenant(t *testing.T) {
 	var staffA StaffUser
 	err := pool.WithTenant(context.Background(), tenantA.ID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		staffA, err = CreateStaffUser(ctx, tx, tenantA.ID, "ta-"+suffix+"@acme.test", "hash", StaffRoleTenantAdmin)
+		staffA, err = CreateStaffUser(ctx, tx, tenantA.ID, "ta-"+suffix+"@acme.test", "hash", StaffRoleTenantAdmin, nil)
 		return err
 	})
 	if err != nil {
