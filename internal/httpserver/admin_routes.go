@@ -566,6 +566,112 @@ func newSuspendPlayerHandler(deps Deps) http.HandlerFunc {
 	}
 }
 
+type clearIdentityReviewRequest struct {
+	ReasonCode string `json:"reason_code"`
+}
+
+// newClearIdentityReviewHandler is Stage 4E's admin counterpart to
+// registration landing a player_account in 'identity_review_required'
+// (ADR 0027 §6/§8) - the only way such an account can ever become
+// gambling-capable again (internal/rg.EvaluateEligibility denies every
+// non-'active' status with zero special-casing for this one). Gated by
+// PermIdentityReviewManage (RoleCompliance only - see that permission's
+// own doc comment for why this is not bundled into PermPlayerSuspend).
+//
+// Adversarial-safety requirement (directive §8's own "do not invent a
+// manual-review workflow beyond what is necessary" balanced against not
+// letting this become a generic status-reset button): this handler
+// verifies the account's CURRENT status is actually
+// identity_review_required before transitioning it to active. Without
+// this check, the exact same endpoint could be misused to reactivate a
+// suspended or self-excluded account by any RoleCompliance principal -
+// this is a distinct, narrower capability than PermPlayerSuspend's own
+// suspend/reinstate authority, and must never silently become a general
+// "set player active" action.
+//
+// This uses identity.SetPlayerAccountStatusIfCurrent - a single atomic
+// "UPDATE ... WHERE status = identity_review_required" - rather than a
+// separate read-then-write, precisely to close a TOCTOU security specialist
+// review found in an earlier version of this handler: a read-then-write
+// has a window in which a CONCURRENT transaction (e.g. a staff suspend
+// racing this exact request) can change the account's status between the
+// read and the write, and a plain write would then silently clobber that
+// intervening change (e.g. reactivating an account that was JUST
+// suspended by someone else). The atomic conditional update makes that
+// impossible: if the status is no longer identity_review_required by the
+// moment this statement runs, nothing is written, full stop.
+func newClearIdentityReviewHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		playerID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid player id")
+			return
+		}
+
+		var req clearIdentityReviewRequest
+		if err := decodeJSON(r, &req); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			return
+		}
+		v := validation.New()
+		v.RequireNonEmpty("reason_code", req.ReasonCode)
+		if v.HasErrors() {
+			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+			return
+		}
+
+		subjectID, _ := uuid.Parse(tc.Subject)
+		var alreadyCleared bool
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			applied, err := identity.SetPlayerAccountStatusIfCurrent(ctx, tx, playerID,
+				identity.PlayerStatusIdentityReviewRequired, identity.PlayerStatusActive)
+			if err != nil {
+				return err
+			}
+			if !applied {
+				// Either the account does not exist, or its status was no
+				// longer identity_review_required by the time this ran (a
+				// concurrent change, or it was never in review) - this
+				// read is for choosing the right response code ONLY, it
+				// never drives the mutation decision above.
+				if _, err := identity.GetPlayerAccountByID(ctx, tx, playerID); err != nil {
+					return err
+				}
+				alreadyCleared = true
+				return nil
+			}
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: subjectID,
+				Action: "identity_review.cleared", TargetType: "player_account", TargetID: playerID.String(),
+				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+				Metadata: map[string]any{"reason_code": req.ReasonCode, "previous_status": string(identity.PlayerStatusIdentityReviewRequired)},
+			})
+		})
+		if errors.Is(err, identity.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "player not found")
+			return
+		}
+		if err != nil {
+			logger.Error("clear_identity_review_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to clear identity review")
+			return
+		}
+		if alreadyCleared {
+			apierror.Write(w, requestID, apierror.CodeConflict, "player account is not in identity_review_required status")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 // --- Audit trail (read-only) ---
 
 type auditEntryResponse struct {

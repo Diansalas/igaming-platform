@@ -17,6 +17,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 )
 
@@ -57,6 +58,18 @@ type Deps struct {
 	// administration, not adapter dispatch, so it is deliberately not
 	// gated by whether any adapter is currently registered.
 	CasinoOrchestrator *casino.Orchestrator
+
+	// PersonResolver is Stage 4E's identity-resolution boundary, consulted
+	// by newRegisterHandler BEFORE a Person is ever created - unlike
+	// PaymentOrchestrator/CasinoOrchestrator, this is NOT "nil means the
+	// feature is disabled": registration is the one route that must never
+	// silently bypass identity resolution again (that was Stage 4D-RG's
+	// own P0 finding). A nil PersonResolver makes the register handler
+	// fail closed (503), never fall through to Stage 2's old
+	// resolution-blind behavior. Every production and test Deps
+	// construction is expected to set this - internal/identityresolution.
+	// NewMockPersonResolver() until a real vendor is contracted (ADR 0027).
+	PersonResolver identityresolution.PersonResolver
 }
 
 // New builds the fully-wired http.Handler for platform-api: global

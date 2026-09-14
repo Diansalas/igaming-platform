@@ -26,6 +26,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 )
 
 func newCasinoTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, orchestrator *casino.Orchestrator) *httptest.Server {
@@ -38,6 +39,7 @@ func newCasinoTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, orche
 		AccessTokenTTL:     5 * time.Minute,
 		RefreshTokenTTL:    time.Hour,
 		CasinoOrchestrator: orchestrator,
+		PersonResolver:     identityresolution.NewMockPersonResolver(),
 	}))
 	t.Cleanup(srv.Close)
 	return srv

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 )
 
 const testJWTSecret = "test-signing-secret-at-least-32-characters"
@@ -46,6 +47,7 @@ func newTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer) *httptest.S
 		ServiceName:     "platform-api-test",
 		AccessTokenTTL:  5 * time.Minute,
 		RefreshTokenTTL: time.Hour,
+		PersonResolver:  identityresolution.NewMockPersonResolver(),
 	}))
 	t.Cleanup(srv.Close)
 	return srv

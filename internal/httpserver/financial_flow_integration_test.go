@@ -21,6 +21,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
@@ -62,6 +63,7 @@ func newFinancialTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, or
 		AccessTokenTTL:      5 * time.Minute,
 		RefreshTokenTTL:     time.Hour,
 		PaymentOrchestrator: orchestrator,
+		PersonResolver:      identityresolution.NewMockPersonResolver(),
 	}))
 	t.Cleanup(srv.Close)
 	return srv

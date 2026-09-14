@@ -16,6 +16,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
@@ -53,6 +54,17 @@ func newRegisterHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
 		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		// Stage 4E: registration must never again create a Person "blindly"
+		// ahead of identity resolution (ADR 0027 §6, closing Stage 4D-RG's
+		// own P0 finding) - a nil resolver is a deployment/configuration
+		// error, not silently-skip-resolution, so this fails closed rather
+		// than falling through to Stage 2's old resolution-blind behavior.
+		if deps.PersonResolver == nil {
+			logger.Error("register_person_resolver_not_configured")
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "registration is temporarily unavailable")
+			return
+		}
 
 		var req registerRequest
 		if err := decodeJSON(r, &req); err != nil {
@@ -92,7 +104,15 @@ func newRegisterHandler(deps Deps) http.HandlerFunc {
 		ip, ua := clientIP(r), r.UserAgent()
 		var tokens tokenPairResponse
 		err = deps.DB.WithTenant(r.Context(), brand.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			account, err := identity.RegisterPlayer(ctx, tx, brand, req.Email, passwordHash)
+			account, outcome, err := identityresolution.RegisterPlayerWithResolution(ctx, tx, deps.PersonResolver, identityresolution.RegisterPlayerWithResolutionParams{
+				Brand: brand, Email: req.Email, PasswordHash: passwordHash,
+				// Verified is deliberately left empty - this HTTP request
+				// body carries only unverified, client-supplied claims
+				// (email/password), never verified identity evidence
+				// (ADR 0027 §3/§10: no real KYC source is integrated yet
+				// to populate this from).
+				RequestID: requestID, IPAddress: ip, UserAgent: ua,
+			})
 			if err != nil {
 				return err
 			}
@@ -108,6 +128,7 @@ func newRegisterHandler(deps Deps) http.HandlerFunc {
 				TenantID: brand.TenantID, ActorType: audit.ActorPlayer, ActorID: account.ID,
 				Action: "player.registered", TargetType: "player_account", TargetID: account.ID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: ip, UserAgent: ua, RequestID: requestID,
+				Metadata: map[string]any{"registration_outcome": string(outcome)},
 			})
 		})
 		if errors.Is(err, identity.ErrEmailTaken) {

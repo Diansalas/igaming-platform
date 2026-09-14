@@ -206,6 +206,25 @@ func TestRoleHasPermission_Stage4DRGRestrictionPermissions(t *testing.T) {
 	}
 }
 
+// TestRoleHasPermission_Stage4EIdentityReviewManagePermission proves Stage
+// 4E's identical separation-of-duties requirement (ADR 0027):
+// PermIdentityReviewManage belongs to RoleCompliance alone - a broad
+// administrator (RoleTenantAdmin) must never be able to clear a
+// self-exclusion-relevant identity review just for holding
+// PermPlayerSuspend/PermStaffManage, and RolePlatformAdmin has no path to
+// resolve a tenant-scoped player_account at all (mirrors
+// TestRoleHasPermission_Stage4DRGRestrictionPermissions exactly).
+func TestRoleHasPermission_Stage4EIdentityReviewManagePermission(t *testing.T) {
+	if !RoleHasPermission(RoleCompliance, PermIdentityReviewManage) {
+		t.Error("expected compliance to have identity_review:manage")
+	}
+	for _, role := range []Role{RolePlatformAdmin, RoleTenantAdmin, RoleSupport, RoleFinance, RolePlayer} {
+		if RoleHasPermission(role, PermIdentityReviewManage) {
+			t.Errorf("expected %q to NOT have identity_review:manage - only compliance may clear an identity review", role)
+		}
+	}
+}
+
 func TestRoleHasPermission_FinanceIsDefinedButEmptyPlaceholder(t *testing.T) {
 	// Stage 2 defines the finance role (per the instructions' explicit
 	// list) but grants it nothing yet - Stage 3's wallet/ledger work is

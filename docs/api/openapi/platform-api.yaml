@@ -594,6 +594,50 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/admin/players/{id}/identity-review/clear:
+    post:
+      summary: Clear a player account out of identity_review_required
+      description: >
+        Stage 4E (docs/decisions/0027). Requires identity_review:manage
+        (compliance only - never tenant_admin/platform_admin, mirroring
+        rg_restriction:write's separation-of-duties precedent). Requires a
+        reason code, recorded on the audit entry. The account's CURRENT
+        status must actually be identity_review_required - attempting this
+        on any other status (e.g. suspended, self_excluded) is rejected
+        with 409 rather than silently reactivating it; this is a narrower
+        capability than player:suspend's own suspend/reinstate authority
+        and must never become a generic "set player active" action.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason_code: { type: string }
+              required: [reason_code]
+      responses:
+        "204":
+          description: Identity review cleared - account is now active
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Account is not currently identity_review_required
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   # --- Audit trail (read-only) ---
   /v1/admin/audit-log:
@@ -656,7 +700,7 @@ components:
         email: { type: string, format: email }
         status:
           type: string
-          enum: [pending_verification, active, suspended, self_excluded, closed]
+          enum: [pending_verification, active, suspended, self_excluded, closed, identity_review_required]
         kyc_tier: { type: integer }
         tenant_id: { type: string, format: uuid }
         brand_id: { type: string, format: uuid }
@@ -670,7 +714,7 @@ components:
         email: { type: string, format: email }
         status:
           type: string
-          enum: [pending_verification, active, suspended, self_excluded, closed]
+          enum: [pending_verification, active, suspended, self_excluded, closed, identity_review_required]
         kyc_tier: { type: integer }
       required: [id, brand_id, email, status, kyc_tier]
     Session:

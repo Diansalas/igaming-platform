@@ -1,191 +1,244 @@
 # Active Stage
 
-## Stage 4D-RG — Responsible Gaming Player-Status Enforcement Foundation — Complete
+## Stage 4E — Person Resolution & Cross-Brand Identity Foundation — Complete
 
 Status: **Complete, pending human approval to authorize the next stage.**
-Issued immediately after Stage 4A's own specialist review identified a
-production-blocking gap: no authoritative platform-side player-account/
-wallet-status or self-exclusion check existed at casino game launch or
-bet time. Real casino provider integration, sportsbook, the Bonus Engine,
-full KYC/AML, deposit/loss/wagering/session limits, reality checks,
-time-outs/cooling-off, a player-facing lobby UI, and a full back-office
-RG UI were explicitly out of scope.
+Issued because Stage 4D-RG was NOT approved for progression: its own
+specialist review found a P0 - `internal/identity.RegisterPlayer` created
+a brand-new, unlinked `Person` on every registration, so a Person
+self-excluded via one brand could register again as a "new" Person at
+another brand and evade restriction. Stage 4D-RG's self-exclusion
+mechanism (platform-wide `player_restrictions`, `EvaluateEligibility`) was
+already correct - the missing capability was reliable Person resolution.
+This stage builds exactly that, and only that. No real KYC/AML vendor
+integration, no production identity document collection, no biometric
+data storage, no document verification, no AML transaction monitoring,
+and no jurisdiction-specific identity rule were in scope.
 
 ### What was built
 
-1. **`internal/rg` package** (`internal/rg/rg.go`) - `player_restrictions`
-   domain type, `CreateSelfExclusion` (player self-service, always
-   platform-wide scope), `CreateStaffRestriction` (staff-initiated,
-   tenant/brand-scoped only - never platform-wide, see "Blockers" below),
-   `ListRestrictionsForAccount`, and `EvaluateEligibility` - the single
-   authoritative "may this player gamble right now" policy boundary.
-2. **No second identity model** - composes the EXISTING `PlayerAccount.
-   Status` and `Wallet.Status` with exactly ONE new signal
-   (`player_restrictions`), anchored on the platform-wide `Person`.
-3. **Migrations `0037`/`0038`** - `player_restrictions`: append-only
-   (RLS + a row-level AND statement-level deny-mutation trigger), dual-
-   scope RLS (platform-wide vs. tenant vs. brand), separate player-self-
-   service vs. staff INSERT policies, tenant-scoped SELECT policies (both
-   hardened during specialist review - see below), a composite `(player_
-   account_id, tenant_id)` FK.
-4. **Casino launch/bet enforcement** - `internal/casino`'s `LaunchGame`
-   and `postBet` both consult `EvaluateEligibility` via a shared
-   `evaluateAndAuditEligibility` wrapper, before a launch session becomes
-   usable and before a bet's financial debit commits respectively. A
-   denial is a RESULT, never a Go error (see below).
-5. **Concurrency**: a transaction-scoped Postgres advisory lock keyed on
-   `person_id` closes the self-exclusion-vs-launch/bet TOCTOU race
-   deterministically - proven under `-race` with real concurrent
-   goroutines against real Postgres.
-6. **New permissions** - `PermRGRestrictionWrite` (RoleCompliance only),
-   `PermRGRestrictionRead` (RoleCompliance/RoleTenantAdmin) - never
-   RolePlatformAdmin.
-7. **Minimal HTTP API** - `POST/GET /v1/me/rg/self-exclusion`,`/status`
-   (player self-service); `POST/GET /v1/admin/rg/restrictions`
-   (staff, tenant/brand-scoped).
-8. **Bet-callback idempotency hardening** (found and fixed during this
-   stage's own review, not a pre-planned item): `postBet` now short-
-   circuits on an already-posted `(provider_id, provider_tx_id)` BEFORE
-   the RG/session/balance checks run at all, so a redelivery is correctly
-   idempotent even across an intervening RG state change.
+1. **`internal/identityresolution` package** - a provider-neutral
+   `PersonResolver` interface (`Match`/`NoMatch`/`Uncertain` outcomes,
+   plus an `ErrResolverUnavailable` sentinel for a genuinely failed
+   resolution attempt) mirroring `CasinoProvider`/`PaymentProvider`'s
+   exact shape. `RawClaims` (unverified, client-supplied) is kept
+   strictly separate from `VerifiedAttributes` (verified evidence from a
+   trusted source) - a resolver must never use the former as a matching
+   signal.
+2. **`RegisterPlayerWithResolution`** - the ONE registration entry point
+   every caller now uses. It calls the resolver BEFORE any Person is
+   created, then dispatches: `Match` → link the EXISTING Person
+   (`identity.RegisterPlayerLinkedToPerson`, no new Person); `NoMatch` →
+   create a brand-new Person, exactly Stage 2's original behavior
+   (`identity.RegisterPlayer`); `Uncertain` OR resolver-unavailable OR an
+   unrecognized outcome → create a new Person but land the account in a
+   safe, non-gambling-capable status (`identity.RegisterPlayerPendingReview`).
+   A non-conformant resolver error (not wrapping `ErrResolverUnavailable`)
+   fails the whole registration - nothing is created.
+3. **No second identity model, one new status, zero new RG code** -
+   migration `0039` adds exactly one value, `identity_review_required`,
+   to the EXISTING `PlayerAccountStatus` enum.
+   `internal/rg.EvaluateEligibility`'s pre-existing `status != active`
+   check already denies it - Stage 4D-RG's own RG code needed zero
+   changes for this stage's new safe state to actually block gambling.
+4. **`MockPersonResolver`** - the only implementation shipped this stage
+   (an exact-match lookup table a test configures via
+   `SetMatch`/`SetUncertain`/`SetUnavailable`), mirroring
+   `MockCasinoProvider`/`MockPaymentProvider`'s identical "magic value"
+   testing convention. A real vendor slots in behind the SAME interface
+   later without touching any caller.
+5. **Fail-closed HTTP wiring** - the register handler now returns 503
+   (`apierror.CodeUnavailable`) if `deps.PersonResolver` is nil, rather
+   than silently falling back to the old resolution-blind behavior -
+   deliberately different from `PaymentOrchestrator`/`CasinoOrchestrator`'s
+   existing "nil means feature disabled" convention, since silently
+   skipping resolution here is exactly the unsafe fallback this stage
+   exists to prevent.
+6. **New admin capability** - `POST /v1/admin/players/{id}/identity-
+   review/clear`, gated by a new `identity_review:manage` permission
+   granted only to `RoleCompliance` (mirroring `rg_restriction:write`'s
+   separation-of-duties precedent - never `RoleTenantAdmin`/
+   `RolePlatformAdmin`). Uses a single atomic conditional status
+   transition (`identity.SetPlayerAccountStatusIfCurrent`, a new function
+   this stage added) rather than a read-then-write, closing a TOCTOU the
+   security review found in an earlier draft of this handler.
+7. **Cross-brand/cross-tenant proof, not just a mechanism claim** -
+   unlike Stage 4D-RG (which could only prove its mechanism was correct,
+   not that a real registration could ever reach it), this stage's own
+   integration test
+   (`TestCrossBrandSelfExclusion_ResolvedPersonCannotEvadeViaSecondBrand`)
+   proves end to end against real Postgres: register at Brand A (new
+   Person), self-exclude via the real player self-service endpoint,
+   register again at an entirely different Brand B/Tenant B resolved (via
+   a configured Mock `Match`) to the SAME person, and confirm
+   `EvaluateEligibility` denies it with `CodeSelfExcluded` specifically -
+   using Stage 4D-RG's `EvaluateEligibility` completely unmodified.
 
-Full design, rationale, and the complete specialist-review findings/fixes
-list: `docs/decisions/0026-responsible-gaming-player-status-enforcement-
+Full design, rationale, every recorded open decision, and the complete
+specialist-review findings/fixes list:
+`docs/decisions/0027-person-resolution-and-cross-brand-identity-
 foundation.md`. Updated architecture doc:
-`docs/architecture/11-kyc-aml-rg-architecture.md`'s "Implementation
-status" section.
+`docs/architecture/05-identity-architecture.md`'s "Implementation status
+(Stage 4E)" section.
 
-### Specialist review: one P0, four P1s found and fixed
+### The honest limit of what this stage closes
 
-An independent 7-specialist parallel review (RG architecture, security,
-financial correctness, identity/Person model, PostgreSQL/RLS, API/HTTP,
-adversarial testing) - each with live-Postgres empirical verification,
-not just static reading - found:
+Every registration reachable over the live HTTP API resolves `NoMatch`
+today, because no trusted source of verified identity evidence
+(`VerifiedAttributes`: legal name, DOB, address, phone, government ID
+reference, KYC provider reference) is wired into the register handler -
+no real KYC/identity-verification vendor is integrated, per this stage's
+own explicit non-goal. The cross-brand evasion-prevention mechanism and
+its orchestration logic are proven correct at the package/integration-
+test level, against a resolver a real future vendor integration will
+replace - they are **not yet actively preventing evasion for a real
+player** over the live API, because no source of verified evidence exists
+yet to feed the resolver. This is the single most important thing to
+understand about this stage's actual, current effect, and it is stated
+plainly rather than buried, per CLAUDE.md's "no fake completion" rule.
 
-1. **P0 (reported independently by three reviewers)**: the cross-brand/
-   cross-tenant self-exclusion PROTECTION is mechanism-correct but
-   currently unreachable in production - `internal/identity.
-   RegisterPlayer` mints a fresh, unlinked `Person` on every registration,
-   with no resolution/dedup logic anywhere in this codebase. A real
-   player who self-excludes and re-registers today is NOT blocked.
-   **Fixed as an explicit documentation correction and tracked open
-   decision** (ADR `0026`'s Context/§9/"Carried-forward limitations"; see
-   "Blockers" below) - not a code defect in this stage's own work, but a
-   precondition its protective claim depends on that does not exist yet.
-2. **P1 - financial correctness**: a bet callback redelivered after
-   already succeeding, and after the RG state it depended on later
-   changed (e.g. the player self-excluded), could incorrectly report a
-   fresh decline instead of its original success - violating the
-   documented idempotent-replay contract, empirically reproduced.
-   **Fixed**: an early already-posted-transaction short-circuit in
-   `postBet`, plus a new regression test and a strengthened concurrency
-   assertion.
-3. **P1 - RLS leak**: the player-facing "my RG status" endpoint leaked a
-   DIFFERENT tenant's confidential restriction `reason_code` to a player
-   with accounts at two tenants, empirically reproduced. **Fixed**:
-   migration `0038` adds tenant scoping to `player_self_read`.
-4. **P1 - defense in depth**: `EvaluateEligibility`'s own SQL relied
-   solely on RLS/caller scope, not an explicit predicate, to exclude a
-   different tenant's rows. **Fixed**: added an explicit tenant predicate.
-5. **P1 - silent-bypass risk**: `EvaluateEligibility` silently skipped
-   brand-scoped restrictions if a caller forgot to resolve `BrandID`.
-   **Fixed**: `BrandID` is now a required, validated parameter.
+### Specialist review: zero P0s, four P1s found and fixed
 
-Several P2s were fixed (a stale doc comment two reviewers independently
-flagged, an RLS UPDATE/DELETE visibility-scope hardening replacing row-
-visibility policies with a statement-level trigger, a composite FK
-addition) and several more explicitly recorded as accepted/deferred
-(full list, with reasoning for each, in ADR `0026`'s own findings
-section) - none silently dropped. The adversarial testing review also
-found `duration_days` completely untested at every layer, plus several
-HTTP-layer authorization/validation gaps (RolePlayer/RoleFinance token
-denial, cross-tenant admin read, invalid `scope` rejection) - all closed
-with new tests.
+An independent 7-specialist parallel review (identity architecture,
+security/privacy, RG/self-exclusion integration, PostgreSQL/RLS, multi-
+tenancy, API/HTTP, adversarial testing) - each reviewing live code, not
+just design - found:
+
+1. **P1 - TOCTOU in the identity-review-clear handler**: a read-then-write
+   could be raced by a concurrent status change (e.g. a staff suspend),
+   silently clobbering it and reactivating a since-suspended account.
+   **Fixed**: `identity.SetPlayerAccountStatusIfCurrent` - a single atomic
+   `UPDATE ... WHERE status = identity_review_required` - replacing the
+   read-then-write, plus a regression test proving a concurrent suspend
+   always wins.
+2. **P1 - inaccurate documentation**: this stage's own ADR and a code
+   comment incorrectly claimed a review-required account "can log in" -
+   false; the existing login handler denies it exactly like a suspended
+   account. **Fixed**: corrected in both places, including the OPEN
+   DECISION rationale that had relied on the same false premise.
+3. **P1 - a test overstated its own proof**: the concurrency test's
+   name/framing implied it closed the hardest possible race (two
+   simultaneous first-time registrations for one real, still-unregistered
+   person); it actually proves the narrower, still-valuable guarantee
+   that concurrent registrations resolving to an ALREADY-EXISTING person
+   never duplicate it. **Fixed**: rewrote the test's own doc comment to
+   state precisely what is and is not proven, and why the harder case is
+   not reachable by any resolver this stage ships.
+4. **P1 - missing test coverage**: no test exercised idempotency through
+   the ACTUAL dispatch path (`RegisterPlayerWithResolution`, not the
+   older `RegisterPlayer` called directly), and no test proved cross-
+   tenant identity-review-clearing is denied. **Fixed**: three new tests
+   (duplicate-email through the dispatch path, genuine concurrent
+   duplicate-email registration proving exactly one succeeds, cross-
+   tenant clearing denial returning 404).
+
+Two further P2s were fixed (resolver-failure audit records were
+hardcoded to `OutcomeSuccess`, hiding outages from an audit scan for
+failures; the resolution audit record carried no `RequestID`/
+`IPAddress`/`UserAgent` unlike every sibling audit record in this
+codebase). Several more P2s were explicitly recorded as accepted/
+deferred with reasoning, none silently dropped - full list in ADR
+`0027`'s own findings section, including: a benign orphan-Person row from
+a losing registration race (inherited unchanged from Stage 2, not a
+regression); the resolver's `Raw`/`Reason` fields being trusted by doc
+comment rather than enforced in code (no real resolver exists yet to
+misuse them); a false-positive Match's trust boundary; migration lock/
+down-migration one-way-door notes; a pre-existing ADR-0026 cross-tenant
+restriction-metadata visibility design now reachable in practice for the
+first time; no per-tenant opt-in/opt-out for resolution (a hybrid-
+licensing open question); and CI's `go test` steps not passing `-race`.
+
+### Newly discovered during this stage's validation, NOT introduced by it
+
+`internal/casino`'s pre-existing `TestConcurrent_
+DuplicateBetDeliveryDuringSelfExclusion` (Stage 4D-RG) is intermittently
+flaky under `go test -race -tags=integration` - observed failing roughly
+1 run in 3 in this session, reporting the two concurrent bet-delivery
+goroutines disagreeing about whether a bet posted while self-exclusion
+was concurrently being applied. No file this stage touches is on that
+code path - confirmed via repeated isolated re-runs. This is a genuine,
+pre-existing race in the casino bet-delivery/self-exclusion interaction
+requiring `casino`/`ledger-finance`/`identity-compliance` specialist
+attention in a future stage; it was NOT fixed here (out of this
+identity-resolution stage's scope) and is NOT silently closed - see
+"Blockers" below.
 
 ### Verification performed
 
-`gofmt -l .` clean. `go build ./...`, `go vet ./...`, `go vet
--tags=integration ./...` clean. `go test ./...`, `go test -tags=integration
-./...`, and `go test -race -tags=integration ./...` all pass across the
-full repository. Migrations `0037` and `0038` both round-tripped (`up` →
-`down` → `up`) cleanly on a database already carrying prior stages' own
-test data. Concurrency tests for all three directive-required race
-scenarios (self-exclusion during launch, during a bet, and during a
-duplicate bet delivery) pass repeatably under `-race` against real
-Postgres, with strengthened assertions proving the two concurrent
-deliveries' own reported results never disagree with each other.
+`gofmt -l .` clean. `go build ./...` clean. `go vet -tags=integration
+./...` clean. `go test ./...`, `go test -tags=integration ./...`, and
+`go test -race ./...` all pass cleanly across the full repository. `go
+test -race -tags=integration ./...` passes except for the pre-existing,
+intermittently flaky casino test noted above. Migration `0039`
+round-tripped (`up` → `down` → `up`) cleanly before this stage's own
+tests populated the new status value (the down migration is a documented,
+intentional one-way door once any row uses `identity_review_required` -
+verified live against the dev database).
 
 ### Pending (to close out this stage)
 
-- Stage 4D-RG Completion Report delivered to the human, ending with the
+- Stage 4E Completion Report delivered to the human, ending with the
   required closing statement. No further stage work begins until
   explicitly authorized.
 
 ### Blockers / genuine scope boundaries (not defects)
 
-None block Stage 4D-RG's own approved scope, which is complete. The
+None block Stage 4E's own approved scope, which is complete. The
 following are honestly labeled boundaries and open decisions for future
-stages, recorded per CLAUDE.md's "record it as a decision" rule rather
-than silently dropped - full detail in ADR `0026`:
+stages, per CLAUDE.md's "record it as a decision" rule - full detail in
+ADR `0027`:
 
-- **Cross-brand/cross-tenant self-exclusion evasion via re-registration
-  remains open** (the P0 finding above). Closing it requires a genuine
-  Person-resolution capability (KYC-driven document/identity matching, or
-  some other deliberate cross-brand linkage) - a substantial future body
-  of work `docs/architecture/05-identity-architecture.md` already
-  anticipated as "Stage 4's KYC-driven hash matching," not a small fix.
-  **This is the single most significant residual gap this stage leaves**
-  and should weigh heavily on any decision about real-money go-live.
-- **No platform-wide, staff-initiated restriction capability exists** -
-  `CreateStaffRestriction` only accepts tenant/brand scope, because no
-  platform-wide player-lookup capability exists anywhere else in this
-  codebase for it to build on (even `RolePlatformAdmin` cannot browse a
-  specific tenant's players today - `PermPlayerRead` is itself
-  `RequireTenantScope`-gated).
-- **No early termination of a self-exclusion is implemented** - most
-  jurisdictions treat this as requiring specific legal process this stage
-  has no mandate to invent; recorded as an open decision requiring legal
-  input before any such endpoint is built.
-- **Whether a bring-your-own-licence tenant's self-exclusions should ever
-  default to tenant-scoped rather than platform-wide** is an open,
-  jurisdiction/licensing-model question this stage does not resolve -
-  every tenant defaults to maximal player protection (platform-wide)
-  today.
-- **KYC/AML, player-level jurisdiction restriction, deposit/loss/
-  wagering/session limits, reality checks, and time-outs/cooling-off**
-  remain **NOT IMPLEMENTED** - documented extension points only
-  (`EvaluateEligibility`'s own shape is designed to grow a KYC/AML check
-  as one more step without changing its callers).
-- The Stage 3D TOCTOU risk (submit/resolve eligibility window) is carried
-  forward unchanged - this stage's implementation did not touch the
-  affected withdrawal-approval path.
-- Stage 4A's own carried-forward limitations (the payments-side
-  unguarded-reversal race, per-tenant provider signing keys, Bonus Engine
-  accounting open decisions) are unaffected and remain separately
-  tracked - none silently closed.
+- **Cross-brand self-exclusion evasion prevention is not yet ACTIVE for a
+  real player** (see "The honest limit" above) - closing this fully
+  requires a real, contracted identity-verification/KYC vendor to
+  populate `VerifiedAttributes`, which is explicitly out of this stage's
+  scope. This remains the single most significant residual gap and
+  should weigh heavily on any decision about real-money go-live, exactly
+  as Stage 4D-RG's own equivalent note said.
+- **No automatic reconciliation of pre-existing duplicate Persons** -
+  directive §14 explicitly forbids heuristic auto-merging; any future
+  cleanup of historical duplicates is a controlled, KYC-backed project,
+  not an automatic batch job.
+- **No per-tenant opt-in/opt-out for Person resolution** - resolution is
+  unconditionally platform-wide today (a single resolver instance). A
+  bring-your-own-licence tenant under a different jurisdiction may
+  eventually need this as a legal/data-controller concern; `ResolutionInput`
+  already carries the fields a future policy would key on, but nothing
+  consumes them yet.
+- **Newly discovered casino concurrency flake** (see above) - carried
+  forward, unresolved, not silently closed.
+- The Stage 3D TOCTOU risk (withdrawal submit/resolve eligibility
+  window), the payments-side unguarded-reversal race, casino per-tenant
+  provider signing keys, the casino real-provider API documentation
+  requirement, and Bonus Engine accounting open decisions are all
+  unaffected by this stage and remain separately tracked - none silently
+  closed.
+- Every Stage 4D-RG carried-forward limitation not specifically about
+  Person duplication (no platform-wide staff-initiated restriction
+  capability; no early termination of self-exclusion; whether a bring-
+  your-own-licence tenant's self-exclusions should ever default to
+  tenant-scoped; KYC/AML, player-level jurisdiction restriction, deposit/
+  loss/wagering/session limits, reality checks, time-outs/cooling-off)
+  remain **NOT IMPLEMENTED**, unchanged, and not silently closed.
 
 ### Decisions/input still useful from the human before the next stage
 
-1. Approve Stage 4D-RG and authorize the next stage (per CLAUDE.md's
-   stage gate - a real casino provider integration, sportsbook, bonus,
-   B2C frontend, partner console, production deployment, real PSP, and
-   real crypto integrations do not begin automatically).
-2. Decide the priority/timeline for closing the cross-brand self-
-   exclusion evasion gap (a Person-resolution capability) relative to any
-   real-money go-live - this is arguably the single highest-priority open
-   RG item on the platform right now.
-3. Decide whether/how a self-exclusion may ever be terminated early in
-   any jurisdiction this platform will operate in (legal input required,
-   not an engineering decision).
-4. Decide whether a bring-your-own-licence tenant's self-exclusions
-   should ever default to tenant-scoped rather than platform-wide.
-5. Decide whether/when a platform-wide staff-initiated restriction
-   capability (and the platform-wide player-lookup capability it would
-   require) should be built.
-6. The already-open, non-blocking items carried forward from Stage 0-4A
-   remain open (`docs/decisions/0005`; ADRs 0017/0018's open items;
-   `brands`' public-read RLS breadth; the promo_liability/bank-treasury/
-   crypto-custodian accounting decisions that still block bonus and
-   crypto financial posting specifically; the Stage 3D TOCTOU risk; the
-   payments-side unguarded-reversal race; per-tenant provider signing
-   keys).
+1. Approve Stage 4E and authorize the next stage (per CLAUDE.md's stage
+   gate).
+2. Decide the priority/timeline for contracting a real identity-
+   verification/KYC vendor to actually activate cross-brand evasion
+   prevention for real players - this is arguably the single highest-
+   priority open item on the platform right now, directly inherited from
+   Stage 4D-RG's own equivalent item.
+3. Decide whether a bring-your-own-licence tenant should be able to
+   opt out of platform-wide Person resolution for data-controller/legal
+   reasons (ADR `0027`'s own recorded open question).
+4. Prioritize the newly discovered casino bet-delivery/self-exclusion
+   concurrency flake for a future stage's specialist attention.
+5. The already-open, non-blocking items carried forward from Stage
+   0-4D-RG remain open (`docs/decisions/0005`; ADRs 0017/0018's open
+   items; `brands`' public-read RLS breadth; the promo_liability/bank-
+   treasury/crypto-custodian accounting decisions; the Stage 3D TOCTOU
+   risk; the payments-side unguarded-reversal race; per-tenant provider
+   signing keys; every Stage 4D-RG item not specifically about Person
+   duplication, listed above).

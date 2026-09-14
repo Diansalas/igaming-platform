@@ -22,6 +22,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/httpserver"
+	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
@@ -120,6 +121,13 @@ func run() error {
 		RefreshTokenTTL:     cfg.RefreshTokenTTL,
 		PaymentOrchestrator: orchestrator,
 		CasinoOrchestrator:  casinoOrchestrator,
+		// Stage 4E: no real identity-resolution vendor is contracted yet
+		// (docs/decisions/0027 §3) - MockPersonResolver's honest default
+		// (NoMatch for every registration, since none carries verified
+		// identity evidence today) preserves Stage 2's original
+		// registration behavior while ensuring every registration now
+		// goes through the resolution boundary, never bypassing it.
+		PersonResolver: identityresolution.NewMockPersonResolver(),
 	})
 
 	// Stage 3C directive item 4: operationalize the ledger-vs-projection

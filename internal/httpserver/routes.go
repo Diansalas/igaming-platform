@@ -68,6 +68,10 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermPlayerRead)(newGetPlayerHandler(deps)))))
 	mux.Handle("POST /v1/admin/players/{id}/suspend",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermPlayerSuspend)(newSuspendPlayerHandler(deps)))))
+	// Stage 4E: clear a player_account out of identity_review_required -
+	// PermIdentityReviewManage (RoleCompliance only), never PermPlayerSuspend.
+	mux.Handle("POST /v1/admin/players/{id}/identity-review/clear",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermIdentityReviewManage)(newClearIdentityReviewHandler(deps)))))
 
 	// Audit trail: read-only, tenant-scoped.
 	mux.Handle("GET /v1/admin/audit-log",

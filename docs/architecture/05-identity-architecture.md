@@ -95,3 +95,45 @@ tokens with reuse detection revoking the full session chain, Postgres-
 backed login lockout, and a permission-oriented RBAC replacing Stage 1's
 role-list skeleton. See the Stage 2 completion report for the full
 authentication/authorization architecture and its security review.
+
+## Implementation status (Stage 4E) — Person resolution
+
+Stage 4D-RG's own specialist review found that "each registration
+currently creates one `Person` per `PlayerAccount`" (above) was a P0: it
+made cross-brand self-exclusion (ADR 0026's own platform-wide
+`player_restrictions` mechanism) unable to ever actually reach a second
+brand's registration, since nothing could recognize two registrations as
+the same real person. Stage 4E (`docs/decisions/0027`) closes this by
+inserting an identity-resolution boundary BEFORE Person creation, without
+introducing a second identity model:
+
+- `internal/identityresolution.PersonResolver` — a provider-neutral
+  interface (`Match` / `NoMatch` / `Uncertain` / unavailable), mirroring
+  `CasinoProvider`/`PaymentProvider`'s exact shape. `MockPersonResolver` is
+  the only implementation shipped this stage - `NOT IMPLEMENTED` for any
+  real KYC/identity-verification vendor.
+- Registration flow: `identityresolution.RegisterPlayerWithResolution`
+  calls the resolver BEFORE deciding whether to link an existing `Person`
+  (`identity.RegisterPlayerLinkedToPerson`), create a brand-new one
+  (`identity.RegisterPlayer`, Stage 2's original behavior), or land the
+  account in a new safe status, `identity_review_required`
+  (`identity.RegisterPlayerPendingReview`, migration 0039) - reusing the
+  EXISTING `PlayerAccountStatus` enum `internal/rg.EvaluateEligibility`
+  already denies, rather than inventing a parallel status/table.
+- **Honest current limitation** (see ADR 0027's own "Carried-forward
+  limitations" section for the full statement): every registration
+  reachable over the live HTTP API resolves `NoMatch` today, because no
+  trusted source of `VerifiedAttributes` (legal name, DOB, government ID
+  reference, KYC provider reference) is wired into the register handler
+  yet - matching on raw, client-supplied registration fields (this doc's
+  original "hash of document number + date of birth" proposal, which
+  assumed KYC had already run) would be worse than no matching at all.
+  The resolution orchestration and cross-brand enforcement are proven
+  correct at the package/integration-test level against a resolver a real
+  future vendor integration will replace; they are not yet actively
+  preventing evasion for a real player until that vendor exists.
+- Platform-wide vs. tenant-scoped remains exactly as this doc's original
+  "Model" section describes: `Person` is platform-wide, self-exclusion
+  attaches to `Person`, never to `PlayerAccount` - Stage 4E does not
+  change this, it makes the platform-wide `Person` actually reachable
+  from a second brand's registration for the first time.

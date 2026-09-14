@@ -99,6 +99,18 @@ const (
 	// self-service endpoint regardless of this permission - RLS's
 	// player_self_read policy, not RBAC, is what authorizes that).
 	PermRGRestrictionRead Permission = "rg_restriction:read"
+
+	// PermIdentityReviewManage gates clearing a player_account out of the
+	// 'identity_review_required' status Stage 4E introduced (ADR 0027
+	// §6/§8) - a security-sensitive decision identical in shape to
+	// PermRGRestrictionWrite (Stage 4D-RG, ADR 0026 §12): clearing a
+	// review incorrectly is exactly as capable of enabling self-exclusion
+	// evasion as writing a restriction incorrectly, so it gets the SAME
+	// separation-of-duties treatment - its own dedicated permission,
+	// deliberately never bundled into PermPlayerSuspend/PermStaffManage/
+	// PermTenantWrite, and NOT granted to RoleTenantAdmin or
+	// RolePlatformAdmin. Granted only to RoleCompliance.
+	PermIdentityReviewManage Permission = "identity_review:manage"
 )
 
 // rolePermissions is a static, in-code role -> permission-set mapping.
@@ -168,6 +180,10 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// row from any tenant-scoped connection); a genuinely platform-wide
 		// restriction additionally requires RolePlatformAdmin.
 		PermRGRestrictionWrite, PermRGRestrictionRead,
+		// Stage 4E: the sole grantee of PermIdentityReviewManage - see that
+		// permission's own doc comment for why it mirrors
+		// PermRGRestrictionWrite's separation-of-duties treatment exactly.
+		PermIdentityReviewManage,
 	),
 	// finance is Stage 3B's own role, dedicated solely to withdrawal
 	// governance - it holds all four withdrawal permissions and nothing
