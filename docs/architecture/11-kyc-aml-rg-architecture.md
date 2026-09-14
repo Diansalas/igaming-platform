@@ -50,3 +50,34 @@ interactions. Stage 4 in the build sequence, with vendor integration work
 starting earlier than the engineering timeline suggests it should (KYC
 vendor contracts have long lead times that are not engineering time —
 Blueprint §9).
+
+## Implementation status (Stage 4D-RG)
+
+This document remains a Stage 0 proposal for KYC and AML in full - neither
+is implemented. **Self-exclusion**, specifically the "at both brand and
+platform level" requirement this document already anticipated above, is
+now `IMPLEMENTED` as a foundation: see `docs/decisions/0026-responsible-
+gaming-player-status-enforcement-foundation.md` for the full design (the
+`player_restrictions` table, the cross-brand/cross-tenant Person-based
+enforcement, the concurrency guarantees, and the RLS model) and
+`internal/rg` for the code. Concretely:
+
+- **Self-exclusion**: `IMPLEMENTED`. Platform-wide by default for player
+  self-service; tenant/brand-scoped for staff-initiated restrictions.
+  Indefinite or time-bound; append-only (no early termination endpoint -
+  ADR 0026 §2's own recorded open decision on why).
+- **Deposit/loss/wager/session limits, reality checks, time-outs/cooling-
+  off**: `NOT IMPLEMENTED` - documented extension points only (ADR 0026
+  §15). None of these share self-exclusion's simple binary-restriction
+  shape closely enough to retrofit onto `player_restrictions` without a
+  concrete design of their own.
+- **KYC tiering, AML screening/monitoring/SAR export**: `NOT IMPLEMENTED`.
+  `EvaluateEligibility` (the new authoritative "may this player gamble
+  right now" boundary casino launch/bet now consult) is deliberately
+  shaped so a future KYC/AML check slots in as one more step in its
+  existing sequence without changing any of its callers (ADR 0026 §14).
+- **Enforcement point**: the platform-side gap this document's "What makes
+  this an architecture concern" section warned about (controls that exist
+  as a feature but are not actually enforced/logged) is now closed for
+  self-exclusion specifically - casino game launch and casino bet are both
+  gated, and every denial is audited (ADR 0026 §11).
