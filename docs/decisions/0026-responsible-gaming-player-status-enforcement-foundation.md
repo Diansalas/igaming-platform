@@ -30,11 +30,21 @@ per brand), and `Wallet.Status` (`active | frozen | closed`, per wallet).
 None of them were ever consulted by `internal/casino`'s `LaunchGame` or
 `postBet` - a suspended or wallet-frozen player could still launch a game
 and place a bet, and `PlayerAccount.Status = 'self_excluded'` was
-brand-scoped only, so a Person barred on one brand could register a new
-account on a second brand of the same operator and keep playing. Stage
-0's own `11-kyc-aml-rg-architecture.md` anticipated exactly this gap:
-"self-exclusion at both brand and platform level (platform level requires
-the cross-brand `person` cluster...)".
+brand-scoped only, with no mechanism capable of reaching a SECOND brand
+account at all. Stage 0's own `11-kyc-aml-rg-architecture.md` anticipated
+exactly this gap: "self-exclusion at both brand and platform level
+(platform level requires the cross-brand `person` cluster...)".
+
+**Important precision, added after this stage's own specialist review**
+(identity/architect and security reviews, independently): this stage
+builds the platform-level MECHANISM (a restriction keyed on the
+platform-wide `Person`, visible from any tenant) but does **not** close
+the literal evasion "register a new brand account and keep playing" for a
+real player today - see §16 "Specialist review findings and fixes" and
+the "Carried-forward limitations" section for why, and precisely what
+remains open. The mechanism is correct and load-bearing for the day this
+precondition is met; it is not, by itself, a complete behavioral guarantee
+yet.
 
 This stage does not invent a new identity model. It adds the ONE genuinely
 new concept these existing types cannot express (a restriction bound to
@@ -301,16 +311,42 @@ Directive §9's two required properties, both proven with real Postgres
   `..._ForgedTenantColumnRejected` (a raw SQL `INSERT` claiming a foreign
   tenant id from a tenant-A-scoped connection - not merely a Go-level
   check, an actual RLS `WITH CHECK` violation).
+- **A player reading their OWN status must never see a DIFFERENT tenant's
+  confidential restriction data**, even though the same Person legitimately
+  has accounts at both: proven by `TestPlayerRestrictions_RLS_
+  PlayerCannotReadAnotherTenantsRestrictionOnSharedPerson` (added after
+  this stage's own security/RLS specialist review found and fixed a real
+  leak here - see §16).
 
-### 10. RLS design (migration 0037)
+**Precondition this section's first two properties depend on, stated
+precisely (identity/architect and security specialist review finding,
+the most significant of this stage's review pass):** the tests above
+construct the shared `person_id` DIRECTLY (`seedAccount`'s `personID`
+parameter, `seedSecondBrandFixture`) - they prove the enforcement
+mechanism is correct once two `PlayerAccount`s share a `person_id`. They
+do **not** prove a real player can achieve that state today.
+`internal/identity.RegisterPlayer` (the only production registration path)
+calls `CreatePerson` unconditionally on every call - a fresh, unlinked
+`Person` every time, with zero lookup/dedup logic anywhere in this
+codebase (`persons.person_key_hash`, the column Stage 2 clearly intended
+for this, is written by nothing). **A real player who self-excludes and
+then registers a second brand or tenant account gets a brand-new
+`person_id` and is NOT blocked by this mechanism today.** This is listed
+as an explicit, tracked item in "Carried-forward limitations" below - it
+is not a defect in this stage's own code, but it is a real gap in the
+protective PROPERTY the Context section above describes, and must not be
+represented as closed until a Person-resolution capability exists.
 
-`player_restrictions` carries `FORCE ROW LEVEL SECURITY` and four policies
-plus two visibility-only policies, deliberately NOT mirroring `audit_log`'s
-`dual_scope_isolation` shape verbatim (an earlier draft tried to and found
-it could not express "a player, authenticated normally with both
-`app.tenant_id` and `app.player_account_id` set, must still be able to
-insert a `tenant_id IS NULL` row for themselves" - see the migration
-file's own comments for the exact reasoning):
+### 10. RLS design (migrations 0037, 0038)
+
+`player_restrictions` carries `FORCE ROW LEVEL SECURITY`. Its policy set,
+after migration 0038's specialist-review fixes (see §16), deliberately
+does NOT mirror `audit_log`'s `dual_scope_isolation` shape verbatim (an
+earlier draft tried to and found it could not express "a player,
+authenticated normally with both `app.tenant_id` and
+`app.player_account_id` set, must still be able to insert a `tenant_id IS
+NULL` row for themselves" - see the migration file's own comments for the
+exact reasoning):
 
 - `staff_and_system_read` (`SELECT`): a staff/system context (no
   `app.player_account_id`) sees its own tenant's rows plus every
@@ -318,7 +354,14 @@ file's own comments for the exact reasoning):
   (running under `db.WithTenant`) able to see a DIFFERENT tenant's
   platform-wide self-exclusion at all.
 - `player_self_read` (`SELECT`): a player-scoped context sees only rows
-  matching THEIR OWN person_id, resolved server-side.
+  matching THEIR OWN person_id, resolved server-side, **and** (migration
+  0038 fix) only a platform-wide row or one scoped to the player's OWN
+  current tenant - migration 0037's original version matched on person_id
+  alone, which let a Person with accounts at two different tenants read a
+  DIFFERENT tenant's own tenant-scoped restriction (including its
+  confidential `reason_code`) through their own status endpoint - a real
+  leak, found and fixed by this stage's own security/RLS specialist
+  review (§16), not merely a theoretical one.
 - `staff_insert` (`INSERT`): a tenant-scoped connection may only insert
   `tenant_id = <its own tenant>`; a genuinely platform-scoped connection
   (`db.WithoutTenant`) may insert `tenant_id IS NULL` - never a
@@ -330,14 +373,24 @@ file's own comments for the exact reasoning):
   row naming THEMSELVES (`person_id`/`player_account_id`/
   `created_by_actor_id` all re-derived server-side from
   `app.player_account_id`, never trusted from the request body).
-- `staff_and_system_update_visibility` / `..._delete_visibility`: scope
-  visibility ONLY (mirrors the read policy) - granted so the deny-mutation
-  trigger has a real row to intercept and can therefore fail LOUDLY with
-  its own named exception, rather than an `UPDATE`/`DELETE` silently
-  affecting zero rows (which would be indistinguishable from targeting a
-  nonexistent id, and untestable as a genuine guarantee). No policy of any
-  kind ever permits the mutation itself to succeed - the trigger denies it
-  unconditionally, regardless of what these policies make visible.
+- **No UPDATE/DELETE row-visibility policy of any kind** (migration 0038
+  fix - superseding migration 0037's original `staff_and_system_
+  update_visibility`/`..._delete_visibility` policies): a
+  `player_restrictions_immutable_statement` trigger (`BEFORE UPDATE OR
+  DELETE ... FOR EACH STATEMENT`) fires unconditionally per statement,
+  regardless of how many rows RLS makes visible - including zero - so a
+  mutation attempt fails LOUDLY with the same named exception even with
+  no visibility policy granting any row at all. Migration 0037's original
+  row-visibility-policy design (kept as a row-level trigger, still
+  present as defense-in-depth) achieved the same loud-failure property
+  but, as a side effect, exposed broader UPDATE/DELETE row visibility
+  than `audit_log`'s own dual-scope pattern - a tenant-scoped connection's
+  mutation SCOPE included every OTHER tenant's platform-wide rows, so a
+  future accidental removal of just the row-level trigger (not both
+  triggers) would have let one tenant silently neuter every platform-wide
+  self-exclusion on the platform. The statement-level trigger closes this
+  without needing any visibility policy at all (security/RLS specialist
+  review finding).
 
 All four RLS/adversarial test categories directive §10 requires (cross-
 tenant read/insert/update/delete; cross-brand unauthorized access; player
@@ -437,21 +490,33 @@ See §8 for full detail. Summary table:
 
 Migration `0037_create_player_restrictions`: one new table, two triggers
 (`player_restrictions_immutable`, `player_restrictions_no_truncate`), six
-RLS policies. No existing table is altered. Round-tripped (`up` → `down`
-→ `up`) cleanly on a database already carrying casino/withdrawal/ledger
-data from prior stages' own test runs.
+RLS policies. Migration `0038_player_restrictions_specialist_review_
+fixes`: fixes `player_self_read` to add tenant scoping, replaces the two
+`staff_and_system_update_visibility`/`..._delete_visibility` policies with
+a statement-level deny-mutation trigger, and adds a composite `(player_
+account_id, tenant_id)` FK (plus the supporting `UNIQUE (id, tenant_id)`
+on `player_accounts`) - see §10 and §16. No pre-existing table's data or
+other columns are altered by either migration. Both round-tripped (`up` →
+`down` → `up`) cleanly on a database already carrying casino/withdrawal/
+ledger data from prior stages' own test runs.
 
 ## Consequences
 
 - The casino launch/bet path now has an authoritative, single, reusable,
-  auditable, race-tested gate - the production-blocking gap Stage 4A
-  identified is closed for self-exclusion and existing account/wallet
-  status, though not for KYC/AML or player-level jurisdiction (§14, not
-  yet implemented).
-- Two OPEN DECISIONs are recorded for human/legal input: whether a
+  auditable, race-tested gate for existing account/wallet status and for
+  self-exclusion WITHIN the identity linkage that exists today (one
+  Person, one or more PlayerAccounts that already share that person_id) -
+  not yet for KYC/AML or player-level jurisdiction (§14), and not yet a
+  complete guarantee against a player evading self-exclusion by
+  re-registering, which depends on a Person-resolution capability this
+  stage does not build (§9, §16, "Carried-forward limitations").
+- Three OPEN DECISIONs are recorded for human/legal input: whether a
   bring-your-own-licence tenant's self-exclusions should ever be
-  tenant-scoped rather than platform-wide by default (§3), and whether/how
-  a self-exclusion may ever be terminated early (§2).
+  tenant-scoped rather than platform-wide by default (§3); whether/how a
+  self-exclusion may ever be terminated early (§2); and when/how a
+  Person-resolution (cross-brand identity linkage) capability should be
+  built, given it is a precondition for this stage's own cross-brand
+  protection to be effective against a real evasion attempt (§16).
 - A platform-wide, staff-initiated restriction capability remains
   unbuilt (§4) pending a genuine platform-wide player-lookup capability
   that does not exist anywhere else in this codebase yet.
@@ -459,15 +524,173 @@ data from prior stages' own test runs.
   existing error-based failure modes - a deliberate, documented
   inconsistency (§6) driven by the audit-durability requirement, not an
   oversight.
+- `postBet` now short-circuits on an already-posted `(provider_id,
+  provider_tx_id)` BEFORE the RG/session/balance checks run at all (§16,
+  financial correctness review finding) - a bet redelivery is now
+  correctly idempotent even across an intervening RG state change.
 
 ## Specialist review findings and fixes
 
-_(Populated after the mandatory 7-specialist review pass - see
-`docs/active-stage.md` for the in-progress record and the Stage 4D-RG
-completion report for the final summary.)_
+Seven independent specialist reviews (RG architecture, security,
+financial correctness, identity/Person model, PostgreSQL/RLS, API/HTTP,
+adversarial testing), each with live-Postgres empirical verification where
+applicable, not just static reading. One finding rose to P0 severity
+(reported independently by three reviewers), two to P1, several P2s.
+
+**P0 - the cross-brand/cross-tenant self-exclusion protection is
+mechanism-correct but currently unreachable in production** (identity/
+architect, security, and PostgreSQL/RLS reviews, independently). This
+stage's own Context section originally overstated what was closed: see
+the corrections now in this ADR's Context and §9 sections, and the
+tracked item in "Carried-forward limitations" below. Fix applied: this
+ADR's own claims corrected throughout; the cross-brand/cross-tenant test
+doc comments (`internal/rg/rg_integration_test.go`,
+`internal/casino/rg_enforcement_integration_test.go`) now explicitly state
+they prove the mechanism, not an end-to-end reachable state. No code
+change closes the underlying gap itself in this stage - see "Carried-
+forward limitations".
+
+**P1 - financial correctness: a redelivered, already-posted bet could
+incorrectly report a fresh decline instead of its original success**
+(financial correctness and adversarial testing reviews, independently,
+empirically reproduced). `postBet` ran the RG eligibility check before
+ever consulting whether this `(provider_id, provider_tx_id)` had already
+posted, so a bet that succeeded, followed later by the player self-
+excluding (a permanent condition - every future redelivery would be
+affected, not a narrow timing window), then redelivered, was re-evaluated
+fresh and reported `declined` for a stake already legitimately taken -
+violating `financial-transaction-flows.md` §5's documented idempotent-
+replay contract. **Fixed**: a new `findPostedBetTransaction` check runs
+first in `postBet`, before session/RG/balance evaluation, short-circuiting
+straight to the original `Succeeded` result for any already-posted
+transaction. New regression test
+(`TestReceiveCallback_RedeliveredBetAfterSelfExclusionStillReportsOriginal
+Success`) plus a strengthened assertion in the existing
+`TestConcurrent_DuplicateBetDeliveryDuringSelfExclusion` that both
+concurrent deliveries' own reported results agree with each other. Noted
+as pre-existing (in a narrower form) for the insufficient-funds decline
+path too, not introduced by this stage, but materially widened by it.
+
+**P1 - `player_self_read` leaked a different tenant's confidential
+restriction data to a player** (security and PostgreSQL/RLS reviews,
+independently, empirically reproduced). The original policy matched on
+`person_id` alone with no tenant predicate; a Person with accounts at two
+tenants could read a DIFFERENT tenant's own tenant-scoped restriction -
+including its `reason_code` - through their own "my RG status" endpoint,
+and the status shown there (`"active": true`) disagreed with what
+`EvaluateEligibility` actually enforces at the other tenant. **Fixed**:
+migration `0038` adds the same tenant-scoping predicate
+`EvaluateEligibility`'s own query already used. New regression test
+`TestPlayerRestrictions_RLS_PlayerCannotReadAnotherTenantsRestrictionOnSha
+redPerson`.
+
+**P1 - `EvaluateEligibility` relied solely on RLS/caller scope, not its
+own SQL, to exclude a different tenant's tenant-scoped rows** (identity/
+architect review finding). Fixed by adding an explicit `tenant_id IS NULL
+OR tenant_id = $4` predicate to the restriction query itself, so
+correctness does not depend on which `db.Pool` scope helper (`WithTenant`
+vs. the doc-comment-sanctioned but riskier `WithPlayerScope`) a future
+caller happens to use.
+
+**P1 - `EvaluateEligibility` silently skipped brand-scoped restrictions
+for a caller that forgot to resolve `BrandID`** (security review finding).
+`BrandID` was not validated as required, so a hypothetical future caller
+passing `uuid.Nil` would silently bypass every brand-scoped restriction
+with no error. Fixed: `BrandID` (like `TenantID`/`PlayerAccountID`) is now
+a required, validated parameter.
+
+**P1 - untested `duration_days`/`DurationDays` at every layer, and several
+untested HTTP-layer authorization/validation edge cases** (adversarial
+testing review finding). Added: Go-level tests for `CreateSelfExclusion`/
+`CreateStaffRestriction`'s duration parameter (including non-positive
+rejection and the resulting `EndsAt` arithmetic); HTTP-level tests for
+`duration_days` validation, `RolePlayer`/`RoleFinance` tokens denied on
+the admin routes, a cross-tenant admin read returning 404, and an invalid
+`scope` value rejected with 400.
+
+**P2s fixed**: a stale doc comment (two independent reviewers) describing
+`LaunchGame` as returning a `*NotEligibleError` that no longer exists; the
+UPDATE/DELETE RLS-visibility-policy design broadened mutation scope beyond
+what the deny-mutation trigger actually needed (§10, migration 0038); no
+composite `(player_account_id, tenant_id)` FK existed alongside the
+existing `(brand_id, tenant_id)` one (migration 0038).
+
+**P2s recorded as accepted/deferred, not fixed this stage** (each is a
+genuine, independently-flagged observation, judged non-blocking for this
+stage's scope):
+- Staff have no path to create a platform-wide restriction even when a
+  genuine cross-tenant risk is identified (RG architecture review) - the
+  same gap §4/§12 already records as an open decision, now cross-
+  referenced from the RG-architecture angle too.
+- `LaunchGame` holds the person advisory lock across the external
+  `provider.Launch` network call for the rest of its transaction
+  (financial correctness review) - a hung provider would block that
+  person's own concurrent self-exclusion write until the launch attempt's
+  own timeout. Worth revisiting once a real provider (with real network
+  latency/failure modes) is integrated; the mock provider's synchronous,
+  fast `Launch` makes this a latent rather than observed issue today.
+- The person-lock-before-balance-lock ordering (§8) is correct today but
+  undocumented as a standing rule for future money-path authors
+  (financial correctness review) - recorded here: any future caller that
+  holds a `wallet_balance_projection` row lock must never call
+  `EvaluateEligibility` (which takes the person lock) while holding it.
+- `postWin`/`postRollback` deliberately do not call `EvaluateEligibility`
+  (settling/reversing an already-legitimate prior bet should not be
+  blocked by a status change that occurred after the bet - blocking it
+  would strand funds, and a rollback is itself a correction), but the ADR
+  did not say so explicitly before this revision (financial correctness
+  review) - now stated here.
+- The append-only trigger is enforced by the same role that owns the
+  table (`igaming`), which could, in principle, `ALTER TABLE ... DISABLE
+  TRIGGER` before mutating a row (security review, empirically
+  demonstrated) - not reachable over HTTP or through any code path in
+  this codebase, and identical to the pre-existing situation for
+  `audit_log`/`ledger_entries`/`ledger_transactions` (not introduced by
+  this stage). A genuine fix (separating the migration-owner role from
+  the runtime role) is a platform-wide operational change out of this
+  stage's scope.
+- A casino provider webhook response discloses the specific decline
+  reason (`self_excluded` vs. `insufficient_funds`) to the external
+  provider (security review) - matches the pre-existing convention for
+  every other decline reason this codebase already returns to providers;
+  collapsing RG-specific reasons to a generic code at that one boundary
+  while keeping the specific code in the audit trail is a reasonable
+  future hardening step, not applied this stage to avoid a rushed,
+  under-designed distinction between "safe to disclose" and "not safe to
+  disclose" decline reasons.
+- `reason_code` has no length/charset validation beyond non-empty
+  (security review) - worth adding before any back-office UI renders it;
+  no such UI exists yet.
+- No rate limiting exists on `POST /v1/me/rg/self-exclusion` (security
+  review) - matches the platform-wide absence of rate limiting on
+  essentially every endpoint today, not an RG-specific gap.
+- An eligibility-check error (e.g. a transient DB failure resolving the
+  account), as opposed to a policy DENIAL, does not itself write an audit
+  record (security review) - it is a loud Go error (logged, causes the
+  request to fail), just not a `player_account`-scoped `audit_log` row;
+  consistent with how every other infra-level error in this codebase is
+  handled.
+- `idx_player_restrictions_tenant` is not read by any current query
+  (PostgreSQL/RLS review) - kept as a reasonable index to have once a
+  tenant-scoped restriction-listing admin feature exists, not removed.
 
 ## Carried-forward limitations (not addressed by this stage)
 
+- **Cross-brand/cross-tenant self-exclusion evasion via re-registration
+  remains open.** `internal/identity.RegisterPlayer` creates a fresh,
+  unlinked `Person` on every registration (no lookup, no dedup -
+  `persons.person_key_hash` is written by nothing in this codebase). A
+  real player who self-excludes and registers a new brand or tenant
+  account today gets a new `person_id` and is NOT blocked by this stage's
+  mechanism. This is the single most significant residual gap this stage
+  leaves - see §9/§16 above. Closing it requires a genuine Person-
+  resolution capability (KYC-driven document/identity matching, or some
+  other deliberate cross-brand linkage), which is a substantial future
+  body of work (`docs/architecture/05-identity-architecture.md` already
+  anticipates this as "Stage 4's KYC-driven hash matching"), not a small
+  fix. **OPEN DECISION**: when this capability is built, and whether
+  self-exclusion enforcement should be treated as a hard blocker on any
+  future real-money go-live until it exists.
 - Stage 3D's withdrawal submit/resolve TOCTOU risk - untouched, this
   stage's changes do not intersect that code path.
 - Stage 4A's payments-side unguarded-reversal race (`internal/payments`'

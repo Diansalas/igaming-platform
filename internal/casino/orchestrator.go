@@ -575,6 +575,15 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 // the bet's own ledger-truth entries is a stronger anchor than a session
 // lookup here: it is impossible for a win to be misdirected to any wallet
 // other than the one the round's own bet is already proven to have used.
+//
+// Deliberately does NOT call evaluateAndAuditEligibility (Stage 4D-RG,
+// ADR 0026's own "Specialist review findings and fixes" - financial
+// correctness review): a win settles a bet that was already legitimate
+// when placed (postBet's own RG check already gated it). Blocking the
+// settlement of an already-placed bet because the player's status changed
+// AFTER the bet would strand the stake in house_gaming with no
+// compensating entry - the opposite of player protection, not an
+// enforcement of it.
 func (o *Orchestrator) postWin(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, event CallbackEvent) (ReceiveCallbackResult, error) {
 	if err := validateCallbackEvent(event); err != nil {
 		return ReceiveCallbackResult{}, err
@@ -652,6 +661,12 @@ func (o *Orchestrator) postWin(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 // posted. A rollback naming a provider_tx_id the ledger never posted a
 // bet OR win for writes a tombstone (CLAUDE.md's rollback rule), mirroring
 // internal/payments.postDepositReversalTombstone exactly.
+//
+// Also deliberately does NOT call evaluateAndAuditEligibility (see
+// postWin's identical doc comment) - a rollback is a CORRECTION to
+// history, not a new stake; gating corrections on the player's current
+// status would make the ledger un-correctable for exactly the players
+// most likely to need a correction.
 func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, event CallbackEvent) (ReceiveCallbackResult, error) {
 	if event.ProviderTxID == "" {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: provider_tx_id is required", ErrInvalidInput)

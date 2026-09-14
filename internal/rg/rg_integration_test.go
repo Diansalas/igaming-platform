@@ -277,6 +277,20 @@ func TestCreateSelfExclusion_BlocksSameAccountLaterOn(t *testing.T) {
 // directive §9/ADR 0026 §4/§9: a Person with accounts on two different
 // BRANDS of the SAME tenant is blocked on both once ONE self-excludes,
 // via the shared person_id - never bypassable by switching brands.
+//
+// IMPORTANT SCOPE NOTE (identity/architect specialist review finding,
+// ADR 0026's own "Carried-forward limitations" §16 for full detail): this
+// test constructs the shared person_id directly via seedAccount's
+// personID parameter - it proves the ENFORCEMENT MECHANISM is correct
+// once two PlayerAccounts share a person_id, but internal/identity's own
+// RegisterPlayer (the ONLY production path that creates an account) mints
+// a brand-new, unlinked Person on every registration, with no cross-brand
+// resolution/deduplication logic anywhere in this codebase. As deployed
+// TODAY, a real player re-registering at a second brand after self-
+// excluding gets a fresh person_id and is NOT blocked - this test does
+// not demonstrate otherwise. See ADR 0026 §16 for the full explanation
+// and the tracked precondition (a future KYC-driven or otherwise
+// deliberate Person-resolution capability) this protection depends on.
 func TestCreateSelfExclusion_CrossBrandSameTenantBlocksOtherAccount(t *testing.T) {
 	pool := testPool(t)
 	tenantID := seedTenant(t, pool)
@@ -313,6 +327,10 @@ func TestCreateSelfExclusion_CrossBrandSameTenantBlocksOtherAccount(t *testing.T
 // db.WithTenant transaction (migration 0037's staff_and_system_read RLS
 // policy), which is what actually makes cross-TENANT (not just
 // cross-brand) enforcement possible.
+//
+// Same scope note as TestCreateSelfExclusion_CrossBrandSameTenantBlocks
+// OtherAccount above: the shared person_id is constructed by this test,
+// not by any production registration path today - see ADR 0026 §16.
 func TestCreateSelfExclusion_CrossTenantBlocksOtherAccount(t *testing.T) {
 	pool := testPool(t)
 	tenantA := seedTenant(t, pool)
@@ -340,6 +358,97 @@ func TestCreateSelfExclusion_CrossTenantBlocksOtherAccount(t *testing.T) {
 	}
 	if decision.Allowed || decision.Code != CodeSelfExcluded {
 		t.Fatalf("expected tenant B's account to be blocked by tenant A's platform-wide self-exclusion, got allowed=%v code=%q", decision.Allowed, decision.Code)
+	}
+}
+
+// TestCreateSelfExclusion_DurationDaysSetsEndsAt exercises
+// CreateSelfExclusion's *int DurationDays parameter directly (adversarial
+// testing specialist review finding: no test anywhere previously drove
+// this parameter - the one existing time-bound test bypassed it entirely
+// via insertRestriction).
+func TestCreateSelfExclusion_DurationDaysSetsEndsAt(t *testing.T) {
+	pool := testPool(t)
+	tenantID := seedTenant(t, pool)
+	a := seedAccount(t, pool, tenantID, uuid.Nil)
+
+	days := 30
+	var restriction Restriction
+	err := pool.WithPlayerScope(context.Background(), a.tenantID, a.accountID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		restriction, err = CreateSelfExclusion(ctx, tx, CreateSelfExclusionParams{
+			TenantID: a.tenantID, PlayerAccountID: a.accountID, DurationDays: &days,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create self-exclusion with duration_days: %v", err)
+	}
+	if restriction.EndsAt == nil {
+		t.Fatal("expected a non-nil EndsAt for a time-bound self-exclusion")
+	}
+	gotDuration := restriction.EndsAt.Sub(restriction.StartsAt)
+	wantDuration := 30 * 24 * time.Hour
+	if gotDuration != wantDuration {
+		t.Fatalf("expected EndsAt - StartsAt = %s, got %s", wantDuration, gotDuration)
+	}
+
+	// Still active right now (30 days out), and still blocks eligibility -
+	// a time-bound exclusion is exactly as enforced as an indefinite one
+	// while it is in its active window.
+	var decision Decision
+	err = pool.WithTenant(context.Background(), a.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		decision, err = EvaluateEligibility(ctx, tx, EligibilityParams{TenantID: a.tenantID, BrandID: a.brandID, PlayerAccountID: a.accountID, WalletID: a.walletID})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("evaluate eligibility: %v", err)
+	}
+	if decision.Allowed || decision.Code != CodeSelfExcluded {
+		t.Fatalf("expected a still-active time-bound self-exclusion to deny, got allowed=%v code=%q", decision.Allowed, decision.Code)
+	}
+}
+
+func TestCreateSelfExclusion_RejectsNonPositiveDurationDays(t *testing.T) {
+	pool := testPool(t)
+	tenantID := seedTenant(t, pool)
+	a := seedAccount(t, pool, tenantID, uuid.Nil)
+
+	for _, days := range []int{0, -1, -30} {
+		days := days
+		err := pool.WithPlayerScope(context.Background(), a.tenantID, a.accountID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := CreateSelfExclusion(ctx, tx, CreateSelfExclusionParams{TenantID: a.tenantID, PlayerAccountID: a.accountID, DurationDays: &days})
+			return err
+		})
+		if !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("duration_days=%d: expected ErrInvalidInput, got %v", days, err)
+		}
+	}
+}
+
+func TestCreateStaffRestriction_DurationDaysSetsEndsAt(t *testing.T) {
+	pool := testPool(t)
+	tenantID := seedTenant(t, pool)
+	a := seedAccount(t, pool, tenantID, uuid.Nil)
+
+	days := 7
+	var restriction Restriction
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		restriction, err = CreateStaffRestriction(ctx, tx, CreateStaffRestrictionParams{
+			ActorStaffID: uuid.New(), TargetPlayerAccountID: a.accountID, Scope: ScopeTenant,
+			DurationDays: &days, ReasonCode: "test",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create staff restriction with duration_days: %v", err)
+	}
+	if restriction.EndsAt == nil {
+		t.Fatal("expected a non-nil EndsAt for a time-bound staff restriction")
+	}
+	if got, want := restriction.EndsAt.Sub(restriction.StartsAt), 7*24*time.Hour; got != want {
+		t.Fatalf("expected EndsAt - StartsAt = %s, got %s", want, got)
 	}
 }
 
@@ -632,6 +741,52 @@ func TestPlayerRestrictions_RLS_PlayerCannotReadOtherPersonsRestriction(t *testi
 	}
 	if len(restrictions) != 0 {
 		t.Fatalf("expected player a to see zero restrictions (none of their own), got %d - possible cross-player leak", len(restrictions))
+	}
+}
+
+// TestPlayerRestrictions_RLS_PlayerCannotReadAnotherTenantsRestrictionOnSharedPerson
+// is a security/RLS specialist review finding, empirically reproduced
+// against a live database: player_self_read (migration 0037) matched on
+// person_id alone with no tenant predicate, so a Person with accounts at
+// TWO tenants could read tenant A's own tenant-scoped restriction
+// (including its confidential reason_code) through their TENANT B
+// self-service status endpoint - and the status shown ("active": true)
+// would have disagreed with what EvaluateEligibility actually enforces at
+// tenant B (nothing). Migration 0038 fixes player_self_read to only
+// surface a platform-wide row or a row scoped to the CALLER's own
+// current tenant.
+func TestPlayerRestrictions_RLS_PlayerCannotReadAnotherTenantsRestrictionOnSharedPerson(t *testing.T) {
+	pool := testPool(t)
+	tenantA := seedTenant(t, pool)
+	tenantB := seedTenant(t, pool)
+	accountA := seedAccount(t, pool, tenantA, uuid.Nil)
+	personID := personIDFor(t, pool, accountA)
+	accountB := seedAccount(t, pool, tenantB, personID)
+
+	err := pool.WithTenant(context.Background(), tenantA, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := CreateStaffRestriction(ctx, tx, CreateStaffRestrictionParams{
+			ActorStaffID: uuid.New(), TargetPlayerAccountID: accountA.accountID, Scope: ScopeTenant,
+			ReasonCode: "AML_SECRET_REASON_TENANT_A",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create tenant A's own tenant-scoped restriction: %v", err)
+	}
+
+	var restrictions []Restriction
+	err = pool.WithPlayerScope(context.Background(), tenantB, accountB.accountID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		restrictions, err = ListRestrictionsForAccount(ctx, tx, accountB.accountID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("list restrictions via tenant B: %v", err)
+	}
+	for _, r := range restrictions {
+		if r.ReasonCode == "AML_SECRET_REASON_TENANT_A" {
+			t.Fatalf("tenant B's player status endpoint must NEVER surface tenant A's own tenant-scoped restriction (or its reason_code), got %+v", restrictions)
+		}
 	}
 }
 

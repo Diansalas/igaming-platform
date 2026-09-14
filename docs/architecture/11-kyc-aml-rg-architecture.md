@@ -62,10 +62,23 @@ gaming-player-status-enforcement-foundation.md` for the full design (the
 enforcement, the concurrency guarantees, and the RLS model) and
 `internal/rg` for the code. Concretely:
 
-- **Self-exclusion**: `IMPLEMENTED`. Platform-wide by default for player
-  self-service; tenant/brand-scoped for staff-initiated restrictions.
-  Indefinite or time-bound; append-only (no early termination endpoint -
-  ADR 0026 §2's own recorded open decision on why).
+- **Self-exclusion enforcement mechanism**: `IMPLEMENTED`. Platform-wide
+  by default for player self-service; tenant/brand-scoped for staff-
+  initiated restrictions. Indefinite or time-bound; append-only (no early
+  termination endpoint - ADR 0026 §2's own recorded open decision on why).
+- **Self-exclusion cross-brand/cross-tenant PROTECTION (evading
+  self-exclusion by re-registering)**: `PROVIDER DEPENDENT` /
+  `NOT IMPLEMENTED` in practice, despite the mechanism above being
+  correct - added after this stage's own specialist review (independently
+  found by three reviewers). `internal/identity.RegisterPlayer` mints a
+  brand-new, unlinked `Person` on every registration; nothing in this
+  codebase resolves or deduplicates a Person across registrations. A real
+  player who self-excludes and registers a new account today is NOT
+  blocked - the platform-wide mechanism has no way to recognize them as
+  the same person. This is exactly the "cross-brand `person` cluster"
+  precondition this document's own Context/§`Responsible gaming` section
+  already named above; it remains unbuilt. See ADR 0026 §9/§16/"Carried-
+  forward limitations" for full detail and the tracked open decision.
 - **Deposit/loss/wager/session limits, reality checks, time-outs/cooling-
   off**: `NOT IMPLEMENTED` - documented extension points only (ADR 0026
   §15). None of these share self-exclusion's simple binary-restriction

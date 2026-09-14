@@ -1,162 +1,191 @@
 # Active Stage
 
-## Stage 4A — Casino Integration Foundation — Complete
+## Stage 4D-RG — Responsible Gaming Player-Status Enforcement Foundation — Complete
 
-Status: **Complete, pending human approval to authorize Stage 4B.** Issued
-immediately after the human approved Stage 3D, as the "CASINO INTEGRATION
-FOUNDATION" directive - a production-grade, provider-agnostic casino
-integration layer, NOT a real casino provider integration. Real provider
-contracts, production credentials, sportsbook, the Bonus Engine, KYC/AML,
-Responsible Gaming enforcement, a player-facing lobby UI, and a full
-back-office catalogue UI were explicitly out of scope.
+Status: **Complete, pending human approval to authorize the next stage.**
+Issued immediately after Stage 4A's own specialist review identified a
+production-blocking gap: no authoritative platform-side player-account/
+wallet-status or self-exclusion check existed at casino game launch or
+bet time. Real casino provider integration, sportsbook, the Bonus Engine,
+full KYC/AML, deposit/loss/wagering/session limits, reality checks,
+time-outs/cooling-off, a player-facing lobby UI, and a full back-office
+RG UI were explicitly out of scope.
 
 ### What was built
 
-1. **`CasinoProvider` interface** (`internal/casino/types.go`) -
-   provider-neutral, no SDK types, no free-form passthrough fields:
-   `Catalogue`, `Launch`, `Balance`, `Bet`, `Win`, `Rollback`,
-   `HandleCallback`, `Capabilities`, `HealthStatus`.
-2. **Game catalogue split** - `casino_games` (platform-wide, no RLS, like
-   `assets`) vs. `casino_game_availability` (tenant-owned, RLS, opt-in
-   only, fail-closed).
-3. **Game launch and session model** - an opaque, single-use,
-   database-backed launch token (never the player's JWT), mirroring
-   `internal/auth`'s refresh-token generation in a wholly separate trust
-   domain; the session row itself persists as the round's own identity
-   anchor for subsequent bet/win callbacks.
-4. **Two-layer provider capability model** - adapter-declared vs.
-   operator-configured, narrowing-only, mirroring `docs/decisions/0022`'s
-   payment-capability model.
-5. **Bet/Win/Rollback financial boundary** on the already-approved ledger
-   (Flows 5-7) - wallet/ledger remain sole financial truth; a provider's
-   own reported balance is never consulted to authorize a posting.
-6. **`MockCasinoProvider`** - the only registered adapter this stage,
-   HMAC-signed synthetic callbacks, deterministic decline/ambiguous/
-   failure behavior, run through the identical `CasinoProvider` contract
-   any future real adapter must also pass.
-7. **HTTP layer** - player catalogue/launch, the provider callback webhook
-   (adapter-verified signature, no bearer-auth middleware), and admin
-   endpoints for platform catalogue management, tenant capability
-   configuration, and tenant game-availability configuration.
-8. **Provider conformance suite** covering directive items A-T, plus
-   dedicated regression tests for every specialist-review finding and
-   concurrency tests for the financial/launch paths, plus a new HTTP-layer
-   authorization/tenant-isolation/webhook-authentication test file.
+1. **`internal/rg` package** (`internal/rg/rg.go`) - `player_restrictions`
+   domain type, `CreateSelfExclusion` (player self-service, always
+   platform-wide scope), `CreateStaffRestriction` (staff-initiated,
+   tenant/brand-scoped only - never platform-wide, see "Blockers" below),
+   `ListRestrictionsForAccount`, and `EvaluateEligibility` - the single
+   authoritative "may this player gamble right now" policy boundary.
+2. **No second identity model** - composes the EXISTING `PlayerAccount.
+   Status` and `Wallet.Status` with exactly ONE new signal
+   (`player_restrictions`), anchored on the platform-wide `Person`.
+3. **Migrations `0037`/`0038`** - `player_restrictions`: append-only
+   (RLS + a row-level AND statement-level deny-mutation trigger), dual-
+   scope RLS (platform-wide vs. tenant vs. brand), separate player-self-
+   service vs. staff INSERT policies, tenant-scoped SELECT policies (both
+   hardened during specialist review - see below), a composite `(player_
+   account_id, tenant_id)` FK.
+4. **Casino launch/bet enforcement** - `internal/casino`'s `LaunchGame`
+   and `postBet` both consult `EvaluateEligibility` via a shared
+   `evaluateAndAuditEligibility` wrapper, before a launch session becomes
+   usable and before a bet's financial debit commits respectively. A
+   denial is a RESULT, never a Go error (see below).
+5. **Concurrency**: a transaction-scoped Postgres advisory lock keyed on
+   `person_id` closes the self-exclusion-vs-launch/bet TOCTOU race
+   deterministically - proven under `-race` with real concurrent
+   goroutines against real Postgres.
+6. **New permissions** - `PermRGRestrictionWrite` (RoleCompliance only),
+   `PermRGRestrictionRead` (RoleCompliance/RoleTenantAdmin) - never
+   RolePlatformAdmin.
+7. **Minimal HTTP API** - `POST/GET /v1/me/rg/self-exclusion`,`/status`
+   (player self-service); `POST/GET /v1/admin/rg/restrictions`
+   (staff, tenant/brand-scoped).
+8. **Bet-callback idempotency hardening** (found and fixed during this
+   stage's own review, not a pre-planned item): `postBet` now short-
+   circuits on an already-posted `(provider_id, provider_tx_id)` BEFORE
+   the RG/session/balance checks run at all, so a redelivery is correctly
+   idempotent even across an intervening RG state change.
 
 Full design, rationale, and the complete specialist-review findings/fixes
-list: `docs/decisions/0025-casino-provider-abstraction-and-game-session-
-model.md`. Narrative architecture doc:
-`docs/architecture/08-casino-integration-architecture.md`.
+list: `docs/decisions/0026-responsible-gaming-player-status-enforcement-
+foundation.md`. Updated architecture doc:
+`docs/architecture/11-kyc-aml-rg-architecture.md`'s "Implementation
+status" section.
 
-### Specialist review: six P1s found and fixed
+### Specialist review: one P0, four P1s found and fixed
 
-An independent 7-specialist parallel review (casino integration
-architecture, financial correctness, security, PostgreSQL/RLS, API/HTTP,
-multi-tenancy, adversarial testing) found six P1s before this stage was
-considered complete, three empirically reproduced during review:
+An independent 7-specialist parallel review (RG architecture, security,
+financial correctness, identity/Person model, PostgreSQL/RLS, API/HTTP,
+adversarial testing) - each with live-Postgres empirical verification,
+not just static reading - found:
 
-1. The launch-session credential was minted but never consulted on the bet
-   path - a payload-supplied `player_account_id` could authorize an
-   arbitrary player's debit, and demo vs. real-money was indistinguishable
-   at posting time. **Fixed**: `postBet` now requires and resolves
-   player/wallet/asset/mode from the platform's own `casino_launch_
-   sessions` row.
-2. A win callback credited whatever player its own payload named, not the
-   round's actual bettor (empirically reproduced: a different player was
-   credited in full). **Fixed**: `postWin` resolves the payee from the
-   round's own bet transaction's ledger entries instead.
-3. Two concurrent, distinct rollback references for the same bet both
-   succeeded, doubling the reversal credit (empirically reproduced).
-   **Fixed**: a row lock (`SELECT ... FOR UPDATE`) on the original-
-   transaction lookup in `postRollback`.
-4. A tenant's own `CasinoProviderCapability` - documented as a kill switch
-   - had no effect on the bet/win/rollback path. **Fixed**: `ReceiveCallback`
-   now checks it before dispatch.
-5. A provider-declared `declined`/`ambiguous` `Outcome` on a bet/win
-   callback posted identically to `succeeded` (empirically reproduced).
-   **Fixed**: rejected outright (`ErrOutcomeNotSucceeded`).
-6. Zero concurrency tests existed for the casino financial/launch paths,
-   and zero HTTP-level tests existed for any casino route. **Fixed**:
-   dedicated concurrency tests plus a new HTTP-layer test file.
+1. **P0 (reported independently by three reviewers)**: the cross-brand/
+   cross-tenant self-exclusion PROTECTION is mechanism-correct but
+   currently unreachable in production - `internal/identity.
+   RegisterPlayer` mints a fresh, unlinked `Person` on every registration,
+   with no resolution/dedup logic anywhere in this codebase. A real
+   player who self-excludes and re-registers today is NOT blocked.
+   **Fixed as an explicit documentation correction and tracked open
+   decision** (ADR `0026`'s Context/§9/"Carried-forward limitations"; see
+   "Blockers" below) - not a code defect in this stage's own work, but a
+   precondition its protective claim depends on that does not exist yet.
+2. **P1 - financial correctness**: a bet callback redelivered after
+   already succeeding, and after the RG state it depended on later
+   changed (e.g. the player self-excluded), could incorrectly report a
+   fresh decline instead of its original success - violating the
+   documented idempotent-replay contract, empirically reproduced.
+   **Fixed**: an early already-posted-transaction short-circuit in
+   `postBet`, plus a new regression test and a strengthened concurrency
+   assertion.
+3. **P1 - RLS leak**: the player-facing "my RG status" endpoint leaked a
+   DIFFERENT tenant's confidential restriction `reason_code` to a player
+   with accounts at two tenants, empirically reproduced. **Fixed**:
+   migration `0038` adds tenant scoping to `player_self_read`.
+4. **P1 - defense in depth**: `EvaluateEligibility`'s own SQL relied
+   solely on RLS/caller scope, not an explicit predicate, to exclude a
+   different tenant's rows. **Fixed**: added an explicit tenant predicate.
+5. **P1 - silent-bypass risk**: `EvaluateEligibility` silently skipped
+   brand-scoped restrictions if a caller forgot to resolve `BrandID`.
+   **Fixed**: `BrandID` is now a required, validated parameter.
 
-All six were fixed, each with a dedicated regression test. Several P2s
-(redelivered-tombstoned-rollback idempotency, a catalogue most-specific-
-row-wins ordering bug, a missing `casino_launch_sessions` immutability
-trigger, a platform-global rather than tenant-scoped `token_hash`
-uniqueness, a webhook raw-error-text leak, an HMAC NUL-byte canonicalization
-gap) were also fixed. Full detail for every finding is in ADR `0025`'s own
-"Specialist review findings and fixes" section.
+Several P2s were fixed (a stale doc comment two reviewers independently
+flagged, an RLS UPDATE/DELETE visibility-scope hardening replacing row-
+visibility policies with a statement-level trigger, a composite FK
+addition) and several more explicitly recorded as accepted/deferred
+(full list, with reasoning for each, in ADR `0026`'s own findings
+section) - none silently dropped. The adversarial testing review also
+found `duration_days` completely untested at every layer, plus several
+HTTP-layer authorization/validation gaps (RolePlayer/RoleFinance token
+denial, cross-tenant admin read, invalid `scope` rejection) - all closed
+with new tests.
 
 ### Verification performed
 
-`gofmt -l .` clean. `go build ./...`, `go vet ./...`, `go vet -tags=integration
-./...` clean. `go test ./...`, `go test -race ./...`, `go test -tags=integration
-./...`, `go test -race -tags=integration ./...` all pass across the full
-repository. Migration `0036` round-tripped (`up` → `down` → `up`) cleanly;
-migration `0035`'s round-trip was verified clean on a fresh database
-(directly, and independently by the architect specialist review) before
-the test suite itself posted real casino ledger rows to the dev database,
-after which `0035`'s own down migration correctly refuses to run (an
-append-only-ledger property, documented in that migration's own down file,
-not a defect).
+`gofmt -l .` clean. `go build ./...`, `go vet ./...`, `go vet
+-tags=integration ./...` clean. `go test ./...`, `go test -tags=integration
+./...`, and `go test -race -tags=integration ./...` all pass across the
+full repository. Migrations `0037` and `0038` both round-tripped (`up` →
+`down` → `up`) cleanly on a database already carrying prior stages' own
+test data. Concurrency tests for all three directive-required race
+scenarios (self-exclusion during launch, during a bet, and during a
+duplicate bet delivery) pass repeatably under `-race` against real
+Postgres, with strengthened assertions proving the two concurrent
+deliveries' own reported results never disagree with each other.
 
 ### Pending (to close out this stage)
 
-- Commit and push this work to `claude/focused-wright-jw88w9`.
-- Stage 4A Completion Report delivered to the human, ending with the
-  required closing statement. No Stage 4B work begins until explicitly
-  authorized.
+- Stage 4D-RG Completion Report delivered to the human, ending with the
+  required closing statement. No further stage work begins until
+  explicitly authorized.
 
 ### Blockers / genuine scope boundaries (not defects)
 
-None block Stage 4A's own approved scope, which is complete. The
+None block Stage 4D-RG's own approved scope, which is complete. The
 following are honestly labeled boundaries and open decisions for future
 stages, recorded per CLAUDE.md's "record it as a decision" rule rather
-than silently dropped - full detail in ADR `0025`:
+than silently dropped - full detail in ADR `0026`:
 
-- **No player-account/wallet-status (suspended/self-excluded/frozen) check
-  at game launch or bet time.** A pre-existing, platform-wide gap
-  (deposits have the identical one), not introduced by this stage - but
-  game launch is the canonical responsible-gaming enforcement point and
-  this must close before any real-money go-live.
-- **The identical unguarded-reversal-lookup race this stage fixed for
-  casino also exists in `internal/payments`** (its own deposit-reversal
-  check) - should receive the same `FOR UPDATE` fix in a future pass.
-- **Per-tenant provider signing keys are not implemented** - today one
-  secret per adapter *instance*, shared across every tenant routed to it.
-  A Stage 4B precondition for any real provider, not a Stage 4A gap (no
-  real provider exists yet to exploit this).
-- Free-round/bonus-stake normalization and jackpot-contribution splits
-  remain `OPEN DECISION`s owned by the Bonus Engine stage - Stage 4A's
-  bet/win posting assumes 100%-`player_cash`-funded stakes only.
-- A catalogue sync job, a jurisdiction-*resolution* engine (beyond the
-  static per-game blocklist check), and a back-office catalogue UI remain
-  **NOT IMPLEMENTED**, per this stage's explicit scope-control list.
-- Sportsbook, the Bonus Engine, KYC/AML, full Responsible Gaming, a
-  player-facing lobby UI, production payment providers, and crypto
-  custodian integration remain **NOT IMPLEMENTED**, per this stage's
-  explicit block list.
+- **Cross-brand/cross-tenant self-exclusion evasion via re-registration
+  remains open** (the P0 finding above). Closing it requires a genuine
+  Person-resolution capability (KYC-driven document/identity matching, or
+  some other deliberate cross-brand linkage) - a substantial future body
+  of work `docs/architecture/05-identity-architecture.md` already
+  anticipated as "Stage 4's KYC-driven hash matching," not a small fix.
+  **This is the single most significant residual gap this stage leaves**
+  and should weigh heavily on any decision about real-money go-live.
+- **No platform-wide, staff-initiated restriction capability exists** -
+  `CreateStaffRestriction` only accepts tenant/brand scope, because no
+  platform-wide player-lookup capability exists anywhere else in this
+  codebase for it to build on (even `RolePlatformAdmin` cannot browse a
+  specific tenant's players today - `PermPlayerRead` is itself
+  `RequireTenantScope`-gated).
+- **No early termination of a self-exclusion is implemented** - most
+  jurisdictions treat this as requiring specific legal process this stage
+  has no mandate to invent; recorded as an open decision requiring legal
+  input before any such endpoint is built.
+- **Whether a bring-your-own-licence tenant's self-exclusions should ever
+  default to tenant-scoped rather than platform-wide** is an open,
+  jurisdiction/licensing-model question this stage does not resolve -
+  every tenant defaults to maximal player protection (platform-wide)
+  today.
+- **KYC/AML, player-level jurisdiction restriction, deposit/loss/
+  wagering/session limits, reality checks, and time-outs/cooling-off**
+  remain **NOT IMPLEMENTED** - documented extension points only
+  (`EvaluateEligibility`'s own shape is designed to grow a KYC/AML check
+  as one more step without changing its callers).
 - The Stage 3D TOCTOU risk (submit/resolve eligibility window) is carried
   forward unchanged - this stage's implementation did not touch the
-  affected withdrawal-approval path, so there was nothing here that would
-  close or worsen it.
+  affected withdrawal-approval path.
+- Stage 4A's own carried-forward limitations (the payments-side
+  unguarded-reversal race, per-tenant provider signing keys, Bonus Engine
+  accounting open decisions) are unaffected and remain separately
+  tracked - none silently closed.
 
 ### Decisions/input still useful from the human before the next stage
 
-1. Approve Stage 4A and authorize Stage 4B (per CLAUDE.md's stage gate - a
-   real casino provider integration, sportsbook, bonus, B2C frontend,
-   partner console, production deployment, real PSP, and real crypto
-   integrations do not begin automatically).
-2. Decide whether the two explicitly-deferred items above (RG/self-
-   exclusion enforcement at launch/bet, the payments-side concurrent-
-   reversal race) should be closed before any production deployment, or
-   whether they are acceptable to carry forward further.
-3. When a real casino provider is contracted, its actual API documentation
-   must be supplied before Stage 4B implementation begins - this stage
-   invents nothing about a real provider's wire format.
-4. The already-open, non-blocking business/compliance tracks carried
-   forward from Stage 0-3D remain open (`docs/decisions/0005`; ADRs
-   0017/0018's open items; `brands`' public-read RLS breadth; the
-   promo_liability/bank-treasury/crypto-custodian accounting decisions
-   that still block bonus and crypto financial posting specifically; the
-   Stage 3D TOCTOU risk).
+1. Approve Stage 4D-RG and authorize the next stage (per CLAUDE.md's
+   stage gate - a real casino provider integration, sportsbook, bonus,
+   B2C frontend, partner console, production deployment, real PSP, and
+   real crypto integrations do not begin automatically).
+2. Decide the priority/timeline for closing the cross-brand self-
+   exclusion evasion gap (a Person-resolution capability) relative to any
+   real-money go-live - this is arguably the single highest-priority open
+   RG item on the platform right now.
+3. Decide whether/how a self-exclusion may ever be terminated early in
+   any jurisdiction this platform will operate in (legal input required,
+   not an engineering decision).
+4. Decide whether a bring-your-own-licence tenant's self-exclusions
+   should ever default to tenant-scoped rather than platform-wide.
+5. Decide whether/when a platform-wide staff-initiated restriction
+   capability (and the platform-wide player-lookup capability it would
+   require) should be built.
+6. The already-open, non-blocking items carried forward from Stage 0-4A
+   remain open (`docs/decisions/0005`; ADRs 0017/0018's open items;
+   `brands`' public-read RLS breadth; the promo_liability/bank-treasury/
+   crypto-custodian accounting decisions that still block bonus and
+   crypto financial posting specifically; the Stage 3D TOCTOU risk; the
+   payments-side unguarded-reversal race; per-tenant provider signing
+   keys).

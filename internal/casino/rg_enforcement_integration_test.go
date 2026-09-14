@@ -154,6 +154,13 @@ func TestLaunchGame_DeniedWhenSelfExcludedPlatformWide(t *testing.T) {
 // Person self-excludes via Brand A's account; a launch attempt through
 // Brand B's account (same tenant, same Person) is ALSO denied - Brand B
 // cannot be used to bypass Brand A's self-exclusion.
+//
+// SCOPE NOTE: seedSecondBrandFixture constructs the shared person_id
+// directly - this proves the enforcement MECHANISM, not that a real
+// player can achieve this today by registering twice. See
+// docs/decisions/0026 §16: internal/identity's RegisterPlayer mints a
+// fresh, unlinked Person on every registration; no production path
+// shares a person_id across two independently-created PlayerAccounts yet.
 func TestLaunchGame_DeniedCrossBrandSelfExclusion(t *testing.T) {
 	pool := testPool(t)
 	brandA := seedCasinoFixture(t, pool)

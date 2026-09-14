@@ -122,6 +122,15 @@ var ErrInvalidInput = errors.New("rg: invalid input")
 // Postgres idiom for serializing on a fact rather than a row, applied
 // here the same way internal/casino.lockCashBalance's row lock serializes
 // concurrent bets against one wallet.
+//
+// LOCK ORDERING RULE (financial correctness specialist review): every
+// caller in this codebase takes this lock BEFORE any wallet-balance lock
+// (internal/casino.lockCashBalance's FOR UPDATE) within the same
+// transaction, never after. A future money path that calls
+// EvaluateEligibility (which calls this) while already holding a balance
+// lock would create a lock-ordering cycle with any other transaction that
+// takes the two in the opposite order - always resolve eligibility FIRST,
+// exactly as internal/casino.postBet already does.
 func lockPerson(ctx context.Context, tx pgx.Tx, personID uuid.UUID) error {
 	if _, err := tx.Exec(ctx,
 		`SELECT pg_advisory_xact_lock(hashtext('player_restrictions'), hashtext($1::text))`,
@@ -452,8 +461,17 @@ type EligibilityParams struct {
 // query's own correctness never depends on which scope helper a future
 // caller happens to choose.
 func EvaluateEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParams) (Decision, error) {
-	if params.TenantID == uuid.Nil || params.PlayerAccountID == uuid.Nil {
-		return Decision{}, fmt.Errorf("%w: tenant_id and player_account_id are required", ErrInvalidInput)
+	// BrandID is required, not merely recommended: the self-exclusion
+	// query below treats brand_id IS NULL in a STORED restriction row as
+	// "applies platform/tenant-wide", but if params.BrandID itself were
+	// silently uuid.Nil, the (brand_id IS NULL OR brand_id = $3) clause
+	// would still correctly find a platform-wide restriction - the real
+	// risk is a brand-SCOPED restriction becoming un-checkable for a
+	// caller that forgot to resolve its own brand id, a silent gap a
+	// future caller (e.g. a sportsbook bet) could introduce without any
+	// visible error. Security specialist review finding.
+	if params.TenantID == uuid.Nil || params.PlayerAccountID == uuid.Nil || params.BrandID == uuid.Nil {
+		return Decision{}, fmt.Errorf("%w: tenant_id, brand_id, and player_account_id are required", ErrInvalidInput)
 	}
 
 	account, err := identity.GetPlayerAccountByID(ctx, tx, params.PlayerAccountID)

@@ -1457,10 +1457,132 @@ stage. Per-tenant provider signing keys (today one secret per adapter
 instance, shared across every tenant routed to it) are recorded as a
 Stage 4B precondition, not solved here.
 
+## Stage 4D-RG — Responsible Gaming Player-Status Enforcement Foundation — complete (approved-pending)
+
+Issued directly after Stage 4A's own specialist review identified a
+production-blocking gap: no authoritative platform-side player-account/
+wallet-status or self-exclusion check existed at casino game launch or
+bet time. Closes exactly that gap - not the full KYC/AML/RG subsystem.
+
+### What was built
+
+1. **`internal/rg` package** - `player_restrictions` (self-exclusion,
+   bound to the platform-wide `Person` so it can be enforced across
+   brands/tenants once two accounts share a `person_id` - see the
+   important precondition noted below), and `EvaluateEligibility`, the
+   single authoritative "may this player gamble right now" policy
+   boundary composing `PlayerAccount.Status`, `Wallet.Status`, and the
+   new restriction signal - no second identity model.
+2. **Migrations `0037`/`0038`** - the `player_restrictions` table,
+   append-only (RLS + a deny-mutation trigger, later hardened to a
+   statement-level trigger), dual-scope RLS (platform-wide vs. tenant vs.
+   brand), player-self-service vs. staff insert policies, a composite FK
+   hardening pass.
+3. **Casino launch/bet enforcement** - `internal/casino`'s `LaunchGame`
+   and `postBet` both consult `EvaluateEligibility` before a session
+   becomes usable / before a debit commits. A denial is a RESULT
+   (`LaunchGameResult.Denied` / `ReceiveCallbackResult.OutcomeDeclined`),
+   never a Go error - an earlier error-based attempt was found, by test,
+   to silently roll back its own audit record.
+4. **A person-keyed Postgres advisory lock** closes the self-exclusion-
+   vs-concurrent-launch/bet TOCTOU race deterministically - proven under
+   `-race` with real concurrent goroutines against real Postgres for all
+   three directive-required race scenarios (self-exclusion during launch,
+   during a bet, and during a duplicate bet delivery).
+5. **New `PermRGRestrictionWrite`/`Read` permissions**, granted only to
+   `RoleCompliance` (write) and `RoleCompliance`/`RoleTenantAdmin` (read)
+   - never `RolePlatformAdmin`, which has no path to resolve a tenant's
+   player account at all today.
+6. **Minimal HTTP API** - player self-service self-exclusion + status;
+   staff create/read restriction, tenant/brand-scoped only (a genuinely
+   platform-wide staff-initiated restriction remains an open decision,
+   not built - see ADR `0026` §4).
+
+Full design, rationale, and the complete specialist-review findings/fixes
+list: `docs/decisions/0026-responsible-gaming-player-status-enforcement-
+foundation.md`. Updated architecture doc:
+`docs/architecture/11-kyc-aml-rg-architecture.md`'s new "Implementation
+status" section.
+
+### Specialist review: one P0, four P1s found and fixed, plus a real
+financial-idempotency bug the testing/review pass itself surfaced
+
+An independent 7-specialist parallel review (RG architecture, security,
+financial correctness, identity/Person model, PostgreSQL/RLS, API/HTTP,
+adversarial testing) found:
+
+- **One P0, reported independently by three reviewers**: the cross-brand/
+  cross-tenant self-exclusion PROTECTION this stage's own Context section
+  originally claimed to close is mechanism-correct but currently
+  unreachable in production - `internal/identity.RegisterPlayer` mints a
+  fresh, unlinked `Person` on every registration, with no resolution/
+  dedup logic anywhere in this codebase, so a real player who
+  self-excludes and re-registers today is NOT blocked. **Fixed as a
+  documentation correction** (this ADR's own Context/§9 sections, this
+  progress entry, and `active-stage.md` now state this precisely; the
+  cross-brand/cross-tenant tests' own doc comments now say explicitly
+  they prove the mechanism, not a reachable end-to-end state) and
+  **tracked as an explicit, human-visible open decision** in ADR `0026`'s
+  "Carried-forward limitations" - no code fix closes the underlying gap
+  in this stage, since doing so is a substantial future body of work
+  (Person-resolution/KYC-driven identity matching), not a small patch.
+- **Four P1s, all fixed with regression tests**: (1) a bet callback
+  redelivered after it had already succeeded, and after the RG state it
+  depended on later changed, could incorrectly report a fresh decline
+  instead of its original success - violating the documented idempotent-
+  replay contract, empirically reproduced and fixed with an early
+  already-posted-transaction short-circuit in `postBet`; (2) the
+  player-facing "my RG status" endpoint leaked a DIFFERENT tenant's
+  confidential restriction `reason_code` to a player with accounts at two
+  tenants, empirically reproduced and fixed with an added RLS tenant
+  predicate (migration `0038`); (3) `EvaluateEligibility`'s own SQL relied
+  solely on RLS/caller scope rather than an explicit predicate to exclude
+  a different tenant's rows, fixed defensively; (4) `EvaluateEligibility`
+  silently skipped brand-scoped restrictions if a future caller forgot to
+  resolve `BrandID`, fixed by making it a required, validated parameter.
+- Several P2s fixed (a stale doc comment two reviewers independently
+  flagged, an RLS UPDATE/DELETE visibility-scope hardening, a composite FK
+  addition) and several P2s explicitly recorded as accepted/deferred
+  (documented in ADR `0026`'s own findings section, not silently dropped).
+- Untested `duration_days` at every layer, and several HTTP-layer
+  authorization/validation edge cases, were found by the adversarial
+  testing review and closed with new tests (Go-level duration parameter
+  tests, HTTP-level duration/scope validation, `RolePlayer`/`RoleFinance`
+  token denial, cross-tenant admin read returning 404).
+
+Full detail for every finding, including the P2s explicitly accepted
+rather than fixed and why, is in ADR `0026`'s own "Specialist review
+findings and fixes" section.
+
+### Verification performed
+
+`gofmt -l .` clean. `go build ./...`, `go vet ./...`, `go vet
+-tags=integration ./...` clean. `go test ./...`, `go test -tags=integration
+./...`, and `go test -race -tags=integration ./...` all pass across the
+full repository. Migrations `0037` and `0038` both round-tripped (`up` →
+`down` → `up`) cleanly on a database already carrying prior stages' own
+test data. New concurrency tests for all three directive-required race
+scenarios pass repeatably under `-race` against real Postgres.
+
+### Not claimed
+
+Per CLAUDE.md's "No fake completion" rule: this stage does NOT claim the
+cross-brand/cross-tenant self-exclusion PROTECTION is effective against a
+real player re-registering today (see the P0 finding above - the
+enforcement MECHANISM is correct and tested; the identity-linkage
+precondition it depends on does not exist yet). It does NOT claim KYC/AML
+implementation, player-level jurisdiction restriction, deposit/loss/
+wagering/session limits, reality checks, or time-outs/cooling-off -
+all remain documented extension points, not implemented (ADR `0026`
+§14/§15). It does NOT claim a platform-wide staff-initiated restriction
+capability (ADR `0026` §4). It does NOT claim regulatory certification or
+production readiness.
+
 ## Next stage
 
 Not started; requires explicit human authorization per the stage-gate
-rule in `CLAUDE.md`. Candidates named in the Stage 3D/4A directives
+rule in `CLAUDE.md`. Candidates named in the Stage 3D/4A/4D-RG directives
 (a real casino provider integration, sportsbook, bonus, B2C frontend,
 partner console, production deployment, real PSP integrations, real
-crypto integrations) do not begin automatically.
+crypto integrations, cross-brand Person resolution) do not begin
+automatically.
