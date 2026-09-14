@@ -370,9 +370,12 @@ func TestWithdrawalApprove_RoleWithoutPermissionDenied(t *testing.T) {
 	srv := newFinancialTestServer(t, pool, issuer, orchestrator)
 	tenant := mustCreateTenant(t, pool)
 
-	// support and compliance are the two staff roles defined in
-	// internal/auth/permission.go's rolePermissions that do NOT carry
-	// PermWithdrawalApprove (only finance/tenant_admin do).
+	// support and compliance are two of the three non-finance staff roles
+	// defined in internal/auth/permission.go's rolePermissions that do NOT
+	// carry PermWithdrawalApprove - Stage 3D removed it from tenant_admin
+	// too (business decision #4/#5: a broad admin role must never hold
+	// withdrawal authority implicitly), so RoleFinance is now the ONLY
+	// role that carries it.
 	roles := []identity.StaffRole{identity.StaffRoleSupport, identity.StaffRoleCompliance}
 	for _, role := range roles {
 		staff := mustCreateStaff(t, pool, tenant.ID, role, "role-pw-1")

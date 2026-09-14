@@ -12,6 +12,19 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
+// ErrPersonNotFound is returned by LinkStaffPersonID when personID does
+// not reference an existing persons row.
+var ErrPersonNotFound = errors.New("identity: person not found")
+
+// ErrAlreadyLinkedOrNotFound is returned by LinkStaffPersonID when the
+// staff user does not exist, or already has a person_id - both cases
+// mean "the link did not happen", and the database's own append-only
+// trigger (migration 0034) is what actually distinguishes and prevents
+// the "already linked" case from being silently overwritten, so this
+// function does not need to (and cannot, in one query) tell them apart
+// more precisely than that.
+var ErrAlreadyLinkedOrNotFound = errors.New("identity: staff user not found, or already linked to a person")
+
 // StaffRole mirrors auth.Role's staff-relevant values. Kept as a
 // separate string type here (rather than importing internal/auth) to
 // avoid a dependency cycle - internal/httpserver is what bridges the two
@@ -115,6 +128,41 @@ func GetStaffUserByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (StaffUser, 
 // (there is no reliable automatic way to detect it - see migration
 // 0029). An unknown/invalid person id fails with the same foreign-key
 // error Postgres would give for any other bad reference.
+// LinkStaffPersonID sets a staff user's person_id, ONLY when it is
+// currently NULL - Stage 3D's remediation path for a legacy staff
+// account created before the mandatory-Person-linkage withdrawal-
+// governance policy (docs/decisions/0024), or any account an admin
+// simply never linked. This is the one and only sanctioned way to set
+// person_id after creation: migration 0034's staff_users_person_id_
+// append_only trigger independently enforces the SAME rule at the
+// database layer (NULL -> a value is allowed; a value -> a DIFFERENT
+// value is not), so this function's own `WHERE person_id IS NULL`
+// clause is defense-in-depth, not the only thing preventing a staff
+// member from laundering an existing link by relinking to someone else -
+// the trigger holds even if this function is bypassed entirely (e.g. a
+// future direct-SQL admin tool).
+func LinkStaffPersonID(ctx context.Context, tx pgx.Tx, staffID, personID uuid.UUID) error {
+	tag, err := tx.Exec(ctx,
+		`UPDATE staff_users SET person_id = $1, updated_at = now() WHERE id = $2 AND person_id IS NULL`,
+		personID, staffID,
+	)
+	if err != nil {
+		if db.IsForeignKeyViolation(err) {
+			return ErrPersonNotFound
+		}
+		return fmt.Errorf("identity: link staff person id: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		// Either the staff user doesn't exist, or it already has a
+		// person_id (already linked) - scanning to tell those apart is
+		// a separate query the caller can do if it wants a more precise
+		// error; this function's contract is simply "did the link
+		// happen", matching SetPlayerAccountStatus's own style.
+		return ErrAlreadyLinkedOrNotFound
+	}
+	return nil
+}
+
 func CreateStaffUser(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, email, passwordHash string, role StaffRole, personID *uuid.UUID) (StaffUser, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	s := StaffUser{ID: uuid.New(), TenantID: tenantID, Email: email, PasswordHash: passwordHash, Role: role, Status: "active", PersonID: personID}

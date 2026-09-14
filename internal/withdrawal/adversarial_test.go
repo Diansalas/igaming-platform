@@ -17,6 +17,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
 // pgRLSViolationCode is the Postgres SQLSTATE for "new row violates
@@ -182,12 +184,12 @@ func TestReject_DuplicateDecisionBySameApproverRejected(t *testing.T) {
 		return MoveToPendingReview(ctx, tx, wr.ID)
 	})
 
-	approver := uuid.New()
+	approver := mustCreateApprover(t, pool, f.tenantID)
 	// amount (100,000) >= the default policy threshold (EUR 1,000.00 =
 	// 100,000 minor units, via ">="): two humans required, so one
 	// approval leaves the request open to a second decision attempt.
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, approver, false, nil)
+		approved, err := Approve(ctx, tx, wr.ID, approver, false, nil, alwaysEligible)
 		if err != nil {
 			return err
 		}
@@ -198,7 +200,7 @@ func TestReject_DuplicateDecisionBySameApproverRejected(t *testing.T) {
 	})
 
 	err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return Reject(ctx, tx, wr.ID, approver, "changed_my_mind")
+		return Reject(ctx, tx, wr.ID, approver, "changed_my_mind", alwaysEligible)
 	})
 	if !errors.Is(err, ErrDuplicateApproval) {
 		t.Fatalf("expected ErrDuplicateApproval when the same approver who approved then attempts to reject, got %v", err)
@@ -243,9 +245,9 @@ func TestWithdrawalApprovals_ApproverPrincipalIdImmutableAndAccurate(t *testing.
 	})
 	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 1_000_000, 2, time.Now().Add(-time.Hour))
 
-	approver := uuid.New()
+	approver := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, approver, false, nil)
+		approved, err := Approve(ctx, tx, wr.ID, approver, false, nil, alwaysEligible)
 		if err != nil {
 			return err
 		}
@@ -328,9 +330,9 @@ func TestApprove_ThresholdAmountRecordedPerDecisionAndCurrentThresholdGovernsRea
 	// amount -> requiresMultipleApprovals is true, and a single human
 	// approval must not be enough.
 	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 50_000, 2, time.Now().Add(-time.Hour))
-	approver1 := uuid.New()
+	approver1 := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, approver1, false, nil)
+		approved, err := Approve(ctx, tx, wr.ID, approver1, false, nil, alwaysEligible)
 		if err != nil {
 			return err
 		}
@@ -346,9 +348,9 @@ func TestApprove_ThresholdAmountRecordedPerDecisionAndCurrentThresholdGovernsRea
 	// readiness (the mechanism resolves its own call's policy fresh
 	// every time, never a value memoized from decision 1).
 	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 200_000, 2, time.Now())
-	approver2 := uuid.New()
+	approver2 := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, approver2, false, nil)
+		approved, err := Approve(ctx, tx, wr.ID, approver2, false, nil, alwaysEligible)
 		if err != nil {
 			return err
 		}
@@ -433,8 +435,9 @@ func TestLockApprovedForSubmission_ConcurrentSubmitsOnlyOneReachesProvider(t *te
 		return MoveToPendingReview(ctx, tx, wr.ID)
 	})
 	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 1_000_000, 2, time.Now().Add(-time.Hour))
+	firstApprover := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, wr.ID, uuid.New(), false, nil)
+		approved, err := Approve(ctx, tx, wr.ID, firstApprover, false, nil, alwaysEligible)
 		if err != nil {
 			return err
 		}
@@ -525,7 +528,7 @@ func TestApprove_ConcurrentDistinctApproversOnlyRequiredCountSatisfiesReadiness(
 	const n = 3
 	approvers := make([]uuid.UUID, n)
 	for i := range approvers {
-		approvers[i] = uuid.New()
+		approvers[i] = mustCreateApprover(t, pool, f.tenantID)
 	}
 
 	results := make([]bool, n)
@@ -536,7 +539,7 @@ func TestApprove_ConcurrentDistinctApproversOnlyRequiredCountSatisfiesReadiness(
 		go func(i int) {
 			defer wg.Done()
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				approved, err := Approve(ctx, tx, wr.ID, approvers[i], false, nil)
+				approved, err := Approve(ctx, tx, wr.ID, approvers[i], false, nil, alwaysEligible)
 				results[i] = approved
 				return err
 			})
@@ -608,5 +611,287 @@ func TestApprove_ConcurrentDistinctApproversOnlyRequiredCountSatisfiesReadiness(
 	}
 	if recordedCount < 2 {
 		t.Fatalf("expected at least the required 2 distinct approvals to have been recorded, got %d", recordedCount)
+	}
+}
+
+// --- Stage 3D governance trigger: direct-SQL bypass attempts ---
+//
+// These tests bypass internal/withdrawal.Approve/Reject entirely (a raw
+// INSERT into withdrawal_approvals), proving migration 0034's
+// withdrawal_approvals_enforce_governance trigger - not this package's
+// own Go-level ApproverEligibility closure - is what actually makes
+// Stage 3D's mandatory-Person-linkage/active-status policy authoritative,
+// per directive item 9 ("the database must not permit a prohibited
+// approval merely because app-layer authorization was bypassed").
+
+// mustInsertBareApprovalAttempt is the shared raw-SQL INSERT these tests
+// use - deliberately identical in shape to the legitimate INSERT
+// Approve/Reject issue, so a rejection can only be attributed to the
+// trigger's own linkage/status check, never to some other malformed
+// statement.
+func mustInsertBareApprovalAttempt(pool *db.Pool, tenantID, requestID, approverID uuid.UUID, decision string) error {
+	return runTx(pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO withdrawal_approvals
+				(id, tenant_id, withdrawal_request_id, approver_principal_id, is_automated_approval, decision,
+				 threshold_amount_at_decision, request_amount_at_decision)
+			 VALUES ($1, $2, $3, $4, false, $5, 0, 0)`,
+			uuid.New(), tenantID, requestID, approverID, decision,
+		)
+		return err
+	})
+}
+
+// TestWithdrawalApprovalsGovernance_UnresolvableApproverDirectSQLRejected
+// proves the trigger rejects a decision naming a principal id with NO
+// backing staff_users row at all - not merely "no linkage", but
+// "identity cannot be resolved" (directive item 1's own wording),
+// entirely independent of internal/httpserver's or this package's own
+// Go-level checks.
+func TestWithdrawalApprovalsGovernance_UnresolvableApproverDirectSQLRejected(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 1000)
+	wr := mustRequestWithdrawal(t, pool, f, 100, "wd-gov-unresolvable")
+	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return MoveToPendingReview(ctx, tx, wr.ID)
+	})
+
+	err := mustInsertBareApprovalAttempt(pool, f.tenantID, wr.ID, uuid.New(), "approve")
+	if err == nil {
+		t.Fatal("expected the database to reject a decision from a principal id with no staff_users row, got nil error")
+	}
+}
+
+// TestWithdrawalApprovalsGovernance_UnlinkedStaffDirectSQLRejected proves
+// the trigger rejects a decision from a REAL staff_users row that simply
+// has no person_id - the exact legacy/pre-remediation case Stage 3C left
+// optional and Stage 3D now forbids at the database layer, regardless of
+// what any application-layer check believes.
+func TestWithdrawalApprovalsGovernance_UnlinkedStaffDirectSQLRejected(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 1000)
+	wr := mustRequestWithdrawal(t, pool, f, 100, "wd-gov-unlinked")
+	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return MoveToPendingReview(ctx, tx, wr.ID)
+	})
+
+	unlinkedStaffID := uuid.New()
+	if err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id)
+			 VALUES ($1, $2, $3, 'x', 'finance', 'active', NULL)`,
+			unlinkedStaffID, f.tenantID, unlinkedStaffID.String()+"@example.com",
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("seed unlinked staff user: %v", err)
+	}
+
+	err := mustInsertBareApprovalAttempt(pool, f.tenantID, wr.ID, unlinkedStaffID, "approve")
+	if err == nil {
+		t.Fatal("expected the database to reject a decision from a real but unlinked (person_id NULL) staff account, got nil error")
+	}
+}
+
+// TestWithdrawalApprovalsGovernance_InactiveStaffDirectSQLRejected proves
+// the trigger rejects a decision from a linked staff account whose status
+// is not 'active' - closing adversarial test item E at the database
+// layer directly, independent of any HTTP-layer or Go-level check.
+func TestWithdrawalApprovalsGovernance_InactiveStaffDirectSQLRejected(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 1000)
+	wr := mustRequestWithdrawal(t, pool, f, 100, "wd-gov-inactive")
+	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return MoveToPendingReview(ctx, tx, wr.ID)
+	})
+
+	inactiveStaffID := mustCreateApprover(t, pool, f.tenantID)
+	if err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, inactiveStaffID)
+		return err
+	}); err != nil {
+		t.Fatalf("suspend staff user: %v", err)
+	}
+
+	err := mustInsertBareApprovalAttempt(pool, f.tenantID, wr.ID, inactiveStaffID, "approve")
+	if err == nil {
+		t.Fatal("expected the database to reject a decision from a linked but inactive staff account, got nil error")
+	}
+}
+
+// TestWithdrawalApprovalsGovernance_RejectDecisionAlsoEnforced proves the
+// trigger's linkage/status check fires for decision = 'reject' too, not
+// only 'approve' - business decision #1's "approve, reject, or submit"
+// wording, at the one transition (reject) that DOES insert into
+// withdrawal_approvals for the trigger to see.
+func TestWithdrawalApprovalsGovernance_RejectDecisionAlsoEnforced(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 1000)
+	wr := mustRequestWithdrawal(t, pool, f, 100, "wd-gov-reject-unlinked")
+	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return MoveToPendingReview(ctx, tx, wr.ID)
+	})
+
+	err := mustInsertBareApprovalAttempt(pool, f.tenantID, wr.ID, uuid.New(), "reject")
+	if err == nil {
+		t.Fatal("expected the database to reject a 'reject' decision from an unresolvable principal id, got nil error")
+	}
+}
+
+// TestWithdrawalApprovalsGovernance_AutomatedApprovalExemptFromLinkageCheck
+// proves the trigger does NOT require a staff_users/person_id linkage
+// when is_automated_approval is true - ADR 0014's service-identity
+// pattern is a fundamentally different kind of principal (never a
+// Person), and this exemption is verified directly against the trigger
+// itself, not merely inferred from internal/withdrawal.Approve's own
+// isAutomated branch.
+func TestWithdrawalApprovalsGovernance_AutomatedApprovalExemptFromLinkageCheck(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 1000)
+	wr := mustRequestWithdrawal(t, pool, f, 100, "wd-gov-automated-exempt")
+	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return MoveToPendingReview(ctx, tx, wr.ID)
+	})
+
+	serviceIdentity := uuid.New() // no backing staff_users row at all - exactly a real service identity's shape.
+	err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO withdrawal_approvals
+				(id, tenant_id, withdrawal_request_id, approver_principal_id, is_automated_approval, decision,
+				 threshold_amount_at_decision, request_amount_at_decision)
+			 VALUES ($1, $2, $3, $4, true, 'approve', 0, 0)`,
+			uuid.New(), f.tenantID, wr.ID, serviceIdentity,
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("expected the database to accept an automated approval with no staff linkage, got error: %v", err)
+	}
+}
+
+// TestWithdrawalApprovalsGovernance_AutomatedFlagCannotBypassSelfApproval
+// is a regression test for a P0 finding this stage's own code-reviewer
+// caught before commit: an earlier draft of migration 0034 exempted
+// EVERY is_automated_approval = true row from every check, including the
+// self-approval equality check - meaning a real staff member could
+// self-approve their own withdrawal simply by setting that one
+// client-supplied boolean, reopening the exact bypass migration 0033
+// deliberately closed. The fix makes the exemption depend on whether a
+// staff_users row actually resolves for the principal, not on the flag:
+// a REAL staff row must satisfy every rule regardless of
+// is_automated_approval. This proves it directly against the trigger,
+// using the exact dual-role (staff-is-also-player) fixture the self-
+// approval tests use, with is_automated_approval = true.
+func TestWithdrawalApprovalsGovernance_AutomatedFlagCannotBypassSelfApproval(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 1000)
+	wr := mustRequestWithdrawal(t, pool, f, 100, "wd-gov-automated-self-approve")
+	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return MoveToPendingReview(ctx, tx, wr.ID)
+	})
+
+	// A real, linked, active staff account whose person_id is the SAME
+	// person as the withdrawing player - the dual-role fixture.
+	dualRoleStaffID := uuid.New()
+	if err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var beneficiaryPersonID uuid.UUID
+		if err := tx.QueryRow(ctx,
+			`SELECT pa.person_id FROM withdrawal_requests wr JOIN player_accounts pa ON pa.id = wr.player_account_id WHERE wr.id = $1`,
+			wr.ID,
+		).Scan(&beneficiaryPersonID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx,
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id)
+			 VALUES ($1, $2, $3, 'x', 'finance', 'active', $4)`,
+			dualRoleStaffID, f.tenantID, dualRoleStaffID.String()+"@example.com", beneficiaryPersonID,
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("seed dual-role staff user: %v", err)
+	}
+
+	err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO withdrawal_approvals
+				(id, tenant_id, withdrawal_request_id, approver_principal_id, is_automated_approval, decision,
+				 threshold_amount_at_decision, request_amount_at_decision)
+			 VALUES ($1, $2, $3, $4, true, 'approve', 0, 0)`,
+			uuid.New(), f.tenantID, wr.ID, dualRoleStaffID,
+		)
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected the database to reject a self-approval from a real staff row even when is_automated_approval = true, got nil error")
+	}
+	if count := countApprovals(t, pool, f.tenantID, wr.ID); count != 0 {
+		t.Fatalf("expected zero recorded approvals after a rejected automated-flagged self-approval, got %d", count)
+	}
+}
+
+// TestWithdrawalApprovalsGovernance_AutomatedFlagCannotBypassLinkageCheck
+// is the linkage-side twin of the test above: a real but UNLINKED staff
+// row with is_automated_approval = true must still be refused - the flag
+// cannot substitute for a real service identity (no staff row at all).
+func TestWithdrawalApprovalsGovernance_AutomatedFlagCannotBypassLinkageCheck(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 1000)
+	wr := mustRequestWithdrawal(t, pool, f, 100, "wd-gov-automated-unlinked")
+	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return MoveToPendingReview(ctx, tx, wr.ID)
+	})
+
+	unlinkedStaffID := uuid.New()
+	if err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id)
+			 VALUES ($1, $2, $3, 'x', 'finance', 'active', NULL)`,
+			unlinkedStaffID, f.tenantID, unlinkedStaffID.String()+"@example.com",
+		)
+		return err
+	}); err != nil {
+		t.Fatalf("seed unlinked staff user: %v", err)
+	}
+
+	err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO withdrawal_approvals
+				(id, tenant_id, withdrawal_request_id, approver_principal_id, is_automated_approval, decision,
+				 threshold_amount_at_decision, request_amount_at_decision)
+			 VALUES ($1, $2, $3, $4, true, 'approve', 0, 0)`,
+			uuid.New(), f.tenantID, wr.ID, unlinkedStaffID,
+		)
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected the database to reject an unlinked real staff row's decision even when is_automated_approval = true, got nil error")
+	}
+}
+
+// countApprovals is a small shared helper for the tests above.
+func countApprovals(t *testing.T, pool *db.Pool, tenantID, requestID uuid.UUID) int {
+	t.Helper()
+	var count int
+	mustRunTx(t, pool, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM withdrawal_approvals WHERE withdrawal_request_id = $1`, requestID).Scan(&count)
+	})
+	return count
+}
+
+// TestWithdrawalPolicies_UpdateDeniedAtDatabaseLayer proves migration
+// 0034's withdrawal_policies_deny_update trigger: no UPDATE is ever
+// permitted, direct SQL included - the table really is insert-only, not
+// merely insert-only "by convention" of the admin API's own handlers.
+func TestWithdrawalPolicies_UpdateDeniedAtDatabaseLayer(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 0)
+	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 100_000, 2, time.Now())
+
+	err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE withdrawal_policies SET approval_threshold_minor_units = 0 WHERE tenant_id = $1`, f.tenantID)
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected the database to reject a direct UPDATE of withdrawal_policies, got nil error")
 	}
 }

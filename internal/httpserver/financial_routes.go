@@ -39,29 +39,49 @@ func registerFinancialRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("GET /v1/me/withdrawals/{id}", auth.Middleware(deps.AuthIssuer)(newGetWithdrawalHandler(deps)))
 	mux.Handle("POST /v1/me/withdrawals/{id}/cancel", auth.Middleware(deps.AuthIssuer)(newCancelWithdrawalHandler(deps)))
 
-	// Staff four-eyes withdrawal review queue - tenant-scoped, gated by
-	// PermWithdrawalApprove (finance/tenant_admin roles - internal/auth/
-	// permission.go). RequireTenantScope excludes platform_admin's
-	// nil-tenant token, matching every other tenant-scoped admin route.
+	// Staff four-eyes withdrawal review queue - tenant-scoped. Stage 3D
+	// splits what was one PermWithdrawalApprove into four distinct
+	// permissions (business decision #4/#5: staff-management and
+	// withdrawal authority must be separable, and a broad admin role
+	// must never hold withdrawal authority implicitly) - only RoleFinance
+	// holds any of them (internal/auth/permission.go). RequireTenantScope
+	// excludes platform_admin's nil-tenant token, matching every other
+	// tenant-scoped admin route.
 	mux.Handle("GET /v1/admin/withdrawals",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalApprove)(newListPendingWithdrawalsHandler(deps)))))
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalReview)(newListPendingWithdrawalsHandler(deps)))))
 	mux.Handle("POST /v1/admin/withdrawals/{id}/approve",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalApprove)(newApproveWithdrawalHandler(deps)))))
 	mux.Handle("POST /v1/admin/withdrawals/{id}/reject",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalApprove)(newRejectWithdrawalHandler(deps)))))
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalReject)(newRejectWithdrawalHandler(deps)))))
 	mux.Handle("POST /v1/admin/withdrawals/{id}/submit",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalApprove)(newSubmitWithdrawalHandler(deps)))))
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalSubmit)(newSubmitWithdrawalHandler(deps)))))
 
-	// Stage 3C stranded-hold recovery - same permission as submit, since
-	// resolving a submitted withdrawal is the same class of action
-	// (deciding what happens to money already in flight).
+	// Stage 3C stranded-hold recovery - same permission as submit/review
+	// respectively, since resolving a submitted withdrawal is the same
+	// class of action (deciding what happens to money already in
+	// flight) as submitting it, and listing submitted requests is the
+	// same class of action as reviewing the pending queue.
 	mux.Handle("GET /v1/admin/withdrawals/submitted",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalApprove)(newListSubmittedWithdrawalsHandler(deps)))))
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalReview)(newListSubmittedWithdrawalsHandler(deps)))))
 	mux.Handle("POST /v1/admin/withdrawals/{id}/resolve",
-		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalApprove)(newResolveWithdrawalHandler(deps)))))
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalSubmit)(newResolveWithdrawalHandler(deps)))))
 
 	// Provider capability configuration - tenant-scoped administrative
 	// action, gated by PermProviderConfigWrite.
 	mux.Handle("PUT /v1/admin/providers/{providerID}/capability",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermProviderConfigWrite)(newWriteProviderCapabilityHandler(deps)))))
+
+	// Stage 3D withdrawal-policy configuration - the minimal admin API
+	// boundary directive item 4 requires so a real policy can be
+	// configured without direct database editing. Gated by
+	// PermWithdrawalPolicyWrite - deliberately its OWN permission, held
+	// only by RoleTenantAdmin (not RoleFinance: the role that approves
+	// withdrawals should not also be the role that can loosen the
+	// policy gating its own approvals - see docs/decisions/0024 §5).
+	mux.Handle("GET /v1/admin/withdrawal-policies",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalPolicyWrite)(newListWithdrawalPoliciesHandler(deps)))))
+	mux.Handle("POST /v1/admin/withdrawal-policies",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalPolicyWrite)(newWriteWithdrawalPolicyHandler(deps)))))
+	mux.Handle("DELETE /v1/admin/withdrawal-policies/{id}",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalPolicyWrite)(newDeleteWithdrawalPolicyHandler(deps)))))
 }

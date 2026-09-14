@@ -49,6 +49,16 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/staff",
 		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermStaffManage)(newCreateStaffHandler(deps))))
 
+	// Stage 3D staff-person linkage remediation - lets an admin bring a
+	// legacy unlinked staff account into compliance with the mandatory-
+	// Person-linkage withdrawal-governance policy (docs/decisions/0024).
+	// Same permission/tenant-targeting rule as staff creation.
+	// Deliberately NOT usable to CHANGE an existing link -
+	// staff_users.person_id is append-only at the database layer
+	// (migration 0034) - only to set one where none exists yet.
+	mux.Handle("POST /v1/admin/tenants/{tenantID}/staff/{staffID}/person-link",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermStaffManage)(newLinkStaffPersonHandler(deps))))
+
 	// Player administration: tenant-scoped only in Stage 2 (a
 	// platform_admin browsing an arbitrary tenant's players is deferred -
 	// see docs/decisions/0011's "Consequences").

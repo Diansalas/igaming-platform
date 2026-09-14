@@ -82,9 +82,13 @@ func TestRoleHasPermission_Stage3BWithdrawalAndProviderConfigPermissions(t *test
 		t.Error("expected finance to NOT have provider_config:write")
 	}
 
-	// tenant_admin has both, per rolePermissions.
-	if !RoleHasPermission(RoleTenantAdmin, PermWithdrawalApprove) {
-		t.Error("expected tenant_admin to have withdrawal:approve")
+	// tenant_admin has provider_config:write, but - as of Stage 3D's
+	// business decision #4/#5 (a broad administrative role must never
+	// hold withdrawal authority implicitly, and staff-management authority
+	// must be separable from withdrawal-approval authority) - it no longer
+	// gets ANY withdrawal permission. RoleFinance is the sole grantee.
+	if RoleHasPermission(RoleTenantAdmin, PermWithdrawalApprove) {
+		t.Error("expected tenant_admin to NOT have withdrawal:approve (Stage 3D removed this privilege-escalation path)")
 	}
 	if !RoleHasPermission(RoleTenantAdmin, PermProviderConfigWrite) {
 		t.Error("expected tenant_admin to have provider_config:write")
@@ -92,11 +96,14 @@ func TestRoleHasPermission_Stage3BWithdrawalAndProviderConfigPermissions(t *test
 
 	// No other role may approve withdrawals or write provider config,
 	// including a player - a client-side role claim must never grant a
-	// financial administrative capability server-side.
-	for _, role := range []Role{RolePlayer, RoleSupport, RoleCompliance} {
+	// financial administrative capability server-side. tenant_admin is
+	// included here now too (see above).
+	for _, role := range []Role{RolePlayer, RoleSupport, RoleCompliance, RoleTenantAdmin} {
 		if RoleHasPermission(role, PermWithdrawalApprove) {
 			t.Errorf("expected %q to NOT have withdrawal:approve", role)
 		}
+	}
+	for _, role := range []Role{RolePlayer, RoleSupport, RoleCompliance} {
 		if RoleHasPermission(role, PermProviderConfigWrite) {
 			t.Errorf("expected %q to NOT have provider_config:write", role)
 		}
@@ -112,6 +119,55 @@ func TestRoleHasPermission_Stage3BWithdrawalAndProviderConfigPermissions(t *test
 	}
 	if RoleHasPermission(RolePlatformAdmin, PermProviderConfigWrite) {
 		t.Error("expected platform_admin to NOT have provider_config:write (RequireTenantScope is the actual gate)")
+	}
+}
+
+// TestRoleHasPermission_Stage3DWithdrawalGovernanceSeparation proves
+// business decision #4/#5 in full: the four withdrawal-decision
+// permissions (review/approve/reject/submit) belong to RoleFinance alone,
+// while the withdrawal-POLICY-write permission belongs to RoleTenantAdmin
+// alone - the two are deliberately disjoint, so the role that approves
+// withdrawals can never also loosen the policy gating its own approvals,
+// and the role that administers tenant/staff config can never silently
+// gain withdrawal-decision authority.
+func TestRoleHasPermission_Stage3DWithdrawalGovernanceSeparation(t *testing.T) {
+	decisionPerms := []Permission{PermWithdrawalReview, PermWithdrawalApprove, PermWithdrawalReject, PermWithdrawalSubmit}
+	for _, perm := range decisionPerms {
+		if !RoleHasPermission(RoleFinance, perm) {
+			t.Errorf("expected finance to have %q", perm)
+		}
+		if RoleHasPermission(RoleFinance, PermWithdrawalPolicyWrite) {
+			t.Error("expected finance to NOT have withdrawal_policy:write (it must not be able to loosen its own approval gate)")
+		}
+	}
+
+	for _, role := range []Role{RolePlatformAdmin, RoleTenantAdmin, RoleSupport, RoleCompliance, RolePlayer} {
+		for _, perm := range decisionPerms {
+			if RoleHasPermission(role, perm) {
+				t.Errorf("expected %q to NOT have %q - only finance may decide withdrawals", role, perm)
+			}
+		}
+	}
+
+	if !RoleHasPermission(RoleTenantAdmin, PermWithdrawalPolicyWrite) {
+		t.Error("expected tenant_admin to have withdrawal_policy:write")
+	}
+	for _, role := range []Role{RolePlatformAdmin, RoleFinance, RoleSupport, RoleCompliance, RolePlayer} {
+		if RoleHasPermission(role, PermWithdrawalPolicyWrite) {
+			t.Errorf("expected %q to NOT have withdrawal_policy:write", role)
+		}
+	}
+
+	// staff:manage (tenant_admin) must never imply any withdrawal-decision
+	// permission - business decision #5's literal wording.
+	if RoleHasPermission(RoleTenantAdmin, PermStaffManage) {
+		for _, perm := range decisionPerms {
+			if RoleHasPermission(RoleTenantAdmin, perm) {
+				t.Errorf("expected staff:manage (tenant_admin) to NOT imply %q", perm)
+			}
+		}
+	} else {
+		t.Fatal("test assumption violated: expected tenant_admin to have staff:manage")
 	}
 }
 

@@ -206,6 +206,28 @@ type staffResponse struct {
 // existing platform_admin, and the one-time bootstrap problem that
 // creates is exactly what the CLI tool avoids (see
 // docs/decisions/0014-service-identity-pattern.md).
+//
+// role = "finance" may ONLY be created by a platform-scoped caller
+// (platform_admin) - Stage 3D specialist review (security/ledger-finance/
+// architect, converging independently) found that removing withdrawal
+// permissions from RoleTenantAdmin's OWN role definition (permission.go)
+// does not, by itself, achieve business decision #4/#5's "staff-
+// management and withdrawal-approval authority must be permission-
+// separated": a tenant_admin still holds PermStaffManage, and
+// PermStaffManage alone was sufficient to mint a BRAND NEW finance staff
+// account (with a password and person_id entirely of the tenant_admin's
+// own choosing) and immediately log in as it - a self-service
+// escalation from "can manage staff" to "can approve withdrawals" that
+// no person-linkage check catches, since the shell account can be linked
+// to any existing person the tenant_admin can reference. This is the
+// same class of attack directive item 2 names explicitly: "staff admin
+// must not be able to silently grant withdrawal approval via account
+// creation." Restricting finance-role creation to platform_admin closes
+// it at the one point that actually matters (who can mint the
+// credential), not merely at the role-definition level - see ADR 0024's
+// residual-findings section for the full analysis. tenant_admin remains
+// able to create tenant_admin/support/compliance staff for its own
+// tenant, since none of those roles hold any withdrawal permission.
 func newCreateStaffHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -249,6 +271,10 @@ func newCreateStaffHandler(deps Deps) http.HandlerFunc {
 		}
 		if v.HasErrors() {
 			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+			return
+		}
+		if identity.StaffRole(req.Role) == identity.StaffRoleFinance && tc.TenantID != uuid.Nil {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "the finance role may only be created by a platform administrator")
 			return
 		}
 
@@ -295,6 +321,108 @@ func newCreateStaffHandler(deps Deps) http.HandlerFunc {
 			resp.PersonID = staff.PersonID.String()
 		}
 		writeJSON(w, http.StatusCreated, resp)
+	}
+}
+
+// --- Staff-person linkage remediation (Stage 3D) ---
+
+type linkStaffPersonRequest struct {
+	PersonID string `json:"person_id"`
+}
+
+// newLinkStaffPersonHandler sets a staff user's person_id, ONLY when it is
+// currently unset - Stage 3D's remediation path (docs/decisions/0024 §1)
+// for a legacy staff account that predates the mandatory-Person-linkage
+// withdrawal-governance policy, or any account an admin simply never
+// linked at creation. This is the ONE sanctioned way to add a link after
+// the fact; identity.LinkStaffPersonID's own `WHERE person_id IS NULL`
+// clause and migration 0034's staff_users_person_id_append_only trigger
+// both independently refuse to let an EXISTING link be changed to a
+// different person - so this endpoint can remediate an unlinked account
+// but can never be used to launder an approval trail by relinking staff
+// to someone else. Same platform_admin-may-target-any-tenant,
+// tenant_admin-only-their-own rule as staff creation, and the same
+// PermStaffManage gate: staff-administration authority is what covers
+// this, per business decision #7's "use the existing identity
+// architecture" - it is deliberately NOT gated by any withdrawal
+// permission, since fixing a linkage is a staff-management action, not a
+// withdrawal decision.
+func newLinkStaffPersonHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		targetTenantID, err := uuid.Parse(r.PathValue("tenantID"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid tenant id")
+			return
+		}
+		if !canActOnTenant(tc, targetTenantID) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "cannot act on a different tenant")
+			return
+		}
+		staffID, err := uuid.Parse(r.PathValue("staffID"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid staff id")
+			return
+		}
+
+		var req linkStaffPersonRequest
+		if err := decodeJSON(r, &req); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			return
+		}
+		personID, err := uuid.Parse(req.PersonID)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "person_id must be a valid UUID")
+			return
+		}
+
+		subjectID, _ := uuid.Parse(tc.Subject)
+		err = deps.DB.WithTenant(r.Context(), targetTenantID, func(ctx context.Context, tx pgx.Tx) error {
+			// Confirm staffID actually belongs to targetTenantID before
+			// attempting the link - staff_users' own RLS (dual-mode:
+			// tenant-scoped rows only visible under this tenant's setting)
+			// already prevents cross-tenant reads/writes; this is
+			// belt-and-braces so a not-found in the wrong tenant reports
+			// clearly rather than via a generic "already linked or not
+			// found" from LinkStaffPersonID.
+			if _, err := identity.GetStaffUserByID(ctx, tx, staffID); err != nil {
+				return err
+			}
+			if err := identity.LinkStaffPersonID(ctx, tx, staffID, personID); err != nil {
+				return err
+			}
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: targetTenantID, ActorType: audit.ActorStaff, ActorID: subjectID,
+				Action: "staff.person_linked", TargetType: "staff_user", TargetID: staffID.String(),
+				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+				Metadata: map[string]any{"person_id": personID.String()},
+			})
+		})
+		if errors.Is(err, identity.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "staff user not found")
+			return
+		}
+		if errors.Is(err, identity.ErrPersonNotFound) {
+			apierror.Write(w, requestID, apierror.CodeValidation, "person_id does not reference an existing person")
+			return
+		}
+		if errors.Is(err, identity.ErrAlreadyLinkedOrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeConflict, "staff user not found, or already linked to a person")
+			return
+		}
+		if err != nil {
+			logger.Error("link_staff_person_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to link staff person")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 

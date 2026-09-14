@@ -61,7 +61,59 @@ func mustCreateBrand(t *testing.T, pool *db.Pool, tenant identity.Tenant) identi
 	return brand
 }
 
+// mustCreateStaff creates a staff user that is ALWAYS linked to a fresh,
+// unrelated Person. Stage 3D's mandatory-Person-linkage withdrawal-
+// governance policy (docs/decisions/0024 §1, migration 0034) requires
+// every staff account that approves/rejects/submits a withdrawal to
+// resolve to a real, active, linked staff_users row - both at the
+// Go level (internal/httpserver's approverEligibilityCheck) and,
+// authoritatively, at the database level (the
+// withdrawal_approvals_enforce_governance trigger). Before Stage 3D, a
+// bare unlinked staff account (person_id NULL) sufficed for every test in
+// this file; auto-linking here, once, is what keeps that true going
+// forward without touching every individual test that exercises an
+// approve/reject/submit/resolve HTTP call. A test that specifically needs
+// to construct an UNLINKED or a dual-role (shared-person) staff account -
+// e.g. to exercise the Stage 3D unlinked-staff-is-rejected adversarial
+// tests, or the Stage 3C self-approval tests - uses a purpose-built
+// helper instead (mustCreateStaffWithPerson, or a dedicated unlinked
+// variant), never this one.
 func mustCreateStaff(t *testing.T, pool *db.Pool, tenantID uuid.UUID, role identity.StaffRole, password string) identity.StaffUser {
+	t.Helper()
+	suffix := uuid.NewString()
+	hash, err := auth.HashPassword(password)
+	if err != nil {
+		t.Fatalf("failed to hash password: %v", err)
+	}
+	personID := uuid.New()
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID)
+		return err
+	}); err != nil {
+		t.Fatalf("failed to create backing person for staff user: %v", err)
+	}
+	var staff identity.StaffUser
+	scope := pool.WithoutTenant
+	if tenantID != uuid.Nil {
+		scope = func(ctx context.Context, fn db.TxFunc) error { return pool.WithTenant(ctx, tenantID, fn) }
+	}
+	err = scope(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		staff, err = identity.CreateStaffUser(ctx, tx, tenantID, fmt.Sprintf("staff-%s@test.com", suffix), hash, role, &personID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("failed to create staff user: %v", err)
+	}
+	return staff
+}
+
+// mustCreateUnlinkedStaff creates a staff user with NO Person linkage
+// (person_id NULL) - what mustCreateStaff always avoided before Stage 3D
+// and now deliberately never produces, so a test proving the new
+// mandatory-linkage rule (docs/decisions/0024 §1) needs this explicit,
+// separately-named helper instead.
+func mustCreateUnlinkedStaff(t *testing.T, pool *db.Pool, tenantID uuid.UUID, role identity.StaffRole, password string) identity.StaffUser {
 	t.Helper()
 	suffix := uuid.NewString()
 	hash, err := auth.HashPassword(password)
@@ -79,7 +131,7 @@ func mustCreateStaff(t *testing.T, pool *db.Pool, tenantID uuid.UUID, role ident
 		return err
 	})
 	if err != nil {
-		t.Fatalf("failed to create staff user: %v", err)
+		t.Fatalf("failed to create unlinked staff user: %v", err)
 	}
 	return staff
 }

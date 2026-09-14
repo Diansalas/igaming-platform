@@ -239,41 +239,59 @@ originally written (Stage 3A `security` review):
    `Person` could supply both. The distinct-approver count now dedupes
    via `COALESCE(staff_users.person_id, approver_principal_id)`, so two
    logins resolving to the same person count once - see ADR 0023 §1.
-2. **The approver is never the beneficiary.** A principal linked to the
-   withdrawing `player_account_id` — or, where a staff member and a player
-   can resolve to the same `Person` (realistic for our own B2C brand), any
-   principal resolving to that `Person` — is rejected as an approver.
-   Without this, a staff member who is also a player self-approves their
-   own payout. **`PARTIALLY IMPLEMENTED` (Stage 3C)**: `staff_users.
-   person_id` (migration `0029`) plus an authoritative `BEFORE INSERT`
-   trigger on `withdrawal_approvals` (migration `0029`/`0033`) enforce
-   this rule at the database itself, not merely the application layer,
-   for any staff/player pair where the linkage is established. The
-   linkage itself is optional, admin-asserted at staff-creation time,
-   unverified, and has no update path - a staff account created without
-   it (the default) is invisible to this check. Closing this fully needs
-   either verified staff identity binding (KYC-adjacent, out of current
-   scope) or disjoint staff-management/withdrawal-approval permissions -
-   see ADR 0023 §1 and §6.
+2. **The approver is never the beneficiary, and must be linked to a Person.**
+   A principal linked to the withdrawing `player_account_id` — or, where a
+   staff member and a player can resolve to the same `Person` (realistic
+   for our own B2C brand), any principal resolving to that `Person` — is
+   rejected as an approver. Without this, a staff member who is also a
+   player self-approves their own payout. **`IMPLEMENTED` (Stage 3C
+   self-approval check; Stage 3D closed the residual linkage gap)**:
+   `staff_users.person_id` (migration `0029`) plus an authoritative
+   `BEFORE INSERT` trigger on `withdrawal_approvals`
+   (`withdrawal_approvals_enforce_governance`, migration `0034`,
+   superseding `0029`/`0033`'s narrower `withdrawal_approvals_deny_
+   self_approval`) enforce this rule at the database itself, not merely
+   the application layer. Stage 3C left the `person_id` linkage optional
+   and admin-asserted, so a staff account created without it (the
+   default at the time) was invisible to the check entirely - **Stage 3D's
+   approved business decision** (`docs/decisions/0024` §1, "Withdrawal
+   approval requires attributable Person identity and approver/
+   beneficiary separation") closes this: the same trigger now REQUIRES
+   every non-automated decision's approver to resolve to a `staff_users`
+   row with a non-NULL `person_id` AND `status = 'active'`, rejecting the
+   decision outright otherwise - an unlinked, unresolvable, or inactive
+   staff identity is never eligible to approve, reject, or submit a
+   withdrawal, full stop. `staff_users.person_id` is now **append-only**
+   once set (migration `0034`'s `staff_users_person_id_append_only`
+   trigger: `NULL` → a value is allowed, remediating a legacy unlinked
+   account; a value → a DIFFERENT value is permanently blocked, so an
+   existing link can never be laundered by relinking to someone else).
+   `internal/withdrawal.Approve`/`Reject` additionally take a mandatory
+   `ApproverEligibility` closure (Go-level, fail-closed on `nil` for a
+   human decision) as defense-in-depth ahead of the trigger; the two
+   HTTP transitions with no `withdrawal_approvals` INSERT for the trigger
+   to see - submit and resolve - carry the identical Go-level check
+   directly in their own handlers, since no database trigger exists for
+   those paths. See `docs/decisions/0024` for the full design and
+   adversarial test list.
 3. **Threshold mutation is itself a bypass.** The four-eyes threshold now
    lives in tenant configuration (`withdrawal_policies`, Stage 3C - see
-   `withdrawal-policy-configuration.md`), so this is no longer
-   hypothetical: a single principal holding both config-write and
-   approval permissions can raise the threshold above the amount,
-   single-approve, and lower it back — no constraint here would notice.
-   `threshold_amount_at_decision`/`request_amount_at_decision` above make
-   it detectable after the fact; *preventing* it requires the two
-   permissions to be separable, and (once a write path exists - no admin
-   API writes `withdrawal_policies` yet, see `withdrawal-policy-
-   configuration.md` §5) every policy write to carry an audit record
-   naming the actor, per CLAUDE.md's standing rule for any admin/
-   financial mutation. `OPEN DECISION`
-   (business/policy, not invented here, unchanged by Stage 3C): whether
-   config-edit and withdrawal-approval permissions must be held by
-   disjoint roles, and whether a threshold change applies to already-open
-   requests or only to ones created after it - `effective_from` currently
-   applies uniformly to any decision made after that timestamp,
-   regardless of when the request itself was created.
+   `withdrawal-policy-configuration.md`). **`IMPLEMENTED` (Stage 3D)**:
+   config-edit and withdrawal-approval permissions are now held by
+   disjoint roles - `PermWithdrawalPolicyWrite` (the minimal admin API
+   Stage 3D added, `GET`/`POST`/`DELETE /v1/admin/withdrawal-policies`)
+   is granted only to `RoleTenantAdmin`, while the four withdrawal-
+   decision permissions (`PermWithdrawalReview/Approve/Reject/Submit`)
+   are granted only to `RoleFinance` - no role holds both, so no single
+   principal can raise a threshold, single-approve, and lower it back.
+   Every policy write is audited (`withdrawal_policy.created`/`.deleted`).
+   `threshold_amount_at_decision`/`request_amount_at_decision` remain the
+   audit-trail record of what was actually in force at decision time.
+   `OPEN DECISION` (business/policy, unchanged by Stage 3D): whether a
+   threshold change applies to already-open requests or only to ones
+   created after it - `effective_from` currently applies uniformly to any
+   DECISION made after that timestamp, regardless of when the request
+   itself was created.
 4. **Structuring below the threshold.** Nothing here stops one large payout
    being split into N sub-threshold requests, each needing a single
    approval. The mechanism hook is recorded now so Stage 3B need not

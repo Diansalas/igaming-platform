@@ -330,6 +330,35 @@ func newListPendingWithdrawalsHandler(deps Deps) http.HandlerFunc {
 	}
 }
 
+// approverEligibilityCheck adapts a direct staff_users lookup into
+// withdrawal.ApproverEligibility - Stage 3D's mandatory-Person-linkage/
+// active-status check (docs/decisions/0024 §1). Shared by every handler
+// that records or acts on a human withdrawal decision (approve, reject,
+// submit, resolve - the business decision's own "approve, reject, or
+// submit" list), so there is exactly one Go-level query implementing this
+// check, not one per handler.
+//
+// A staff row that cannot be resolved at all (deleted, or the id simply
+// doesn't exist) reports linked=false, active=false rather than an
+// error - "unresolvable identity" is exactly as ineligible as "resolved
+// but unlinked/inactive" per docs/decisions/0024 §1, and treating it as a
+// hard error here would let a caller mistake a 500 for something other
+// than "this principal is not eligible."
+func approverEligibilityCheck(ctx context.Context, tx pgx.Tx) withdrawal.ApproverEligibility {
+	return func(approverPrincipalID uuid.UUID) (linked, active bool, err error) {
+		var personID *uuid.UUID
+		var status string
+		err = tx.QueryRow(ctx, `SELECT person_id, status FROM staff_users WHERE id = $1`, approverPrincipalID).Scan(&personID, &status)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, false, nil
+		}
+		if err != nil {
+			return false, false, fmt.Errorf("httpserver: approver eligibility lookup: %w", err)
+		}
+		return personID != nil, status == "active", nil
+	}
+}
+
 type approveWithdrawalResponse struct {
 	Approved bool `json:"approved"`
 }
@@ -405,7 +434,7 @@ func newApproveWithdrawalHandler(deps Deps) http.HandlerFunc {
 				return isBeneficiary, err
 			}
 			var err error
-			approved, err = withdrawal.Approve(ctx, tx, id, approverID, false, beneficiaryCheck)
+			approved, err = withdrawal.Approve(ctx, tx, id, approverID, false, beneficiaryCheck, approverEligibilityCheck(ctx, tx))
 			if err != nil {
 				return err
 			}
@@ -437,6 +466,14 @@ func newApproveWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 		if errors.Is(err, withdrawal.ErrSelfApproval) {
 			apierror.Write(w, requestID, apierror.CodeForbidden, "cannot approve your own withdrawal")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrApproverNotLinked) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "this staff account has no confirmed Person linkage and is not eligible to approve withdrawals")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrApproverInactive) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "this staff account is not active")
 			return
 		}
 		if errors.Is(err, withdrawal.ErrStepUpRequired) {
@@ -495,7 +532,7 @@ func newRejectWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			if err := withdrawal.Reject(ctx, tx, id, approverID, req.ReasonCode); err != nil {
+			if err := withdrawal.Reject(ctx, tx, id, approverID, req.ReasonCode, approverEligibilityCheck(ctx, tx)); err != nil {
 				return err
 			}
 			// See newApproveWithdrawalHandler's identical rationale.
@@ -516,6 +553,14 @@ func newRejectWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 		if errors.Is(err, withdrawal.ErrDuplicateApproval) {
 			apierror.Write(w, requestID, apierror.CodeConflict, "you have already recorded a decision for this withdrawal")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrApproverNotLinked) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "this staff account has no confirmed Person linkage and is not eligible to reject withdrawals")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrApproverInactive) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "this staff account is not active")
 			return
 		}
 		if err != nil {
@@ -597,6 +642,25 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 
 		var wr withdrawal.WithdrawalRequest
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			// Stage 3D business decision #1's "approve, reject, or submit"
+			// list includes submit - unlike approve/reject, no INSERT into
+			// withdrawal_approvals happens here for the database's own
+			// withdrawal_approvals_enforce_governance trigger to catch, so
+			// this Go-level check is the ONLY enforcement point for this
+			// transition. Checked before the row lock/provider call below,
+			// so an ineligible submitter never reaches the payment
+			// provider at all.
+			linked, active, err := approverEligibilityCheck(ctx, tx)(submitterID)
+			if err != nil {
+				return fmt.Errorf("withdrawal: submitter eligibility check: %w", err)
+			}
+			if !linked {
+				return withdrawal.ErrApproverNotLinked
+			}
+			if !active {
+				return withdrawal.ErrApproverInactive
+			}
+
 			// LockApprovedForSubmission, not a plain GetByID, and the lock
 			// held for the rest of this transaction (through the provider
 			// call and MarkSubmitted) - see its own doc comment. A staff
@@ -674,6 +738,14 @@ func newSubmitWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 		if errors.Is(err, withdrawal.ErrStateConflict) {
 			apierror.Write(w, requestID, apierror.CodeConflict, "withdrawal is not approved and ready for submission")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrApproverNotLinked) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "this staff account has no confirmed Person linkage and is not eligible to submit withdrawals")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrApproverInactive) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "this staff account is not active")
 			return
 		}
 		if errors.Is(err, payments.ErrNoRoutableProvider) {
@@ -782,6 +854,23 @@ func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
 
 		var wr withdrawal.WithdrawalRequest
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			// Same rationale as newSubmitWithdrawalHandler's identical
+			// check: resolving a stranded `submitted` withdrawal is the
+			// same class of withdrawal-governance decision as submitting
+			// it, and no withdrawal_approvals row is inserted here for the
+			// database trigger to catch - this Go-level check is the only
+			// enforcement point.
+			linked, active, err := approverEligibilityCheck(ctx, tx)(resolverID)
+			if err != nil {
+				return fmt.Errorf("withdrawal: resolver eligibility check: %w", err)
+			}
+			if !linked {
+				return withdrawal.ErrApproverNotLinked
+			}
+			if !active {
+				return withdrawal.ErrApproverInactive
+			}
+
 			wr, err = withdrawal.LockSubmittedForResolution(ctx, tx, id)
 			if err != nil {
 				return err
@@ -860,6 +949,14 @@ func newResolveWithdrawalHandler(deps Deps) http.HandlerFunc {
 		}
 		if errors.Is(err, withdrawal.ErrStateConflict) {
 			apierror.Write(w, requestID, apierror.CodeConflict, "withdrawal is not submitted and awaiting resolution")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrApproverNotLinked) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "this staff account has no confirmed Person linkage and is not eligible to resolve withdrawals")
+			return
+		}
+		if errors.Is(err, withdrawal.ErrApproverInactive) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "this staff account is not active")
 			return
 		}
 		if errors.Is(err, payments.ErrCallbackProviderMismatch) {

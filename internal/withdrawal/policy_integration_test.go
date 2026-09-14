@@ -127,6 +127,40 @@ func TestResolveApprovalPolicy_UnknownAssetFailsClosed(t *testing.T) {
 	}
 }
 
+// TestResolveApprovalPolicy_NotYetEffectivePolicyIsIgnored is Stage 3D
+// directive item 5's "inactive policy" security test: a withdrawal_
+// policies row whose effective_from is still in the FUTURE relative to
+// the resolution time must never be selected - ResolveApprovalPolicy's
+// own `effective_from <= $3` clause is the mechanism, but no test
+// exercised it against a genuinely future-dated row before this (every
+// existing test only ever varies effective_from into the PAST). Falls
+// back to the next-best matching row, or the fail-closed default if none
+// applies.
+func TestResolveApprovalPolicy_NotYetEffectivePolicyIsIgnored(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool, 0)
+
+	// An already-effective, looser policy...
+	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 500_000, 2, time.Now().Add(-time.Hour))
+	// ...and a scheduled, not-yet-effective, TIGHTER policy - if the
+	// not-yet-effective row were ever incorrectly selected, resolving now
+	// would see its lower threshold/higher required_approvals instead.
+	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 1_000, 5, time.Now().Add(time.Hour))
+
+	var policy ApprovalPolicy
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		policy, err = ResolveApprovalPolicy(ctx, tx, f.tenantID, f.brandID, nil, "EUR", time.Now())
+		return err
+	})
+	if err != nil {
+		t.Fatalf("resolve policy: %v", err)
+	}
+	if policy.ThresholdAmount != 500_000 || policy.RequiredApprovals != 2 {
+		t.Fatalf("expected the already-effective policy (threshold=500000, required=2) to be selected, got %+v - the not-yet-effective row was incorrectly applied", policy)
+	}
+}
+
 // TestApprove_RequireStepUpFailsClosedWhenAboveThreshold is directive
 // item 6's proof: a tenant that configures RequireStepUp=true on a
 // policy row, before MFA exists (ADR 0017 - preserved, not implemented
@@ -146,7 +180,10 @@ func TestApprove_RequireStepUpFailsClosedWhenAboveThreshold(t *testing.T) {
 		return MoveToPendingReview(ctx, tx, above.ID)
 	})
 	err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := Approve(ctx, tx, above.ID, uuid.New(), false, nil)
+		// Never reaches the INSERT (ErrStepUpRequired is returned before
+		// anything is recorded) - alwaysEligible only needs to satisfy
+		// Approve's own Go-level fail-closed-on-nil contract.
+		_, err := Approve(ctx, tx, above.ID, uuid.New(), false, nil, alwaysEligible)
 		return err
 	})
 	if !errors.Is(err, ErrStepUpRequired) {
@@ -170,8 +207,9 @@ func TestApprove_RequireStepUpFailsClosedWhenAboveThreshold(t *testing.T) {
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return MoveToPendingReview(ctx, tx, below.ID)
 	})
+	belowApprover := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		approved, err := Approve(ctx, tx, below.ID, uuid.New(), false, nil)
+		approved, err := Approve(ctx, tx, below.ID, belowApprover, false, nil, alwaysEligible)
 		if err != nil {
 			return err
 		}

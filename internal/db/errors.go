@@ -16,6 +16,20 @@ const pgUniqueViolationCode = "23505"
 // in every handler.
 const pgForeignKeyViolationCode = "23503"
 
+// pgCheckViolationCode is the Postgres SQLSTATE for check_violation -
+// used by Stage 3D's withdrawal-policy admin API as a defense-in-depth
+// backstop behind its own application-level validation (e.g. a negative
+// threshold or a zero required_approvals count), so a CHECK constraint
+// added at the database layer is never surfaced as a generic 500.
+const pgCheckViolationCode = "23514"
+
+// IsCheckViolation reports whether err is a Postgres CHECK-constraint
+// violation (SQLSTATE 23514).
+func IsCheckViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgCheckViolationCode
+}
+
 // IsForeignKeyViolation reports whether err is a Postgres foreign-key
 // violation (SQLSTATE 23503).
 func IsForeignKeyViolation(err error) bool {

@@ -191,6 +191,58 @@ func mustRequestWithdrawal(t *testing.T, pool *db.Pool, f fixture, amount int64,
 	return wr
 }
 
+// mustCreateApprover inserts a real, linked, active staff_users row under
+// tenantID and returns its id. Stage 3D's mandatory-Person-linkage policy
+// (migration 0034) requires every non-automated Approve/Reject decision
+// to resolve, at the DATABASE level, to a staff_users row with a non-NULL
+// person_id and status = 'active' - a bare uuid.New() approver id, which
+// sufficed for every pre-Stage-3D test in this package, is now rejected
+// by the withdrawal_approvals_enforce_governance trigger the moment a
+// decision actually reaches the INSERT, regardless of what a test's own
+// ApproverEligibility closure (below) reports - that closure is this
+// package's own Go-level check, entirely decoupled from what the trigger
+// independently re-verifies from real table state (see
+// ApproverEligibility's own doc comment in withdrawal.go). Every test
+// call that expects an Approve/Reject decision to actually be recorded
+// must use an id from this helper, not a bare uuid.New(); a call that is
+// expected to fail BEFORE the INSERT (e.g. a self-approval or step-up
+// refusal) does not need one.
+func mustCreateApprover(t *testing.T, pool *db.Pool, tenantID uuid.UUID) uuid.UUID {
+	t.Helper()
+	personID := uuid.New()
+	staffID := uuid.New()
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed approver person: %v", err)
+	}
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, status, person_id)
+			 VALUES ($1, $2, $3, 'x', 'finance', 'active', $4)`,
+			staffID, tenantID, staffID.String()+"@example.com", personID,
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed approver staff user: %v", err)
+	}
+	return staffID
+}
+
+// alwaysEligible is a trivial ApproverEligibility for a test whose
+// approver id was created via mustCreateApprover (real, linked, active),
+// or for a test that never reaches the point Approve/Reject would
+// actually invoke it (e.g. a self-approval or step-up refusal, both
+// returned before the INSERT). See mustCreateApprover's own doc comment
+// for why the database trigger, not this closure, is what actually
+// enforces Stage 3D's policy once a decision is recorded.
+func alwaysEligible(uuid.UUID) (linked, active bool, err error) {
+	return true, true, nil
+}
+
 func cashBalance(t *testing.T, pool *db.Pool, f fixture) int64 {
 	t.Helper()
 	var signed int64
@@ -344,13 +396,13 @@ func TestFullHappyPath_RequestPendingReviewApproveSubmitComplete(t *testing.T) {
 	// configured threshold above the request amount.
 	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 1_000_000, 2, time.Now().Add(-time.Hour))
 
-	approverID := uuid.New()
+	approverID := mustCreateApprover(t, pool, f.tenantID)
 	var approved bool
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		// Below the configured policy threshold - a single approval
 		// suffices.
-		approved, err = Approve(ctx, tx, wr.ID, approverID, false, nil)
+		approved, err = Approve(ctx, tx, wr.ID, approverID, false, nil, alwaysEligible)
 		return err
 	})
 	if !approved {
@@ -405,17 +457,17 @@ func TestApprove_AboveThresholdRequiresTwoDistinctHumanApprovers(t *testing.T) {
 	var approved bool
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		approved, err = Approve(ctx, tx, wr.ID, serviceIdentity, true, nil)
+		approved, err = Approve(ctx, tx, wr.ID, serviceIdentity, true, nil, nil)
 		return err
 	})
 	if approved {
 		t.Fatal("an automated approval must never satisfy an above-threshold four-eyes requirement by itself")
 	}
 
-	firstApprover := uuid.New()
+	firstApprover := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		approved, err = Approve(ctx, tx, wr.ID, firstApprover, false, nil)
+		approved, err = Approve(ctx, tx, wr.ID, firstApprover, false, nil, alwaysEligible)
 		return err
 	})
 	if approved {
@@ -424,7 +476,7 @@ func TestApprove_AboveThresholdRequiresTwoDistinctHumanApprovers(t *testing.T) {
 
 	// The same approver cannot supply the second approval.
 	err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := Approve(ctx, tx, wr.ID, firstApprover, false, nil)
+		_, err := Approve(ctx, tx, wr.ID, firstApprover, false, nil, alwaysEligible)
 		return err
 	})
 	if !errors.Is(err, ErrDuplicateApproval) {
@@ -432,10 +484,10 @@ func TestApprove_AboveThresholdRequiresTwoDistinctHumanApprovers(t *testing.T) {
 	}
 
 	// A second, DISTINCT human approver completes the four-eyes requirement.
-	secondApprover := uuid.New()
+	secondApprover := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		approved, err = Approve(ctx, tx, wr.ID, secondApprover, false, nil)
+		approved, err = Approve(ctx, tx, wr.ID, secondApprover, false, nil, alwaysEligible)
 		return err
 	})
 	if !approved {
@@ -466,7 +518,10 @@ func TestApprove_BeneficiaryCannotApproveOwnWithdrawal(t *testing.T) {
 	approverIsBeneficiary := func(uuid.UUID) (bool, error) { return true, nil }
 
 	err := runTx(pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := Approve(ctx, tx, wr.ID, uuid.New(), false, approverIsBeneficiary)
+		// Never reaches the INSERT (self-approval is refused before it) -
+		// alwaysEligible only needs to satisfy Approve's own Go-level
+		// fail-closed-on-nil contract, not a real staff_users row.
+		_, err := Approve(ctx, tx, wr.ID, uuid.New(), false, approverIsBeneficiary, alwaysEligible)
 		return err
 	})
 	if !errors.Is(err, ErrSelfApproval) {
@@ -487,8 +542,9 @@ func TestReject_RestoresPlayerCashBalance(t *testing.T) {
 		t.Fatalf("expected cash 600 after hold, got %d", got)
 	}
 
+	approverID := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		return Reject(ctx, tx, wr.ID, uuid.New(), "failed_kyc_check")
+		return Reject(ctx, tx, wr.ID, approverID, "failed_kyc_check", alwaysEligible)
 	})
 
 	var final WithdrawalRequest
@@ -520,8 +576,9 @@ func TestFail_PostSubmissionFailureRestoresPlayerCashBalance(t *testing.T) {
 		return MoveToPendingReview(ctx, tx, wr.ID)
 	})
 	mustSetWithdrawalPolicy(t, pool, f.tenantID, "EUR", 1_000_000, 2, time.Now().Add(-time.Hour))
+	approverID := mustCreateApprover(t, pool, f.tenantID)
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := Approve(ctx, tx, wr.ID, uuid.New(), false, nil)
+		_, err := Approve(ctx, tx, wr.ID, approverID, false, nil, alwaysEligible)
 		return err
 	})
 	mustRunTx(t, pool, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

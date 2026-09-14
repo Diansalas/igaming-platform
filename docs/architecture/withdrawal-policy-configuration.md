@@ -134,7 +134,8 @@ resolution mechanism.
    decided.** §3's default (fail closed, threshold 0) is a deliberately
    conservative placeholder, not a risk/compliance/business decision.
    Nothing in this stage should be read as proposing any specific
-   production threshold.
+   production threshold. Stage 3D's admin API (§8) lets a tenant
+   configure one; it does not decide what value to configure.
 2. **Jurisdiction-scoped policy rows cannot be selected today, and are
    now schema-blocked from being written.** No per-player/per-withdrawal
    jurisdiction assignment exists in the platform (a `player_account`
@@ -146,19 +147,59 @@ resolution mechanism.
    false-sense-of-enforcement risk (a compliance officer could configure
    a jurisdiction-scoped policy that silently never matched anything).
    This remains a schema-readiness decision for a future stage, now
-   structurally enforced rather than merely documented.
-3. **Whether policy-config-edit and withdrawal-approval permissions must
-   be held by disjoint roles remains open** — unchanged from Stage 3B
-   (`withdrawal-state-machine.md` §5 bypass #3): a staff member who can
-   both edit `withdrawal_policies` and approve withdrawals could still
-   lower a threshold immediately before approving. `threshold_amount_at_
-   decision` on each `withdrawal_approvals` row makes such a change
-   detectable after the fact; it does not prevent it.
-4. **No admin API exists yet to write `withdrawal_policies` rows.** This
-   stage only builds the resolution boundary and the table; a
-   partner-console/back-office CRUD surface for tenant/brand staff to
-   configure their own policy is future work (would also need to decide
-   #3 first).
+   structurally enforced rather than merely documented. Stage 3D's admin
+   API (§8) never accepts a client-supplied `jurisdiction_code` for the
+   identical reason - it always inserts `NULL`.
+3. **`RESOLVED` (Stage 3D, `docs/decisions/0024` §4).** Policy-config-edit
+   and withdrawal-approval permissions are now held by disjoint roles:
+   `PermWithdrawalPolicyWrite` belongs only to `RoleTenantAdmin`;
+   `PermWithdrawalReview/Approve/Reject/Submit` belong only to
+   `RoleFinance`. No role holds both, closing `withdrawal-state-
+   machine.md` §5 bypass #3 structurally, not merely via the
+   after-the-fact `threshold_amount_at_decision` audit trail.
+4. **`RESOLVED` (Stage 3D).** A minimal admin API now exists:
+   `GET`/`POST`/`DELETE /v1/admin/withdrawal-policies`
+   (`internal/httpserver/withdrawal_policy_handlers.go`), gated by
+   `PermWithdrawalPolicyWrite` and scoped to the caller's own tenant via
+   RLS. `POST` only ever INSERTs a new row (the table remains an
+   append-only history of policy-in-force-over-time, matching every
+   other financial-configuration table in this codebase - see that
+   file's own doc comment for why); `DELETE` removes a misconfigured row,
+   which is safe precisely because `threshold_amount_at_decision`/
+   `request_amount_at_decision` already snapshot the policy onto each
+   `withdrawal_approvals` row at decision time, so removing a policy row
+   can only change what a FUTURE decision resolves to, never rewrite a
+   past one. This is deliberately the minimal boundary the Stage 3D
+   directive asked for - no partner-console/back-office UI, no bulk
+   import, no policy versioning/rollback UI - a real operator-facing
+   surface for tenant/brand staff to manage their own policy remains
+   future work.
+
+## 8. Admin API — `IMPLEMENTED` (Stage 3D, minimal boundary only)
+
+See §5 items 3-4 above for the business-decision context. Request/
+response shapes:
+
+- `POST /v1/admin/withdrawal-policies` — body:
+  `{asset_code, approval_threshold_minor_units, required_approvals,
+  require_step_up?, brand_id?, policy_version?, effective_from?}`.
+  `brand_id` omitted/empty applies to every brand under the tenant;
+  supplying one is validated by the composite `(brand_id, tenant_id)` FK
+  (migration `0033`), so a brand belonging to a different tenant is
+  refused as an invalid reference, not silently accepted as a dead row.
+  `effective_from` defaults to now and may be a future timestamp (a
+  scheduled policy change); `policy_version` defaults to `1`. Every
+  create is audited (`withdrawal_policy.created`).
+- `GET /v1/admin/withdrawal-policies` — lists every policy row for the
+  caller's own tenant (RLS-scoped), most specific/most recent first.
+- `DELETE /v1/admin/withdrawal-policies/{id}` — removes one row (audited
+  as `withdrawal_policy.deleted`); RLS scopes the id lookup to the
+  caller's own tenant, so naming another tenant's row id is a 404, not a
+  403 (no confirmation that the id even exists elsewhere is ever leaked).
+
+Both routes require `RequireTenantScope` (excludes `platform_admin`'s
+nil-tenant token, matching every other tenant-scoped admin route) and
+`PermWithdrawalPolicyWrite`.
 
 ## 6. Approver role requirements — schema-only, `NOT IMPLEMENTED`
 

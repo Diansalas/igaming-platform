@@ -98,6 +98,23 @@ var (
 	// in.
 	ErrStepUpRequired = errors.New("withdrawal: this decision requires a step-up/MFA challenge, which is not yet implemented (ADR 0017)")
 
+	// ErrApproverNotLinked is returned by Approve/Reject when the
+	// caller-supplied ApproverEligibility reports that approverPrincipalID
+	// is not linked to a Person - including when the identity cannot be
+	// resolved at all (no matching staff account). "Linked" means a
+	// confirmed staff_users.person_id association (established by an
+	// admin action), not KYC/identity verification of the Person itself -
+	// see migration 0034's own doc comment. Stage 3D business policy: an
+	// unlinked staff identity is never eligible to record a human
+	// withdrawal decision, full stop - not merely "less trusted." See
+	// ApproverEligibility's doc comment.
+	ErrApproverNotLinked = errors.New("withdrawal: approver has no confirmed Person linkage and is not eligible to record withdrawal decisions")
+
+	// ErrApproverInactive is returned by Approve/Reject when the
+	// caller-supplied ApproverEligibility reports the approver's staff
+	// account is not active (e.g. suspended).
+	ErrApproverInactive = errors.New("withdrawal: approver staff account is not active")
+
 	// ErrIdempotencyKeyReused is returned when a retried RequestWithdrawal
 	// call's idempotency_key matches an existing request whose wallet,
 	// asset, or amount differs from the one now requested - the
@@ -458,6 +475,27 @@ func MoveToPendingReview(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) er
 // the automated risk-engine service identity).
 type BeneficiaryCheck func(approverPrincipalID uuid.UUID) (isBeneficiary bool, err error)
 
+// ApproverEligibility reports whether approverPrincipalID is currently
+// eligible to record a HUMAN withdrawal decision: linked to a verified
+// Person (linked) and an active staff account (active) - Stage 3D's
+// business policy (docs/decisions/0024 §1: "any staff identity that can
+// approve, reject, or submit withdrawals MUST be linked to a Person
+// identity"). Like BeneficiaryCheck, this package has, and should have,
+// no direct dependency on staff_users (that lives in internal/identity),
+// so the caller supplies this closure - but unlike BeneficiaryCheck, a
+// nil ApproverEligibility on a non-automated call is itself a fail-closed
+// ERROR here (ErrInvalidInput), never a silent skip: this check exists
+// specifically because Stage 3C's optional, unenforced Person linkage
+// was found insufficient, so the package that owns the invariant must
+// not let a caller accidentally omit it. The database-level backstop
+// (migration 0034's withdrawal_approvals_enforce_governance trigger)
+// independently re-verifies the SAME facts directly from staff_users
+// before the row can ever be inserted, regardless of what this closure
+// reports - so a caller that gets this wrong (or a future direct-SQL
+// caller that bypasses this package entirely) still cannot commit a
+// prohibited decision.
+type ApproverEligibility func(approverPrincipalID uuid.UUID) (linked, active bool, err error)
+
 // Approve records a four-eyes 'approve' decision for a withdrawal request
 // and, once the four-eyes requirement for the request's amount is
 // satisfied, transitions the request to `approved`. approved reports
@@ -495,6 +533,11 @@ type BeneficiaryCheck func(approverPrincipalID uuid.UUID) (isBeneficiary bool, e
 //
 // beneficiaryCheck implements bypass #2 - see BeneficiaryCheck's doc.
 //
+// approverEligibility implements Stage 3D's mandatory-Person-linkage
+// policy - see ApproverEligibility's doc. Required (non-nil) whenever
+// isAutomated is false; a nil value there is itself a fail-closed
+// ErrInvalidInput, not a skip.
+//
 // If the resolved policy requires a step-up/MFA challenge for a request
 // at or above threshold (ApprovalPolicy.RequireStepUp - directive item
 // 6), this returns ErrStepUpRequired before recording anything: MFA is
@@ -511,7 +554,7 @@ type BeneficiaryCheck func(approverPrincipalID uuid.UUID) (isBeneficiary bool, e
 // alone would guarantee for genuinely simultaneous calls.
 func Approve(
 	ctx context.Context, tx pgx.Tx, requestID, approverPrincipalID uuid.UUID,
-	isAutomated bool, beneficiaryCheck BeneficiaryCheck,
+	isAutomated bool, beneficiaryCheck BeneficiaryCheck, approverEligibility ApproverEligibility,
 ) (approved bool, err error) {
 	if approverPrincipalID == uuid.Nil {
 		return false, fmt.Errorf("%w: approver principal id is required", ErrInvalidInput)
@@ -523,6 +566,22 @@ func Approve(
 	}
 	if wr.State != StatePendingReview {
 		return false, fmt.Errorf("%w: request %s is in state %q, expected %q", ErrStateConflict, requestID, wr.State, StatePendingReview)
+	}
+
+	if !isAutomated {
+		if approverEligibility == nil {
+			return false, fmt.Errorf("%w: approver eligibility check is required for a human decision", ErrInvalidInput)
+		}
+		linked, active, err := approverEligibility(approverPrincipalID)
+		if err != nil {
+			return false, fmt.Errorf("withdrawal: approver eligibility check: %w", err)
+		}
+		if !linked {
+			return false, ErrApproverNotLinked
+		}
+		if !active {
+			return false, ErrApproverInactive
+		}
 	}
 
 	policy, err := ResolveApprovalPolicy(ctx, tx, wr.TenantID, wr.BrandID, nil, wr.AssetCode, time.Now())
@@ -593,9 +652,17 @@ func Approve(
 		// 0029 already added staff_users.person_id for exactly this class
 		// of identity - counting COALESCE(su.person_id,
 		// wa.approver_principal_id) collapses two logins resolving to the
-		// same person into one, while a staff row with no person_id
-		// linkage (the common case) still counts by its own principal id,
-		// unchanged from before.
+		// same person into one. The COALESCE's unlinked-fallback branch
+		// (falling back to approver_principal_id) is now unreachable for
+		// any row this query counts: Stage 3D's governance trigger
+		// (migration 0034) refuses to INSERT a non-automated approval
+		// from an unlinked staff account in the first place, so every
+		// human approval counted here already has a non-NULL
+		// su.person_id. Kept as written (not simplified to a bare
+		// su.person_id) as defense-in-depth - correct even if that
+		// trigger is ever bypassed - and to avoid every automated
+		// decision's join failing to match staff_users, which the
+		// is_automated_approval = false filter above excludes anyway.
 		if err := tx.QueryRow(ctx,
 			`SELECT COUNT(DISTINCT COALESCE(su.person_id, wa.approver_principal_id))
 			 FROM withdrawal_approvals wa
@@ -664,12 +731,20 @@ func approverActorType(isAutomated bool) audit.ActorType {
 // withdrawal-state-machine.md §7 requires "the threshold and amount in
 // force at the time" on every approval decision, including rejections,
 // even though a rejection is not itself threshold-gated.
-func Reject(ctx context.Context, tx pgx.Tx, requestID, approverPrincipalID uuid.UUID, reasonCode string) error {
+//
+// approverEligibility is Stage 3D's mandatory-Person-linkage check (see
+// ApproverEligibility's doc) - a rejection is always a human decision
+// (there is no automated-rejection path), so this is unconditionally
+// required, never nil.
+func Reject(ctx context.Context, tx pgx.Tx, requestID, approverPrincipalID uuid.UUID, reasonCode string, approverEligibility ApproverEligibility) error {
 	if approverPrincipalID == uuid.Nil {
 		return fmt.Errorf("%w: approver principal id is required", ErrInvalidInput)
 	}
 	if reasonCode == "" {
 		return fmt.Errorf("%w: reason code is required to reject a withdrawal", ErrInvalidInput)
+	}
+	if approverEligibility == nil {
+		return fmt.Errorf("%w: approver eligibility check is required", ErrInvalidInput)
 	}
 
 	wr, err := lockRequestForUpdate(ctx, tx, requestID)
@@ -678,6 +753,17 @@ func Reject(ctx context.Context, tx pgx.Tx, requestID, approverPrincipalID uuid.
 	}
 	if wr.State != StatePendingReview {
 		return fmt.Errorf("%w: request %s is in state %q, expected %q", ErrStateConflict, requestID, wr.State, StatePendingReview)
+	}
+
+	linked, active, err := approverEligibility(approverPrincipalID)
+	if err != nil {
+		return fmt.Errorf("withdrawal: approver eligibility check: %w", err)
+	}
+	if !linked {
+		return ErrApproverNotLinked
+	}
+	if !active {
+		return ErrApproverInactive
 	}
 
 	policy, err := ResolveApprovalPolicy(ctx, tx, wr.TenantID, wr.BrandID, nil, wr.AssetCode, time.Now())

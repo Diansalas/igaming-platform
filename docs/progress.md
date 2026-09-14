@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-13 (Stage 3C)
+Last updated: 2026-09-14 (Stage 3D)
 
-## Status: Stage 3C (Financial Hardening & Operational Controls) — complete, pending human approval to start Stage 4
+## Status: Stage 3D (Withdrawal Governance Final Gate) — complete, pending human approval to start Stage 4
 
 ## Stage 0 — complete (approved)
 
@@ -1240,10 +1240,120 @@ gap. Withdrawal resolution is a manual recovery path, not an automated
 sweep. No production withdrawal approval threshold is proposed anywhere
 in this stage's code, migrations, or documentation.
 
+## Stage 3D — Withdrawal Governance Final Gate — complete (approved-pending)
+
+Status: **Complete, pending human approval to authorize Stage 4.** Issued
+immediately after the human approved Stage 3C, as an explicit "NOT a new
+financial architecture stage" directive: a tightly-scoped governance-
+hardening pass closing Stage 3C's own documented residual gap (self-
+approval enforcement was `PARTIALLY IMPLEMENTED` because `staff_users.
+person_id` linkage was optional and unenforced), under an approved
+business decision. Casino, sportsbook, bonus, B2C frontend, partner
+console, real PSP, real crypto, and production MFA were explicitly out of
+scope; full detail (including the verbatim business decision) is in ADR
+`0024`.
+
+### Approved business decision (verbatim)
+
+> Withdrawal approval requires attributable Person identity and
+> approver/beneficiary separation.
+
+With seven numbered requirements - mandatory staff→Person linkage,
+attributability, approver/beneficiary separation, staff-management/
+withdrawal-approval permission separation, no implicit grant via a broad
+admin role, no eligibility for unlinked accounts, and no second identity
+model. Full text in ADR `0024` §"The approved business decision."
+
+### Completed work
+
+Full itemized account in ADR `0024`. Summary:
+
+- **One migration** (`0034`, iterated in place during specialist review -
+  see below): `staff_users.person_id` becomes append-only (`NULL` → a
+  value allowed; a value → a different value permanently refused); the
+  Stage 3C self-approval-only trigger is replaced by `withdrawal_
+  approvals_enforce_governance`, requiring every human decision's
+  approver to resolve to a linked, active `staff_users` row; and
+  `withdrawal_policies` gains a `BEFORE UPDATE` deny-mutation trigger.
+- **RBAC separation**: `PermWithdrawalApprove` split into `PermWithdrawal
+  Review/Approve/Reject/Submit`; `RoleTenantAdmin` loses all four
+  (previously held `PermWithdrawalApprove` alongside `PermStaffManage` -
+  the Stage 3C-identified escalation vector); `RoleFinance` is the sole
+  grantee. A new `PermWithdrawalPolicyWrite` (granted only to
+  `RoleTenantAdmin`, never `RoleFinance`) gates the new policy admin API.
+- **Service-layer enforcement**: `internal/withdrawal.Approve`/`Reject`
+  take a mandatory `ApproverEligibility` closure (fail-closed on `nil` for
+  a human decision, mirroring the existing `BeneficiaryCheck` pattern but
+  stricter); `newSubmitWithdrawalHandler`/`newResolveWithdrawalHandler`
+  carry an equivalent explicit check directly (no database trigger covers
+  those two transitions, since neither inserts into `withdrawal_
+  approvals`).
+- **Staff-person-link remediation endpoint**: `POST /v1/admin/tenants/
+  {tenantID}/staff/{staffID}/person-link`, `PermStaffManage`-gated, the
+  sanctioned path to link a legacy unlinked account (never to relink).
+- **Minimal withdrawal-policy admin API**: `GET`/`POST`/`DELETE /v1/admin/
+  withdrawal-policies` - insert-only creation (never `UPDATE`), `DELETE`
+  requiring a `reason_code` and capturing a before-image in its audit
+  record, backdated `effective_from` rejected, `jurisdiction_code`/
+  `required_approver_roles` never accepted from the request body.
+- **Adversarial tests A-H** (directive item 3's full list): A/B/D/H were
+  already covered by Stage 3C's `stage3c_self_approval_test.go`
+  (unchanged, still passing); C/E/F/G are newly covered end-to-end
+  (`stage3d_withdrawal_governance_test.go`) plus at the database layer
+  directly (`internal/withdrawal/adversarial_test.go`'s
+  `TestWithdrawalApprovalsGovernance_*` tests, including direct-SQL
+  bypass attempts). Policy security tests (unauthorized/cross-tenant
+  access, invalid input, inactive/not-yet-effective policy, removal and
+  its audit-trail integrity) in `stage3d_withdrawal_policy_admin_test.go`
+  and `policy_integration_test.go`.
+- **Independent specialist review** (`security`, `ledger-finance`,
+  `payments`, `architect`, `backend`, `qa`, `code-reviewer`, all seven in
+  parallel) found and this stage fixed, before being considered complete:
+  a **P0** where an early draft of migration `0034` let a real staff
+  member self-approve their own withdrawal by setting `is_automated_
+  approval = true` (reopening a bypass Stage 3C's migration `0033`
+  deliberately closed); a **P1**, confirmed independently by three
+  specialists, where removing withdrawal permissions from
+  `RoleTenantAdmin`'s role definition alone did not stop a tenant_admin
+  from minting a brand-new `finance`-role staff account via
+  `PermStaffManage` and self-escalating (closed by restricting `finance`-
+  role staff creation to platform-scoped callers); and several P2s
+  (an overclaiming "verified Person" wording, missing before-image/
+  reason-code on policy deletion, missing DB-level append-only guard and
+  backdating protection on `withdrawal_policies`, and test-coverage gaps
+  in adversarial item G and the policy-removal/inactive-policy
+  scenarios). **All were fixed, each with a dedicated regression test**;
+  full detail and the specific fix for each finding is in ADR `0024`'s
+  "Specialist review findings and fixes" section.
+
+### Verification performed
+
+`gofmt -l .`, `go build ./...`, `go vet -tags=integration ./...` clean.
+Full test suite (`go test -tags=integration ./...`) passes against real
+PostgreSQL 16 - 127 tests in the three most-affected packages
+(`internal/httpserver`, `internal/withdrawal`, `internal/auth`) verified
+individually with `-count=1 -v` (0 failures), plus the full-repo run
+including `internal/reconciliation`'s scheduler suite. Migration `0034`
+round-tripped (`up` → `down` → `up`) both mid-review (after the P0 fix)
+and again as the final validation pass. `git status`/`git diff --stat`
+confirmed no production credentials and every changed file traces to an
+approved Stage 3D item or a specialist-review fix.
+
+### Not claimed
+
+Per CLAUDE.md's "No fake completion" rule: this stage does NOT claim
+production readiness, regulatory certification, production MFA readiness,
+PSP readiness, or crypto readiness. It does not claim the TOCTOU race on
+submit/resolve eligibility (ADR `0024`'s open item 2) is closed - that
+remains a known, documented residual risk with a low practical blast
+radius, not a silently accepted one. No production withdrawal approval
+threshold, required-approver-role rule, or step-up requirement is
+proposed anywhere in this stage's code, migrations, or documentation.
+
 ## Next stage
 
 Not started; requires explicit human authorization per the stage-gate
-rule in `CLAUDE.md`. Candidates named in the Stage 3C directive
+rule in `CLAUDE.md`. Candidates named in the Stage 3C/3D directives
 (casino, sportsbook, bonus, B2C frontend, partner console, production
 deployment, real PSP integrations, real crypto integrations) do not
 begin automatically.
