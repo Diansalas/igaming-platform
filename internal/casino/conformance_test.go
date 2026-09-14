@@ -166,7 +166,7 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 		}
 		ctx := context.Background()
 
-		valid := mock.CallbackPayload(CallbackEventBet, "bet-auth-1", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", uuid.New())
+		valid := mock.CallbackPayload(CallbackEventBet, "bet-auth-1", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", uuid.New(), uuid.New())
 		if _, err := provider.HandleCallback(ctx, valid); err != nil {
 			t.Fatalf("expected a correctly-signed callback to be accepted, got %v", err)
 		}
@@ -218,7 +218,7 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 		}
 		ctx := context.Background()
 
-		payload := mock.CallbackPayload(CallbackEventWin, "win-redeliver-1", "", "round-1", "game-1", 500, "EUR", OutcomeSucceeded, "", uuid.New())
+		payload := mock.CallbackPayload(CallbackEventWin, "win-redeliver-1", "", "round-1", "game-1", 500, "EUR", OutcomeSucceeded, "", uuid.New(), uuid.Nil)
 		first, err := provider.HandleCallback(ctx, payload)
 		if err != nil {
 			t.Fatalf("first delivery: %v", err)

@@ -177,6 +177,30 @@ var (
 	// required id, non-positive amount, empty reference) caught before
 	// ever reaching the database.
 	ErrInvalidInput = errors.New("casino: invalid input")
+
+	// ErrOutcomeNotSucceeded is returned by postBet/postWin when a
+	// CallbackEvent's own Outcome field is declared "declined" or
+	// "ambiguous" rather than "succeeded" - specialist review (qa)
+	// finding: the field was parsed from the signed payload but never
+	// enforced, so a provider-declared decline/ambiguous outcome was
+	// silently posted as a real financial effect regardless. A provider
+	// that calls the bet/win callback boundary at all is instructing the
+	// platform to move money for that event; if its own payload disagrees
+	// with that ("outcome": "declined"/"ambiguous"), the callback is
+	// malformed/self-contradictory and is rejected rather than trusted
+	// either way.
+	ErrOutcomeNotSucceeded = errors.New("casino: callback outcome is not 'succeeded'")
+
+	// ErrLaunchSessionRequired is returned by postBet when a bet callback
+	// carries no session_id, or names one that does not resolve to a
+	// known, non-revoked, real-money (never demo) launch session issued
+	// by THIS provider (ADR 0025 §3/§6 - specialist review finding,
+	// independently raised by security/multi-tenancy/architect: a bet
+	// callback with no session binding lets a validly-signed provider
+	// debit an arbitrary player's wallet with no record that a launch
+	// ever occurred, and cannot distinguish a demo round from a real-
+	// money one).
+	ErrLaunchSessionRequired = errors.New("casino: bet callback requires a valid real-money launch session")
 )
 
 // AmountLimit is one (asset_code, min, max) row - present in the schema
@@ -266,6 +290,19 @@ type LaunchRequest struct {
 	// it in the provider's own launch URL for the provider to present
 	// back on its own wallet-callback calls. Never the player's JWT.
 	LaunchToken string
+	// SessionID is the platform's own casino_launch_sessions row id for
+	// this round - distinct from LaunchToken (which is single-use and
+	// consumed once at bootstrap). The adapter is expected to have its
+	// provider echo THIS identifier back on every subsequent bet/win/
+	// rollback callback, so ReceiveCallback can resolve player/wallet/
+	// asset/mode from the platform's own session record instead of
+	// trusting a payload-supplied player_account_id (specialist review
+	// finding, security/multi-tenancy/architect reviews converging
+	// independently: a callback with no session binding lets a valid,
+	// correctly-signed provider misdirect funds to an arbitrary player
+	// within the tenant, and cannot distinguish a demo-mode round from a
+	// real-money one).
+	SessionID uuid.UUID
 }
 
 // LaunchResult is what a CasinoProvider adapter returns from Launch.
@@ -375,6 +412,16 @@ type CallbackEvent struct {
 	Outcome         Outcome
 	DeclineReason   string
 	PlayerAccountID uuid.UUID
+	// SessionID is the LaunchRequest.SessionID the platform handed this
+	// provider at launch time, echoed back on this callback - required
+	// for CallbackEventBet (postBet resolves the actual wallet/player/
+	// mode from the platform's own casino_launch_sessions row this names,
+	// never from PlayerAccountID above, which is payload-supplied and
+	// therefore never authoritative for a financial write). Win/Rollback
+	// derive their own accounts from the ledger's own prior entries
+	// instead (see postWin/postRollback), so this field is not consulted
+	// for those event types.
+	SessionID uuid.UUID
 }
 
 // CasinoProvider is the interface every adapter (real aggregator or

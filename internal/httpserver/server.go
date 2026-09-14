@@ -46,9 +46,16 @@ type Deps struct {
 
 	// CasinoOrchestrator resolves a game's provider, mints/resolves
 	// game-launch sessions, and dispatches provider bet/win/rollback
-	// callbacks (Stage 4A). Nil is treated as "casino routes disabled" by
-	// each casino handler, mirroring PaymentOrchestrator's identical
-	// nil-means-disabled convention.
+	// callbacks (Stage 4A). Nil disables every route that actually calls
+	// it (catalogue listing, launch, the webhook, tenant capability
+	// config) - each such handler guards explicitly, mirroring
+	// PaymentOrchestrator's identical nil-means-disabled convention. The
+	// platform-wide catalogue-upsert and tenant-availability-toggle
+	// routes call casino package functions directly (never the
+	// orchestrator) and remain reachable regardless: managing WHICH
+	// titles exist and WHICH ones a tenant has opted into is catalogue
+	// administration, not adapter dispatch, so it is deliberately not
+	// gated by whether any adapter is currently registered.
 	CasinoOrchestrator *casino.Orchestrator
 }
 

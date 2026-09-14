@@ -189,6 +189,36 @@ func ResolveLaunchToken(ctx context.Context, tx pgx.Tx, rawToken string) (Launch
 	return s, nil
 }
 
+// GetLaunchSessionByID reads a casino_launch_sessions row by its platform
+// id, WITHOUT consuming it - the single-use consume-on-resolve semantics
+// in ResolveLaunchToken apply only to the raw launch TOKEN (bootstrapping
+// the game client), never to the session ROW itself, which remains the
+// round's own identity anchor for as long as the round runs (ADR 0025 §3/
+// §6 - specialist review finding: bet/win/rollback callbacks throughout a
+// round must resolve player/wallet/asset/mode from this platform-owned
+// row, never trust a payload-supplied player_account_id). tx must already
+// be tenant-scoped; RLS is what actually prevents this from ever resolving
+// a different tenant's session.
+func GetLaunchSessionByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (LaunchSession, error) {
+	var s LaunchSession
+	var status LaunchSessionStatus
+	err := tx.QueryRow(ctx,
+		`SELECT id, tenant_id, brand_id, player_account_id, wallet_id, game_id, provider_id, provider_game_id,
+			asset_code, mode, status, expires_at
+		 FROM casino_launch_sessions WHERE id = $1`,
+		id,
+	).Scan(&s.ID, &s.TenantID, &s.BrandID, &s.PlayerAccountID, &s.WalletID, &s.GameID, &s.ProviderID, &s.ProviderGameID,
+		&s.AssetCode, &s.Mode, &status, &s.ExpiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return LaunchSession{}, ErrLaunchSessionNotFound
+	}
+	if err != nil {
+		return LaunchSession{}, fmt.Errorf("casino: get launch session by id: %w", err)
+	}
+	s.Status = status
+	return s, nil
+}
+
 // RevokeLaunchSession marks an active session unusable without consuming
 // it (e.g. the launch attempt itself failed after the token was minted,
 // or a staff-initiated safety revocation) - never a DELETE, since the

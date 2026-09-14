@@ -224,15 +224,27 @@ func IsGameAvailable(ctx context.Context, tx pgx.Tx, tenantID, brandID, gameID u
 // (tenantID, brandID) - the player-facing catalogue view, joining the
 // platform catalogue against the tenant's own opt-in layer and excluding
 // any platform-disabled title. tx must already be tenant-scoped.
+//
+// Resolution is most-specific-row-wins FIRST (the inner DISTINCT ON,
+// exactly like IsGameAvailable), THEN filtered by that winning row's own
+// `enabled` value - never the other order. A brand-specific row with
+// enabled=false must be the one that decides a brand's view of a game
+// that is enabled tenant-wide; filtering `enabled = true` in the join's
+// WHERE clause before resolving most-specific-wins (a bug this fix
+// closes - specialist review finding) would instead let the tenant-wide
+// row win by simply discarding the brand's own opt-out before selection.
 func ListAvailableGames(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID) ([]Game, error) {
 	rows, err := tx.Query(ctx,
-		`SELECT DISTINCT ON (g.id)
-			g.id, g.provider_id, g.provider_game_id, g.name, g.game_type, g.rtp_variant, g.volatility,
+		`SELECT g.id, g.provider_id, g.provider_game_id, g.name, g.game_type, g.rtp_variant, g.volatility,
 			g.feature_flags, g.supported_assets, g.mobile_supported, g.demo_supported, g.jurisdiction_blocklist, g.status
 		 FROM casino_games g
-		 JOIN casino_game_availability a ON a.game_id = g.id
-		 WHERE g.status = 'active' AND a.tenant_id = $1 AND (a.brand_id = $2 OR a.brand_id IS NULL) AND a.enabled = true
-		 ORDER BY g.id, (a.brand_id IS NULL) ASC`,
+		 JOIN (
+			SELECT DISTINCT ON (game_id) game_id, enabled
+			FROM casino_game_availability
+			WHERE tenant_id = $1 AND (brand_id = $2 OR brand_id IS NULL)
+			ORDER BY game_id, (brand_id IS NULL) ASC
+		 ) a ON a.game_id = g.id
+		 WHERE g.status = 'active' AND a.enabled = true`,
 		tenantID, brandID,
 	)
 	if err != nil {

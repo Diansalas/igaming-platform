@@ -1350,10 +1350,117 @@ radius, not a silently accepted one. No production withdrawal approval
 threshold, required-approver-role rule, or step-up requirement is
 proposed anywhere in this stage's code, migrations, or documentation.
 
+## Stage 4A — Casino Integration Foundation — complete (approved-pending)
+
+Status: **Complete, pending human approval to authorize Stage 4B.** Issued
+after Stage 3D's approval, as a "CASINO INTEGRATION FOUNDATION" directive:
+a production-grade, provider-agnostic casino integration layer - the
+`CasinoProvider` interface, a `MockCasinoProvider`, a platform-wide/
+tenant-opt-in game catalogue, an opaque single-use game-launch-token
+mechanism, a two-layer provider capability/routing model, and bet/win/
+rollback posting on top of the already-approved ledger
+(`financial-transaction-flows.md` Flows 5-7). Real casino provider
+contracts, production credentials, sportsbook, the Bonus Engine, KYC/AML,
+RG, a lobby UI, and a back-office catalogue UI were explicitly out of
+scope. Full design and the complete specialist-review findings/fixes list
+are in `docs/decisions/0025-casino-provider-abstraction-and-game-session-
+model.md`.
+
+### Completed work
+
+Full itemized account in ADR `0025`. Summary:
+
+- **Two migrations**: `0035` (the four new tables - `casino_games`
+  platform-wide no-RLS, `casino_game_availability`/`casino_provider_
+  capabilities` tenant-owned RLS with the player-scope-exclusion guard,
+  `casino_launch_sessions` tenant-owned RLS with the dual `tenant_staff_
+  scope`/`player_self_scope` pattern mirroring `withdrawal_requests` -
+  plus the additive `casino_bet`/`casino_win`/`casino_rollback` ledger
+  transaction-type CHECK values) and `0036` (hardening added during
+  specialist review: an immutability trigger on `casino_launch_sessions`
+  mirroring `withdrawal_requests`'s, and a tenant-scoped `token_hash`
+  uniqueness in place of a platform-global one).
+- **`internal/casino`** (7 files): `types.go` (the `CasinoProvider`
+  interface, every request/response shape, sentinel errors),
+  `catalogue.go` (platform/tenant catalogue split), `capability.go`
+  (two-layer capability model, narrowing-only enforcement), `launch.go`
+  (single-use launch-token generation/resolution, mirroring `internal/
+  auth`'s refresh-token pattern in a separate trust domain),
+  `orchestrator.go` (`LaunchGame`'s full eligibility chain; `ReceiveCallback`
+  dispatch with tenant-capability enforcement; `postBet`/`postWin`/
+  `postRollback` implementing Flows 5-7), `mock.go` (`MockCasinoProvider`,
+  HMAC-signed synthetic callbacks).
+- **HTTP layer**: player-facing catalogue listing/launch, the provider
+  callback webhook (no bearer-auth middleware, adapter-verified signature
+  instead), and admin endpoints for platform catalogue management
+  (platform_admin only), tenant provider-capability configuration, and
+  tenant game-availability configuration - `casino_handlers.go`,
+  `casino_admin_handlers.go`, `casino_routes.go`, two new permissions
+  (`PermCasinoCatalogueManage`, `PermCasinoConfigWrite`).
+- **Provider conformance suite**: `conformance_test.go` (adapter-contract-
+  only, no DB - catalogue/launch/bet/win/rollback contracts, ambiguous/
+  timeout outcome, provider authentication, provider failure, capability
+  shape) and `orchestrator_integration_test.go` (real PostgreSQL - every
+  directive item A-T, plus dedicated regression tests for every specialist-
+  review finding below and concurrency tests for duplicate-bet idempotency,
+  distinct-rollback exclusivity, and single-use launch-token resolution)
+  plus `internal/httpserver/casino_flow_integration_test.go` (HTTP-layer
+  authorization/tenant-isolation/webhook-authentication).
+- **Independent 7-specialist review** (casino integration architecture,
+  financial correctness, security, PostgreSQL/RLS, API/HTTP, multi-tenancy,
+  adversarial testing, all seven in parallel) found and this stage fixed,
+  before being considered complete: **six P1s**, several confirmed
+  independently by multiple specialists and three empirically reproduced
+  during review - (1) the launch-session credential was minted but never
+  consulted on the bet path, letting a payload-supplied `player_account_id`
+  authorize an arbitrary player's debit and making demo-vs-real-money
+  indistinguishable at posting time; (2) a win callback credited whatever
+  player its own payload named rather than the round's actual bettor,
+  empirically reproduced; (3) two concurrent, distinct rollback references
+  for the same bet both succeeded, doubling the reversal credit,
+  empirically reproduced; (4) a tenant's own `CasinoProviderCapability` -
+  documented as a kill switch - had no effect on the bet/win/rollback path;
+  (5) a provider-declared `declined`/`ambiguous` `Outcome` on a bet/win
+  callback posted identically to `succeeded`, empirically reproduced; (6)
+  zero concurrency tests existed for the casino financial/launch paths, and
+  zero HTTP-level tests existed for any casino route. **All six were fixed,
+  each with a dedicated regression test**; full detail and the specific fix
+  for each finding, plus the fixed P2s and the explicitly-deferred residual
+  items, are in ADR `0025`'s "Specialist review findings and fixes" section.
+
+### Verification performed
+
+`gofmt -l .` clean. `go build ./...`, `go vet ./...`, `go vet -tags=integration
+./...` clean. `go test ./...`, `go test -race ./...`, `go test -tags=integration
+./...`, and `go test -race -tags=integration ./...` all pass across the
+full repository, including 30 top-level tests (plus subtests) in
+`internal/casino` and 6 new HTTP-level tests in `internal/httpserver`.
+Migration `0036` round-tripped (`up` → `down` → `up`) cleanly. Migration
+`0035`'s own round-trip was verified clean on a fresh database earlier in
+the stage (by direct test and independently by the architect specialist
+review); by the end of the stage the dev database has posted real
+`casino_bet`/`casino_win`/`casino_rollback` rows from the test suite
+itself, so `0035`'s down migration can no longer succeed there - documented
+in `0035`'s own down-migration file as the correct, expected behavior for
+an append-only ledger (CLAUDE.md: "Corrections are compensating entries,
+never edits or deletions of historical entries"), not a defect.
+
+### Not claimed
+
+Per CLAUDE.md's "No fake completion" rule: this stage does NOT claim a
+real casino provider integration, production readiness, regulatory
+certification, or RG/self-exclusion enforcement at game launch (an
+explicitly deferred, pre-existing platform-wide gap - see ADR `0025`'s
+findings section). Free-round/bonus-stake normalization and jackpot-
+contribution splits remain `OPEN DECISION`s owned by the Bonus Engine
+stage. Per-tenant provider signing keys (today one secret per adapter
+instance, shared across every tenant routed to it) are recorded as a
+Stage 4B precondition, not solved here.
+
 ## Next stage
 
 Not started; requires explicit human authorization per the stage-gate
-rule in `CLAUDE.md`. Candidates named in the Stage 3C/3D directives
-(casino, sportsbook, bonus, B2C frontend, partner console, production
-deployment, real PSP integrations, real crypto integrations) do not
-begin automatically.
+rule in `CLAUDE.md`. Candidates named in the Stage 3D/4A directives
+(a real casino provider integration, sportsbook, bonus, B2C frontend,
+partner console, production deployment, real PSP integrations, real
+crypto integrations) do not begin automatically.

@@ -11,6 +11,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/casino"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
@@ -188,6 +189,10 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "player account not found")
 			return
 		}
+		if db.IsForeignKeyViolation(err) {
+			apierror.Write(w, requestID, apierror.CodeValidation, "unknown asset code")
+			return
+		}
 		if errors.Is(err, casino.ErrGameNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "game not found")
 			return
@@ -296,6 +301,12 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "not found")
 			return
 		}
+		if errors.Is(err, casino.ErrProviderUnavailable) {
+			// The tenant's own CasinoProviderCapability is disabled (or
+			// never configured) - a kill switch, not a platform failure.
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "provider is not enabled for this tenant")
+			return
+		}
 		if errors.Is(err, casino.ErrBetNotFound) {
 			// A win/rollback naming a round with no matching prior bet is
 			// an integrity alert - a provider protocol violation, not a
@@ -309,8 +320,20 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeConflict, "original transaction already rolled back")
 			return
 		}
+		if errors.Is(err, casino.ErrLaunchSessionRequired) {
+			logger.Error("casino_webhook_missing_session_binding", "provider_id", providerID, "tenant_id", t.ID.String())
+			apierror.Write(w, requestID, apierror.CodeValidation, "callback rejected")
+			return
+		}
+		if errors.Is(err, casino.ErrOutcomeNotSucceeded) {
+			apierror.Write(w, requestID, apierror.CodeValidation, "callback outcome is not succeeded")
+			return
+		}
 		if errors.Is(err, casino.ErrInvalidInput) {
-			apierror.Write(w, requestID, apierror.CodeValidation, err.Error())
+			// Never echo err.Error() to an unauthenticated caller - it may
+			// include submitted field values (security specialist review
+			// finding). A fixed, generic message only.
+			apierror.Write(w, requestID, apierror.CodeValidation, "callback rejected: invalid input")
 			return
 		}
 		if err != nil {

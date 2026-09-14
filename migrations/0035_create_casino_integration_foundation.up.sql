@@ -8,8 +8,11 @@
 -- 1. Ledger transaction types for Flows 5-7 (financial-transaction-
 -- flows.md, already BLUEPRINT). Postgres has no ALTER CHECK - the
 -- constraint is dropped and recreated with the additive values, which is
--- safe here because this only ADDS accepted values, never removes one an
--- existing row could already hold.
+-- safe for THIS (up) direction because it only ADDS accepted values,
+-- never removes one an existing row could already hold. The corresponding
+-- down migration's narrower recreation is NOT safe once a row holds one of
+-- these new values - see this migration's own down.sql for why that is
+-- correct, expected behavior for an append-only ledger rather than a bug.
 ALTER TABLE ledger_transactions DROP CONSTRAINT ledger_transactions_transaction_type_check;
 ALTER TABLE ledger_transactions ADD CONSTRAINT ledger_transactions_transaction_type_check CHECK (transaction_type IN (
     'deposit', 'deposit_reversal',

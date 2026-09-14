@@ -114,7 +114,7 @@ tenant/brand's `casino_game_availability.enabled = true`, the resolved
 provider's own capability row (§4) is active for this tenant/brand/asset,
 and the tenant's jurisdiction is not in the game's
 `jurisdiction_blocklist`. Missing any one of these fails closed with a
-specific, distinguishable error (§9) — never a generic 404, so an operator
+specific, distinguishable error — never a generic 404, so an operator
 can tell "game doesn't exist" from "game exists but isn't enabled here"
 from "provider unavailable" from "blocked in this jurisdiction" (directive
 items C/O/P/Q's distinct adversarial cases depend on this).
@@ -183,14 +183,19 @@ not merely "consistent with an existing pattern":
    schema and generation mechanism.
 
 **Single-use, per §"Game launch"'s explicit instruction**: `status`
-transitions `active` → `consumed` on first successful resolution (the
-provider's own `Launch`/game-bootstrap call against the platform, which
-this stage models via `ResolveLaunchToken` — see §9), never re-usable
-after. A provider that needs a longer-lived session for its own internal
-game-client reconnect logic is expected to maintain that session itself,
-downstream of this one-time resolution — the platform's own credential is
-deliberately narrower than "how long the player's game client stays
-open."
+transitions `active` → `consumed` on first successful resolution
+(`ResolveLaunchToken`), never re-usable after — enforced by an atomic
+conditional `UPDATE ... WHERE status = 'active'`, not a read-then-write, so
+two concurrent resolution attempts for the same token can never both
+succeed (proven under real concurrency by
+`TestResolveLaunchToken_ConcurrentResolutionOnlyOneSucceeds`). The launch
+token's single use governs *bootstrapping the game client only* — it is
+not the credential subsequent bet/win/rollback callbacks throughout the
+round authenticate against (§6 covers what those calls actually carry).
+Migration 0036 additionally freezes every identity/token/expiry column and
+the whole row once terminal (`consumed`/`expired`/`revoked`), closing a
+specialist-review finding that an un-triggered table let a consumed
+session be resurrected to `active` with an unbounded new expiry.
 
 **What crosses to the provider**: `provider_game_id`, `mode`,
 `asset_code`, and the opaque launch token itself (as a URL parameter or
@@ -234,17 +239,20 @@ Identical rule to `payment-orchestration.md` §10, restated for casino
 because the directive explicitly re-demands it: **a provider callback is
 never processed by an unauthenticated handler.** The platform knows which
 adapter is responsible for verifying a given callback from the URL path
-(`POST /v1/webhooks/casino/{tenantSlug}/{providerID}/{operation}` — the
-same per-tenant-path-selects-the-adapter resolution
-`payment-orchestration.md` §3 already uses for payments, carried forward
-rather than inventing a second convention), and that adapter's own
-`HandleCallback` verifies the payload's authenticity (HMAC/signature,
-vendor-specific) **before** any payload field is used to resolve tenant,
-player, wallet, or game. An unverified payload never reaches routing or
-the ledger. The tenant comes from the URL's tenant slug (resolved,
-authenticated-tenant lookup — same `identity.GetTenantBySlug` +
-active-status check `newPaymentWebhookHandler` already performs, reused
-verbatim), never asserted by the payload.
+(`POST /v1/webhooks/casino/{tenantSlug}/{providerID}` — the same per-
+tenant-path-selects-the-adapter resolution `payment-orchestration.md` §3
+already uses for payments, carried forward rather than inventing a second
+convention; the *operation* — bet/win/rollback — is carried inside the
+signed payload's own `event_type` field rather than a further URL segment,
+since the wire shape is entirely internal to the adapter and a URL-
+embedded operation type would be redundant with what `HandleCallback`
+already parses), and that adapter's own `HandleCallback` verifies the
+payload's authenticity (HMAC/signature, vendor-specific) **before** any
+payload field is used to resolve tenant, player, wallet, or game. An
+unverified payload never reaches routing or the ledger. The tenant comes
+from the URL's tenant slug (resolved, authenticated-tenant lookup — same
+`identity.GetTenantBySlug` + active-status check `newPaymentWebhookHandler`
+already performs, reused verbatim), never asserted by the payload.
 
 ### 6. Bet / Win / Rollback — no second balance system, existing ledger only
 
@@ -257,14 +265,30 @@ modified by this ADR) is the binding specification:
   funds is checked and rejected **before** posting, inside the same
   transaction (invariant #15's read-then-write-atomically pattern,
   identical to `RequestWithdrawal`'s balance check) — a declined bet
-  produces **no** `LedgerTransaction` row.
+  produces **no** `LedgerTransaction` row. **The wallet a bet debits is
+  resolved from the platform's own `casino_launch_sessions` row the
+  callback names (`session_id`), never from a payload-supplied
+  `player_account_id` directly** — closed as a specialist-review finding
+  (see this ADR's own findings section): a bet callback with no session
+  binding let a validly-signed provider debit an arbitrary player within
+  the tenant, with no record a launch ever occurred, and could not
+  distinguish a demo round from a real-money one. `postBet` rejects a
+  callback with no `session_id`, one naming an unknown/revoked session, a
+  different provider's session, a demo-mode session, or a mismatched
+  asset — all before touching the ledger.
 - **Win**: debit `house_gaming`, credit `player_cash`. Idempotency key is
   the win's own `(provider_id, provider_tx_id)`, distinct from the
-  triggering bet's. A win callback naming a round with no matching prior
-  bet transaction is rejected as an **integrity alert** (a provider
-  protocol violation, not a routine failure) — logged and audited at
-  elevated severity, never silently 404'd the way an ordinary not-found
-  is.
+  triggering bet's. **The wallet a win credits is resolved from the
+  round's own bet transaction's ledger entries — the same `player_cash`
+  account that bet actually debited — never from the win callback's own
+  `player_account_id`**, closed as a specialist-review finding (empirically
+  reproduced: a win naming a different player was credited in full). A win
+  callback naming a round with no matching, still-valid (never rolled
+  back) prior bet transaction is rejected as an **integrity alert** (a
+  provider protocol violation, not a routine failure) — logged and audited
+  at elevated severity, never silently 404'd the way an ordinary not-found
+  is. A win on a round whose bet has already been rolled back (a voided
+  round) is the identical integrity violation, not a separate case.
 - **Rollback**: a new `LedgerTransaction` with `reverses_transaction_id`
   pointing at the original bet (and, separately, at the win, if one was
   also posted for the same round — two independent reversal postings, one
@@ -275,7 +299,14 @@ modified by this ADR) is the binding specification:
   writes a **tombstone** (`ledger.TxTombstone`, the identical mechanism
   `postDepositReversalTombstone` already implements for payments), so a
   late-arriving original bet callback for that same reference is rejected
-  rather than posted after the fact.
+  rather than posted after the fact. The original-transaction lookup takes
+  a row lock (`SELECT ... FOR UPDATE`) before checking whether it has
+  already been reversed — closed as a specialist-review finding
+  (empirically reproduced: two concurrent, distinct rollback references
+  for the same bet both succeeded, doubling the reversal credit) — and a
+  redelivery of the identical rollback reference (including one targeting
+  an already-tombstoned original) is a true idempotent no-op, never
+  `ErrAlreadyRolledBack`.
 
 **Explicit scope boundary, not a silent gap**: `player_bonus`-funded
 stakes (bonus-wagering split) and jackpot contribution splits are
@@ -321,6 +352,85 @@ posting and their idempotency, duplicate-callback handling, provider-
 authentication failure, provider failure/timeout, and capability
 declaration shape — directive items A-T are the authoritative list; see
 `docs/progress.md`'s Stage 4A section for the exact test-to-item mapping.
+
+## Specialist review findings and fixes
+
+Seven parallel specialist reviews (casino integration architecture,
+financial correctness, security, PostgreSQL/RLS, API/HTTP, multi-tenancy,
+adversarial testing) ran against the initial Stage 4A implementation.
+Several independently converged on the same root causes; all were fixed,
+each with a dedicated regression test, before this stage was declared
+complete:
+
+- **P1 (multi-tenancy, security, architect — independently converged)**:
+  the launch-session credential §3 designates as the binding between a
+  player and a provider's callbacks was minted but never consulted on the
+  bet/win posting path — `ReceiveCallback` trusted a payload-supplied
+  `player_account_id` directly. Fixed by requiring a bet callback to carry
+  `session_id`, resolving player/wallet/asset/mode from the platform's own
+  `casino_launch_sessions` row, and rejecting a missing/unknown/wrong-
+  provider/demo-mode/asset-mismatched session (§6's Bet bullet, above).
+- **P1 (ledger-finance, empirically reproduced)**: a win callback credited
+  whatever `player_account_id` its own payload named, with no binding to
+  the round's actual bettor — a win naming a different player was credited
+  in full. Fixed by resolving the win's payee from the round's own bet
+  transaction's ledger entries instead (§6's Win bullet, above), which
+  also closes the related "win on an already-rolled-back bet" gap.
+- **P1 (ledger-finance, empirically reproduced)**: two concurrent, distinct
+  rollback references for the same bet both succeeded, doubling the
+  reversal credit. Fixed with a row lock (`SELECT ... FOR UPDATE`) on the
+  original-transaction lookup inside `postRollback` (§6's Rollback bullet,
+  above), proven under real concurrency by
+  `TestReceiveCallback_ConcurrentDistinctRollbacksOnlyOneSucceeds`.
+- **P1 (multi-tenancy)**: a tenant's own `CasinoProviderCapability` row —
+  documented as an operator kill switch — had no effect on the bet/win/
+  rollback path; only the process-global adapter registry decided whether
+  a callback posted. Fixed by checking the tenant-wide capability
+  (`status = active` and the specific operation's `supports_*` flag)
+  inside `ReceiveCallback` before dispatch, for every event type.
+- **P1 (qa, empirically reproduced)**: `CallbackEvent.Outcome` was parsed
+  from the signed payload but never enforced on the bet/win posting path —
+  a provider-declared `declined`/`ambiguous` outcome posted identically to
+  `succeeded`. Fixed by rejecting any bet/win callback whose own `Outcome`
+  is not `succeeded` (`ErrOutcomeNotSucceeded`).
+- **P1 (casino architecture, qa)**: no concurrency tests existed for the
+  casino financial/launch paths at all, contrary to CLAUDE.md's mandatory
+  financial-test list. Closed with dedicated concurrent tests for
+  duplicate-bet idempotency, distinct-rollback exclusivity, and single-use
+  launch-token resolution.
+- **P1 (API/HTTP, security)**: zero HTTP-level tests existed for any
+  casino route, so the route table's authorization/tenant-scope/webhook-
+  signature guarantees were unverified by anything but code inspection.
+  Closed with `internal/httpserver/casino_flow_integration_test.go`
+  (player-denied-on-admin-routes, platform-only-catalogue-management,
+  tenant-scoped-config-routes, cross-tenant-availability-invisible,
+  webhook tenant-enumeration-resistance, unsigned-payload-rejected).
+- **P2s fixed**: a redelivered rollback whose original was never seen
+  (tombstoned) previously errored instead of repeating its idempotent
+  result; `ListAvailableGames` resolved most-specific-row-wins in the
+  wrong order (filtering `enabled` before selecting the winning row, so a
+  brand's explicit opt-out could be overridden by a tenant-wide opt-in);
+  `casino_launch_sessions` had no immutability trigger (migration 0036
+  closes this, mirroring `withdrawal_requests`'s); `token_hash` was a
+  platform-global unique constraint rather than tenant-scoped (migration
+  0036 closes this too, per migration 0021's own stated rule); the webhook
+  echoed raw internal error text for `ErrInvalidInput`; a mock callback's
+  HMAC canonicalization did not reject embedded NUL bytes; missing cross-
+  tenant forged-insert tests for `casino_game_availability`/
+  `casino_provider_capabilities`.
+- **Not fixed this stage, explicitly deferred** (recorded here per
+  CLAUDE.md's "record it as a decision" rule, not silently dropped): no
+  player-account/wallet-status (suspended/self-excluded/frozen) check at
+  game launch or bet time — a pre-existing, platform-wide gap (deposits
+  have the same one), not introduced by this stage, but game launch is the
+  canonical responsible-gaming enforcement point and this must close
+  before any real-money go-live; the identical unguarded-reversal-lookup
+  race this ADR fixes for casino also exists in `internal/payments`
+  (`internal/payments/orchestrator.go`'s deposit-reversal check) and should
+  receive the same `FOR UPDATE` fix in a future pass; per-tenant provider
+  signing keys (today one secret per adapter *instance*, shared across
+  every tenant that routes to it) are a Stage 4B precondition for any real
+  provider, not a Stage 4A gap.
 
 ## Consequences
 

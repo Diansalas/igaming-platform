@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -178,7 +179,7 @@ func (m *MockCasinoProvider) Launch(_ context.Context, req LaunchRequest) (Launc
 	}
 	return LaunchResult{
 		Outcome:   OutcomeSucceeded,
-		LaunchURL: fmt.Sprintf("https://mock-casino.invalid/launch/%s?token=%s", req.ProviderGameID, req.LaunchToken),
+		LaunchURL: fmt.Sprintf("https://mock-casino.invalid/launch/%s?token=%s&session=%s", req.ProviderGameID, req.LaunchToken, req.SessionID),
 	}, nil
 }
 
@@ -269,6 +270,11 @@ type mockCasinoCallbackBody struct {
 	Outcome              string `json:"outcome"`
 	DeclineReason        string `json:"decline_reason,omitempty"`
 	PlayerAccountID      string `json:"player_account_id"`
+	// SessionID echoes back the LaunchRequest.SessionID the platform
+	// handed this provider at launch time - required on a bet callback so
+	// ReceiveCallback can resolve player/wallet/asset/mode from the
+	// platform's own casino_launch_sessions row (ADR 0025 §3/§6).
+	SessionID string `json:"session_id,omitempty"`
 	// Signature is this instance's HMAC-SHA256 (hex-encoded) over the
 	// other fields via MockCasinoProvider.sign - HandleCallback verifies it
 	// before acting on anything else. A real adapter's equivalent field (or
@@ -281,13 +287,35 @@ type mockCasinoCallbackBody struct {
 // identifying/effect-bearing fields (never including Signature itself,
 // which would make verification vacuous) - mirrors MockProvider.sign
 // exactly, separator-joined so no combination of field values can be
-// reinterpreted as a different set of fields.
+// reinterpreted as a different set of fields. Each field's own NUL bytes
+// are stripped by HandleCallback before this is ever called (see
+// containsNULByte) - a NUL is also this canonicalization's own separator,
+// so a field value permitted to contain one could otherwise be crafted to
+// forge a different field layout with an identical MAC input (specialist
+// review finding).
 func (m *MockCasinoProvider) sign(body mockCasinoCallbackBody) string {
 	mac := hmac.New(sha256.New, m.signingSecret)
-	fmt.Fprintf(mac, "%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s\x00%s\x00%s",
+	fmt.Fprintf(mac, "%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%s",
 		body.EventType, body.ProviderTxID, body.OriginalProviderTxID, body.RoundID, body.ProviderGameID,
-		body.Amount, body.AssetCode, body.Outcome, body.DeclineReason, body.PlayerAccountID)
+		body.Amount, body.AssetCode, body.Outcome, body.DeclineReason, body.PlayerAccountID, body.SessionID)
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// callbackBodyHasNULByte reports whether any string field of body contains
+// a literal NUL byte (a JSON string may legally decode one via a unicode
+// escape) - which would otherwise let two DIFFERENT field layouts hash to
+// the same sign() output, since a NUL byte is also this canonicalization's
+// own field separator (specialist review finding).
+func callbackBodyHasNULByte(body mockCasinoCallbackBody) bool {
+	for _, s := range []string{
+		body.EventType, body.ProviderTxID, body.OriginalProviderTxID, body.RoundID, body.ProviderGameID,
+		body.AssetCode, body.Outcome, body.DeclineReason, body.PlayerAccountID, body.SessionID,
+	} {
+		if strings.ContainsRune(s, 0) {
+			return true
+		}
+	}
+	return false
 }
 
 // CallbackPayload builds a synthetic webhook body, as JSON, in the shape
@@ -297,12 +325,17 @@ func (m *MockCasinoProvider) sign(body mockCasinoCallbackBody) string {
 // exactly as a real, correctly-authenticated provider delivery would; a
 // test wanting to exercise directive item J (provider authentication
 // failure) should instead hand-construct a payload with a wrong/missing
-// signature.
-func (m *MockCasinoProvider) CallbackPayload(eventType CallbackEventType, providerTxID, originalProviderTxID, roundID, providerGameID string, amount int64, assetCode string, outcome Outcome, declineReason string, playerAccountID uuid.UUID) []byte {
+// signature. sessionID is required for a bet event (ReceiveCallback's
+// postBet rejects a bet with no session binding) and ignored by win/
+// rollback; pass uuid.Nil for those.
+func (m *MockCasinoProvider) CallbackPayload(eventType CallbackEventType, providerTxID, originalProviderTxID, roundID, providerGameID string, amount int64, assetCode string, outcome Outcome, declineReason string, playerAccountID, sessionID uuid.UUID) []byte {
 	body := mockCasinoCallbackBody{
 		EventType: string(eventType), ProviderTxID: providerTxID, OriginalProviderTxID: originalProviderTxID,
 		RoundID: roundID, ProviderGameID: providerGameID, Amount: amount, AssetCode: assetCode,
 		Outcome: string(outcome), DeclineReason: declineReason, PlayerAccountID: playerAccountID.String(),
+	}
+	if sessionID != uuid.Nil {
+		body.SessionID = sessionID.String()
 	}
 	body.Signature = m.sign(body)
 	marshalled, _ := json.Marshal(body)
@@ -322,13 +355,22 @@ func (m *MockCasinoProvider) HandleCallback(_ context.Context, rawPayload []byte
 	if err := json.Unmarshal(rawPayload, &body); err != nil {
 		return CallbackEvent{}, fmt.Errorf("casino/mock: parse callback: %w", err)
 	}
-	if body.ProviderTxID == "" {
-		return CallbackEvent{}, fmt.Errorf("casino/mock: callback missing provider_tx_id")
+	if callbackBodyHasNULByte(body) {
+		return CallbackEvent{}, ErrCallbackSignatureInvalid
 	}
 
+	// Verify the signature before inspecting or acting on ANY other field
+	// (ADR 0025 §5/§12) - the missing-provider_tx_id check below used to
+	// run first, which is harmless in itself (no DB access, no
+	// CallbackEvent), but the field-check-before-signature-check ORDER is
+	// exactly the pattern a future, less careful adapter author would copy
+	// verbatim (specialist review finding).
 	expected := m.sign(body)
 	if body.Signature == "" || !hmac.Equal([]byte(expected), []byte(body.Signature)) {
 		return CallbackEvent{}, ErrCallbackSignatureInvalid
+	}
+	if body.ProviderTxID == "" {
+		return CallbackEvent{}, fmt.Errorf("casino/mock: callback missing provider_tx_id")
 	}
 
 	var eventType CallbackEventType
@@ -368,11 +410,19 @@ func (m *MockCasinoProvider) HandleCallback(_ context.Context, rawPayload []byte
 		}
 		playerAccountID = parsed
 	}
+	var sessionID uuid.UUID
+	if body.SessionID != "" {
+		parsed, err := uuid.Parse(body.SessionID)
+		if err != nil {
+			return CallbackEvent{}, fmt.Errorf("casino/mock: invalid session_id: %w", err)
+		}
+		sessionID = parsed
+	}
 
 	return CallbackEvent{
 		EventType: eventType, ProviderTxID: body.ProviderTxID, OriginalProviderTxID: body.OriginalProviderTxID,
 		RoundID: body.RoundID, ProviderGameID: body.ProviderGameID, Amount: body.Amount, AssetCode: body.AssetCode,
-		Outcome: outcome, DeclineReason: body.DeclineReason, PlayerAccountID: playerAccountID,
+		Outcome: outcome, DeclineReason: body.DeclineReason, PlayerAccountID: playerAccountID, SessionID: sessionID,
 	}, nil
 }
 

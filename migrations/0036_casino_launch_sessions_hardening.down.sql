@@ -1,0 +1,5 @@
+DROP INDEX idx_casino_launch_sessions_tenant_token_hash;
+ALTER TABLE casino_launch_sessions ADD CONSTRAINT casino_launch_sessions_token_hash_key UNIQUE (token_hash);
+
+DROP TRIGGER casino_launch_sessions_immutable_fields ON casino_launch_sessions;
+DROP FUNCTION casino_launch_sessions_enforce_immutable_fields();

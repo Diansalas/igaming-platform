@@ -187,9 +187,16 @@ posting functions, each implementing an already-BLUEPRINT flow from
 
 | Event | Flow | Posting | Ledger accounts |
 |---|---|---|---|
-| Bet | 5 | debit `player_cash`, credit `house_gaming` | invariant #15: balance locked (`SELECT ... FOR UPDATE`) and checked **inside** the same transaction as the debit; insufficient funds → `OutcomeDeclined`, nothing posted |
-| Win | 6 | debit `house_gaming`, credit `player_cash` | a win naming a round with no matching prior bet under the SAME tenant is `ErrBetNotFound` — an integrity alert (provider protocol violation), never silently posted |
-| Rollback | 7 | exact inverse of whichever of Flow 5/6 the named original posted | looked up by `(tenant_id, provider_id, provider_tx_id)`; an original never seen writes a `tombstone` (mirrors `payments.postDepositReversalTombstone`), never an error |
+| Bet | 5 | debit `player_cash`, credit `house_gaming` | invariant #15: balance locked (`SELECT ... FOR UPDATE`) and checked **inside** the same transaction as the debit; insufficient funds → `OutcomeDeclined`, nothing posted. The wallet debited is resolved from the platform's own `casino_launch_sessions` row named by the callback's `session_id` — never from a payload-supplied `player_account_id` — and rejected outright for a missing/unknown/wrong-provider/demo-mode/asset-mismatched session |
+| Win | 6 | debit `house_gaming`, credit `player_cash` | a win naming a round with no matching, still-valid (never rolled back) prior bet under the SAME tenant is `ErrBetNotFound` — an integrity alert (provider protocol violation), never silently posted. The wallet credited is resolved from the round's own bet transaction's ledger entries, never from the win callback's own `player_account_id` |
+| Rollback | 7 | exact inverse of whichever of Flow 5/6 the named original posted | looked up by `(tenant_id, provider_id, provider_tx_id)` under a row lock (`SELECT ... FOR UPDATE`, closing a concurrent-double-reversal race found in review); an original never seen writes a `tombstone` (mirrors `payments.postDepositReversalTombstone`), never an error |
+
+Every bet/win/rollback callback is additionally gated by the tenant's own
+`CasinoProviderCapability` (§9) inside `ReceiveCallback`, before dispatch —
+a disabled or unconfigured capability is a real kill switch on the money
+path, not merely a launch-time check. A bet/win callback whose own
+`Outcome` field is not `succeeded` is rejected outright
+(`ErrOutcomeNotSucceeded`) rather than posted as though it were.
 
 Every posting call goes through the existing `ledger.Post` API — no second
 balance system, no mutable "casino balance" anywhere. All amounts are
