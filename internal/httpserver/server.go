@@ -71,6 +71,7 @@ func New(deps Deps) http.Handler {
 	registerIdentityRoutes(mux, deps)
 	registerFinancialRoutes(mux, deps)
 	registerCasinoRoutes(mux, deps)
+	registerRGRoutes(mux, deps)
 
 	instrumented := otelhttp.NewHandler(mux, deps.ServiceName)
 

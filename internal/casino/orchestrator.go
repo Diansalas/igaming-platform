@@ -11,6 +11,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
 )
 
@@ -70,11 +71,24 @@ type LaunchGameParams struct {
 }
 
 // LaunchGameResult is what LaunchGame returns to its caller (an HTTP
-// handler).
+// handler). Denied/DenialCode/DenialMessage report a Stage 4D-RG policy
+// denial (internal/rg.EvaluateEligibility) - deliberately a RESULT field,
+// never a Go error: the audit record evaluateAndAuditEligibility writes
+// for a denial is in the SAME transaction as this call, and db.WithTenant
+// rolls back that entire transaction - audit record included - whenever
+// its callback returns a non-nil error (see db.Pool.WithTenant's own doc
+// comment). Returning the denial as an error was tried and found to
+// silently discard its own audit record every time - exactly the "result
+// must be... auditable" failure directive §5 exists to prevent - fixed by
+// mirroring postBet's already-correct decline-without-error convention
+// (see its own identical insufficient-funds case) instead.
 type LaunchGameResult struct {
-	LaunchURL string
-	SessionID uuid.UUID
-	ExpiresAt time.Time
+	LaunchURL     string
+	SessionID     uuid.UUID
+	ExpiresAt     time.Time
+	Denied        bool
+	DenialCode    string
+	DenialMessage string
 }
 
 // LaunchGame resolves a game's eligibility (platform status, tenant/
@@ -115,6 +129,20 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, tx pgx.Tx, params LaunchG
 	}
 	if !containsString(game.SupportedAssets, params.AssetCode) {
 		return LaunchGameResult{}, fmt.Errorf("%w: game does not support asset %s", ErrInvalidInput, params.AssetCode)
+	}
+
+	// Stage 4D-RG: the single authoritative "may this player gamble right
+	// now" policy boundary (ADR 0026 §5/§6), consulted BEFORE a launch
+	// session is minted - a prohibited player (suspended, self-excluded
+	// anywhere on the platform via their cross-brand Person, or holding a
+	// non-active wallet) must never obtain a usable session, regardless of
+	// what any provider does or does not enforce on its own end.
+	decision, err := evaluateAndAuditEligibility(ctx, tx, params.TenantID, params.BrandID, params.PlayerAccountID, params.WalletID, "casino.launch_denied")
+	if err != nil {
+		return LaunchGameResult{}, err
+	}
+	if !decision.Allowed {
+		return LaunchGameResult{Denied: true, DenialCode: decision.Code, DenialMessage: decision.Message}, nil
 	}
 
 	capability, found, err := LoadCapability(ctx, tx, params.TenantID, params.BrandID, game.ProviderID)
@@ -176,6 +204,45 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, tx pgx.Tx, params LaunchG
 	}
 
 	return LaunchGameResult{LaunchURL: result.LaunchURL, SessionID: session.ID, ExpiresAt: session.ExpiresAt}, nil
+}
+
+// evaluateAndAuditEligibility consults the single authoritative
+// rg.EvaluateEligibility policy boundary and, on denial, writes an audit
+// record BEFORE returning - so a denial is always visible in the audit
+// trail even though (by design, per the directive's §7) it produces no
+// ledger effect at all. Shared verbatim by LaunchGame and postBet so
+// casino never grows two independent copies of "is this player allowed to
+// gamble right now" (ADR 0026 §5's explicit "do not duplicate independent
+// RG checks throughout handlers" rule).
+//
+// Callers decide FOR THEMSELVES how to surface a non-Allowed Decision -
+// LaunchGame has no "declined" outcome shape and returns an error
+// (*NotEligibleError, matching every one of its other eligibility
+// failures); postBet already has an established decline-without-error
+// convention (the identical insufficient-funds case just above it) and
+// reports the SAME way, so an RG-declined bet is exactly as
+// provider-protocol-normal as an insufficient-funds decline, never a
+// transport-level error.
+func evaluateAndAuditEligibility(ctx context.Context, tx pgx.Tx, tenantID, brandID, playerAccountID, walletID uuid.UUID, auditAction string) (rg.Decision, error) {
+	decision, err := rg.EvaluateEligibility(ctx, tx, rg.EligibilityParams{
+		TenantID: tenantID, BrandID: brandID, PlayerAccountID: playerAccountID, WalletID: walletID,
+	})
+	if err != nil {
+		return rg.Decision{}, fmt.Errorf("casino: evaluate rg eligibility: %w", err)
+	}
+	if decision.Allowed {
+		return decision, nil
+	}
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: tenantID, ActorType: audit.ActorSystem, Action: auditAction,
+		TargetType: "player_account", TargetID: playerAccountID.String(), Outcome: audit.OutcomeDenied,
+		Metadata: map[string]any{
+			"reason_code": decision.Code, "person_id": decision.PersonID.String(), "brand_id": brandID.String(),
+		},
+	}); err != nil {
+		return rg.Decision{}, fmt.Errorf("casino: audit rg denial: %w", err)
+	}
+	return decision, nil
 }
 
 func containsString(list []string, s string) bool {
@@ -360,6 +427,22 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	wl, err := wallet.GetByID(ctx, tx, session.WalletID)
 	if err != nil {
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve wallet: %w", err)
+	}
+
+	// Stage 4D-RG: re-evaluate eligibility HERE, independently of whatever
+	// LaunchGame decided when the session was minted - a session can span an
+	// arbitrarily long round, and a self-exclusion/suspension applied
+	// mid-round must still stop the NEXT bet from posting (directive §7/§8:
+	// "a player cannot place a new bet when platform policy prohibits
+	// gambling... checked BEFORE the financial debit is committed"). No
+	// ledger entry has been touched yet at this point - a denial here
+	// produces zero financial effect, never a partial one.
+	decision, err := evaluateAndAuditEligibility(ctx, tx, tenantID, session.BrandID, session.PlayerAccountID, wl.ID, "casino_bet.denied_by_rg_policy")
+	if err != nil {
+		return ReceiveCallbackResult{}, err
+	}
+	if !decision.Allowed {
+		return ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason: decision.Code}, nil
 	}
 
 	cashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &wl.ID, ledger.AccountPlayerCash, event.AssetCode)

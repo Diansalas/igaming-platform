@@ -223,6 +223,15 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to launch game")
 			return
 		}
+		if result.Denied {
+			// Stage 4D-RG: told to the player directly (never a generic
+			// "forbidden") - a player denied by their own account status or
+			// self-exclusion is legitimately owed that specific reason, the
+			// same way a real-world RG self-exclusion page always names
+			// itself rather than presenting a bare access-denied screen.
+			apierror.Write(w, requestID, apierror.CodeForbidden, "gambling is currently restricted for this account: "+result.DenialCode)
+			return
+		}
 
 		writeJSON(w, http.StatusCreated, launchCasinoGameResponse{
 			LaunchURL: result.LaunchURL, SessionID: result.SessionID.String(), ExpiresAt: result.ExpiresAt.Format(rfc3339),

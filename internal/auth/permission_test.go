@@ -171,6 +171,41 @@ func TestRoleHasPermission_Stage3DWithdrawalGovernanceSeparation(t *testing.T) {
 	}
 }
 
+// TestRoleHasPermission_Stage4DRGRestrictionPermissions proves Stage
+// 4D-RG's separation-of-duties requirement (ADR 0026 §12, mirroring Stage
+// 3D's identical withdrawal-governance precedent): PermRGRestrictionWrite
+// belongs to RoleCompliance alone - never RoleTenantAdmin (a broad
+// administrator must not get RG-restriction WRITE authority automatically
+// just for holding PermStaffManage/PermPlayerSuspend) and never
+// RolePlatformAdmin (which has no path to resolve a tenant-scoped
+// player_account at all, so the permission would be unusable dead
+// weight - see internal/rg.CreateStaffRestriction's own doc comment).
+func TestRoleHasPermission_Stage4DRGRestrictionPermissions(t *testing.T) {
+	if !RoleHasPermission(RoleCompliance, PermRGRestrictionWrite) {
+		t.Error("expected compliance to have rg_restriction:write")
+	}
+	if !RoleHasPermission(RoleCompliance, PermRGRestrictionRead) {
+		t.Error("expected compliance to have rg_restriction:read")
+	}
+
+	for _, role := range []Role{RolePlatformAdmin, RoleTenantAdmin, RoleSupport, RoleFinance, RolePlayer} {
+		if RoleHasPermission(role, PermRGRestrictionWrite) {
+			t.Errorf("expected %q to NOT have rg_restriction:write - only compliance may create a restriction", role)
+		}
+	}
+
+	// RoleTenantAdmin gets READ-only visibility (an operational admin
+	// reasonably needs to see why a player is restricted) but never write.
+	if !RoleHasPermission(RoleTenantAdmin, PermRGRestrictionRead) {
+		t.Error("expected tenant_admin to have rg_restriction:read")
+	}
+	for _, role := range []Role{RolePlatformAdmin, RoleSupport, RoleFinance, RolePlayer} {
+		if RoleHasPermission(role, PermRGRestrictionRead) {
+			t.Errorf("expected %q to NOT have rg_restriction:read", role)
+		}
+	}
+}
+
 func TestRoleHasPermission_FinanceIsDefinedButEmptyPlaceholder(t *testing.T) {
 	// Stage 2 defines the finance role (per the instructions' explicit
 	// list) but grants it nothing yet - Stage 3's wallet/ledger work is

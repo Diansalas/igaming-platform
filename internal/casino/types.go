@@ -203,6 +203,16 @@ var (
 	ErrLaunchSessionRequired = errors.New("casino: bet callback requires a valid real-money launch session")
 )
 
+// Stage 4D-RG's LaunchGame/postBet eligibility denial (internal/
+// rg.EvaluateEligibility) is deliberately NOT a sentinel error here -
+// unlike every other failure mode above, a denial must still let its own
+// audit record commit (see LaunchGameResult's own doc comment for why a
+// Go error was tried and rejected: it silently rolled back the audit
+// write along with everything else). LaunchGame reports it via
+// LaunchGameResult.Denied/DenialCode; postBet via
+// ReceiveCallbackResult.Outcome == OutcomeDeclined (mirroring the
+// existing insufficient-funds decline shape exactly).
+
 // AmountLimit is one (asset_code, min, max) row - present in the schema
 // for a future stake-limit feature but not read or enforced anywhere in
 // Stage 4A (responsible-gaming stake limits are explicitly out of scope -

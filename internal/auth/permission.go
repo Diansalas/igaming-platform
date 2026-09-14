@@ -80,6 +80,25 @@ const (
 	// (PermCasinoConfigWrite) but must never be able to add an unvetted
 	// title to the shared catalogue every other tenant can then also see.
 	PermCasinoCatalogueManage Permission = "casino_catalogue:manage"
+
+	// PermRGRestrictionWrite gates creating a staff-initiated Responsible
+	// Gaming restriction (Stage 4D-RG, ADR 0026 §12) - today, only
+	// self-exclusion, always scoped to the caller's own tenant/brand (never
+	// platform-wide - see internal/rg.CreateStaffRestriction's own doc
+	// comment for why). Deliberately its own permission, NEVER bundled into
+	// PermPlayerSuspend/PermStaffManage/PermTenantWrite: the directive's own
+	// explicit instruction is that this must not be automatically granted to
+	// every broad administrator (RoleTenantAdmin does NOT get it, mirroring
+	// the withdrawal-approval precedent - ADR 0024's identical separation-
+	// of-duties rationale). Granted only to RoleCompliance - migration
+	// 0037's staff_insert RLS policy independently enforces the
+	// own-tenant-only scope at the database, not just here.
+	PermRGRestrictionWrite Permission = "rg_restriction:write"
+	// PermRGRestrictionRead gates reading another player's Responsible
+	// Gaming restriction history (a player always sees their OWN via the
+	// self-service endpoint regardless of this permission - RLS's
+	// player_self_read policy, not RBAC, is what authorizes that).
+	PermRGRestrictionRead Permission = "rg_restriction:read"
 )
 
 // rolePermissions is a static, in-code role -> permission-set mapping.
@@ -91,6 +110,15 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermTenantRead, PermTenantWrite, PermBrandRead, PermBrandWrite,
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead, PermStaffManage,
 		PermCasinoCatalogueManage,
+		// Deliberately NOT PermRGRestrictionWrite/Read (Stage 4D-RG, ADR
+		// 0026 §12): platform_admin cannot resolve a specific tenant's
+		// player_account at all today (PermPlayerRead is itself
+		// RequireTenantScope-gated, and player_accounts' own RLS has no
+		// platform-wide read policy), so it has no way to legitimately
+		// exercise either permission - granting it would be exactly the
+		// "capability nothing can actually use" CLAUDE.md's "no fake
+		// completion" rule warns against. See CreateStaffRestriction's own
+		// doc comment for the full reasoning and the recorded OPEN DECISION.
 	),
 	// Stage 3D business decision #4/#5: tenant_admin (a broad
 	// administrative role that also holds PermStaffManage) deliberately
@@ -120,12 +148,26 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermTenantRead, PermBrandRead, PermBrandWrite,
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead, PermStaffManage,
 		PermProviderConfigWrite, PermWithdrawalPolicyWrite, PermCasinoConfigWrite,
+		// PermRGRestrictionRead only, deliberately NOT PermRGRestrictionWrite -
+		// Stage 4D-RG's own explicit instruction (mirroring Stage 3D business
+		// decision #4/#5's withdrawal-approval precedent exactly): a broad
+		// tenant administrator must never get RG-restriction WRITE authority
+		// automatically just for holding PermStaffManage/PermPlayerSuspend.
+		// Read-only visibility into restrictions affecting their own tenant's
+		// players remains reasonable for an operational admin role.
+		PermRGRestrictionRead,
 	),
 	RoleSupport: permSet(
 		PermPlayerRead,
 	),
 	RoleCompliance: permSet(
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead,
+		// The sole tenant-scoped grantee of PermRGRestrictionWrite (Stage
+		// 4D-RG, ADR 0026 §12) - a tenant/brand-scoped restriction only
+		// (migration 0037's staff_insert RLS policy rejects a platform-wide
+		// row from any tenant-scoped connection); a genuinely platform-wide
+		// restriction additionally requires RolePlatformAdmin.
+		PermRGRestrictionWrite, PermRGRestrictionRead,
 	),
 	// finance is Stage 3B's own role, dedicated solely to withdrawal
 	// governance - it holds all four withdrawal permissions and nothing
