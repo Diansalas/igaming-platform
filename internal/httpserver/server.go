@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 )
@@ -42,6 +43,13 @@ type Deps struct {
 	// them (e.g. a future read-only reporting deployment) aren't forced
 	// to wire one up.
 	PaymentOrchestrator *payments.Orchestrator
+
+	// CasinoOrchestrator resolves a game's provider, mints/resolves
+	// game-launch sessions, and dispatches provider bet/win/rollback
+	// callbacks (Stage 4A). Nil is treated as "casino routes disabled" by
+	// each casino handler, mirroring PaymentOrchestrator's identical
+	// nil-means-disabled convention.
+	CasinoOrchestrator *casino.Orchestrator
 }
 
 // New builds the fully-wired http.Handler for platform-api: global
@@ -55,6 +63,7 @@ func New(deps Deps) http.Handler {
 
 	registerIdentityRoutes(mux, deps)
 	registerFinancialRoutes(mux, deps)
+	registerCasinoRoutes(mux, deps)
 
 	instrumented := otelhttp.NewHandler(mux, deps.ServiceName)
 

@@ -47,12 +47,12 @@ const (
 	AccountManualAdjustment     AccountType = "manual_adjustment"
 )
 
-// TransactionType is limited to the flows Stage 3B actually implements
-// (deposit/withdrawal/manual_adjustment/tombstone) - see migration
-// 0021's own comment. Casino/sportsbook/bonus/crypto types are added by
-// an additive migration + a new const here when their owning stage
-// implements them; they are explicitly BLOCKED this stage
-// (CLAUDE.md Stage 3B scope gate).
+// TransactionType is limited to the flows implemented so far
+// (deposit/withdrawal/manual_adjustment/tombstone, plus Stage 4A's
+// casino bet/win/rollback) - see migration 0021's own comment.
+// Sportsbook/bonus/crypto types remain added by an additive migration +
+// a new const here when their owning stage implements them; they are
+// explicitly BLOCKED until then (CLAUDE.md's stage scope gate).
 type TransactionType string
 
 const (
@@ -65,6 +65,13 @@ const (
 	TxWithdrawalReversed  TransactionType = "withdrawal_reversed"
 	TxManualAdjustment    TransactionType = "manual_adjustment"
 	TxTombstone           TransactionType = "tombstone"
+	// TxCasinoBet/Win/Rollback implement financial-transaction-flows.md
+	// Flows 5-7 (Stage 4A, migration 0035's additive CHECK-constraint
+	// values). See internal/casino's own package doc comment for the
+	// owning package.
+	TxCasinoBet      TransactionType = "casino_bet"
+	TxCasinoWin      TransactionType = "casino_win"
+	TxCasinoRollback TransactionType = "casino_rollback"
 )
 
 // Direction is a ledger entry's debit/credit side. Never a signed amount

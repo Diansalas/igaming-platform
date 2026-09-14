@@ -62,6 +62,24 @@ const (
 	// threshold or turning off step-up immediately before approving,
 	// then reverting it - withdrawal-state-machine.md §5 bypass #3).
 	PermWithdrawalPolicyWrite Permission = "withdrawal_policy:write"
+
+	// PermCasinoConfigWrite gates a tenant's own casino integration
+	// configuration (Stage 4A, ADR 0025 §4/§11): writing a
+	// CasinoProviderCapability row (which providers/assets/game types this
+	// tenant routes to) and toggling a platform-catalogue title's
+	// tenant/brand availability. Tenant-level routing configuration, not a
+	// money-moving action, so it is bundled with the tenant's other
+	// provider/config permissions rather than split out per sub-action -
+	// mirrors PermProviderConfigWrite's identical scope for payments.
+	PermCasinoConfigWrite Permission = "casino_config:write"
+
+	// PermCasinoCatalogueManage gates registering/updating a title in the
+	// PLATFORM-WIDE game catalogue (casino_games - ADR 0025 §2). Deliberately
+	// its own, platform-only permission, never granted to RoleTenantAdmin:
+	// a tenant may opt into a title the platform has already vetted
+	// (PermCasinoConfigWrite) but must never be able to add an unvetted
+	// title to the shared catalogue every other tenant can then also see.
+	PermCasinoCatalogueManage Permission = "casino_catalogue:manage"
 )
 
 // rolePermissions is a static, in-code role -> permission-set mapping.
@@ -72,6 +90,7 @@ var rolePermissions = map[Role]map[Permission]bool{
 	RolePlatformAdmin: permSet(
 		PermTenantRead, PermTenantWrite, PermBrandRead, PermBrandWrite,
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead, PermStaffManage,
+		PermCasinoCatalogueManage,
 	),
 	// Stage 3D business decision #4/#5: tenant_admin (a broad
 	// administrative role that also holds PermStaffManage) deliberately
@@ -100,7 +119,7 @@ var rolePermissions = map[Role]map[Permission]bool{
 	RoleTenantAdmin: permSet(
 		PermTenantRead, PermBrandRead, PermBrandWrite,
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead, PermStaffManage,
-		PermProviderConfigWrite, PermWithdrawalPolicyWrite,
+		PermProviderConfigWrite, PermWithdrawalPolicyWrite, PermCasinoConfigWrite,
 	),
 	RoleSupport: permSet(
 		PermPlayerRead,

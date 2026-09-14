@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/httpserver"
@@ -97,6 +98,19 @@ func run() error {
 		"mock": payments.NewMockProvider("mock", "EUR", "USD", "GBP", "BRL", "MXN"),
 	})
 
+	// Stage 4A ships a mock casino adapter only (CLAUDE.md's Stage 4A
+	// scope gate) - registered exactly like a future real aggregator
+	// would be, via the same CasinoProvider interface and provider_id-
+	// keyed registry (ADR 0025 §1/§4). A tenant must still write its own
+	// CasinoProviderCapability row (PUT
+	// /v1/admin/casino/providers/mock/capability) and opt a platform-
+	// catalogue title into its own availability before any player can
+	// launch it - registering the adapter here does not itself enable it
+	// for any tenant.
+	casinoOrchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{
+		"mock": casino.NewMockCasinoProvider("mock", "EUR", "USD", "GBP", "BRL", "MXN"),
+	})
+
 	handler := httpserver.New(httpserver.Deps{
 		Logger:              logger,
 		DB:                  pool,
@@ -105,6 +119,7 @@ func run() error {
 		AccessTokenTTL:      cfg.AccessTokenTTL,
 		RefreshTokenTTL:     cfg.RefreshTokenTTL,
 		PaymentOrchestrator: orchestrator,
+		CasinoOrchestrator:  casinoOrchestrator,
 	})
 
 	// Stage 3C directive item 4: operationalize the ledger-vs-projection

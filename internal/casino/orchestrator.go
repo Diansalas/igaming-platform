@@ -1,0 +1,580 @@
+package casino
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/wallet"
+)
+
+// Orchestrator is the casino integration's routing/dispatch layer (ADR
+// 0025): it resolves which CasinoProvider serves a game, mints/resolves
+// game-launch sessions, and translates verified provider callbacks into
+// ledger postings for Flows 5-7. It never posts a ledger entry outside
+// of calling ledger.Post with the canonical shapes those flows specify -
+// no provider-specific branch exists anywhere in this file
+// (docs/decisions/0022 §1's "no provider branch" rule, applied here too).
+type Orchestrator struct {
+	// providers is the Go-level adapter registry keyed by provider_id -
+	// the authority on which CasinoProvider implementation a provider_id
+	// actually is, mirroring internal/payments.Orchestrator's identical
+	// registry/authority split (docs/decisions/0022 §2.1).
+	providers map[string]CasinoProvider
+}
+
+// NewOrchestrator constructs an Orchestrator over the given adapter
+// registry (provider_id -> CasinoProvider implementation).
+func NewOrchestrator(providers map[string]CasinoProvider) *Orchestrator {
+	return &Orchestrator{providers: providers}
+}
+
+// Provider returns the registered adapter for providerID - used by
+// admin/config code (e.g. writing a ProviderCapability row or syncing a
+// catalogue) that needs the actual adapter instance.
+func (o *Orchestrator) Provider(providerID string) (CasinoProvider, bool) {
+	p, ok := o.providers[providerID]
+	return p, ok
+}
+
+// LaunchGameParams is LaunchGame's input. TenantID/BrandID/PlayerAccountID/
+// WalletID MUST be resolved server-side from the authenticated player
+// session - never from a request body (payment-orchestration.md §3's
+// identical rule, restated for casino by ADR 0025 §3). GameID is the
+// PLATFORM's own game id (from ListAvailableGames), never a client-
+// supplied provider_game_id - resolving through the platform's own
+// catalogue is what lets ResolveLaunchEligibility enforce availability/
+// jurisdiction/asset checks before ever contacting a provider.
+type LaunchGameParams struct {
+	TenantID        uuid.UUID
+	BrandID         uuid.UUID
+	PlayerAccountID uuid.UUID
+	WalletID        uuid.UUID
+	GameID          uuid.UUID
+	AssetCode       string
+	Mode            GameMode
+	// JurisdictionCode is the tenant's own configured jurisdiction, if
+	// known - resolution of a per-player jurisdiction is TODO(jurisdiction),
+	// the identical open scope boundary payment-orchestration.md §4
+	// carries for payment routing. A nil value skips the jurisdiction
+	// check entirely (fails open only in the sense that no jurisdiction
+	// context exists yet to check against - never silently ignores an
+	// actually-resolved jurisdiction).
+	JurisdictionCode *string
+}
+
+// LaunchGameResult is what LaunchGame returns to its caller (an HTTP
+// handler).
+type LaunchGameResult struct {
+	LaunchURL string
+	SessionID uuid.UUID
+	ExpiresAt time.Time
+}
+
+// LaunchGame resolves a game's eligibility (platform status, tenant/
+// brand availability, jurisdiction, asset support), resolves its
+// provider's own capability and health, mints a single-use launch
+// session (ADR 0025 §3), and calls the provider's Launch. Every failure
+// mode returns a specific, distinguishable sentinel error (directive
+// items C/O/P/Q depend on this - "game doesn't exist" vs. "not enabled
+// here" vs. "provider unavailable" vs. "blocked in this jurisdiction"
+// are never collapsed into one generic not-found).
+func (o *Orchestrator) LaunchGame(ctx context.Context, tx pgx.Tx, params LaunchGameParams) (LaunchGameResult, error) {
+	if params.TenantID == uuid.Nil || params.BrandID == uuid.Nil || params.PlayerAccountID == uuid.Nil || params.WalletID == uuid.Nil || params.GameID == uuid.Nil {
+		return LaunchGameResult{}, fmt.Errorf("%w: launch requires fully-populated, server-derived identity fields", ErrInvalidInput)
+	}
+	if params.AssetCode == "" {
+		return LaunchGameResult{}, fmt.Errorf("%w: asset_code is required", ErrInvalidInput)
+	}
+	if params.Mode != ModeReal && params.Mode != ModeDemo {
+		return LaunchGameResult{}, fmt.Errorf("%w: mode must be 'real' or 'demo'", ErrInvalidInput)
+	}
+
+	game, err := GetGameByID(ctx, tx, params.GameID)
+	if err != nil {
+		return LaunchGameResult{}, err
+	}
+	if game.Status != GameStatusActive {
+		return LaunchGameResult{}, ErrGameDisabled
+	}
+	available, err := IsGameAvailable(ctx, tx, params.TenantID, params.BrandID, params.GameID)
+	if err != nil {
+		return LaunchGameResult{}, err
+	}
+	if !available {
+		return LaunchGameResult{}, ErrGameNotAvailable
+	}
+	if params.JurisdictionCode != nil && containsString(game.JurisdictionBlocklist, *params.JurisdictionCode) {
+		return LaunchGameResult{}, ErrJurisdictionBlocked
+	}
+	if !containsString(game.SupportedAssets, params.AssetCode) {
+		return LaunchGameResult{}, fmt.Errorf("%w: game does not support asset %s", ErrInvalidInput, params.AssetCode)
+	}
+
+	capability, found, err := LoadCapability(ctx, tx, params.TenantID, params.BrandID, game.ProviderID)
+	if err != nil {
+		return LaunchGameResult{}, err
+	}
+	if !found || capability.Status != CapabilityActive || !capability.SupportsLaunch {
+		return LaunchGameResult{}, ErrProviderUnavailable
+	}
+	if !containsString(capability.SupportedAssets, params.AssetCode) {
+		return LaunchGameResult{}, ErrProviderUnavailable
+	}
+
+	provider, registered := o.providers[game.ProviderID]
+	if !registered {
+		return LaunchGameResult{}, fmt.Errorf("%w: %s", ErrUnknownProvider, game.ProviderID)
+	}
+	if health, err := provider.HealthStatus(ctx); err == nil && health.CircuitState == CircuitOpen {
+		return LaunchGameResult{}, ErrProviderUnavailable
+	}
+
+	session, token, err := CreateLaunchSession(ctx, tx, CreateLaunchSessionParams{
+		TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID, WalletID: params.WalletID,
+		GameID: params.GameID, ProviderID: game.ProviderID, ProviderGameID: game.ProviderGameID,
+		AssetCode: params.AssetCode, Mode: params.Mode,
+	})
+	if err != nil {
+		return LaunchGameResult{}, err
+	}
+
+	result, err := provider.Launch(ctx, LaunchRequest{
+		ProviderGameID: game.ProviderGameID, PlayerAccountID: params.PlayerAccountID,
+		AssetCode: params.AssetCode, Mode: params.Mode, LaunchToken: token,
+	})
+	if err != nil {
+		// The launch call itself failed at the transport level - the
+		// session was never actually usable, so revoke it rather than
+		// leaving an 'active' row a retried launch attempt could never
+		// reach (a fresh LaunchGame call mints its own new session
+		// instead of trying to reuse this one).
+		_ = RevokeLaunchSession(ctx, tx, session.ID)
+		return LaunchGameResult{}, fmt.Errorf("casino: provider launch call failed: %w", err)
+	}
+	if result.Outcome != OutcomeSucceeded {
+		_ = RevokeLaunchSession(ctx, tx, session.ID)
+		return LaunchGameResult{}, fmt.Errorf("casino: provider declined launch: %s", result.DeclineReason)
+	}
+
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: params.TenantID, ActorType: audit.ActorPlayer, ActorID: params.PlayerAccountID,
+		Action: "casino.launched", TargetType: "casino_launch_session", TargetID: session.ID.String(),
+		Outcome: audit.OutcomeSuccess,
+		Metadata: map[string]any{
+			"game_id": params.GameID.String(), "provider_id": game.ProviderID, "provider_game_id": game.ProviderGameID,
+			"asset_code": params.AssetCode, "mode": string(params.Mode),
+		},
+	}); err != nil {
+		return LaunchGameResult{}, fmt.Errorf("casino: audit launch: %w", err)
+	}
+
+	return LaunchGameResult{LaunchURL: result.LaunchURL, SessionID: session.ID, ExpiresAt: session.ExpiresAt}, nil
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// roundCorrelationID deterministically derives a stable UUID from
+// (tenantID, providerID, roundID) so a bet and its later win, posted by
+// two entirely separate ReceiveCallback calls, land under the SAME
+// ledger_transactions.correlation_id without requiring a lookup table of
+// provider round ids - directive item 13's "sufficient correlation
+// context to trace... provider transaction ID". Deterministic (SHA1/v5,
+// never randomized) so the same round always maps to the same
+// correlation id, computed independently by whichever call happens to
+// see it first.
+func roundCorrelationID(tenantID uuid.UUID, providerID, roundID string) uuid.UUID {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(tenantID.String()+":"+providerID+":"+roundID))
+}
+
+// ReceiveCallbackResult is what ReceiveCallback returns for a caller
+// (an HTTP handler) that needs to know the outcome without exposing the
+// full ledger internals - mirrors internal/payments.ReceiveCallbackResult.
+type ReceiveCallbackResult struct {
+	Outcome             Outcome
+	LedgerTransactionID *uuid.UUID
+	DeclineReason       string
+	// Tombstoned is true only for a rollback whose original bet/win was
+	// never seen (financial-transaction-flows.md §7's tombstone case).
+	Tombstoned bool
+}
+
+// ReceiveCallback dispatches a verified provider callback: parses it via
+// the named adapter's HandleCallback, then posts Flow 5 (bet), Flow 6
+// (win), or Flow 7 (rollback) via ledger.Post.
+//
+// tenantID is resolved by the caller (an HTTP handler, from a per-tenant
+// webhook path) BEFORE opening tx and BEFORE calling this function -
+// never from rawPayload, mirroring internal/payments.Orchestrator.
+// ReceiveCallback's identical, already-reviewed signature choice and
+// rationale (payment-orchestration.md §3).
+func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, rawPayload []byte) (ReceiveCallbackResult, error) {
+	provider, ok := o.providers[providerID]
+	if !ok {
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: %s", ErrUnknownProvider, providerID)
+	}
+
+	event, err := provider.HandleCallback(ctx, rawPayload)
+	if err != nil {
+		// Never wrap rawPayload's bytes into this error.
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: handle callback: %w", err)
+	}
+
+	switch event.EventType {
+	case CallbackEventBet:
+		return o.postBet(ctx, tx, tenantID, providerID, event)
+	case CallbackEventWin:
+		return o.postWin(ctx, tx, tenantID, providerID, event)
+	case CallbackEventRollback:
+		return o.postRollback(ctx, tx, tenantID, providerID, event)
+	default:
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: unsupported callback event type %q", event.EventType)
+	}
+}
+
+func validateCallbackEvent(event CallbackEvent) error {
+	if event.ProviderTxID == "" {
+		return fmt.Errorf("%w: provider_tx_id is required", ErrInvalidInput)
+	}
+	if event.PlayerAccountID == uuid.Nil {
+		return fmt.Errorf("%w: player_account_id is required", ErrInvalidInput)
+	}
+	if event.AssetCode == "" {
+		return fmt.Errorf("%w: asset_code is required", ErrInvalidInput)
+	}
+	if event.Amount <= 0 {
+		return fmt.Errorf("%w: amount must be positive, got %d", ErrInvalidInput, event.Amount)
+	}
+	return nil
+}
+
+// lockCashBalance takes a row lock on the wallet's player_cash
+// wallet_balance_projection row and returns its raw debit/credit
+// totals - identical pattern and rationale to
+// internal/withdrawal.lockCashBalanceForUpdate (invariant #15: the
+// balance read and the prospective debit happen inside the same
+// transaction, never a stale check-then-post).
+func lockCashBalance(ctx context.Context, tx pgx.Tx, ledgerAccountID uuid.UUID) (debitTotal, creditTotal int64, err error) {
+	err = tx.QueryRow(ctx,
+		`SELECT debit_total, credit_total FROM wallet_balance_projection WHERE ledger_account_id = $1 FOR UPDATE`,
+		ledgerAccountID,
+	).Scan(&debitTotal, &creditTotal)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("casino: lock cash balance: %w", err)
+	}
+	return debitTotal, creditTotal, nil
+}
+
+// postBet implements Flow 5 (financial-transaction-flows.md §5): debit
+// player_cash, credit house_gaming. Player_bonus-funded stakes are
+// explicitly out of scope this stage (ADR 0025 §6) - every bet here is
+// assumed 100% player_cash-funded.
+func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, event CallbackEvent) (ReceiveCallbackResult, error) {
+	if err := validateCallbackEvent(event); err != nil {
+		return ReceiveCallbackResult{}, err
+	}
+
+	wl, err := wallet.GetByPlayerAndAsset(ctx, tx, event.PlayerAccountID, event.AssetCode)
+	if err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve wallet: %w", err)
+	}
+
+	cashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &wl.ID, ledger.AccountPlayerCash, event.AssetCode)
+	if err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve player_cash account: %w", err)
+	}
+	houseAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, nil, ledger.AccountHouseGaming, event.AssetCode)
+	if err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve house_gaming account: %w", err)
+	}
+
+	// Invariant #15: lock and check the balance INSIDE this transaction,
+	// immediately before posting - a concurrent bet against the same
+	// wallet cannot both observe "sufficient" (financial-transaction-
+	// flows.md §5's "insufficient funds -> rejected before posting,
+	// checked in the same DB transaction that would post it").
+	debitTotal, creditTotal, err := lockCashBalance(ctx, tx, cashAccountID)
+	if err != nil {
+		return ReceiveCallbackResult{}, err
+	}
+	available := creditTotal - debitTotal
+	if available < event.Amount {
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_bet.declined",
+			TargetType: "wallet", TargetID: wl.ID.String(), Outcome: audit.OutcomeFailure,
+			Metadata: map[string]any{
+				"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "amount": event.Amount,
+				"asset_code": event.AssetCode, "decline_reason": "insufficient_funds",
+			},
+		}); err != nil {
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: audit bet decline: %w", err)
+		}
+		return ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason: "insufficient_funds"}, nil
+	}
+
+	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+		TenantID: tenantID, TransactionType: ledger.TxCasinoBet,
+		// Namespaced by providerID - see the identical rationale on
+		// internal/payments' deposit-posting idempotency key: nothing in
+		// the CasinoProvider contract guarantees provider_tx_id
+		// uniqueness ACROSS providers.
+		IdempotencyKey: providerID + ":" + event.ProviderTxID,
+		ProviderID:     &providerID, ProviderTxID: &event.ProviderTxID,
+		CorrelationID: roundCorrelationID(tenantID, providerID, event.RoundID),
+		Entries: []ledger.EntryInput{
+			{LedgerAccountID: cashAccountID, Direction: ledger.Debit, Amount: event.Amount},
+			{LedgerAccountID: houseAccountID, Direction: ledger.Credit, Amount: event.Amount},
+		},
+	})
+	if err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: post bet: %w", err)
+	}
+
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_bet.posted",
+		TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
+		Metadata: map[string]any{
+			"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
+			"amount": event.Amount, "asset_code": event.AssetCode, "already_posted": postResult.AlreadyPosted,
+		},
+	}); err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: audit bet posted: %w", err)
+	}
+
+	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
+}
+
+// postWin implements Flow 6 (financial-transaction-flows.md §6): debit
+// house_gaming, credit player_cash. A win naming a round with no matching
+// prior bet is an integrity alert (a provider protocol violation), not a
+// routine failure - logged/audited at elevated severity by the HTTP
+// handler, which maps ErrBetNotFound distinctly from an ordinary
+// not-found.
+func (o *Orchestrator) postWin(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, event CallbackEvent) (ReceiveCallbackResult, error) {
+	if err := validateCallbackEvent(event); err != nil {
+		return ReceiveCallbackResult{}, err
+	}
+
+	var betExists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM ledger_transactions WHERE tenant_id = $1 AND correlation_id = $2 AND transaction_type = $3)`,
+		tenantID, roundCorrelationID(tenantID, providerID, event.RoundID), ledger.TxCasinoBet,
+	).Scan(&betExists); err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: check prior bet: %w", err)
+	}
+	if !betExists {
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: round=%s provider=%s", ErrBetNotFound, event.RoundID, providerID)
+	}
+
+	wl, err := wallet.GetByPlayerAndAsset(ctx, tx, event.PlayerAccountID, event.AssetCode)
+	if err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve wallet: %w", err)
+	}
+
+	cashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &wl.ID, ledger.AccountPlayerCash, event.AssetCode)
+	if err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve player_cash account: %w", err)
+	}
+	houseAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, nil, ledger.AccountHouseGaming, event.AssetCode)
+	if err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve house_gaming account: %w", err)
+	}
+
+	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+		TenantID: tenantID, TransactionType: ledger.TxCasinoWin,
+		IdempotencyKey: providerID + ":" + event.ProviderTxID,
+		ProviderID:     &providerID, ProviderTxID: &event.ProviderTxID,
+		CorrelationID: roundCorrelationID(tenantID, providerID, event.RoundID),
+		Entries: []ledger.EntryInput{
+			{LedgerAccountID: houseAccountID, Direction: ledger.Debit, Amount: event.Amount},
+			{LedgerAccountID: cashAccountID, Direction: ledger.Credit, Amount: event.Amount},
+		},
+	})
+	if err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: post win: %w", err)
+	}
+
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_win.posted",
+		TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
+		Metadata: map[string]any{
+			"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
+			"amount": event.Amount, "asset_code": event.AssetCode, "already_posted": postResult.AlreadyPosted,
+		},
+	}); err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: audit win posted: %w", err)
+	}
+
+	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
+}
+
+// postRollback implements Flow 7 (financial-transaction-flows.md §7): a
+// new LedgerTransaction with reverses_transaction_id pointing at the
+// SPECIFIC original bet or win transaction named by
+// event.OriginalProviderTxID - exact inverse of whichever flow actually
+// posted. A rollback naming a provider_tx_id the ledger never posted a
+// bet OR win for writes a tombstone (CLAUDE.md's rollback rule), mirroring
+// internal/payments.postDepositReversalTombstone exactly.
+func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, event CallbackEvent) (ReceiveCallbackResult, error) {
+	if event.ProviderTxID == "" {
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: provider_tx_id is required", ErrInvalidInput)
+	}
+	if event.OriginalProviderTxID == "" {
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: original_provider_tx_id is required for a rollback", ErrInvalidInput)
+	}
+
+	var originalID uuid.UUID
+	var originalType ledger.TransactionType
+	err := tx.QueryRow(ctx,
+		`SELECT id, transaction_type FROM ledger_transactions WHERE tenant_id = $1 AND provider_id = $2 AND provider_tx_id = $3`,
+		tenantID, providerID, event.OriginalProviderTxID,
+	).Scan(&originalID, &originalType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		txID, tombErr := postRollbackTombstone(ctx, tx, tenantID, providerID, event)
+		if tombErr != nil {
+			return ReceiveCallbackResult{}, tombErr
+		}
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_rollback.tombstoned",
+			TargetType: "ledger_transaction", TargetID: txID.String(), Outcome: audit.OutcomeSuccess,
+			Metadata: map[string]any{
+				"provider_id": providerID, "original_provider_tx_id": event.OriginalProviderTxID,
+				"rollback_provider_tx_id": event.ProviderTxID,
+			},
+		}); err != nil {
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: audit rollback tombstone: %w", err)
+		}
+		return ReceiveCallbackResult{Tombstoned: true, LedgerTransactionID: &txID}, nil
+	}
+	if err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: look up original transaction: %w", err)
+	}
+	if originalType != ledger.TxCasinoBet && originalType != ledger.TxCasinoWin {
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: original transaction %s has type %q, expected casino_bet or casino_win",
+			ErrInvalidInput, originalID, originalType)
+	}
+
+	// A prior reversal against originalID is only a conflict if it was
+	// posted under a DIFFERENT rollback reference - a REDELIVERY of this
+	// exact rollback (same event.ProviderTxID) must fall through to
+	// ledger.Post below and return its own idempotent no-op result, never
+	// ErrAlreadyRolledBack (directive items G/H/I: redelivery/replay of a
+	// financial callback must never be indistinguishable from a genuine
+	// second, conflicting rollback attempt).
+	var existingReversalProviderTxID *string
+	err = tx.QueryRow(ctx,
+		`SELECT provider_tx_id FROM ledger_transactions WHERE reverses_transaction_id = $1`, originalID,
+	).Scan(&existingReversalProviderTxID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: check existing rollback: %w", err)
+	}
+	if existingReversalProviderTxID != nil && *existingReversalProviderTxID != event.ProviderTxID {
+		return ReceiveCallbackResult{}, ErrAlreadyRolledBack
+	}
+
+	entries, err := loadEntries(ctx, tx, originalID)
+	if err != nil {
+		return ReceiveCallbackResult{}, err
+	}
+
+	inverted := make([]ledger.EntryInput, 0, len(entries))
+	for _, e := range entries {
+		dir := ledger.Credit
+		if e.Direction == ledger.Credit {
+			dir = ledger.Debit
+		}
+		inverted = append(inverted, ledger.EntryInput{LedgerAccountID: e.LedgerAccountID, Direction: dir, Amount: e.Amount})
+	}
+
+	rollbackTxType := ledger.TxCasinoRollback
+	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+		TenantID: tenantID, TransactionType: rollbackTxType,
+		IdempotencyKey:        providerID + ":" + event.ProviderTxID,
+		ProviderID:            &providerID,
+		ProviderTxID:          &event.ProviderTxID,
+		CorrelationID:         roundCorrelationID(tenantID, providerID, event.RoundID),
+		ReversesTransactionID: &originalID,
+		Entries:               inverted,
+	})
+	if err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: post rollback: %w", err)
+	}
+
+	auditAction := "casino_bet.rolled_back"
+	if originalType == ledger.TxCasinoWin {
+		auditAction = "casino_win.rolled_back"
+	}
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: tenantID, ActorType: audit.ActorSystem, Action: auditAction,
+		TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
+		Metadata: map[string]any{
+			"provider_id": providerID, "rollback_provider_tx_id": event.ProviderTxID,
+			"original_provider_tx_id": event.OriginalProviderTxID, "original_transaction_id": originalID.String(),
+			"already_posted": postResult.AlreadyPosted,
+		},
+	}); err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: audit rollback: %w", err)
+	}
+
+	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
+}
+
+func postRollbackTombstone(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, event CallbackEvent) (uuid.UUID, error) {
+	// ReasonCode left nil - ledger_transactions' CHECK constraint
+	// (migration 0021) forbids it for any type other than
+	// manual_adjustment. The human-readable reason lives in this
+	// function's caller's audit record instead.
+	result, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+		TenantID: tenantID, TransactionType: ledger.TxTombstone,
+		IdempotencyKey: fmt.Sprintf("tombstone:%s:%s", providerID, event.OriginalProviderTxID),
+		ProviderID:     &providerID, ProviderTxID: &event.OriginalProviderTxID,
+		CorrelationID: uuid.New(),
+	})
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("casino: post rollback tombstone: %w", err)
+	}
+	return result.TransactionID, nil
+}
+
+type ledgerEntry struct {
+	LedgerAccountID uuid.UUID
+	Direction       ledger.Direction
+	Amount          int64
+}
+
+func loadEntries(ctx context.Context, tx pgx.Tx, transactionID uuid.UUID) ([]ledgerEntry, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT ledger_account_id, direction, amount FROM ledger_entries WHERE ledger_transaction_id = $1`,
+		transactionID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("casino: load entries: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ledgerEntry
+	for rows.Next() {
+		var e ledgerEntry
+		if err := rows.Scan(&e.LedgerAccountID, &e.Direction, &e.Amount); err != nil {
+			return nil, fmt.Errorf("casino: scan entry: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
