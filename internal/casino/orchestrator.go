@@ -216,11 +216,12 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, tx pgx.Tx, params LaunchG
 // RG checks throughout handlers" rule).
 //
 // Callers decide FOR THEMSELVES how to surface a non-Allowed Decision -
-// LaunchGame has no "declined" outcome shape and returns an error
-// (*NotEligibleError, matching every one of its other eligibility
-// failures); postBet already has an established decline-without-error
-// convention (the identical insufficient-funds case just above it) and
-// reports the SAME way, so an RG-declined bet is exactly as
+// LaunchGame reports it via LaunchGameResult.Denied/DenialCode (a result
+// field, never a Go error - see LaunchGameResult's own doc comment for why
+// an earlier error-based attempt was found, by test, to silently roll back
+// its own audit record); postBet already has an established decline-
+// without-error convention (the identical insufficient-funds case just
+// above it) and reports the SAME way, so an RG-declined bet is exactly as
 // provider-protocol-normal as an insufficient-funds decline, never a
 // transport-level error.
 func evaluateAndAuditEligibility(ctx context.Context, tx pgx.Tx, tenantID, brandID, playerAccountID, walletID uuid.UUID, auditAction string) (rg.Decision, error) {
@@ -363,6 +364,29 @@ func validateCallbackEvent(event CallbackEvent) error {
 	return nil
 }
 
+// findPostedBetTransaction looks up whether a casino_bet transaction has
+// already been posted for (providerID, providerTxID) under tenantID - see
+// postBet's own idempotency-short-circuit doc comment for why this check
+// exists ahead of RG/balance evaluation, not merely inside ledger.Post's
+// own conflict handling. A DECLINED bet (RG-denied or insufficient-funds)
+// intentionally posts no row at all (Flow 5's own design), so it is
+// correctly NOT found here and a redelivery of a genuinely-declined
+// attempt is re-evaluated fresh each time against current state - only a
+// SUCCEEDED post is idempotent-replayed verbatim.
+func findPostedBetTransaction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, providerTxID string) (id uuid.UUID, found bool, err error) {
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = $2 AND provider_id = $3 AND provider_tx_id = $4`,
+		tenantID, ledger.TxCasinoBet, providerID, providerTxID,
+	).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("casino: check existing bet transaction: %w", err)
+	}
+	return id, true, nil
+}
+
 // lockCashBalance takes a row lock on the wallet's player_cash
 // wallet_balance_projection row and returns its raw debit/credit
 // totals - identical pattern and rationale to
@@ -401,6 +425,31 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	if err := validateCallbackEvent(event); err != nil {
 		return ReceiveCallbackResult{}, err
 	}
+
+	// Idempotency short-circuit, BEFORE session/RG/balance evaluation:
+	// financial-transaction-flows.md §5 requires an exact retry (same
+	// provider_tx_id) of an ALREADY-POSTED bet to be "an idempotent no-op
+	// returning the original result" - never re-evaluated against
+	// whatever the platform's live state happens to be at redelivery
+	// time. Without this check, a bet that legitimately succeeded, then
+	// redelivered after the player later self-excluded (self-exclusion is
+	// effectively permanent - EVERY future redelivery would be affected,
+	// not just a narrow timing window) or after the wallet balance
+	// changed, would incorrectly report "declined" for a stake that was
+	// already taken - a provider that treats "declined" as "stake never
+	// taken" could then void the round and never deliver its own win
+	// callback for a round the platform already debited (financial
+	// correctness specialist review finding, empirically reproduced).
+	// ledger.Post's OWN idempotency key would also no-op a redelivery
+	// that reaches it - this check exists so a redelivery never even
+	// reaches the RG/balance checks, which must only ever evaluate a
+	// bet's FIRST delivery.
+	if existingID, found, err := findPostedBetTransaction(ctx, tx, tenantID, providerID, event.ProviderTxID); err != nil {
+		return ReceiveCallbackResult{}, err
+	} else if found {
+		return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &existingID}, nil
+	}
+
 	if event.SessionID == uuid.Nil {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: session_id is required", ErrLaunchSessionRequired)
 	}

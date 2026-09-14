@@ -254,6 +254,71 @@ func TestReceiveCallback_BetDeclinedWhenWalletFrozen_NoLedgerEffect(t *testing.T
 	}
 }
 
+// TestReceiveCallback_RedeliveredBetAfterSelfExclusionStillReportsOriginalSuccess
+// is the financial-correctness specialist review's own empirically-
+// reproduced finding: a bet that succeeded, then redelivered (the exact
+// same provider_tx_id) AFTER the player self-excluded, must report the
+// SAME success it originally did - financial-transaction-flows.md §5's
+// "exact retry -> idempotent no-op returning the original result", never
+// re-evaluated against the now-changed RG state. Without
+// findPostedBetTransaction's early short-circuit, this redelivery would
+// incorrectly decline a stake that was already legitimately taken.
+func TestReceiveCallback_RedeliveredBetAfterSelfExclusionStillReportsOriginalSuccess(t *testing.T) {
+	pool := testPool(t)
+	f := seedCasinoFixture(t, pool)
+	fundWallet(t, pool, f, 5000)
+	provider := NewMockCasinoProvider("mock-casino", "EUR")
+	registerCasinoCapability(t, pool, f, provider, 100)
+	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+
+	payload := provider.CallbackPayload(CallbackEventBet, "bet-redeliver-after-exclusion", "", "round-redeliver-after-exclusion", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+
+	var first ReceiveCallbackResult
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		first, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("first delivery: %v", err)
+	}
+	if first.Outcome != OutcomeSucceeded || first.LedgerTransactionID == nil {
+		t.Fatalf("expected the first delivery to succeed, got %+v", first)
+	}
+
+	selfExclude(t, pool, f)
+
+	var second ReceiveCallbackResult
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		second, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("redelivery: %v", err)
+	}
+	if second.Outcome != OutcomeSucceeded || second.LedgerTransactionID == nil || *second.LedgerTransactionID != *first.LedgerTransactionID {
+		t.Fatalf("expected the redelivery to report the ORIGINAL success (id %s), got %+v", first.LedgerTransactionID, second)
+	}
+	if balance := cashBalance(t, pool, f); balance != 4000 {
+		t.Fatalf("expected cash balance 4000 (5000 funded - 1000 bet, posted exactly once), got %d", balance)
+	}
+	var count int
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND provider_id = 'mock-casino' AND provider_tx_id = 'bet-redeliver-after-exclusion'`,
+			f.tenantID,
+		).Scan(&count)
+	})
+	if err != nil {
+		t.Fatalf("count ledger transactions: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one ledger_transactions row, got %d", count)
+	}
+}
+
 // --- Concurrency (directive §8) ---
 
 // TestConcurrent_SelfExclusionDuringLaunch_Deterministic is directive
@@ -418,18 +483,21 @@ func TestConcurrent_DuplicateBetDeliveryDuringSelfExclusion(t *testing.T) {
 
 		var wg sync.WaitGroup
 		var err1, err2, exclusionErr error
+		var result1, result2 ReceiveCallbackResult
 		wg.Add(3)
 		go func() {
 			defer wg.Done()
 			err1 = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+				var err error
+				result1, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
 				return err
 			})
 		}()
 		go func() {
 			defer wg.Done()
 			err2 = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+				var err error
+				result2, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
 				return err
 			})
 		}()
@@ -455,6 +523,26 @@ func TestConcurrent_DuplicateBetDeliveryDuringSelfExclusion(t *testing.T) {
 		balance := cashBalance(t, pool, f)
 		if balance != 5000 && balance != 4000 {
 			t.Fatalf("iteration %d: balance %d is neither 5000 (both declined) nor 4000 (posted exactly once) - possible double-post", i, balance)
+		}
+		// Financial-correctness specialist review finding: the two
+		// deliveries' OWN reported results must never disagree with each
+		// other about whether this provider_tx_id posted - one reporting
+		// Succeeded while the other reports Declined for the SAME
+		// provider_tx_id would mean one delivery failed to see an
+		// already-posted transaction (findPostedBetTransaction's own
+		// idempotency short-circuit) and incorrectly re-evaluated live RG
+		// state instead of replaying the original result.
+		if balance == 4000 {
+			if result1.Outcome != OutcomeSucceeded || result2.Outcome != OutcomeSucceeded {
+				t.Fatalf("iteration %d: balance shows the bet posted, but results disagree: %+v / %+v", i, result1, result2)
+			}
+			if result1.LedgerTransactionID == nil || result2.LedgerTransactionID == nil || *result1.LedgerTransactionID != *result2.LedgerTransactionID {
+				t.Fatalf("iteration %d: both deliveries succeeded but reported different transaction ids: %+v / %+v", i, result1, result2)
+			}
+		} else {
+			if result1.Outcome != OutcomeDeclined || result2.Outcome != OutcomeDeclined {
+				t.Fatalf("iteration %d: balance shows nothing posted, but a result reports success: %+v / %+v", i, result1, result2)
+			}
 		}
 		var betCount int
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

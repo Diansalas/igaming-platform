@@ -436,11 +436,21 @@ type EligibilityParams struct {
 // parameter/call slotting in as one more Decision-producing step here,
 // after the checks below, before returning Allowed).
 //
-// tx must already be tenant-scoped (db.WithTenant or db.WithPlayerScope)
-// for params.TenantID - RLS is what actually makes the person-level
-// restriction lookup below see every tenant's platform-wide rows while
-// still excluding a different tenant's own tenant-scoped ones (migration
-// 0037's staff_and_system_read policy).
+// tx must already be tenant-scoped (db.WithTenant) for params.TenantID.
+// The restriction query below deliberately does NOT rely solely on RLS to
+// keep a different tenant's own tenant-scoped rows out - it filters
+// `tenant_id IS NULL OR tenant_id = params.TenantID` explicitly, matching
+// params.TenantID rather than the ambient GUC. This is defense in depth
+// against a hypothetical future caller running this function under
+// db.WithPlayerScope (which sets app.player_account_id, not app.tenant_id
+// alone) - migration 0037's player_self_read RLS policy exposes a
+// player's OWN restrictions across EVERY tenant, so without this explicit
+// predicate a WithPlayerScope caller could over-deny (or, for a
+// differently-shaped future query, over-allow) using a different tenant's
+// tenant-scoped row. Every current caller already runs under db.WithTenant,
+// so this predicate is currently redundant with RLS - it is added so the
+// query's own correctness never depends on which scope helper a future
+// caller happens to choose.
 func EvaluateEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParams) (Decision, error) {
 	if params.TenantID == uuid.Nil || params.PlayerAccountID == uuid.Nil {
 		return Decision{}, fmt.Errorf("%w: tenant_id and player_account_id are required", ErrInvalidInput)
@@ -475,8 +485,9 @@ func EvaluateEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParam
 			  AND starts_at <= now()
 			  AND (ends_at IS NULL OR ends_at > now())
 			  AND (brand_id IS NULL OR brand_id = $3)
+			  AND (tenant_id IS NULL OR tenant_id = $4)
 		)`,
-		account.PersonID, RestrictionSelfExclusion, params.BrandID,
+		account.PersonID, RestrictionSelfExclusion, params.BrandID, params.TenantID,
 	).Scan(&excluded)
 	if err != nil {
 		return Decision{}, fmt.Errorf("rg: check self-exclusion: %w", err)
