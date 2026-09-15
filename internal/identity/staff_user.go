@@ -37,6 +37,11 @@ const (
 	StaffRoleSupport       StaffRole = "support"
 	StaffRoleCompliance    StaffRole = "compliance"
 	StaffRoleFinance       StaffRole = "finance"
+	// StaffRoleRiskManager is Stage 4G's own role - Risk configuration is
+	// its own authority, deliberately never bundled into Compliance,
+	// Finance, TenantAdmin, or PlatformAdmin (directive §24, migration
+	// 0041).
+	StaffRoleRiskManager StaffRole = "risk_manager"
 )
 
 // StaffUser operates the platform/back office - distinct from

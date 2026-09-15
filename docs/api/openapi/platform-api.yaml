@@ -1115,6 +1115,128 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # --- Stage 4G: Risk & Limits admin API (docs/decisions/0031) ---
+  /v1/admin/risk/rules:
+    get:
+      summary: List a tenant's risk rules for one operation
+      description: >
+        Requires risk_config:read (risk_manager or tenant_admin,
+        read-only for tenant_admin). Returns the caller's own tenant's
+        rules PLUS every platform-wide rule for that operation - no
+        pagination or status filter this stage (returns disabled rules
+        too).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: operation
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [casino_launch, casino_bet, deposit, withdrawal, sportsbook_bet, bonus_grant]
+      responses:
+        "200":
+          description: Risk rules for the named operation
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RiskRule"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      summary: Create a risk rule
+      description: >
+        Requires risk_config:manage (risk_manager only). Always
+        tenant-scoped this stage - a genuinely platform-wide rule
+        (tenant_id NULL) has no HTTP write path yet (docs/decisions/0031
+        §8's own recorded open decision). A rule is immutable after
+        creation except for status/description/effective_until - a
+        policy change is a new rule, never an edit.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                brand_id: { type: string, format: uuid }
+                jurisdiction_code: { type: string }
+                player_account_id: { type: string, format: uuid }
+                product: { type: string, enum: [casino, sportsbook, payments, bonus] }
+                operation:
+                  type: string
+                  enum: [casino_launch, casino_bet, deposit, withdrawal, sportsbook_bet, bonus_grant]
+                provider_id: { type: string }
+                game_id: { type: string, format: uuid }
+                asset_code: { type: string }
+                payment_method: { type: string }
+                limit_kind: { type: string, enum: [min_amount, max_amount, cumulative_amount] }
+                time_window: { type: string, enum: [transaction, rolling_hour, rolling_day, rolling_week, rolling_month] }
+                threshold: { type: integer, format: int64, description: "Minor units, matching the asset's own exponent" }
+                rule_kind: { type: string, enum: [hard_limit, configurable_limit, risk_signal], default: configurable_limit }
+                action: { type: string, enum: [deny, review], default: deny }
+                description: { type: string }
+              required: [operation, limit_kind, time_window, threshold]
+      responses:
+        "201":
+          description: Rule created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RiskRule"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/risk/rules/{id}/disable:
+    post:
+      summary: Disable a risk rule
+      description: >
+        Requires risk_config:manage. The only legitimate mutation besides
+        description/effective_until - a rule is never deleted, so a past
+        RiskDecision remains explainable against the exact rule that
+        produced it. Returns 404 (never 403) both for a genuinely
+        nonexistent id AND for a rule outside the caller's own tenant
+        scope (platform-wide or a different tenant's) - never confirms
+        existence outside the caller's own authorization.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Rule disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RiskRule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1266,6 +1388,37 @@ components:
         uploaded_at: { type: string, format: date-time }
         reviewed_at: { type: string, format: date-time }
       required: [id, player_account_id, verification_id, document_type, version, status, content_type, size_bytes, original_filename, uploaded_at]
+    RiskRule:
+      type: object
+      description: >
+        A Risk & Limits policy rule (internal/risk.Rule / risk_rules).
+        Immutable after creation except status/description/
+        effective_until - see docs/decisions/0031.
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid, description: "Absent/empty means platform-wide" }
+        brand_id: { type: string, format: uuid }
+        jurisdiction_code: { type: string }
+        player_account_id: { type: string, format: uuid }
+        product: { type: string, enum: [casino, sportsbook, payments, bonus] }
+        operation:
+          type: string
+          enum: [casino_launch, casino_bet, deposit, withdrawal, sportsbook_bet, bonus_grant]
+        provider_id: { type: string }
+        game_id: { type: string, format: uuid }
+        asset_code: { type: string }
+        payment_method: { type: string }
+        limit_kind: { type: string, enum: [min_amount, max_amount, cumulative_amount] }
+        time_window: { type: string, enum: [transaction, rolling_hour, rolling_day, rolling_week, rolling_month] }
+        threshold: { type: integer, format: int64 }
+        rule_kind: { type: string, enum: [hard_limit, configurable_limit, risk_signal] }
+        action: { type: string, enum: [deny, review] }
+        status: { type: string, enum: [active, disabled] }
+        effective_from: { type: string, format: date-time }
+        effective_until: { type: string, format: date-time }
+        description: { type: string }
+        created_at: { type: string, format: date-time }
+      required: [id, operation, limit_kind, time_window, threshold, rule_kind, action, status, effective_from, created_at]
     Error:
       type: object
       description: Platform-wide error envelope (internal/apierror.Error).

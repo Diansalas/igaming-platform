@@ -39,6 +39,8 @@ const (
 	RoleCompliance    Role = "compliance"
 	RoleFinance       Role = "finance"
 	RolePlayer        Role = "player"
+	// RoleRiskManager is Stage 4G's own role - see identity.StaffRoleRiskManager.
+	RoleRiskManager Role = "risk_manager"
 )
 
 // PrincipalType distinguishes what kind of subject a token identifies -

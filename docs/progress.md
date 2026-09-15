@@ -1871,12 +1871,165 @@ claim cross-brand real-player protection is active (unchanged from Stage
 4E - this stage does not wire KYC evidence into `PersonResolver`). It
 does NOT claim regulatory certification or production readiness.
 
+## Stage 4G — Project Orchestration Governance + Risk & Limits Engine — complete (approved-pending)
+
+Two parts: (A) permanent multi-agent orchestration governance
+(`docs/governance/*`), and (B) the platform's first central Risk & Limits
+engine (`internal/risk`) - ONE reusable rule/policy architecture,
+consumed by domain-specific integration points, never a separate limit
+engine per product.
+
+### Part A — Governance
+
+`docs/governance/agent-registry.md`/`ownership.md`/
+`integration-protocol.md`/`change-control.md`/`task-registry.md`/
+`project-status.md` - permanent process documents every future stage
+operates under. `.claude/agents/risk.md` - a new specialist definition.
+The Master Orchestrator role formalizes this session's own established
+working pattern (direct implementation for cross-cutting work, parallel
+independent specialist review at stage end) rather than introducing an
+untested multi-agent code-writing pipeline.
+
+### Part B — Risk & Limits engine
+
+- `risk.Evaluate(ctx, tx, RiskRequest) -> (RiskDecision, error)` - the
+  single decision boundary, `Outcome` exactly `allow`/`deny`/`review`,
+  fail-closed (any error MUST be treated as deny).
+- `risk_rules` (migration 0041) - dual-scope (platform-wide/tenant-
+  owned, mirroring `player_restrictions`), HARD_LIMIT/CONFIGURABLE_LIMIT/
+  RISK_SIGNAL kinds, deterministic precedence.
+- Limit kinds implemented: `min_amount`/`max_amount`/`cumulative_amount`
+  only (`count`/`velocity`/`exposure`/`loss` are documented future
+  extensions, not database-configurable yet).
+- Enforcement wired into `internal/casino`'s `LaunchGame` (real-mode
+  only) and `postBet` (after RG eligibility, before the balance lock) -
+  the only two of six designed operations actually enforced this stage.
+- Risk and Responsible Gaming kept strictly separate domains -
+  `internal/rg.EvaluateEligibility` remains the sole self-exclusion
+  authority; both consulted in a fixed order (RG first, always
+  short-circuiting Risk on denial).
+- New `risk_manager` StaffRole/Role, `risk_config:read`/`risk_config:manage`
+  permissions, mirroring Stage 4F's verification-permission
+  separation-of-duties precedent exactly (including the identical
+  self-escalation guard in staff creation).
+
+Full design: `docs/decisions/0031-risk-and-limits-engine.md`.
+
+### Specialist review: 9 areas, real P0/P1s found and fixed
+
+A 9-area independent parallel review (risk architecture, financial
+correctness, casino integration, RG integration/domain separation,
+security, PostgreSQL/RLS, API, adversarial testing, multi-tenancy) found
+and this stage fixed:
+
+1. **P1 (independently found by 4 reviewers) - specificity scoring bug**:
+   a rule scoped by `(tenant)` and one scoped by `(tenant, asset_code)`
+   were scored as an ARTIFICIAL TIE, forcing `ErrConflictingRules` - a
+   fail-closed outage of the entire operation for that tenant, for rules
+   never actually in conflict. **Fixed**: rescored as a bitmask summing
+   every present scope dimension, not just the single highest-ranked one.
+2. **P1 - non-deterministic deny-vs-review aggregation**: a Go map's
+   randomized iteration order could let a later REVIEW-action breach
+   silently downgrade an earlier DENY-action breach across independent
+   configurable-rule groups. **Fixed**: deny-priority merge,
+   order-independent by construction.
+3. **P1 (independently found by 2 reviewers) - int64 overflow in the
+   cumulative-amount check**: summing many `NUMERIC(38,0)` ledger entries
+   into a plain `int64` could silently wrap negative for an 18-exponent
+   asset, failing OPEN exactly where fail-closed matters most. **Fixed**:
+   scanned as `pgtype.Numeric`, compared via `math/big`.
+4. **P1 - rolled-back bets permanently consumed cumulative capacity**:
+   the query counted a bet's debit even after `casino_rollback` reversed
+   it. **Fixed**: nets debits minus credits across both transaction
+   types.
+5. **P1 (live-database confirmed) - `risk_rules` RLS missing the
+   player-scope guard**: a `db.WithPlayerScope` connection could read
+   every tenant's risk rules and successfully disable one - no
+   player-facing code path reaches this today (defense-in-depth, not a
+   live incident). **Fixed**: added the guard to all four RLS policies,
+   mirroring `player_restrictions`/`sessions`' own established pattern.
+6. **P0 (adversarial) - two real code paths had zero test coverage**:
+   `RuleRiskSignal` contributing to `REVIEW`, and a `HARD_LIMIT` rule with
+   `action=review`. **Fixed** with new tests proving both actually work.
+7. **P0/P1 (adversarial) - missing integration-level tests**: `Evaluate`
+   itself skipping an out-of-window rule (only a unit test of the helper
+   existed), and cross-tenant denial of the DISABLE HTTP endpoint. Both
+   added.
+8. **P1 (self-referential) - ADR 0031 and this progress/active-stage
+   entry did not exist** at the time code/migration comments already
+   cited them. Closed by their own existence.
+
+P2s fixed: OpenAPI documentation for the three new risk endpoints; audit
+records for rule creation/disabling now carry IP/user-agent/request-id;
+HTTP-layer enum validation for every rule field (was previously
+unvalidated free text hitting DB CHECK/500s); risk-denial audit metadata
+enriched with provider/game/asset/amount; the down migration documents
+the `risk_manager`-row one-way-door. Several more P2s explicitly recorded
+as accepted/deferred with reasoning (not fixed this stage, not silently
+dropped) - full list with reasoning in ADR 0031's own findings section:
+`CreateRule` does not cross-validate limit_kind/operation compatibility;
+an oversized threshold inserted directly via SQL can brick evaluation for
+a tenant+operation (consistent with the codebase's pre-existing int64-
+minor-units convention); no uniqueness constraint on `risk_rules`; GET
+`/v1/admin/risk/rules` has no pagination or default disabled-row filter;
+`risk_signal` rules force `action=review` server-side with no HTTP-layer
+feedback if the caller sent `action=deny`; no FK from `risk_rules.
+tenant_id` to `tenants(id)` (matching `player_restrictions`' own
+pre-existing gap); the immutability trigger permits re-enabling a
+disabled rule and clearing `effective_until` with no dedicated audited Go
+path for either.
+
+### Newly disclosed limitations (not defects)
+
+Jurisdiction-scoped rules are reachable only from `LaunchGame`, never
+`postBet` (`casino_launch_sessions` does not persist launch-time
+jurisdiction - the same pre-existing "TODO(jurisdiction)" gap named
+elsewhere in this codebase). No licence-mode scoping dimension exists yet
+- a platform-wide HARD_LIMIT would apply identically inside a future
+bring-your-own-licence tenant under a different jurisdiction's own legal
+regime; no such tenant exists yet, recorded before one does. No role can
+create a genuinely platform-wide rule via HTTP this stage (mirrors
+`internal/rg.CreateStaffRestriction`'s identical, already-established
+precedent).
+
+### Verification performed
+
+`gofmt -l .` clean. `go build ./...` clean. `go vet -tags=integration
+./...` clean. `go test ./...`, `go test -race ./...`, `go test
+-tags=integration ./...` all pass cleanly across the full repository. `go
+test -race -tags=integration ./...` passes except for the pre-existing,
+already-documented `TestConcurrent_DuplicateBetDeliveryDuringSelfExclusion`
+flake (Stage 4D-RG/4E, unrelated to this stage, confirmed via repeated
+isolated re-runs to still be intermittent and pre-existing, not a
+regression). Migration `0041` round-tripped (`up` -> `down` -> `up`)
+cleanly against the live dev database, including after the RLS
+player-scope-guard fix.
+
+### Not claimed
+
+Per CLAUDE.md's "No fake completion" rule: this stage does NOT claim
+jurisdiction-scoped risk rules are enforceable at bet time (only at
+launch time - see "Newly disclosed limitations" above). It does NOT
+claim a platform-wide hard limit is safe for a hybrid-licensing (bring-
+your-own-licence) tenant under a different jurisdiction - no such tenant
+exists yet, and this is recorded as an open decision, not resolved. It
+does NOT claim `deposit`/`withdrawal`/`sportsbook_bet`/`bonus_grant` risk
+enforcement exists - only casino_launch/casino_bet are wired, though an
+operator can configure rules for the other four (they are simply never
+evaluated). It does NOT claim this closes the Bonus Engine's own need for
+a risk/limits foundation - directive §32 explicitly blocks Bonus until
+this architecture is proven stable, which is a human decision, not
+self-certified here.
+
 ## Next stage
 
 Not started; requires explicit human authorization per the stage-gate
-rule in `CLAUDE.md`. Candidates named in the Stage 3D/4A/4D-RG/4E/4F
-directives (a real casino provider integration, sportsbook, bonus, B2C
-frontend, partner console, production deployment, real PSP integrations,
+rule in `CLAUDE.md`. Directive §"FINAL GOVERNANCE RULE" explicitly
+forbids starting Bonus, a real KYC provider, a real casino provider, or
+sportsbook automatically. Candidates named in the Stage 3D/4A/4D-RG/4E/
+4F/4G directives (a real casino provider integration, sportsbook, bonus
+- once Risk & Limits is proven stable per directive §32, B2C frontend,
+partner console, production deployment, real PSP integrations,
 real crypto integrations, a real identity-verification/KYC vendor to
 actually populate `VerifiedAttributes` AND perform real document
 verification) do not begin automatically.

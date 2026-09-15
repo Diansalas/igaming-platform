@@ -259,7 +259,7 @@ func newCreateStaffHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeValidation, "password too short")
 			return
 		}
-		v.RequireOneOf("role", req.Role, "tenant_admin", "support", "compliance", "finance")
+		v.RequireOneOf("role", req.Role, "tenant_admin", "support", "compliance", "finance", "risk_manager")
 		var personID *uuid.UUID
 		if req.PersonID != "" {
 			parsed, err := uuid.Parse(req.PersonID)
@@ -275,6 +275,16 @@ func newCreateStaffHandler(deps Deps) http.HandlerFunc {
 		}
 		if identity.StaffRole(req.Role) == identity.StaffRoleFinance && tc.TenantID != uuid.Nil {
 			apierror.Write(w, requestID, apierror.CodeForbidden, "the finance role may only be created by a platform administrator")
+			return
+		}
+		// Stage 4G: identical reasoning to the finance restriction just
+		// above - a tenant_admin's own PermStaffManage would otherwise let
+		// it mint a risk_manager account (of a password/person_id entirely
+		// of its own choosing) and self-escalate into Risk & Limits
+		// configuration authority, the exact class of attack Stage 3D's
+		// specialist review found for finance.
+		if identity.StaffRole(req.Role) == identity.StaffRoleRiskManager && tc.TenantID != uuid.Nil {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "the risk_manager role may only be created by a platform administrator")
 			return
 		}
 

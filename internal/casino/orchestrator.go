@@ -12,6 +12,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/rg"
+	"github.com/Diansalas/igaming-platform/internal/risk"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
 )
 
@@ -145,6 +146,32 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, tx pgx.Tx, params LaunchG
 		return LaunchGameResult{Denied: true, DenialCode: decision.Code, DenialMessage: decision.Message}, nil
 	}
 
+	// Stage 4G: the central Risk & Limits boundary, consulted alongside
+	// (never instead of) RG eligibility above - a separate domain, per
+	// ADR 0031 §1. Skipped for demo-mode launches: no real financial
+	// exposure exists yet to gate. A REVIEW outcome is treated identically
+	// to DENY at this integration point (ADR 0031 §6 - no
+	// compliance-review workflow exists yet for casino launch, so a
+	// review-flagged launch fails safe by blocking rather than proceeding
+	// provisionally).
+	if params.Mode == ModeReal {
+		var jurisdictionCode string
+		if params.JurisdictionCode != nil {
+			jurisdictionCode = *params.JurisdictionCode
+		}
+		riskDecision, err := evaluateAndAuditRisk(ctx, tx, risk.RiskRequest{
+			TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID,
+			Operation: risk.OperationCasinoLaunch, Product: "casino", ProviderID: game.ProviderID, GameID: params.GameID,
+			AssetCode: params.AssetCode, JurisdictionCode: jurisdictionCode,
+		}, "casino.launch_denied_by_risk_policy")
+		if err != nil {
+			return LaunchGameResult{}, err
+		}
+		if riskDecision.Outcome != risk.OutcomeAllow {
+			return LaunchGameResult{Denied: true, DenialCode: riskDecision.Code, DenialMessage: riskDecision.Message}, nil
+		}
+	}
+
 	capability, found, err := LoadCapability(ctx, tx, params.TenantID, params.BrandID, game.ProviderID)
 	if err != nil {
 		return LaunchGameResult{}, err
@@ -242,6 +269,49 @@ func evaluateAndAuditEligibility(ctx context.Context, tx pgx.Tx, tenantID, brand
 		},
 	}); err != nil {
 		return rg.Decision{}, fmt.Errorf("casino: audit rg denial: %w", err)
+	}
+	return decision, nil
+}
+
+// evaluateAndAuditRisk consults the central risk.Evaluate boundary
+// (Stage 4G, ADR 0031 §2) and, on a non-ALLOW outcome, writes an audit
+// record BEFORE returning - identical shape to evaluateAndAuditEligibility
+// immediately above, so casino never grows two independent conventions
+// for "consult a policy boundary, audit a denial, let the caller decide
+// how to surface it." A non-nil error from risk.Evaluate is NEVER treated
+// as ALLOW - it propagates up, aborting the whole transaction (fail-
+// closed, ADR 0031 §6), unlike a clean non-ALLOW RiskDecision (a genuine
+// business decision, reported the same decline-without-error way
+// LaunchGame/postBet already report an RG denial).
+func evaluateAndAuditRisk(ctx context.Context, tx pgx.Tx, req risk.RiskRequest, auditAction string) (risk.RiskDecision, error) {
+	decision, err := risk.Evaluate(ctx, tx, req)
+	if err != nil {
+		return risk.RiskDecision{}, fmt.Errorf("casino: evaluate risk policy: %w", err)
+	}
+	if decision.Outcome == risk.OutcomeAllow {
+		return decision, nil
+	}
+	// Metadata includes enough to investigate WHICH game/provider/stake
+	// triggered the denial (casino integration specialist review finding:
+	// an earlier version omitted these, unlike the sibling
+	// casino_bet.declined insufficient-funds audit record) - never raw
+	// rule contents beyond the already-opaque reason code.
+	metadata := map[string]any{
+		"reason_code": decision.Code, "outcome": string(decision.Outcome), "operation": string(req.Operation),
+		"brand_id": req.BrandID.String(), "provider_id": req.ProviderID, "asset_code": req.AssetCode,
+	}
+	if req.GameID != uuid.Nil {
+		metadata["game_id"] = req.GameID.String()
+	}
+	if req.Amount != 0 {
+		metadata["amount"] = req.Amount
+	}
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: req.TenantID, ActorType: audit.ActorSystem, Action: auditAction,
+		TargetType: "player_account", TargetID: req.PlayerAccountID.String(), Outcome: audit.OutcomeDenied,
+		Metadata: metadata,
+	}); err != nil {
+		return risk.RiskDecision{}, fmt.Errorf("casino: audit risk denial: %w", err)
 	}
 	return decision, nil
 }
@@ -492,6 +562,42 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	}
 	if !decision.Allowed {
 		return ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason: decision.Code}, nil
+	}
+
+	// Stage 4G: the central Risk & Limits boundary - re-evaluated on
+	// every bet, exactly like RG eligibility just above, since a limit
+	// (or the cumulative usage it aggregates) can change between one bet
+	// and the next within the same launch session. No ledger entry has
+	// been touched yet at this point - a denial here produces zero
+	// financial effect. This call sits AFTER the idempotency short-
+	// circuit at the top of this function (financial-transaction-
+	// flows.md's own requirement, directive §27): a redelivered
+	// already-posted bet returns there and never reaches risk evaluation
+	// a second time, so a cumulative rule's aggregate state changing
+	// between the original delivery and a retry can never flip an
+	// already-succeeded bet's own outcome.
+	//
+	// JurisdictionCode is deliberately left empty here (multi-tenancy/
+	// architecture specialist review, disclosed - ADR 0031 §8): unlike
+	// LaunchGameParams, casino_launch_sessions does not persist the
+	// jurisdiction resolved at launch time, and no other source of a
+	// per-bet jurisdiction exists in this codebase today (the same
+	// already-documented "TODO(jurisdiction)" gap LaunchGameParams'
+	// own doc comment names). A jurisdiction-scoped risk rule is
+	// therefore NEVER reachable from postBet, only from LaunchGame -
+	// express a legal/jurisdiction constraint that must also bind
+	// bet-time as a tenant-scoped (or platform-wide) rule instead until
+	// jurisdiction is persisted on the launch session.
+	riskDecision, err := evaluateAndAuditRisk(ctx, tx, risk.RiskRequest{
+		TenantID: tenantID, BrandID: session.BrandID, PlayerAccountID: session.PlayerAccountID,
+		Operation: risk.OperationCasinoBet, Product: "casino", ProviderID: providerID, GameID: session.GameID, AssetCode: event.AssetCode,
+		Amount: event.Amount, CorrelationID: roundCorrelationID(tenantID, providerID, event.RoundID),
+	}, "casino_bet.denied_by_risk_policy")
+	if err != nil {
+		return ReceiveCallbackResult{}, err
+	}
+	if riskDecision.Outcome != risk.OutcomeAllow {
+		return ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason: riskDecision.Code}, nil
 	}
 
 	cashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &wl.ID, ledger.AccountPlayerCash, event.AssetCode)

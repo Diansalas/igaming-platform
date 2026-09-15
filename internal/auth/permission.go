@@ -135,6 +135,26 @@ const (
 	// evidence is a compliance-specific judgment call), not RoleFinance,
 	// not RolePlatformAdmin.
 	PermVerificationReview Permission = "verification:review"
+
+	// PermRiskConfigRead gates read-only visibility into a tenant's Risk &
+	// Limits rules (Stage 4G, ADR 0031). Granted to RoleRiskManager and
+	// RoleTenantAdmin (an operational admin reasonably needs to see what
+	// limits apply), never RoleCompliance/RoleFinance/RolePlatformAdmin -
+	// directive §24's explicit "do not automatically grant risk
+	// configuration to broad administrative roles," and no justification
+	// exists for Compliance/Finance to hold it either (they consult risk
+	// DENIALS via the existing audit trail, not this permission).
+	PermRiskConfigRead Permission = "risk_config:read"
+	// PermRiskConfigManage gates CREATING/DISABLING a risk_rules row -
+	// deliberately its OWN authority, never bundled into
+	// PermVerificationReview/PermWithdrawalPolicyWrite/PermStaffManage,
+	// mirroring PermVerificationReview's separation-of-duties precedent.
+	// Granted ONLY to RoleRiskManager - not RoleTenantAdmin (read-only
+	// visibility is reasonable for an operational admin; writing a limit
+	// that changes what players/tenants can wager or move is a
+	// risk-specific judgment call), not RoleCompliance/RoleFinance/
+	// RolePlatformAdmin.
+	PermRiskConfigManage Permission = "risk_config:manage"
 )
 
 // rolePermissions is a static, in-code role -> permission-set mapping.
@@ -196,6 +216,9 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// reasoning as PermRGRestrictionRead immediately above - never
 		// PermVerificationReview.
 		PermVerificationRead,
+		// Stage 4G: read-only Risk & Limits visibility, same reasoning -
+		// never PermRiskConfigManage.
+		PermRiskConfigRead,
 	),
 	RoleSupport: permSet(
 		PermPlayerRead,
@@ -222,6 +245,13 @@ var rolePermissions = map[Role]map[Permission]bool{
 	// half of Stage 3D's required separation).
 	RoleFinance: permSet(
 		PermWithdrawalReview, PermWithdrawalApprove, PermWithdrawalReject, PermWithdrawalSubmit,
+	),
+	// Stage 4G: risk_manager is dedicated solely to Risk & Limits
+	// configuration - it holds both risk_config permissions and nothing
+	// else, deliberately not PermStaffManage/PermPlayerRead/PermAuditRead,
+	// mirroring RoleFinance's own "one role, one narrow authority" shape.
+	RoleRiskManager: permSet(
+		PermRiskConfigRead, PermRiskConfigManage,
 	),
 	RolePlayer: permSet(),
 }

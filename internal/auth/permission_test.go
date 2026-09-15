@@ -255,6 +255,38 @@ func TestRoleHasPermission_Stage4FVerificationPermissions(t *testing.T) {
 	}
 }
 
+func TestRoleHasPermission_Stage4GRiskConfigPermissions(t *testing.T) {
+	if !RoleHasPermission(RoleRiskManager, PermRiskConfigManage) {
+		t.Error("expected risk_manager to have risk_config:manage")
+	}
+	if !RoleHasPermission(RoleRiskManager, PermRiskConfigRead) {
+		t.Error("expected risk_manager to have risk_config:read")
+	}
+	if !RoleHasPermission(RoleTenantAdmin, PermRiskConfigRead) {
+		t.Error("expected tenant_admin to have risk_config:read")
+	}
+
+	for _, role := range []Role{RolePlatformAdmin, RoleTenantAdmin, RoleSupport, RoleCompliance, RoleFinance, RolePlayer} {
+		if RoleHasPermission(role, PermRiskConfigManage) {
+			t.Errorf("expected %q to NOT have risk_config:manage - only risk_manager may create/disable rules", role)
+		}
+	}
+	for _, role := range []Role{RolePlatformAdmin, RoleSupport, RoleCompliance, RoleFinance, RolePlayer} {
+		if RoleHasPermission(role, PermRiskConfigRead) {
+			t.Errorf("expected %q to NOT have risk_config:read", role)
+		}
+	}
+
+	// risk_manager holds ONLY the two risk_config permissions - never
+	// PermStaffManage/PermPlayerRead/PermAuditRead, mirroring RoleFinance's
+	// own "one role, one narrow authority" precedent.
+	for _, perm := range []Permission{PermStaffManage, PermPlayerRead, PermPlayerSuspend, PermAuditRead, PermTenantWrite} {
+		if RoleHasPermission(RoleRiskManager, perm) {
+			t.Errorf("expected risk_manager to NOT have %q", perm)
+		}
+	}
+}
+
 func TestRoleHasPermission_FinanceIsDefinedButEmptyPlaceholder(t *testing.T) {
 	// Stage 2 defines the finance role (per the instructions' explicit
 	// list) but grants it nothing yet - Stage 3's wallet/ledger work is
