@@ -225,6 +225,36 @@ func TestRoleHasPermission_Stage4EIdentityReviewManagePermission(t *testing.T) {
 	}
 }
 
+// TestRoleHasPermission_Stage4FVerificationPermissions proves Stage 4F's
+// separation-of-duties requirement (ADR 0028): PermVerificationReview
+// belongs to RoleCompliance alone, PermVerificationRead additionally to
+// RoleTenantAdmin (read-only), and neither ever reaches RolePlatformAdmin
+// or RoleFinance - mirroring TestRoleHasPermission_Stage4DRGRestriction
+// Permissions/TestRoleHasPermission_Stage4EIdentityReviewManagePermission
+// exactly.
+func TestRoleHasPermission_Stage4FVerificationPermissions(t *testing.T) {
+	if !RoleHasPermission(RoleCompliance, PermVerificationReview) {
+		t.Error("expected compliance to have verification:review")
+	}
+	if !RoleHasPermission(RoleCompliance, PermVerificationRead) {
+		t.Error("expected compliance to have verification:read")
+	}
+	if !RoleHasPermission(RoleTenantAdmin, PermVerificationRead) {
+		t.Error("expected tenant_admin to have verification:read")
+	}
+
+	for _, role := range []Role{RolePlatformAdmin, RoleTenantAdmin, RoleSupport, RoleFinance, RolePlayer} {
+		if RoleHasPermission(role, PermVerificationReview) {
+			t.Errorf("expected %q to NOT have verification:review - only compliance may approve/reject", role)
+		}
+	}
+	for _, role := range []Role{RolePlatformAdmin, RoleSupport, RoleFinance, RolePlayer} {
+		if RoleHasPermission(role, PermVerificationRead) {
+			t.Errorf("expected %q to NOT have verification:read", role)
+		}
+	}
+}
+
 func TestRoleHasPermission_FinanceIsDefinedButEmptyPlaceholder(t *testing.T) {
 	// Stage 2 defines the finance role (per the instructions' explicit
 	// list) but grants it nothing yet - Stage 3's wallet/ledger work is

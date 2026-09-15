@@ -461,3 +461,38 @@ func ListActiveSessions(ctx context.Context, tx pgx.Tx, principalType PrincipalT
 	}
 	return sessions, rows.Err()
 }
+
+// RevokeAllSessionsForPrincipal revokes every non-revoked session
+// belonging to principalID - used by Stage 4F's password-reset-confirm
+// flow (directive §13's "session invalidation where appropriate"): a
+// successful password reset forces re-authentication everywhere, exactly
+// the same protective response as detected refresh-token reuse
+// (revokeChainFrom above), since a completed reset is itself a strong
+// signal the account may have been compromised and its old credential
+// exposed. Called within the caller's own already-scoped (WithTenant) tx.
+//
+// Requires db.SetPrincipalIDForCurrentTx first (security specialist
+// review finding, Stage 4F: an earlier version of this function omitted
+// this and silently updated ZERO rows every time, since sessions'
+// session_select_own_principal SELECT policy - required for Postgres to
+// permit ANY UPDATE against these rows at all, not merely satisfying the
+// UPDATE policy's own USING clause, per docs/decisions/0016's identical
+// documented Postgres RLS interaction - additionally requires
+// app.principal_id to match, which a plain WithTenant transaction never
+// sets). See SetPrincipalIDForCurrentTx's own doc comment for why this
+// function sets that GUC directly rather than using WithPrincipalScope
+// (which would open a second transaction, breaking atomicity with the
+// caller's own password-hash update and audit record).
+func RevokeAllSessionsForPrincipal(ctx context.Context, tx pgx.Tx, principalType PrincipalType, principalID uuid.UUID) error {
+	if err := db.SetPrincipalIDForCurrentTx(ctx, tx, principalID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx,
+		`UPDATE sessions SET revoked_at = now() WHERE principal_type = $1 AND principal_id = $2 AND revoked_at IS NULL`,
+		principalType, principalID,
+	)
+	if err != nil {
+		return fmt.Errorf("auth: revoke all sessions: %w", err)
+	}
+	return nil
+}

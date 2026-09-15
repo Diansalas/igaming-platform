@@ -21,12 +21,21 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/email"
 	"github.com/Diansalas/igaming-platform/internal/httpserver"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
 )
+
+// kycMockWebhookSecret is MockKYCProvider's dev/test-only HMAC signing
+// key - never a real credential, since no real KYC vendor is integrated
+// (docs/decisions/0028 §1). A real vendor's own webhook secret would come
+// from cfg (internal/config), provisioned per environment, never
+// hardcoded like this.
+const kycMockWebhookSecret = "dev-mock-kyc-webhook-secret-not-for-production"
 
 func main() {
 	if err := run(); err != nil {
@@ -128,6 +137,25 @@ func run() error {
 		// registration behavior while ensuring every registration now
 		// goes through the resolution boundary, never bypassing it.
 		PersonResolver: identityresolution.NewMockPersonResolver(),
+
+		// Stage 4F: no real KYC/identity-verification vendor is contracted
+		// yet (docs/decisions/0028 §1) - MockKYCProvider is the only
+		// implementation registered, exactly mirroring the mock casino/
+		// payment adapters' identical role. KYC verification is a
+		// genuinely optional/deferred flow (unlike PersonResolver above),
+		// so nil-means-disabled would also be a legitimate choice for a
+		// deployment that doesn't want it exposed yet - this deployment
+		// enables it.
+		KYCOrchestrator: kyc.NewOrchestrator(map[string]kyc.KYCProvider{
+			"mock": kyc.NewMockKYCProvider(kycMockWebhookSecret),
+		}),
+		DocumentStorage: kyc.NewMockDocumentStorageProvider(),
+		MalwareScanner:  kyc.NewMockMalwareScanner(),
+
+		// Stage 4F: no real email-delivery vendor is contracted yet
+		// (docs/decisions/0030 §4) - email.MockProvider records what would
+		// have been sent without any production SMTP/API credentials.
+		EmailProvider: email.NewMockProvider(),
 	})
 
 	// Stage 3C directive item 4: operationalize the ledger-vs-projection

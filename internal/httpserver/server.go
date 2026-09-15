@@ -17,7 +17,9 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/email"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 )
 
@@ -70,6 +72,26 @@ type Deps struct {
 	// construction is expected to set this - internal/identityresolution.
 	// NewMockPersonResolver() until a real vendor is contracted (ADR 0027).
 	PersonResolver identityresolution.PersonResolver
+
+	// KYCOrchestrator/DocumentStorage/MalwareScanner are Stage 4F's
+	// verification/document boundary. Nil disables every route that
+	// calls them (mirrors PaymentOrchestrator/CasinoOrchestrator's
+	// nil-means-disabled convention, NOT PersonResolver's fail-closed
+	// one) - unlike identity resolution, KYC verification is a genuinely
+	// optional/deferred flow no existing endpoint depends on, so a
+	// deployment that hasn't wired one up simply doesn't expose these
+	// routes' functionality, rather than failing registration/login.
+	KYCOrchestrator *kyc.Orchestrator
+	DocumentStorage kyc.DocumentStorageProvider
+	MalwareScanner  kyc.MalwareScanner
+
+	// EmailProvider is Stage 4F's email-delivery boundary (email
+	// verification, password reset). Nil-means-disabled for the
+	// player-facing request endpoints (they return 503) - never silently
+	// skipped, since a player who thinks a verification/reset email was
+	// sent when it wasn't is a worse outcome than an explicit, honest
+	// "temporarily unavailable".
+	EmailProvider email.Provider
 }
 
 // New builds the fully-wired http.Handler for platform-api: global
@@ -85,6 +107,8 @@ func New(deps Deps) http.Handler {
 	registerFinancialRoutes(mux, deps)
 	registerCasinoRoutes(mux, deps)
 	registerRGRoutes(mux, deps)
+	registerCredentialRoutes(mux, deps)
+	registerKYCRoutes(mux, deps)
 
 	instrumented := otelhttp.NewHandler(mux, deps.ServiceName)
 

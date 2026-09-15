@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-14 (Stage 4E)
+Last updated: 2026-09-15 (Stage 4F)
 
-## Status: Stage 4E (Person Resolution & Cross-Brand Identity Foundation) — complete, pending human approval to start the next stage
+## Status: Stage 4F (Player Verification, Documents & Authentication Foundation) — complete, pending human approval to start the next stage
 
 ## Stage 0 — complete (approved)
 
@@ -1733,11 +1733,150 @@ does NOT claim automatic reconciliation of pre-existing duplicate Persons
 (directive §14 - explicitly not attempted). It does NOT claim regulatory
 certification or production readiness.
 
+## Stage 4F — Player Verification, Documents & Authentication Foundation — complete (approved-pending)
+
+Builds the platform-owned KYC/identity-verification state model
+(`kyc_verifications`/`kyc_documents`, migration `0040`), a document
+storage/security boundary, a provider-neutral `KYCProvider` abstraction,
+and email-verification/password-reset authentication flows. No real
+KYC/AML vendor is selected or integrated (directive §1's explicit
+non-goal) - `MockKYCProvider` is the only implementation, with its own
+invented callback format, never modeled on a real vendor's API.
+
+### What was built
+
+- `kyc_verifications`/`kyc_documents` (migration `0040`) - tenant-owned,
+  RLS-enforced, hanging off the existing Person/PlayerAccount/Tenant/
+  Brand model via foreign keys. `kyc_verifications.status` is a fully
+  independent 6-state machine, never written to or read from
+  `PlayerAccountStatus`. `kyc_documents` is versioned and
+  database-trigger-immutable (only status/reviewed_at/reviewed_by/
+  rejection_reason may ever change; DELETE/TRUNCATE refused outright).
+- `internal/kyc` package: `KYCProvider`/`Orchestrator`/`MockKYCProvider`,
+  `DocumentStorageProvider`/`MockDocumentStorageProvider`,
+  `MalwareScanner`/`MockMalwareScanner`, `ValidateUpload` (size/
+  content-sniffing/extension-consistency/filename-sanitization),
+  `CreateVerification`/`ReviewVerification`, `UploadDocument`/
+  `ReviewDocument`/`GetDocumentContent` (every content read audited).
+- `internal/auth/credential_token.go`: unified, purpose-discriminated
+  `player_credential_tokens` (email_verification | password_reset),
+  `IssueCredentialToken`/`CountRecentCredentialTokens`/
+  `ValidateAndConsumeCredentialToken` - the atomic two-phase lookup-then-
+  consume entry point every confirm handler uses.
+- `internal/email` package: `Provider`/`MockProvider` - no production
+  SMTP/API dependency introduced.
+- `internal/httpserver/credential_handlers.go` +
+  `kyc_handlers.go`/`kyc_admin_handlers.go`: player self-service
+  (email-verification request/confirm, password-reset request/confirm,
+  document upload/listing), compliance review (verification/document
+  approve/reject), and the provider webhook endpoint, gated by two new
+  permissions (`PermVerificationRead`: Compliance + TenantAdmin;
+  `PermVerificationReview`: Compliance only).
+- `docs/decisions/0028` (verification model/provider abstraction),
+  `0029` (document storage/security/privacy), `0030` (email verification/
+  password reset) - full rationale, including every recorded OPEN
+  DECISION.
+
+### Specialist review: findings and fixes
+
+A 7-area independent review (identity architecture, KYC provider
+architecture, security/privacy, document security, PostgreSQL/RLS,
+API/RBAC, adversarial testing) found and fixed:
+
+1. **P1 - `SubmitVerification`/`GetVerification` dead code** - declared
+   on `KYCProvider` but never called. **Fixed**: wired into
+   `UploadDocument` via a new `submitVerificationDocuments` helper - each
+   upload resubmits the verification's current full document set.
+2. **P1 - password hashed before token validation** in the password-
+   reset confirm handler, an uncosted Argon2id DoS surface on an
+   unauthenticated route. **Fixed**: hashing moved inside
+   `ValidateAndConsumeCredentialToken`'s callback.
+3. **P1 (PostgreSQL/RLS) - non-composite tenant FKs** on
+   `kyc_verifications.player_account_id`, `player_credential_tokens.
+   player_account_id`, `kyc_documents.verification_id`/`reviewed_by` -
+   proven exploitable via direct SQL (a mislabelled cross-tenant row
+   inserted successfully). **Fixed**: composite `(child_id, tenant_id)
+   REFERENCES parent(id, tenant_id)` FKs throughout, backed by new
+   `UNIQUE (id, tenant_id)` on `player_accounts`/`staff_users`/
+   `kyc_verifications` (mirroring `brands`' own precedent, migration
+   0008). Regression test:
+   `TestKYCVerifications_CompositeTenantFKRejectsCrossTenantPlayerAccount`.
+4. **P1 (PostgreSQL/RLS) - `kyc_verifications`/`player_credential_tokens`
+   had zero append-only protection** - proven via direct SQL `DELETE`
+   against a rejected verification/live token succeeding. **Fixed**:
+   `BEFORE DELETE`/`BEFORE TRUNCATE` triggers on both tables (status
+   mutation itself remains a normal, allowed UPDATE).
+5. **P0 (adversarial) - concurrent double-confirm of a credential token
+   was untested under real concurrency** (only sequential replay was
+   proven). **Fixed**: `TestPasswordReset_ConcurrentDoubleConfirmAppliesExactlyOnce`
+   (8 goroutines, `-race`) proves exactly one of many simultaneous
+   confirms succeeds and exactly one row is ever consumed.
+6. **P1 - `MalwareScanner`'s fail-closed contract untested** (the mock
+   can never itself error). **Fixed**:
+   `TestUploadDocument_FailsClosedOnScannerError` with a real
+   error-returning scanner stub proves the upload is refused and nothing
+   is stored.
+7. **P2 (PostgreSQL/RLS) - globally-unique `provider_reference`** - a
+   cross-tenant existence oracle and future B2B collision/denial risk.
+   **Fixed**: rescoped the unique index to
+   `(tenant_id, provider_id, provider_reference)`.
+8. **P2 (PostgreSQL/RLS) - `token_lookup` policy lacked the
+   tenant-unset conjunct** migration 0018 already established for the
+   identical session-lookup pattern. **Fixed**: added.
+9. Added a direct audit-trail assertion test
+   (`TestKYC_ActionsProduceAuditRecords`) confirming
+   `kyc.verification_submitted`/`kyc.document_uploaded`/
+   `kyc.document_reviewed`/`kyc.document_accessed` actually produce
+   `audit_log` rows, not merely return success from the Go call.
+
+P2s explicitly recorded as accepted/deferred with reasoning (not fixed
+this stage, not silently dropped): `kyc_documents` review decisions
+(status/reviewed_by/reviewed_at) remain revertible in place; no per-IP/
+global rate limit on credential-token endpoints; no upload-rate-limit on
+`/v1/me/kyc/documents`; a password-reset timing side-channel (email sent
+synchronously only on the "found" path); `ParseMultipartForm` may spill
+to the OS temp directory before validation runs (narrows this package's
+own "never touches disk" claim to the stored-content path specifically);
+no retention/purge policy for `player_credential_tokens.requested_ip`
+(PII); an access-JWT remains valid up to 15 minutes post-reset;
+`IssuingCountry` is unvalidated free text; denied/cross-owner document-
+access attempts are not themselves audited (only successful accesses
+are); the app's own Postgres role owns these tables and could in
+principle disable its own RLS/triggers (a pre-existing, platform-wide
+limitation, not new to this stage) - full list with reasoning in ADR
+0028/0029/0030's own findings sections.
+
+### Verification performed
+
+`gofmt -l .` clean. `go build ./...` clean. `go vet -tags=integration
+./...` clean. `go test ./...`, `go test -race ./...`, and `go test
+-tags=integration ./...` all pass cleanly across the full repository. `go
+test -race -tags=integration ./...` passes except for the pre-existing,
+already-documented `TestConcurrent_DuplicateBetDeliveryDuringSelfExclusion`
+flake (Stage 4D-RG/4E, unrelated to this stage's own files, not fixed
+here). Migration `0040` round-tripped (`up` -> `down` -> `up`, twice)
+cleanly against the live dev database, including after the composite-FK/
+append-only-trigger fixes.
+
+### Not claimed
+
+Per CLAUDE.md's "No fake completion" rule: this stage does NOT claim a
+real KYC/AML vendor is integrated, or that document verification actually
+happens against a real identity-verification service (directive §1's
+explicit non-goal - `MockKYCProvider` only). It does NOT claim production-
+grade document storage (encryption at rest, real malware scanning,
+signed/short-lived access URLs, retention/legal-hold tooling are all
+documented future requirements, not built - ADR 0029 §3/§6). It does NOT
+claim cross-brand real-player protection is active (unchanged from Stage
+4E - this stage does not wire KYC evidence into `PersonResolver`). It
+does NOT claim regulatory certification or production readiness.
+
 ## Next stage
 
 Not started; requires explicit human authorization per the stage-gate
-rule in `CLAUDE.md`. Candidates named in the Stage 3D/4A/4D-RG/4E
+rule in `CLAUDE.md`. Candidates named in the Stage 3D/4A/4D-RG/4E/4F
 directives (a real casino provider integration, sportsbook, bonus, B2C
 frontend, partner console, production deployment, real PSP integrations,
 real crypto integrations, a real identity-verification/KYC vendor to
-actually populate `VerifiedAttributes`) do not begin automatically.
+actually populate `VerifiedAttributes` AND perform real document
+verification) do not begin automatically.

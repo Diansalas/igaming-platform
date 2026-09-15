@@ -198,6 +198,62 @@ func (p *Pool) WithPlayerScope(ctx context.Context, tenantID, playerAccountID uu
 	return nil
 }
 
+// WithCredentialTokenLookup runs fn in a platform-scoped transaction (no
+// app.tenant_id) with "app.credential_token_lookup_hash" set to hash, for
+// the lifetime of the transaction. This is the ONLY sanctioned way to
+// read a player_credential_tokens row (Stage 4F: email verification /
+// password reset) before any tenant scope is known - the presented token
+// carries no tenant hint, exactly like a refresh token, so this mirrors
+// WithSessionLookup's identical rationale and mechanism. hash must be the
+// SHA-256 hex digest of the actual, unguessable raw token presented by
+// the caller. Migration 0040's token_lookup policy grants visibility to
+// at most the one row whose token_hash exactly equals this value.
+func (p *Pool) WithCredentialTokenLookup(ctx context.Context, hash string, fn TxFunc) error {
+	if hash == "" {
+		return fmt.Errorf("db: WithCredentialTokenLookup called with empty hash")
+	}
+
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("db: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.credential_token_lookup_hash', $1, true)`, hash); err != nil {
+		return fmt.Errorf("db: set credential token lookup context: %w", err)
+	}
+
+	if err := fn(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("db: commit tx: %w", err)
+	}
+	return nil
+}
+
+// SetPrincipalIDForCurrentTx sets the Postgres session variable
+// "app.principal_id" for the lifetime of the CURRENT transaction (tx must
+// already be open - this does not begin or commit one), for code that
+// needs to satisfy the sessions table's own session_select_own_principal
+// RLS policy (migration 0018) from WITHIN an already-open, differently-
+// scoped transaction (e.g. WithTenant) rather than opening a fresh one
+// via WithPrincipalScope - used by internal/auth.
+// RevokeAllSessionsForPrincipal (Stage 4F's password-reset-confirm flow),
+// which must revoke sessions ATOMICALLY alongside a password-hash update
+// and an audit record already running inside one WithTenant transaction;
+// WithPrincipalScope's own separate transaction would break that
+// atomicity. Like SetSessionInternalOpID, this grants no authorization of
+// its own - the caller must already be legitimately acting as this exact
+// principal (e.g. it was just resolved from a validated credential token
+// or an authenticated session) before calling it.
+func SetPrincipalIDForCurrentTx(ctx context.Context, tx pgx.Tx, principalID uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.principal_id', $1, true)`, principalID.String()); err != nil {
+		return fmt.Errorf("db: set principal id context: %w", err)
+	}
+	return nil
+}
+
 // SetSessionInternalOpID sets the Postgres session variable
 // "app.session_internal_op_id" for the lifetime of the CURRENT
 // transaction (tx must already be open - this does not begin or commit

@@ -667,6 +667,454 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # --- Stage 4F: email verification and password reset
+  # (docs/decisions/0030) ---
+  /v1/me/email-verification/request:
+    post:
+      summary: Request a new email-verification token for the caller's own account
+      description: >
+        Authenticated, self-service. Rate-limited to 3 requests/hour per
+        account - a rate-limited request returns the SAME 204 as a
+        successful one (never distinguishable), and any prior outstanding
+        token of this purpose is superseded. Delivered via the configured
+        EmailProvider (MockProvider in this stage - no production SMTP/API
+        dependency).
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Verification email sent, or silently rate-limited
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Email delivery is not configured
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/auth/email-verification/confirm:
+    post:
+      summary: Confirm an email-verification token
+      description: >
+        Unauthenticated (a player has no session to present at this
+        point). One-time use, enforced by an atomic conditional UPDATE -
+        never applies its side effect twice under concurrent replay. On
+        success, stamps player_accounts.verified_at and transitions the
+        account out of pending_verification to active if it is still in
+        that exact state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token: { type: string }
+              required: [token]
+      responses:
+        "204":
+          description: Email verified
+        "400":
+          description: Invalid, expired, or already-consumed token
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/auth/password-reset/request:
+    post:
+      summary: Request a password-reset token
+      description: >
+        Unauthenticated. ALWAYS returns 204 regardless of whether the
+        email matches an account or is rate-limited (directive's
+        anti-enumeration requirement - never reveals whether a specific
+        email belongs to an account). An unknown brand_slug returns 404
+        (a brand slug is a public identifier, unlike email).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                brand_slug: { type: string }
+                email: { type: string, format: email }
+              required: [brand_slug, email]
+      responses:
+        "204":
+          description: If an account matched, a reset email was sent - identical response otherwise
+        "404":
+          description: Unknown brand
+        "503":
+          description: Email delivery is not configured
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/auth/password-reset/confirm:
+    post:
+      summary: Confirm a password-reset token and set a new password
+      description: >
+        Unauthenticated. One-time use (atomic conditional UPDATE,
+        verified exactly-once under real concurrent replay). The new
+        password is hashed (Argon2id) ONLY after the token is validated
+        and consumed, closing an uncosted-hashing DoS surface found in
+        specialist review. On success, revokes every session for the
+        account (RevokeAllSessionsForPrincipal) - a completed reset forces
+        re-authentication everywhere.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token: { type: string }
+                new_password: { type: string }
+              required: [token, new_password]
+      responses:
+        "204":
+          description: Password reset - all sessions revoked
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # --- Stage 4F: player verification (KYC) and document management
+  # (docs/decisions/0028/0029) ---
+  /v1/me/kyc/verifications:
+    post:
+      summary: Start a new identity-verification attempt for the caller's own account
+      description: >
+        Authenticated, self-service. Calls the registered KYCProvider
+        (MockKYCProvider only this stage - no real vendor is integrated)
+        and creates a new kyc_verifications row. NOT_IMPLEMENTED for any
+        production identity-verification vendor.
+      security:
+        - bearerAuth: []
+      responses:
+        "201":
+          description: Verification created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Verification"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Identity verification is not configured
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      summary: List the caller's own verification attempts
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Verifications, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Verification"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/me/kyc/documents:
+    post:
+      summary: Upload an identity/verification document
+      description: >
+        Authenticated, self-service, multipart/form-data
+        (verification_id, document_type, issuing_country [optional],
+        file). Validated server-side (size, sniffed content-type - never
+        the client's claimed Content-Type, extension consistency,
+        filename sanitization) and malware-scanned (mock scanner, fails
+        closed on a scan error) before storage. A reupload of the same
+        document_type is a NEW, version-incremented row - never an
+        overwrite; documents are immutable after upload except for the
+        review fields.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                verification_id: { type: string, format: uuid }
+                document_type:
+                  type: string
+                  enum: [passport, national_id, drivers_license, proof_of_address, selfie, other]
+                issuing_country: { type: string }
+                file: { type: string, format: binary }
+              required: [verification_id, document_type, file]
+      responses:
+        "201":
+          description: Document stored, pending review
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Verification not found or not owned by the caller
+        "503":
+          description: Document upload is not configured
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      summary: List the caller's own documents (every version)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Documents, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Document"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/me/kyc/documents/{id}/content:
+    get:
+      summary: Download the caller's own document content
+      description: >
+        Every access, successful or not, is audited
+        (kyc.document_accessed on success). A document owned by a
+        DIFFERENT player account (even within the same tenant) returns
+        404, never 403 - enforced at the application layer, not RLS (ADR
+        0029 §4a).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Raw document bytes
+          content:
+            application/octet-stream: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/kyc/verifications:
+    get:
+      summary: List a player account's verification attempts (compliance/tenant admin)
+      description: >
+        Requires verification:read (compliance or tenant_admin,
+        read-only for tenant_admin). Requires a real tenant context -
+        scoped to the caller's own tenant only.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: player_account_id
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Verifications for the named player account, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Verification"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/kyc/verifications/{id}/review:
+    post:
+      summary: Approve, reject, or flag a verification for further review
+      description: >
+        Requires verification:review (compliance only - never
+        tenant_admin/platform_admin/finance, directive §19). Rejects with
+        409 if the verification is already in a terminal status.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [approved, rejected, review_required] }
+                reason: { type: string }
+              required: [status]
+      responses:
+        "200":
+          description: Verification updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Verification"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Verification is already in a terminal status
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/kyc/documents:
+    get:
+      summary: List a player account's documents (compliance/tenant admin)
+      description: Requires verification:read. Tenant-scoped only - see ADR 0029 §4 for why this never exposes a platform-wide Person's documents to an arbitrary tenant.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: player_account_id
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Documents for the named player account, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Document"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/kyc/documents/{id}/review:
+    post:
+      summary: Approve or reject a document
+      description: >
+        Requires verification:review (compliance only). Only status/
+        reviewed_at/reviewed_by/rejection_reason ever change - enforced by
+        a database trigger, not merely this handler. Rejecting without a
+        reason returns 400.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string, enum: [approved, rejected] }
+                reason: { type: string }
+              required: [status]
+      responses:
+        "200":
+          description: Document updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Document"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/kyc/documents/{id}/content:
+    get:
+      summary: Download a document's content (compliance/tenant admin)
+      description: Requires verification:read. Every access is audited (kyc.document_accessed).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Raw document bytes
+          content:
+            application/octet-stream: {}
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/webhooks/kyc/{tenantSlug}/{providerID}:
+    post:
+      summary: KYC provider callback (verification status update)
+      description: >
+        No bearer-token middleware - a provider is not an authenticated
+        platform principal. Tenant is resolved from the URL slug only,
+        never trusted from the payload. Payload signature verification is
+        the adapter's own responsibility (MockKYCProvider: HMAC, a
+        platform-invented format never modeled on any real vendor).
+        Idempotent - a callback for an already-terminal verification is a
+        no-op. A provider error never corrupts stored verification state.
+      parameters:
+        - name: tenantSlug
+          in: path
+          required: true
+          schema: { type: string }
+        - name: providerID
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        "204":
+          description: Callback processed
+        "400":
+          description: Invalid signature or payload
+        "404":
+          description: Unknown tenant or provider
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -774,6 +1222,50 @@ components:
           enum: [success, failure, denied]
         created_at: { type: string, format: date-time }
       required: [id, actor_type, action, outcome, created_at]
+    Verification:
+      type: object
+      description: >
+        A platform-owned KYC/identity-verification attempt
+        (internal/kyc.Verification / kyc_verifications). Never collapsed
+        into PlayerAccount.status - see docs/decisions/0028.
+      properties:
+        id: { type: string, format: uuid }
+        player_account_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [unverified, pending, review_required, approved, rejected, expired]
+        provider_id: { type: string, example: mock }
+        provider_reference: { type: string }
+        reason: { type: string }
+        reviewed_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+      required: [id, player_account_id, status, provider_id, created_at]
+    Document:
+      type: object
+      description: >
+        A versioned, immutable-after-upload identity/verification
+        document (internal/kyc.Document / kyc_documents). A reupload of
+        the same document_type is a NEW row with version+1, never an
+        overwrite - see docs/decisions/0029.
+      properties:
+        id: { type: string, format: uuid }
+        player_account_id: { type: string, format: uuid }
+        verification_id: { type: string, format: uuid }
+        document_type:
+          type: string
+          enum: [passport, national_id, drivers_license, proof_of_address, selfie, other]
+        issuing_country: { type: string }
+        version: { type: integer }
+        status:
+          type: string
+          enum: [pending_review, approved, rejected]
+        content_type: { type: string }
+        size_bytes: { type: integer, format: int64 }
+        original_filename: { type: string }
+        rejection_reason: { type: string }
+        uploaded_at: { type: string, format: date-time }
+        reviewed_at: { type: string, format: date-time }
+      required: [id, player_account_id, verification_id, document_type, version, status, content_type, size_bytes, original_filename, uploaded_at]
     Error:
       type: object
       description: Platform-wide error envelope (internal/apierror.Error).

@@ -137,3 +137,35 @@ introducing a second identity model:
   attaches to `Person`, never to `PlayerAccount` - Stage 4E does not
   change this, it makes the platform-wide `Person` actually reachable
   from a second brand's registration for the first time.
+
+## Implementation status (Stage 4F) — player verification, documents, email/password auth
+
+Stage 4F (`docs/decisions/0028`/`0029`/`0030`) adds a platform-owned KYC/
+identity-verification and document-management subsystem, and email-
+verification/password-reset authentication, without touching the Person/
+PlayerAccount model above:
+
+- `internal/kyc.Verification`/`Document` are entirely new, TENANT-owned
+  concepts (`kyc_verifications`/`kyc_documents`, migration 0040) hanging
+  off the existing model via `player_account_id`/`person_id` foreign
+  keys - `person_id` is carried only as a denormalized anchor, never an
+  RLS or enforcement key this stage (ADR 0028 §3). `kyc_verifications.
+  status` never touches `PlayerAccountStatus`, and vice versa.
+- **Still `NOT IMPLEMENTED`**: this stage does NOT supply `VerifiedAttributes`
+  to `internal/identityresolution.PersonResolver` from KYC evidence - the
+  connection point ADR 0027 left open remains open (ADR 0028 §7). A real
+  KYC verification's approved evidence is a natural future source for
+  `PersonResolver`, but wiring it requires the same care ADR 0027 already
+  documented: never heuristic matching, never automatic Person merging.
+  Cross-brand real-player protection (Stage 4E) therefore remains exactly
+  as inactive for a real player as it was before this stage.
+- `player_accounts.verified_at` (Stage 2's own reserved hook) is
+  repurposed for EMAIL verification specifically
+  (`internal/httpserver/credential_handlers.go`), entirely separate from
+  KYC identity verification - see ADR 0030 §7 for the full rationale,
+  including the dormant `PlayerStatusPendingVerification` gap it closes
+  as a side effect.
+- `internal/kyc.KYCProvider`/`Orchestrator`/`MockKYCProvider` mirror
+  `CasinoProvider`/`PaymentProvider`'s exact provider-abstraction shape
+  (ADR 0028 §4/§6) - `NOT IMPLEMENTED` for any real vendor, per this
+  stage's own explicit non-goal (directive §1).

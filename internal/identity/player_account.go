@@ -227,6 +227,39 @@ func SetPlayerAccountStatus(ctx context.Context, tx pgx.Tx, id uuid.UUID, status
 	return nil
 }
 
+// SetPlayerAccountPasswordHash overwrites a player account's password
+// hash - the mutation behind Stage 4F's password-reset-confirm flow.
+// Deliberately narrow (password hash only), mirroring
+// SetPlayerAccountStatus's own "one field, one purpose" shape.
+func SetPlayerAccountPasswordHash(ctx context.Context, tx pgx.Tx, id uuid.UUID, passwordHash string) error {
+	tag, err := tx.Exec(ctx, `UPDATE player_accounts SET password_hash = $1, updated_at = now() WHERE id = $2`, passwordHash, id)
+	if err != nil {
+		return fmt.Errorf("identity: set player account password hash: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetPlayerAccountEmailVerified stamps verified_at (Stage 4F: this
+// specific brand relationship's email was confirmed - see migration
+// 0040's column comment for why this is distinct from platform-wide KYC
+// identity verification, which never touches player_accounts at all).
+// Idempotent - confirming an already-verified email simply re-stamps the
+// time rather than erroring, since there is no harm in it and no
+// meaningful "already done" error a caller needs to react to differently.
+func SetPlayerAccountEmailVerified(ctx context.Context, tx pgx.Tx, id uuid.UUID) error {
+	tag, err := tx.Exec(ctx, `UPDATE player_accounts SET verified_at = now(), updated_at = now() WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("identity: set player account email verified: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // SetPlayerAccountStatusIfCurrent atomically transitions id from fromStatus
 // to toStatus - the WHERE clause's own status predicate is what makes this
 // safe against a concurrent status change, unlike a plain "read current

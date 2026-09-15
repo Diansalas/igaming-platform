@@ -111,6 +111,30 @@ const (
 	// PermTenantWrite, and NOT granted to RoleTenantAdmin or
 	// RolePlatformAdmin. Granted only to RoleCompliance.
 	PermIdentityReviewManage Permission = "identity_review:manage"
+
+	// PermVerificationRead gates STAFF read access to another player's
+	// KYC verification/document metadata (Stage 4F) - a player always
+	// sees their OWN via the self-service endpoints regardless of this
+	// permission, exactly like PermRGRestrictionRead's own precedent.
+	// Granted to RoleCompliance and RoleTenantAdmin (an operational admin
+	// reasonably needs to see a player's verification state), never
+	// RolePlatformAdmin (no path to resolve a tenant-scoped
+	// player_account at all - identical reasoning to every other
+	// platform-admin exclusion in this file) and never RoleFinance
+	// (directive §19's explicit "do not grant sensitive verification
+	// access to Finance... unless explicitly justified" - no
+	// justification exists).
+	PermVerificationRead Permission = "verification:read"
+	// PermVerificationReview gates APPROVING/REJECTING a verification or
+	// document (Stage 4F) - deliberately its own permission, never
+	// bundled into PermVerificationRead/PermPlayerSuspend/PermStaffManage,
+	// mirroring PermRGRestrictionWrite/PermIdentityReviewManage's
+	// identical separation-of-duties precedent exactly. Granted ONLY to
+	// RoleCompliance - not RoleTenantAdmin (read-only visibility is
+	// reasonable for an operational admin; approving/rejecting identity
+	// evidence is a compliance-specific judgment call), not RoleFinance,
+	// not RolePlatformAdmin.
+	PermVerificationReview Permission = "verification:review"
 )
 
 // rolePermissions is a static, in-code role -> permission-set mapping.
@@ -168,6 +192,10 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// Read-only visibility into restrictions affecting their own tenant's
 		// players remains reasonable for an operational admin role.
 		PermRGRestrictionRead,
+		// Stage 4F: read-only verification/document visibility, same
+		// reasoning as PermRGRestrictionRead immediately above - never
+		// PermVerificationReview.
+		PermVerificationRead,
 	),
 	RoleSupport: permSet(
 		PermPlayerRead,
@@ -184,6 +212,9 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// permission's own doc comment for why it mirrors
 		// PermRGRestrictionWrite's separation-of-duties treatment exactly.
 		PermIdentityReviewManage,
+		// Stage 4F: the sole grantee of PermVerificationReview, plus
+		// read visibility - see both permissions' own doc comments.
+		PermVerificationRead, PermVerificationReview,
 	),
 	// finance is Stage 3B's own role, dedicated solely to withdrawal
 	// governance - it holds all four withdrawal permissions and nothing

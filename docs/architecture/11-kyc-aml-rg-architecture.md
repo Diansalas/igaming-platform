@@ -94,3 +94,45 @@ enforcement, the concurrency guarantees, and the RLS model) and
   as a feature but are not actually enforced/logged) is now closed for
   self-exclusion specifically - casino game launch and casino bet are both
   gated, and every denial is audited (ADR 0026 §11).
+
+## Implementation status (Stage 4F) — KYC provider abstraction and document management foundation
+
+Stage 4F (`docs/decisions/0028`/`0029`) builds the platform-owned
+verification/document-management SUBSYSTEM this document's "KYC
+tiering, AML screening/monitoring/SAR export" bullet above still
+correctly marks `NOT IMPLEMENTED` for any real vendor - it does not
+contradict that bullet, it builds the boundary a real vendor slots into:
+
+- **Platform-owned verification state model**: `IMPLEMENTED` as a
+  foundation. `kyc_verifications`/`kyc_documents` (migration 0040) - a
+  6-state verification state machine, versioned/immutable document
+  evidence, entirely separate from `PlayerAccountStatus` and from RG's
+  `player_restrictions`. See ADR 0028 for the full state model and which
+  facts are platform-wide vs. tenant-specific.
+- **KYC provider abstraction**: `IMPLEMENTED` as a foundation,
+  `MockKYCProvider` only. `internal/kyc.KYCProvider` mirrors
+  `CasinoProvider`/`PaymentProvider`'s exact shape - a real vendor
+  (Onfido or otherwise) slots in as an adapter without changing
+  `Person`/`PlayerAccount`/`kyc.Verification`/`kyc.Document`/`internal/
+  rg`/`internal/wallet`/`internal/casino` (ADR 0028 §6). No vendor is
+  selected or integrated this stage (directive §1's explicit non-goal).
+- **Document management**: `IMPLEMENTED` as a foundation. Upload
+  validation (size/content-sniffing/extension-consistency/filename
+  sanitization), a mock malware-scanning boundary with a documented
+  fail-closed contract, and a `DocumentStorageProvider` abstraction
+  (`MockDocumentStorageProvider` only - in-memory, dev/test-only). See
+  ADR 0029 for the full security/access-control model and the explicit
+  list of future production requirements (encryption at rest, real
+  malware scanning, signed access URLs, retention/legal-hold) not built
+  this stage.
+- **Relationship to self-exclusion cross-brand protection (above)**:
+  UNCHANGED - this stage does NOT wire approved KYC evidence into
+  `internal/identityresolution.PersonResolver`. That connection remains
+  an explicit OPEN DECISION (ADR 0028 §7); a real KYC vendor integration
+  is still the prerequisite for closing the cross-brand evasion gap this
+  document and ADR 0026/0027 both already documented.
+- **Email verification / password reset**: `IMPLEMENTED`. A separate
+  authentication concern from KYC identity verification - see ADR 0030.
+  Never mixed with KYC status, RG restriction, or account status (this
+  document's own "do not mix these into one boolean" precedent, applied
+  identically to email verification).

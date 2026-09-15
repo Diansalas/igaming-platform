@@ -1,0 +1,700 @@
+//go:build integration
+
+// Stage 4F HTTP-layer tests: email verification, password reset, KYC
+// verification/document lifecycle, staff review authorization, provider
+// callback authentication, tenant isolation. Follows casino_flow_
+// integration_test.go/rg_flow_integration_test.go's own conventions
+// exactly (fixtures via internal packages, bearer tokens minted through
+// the real HTTP register/login flow).
+package httpserver
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/email"
+	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/identityresolution"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
+)
+
+func newKYCTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer) (*httptest.Server, *kyc.MockKYCProvider, *email.MockProvider) {
+	t.Helper()
+	mockProvider := kyc.NewMockKYCProvider("test-webhook-secret")
+	mockEmail := email.NewMockProvider()
+	srv := httptest.NewServer(New(Deps{
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:              pool,
+		AuthIssuer:      issuer,
+		ServiceName:     "platform-api-test",
+		AccessTokenTTL:  5 * time.Minute,
+		RefreshTokenTTL: time.Hour,
+		PersonResolver:  identityresolution.NewMockPersonResolver(),
+		KYCOrchestrator: kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mockProvider}),
+		DocumentStorage: kyc.NewMockDocumentStorageProvider(),
+		MalwareScanner:  kyc.NewMockMalwareScanner(),
+		EmailProvider:   mockEmail,
+	}))
+	t.Cleanup(srv.Close)
+	return srv, mockProvider, mockEmail
+}
+
+// tinyPNG is a minimal valid 1x1 PNG - real PNG magic bytes so
+// http.DetectContentType sniffs it as image/png, exactly like a real
+// uploaded photo would be.
+var tinyPNG = []byte{
+	0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+	0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+	0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+	0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+	0x42, 0x60, 0x82,
+}
+
+func postMultipartDocument(t *testing.T, srv *httptest.Server, bearerToken string, verificationID, documentType, filename string, content []byte) *http.Response {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("verification_id", verificationID)
+	_ = mw.WriteField("document_type", documentType)
+	fw, err := mw.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatalf("failed to create form file: %v", err)
+	}
+	if _, err := fw.Write(content); err != nil {
+		t.Fatalf("failed to write form file: %v", err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("failed to close multipart writer: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/me/kyc/documents", &buf)
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	return resp
+}
+
+// --- 1. Email verification: request -> confirm -> account becomes active ---
+
+func TestEmailVerification_RequestConfirmActivatesAccount(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, mockEmail := newKYCTestServer(t, pool, issuer)
+	brand := mustCreateBrand(t, pool, mustCreateTenant(t, pool))
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	resp := postJSON(t, srv, "/v1/me/email-verification/request", player.Tokens.AccessToken, map[string]any{})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 requesting email verification, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	sent := mockEmail.Sent()
+	if len(sent) != 1 || sent[0].To != player.Email {
+		t.Fatalf("expected exactly one email sent to %s, got %+v", player.Email, sent)
+	}
+	token := extractToken(t, sent[0].Body)
+
+	resp = postJSON(t, srv, "/v1/auth/email-verification/confirm", "", map[string]any{"token": token})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 confirming email verification, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = getJSON(t, srv, "/v1/me", player.Tokens.AccessToken)
+	defer resp.Body.Close()
+	var me map[string]any
+	decodeBody(t, resp, &me)
+	if me["status"] != "active" {
+		t.Fatalf("expected status active after email verification, got %+v", me["status"])
+	}
+}
+
+// --- 2. Confirming twice fails the second time (one-time use) ---
+
+func TestEmailVerification_TokenIsOneTimeUse(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, mockEmail := newKYCTestServer(t, pool, issuer)
+	brand := mustCreateBrand(t, pool, mustCreateTenant(t, pool))
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	postJSON(t, srv, "/v1/me/email-verification/request", player.Tokens.AccessToken, map[string]any{}).Body.Close()
+	token := extractToken(t, mockEmail.Sent()[0].Body)
+
+	first := postJSON(t, srv, "/v1/auth/email-verification/confirm", "", map[string]any{"token": token})
+	if first.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected first confirm to succeed, got %d", first.StatusCode)
+	}
+	first.Body.Close()
+
+	second := postJSON(t, srv, "/v1/auth/email-verification/confirm", "", map[string]any{"token": token})
+	defer second.Body.Close()
+	if second.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 reusing an already-consumed token, got %d", second.StatusCode)
+	}
+}
+
+// --- 3. An expired token is rejected (forced directly at the DB layer,
+// since the real TTL is 24h) ---
+
+func TestEmailVerification_ExpiredTokenRejected(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, mockEmail := newKYCTestServer(t, pool, issuer)
+	brand := mustCreateBrand(t, pool, mustCreateTenant(t, pool))
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	postJSON(t, srv, "/v1/me/email-verification/request", player.Tokens.AccessToken, map[string]any{}).Body.Close()
+	token := extractToken(t, mockEmail.Sent()[0].Body)
+
+	err := pool.WithTenant(context.Background(), brand.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE player_credential_tokens SET expires_at = now() - interval '1 hour'`)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("failed to force token expiry: %v", err)
+	}
+
+	resp := postJSON(t, srv, "/v1/auth/email-verification/confirm", "", map[string]any{"token": token})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an expired token, got %d", resp.StatusCode)
+	}
+}
+
+// --- 4. Rate limiting: resending beyond the limit is silently a no-op
+// (never a distinguishable response - directive's anti-enumeration
+// requirement) ---
+
+func TestEmailVerification_ResendIsRateLimited(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, mockEmail := newKYCTestServer(t, pool, issuer)
+	brand := mustCreateBrand(t, pool, mustCreateTenant(t, pool))
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	for i := 0; i < credentialTokenRateMaxCount+2; i++ {
+		resp := postJSON(t, srv, "/v1/me/email-verification/request", player.Tokens.AccessToken, map[string]any{})
+		if resp.StatusCode != http.StatusNoContent {
+			t.Fatalf("iteration %d: expected 204 (rate limiting is silent), got %d", i, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+	if len(mockEmail.Sent()) != credentialTokenRateMaxCount {
+		t.Fatalf("expected exactly %d emails actually sent, got %d", credentialTokenRateMaxCount, len(mockEmail.Sent()))
+	}
+}
+
+// --- 5. Password reset: request -> confirm -> new password works, old
+// password rejected, all sessions revoked ---
+
+func TestPasswordReset_RequestConfirmChangesPasswordAndRevokesSessions(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, mockEmail := newKYCTestServer(t, pool, issuer)
+	brand := mustCreateBrand(t, pool, mustCreateTenant(t, pool))
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	resp := postJSON(t, srv, "/v1/auth/password-reset/request", "", map[string]any{"brand_slug": brand.Slug, "email": player.Email})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 requesting password reset, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	token := extractToken(t, mockEmail.Sent()[0].Body)
+	const newPassword = "a-brand-new-password-1"
+	resp = postJSON(t, srv, "/v1/auth/password-reset/confirm", "", map[string]any{"token": token, "new_password": newPassword})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 confirming password reset, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// The OLD access token's underlying session is now revoked - refresh
+	// must fail even though the access token itself hasn't expired yet.
+	refreshResp := postJSON(t, srv, "/v1/auth/refresh", "", map[string]any{"refresh_token": player.Tokens.RefreshToken})
+	defer refreshResp.Body.Close()
+	if refreshResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 refreshing a session revoked by password reset, got %d", refreshResp.StatusCode)
+	}
+
+	// Logging in with the NEW password succeeds.
+	loginResp := postJSON(t, srv, "/v1/auth/login", "", map[string]any{"brand_slug": brand.Slug, "email": player.Email, "password": newPassword})
+	defer loginResp.Body.Close()
+	if loginResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 logging in with the new password, got %d", loginResp.StatusCode)
+	}
+}
+
+// --- 6. Request against a non-existent email returns the SAME response
+// as a real one (anti-enumeration) ---
+
+func TestPasswordReset_UnknownEmailGetsIdenticalResponse(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, mockEmail := newKYCTestServer(t, pool, issuer)
+	brand := mustCreateBrand(t, pool, mustCreateTenant(t, pool))
+
+	resp := postJSON(t, srv, "/v1/auth/password-reset/request", "", map[string]any{"brand_slug": brand.Slug, "email": "no-such-player@example.com"})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 for an unknown email, got %d", resp.StatusCode)
+	}
+	if len(mockEmail.Sent()) != 0 {
+		t.Fatalf("expected no email sent for an unknown email, got %+v", mockEmail.Sent())
+	}
+}
+
+// --- 7. Reset token replay after use fails ---
+
+func TestPasswordReset_TokenIsOneTimeUse(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, mockEmail := newKYCTestServer(t, pool, issuer)
+	brand := mustCreateBrand(t, pool, mustCreateTenant(t, pool))
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	postJSON(t, srv, "/v1/auth/password-reset/request", "", map[string]any{"brand_slug": brand.Slug, "email": player.Email}).Body.Close()
+	token := extractToken(t, mockEmail.Sent()[0].Body)
+
+	first := postJSON(t, srv, "/v1/auth/password-reset/confirm", "", map[string]any{"token": token, "new_password": "first-new-password-1"})
+	if first.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected first confirm to succeed, got %d", first.StatusCode)
+	}
+	first.Body.Close()
+
+	second := postJSON(t, srv, "/v1/auth/password-reset/confirm", "", map[string]any{"token": token, "new_password": "second-new-password-1"})
+	defer second.Body.Close()
+	if second.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 reusing an already-consumed reset token, got %d", second.StatusCode)
+	}
+}
+
+// --- 7a. Concurrent double-confirm of the SAME one-time token: the
+// atomic conditional-UPDATE consumption (ValidateAndConsumeCredentialToken
+// - WHERE consumed_at IS NULL AND expires_at > now(), checked via
+// RowsAffected) must let exactly ONE of two simultaneous requests
+// succeed, never both - a P0 finding from adversarial review, previously
+// exercised only sequentially. Uses password reset since its side effect
+// (password change + full session revocation) is unambiguous to verify
+// exactly-once. ---
+
+func TestPasswordReset_ConcurrentDoubleConfirmAppliesExactlyOnce(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, mockEmail := newKYCTestServer(t, pool, issuer)
+	brand := mustCreateBrand(t, pool, mustCreateTenant(t, pool))
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	postJSON(t, srv, "/v1/auth/password-reset/request", "", map[string]any{"brand_slug": brand.Slug, "email": player.Email}).Body.Close()
+	token := extractToken(t, mockEmail.Sent()[0].Body)
+
+	const concurrency = 8
+	statusCodes := make([]int, concurrency)
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		go func(i int) {
+			defer wg.Done()
+			resp := postJSON(t, srv, "/v1/auth/password-reset/confirm", "", map[string]any{
+				"token": token, "new_password": fmt.Sprintf("racer-new-password-%d", i),
+			})
+			statusCodes[i] = resp.StatusCode
+			resp.Body.Close()
+		}(i)
+	}
+	wg.Wait()
+
+	successes := 0
+	for _, code := range statusCodes {
+		if code == http.StatusNoContent {
+			successes++
+		} else if code != http.StatusBadRequest {
+			t.Fatalf("expected every racing confirm to return 204 or 400, got %d", code)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("expected exactly 1 of %d concurrent confirms to succeed, got %d", concurrency, successes)
+	}
+
+	// The token itself must show exactly one consumption, never two
+	// concurrent UPDATEs both believing they won.
+	var consumedCount int
+	err := pool.WithTenant(context.Background(), brand.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM player_credential_tokens WHERE token_hash IS NOT NULL AND consumed_at IS NOT NULL AND player_account_id = $1`,
+			player.ID).Scan(&consumedCount)
+	})
+	if err != nil {
+		t.Fatalf("query consumed tokens: %v", err)
+	}
+	if consumedCount != 1 {
+		t.Fatalf("expected exactly 1 consumed credential token row, got %d", consumedCount)
+	}
+}
+
+// --- 8. KYC verification + document lifecycle: create verification,
+// upload a document, list, download own content ---
+
+func TestKYC_VerificationAndDocumentLifecycle(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	brand := mustCreateBrand(t, pool, mustCreateTenant(t, pool))
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	resp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating a verification, got %d", resp.StatusCode)
+	}
+	var verification map[string]any
+	decodeBody(t, resp, &verification)
+	verificationID := verification["id"].(string)
+
+	uploadResp := postMultipartDocument(t, srv, player.Tokens.AccessToken, verificationID, "passport", "passport.png", tinyPNG)
+	if uploadResp.StatusCode != http.StatusCreated {
+		body := make([]byte, 2048)
+		n, _ := uploadResp.Body.Read(body)
+		t.Fatalf("expected 201 uploading a document, got %d: %s", uploadResp.StatusCode, body[:n])
+	}
+	var doc map[string]any
+	decodeBody(t, uploadResp, &doc)
+	if doc["status"] != "pending_review" || doc["content_type"] != "image/png" || doc["version"].(float64) != 1 {
+		t.Fatalf("unexpected document response: %+v", doc)
+	}
+	docID := doc["id"].(string)
+
+	listResp := getJSON(t, srv, "/v1/me/kyc/documents", player.Tokens.AccessToken)
+	defer listResp.Body.Close()
+	var docs []map[string]any
+	decodeBody(t, listResp, &docs)
+	if len(docs) != 1 {
+		t.Fatalf("expected exactly one document, got %+v", docs)
+	}
+
+	contentResp := getJSON(t, srv, "/v1/me/kyc/documents/"+docID+"/content", player.Tokens.AccessToken)
+	defer contentResp.Body.Close()
+	if contentResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 downloading own document content, got %d", contentResp.StatusCode)
+	}
+	if ct := contentResp.Header.Get("Content-Type"); ct != "image/png" {
+		t.Errorf("expected Content-Type image/png, got %q", ct)
+	}
+}
+
+// --- 9. A reupload of the same document_type creates a NEW version, not
+// an overwrite ---
+
+func TestKYC_ReuploadCreatesNewVersion(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	brand := mustCreateBrand(t, pool, mustCreateTenant(t, pool))
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	verResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
+	var verification map[string]any
+	decodeBody(t, verResp, &verification)
+	verificationID := verification["id"].(string)
+
+	first := postMultipartDocument(t, srv, player.Tokens.AccessToken, verificationID, "passport", "p1.png", tinyPNG)
+	var firstDoc map[string]any
+	decodeBody(t, first, &firstDoc)
+
+	second := postMultipartDocument(t, srv, player.Tokens.AccessToken, verificationID, "passport", "p2.png", tinyPNG)
+	defer second.Body.Close()
+	var secondDoc map[string]any
+	decodeBody(t, second, &secondDoc)
+
+	if firstDoc["version"].(float64) != 1 || secondDoc["version"].(float64) != 2 {
+		t.Fatalf("expected versions 1 then 2, got %v then %v", firstDoc["version"], secondDoc["version"])
+	}
+	if firstDoc["id"] == secondDoc["id"] {
+		t.Fatal("expected the reupload to be a NEW row, not an edit of the first")
+	}
+
+	listResp := getJSON(t, srv, "/v1/me/kyc/documents", player.Tokens.AccessToken)
+	defer listResp.Body.Close()
+	var docs []map[string]any
+	decodeBody(t, listResp, &docs)
+	if len(docs) != 2 {
+		t.Fatalf("expected BOTH historical versions to remain listed, got %+v", docs)
+	}
+}
+
+// --- 10. Rejected uploads: wrong extension for sniffed content, and
+// malware-scanner detection ---
+
+func TestKYC_UploadRejectsMismatchedExtensionAndMalware(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	brand := mustCreateBrand(t, pool, mustCreateTenant(t, pool))
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	verResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
+	var verification map[string]any
+	decodeBody(t, verResp, &verification)
+	verificationID := verification["id"].(string)
+
+	mismatched := postMultipartDocument(t, srv, player.Tokens.AccessToken, verificationID, "passport", "passport.pdf", tinyPNG)
+	defer mismatched.Body.Close()
+	if mismatched.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for a .pdf filename containing PNG bytes, got %d", mismatched.StatusCode)
+	}
+
+	malwareContent := append([]byte("\x89PNG\r\n\x1a\n"), []byte(`X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*`)...)
+	malwareContent = append(malwareContent, tinyPNG...)
+	infected := postMultipartDocument(t, srv, player.Tokens.AccessToken, verificationID, "passport", "passport.png", malwareContent)
+	defer infected.Body.Close()
+	if infected.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for malware-scanner-flagged content, got %d", infected.StatusCode)
+	}
+}
+
+// --- 11. A player cannot access another player's document or verification ---
+
+func TestKYC_PlayerCannotAccessAnotherPlayersDocument(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	brand := mustCreateBrand(t, pool, mustCreateTenant(t, pool))
+	playerA := mustRegisterPlayer(t, srv, brand.Slug)
+	playerB := mustRegisterPlayer(t, srv, brand.Slug)
+
+	verResp := postJSON(t, srv, "/v1/me/kyc/verifications", playerA.Tokens.AccessToken, map[string]any{})
+	var verification map[string]any
+	decodeBody(t, verResp, &verification)
+	verificationID := verification["id"].(string)
+
+	uploadResp := postMultipartDocument(t, srv, playerA.Tokens.AccessToken, verificationID, "passport", "p.png", tinyPNG)
+	var doc map[string]any
+	decodeBody(t, uploadResp, &doc)
+	docID := doc["id"].(string)
+
+	// Player B attempts to download Player A's document content.
+	resp := getJSON(t, srv, "/v1/me/kyc/documents/"+docID+"/content", playerB.Tokens.AccessToken)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for cross-player document access, got %d", resp.StatusCode)
+	}
+
+	// Player B attempts to upload a document against Player A's verification.
+	crossUpload := postMultipartDocument(t, srv, playerB.Tokens.AccessToken, verificationID, "selfie", "s.png", tinyPNG)
+	defer crossUpload.Body.Close()
+	if crossUpload.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 uploading against another player's verification, got %d", crossUpload.StatusCode)
+	}
+}
+
+// --- 12. Compliance can review; tenant_admin can read but not review;
+// finance/platform_admin/player are denied entirely ---
+
+func TestKYC_ReviewAuthorization(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	verResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
+	var verification map[string]any
+	decodeBody(t, verResp, &verification)
+	verificationID := verification["id"].(string)
+
+	tenantAdmin := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleTenantAdmin, "ta-kyc-pw-1")
+	tenantAdminTokens := mustLoginStaff(t, srv, tenant.Slug, tenantAdmin.Email, "ta-kyc-pw-1")
+	readResp := getJSON(t, srv, "/v1/admin/kyc/verifications?player_account_id="+player.ID.String(), tenantAdminTokens.AccessToken)
+	if readResp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 for tenant_admin reading verifications, got %d", readResp.StatusCode)
+	}
+	readResp.Body.Close()
+	reviewByAdminResp := postJSON(t, srv, "/v1/admin/kyc/verifications/"+verificationID+"/review", tenantAdminTokens.AccessToken, map[string]any{"status": "approved"})
+	if reviewByAdminResp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 for tenant_admin reviewing a verification, got %d", reviewByAdminResp.StatusCode)
+	}
+	reviewByAdminResp.Body.Close()
+
+	finance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleFinance, "finance-kyc-pw-1")
+	financeTokens := mustLoginStaff(t, srv, tenant.Slug, finance.Email, "finance-kyc-pw-1")
+	financeResp := getJSON(t, srv, "/v1/admin/kyc/verifications?player_account_id="+player.ID.String(), financeTokens.AccessToken)
+	defer financeResp.Body.Close()
+	if financeResp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 for finance reading verifications, got %d", financeResp.StatusCode)
+	}
+
+	playerAttempt := postJSON(t, srv, "/v1/admin/kyc/verifications/"+verificationID+"/review", player.Tokens.AccessToken, map[string]any{"status": "approved"})
+	defer playerAttempt.Body.Close()
+	if playerAttempt.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 for a player token reviewing a verification, got %d", playerAttempt.StatusCode)
+	}
+
+	compliance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleCompliance, "compliance-kyc-pw-1")
+	complianceTokens := mustLoginStaff(t, srv, tenant.Slug, compliance.Email, "compliance-kyc-pw-1")
+	reviewResp := postJSON(t, srv, "/v1/admin/kyc/verifications/"+verificationID+"/review", complianceTokens.AccessToken, map[string]any{"status": "approved", "reason": "docs_verified"})
+	defer reviewResp.Body.Close()
+	if reviewResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for compliance reviewing a verification, got %d", reviewResp.StatusCode)
+	}
+	var reviewed map[string]any
+	decodeBody(t, reviewResp, &reviewed)
+	if reviewed["status"] != "approved" {
+		t.Fatalf("expected status approved, got %+v", reviewed["status"])
+	}
+}
+
+// --- 13. Cross-tenant: a different tenant's compliance staff cannot
+// read/review a verification belonging to another tenant's player ---
+
+func TestKYC_CrossTenantAccessDenied(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	tenantA := mustCreateTenant(t, pool)
+	brandA := mustCreateBrand(t, pool, tenantA)
+	playerA := mustRegisterPlayer(t, srv, brandA.Slug)
+
+	verResp := postJSON(t, srv, "/v1/me/kyc/verifications", playerA.Tokens.AccessToken, map[string]any{})
+	var verification map[string]any
+	decodeBody(t, verResp, &verification)
+	verificationID := verification["id"].(string)
+
+	tenantB := mustCreateTenant(t, pool)
+	complianceB := mustCreateStaff(t, pool, tenantB.ID, identity.StaffRoleCompliance, "compliance-kyc-crosstenant-pw-1")
+	complianceBTokens := mustLoginStaff(t, srv, tenantB.Slug, complianceB.Email, "compliance-kyc-crosstenant-pw-1")
+
+	// Tenant B's compliance staff cannot see tenant A's player's
+	// verification at all (RLS-scoped list returns empty, not an error).
+	listResp := getJSON(t, srv, "/v1/admin/kyc/verifications?player_account_id="+playerA.ID.String(), complianceBTokens.AccessToken)
+	defer listResp.Body.Close()
+	var list []map[string]any
+	decodeBody(t, listResp, &list)
+	if len(list) != 0 {
+		t.Fatalf("expected tenant B to see zero verifications for tenant A's player, got %+v", list)
+	}
+
+	reviewResp := postJSON(t, srv, "/v1/admin/kyc/verifications/"+verificationID+"/review", complianceBTokens.AccessToken, map[string]any{"status": "approved"})
+	defer reviewResp.Body.Close()
+	if reviewResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for tenant B reviewing tenant A's verification, got %d", reviewResp.StatusCode)
+	}
+}
+
+// --- 14. Provider callback: valid signature applies the outcome,
+// invalid signature is rejected, unknown provider_reference 404s ---
+
+func TestKYC_WebhookCallbackAuthentication(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, mockProvider, _ := newKYCTestServer(t, pool, issuer)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	verResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
+	var verification map[string]any
+	decodeBody(t, verResp, &verification)
+	providerReference := verification["provider_reference"].(string)
+
+	body, sig := mockProvider.MockCallbackPayload(providerReference, kyc.ProviderApproved, "auto_approved")
+	signed := kyc.MockSignedCallbackBody(body, sig)
+	resp := rawPostJSON(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", signed)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for a validly-signed callback, got %d", resp.StatusCode)
+	}
+	var result map[string]any
+	decodeBody(t, resp, &result)
+	if result["status"] != "approved" {
+		t.Fatalf("expected status approved after callback, got %+v", result["status"])
+	}
+
+	tamperedBody, _ := mockProvider.MockCallbackPayload(providerReference, kyc.ProviderRejected, "tampered")
+	tamperedSigned := kyc.MockSignedCallbackBody(tamperedBody, "0000000000000000000000000000000000000000000000000000000000000000")
+	badSigResp := rawPostJSON(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", tamperedSigned)
+	defer badSigResp.Body.Close()
+	if badSigResp.StatusCode == http.StatusOK {
+		t.Fatal("expected an invalid signature to be rejected, got 200")
+	}
+
+	// Idempotent: a repeat of the ORIGINAL, validly-signed callback for an
+	// already-terminal (approved) verification is a no-op, not an error,
+	// and never flips it to rejected.
+	repeat := rawPostJSON(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", signed)
+	defer repeat.Body.Close()
+	if repeat.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 replaying an already-applied callback, got %d", repeat.StatusCode)
+	}
+	var repeatResult map[string]any
+	decodeBody(t, repeat, &repeatResult)
+	if repeatResult["status"] != "approved" {
+		t.Fatalf("expected status to remain approved after a redelivered callback, got %+v", repeatResult["status"])
+	}
+
+	unknownRefBody, unknownSig := mockProvider.MockCallbackPayload("no-such-reference", kyc.ProviderApproved, "x")
+	unknownSigned := kyc.MockSignedCallbackBody(unknownRefBody, unknownSig)
+	unknownResp := rawPostJSON(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", unknownSigned)
+	defer unknownResp.Body.Close()
+	if unknownResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for an unknown provider_reference, got %d", unknownResp.StatusCode)
+	}
+}
+
+// --- 15. RLS adversarial: direct SQL cross-tenant access to
+// kyc_verifications/kyc_documents/player_credential_tokens is denied ---
+
+func TestKYC_RLSAdversarial_CrossTenantDirectSQLDenied(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	tenantA := mustCreateTenant(t, pool)
+	brandA := mustCreateBrand(t, pool, tenantA)
+	playerA := mustRegisterPlayer(t, srv, brandA.Slug)
+
+	verResp := postJSON(t, srv, "/v1/me/kyc/verifications", playerA.Tokens.AccessToken, map[string]any{})
+	var verification map[string]any
+	decodeBody(t, verResp, &verification)
+	verificationID := verification["id"].(string)
+
+	tenantB := mustCreateTenant(t, pool)
+
+	var count int
+	err := pool.WithTenant(context.Background(), tenantB.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM kyc_verifications WHERE id = $1`, verificationID).Scan(&count)
+	})
+	if err != nil {
+		t.Fatalf("unexpected error querying kyc_verifications: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected tenant B to see zero rows for tenant A's verification, got %d", count)
+	}
+
+	err = pool.WithTenant(context.Background(), tenantB.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO kyc_verifications (id, tenant_id, brand_id, player_account_id, person_id, status, provider_id)
+			 VALUES (gen_random_uuid(), $1, $2, $3, $4, 'unverified', 'mock')`,
+			tenantA.ID, brandA.ID, playerA.ID, uuid.New(),
+		)
+		return err
+	})
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+		t.Fatalf("expected a row-level-security violation (42501), got: %v", err)
+	}
+}
+
+// extractToken pulls the raw token out of a mock email body (the mock
+// handlers embed it as "...: <token>" - see credential_handlers.go).
+func extractToken(t *testing.T, body string) string {
+	t.Helper()
+	idx := bytes.LastIndexByte([]byte(body), ' ')
+	if idx == -1 || idx == len(body)-1 {
+		t.Fatalf("failed to extract token from email body: %q", body)
+	}
+	return body[idx+1:]
+}
