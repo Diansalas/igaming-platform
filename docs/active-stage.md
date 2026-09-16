@@ -1,13 +1,16 @@
 # Active Stage
 
-## Stage 4G-FINAL — Architectural Hardening & Final Gate — Complete
+## Stage 4G-FINAL (+ FINANCE-GATE follow-up) — Architectural Hardening & Final Gate — Complete
 
 Status: **Complete, pending human approval to authorize the next stage.**
 Explicitly not a business-functionality stage - the directive's objective
 was to harden Stage 4G (project orchestration governance + the Risk &
 Limits engine) so the platform core is genuinely extensible, governed,
 and safe to build future domains on. No new domain, no new business
-capability.
+capability. A follow-up "Stage 4G-FINAL-FINANCE-GATE" closed the one gap
+left open when this stage originally committed: the independent
+Financial/Ledger specialist review (see the updated specialist-review
+section below) - itself also final-gate-only, no business functionality.
 
 ### Part A — Governance made operational
 
@@ -101,20 +104,24 @@ ADR 0031 §12), and cross-domain boundary verification (I,
 `docs/architecture/02-domain-and-service-boundaries.md`) - all
 documentation, no code change beyond what Parts C/D/F already required.
 
-### Specialist review: 10 of 11 areas completed; Financial/Ledger outstanding
+### Specialist review: 11 of 11 areas now complete
 
 Architecture, Risk, Casino, Responsible Gaming, Security/RBAC (x2),
 PostgreSQL/RLS, API/HTTP, Adversarial Testing, Multi-tenancy,
-Documentation/Governance all completed and reported findings, fixed
-below. **Financial/Ledger did not complete**: the dedicated
-`ledger-finance` review agent stalled for over an hour (after two of its
-own cleanup attempts were correctly denied by the safety classifier) and
-was stopped without producing findings; the Orchestrator performed a
-direct financial-correctness self-review of the `postBet` lock in its
-place (`task-registry.md`'s `IA-4GF-01`) - recorded honestly as
-self-review, not independent sign-off, and carried forward as an
-outstanding item rather than silently closed. Full findings and fixes in
-`docs/progress.md`'s Stage 4G-FINAL entry.
+Documentation/Governance all completed during the original Stage 4G-FINAL
+run. **Financial/Ledger** did not complete in that run (its review agent
+stalled and was stopped without findings; the Orchestrator's own
+self-review at the time was explicitly recorded as not a substitute) but
+was completed via the Stage 4G-FINAL-FINANCE-GATE follow-up: an
+independent `ledger-finance` review of the `postBet` advisory lock and the
+`internal/rg` `clock_timestamp()` fix, answering all 20 required questions
+plus a 14-scenario adversarial-coverage matrix. **Verdict: PASS,
+independent sign-off GRANTED.** No P0/P1 found; 6 P2s and 3 P3s recorded
+as follow-up hardening/observability items (none blocking), none fixed
+this stage per the finance-gate directive's own "no scope expansion"
+instruction. Full findings, the 20 answers, and the coverage matrix are in
+`docs/progress.md`'s Stage 4G-FINAL-FINANCE-GATE entry;
+`task-registry.md`'s `IA-4GF-01`/`IA-4GF-03` rows carry the sign-off.
 
 ### Verification performed
 

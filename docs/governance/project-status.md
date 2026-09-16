@@ -25,11 +25,12 @@ stage detail), and the ADRs cited below.
 | 4E | Person resolution & cross-brand identity foundation | Complete |
 | 4F | Player verification, documents & authentication foundation | Complete |
 | 4G | Orchestration governance + Risk & Limits engine foundation | Complete |
-| 4G-FINAL | Architectural hardening: operational governance, jurisdiction/licensing context, flake root-cause fix (10/11 specialist reviews complete - financial/ledger outstanding, see below) | Complete (this stage) |
+| 4G-FINAL | Architectural hardening: operational governance, jurisdiction/licensing context, flake root-cause fix (11/11 specialist reviews complete - financial/ledger closed via the FINANCE-GATE follow-up below) | Complete |
+| 4G-FINAL-FINANCE-GATE | Independent financial-correctness sign-off on the `postBet` lock + `internal/rg` fix (final-gate-only, no business functionality) | Complete (this stage) |
 
 ## Active stage
 
-Stage 4G-FINAL — see `docs/active-stage.md` for full detail.
+Stage 4G-FINAL-FINANCE-GATE — see `docs/active-stage.md` for full detail.
 
 ## Blocked stages
 
@@ -93,6 +94,13 @@ Stage 4G-FINAL — see `docs/active-stage.md` for full detail.
   full itemized list.
 - Stage 4G-FINAL's own P2s — see `docs/progress.md`'s Stage 4G-FINAL
   entry for the full itemized list.
+- Stage 4G-FINAL-FINANCE-GATE's own P2s/P3s (6 P2s, 3 P3s, none fixed -
+  see the "Resolved via the Stage 4G-FINAL-FINANCE-GATE follow-up"
+  section below and `docs/progress.md`'s Stage 4G-FINAL-FINANCE-GATE
+  entry for the full itemized list) — of particular note before any
+  future stage builds further on `internal/casino`'s bet/win/rollback
+  path: F1 (idempotent bet replay not amount-verified) and F2 (`postWin`
+  missing a replay short-circuit after rollback).
 
 ## Resolved this stage (Stage 4G-FINAL) — for the historical record
 
@@ -172,6 +180,29 @@ Stage 4G-FINAL — see `docs/active-stage.md` for full detail.
   `tenants.licensing_model` always has a real value and both real
   `internal/casino` call sites (`LaunchGame`, `postBet`) resolve and
   supply it unconditionally. See ADR 0031 §10.
+
+## Resolved via the Stage 4G-FINAL-FINANCE-GATE follow-up
+
+- **Financial/Ledger specialist review outstanding** (Stage 4G-FINAL's
+  own disclosed gap - its dedicated review agent stalled and was stopped
+  without findings) — closed: an independent `ledger-finance` review of
+  the `postBet` advisory lock and the `internal/rg` `clock_timestamp()`
+  fix ran to completion, answered all 20 required financial-correctness
+  questions, and assessed 14 adversarial scenarios. **Verdict: PASS,
+  independent sign-off GRANTED.** No P0/P1 found. 6 P2s (idempotent
+  replay not amount-verified; `postWin` missing a replay short-circuit;
+  a rollback-vs-concurrent-bet race surfaces an opaque 500 though
+  financially safe; the lock has no `lock_timeout`; the
+  `clock_timestamp()` fix leaves a smaller app-clock-vs-DB-clock skew
+  window; no canonical lock order across bet/win/rollback on the
+  balance-projection hot rows) and 3 P3s (declined bets aren't
+  idempotent across sequential redeliveries of a *transient* denial;
+  idempotent replays aren't audited; `postBet` doesn't reject
+  expired/consumed sessions, which is deliberate per ADR 0025) were
+  recorded, none fixed this stage (none blocking; fixing was judged
+  outside this final-gate-only stage's authorized scope). Full findings:
+  `docs/progress.md`'s Stage 4G-FINAL-FINANCE-GATE entry;
+  `task-registry.md`'s `IA-4GF-01`/`IA-4GF-03` rows.
 
 ## External dependencies / provider documentation requirements
 

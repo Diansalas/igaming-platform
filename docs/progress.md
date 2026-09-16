@@ -2186,7 +2186,7 @@ within a single run roughly half the time.
   standard" - PASS/FAIL/FLAKE/NOT RUN/BLOCKED per suite, applied to this
   stage's own completion report.
 
-### Specialist review: 10 of 11 areas completed independently; 1 outstanding (not silently closed)
+### Specialist review: 10 of 11 areas completed independently this stage; Financial/Ledger completed as a follow-up gate (see Stage 4G-FINAL-FINANCE-GATE below)
 
 Architecture, risk, casino, RG, security/RBAC (x2), PostgreSQL/RLS,
 API/HTTP, adversarial testing, multi-tenancy, and documentation/
@@ -2195,32 +2195,16 @@ governance were each reviewed independently and reported findings. Per
 written; every P2 was either fixed or recorded here with reasoning - none
 silently dropped.
 
-**Financial/ledger review did NOT complete this stage** - per
-CLAUDE.md's no-fake-completion rule, this is stated plainly rather than
-folded into "11 areas reviewed." The dedicated `ledger-finance` specialist
-agent, tasked with reviewing the `postBet` delivery lock's financial
-correctness, stalled after roughly an hour: its own attempts to clean up
-leftover test data (a `DELETE`/`UPDATE` on `risk_rules`) were correctly
-denied twice by the Claude Code auto-mode safety classifier
-("[Cloud Storage Mass Delete]"), and it made no further progress after
-that - it never produced a findings report. The Orchestrator stopped the
-stalled agent and performed a direct financial-correctness self-review in
-its place (documented in `task-registry.md`'s `IA-4GF-01` row): confirmed
-`pg_advisory_xact_lock` is transaction-scoped (auto-released at commit/
-rollback), confirmed a consistent lock-acquisition order versus
-`rg.lockPerson` (deadlock-safe by construction, since only one call site
-ever acquires both and always in the same order), and relied on the
-adversarial stress tests' own direct assertions
-(`SUM(debits)==SUM(credits)`, at most one `ledger_transactions` row per
-`provider_tx_id`) under up to 10-way concurrency. **This is Orchestrator
-self-review, explicitly not a substitute for independent `ledger-finance`
-sign-off** - recorded as an outstanding item for human attention, not
-silently treated as done. Given `postBet` is the platform's core bet-
-settlement financial code path, a follow-up independent financial-
-correctness review of this specific lock (and, ideally, of the
-`internal/rg` `clock_timestamp()` fix's interaction with it) before
-further hardening stages touch this file is recommended, though not
-strictly blocking given the direct evidence already gathered.
+**Financial/ledger review did NOT complete during this stage's original
+run** - the dedicated `ledger-finance` specialist agent stalled after
+roughly an hour (its own attempts to clean up leftover test data were
+correctly denied twice by the Claude Code auto-mode safety classifier)
+and was stopped without producing a findings report. The Orchestrator
+performed a direct financial-correctness self-review in its place at the
+time, explicitly recorded as self-review, not independent sign-off. **This
+gap was closed as a follow-up "Stage 4G-FINAL-FINANCE-GATE" - see its own
+entry immediately below for the actual independent `ledger-finance`
+review, its PASS verdict, and its findings.**
 
 **P1s found and fixed:**
 
@@ -2304,6 +2288,212 @@ strictly blocking given the direct evidence already gathered.
   4G-FINAL (Stage 4G's own original code) and was not made worse by this
   stage's changes; left as pre-existing debt rather than expanding this
   stage's diff to fix an unrelated function.
+
+## Stage 4G-FINAL-FINANCE-GATE — Independent financial correctness sign-off — complete
+
+Final-gate-only follow-up to Stage 4G-FINAL: obtained the one specialist
+review that did not complete in that stage's original run. No business
+functionality, no new limit kinds, no other domain work - per the
+directive's own "no scope expansion" instruction, only a fix required to
+resolve a P0/P1/P2 finding from this review would have been permitted,
+and none was required (verdict: PASS).
+
+### Review scope
+
+Independent `ledger-finance` specialist review, dispatched fresh
+(read-only: no file modifications, no database mutations permitted), of
+`internal/casino/orchestrator.go`'s `postBet` function - the new
+`pg_advisory_xact_lock`, the idempotency short-circuit, RG/Risk
+evaluation ordering versus the ledger mutation, rollback/error-path
+behavior - and `internal/rg/rg.go`'s `clock_timestamp()` fix and its
+interaction with the new lock. Reviewed at HEAD, commit `19f4125`.
+
+### Verdict: PASS — independent sign-off GRANTED
+
+No P0 or P1 financial-correctness issue found. None of the reviewer's
+veto triggers present: no floating-point money, no historical-ledger-row
+mutation, no direct balance update (balances remain trigger-maintained
+projections), no money path without a DB-enforced idempotency key.
+
+### Answers to the 20 required questions (summarized - see the full
+report for file:line citations and exact test evidence)
+
+1. Concurrent duplicate callbacks cannot produce more than one financial
+   mutation (three independent layers: the new lock, the DB unique
+   index, `ledger.Post`'s own conflict handling).
+2. The lock scope `(tenant_id, provider_id, provider_tx_id)` correctly
+   serializes the intended operation - it is exactly the identity the DB
+   uniqueness and the ledger idempotency key already use.
+3. The lock is transaction-scoped (`pg_advisory_xact_lock`, not the
+   session-scoped variant) and releases on commit or rollback - verified
+   empirically via a read-only `pg_locks` probe.
+4. No deadlock cycle is reachable: the lock is acquired as the first lock
+   of the transaction, and occupies a distinct advisory namespace from
+   `rg.lockPerson`/`risk_cumulative` (confirmed via `pg_locks`).
+5. Lock ordering is compatible with the existing architecture - the
+   global order (bet-delivery lock -> `rg.lockPerson` -> cumulative-usage
+   lock -> balance-projection row lock -> ledger insert) is respected
+   everywhere; `LaunchGame` uses the same relative RG-before-risk order.
+6. A failed Risk decision cannot mutate the ledger (evaluated before any
+   balance lock or `ledger.Post`).
+7. A failed RG decision cannot mutate the ledger (evaluated before Risk
+   and before any ledger write).
+8. A failed/idempotent duplicate callback cannot mutate the ledger (the
+   short-circuit returns before session/RG/risk/balance/post; a
+   duplicate that somehow reached `ledger.Post` is stopped by the unique
+   constraint).
+9. A successful operation cannot be incorrectly denied by a duplicate
+   delivery observing changed Risk/RG state - the lock plus short-circuit
+   is exactly what fixes this (this stage's own Part F work); the one
+   residual case is a previously-*declined* bet being re-evaluated on
+   redelivery, which is by design for RG but has a transient-denial edge
+   case (F7 below).
+10. Idempotency and financial correctness are both preserved, subject to
+    F1/F2 below.
+11. Rollback transactions are correctly represented - a new transaction
+    with entries as the exact inverse of the original's own loaded
+    entries, history never edited.
+12. No double reversal possible under rollback + duplicate-callback races
+    (`SELECT ... FOR UPDATE` serializes concurrent rollbacks); the
+    concurrent bet+rollback and concurrent identical-rollback-redelivery
+    races are financially safe by code analysis but not proven by a test
+    (F3, D/E below).
+13. `SUM(debits)==SUM(credits)` holds for every successful mutation,
+    enforced by a deferred DB constraint `ledger.Post` forces IMMEDIATE.
+14. Append-only ledger semantics preserved - an advisory lock touches no
+    ledger table; the append-only trigger already permits the row locks
+    used elsewhere.
+15. The `clock_timestamp()` change creates no financial-correctness
+    issue - it appears only in a read predicate, never influences an
+    amount/direction/entry, and can only make the check fail more
+    restrictively than before, never less.
+16. The transaction boundary is correct under READ COMMITTED (what the
+    pool actually uses) - the design depends on this isolation level;
+    worth documenting as an explicit dependency (see F-follow-ups).
+17. No TOCTOU window within a single `postBet` for a given
+    `provider_tx_id` - every check's lock is held to commit.
+18. Provider callbacks are correctly isolated by tenant/provider/
+    provider-tx identity (tenant server-derived, RLS-scoped, the ledger
+    idempotency key and DB unique index and the new lock key all include
+    all three components).
+19. Compatible with future real casino providers, with two caveats (F4,
+    F2/F7 below - a real provider's retry behavior would surface these
+    more often than the mock does).
+20. No P0/P1 financial-correctness issue is present.
+
+### Findings — 6 P2s, 3 P3s, 2 hand-offs; none fixed this stage (none
+blocking; fixing was judged out of this final-gate-only stage's
+authorized scope and left for human-authorized follow-up work, per
+CLAUDE.md's "no uncontrolled scope expansion")
+
+**P2s** (owner recommended by the reviewer in parentheses):
+
+- **F1 (casino/ledger-finance)**: `findPostedBetTransaction`'s idempotent
+  replay matches on `(tenant_id, transaction_type, provider_id,
+  provider_tx_id)` only and never compares the redelivered amount/asset
+  against what was actually posted - a provider redelivering the same
+  `provider_tx_id` with a *different* amount is told "succeeded" without
+  verification. `internal/payments` already rejects the analogous case
+  explicitly. No test covers this.
+- **F2 (casino/ledger-finance)**: `postWin` has no "already posted ->
+  replay original result" short-circuit (pre-existing since Stage 4A). A
+  redelivered win after its bet was rolled back returns `ErrBetNotFound`
+  instead of idempotently replaying its own prior success - the ledger
+  stays correct, but the provider is told "no matching prior bet" for a
+  win the platform genuinely credited.
+- **F3 (casino/ledger-finance)**: a rollback of a never-seen original
+  racing a concurrent bet on the same `provider_tx_id` degrades to an
+  opaque internal error (financially safe - the whole transaction aborts,
+  nothing posted - but unclassifiable by the webhook handler, surfaces as
+  a 500). `internal/payments` has a regression test for the sequential
+  form; casino has none, and neither domain tests the concurrent form.
+- **F4 (casino/platform)**: the new lock is an unbounded blocking
+  `pg_advisory_xact_lock` with no `lock_timeout`, unlike
+  `internal/reconciliation`'s use of the `try_` variant - under a
+  provider retry storm on one `provider_tx_id`, each waiter holds a
+  pooled connection and open transaction for the queue's duration.
+- **F5 (rg)**: the `clock_timestamp()` fix is correct but incomplete -
+  `starts_at` is stamped from the *application* clock but enforced
+  against the *database* clock, leaving a clock-skew-sized (not
+  transaction-duration-sized) window. Strict improvement over the bug
+  that was fixed; same defect class remains at a much smaller scale.
+  Financially inert - an RG enforcement item, not a ledger one.
+- **F6 (ledger-finance)**: no canonical lock/entry order across
+  bet/win/rollback on `wallet_balance_projection`'s hot rows (the
+  tenant-wide `house_gaming` account) - pre-existing, not introduced this
+  stage; the new lock marginally widens the window by holding
+  duplicate-delivery transactions open longer. Can produce a spurious
+  40P01 abort under concurrent bet+win/rollback on the same player, never
+  financial corruption.
+- **F11 (test gap, casino/ledger-finance)**: the new stress tests
+  (`adversarial_lock_stress_test.go`) assert balance and row count but
+  never assert `SUM(debits)==SUM(credits)` directly, though the helper
+  already exists and is used by four other casino tests.
+
+**P3s** (lower severity, recorded for completeness):
+
+- **F7**: a *declined* bet leaves no record, so decline is not
+  idempotent across sequential redeliveries of a *transient* denial
+  (cumulative window rollover, a temporarily frozen wallet, an edited
+  limit) - correct for RG's effectively-permanent self-exclusion, a real
+  edge case for anything transient. Should be stated explicitly in
+  provider-protocol documentation.
+- **F8**: idempotent replays write no audit record - recommend a
+  low-severity audit/metric on the replay path for provider-behavior
+  forensics.
+- **F9**: `postBet` only rejects `revoked` sessions; `expired`/`consumed`
+  sessions still permit bets - deliberate per ADR 0025 §3/§6 (the round
+  outlives the launch token), flagged for explicit casino/security
+  sign-off, not a ledger issue.
+
+**Hand-offs (non-financial, out of this review's domain)**:
+
+- **F10 (security)**: the exact `now()`-vs-`clock_timestamp()` bug class
+  fixed in `internal/rg` this stage still exists in
+  `internal/auth/session.go:439` and
+  `internal/auth/credential_token.go:208` (`expires_at > now()`).
+- **Cross-provider identical transaction IDs (item J)** and **concurrent
+  bet+rollback (item D)** / **concurrent duplicate-callback+rollback
+  (item E)**: correct by code analysis, not proven by a test - recommend
+  adding regression tests when casino or ledger-finance next touches
+  these paths.
+
+### Adversarial test coverage (A-N) — see the full agent report for the
+exact commands; summary:
+
+Covered and PASS: A (2 concurrent identical deliveries), B (N=10
+concurrent identical deliveries), G (RG denial during concurrent
+delivery), K (`SUM(debits)==SUM(credits)`, via existing tests, not the
+new stress tests), L (per-transaction debit/credit balance), M (rollback
+behavior), N (race detector - every run above used `-race`, no race
+reports).
+
+Partially covered (a related but not identical scenario is tested; PASS
+on what exists): C (concurrent different bets, same player - the
+overdraft-race variant is untested in casino, though covered in
+`internal/withdrawal`), F (risk denial during concurrent delivery - a
+duplicate racing a live risk-rule change is untested), H (idempotent
+redelivery after RG state change is tested; after a *risk*-rule change is
+not, though the short-circuit is state-independent by construction), I
+(cross-tenant isolation is tested; posting the identical
+`provider_tx_id` as a successful bet under two different tenants is not).
+
+Not covered by any test (correct by code analysis only): D (concurrent
+bet + rollback), E (concurrent duplicate callback + rollback), J
+(cross-provider identical transaction IDs).
+
+No test result was fabricated; every PASS above is backed by an actual
+`go test -race -tags=integration` run this stage, and every gap is stated
+as a gap rather than assumed passing.
+
+### Environmental observation, no action taken
+
+`risk_rules` held 59 leftover rows (all platform-wide, all
+`status='disabled'`) at review time. Confirmed inert -
+`risk.Rule.appliesAt` requires `RuleActive`, so these cannot influence any
+evaluation, and no test failure this stage was attributable to them. Per
+this stage's own explicit instruction, the reviewer took no cleanup
+action on shared database state.
 
 ## Next stage
 
