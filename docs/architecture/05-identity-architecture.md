@@ -169,3 +169,169 @@ PlayerAccount model above:
   `CasinoProvider`/`PaymentProvider`'s exact provider-abstraction shape
   (ADR 0028 §4/§6) - `NOT IMPLEMENTED` for any real vendor, per this
   stage's own explicit non-goal (directive §1).
+
+## Stage 4H-B0 — Retail identity impact (architecture only, `NOT IMPLEMENTED`)
+
+Issued as part of "STAGE 4H-B0 — BONUS + GAMIFICATION + RETAIL
+ARCHITECTURE/SCOPE FREEZE" (design-only; no code, no migration). The
+confirmed business requirement is that the platform support retail
+operations (a physical agent/cashier network, in-person player
+registration) as another surface of the same platform, sharing identity/
+KYC/RG with online. Owner: `identity-compliance`, covering identity and
+KYC/RG impact only. The hierarchy data model itself
+(`docs/architecture/26-retail-operations-architecture.md`) and hierarchy
+RBAC (`docs/decisions/0036-retail-hierarchy-rbac-and-audit.md`) are
+`architect`'s and `security`'s parallel work, not designed here — this
+section is written against explicitly stated assumptions about that
+parallel work (below), to be reconciled once those documents land.
+
+**Assumptions this section makes about the parallel hierarchy/cashier
+design** (stated explicitly per this stage's own directive, since neither
+parallel document exists yet as of this writing): (1) a cashier
+authenticates as a staff-shaped principal scoped to a specific retail
+location within a tenant's hierarchy — not a `PlayerAccount`, not a new,
+unrelated actor type; (2) a retail location/terminal is a client of the
+same `platform-api` backend the online frontend already talks to — it is
+never given direct database access or a local copy of any compliance
+logic; (3) a hierarchy (agent network) is scoped to a single tenant by
+default, with the possibility of a licence/operator's network spanning
+more than one tenant left open by the business requirement (`docs/
+architecture/26`'s own question to answer, not assumed here either way —
+see the parallel KYC/AML/RG document's §4/§5 for why this matters to
+self-exclusion scope). If any of these assumptions turns out to be wrong
+once the two parallel documents land, this section's conclusions need a
+re-check, not a silent carry-forward — recorded here so that
+reconciliation is a checklist, not a rediscovery.
+
+### 1. Player registration through retail — reuses the existing flow, plus one new provenance fact
+
+Retail registration is the same lifecycle event as online registration —
+"a player registers" — and reuses `identityresolution.
+RegisterPlayerWithResolution` → `identity.RegisterPlayer*` exactly as it
+stands today (ADR 0027). It does **not** need a second registration
+code path, a second `Person`/`PlayerAccount` creation function, or a
+parallel identity model — the same `Match`/`NoMatch`/`Uncertain`/
+resolver-unavailable dispatch (ADR 0027 §3) applies identically regardless
+of which channel the request came from, because none of that dispatch
+logic is channel-aware today and has no reason to become so: person
+resolution answers "is this the same real person," a question that does
+not change meaning depending on whether the request arrived over HTTPS
+from a browser or from a cashier's terminal calling the identical
+backend endpoint.
+
+What retail registration genuinely adds, and what does not yet exist to
+express it:
+
+- **`registration_channel` provenance — `ARCHITECTURAL DECISION`,
+  `NOT IMPLEMENTED`.** `player_accounts` has no column today recording how
+  an account was opened. A cashier-assisted registration is a materially
+  different provenance fact from a self-service web/app registration —
+  not because the identity model needs a second shape, but because at
+  least three downstream, jurisdiction-configurable decisions legitimately
+  need to read it (KYC initial-tier defaulting, RG defaults, and future
+  AML/reporting channel-splitting — see the companion KYC/AML/RG
+  document's §1/§2 for what specifically reads it). This should be a
+  small, additive column — `registration_channel` (`online` | `retail`,
+  extensible), `NOT NULL DEFAULT 'online'` for backward compatibility —
+  following exactly the same additive-migration discipline already used
+  for `PlayerAccountStatus`'s own widening (migration `0039`,
+  `identity_review_required`) rather than a schema redesign. Not built
+  this stage — no migration is written, per this stage's own
+  design-only scope.
+- **Actor provenance for the assisting cashier — `RECOMMENDATION`.**
+  Mirroring `player_restrictions`' own `created_by_actor_type`/
+  `created_by_actor_id` pattern (ADR 0026 §2) and
+  `RegisterPlayerWithResolutionParams`' existing `RequestID`/`IPAddress`/
+  `UserAgent` audit fields (ADR 0027 P2 fix), a retail registration's
+  `identity_resolution.performed`/`player.registered` audit records should
+  additionally carry the assisting cashier's staff-principal id — never
+  folded into the `Person`/`PlayerAccount` row itself (that would be
+  conflating an audit fact with an identity fact), but present in
+  `audit.Entry.Metadata` exactly as every other actor-attributed action on
+  this platform already is. This is what makes a later "which cashier
+  registered this account" compliance query possible without inventing a
+  new table.
+- **Does this need a new KYC tier? No — extend the existing tiered-trigger
+  model, do not invent one.** Blueprint §4.7's tiered model (`docs/
+  architecture/11-kyc-aml-rg-architecture.md`) already keys KYC
+  requirements to lifecycle events, and "registration" is already one of
+  those events — retail registration is the SAME event through a
+  different channel, not a new event needing a new tier. What is
+  genuinely open is which STARTING verification requirement/tier a
+  retail-originated account defaults to, and whether in-person presence at
+  a cashier counts toward satisfying part of it — that is a
+  jurisdiction-configuration question, not a new tier taxonomy, and is
+  addressed in the companion KYC/AML/RG document's §1/§2 (`OPEN DECISION`,
+  compliance/legal sign-off required, not resolved here).
+
+### 2. Cashier as an actor — extending Stage 3D's mandatory Person-linkage rule
+
+Stage 3D (`docs/decisions/0024-stage3d-withdrawal-governance-final-gate.md`
+§1) made a specific staff-integrity rule authoritative at the database
+layer: a `staff_users` row must carry a non-`NULL`, append-only-once-set
+`person_id` AND `status = 'active'` before it may approve or reject a
+withdrawal — closing a self-dealing risk (a staff member approving their
+own or a colluding party's payout) using the SAME `Person`/`StaffUser`
+identity architecture already in place, never a second identity model.
+
+**Extension, `ARCHITECTURAL DECISION`:** the identical mandatory
+Person-linkage requirement should extend to any cashier action that is
+financially or compliance-equivalent to a withdrawal decision — most
+concretely, a cashier confirming a cash payout (a retail withdrawal
+analogue) or a cashier confirming a cash deposit that immediately credits
+a player wallet. The reasoning is the same self-dealing concern Stage 3D
+already closed for withdrawal approval, applied to the same class of risk
+at a different counter: an unlinked (`person_id IS NULL`) cashier account
+is, by Stage 3D's own finding, "invisible to enforcement" — the SAME
+statement is true whether the money movement is a withdrawal approval or
+a retail cash payout, and there is no principled reason cashiers should
+be exempt from a rule justified purely by "does this action move money
+based on this staff member's own decision." **Whether a retail cash
+payout is legally/operationally the same enforcement point as a
+withdrawal approval, or needs its own distinct governance mechanism, is
+for `payments`/`ledger-finance` to design when retail cash handling is
+implemented** (retail cash flows are not this specialist's domain) — this
+section states only that, from the identity-linkage angle, the SAME
+`staff_users.person_id`-mandatory/`status = 'active'` rule should be the
+default posture, not a weaker one invented for retail's sake, per this
+specialist's Authority ("cannot weaken an RG or KYC enforcement rule to
+ease a product flow").
+
+**A genuinely new consideration Stage 3D did not need to address —
+`ARCHITECTURAL DECISION`: staff/player identity collision (staff self-play
+prohibition).** Stage 3D's self-approval check compares two `StaffUser`
+principals' `person_id`s to each other. Retail introduces a new pairing:
+a cashier (`StaffUser`, linked `person_id` per the extension above) and
+the player they are registering or serving (`PlayerAccount`, linked to
+its own `person_id` via ADR 0027's resolution flow). A cashier registering
+or transacting for a player who resolves to the CASHIER'S OWN `person_id`
+— i.e., staff attempting to play through their own retail terminal, a
+well-known retail-gaming integrity risk this platform has not previously
+needed to consider because no staff principal has ever been able to touch
+a `PlayerAccount`'s money flow as both parties — is a distinct risk from
+Stage 3D's peer-to-peer self-approval case. **This is flagged as an
+`OPEN DECISION`, not resolved here**: whether to enforce it as a hard
+platform-level block (a `person_id` equality check between the acting
+staff principal and the resolved player at registration/cash-transaction
+time, analogous in shape to Stage 3D's self-approval trigger but a NEW
+mechanism, not a reuse of the withdrawal-specific one) or as a detective/
+audit control (flagged for review, not blocked) is a policy call for
+`identity-compliance` to make jointly with `security`/`architect` once the
+retail transaction surface (owned by `payments`/`casino`/whoever ends up
+building retail cash/bet handlers) is designed — recording the question
+now so it is not silently absent from that design.
+
+### 3. Cross-tenant hierarchy and Person scope — no change to the identity model itself
+
+If a hierarchy spans more than one tenant (assumption 3 above, left open
+by `docs/architecture/26`), nothing about `Person` being platform-wide
+(unchanged since Stage 2) or `PlayerAccount` being tenant-owned changes —
+a cashier resolving or serving a player still goes through the exact same
+`identity.RegisterPlayer*`/`internal/rg.EvaluateEligibility` surface,
+scoped by the SAME `(tenant_id, brand_id, player_account_id)` triple every
+other caller already resolves server-side. What DOES change, if a
+hierarchy is confirmed to span tenants, is a question squarely about
+Responsible Gaming restriction SCOPE (self-exclusion reach across that
+hierarchy), not about the identity model — see the companion KYC/AML/RG
+document's §4 for the full treatment; this document does not duplicate it
+here to avoid two sources of truth for the same open question.
