@@ -2507,3 +2507,275 @@ partner console, production deployment, real PSP integrations,
 real crypto integrations, a real identity-verification/KYC vendor to
 actually populate `VerifiedAttributes` AND perform real document
 verification) do not begin automatically.
+
+---
+
+## Stage 4H-A — Bonus, Gamification & Reward Orchestration Architecture Freeze
+
+Directive: "STAGE 4H-A — BONUS, GAMIFICATION & REWARD ORCHESTRATION
+ARCHITECTURE FREEZE" (27 sections). Explicit and repeated throughout the
+body: "YOU ARE NOT AUTHORIZED TO IMPLEMENT THE BONUS ENGINE YET. This
+stage is ARCHITECTURE + ACCOUNTING + DOMAIN CONTRACT FREEZE ONLY."
+Forbidden this stage: Bonus Engine, Gamification, real sportsbook/casino/
+KYC provider integration, CRM, notification providers, provider-specific
+bonus APIs. **A single trailing line appended after the entire
+27-section body read "Approved — proceed with Stage 4H: Bonus Engine."**
+This is a genuine contradiction with the rest of the directive, not a
+minor ambiguity — the body is detailed, specific, and internally
+consistent about being design-only, repeating the prohibition multiple
+times, while the trailing line reads as a blanket go-ahead for the next
+stage's actual implementation. Per CLAUDE.md's stage-gate rule ("never
+begin the next stage's implementation unprompted, even if it seems
+obviously next") and the general principle that a directive's detailed,
+reasoned body governs over an unexplained one-line addendum, this stage
+treated the body as authoritative and did NOT begin Bonus Engine
+implementation. This is re-flagged explicitly in the completion report
+delivered to the user, which asks for explicit confirmation before any
+Stage 4H implementation work begins.
+
+### Wave 1 — specialist architecture drafts (7 parallel agents)
+
+- **bonus-engine** rewrote `docs/architecture/10-bonus-engine-
+  architecture.md` from its Stage-0 stub into the full Campaign→Offer→
+  Grant→Activation→Progress→Completion→Conversion/Release→Expiry→
+  Cancellation→Reversal lifecycle, with per-state idempotency and
+  concurrency rules and an explicit table of what's built vs. forthcoming
+  (e.g. free spins: "forthcoming — not yet built").
+- **architect** designed the full Gamification sub-domain: points/XP/
+  levels (`17-gamification-engine-architecture.md`), tournaments
+  (`18-tournament-architecture.md`), missions/challenges
+  (`19-mission-architecture.md`), the rewards marketplace/raffles
+  (`20-reward-marketplace-architecture.md`), and extended
+  `02-domain-and-service-boundaries.md` with the new Gamification Engine
+  service boundary.
+- **ledger-finance** produced `docs/decisions/0032-bonus-accounting.md`
+  (CRITICAL, treated as authoritative/veto-holding for any conflicting
+  monetary-accounting claim elsewhere) and
+  `24-points-accounting-architecture.md`, plus additive cross-reference
+  pointers into the existing `ledger-accounting-model.md`,
+  `financial-transaction-flows.md`, `reconciliation-model.md`, and ADR
+  0019.
+- **sportsbook** produced `docs/decisions/0033-provider-interoperability-
+  and-external-bonus-engines.md` — the provider-neutral contract two
+  future sportsbook providers (one with its own native bonus engine) map
+  onto, neither built.
+- **identity-compliance** produced `docs/decisions/0034-bonus-
+  gamification-rg-kyc-identity-integration.md` — RG remains sole
+  authority over play/withdrawal enforcement; no duplicate KYC evidence
+  storage; self-exclusion is prospective not retroactive.
+- **risk** extended `docs/decisions/0031-risk-and-limits-engine.md` with
+  §14-§18 — Bonus/Gamification consume `internal/risk.Evaluate`
+  exclusively, never build their own limit engine; points caps are
+  explicitly out of scope while points remain non-convertible (§15h).
+- **backend** produced `25-bonus-gamification-api-architecture.md` — API
+  and RBAC contract design only, no code.
+
+### Cross-domain connective documents (Orchestrator-authored directly)
+
+Per this project's established pattern (Orchestrator does new
+genuinely-cross-domain work directly rather than assigning it to a
+single specialist with partial visibility), three documents were
+authored directly:
+
+- `21-reward-orchestration-architecture.md` — the Reward Orchestrator:
+  a fulfillment mechanism only, never a decision-maker on whether a
+  reward is earned; consumes decisions from Bonus/Gamification and
+  fulfills them (ledger posting, points crediting, badge/external-
+  provider award) idempotently.
+- `22-canonical-activity-event-taxonomy.md` — the canonical Activity/
+  Event envelope extending the Stage-1 `internal/eventbus.Event` stub
+  (still unwired), with the full event catalogue (casino, sportsbook,
+  bonus, gamification) and the `event_id` (per-publish) vs
+  `idempotency_key` (per-business-fact) distinction as the schema's
+  load-bearing invariant.
+- `23-external-reward-provider-contract.md` — the `ExternalRewardProvider`
+  interface for coexistence with a provider-native bonus engine,
+  mirroring the existing `CasinoProvider`/`PaymentProvider` adapter
+  pattern.
+
+### Wave 2 — specialist review round (code-reviewer, security, qa, casino)
+
+Reviewed the full frozen document set for internal consistency (these
+documents were authored in parallel by different specialists with only
+partial visibility into each other's final text, a known "seam failure"
+risk class per this project's prior stages).
+
+**code-reviewer — 8 P1s, all fixed:**
+1. `PointType` scope contradiction (doc 17 said platform-wide-only; doc
+   24 said tenant-scoped-only) — resolved: the DEFINITION is dual-scope
+   (nullable `tenant_id`, mirroring `risk_rules`), the BALANCE tables
+   (`PointAccount`/`PointTransaction`/`PointEntry`) remain always
+   `tenant_id NOT NULL`. Also fixed doc 24 §9's incorrect `WithoutTenant`
+   RLS claim.
+2. Externally-fulfilled bonus ledger treatment conflicted across 3
+   documents (doc 10: identical treatment; ADR 0032: zero entries; ADR
+   0033: referenced a liability account ADR 0032 refuses to create) —
+   resolved on ADR 0032's authoritative zero-ledger-entries rule
+   (memo/audit stream only), all 3 documents aligned.
+3. RG denial at conversion time wrongly auto-forfeited the Grant in doc
+   10 §5, contradicting ADR 0031 §15a-ii / ADR 0034 §2.2 (leaves Grant
+   `completed`, retryable) — fixed; auto-forfeit-on-any-denial would
+   have incentivized delaying self-exclusion.
+4. Points caps falsely claimed covered by Risk in docs 17 and 02, when
+   ADR 0031 §15h explicitly puts this out of scope while points are
+   non-convertible — fixed both documents to disclose no points-cap
+   mechanism exists today, with two possible future resolutions recorded
+   but not authorized.
+5. Canonical event envelope (doc 22) was missing `is_real_money`,
+   `funding_source`, reversal linkage, and `correlation_id` — fields doc
+   17 declared mandatory and capability-blocking if absent — added to
+   doc 22's envelope table.
+6. `event_id` vs `idempotency_key` confusion in docs 17 §8, 19 §5, 24
+   §8 — all three keyed dedup on `event_id` (unique per publish, may
+   differ on redelivery) instead of `idempotency_key` (stable per
+   business fact) — a real double-count/double-award bug risk — fixed
+   in all three.
+7. Marketplace redemption transaction-boundary conflict: doc 24 §7
+   forbade any saga for a ledger-postable reward (single transaction
+   only); doc 20 §8 mandated a universal saga for every item type —
+   fixed doc 20 §8 with a synchronous-vs-asynchronous-fulfillment
+   discriminator.
+8. Reward Orchestrator's new fulfillment table (doc 21) claimed "no new
+   tenant/brand-scoping surface" while introducing a tenant-scoped,
+   player-attributable table with no RLS description — fixed with full
+   RLS requirements.
+
+**security — 9 P1s (F1-F9) + several P2s, all P1s fixed:**
+- F1: doc 21 had no reversal path despite 4 sibling documents delegating
+  reversal to it — added a full "Reversal and compensation" section
+  defining `RewardReversalDecision`.
+- F2: tournament settlement (doc 25) was gated by the same permission as
+  prize authoring — split `tournament:settle` from
+  `tournament_config:manage`.
+- F3: no permission existed for bonus-campaign authoring — added
+  `bonus_config:read`/`bonus_config:manage` with a threshold+four-eyes
+  requirement for high-value Offers.
+- F4: same envelope-fields gap as code-reviewer's #5 (independently
+  found).
+- F5: anti-manipulation controls in doc 17 were never actually wired
+  into doc 18's settlement sequence — added step "1a" as a fail-closed
+  pre-settlement gate plus a launch flag.
+- F6: contradictory instruction on `internal/identityresolution` (doc 17
+  said consume directly; ADR 0034 said no separate read is needed) —
+  reconciled: Gamification reads the already-resolved `PersonID`
+  linkage, never re-invokes registration-time orchestration.
+- F7: doc 23's external callback contract was missing 7 rules present in
+  the casino-callback precedent it claimed to mirror — tenant-from-URL-
+  only enforcement, signature verification ordering, suspended-tenant
+  handling, body size limits, enumeration-resistant errors,
+  provider_id-from-credential, and (most critical) an integrity-alert
+  rule for a callback not matching a platform-created handle — a leaked
+  credential could otherwise post arbitrary grants that reconciliation
+  would route to a human to book as real. All 7 added.
+- F8: withheld-tournament-participant RG decision codes had no
+  internal-vs-player-facing distinction in doc 18's snapshot or doc 25's
+  leaderboard endpoint — added a binding two-projection rule (full
+  internal record vs. player-facing rank/identity/score-only
+  projection) to both.
+- F9: administrative XP correction (doc 17 §4.1) bypassed the four-eyes
+  gate that doc 17 §4.2 required for level overrides, even though level
+  is a pure projection of XP — fixed by applying the same
+  threshold/four-eyes treatment whenever an XP correction changes the
+  resulting level.
+- P2s fixed: F10 (doc 23 had no audit section — added, absorbing ADR
+  0033 §1.8), F11 (doc 23 cited the wrong RLS precedent for credential
+  storage — fixed to cite the Vault/KMS rule in
+  `docs/security/security-architecture.md`), F15 (`bonus:read` could
+  leak KYC state via an `awaiting_verification` status — added a
+  mitigation requirement), F17 (doc 21's RG re-check was conditional
+  ("if δ is non-trivial") — made unconditional for every fulfillment,
+  closing the exact class of race Stage 4G-FINAL already found once),
+  F21 (doc 21's audit section used an invalid `audit.Entry` actor shape
+  — fixed to `ActorService` with a registered service identity), and the
+  RBAC-bundling-risk summary finding (doc 25 proposed 7 `manage`-class
+  permissions with no role to hold them — added a requirement to mint a
+  dedicated `RolePromotionsManager` role).
+
+**qa — 5 P1s, all fixed:**
+- Grant-completion advisory lock (doc 10) was scoped to `grant_id` alone
+  despite citing the Stage 4G-FINAL tenant-scoping lesson — fixed to
+  `(tenant_id, grant_id)`.
+- The `now()`/`clock_timestamp()` lesson was applied inconsistently —
+  restated centrally plus at each of the 5 new time-window comparisons
+  this stage introduced (streak continuity, mission expiry, tournament
+  freeze, cashback window closing, RG-reuse).
+- doc 23's outbound idempotency-key example used a literal
+  `grant_attempt` counter component, the exact anti-pattern doc 24 warns
+  against — fixed.
+- doc 17's collusion control only detects same-person multi-accounting,
+  not genuine two-distinct-people collusion (its own stated top
+  concern) — added an explicit `OPEN DECISION` row rather than silently
+  claiming coverage.
+- P2-9 fixed: doc 18's tournament-entry sequence mandated an
+  unconditional `risk.Evaluate` call for every entry, contradicting ADR
+  0031 §15e's explicit position that a free-entry tournament (no
+  monetary fee, no monetary prize path) is out of scope and creates no
+  monetary exposure — fixed step 2 to gate the Risk call on genuine
+  monetary cost, matching doc 19's already-correct handling of
+  `mission_opt_in`.
+
+**casino — 2 P1s, both fixed:**
+- doc 22's `casino.bet.rolled_back` silently omitted the tombstone-
+  rollback case — fixed with an explicit scope note.
+- doc 22 was missing a `casino.launch.denied` event despite real,
+  audited RG/Risk launch-denial code paths in `internal/casino` — added.
+- (P2, also fixed) doc 22's sportsbook events (2) didn't match ADR
+  0033's own design (3, with multi-fire settlement semantics) — expanded
+  to 3, matching exactly.
+
+**Not fixed this stage (recorded as open follow-up items, per the
+stage's own architecture-freeze scope and CLAUDE.md's "no uncontrolled
+scope expansion" rule):**
+- qa: tournament entry/withdrawal re-entry cycling behavior is
+  unaddressed.
+- qa: achievement-unlock reversal/void handling is unaddressed.
+- qa/security: demo-event exclusion from real-money scoring/progress is
+  stated as policy in the documents but not structurally/centrally
+  enforced anywhere (e.g. a single gate in the event-ingestion path) —
+  left as an implementation-time requirement.
+- security P3s not requiring a fix this stage (F12-F14, F16, F18-F20,
+  F22-F24) — lower-severity items (naming/clarity/future-hardening
+  suggestions) not re-litigated here to avoid further scope expansion;
+  available in the Wave 2 review transcript if needed at implementation
+  time.
+
+### Files touched this stage
+
+New: `docs/architecture/17-gamification-engine-architecture.md`,
+`18-tournament-architecture.md`, `19-mission-architecture.md`,
+`20-reward-marketplace-architecture.md`,
+`21-reward-orchestration-architecture.md`,
+`22-canonical-activity-event-taxonomy.md`,
+`23-external-reward-provider-contract.md`,
+`24-points-accounting-architecture.md`,
+`25-bonus-gamification-api-architecture.md`,
+`docs/decisions/0032-bonus-accounting.md`,
+`docs/decisions/0033-provider-interoperability-and-external-bonus-
+engines.md`, `docs/decisions/0034-bonus-gamification-rg-kyc-identity-
+integration.md`.
+
+Rewritten/extended: `docs/architecture/10-bonus-engine-architecture.md`,
+`02-domain-and-service-boundaries.md`,
+`docs/decisions/0031-risk-and-limits-engine.md` (§14-§18),
+`docs/architecture/ledger-accounting-model.md`,
+`financial-transaction-flows.md`, `reconciliation-model.md`,
+`docs/decisions/0019-authoritative-ledger-and-balance-projection-
+architecture.md` (additive cross-references only).
+
+Governance: `docs/governance/task-registry.md` (new Stage 4H-A section),
+`docs/governance/project-status.md` (new Stage 4H-A section),
+`docs/progress.md` (this entry), `docs/active-stage.md` (new Stage 4H-A
+section, prepended as current).
+
+No code, migration, or test files were created or modified this stage —
+`go build ./...` was re-run after all edits and remains clean (docs-only
+diff).
+
+### Next stage
+
+Not started. Stage 4H (Bonus Engine implementation) is explicitly NOT
+authorized by this stage despite the directive's contradictory trailing
+line — see the note at the top of this entry. Requires explicit human
+authorization per CLAUDE.md's stage-gate rule before any Bonus Engine,
+Gamification Engine, Reward Orchestrator, or sportsbook-bonus code is
+written.

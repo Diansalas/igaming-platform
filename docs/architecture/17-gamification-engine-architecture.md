@@ -163,8 +163,31 @@ twice — but the enforcement of that idempotency is the points accounting
 layer's job (a database constraint), never a "check then insert" in
 Gamification, per CLAUDE.md's financial rules applied by analogy.
 
-Points earning and spending **caps** are Risk's job, not Gamification's —
-see §7.
+Points earning and spending **caps**, if they are ever built, are Risk's
+job, not Gamification's — see §7. **Specialist-review correction (P1
+fix)**: an earlier draft of this section, of doc 02's Gamification
+boundary row, and of §7.1 below all stated or implied that Risk already
+covers points earning/spending caps today. It does not, deliberately:
+`docs/decisions/0031-risk-and-limits-engine.md` §15h explicitly puts
+points earning/spending OUT of Risk's scope "while points are non-
+convertible, non-withdrawable, non-transferable" (requiring a
+`risk.Evaluate` call on every points award would add a database round
+trip and a fail-closed dependency to a non-financial event for no risk
+benefit), and §18 confirms there is no way to express "at most N points"
+in `internal/risk` today (no points-denominated threshold exists). **Net
+effect, disclosed rather than silently implied away: no points earning or
+spending cap mechanism exists anywhere in this architecture today** — not
+in Risk (deliberately out of scope while points aren't money) and not in
+Gamification (deliberately refuses to build its own limit engine, per §7
+below and this document's own "reimplements neither" rule). If abuse
+patterns ever require a points-specific cap, it requires either (a) ADR
+0031 §15h being revisited (points becoming Risk-relevant, e.g. because
+they became convertible — itself a legal/licensing decision, §14 item 3),
+or (b) a narrowly-scoped Gamification-owned rate-limit specifically for
+points issuance velocity (analogous to Bonus Engine's own
+device/payment-fingerprint detector, `docs/architecture/10-bonus-engine-
+architecture.md` §1.4 — a detector, not a generic limit engine). Neither
+is designed or authorized this stage; this gap is recorded, not solved.
 
 ## 4. XP and Levels
 
@@ -205,7 +228,22 @@ and audited, are: (a) a **correction** for XP awarded from activity that
 was subsequently voided (a rolled-back bet), which is a compensating
 adjustment carrying the reversing event's identity, never an edit of the
 original accrual; and (b) an administrative correction, which requires a
-reason code and follows CLAUDE.md's audit rules for administrative actions.
+reason code and follows CLAUDE.md's audit rules for administrative
+actions. **Specialist-review correction (P1 fix, F9)**: since §4.2 below
+makes level a pure, recomputed PROJECTION of XP ("writing XP *is* writing
+level"), an administrative XP correction is mechanically the SAME
+capability as a level override by another name — a support agent denied a
+level override above the four-eyes threshold could otherwise achieve the
+identical outcome (crossing a level threshold, triggering
+`level_rewards[]`, attaching permanently-`retained_benefits[]`) by
+labeling it an "administrative XP correction" instead, with a single
+actor and no second pair of eyes. **The corrected rule: an administrative
+XP correction whose resulting level (recomputed from the corrected XP)
+differs from the player's current level carries the IDENTICAL threshold
+and four-eyes treatment §4.2 requires for a direct level override.** This
+does not remove the correction path — §4.2's own principle, that an
+override must never be achieved by fabricating XP, is correct and stands
+— it controls the one path that remained uncontrolled.
 
 ### 4.2 Level model
 
@@ -252,10 +290,14 @@ Key invariants and decisions:
 - **Player overrides** (support/VIP-manager granting a level) are a
   first-class, audited, optionally time-bounded field, never achieved by
   writing fake XP. Fabricating XP to produce a level corrupts the projection
-  invariant above and destroys the audit trail. Overrides above a
-  configurable level threshold should require the same four-eyes treatment
-  CLAUDE.md requires for manual balance adjustments — flagged for
-  `security` review when built, not decided here.
+  invariant above and destroys the audit trail. **Decision, firmed up per
+  specialist review (F9 above depends on this being settled, not
+  hedged)**: overrides above a configurable level threshold REQUIRE the
+  same four-eyes treatment CLAUDE.md requires for manual balance
+  adjustments — this is a binding requirement for the implementation
+  stage, not merely a recommendation deferred to a future `security`
+  review. `security` review at build time confirms the mechanism, it does
+  not decide whether the control exists.
 - **Segmentation**: a programme may be restricted to a segment (see §6).
   A player in no eligible programme simply has no level; "no level" is a
   valid state, not level zero by default.
@@ -333,6 +375,21 @@ Design notes, all deferred to implementation:
   streak from the qualifying-activity history must produce the same answer
   as incremental evaluation did. A streak whose only truth is an
   incrementally-mutated counter cannot be audited or corrected.
+- **Specialist-review addition**: any comparison of a streak's continuity
+  window against "now" (has this period's grace window elapsed, is the
+  streak broken) MUST use Postgres `clock_timestamp()`, never `now()`,
+  inside the implementing transaction. `now()` is frozen at transaction
+  start and does not re-evaluate per statement — this is the EXACT
+  mechanism that produced a real, previously-undiscovered self-exclusion-
+  enforcement bug in `internal/rg` (Stage 4G-FINAL Part F), and any new
+  time-window read introduced by this stage's designs (streaks here,
+  mission expiry in doc 19 §6, tournament freeze/settlement-lag in doc 18
+  §6/§8, Bonus Engine's cashback-window-closing job in
+  `docs/architecture/10-bonus-engine-architecture.md` §1.3/§2) is exposed
+  to the identical failure mode if a transaction evaluating it is ever
+  queued behind an advisory lock or other blocking wait. This is a
+  binding implementation requirement for this and every sibling
+  time-window comparison named above, not a suggestion.
 - Relationship to missions: a streak may *be* a mission's completion
   condition ("complete a 7-day streak"), and a mission may be one of a
   streak's qualifying conditions. They compose through gamification events.
@@ -468,7 +525,8 @@ existing domains rather than reimplementing them:
 
 | Concern | Control | Owning domain |
 |---|---|---|
-| Multi-accounting / collusion | Person-level resolution across accounts | `internal/identityresolution` (ADR 0027) |
+| Multi-accounting (one person, many accounts) | Read the already-resolved `Person`-keyed linkage each `PlayerAccount` carries (ADR 0027) — **specialist-review correction (P1 fix, F6)**: an earlier draft of this row named `internal/identityresolution` as the read surface, which directly contradicts `docs/decisions/0034-bonus-gamification-rg-kyc-identity-integration.md` §4's explicit statement that "no separate read of `internal/identityresolution` is needed or appropriate — that package is registration-time orchestration, not a per-action read surface." The two documents are reconciled, not in conflict, once the distinction is stated: `internal/identityresolution` is the ORCHESTRATION that computes/updates a `PlayerAccount`'s `PersonID` linkage at registration/resolution time; Gamification never calls that orchestration itself (matching ADR 0034 §4) — it only READS the resulting, already-computed `PersonID` on each `PlayerAccount` row, the exact same read ADR 0034 §4 already relies on for its own bonus-eligibility purpose. Tournament/leaderboard collusion detection (a cross-participant check at settlement) and bonus eligibility (a single-player check at grant time) are different CONSUMERS of the identical `PersonID` field — neither invokes `internal/identityresolution`'s own registration-time logic | `Person.id`/`PlayerAccount.PersonID` (ADR 0027) |
+| **Genuine two-party collusion (two DISTINCT people agreeing one deliberately loses/feeds score to the other) — `OPEN DECISION`, not solved by the row above** | **Specialist-review correction**: person-level resolution structurally cannot detect this — it only clusters the SAME physical person's accounts, and two colluding strangers are, correctly, two different persons. No behavioral/pattern detection (repeated head-to-head play between the same two accounts, one-sided loss patterns, device/IP/payment-method correlation short of common personhood) is designed here. This is named as the domain's own top concern in this section's opening sentence and must not be left silently answered by a control that doesn't cover it. A future stage must design this explicitly (candidate owner: `risk` as a new `RISK_SIGNAL` pattern, or a Gamification-owned detector analogous to Bonus Engine's own device/payment-fingerprint detector, §"Abuse-control's place in the lifecycle" in `docs/architecture/10-bonus-engine-architecture.md`) — not resolved this stage | `risk` and/or this domain — TBD, §14 |
 | Wash/low-risk betting to farm score | Risk signals and exposure limits | `internal/risk` (ADR 0031) — §7 below |
 | Excluded/restricted players scoring | RG eligibility check before any scoring or entry | `internal/rg` — §7 below |
 | Voided activity inflating score | Compensating negative contributions | This domain (§6.1) |
@@ -498,14 +556,14 @@ their own `RiskRequest` shape (none exist today; each requires the
 five-step `LimitKind`/enum extension ADR 0031 §12 documents, and none is
 authorized by this document):
 
-| Gamification operation | Exposure being controlled |
-|---|---|
-| Points award | Points earning caps per period; anomalous accrual |
-| Points spend | Points spending caps per period |
-| Tournament entry | Entry count/velocity; buy-in exposure |
-| Mission opt-in | Concurrent mission caps; promotional exposure |
-| Reward redemption | Redemption value caps per period |
-| Marketplace purchase | Purchase limits per item/period (doc 20) |
+| Gamification operation | Exposure being controlled | Registered in ADR 0031 §16's proposed-`Operation` list? |
+|---|---|---|
+| Points award | Points earning caps per period; anomalous accrual | **No — and ADR 0031 §15h explicitly declines this integration** while points remain non-convertible/non-withdrawable/non-transferable (see §3.3 above); not merely "not yet built," actively out of scope until that premise changes |
+| Points spend | Points spending caps per period | Same as above |
+| Tournament entry | Entry count/velocity; buy-in exposure | Yes — `tournament_entry` |
+| Mission opt-in | Concurrent mission caps; promotional exposure | **No — specialist-review correction**: an earlier draft of this table implied this was a registered candidate; it is not one of ADR 0031 §16's four proposed values (`bonus_conversion`, `tournament_entry`, `marketplace_purchase`, `reward_redemption`). A mission with no monetary entry fee or monetary reward creates no exposure for Risk to gate at all (mirrors ADR 0031 §15e's free-tournament-entry reasoning); if a future mission design ever charges a monetary entry fee, that requires filing a genuinely new proposal through ADR 0031 §16's process, not assuming this row already covers it |
+| Reward redemption | Redemption value caps per period | Yes (conditional) — `reward_redemption` |
+| Marketplace purchase | Purchase limits per item/period (doc 20) | Yes — `marketplace_purchase` |
 
 Each follows `internal/casino`'s established pattern exactly: resolve the
 `RiskRequest` server-side (including `JurisdictionCode` and `LicensingMode`
@@ -568,10 +626,20 @@ Consequences that follow directly:
 - Adding a new provider, or a second aggregator for the same game, must
   require **zero** gamification changes. If it does not, the boundary has
   been violated.
-- An event's `event_id` is the basis of every gamification idempotency key.
-  A durable at-least-once bus will redeliver; every consumer must be
-  idempotent (this is already `internal/eventbus`'s own stated rationale
-  for carrying `EventID` from Stage 1).
+- An event's **`idempotency_key`** — never `event_id` — is the basis of
+  every gamification idempotency key. **Specialist-review correction**:
+  an earlier draft of this bullet named `event_id`; per
+  `docs/architecture/22-canonical-activity-event-taxonomy.md`'s own
+  explicit envelope contract, `event_id` is unique per PUBLISH and may
+  legitimately differ across redeliveries of the same fact, while
+  `idempotency_key` is unique per BUSINESS FACT and is the field actually
+  designed to stay stable across redelivery. Deduping on `event_id` would
+  not dedupe a redelivery at all — it would insert a second contribution
+  with a new `event_id`, a real double-count bug. A durable at-least-once
+  bus will redeliver; every consumer must be idempotent on
+  `idempotency_key` (this is already `internal/eventbus`'s own stated
+  rationale for carrying `EventID` from Stage 1, refined here now that
+  the canonical taxonomy distinguishes the two fields explicitly).
 
 The canonical taxonomy itself is
 `docs/architecture/22-canonical-activity-event-taxonomy.md`, owned by the
@@ -724,7 +792,7 @@ above must be answered by the human before any design work starts.
 | Bonus Engine (doc 10) | Sibling. A bonus-shaped reward is fulfilled by Bonus *via* the Orchestrator, never called directly from Gamification |
 | `internal/risk` (ADR 0031) | Consumes `Evaluate`. Never builds a limit engine |
 | `internal/rg` | Consumes `EvaluateEligibility`. Never defines a second self-exclusion |
-| `internal/identityresolution` | Consumes for anti-collusion. Never builds its own linking |
+| `internal/identityresolution` | **Specialist-review correction**: does NOT call this package directly for anti-collusion (see §6.6's corrected row) — reads the `PersonID` linkage that package's registration-time orchestration already produced on each `PlayerAccount`, per ADR 0034 §4. Never builds its own linking, never re-invokes registration-time resolution as a per-action read |
 | `internal/ledger` / `internal/wallet` | **No direct relationship at all.** Gamification never posts money |
 | `internal/audit` | Writes through the existing shared mechanism only |
 | Tenant configuration | Reads. Brand differences are config rows, never code paths |
@@ -762,8 +830,16 @@ was written. None of these is a fact asserted about another domain:
    and at what weight?** Real abuse surface; a product decision with
    financial consequences.
 2. **What happens to accrued points, XP, level, and in-flight tournament
-   entries on self-exclusion?** Forfeit, freeze, or preserve for return.
-   Regulatory dimension; `identity-compliance` plus human.
+   entries on self-exclusion?** **Specialist-review correction**: the
+   GENERAL rule is already resolved, not open —
+   `docs/decisions/0034-bonus-gamification-rg-kyc-identity-integration.md`
+   §2 decides this prospectively (already-committed effects stand,
+   in-progress progression simply stops, nothing is clawed back). Only a
+   narrow sub-question remains genuinely open: whether *unlocking* an
+   already-fully-satisfied wagering/progress requirement after exclusion
+   counts as mechanical settlement (allowed) or further progress
+   (blocked) — flagged in ADR 0034 itself for `bonus-engine`/product to
+   decide, not a gap in this document.
 3. **Are points ever convertible to withdrawable monetary value?** If yes,
    points become a financial liability with AML and licensing implications
    and the design constraints change materially.
@@ -777,6 +853,19 @@ was written. None of these is a fact asserted about another domain:
 7. **Is there any commercial requirement for cross-tenant competition?**
    §9.2 says no by default; overriding it requires an ADR and compliance
    review.
+
+**Engineering design item, not a human/product/legal decision** (recorded
+separately from the list above per specialist review, so it is not
+mistaken for something needing legal sign-off when it is really
+undone technical work): §6.6's anti-manipulation table names
+person-level resolution as the collusion control, but that control only
+detects one person operating multiple accounts — it cannot detect two
+genuinely distinct people agreeing to feed score to one of them. This is
+the domain's own stated top abuse concern and has no designed control
+yet. A future stage must design behavioral/pattern detection for this
+(candidate owner `risk`, as a new pattern-based signal, or a
+Gamification-owned detector) before any tournament with a real prize
+pool ships.
 
 ## Cross-references
 

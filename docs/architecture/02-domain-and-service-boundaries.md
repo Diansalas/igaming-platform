@@ -145,10 +145,21 @@ codebase has already established rather than inventing a new one:
 
 - **Gamification is NOT a Risk replacement.** It has **no limit engine, no
   threshold, no cap, no counter, and no velocity concept of its own**.
-  Every promotional cap, reward-redemption limit, marketplace purchase
-  limit, and points earning/spending cap is a rule in `internal/risk`,
-  evaluated by `risk.Evaluate` in the same transaction as the effect it
-  gates, fail-closed on error — ADR 0031 §13's standing obligation applied
+  Every promotional cap, reward-redemption limit, and marketplace purchase
+  limit is a rule in `internal/risk`, evaluated by `risk.Evaluate` in the
+  same transaction as the effect it gates, fail-closed on error — ADR 0031
+  §13's standing obligation applied. **Specialist-review correction**: an
+  earlier draft of this bullet also listed "points earning/spending cap"
+  as already covered by this rule — it is not.
+  `docs/decisions/0031-risk-and-limits-engine.md` §15h explicitly puts
+  points earning/spending OUT of Risk's scope while points remain
+  non-convertible/non-withdrawable/non-transferable. Gamification's
+  refusal to build its own limit engine still holds (it may not invent a
+  points cap either), but the honest state today is that **no points
+  earning/spending cap mechanism exists anywhere** — see
+  `docs/architecture/17-gamification-engine-architecture.md` §3.3 for the
+  full disclosure and the two possible future resolutions, neither
+  authorized this stage
   to this domain. Several of these want limit kinds ADR 0031 §4
   deliberately did not implement (`count`, `velocity`); the answer is ADR
   0031 §12's five-step extension process, never a counter inside

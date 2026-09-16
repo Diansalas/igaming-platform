@@ -223,6 +223,90 @@ Stage 4G-FINAL-FINANCE-GATE — see `docs/active-stage.md` for full detail.
   before any real-money go-live.
 - Explicit authorization for each future stage per the stage-gate rule.
 
+## Stage 4H-A: Bonus, Gamification & Reward Orchestration architecture freeze
+
+Architecture/accounting/domain-contract freeze only — **no Bonus Engine,
+Gamification Engine, Reward Orchestrator, sportsbook-bonus, or
+external-reward-provider code was written this stage.** Three domains
+frozen as architecturally distinct (never merged): Bonus Engine
+(economic/promotional reward policy + lifecycle), Gamification Engine
+(engagement/progression policy — points/XP/levels/missions/challenges/
+achievements/badges/leaderboards/tournaments/streaks/marketplace/
+raffles/mini-games), Reward Orchestrator (fulfillment mechanism only —
+never decides whether a reward is earned).
+
+Key decisions frozen this stage:
+- **`ExternalRewardProvider` abstraction** (doc 23) for coexistence with
+  provider-native bonus engines (a known future sportsbook provider has
+  its own) — provider-neutral, two future providers mapped onto one
+  canonical contract, neither built now.
+- **Canonical Activity/Event taxonomy** (doc 22) extending the Stage-1
+  `internal/eventbus.Event` stub (still unwired) — `event_id`
+  (per-publish) vs `idempotency_key` (per-business-fact, stable across
+  redelivery) is the load-bearing distinction; confusing the two would
+  have caused real double-count/double-award bugs and was found
+  conflated in 3 draft documents before being fixed.
+- **Bonus accounting (ADR 0032, CRITICAL/authoritative)**: `promo_liability`
+  as debit-side mirror of `player_bonus`; new `bonus_expense` account
+  type; Invariant B1 (`signed(promo_liability) + Σ signed(player_bonus)
+  == 0` per tenant/asset, hourly, zero-tolerance, P1); cash conversion is
+  a single atomic 4-entry transaction (never retire-and-recredit, never a
+  `ConversionOperation`); three funding scenarios — operator-funded
+  (`bonus_expense`), provider-funded (`provider_payable`),
+  externally-fulfilled (**zero ledger entries, ever** — this rule was
+  violated by 3 draft documents and required cross-document fixes).
+- **`PointType` scope correction**: the type DEFINITION is dual-scope
+  (nullable `tenant_id`, mirroring `risk_rules`), matching a
+  platform-wide catalogue; actual balance tables (`PointAccount`/
+  `PointTransaction`/`PointEntry`) remain always `tenant_id NOT NULL` — a
+  liability can never be platform-wide even if its definition is.
+- **RG mid-lifecycle self-exclusion semantics** (ADR 0034 §2): prospective
+  not retroactive — already-committed effects stand, in-progress grants
+  simply stop progressing, no clawback. Conversion-time RG/Risk denial
+  leaves the Grant `completed` (retryable), never auto-forfeits — an
+  earlier draft's auto-forfeit-on-any-denial would have created a
+  perverse incentive to delay self-excluding.
+- **Points caps disclosed as unimplemented**: two draft documents claimed
+  `internal/risk` already covers points earning/spending caps; ADR 0031
+  §15h explicitly puts this out of scope while points are
+  non-convertible. Corrected — no points-cap mechanism exists anywhere
+  today; two possible future resolutions recorded but not authorized.
+
+Wave 2 specialist review (code-reviewer, security, qa, casino) found ~20
+genuine P1-severity cross-document contradictions among the
+parallel-authored architecture set (not stylistic — actual conflicting
+decisions about the same entity/mechanism, e.g. 3 documents disagreeing
+on externally-fulfilled bonus ledger treatment, 3 documents keying
+idempotency on the wrong field, a synchronous-vs-asynchronous
+marketplace-redemption transaction-boundary conflict between docs 20 and
+24). **All P1s were fixed in-place** across docs 10, 17, 18, 19, 20, 21,
+22, 23, 24, 25 and ADR 0033, each with an explicit "specialist-review
+correction" callout rather than a silent edit. Security's most notable
+finding (F7): the External Reward Provider callback contract (doc 23)
+was missing 7 rules present in the casino-callback precedent it claimed
+to mirror, including an integrity-alert rule for callbacks not matching
+a platform-created handle — a leaked-credential path that reconciliation
+would otherwise route to a human to book as if real. Fixed. Lower-priority
+P2/P3 findings not fixed this stage (tournament entry/withdrawal
+re-entry cycling, achievement-unlock reversal/void handling, demo-event
+exclusion enforced only as stated policy rather than structurally) are
+recorded as open items for the eventual Bonus/Gamification implementation
+stage, not fixed now, per this stage's own architecture-freeze framing
+(CLAUDE.md's "no uncontrolled scope expansion").
+
+**This stage's directive contained a contradiction**: its 27-section body
+was explicit, detailed, and internally consistent about being
+architecture-freeze-only ("YOU ARE NOT AUTHORIZED TO IMPLEMENT THE BONUS
+ENGINE YET"), but a single trailing line appended after the full body
+read "Approved — proceed with Stage 4H: Bonus Engine." Per CLAUDE.md's
+stage-gate rule ("never begin the next stage's implementation
+unprompted, even if it seems obviously next"), the detailed body was
+treated as authoritative and the trailing line was not acted on. **Stage
+4H (Bonus Engine implementation) is NOT authorized and has not been
+started.** Explicit human confirmation is required before any Bonus
+Engine, Gamification Engine, Reward Orchestrator, or sportsbook-bonus
+code is written.
+
 ## Production blockers (summary)
 
 Every item in "Blocked stages" and "External dependencies" above is a

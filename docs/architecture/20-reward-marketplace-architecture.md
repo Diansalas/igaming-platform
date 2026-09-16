@@ -223,13 +223,46 @@ created --> reserved --> charged --> fulfilling --> fulfilled
 
 Decisions:
 
-- **Charge before fulfil, refund on failure.** The alternative (fulfil
-  first, charge after) can deliver an item without payment; this order can
-  charge without delivering, which is recoverable through a refund. Between
-  two imperfect orderings, choose the recoverable one — and make the refund
-  path a first-class, tested state, not an exception handler.
+- **Charge before fulfil, refund on failure — but only where "before" and
+  "after" are actually two separate steps.** **Specialist-review
+  correction (P1 fix)**: an earlier draft of this bullet applied the
+  `charged → fulfilling → failed → refunding → refunded` state sequence
+  uniformly to every item type, which directly conflicts with
+  `docs/architecture/24-points-accounting-architecture.md` §7's explicit
+  rule for a reward that resolves to a synchronous ledger/points posting
+  (e.g. a points-priced bonus grant): "both ledgers live in the same
+  PostgreSQL database... points spend and bonus grant commit together or
+  not at all. No saga, no distributed transaction, no compensation path is
+  needed or **permitted** for that case." The two documents are
+  reconciled, not in conflict, once the discriminator is stated
+  explicitly:
+  - **Synchronous fulfilment** (the reward is a single database
+    posting — an internal bonus grant, a points-denominated non-monetary
+    state change, anything with no external call): `charged` and
+    `fulfilled` happen in the SAME database transaction as the points
+    spend. There is no persisted `fulfilling` state and no refund path for
+    this case, because there is no window in which one succeeded and the
+    other didn't — this is doc 24 §7's case, and doc 24's prohibition on a
+    saga/compensation path for it stands unmodified.
+  - **Asynchronous fulfilment** (the reward requires an external call —
+    free spins via Casino's forthcoming normalised interface, an
+    External Reward Provider request, doc 20 §"Some fulfilments are
+    economically irreversible" below): THIS is where the alternative
+    (fulfil first, charge after) can deliver an item without payment,
+    this order can charge without delivering, and refund is the
+    recoverable direction — the `charged → fulfilling → failed →
+    refunding → refunded` sequence applies. Make the refund path a
+    first-class, tested state, not an exception handler.
+  An implementer must not apply the asynchronous sequence to a
+  synchronous-fulfilment item type, and must not attempt the
+  single-transaction shortcut for an item type whose fulfilment requires
+  an external call.
 - **Every order is idempotent** on a client-supplied-then-server-validated
-  idempotency key, enforced by a database uniqueness constraint. A
+  idempotency key, enforced by a database uniqueness constraint:
+  `UNIQUE (tenant_id, player_account_id, client_reference)` —
+  **specialist-review addition** naming the composite explicitly (an
+  earlier draft of this bullet left the key's components unnamed, unlike
+  every sibling domain's idempotency section this stage). A
   double-submitted purchase produces one order, never two.
 - **A refund is a reversal request through the Reward Orchestrator**, never
   a direct credit from the marketplace. It carries the original order's

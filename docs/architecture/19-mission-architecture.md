@@ -137,9 +137,15 @@ reasons — reproducibility, dispute resolution, and correctness under voids.
   independently mutable counter. Recomputing it from the trail must
   reproduce it. Drift is a defect.
 - **Idempotency**: every contribution is keyed on the canonical event's
-  `event_id`, enforced by a database uniqueness constraint. A redelivered
-  event can never double-count. This is a constraint, never a
-  check-then-insert.
+  **`idempotency_key`** — never `event_id`, per
+  `docs/architecture/22-canonical-activity-event-taxonomy.md`'s explicit
+  distinction between the two (`event_id` is unique per publish and may
+  differ across redeliveries; `idempotency_key` is unique per business
+  fact and is the one designed to stay stable — **specialist-review
+  correction** to an earlier draft that named `event_id`, which would not
+  have deduped a redelivery at all) — enforced by a database uniqueness
+  constraint. A redelivered event can never double-count. This is a
+  constraint, never a check-then-insert.
 - **Voids and reversals decrement.** A rolled-back bet writes a
   compensating negative contribution carrying the reversal's identity. The
   original contribution is never edited or deleted.
@@ -188,6 +194,12 @@ to instance start). Expiry is an explicit, audited state transition, not an
 implicit consequence of a timestamp comparison at read time — otherwise
 "when did it expire" has no answer and partial-completion rewards have no
 trigger point. A player must be able to see the deadline before opting in.
+**Specialist-review addition**: whatever transaction actually performs
+this comparison against "now" MUST read Postgres `clock_timestamp()`,
+never `now()` — see `docs/architecture/17-gamification-engine-architecture.md`
+§5.2 for why this is a binding requirement, not a stylistic preference
+(it is the exact mechanism behind a real bug Stage 4G-FINAL found and
+fixed in `internal/rg`).
 
 **Abandonment** (a player explicitly leaving an opted-in mission) is
 supported as a distinct state from expiry, because the two mean different

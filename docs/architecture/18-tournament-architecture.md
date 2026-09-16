@@ -75,10 +75,25 @@ non-negotiably (ADR 0031 §1):
 
 1. **RG** — `rg.EvaluateEligibility`. A denial short-circuits; Risk is
    never evaluated. Gamification defines no second self-exclusion concept.
-2. **Risk** — `risk.Evaluate` with a `tournament_entry` operation, its own
-   `RiskRequest` (tenant, brand, player, jurisdiction, licensing mode,
-   amount where an entry cost exists). Any non-nil error is treated as a
-   `DENY` (fail-closed, ADR 0031 §6).
+2. **Risk** — `risk.Evaluate` with a `tournament_entry` operation, **only
+   when the entry carries a genuine monetary cost** (an entry fee, or a
+   prize path with real monetary value). **Specialist-review correction
+   (P2 fix)**: an earlier draft called this an unconditional step for
+   every entry — this contradicts
+   `docs/decisions/0031-risk-and-limits-engine.md` §15e's own explicit
+   position: "a free-entry tournament (no monetary fee, no monetary prize
+   path) is out of scope for the same reason... it creates no monetary
+   exposure," and §18 confirms `tournament_entry` does not exist as a
+   storable/enforceable `Operation` today (rejected by both the CHECK
+   constraint and the HTTP allowlist). A free-entry tournament therefore
+   skips this step entirely — mirroring `docs/architecture/19-mission-
+   architecture.md` §8's identical, correctly-stated handling of
+   `mission_opt_in`'s non-existence. When an entry DOES carry monetary
+   cost, its own `RiskRequest` (tenant, brand, player, jurisdiction,
+   licensing mode, amount) is evaluated exactly as described, and any
+   non-nil error is treated as a `DENY` (fail-closed, ADR 0031 §6) —
+   `tournament_entry` still requires ADR 0031 §16's extension process
+   before any code accepts it, documented-only until then.
 3. **Tournament-specific conditions** — segment membership, level/VIP tier
    requirement, jurisdiction/market permission, minimum account age,
    KYC-verification state where the prize structure requires it, brand
@@ -97,6 +112,28 @@ records the withholding and its reason, and no reward decision is emitted
 for them. Whether their would-be prize redistributes to the next ranked
 participant or is simply not awarded is a **prize-structure configuration
 property**, decided per definition, not an implicit behaviour. See §14.
+
+**Specialist-review addition (P1 fix, F8) — the snapshot has TWO
+projections, and this is binding, not an implementation detail.** The
+full internal snapshot (participant, score, rank, tie-break resolution,
+withheld/disqualified status AND ITS REASON — including an RG decision
+`Code` such as a self-exclusion code) is staff/audit-only, gated by an
+RG-aware permission (at minimum the same bar as `rg_restriction:read`).
+**A player-facing view of the SAME settled period (live standings or
+historical results) carries rank, display identity, and score ONLY — a
+withheld or disqualified participant is either omitted from the
+player-facing view entirely, or shown with no reason of any kind, and
+NEVER with an RG-derived code.** An earlier draft of this document left
+this undecided, and doc 25's player-facing leaderboard-history endpoint
+sketch inherited the gap by not excluding withholding reasons — without
+this rule, a player viewing a concluded tournament's standings could
+learn, with certainty, that a specific named individual self-excluded
+from gambling: under every RG regime this is among the most
+confidentiality-sensitive facts the platform holds about a player, and it
+is far cheaper to specify the two-projection rule now than to retrofit it
+once a settled-snapshot shape is a public API contract. Mirrors doc 17
+§9.3's identical minimal-disclosure rule for the live score journal,
+applied here to the settled/historical snapshot as well.
 
 ## 4. Entry models
 
@@ -203,7 +240,16 @@ the formal boundary** between "ranking may still change" and "ranking is
 final." Freezing is an explicit, audited state transition, not an implicit
 consequence of the clock passing `window_end` — because the settlement lag
 means those are different moments, and a dispute needs to know exactly
-which one applied.
+which one applied. **Specialist-review addition**: the transaction that
+actually performs the freeze/settlement-lag comparison MUST read Postgres
+`clock_timestamp()`, never `now()` — see
+`docs/architecture/17-gamification-engine-architecture.md` §5.2 for why
+this is a binding requirement, not a stylistic preference. Concretely: a
+freeze job queued behind the same tenant/instance's advisory lock as a
+concurrent score-cancelling rollback must not freeze the ranking having
+missed a correction that, by wall-clock time, had already committed —
+the same failure shape as the real `internal/rg` bug Stage 4G-FINAL
+found, applied here to prize money instead of self-exclusion.
 
 ## 7. Prize pool, distribution, and ties
 
@@ -269,6 +315,29 @@ Properties, each chosen to make settlement disputable and reproducible:
 
 1. **The ranking is computed from the score journal inside one transaction**
    at freeze. No derived store is read.
+1a. **Specialist-review addition (P1 fix, F5): before any reward decision
+   is emitted, every ranked participant in a prize-bearing position is
+   evaluated against doc 17 §6.6's anti-manipulation controls; an
+   unavailable or not-yet-built control is a FAIL-CLOSED condition that
+   withholds that participant from settlement, never a skipped step.**
+   An earlier draft of this section specified settlement fully as six
+   numbered properties, none of which was a collusion/multi-accounting
+   check — the anti-manipulation table in doc 17 §6.6 existed only as a
+   neighbouring document's aspiration, never as a gate this state machine
+   actually enforces, so nothing in the settlement sequence as originally
+   written would ever have invoked it. Concretely: `frozen --(compute)-->
+   settling` MUST include, for every participant in a rank that would
+   receive a prize, (i) a check against the `PersonID`-linkage
+   multi-accounting control (doc 17 §6.6, corrected), (ii) a check against
+   whatever wash-betting/velocity Risk signal exists for the relevant
+   operation (doc 17 §7.1 — and if that signal does not exist yet because
+   its `count`/`velocity` `LimitKind` has not been built, that is itself a
+   reason to withhold, not a reason to skip the check), and (iii) the
+   existing RG/Risk/tournament-condition re-evaluation already named in
+   §3. **Launch flag**: a tournament with a monetary prize pool must not
+   go live before doc 17 §6.6's controls actually exist and are wired
+   here — this launch precondition is recorded, not waived, by this
+   stage's architecture freeze.
 2. **A `TournamentResultSnapshot` is persisted and is immutable**: every
    participant, final score, final rank, tie-break resolution applied,
    withheld/disqualified participants and their reasons, the definition and

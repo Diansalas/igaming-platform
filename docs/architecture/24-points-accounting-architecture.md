@@ -74,8 +74,10 @@ Conceptual shape (not DDL):
 
 ```
 PointType
-  tenant_id                 -- NOT NULL; no platform-global point type exists
-  code                      -- UNIQUE (tenant_id, code), never platform-global
+  tenant_id                 -- NULLABLE: NULL = platform-wide DEFINITION/TEMPLATE,
+                             -- non-NULL = tenant-owned definition; see the scope
+                             -- correction immediately below this block
+  code                      -- UNIQUE (tenant_id, code)
   brand_id                  -- nullable = all brands OF THAT TENANT, never all tenants
   display_name
   exponent                  -- default 0 (whole points); see §3
@@ -84,15 +86,49 @@ PointType
   active
 ```
 
+**Specialist-review correction on scope (P1 fix)**: an earlier draft of
+this section made `PointType.tenant_id` `NOT NULL` ("no platform-global
+point type exists"), reasoning from the liability argument in point 1
+below. Cross-document review found this conflates two genuinely different
+things: the **registry row** (a *definition* — a name, an exponent, a
+default expiry policy) versus the **balance** (a *liability* — an actual
+player's accrued points in that type). The liability argument is correct
+and binding for the balance side (`PointAccount`/`PointTransaction`/
+`PointEntry` below remain `tenant_id NOT NULL`, always — a platform-wide
+balance row would be incoherent, exactly as originally argued) but does
+**not** extend to the definition side: a `PointType` *definition* is a
+template, exactly like a platform-wide `risk_rules` row (ADR 0031) or a
+platform-wide Bonus Campaign template
+(`docs/architecture/10-bonus-engine-architecture.md` §8) — both of which
+this codebase already allows to be `tenant_id IS NULL`. Disallowing a
+platform-wide `PointType` *definition* would make it impossible for a
+platform-wide Bonus Campaign template, Marketplace item template, or
+Level programme template (all of which reference a `PointType.code` for
+pricing/denomination — see `docs/architecture/17-gamification-engine-
+architecture.md` §9.1, `docs/architecture/20-reward-marketplace-
+architecture.md` §3) to ever exist, contradicting those documents. The
+corrected model: **`PointType` (the definition) is dual-scope, nullable
+`tenant_id`, mirroring `risk_rules`'s exact pattern — a tenant may
+instantiate/reference a platform-wide `PointType` definition, but every
+actual balance row for that type remains tenant-scoped and non-nullable.**
+This also corrects §9's RLS section below, which previously justified the
+`NOT NULL` choice with a claim about `db.WithoutTenant` connections that
+does not match this codebase's actual RLS policy shape (a `WithoutTenant`
+connection sees only `tenant_id IS NULL` rows under migration 0041's real
+policy text, never another tenant's data — the same policy shape this
+document's own dual-scope tables already rely on elsewhere).
+
 Why plurality rather than assuming one currency — the directive explicitly
 forbids assuming, so this is argued rather than asserted:
 
-1. **Multi-tenancy makes a single global points currency incoherent.** A
+1. **Multi-tenancy makes a single global points BALANCE incoherent.** A
    platform-global points balance is a cross-tenant shared object, which
    contradicts CLAUDE.md's rule that every tenant-owned table carries
    `tenant_id` under RLS, and would make tenant A's points economically
    meaningful against tenant B's redemption catalogue. Points issued by
-   one operator are a liability of *that* operator.
+   one operator are a liability of *that* operator. (This argues the
+   BALANCE must be tenant-scoped; it does not argue the type DEFINITION
+   must be — see the scope correction above.)
 2. **Brand differences must be configuration, not code paths.** "Loyalty
    Points", a VIP-tier currency, and a seasonal tournament currency are
    three configuration rows under this model and three code branches
@@ -371,12 +407,20 @@ Every mechanism below is the same one the money ledger uses.
 - **Internally-originated** points movements (a gamification rule firing, a
   mission completion, a marketplace order, a tier award): `UNIQUE
   (tenant_id, idempotency_key)`, where the key is the originating system's
-  own event id, **generated once when the operation is first accepted and
-  reused verbatim on every retry — never regenerated per attempt.** A
-  Reward Orchestrator or gamification worker that mints a fresh key per
-  delivery attempt has defeated the mechanism entirely; this is the most
-  likely practical failure of this design and is called out rather than
-  assumed.
+  own **`idempotency_key`, generated once when the operation is first
+  accepted and reused verbatim on every retry — never regenerated per
+  attempt.** **Specialist-review correction**: an earlier draft of this
+  bullet called the key the originating system's own "event id" — this
+  must NOT be `docs/architecture/22-canonical-activity-event-taxonomy.md`'s
+  `event_id` field, which is explicitly unique per PUBLISH (and can differ
+  across redeliveries under at-least-once broker semantics); it must be
+  that same taxonomy's separate `idempotency_key` field, unique per
+  BUSINESS FACT, which is the field actually designed to be stable across
+  redelivery. A Reward Orchestrator or gamification worker that mints a
+  fresh key per delivery attempt — or that reuses the wrong one of these
+  two taxonomy fields — has defeated the mechanism entirely; this is the
+  most likely practical failure of this design and is called out rather
+  than assumed.
 - **Externally-originated** points movements (an External Reward Provider
   awarding points): `UNIQUE (tenant_id, provider_id, provider_tx_id)`, with
   `provider_id` resolved from the **credential that verified the callback
@@ -409,11 +453,17 @@ Every mechanism below is the same one the money ledger uses.
 this codebase — stated concretely because ADR 0019 found tables whose prose
 claimed tenant-scoped RLS while carrying no `tenant_id` column.
 
-- Every points table (`point_types`, `point_accounts`, `point_transactions`,
-  `point_entries`, `point_balance_projection`, and any points
-  reconciliation tables) carries **`tenant_id NOT NULL`** with `FORCE ROW
-  LEVEL SECURITY` and a policy gated on the connection-level
-  `app.tenant_id` setting.
+- **`point_types` is dual-scope** (nullable `tenant_id`, mirroring
+  `risk_rules`'s exact policy shape — see the scope correction in §2):
+  `tenant_id IS NULL` rows are platform-wide definitions readable by every
+  tenant's staff and only writable via a platform-scoped connection;
+  `tenant_id`-set rows are readable and writable only by that tenant's
+  staff. **`point_accounts`, `point_transactions`, `point_entries`,
+  `point_balance_projection`, and any points reconciliation tables carry
+  `tenant_id NOT NULL`** — the liability argument in §2 applies fully to
+  every balance-bearing table, just not to the type-definition registry.
+  All of the above carry `FORCE ROW LEVEL SECURITY` and a policy gated on
+  the connection-level `app.tenant_id` setting.
 - **`tenant_id` is never accepted from the client** on any write path —
   always derived server-side from authenticated context.
 - Player-scoped rows carry **`player_account_id` denormalized on every row
@@ -428,12 +478,24 @@ claimed tenant-scoped RLS while carrying no `tenant_id` column.
   from a path, query or body parameter.
 - House-level points accounts have **no** player scope and are readable
   only by staff/service principals with the appropriate RBAC permission.
-- **No points table is platform-scoped.** ADR 0013's dual-scope
-  (`tenant_id IS NULL`) pattern deliberately does **not** apply, for the
-  same reason ADR 0019 excluded the reconciliation tables: a dual-scope
-  policy would make a `WithoutTenant` connection a legitimate cross-tenant
-  read path. Cross-tenant points reporting goes through the reporting layer
-  (`12-audit-reporting-architecture.md`), not relaxed RLS.
+- **No BALANCE-bearing points table is platform-scoped** —
+  `point_accounts`/`point_transactions`/`point_entries`/the projection and
+  any reconciliation table are always `tenant_id NOT NULL`, for the same
+  reason ADR 0019 excluded the reconciliation tables from dual-scope: a
+  balance is never a legitimate cross-tenant object. **Specialist-review
+  correction**: an earlier draft of this bullet additionally claimed a
+  dual-scope policy "would make a `WithoutTenant` connection a legitimate
+  cross-tenant read path" — that claim is inaccurate against this
+  codebase's actual RLS policy shape (migration 0041's real policy text:
+  `tenant_id IS NULL OR tenant_id = current_setting('app.tenant_id')`,
+  under which a `WithoutTenant` connection sees ONLY the `tenant_id IS
+  NULL` rows, never another tenant's) — the true reason balance tables
+  stay single-scope is the liability argument alone, not an RLS-safety
+  argument. `point_types` (the definition registry, §2) IS dual-scope,
+  using exactly this same, correctly-understood policy shape. Cross-tenant
+  points *reporting* (aggregated, non-transactional) goes through the
+  reporting layer (`12-audit-reporting-architecture.md`), not relaxed RLS
+  on any balance table.
 - Players never write to any points table directly; there is no
   player-scoped `INSERT`/`UPDATE`/`WITH CHECK` policy on any of them.
 

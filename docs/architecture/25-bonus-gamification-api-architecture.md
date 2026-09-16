@@ -146,8 +146,37 @@ only).
   visibility into one player's bonus history — mirrors
   `GET /v1/admin/players/{id}` precedent), gated by a proposed
   `bonus:read` permission (player-scoped read, distinct from
-  `bonus_config:read` below — mirrors `player:read` vs. `risk_config:read`
-  being separate authorities today).
+  `bonus_config:read`/`bonus_config:manage` for campaign/offer authoring —
+  mirrors `player:read` vs. `risk_config:read` being separate authorities
+  today). **Specialist-review correction (P1 fix, F3)**: an earlier draft
+  of this document referenced `bonus_config:read`/`bonus_config:manage`
+  in passing (as here) but never actually defined them as a resource area
+  or listed them in §2's permission summary — the absence, not a typo, was
+  the finding. Bonus campaign/Offer authoring is the highest-value
+  configuration surface in this entire domain (an Offer with a narrow
+  eligibility axis and a large reward is functionally equivalent to a
+  manual grant, without carrying a manual grant's four-eyes/threshold
+  control — `docs/architecture/10-bonus-engine-architecture.md` §10 only
+  requires that treatment for genuinely manual overrides, not for
+  authoring an Offer that makes the grant automatic). This document now
+  requires: (i) `bonus_config:read`/`bonus_config:manage` as a first-class
+  permission pair (added to §2 below), never bundled into
+  `RoleTenantAdmin` by default; (ii) any Offer whose maximum per-player
+  reward value exceeds a configurable threshold requires the same
+  reason-code + four-eyes treatment as a manual adjustment, closing the
+  "configure it instead of adjusting it" bypass.
+- **Specialist-review addition (P2 fix, F15)**: `awaiting_verification`
+  (a KYC-gated grant status, per
+  `docs/decisions/0034-bonus-gamification-rg-kyc-identity-integration.md`
+  §6) is a KYC-derived fact. A `bonus:read` holder without the separate
+  `verification:read` permission must not be able to infer a player's KYC
+  state from this endpoint — either the status is generalized to a
+  non-KYC-specific "pending" value for a caller lacking
+  `verification:read`, or `bonus:read` is defined to always require
+  `verification:read` alongside it. `bonus:read` must never become a
+  side-channel around `verification:read`'s deliberate separation of
+  duties (`internal/auth/permission.go`'s explicit "never grant sensitive
+  verification access to Finance" precedent, applied by analogy).
 - No player-initiated mutation here (claiming/opting into an *offer* is a
   missions/marketplace-style action, see 1.2/1.8); forfeiture/cancellation
   is a staff or system (bonus-engine) action, not exposed as a raw player
@@ -286,9 +315,21 @@ once concluded).
   to concluded/settled — mirrors the withdrawal state-machine precedent
   of explicit, audited state transitions rather than field overwrites),
   `GET /v1/admin/tournaments/{id}/results`.
-- Permissions: `tournament_config:read` / `tournament_config:manage`,
-  mirroring `risk_config:read/manage` exactly (read/manage split, manage
-  never bundled into a broad admin role by default).
+- Permissions: `tournament_config:read` / `tournament_config:manage` for
+  DEFINITION authoring (name, schedule, prize structure), mirroring
+  `risk_config:read/manage` exactly. **Specialist-review correction (P1
+  fix, F2)**: an earlier draft placed `/close` and `/settle` under this
+  SAME `tournament_config:manage` permission — this is the exact
+  anti-pattern `internal/auth/permission.go` already solved twice for
+  withdrawal policy and risk config ("the role that approves withdrawals
+  must not also be the role that can loosen the policy gating its own
+  approvals"), applied here: a single actor holding
+  `tournament_config:manage` could author a tournament's prize structure
+  AND settle it themselves, with no second pair of eyes on a transition
+  that pays out real money. Settlement/close/recalculation authority is
+  its own permission, **`tournament:settle`**, never bundled with
+  `tournament_config:manage` by default and never granted to the same
+  role as a matter of course.
 - Tenant/brand scoping: a tournament is tenant+brand-scoped configuration;
   a player can only see/enter tournaments scoped to their own brand,
   resolved server-side from their account, never from a client-supplied
@@ -307,7 +348,18 @@ leaderboard, VIP wagering leaderboard).
   cursor-paginated), `GET /v1/leaderboards/{boardID}/history/{periodID}`
   (a concluded period's final standings — immutable once the period
   closes, mirroring the ledger's "never edit history" principle applied
-  to a non-financial append-only record).
+  to a non-financial append-only record). **Specialist-review addition
+  (P1 fix, F8)**: both endpoints return the PLAYER-FACING projection only
+  — display identity, rank, score — never a withholding/disqualification
+  reason for any participant, and never an RG-derived code under any
+  circumstance, per `docs/architecture/18-tournament-architecture.md`'s
+  corrected two-projection rule (§3). A withheld/disqualified participant
+  is either omitted from this response or shown with no reason at all.
+  The full internal record (including RG/Risk decision codes) is
+  staff/audit-only, exposed through a separate, RG-aware-permission-gated
+  endpoint this document does not sketch (deferred — the player-facing
+  contract is what must be locked down now, since it is the harder one to
+  retrofit).
 - Staff: `GET /v1/admin/leaderboards` (definitions), `POST
   /v1/admin/leaderboards` (define a board — idempotent via
   `client_reference`).
@@ -415,21 +467,43 @@ convention established by `risk_config:read`/`risk_config:manage` and
 
 | Proposed permission | Gates |
 |---|---|
-| `bonus:read` | Staff visibility into a specific player's bonus/points/reward history (1.1, 1.4, 1.9, 1.10) |
+| `bonus:read` | Staff visibility into a specific player's bonus/points/reward history (1.1, 1.4, 1.9, 1.10) — MUST NOT disclose a KYC-derived status to a caller lacking `verification:read` (F15, §1.1) |
+| **`bonus_config:read` / `bonus_config:manage`** | **Specialist-review addition (P1 fix, F3) — previously referenced but never defined.** Campaign/Offer authoring (§1.1) — the highest-value configuration surface in this domain; `manage` never bundled into `RoleTenantAdmin` by default, and an Offer whose max per-player reward exceeds a configurable threshold requires the same four-eyes treatment as a manual adjustment |
 | `mission_config:read` / `mission_config:manage` | Mission catalogue visibility / authoring (1.2) |
 | `gamification_config:read` / `gamification_config:manage` | Level ladder, badge catalogue, leaderboard definitions (1.3, 1.5, 1.7) |
-| `tournament_config:read` / `tournament_config:manage` | Tournament definitions and settlement (1.6) |
+| `tournament_config:read` / `tournament_config:manage` | Tournament DEFINITION visibility / authoring only (1.6) — does NOT gate settlement |
+| **`tournament:settle`** | **Specialist-review addition (P1 fix, F2) — previously bundled into `tournament_config:manage`.** Settlement, close, and recalculation authority. Never bundled with `tournament_config:manage`, never granted to the same role as a matter of course — the role that authors a prize structure must not also be the role that pays it out unaccompanied |
 | `marketplace_config:read` / `marketplace_config:manage` | Marketplace catalogue administration (1.8) |
+
+**Specialist-review addition — bundling risk, recorded as a build-time
+requirement (F2/F3's underlying structural issue):** every narrow
+authority already in this codebase's real permission model has a
+DEDICATED role holding it and nothing else (`RoleFinance` for the four
+withdrawal permissions, `RoleRiskManager` for the two `risk_config`
+permissions, `RoleCompliance` for `rg_restriction:write`/
+`identity_review:manage`/`verification:review`). This document proposes
+seven `manage`-class permissions (`bonus_config:manage`,
+`mission_config:manage`, `gamification_config:manage`,
+`tournament_config:manage`, `tournament:settle`,
+`marketplace_config:manage`) and names no role to hold them — a
+permission with no grantee is a capability nothing can actually use,
+which makes bundling it into `RoleTenantAdmin` the path of least
+resistance at build time, exactly the failure `internal/auth/
+permission.go`'s own `RolePlatformAdmin` RG comment warns against.
+**Required at build time**: mint a dedicated role (e.g.
+`RolePromotionsManager`) holding this `manage`/`settle` set and nothing
+else, mirroring `RoleRiskManager`'s shape exactly — this is a build-time
+requirement recorded now, not resolved by this architecture-freeze stage.
+The `*_config:read` side may safely bundle into `RoleTenantAdmin`, which
+already holds `PermRiskConfigRead` today — that precedent is explicitly
+fine to follow.
 
 Left open for `architect`/the eventual implementer to decide at build
 time (flagged, not resolved here): whether `bonus:read` should absorb
 points/rewards visibility entirely or split further once the Points
 Accounting ADR and Reward Orchestrator design land — this document does
 not commit to a final permission count, only to the naming convention and
-the read/manage separation-of-duties pattern (manage authority is never
-bundled into `RoleTenantAdmin`/`RolePlatformAdmin` by default, mirroring
-`risk_config:manage`'s precedent, pending an explicit business decision
-otherwise).
+the read/manage separation-of-duties pattern.
 
 ## 3. Explicit non-goals of this document
 

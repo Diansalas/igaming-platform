@@ -138,9 +138,23 @@ notion of truth. Concretely, a daily job compares:
   we call `Grant` or receive a callback claiming a grant) against the
   provider's own grant/settlement report (file, API pull, or accumulated
   callback history) for the same period.
-- Every ledger posting that recognized bonus liability or player-facing
-  value for an external grant (a `ledger-finance`-owned account —
-  coordinated, not decided, here) against the same external record.
+- **Specialist-review correction (P1 fix)**: an earlier draft of this
+  bullet compared against "every ledger posting that recognized bonus
+  liability... for an external grant" — this is no longer accurate.
+  `docs/decisions/0032-bonus-accounting.md` §6(c) (the authoritative,
+  since-settled accounting decision) posts **zero ledger entries** for an
+  externally-fulfilled grant precisely because the value never enters a
+  platform wallet — there is no "ledger posting that recognized bonus
+  liability" for this case, and there must never be one (a mirrored
+  provider-held balance is exactly the second-truth-system ADR 0032 §0
+  forbids). The corrected comparison: every `external_reward_grant` row's
+  recorded *fact* (§6(c)'s memo/audit stream — counts and references, not
+  balances) against the provider's own record. The ONE case that does
+  touch the ledger is when external value genuinely lands in a platform
+  wallet (e.g. the provider settles a free-bet win as a real payout) —
+  that posts as an ordinary Flow 9 provider-settlement entry into
+  `player_cash`, reconciled exactly like any other provider settlement,
+  never as bonus accounting.
 
 A mismatch (provider claims granted, we have no record; we have a record,
 provider denies it) is a reconciliation exception, logged and routed for
@@ -338,11 +352,19 @@ only guarantees the underlying records make it possible.
 
 ## Consequences
 
-- No new financial-truth machinery: external reward grants post through
-  the same `ledger.Post` API and account model `ledger-finance`'s Bonus
-  Accounting ADR defines, exactly as ADR 0025 established for casino —
-  this ADR adds new *rows and a new adapter category*, never a second
-  ledger.
+- No new financial-truth machinery. **Specialist-review correction (P1
+  fix)**: an earlier draft of this bullet said external reward grants
+  "post through the same `ledger.Post` API and account model" — per
+  `docs/decisions/0032-bonus-accounting.md` §6(c), an externally-fulfilled
+  grant (the provider's own bonus engine owns it end to end) posts ZERO
+  ledger entries; it is recorded as a domain event plus an audit record
+  and reconciled via a memo/audit stream, never a `ledger.Post` call. The
+  "no second ledger" principle still holds, corrected: this ADR adds new
+  *rows in a non-ledger table* (`external_reward_grant`) and a new adapter
+  category, never a parallel or mirrored ledger, and never a `ledger.Post`
+  call for value that never entered a platform wallet. The one exception
+  — external value genuinely landing in a platform wallet — posts through
+  the ordinary Flow 9 provider-settlement path, not a bonus-specific one.
 - Bonus/Gamification code never branches on sportsbook provider identity;
   Sportsbook code never branches on which system (platform vs. provider)
   currently owns a given promotion's fulfillment beyond reading
@@ -351,16 +373,29 @@ only guarantees the underlying records make it possible.
   proposes something Casino's precedent does not already cover verbatim —
   flagged explicitly for `architect`/Reward-Orchestrator confirmation, not
   adopted as settled fact.
-- Genuinely open, deferred to the Orchestrator's contract finalization or
-  a later stage, not silently assumed resolved: (a) whether
-  `ExternalRewardProvider.Grant` carries an outbound idempotency-key field
-  (§1.5); (b) whether the canonical error taxonomy distinguishes
-  safe-discard ambiguity from escalate-on-late-success ambiguity (§1.6);
-  (c) the exact shared event envelope (correlation id, versioning) for
+- **Item (a) resolved during specialist review, no longer open**: whether
+  `ExternalRewardProvider.Grant`/`RequestReward` carries an outbound
+  idempotency-key field — yes, `docs/architecture/23-external-reward-
+  provider-contract.md`'s "Idempotency" section already states every
+  outbound call carries a platform-generated idempotency key, generated
+  once and reused verbatim on retry; this ADR's own §1.5 should be read
+  as confirming, not questioning, that shape.
+- Still genuinely open, deferred to the Orchestrator's contract
+  finalization or a later stage, not silently assumed resolved: (b)
+  whether the canonical error taxonomy distinguishes safe-discard
+  ambiguity from escalate-on-late-success ambiguity (§1.6); (c) the exact
+  shared event envelope (correlation id, versioning) for
   `sportsbook_bet`/`sportsbook_settlement`/`sportsbook_void_cancel`, owned
-  by the Master Orchestrator's canonical taxonomy doc; (d) the specific
-  ledger account names for external-grant liability, owned by
-  `ledger-finance`'s Bonus Accounting ADR.
+  by the Master Orchestrator's canonical taxonomy doc (now added — see
+  `docs/architecture/22-canonical-activity-event-taxonomy.md`'s envelope
+  table, `correlation_id` field).
+- **Item (d) is now moot, not merely resolved differently**:
+  `docs/decisions/0032-bonus-accounting.md` §6(c) (settled during this
+  same review round) determined an externally-fulfilled grant posts ZERO
+  ledger entries — there is no "external-grant liability" account to
+  name, because no such liability is ever recognized on this platform's
+  ledger for a reward the platform never held. See the corrected
+  Consequences bullet above.
 
 ## Owner
 

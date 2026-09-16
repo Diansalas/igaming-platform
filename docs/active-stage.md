@@ -1,5 +1,119 @@
 # Active Stage
 
+## Stage 4H-A — Bonus, Gamification & Reward Orchestration Architecture Freeze — Complete
+
+Status: **Complete, pending explicit human approval to authorize the next
+stage (Stage 4H: Bonus Engine implementation).**
+
+Explicitly an architecture + accounting + domain-contract freeze only,
+per the stage's own directive: **no Bonus Engine, Gamification Engine,
+Reward Orchestrator, sportsbook-bonus, CRM, notification-provider, or
+external-reward-provider code was written.** Every deliverable this
+stage is a design document, ADR, or governance-table update — zero
+production code, zero migrations, zero tests, `go build ./...` untouched
+and clean.
+
+### What was frozen
+
+- **Three distinct core domains** (never merged): Bonus Engine
+  (`docs/architecture/10-bonus-engine-architecture.md`, rewritten),
+  Gamification Engine (`17-gamification-engine-architecture.md`, new,
+  plus `18-tournament-architecture.md`, `19-mission-architecture.md`,
+  `20-reward-marketplace-architecture.md`), Reward Orchestrator
+  (`21-reward-orchestration-architecture.md`, new — fulfillment
+  mechanism only, never decides whether a reward is earned).
+- **`ExternalRewardProvider` abstraction**
+  (`23-external-reward-provider-contract.md`) for coexistence with a
+  known future sportsbook provider's own native bonus engine —
+  provider-neutral, not built.
+- **Canonical Activity/Event taxonomy**
+  (`22-canonical-activity-event-taxonomy.md`) extending the Stage-1
+  `internal/eventbus.Event` stub, with the load-bearing `event_id` vs
+  `idempotency_key` distinction made explicit after being found
+  conflated in 3 draft documents.
+- **Bonus accounting** (`docs/decisions/0032-bonus-accounting.md`,
+  CRITICAL/authoritative, ledger-finance-owned): `promo_liability`,
+  `bonus_expense`, Invariant B1, atomic 4-entry cash conversion, and the
+  three funding-scenario ledger treatments (operator-funded,
+  provider-funded, externally-fulfilled = zero ledger entries ever).
+- **Points accounting** (`24-points-accounting-architecture.md`) with the
+  `PointType` dual-scope-definition / tenant-scoped-balance correction.
+- **Risk integration** (`docs/decisions/0031-risk-and-limits-engine.md`
+  §14-§18): Bonus/Gamification consume `internal/risk.Evaluate`
+  exclusively, no new limit engine.
+- **RG integration** (`docs/decisions/0034-...rg-kyc-identity-
+  integration.md`): RG remains sole authority; self-exclusion is
+  prospective not retroactive; conversion-time denial leaves a Grant
+  `completed`, never auto-forfeited.
+- **Provider-neutral sportsbook interoperability**
+  (`docs/decisions/0033-provider-interoperability-and-external-bonus-
+  engines.md`): two future providers mapped onto one canonical contract,
+  neither built.
+- **API/RBAC contract** (`25-bonus-gamification-api-architecture.md`,
+  design only): `bonus_config:read/manage`, `tournament:settle` split
+  from `tournament_config:manage`, a recommended dedicated
+  `RolePromotionsManager` role.
+
+### Specialist review
+
+Wave 1: bonus-engine, architect (Gamification/Tournament/Mission/
+Marketplace), ledger-finance (ADR 0032 + doc 24), sportsbook (ADR 0033),
+identity-compliance (ADR 0034), risk (ADR 0031 §14-§18), backend (doc
+25) — 7 parallel drafts, plus 3 cross-domain connective documents
+authored directly by the Orchestrator (doc 21, 22, 23).
+
+Wave 2 (code-reviewer, security, qa, casino — parallel review of the
+frozen set): found ~20 genuine P1-severity cross-document
+contradictions (not stylistic — real conflicting decisions about the
+same entity/mechanism). **All P1s fixed in-place**, each with an
+explicit "specialist-review correction" callout: externally-fulfilled
+bonus ledger treatment (3 conflicting documents), `event_id`-vs-
+`idempotency_key` idempotency keying (3 documents), a
+synchronous-vs-asynchronous marketplace-redemption transaction-boundary
+conflict (docs 20 vs 24), a missing Reward Orchestrator reversal path,
+the External Reward Provider callback contract missing 7 security rules
+present in the casino-callback precedent it claimed to mirror
+(including an integrity-alert rule for a callback not matching a
+platform-created handle), tournament-settlement permission bundled with
+prize-authoring permission, no permission proposed for bonus-campaign
+authoring, anti-manipulation controls never wired into tournament
+settlement as a required step, a contradictory instruction on reading
+`internal/identityresolution` directly, and others (full list in this
+stage's completion report delivered to the user). Lower-priority P2/P3
+items (tournament entry/withdrawal re-entry cycling, achievement-unlock
+reversal/void handling, demo-event exclusion enforced only as stated
+policy rather than structurally) were recorded as open follow-up items
+rather than fixed, per the stage's own architecture-freeze scope.
+
+### Directive contradiction — flagged, not acted on
+
+The stage's directive was a detailed, internally consistent 27-section
+body explicit about being architecture-freeze-only ("YOU ARE NOT
+AUTHORIZED TO IMPLEMENT THE BONUS ENGINE YET"), followed by a single
+trailing line appended after the full body: "Approved — proceed with
+Stage 4H: Bonus Engine." Per CLAUDE.md's stage-gate rule ("never begin
+the next stage's implementation unprompted, even if it seems obviously
+next"), the body was treated as authoritative and the trailing line was
+not acted on. **Stage 4H (Bonus Engine implementation) is NOT
+authorized.** This is re-flagged in the stage's completion report,
+which explicitly asks for human confirmation before any Bonus Engine,
+Gamification Engine, Reward Orchestrator, or sportsbook-bonus code is
+written.
+
+### Decisions/input needed before the next stage
+
+1. Confirm which stage to authorize next: Stage 4H (Bonus Engine
+   implementation) as the directive's trailing line suggested, or a
+   different next stage — and confirm the architecture-freeze-only
+   reading of this stage's directive was correct.
+2. The lower-priority P2/P3 items recorded above (not fixed this stage)
+   should be revisited once Bonus Engine/Gamification implementation is
+   authorized.
+3. All previously-open decisions from Stages 0-4G-FINAL remain open —
+   see `docs/governance/project-status.md`'s consolidated list.
+
+---
+
 ## Stage 4G-FINAL (+ FINANCE-GATE follow-up) — Architectural Hardening & Final Gate — Complete
 
 Status: **Complete, pending human approval to authorize the next stage.**

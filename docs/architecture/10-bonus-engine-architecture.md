@@ -128,8 +128,8 @@ rule — Risk rules are amount/frequency-shaped, not identity-graph-shaped).
 |---|---|---|---|
 | Deposit bonus | Yes, cleanly | Internal — Grant `activated` on `deposit.settled`; reward posted as `player_bonus` balance via split instruction (§6) | Eligibility axis governs first-deposit-only, min/max, deposit method |
 | Reload bonus | Yes, cleanly | Internal, identical to deposit bonus | Distinguished only by eligibility (existing depositor, not first-deposit) — same Offer shape, no new lifecycle concept |
-| Cashback | Yes, with a distinct completion trigger | Internal | Completion is time/window-based (a settlement job closing the cashback window and computing net loss), not wagering-multiplier-based — Offer's Wagering axis is effectively bypassed in favor of the Payout axis's cashback % and window; Grant still moves `issued→activated→completed→converted` |
-| Free spins | Grant decision fits; fulfillment does not | Grant decision internal; fulfillment via Reward Orchestrator → `casino`'s normalised free-round interface | Bonus Engine issues the GRANT (game, count, bet level) and a `fulfillment_requested` Progress entry; it never calls a casino provider API directly. Fulfillment status (`fulfillment_confirmed`/`fulfillment_failed`) arrives back through the Reward Orchestrator and is appended to Progress, not re-derived |
+| Cashback | Yes, with a distinct completion trigger | Internal | Completion is time/window-based (a settlement job closing the cashback window and computing net loss), not wagering-multiplier-based — Offer's Wagering axis is effectively bypassed in favor of the Payout axis's cashback % and window; Grant still moves `issued→activated→completed→converted`. **Specialist-review addition**: the settlement job's own comparison against "now" to decide the window has elapsed MUST read `clock_timestamp()`, never `now()` — see `docs/architecture/17-gamification-engine-architecture.md` §5.2; this is a binding requirement given a settlement job can be queued behind the same Grant-completion advisory lock discussed in §9 below |
+| Free spins | Grant decision fits; fulfillment does not | Grant decision internal; fulfillment via Reward Orchestrator → `casino`'s normalised free-round interface, **forthcoming — not yet built** (confirmed by specialist review: `internal/casino`'s `CasinoProvider` interface has no free-round method today; `08-casino-integration-architecture.md` §1 records this as an `OPEN DECISION` deferred to the Bonus Engine implementation stage) | Bonus Engine issues the GRANT (game, count, bet level) and a `fulfillment_requested` Progress entry; it never calls a casino provider API directly. Fulfillment status (`fulfillment_confirmed`/`fulfillment_failed`) arrives back through the Reward Orchestrator and is appended to Progress, not re-derived |
 | Free bets | Same as free spins, sportsbook side | Grant decision internal; fulfillment via Reward Orchestrator → sportsbook's own normalised interface (`09-sportsbook-architecture.md`, once built) | Identical boundary to free spins — Bonus Engine never talks to a sportsbook provider |
 | Wagering bonus (generic multiplier bonus with no deposit trigger, e.g. mission/tournament payout requiring playthrough) | Yes | Internal | Wagering axis is the primary mechanism; eligibility axis may be empty/always-true if the triggering condition is external (mission/tournament completion signal, §2's "mission rewards"/"tournament rewards" rows) |
 | Cash reward (no wagering requirement at all) | Fits, but Wagering axis is a no-op | Internal | `activated` and `completed` happen atomically (multiplier = 1x / immediately satisfied) — modeled as a Wagering axis with multiplier 0 or "already satisfied," not a bypass of the state machine, so the Progress trail still records a `completed` transition and reason |
@@ -204,16 +204,37 @@ section's Bonus-Engine-side responsibilities are what should be revised.
   external report does not cleanly map to §1.2's states, the Progress
   entry still records the external engine's own raw status string — the
   mapping is best-effort for cross-fulfiller reporting, not authoritative.
-- **Reconcile against the ledger regardless of which system actually
-  fulfilled the reward** — the accounting boundary (§6) treats an
-  `external`-fulfilled Grant's lifecycle events (activation, completion,
-  expiry, reversal) identically to an `internal` one: Bonus Engine emits
-  the same shape of split instruction/lifecycle event either way, sourced
-  from our own recorded Grant/Progress state, so `ledger-finance`'s
-  posting logic and reconciliation job never need a fulfiller-specific
-  code path. What differs is only WHERE the triggering fact came from (our
-  own rule evaluation vs. an external callback), never what Bonus Engine
-  hands to the ledger boundary.
+- **Reconcile against the correct system of record regardless of which
+  system actually fulfilled the reward.** **Specialist-review correction
+  (P1 fix)**: an earlier draft of this bullet claimed `external`- and
+  `internal`-fulfilled Grants receive IDENTICAL ledger treatment and that
+  `ledger-finance`'s posting logic "never needs a fulfiller-specific code
+  path" — this directly contradicted
+  `docs/decisions/0032-bonus-accounting.md` §6(c), the authoritative
+  accounting decision (Financial/Ledger's own veto applies here): an
+  externally-fulfilled Grant (the provider's own bonus engine owns
+  fulfillment end to end, value never enters a platform wallet) posts
+  **ZERO ledger entries** — no `promo_liability`, no `player_bonus`, no
+  `bonus_expense` — precisely because mirroring a balance held in a
+  provider's own system is a second financial truth system, exactly what
+  ADR 0032 §0 and this document's own §6 forbid. The corrected contract:
+  Bonus Engine's lifecycle events carry an explicit
+  fulfillment-destination flag (`into_platform_wallet` vs
+  `inside_provider`, per ADR 0032 §6(c)'s "a reward type that does not
+  declare it is rejected at configuration time rather than guessed at
+  posting time"). For `into_platform_wallet` Grants (internal, or
+  provider-*funded*-but-platform-fulfilled per ADR 0032 §6(b)),
+  `ledger-finance`'s posting logic applies unchanged. For
+  `inside_provider` Grants, Bonus Engine still records the Grant/Progress
+  trail (for reporting, RG/limit visibility, and player-support
+  answerability, per ADR 0032 §6(c)) but emits NO lifecycle event to the
+  ledger boundary at all — reconciliation for these is the memo/audit
+  stream ADR 0032 §6(c) and `reconciliation-model.md` §2.10 define, never
+  a ledger-vs-ledger comparison. The moment external value genuinely lands
+  in a platform wallet (the provider settles a free-bet win as a real
+  payout), that is an ordinary provider settlement posting into
+  `player_cash` under Flow 9's existing shape — not a bonus grant, and it
+  must not create a bonus balance or wagering requirement on our side.
 
 ## 4. Risk integration
 
@@ -293,17 +314,42 @@ Bonus Engine enforcement point mirrors `internal/casino/orchestrator.go`
 exactly: RG first, Risk second, RG's denial short-circuits before Risk
 ever runs (ADR 0031 §1). `EligibilityParams` resolves identically
 (`TenantID`/`BrandID`/`PlayerAccountID`/`WalletID` from the Grant's own
-authoritative records). A `Decision.Allowed == false` at grant time,
-activation time, or conversion time blocks that transition outright and is
-recorded as a `forfeited`/`cancelled` Progress entry with the RG decision's
-own `Code` as the reason (§10) — never silently skipped.
+authoritative records). A `Decision.Allowed == false` at GRANT or
+ACTIVATION time blocks that transition outright and is recorded as a
+`cancelled` Progress entry with the RG decision's own `Code` as the reason
+(§10) — never silently skipped.
+
+**Specialist-review correction (P1 fix) — conversion is NOT
+`forfeited`/`cancelled` on RG/Risk denial.** An earlier draft of this
+section grouped conversion-time denial with grant/activation-time denial
+and forfeited the Grant on any of the three — this directly contradicts
+two other frozen documents from this same stage: ADR 0031 §15a-ii ("a
+`DENY`, `REVIEW`, or error [at conversion] blocks the transition and
+leaves the Grant in `completed`, which is non-terminal and retryable
+after review — it does NOT forfeit") and
+`docs/decisions/0034-bonus-gamification-rg-kyc-identity-integration.md`
+§2.2 ("already-committed effects are never retroactively reversed or
+clawed back"). Forfeiture posts `Dr player_bonus / Cr promo_liability`
+under ADR 0032 §5 — it EXTINGUISHES the player's already-earned bonus
+balance. Auto-forfeiting a fully-wagered-through balance the instant a
+player self-excludes turns self-exclusion into a financial penalty,
+exactly the perverse incentive (delay self-excluding to avoid losing the
+balance) ADR 0034 §2's own reasoning exists to prevent. The corrected
+rule: a `Decision.Allowed == false` at CONVERSION time leaves the Grant in
+`completed` (non-terminal, retryable once eligibility is re-checked and
+passes, or resolved through whatever future compliance-review workflow
+ADR 0031 §11/§17 anticipates) — it is recorded as a Progress entry with
+the RG/Risk decision's own `Code`, but it is never a `forfeited` or
+`cancelled` transition. This mirrors ADR 0034's own explicit position on
+the flagged "unlock an already-wagered-through balance post-exclusion"
+question: settle it as a mechanical entitlement, don't confiscate it.
 
 This is a **dependency** on the parallel identity-compliance RG/KYC
-integration ADR for Bonus/Gamification for any bonus-specific nuance (e.g.
-whether a *pending* self-exclusion cooling-off period should block
-`activated`→`in_progress` progression even for an already-activated Grant)
-— this document's contribution is the calling contract, not new RG policy
-content.
+integration ADR for Bonus/Gamification for any further bonus-specific
+nuance (e.g. whether a *pending* self-exclusion cooling-off period should
+block `activated`→`in_progress` progression even for an already-activated
+Grant) — this document's contribution is the calling contract, not new RG
+policy content.
 
 ## 6. Accounting boundary — CRITICAL, owned entirely by `ledger-finance`
 
@@ -416,13 +462,21 @@ invented:
   over the Offer's threshold. Concurrent triggers for the *same* Grant
   (e.g. two bet-settlement events arriving near-simultaneously, both
   computing that the multiplier is now satisfied) require serialization —
-  an advisory-lock-or-equivalent scoped to the Grant id, mirroring the
-  exact fix `postBet` needed for the identical concurrent-redelivery
-  hazard (Stage 4G-FINAL Part F's `pg_advisory_xact_lock` on
-  `(tenant_id, provider_id, provider_tx_id)`; here scoped to `grant_id`).
-  Without this, two concurrent triggers could each independently decide
-  "this Grant just completed" and double-emit a conversion lifecycle
-  event.
+  an advisory-lock-or-equivalent scoped to **`(tenant_id, grant_id)`**,
+  mirroring the exact fix `postBet` needed for the identical
+  concurrent-redelivery hazard (Stage 4G-FINAL Part F's
+  `pg_advisory_xact_lock` on `(tenant_id, provider_id, provider_tx_id)`).
+  **Specialist-review correction**: an earlier draft of this section
+  scoped the lock to `grant_id` alone; that is the same un-tenant-scoped
+  shape three independent Stage 4G-FINAL reviewers (architect, security,
+  multi-tenancy) already found and fixed once for `postBet`'s own lock,
+  and citing that fix by name while not adopting its tenant-scoping would
+  let a future implementer copy the mistake forward. `tenant_id` costs
+  nothing extra here and closes the hash-collision risk regardless of
+  whether `grant_id` generation is later proven collision-resistant
+  across tenants. Without this lock, two concurrent triggers could each
+  independently decide "this Grant just completed" and double-emit a
+  conversion lifecycle event.
 - **Reversal**: idempotency key = `(grant_id, reversing_event_reference)`.
   A reversal for a Grant/Progress state never actually reached writes a
   tombstone (mirrors `payments.postDepositReversalTombstone` and
