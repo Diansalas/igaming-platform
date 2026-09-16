@@ -27,6 +27,7 @@ components rather than duplicated per service.
 | `game-gateway` | Aggregator/provider adapters, catalogue, launch tokens, wallet-callback endpoint | casino |
 | `sportsbook-adapter` | Sportsbook provider integration, open-bet liability | sportsbook |
 | `bonus-engine` | Campaign/Offer/Grant/Progress, rule evaluation | bonus-engine |
+| `gamification` | Points/XP/level rules, achievements, missions, tournaments, leaderboards, streaks — **`NOT IMPLEMENTED`**, architecture frozen Stage 4H-A | gamification (architecture by architect) |
 | `payment-orchestrator` | PSP/crypto routing, reserve accounting, withdrawal workflow | payments |
 | `compliance` | KYC/AML orchestration, RG controls, case queue | identity-compliance |
 | `backoffice-api` / `partner-console-api` | Admin operations, RBAC-gated | backend / backoffice |
@@ -50,6 +51,12 @@ over-building ahead of proven need (§13).
   it, they don't implement their own audit writer.
 - `tenant-config` is the single source of truth for what a brand looks
   like; no service caches tenant config longer than its documented TTL.
+- Only the Reward Orchestrator turns a reward *decision* into a fulfilled
+  reward. Domains that decide a reward is owed (`bonus-engine`,
+  `gamification`, tournaments, missions, the future reward marketplace)
+  emit a decision and stop; they never credit a wallet, a points balance,
+  or an externally-fulfilled reward themselves (Stage 4H-A architecture
+  freeze — `NOT IMPLEMENTED`).
 
 ## What is explicitly NOT a separate service (yet)
 
@@ -117,3 +124,63 @@ not fixed, since it would require either a policy-level convention (staff
 guidance: "risk rules govern limits, not identity-based prohibition") or
 a schema-level restriction neither this stage's directive nor any
 specialist review this stage flagged as urgent.
+
+## Gamification Engine boundary (Stage 4H-A — architecture freeze)
+
+Status: **`NOT IMPLEMENTED`.** No `internal/gamification` package, no
+schema, no migration, no API exists. Stage 4H-A froze the architecture only
+(`17-gamification-engine-architecture.md`, `18-tournament-architecture.md`,
+`19-mission-architecture.md`, `20-reward-marketplace-architecture.md`).
+This section states the boundary the eventual implementation must satisfy,
+in the same Owns / Never does style as the verified table above — it
+records a *contract*, not a verification, because there is nothing built to
+verify yet.
+
+| Domain | Package (future) | Sole authority for | Never does |
+|---|---|---|---|
+| Gamification | `internal/gamification` | Points earning/spending **rules** (when and how much), XP accrual, level definitions and current level, achievement/badge definitions and unlocks, mission definitions and progression, tournament definitions/entry/scoring/settlement decisions, leaderboard ranking and immutable result snapshots, streak state | Post to the ledger; credit a points balance; grant a bonus; fulfil any reward; own the points ledger schema; define limits/caps; define self-exclusion; accept a provider-specific payload |
+
+The five boundaries that matter most, each mirroring a separation this
+codebase has already established rather than inventing a new one:
+
+- **Gamification is NOT a Risk replacement.** It has **no limit engine, no
+  threshold, no cap, no counter, and no velocity concept of its own**.
+  Every promotional cap, reward-redemption limit, marketplace purchase
+  limit, and points earning/spending cap is a rule in `internal/risk`,
+  evaluated by `risk.Evaluate` in the same transaction as the effect it
+  gates, fail-closed on error — ADR 0031 §13's standing obligation applied
+  to this domain. Several of these want limit kinds ADR 0031 §4
+  deliberately did not implement (`count`, `velocity`); the answer is ADR
+  0031 §12's five-step extension process, never a counter inside
+  Gamification.
+- **Gamification is NOT an RG replacement.** It has **no self-exclusion
+  concept**, never reads or writes `player_restrictions`, and never caches
+  an eligibility answer. It calls `rg.EvaluateEligibility` before any
+  player-facing gamification action — earning or spending points, mission
+  opt-in/progress/completion, tournament entry or scoring, achievement
+  unlock, streak advance, marketplace redemption, or any reward triggered
+  by these — exactly as `internal/casino` already does. Order is fixed: RG
+  first, then Risk, with an RG denial short-circuiting before Risk is
+  evaluated (ADR 0031 §1).
+- **Gamification never creates financial liability.** It emits a reward
+  *decision*; the Reward Orchestrator owns fulfilment, retry, failure, and
+  reversal, and routes to whichever domain owns the mechanism. No
+  gamification package may import `internal/ledger`, `internal/wallet`, or
+  the Bonus Engine.
+- **Gamification does not own the points ledger.** It decides *when* and
+  *how much*; `ledger-finance` owns the points accounting model
+  (`24-points-accounting-architecture.md`, not yet written). Same split as
+  `internal/casino` deciding a bet and `internal/ledger` posting it — no
+  second balance system, for money or for points.
+- **Gamification consumes canonical events only.** It never accepts a
+  casino-, sportsbook-, or payments-provider-specific payload, and no
+  provider identifier or provider game id appears in a gamification rule.
+  Adding a provider must require zero gamification changes — verifiable by
+  import inspection the same way the Risk/RG separation already is.
+
+Gamification is also a sibling of the Bonus Engine, not a layer of it: the
+Bonus Engine owns monetary promotional liability (Campaign/Offer/Grant/
+Progress, wagering, forfeiture); Gamification owns behavioural progression
+state. A gamification reward that happens to be bonus-shaped is fulfilled
+by the Bonus Engine *via* the Reward Orchestrator, never by Gamification
+calling the Bonus Engine directly.
