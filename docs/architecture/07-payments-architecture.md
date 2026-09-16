@@ -178,10 +178,32 @@ adapter registry.
 
 ### 2. Retail deposit flow — `ARCHITECTURAL DECISION`
 
+**Wave-2 review correction (F3, P1)**: an earlier draft of this section
+described only a player-pre-request flow (step 1 below) as if it were the
+sole entry point. `ledger-finance`'s ADR 0035 §3.2 and `architect`'s doc
+26 §4.1 both describe a **counter-originated** flow instead — a player
+walks up with cash, with no prior app session or pending request — which
+is what a retail network is for and cannot be built on the player-
+pre-request flow alone (a player without an app session could never
+deposit at all). **Resolution**: the counter-originated flow is
+**primary**; the flow below is retained as an **optional second entry
+point** for a player who prefers to initiate from their own session
+before walking to the counter. Both resolve to the identical posting and
+the identical `internal/ledger` idempotency key (ADR 0035 §8.1) — the
+only difference is which principal creates the `RetailDepositRequest`
+row and when. Concretely: in the counter-originated case, the cashier's
+own confirm call (step 3, below) both creates and confirms the request in
+one step (server-derived `player_account_id` resolved from whatever
+identity check the counter performs, per `11-kyc-aml-rg-architecture.md`);
+in the player-pre-request case, step 1 creates the row ahead of time and
+step 3 only confirms it. The handler in step 3 does not need to know
+which case it's in — the idempotency mechanism is the same either way.
+
 Procedural flow (accounts/postings excluded — `ledger-finance`'s ADR
 0035):
 
-1. **Request creation.** The player initiates a retail deposit (in the
+1. **Request creation (optional entry point — see above).** The player
+   initiates a retail deposit (in the
    player app, or at the cashier's terminal under the player's own
    authenticated session — the specifics of that UI are `frontend`/
    `backoffice`'s territory, not this document's) for `(amount,
@@ -198,17 +220,31 @@ Procedural flow (accounts/postings excluded — `ledger-finance`'s ADR
 2. **Physical handover.** The player hands the cashier cash.
 3. **Cashier confirmation — the API call.** The cashier's terminal calls
    an endpoint conceptually `POST /v1/retail/deposit-requests/{id}/confirm`
-   authenticated as the **cashier's own staff/agent-network principal**
-   (server-derived actor — never a terminal-embedded shared credential,
-   see §6). The request body carries the **amount actually received**
+   authenticated as **both the terminal's own per-terminal credential and
+   the cashier's own staff/agent-network principal** (both server-derived
+   actors, presented together — see §6's corrected two-principal
+   requirement; never a terminal-embedded *shared* credential). The
+   request body carries the **amount actually received**
    (attested by the cashier) and, pending §3's identity-compliance
    dependency, an identity-verification attestation. The handler:
    a. Looks up `RetailDepositRequest` by `id` (never trusts a
       client-supplied player/amount — the platform's own stored request is
       authoritative, matching §6's "no client device is a source of
       financial truth").
-   b. Runs the hierarchy/limit check (§4) — **before** anything else,
-      fail-closed.
+   b. **Wave-2 review correction (F9, P1 — safety-critical)**: an earlier
+      draft of this step ran the hierarchy/limit (`risk.Evaluate`) check
+      first and had no RG call anywhere in this handler, contradicting
+      the fixed gate order every sibling document states as binding
+      (`docs/decisions/0035-retail-agent-network-accounting.md` §3.2,
+      `docs/decisions/0036-retail-hierarchy-rbac-and-audit.md` §8.1, ADR
+      0031 §22, `11-kyc-aml-rg-architecture.md` §3's own `ARCHITECTURAL
+      DECISION` that a cash deposit crediting a wallet calls
+      `rg.EvaluateEligibility`). The corrected order, all inside the
+      posting transaction, before commit: **`rg.EvaluateEligibility`
+      first (short-circuiting on any restriction) → `risk.Evaluate`
+      (§4, hierarchy/funding-limit check) → the `agent_float`
+      sufficiency lock.** A non-nil result from either RG or Risk is a
+      denial; the handler never reaches the posting step.
    c. Compares the cashier-attested amount to the request's own amount.
       **On mismatch: the request is not silently adjusted** (mirrors
       `withdrawal-state-machine.md` §7's immutable-amount principle) — it
@@ -304,7 +340,8 @@ mechanics**, and the terminal `submitted → completed` fact:
   kind of human-attested, synchronous confirmation as the deposit side
   (§2) — the cashier confirms cash was handed to the player, via an
   endpoint conceptually `POST /v1/retail/withdrawal-requests/{id}/complete`,
-  authenticated as the cashier's own principal, with the identical
+  authenticated as both the terminal and the cashier's own principal
+  together (§6's two-principal requirement), with the identical
   idempotency shape (a state-transition guard on `WithdrawalRequest.state
   = 'submitted'`, `RowsAffected()` checked before the release-side ledger
   call, per §2 above and `withdrawal-state-machine.md` §4's existing
@@ -337,6 +374,17 @@ already ran the full four-eyes/threshold check (§5 of
 submission is likewise distinct from approval, and needed no new design
 here beyond confirming the separation holds for this fulfillment method
 too.
+
+**Wave-2 review clarification (F9)**: unlike the deposit-confirm handler
+(§2 step 3b), this `complete` hand-over call is **not** required to
+re-run `rg.EvaluateEligibility` before it proceeds — this is the one
+legitimate exception `docs/decisions/0036-retail-hierarchy-rbac-and-
+audit.md` §8.1 grants, stated here explicitly rather than left silent:
+`complete` discharges an authorization (RG and Risk) that already ran at
+`approved` time, on the same `WithdrawalRequest`, inside its own gated
+transition. It is a fulfillment of an already-cleared decision, not a
+new value-crediting event that could itself be the point a self-exclusion
+first applies.
 
 **`OPEN DECISION`** (agent-network operations, not resolved here): what
 happens when the chosen agent/location cannot fulfill (float too low to
@@ -386,11 +434,15 @@ Flagged dependencies on `risk`'s parallel-wave ADR 0031 extension:
   §9/§10 added jurisdiction and licensing-mode fields the same way; a
   hierarchy-level field is the same shape of extension, not a new
   mechanism).
-- Very likely a new `LimitKind` and/or `Operation` value (e.g. something
-  like `retail_cash_deposit_confirm`/`retail_cash_withdrawal_fulfill`),
-  following ADR 0031 §12/§16's existing extension model — not invented
-  here, only anticipated as the probable shape so `risk`'s parallel design
-  and this one don't talk past each other.
+- New `Operation` values, following ADR 0031 §16's existing extension
+  model. **Wave-2 review correction (F4, P1)**: an earlier draft of this
+  bullet speculated example names (`retail_cash_deposit_confirm`/
+  `retail_cash_withdrawal_fulfill`) that conflicted with names
+  independently proposed elsewhere. `risk` owns `Operation` naming (ADR
+  0031 §16); the authoritative set, resolved in ADR 0031 §21, is
+  `retail_deposit`, `retail_withdrawal`, `retail_funding` — this
+  document's deposit-confirm and withdrawal-fulfill call sites map onto
+  `retail_deposit` and `retail_withdrawal` respectively.
 
 ### 5. Cashier settlement / float replenishment — `RECOMMENDATION`
 
@@ -432,15 +484,35 @@ never a source of financial truth.** This generalizes CLAUDE.md's "Redis
 never holds an authoritative balance" principle to any client device, per
 this stage's directive item #22:
 
-- The terminal authenticates as the logged-in **cashier's own** staff/
-  agent-network principal, through the platform's existing auth system —
-  never a terminal-embedded shared API key/secret standing in for
-  "whichever cashier is currently at this terminal." A shared
-  terminal-level credential would break the actor-attribution CLAUDE.md's
-  audit requirement depends on (actor, tenant, entity, before/after,
-  reason code) — every retail confirm/complete action's audit record must
-  name a real, individual staff principal, exactly like every other
-  mutating administrative action in this codebase.
+- **Wave-2 review correction (F2, P1)**: an earlier draft of this bullet
+  (and §2 step 3's "authenticated as the cashier's own... principal")
+  required only the cashier's own principal, with no terminal credential
+  at all. This contradicted `docs/architecture/26-retail-operations-
+  architecture.md` §2.2 and `docs/decisions/0036-retail-hierarchy-rbac-
+  and-audit.md` §4.4, both of which require **two** authenticated
+  principals presented together for any money-touching retail
+  operation — the terminal (a `service` principal, ADR 0014 option 2)
+  and the cashier (their own `staff_users` principal) — neither alone
+  sufficient. This is not the same thing as a *shared* terminal
+  credential (which both this document and ADR 0036 correctly reject for
+  destroying actor attribution): a **non-shared, per-terminal**
+  credential presented **alongside** the cashier's own login satisfies
+  both requirements simultaneously — actor attribution stays on the
+  cashier, and the terminal identity is what ADR 0035 §8.2's idempotency
+  key (`'retail:' || terminal_id || ':' || operation_id`) is
+  **server-resolved from**, closing the namespace-squatting attack ADR
+  0035 §8.2 describes (a terminal-identity claimed from request payload,
+  rather than resolved from its own credential, could replay or squat
+  another terminal's idempotency keys). Corrected: the terminal
+  authenticates with its own per-terminal credential (registration-secret
+  exchange, per ADR 0036 §4.4) **and** the cashier authenticates as their
+  own staff/agent-network principal through the platform's existing auth
+  system — both required, neither a shared secret standing in for
+  "whichever cashier is currently at this terminal." Every retail
+  confirm/complete action's audit record still names the real, individual
+  staff principal as actor, exactly like every other mutating
+  administrative action in this codebase — the terminal identity is
+  recorded alongside it, never instead of it.
 - `tenant_id`/`brand_id` are resolved server-side from that authenticated
   context, never asserted by the terminal — identical to every existing
   rule in this codebase (`withdrawal-state-machine.md` §7, CLAUDE.md's

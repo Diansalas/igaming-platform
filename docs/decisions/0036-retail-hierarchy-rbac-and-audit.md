@@ -321,6 +321,29 @@ Then, before the scope is usable:
    Without this, "suspend the Partner" is a control that suspends exactly
    one login and leaves its forty cashiers trading (threat A9).
 
+   **Wave-2 review correction (F8, P1)**: this check runs during scope
+   *resolution*, before `app.hierarchy_node_id` is established — so a
+   plain per-request connection either has no node scope set yet, or (if
+   run after `WithNodeScope`) is scoped to the candidate node itself, not
+   its ancestors. Either way, §3.3's `closure_scope` policy — which only
+   permits rows where `ancestor_node_id` equals the *caller's own* resolved
+   scope — makes this query's `hierarchy_node_closure` read return zero
+   rows regardless of the real data, so `NOT EXISTS` is always true and
+   the check silently passes every time (fail-open, not fail-closed). The
+   binding fix: this specific check runs through a dedicated
+   `SECURITY DEFINER` accessor (e.g. `retail.node_and_ancestors_active(tenant_id,
+   node_id) RETURNS boolean`) that reads `hierarchy_node_closure`/
+   `hierarchy_nodes` without going through `closure_scope` at all,
+   accepts the candidate node id as an explicit parameter (never session
+   state), and is itself audited/reviewed as a scoped RLS-bypass
+   primitive — exactly like the internal service-identity pattern ADR
+   0014 already establishes for other privileged reads. `closure_scope`
+   itself is **not** widened to permit this — doing so would reopen
+   §3.3 Class 3's separate "no ancestor visibility" default this
+   document already chose. Test §10.11 must assert this check fails
+   closed against a real suspended ancestor, not just that the query
+   runs.
+
 **Deliberate rejection: the scope node id is NOT a JWT claim.**
 `ARCHITECTURAL DECISION`. ADR 0011's claim set (`tenant_id`, `role`,
 `principal_type`) is **unchanged by this document** — no `retail_node_id`
@@ -363,6 +386,72 @@ the two-layer split ADR 0024 uses for withdrawal governance (Go-level
 `ApproverEligibility` closure in front of an authoritative database
 trigger), applied to a different invariant. Neither layer alone is the
 design.
+
+#### 2.5a Transaction phasing for a money-touching retail operation — binding, corrects an internal contradiction found by Wave-2 review (F1, P0)
+
+An earlier draft of §2.5 said `WithNodeScope` wraps the **whole** handler
+body, so "all reads/writes inside `fn` are subtree-bounded by RLS." §3.5
+point 3 separately requires that the actual ledger posting (and the RG/
+Risk/float-sufficiency reads inside the same DB transaction, per ADR 0035
+§3.2) run "under a tenant/service scope with no agent principal" — i.e.
+with `app.hierarchy_node_id` **unset**. Both cannot be true of the same
+connection for the same statements: with the GUC set for the whole
+transaction, the un-guarded posting-path policies on `ledger_entries`/
+`wallet_balance_projection`/`ledger_accounts` (§3.5 point 3's "exactly as
+today" tenant/service scope) don't apply, and adding the §3.5 point 4
+guard to those same policies makes them invisible to a node-scoped
+connection — the retail posting silently updates zero projection rows,
+exactly the P1-drift-by-construction failure ADR 0035 §1.3 warned about
+and this section exists to prevent. Symmetrically, the dual-scope
+configuration reads (§3.3 Class 2 — node type/relation/capability
+definitions) require the GUC **unset** to see a platform-wide template
+row, so a capability check made while node-scoped would itself fail
+closed.
+
+**Binding resolution**: a money-touching retail operation is one database
+transaction with **two phases on the connection's session state**, not
+one:
+
+1. **Authorization phase** — `app.hierarchy_node_id` is **set**
+   (`WithNodeScope`). Reads only: resolve the caller's scope, read
+   `hierarchy_node_types`/`_relations`/`_capabilities` (as platform-wide
+   templates, which is why capability resolution must complete **before**
+   the GUC is set, or via a dedicated accessor that runs unscoped —
+   `architect` to confirm the exact call order in implementation), check
+   node status and the ancestor-suspension predicate (§2.4 step 5, see
+   also §3.3 Class 3's fix below), and — for a read-only report or an
+   inquiry endpoint — stop here; this phase alone is sufficient and uses
+   the §3.5 additional SELECT-only policy to read node-scoped ledger
+   projections.
+2. **Posting phase** — `app.hierarchy_node_id` is **cleared** (`SET
+   LOCAL app.hierarchy_node_id TO DEFAULT`, or an equivalent
+   session-reset primitive `internal/db` must expose and this document
+   requires be added, reviewed as its own change since "clear an
+   authorization GUC mid-transaction" is itself an escalation-adjacent
+   primitive) before RG (`rg.EvaluateEligibility`), `risk.Evaluate`, the
+   `SELECT ... FOR UPDATE` float-sufficiency read, and the ledger posting
+   itself run — all under the **same tenant/service scope every other
+   domain's posting path already uses** (ADR 0019's actor matrix), so the
+   existing, unguarded posting policies apply unchanged and §3.5 point 3
+   holds exactly as written.
+3. **Audit phase** — the audit insert (§7.3) requires `actor_node_id`
+   bound to the writer's own scope, so it is written **either** back
+   under the authorization-phase's node scope (GUC re-set after the
+   posting phase completes, same transaction) **or** via a
+   `SECURITY DEFINER`-style accessor that accepts the resolved node id as
+   an explicit parameter rather than reading it from session state — the
+   second option avoids a second GUC flip per request and is
+   `RECOMMENDATION`ed, left to implementation to choose.
+
+Consequence for §3.5 point 4: the `app.hierarchy_node_id IS NULL` guard
+applies **only** to the existing staff-scope read policies that a
+node-scoped connection could otherwise also satisfy (the failure mode
+§3.5 point 4 itself describes) — it must **not** be added to the
+posting-path write policies the posting engine uses during phase 2,
+because phase 2 never carries the GUC in the first place under this
+phasing and adding the guard there would be a no-op at best and a source
+of confusion at worst. This is a correction to §3.5 point 4's wording,
+not to its intent.
 
 A `node_id` supplied in a path, query or body is **never** the scope. It
 is accepted only as a **narrowing filter within the already-resolved
@@ -429,6 +518,12 @@ Proposed roles — **capability profiles, deliberately position-independent**:
 - **`retail_agent_admin`** — `retail_node:read`, `retail_node:manage`,
   `retail_binding:manage`, `retail_report:read`,
   `retail_commission:read`, `retail_audit:read`, `retail_player:read`.
+  **`retail_audit:read` cannot be usefully granted until §7.3's finding
+  (C1: the existing `audit_log` RLS policy does not yet narrow by
+  subtree) is resolved** — granting it today would give
+  `retail_agent_admin` tenant-wide audit visibility, not subtree-scoped,
+  defeating the permission's own purpose. Flagged here so implementation
+  does not grant it before §7.3's migration lands (Wave-2 review, F14).
 - **`retail_network_manager`** (tenant back-office, root-scoped) — the
   above plus `retail_node:reassign`, `retail_node:suspend`,
   `retail_config:read`/`retail_config:manage`.
@@ -650,7 +745,7 @@ branch, and there must never be one: a policy of the form
 *full tenant visibility*, which is precisely the failure mode ADR 0016
 had to retire from `sessions` (`FOR SELECT USING (true)`) and ADR 0031's
 own P1 had on `risk_rules`. **Tenant-wide access is not a bypass branch;
-it is simply the root node's subtree** (§2.4 step 2), which flows through
+it is simply the root node's subtree** (§2.4 step 3), which flows through
 the identical predicate.
 
 Note the `app.player_account_id IS NULL` conjunct is present **from day
@@ -697,7 +792,7 @@ DECISION`, and the subtlest point in this section. Two consequences:
      USING (
        tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
        AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
-       AND ancestor_id = NULLIF(current_setting('app.hierarchy_node_id', true), '')::uuid
+       AND ancestor_node_id = NULLIF(current_setting('app.hierarchy_node_id', true), '')::uuid
      );
    ```
 
@@ -722,8 +817,8 @@ DECISION`, and the subtlest point in this section. Two consequences:
 **Performance/complexity trade-offs, stated honestly:**
 
 - Reads: one index probe per row against
-  `hierarchy_node_closure (tenant_id, ancestor_id, descendant_id)`. Cheap and
-  plan-stable. A second index on `(tenant_id, descendant_id)` supports the
+  `hierarchy_node_closure (tenant_id, ancestor_node_id, descendant_node_id)`. Cheap and
+  plan-stable. A second index on `(tenant_id, descendant_node_id)` supports the
   ancestor-status check in §2.4.
 - Storage: closure is O(nodes × average depth). For a network of 10⁴
   nodes at depth ≤ 6, that is ~10⁵ rows — trivial.
@@ -825,11 +920,15 @@ Four properties this shape must have:
    made by the posting engine under a tenant/service scope, exactly as
    today. A retail-scoped `INSERT`/`UPDATE` policy on any ledger table
    would be a P0 and must not be created.
-4. **The existing staff-scope policies must additionally carry the
-   `app.hierarchy_node_id IS NULL` guard**, for the same reason §3.3's
-   Class 2 shape does, and for the same reason §7.3 gives for `audit_log`:
-   permissive policies OR together, so a narrow policy placed beside a
-   broad one narrows nothing unless the broad one is guarded.
+4. **The existing staff-scope *read* policies (the ones a node-scoped
+   connection could otherwise also satisfy during the authorization
+   phase, §2.5a) must additionally carry the `app.hierarchy_node_id IS
+   NULL` guard**, for the same reason §3.3's Class 2 shape does and §7.3
+   gives for `audit_log`: permissive policies OR together, so a narrow
+   policy placed beside a broad one narrows nothing unless the broad one
+   is guarded. **This guard is never added to the posting-engine's own
+   write path** (§2.5a phase 2 runs with the GUC unset by construction,
+   so the guard would be a no-op there) — Wave-2 review correction (F1).
 
 This remains an `OPEN DECISION` in the sense ADR 0035 means it — the
 `ledger_accounts` owner-family change (its option (b)) is `architect`'s
@@ -1003,8 +1102,8 @@ sessions that should have been destroyed.
 ### 4.6 Which existing roles get a root scope
 
 Only `RoleTenantAdmin`, the proposed `retail_network_manager`, and
-`RoleCompliance` (investigation) resolve to the tenant root (§2.4 step 2),
-and every such resolution is audited with `scope_source: "tenant_root"`.
+`RoleCompliance` (investigation) resolve to the network root (§2.4 step 3),
+and every such resolution is audited with `scope_source: "network_root"`.
 `RolePlatformAdmin` is deliberately **excluded**: it holds a nil-tenant
 token (ADR 0011), `RequireTenantScope` denies it before any retail
 handler runs, and there is no code path by which it could resolve a
@@ -1256,8 +1355,8 @@ bookkeeping: repeated cross-subtree probing is the single best detection
 signal for a compromised or hostile agent credential (threat T1), and it
 is invisible unless denials are recorded.
 
-**Every** root-scope resolution (§2.4 step 2), with
-`scope_source: "tenant_root"`, so "someone acted with whole-network
+**Every** root-scope resolution (§2.4 step 3), with
+`scope_source: "network_root"`, so "someone acted with whole-network
 visibility" is never silent.
 
 Proposed action namespace, following the existing `domain.event`
@@ -1335,6 +1434,15 @@ Scope note: the RG/KYC *rules* are `identity-compliance`'s
 (`docs/decisions/0026`, `0027`, `0028`, `0034`). This section establishes
 only that **the authorization layer cannot be used as a bypass vector** —
 which is the question actually asked of `security`.
+
+**Load-bearing premise, stated explicitly (Wave-2 review correction,
+F12, P2)**: this section's non-bypass guarantee presupposes every retail
+player is an identified `PlayerAccount`. Whether anonymous/bearer-
+instrument retail play is required in any target jurisdiction is an open
+human/business/legal decision escalated by `risk` (ADR 0031 §22) and
+`ledger-finance` (ADR 0035 §11.4) — if answered "yes" for any
+jurisdiction, this section's guarantee does not cover that case and needs
+its own design.
 
 ### 8.1 The structural guarantee: retail is a channel, not a second rulebook
 
@@ -1474,10 +1582,12 @@ assumed absent.
 
 Retail operations are exposure-affecting and fall under ADR 0031 §13's
 standing rule: they must call `risk.Evaluate` in the same transaction as
-their effect. Doc 26 §4.3 proposes new `risk.Operation` values
-(`retail_counter_deposit`, `retail_counter_payout`,
-`retail_float_advance`, `retail_settlement`) rather than reusing
-`deposit`/`withdrawal`, correctly routed through ADR 0031 §16's five-step
+their effect. **Wave-2 review correction (F4, P1)**: an earlier draft of
+this section endorsed doc 26 §4.3's now-superseded operation names
+verbatim; the authoritative set, resolved in ADR 0031 §21 (which owns
+naming per §16) and corrected in doc 26 §4.3, is **`retail_deposit`,
+`retail_withdrawal`, `retail_funding`** rather than reusing
+`deposit`/`withdrawal`, correctly routed through ADR 0031 §16's six-step
 extension process and owned by `risk`. `security` supports separate
 values for the same reason ADR 0031 §15e gave for `tournament_entry`:
 reusing `deposit`/`withdrawal` would silently rebind every existing
@@ -1698,7 +1808,7 @@ complete**
   any audit read would see the whole tenant's trail; and the narrowing
   cannot be added by a new policy alongside the existing one. Also closes
   a pre-existing missing `app.player_account_id` guard.
-- **P1-2 Suspension that does not cascade to descendants (§2.4 step 4).**
+- **P1-2 Suspension that does not cascade to descendants (§2.4 step 5).**
   Suspending a Partner otherwise stops one login and leaves its whole
   network trading.
 - **P1-3 Scope carried in the JWT (§2.4).** Makes every revocation,

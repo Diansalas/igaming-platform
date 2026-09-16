@@ -85,9 +85,16 @@ consistent with how `06-wallet-ledger-architecture.md` is built: that
 document's account-type list (`player_cash`, `house_gaming`, etc.) has no
 channel concept baked in today, and none is needed — a retail
 cashier-assisted deposit or bet posts through the exact same
-`LedgerTransaction`/`LedgerEntry` shape, the same
-`(tenant_id, provider_id, provider_tx_id)` idempotency discipline, and the
-same invariants as an online one. Retail is a *channel* and an
+`LedgerTransaction`/`LedgerEntry` shape and the same invariants as an
+online one. **Wave-2 review correction (F3, P1)**: an earlier draft of
+this sentence named the idempotency mechanism as
+`(tenant_id, provider_id, provider_tx_id)` — the provider-callback shape.
+`ledger-finance`'s ADR 0035 §8.1 explicitly rejects that shape for
+retail (a terminal is not a provider) in favor of `internal/ledger`'s own
+`(tenant_id, idempotency_key)` constraint. The point this sentence exists
+to make is unaffected either way — one ledger, one idempotency
+discipline, not a second one for retail — corrected to name the actual
+mechanism. Retail is a *channel* and an
 *origination path* (cashier/agent-operated vs. player self-service), never
 a second ledger, a second account-type set, or a second set of invariants.
 Whatever field carries the originating hierarchy node on the ledger/wallet
@@ -134,34 +141,55 @@ computation of the same fact.
 
 ### 2. Hierarchy-scoped report access model — `ARCHITECTURAL DECISION` + `OPEN DECISION`
 
-**2.1 What each level needs.** No new report *types* are invented — only
+**2.1 What each node needs.** No new report *types* are invented — only
 new scope filters over the report set already named in "Reporting and BI"
 above, plus the retail-specific commission/till views a hierarchy
-structurally requires:
+structurally requires.
 
-| Level | Read scope | Reports |
-|---|---|---|
-| Agent | itself only (a leaf in the directive's hierarchy) | own players' activity (GGR/NGR/FTD/retention at player level), own commission earned, own cashier till/settlement view (§4) |
-| Super Agent | its subtree (its Agents + their players) | same report set, rolled up across its Agents, with per-Agent drill-down — not a single opaque aggregate |
-| Partner | its whole subtree | same, rolled up to Partner level, drillable down through Super Agent/Agent |
-| Operator | tenant-wide | the existing full daily report set from "Reporting and BI" above, with `hierarchy_node_id`/`channel` simply available as additional grouping dimensions — this is today's Back Office reporting user, unchanged |
+**Wave-2 review correction (F10, P2)**: an earlier draft of this section
+assigned report scope by a fixed per-level table (Agent = itself only,
+"a leaf in the directive's hierarchy"; Super Agent/Partner = subtree;
+Operator = tenant-wide) and treated `hierarchy_node_type` as a fixed
+`Operator`/`Partner`/`SuperAgent`/`Agent`/`Cashier` enum "so a report can
+filter or group by level." Both contradict `docs/architecture/26-retail-
+operations-architecture.md` §1.1's explicit rejection of any level/ladder
+structure (node type carries no position, and doc 26's own seed data has
+`agent → shop → cashier_desk` — an Agent is not a leaf) and `docs/
+decisions/0036-retail-hierarchy-rbac-and-audit.md` §2.6's uniform rule
+that every node's read scope is itself plus all descendants, with no
+special-cased "tenant-wide" branch (a session acts under one network
+root at a time, per ADR 0036 §2.4's multi-network correction — the
+network root is simply the widest case of the same rule, not a
+categorically different one).
 
-A level's report is always "its own report, plus every report the levels
-below it could produce, rolled up and drillable" — never a distinct report
-definition per level. This falls directly out of §1: the report
-definition is identical at every level; only the
+**Corrected rule**: every node's report scope is **itself plus all
+descendants**, resolved per ADR 0036 §2.4/§2.6 — the network root is the
+widest case of this one rule, not a separate "tenant-wide" case. A node's
+report is always "its own report, plus every report the nodes below it
+could produce, rolled up and drillable" — never a distinct report
+definition per node type. This falls directly out of §1: the report
+definition is identical at every scope; only the
 `WHERE hierarchy_node_id IN (subtree of X)` filter changes, supplied by
-the caller's authorized scope — never a client-asserted node id, the same
-server-side-only-authorization rule CLAUDE.md states for `tenant_id`,
-applied here to hierarchy node.
+the caller's authorized scope (resolved server-side per request, never
+cached and never a client-asserted node id — the same rule CLAUDE.md
+states for `tenant_id`, applied here to hierarchy node). `hierarchy_node_type`
+itself is whatever type code the tenant configured (dual-scope,
+`docs/architecture/26...` §1.1) — denormalized onto the CDC fact rows for
+filtering/grouping convenience, never a fixed enum this pipeline
+constrains.
 
-**2.2 Query pattern and its dependency on the hierarchy storage decision —
-`OPEN DECISION`, blocking efficiency (not blocking the dimension design in
-§1).** The underlying query pattern behind every row above except Agent's
-is a **subtree aggregation**: "aggregate fact rows for the set of
-hierarchy nodes that are descendants-or-self of node X." How efficiently
-that descendant set is produced depends on `architect`'s hierarchy-storage
-decision, not yet settled:
+**2.2 Query pattern — settled by `architect`'s doc 26 (Wave-2 review
+correction, F10: this was an open decision in an earlier draft, now
+closed).** The underlying query pattern behind every subtree-scoped
+report is a **subtree aggregation**: "aggregate fact rows for the set of
+hierarchy nodes that are descendants-or-self of node X." `docs/
+architecture/26-retail-operations-architecture.md` §1.3 has since
+resolved the storage question — **adjacency list authoritative, with a
+closure table maintained transactionally as a derived projection** (H2)
+— which is exactly the closure-table shape this section recommends for
+reporting efficiency below. The two bullets below are retained as the
+reasoning trail for why that choice matters to this pipeline, not as a
+still-open alternative:
 
 - **Closure table** (a materialized `(ancestor_node_id,
   descendant_node_id, depth)` table maintained transactionally alongside
@@ -178,21 +206,12 @@ decision, not yet settled:
   recursive resolution at report-query time is not viable in the
   analytical store.
 
-**Dependency, stated explicitly rather than assumed away**: whichever
-model `architect` chooses operationally, the reporting layer needs a
-resolved ancestor/descendant mapping available to CDC — either directly
-(closure table exists operationally, CDC replicates it as-is) or via a
-reporting-side materialized projection this pipeline would have to build
-and maintain itself (recompute a closure/subtree-membership table from the
-adjacency list on every node create/move/re-parent event, publish it to
-ClickHouse as its own dimension table). The second path is buildable but
-is additional pipeline surface not needed if the operational model is
-already a closure table. This document does not require `architect` to
-choose a closure table, but flags that choosing adjacency-list-only moves
-the closure-computation problem here instead of eliminating it, and asks
-that ownership of computing it be settled between `architect` and
-`data-analytics` before Stage 4H-B implementation, to avoid building it
-twice. Hierarchy nodes are expected to change rarely relative to
+**Resolved**: since architect's operational model is adjacency-list-
+authoritative with a transactionally-maintained closure table (above),
+the reporting layer's dependency is satisfied directly — the closure
+table exists operationally and CDC replicates it as-is into ClickHouse as
+a small dimension table, with no reporting-side recomputation needed.
+Hierarchy nodes are expected to change rarely relative to
 transaction volume, so eventual consistency on this projection (within the
 same < 5 min freshness target) is acceptable — not a hot-path requirement.
 

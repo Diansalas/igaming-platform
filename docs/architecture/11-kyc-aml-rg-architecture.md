@@ -265,8 +265,24 @@ platform's own RG concurrency findings (ADR 0026 §8, the
 because a bypass here is a compliance failure, not a bug in the ordinary
 sense.
 
+**Load-bearing premise, stated explicitly rather than assumed (Wave-2
+review correction, F12, P2)**: everything in this section assumes every
+retail player transacts through an identified `PlayerAccount` — the same
+premise `docs/decisions/0031-risk-and-limits-engine.md` §22 and
+`docs/decisions/0035-retail-agent-network-accounting.md` §11.4 each
+independently escalate as a genuinely open human/business/legal decision
+("if anonymous retail play is in scope, requirement #16 is not
+satisfiable as written," per ADR 0031 §22 — no amount of Risk
+configuration can compensate, because `matches()` has nothing to match
+on for a transaction with no player). An earlier draft of this section
+made this assumption silently. If the human answer is that anonymous or
+bearer-instrument retail play is required in some jurisdiction, this
+entire section's binding mechanism (and ADR 0036 §8's) does not apply to
+that case and needs its own design — not a default, not resolved here.
+
 **`ARCHITECTURAL DECISION`, binding on any future retail implementation
-stage:** any retail action that is gambling-enabling or value-crediting/
+stage, for the identified-player case above:** any retail action that is
+gambling-enabling or value-crediting/
 debiting — registration completion where the resulting account can
 immediately transact, a cash deposit crediting a wallet, a cash withdrawal
 payout debiting a wallet, a bet placed at a retail terminal if retail bet
@@ -331,13 +347,26 @@ card/bank reversal once physically handed over, which argues for
 fail-closed here at least as strongly as it does on the fully-online path.
 
 **`OPEN DECISION` (business/operations sign-off required, not resolved
-here):** whether the retail hierarchy design (architect's/security's
-parallel work) provides any bounded, explicitly-approved exception to
-strict fail-closed — e.g. a short-lived, narrowly-scoped, PRE-fetched
+here):** whether any bounded, explicitly-approved exception to strict
+fail-closed is commercially necessary. **Wave-2 review correction (F13,
+P2)**: an earlier draft of this bullet floated one candidate shape for
+such an exception — a short-lived, narrowly-scoped, pre-fetched
 "provisionally clear" token issued while online and consulted (never
-authoritatively decided) offline, with mandatory reconciliation once
-connectivity returns — is a genuine availability-vs-compliance trade-off
-this specialist cannot resolve unilaterally: CLAUDE.md is explicit that
+authoritatively decided) offline — without noting that `docs/
+architecture/26-retail-operations-architecture.md` §2.5, ADR 0031 §19/§24,
+and `docs/decisions/0035-retail-agent-network-accounting.md` §8.4 each
+independently pre-reject precisely that mechanism shape ("a terminal-local
+cache is just a cache that happens to be in a shop"; "**not** a cached
+limit, **not** a locally-replicated rule set"; "not a quiet relaxation of
+invariant #15 inside a retail code path") — a token consulted offline to
+permit a transaction *is* authoritative offline, which is exactly what
+those three documents rule out. The human decision is therefore between
+"no offline capability" and "a genuinely new, explicitly-designed
+exception with a hard per-terminal exposure cap and a recorded residual-
+risk acceptance" — not between two engineering options, one of which is
+already vetoed elsewhere. This is a genuine availability-vs-compliance
+trade-off this specialist cannot resolve unilaterally: CLAUDE.md is
+explicit that
 "enforcement is not optional and any exception requires an explicit,
 recorded decision, not a quiet code change." If the business decides some
 bounded offline tolerance is commercially necessary, that decision must be
@@ -370,14 +399,20 @@ same restriction. **No third scope category is invented for retail** —
 every retail self-exclusion request must be classified into one of these
 two existing paths, never a new hybrid.
 
-### 5. Cross-brand/cross-tenant self-exclusion for retail specifically — `OPEN DECISION`
+### 5. Cross-brand/cross-network self-exclusion for retail specifically — `OPEN DECISION`
 
-If a retail hierarchy (agent network) spans more than one tenant/brand
-under a single licence/operator (an open question for `docs/architecture/
-26`, not assumed either way here — see `05-identity-architecture.md` §3),
-a genuine regulatory question arises that this specialist flags rather
-than resolves, because it is a compliance/regulatory policy question, not
-an engineering one:
+**Wave-2 review correction (F11, P2)**: an earlier draft of this section
+framed the question as whether a hierarchy spans multiple *tenants*.
+`docs/architecture/26-retail-operations-architecture.md` H5/§5.1 has
+since resolved that a network never spans tenants (a cross-tenant parent
+edge is a constraint violation) — but a tenant may run **several
+networks** (e.g. one per licence/jurisdiction/brand, doc 26 §5.1 entity
+4). The genuine regulatory question survives with the corrected topology:
+if a retail agent network spans more than one **network/brand within a
+single tenant/licence** (see `05-identity-architecture.md` §3), a genuine
+regulatory question arises that this specialist flags rather than
+resolves, because it is a compliance/regulatory policy question, not an
+engineering one:
 
 - **Player self-service self-exclusion** already defaults platform-wide
   (ADR 0026 §3) regardless of tenant/brand/channel — this needs no change

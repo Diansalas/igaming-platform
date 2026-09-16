@@ -423,6 +423,106 @@ Gamification and the Reward Orchestrator have no dependency edge into
 either Bonus Engine's or Retail's implementation stages — they remain
 independently deferred.
 
+## 22a. Wave-2 cross-document consistency review (code-reviewer) and scope review (product-owner-proxy)
+
+After all ten Wave-1 documents landed, two Wave-2 reviews ran: a
+cross-document consistency review (mirroring Stage 4H-A's own Wave-2
+review, which found ~20 genuine cross-document contradictions in that
+stage's parallel-authored set) and a scope-discipline review.
+
+**code-reviewer found 14 findings (F1-F14): 1 P0, 8 P1, 4 P2, 1
+consolidated P3 list.** All P0/P1 findings were fixed in-place, each with
+an explicit "Wave-2 review correction" callout in the affected document
+(this project's established practice — never a silent edit):
+
+- **F1 (P0)**: ADR 0036's retail transaction design required
+  `app.hierarchy_node_id` set for the whole handler (§2.5) while also
+  requiring it unset for the posting engine, dual-scope config reads, and
+  set again for the audit insert — an internal contradiction that would
+  have manufactured P1 drift by construction (the exact failure ADR 0035
+  §1.3 warned about) or made every counter operation fail closed
+  permanently. Fixed by adding an explicit three-phase transaction model
+  (§2.5a: authorization phase scoped, posting phase unscoped, audit
+  phase re-scoped or parameterized) to ADR 0036.
+- **F2 (P1)**: payments' and backend's documents required only the
+  cashier's own principal for a counter operation, contradicting doc
+  26/ADR 0036's two-principal (terminal + cashier) requirement — and
+  silently defeating ADR 0035's terminal-identity-based idempotency
+  namespace-squatting mitigation, which depends on a terminal credential
+  existing. Fixed across both documents.
+- **F3 (P1)**: two incompatible deposit/withdrawal flow shapes (ADR
+  0035/doc 26 assumed counter-originated; payments/backend assumed a
+  player-pre-request flow only) and three different idempotency-key
+  encodings across four documents. Resolved: counter-originated is
+  primary, the player-pre-request flow is an optional second entry
+  point converging on the same posting/key; ADR 0035's `(tenant_id,
+  idempotency_key)` encoding is authoritative (ledger-finance holds the
+  financial veto), corrected in docs 04/12/26.
+- **F4 (P1)**: four different `risk.Operation` name sets proposed
+  independently across ADR 0031/ADR 0035/doc 26/payments, plus an
+  outbound agent-settlement money path with no `Operation` gating it at
+  all. Resolved: `retail_deposit`/`retail_withdrawal`/`retail_funding`
+  is authoritative (risk owns naming), corrected in all four documents;
+  the settlement-path gap recorded as unresolved (§23 P1 below).
+- **F5 (P1)**: risk's `hierarchy_level` scope dimension contradicted
+  architect's explicit rejection of any level/ladder concept. Renamed to
+  `hierarchy_node_type` with a tenant-required CHECK constraint added
+  (a platform-wide rule cannot reference a tenant-authored type code).
+- **F6 (P1)**: backend's API document contradicted ADR 0036 in three
+  load-bearing ways (claimed no second RLS dimension exists; proposed a
+  `hierarchy_node_id` JWT claim ADR 0036 explicitly rejects; proposed a
+  `staff_users` column ADR 0036 explicitly rejects in favor of an N:M
+  assignment table). All three corrected to match ADR 0036.
+- **F7 (P1)**: player-registration provenance was a three-way
+  disagreement (identity-compliance: audit metadata only, no new table;
+  architect/security: a dedicated `retail_player_origins` table; backend:
+  a third, different FK). Resolved: both `retail_player_origins`
+  (attribution source of record) and `registration_channel` (identity-
+  compliance's own column) are correct and additive to each other;
+  backend's third mechanism withdrawn.
+- **F8 (P1)**: ADR 0036's own ancestor-suspension check (a Partner
+  suspension must cascade to its cashiers) was silently defeated by ADR
+  0036's own closure-table RLS policy, which made the check's query
+  return zero rows regardless of real data — fail-open, not fail-closed.
+  Fixed with a `SECURITY DEFINER` accessor design that bypasses the
+  closure-table policy for this specific, audited check.
+- **F9 (P1, safety-critical)**: payments' retail deposit handler never
+  called `rg.EvaluateEligibility` at all and ran the Risk check before
+  anything else, contradicting the fixed RG-first-then-Risk order every
+  sibling document states as binding. Fixed.
+- P2s F10-F13 (reporting's hard-coded per-level scope ladder contradicting
+  the uniform descendant-scope rule; identity-compliance's cross-tenant
+  premise invalidated by architect's own topology decision; the anonymous-
+  play assumption stated silently rather than explicitly in two documents;
+  offline-retail floating a mechanism shape other documents pre-reject)
+  — all fixed. F14's consolidated one-line drift items (stale ADR 0031
+  section citations, `scope_source` naming drift, column-name drift,
+  a now-resolved qa `OPEN DECISION`, a stale StaffRole hedge) — the
+  safety/correctness-relevant ones fixed; a handful of pure cosmetic
+  items (shift/session table naming across three documents:
+  `retail_terminal_sessions`/`retail_shift`/`/v1/retail/shifts`; backend's
+  float-inquiry endpoint conflating the ledger-side `agent_float`
+  projection with the till, which ADR 0035 explicitly is not a ledger
+  account; a stale "does not exist yet" note in bonus doc 10 §5) recorded
+  here rather than fixed, to avoid further scope expansion in an
+  architecture-freeze stage — these are naming/wording inconsistencies
+  with no correctness impact, to be reconciled when retail implementation
+  is actually scoped.
+
+**product-owner-proxy independently confirmed the Blueprint-anchor
+finding** (zero retail content in the Blueprint, exactly like
+Gamification in Stage 4H-A) and gave a concrete recommended MVP-vs-
+deferred split (§1.3/§2 above already incorporate it), plus one scope-
+creep finding: **ADR 0035 §5's commission-accounting machinery
+(periodic-run mechanism, accrual→payable state machine, hierarchical
+override cascades) is more fully designed than the unresolved commercial
+terms (rate, base) justify** — the boundary-setting invariants (pool
+separation, commission is computable not a stored balance) are cheap and
+worth keeping frozen; the override-cascade posting mechanics should be
+treated as "documented for future reference," not binding, until the
+commercial terms are set, since those terms may change the correct
+posting shape anyway.
+
 ## 23. P0/P1/P2 risks (aggregated across all ten Wave-1 documents)
 
 ### P0 — must resolve before any retail implementation stage is authorized
@@ -486,17 +586,20 @@ independently deferred.
   ledger-finance) — the same class of gap as Stage 4H-A's bonus-campaign-
   budget-cap finding; a Partner with 200 Agents each capped at €10k/day
   has no enforceable network-wide cap.
-- Player-registration provenance mechanism disagreement between
-  identity-compliance (a `registration_channel` column on
-  `player_accounts`) and architect/security (a separate
-  `retail_player_origins` table) — flagged for Wave-2 review, resolution
-  recorded in the governance-update commit for this stage once the Wave-2
-  review's finding is applied.
-- Retail cash rail vs. retail ledger accounting: whether payments' and
-  ledger-finance's two independently-designed idempotency mechanisms
-  (a state-transition guard vs. a `(tenant_id, idempotency_key)` shape)
-  describe the same mechanism or two that would conflict if both were
-  implemented — flagged for Wave-2 review.
+- **`agent_settlement`/`agent_commission_payout` — an outbound real-money
+  payment to an agent node — has no `risk.Operation` gating it at all**
+  under the now-authoritative `retail_deposit`/`retail_withdrawal`/
+  `retail_funding` set (Wave-2 review finding F4). ADR 0035 §11.3 itself
+  notes this money path also has no approval state machine designed.
+  `risk` + `ledger-finance` must jointly decide whether it needs a fourth
+  `Operation` or is gated entirely by an approval workflow that does not
+  yet exist — not resolved this stage.
+- Nine more P1-severity cross-document contradictions (F2, F3, F5, F6,
+  F7, F8, F9, plus two more) were found and fixed in-place by the Wave-2
+  cross-document review — see §22a below for the complete list and
+  resolutions. Listed here only for risks that remain genuinely open
+  after fixing; the contradictions themselves are closed, not open
+  risks.
 - Cashier step-up/MFA exemption named as a completion blocker if no
   compensating control is designed (security).
 - Jurisdiction-derived capability restrictions vs. hierarchy-level

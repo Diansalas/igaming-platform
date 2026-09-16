@@ -349,7 +349,7 @@ its `account_type` and owner scope. No account is a member of two pools.
 |---|---|---|
 | H → F | Yes | `agent_funding` (real money received from the node) |
 | F → H | Yes | `agent_settlement` (real money paid out to the node); `till_variance` (§6.4, if adopted); four-eyes `manual_adjustment` (§7.1) |
-| F → F | Yes, **adjacent nodes only** | `agent_float_transfer` |
+| F → F | Yes, **adjacent nodes only** | `retail_funding` |
 | F → P | Yes | `retail_deposit` |
 | P → F | Yes | `retail_withdrawal_payout` |
 | P → P | Yes | `retail_withdrawal_authorization` (into `player_withdrawal_hold`), plus every existing intra-player flow |
@@ -363,7 +363,7 @@ its `account_type` and owner scope. No account is a member of two pools.
 Two further structural rules, both checkable at posting time:
 
 - **No transaction may contain entries against two different nodes'
-  `agent_float` accounts except an `agent_float_transfer`**, which contains
+  `agent_float` accounts except a `retail_funding`**, which contains
   exactly two float entries and nothing else. This prevents a retail
   deposit from quietly moving float between nodes under cover of a player
   leg.
@@ -489,7 +489,7 @@ PSP rail (§11.2).
 > **Invariant R1 (retail conservation).** For every `LedgerTransaction`
 > whose `transaction_type` is `retail_deposit`,
 > `retail_withdrawal_authorization`, `retail_withdrawal_payout` or
-> `agent_float_transfer`, the sum of entries against **any** house-level
+> `retail_funding`, the sum of entries against **any** house-level
 > external-rail account (`psp_clearing`, `psp_reserve`, and any bank/
 > treasury account Flow 18 adds) is exactly **zero** — i.e. those
 > transactions contain no such entries at all. Enforced unconditionally at
@@ -589,7 +589,7 @@ ADR 0031 §13 and `internal/casino`'s bet path.
   shift" counter in retail code. Those are `risk_rules` rows.
 - RG composes with Risk in the fixed order RG-first-then-Risk on any
   operation with a player leg (§3.2). Operations with no player leg
-  (`agent_float_transfer`, `agent_funding`, `agent_settlement`,
+  (`retail_funding`, `agent_funding`, `agent_settlement`,
   commission) have no RG dimension — RG is a player-protection concept and
   a hierarchy node is not a player.
 
@@ -602,7 +602,15 @@ model are executed together in one authorized change:
 |---|---|---|
 | `retail_deposit` | Funding a player's wallet at a physical counter | Not a PSP `deposit`: different rail, different counterparty, different exposure (agent float, not PSP chargeback), and reusing `deposit` would silently rebind every existing deposit rule to retail |
 | `retail_withdrawal` | Step A authorization of a counter payout | Same reasoning against reusing `withdrawal` |
-| `agent_float_transfer` | Moving float between nodes | No player, no wallet, no existing operation resembles it |
+| `retail_funding` | Moving float between nodes (and its settlement/reversal counterpart) | No player, no wallet, no existing operation resembles it |
+
+**Wave-2 review correction (F4, P1)**: an earlier draft of this table
+named this third value `retail_funding`. `risk` owns `Operation`
+naming (ADR 0031 §16) and, independently, `architect`'s doc 26 §4.3
+proposed a fourth, different name again — ADR 0031 §21 resolved the
+authoritative set as `retail_deposit`/`retail_withdrawal`/
+`retail_funding`. Renamed here, and in every reference to this value
+throughout this document, to match.
 
 The ledger-side mapping ADR 0031 §16 step 5 explicitly reserves for
 `ledger-finance` to specify, supplied here so that `cumulative_amount`
@@ -612,17 +620,17 @@ rules can work for the two player-facing operations:
 |---|---|---|
 | `retail_deposit` | `retail_deposit` | `retail_deposit_reversal` |
 | `retail_withdrawal` | `retail_withdrawal_authorization` | `retail_withdrawal_authorization_reversal` |
-| `agent_float_transfer` | **not supportable today — see below** | — |
+| `retail_funding` | **not supportable today — see below** | — |
 
 **A genuine gap, stated rather than designed around.** ADR 0031's
 cumulative aggregation query nets `ledger_entries` filtered by
-`le.player_account_id` and `asset_code`. An `agent_float_transfer` has no
+`le.player_account_id` and `asset_code`. A `retail_funding` has no
 `player_account_id` on either leg, so a `cumulative_amount` rule on that
 operation would aggregate to **zero** and silently never fire — the exact
 fail-open behaviour ADR 0031 §6 exists to prevent. Making it work requires
 a node-keyed aggregation in `internal/risk`, which is Risk's to build, not
 `ledger-finance`'s to design. Until it exists, `cumulative_amount` on
-`agent_float_transfer` is **unsupported and must be treated as
+`retail_funding` is **unsupported and must be treated as
 unavailable**, not quietly assumed to work. Per-transaction
 `min_amount`/`max_amount` rules on it work unchanged, because those compare
 `req.Amount` directly and are generic over `Operation`.
@@ -752,8 +760,19 @@ lower node's payable. Modelling it as a transfer would make one node's
 commission reducible by another's, and would break the property that a
 node's payable balance is what the operator actually owes that node.
 
-Status: **§5.1/§5.3/§5.4 RESOLVED (architecture) — `NOT IMPLEMENTED`.
-§5.2 is an `OPEN DECISION` (commercial, human sign-off).**
+Status: **§5.1 (pool-separation invariants: commission is computable, not
+a stored balance pre-run; P↔C and C→C forbidden) RESOLVED (architecture)
+— `NOT IMPLEMENTED`, and this part should stay frozen: it is cheap and
+boundary-setting regardless of commercial terms. §5.3/§5.4 (the periodic
+commission-run mechanism and the hierarchical override-cascade posting
+shape) downgraded from RESOLVED to `DOCUMENTED FOR FUTURE REFERENCE, NOT
+BINDING` (Wave-2 `product-owner-proxy` scope-discipline finding): this
+machinery is more fully designed than the unresolved §5.2 commercial
+terms (base, rate) justify, and if commission turns out to be
+jurisdiction-withheld-at-source or otherwise structured differently, the
+correct posting shape may not be this one. Re-review §5.3/§5.4 once §5.2
+is answered, rather than treating them as frozen ahead of it. §5.2
+remains an `OPEN DECISION` (commercial, human sign-off).**
 
 ### 6. Cashier shift and till reconciliation
 
@@ -1254,7 +1273,7 @@ engineering choice.
   the `retail_deposit`, `retail_deposit_reversal`,
   `retail_withdrawal_authorization`,
   `retail_withdrawal_authorization_reversal`, `retail_withdrawal_payout`,
-  `agent_funding`, `agent_float_transfer`, `agent_settlement`,
+  `agent_funding`, `retail_funding`, `agent_settlement`,
   `agent_commission_accrual`, `agent_commission_capitalization`,
   `agent_commission_payout` transaction types added to the `CHECK`
   constraint on `ledger_transactions.transaction_type`. Until then every
@@ -1288,7 +1307,7 @@ engineering choice.
   - A retail transaction containing a `psp_clearing`/`psp_reserve` entry
     is **rejected** (invariant R1).
   - A transaction touching two nodes' floats that is not an
-    `agent_float_transfer` is rejected; a transaction with a player leg and
+    `retail_funding` is rejected; a transaction with a player leg and
     two float legs is rejected (invariant R2).
   - Payout Step B against an expired, unknown or already-discharged
     authorization is rejected; hold expiry restores `player_cash` exactly;
@@ -1347,7 +1366,7 @@ engineering choice.
     inherits `financial-transaction-flows.md` §16's open decision, now with
     a `ledger-finance` `RECOMMENDATION` attached.
 12. **Node-keyed cumulative aggregation in `internal/risk`** (§4) — `risk`.
-    Until it exists, `cumulative_amount` on `agent_float_transfer` is
+    Until it exists, `cumulative_amount` on `retail_funding` is
     unsupported and must not be presented as working.
 13. **Is retail authorized product scope at all** — Master Orchestrator +
     `product-owner-proxy`. Retail has no Blueprint anchor (see header);
@@ -1372,7 +1391,7 @@ is the one to revisit.
    depth-agnostic and stay correct for two levels or six.
 3. There exists a server-side authorization predicate answering "may this
    actor move float from node A to node B", and it is evaluated **before**
-   any `agent_float_transfer` is posted. This ADR requires its existence
+   any `retail_funding` is posted. This ADR requires its existence
    and its position; it designs neither.
 4. `agent_float` is scoped **tenant + node + asset**, deliberately **not**
    tenant + brand + node + asset — an agent's commercial relationship is

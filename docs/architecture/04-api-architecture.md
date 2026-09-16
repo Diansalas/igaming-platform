@@ -110,51 +110,68 @@ still-unlanded documents.
 
 ### 0. Hierarchy as data — conceptual model (`ARCHITECTURAL DECISION`)
 
-Before the endpoint groups: a `HierarchyNode` is an **ordinary
-tenant-owned table**, RLS-scoped by `tenant_id` exactly like every other
-tenant-owned table (CLAUDE.md's RLS rule) — this document introduces no
-second isolation primitive alongside `tenant_id`. A node's position in the
-hierarchy (`parent_node_id`, `node_type` ∈
-`{partner, super_agent, agent, cashier_terminal}`) is ordinary data, and
-"can this caller see/act on this subtree" is an **authorization-scope
-question layered on top of tenant scope** — the same shape this codebase
-already uses for brand-scoped withdrawal queues (`withdrawal-state-
-machine.md` §2) — not a new row-level-security dimension. `security`'s
-parallel design owns exactly how that scope is resolved and enforced
-(claim on the session, a recursive scope query, etc.); this document only
-assumes such a mechanism exists and is enforced server-side, never
-inferred from a client-supplied node id.
+**Wave-2 review correction (F6, P1)**: an earlier draft of this section
+claimed `HierarchyNode` introduces "no second isolation primitive
+alongside `tenant_id`" and modeled subtree visibility as an
+application-layer authorization check on top of ordinary tenant RLS.
+`docs/decisions/0036-retail-hierarchy-rbac-and-audit.md` §2.1 explicitly
+rejects exactly that option by name ("An application-only subtree filter
+is one forgotten `WHERE` clause away from a full-tenant data leak") and
+§3 makes a closure-table RLS predicate (`app.hierarchy_node_id` +
+`hierarchy_node_closure`) the **authoritative** boundary — a genuine
+second, additional RLS dimension alongside `tenant_id`, not a
+convenience layered on top of it. Corrected: a `HierarchyNode` is
+tenant-owned and `tenant_id`-scoped, **and** every hierarchy-scoped table
+additionally carries the closure-predicate RLS policy ADR 0036 §3
+defines; "can this caller see/act on this subtree" is enforced at the
+database layer, per CLAUDE.md's RLS rule, never by application discipline
+alone. A node's type (`hierarchy_node_types`, a tenant-owned — or
+platform-template, dual-scope — configuration row, **not** a fixed
+`node_type` enum: `docs/architecture/26-retail-operations-
+architecture.md` §1.1 explicitly rejects any structural element
+containing the literal strings `partner`/`super_agent`/`agent`/
+`cashier_terminal`) determines its structure and capability, resolved
+per ADR 0036 §2.8's composition rule.
 
-**`ARCHITECTURAL DECISION`, flagged for `architect` confirmation:**
-`Player` is deliberately **not** its own `HierarchyNode` row, despite
-being the stated leaf of the directive's hierarchy list. Modeling every
-player as a tree node would multiply the tree by player count and conflate
-an organizational/staff hierarchy (who reports to whom, who is authorized
-to act where) with a customer-attribution relationship (which agent
-registered/services this player). Instead: `player_account` gains a
-nullable `registered_at_node_id` reference (an ordinary FK to
-`HierarchyNode`, used for commission/reporting attribution only — the
-commission *value* itself is `ledger-finance`/risk's business-rule domain,
-per the directive, not modeled here). `Cashier` *is* a real principal
-(see §3) but is not itself a `HierarchyNode` row either — a cashier is a
-staff-like principal **assigned to** an `agent`-type or
-`cashier_terminal`-type node, the same way a back-office staff member is
-assigned to a tenant without being a row in the tenant table.
+**`ARCHITECTURAL DECISION`, corrected (Wave-2 review, F7, P1)**: `Player`
+is deliberately **not** its own `HierarchyNode` row, for the reason
+originally stated here (multiplying the tree by player count, conflating
+an organizational hierarchy with a customer-attribution relationship) —
+this part was correct and doc 26 §1.6 independently reaches the same
+conclusion. What was wrong: an earlier draft invented its own mechanism
+(`player_account.registered_at_node_id`, a direct FK) for recording that
+attribution. The authoritative mechanism, resolved between `architect`
+and `identity-compliance`, is **two separate, narrower pieces**: (a) a
+retail-owned `retail_player_origins` table (doc 26 §3.2/§5.1 entity 10,
+`UNIQUE(player_account_id)`, recording node/terminal/cashier at
+registration time — the source of record for commission/reporting
+attribution and for `security`'s subtree-scoped player accessor, ADR
+0036 §5.5); (b) a `registration_channel` column directly on
+`player_accounts` (`identity-compliance`'s own table, doc 05's Stage
+4H-B0 section — `online`/`retail`, no node dimension). This document's
+own `registered_at_node_id` FK proposal is withdrawn; neither endpoint
+group below writes it. `Cashier` *is* a real principal (see §3) but is
+not itself a `HierarchyNode` row either — a cashier is a staff-like
+principal assigned to a node via the effective-dated N:M
+`hierarchy_node_staff_assignments` table (ADR 0036 §2.3), never a column
+on `staff_users` and never a fixed node type.
 
 ### 1. Cashier/POS operations — API surface (conceptual endpoint groups)
 
-Every endpoint in this section is called by a **cashier session**, not a
-player session and not a bare terminal credential (see §3). Every
-endpoint resolves `tenant_id` and the cashier's own `hierarchy_node_id`
-server-side from the authenticated session — never from a request
-parameter — exactly as `tenant_id`/`brand_id` are resolved today
-(`withdrawal-state-machine.md` §7's "all resolved server-side" pattern,
-applied to the additional node dimension).
+Every endpoint in this section is called by a **cashier session together
+with the terminal's own credential** (§3's two-principal requirement,
+Wave-2 review F2/F6) — never a player session, and never either principal
+alone. Every endpoint resolves `tenant_id` and the caller's own
+`scope_node_id` server-side per ADR 0036 §2.4's resolution order (never
+from a JWT claim, never from a request parameter, and re-resolved on
+every request, not cached at login) — exactly as `tenant_id`/`brand_id`
+are resolved today (`withdrawal-state-machine.md` §7's "all resolved
+server-side" pattern, applied to the additional node dimension).
 
 | Group | Conceptual endpoint(s) | Actor / scope | Idempotency shape |
 |---|---|---|---|
-| Player registration-at-retail | `POST /v1/retail/players` | Cashier session, scoped to their own node — the created `player_account.registered_at_node_id` is set server-side to the caller's own node, never client-supplied | Caller-supplied `client_reference`, unique on `(tenant_id, hierarchy_node_id, client_reference)` — mirrors doc 25's admin-create precedent (mission/badge creation), namespaced by node rather than by player since no player identity exists yet at the point of the call |
-| Deposit confirmation | `POST /v1/retail/deposit-requests/{id}/confirm` (naming matches `07-payments-architecture.md`'s landed "Retail cash rail" §2) | Cashier session, scoped to own node; acts on a `RetailDepositRequest` already created (at player-request time) in state `awaiting_cash_handover` for a specific `player_account` — never a call that creates and confirms in one step | Per `07-payments-architecture.md` §1/§2 (landed during this stage, not this document's own invention): **not** an ADR-0020-style `(provider_id, provider_tx_id)` uniqueness key — retail cash is explicitly not a `PaymentProvider` adapter, so there is no `provider_id`. Idempotency is a state-transition guard: `UPDATE ... WHERE state = 'awaiting_cash_handover'`, `RowsAffected()` checked before the ledger-posting call is made; a repeat/racing confirm against an already-resolved request is a no-op returning current state, never a second posting |
+| Player registration-at-retail | `POST /v1/retail/players` | Cashier session (both principals, §3), scoped to their own node — the created `retail_player_origins` row and the new `player_accounts.registration_channel` value are both set server-side to `retail`/the caller's own node, never client-supplied (§0's corrected attribution mechanism) | Caller-supplied `client_reference`, unique on `(tenant_id, hierarchy_node_id, client_reference)` — mirrors doc 25's admin-create precedent (mission/badge creation), namespaced by node rather than by player since no player identity exists yet at the point of the call |
+| Deposit confirmation | `POST /v1/retail/deposit-requests/{id}/confirm` (naming matches `07-payments-architecture.md`'s landed "Retail cash rail" §2) | Cashier session, scoped to own node; acts on a `RetailDepositRequest` in state `awaiting_cash_handover` for a specific `player_account`. **Wave-2 review correction (F3, P1)**: an earlier draft said this call could never create and confirm a request in one step — corrected: payments §2's Wave-2 resolution makes the counter-originated flow (no prior player session) primary, so this endpoint accepts either an existing pending request id or the parameters to create-and-confirm one in the same call; both paths converge on the identical posting and idempotency key | Per `07-payments-architecture.md` §1/§2/§8.1 (ADR 0035 is authoritative on the mechanism, ledger-finance holds the financial veto): **not** an ADR-0020-style `(provider_id, provider_tx_id)` uniqueness key — retail cash is explicitly not a `PaymentProvider` adapter. Idempotency is `internal/ledger`'s own `(tenant_id, idempotency_key)` constraint (`idempotency_key = 'retail:' || terminal_id || ':' || terminal_operation_id`, server-resolved from the terminal's own credential, never client-asserted); a repeat/racing confirm against an already-resolved request is a no-op returning current state, never a second posting |
 | Withdrawal confirmation/fulfillment | `POST /v1/retail/withdrawal-requests/{id}/complete` (naming matches `07-payments-architecture.md` §3) | Cashier session, scoped to own node; acts on a `WithdrawalRequest` already in `submitted` state, reached via the *existing, unmodified* `requested → pending_review → approved` review/approval chain — review/approval is centralized and unaffected by channel (see §4) | Matches `WithdrawalRequest`'s existing state-transition concurrency control (`withdrawal-state-machine.md` §4: optimistic concurrency, `UPDATE ... WHERE state = $expected`), applied here to the `submitted → completed` transition exactly as `07-payments-architecture.md` §3 specifies — a repeat call against an already-`completed` request is a no-op returning current state, never a second cash movement |
 | Shift/till open/close | `POST /v1/retail/shifts` (open), `POST /v1/retail/shifts/{id}/close` | Cashier session, scoped to own node/terminal | Append-only; at most one open shift per `(tenant_id, hierarchy_node_id or terminal_id)` enforced by a partial unique constraint (`WHERE closed_at IS NULL`) — opening a second shift while one is open is rejected, not silently allowed to coexist |
 | Balance/float inquiry | `GET /v1/retail/shifts/{id}/float`, `GET /v1/retail/players/{id}/balance` | Cashier session, own node/shift for the till float; a specific player's balance only in the presence of that player (see `OPEN DECISION` below) | Read-only, no idempotency concern — a pure projection read, same as `GET /v1/wallets` today; never itself an authoritative source for a subsequent write (a stale float display must not be trusted by a later confirm-deposit call, which re-derives its own state independently) |
@@ -189,15 +206,17 @@ needed a materially different response shape or a materially different
 trust boundary than an internal back-office caller with equivalent
 permissions — no such need is identified here.
 
-**`OPEN DECISION`, flagged for `architect` + identity owner:** whether a
-partner-console user is represented by the existing `staff_users`-shaped
-principal (extended with a `hierarchy_node_id` column, the same way
-`brand_id` already sits alongside `tenant_id` on relevant tables) or a
-genuinely distinct principal type. This document assumes (does not
-decide) the former, since it avoids a second principal/session model for
-what is, functionally, staff authentication scoped one level narrower than
-today's tenant-wide staff — but identity's principal model is not this
-document's to redesign.
+**Resolved by `security`'s parallel document (Wave-2 review correction,
+F6, P1)**: an earlier draft of this bullet proposed extending
+`staff_users` with a `hierarchy_node_id` column. `docs/decisions/0036-
+retail-hierarchy-rbac-and-audit.md` §2.3/§4.1 decided otherwise, and
+correctly so — a single column cannot express the N:M model a staff
+principal actually needs (one cashier can be assigned to more than one
+node over time, effective-dated): a partner-console user is the existing
+`staff_users`-shaped principal (no schema change to that table)
+**plus** a row in the effective-dated `hierarchy_node_staff_assignments`
+table (ADR 0036 §2.3), exactly the same mechanism a retail cashier uses
+(§3). No genuinely distinct principal type is introduced.
 
 Endpoint groups (paths illustrative):
 
@@ -250,19 +269,30 @@ build-time requirement, not resolved here: a dedicated role (analogous to
 
 **`ARCHITECTURAL DECISION`**: the primary authentication event is a
 **cashier login on the terminal** — a human, staff-like principal
-authenticating — not a terminal-only credential granting API access on
-its own. This fits the existing JWT/session model
+authenticating. **Wave-2 review correction (F2/F6, P1)**: an earlier
+draft of this section required only that single principal, with no
+terminal credential at all, and additionally proposed a `hierarchy_node_id`
+JWT claim resolved once at login. Both are corrected: (a) per §0/§3's
+two-principal requirement, a money-touching operation additionally
+requires the terminal's own per-terminal credential presented alongside
+the cashier's login (ADR 0036 §4.4) — neither principal alone is
+sufficient; (b) `docs/decisions/0036-retail-hierarchy-rbac-and-audit.md`
+§2.4 explicitly rejects a scope claim ("the scope node id is NOT a JWT
+claim") because a claim survives a suspension/reassignment until token
+expiry, converting a revocation into an advisory one — the cashier's
+`scope_node_id` is instead **re-resolved from the database on every
+request** (via `hierarchy_node_staff_assignments`, §0), never cached in
+the token. This fits the existing JWT/session model
 (`05-identity-architecture.md`, ADR 0011's platform-scoped identity
-tokens) with no new token type: the cashier receives the same shape of
-staff-session JWT issued today (subject = staff principal id, `tenant_id`
-claim, permission set resolved server-side), plus one additive claim,
-`hierarchy_node_id`, resolved server-side at login from the cashier's own
-staff record — never client-supplied, exactly like `tenant_id` is never
-client-supplied today. This is deliberately **not** a repeat of this same
-document's single-use opaque game-launch token pattern (§"Authentication/
-authorization propagation" above): a cashier session is a genuine
-multi-request work session (a shift can span hours and many
-transactions), not a single-use, single-purpose token.
+tokens) with no new token type and no claim-set amendment: the cashier
+receives the same shape of staff-session JWT issued today (subject =
+staff principal id, `tenant_id` claim, permission set resolved
+server-side); the terminal presents its own separate per-terminal
+credential (§below) on the same request. This is deliberately **not** a
+repeat of this same document's single-use opaque game-launch token
+pattern (§"Authentication/authorization propagation" above): a cashier
+session is a genuine multi-request work session (a shift can span hours
+and many transactions), not a single-use, single-purpose token.
 
 A shift (§1) additionally bounds the session at the business-logic layer,
 not the auth layer: a mutating retail action outside an open shift is
@@ -270,22 +300,27 @@ rejected fail-closed, the same enforcement shape RG already uses for
 "no path when state disallows it," rather than being expressed as a
 separate short-lived token per shift.
 
-**`RECOMMENDATION`, `OPEN DECISION` on exact mechanism (flagged for
-`security`)**: a secondary, device-level credential for the terminal
-itself should additionally exist, layered onto (never substituting for)
-cashier login. Reasoning: (a) an unattended or stolen terminal must not be
-able to accept a valid cashier's credentials from an unregistered device
-— this is a real fraud vector specific to a channel handling physical
-cash, unlike a player's browser session; (b) device revocation (a
-decommissioned or reported-stolen terminal) needs a lifecycle independent
-of any individual cashier's own credential lifecycle — revoking a
-terminal should not require rotating every cashier who ever used it, and
-vice versa. Concretely this looks like a device-bound channel (e.g. mTLS
-client certificate or a long-lived signed device token presented
-alongside, never instead of, the cashier's own JWT) such that a cashier
-JWT is only honored over a channel already authenticated as a registered
-terminal. The exact mechanism is `security`'s to specify, consistent with
-"security owns RBAC/auth enforcement design" — this document only records
+**`ARCHITECTURAL DECISION` (Wave-2 review correction, F2, P1 — no longer
+merely recommended)**: a device-level credential for the terminal itself
+is **required**, layered onto (never substituting for) cashier login, for
+every money-touching operation (§0/§1) — `docs/decisions/0036-retail-
+hierarchy-rbac-and-audit.md` §4.4 adopts doc 26 §2.2's two-principal rule
+without modification ("a counter deposit or payout from an unregistered
+device must simply fail"), and ADR 0035 §8.2's idempotency-key
+namespace-squatting mitigation depends on the terminal identity being
+server-resolved from this credential, not asserted. Reasoning: (a) an
+unattended or stolen terminal must not be able to accept a valid
+cashier's credentials from an unregistered device — this is a real fraud
+vector specific to a channel handling physical cash, unlike a player's
+browser session; (b) device revocation (a decommissioned or
+reported-stolen terminal) needs a lifecycle independent of any individual
+cashier's own credential lifecycle — revoking a terminal should not
+require rotating every cashier who ever used it, and vice versa.
+Concretely this looks like a device-bound channel (ADR 0036 §4.4's
+registration-secret exchange for a first slice, mTLS as target state) such
+that a cashier JWT is only honored over a channel already authenticated
+as a registered terminal. The exact mechanism is `security`'s to specify,
+consistent with "security owns RBAC/auth enforcement design" — this document only records
 the requirement and its rationale.
 
 ### 4. The "client, not a financial system" boundary (`ARCHITECTURAL DECISION`)

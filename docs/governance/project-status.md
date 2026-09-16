@@ -34,9 +34,22 @@ Stage 4G-FINAL-FINANCE-GATE — see `docs/active-stage.md` for full detail.
 
 ## Blocked stages
 
-- **Bonus Engine**: explicitly blocked (Stage 4G §32) until the Risk &
-  Limits architecture is stable enough for Bonus to consume without
-  building its own independent limit engine. Not started.
+- **Bonus Engine**: architecture frozen (Stage 4H-A) and an MVP
+  implementation-scope plan is now on file (Stage 4H-B0 — 5-type first
+  slice, migration order, package ownership). The Stage 4G §32 block is
+  **qualified-lifted**: `bonus-engine`'s own direct gate-check found the
+  Risk & Limits architecture stable enough (Stage 4G-FINAL 11/11-area
+  review plus the finance-gate follow-up, PASS/no P0/P1) for a first
+  slice restricted to `min_amount`/`max_amount` rules, pending one small
+  dependency request to `risk` (the `bonus_conversion` `Operation`
+  value). **Implementation itself is still not authorized** — this is a
+  scope plan, not a start.
+- **Retail (agent-hierarchy network)**: architecture/scope frozen (Stage
+  4H-B0) across 10 documents — see `docs/architecture/27-stage-4h-b0-
+  scope-and-implementation-plan.md`. Not started, and not authorizable
+  yet: several P0 human/legal decisions (retail licensing status,
+  node-float vs. ADR 0007 `Wallet` conflict, anonymous-play policy) block
+  even scoping an implementation stage, per that document's §22/§24.
 - **Sportsbook**: not started — no directive has authorized it yet.
 - **Real KYC/AML vendor integration**: not started — Stage 4F built the
   provider-neutral boundary only; no vendor is contracted.
@@ -222,6 +235,17 @@ Stage 4G-FINAL-FINANCE-GATE — see `docs/active-stage.md` for full detail.
 - Legal interpretation of jurisdiction-specific RG/KYC/AML requirements
   before any real-money go-live.
 - Explicit authorization for each future stage per the stage-gate rule.
+- **Retail licensing status per target jurisdiction** (Stage 4H-B0) —
+  land-based/retail gambling is typically licensed separately from
+  online, and the platform's only current licence (Anjouan) is
+  online-only.
+- **Whether anonymous/bearer retail play is permitted or required** in
+  any target jurisdiction (Stage 4H-B0) — would make RG/KYC/Risk
+  enforcement structurally unsatisfiable as currently designed.
+- **Whether a retail hierarchy node's float amends ADR 0007's
+  human-approved multi-wallet-per-player model** (Stage 4H-B0) — see
+  `docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md`
+  §24 for the full list of retail-specific human decisions.
 
 ## Stage 4H-A: Bonus, Gamification & Reward Orchestration architecture freeze
 
@@ -379,6 +403,84 @@ treated as authoritative and the trailing line was not acted on. **Stage
 started.** Explicit human confirmation is required before any Bonus
 Engine, Gamification Engine, Reward Orchestrator, or sportsbook-bonus
 code is written.
+
+## Stage 4H-B0: Bonus, Gamification & Retail scope/implementation plan
+
+Architecture/scope-freeze stage responding to a new confirmed business
+requirement: the platform must support retail iGaming operations (a
+configurable agent-hierarchy network — Operator → Partner → Super Agent
+→ Agent → Player/Cashier, configurable depth/structure per tenant/
+licence/jurisdiction, never hardcoded) as another surface of the same
+platform, sharing identity/wallet/ledger/risk/RG/payments/reporting/
+audit/bonus/tenant architecture wherever appropriate. **No production
+code, no migrations, and no implementation were started.** Full detail:
+`docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md` (the
+directive's own required master synthesis document, covering all 25
+numbered deliverables).
+
+Ten specialists (architect, ledger-finance, security, identity-
+compliance, payments, risk, data-analytics, backend, qa, bonus-engine)
+each produced a Wave-1 architecture document, each owning a distinct
+file so nothing overwrote another's work. Key decisions: a configurable
+hierarchy model (adjacency list authoritative + closure-table derived
+projection, no hardcoded level ladder — architect); agent float modeled
+as a platform liability, never commingled with player/commission/house
+funds (ledger-finance, ADR 0035); a three-axis authorization model
+(capability + tenant + hierarchy-scope) with closure-table RLS
+fail-closed by construction (security, ADR 0036); RG/KYC non-bypass made
+structural rather than policy-based (identity-compliance); retail cash
+modeled as a fulfillment channel, not a `PaymentProvider` (payments);
+two new Risk scope dimensions with an honest disclosure that daily/
+periodic hierarchy-level funding limits are not yet expressible (risk,
+ADR 0031 §19-24); one shared reporting pipeline for online+retail
+(data-analytics); a single API surface for Back Office and a future
+retail console (backend); and a concrete Bonus Engine MVP
+implementation-scope plan with a qualified gate-check lifting Stage 4G
+§32's block for a first slice (bonus-engine).
+
+**Wave-2 review found and fixed 1 P0 + 8 P1 genuine cross-document
+contradictions** (code-reviewer, 14 findings F1-F14) — the same "seam
+failure" pattern Stage 4H-A's own Wave-2 review found, at larger scale
+given this stage produced roughly 8,000+ lines across 10 documents.
+Notable fixes: a transaction-phasing contradiction in ADR 0036 that would
+have made every retail posting silently update zero projection rows or
+fail closed permanently (F1, P0); a fail-open ancestor-suspension check
+defeated by the RLS policy meant to protect it (F8); a payments handler
+that never called RG at all and inverted the fixed gate order (F9,
+safety-critical); four independently-proposed, mutually inconsistent
+`risk.Operation` name sets (F4); and a three-way disagreement on
+player-registration provenance, resolved as two complementary mechanisms
+rather than picking one (F7). Full list:
+`docs/architecture/27-*.md` §22a.
+
+**Wave-2 scope review (product-owner-proxy) independently confirmed the
+Blueprint-anchor finding**: retail, like Gamification in Stage 4H-A, has
+zero Blueprint content — it is human-directed business scope, correctly
+labeled as such throughout by every specialist (none presented it as a
+Blueprint requirement). Gave a concrete recommended MVP-vs-deferred split
+(a fixed 2-3 level hierarchy, cash deposit only, no commission
+automation, no offline, no anonymous play, for a first slice — see
+doc 27 §1.3/§2) and one scope-creep finding: ADR 0035's commission-
+accounting machinery (periodic-run mechanism, override-cascade posting)
+is more fully designed than its own unresolved commercial terms justify
+— downgraded from binding to "documented for future reference" pending
+those terms.
+
+**8 P0 risks require human/legal/cross-specialist decisions before any
+retail implementation stage can even be scoped** (doc 27 §23/§24):
+retail's licensing status (the platform's only current licence is
+online-only), whether a hierarchy node's float amends ADR 0007's
+human-approved `Wallet` definition, whether anonymous/bearer retail play
+is required in any target jurisdiction (would make RG/KYC/Risk
+enforcement structurally unsatisfiable), delegated limit-authoring by
+hierarchy actors, the existing `audit_log` RLS policy's retail-readiness,
+and others. None resolved this stage — all explicitly escalated, not
+guessed at.
+
+**This stage's directive had no contradictory trailing line** (unlike
+Stage 4H-A's) — it explicitly stated "This stage must NOT automatically
+proceed to implementation. Wait for explicit approval before Stage
+4H-B1," consistent with the detailed body. No ambiguity to flag.
 
 ## Production blockers (summary)
 

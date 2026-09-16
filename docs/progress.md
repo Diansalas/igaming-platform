@@ -2986,3 +2986,451 @@ authorization. This addendum closes out the remaining Wave-2 review
 findings (ledger-finance's required financial sign-off, now granted, and
 product-owner-proxy's scope-discipline review) that were still pending
 when this stage's first completion report was delivered.
+
+---
+
+## Stage 4H-B0 — Bonus, Gamification & Retail Scope/Implementation Plan
+
+Directive: "STAGE 4H-B0 — BONUS + GAMIFICATION + RETAIL ARCHITECTURE/
+SCOPE FREEZE," responding to a new confirmed business requirement: the
+platform must support retail iGaming operations (a configurable
+agent-hierarchy network — Operator → Partner → Super Agent → Agent →
+Player/Cashier, configurable depth/structure per tenant/licence/
+jurisdiction, never hardcoded) as another surface of the same platform,
+sharing identity/wallet/ledger/risk/RG/payments/reporting/audit/bonus/
+tenant architecture wherever appropriate. Architecture/scope-freeze
+only — **no production code, no migrations, and no implementation were
+started this stage.** The directive explicitly required the Orchestrator
+to work as coordinator, delegate analysis to specialists without letting
+them overwrite each other's work, and produce a master "STAGE 4H-B0 —
+BONUS, GAMIFICATION & RETAIL SCOPE/IMPLEMENTATION PLAN" covering 25
+numbered deliverables, ending with an explicit instruction not to proceed
+to implementation automatically.
+
+### Wave 1 — ten specialist architecture documents (parallel, each owning a distinct file)
+
+- **architect** — `docs/architecture/26-retail-operations-
+  architecture.md` (new, 1272 lines, 11 sections): the core retail +
+  configurable agent-hierarchy architecture. Key decisions: node type,
+  structure, and capability kept as three separate concerns (no
+  hardcoded `level` integer or enum); storage is adjacency-list-
+  authoritative with a closure table maintained transactionally as a
+  derived projection (mirrors the ledger/balance-projection pattern);
+  neither a Player nor a Cashier is a hierarchy node (a Player is an
+  attribution edge via `retail_player_origins`, a Cashier is an
+  effective-dated N:M staff assignment); a cashier is an
+  `identity.StaffUser` with a retail role, a terminal is a `service`
+  principal (ADR 0014 option 2), and both are required together for any
+  money-touching operation. Independently confirmed the Blueprint has
+  zero retail content (a full 20-page text search) — retail is
+  human-directed business scope, not a Blueprint requirement, exactly
+  like Gamification in Stage 4H-A. Disclosed a P0 conflict on whether a
+  node's float fits ADR 0007's player-centric `Wallet` definition
+  (deferred to ledger-finance + human, not resolved unilaterally) and a
+  P0 flag that retail is very likely outside the platform's current
+  Anjouan (online-only) licence. Also updated `docs/architecture/
+  02-domain-and-service-boundaries.md` with the new Retail/Agent Network
+  domain boundary section.
+- **ledger-finance** — `docs/decisions/0035-retail-agent-network-
+  accounting.md` (new, 1429 lines, ADR-0032 structure/rigor). Key
+  decisions: an agent's float is a platform *liability*, credit-normal,
+  the structural analogue of `player_cash` for a non-player counterparty
+  — so a retail cash deposit is a *transfer of an existing platform
+  liability* from agent to player (`Dr agent_float / Cr player_cash`,
+  two entries, no `psp_clearing` leg), never a new deposit into the
+  platform. Three new account types (`agent_float`,
+  `agent_commission_payable`, `agent_commission_expense`). Invariant R1
+  (retail transactions never touch PSP/bank rails), R2 (pool separation:
+  player/agent-operational/commission/house, with a permitted-transition
+  matrix), R3 (shift/till reconciliation against the terminal's
+  *declared* movements, zero-tolerance — never a human cash count, which
+  would reintroduce an unverifiable second truth source). Retail
+  withdrawal is two steps reusing `player_withdrawal_hold` unchanged, to
+  avoid an unreconcilable authorize-then-hand-over window. Commission
+  recognized by a periodic run, not per-event. Disclosed a P0 blocking
+  precondition: `ledger_accounts` today supports only wallet-scoped or
+  house-level ownership, neither of which correctly fits a node-scoped
+  `agent_float` account without an additive schema change — explicitly
+  not applied unilaterally (changes an already-implemented shared
+  table), deferred to architect + security + human sign-off. Also
+  disclosed a genuinely new attack class: POS idempotency
+  namespace-squatting, if a terminal's identity were taken from request
+  payload rather than resolved from its own credential.
+- **security** — `docs/decisions/0036-retail-hierarchy-rbac-and-audit.md`
+  (new, ~1930 lines after Wave-2 fixes, 14 sections, 36 mandatory tests
+  specified). Key decisions: three orthogonal authorization axes
+  (capability/`auth.Permission`, tenant/`app.tenant_id`, and a new
+  hierarchy-scope axis/`app.hierarchy_node_id`) — explicitly rejected "a
+  Role per hierarchy level" since depth is tenant-configurable (would be
+  a brand-specific code path, forbidden by CLAUDE.md). RLS via a
+  closure-table `EXISTS` predicate, fail-closed by construction (no `OR
+  guc IS NULL` escape branch). Scope resolved from the DB per request,
+  never a JWT claim, so suspension/reassignment take effect on the next
+  request rather than at token expiry. Drafted before architect's/
+  ledger-finance's documents existed; reconciled in place against both
+  once they landed mid-task, with each correction marked visibly
+  (C13/C15/C18 etc.), not silently rewritten — including discovering
+  its own draft was wrong about whether a tenant runs one hierarchy tree
+  or several (doc 26 confirmed several networks per tenant are allowed).
+  5 P0 design invariants stated as binding requirements on any future
+  implementation (subtree-reassignment permission never bundled with
+  general manage; no fail-open RLS branch; no retail role holds
+  `PermStaffManage`; no retail money path skips RG→Risk; the closure
+  table is write-protected as authorization data itself). 1 P1 disclosed
+  and not silently assumed away: the existing `audit_log` RLS policy
+  (ADR 0013, accepted Stage 2) does not narrow by subtree as-is, and
+  Postgres's OR-of-permissive-policies semantics mean a narrower policy
+  added beside it cannot narrow anything — flagged for a fresh security
+  review of the eventual migration, not fixed here (would modify an
+  accepted decision).
+- **identity-compliance** — Stage 4H-B0 sections appended to
+  `docs/architecture/05-identity-architecture.md` (166 lines) and
+  `11-kyc-aml-rg-architecture.md` (293 lines). Key decisions: retail
+  registration reuses the existing `identityresolution.
+  RegisterPlayerWithResolution` flow as-is (no second registration
+  path), with a new `registration_channel` provenance column
+  (`online`/`retail`) on `player_accounts`. No new KYC tier invented —
+  the existing tiered-trigger model already keys off "registration" as a
+  lifecycle event; what's genuinely open (starting tier default,
+  whether in-person presence satisfies part of KYC evidence) is a
+  jurisdiction-configuration question, escalated not resolved. The
+  binding RG mechanism: any retail action that is gambling-enabling or
+  value-moving MUST call the identical `internal/rg.EvaluateEligibility`
+  every other entry point already calls — never a retail-specific
+  reimplementation, cached flag, or local restriction check. Flagged a
+  P0: a fail-open POS design during connectivity loss (defaulting to
+  "allow" when no eligibility decision can be obtained) would be a
+  silent RG enforcement weakening — the binding default is fail-closed,
+  with any bounded offline tolerance an explicit, separate human/
+  business decision. Also flagged a genuinely new risk class this
+  platform hasn't had to consider: a staff/player identity collision
+  (a cashier serving a player who resolves to the cashier's own
+  `person_id`).
+- **payments** — a new "Retail cash rail" section in `docs/architecture/
+  07-payments-architecture.md`. Key decision: retail cash is **not** a
+  `PaymentProvider` implementation (the interface models an async,
+  untrusted-external-vendor relationship that doesn't exist for a
+  cashier-mediated handover) — modeled instead as a structurally
+  distinct fulfillment channel. Retail withdrawal reuses the existing
+  `withdrawal_requests` state machine and four-eyes/policy-threshold
+  machinery unchanged through `approved`; a cashier's role is
+  fulfillment only, never approval. Confirmed a POS/cashier terminal is
+  never a source of financial truth, generalizing CLAUDE.md's
+  "Redis/cache is never authoritative" principle to any client device.
+- **risk** — a new "Stage 4H-B0: Retail Risk Integration" section (§19-24)
+  appended to `docs/decisions/0031-risk-and-limits-engine.md`. Key
+  decisions: the identical "consume `internal/risk.Evaluate`, never
+  build a second limit engine" rule restated for retail, unweakened.
+  Two new scope dimensions (`HierarchyNodeType`, `HierarchyNodeID`) fit
+  the existing `Rule`/`specificity()` model as ordinary additive scope
+  fields — no new precedence mechanism. Explicitly rejected
+  subtree/ancestor rule inheritance (would require `matches()` to become
+  set-membership plus a within-dimension nearest-ancestor tiebreak a
+  presence bitmask cannot express). Disclosed two P0s: anonymous/bearer
+  retail play would make every player-scoped Risk/RG/KYC mechanism
+  structurally unsatisfiable (no player row to key anything on — escalated,
+  not resolved), and delegated limit-authoring by hierarchy actors (a
+  Super Agent setting its own sub-agents' limits) would be the limit
+  engine defeating itself unless a new bounded-authoring model is
+  explicitly designed. Disclosed a P1 carried forward as the single most
+  important open item: "daily/periodic funding limit by hierarchy
+  level" — the most natural reading of the business requirement — is
+  **not yet expressible** even after the proposed extensions, because
+  `internal/risk`'s cumulative-amount aggregation is keyed on
+  `player_account_id` and a float advance between two agent nodes has no
+  player at all; only per-transaction caps work today.
+- **data-analytics** — a new "Retail agent-hierarchy reporting" section
+  in `docs/architecture/12-audit-reporting-architecture.md` (245 lines).
+  Key decision: one shared reporting pipeline for online+retail, with
+  three additive dimensions (`hierarchy_node_id`, `hierarchy_node_type`,
+  `channel`) on the existing CDC fact tables — never a parallel retail
+  reporting system. One shared reporting API surface for BO and a future
+  retail/agent console, parameterized by the caller's own authorized
+  scope — never dedicated retail endpoints (explicitly rejected as
+  reproducing the "second computation of the same fact" failure
+  CLAUDE.md's ledger-authority rule already forbids one layer down).
+- **backend** — a new "Stage 4H-B0 — Retail/POS and Agent Hierarchy API
+  Surface" section in `docs/architecture/04-api-architecture.md`.
+  Conceptual endpoint groups for cashier/POS operations (registration-
+  at-retail, deposit/withdrawal confirmation, shift/till open-close,
+  balance/float inquiry) and hierarchy management (same endpoints as the
+  existing Back Office, parameterized by caller scope — matching this
+  platform's existing single-surface-many-roles pattern). Discovered and
+  corrected its own first draft mid-task once payments' landed document
+  revealed a different idempotency mechanism than assumed.
+- **qa** — a new "Stage 4H-B0 — Retail, Hierarchy/RBAC, RG-Bypass and
+  Bonus Test Strategy" section in `docs/testing/testing-strategy.md`
+  (306 lines). A 9-item retail financial testing floor mirroring ADR
+  0032's format; cross-hierarchy-node isolation named as "the single
+  most important new isolation class this stage introduces," weighted
+  equal to tenant isolation; a concrete, named, required adversarial
+  test for RG-bypass-through-retail modeled directly on the Stage
+  4G-FINAL `clock_timestamp()` race (a player self-excludes online while
+  a retail cashier transaction for the same player is in flight); a
+  dedicated concurrency/correctness test class for the hierarchy's
+  recursive-subtree mechanism (node reassignment mid-query, concurrent
+  reassignment races, cycle-prevention under concurrency). Confirmed
+  ADR 0032's existing bonus testing floor applies unchanged to whatever
+  bonus slice ships, and explicitly deferred all Gamification-specific
+  test design.
+- **bonus-engine** — a new "Stage 4H-B0 — MVP Implementation Scope Plan"
+  section in `docs/architecture/10-bonus-engine-architecture.md`. Named
+  the exact first-slice bonus types (deposit, reload, cashback, generic
+  wagering bonus, coupon) and the exact excluded types (free spins/free
+  bets — blocked on casino/sportsbook interfaces; tournament/mission/
+  loyalty-reward — blocked on deferred Gamification). Answered the
+  Stage 4G §32 gate check directly: Risk & Limits is now stable enough
+  (Stage 4G-FINAL 11/11-area review + finance-gate follow-up, PASS/no
+  P0/P1) to qualified-lift the block for this first slice, with two
+  named conditions (first-slice Risk rules restricted to
+  `min_amount`/`max_amount`; one dependency request to `risk` for the
+  `bonus_conversion` `Operation` value). Confirmed the Reward
+  Orchestrator is not needed for this slice — Bonus Engine fulfills
+  directly through `wallet`/`ledger`. Flagged a stale governance entry:
+  `project-status.md`'s "Blocked stages" table still said Bonus Engine
+  was fully blocked, inconsistent with Stage 4H-A's own completion —
+  corrected in this stage's governance update.
+
+### Wave 2 — cross-document consistency review (code-reviewer) and scope-discipline review (product-owner-proxy)
+
+**code-reviewer** reviewed all ten Wave-1 documents plus the draft
+master synthesis document for genuine cross-document contradictions,
+mirroring the exact "seam failure" pattern Stage 4H-A's own Wave-2
+review found (~20 P1 contradictions in that stage's smaller
+parallel-authored set) — at larger scale here, given ~8,000+ lines
+across 10 documents. Found 14 findings (F1-F14: 1 P0, 8 P1, 4 P2, 1
+consolidated P3 list). **All P0/P1/P2 findings fixed in-place**, each
+with an explicit "Wave-2 review correction" callout naming the finding
+and the fix, never a silent edit:
+
+- **F1 (P0)** — ADR 0036 required `app.hierarchy_node_id` set for an
+  entire retail transaction (§2.5) while separately requiring it unset
+  for the ledger posting engine and dual-scope config reads, and set
+  again for the audit insert — an internal contradiction that would have
+  manufactured P1 ledger drift by construction (the exact failure ADR
+  0035 §1.3 warned about) or made every counter operation fail closed
+  permanently. Fixed by adding an explicit three-phase transaction model
+  (authorization phase scoped, posting phase unscoped under the existing
+  tenant/service posting path, audit phase re-scoped or parameterized).
+- **F2 (P1)** — payments' and backend's documents required only the
+  cashier's own principal for a money-touching counter operation,
+  contradicting doc 26/ADR 0036's two-principal (terminal + cashier)
+  requirement, and silently defeating ADR 0035's terminal-identity-based
+  idempotency namespace-squatting mitigation (which depends on a
+  terminal credential existing to resolve identity from). Fixed across
+  both documents.
+- **F3 (P1)** — two incompatible deposit/withdrawal flow shapes (ADR
+  0035/doc 26 assumed a counter-originated flow with no prior player
+  session; payments/backend assumed only a player-pre-request flow,
+  under which a player without an app session could never deposit at a
+  counter at all) and three different idempotency-key encodings across
+  four documents. Resolved: the counter-originated flow is primary, the
+  player-pre-request flow is an optional second entry point converging
+  on the identical posting and key; ADR 0035's `internal/ledger`-native
+  `(tenant_id, idempotency_key)` encoding is authoritative (ledger-
+  finance holds the financial-accounting veto per the ADR 0032
+  precedent), corrected in docs 04/12/26 which had proposed a
+  provider-callback-shaped key that doesn't fit a terminal (no
+  `ProviderCapability`, no signature-verified callback, no counterparty
+  statement).
+- **F4 (P1)** — four independently-proposed, mutually inconsistent
+  `risk.Operation` name sets across ADR 0031/ADR 0035/doc 26/payments,
+  plus a discovery that an outbound agent-settlement money path has no
+  `Operation` gating it under any of the proposed sets. Resolved:
+  `retail_deposit`/`retail_withdrawal`/`retail_funding` is authoritative
+  (risk owns `Operation` naming per its own extension model), corrected
+  in all four documents including renaming ADR 0035's own
+  `agent_float_transfer` to `retail_funding`; risk's two initially-
+  conditional values (`retail_deposit`/`retail_withdrawal`) were also
+  resolved from CONDITIONAL to unconditionally-required, since ADR
+  0035's Invariant R1 had already definitively answered the decision
+  rule risk's own document posed. The ungated settlement-path gap
+  recorded as an open risk, not resolved.
+- **F5 (P1)** — risk's `hierarchy_level` scope dimension and its
+  "an `agent`-level node may fund at most €X" framing contradicted
+  architect's explicit rejection of any level/ladder concept (a node has
+  a type, never a position) — architect holds the structural veto.
+  Renamed to `hierarchy_node_type` throughout ADR 0031, with a new
+  tenant-required CHECK constraint added (a platform-wide rule cannot
+  reference a tenant-authored type code, since two tenants may define
+  the same code meaning different things).
+- **F6 (P1)** — backend's API document contradicted ADR 0036 in three
+  load-bearing ways: claimed hierarchy scope introduces "no second
+  isolation primitive" when ADR 0036 makes closure-table RLS a genuine
+  second, authoritative RLS dimension; proposed a `hierarchy_node_id`
+  JWT claim that ADR 0036 explicitly rejects by name (converts
+  revocation into an advisory one); proposed extending `staff_users`
+  with a column that ADR 0036 explicitly rejects in favor of an
+  effective-dated N:M assignment table (a single column cannot express
+  one cashier assigned to more than one node over time). All three
+  corrected to match ADR 0036, which holds the RBAC/RLS veto.
+- **F7 (P1)** — player-registration provenance was a three-way
+  disagreement: identity-compliance said audit metadata alone made a
+  new table unnecessary; architect/security required a dedicated
+  `retail_player_origins` table; backend independently invented a third,
+  different FK. Resolved as two complementary, non-competing mechanisms
+  — `retail_player_origins` (attribution source of record, what
+  security's subtree-scoped player accessor and commission attribution
+  actually query, since a JSONB audit value cannot be an indexable join
+  target or RLS predicate) and `registration_channel` (identity-
+  compliance's own additive column on `player_accounts`) — corrected in
+  all three documents; backend's third mechanism withdrawn.
+- **F8 (P1)** — ADR 0036's own ancestor-suspension check (suspending a
+  Partner must cascade to its cashiers) was silently defeated by ADR
+  0036's own closure-table RLS policy: the check's query, run during
+  scope resolution, could only see rows the caller's *own* resolved
+  scope already permitted — so it always returned zero rows regardless
+  of real suspension data, making `NOT EXISTS` always true (fail-open,
+  not fail-closed, exactly inverting the control's purpose). Fixed with
+  a `SECURITY DEFINER`-style accessor design that reads the closure
+  table for this one specific, audited check without going through the
+  caller-scoped policy at all.
+- **F9 (P1, safety-critical)** — payments' retail deposit-confirmation
+  handler never called `rg.EvaluateEligibility` anywhere and ran the
+  Risk/hierarchy-limit check first, contradicting the fixed
+  RG-first-then-Risk gate order every sibling document (ADR 0035, ADR
+  0036, ADR 0031, doc 11) states as binding. Fixed to the correct order,
+  with an added clarification for why the withdrawal `complete` handler
+  is the one legitimate exception (it discharges an already-RG/Risk-
+  cleared decision from `approved`, not a new value-crediting event).
+- P2s F10-F13 fixed: data-analytics' reporting document hard-coded a
+  per-level report-scope table ("Agent = itself only, a leaf") and a
+  fixed node-type enum, both contradicting architect's rejection of any
+  level/ladder concept and doc 26's own seed data (an Agent is not a
+  leaf) — replaced with the uniform "every node's scope is itself plus
+  descendants" rule, and its hierarchy-storage open decision closed
+  (architect had since settled on adjacency-list-plus-closure-table).
+  Identity-compliance's cross-tenant self-exclusion framing was built on
+  a premise (a hierarchy might span tenants) that architect's own
+  document had since closed in the opposite direction (a network never
+  spans tenants; a tenant may run several networks) — corrected in both
+  doc 05 and doc 11. The anonymous-play assumption (every retail player
+  is an identified `PlayerAccount`) was stated silently in doc 11's
+  binding RG mechanism and ADR 0036's non-bypass guarantee, when three
+  other documents (ADR 0031, ADR 0035, doc 26) already escalate it as a
+  genuinely open human decision — made explicit in both places. Doc 11's
+  offline-retail exception floated a specific mechanism shape (a
+  pre-fetched "provisionally clear" token) that three other documents
+  independently pre-reject by name — reframed so the human decision is
+  "no offline" vs. "a genuinely new, explicitly-designed exception,"
+  not between two options one of which is already vetoed.
+- F14's consolidated one-line drift items: stale ADR 0031 §12-vs-§16
+  citations, `scope_source: "tenant_root"` vs `"network_root"` naming
+  drift from ADR 0036's own mid-task multi-network correction, closure-
+  table column-name drift (`ancestor_id` vs `ancestor_node_id`), a qa
+  `OPEN DECISION` (withdrawal exceeding float) that ADR 0035 had already
+  resolved, and a stale "retail actors are likely not `StaffRole`s"
+  hedge in ADR 0031 that ADR 0036 had since decided otherwise — all
+  fixed. Three purely cosmetic naming-drift items (a shift/session table
+  named three different ways across three documents; backend's
+  float-inquiry endpoint conflating the ledger-side `agent_float`
+  projection with the physical till, which ADR 0035 explicitly is never
+  a ledger account; a stale note in bonus doc 10) recorded rather than
+  fixed, to avoid further scope expansion in an architecture-freeze
+  stage — no correctness impact, to be reconciled if/when retail
+  implementation is scoped.
+
+**product-owner-proxy** independently re-confirmed the Blueprint-anchor
+finding (read the full 20-page Blueprint text directly rather than
+trusting architect's/ledger-finance's prior claims: zero occurrences of
+retail/land-based/agent/POS/terminal/kiosk/shop/outlet/voucher as either
+a whole word or a concept) and credited every specialist for correctly
+labeling retail as human-directed scope, never a Blueprint requirement.
+Gave a concrete recommended MVP-vs-deferred split for the Orchestrator's
+synthesis document (a fixed 2-3 level hierarchy for the first workflow
+even though the schema stays depth-agnostic; counter deposit only, no
+withdrawal in the first slice; prefunded float only, no credit line; a
+single flat commission rate, no tiering/override cascade; no
+agent-to-agent transfers; single currency; no offline; no anonymous
+play; franchised-till model only) and one scope-creep finding: ADR
+0035 §5's commission-accounting machinery (a periodic-run mechanism with
+its own idempotency scheme, an accrual→payable→capitalization state
+machine, full hierarchical-override-cascade posting) is more fully
+designed than its own unresolved commercial terms (§5.2's rate/base)
+justify — the document defers the one number that would make the design
+real while fully designing the machinery around that unknown number.
+Applied: ADR 0035 §5's status downgraded from "RESOLVED (architecture)"
+to "documented for future reference, not binding" for §5.3/§5.4
+specifically, while keeping §5.1's cheap, boundary-setting pool-
+separation invariants frozen. Also confirmed no compounding dependency
+on the already-deferred Gamification Engine anywhere in the retail
+design (grepped every retail document for gamification/mission/
+tournament/leaderboard/badge/achievement/streak — every hit was either a
+citation of the Stage 4H-A precedent or an explicit "reuse as-is, no
+retail-specific gamification concept proposed" statement).
+
+### Master synthesis document
+
+`docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md`
+(new, authored directly by the Orchestrator per this project's
+established "Orchestrator authors genuinely cross-cutting connective
+documents directly" pattern), covering the directive's all 25 numbered
+deliverables: exact MVP scope (Bonus Engine's 5-type first slice,
+independently authorizable; Gamification and Retail implementation both
+explicitly NOT authorized), exact deferred scope, retail architecture,
+hierarchy/agent-network architecture, financial model, RBAC model,
+reporting permission model, online+retail shared-domain model (an 8:7:1
+reuse/extend/new ratio across 16 assessed domains — architect's own
+stated test of whether "one platform, not two products" is real), bonus
+implementation plan, Gamification implementation plan (fully deferred,
+unchanged), canonical activity/event model, external sportsbook
+boundary, Reward Orchestrator minimum boundary (not built, unchanged
+from Stage 4H-A), database entities/relationships, API surface,
+migration plan (only the Bonus Engine's is authorized to exist in
+detail), package/domain ownership, test strategy, security/RLS strategy,
+reconciliation strategy, audit requirements, dependencies between
+stages, an aggregated P0/P1/P2 risk register (8 P0s, all human/legal/
+cross-specialist decisions), 14 human business decisions still required,
+and a recommended implementation order (Bonus Engine independently
+ready; a "Retail-Legal" human/business workstream must resolve licensing/
+node-float/anonymous-play questions before any retail engineering stage
+can even be scoped).
+
+### Governance updates
+
+`docs/governance/ownership.md` — registered the new Retail/Agent Network
+domain (architecture: architect; implementation owner: an open decision
+between backend and a future dedicated `retail` specialist; financial
+accounting: ledger-finance; RBAC/RLS/audit: security) and corrected the
+Bonus Engine row's stale "explicitly blocked" note to reflect the
+qualified-lifted gate. `docs/governance/task-registry.md` — new Stage
+4H-B0 section, 14 rows (4HB0-01 through 4HB0-14). `docs/governance/
+project-status.md` — new Stage 4H-B0 section; corrected the stale
+"Blocked stages" table entry for Bonus Engine that bonus-engine's own
+Wave-1 review flagged; added a new "Retail (agent-hierarchy network)"
+blocked-stage entry; added three new items to "Human decisions required
+before production launch."
+
+### Files touched this stage
+
+New: `docs/architecture/26-retail-operations-architecture.md`,
+`docs/decisions/0035-retail-agent-network-accounting.md`,
+`docs/decisions/0036-retail-hierarchy-rbac-and-audit.md`,
+`docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md`.
+
+Extended (new sections/subsections appended or corrected in place, prior
+content preserved): `docs/architecture/02-domain-and-service-
+boundaries.md`, `04-api-architecture.md`, `05-identity-architecture.md`,
+`07-payments-architecture.md`, `10-bonus-engine-architecture.md`,
+`11-kyc-aml-rg-architecture.md`, `12-audit-reporting-architecture.md`,
+`docs/decisions/0031-risk-and-limits-engine.md`, `docs/testing/
+testing-strategy.md`.
+
+Governance: `docs/governance/ownership.md`, `task-registry.md`,
+`project-status.md`, `docs/progress.md` (this entry), `docs/active-
+stage.md`.
+
+No code, migration, or test files were created or modified this stage —
+`go build ./...` re-run after all edits and remains clean (docs-only
+diff, verified at every intermediate commit).
+
+### Next stage
+
+Not started. Per this stage's own directive ("This stage must NOT
+automatically proceed to implementation. Wait for explicit approval
+before Stage 4H-B1") and CLAUDE.md's stage-gate rule, no implementation
+stage has been started: not Stage 4H-B1 (Bonus Engine implementation,
+independently ready per bonus-engine's own gate-check), not a
+"Retail-Legal" workstream, not Stage 4H-B2/4H-B3 (retail architecture
+hardening/implementation). Explicit human authorization is required to
+name which stage(s) to begin next.

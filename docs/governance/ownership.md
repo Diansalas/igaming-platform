@@ -20,7 +20,11 @@ before any edit occurs, and records the decision in `task-registry.md`.
 | Risk Management | risk | `internal/risk`, `migrations/*risk*` |
 | Casino | casino | `internal/casino`, `migrations/*casino*`, `internal/httpserver/*casino*` |
 | Sportsbook | sportsbook | `internal/sportsbook` (not yet created) |
-| Bonus Engine | bonus-engine | `internal/bonus` (not yet created — blocked on Risk & Limits stability per Stage 4G §32) |
+| Bonus Engine | bonus-engine | `internal/bonus` (not yet created — Stage 4G §32 block qualified-lifted per Stage 4H-B0's MVP scope plan for a first slice; implementation not yet authorized) |
+| Retail / Agent Network — architecture | architect | `docs/architecture/26-retail-operations-architecture.md`, cross-cutting retail ADRs (Stage 4H-B0) |
+| Retail / Agent Network — implementation (if authorized) | **OPEN DECISION** — `backend` (adequate while architecture-only) vs. a new dedicated `retail` specialist (architect's recommendation once implementation is authorized) | `internal/agentnetwork` (hierarchy primitive — deliberately not `internal/retail`, since a B2B sub-operator tree or affiliate chain is the same graph and a retail-specific name would guarantee a second consumer duplicates it), `internal/retail` (operational surface) |
+| Retail financial accounting | ledger-finance | `docs/decisions/0035-retail-agent-network-accounting.md`, retail account/transaction types |
+| Retail RBAC/RLS/audit | security | `docs/decisions/0036-retail-hierarchy-rbac-and-audit.md`, hierarchy-scope RLS mechanics |
 | API / HTTP (general) | backend | `internal/httpserver/server.go`, routing/shared middleware, and any handler file not claimed by a more specific domain above |
 | API / HTTP (domain handlers) | the domain's own specialist | `internal/httpserver/<domain>_handlers.go`, `<domain>_routes.go` (e.g. `kyc_handlers.go` → identity-compliance, `credential_handlers.go` → identity-compliance) |
 | Database / RLS (schema shape, cross-cutting) | architect + security | `internal/db`, tenant-scoping helpers (`WithTenant`/`WithPlayerScope`/etc.) |

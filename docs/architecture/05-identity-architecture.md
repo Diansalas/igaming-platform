@@ -248,9 +248,21 @@ express it:
   folded into the `Person`/`PlayerAccount` row itself (that would be
   conflating an audit fact with an identity fact), but present in
   `audit.Entry.Metadata` exactly as every other actor-attributed action on
-  this platform already is. This is what makes a later "which cashier
-  registered this account" compliance query possible without inventing a
-  new table.
+  this platform already is. **Wave-2 review correction (F7, P1)**: an
+  earlier draft of this bullet claimed audit metadata is what makes a
+  later "which cashier registered this account" query possible "without
+  inventing a new table" — that is withdrawn. `architect`'s
+  `retail_player_origins` table (`docs/architecture/26-retail-operations-
+  architecture.md` §3.2/§5.1 entity 10, `UNIQUE(player_account_id)`) is
+  the authoritative source of record for node/terminal/cashier
+  attribution — it is what `security`'s subtree-scoped player accessor
+  (ADR 0036 §5.5) and commission attribution actually query, because a
+  JSONB audit-metadata value cannot serve as an indexable join target or
+  an RLS predicate. The audit-metadata record above is a complementary
+  audit trail, not the source of record — this document's own
+  `registration_channel` column and architect's `retail_player_origins`
+  table are the two pieces that together record retail provenance;
+  neither replaces the other.
 - **Does this need a new KYC tier? No — extend the existing tiered-trigger
   model, do not invent one.** Blueprint §4.7's tiered model (`docs/
   architecture/11-kyc-aml-rg-architecture.md`) already keys KYC
@@ -323,15 +335,24 @@ now so it is not silently absent from that design.
 
 ### 3. Cross-tenant hierarchy and Person scope — no change to the identity model itself
 
-If a hierarchy spans more than one tenant (assumption 3 above, left open
-by `docs/architecture/26`), nothing about `Person` being platform-wide
+**Wave-2 review correction (F11, P2)**: an earlier draft framed this as
+open ("if a hierarchy spans more than one tenant, left open by doc 26").
+`docs/architecture/26-retail-operations-architecture.md` H5/§5.1 has
+since resolved this definitively: a node's parent must be in the same
+`tenant_id` and the same `network_id`, enforced by a composite foreign
+key — a cross-tenant parent edge is a constraint violation. **A hierarchy
+network never spans tenants.** What doc 26 §5.1 entity 4 does allow is
+*several networks within one tenant* (e.g. one per licence/jurisdiction/
+brand) — a materially different topology from what this section
+originally assumed. Nothing about `Person` being platform-wide
 (unchanged since Stage 2) or `PlayerAccount` being tenant-owned changes —
 a cashier resolving or serving a player still goes through the exact same
 `identity.RegisterPlayer*`/`internal/rg.EvaluateEligibility` surface,
 scoped by the SAME `(tenant_id, brand_id, player_account_id)` triple every
-other caller already resolves server-side. What DOES change, if a
-hierarchy is confirmed to span tenants, is a question squarely about
-Responsible Gaming restriction SCOPE (self-exclusion reach across that
-hierarchy), not about the identity model — see the companion KYC/AML/RG
+other caller already resolves server-side. The genuinely open question,
+corrected per doc 26's resolution above, is squarely about Responsible
+Gaming restriction SCOPE — whether a staff-initiated restriction must
+reach every **network and brand within one tenant/licence**, not "across
+tenants" — not about the identity model — see the companion KYC/AML/RG
 document's §4 for the full treatment; this document does not duplicate it
 here to avoid two sources of truth for the same open question.

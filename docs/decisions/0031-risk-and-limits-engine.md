@@ -1016,11 +1016,18 @@ architect's parallel document before any of this is built**:
 
 1. A hierarchy **node** is a persistent, server-side-identifiable entity
    with a stable identifier, owned by exactly one `tenant_id`.
-2. A node has exactly one **level** drawn from a small, tenant/
-   licence/jurisdiction-configurable set (e.g. `partner`, `super_agent`,
-   `agent`, `cashier`) — i.e. level is a configuration value, not a Go
-   type or a code path (CLAUDE.md's "nothing brand-specific may become a
-   code path", applied to hierarchy shape).
+2. A node has exactly one **type** (`hierarchy_node_type`, a tenant-owned
+   configuration row, not a platform-wide ladder position — e.g.
+   `partner`, `super_agent`, `agent`, `cashier` are *seed data*, not an
+   enum) drawn from a small, tenant/licence/jurisdiction-configurable set
+   — i.e. type is a configuration value, not a Go type or a code path
+   (CLAUDE.md's "nothing brand-specific may become a code path", applied
+   to hierarchy shape). **Wave-2 review correction (F5, P1)**: an earlier
+   draft of this ADR called this dimension "level" throughout, which
+   contradicted `docs/architecture/26-retail-operations-architecture.md`
+   §1.2's explicit rejection of any level/ladder concept — a node has a
+   `node_type_id`, never a level. Renamed to `hierarchy_node_type`
+   everywhere in this section to match doc 26's actual entity.
 3. A retail-originated operation has exactly ONE acting node resolvable
    server-side from the authenticated retail session — never a set, and
    never client-supplied.
@@ -1099,9 +1106,18 @@ the fail-closed contract changes.
 **(a) Shape.** Two fields on both `Rule` and `RiskRequest`, mirroring the
 two shapes the struct already uses:
 
-- `HierarchyLevel string` — mirrors `Product`/`LicensingMode` exactly: a
+- `HierarchyNodeType string` — mirrors `Product`/`LicensingMode` exactly: a
   configuration-valued string, empty meaning "applies regardless of
-  level."
+  type." **Wave-2 review correction (F5, P1)**: unlike `Product`/
+  `LicensingMode` (fixed platform vocabularies), a node type code is
+  tenant-authored (doc 26 §1.4 explicitly allows two tenants to define
+  the same code, e.g. `'agent'`, meaning genuinely different things). A
+  platform-wide (`tenant_id IS NULL`) rule referencing a tenant-authored
+  type code would silently bind every tenant's differently-meaning type.
+  This field therefore carries the same `CHECK (hierarchy_node_type IS
+  NULL OR tenant_id IS NOT NULL)` the `hierarchy_node_id` field below
+  already has — a platform-wide rule may not scope by node type at all,
+  only a tenant-scoped rule may.
 - `HierarchyNodeID *uuid.UUID` on `Rule` / `uuid.UUID` on `RiskRequest` —
   mirrors `PlayerAccountID`/`BrandID` exactly, including the
   `NULL`-means-wildcard convention and (on the rule side) the
@@ -1123,7 +1139,7 @@ existing ones. Recommended order, most to least specific:
 
 ```
 player > hierarchy_node > game > provider > asset > payment_method >
-product > hierarchy_level > brand > tenant > jurisdiction >
+product > hierarchy_node_type > brand > tenant > jurisdiction >
 licensing_mode
 ```
 
@@ -1132,7 +1148,7 @@ Rationale, consistent with the ordering rationale already in
 and so ranks with the entity-identifying dimensions, but immediately
 BELOW `player_account_id`, because a node contains many players and a
 single player is the narrowest possible subject — a player-specific
-override must keep beating a node-specific one. `hierarchy_level` is a
+override must keep beating a node-specific one. `hierarchy_node_type` is a
 categorical class, like `product` and `licensing_mode`, so it ranks with
 those: below every entity-identifying and value-carrying dimension, and
 above the operating-entity chain (`brand`/`tenant`/`jurisdiction`/
@@ -1148,11 +1164,11 @@ extension rather than a redesign:
    value depends on the numeric bit positions. Only the relative order is
    load-bearing.
 2. **One bit per dimension, never shared.** A rule scoped
-   `hierarchy_level = 'agent'` and a rule scoped `hierarchy_node = N` are
+   `hierarchy_node_type = 'agent'` and a rule scoped `hierarchy_node = N` are
    therefore NOT a tie — the node-scoped rule strictly wins, which is the
    intended "custom limit for this one agent beats the level default."
 3. **Conflict detection extends automatically.** Two CONFIGURABLE rules
-   both scoped by the same `hierarchy_level` and nothing else, for the
+   both scoped by the same `hierarchy_node_type` and nothing else, for the
    same `(limit_kind, time_window)`, are a genuine tie and return
    `ErrConflictingRules` — fail-closed, per §5. Operationally this means
    a retail operator must author exactly one per-level default per
@@ -1193,7 +1209,7 @@ composite foreign key `(hierarchy_node_id, tenant_id)` into the retail
 domain's own node table, mirroring the existing
 `FOREIGN KEY (player_account_id, tenant_id) REFERENCES player_accounts
 (id, tenant_id)`. That table does not exist and is not Risk's to create.
-`hierarchy_level`'s permitted values likewise belong to the retail
+`hierarchy_node_type`'s permitted values likewise belong to the retail
 domain's configuration, not to a `CHECK` constraint invented here (the
 level set is per tenant/licence/jurisdiction per the requirement, so a
 hard-coded `CHECK` would be wrong — an unconstrained `TEXT` scope field,
@@ -1223,11 +1239,49 @@ That is the intended fail-closed posture, not an oversight.
 | Proposed value | Gates | Status | Why not an existing value |
 |---|---|---|---|
 | `retail_funding` | A float advance/replenishment between two hierarchy nodes (e.g. Super Agent → Agent), and its reversal/settlement counterpart | `NOT IMPLEMENTED` — DOCUMENTED ONLY, no constant, no migration, no HTTP validation, no OpenAPI entry | No existing operation describes a value movement between two non-player entities. Reusing `deposit` would retroactively rebind every `deposit` rule an operator has authored to agent float movements — the exact failure §15e rejects for `casino_bet`/`tournament_entry` |
-| `retail_withdrawal` | A player taking cash out at a retail location | `NOT IMPLEMENTED` — DOCUMENTED ONLY, and **CONDITIONAL**, see the decision rule below | Conditional: distinct only if the cash-out is a genuinely different money movement from a rails withdrawal |
-| `retail_deposit` | A player putting cash in at a retail counter | `NOT IMPLEMENTED` — DOCUMENTED ONLY, and **CONDITIONAL on the identical criterion**, decided in the same change as `retail_withdrawal`, never differently for in and out | Same conditional |
+| `retail_withdrawal` | A player taking cash out at a retail location | `NOT IMPLEMENTED` — DOCUMENTED ONLY. **RESOLVED YES** (Wave-2 review, F4) — see below | Distinct: the cash-out debits an agent's float, never the platform's payment rails (ADR 0035 §1.1's decision plus Invariant R1) — a genuinely different money movement from a rails withdrawal |
+| `retail_deposit` | A player putting cash in at a retail counter | `NOT IMPLEMENTED` — DOCUMENTED ONLY. **RESOLVED YES on the identical criterion**, decided in the same change as `retail_withdrawal`, never differently for in and out | Same reasoning |
 
-**Decision rule for the two conditional values** (recorded so whoever
-closes it does not re-derive it, exactly as §15f does for
+**Wave-2 review correction (F4, P1)**: an earlier draft of this table
+left `retail_withdrawal`/`retail_deposit` as `CONDITIONAL`, pending the
+decision rule below. `docs/decisions/0035-retail-agent-network-
+accounting.md` §1.1 and Invariant R1 have since answered the rule's own
+question definitively: a retail deposit/withdrawal is `Dr agent_float /
+Cr player_cash` (or the inverse) and **never** touches
+`psp_clearing`/`psp_reserve`/a bank rail. Both values are therefore
+**unconditionally required**, not merely documented as conditional — an
+earlier draft of ADR 0035 and this ADR both independently reached the
+"yes" answer without either recording it as closed. The decision rule
+below is retained as the reasoning trail, not as a still-open question.
+
+**Naming, corrected to a single authoritative set (Wave-2 review, F4)**:
+`risk` owns `Operation` naming (§16). An earlier draft of
+`docs/architecture/26-retail-operations-architecture.md` §4.3 (endorsed
+verbatim by `docs/decisions/0036-retail-hierarchy-rbac-and-audit.md`
+§8.6) independently proposed `retail_counter_deposit`/
+`retail_counter_payout`/`retail_float_advance`/`retail_settlement`, and
+`docs/architecture/07-payments-architecture.md` §4 floated a third,
+unrelated pair. The authoritative set, binding on all three documents, is
+exactly the three rows above: **`retail_deposit`, `retail_withdrawal`,
+`retail_funding`** — `retail_funding` covers both a float advance and its
+settlement/reversal counterpart (no separate `retail_settlement` value;
+ledger-finance's own `agent_float_transfer` naming in ADR 0035 §4 is
+renamed to `retail_funding` to match). Doc 26 §4.3, ADR 0036 §8.6, and
+payments §4 are corrected to this set in their own documents.
+
+**Gap surfaced, not yet closed (Wave-2 review, F4)**: ADR 0035's
+`agent_settlement` and `agent_commission_payout` transaction types — an
+outbound real-money payment to an agent node, which ADR 0035 §11.3 itself
+notes has no approval state machine designed — currently have **no**
+corresponding `Operation` under any of the three values above, so
+`risk.Evaluate` never sees that money movement at all. This is a real
+gap, not a naming question: `risk` + `ledger-finance` must jointly decide
+whether it needs a fourth `Operation` or is gated entirely by the
+approval workflow ADR 0035 flags as undesigned — not resolved in this
+stage.
+
+**Decision rule that produced the "yes" answer above** (recorded so a
+future reader does not re-derive it, exactly as §15f does for
 `reward_redemption`): *does the retail cash-out/cash-in debit or credit
 an AGENT'S FLOAT rather than the platform's payment rails?* If yes, it is
 a different money movement with a different counterparty, a different
@@ -1249,12 +1303,12 @@ This is the mirror image of §15e's reasoning and the asymmetry is
 deliberate: reuse of an existing `Operation` is WRONG when the amount or
 the money movement differs in kind (a bonus conversion is not a bonus
 grant), and RIGHT when it is the same money leaving the same wallet
-through a different channel. This ADR's own reading is that the first
-branch is more likely (retail cash almost always moves against an agent
-float rather than a PSP), but the decisive fact is the ledger treatment,
-which is `ledger-finance`'s to state with the `architect`'s hierarchy
-model in hand — not Risk's to guess. Recorded as an `OPEN DECISION`
-(§24).
+through a different channel. **Resolved (Wave-2 review, F4)**: this ADR's
+own first-branch reading was correct — `ledger-finance`'s ADR 0035 §1.1/
+Invariant R1 has since stated the ledger treatment definitively (retail
+cash always moves against `agent_float`, never a PSP rail), closing this
+as a decided question, not an open one. `retail_deposit`/
+`retail_withdrawal` are both required, per the table above.
 
 **Consequences that hold whichever branch is chosen:**
 
@@ -1426,9 +1480,13 @@ held only by `RoleRiskManager`, which is always tenant-scoped (migration
 Tenant Admin and Platform Admin per `docs/governance/ownership.md`.
 **No retail hierarchy actor — Partner, Super Agent, Agent or Cashier —
 has, or may be given as part of the retail domain's own work, any
-risk-configuration write access.** Retail actors are in all likelihood
-not `StaffRole`s at all but a distinct actor population (the architect's
-call, not this ADR's); either way, a commercial hierarchy participant
+risk-configuration write access.** **Resolved (Wave-2 review correction,
+F14, P3)**: an earlier draft of this bullet hedged that retail actors
+were "in all likelihood not `StaffRole`s at all." `docs/decisions/0036-
+retail-hierarchy-rbac-and-audit.md` §4.1 has since decided this: a
+cashier (and every other retail hierarchy actor) is a `staff_users` row
+with a retail role, assigned to a node — not a distinct actor population.
+Either way, a commercial hierarchy participant
 authoring the limits that constrain it is the limit engine defeating
 itself. If the product genuinely requires "a Super Agent sets its
 sub-agents' limits", that is a **delegated-authoring model** — a new
@@ -1456,11 +1514,6 @@ placeholders above.
 
 **Open decisions introduced by Stage 4H-B0:**
 
-- **Does a retail cash-in/cash-out need its own `Operation`, or is it
-  `deposit`/`withdrawal` narrowed by `payment_method`?** Decision rule in
-  §21; turns on the ledger treatment, owned by `ledger-finance` with the
-  architect's hierarchy model. Must be decided identically for cash-in
-  and cash-out, in one change.
 - **Do rules inherit down the hierarchy (subtree/ancestor matching)?**
   §20(c). Not adopted; adopting it later is a change to `matches()` AND a
   new within-dimension ordering in `specificity()`, i.e. the first
@@ -1502,7 +1555,7 @@ validation, and **remains so after this stage**:
   `newCreateRiskRuleHandler`'s allowlist. A rule intended to govern an
   agent float advance **cannot be stored today**, which is correct: it
   would be a rule nothing evaluates.
-- `hierarchy_level` / `hierarchy_node_id` as scope dimensions — the
+- `hierarchy_node_type` / `hierarchy_node_id` as scope dimensions — the
   columns do not exist, the `Rule`/`RiskRequest` fields do not exist,
   `specificity()` has no bits for them, and the HTTP handler accepts no
   such input. **Requirement #6 is therefore `NOT IMPLEMENTED` in every

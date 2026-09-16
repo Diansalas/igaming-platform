@@ -1,5 +1,78 @@
 # Active Stage
 
+## Stage 4H-B0 — Bonus, Gamification & Retail Scope/Implementation Plan — Complete
+
+Status: **Complete, pending explicit human approval before Stage 4H-B1
+(or any retail implementation stage).**
+
+Architecture/scope-freeze stage responding to a new confirmed business
+requirement: retail iGaming operations (a configurable agent-hierarchy
+network — Operator → Partner → Super Agent → Agent → Player/Cashier,
+never hardcoded) as another surface of the same platform. **No
+production code, no migrations, and no implementation were started.**
+Full detail: `docs/architecture/27-stage-4h-b0-scope-and-implementation-
+plan.md` (the master synthesis, covering the directive's 25 numbered
+deliverables) and `docs/governance/project-status.md`'s Stage 4H-B0
+section. Governance record: `docs/governance/task-registry.md`'s
+Stage 4H-B0 rows (4HB0-01 through 4HB0-14).
+
+**Ten Wave-1 specialist documents**, each specialist owning a distinct
+file: architect (`26-retail-operations-architecture.md`, the core
+hierarchy/retail architecture — adjacency list + closure-table
+projection, no hardcoded level ladder), ledger-finance (ADR 0035, agent
+float as a platform liability, three new account types, Invariants
+R1-R3), security (ADR 0036, three-axis authorization, closure-table RLS
+fail-closed by construction, RG/KYC non-bypass made structural),
+identity-compliance (docs 05/11 addenda), payments (doc 07's "Retail
+cash rail" section), risk (ADR 0031 §19-24), data-analytics (doc 12
+addition), backend (doc 04 addition), qa (testing-strategy.md addition),
+bonus-engine (doc 10's MVP implementation-scope plan — 5-type first
+slice, Stage 4G §32 gate qualified-lifted).
+
+**Wave-2 review found and fixed 1 P0 + 8 P1 genuine cross-document
+contradictions** (code-reviewer, mirroring Stage 4H-A's own Wave-2
+pattern at larger scale — 14 findings F1-F14 across 10 documents,
+~8,000+ lines). Most severe: a transaction-phasing contradiction in ADR
+0036 that would have silently broken every retail ledger posting or made
+every counter operation fail closed permanently (F1); a fail-open
+ancestor-suspension check defeated by the very RLS policy meant to
+protect it (F8); a payments handler that never called RG at all and
+inverted the fixed RG-then-Risk gate order (F9, safety-critical). All
+fixed in-place with explicit "Wave-2 review correction" callouts. Full
+list: doc 27 §22a.
+
+**Wave-2 scope review (product-owner-proxy)** independently confirmed
+retail has zero Blueprint content (like Gamification in Stage 4H-A —
+human-directed business scope, correctly never presented as a Blueprint
+requirement by any specialist), gave a concrete recommended MVP-vs-
+deferred split, and found one scope-creep item (ADR 0035's commission
+machinery downgraded from binding to documented-for-future-reference
+pending unresolved commercial terms).
+
+**8 P0 human/legal/cross-specialist decisions block any retail
+implementation stage from even being scoped** (doc 27 §23/§24): retail's
+licensing status (the platform's only current licence is online-only),
+whether a hierarchy node's float amends ADR 0007's human-approved
+`Wallet` model, whether anonymous/bearer retail play is required
+(structurally breaks RG/KYC/Risk if so), delegated limit-authoring
+self-defeat risk, and others — all explicitly escalated, none guessed
+at or resolved unilaterally.
+
+**Bonus Engine's Stage 4G §32 block is qualified-lifted** for a
+first-slice implementation (deposit/reload/cashback/generic-wagering/
+coupon bonus types only) — bonus-engine made this gate-check call
+directly, citing Stage 4G-FINAL's clean financial sign-off. This is a
+scope plan, not an authorization to implement; Stage 4H-B1 still requires
+explicit human approval like every other stage.
+
+This stage's directive had no contradictory trailing line (unlike Stage
+4H-A's) — it stated plainly "This stage must NOT automatically proceed
+to implementation. Wait for explicit approval before Stage 4H-B1," and
+this stage complies with that exactly: no implementation stage
+(4H-B1/"Retail-Legal"/4H-B2/4H-B3) has been started.
+
+---
+
 ## Stage 4H-A — Bonus, Gamification & Reward Orchestration Architecture Freeze — Complete
 
 Status: **Complete, pending explicit human approval to authorize the next

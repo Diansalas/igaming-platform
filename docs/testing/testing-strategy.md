@@ -153,19 +153,14 @@ happy-path bonus grant test does not satisfy ADR 0032's floor.
    settlement as its own auditable posting, and a test that commission
    figures are recomputable from stored inputs (mirrors ADR 0032 §9's
    reconciliation-by-recomputation requirement).
-6. **Retail withdrawal exceeding an agent's available float.** `OPEN
-   DECISION` — whether this is rejected outright or draws from an upstream
-   node in the hierarchy is a retail-accounting design question for
-   `architect`/`ledger-finance` to resolve (ADR 0035), not one this
-   document invents an answer to. Both branches are testable once decided:
-   if rejected, the test asserts a clean deny with no partial posting; if
-   it draws upstream, the test asserts the draw is itself an atomic,
-   auditable, idempotent ledger operation across both nodes' floats (i.e.
-   it inherits this entire testing floor, not a lighter one, because it is
-   still a financial write). This test class cannot be written until the
-   decision is made, and its absence blocks retail withdrawal from being
-   marked `IMPLEMENTED` — not a gap qa will wave through as "pending
-   design."
+6. **Retail withdrawal exceeding an agent's available float.** **Resolved
+   (Wave-2 review correction, F14, P3)**: an earlier draft of this item
+   left the reject-vs-draw-upstream question open. `docs/decisions/0035-
+   retail-agent-network-accounting.md` §1.4 has since decided it: the
+   debit is **rejected**, not clamped, and there is no implicit upstream
+   draw. This test is therefore **required**, not blocked: assert a clean
+   deny with no partial posting when a withdrawal would exceed the
+   node's own available float.
 7. **Reconciliation drift detection.** The new retail reconciliation
    stream ledger-finance is designing (analogous to ADR 0032's Invariant
    B1 stream) needs its own hourly, zero-tolerance drift test:
