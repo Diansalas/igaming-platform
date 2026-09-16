@@ -303,7 +303,8 @@ expense-recognition account. Left open pending the actual jackpot-provider
 contract; Stage 3B does not require resolving it since no jackpot
 integration ships in this stage.
 
-`OPEN DECISION` (`promo_liability` framing and the missing bonus-cost
+`OPEN DECISION` — **now RESOLVED, see the resolution note immediately
+below this block** (`promo_liability` framing and the missing bonus-cost
 account): double-entry forces a choice here, and the Blueprint's
 ten-account list does not obviously contain the counter-account a bonus
 grant needs. `player_bonus` is unambiguously credit-normal (value owed to
@@ -328,6 +329,23 @@ a bonus grant is one debit and one credit of equal amount in one asset
 (Flow 12 must never post two same-direction entries), and no bonus value
 is ever created without a balancing counter-entry.
 
+**RESOLVED (Stage 4H-A) — `docs/decisions/0032-bonus-accounting.md`.** The
+framing above is settled: **framing 1 is confirmed** — `promo_liability` is
+the debit-side mirror of `player_bonus`, and the genuinely missing piece,
+a **new `bonus_expense` account type** (house-level, per `(tenant_id,
+asset_code)`, `wallet_id IS NULL`, debit-normal), is added to carry
+*recognized* promotional cost at the moment bonus value leaves
+`player_bonus` for any reason other than forfeiture. The resulting
+zero-tolerance invariant is **B1**: `signed(promo_liability) + Σ
+signed(player_bonus) == 0` per `(tenant_id, asset_code)` at every instant
+(see §6). ADR 0032 holds the full reasoning, the per-event entry tables
+(grant / conversion / forfeiture / reversal), the operator- vs.
+provider-funded vs. externally-fulfilled cost treatments, and the
+recognition position; it is not duplicated here. Status: **architecture
+only, `NOT IMPLEMENTED`** — no migration adds `bonus_expense` or any
+`bonus_*` `transaction_type` yet, so bonus postings remain `BLOCKED` by the
+existing `CHECK` constraint until their own stage.
+
 `OPEN DECISION` (cross-asset conversion counter-account): `ADR 0021`'s
 `ConversionOperation` cannot balance per asset using only player wallet
 accounts (see that ADR's corrected text) — it requires a house-level
@@ -339,7 +357,9 @@ Beyond the Blueprint's ten plus `player_withdrawal_hold`, every flow in
 `financial-transaction-flows.md` resolves onto this list **with three
 exceptions, all recorded as `OPEN DECISION`s above or in the flows
 document rather than silently patched**: the bonus-grant counter-account
-(`promo_liability` framing, above), the FX/conversion clearing account
+(`promo_liability` framing, above — **now resolved by ADR 0032, which also
+adds `bonus_expense` as a twelfth account type; `NOT IMPLEMENTED`**), the
+FX/conversion clearing account
 required by ADR 0021, and the provider-fee expense account (Flow 17). Each
 is a finance/reporting decision, not an engineering one. If Stage 3B
 implementation surfaces a further gap, it is likewise a new architectural
@@ -470,6 +490,42 @@ These are the floor Stage 3B must meet; each transaction flow in
 `financial-transaction-flows.md` states which of these apply to it
 specifically.
 
+### 6.1 Invariant B1 (bonus mirror) — added Stage 4H-A, `NOT IMPLEMENTED`
+
+`docs/decisions/0032-bonus-accounting.md` §2 adds one further invariant,
+listed here so the mandatory list above stays the single place to look:
+
+| # | Invariant | Enforcement mechanism |
+|---|---|---|
+| B1 | `signed(promo_liability) + Σ signed(player_bonus) == 0` for every `(tenant_id, asset_code)`, at every instant, **no tolerance band** | Rule B2 in ADR 0032: every `LedgerEntry` against a `player_bonus` account carries an equal, opposite `promo_liability` entry in the **same `LedgerTransaction`**, generated/validated in `internal/ledger` rather than assembled by callers. Verified continuously by a new hourly, zero-tolerance reconciliation stream, P1 on any drift (`reconciliation-model.md`) |
+
+B1 is `NOT IMPLEMENTED`: it becomes enforceable only once the
+`bonus_expense` account type and the `bonus_*` transaction types exist.
+Its full derivation, the worked grant/bet/win/convert check, and the
+provider-funded and externally-fulfilled variants are in ADR 0032 and are
+not restated here.
+
+### 6.2 Open item — `player_locked` loses stake origin (blocking precondition, future stage)
+
+`OPEN DECISION`, recorded here because it constrains a **future** stage and
+must not be discovered during implementation. §2's `player_locked` is a
+**single** account type, so a sportsbook stake posted per
+`financial-transaction-flows.md` Flow 8 loses whether the locked funds came
+from `player_cash` or `player_bonus`. Two consequences: settlement cannot
+know whether to return the stake to cash or to bonus, and invariant B1
+(§6.1) breaks the moment a bonus-funded stake is locked, because the value
+has left `player_bonus` while the player may still get it back, leaving
+`promo_liability` with nothing correct to mirror.
+
+`RECOMMENDATION` (ADR 0032 §10): split into `player_locked_cash` and
+`player_locked_bonus` (or carry an equally binding, indexable origin
+dimension) and extend B1's account set to include the bonus-origin locked
+account. This does **not** affect casino (no locked state) and is **not**
+resolved in Stage 4H-A. It **is** a blocking precondition for implementing
+bonus-funded sportsbook stakes, it changes a Blueprint-listed account type,
+and it therefore requires `architect` + `sportsbook` + `ledger-finance`
+sign-off in the stage that needs it.
+
 ## 7. Cross-references
 
 - Object scoping, `Wallet` shape: `financial-domain-model.md`.
@@ -481,6 +537,10 @@ specifically.
   `docs/decisions/0019-authoritative-ledger-and-balance-projection-architecture.md`.
 - Multi-asset accounting ADR:
   `docs/decisions/0021-multi-asset-accounting.md`.
+- Bonus/reward/promotional accounting (`promo_liability` resolution,
+  `bonus_expense`, invariant B1): `docs/decisions/0032-bonus-accounting.md`.
+- Loyalty/VIP points (a **separate** ledger, not covered by this model):
+  `docs/architecture/24-points-accounting-architecture.md`.
 - RLS design for every table introduced here: kept in one canonical place,
   `docs/decisions/0019-authoritative-ledger-and-balance-projection-architecture.md`'s
   "Security/RLS" section, rather than duplicated per document.

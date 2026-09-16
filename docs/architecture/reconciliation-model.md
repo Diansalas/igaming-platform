@@ -168,6 +168,66 @@ flowchart LR
   reconciliation job's window accounts for the per-asset confirmation
   delay rather than flagging every recent deposit as a false mismatch.
 
+### 2.9 Bonus mirror (invariant B1) — added Stage 4H-A, `NOT IMPLEMENTED`
+
+`docs/decisions/0032-bonus-accounting.md` §2 adds a reconciliation stream
+of the same class as §2.1 (internal, zero-tolerance, hourly, P1 on drift) —
+not a counterparty-statement diff, so it is buildable without any vendor
+relationship, unlike §2.2–§2.8.
+
+- **Reconciliation key**: `(tenant_id, asset_code)`.
+- **Expected state**: `signed(promo_liability) + Σ signed(player_bonus)
+  == 0` — invariant B1 (`ledger-accounting-model.md` §6.1).
+- **Cadence**: hourly, the same sweep cadence as §2.1.
+- **Tolerance**: **zero**, no tolerance band.
+- **Severity**: **P1** on any non-zero drift, identical handling to §2.1
+  (page `ledger-finance`/on-call immediately, one
+  `ReconciliationMismatch` row per key, never a log line).
+- **Cost**: two aggregate reads per `(tenant, asset)`; it catches the whole
+  family of bonus-posting bugs that would otherwise surface months later as
+  an unexplained `promo_liability` balance.
+- **Correction mechanism**: a compensating `LedgerTransaction` only (§5);
+  B1 drift means a bonus posting path omitted or mis-signed a mirror leg,
+  and is never resolved by adjusting `promo_liability` to match.
+
+`NOT IMPLEMENTED`: this stream becomes runnable only once the
+`bonus_expense` account type and the `bonus_*` transaction types exist.
+ADR 0032 holds the invariant's derivation and Rule B2 (how the mirror legs
+are produced); it is not restated here.
+
+### 2.10 Externally-fulfilled bonuses — memo/audit stream, `NOT IMPLEMENTED`
+
+Per ADR 0032 §6(c), a bonus granted, tracked and settled entirely inside a
+provider's own system **posts zero ledger entries** — the platform never
+mirrors a balance held in a provider's system. That does not make it
+unreconcilable: the *fact* of the external grant is still recorded as a
+domain event plus an `audit.Record`, and must be diffable against the
+provider's own reporting.
+
+- **Reconciliation key**: the external reward reference declared by the
+  provider contract (`docs/architecture/23-external-reward-provider-
+  contract.md`), correlated to our domain event / `audit.Record`.
+- **Expected state**: **counts and references match, not balances.** This
+  is a memo stream by construction — there is no ledger balance on our side
+  to compare, and asserting one would recreate the second-truth-system
+  failure §6(c) exists to prevent.
+- **Mismatch states**: (a) the provider reports an external grant we have
+  no event/audit record for (visibility gap — RG/limit and player-support
+  answerability are affected even though no money moved on our side); (b)
+  we recorded a grant the provider's statement does not show.
+- **Tolerance**: zero count/reference mismatch; **no monetary tolerance
+  applies because no monetary comparison is made.**
+- **Boundary**: if external value genuinely lands in a platform wallet,
+  that is an ordinary provider settlement into `player_cash` keyed on
+  `(tenant_id, provider_id, provider_tx_id)` (Flow 9 shape) and reconciles
+  under §2.3/§2.4, **not** here. If the provider bills us for its cost,
+  that is `provider_payable` and reconciles under §2.5.
+
+The stream shape is defined by the External Reward Provider contract
+(`docs/architecture/23-external-reward-provider-contract.md`) and ADR 0032
+§6(c); this section records that it is required and its tolerance, and does
+not redesign the job.
+
 ## 3. Balance projections — materialization and rebuild
 
 - **Current balance** = `SELECT SUM(...)` over all `player_cash` entries
@@ -270,3 +330,8 @@ tables, and not a new primitive.
 - PSP-side data source: `payment-orchestration.md` §9.
 - Crypto-side data source: `crypto-custody-boundary.md` §7.
 - Withdrawal-hold-specific check: `withdrawal-state-machine.md` §3.
+- Bonus mirror invariant B1 and the externally-fulfilled treatment
+  (§2.9/§2.10): `docs/decisions/0032-bonus-accounting.md`,
+  `ledger-accounting-model.md` §6.1.
+- External reward reference/reporting contract (§2.10's data source):
+  `docs/architecture/23-external-reward-provider-contract.md`.

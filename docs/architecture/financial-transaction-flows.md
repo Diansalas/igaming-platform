@@ -222,6 +222,19 @@ found no single statement of that boundary anywhere in the Stage 3A set.
 - **Failure behavior**: insufficient funds → rejected pre-posting, same
   pattern as Flow 5.
 - **Audit event**: `sportsbook_bet.locked`.
+- **`OPEN DECISION` / blocking precondition for a future stage —
+  `player_locked` loses stake origin.** `player_locked` is a *single*
+  account type, so this flow does not record whether the locked funds came
+  from `player_cash` or `player_bonus`. Settlement (Flows 9/10/11)
+  therefore cannot know which account to return the stake to, and ADR
+  0032's invariant B1 breaks the moment a bonus-funded stake is locked.
+  Recommended resolution (ADR 0032 §10): split into `player_locked_cash` /
+  `player_locked_bonus`, or carry an equally binding indexable origin
+  dimension, and extend B1's account set accordingly. **Not resolved in
+  Stage 4H-A**; it changes a Blueprint-listed account type and needs
+  `architect` + `sportsbook` + `ledger-finance` sign-off in the stage that
+  implements bonus-funded sportsbook stakes. Full statement:
+  `ledger-accounting-model.md` §6.2.
 - **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #12, #15.
 
 ## 9. Sportsbook settlement — `BLUEPRINT`
@@ -322,9 +335,17 @@ found no single statement of that boundary anywhere in the Stage 3A set.
   the magnitude of `promo_liability` mirrors the outstanding `player_bonus`
   total with the opposite sign. Whether that counter-side should instead be
   a distinct `bonus_expense` account, leaving `promo_liability`
-  credit-normal, is the `OPEN DECISION` recorded in
-  `ledger-accounting-model.md` §2 — it must be resolved before Flow 12 is
-  implemented, because it changes the expected sign in every bonus test.
+  credit-normal, was the `OPEN DECISION` recorded in
+  `ledger-accounting-model.md` §2.
+- **`RESOLVED` (architecture, Stage 4H-A) — `NOT IMPLEMENTED`**, by
+  `docs/decisions/0032-bonus-accounting.md` §2/§3: the directions above are
+  confirmed unchanged (Dr `promo_liability` / Cr `player_bonus`, two
+  entries). `promo_liability` is the debit-side mirror of `player_bonus`
+  (invariant B1), and **no `bonus_expense` is recognized at grant** — a
+  granted bonus is a contingent liability, not a recognized cost. ADR 0032
+  also adds the provider-funded variant (§6(b)) and the
+  externally-fulfilled case (§6(c), **zero ledger entries**). Full
+  reasoning and entry tables live in the ADR, not here.
 - **Audit event**: `bonus.granted`.
 - **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8.
 
@@ -348,7 +369,7 @@ found no single statement of that boundary anywhere in the Stage 3A set.
 - **Accounts (always posted)**: debit `player_bonus`, credit `player_cash`
   — this leg is unconditional and independently testable: converting
   amount `X` always moves `X` from `player_bonus` to `player_cash`.
-- **Accounts (`OPEN DECISION`)**: whether the same transaction *also*
+- **Accounts (formerly `OPEN DECISION`, now `RESOLVED`)**: whether the same transaction *also*
   moves `promo_liability` is not fixed here, and depends on the
   `promo_liability` framing left open in `ledger-accounting-model.md` §2.
   Note the direction constraint: Flow 12 **debits** `promo_liability` on
@@ -358,9 +379,19 @@ found no single statement of that boundary anywhere in the Stage 3A set.
   land (a realized-bonus-cost/P&L account does not exist yet; same gap as
   §2's `promo_liability` `OPEN DECISION`). Under framing 1 of that open
   decision, nothing moves here at all (the cost was already recognized at
-  grant and the player keeps it). Stage 3B must resolve this before
-  implementing Flow 14, since it changes the expected `promo_liability`
-  balance-effect assertion in any conversion test.
+  grant and the player keeps it).
+- **`RESOLVED` (architecture, Stage 4H-A) — `NOT IMPLEMENTED`**, by
+  `docs/decisions/0032-bonus-accounting.md` §4. Conversion is a **single
+  atomic transfer within one wallet and one asset — Dr `player_bonus` `X`
+  / Cr `player_cash` `X` — never "retire and re-credit as new cash"**, and
+  the `promo_liability` mirror *is* discharged in the same transaction
+  against the newly added `bonus_expense` account: four entries
+  (Dr `player_bonus` · Cr `player_cash` · Dr `bonus_expense` ·
+  Cr `promo_liability`), one `LedgerTransaction`, one database transaction.
+  A bonus conversion is **never** an ADR 0021 `ConversionOperation` (same
+  asset, no FX clearing account). Max-cashout capping happens before
+  posting; an over-conversion is rejected, not clamped. Rationale, worked
+  figures and the balance-check rule are in the ADR.
 - **Idempotency key**: bonus-engine's own conversion event id.
 - **Audit event**: `bonus.converted`.
 - **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8.
@@ -377,6 +408,17 @@ found no single statement of that boundary anywhere in the Stage 3A set.
   forfeiture is a new economic fact, is often partial, and may occur long
   after grant; reversal is reserved for correcting a transaction that
   should not have been posted.)
+- **`RESOLVED` (architecture, Stage 4H-A) — `NOT IMPLEMENTED`**, by
+  `docs/decisions/0032-bonus-accounting.md` §5/§7. The two entries above
+  are confirmed, and the expense position the flow never stated is now
+  fixed: **no `bonus_expense` is recognized or reversed on forfeiture** —
+  the value never left `player_bonus` except to be extinguished, so a
+  forfeited bonus costs the operator nothing. The forfeited amount is the
+  *currently outstanding* bonus, never the original grant amount; grant
+  attribution (FIFO/lot) is a Bonus Engine rule, not a ledger concern. A
+  separate `bonus_reversal` type covers the genuinely different "this grant
+  should never have been posted" case, with tombstone and double-reversal
+  protection per the established casino/payments pattern.
 - **Idempotency key**: bonus-engine's own forfeiture event id.
 - **Audit event**: `bonus.forfeited`.
 - **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8.
@@ -513,10 +555,10 @@ in each flow above.
 | 9 | Sportsbook settlement | loss: `player_locked` → `house_gaming`. Win: `player_locked` → `house_gaming` (stake) **and** `house_gaming` → `player_cash`/`player_bonus` (stake+winnings) | Flow 10 |
 | 10 | Sportsbook void | reverse of Flow 8/9 | — |
 | 11 | Sportsbook partial settlement | `player_locked` (released portion `R`) → `player_cash`/`player_bonus` (payout `P`), with `house_gaming` taking the difference on whichever side balances (`R>P` credit, `P>R` debit) | Flow 10 (on the settled portion) |
-| 12 | Bonus grant | `promo_liability` → `player_bonus` | Flow 15 |
+| 12 | Bonus grant | `promo_liability` → `player_bonus` (two entries; no `bonus_expense` at grant — ADR 0032 §3) | Flow 15 (forfeiture) / `bonus_reversal` (erroneous grant) |
 | 13 | Bonus wagering | (derived read, no posting) | n/a |
-| 14 | Bonus conversion | `player_bonus` → `player_cash` (+`promo_liability` discharge, timing `OPEN DECISION`) | — |
-| 15 | Bonus forfeiture | `player_bonus` → `promo_liability` | — |
+| 14 | Bonus conversion | **Single atomic four-entry transaction** (ADR 0032 §4, `RESOLVED`): `player_bonus` → `player_cash` **and** `bonus_expense` → `promo_liability`. Never retire-and-recredit; never a `ConversionOperation` | — |
+| 15 | Bonus forfeiture | `player_bonus` → `promo_liability` (two entries; **no** `bonus_expense` recognized or reversed — ADR 0032 §5) | — |
 | 16 | Manual adjustment | `manual_adjustment` ↔ target account | itself (a second manual adjustment) |
 | 17 | Provider settlement | `house_gaming`/expense → `provider_payable` → `psp_clearing` | — |
 | 18 | PSP clearing batch | bank rail → `psp_clearing` (i.e. credit `psp_clearing`); bank-rail account itself an `OPEN DECISION` | — |
@@ -534,6 +576,10 @@ its own per-asset balanced entries and its counter-account `OPEN DECISION`
 ## Cross-references
 
 - Account definitions, invariants: `ledger-accounting-model.md`.
+- Bonus/reward/promotional accounting (resolves Flows 12/14/15's bonus
+  `OPEN DECISION`s; adds `bonus_expense`, invariant B1, `bonus_reversal`,
+  provider-funded and externally-fulfilled treatments):
+  `docs/decisions/0032-bonus-accounting.md`.
 - Withdrawal state machine detail: `withdrawal-state-machine.md`.
 - Payment/PSP routing: `payment-orchestration.md`.
 - Crypto-specific deposit/withdrawal detail: `crypto-custody-boundary.md`.

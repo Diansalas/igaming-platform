@@ -397,7 +397,8 @@ a documentation-review finding that the original table's "Enforced"/
 | Casino bet | `casino_bet` | PARTIALLY IMPLEMENTED - identical caveat: `risk.Evaluate` is called and enforced on every real bet, `LicensingMode` is always correctly populated (resolved from `tenants.licensing_model`, which is never empty), but `JurisdictionCode` is only non-empty when the session's own launch happened to have one (see Casino launch row) |
 | Payments | `deposit`, `withdrawal` | NOT IMPLEMENTED - `Operation` enum + schema exist, `internal/payments` never calls `risk.Evaluate` - must call it before posting, mirroring `internal/casino`'s exact pattern, when that stage is authorized |
 | Sportsbook | `sportsbook_bet` | NOT IMPLEMENTED - does not exist as a package yet (blocked per this stage's own stop condition) |
-| Bonus | `bonus_grant` | NOT IMPLEMENTED - Bonus Engine is explicitly NOT started this stage (directive §32/Final Governance Rule); when it is, it MUST consume `internal/risk.Evaluate`, never build its own limit engine. Contract specified in full by Stage 4H-A, §15a-§15d below: `min_amount`/`max_amount` apply unchanged, `cumulative_amount` is NOT usable for this operation until `operationLedgerTransactionTypes` gains a bonus entry, and frequency requires a `count` `LimitKind` that does not exist |
+| Bonus - issuance AND activation | `bonus_grant` (both checkpoints) | NOT IMPLEMENTED - Bonus Engine is explicitly NOT started this stage (directive §32/Final Governance Rule); when it is, it MUST consume `internal/risk.Evaluate`, never build its own limit engine. Contract specified in full by Stage 4H-A, §15a-§15d below: `min_amount`/`max_amount` apply unchanged, `cumulative_amount` is NOT usable for this operation until `operationLedgerTransactionTypes` gains a bonus entry, and frequency requires a `count` `LimitKind` that does not exist. Both the `issued` creation and the `issued` → `activated` transition call `Evaluate` under this same operation value - activation is re-evaluated, not assumed covered by the grant-time decision (§15a-ii); no new `Operation` value is needed for either, and `bonus_activate` is explicitly rejected |
+| Bonus - completion/conversion | `bonus_conversion` (PROPOSED, documented only - §16) | NOT IMPLEMENTED - the `Operation` value does not exist in `internal/risk/types.go` or migration 0041's CHECK constraint, and is deliberately not added this stage (architecture-freeze). The `completed` → `converted` release MUST be gated separately with the ACTUAL released amount (max-cashout/partial-wagering capped), which is why it cannot reuse `bonus_grant` (§15a-ii) |
 | Gamification - tournament entry | `tournament_entry` (PROPOSED, documented only - §16) | NOT IMPLEMENTED - the `Operation` value does not exist in `internal/risk/types.go` or migration 0041's CHECK constraint, and is deliberately not added this stage (architecture-freeze) |
 | Gamification - marketplace purchase | `marketplace_purchase` (PROPOSED, documented only - §16) | NOT IMPLEMENTED - same: proposed value, no code, no migration this stage |
 | Rewards - redemption | `reward_redemption` (PROPOSED, CONDITIONAL - §16) | NOT IMPLEMENTED - needed only if a redemption can create player value WITHOUT going through a Bonus Engine Grant; if every redemption materializes as a Grant, `bonus_grant` already covers it and no new value should be added. Open decision, §17 |
@@ -409,8 +410,10 @@ declaration - `migrations/0041` already accepted all six from Stage 4G.
 This section exists so a future domain's own directive can point here
 rather than re-deriving the integration contract from scratch.
 
-**Stage 4H-A addendum**: the last five rows above were appended by Stage
-4H-A's architecture freeze for Bonus/Gamification/Reward Orchestration.
+**Stage 4H-A addendum**: the last six rows above were appended by Stage
+4H-A's architecture freeze for Bonus/Gamification/Reward Orchestration,
+and the `Bonus - issuance AND activation` row was widened by the same
+freeze to name activation as its own checkpoint.
 Every `Operation` value in them marked PROPOSED is DOCUMENTED ONLY - no
 Go constant, no migration, and no HTTP validation accepts any of them,
 and none may be created before the extension steps in §16 are executed
@@ -606,6 +609,58 @@ unless the grant is genuinely scoped to one, which also means a rule
 narrowed by those dimensions simply never matches a general grant - the
 correct behavior, not a gap.
 
+**(a-ii) Bonus activation and completion/conversion - two further
+checkpoints; one reuses `bonus_grant`, one needs a new `Operation`.**
+`docs/architecture/10-bonus-engine-architecture.md` §4 correctly states
+that the Bonus Engine calls `Evaluate` at three points, not one, and
+defers the `Operation` question to this ADR. Resolved here:
+
+- **Activation (`issued` → `activated`) - YES, its own `Evaluate` call,
+  reusing `OperationBonusGrant` unchanged.** The grant-time check in (a)
+  is NOT sufficient, because activation is not inherent to the grant
+  having been approved: doc 10 §1.2 states an `issued` Grant carries "no
+  wagering exposure yet", and §1.3 lists activation triggers (an opt-in
+  click, a later qualifying `deposit.settled`, manual staff activation)
+  that can occur arbitrarily long after issuance. Activation is the
+  transition at which funds actually exist in the player's wallet, so by
+  §13's own rule it is the exposure-affecting effect, and the rules in
+  force at *that* moment (effective dates, a jurisdiction hard limit
+  added since, a newly added player-scoped override) are the rules that
+  must govern it. It reuses `OperationBonusGrant` - already a constant in
+  `internal/risk/types.go` and already accepted by migration 0041 -
+  rather than a new `bonus_activate` value, because it is the same policy
+  question about the same money at a later instant; a distinct operation
+  would force every operator to author each bonus cap twice, and one
+  forgotten copy is a silent gap. This is the mirror image of (e): there,
+  reuse would have created FALSE coupling between unrelated decisions;
+  here, reuse creates the correct coupling. **No new code and no
+  migration** - DOCUMENTED ONLY in the sense that no caller exists yet.
+  One trap for (b)'s future ledger mapping: once `bonus_grant` gains
+  `operationLedgerTransactionTypes` entries, a two-step grant must
+  consume its cumulative capacity ONCE across the issuance/activation
+  pair, not twice - otherwise activation is denied by the very grant
+  being activated. That is `ledger-finance`'s to specify, per (b).
+- **Completion/conversion (`completed` → `converted`) - YES, and it needs
+  a DISTINCT `Operation`: `bonus_conversion` (§16, DOCUMENTED ONLY).**
+  Conversion releases withdrawable cash, so it is exposure-affecting in
+  the strongest sense. It must NOT reuse `OperationBonusGrant`: the
+  amount differs by design (max-cashout capping, partial wagering), and
+  the thresholds differ in kind - a converted amount legitimately exceeds
+  the grant that produced it (a 50-unit grant wagered up converts against
+  a 250-unit max cashout). Reusing `bonus_grant` would make every
+  existing `max_amount` grant rule silently bind conversions and deny
+  legitimate ones, which is exactly the retroactive-rebinding failure
+  §15e rejects for `casino_bet`/`tournament_entry`. The `RiskRequest` is
+  (a)'s shape with `Amount` set to the **actual amount to be released** -
+  payout rules applied FIRST, the result then gated - never the original
+  grant value. Naming: `bonus_conversion`, superseding doc 10 §4's
+  placeholder `bonus_convert` and consistent with §16's other noun-form
+  proposals; `bonus_activate` is explicitly NOT adopted. Fail-closed
+  still applies here without destroying a player entitlement: a `DENY`,
+  `REVIEW`, or error blocks the transition and leaves the Grant in
+  `completed`, which is non-terminal and retryable after review - it does
+  not forfeit.
+
 **(b) Bonus amount - covered unchanged by `max_amount`/`min_amount`; NOT
 covered by `cumulative_amount`.** This splits into two genuinely
 different answers and must not be reported as one:
@@ -770,24 +825,27 @@ this stage.)
 ### 16. Proposed `Operation` values - DOCUMENTED ONLY
 
 Per §13's own table, `bonus_grant` already exists and covers bonus
-issuance, bonus amount, and (once `count` exists) bonus frequency - no
-new operation is needed for ANY of the three, which is the single most
-important negative result of this analysis. Frequency needs a new
-`LimitKind`, not a new `Operation`, and conflating those two extension
-axes would have produced operations nobody needs.
+issuance, bonus amount, bonus **activation** (§15a-ii), and (once `count`
+exists) bonus frequency - no new operation is needed for ANY of the four,
+which is the single most important negative result of this analysis.
+Frequency needs a new `LimitKind`, not a new `Operation`, and conflating
+those two extension axes would have produced operations nobody needs.
 
-Three further values are proposed for the gamification/reward surface.
-They are DOCUMENTED ONLY: no Go constant, no migration, no HTTP
-validation, no OpenAPI enum entry is added this stage, and none of them
-can be stored in `risk_rules` today (migration 0041's `operation` CHECK
-rejects every value outside the original six, which is the intended
-fail-closed posture - see §18).
+Four further values are proposed. They are DOCUMENTED ONLY: no Go
+constant, no migration, no HTTP validation, no OpenAPI enum entry is
+added this stage, and none of them can be stored in `risk_rules` today
+(migration 0041's `operation` CHECK rejects every value outside the
+original six, which is the intended fail-closed posture - see §18).
 
 | Proposed value | Gates | Why not an existing value |
 |---|---|---|
+| `bonus_conversion` | The `completed` → `converted` release of bonus value as withdrawable cash | The released amount differs from the granted amount by design (max cashout, partial wagering); reusing `bonus_grant` would silently rebind every existing grant-size rule to conversions (§15a-ii) |
 | `tournament_entry` | A tournament entry that debits real money | Reusing `casino_bet` would retroactively rebind every existing casino stake rule to tournament entries (§15e) |
 | `marketplace_purchase` | Spending a balance on a marketplace item | Neither a wager nor a grant; its own thresholds and its own ledger mapping (§15g) |
 | `reward_redemption` | CONDITIONAL - only if a redemption can create value without a Bonus Engine Grant | If every redemption IS a Grant, `bonus_grant` covers it and this value must NOT be added (§15f, §17) |
+
+`bonus_activate` was considered and **rejected** (§15a-ii): activation is
+re-evaluated under `bonus_grant`, not under a value of its own.
 
 Each slots into the existing `Operation` type's pattern exactly (a
 `string`-typed constant in `internal/risk/types.go` alongside the current

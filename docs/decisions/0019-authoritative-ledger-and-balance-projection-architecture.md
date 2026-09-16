@@ -269,7 +269,7 @@ API that accepts an arbitrary `transaction_type`. The binding rule:
 |---|---|
 | Player session (brand frontend) | Only `deposit` *initiation* (no posting — the posting is the PSP callback), `withdrawal_requested` (hold), and withdrawal cancellation. A player action never directly produces a credit to `player_cash`/`player_bonus`. |
 | Verified provider callback (signature-verified adapter) | `deposit`, casino/sportsbook bet/win/settlement/void/rollback, `psp_*`, custodian events — scoped to the tenant resolved from the *credential the callback authenticated with*, never from a tenant/player identifier in the payload, **and further scoped to the originating provider** (see below). |
-| Internal service (bonus engine, settlement job) | `bonus_grant`, `bonus_conversion`, `bonus_forfeiture`, `provider_settlement` — under a service identity (ADR 0014), not a player or staff identity. |
+| Internal service (bonus engine, settlement job, gamification, reward orchestrator) | `bonus_grant`, `bonus_conversion`, `bonus_forfeiture`, `bonus_reversal` (added Stage 4H-A by `docs/decisions/0032-bonus-accounting.md` §7/§8 — a compensating transaction with `reverses_transaction_id` set, or a tombstone for a never-seen grant; `NOT IMPLEMENTED`, the type does not exist in the `transaction_type` `CHECK` constraint yet), `provider_settlement` — under a service identity (ADR 0014), not a player or staff identity. Gamification and the Reward Orchestrator inherit this row unchanged; they are internal services, **not** a new actor class. |
 | Staff principal with explicit RBAC permission | `manual_adjustment` only, four-eyes-gated above the configured threshold, `reason_code` mandatory. |
 
 Enforcement is server-side at the posting API boundary (a per-
