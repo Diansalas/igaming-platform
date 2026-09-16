@@ -28,6 +28,7 @@ components rather than duplicated per service.
 | `sportsbook-adapter` | Sportsbook provider integration, open-bet liability | sportsbook |
 | `bonus-engine` | Campaign/Offer/Grant/Progress, rule evaluation | bonus-engine |
 | `gamification` | Points/XP/level rules, achievements, missions, tournaments, leaderboards, streaks — **`NOT IMPLEMENTED`**, architecture frozen Stage 4H-A | gamification (architecture by architect) |
+| `retail` / `agent-network` | Configurable hierarchy/agent network, retail terminals & cashier sessions, counter operations — **`NOT IMPLEMENTED`**, architecture frozen Stage 4H-B0 (`26-retail-operations-architecture.md`) | no existing specialist — architecture by architect; implementation owner is an OPEN DECISION for the Orchestrator (see doc 26 §7) |
 | `payment-orchestrator` | PSP/crypto routing, reserve accounting, withdrawal workflow | payments |
 | `compliance` | KYC/AML orchestration, RG controls, case queue | identity-compliance |
 | `backoffice-api` / `partner-console-api` | Admin operations, RBAC-gated | backend / backoffice |

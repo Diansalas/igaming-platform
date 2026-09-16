@@ -370,16 +370,21 @@ API-surface design, which this document confirms still holds as written.
 ### 6. Ownership and labeling
 
 Authored by `backend-platform` per Stage 4H-B0's assignment, mirroring doc
-25's permission-naming conventions as instructed. Cross-domain inputs
-expected, not yet reconciled: `security` (RBAC/hierarchy-scope enforcement
-mechanism, §0/§2; device-credential mechanism, §3), `payments` (retail
-deposit/withdrawal idempotency and provider-adapter shape, §1),
+25's permission-naming conventions as instructed. Cross-domain inputs:
+`payments` (retail deposit/withdrawal idempotency and fulfillment-channel
+shape, §1/§4) landed during this document's authorship and has been
+reconciled in place — see the endpoint naming and idempotency mechanism
+in §1's table and the corrections in §4. Still outstanding, not yet
+reconciled: `security` (RBAC/hierarchy-scope enforcement mechanism, §0/§2;
+device-credential mechanism, §3 — expected at `docs/decisions/0036-
+retail-hierarchy-rbac-and-audit.md`), `architect` (hierarchy data-model
+design and confirmation of the Player-is-not-a-node modeling decision in
+§0, and of the same-endpoints-many-scopes recommendation in §2 — expected
+at `docs/architecture/26-retail-operations-architecture.md`),
 `ledger-finance`/risk (commission-plan and limit values referenced but not
-defined by §2's node config; retail cash-in-hand ledger treatment beyond
-"reuses the existing `PaymentProvider` posting path," which is this
-document's boundary claim, not a full ledger design), `architect`
-(confirmation of the Player-is-not-a-node modeling decision in §0, and of
-the same-endpoints-many-scopes recommendation in §2). Every substantive
+defined by §2's node config; the retail ledger-account/posting treatment
+this document only assumes is callable from the confirm/complete handlers
+— expected at ADR 0035). Every substantive
 statement above is labeled `ARCHITECTURAL DECISION`, `RECOMMENDATION`, or
 `OPEN DECISION` inline; everything in this section is `NOT IMPLEMENTED` —
 no Go types, no route registrations, no OpenAPI YAML, no migration, no
