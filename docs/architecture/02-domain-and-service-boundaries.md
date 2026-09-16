@@ -196,3 +196,112 @@ Progress, wagering, forfeiture); Gamification owns behavioural progression
 state. A gamification reward that happens to be bonus-shaped is fulfilled
 by the Bonus Engine *via* the Reward Orchestrator, never by Gamification
 calling the Bonus Engine directly.
+
+## Retail / Agent Network boundary (Stage 4H-B0 — architecture freeze)
+
+Status: **`NOT IMPLEMENTED`.** No `internal/retail` or
+`internal/agentnetwork` package, no schema, no migration, no API, no test
+exists. Stage 4H-B0 froze the architecture only — see
+`docs/architecture/26-retail-operations-architecture.md`, which is
+authoritative for this domain and which this section summarizes rather
+than restates. Like the Gamification section above, this records a
+*contract* the eventual implementation must satisfy, not a verification,
+because there is nothing built to verify.
+
+**Scope anchor, stated honestly** (`CLAUDE.md`'s "never claim a Blueprint
+requirement that isn't there"): `iGaming-Platform-Blueprint.pdf` contains
+**no** retail, land-based, agent-network, POS, terminal, shop or kiosk
+requirement — verified by full-text search of all 20 pages (the three
+occurrences of "cashier" all mean the *online* player-facing deposit/
+withdraw screen). Retail enters the project as a human-directed business
+requirement via the Orchestrator (Stage 4H-B0), which is a legitimate
+authority for scope but is **not** the Blueprint and must never be cited
+as such. This is structurally the same unanchored-scope situation
+`product-owner-proxy` recorded for Gamification in Stage 4H-A; doc 26 §0.1
+recommends the Orchestrator record it in `14-mvp-scope-and-roadmap.md` the
+same way.
+
+| Domain | Package (future) | Sole authority for | Never does |
+|---|---|---|---|
+| Retail / Agent Network | `internal/agentnetwork` (hierarchy primitive) + `internal/retail` (operational surface) — split recommended, doc 26 §7.1 | The configurable hierarchy: node **types**, allowed parent→child **structure**, node **capabilities**, node instances and their parent edges, the derived closure projection, node↔staff assignments, terminal registration and cashier shift sessions, counter-operation orchestration and its idempotency records, retail player-origin attribution, and the **structural** authorization question "may node A move value to node B, and is this actor authorized over node A" | Post to the ledger; own any balance, float, commission accrual or settlement amount; define a limit, cap, counter or velocity; define eligibility or self-exclusion; define a KYC tier; write its own audit records; accept a client-supplied tenant id, node id or parent claim; create a second identity, wallet, or player model |
+
+The boundaries that matter most, each mirroring a separation this
+codebase already established rather than inventing a new one:
+
+- **Retail is not a second financial system.** A terminal is an API
+  client of the same platform, with no terminal-local balance, no
+  terminal-side authorization decision, and no offline acceptance of any
+  balance-affecting operation (doc 26 §2.5 — an offline requirement is an
+  `OPEN DECISION` for the human, not an assumed capability). `CLAUDE.md`'s
+  "the authoritative balance read happens inside the same database
+  transaction as the write" applies to a counter terminal exactly as it
+  applies to a browser.
+- **Retail owns no money.** It emits the *reason* for a movement (float
+  advance, settlement, commission, counter deposit/payout) and the
+  *authorization* for it; `ledger-finance` owns every account, posting and
+  monetary invariant — `docs/decisions/0035-*`. This is ADR 0032's
+  precedent applied unchanged: if doc 26 and ADR 0035 ever disagree on
+  monetary treatment, **ADR 0035 wins.** No retail package may import
+  `internal/ledger` or `internal/wallet` to decide anything monetary
+  itself.
+- **Retail is NOT a Risk replacement.** It has no limit engine, no
+  threshold, no cap, no counter and no velocity concept of its own. Float
+  ceilings, per-cashier payout limits, daily counter-deposit caps and
+  cash-structuring thresholds are rules in `internal/risk`, evaluated by
+  `risk.Evaluate` in the same transaction as the effect they gate,
+  fail-closed on error (ADR 0031 §13). New `Operation` values and any new
+  `LimitKind` go through ADR 0031 §12's extension process, owned by
+  `risk` — never a counter inside retail.
+- **Retail is NOT an RG or KYC replacement.** Every player-facing counter
+  operation calls `rg.EvaluateEligibility` first, then `risk.Evaluate`,
+  in that fixed order with RG short-circuiting on denial (ADR 0031 §1) —
+  this is ADR 0027's own standing forward note ("any FUTURE endpoint that
+  can move money or let a player gamble MUST call `EvaluateEligibility`")
+  applied to exactly the endpoints it was written for. KYC tiers, AML
+  treatment of cash, and physical-presence self-exclusion are
+  `identity-compliance`'s, flagged in doc 26 §3.3 and not invented there.
+- **Retail creates no second identity model.** A player registered at a
+  counter is an ordinary `Person` + `PlayerAccount` under a
+  `(tenant_id, brand_id)` pair, created through the unchanged
+  `identityresolution.RegisterPlayerWithResolution` flow (ADR 0027). A
+  cashier is an `identity.StaffUser` with a retail role — **not** a new
+  actor or principal type, so `audit.ActorType` and `auth.PrincipalType`
+  are unchanged. A terminal is a `service` principal, which makes ADR
+  0014's option 2 real for the first time. **Neither a player nor a
+  cashier is a node in the hierarchy** (doc 26 §1.6) — they attach to a
+  node by reference.
+- **The hierarchy is configuration, never a code path.** No table,
+  constraint, enum, Go type or permission may contain
+  `operator`/`partner`/`super_agent`/`agent`/`cashier` as a structural
+  element; that chain is seed data in a configuration table, and a
+  different tenant's network is a different set of rows with zero code
+  change. This is `CLAUDE.md`'s "nothing brand-specific may become a code
+  path" applied to network topology. An integer `level` column is
+  explicitly rejected. Node **type/relation/capability definitions** are
+  dual-scope (`tenant_id IS NULL` = platform-wide template), mirroring
+  `risk_rules` (ADR 0031 §3) and the `PointType` correction (doc 24 §2);
+  every node **instance** row is `tenant_id NOT NULL`.
+
+### Open cross-domain items this boundary depends on
+
+Doc 26 §8 flags these explicitly rather than resolving them; **none is a
+silent change to previously approved architecture**, and each needs its
+named owner's sign-off before any retail implementation:
+
+| Item | Owner(s) | Severity |
+|---|---|---|
+| Node float vs. ADR 0007's explicitly player-centric `Wallet` model (amending ADR 0007 would need human sign-off — it is a recorded human decision) | **ledger-finance** (ADR 0035) | **P0** |
+| A node-subtree RLS dimension (`app.hierarchy_node_id` + `WithNodeScope`), including the permissive-policy OR-widening split ADR 0019 already documents for `app.player_account_id` | architect + security | P1 |
+| Whether `player_accounts`' RLS gains a node dimension (doc 26 recommends **no**, and routing subtree reads through a retail-owned attribution table instead) | identity-compliance + security | P1 |
+| New `StaffRole` values and retail permissions (`staff_users`' table shape itself is unchanged) | identity-compliance + security | P2 |
+| `risk.Operation` extension for retail operations | risk | P2 |
+| A node/terminal dimension on audit records | architect + security | P2 |
+
+Two findings are explicitly **not** conflicts: ADR 0010's
+single-deployable shape is untouched (retail adds packages, not
+deployables), and jurisdiction needs no change to doc 15/ADR 0006/ADR 0012
+— a `hierarchy_nodes.jurisdiction_code` resolves against the existing
+tenant-level `TenantJurisdictionConfig`. That second one is a **positive
+finding**: a registered shop address would be the first authoritative,
+non-geolocated source of jurisdiction this platform has ever had, against
+the `TODO(jurisdiction)` gap doc 15 and ADR 0031 §9 both still record.
