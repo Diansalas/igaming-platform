@@ -168,8 +168,23 @@ found no single statement of that boundary anywhere in the Stage 3A set.
 - **Retry behavior**: exact retry (same `provider_tx_id`) → idempotent
   no-op returning the original result, per Blueprint's callback contract.
 - **Compensation**: Flow 7 (rollback).
+- **Bonus-funded portion — mirror legs required (ADR 0032 §2, Rule B2).**
+  **Wave-2 ledger-finance review correction (P1-1)**: an earlier draft of
+  this flow described only the two-entry cash-funded shape. Any entry in
+  this flow against `player_bonus` is accompanied, in the **same
+  `LedgerTransaction`**, by an equal and opposite entry against
+  `promo_liability`, joined by an equal `bonus_expense` entry so the
+  transaction still balances per asset. A bonus-funded stake of `X` is
+  therefore four entries (Dr `player_bonus` `X` · Cr `house_gaming` `X` ·
+  Dr `bonus_expense` `X` · Cr `promo_liability` `X`). A cash-funded stake
+  is unchanged (two entries). A mixed cash+bonus stake is the cash portion
+  as a two-entry pair plus the bonus portion as its own four-entry group
+  in the same transaction. These legs are generated/validated in
+  `internal/ledger`, never hand-assembled by `internal/casino`.
+  Provider-funded grants substitute `provider_payable` for `bonus_expense`
+  (ADR 0032 §6(b)). **Invariants engaged: add B1.**
 - **Audit event**: `casino_bet.posted`.
-- **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #15.
+- **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #15, B1.
 
 ## 6. Casino win — `BLUEPRINT`
 
@@ -186,8 +201,14 @@ found no single statement of that boundary anywhere in the Stage 3A set.
 - **Failure behavior**: a win callback for a round with no matching prior
   bet transaction is rejected and escalated (integrity alert — a
   provider protocol violation, not a normal failure path).
+- **Bonus-funded portion — mirror legs required (ADR 0032 §2, Rule B2).**
+  A win credited to `player_bonus` is a four-entry transaction, inverted
+  from Flow 5's stake shape: Dr `house_gaming` `Y` · Cr `player_bonus`
+  `Y` · Dr `promo_liability` `Y` · Cr `bonus_expense` `Y`. A win credited
+  to `player_cash` is unchanged (two entries). **Wave-2 ledger-finance
+  review correction (P1-1)**: omitted in an earlier draft.
 - **Audit event**: `casino_win.posted`.
-- **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #13.
+- **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #13, B1.
 
 ## 7. Casino rollback — `BLUEPRINT`
 
@@ -205,8 +226,15 @@ found no single statement of that boundary anywhere in the Stage 3A set.
   `provider_tx_id` the ledger never posted a bet for → tombstone written
   (CLAUDE.md rollback rule) so a late-arriving original bet callback for
   that reference is rejected rather than posted after the fact.
+- **Bonus-funded portion — mirror legs required (ADR 0032 §2/§7).** A
+  rollback of a bonus-funded bet or win inverts every leg the original
+  posted, including its `promo_liability`/`bonus_expense` mirror pair —
+  this falls out automatically because those legs live in the same
+  transaction being reversed, so no special-case rollback code is needed.
+  **Wave-2 ledger-finance review correction (P1-1)**: omitted in an
+  earlier draft, which described only the two-entry cash-funded case.
 - **Audit event**: `casino_bet.rolled_back` / `casino_win.rolled_back`.
-- **Invariants engaged**: #1, #2, #3, #4, #5, #10, #13, #14.
+- **Invariants engaged**: #1, #2, #3, #4, #5, #10, #13, #14, B1.
 
 ## 8. Sportsbook bet / fund lock — `BLUEPRINT`
 
@@ -261,8 +289,15 @@ found no single statement of that boundary anywhere in the Stage 3A set.
 - **Failure behavior**: settlement references a bet slip with no matching
   `player_locked` entry (already settled, or never locked) → rejected,
   integrity alert.
+- **Bonus-funded portion — mirror legs required (ADR 0032 §2, Rule B2).**
+  Where the original stake locked from `player_bonus` (subject to the
+  `player_locked` origin gap noted in Flow 8's `OPEN DECISION` — this
+  flow cannot be implemented for a bonus-funded stake until that gap is
+  resolved), the payout leg crediting `player_bonus` carries the same
+  `promo_liability`/`bonus_expense` mirror pair as Flow 6's win. **Wave-2
+  ledger-finance review correction (P1-1)**: omitted in an earlier draft.
 - **Audit event**: `sportsbook_bet.settled`.
-- **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #12, #13.
+- **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #12, #13, B1.
 
 ## 10. Sportsbook void — `BLUEPRINT`
 
@@ -313,7 +348,15 @@ found no single statement of that boundary anywhere in the Stage 3A set.
   amount, it does not recompute or validate the odds/margin math itself
   (that validation, if any, belongs to the sportsbook specialist's
   provider-adapter layer, not the ledger).
-- **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #12, #13.
+- **Bonus-funded portion — mirror legs required (ADR 0032 §2, Rule B2).**
+  Where the payout `P` (or its `player_bonus`-attributable share) credits
+  `player_bonus`, that portion carries the same `promo_liability`/
+  `bonus_expense` mirror pair as Flow 6/9, added to whichever of the
+  `R`/`P`/margin legs above already apply — the transaction remains
+  balanced per asset with the mirror pair as an additional, separate
+  balanced group. **Wave-2 ledger-finance review correction (P1-1)**:
+  omitted in an earlier draft.
+- **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #12, #13, B1.
 
 ## 12. Bonus grant — `BLUEPRINT`
 
@@ -533,8 +576,52 @@ found no single statement of that boundary anywhere in the Stage 3A set.
   `jackpot_contribution`, credit `player_cash`, keyed by the provider's
   jackpot-win reference, subject to the same `OPEN DECISION` on liability
   vs. expense framing noted in `ledger-accounting-model.md` §2.
-- **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #13 (for the payout
-  transaction specifically).
+- **Bonus-funded stake, jackpot carve-out.** If the stake being carved
+  from was bonus-funded, the carve-out debits `player_bonus` (not
+  `player_cash`) for its share, and that debit carries the same
+  `promo_liability`/`bonus_expense` mirror pair as the rest of Flow 5's
+  bonus-funded stake — the carve-out is a split of the same stake amount
+  Flow 5 already mirrors, not a second, separately-mirrored movement.
+  Jackpot **payout** always credits `player_cash`, never `player_bonus`
+  — a jackpot win is new value the player did not stake, so it carries no
+  wagering requirement regardless of how the contributing stake was
+  funded. **Wave-2 ledger-finance review correction (P1-1)**: omitted in
+  an earlier draft.
+- **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #13, B1 (for the
+  payout transaction specifically; B1 only where the contributing stake
+  was bonus-funded).
+
+## 21. Externally-fulfilled bonus — no posting — `ARCHITECTURAL DECISION`
+
+Added by Wave-2 ledger-finance review (P1-1): ADR 0032 §6(c)'s
+"externally-fulfilled" treatment had no corresponding flow in this
+document, though the Consequences section of that ADR asked for one.
+
+- **Initiating event**: an external (provider-native) bonus engine
+  grants, tracks, wagers and settles a bonus entirely inside its own
+  system (`docs/decisions/0033-provider-interoperability-and-external-
+  bonus-engines.md`).
+- **Accounts**: **none.** The ledger posts zero entries — no
+  `promo_liability`, no `player_bonus`, no `bonus_expense`. Recording a
+  liability the platform does not owe is exactly as wrong as omitting one
+  it does (ADR 0032 §6(c)).
+- **What is recorded instead**: the fact of the grant/settlement as a
+  domain event plus an `audit.Record`, reconciled against the provider's
+  own statement as a memo stream — counts and references, not balances
+  (`reconciliation-model.md` §2.10).
+- **The Flow 9 boundary case**: the moment external value genuinely lands
+  in the platform wallet (the provider settles a free-bet win as a real
+  payout), that landing is an ordinary Flow 9-shaped provider-settlement
+  posting into `player_cash`, keyed on `(tenant_id, provider_id,
+  provider_tx_id)` — cash from a provider, **not** a bonus grant, and it
+  creates no bonus balance or wagering requirement on the platform side.
+- **Idempotency key**: n/a — no `LedgerTransaction` is posted for the
+  externally-fulfilled fact itself; the memo-stream record is keyed by
+  the provider's own reference for reconciliation purposes only.
+- **Audit event**: a Bonus/Gamification domain event (not yet named a
+  ledger `transaction_type`, because none is posted), plus `audit.Record`.
+- **Invariants engaged**: none (no posting). Reconciled under
+  `reconciliation-model.md` §2.10's memo stream, not B1.
 
 ## Summary table
 
@@ -548,13 +635,13 @@ in each flow above.
 | 2 | Deposit reversal | `player_cash` → `psp_clearing` | — (itself a reversal) |
 | 3 | Withdrawal | `player_cash` → `player_withdrawal_hold` → `psp_clearing`/custodian | Flow 4 |
 | 4 | Withdrawal reversal | reverse of Flow 3's applicable step | — |
-| 5 | Casino bet | `player_cash`/`player_bonus` → `house_gaming` (+`jackpot_contribution` split) | Flow 7 |
-| 6 | Casino win | `house_gaming` → `player_cash`/`player_bonus` | Flow 7 |
-| 7 | Casino rollback | reverse of Flow 5/6 | — |
+| 5 | Casino bet | `player_cash`/`player_bonus` → `house_gaming` (+`jackpot_contribution` split) (+ `bonus_expense` → `promo_liability` mirror pair on the bonus-funded portion — ADR 0032 §2) | Flow 7 |
+| 6 | Casino win | `house_gaming` → `player_cash`/`player_bonus` (+ `promo_liability` → `bonus_expense` mirror pair on the bonus-funded portion — ADR 0032 §2) | Flow 7 |
+| 7 | Casino rollback | reverse of Flow 5/6, mirror legs included | — |
 | 8 | Sportsbook lock | `player_cash`/`player_bonus` → `player_locked` | Flow 10 |
-| 9 | Sportsbook settlement | loss: `player_locked` → `house_gaming`. Win: `player_locked` → `house_gaming` (stake) **and** `house_gaming` → `player_cash`/`player_bonus` (stake+winnings) | Flow 10 |
+| 9 | Sportsbook settlement | loss: `player_locked` → `house_gaming`. Win: `player_locked` → `house_gaming` (stake) **and** `house_gaming` → `player_cash`/`player_bonus` (stake+winnings) (+ mirror pair on the bonus-funded portion — ADR 0032 §2) | Flow 10 |
 | 10 | Sportsbook void | reverse of Flow 8/9 | — |
-| 11 | Sportsbook partial settlement | `player_locked` (released portion `R`) → `player_cash`/`player_bonus` (payout `P`), with `house_gaming` taking the difference on whichever side balances (`R>P` credit, `P>R` debit) | Flow 10 (on the settled portion) |
+| 11 | Sportsbook partial settlement | `player_locked` (released portion `R`) → `player_cash`/`player_bonus` (payout `P`), with `house_gaming` taking the difference on whichever side balances (`R>P` credit, `P>R` debit) (+ mirror pair on the bonus-funded portion of `P` — ADR 0032 §2) | Flow 10 (on the settled portion) |
 | 12 | Bonus grant | `promo_liability` → `player_bonus` (two entries; no `bonus_expense` at grant — ADR 0032 §3) | Flow 15 (forfeiture) / `bonus_reversal` (erroneous grant) |
 | 13 | Bonus wagering | (derived read, no posting) | n/a |
 | 14 | Bonus conversion | **Single atomic four-entry transaction** (ADR 0032 §4, `RESOLVED`): `player_bonus` → `player_cash` **and** `bonus_expense` → `promo_liability`. Never retire-and-recredit; never a `ConversionOperation` | — |
@@ -563,7 +650,8 @@ in each flow above.
 | 17 | Provider settlement | `house_gaming`/expense → `provider_payable` → `psp_clearing` | — |
 | 18 | PSP clearing batch | bank rail → `psp_clearing` (i.e. credit `psp_clearing`); bank-rail account itself an `OPEN DECISION` | — |
 | 19 | PSP reserve movement | increase: `psp_reserve` → `psp_clearing` (debit reserve). Release: inverse | itself (inverse movement) |
-| 20 | Jackpot contribution / payout | contribution (within Flow 5): `player_cash`/`player_bonus` → `jackpot_contribution`, carved out of the stake rather than out of `house_gaming`. Payout: `jackpot_contribution` → `player_cash` | — |
+| 20 | Jackpot contribution / payout | contribution (within Flow 5): `player_cash`/`player_bonus` → `jackpot_contribution`, carved out of the stake rather than out of `house_gaming` (+ mirror pair if bonus-funded — ADR 0032 §2). Payout: `jackpot_contribution` → `player_cash` (always cash, never bonus) | — |
+| 21 | Externally-fulfilled bonus | **none — zero ledger entries, ever** (ADR 0032 §6(c)); memo stream only | n/a |
 
 **Not in this list — cross-asset conversion.** No flow above moves value
 between two assets; per ADR 0007/0021 that is only ever an explicit
@@ -578,7 +666,9 @@ its own per-asset balanced entries and its counter-account `OPEN DECISION`
 - Account definitions, invariants: `ledger-accounting-model.md`.
 - Bonus/reward/promotional accounting (resolves Flows 12/14/15's bonus
   `OPEN DECISION`s; adds `bonus_expense`, invariant B1, `bonus_reversal`,
-  provider-funded and externally-fulfilled treatments):
+  the mirror-leg requirement now reflected in Flows 5/6/7/9/11/20/21,
+  provider-funded and externally-fulfilled treatments, the lifecycle
+  event → posting map, and the direct-cash-reward treatment):
   `docs/decisions/0032-bonus-accounting.md`.
 - Withdrawal state machine detail: `withdrawal-state-machine.md`.
 - Payment/PSP routing: `payment-orchestration.md`.

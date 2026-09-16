@@ -294,6 +294,79 @@ recorded as open items for the eventual Bonus/Gamification implementation
 stage, not fixed now, per this stage's own architecture-freeze framing
 (CLAUDE.md's "no uncontrolled scope expansion").
 
+### Addendum: ledger-finance financial sign-off + product-owner-proxy scope review
+
+Two further Wave-2 specialists — `ledger-finance` (the independent
+financial-correctness sign-off CLAUDE.md requires before any monetary
+architecture is considered reviewed) and `product-owner-proxy` (scope
+discipline) — completed after the review round above and required a
+second round of fixes.
+
+**ledger-finance: PASS WITH FINDINGS, sign-off granted once 7 P1s were
+applied.** No P0. All 7 P1s fixed in-place: (1) the bonus-funded mirror
+legs (`promo_liability`/`bonus_expense`) were missing from
+`financial-transaction-flows.md`'s actual play flows (5/6/7/9/11/20) —
+an implementer following the frozen flows literally would have broken
+invariant B1 on the first bonus-funded bet; fixed, plus a new Flow 21
+for externally-fulfilled = no posting; (2) no binding map existed from
+Bonus Engine lifecycle events to ledger postings, leaving `cancelled`
+with no accounting treatment and `converted` undefined — added ADR 0032
+§3.1; (3) a direct cash reward (`cash_credit`) had no defined double-entry
+treatment despite being referenced as supported in two documents — added
+to ADR 0032 §3; (4) Rule B2 (the bonus mirror rule) didn't explicitly
+bind `manual_adjustment`, and ADR 0032 §7 told staff to post a
+partly-consumed-grant correction with no named target account — both
+fixed; (5) the Reward Orchestrator's reversal path rejected
+never-fulfilled reversals without a tombstone (reopening the exact race
+CLAUDE.md's rollback rule exists to prevent) and placed its
+single-reversal guarantee on a tracking table that doesn't exist for
+money-moving mechanisms — fixed to defer to the owning ledger's own
+guarantee; (6) the External Reward Provider contract never declared a
+per-reward-type fulfilment-destination flag, leaving its own reversal
+row hedging on "if any monetary effect exists" — exactly the
+guess-at-posting-time ADR 0032 forbids — fixed; (7) the marketplace
+document's cross-tenant points-isolation rationale cited the point
+type's own scope, invalidated by this stage's own dual-scope correction
+to `PointType` definitions — fixed to cite the balance tables' RLS
+instead. 4 of 5 P2s fixed (idempotency-key terminology in ADR 0032 §8,
+a decimal-vs-int64 amount representation gap in doc 21, an inline
+zero-ledger-entries note in doc 21's mapping table, two new open
+decisions on tournament prize-pool liability and split-prize rounding
+added to ADR 0032); 1 P2 + 1 P3 recorded rather than fixed (a campaign
+budget-cap enforcement gap disclosed as `NOT IMPLEMENTED`, and a cosmetic
+`PointType` shape drift in doc 17 that document already labels
+conceptual-only).
+
+**product-owner-proxy: no P0/P1/P2 (a scope-discipline review, not a
+correctness review).** Read the Blueprint in full (20 pages) and found
+it never mentions gamification, points, XP, levels, achievements,
+badges, missions, tournaments, leaderboards, streaks, a reward
+marketplace, raffles, or mini-games — the entire Gamification Engine/
+Reward Marketplace/Reward Orchestrator domain (5 of this stage's
+architecture documents) has no anchor in the Blueprint and no anchor in
+this project's own prior MVP roadmap (`14-mvp-scope-and-roadmap.md`).
+Execution discipline within the frozen documents was found unusually
+strong (correct `NOT IMPLEMENTED` labeling throughout, several genuine
+`RECOMMENDATION`s correctly labeled as such, no recommendation
+dishonestly presented as a Blueprint requirement) — the finding is that
+the volume and fidelity of speculative design is itself a form of scope
+creep, independent of how honestly it's labeled. The Reward Orchestrator
+was specifically flagged as **premature abstraction**: a
+three-domain-ready fulfillment layer built ahead of a second concrete
+reward-producing domain, when Bonus Engine alone (the only domain
+actually required by the Blueprint/MVP) already has a sufficient
+lighter-weight fulfillment mechanism of its own. `18-tournament-
+architecture.md` was flagged as the single most disproportionately
+designed sub-capability — its settlement/prize-arithmetic/anti-collusion
+depth exceeds parts of the Bonus Engine's own MVP-required core
+lifecycle, for a feature with zero scheduled build. All findings applied
+to `14-mvp-scope-and-roadmap.md`'s "Features deliberately deferred"
+section, including guidance for when Stage 4H is eventually authorized:
+scope the first Bonus Engine implementation to the MVP-required bonus
+types only (deposit, reload, cashback, generic wagering bonus, coupon),
+and do not build the Reward Orchestrator as a standalone domain unless
+Gamification is authorized alongside it.
+
 **This stage's directive contained a contradiction**: its 27-section body
 was explicit, detailed, and internally consistent about being
 architecture-freeze-only ("YOU ARE NOT AUTHORIZED TO IMPLEMENT THE BONUS

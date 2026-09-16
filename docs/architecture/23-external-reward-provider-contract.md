@@ -61,6 +61,25 @@ capability** — `ExternalRewardRequest`/`Status` calls for an
 unsupported capability fail closed with a typed
 `ErrCapabilityUnsupported`, never silently no-op.
 
+**Fulfilment-destination declaration (Wave-2 ledger-finance review
+correction, P1-6).** Every reward type a provider declares MUST
+additionally declare its **fulfilment destination**:
+`into_platform_wallet` (the provider funds it but value lands in one of
+our wallets — `docs/decisions/0032-bonus-accounting.md` §6(a)/(b),
+ordinary ledger postings apply) or `inside_provider` (the provider
+grants, tracks and settles it in its own system; value never enters a
+platform wallet — ADR 0032 §6(c), **the ledger posts zero entries,
+ever**). A reward type that does not declare a destination is **rejected
+at configuration time**, per ADR 0032 §6(c) — never defaulted, and never
+resolved at posting time. This field is the single discriminator every
+downstream posting decision in this contract reads; it is not advisory
+metadata. An earlier draft of this document left the destination
+undeclared here even though `10-bonus-engine-architecture.md` §3.2
+adopted the `into_platform_wallet`/`inside_provider` split on the Bonus
+Engine side — this section is the actual configuration point where a
+reward type's destination is declared, and it is now the binding source
+those other documents defer to.
+
 ### Grant (`RequestReward`)
 
 Takes a canonical `ExternalRewardRequest` (tenant, brand, player
@@ -279,7 +298,7 @@ decision later for a disputing player or a regulator.
 | Completion / Conversion | `Status` = `Settled`, or a callback reporting the same |
 | Expiry | Provider-side unless the provider reports it; if unreported, the platform's own record ages out per a configured maximum-unknown-duration and is marked `Unknown` → reconciliation-flagged, never silently assumed either way |
 | Cancellation | `Revoke` (best-effort, see above) |
-| Reversal | `Status` = `Reversed`, or a callback; ledger-side (if any monetary effect exists — see `docs/decisions/0032-bonus-accounting.md`'s "externally-fulfilled bonus" treatment) posts a compensating entry exactly like any other reversal |
+| Reversal | `Status` = `Reversed`, or a callback. **Wave-2 ledger-finance review correction (P1-6)**: an earlier draft hedged this row ("if any monetary effect exists"), which is precisely the guess-at-posting-time ADR 0032 §6(c) forbids. For an `inside_provider` reward type (per the fulfilment-destination declaration in "Capability discovery," above): **no ledger effect whatsoever**, on the reversal as on the grant — the record is the domain event + `audit.Record`, reconciled under `reconciliation-model.md` §2.10. For an `into_platform_wallet` reward type: an ordinary compensating transaction exactly like any other reversal (ADR 0032 §7). Where external value had genuinely landed in `player_cash` under the Flow 9 shape, the reversal is a **provider-settlement reversal** under that flow, not bonus accounting. |
 
 **Do not assume external providers have the same lifecycle as our
 platform.** Any stage that maps a real provider's fewer/different states

@@ -96,9 +96,19 @@ Non-negotiable properties:
   two-domain debit with its own partial-failure semantics, and it is not
   worth that complexity absent a real requirement. If it is ever needed, it
   needs its own ADR.
-- **A point type's scope constrains the item's scope.** An item priced in a
-  tenant-scoped point type can only appear in that tenant's catalog. This
-  falls out of doc 17 §3.2's scoping and must be enforced, not assumed.
+- **A point type's scope constrains the item's scope.** A **tenant-scoped**
+  point type's items can only appear in that tenant's catalog. A
+  **platform-wide** point type definition (nullable `tenant_id`,
+  `docs/architecture/24-points-accounting-architecture.md` §2/§9) may be
+  referenced by any tenant's catalog (it is a template, exactly like a
+  platform-wide `risk_rules` row); the balance debited on purchase is
+  always the purchasing tenant's own `PointAccount` in that type. **Wave-2
+  ledger-finance review correction (P1-7)**: an earlier draft of this
+  bullet said this "falls out of doc 17 §3.2's scoping" for every point
+  type, which the Wave-1 correction to doc 24 (making `PointType`
+  definitions dual-scope) invalidated for the platform-wide case — a point
+  type's own scope isolates nothing for a platform-wide type, and must not
+  be enforced, not assumed.
 - **`RECOMMENDATION`: the first implementation should support
   `point_type` pricing only.** A monetary price turns the marketplace into
   a payment surface, with PSP, AML, refund, chargeback, and tax
@@ -314,8 +324,16 @@ Per doc 17 §9, without exception:
   `player_self_scope` policy so a player reads their own orders and no
   one else's.
 - **A player's points from tenant A are never spendable in tenant B's
-  catalog** — this falls out of the point type's own scope (doc 17 §3.2)
-  and must be enforced at the data level, not by application discipline.
+  catalog.** **Wave-2 ledger-finance review correction (P1-7)**: this does
+  **not** fall out of the point type's scope — a `PointType` *definition*
+  may legitimately be platform-wide (`tenant_id IS NULL`,
+  `docs/architecture/24-points-accounting-architecture.md` §2/§9). It
+  falls out of the **balance** tables: `point_accounts`/
+  `point_transactions`/`point_entries`/`point_balance_projection` are
+  `tenant_id NOT NULL` under `FORCE ROW LEVEL SECURITY`, so the only
+  balance a purchase can ever debit is the purchasing tenant's own
+  account in that point type. Enforced at the data level, never by
+  application discipline.
 - Jurisdiction and licensing-mode scoping use ADR 0006 / ADR 0031 §9–§10's
   existing mechanism. An item unavailable in a market is a configuration
   row, never a code path.

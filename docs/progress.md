@@ -2779,3 +2779,210 @@ line — see the note at the top of this entry. Requires explicit human
 authorization per CLAUDE.md's stage-gate rule before any Bonus Engine,
 Gamification Engine, Reward Orchestrator, or sportsbook-bonus code is
 written.
+
+---
+
+## Stage 4H-A addendum — ledger-finance financial sign-off + product-owner-proxy scope review
+
+Two further Wave-2 specialists were dispatched after the first review
+round (code-reviewer/security/qa/casino, above) reported back and their
+fixes were committed: `ledger-finance` (the independent financial-
+correctness sign-off CLAUDE.md requires — "Financial/Ledger must
+independently approve all monetary accounting decisions" — before this
+stage's monetary architecture counts as reviewed) and `product-owner-
+proxy` (scope discipline against the B2C-MVP-first objective).
+
+### ledger-finance — verdict: PASS WITH FINDINGS, sign-off granted once 7 P1s applied
+
+No P0. Independently re-derived ADR 0032 §3's worked-example arithmetic
+from scratch and confirmed it correct; found no floating-point money, no
+balance mutation, no historical-entry edit, and no cache read on a
+money/points hot path anywhere in the reviewed set (all "Verified clean"
+in the review's own words). The 7 P1s were all gaps/drifts in the frozen
+contract, not wrong accounting — each was a place an implementer
+following the documents literally would have produced a posting breaking
+invariant B1, a money path with no defined double-entry treatment, or an
+idempotency/tombstone guarantee with no table to live on:
+
+1. **`financial-transaction-flows.md` was never updated for Rule B2 on
+   the bonus-funded *play* flows.** ADR 0032 §2's Rule B2 (every
+   `player_bonus` entry carries a `promo_liability`/`bonus_expense`
+   mirror pair) was only reflected in the bonus-specific Flows 12/14/15;
+   Flows 5 (casino bet), 6 (casino win), 7 (rollback), 9 (sportsbook
+   settlement), 11 (partial settlement), and 20 (jackpot carve-out) —
+   the flows carrying the *highest volume* of `player_bonus` entries —
+   still described only the two-entry cash-funded shape. An implementer
+   coding Flow 5 as written would post `Dr player_bonus / Cr
+   house_gaming` and break invariant B1 on the very first bonus-funded
+   spin, caught only by the hourly B1 sweep as a P1 incident. **Fixed**:
+   added the mirror-leg requirement to all six flows, added a new **Flow
+   21 — Externally-fulfilled bonus (no posting)** (ADR 0032's own
+   Consequences section had asked for this flow but it was never
+   written), and updated the summary table and ADR 0032's own
+   Consequences bullet to name the corrected flow list.
+2. **No authoritative mapping from Bonus Engine lifecycle events to
+   ledger transaction types; `cancelled` had no accounting treatment at
+   all.** Three coupled gaps: (a) both `granted` and `activated` were
+   emitted as lifecycle events with no statement of which one triggers
+   the ADR 0032 §3 grant posting — since the two events carry different
+   idempotency keys, a domain posting on both would double-credit
+   undetected; (b) a `converted` lifecycle event was never defined
+   despite ADR 0032 §4 requiring one to trigger the `bonus_conversion`
+   posting; (c) `cancelled` — a terminal state reachable after funds
+   already sit in `player_bonus` — had no posting and no
+   `transaction_type` at all. **Fixed**: added ADR 0032 §3.1, a binding
+   lifecycle-event → posting map table (one `bonus_grant` posting at
+   `activated` only, never `issued`; `converted` → `bonus_conversion`;
+   `cancelled` from an activated grant → `bonus_forfeiture`, identical
+   shape to expiry); added `converted` to doc 10 §6's event list and
+   corrected its §1.3 wording.
+3. **A no-wagering cash reward (`cash_credit`) had no defined double-
+   entry treatment anywhere**, despite being referenced as a supported
+   reward type in doc 10 §2 and doc 21's fulfillment-mechanism table,
+   both of which deferred to ADR 0032 for a treatment ADR 0032 never
+   defined. Using `promo_liability` for a direct cash credit would
+   violate B1 by construction, since nothing contingent is outstanding.
+   **Fixed**: added a two-entry direct-cash-reward treatment to ADR 0032
+   §3 (`Dr bonus_expense / Cr player_cash`, or `provider_payable` if
+   provider-funded) and clarified doc 10 §2's "Wagering axis with
+   multiplier 0" language is a lifecycle-state statement only, never two
+   postings.
+4. **Rule B2's applicability to `manual_adjustment` was unstated, and
+   ADR 0032 §7 prescribed `manual_adjustment` for the consumed portion
+   of a partly-consumed grant without naming a target account** — the
+   single most likely manual bonus-correction path could post `Dr
+   player_bonus / Cr manual_adjustment` with no mirror leg, breaking B1
+   on a four-eyes-approved action that looks entirely legitimate in the
+   audit log. **Fixed**: added an explicit "Rule B2 admits no exception
+   by transaction type" statement, and corrected §7 to target
+   `player_cash`, never `player_bonus`, for the consumed-portion
+   correction.
+5. **The Reward Orchestrator's reversal path had no tombstone, and
+   placed its single-reversal constraint on a table that doesn't exist
+   for money-moving mechanisms.** Rejecting (rather than tombstoning) a
+   reversal of a never-fulfilled decision reopens exactly the race
+   CLAUDE.md's rollback rule exists to prevent — a late-arriving original
+   could fulfill after its own reversal was rejected. And the `UNIQUE
+   (tenant_id, original_decision_id)` guarantee was placed on "the
+   reversal-tracking record," which the same document's own idempotency
+   section says exists only for badges and `external_provider_reward` —
+   not for `cash_credit`/`bonus_credit`/`points_credit`, the mechanisms
+   that actually move value. **Fixed**: the guarantee now defers to the
+   owning ledger's own `FOR UPDATE`-guarded single-reversal pattern for
+   money/points mechanisms, and a tombstone is written (in the owning
+   ledger or the Orchestrator's tracking table, per mechanism) rather
+   than a bare rejection.
+6. **The External Reward Provider contract was missing the per-reward-
+   type fulfilment-destination declaration ADR 0032 §6(c) explicitly
+   assigns to it** — doc 23's capability discovery listed reward *types*
+   a provider could fulfill with no destination dimension, so its own
+   Reversal row hedged ("if any monetary effect exists"), exactly the
+   guess-at-posting-time §6(c) forbids. **Fixed**: added a binding
+   fulfilment-destination flag (`into_platform_wallet` vs
+   `inside_provider`) to capability discovery, rejected at configuration
+   time if undeclared, and corrected the Reversal row to branch on it
+   (zero ledger effect for `inside_provider`, ordinary compensating
+   transaction for `into_platform_wallet`).
+7. **Cross-tenant points-spend isolation was justified by a premise this
+   round's own `PointType` dual-scope correction invalidated.** Doc 20
+   said tenant isolation "falls out of the point type's own scope" —
+   true only for a tenant-scoped `PointType`; for the platform-wide
+   definitions this stage's own doc 24 correction now permits, the point
+   type isolates nothing. **Fixed**: doc 20 §3/§10 now correctly attribute
+   isolation to the balance tables' `tenant_id NOT NULL` + RLS, never the
+   point type definition's own scope.
+
+4 of 5 P2s fixed (ADR 0032 §8's idempotency-key wording corrected from
+"event id" to `idempotency_key`, matching doc 22's terminology; doc 21's
+`amount_minor_units`/`points_amount` corrected to a decimal
+representation rather than `int64`, which overflows for an
+exponent-18 asset; doc 21's fulfillment-mapping table gained an inline
+zero-ledger-entries note for `external_provider_reward`; two new open
+decisions — pooled tournament prize-pool liability accounting, and
+split-prize/pro-rata rounding — added to ADR 0032's open-decisions list).
+1 P2 (a campaign budget-cap field with no enforcement mechanism anywhere
+— disclosed as `NOT IMPLEMENTED`/advisory-only in doc 10, not fixed) and
+1 P3 (a cosmetic `PointType` shape drift in doc 17, which already labels
+itself conceptual-only) were recorded rather than fixed.
+
+### product-owner-proxy — verdict: no P0/P1/P2 (scope-discipline review, not correctness)
+
+Read `CLAUDE.md`, `docs/architecture/14-mvp-scope-and-roadmap.md`, and
+the full Blueprint PDF (all 20 pages) and cross-checked every Stage 4H-A
+sub-capability against Blueprint §4 and doc 14's MVP baseline.
+
+**Top-line finding**: the Blueprint never mentions gamification, points,
+XP, levels, achievements, badges, missions, tournaments, leaderboards,
+streaks, a reward marketplace, raffles, or mini-games — its §4.5 "Bonus
+and promotion engine" is exactly Campaign→Offer→Grant→Progress with five
+config axes, precisely what `10-bonus-engine-architecture.md`
+implements, no more. `14-mvp-scope-and-roadmap.md`'s own B2C MVP scope
+also never mentions gamification anywhere. The entire Gamification
+Engine domain (docs 17-20) and the standalone Reward Orchestrator (doc
+21) are net-new scope introduced this stage with no anchor in the
+Blueprint and no anchor in this project's own previously-recorded
+roadmap. This was not specialists inventing scope unilaterally — the
+stage's own directive asked for it — but the review's finding is that it
+should now be reconciled with the MVP baseline document rather than left
+an unrecorded gap.
+
+Execution discipline within the frozen documents was found unusually
+strong for a body of work this size: nearly everything correctly labeled
+`NOT IMPLEMENTED`, dependencies stated as `ASSUMPTION`s rather than
+facts about other domains, several genuine `RECOMMENDATION`s correctly
+labeled as such, no place where a recommendation was dishonestly
+presented as a Blueprint requirement, and doc 17 §11 (raffles/mini-games)
+singled out as exactly the right proportionate treatment for a
+zero-mandate feature (two short paragraphs, explicitly "not scheduled,"
+refusing to design the hard regulatory/RNG question).
+
+Per-capability verdicts of note: **Tournaments (doc 18)** flagged as the
+single most disproportionately-designed sub-capability — its
+settlement/prize-arithmetic/anti-collusion depth exceeds parts of the
+Bonus Engine's own MVP-required core lifecycle, for a feature with zero
+scheduled build, and is the part of the design least likely to still be
+correct by the time (if ever) tournaments are authorized. **Reward
+Orchestrator (doc 21)** flagged as **premature abstraction** — a
+three-domain-ready fulfillment layer built ahead of a second concrete
+reward-producing domain, when Bonus Engine alone (the only domain
+actually required by the Blueprint/MVP) already has a sufficient
+lighter-weight fulfillment mechanism of its own (doc 10 §6). **Bonus
+Engine's own type matrix (doc 10 §2)** found justified at its core
+(Blueprint-required, MVP-scoped) but carrying tournament/mission/
+loyalty-reward rows and full external-bonus-engine coexistence that are
+B2B/future-Gamification-driven scope riding along on the MVP-required
+document. **`ExternalRewardProvider`/ADR 0033** found grounded in a real
+hybrid-licensing concern but sequenced ahead of need (Sportsbook is P3 in
+doc 14's own build order; no commercial sportsbook relationship exists;
+`09-sportsbook-architecture.md` doesn't exist yet).
+
+All findings applied to `14-mvp-scope-and-roadmap.md`'s "Features
+deliberately deferred" section: the Gamification Engine/Reward
+Marketplace/Reward Orchestrator domain added as deferred scope with the
+Blueprint-silence finding recorded; the `ExternalRewardProvider`
+contract added as sequenced-ahead-of-need; and an implementation-scope
+note added for whenever Stage 4H is authorized (scope the first slice to
+the MVP-required bonus types only — deposit, reload, cashback, generic
+wagering bonus, coupon — and do not build the Reward Orchestrator as a
+standalone domain unless Gamification is authorized alongside it).
+
+### Files touched in this addendum
+
+`docs/decisions/0032-bonus-accounting.md`, `docs/architecture/
+financial-transaction-flows.md`, `docs/architecture/10-bonus-engine-
+architecture.md`, `docs/architecture/20-reward-marketplace-architecture.md`,
+`docs/architecture/21-reward-orchestration-architecture.md`,
+`docs/architecture/23-external-reward-provider-contract.md`,
+`docs/architecture/14-mvp-scope-and-roadmap.md`. Governance:
+`docs/governance/task-registry.md` (4HA-12/13/14), `docs/governance/
+project-status.md`, `docs/progress.md` (this entry), `docs/active-
+stage.md`. No code, migration, or test files were created or modified —
+`go build ./...` re-run after all edits and remains clean.
+
+### Next stage
+
+Unchanged from the entry above: not started, requires explicit human
+authorization. This addendum closes out the remaining Wave-2 review
+findings (ledger-finance's required financial sign-off, now granted, and
+product-owner-proxy's scope-discipline review) that were still pending
+when this stage's first completion report was delivered.

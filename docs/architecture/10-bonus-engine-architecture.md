@@ -55,7 +55,15 @@ stage directive.
 - **Campaign** — the marketing/compliance container: name, time window,
   target segment definition, jurisdiction/licensing/tenant/brand scope
   (§8), budget cap, and — new this stage — a **fulfillment owner**
-  (`internal` vs `external:<provider_id>`, §3).
+  (`internal` vs `external:<provider_id>`, §3). **Wave-2 ledger-finance
+  review finding (P2)**: the budget cap field has no stated enforcement
+  mechanism anywhere in this document or in `internal/risk`'s per-player
+  rule shape (ADR 0031 §4.1's rules are all per-player, not
+  aggregate-scoped). It is `NOT IMPLEMENTED` and advisory only this
+  stage; if enforced, the natural point is server-side at `bonus_grant`
+  posting time, checked against that campaign's outstanding
+  `player_bonus` plus recognized `bonus_expense` — but that check, and
+  its owner, are not designed here.
 - **Offer** — a versioned rule set under a Campaign: the five
   configuration axes from the Stage 0 stub (Eligibility, Reward, Wagering,
   Payout, Abuse controls), unchanged in shape, detailed per bonus type in
@@ -96,7 +104,7 @@ stage directive.
 | `activated` → `in_progress` / Progress append | Automated rule evaluation | Every `round.settled` / `bet.settled` event whose stake the Offer's contribution rules recognize |
 | `activated`/`in_progress` → `completed` | Automated rule evaluation | Wagering multiplier reached, or a cashback window's settlement job closes the window |
 | `activated`/`in_progress` → `completed` | Provider callback | Externally-fulfilled Grant reports its own completion (§3) |
-| `completed` → `converted` | Automated rule evaluation | Conversion job applies payout rules (max cashout, cash/bonus ordering) and emits the conversion split instruction (§6) |
+| `completed` → `converted` | Automated rule evaluation | Conversion job applies payout rules (max cashout, cash/bonus ordering), emits the wagering split instruction (§6 item 1), and emits the `converted` lifecycle event (§6 item 2) — **specialist-review correction (Wave-2 ledger-finance P1-2)**: an earlier draft called this "the conversion split instruction (§6)," conflating the split instruction with the lifecycle event; ADR 0032 §3.1 binds `converted` to a `bonus_conversion` posting and requires the event to exist |
 | `completed` → `converted` | Staff action | Manual release override (documented exception, always audited, §10) |
 | `activated`/`in_progress`/`issued` → `expired` | Automated rule evaluation | Time-limit reached with no `completed` transition |
 | `issued`/`activated` → `cancelled` | Player action | Player opts out where the Offer permits it |
@@ -377,11 +385,19 @@ strengthened:
 2. **Lifecycle events** — `granted`, `activated`, `completed`
    (conversion-eligible, carrying the Offer's payout rules: max cashout,
    cash-first/bonus-first ordering, partial-release thresholds),
-   `expired` (forfeiture), `cancelled`, `reversed` — each carrying enough
-   context (Grant id, Offer version, amounts, reason code, correlation id)
-   for `ledger-finance`'s design to turn into actual balanced postings,
-   without Bonus Engine specifying account types, posting order, or
-   liability recognition timing.
+   `converted`, `expired` (forfeiture), `cancelled`, `reversed` — each
+   carrying enough context (Grant id, Offer version, amounts, reason code,
+   correlation id) for `ledger-finance`'s design to turn into actual
+   balanced postings, without Bonus Engine specifying account types,
+   posting order, or liability recognition timing. **Specialist-review
+   addition (Wave-2 ledger-finance P1-2)**: an earlier draft of this list
+   omitted `converted` even though ADR 0032 §4 defines a posting
+   (`bonus_conversion`) that only that event can trigger; ADR 0032 §3.1
+   is the binding event-to-posting map, including which single event
+   (`activated`, never `issued`) produces the one `bonus_grant` posting
+   per Grant, and how `cancelled` and a direct `cash_credit` reward both
+   post (`bonus_forfeiture` and a two-entry expense recognition
+   respectively — neither was previously defined anywhere).
 
 This split holds identically whether the Grant is `internal`- or
 `external`-fulfilled (§3.2) — Bonus Engine emits the same lifecycle event

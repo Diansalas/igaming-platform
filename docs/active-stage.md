@@ -85,6 +85,38 @@ reversal/void handling, demo-event exclusion enforced only as stated
 policy rather than structurally) were recorded as open follow-up items
 rather than fixed, per the stage's own architecture-freeze scope.
 
+### Addendum: ledger-finance financial sign-off + product-owner-proxy scope review
+
+Two further Wave-2 specialists completed after the first review round
+above: `ledger-finance` (independent financial sign-off, required by
+CLAUDE.md before any monetary architecture counts as reviewed) and
+`product-owner-proxy` (scope discipline).
+
+**ledger-finance: PASS WITH FINDINGS, sign-off granted once 7 P1s were
+applied** — all 7 fixed in-place across ADR 0032, `financial-transaction-
+flows.md` (Flows 5/6/7/9/11/20 gained the bonus-funded mirror legs an
+implementer following the frozen documents literally would have missed,
+breaking invariant B1 on the first bonus-funded bet; a new Flow 21 added
+for externally-fulfilled = no posting), and docs 10/20/21/23 (a binding
+lifecycle-event-to-posting map, a direct cash-reward treatment, an
+explicit `manual_adjustment` account/mirror-leg rule, a tombstone on
+Reward Orchestrator reversals of never-fulfilled decisions, a
+fulfilment-destination declaration on the External Reward Provider
+contract, and a corrected cross-tenant points-isolation rationale). Full
+detail: `docs/governance/project-status.md`'s Stage 4H-A addendum.
+
+**product-owner-proxy: no correctness findings, but a real scope-anchor
+gap** — read the full Blueprint (20 pages) and confirmed it never
+mentions gamification/points/XP/levels/achievements/badges/missions/
+tournaments/leaderboards/streaks/marketplace/raffles/mini-games; the
+entire Gamification Engine/Reward Marketplace/Reward Orchestrator domain
+(5 architecture documents this stage) had no anchor in the Blueprint or
+this project's prior MVP roadmap. Recorded as deferred scope in
+`14-mvp-scope-and-roadmap.md`, with the Reward Orchestrator flagged as
+premature abstraction and doc 18 (Tournaments) flagged as the most
+disproportionately-designed sub-capability, both for if/when this domain
+is ever authorized.
+
 ### Directive contradiction — flagged, not acted on
 
 The stage's directive was a detailed, internally consistent 27-section

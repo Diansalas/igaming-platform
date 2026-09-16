@@ -51,7 +51,7 @@ A conceptual shape every producer supplies:
 | `tenant_id` / `brand_id` / `player_account_id` | Server-derived scope, never client-supplied |
 | `source_domain` | `bonus`, `gamification`, or a future producer — for audit, never for branching fulfillment logic differently by producer where the reward *type* already determines the mechanism |
 | `reward_type` | One of a canonical vocabulary: `cash_credit`, `bonus_credit` (i.e. `player_bonus` wallet), `free_spins`, `free_bet`, `points_credit`, `badge_unlock`, `tournament_entry_credit`, `external_provider_reward`, etc. — extensible, but each new type requires an explicit fulfillment-mechanism mapping below, never a default/fallback guess |
-| `amount_minor_units` / `asset_code` | Present only for monetary `reward_type`s, same integer-minor-units discipline as the ledger |
+| `amount_minor_units` / `asset_code` | Present only for monetary `reward_type`s, same integer-minor-units discipline as the ledger — carried as a `NUMERIC(38,0)`-compatible decimal representation (decimal string over the wire), never an `int64` (an asset with exponent 18 per ADR 0021/CLAUDE.md overflows one); `points_amount` likewise per doc 24 §3. (Wave-2 ledger-finance review, P2.) |
 | `points_amount` / `point_type` | Present only for points-related `reward_type`s (see `docs/architecture/24-points-accounting-architecture.md` for the points ledger this credits) |
 | `fulfillment_hint` | Optional producer hint: "prefer external provider X if available" — the Orchestrator may override this if the hint's provider fails capability discovery, per campaign-level fallback policy owned by the producer domain, not invented here |
 | `jurisdiction_code` / `licensing_mode` | Threaded through from the producer exactly like every other Risk-consuming operation (ADR 0031 §9/§10) — the Orchestrator does not resolve these itself |
@@ -65,7 +65,7 @@ A conceptual shape every producer supplies:
 | `points_credit` | Points ledger (`docs/architecture/24-points-accounting-architecture.md`) | ledger-finance-designed points ledger, NOT `internal/ledger` |
 | `badge_unlock` / non-monetary gamification state | Gamification's own state store (no ledger involvement at all — **citation corrected per specialist review**: the governing rule is ADR 0032 §1's monetary test, "redemption value in a registered Asset, or we'd owe them in an Asset on request → ledger; otherwise no entry at all," not a doc 17 quotation that does not exist in that document) | gamification |
 | `tournament_entry_credit` | A `points_credit` when the entry fee is denominated in a `PointType`, **or genuinely nothing when entry is free** (no ledger effect, Gamification state only) — **specialist-review correction (P2 fix)**: an earlier draft of this row also offered a "`cash_credit`-shaped entry-fee waiver" option, which conflicts with ADR 0032 §1's own worked example ("Free tournament entry with no cash-value alternative → No [ledger entry] → Gamification state only," calling a ledger posting for this case "a defect: it inflates `promo_liability` with an obligation that can never be discharged in an asset"). If a tournament's entry fee is genuinely asset-denominated, that is not a "waiver" at all — it is an ordinary `cash_credit`/`points_credit` per the rows above, resolved the same way any other priced item is | whichever mechanism it resolves to, or no ledger effect at all for a free entry |
-| `external_provider_reward` | `ExternalRewardProvider.RequestReward` (`docs/architecture/23-external-reward-provider-contract.md`) | Reward Orchestrator itself, via the External Reward Provider contract |
+| `external_provider_reward` | `ExternalRewardProvider.RequestReward` (`docs/architecture/23-external-reward-provider-contract.md`) — **zero ledger entries** while the declared fulfilment destination is `inside_provider` (ADR 0032 §6(c)); ordinary ledger postings apply if the declared destination is `into_platform_wallet` (doc 23's capability-discovery destination flag) | Reward Orchestrator itself, via the External Reward Provider contract |
 
 **The Orchestrator never invents a NEW fulfillment mechanism outside this
 table.** A future reward type with no mapping is NOT IMPLEMENTED until
@@ -95,16 +95,47 @@ gate on who may authorize it). This document now defines the shape:
   `RewardDecision`, not a same-`decision_id` replay. It carries:
   `reversal_id` (its own idempotency key — distinct from, but linked to,
   the original `decision_id`), `original_decision_id` (mandatory,
-  validated to exist and to have actually been fulfilled — a reversal of
-  a decision the Orchestrator never fulfilled is rejected, not silently
-  accepted), `reason_code` (mandatory), and `initiated_by` (the actor —
-  system-driven for an automated void/rollback-triggered compensation, or
-  staff-driven for a manual reversal).
-- **Single-reversal guarantee**: a `UNIQUE (tenant_id, original_decision_id)`
-  constraint on the reversal-tracking record — mirroring doc 24 §4.2's
-  already-correct `FOR UPDATE`-guarded single-reversal pattern for points
-  — so a retried or duplicated reversal request for the same original
-  decision produces exactly one compensating effect, never two.
+  validated per mechanism as below), `reason_code` (mandatory), and
+  `initiated_by` (the actor — system-driven for an automated
+  void/rollback-triggered compensation, or staff-driven for a manual
+  reversal).
+- **Single-reversal guarantee, per mechanism.** **Wave-2 ledger-finance
+  review correction (P1-5)**: an earlier draft placed this guarantee on
+  "the reversal-tracking record" unconditionally, but the Orchestrator's
+  own tracking table (see "Idempotency and concurrency," below) exists
+  only for `badge_unlock`/non-monetary state and `external_provider_
+  reward` — for `cash_credit`/`bonus_credit` (money ledger) and
+  `points_credit` (points ledger) there is no such row, so a constraint
+  on it would guarantee nothing for the mechanisms that actually move
+  value. The guarantee is therefore the **owning ledger's own**, not a
+  second registry: for `cash_credit`/`bonus_credit`/`points_credit`, the
+  original transaction is selected `FOR UPDATE` and the reversal rejected
+  if a transaction already reverses it (`docs/decisions/0032-bonus-
+  accounting.md` §7; `docs/architecture/24-points-accounting-
+  architecture.md` §4.2). `original_decision_id`'s existence and
+  fulfilled-ness are established by looking that transaction up on the
+  owning ledger's own idempotency key (`(tenant_id, idempotency_key =
+  original decision_id)`), not by a tracking row the Orchestrator does
+  not keep for these mechanisms. Only for `badge_unlock`/non-monetary
+  state and `external_provider_reward` — the mechanisms that *do* have an
+  Orchestrator tracking row — does the Orchestrator additionally carry
+  `UNIQUE (tenant_id, original_decision_id)` on that row (mirroring doc
+  24 §4.2's `FOR UPDATE`-guarded single-reversal pattern for points).
+- **Reversal of a never-fulfilled decision writes a tombstone, it is not
+  merely rejected.** **Wave-2 ledger-finance review correction (P1-5)**:
+  an earlier draft said such a reversal "is rejected, not silently
+  accepted" — rejection alone reopens exactly the race CLAUDE.md's
+  rollback rule exists to prevent, because the late-arriving original
+  `RewardDecision` can then fulfill *after* its own reversal was
+  rejected, crediting a wallet or points balance for a reward that was
+  already clawed back. A `RewardReversalDecision` whose
+  `original_decision_id` the owning ledger has never posted instead
+  writes a tombstone occupying that original's own idempotency slot — in
+  the owning ledger for `cash_credit`/`bonus_credit`/`points_credit`
+  (ADR 0032 §7 / doc 24 §4.2's `postRollbackTombstone`-equivalent
+  mechanism), or in the Orchestrator's own tracking table for
+  `badge_unlock`/`external_provider_reward` — so the late-arriving
+  original is rejected rather than fulfilled after its own reversal.
 - **Fulfillment-mechanism-specific reversal**: for `cash_credit`/
   `bonus_credit`/`points_credit`, the reversal is an ordinary compensating
   ledger/points entry via `reverses_transaction_id` (inherited, not

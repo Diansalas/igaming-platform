@@ -32,6 +32,53 @@ ISO 27001 posture (year-two per Blueprint §8).
   the destination, until a partner/jurisdiction demands it).
 - CRM journey-builder depth beyond what's needed to trigger bonus grants.
 - ISO 27001 formal certification work.
+- **Gamification Engine in full** (points/XP/levels/achievements/badges/
+  missions/challenges/tournaments/leaderboards/streaks), **the Reward
+  Marketplace**, and **the standalone Reward Orchestrator** —
+  architecture frozen speculatively in Stage 4H-A ahead of any product or
+  business requirement. Added by a Wave-2 `product-owner-proxy` scope
+  review of Stage 4H-A's architecture-freeze deliverables: the Blueprint
+  (all 20 pages, reviewed in full for this finding) never mentions
+  gamification, points, XP, levels, achievements, badges, missions,
+  tournaments, leaderboards, streaks, a reward marketplace, raffles, or
+  mini-games — its §4.5 "Bonus and promotion engine" is exactly
+  Campaign→Offer→Grant→Progress with five config axes, precisely what
+  this document's MVP scope above already lists. This domain has no
+  anchor in the Blueprint and no anchor anywhere in this roadmap prior to
+  Stage 4H-A. Revisit when a concrete retention/engagement product
+  requirement or B2B partner need is identified, not before — and when it
+  is, note that `18-tournament-architecture.md`'s settlement/prize-
+  arithmetic/anti-collusion depth is the part of the frozen design most
+  likely to need re-scoping at that time (it carries more design rigor
+  than the Bonus Engine's own core lifecycle received, for a feature with
+  zero scheduled build, and will need re-review against whatever RG/
+  Risk/identity-resolution shape exists by then).
+- **The `ExternalRewardProvider`/External Reward Provider contract**
+  (`docs/decisions/0033-provider-interoperability-and-external-bonus-
+  engines.md`, `docs/architecture/23-external-reward-provider-contract.md`)
+  — grounded in a real hybrid-licensing/sportsbook-interop concern
+  (Blueprint §4.4's widget/iframe framing), so it clears the
+  future-B2B-architecture bar in principle, but sequenced ahead of need:
+  Sportsbook is P3 in this document's own build order below, no
+  commercial sportsbook relationship exists yet, and
+  `09-sportsbook-architecture.md` does not exist yet either. Defer further
+  work on it until sportsbook architecture actually starts.
+
+**Bonus Engine implementation scope note** (added by the same review):
+when Stage 4H (Bonus Engine implementation) is authorized, scope it to
+`10-bonus-engine-architecture.md`'s core lifecycle for the bonus types
+this document's MVP scope actually needs (deposit, reload, cashback,
+generic wagering bonus, coupon) — treat that document §2's tournament/
+mission/loyalty-reward type-matrix rows as blocked on the deferred
+Gamification Engine and out of the first implementation slice, not as
+implied-included; and do not build the Reward Orchestrator as a
+standalone domain in that same stage unless Gamification is authorized
+alongside it — confirm at that time whether Bonus Engine can fulfill
+directly through `wallet`/`ledger` and Casino's free-round interface
+(once built) without the extra orchestration layer, since building a
+three-domain-ready orchestration layer ahead of a second concrete
+reward-producing domain is exactly the "generality for a hypothetical
+future need" `CLAUDE.md`'s scope test exists to catch.
 
 Recorded here rather than silently dropped, per `CLAUDE.md`'s scope-
 expansion test — revisit each when the corresponding trigger condition
