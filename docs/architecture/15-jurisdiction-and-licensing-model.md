@@ -114,8 +114,41 @@ jurisdiction rows or ruleset content added). Full
 ruleset resolution, payment filtering) is implemented as each owning
 subsystem is built (Stages 3–4).
 
+## Risk & Limits consumption (Stage 4G-FINAL)
+
+`internal/risk` (Stage 4G, `docs/decisions/0031-risk-and-limits-engine.md`)
+consumes two fields from this model directly, as plain scope dimensions
+on `RiskRequest`/`Rule` - it never queries `jurisdictions`, `licences`, or
+`tenants` itself, and every value below is resolved by the CALLING domain
+from its own trusted context, exactly like `TenantID`/`BrandID` already
+are:
+
+- **`JurisdictionCode`** (`jurisdictions.code`) - lets a risk rule express
+  a legal/jurisdiction-specific ceiling (e.g. a `HARD_LIMIT` on max stake
+  for a specific market). Migration 0042 added
+  `casino_launch_sessions.jurisdiction_code`, populated once at launch
+  time from whatever jurisdiction context `LaunchGame`'s own caller
+  resolved, and read back by `postBet` for every subsequent bet in that
+  round - see ADR 0031 §9 for the full design and why this was previously
+  reachable only at launch time, not bet time.
+- **`LicensingMode`** (`tenants.licensing_model`) - lets a risk rule
+  distinguish "this is our OWN platform licence's legal ceiling" from "a
+  general commercial policy," so a platform-wide `HARD_LIMIT` does not
+  accidentally bind a future self-licensed (BYOL) tenant operating under
+  a completely different licence's own legal regime. See ADR 0031 §10.
+  No BYOL tenant is onboarded by this addition - it is the contract a
+  future one will rely on.
+
+Both remain OPTIONAL scope dimensions (empty/unscoped matches every
+value of that dimension) - existing and future rules that don't need
+this distinction are entirely unaffected. Full precedence/specificity
+rules for how these interact with every other `Rule` dimension are
+`internal/risk`'s own concern (ADR 0031 §5), not duplicated here.
+
 ## Ownership
 
 `architect` owns this schema; `identity-compliance` owns the KYC/AML/RG
 ruleset content it points to; `payments` and `data-analytics` consume it
-for their own filtering.
+for their own filtering; `risk` consumes `jurisdiction_code`/
+`licensing_model` as read-only `RiskRequest` scope dimensions (Stage
+4G-FINAL) without owning or modifying this schema.

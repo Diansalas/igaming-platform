@@ -53,8 +53,21 @@ type LaunchSession struct {
 	ProviderGameID  string
 	AssetCode       string
 	Mode            GameMode
-	Status          LaunchSessionStatus
-	ExpiresAt       time.Time
+	// JurisdictionCode is the jurisdiction LaunchGame resolved at mint
+	// time (Stage 4G-FINAL Part C - migration 0042), denormalized here
+	// exactly like ProviderGameID/AssetCode so the round's own
+	// jurisdiction context stays fixed for its whole lifetime even if the
+	// player's resolved jurisdiction could theoretically change mid-round.
+	// Empty when LaunchGame itself had no resolved jurisdiction to persist
+	// (TODO(jurisdiction) - see LaunchGameParams' own doc comment) - never
+	// silently defaulted to a real code. Populated for a DEMO-mode session
+	// too (LaunchGame computes it unconditionally, before branching on
+	// Mode) - harmless: postBet already rejects any non-real-mode session
+	// before ever reading this field, so a demo session's persisted value
+	// is inert data, never consulted by risk (casino integration review).
+	JurisdictionCode string
+	Status           LaunchSessionStatus
+	ExpiresAt        time.Time
 }
 
 // CreateLaunchSessionParams is CreateLaunchSession's input. All identity
@@ -65,16 +78,17 @@ type LaunchSession struct {
 // the already-resolved, eligibility-checked Game (ResolveLaunchEligibility),
 // never re-derived from client input at this point.
 type CreateLaunchSessionParams struct {
-	TenantID        uuid.UUID
-	BrandID         uuid.UUID
-	PlayerAccountID uuid.UUID
-	WalletID        uuid.UUID
-	GameID          uuid.UUID
-	ProviderID      string
-	ProviderGameID  string
-	AssetCode       string
-	Mode            GameMode
-	TTL             time.Duration
+	TenantID         uuid.UUID
+	BrandID          uuid.UUID
+	PlayerAccountID  uuid.UUID
+	WalletID         uuid.UUID
+	GameID           uuid.UUID
+	ProviderID       string
+	ProviderGameID   string
+	AssetCode        string
+	Mode             GameMode
+	JurisdictionCode string
+	TTL              time.Duration
 }
 
 // CreateLaunchSession mints a brand-new, single-use, opaque launch
@@ -106,10 +120,11 @@ func CreateLaunchSession(ctx context.Context, tx pgx.Tx, params CreateLaunchSess
 	_, err = tx.Exec(ctx,
 		`INSERT INTO casino_launch_sessions
 			(id, tenant_id, brand_id, player_account_id, wallet_id, game_id, provider_id, provider_game_id,
-			 asset_code, mode, token_hash, status, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'active', $12)`,
+			 asset_code, mode, jurisdiction_code, token_hash, status, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, ''), $12, 'active', $13)`,
 		id, params.TenantID, params.BrandID, params.PlayerAccountID, params.WalletID, params.GameID,
-		params.ProviderID, params.ProviderGameID, params.AssetCode, params.Mode, hashLaunchToken(token), expiresAt,
+		params.ProviderID, params.ProviderGameID, params.AssetCode, params.Mode, params.JurisdictionCode,
+		hashLaunchToken(token), expiresAt,
 	)
 	if err != nil {
 		return LaunchSession{}, "", fmt.Errorf("casino: create launch session: %w", err)
@@ -118,7 +133,8 @@ func CreateLaunchSession(ctx context.Context, tx pgx.Tx, params CreateLaunchSess
 	return LaunchSession{
 		ID: id, TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID,
 		WalletID: params.WalletID, GameID: params.GameID, ProviderID: params.ProviderID, ProviderGameID: params.ProviderGameID,
-		AssetCode: params.AssetCode, Mode: params.Mode, Status: LaunchSessionActive, ExpiresAt: expiresAt,
+		AssetCode: params.AssetCode, Mode: params.Mode, JurisdictionCode: params.JurisdictionCode,
+		Status: LaunchSessionActive, ExpiresAt: expiresAt,
 	}, token, nil
 }
 
@@ -145,18 +161,22 @@ func ResolveLaunchToken(ctx context.Context, tx pgx.Tx, rawToken string) (Launch
 
 	var s LaunchSession
 	var status LaunchSessionStatus
+	var jurisdictionCode *string
 	err := tx.QueryRow(ctx,
 		`SELECT id, tenant_id, brand_id, player_account_id, wallet_id, game_id, provider_id, provider_game_id,
-			asset_code, mode, status, expires_at
+			asset_code, mode, jurisdiction_code, status, expires_at
 		 FROM casino_launch_sessions WHERE token_hash = $1`,
 		hash,
 	).Scan(&s.ID, &s.TenantID, &s.BrandID, &s.PlayerAccountID, &s.WalletID, &s.GameID, &s.ProviderID, &s.ProviderGameID,
-		&s.AssetCode, &s.Mode, &status, &s.ExpiresAt)
+		&s.AssetCode, &s.Mode, &jurisdictionCode, &status, &s.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return LaunchSession{}, ErrLaunchSessionNotFound
 	}
 	if err != nil {
 		return LaunchSession{}, fmt.Errorf("casino: resolve launch token: %w", err)
+	}
+	if jurisdictionCode != nil {
+		s.JurisdictionCode = *jurisdictionCode
 	}
 
 	if status != LaunchSessionActive {
@@ -202,18 +222,22 @@ func ResolveLaunchToken(ctx context.Context, tx pgx.Tx, rawToken string) (Launch
 func GetLaunchSessionByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (LaunchSession, error) {
 	var s LaunchSession
 	var status LaunchSessionStatus
+	var jurisdictionCode *string
 	err := tx.QueryRow(ctx,
 		`SELECT id, tenant_id, brand_id, player_account_id, wallet_id, game_id, provider_id, provider_game_id,
-			asset_code, mode, status, expires_at
+			asset_code, mode, jurisdiction_code, status, expires_at
 		 FROM casino_launch_sessions WHERE id = $1`,
 		id,
 	).Scan(&s.ID, &s.TenantID, &s.BrandID, &s.PlayerAccountID, &s.WalletID, &s.GameID, &s.ProviderID, &s.ProviderGameID,
-		&s.AssetCode, &s.Mode, &status, &s.ExpiresAt)
+		&s.AssetCode, &s.Mode, &jurisdictionCode, &status, &s.ExpiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return LaunchSession{}, ErrLaunchSessionNotFound
 	}
 	if err != nil {
 		return LaunchSession{}, fmt.Errorf("casino: get launch session by id: %w", err)
+	}
+	if jurisdictionCode != nil {
+		s.JurisdictionCode = *jurisdictionCode
 	}
 	s.Status = status
 	return s, nil

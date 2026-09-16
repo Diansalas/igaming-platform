@@ -42,3 +42,8 @@ may mark it integrated/complete.
    governing directive for the exact bar (this project's convention to
    date: fix all P0/P1 before the completion report, record P2s
    explicitly rather than silently dropping them).
+7. **Test results are reported per the standard in
+   `docs/testing/testing-strategy.md`'s "Test reporting standard"**
+   (Stage 4G-FINAL) — PASS/FAIL/FLAKE/NOT RUN/BLOCKED per suite, never a
+   blanket "all clean" when any suite actually failed or flaked. A FLAKE
+   verdict requires stated evidence, not just the label.

@@ -1171,6 +1171,7 @@ paths:
               properties:
                 brand_id: { type: string, format: uuid }
                 jurisdiction_code: { type: string }
+                licensing_mode: { type: string, enum: [under_platform_licence, own_licence], description: "Stage 4G-FINAL: scopes the rule to tenants operating under this licensing arrangement (tenants.licensing_model). Omitted means the rule applies regardless of licensing mode." }
                 player_account_id: { type: string, format: uuid }
                 product: { type: string, enum: [casino, sportsbook, payments, bonus] }
                 operation:
@@ -1399,6 +1400,7 @@ components:
         tenant_id: { type: string, format: uuid, description: "Absent/empty means platform-wide" }
         brand_id: { type: string, format: uuid }
         jurisdiction_code: { type: string }
+        licensing_mode: { type: string, enum: [under_platform_licence, own_licence], description: "Stage 4G-FINAL: absent means the rule applies regardless of licensing mode" }
         player_account_id: { type: string, format: uuid }
         product: { type: string, enum: [casino, sportsbook, payments, bonus] }
         operation:

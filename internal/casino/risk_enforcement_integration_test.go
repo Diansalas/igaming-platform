@@ -41,6 +41,88 @@ func createCasinoRiskRule(t *testing.T, pool *db.Pool, f casinoFixture, params r
 	return r
 }
 
+// mintSessionWithJurisdiction is mintSession plus a persisted
+// jurisdiction_code (migration 0042, Stage 4G-FINAL Part C) - proves a
+// jurisdiction-scoped risk rule is reachable from postBet, not only from
+// LaunchGame (the gap Stage 4G's own completion report disclosed).
+func mintSessionWithJurisdiction(t *testing.T, pool *db.Pool, f casinoFixture, providerID, assetCode, jurisdictionCode string) uuid.UUID {
+	t.Helper()
+	game := seedGame(t, pool, providerID, assetCode)
+	var sessionID uuid.UUID
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		session, _, err := CreateLaunchSession(ctx, tx, CreateLaunchSessionParams{
+			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID,
+			GameID: game.ID, ProviderID: providerID, ProviderGameID: game.ProviderGameID,
+			AssetCode: assetCode, Mode: ModeReal, JurisdictionCode: jurisdictionCode,
+		})
+		if err != nil {
+			return err
+		}
+		sessionID = session.ID
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("mint launch session with jurisdiction: %v", err)
+	}
+	return sessionID
+}
+
+// seedJurisdiction creates a real jurisdictions row (casino_launch_sessions.
+// jurisdiction_code and risk_rules.jurisdiction_code both FK into it) -
+// mirrors internal/identity/identity_integration_test.go's identical
+// seeding pattern.
+func seedJurisdiction(t *testing.T, pool *db.Pool) string {
+	t.Helper()
+	code := "TEST-" + uuid.NewString()[:8]
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO jurisdictions (code, name) VALUES ($1, 'Test Jurisdiction')`, code)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed jurisdiction: %v", err)
+	}
+	return code
+}
+
+// TestReceiveCallback_BetDeniedByJurisdictionScopedRiskRuleViaLaunchSession
+// is Stage 4G-FINAL Part C's own regression: a jurisdiction-scoped
+// HARD_LIMIT must be reachable from postBet via the SAME jurisdiction
+// LaunchGame resolved and persisted onto the session (migration 0042) -
+// Stage 4G's own completion report explicitly disclosed this as
+// UNREACHABLE before this fix.
+func TestReceiveCallback_BetDeniedByJurisdictionScopedRiskRuleViaLaunchSession(t *testing.T) {
+	pool := testPool(t)
+	f := seedCasinoFixture(t, pool)
+	fundWallet(t, pool, f, 100000)
+	jurisdictionCode := seedJurisdiction(t, pool)
+	provider := NewMockCasinoProvider("mock-casino", "EUR")
+	registerCasinoCapability(t, pool, f, provider, 100)
+	sessionID := mintSessionWithJurisdiction(t, pool, f, "mock-casino", "EUR", jurisdictionCode)
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+
+	createCasinoRiskRule(t, pool, f, risk.CreateRuleParams{
+		JurisdictionCode: jurisdictionCode, Operation: risk.OperationCasinoBet,
+		LimitKind: risk.LimitMaxAmount, TimeWindow: risk.WindowTransaction, Threshold: 50, RuleKind: risk.RuleHardLimit,
+	})
+
+	payload := provider.CallbackPayload(CallbackEventBet, "bet-jurisdiction", "", "round-1", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	var result ReceiveCallbackResult
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("ReceiveCallback: %v", err)
+	}
+	if result.Outcome != OutcomeDeclined || result.DeclineReason != risk.CodeHardLimitBreach {
+		t.Fatalf("expected the jurisdiction-scoped hard limit to deny a 75-unit bet (threshold 50), got %+v", result)
+	}
+	if balance := cashBalance(t, pool, f); balance != 100000 {
+		t.Fatalf("expected the funded balance unchanged after a jurisdiction-scoped risk denial, got %d", balance)
+	}
+}
+
 func TestLaunchGame_DeniedByRiskHardLimit(t *testing.T) {
 	pool := testPool(t)
 	f := seedCasinoFixture(t, pool)

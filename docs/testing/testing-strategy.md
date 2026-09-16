@@ -58,6 +58,35 @@ bonus grant → wagering progress → payout or forfeiture.
 - `code-reviewer` checks that claimed test coverage actually exercises the
   failure modes it claims to, not just that tests exist.
 
+## Test reporting standard (Stage 4G-FINAL)
+
+Every completion report's test section states, per test suite/command
+run, one of exactly five results — never a blanket "all clean" when any
+suite actually flaked or failed:
+
+- **PASS** — ran, every test passed, no flake observed.
+- **FAIL** — ran, at least one test failed and the failure is real
+  (reproducible, not investigated-and-dismissed as infrastructure noise).
+  A stage is not complete with an unresolved FAIL on anything the stage
+  touched.
+- **FLAKE** — ran, failed at least once, but investigated and determined
+  to be genuine non-determinism (not a correctness defect) — the report
+  states the evidence for that conclusion (reproduction rate, isolated
+  re-run results, root-cause mechanism if known), never just the label.
+  A FLAKE the investigation cannot explain is a FAIL, not a FLAKE.
+- **NOT RUN** — the suite exists but was not executed this stage (e.g. a
+  suite gated on infrastructure unavailable in this environment) — the
+  report states why.
+- **BLOCKED** — the suite could not run due to an environment/dependency
+  problem outside the change being validated (e.g. the database was
+  unreachable) — distinct from NOT RUN in that it was ATTEMPTED and
+  failed to execute at all, not skipped by choice.
+
+For every suite, the report states: the exact command, the result, the
+specific failure/flake if any, whether it blocks stage completion, and
+the reason for that blocking determination. See any Stage 4G-FINAL-or-
+later completion report's own test matrix for the applied format.
+
 ## What "done" requires
 
 Every deliverable is labeled one of `IMPLEMENTED`, `PARTIALLY

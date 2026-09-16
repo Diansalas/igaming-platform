@@ -118,15 +118,27 @@ type Rule struct {
 	TenantID         *uuid.UUID
 	BrandID          *uuid.UUID
 	JurisdictionCode string
-	PlayerAccountID  *uuid.UUID
-	Product          string
-	Operation        Operation
-	ProviderID       string
-	GameID           *uuid.UUID
-	AssetCode        string
-	PaymentMethod    string
-	LimitKind        LimitKind
-	TimeWindow       TimeWindow
+	// LicensingMode scopes a rule to tenants operating under a specific
+	// licensing arrangement - "under_platform_licence" or "own_licence"
+	// (Stage 4G-FINAL Part D), mirroring tenants.licensing_model exactly
+	// (never a new taxonomy). Empty means "applies regardless of
+	// licensing mode." A platform-wide (TenantID nil) HARD_LIMIT
+	// expressing the PLATFORM's own licence's legal ceiling MUST set this
+	// explicitly to "under_platform_licence" - left empty, it would
+	// otherwise also bind a future bring-your-own-licence tenant
+	// operating under a different licence's own legal regime, which is
+	// exactly the gap this field exists to close. See
+	// docs/decisions/0031-risk-and-limits-engine.md §10.
+	LicensingMode   string
+	PlayerAccountID *uuid.UUID
+	Product         string
+	Operation       Operation
+	ProviderID      string
+	GameID          *uuid.UUID
+	AssetCode       string
+	PaymentMethod   string
+	LimitKind       LimitKind
+	TimeWindow      TimeWindow
 	// Threshold is minor units, matching the asset's own registered
 	// exponent - never floating point (CLAUDE.md's financial rules).
 	Threshold          int64
@@ -152,14 +164,19 @@ type Rule struct {
 //
 // Scored as a bitmask, one bit per scope dimension, ordered most to least
 // specific: player > game > provider > asset > payment_method > product >
-// brand > tenant > jurisdiction - directive §16's own suggested ordering,
-// extended to cover EVERY optional scope field. Each bit strictly
-// outweighs the sum of every lower bit combined (a plain property of
-// binary place value), so a single player-scoped rule always beats any
-// combination of lower-ranked dimensions, while a rule that ALSO narrows
-// by an additional dimension (e.g. tenant+asset) is correctly scored as
-// MORE specific than a rule matching on tenant alone - closing a P1 found
-// in specialist review: the previous single-highest-dimension-only scheme
+// brand > tenant > jurisdiction > licensing_mode - directive §16's own
+// suggested ordering, extended to cover EVERY optional scope field.
+// licensing_mode ranks below jurisdiction deliberately (Stage 4G-FINAL
+// Part D): it is a broader, binary categorization (platform-operated vs.
+// bring-your-own-licence) rather than a specific legal jurisdiction, so a
+// rule narrowed by an actual jurisdiction is treated as more specific
+// than one narrowed only by licensing mode. Each bit strictly outweighs
+// the sum of every lower bit combined (a plain property of binary place
+// value), so a single player-scoped rule always beats any combination of
+// lower-ranked dimensions, while a rule that ALSO narrows by an
+// additional dimension (e.g. tenant+asset) is correctly scored as MORE
+// specific than a rule matching on tenant alone - closing a P1 found in
+// specialist review: the previous single-highest-dimension-only scheme
 // treated "tenant only" and "tenant+asset" as an ARTIFICIAL TIE, which
 // forced ErrConflictingRules (and therefore a fail-closed outage of the
 // entire operation for that tenant) for two rules that were never
@@ -167,30 +184,33 @@ type Rule struct {
 func (r Rule) specificity() int {
 	score := 0
 	if r.PlayerAccountID != nil {
-		score |= 1 << 8
+		score |= 1 << 9
 	}
 	if r.GameID != nil {
-		score |= 1 << 7
+		score |= 1 << 8
 	}
 	if r.ProviderID != "" {
-		score |= 1 << 6
+		score |= 1 << 7
 	}
 	if r.AssetCode != "" {
-		score |= 1 << 5
+		score |= 1 << 6
 	}
 	if r.PaymentMethod != "" {
-		score |= 1 << 4
+		score |= 1 << 5
 	}
 	if r.Product != "" {
-		score |= 1 << 3
+		score |= 1 << 4
 	}
 	if r.BrandID != nil {
-		score |= 1 << 2
+		score |= 1 << 3
 	}
 	if r.TenantID != nil {
-		score |= 1 << 1
+		score |= 1 << 2
 	}
 	if r.JurisdictionCode != "" {
+		score |= 1 << 1
+	}
+	if r.LicensingMode != "" {
 		score |= 1 << 0
 	}
 	return score
@@ -212,12 +232,20 @@ type RiskRequest struct {
 	BrandID          uuid.UUID
 	PlayerAccountID  uuid.UUID
 	JurisdictionCode string
-	Product          string
-	Operation        Operation
-	ProviderID       string
-	GameID           uuid.UUID
-	AssetCode        string
-	PaymentMethod    string
+	// LicensingMode is the requesting tenant's OWN licensing_model
+	// (tenants.licensing_model - "under_platform_licence" or
+	// "own_licence"), resolved server-side by the caller exactly like
+	// every other identity field on this struct - risk.Evaluate never
+	// looks it up itself. Required for a request to ever match a rule
+	// scoped by LicensingMode; left empty only matches rules that leave
+	// LicensingMode unscoped too. See Rule.LicensingMode's doc comment.
+	LicensingMode string
+	Product       string
+	Operation     Operation
+	ProviderID    string
+	GameID        uuid.UUID
+	AssetCode     string
+	PaymentMethod string
 	// Amount is minor units for THIS operation (e.g. the stake being
 	// placed) - required whenever a matching rule needs it.
 	Amount int64

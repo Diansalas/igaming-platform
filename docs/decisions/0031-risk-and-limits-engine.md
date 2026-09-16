@@ -139,30 +139,12 @@ commits - no change to `internal/risk` itself.
   compliance workflow, rather than blocking like `DENY`? Not resolved -
   this stage's only consumer (`internal/casino`) blocks on both. A future
   stage introducing an actual compliance review queue would revisit this.
-- **Jurisdiction-scoped rules are reachable ONLY from `LaunchGame`, never
-  from `postBet`** - a real, disclosed gap found by specialist review.
-  `LaunchGame` forwards its own `params.JurisdictionCode` into
-  `RiskRequest`; `postBet` cannot, because `casino_launch_sessions` does
-  not persist the jurisdiction resolved at launch time and no other
-  source of a per-bet jurisdiction exists anywhere in this codebase today
-  (the same already-documented "TODO(jurisdiction)" gap
-  `LaunchGameParams.JurisdictionCode`'s own doc comment names, not a new
-  one this stage introduces). A jurisdiction-scoped `HARD_LIMIT` intended
-  to bind bet-time as well as launch-time must ALSO be created as a
-  tenant-scoped (or platform-wide, jurisdiction-less) rule until
-  jurisdiction is persisted on the launch session - a future, scoped
-  schema change, not attempted here.
-- **No licence-mode dimension exists** - a platform-wide `HARD_LIMIT`
-  (`tenant_id IS NULL`) is enforced identically inside EVERY tenant,
-  including a future bring-your-own-licence (BYOL) tenant operating under
-  a completely different jurisdiction's own legal regime (`tenants.
-  licensing_model`, migration 0001). `jurisdiction_code` is the only
-  partial mitigation, and per the gap above it is not even reachable at
-  bet time yet. No BYOL tenant exists as of this stage, so this is not
-  yet a live incident, but it is recorded here explicitly rather than
-  left for a future stage to discover silently - CLAUDE.md's hybrid-
-  licensing model (ADR 0006) will need a licensing-mode-aware scoping
-  dimension before a real BYOL tenant onboards.
+  See §11 below for why this is a deliberately preserved three-way
+  distinction, not a simplification opportunity.
+- ~~Jurisdiction-scoped rules are reachable ONLY from `LaunchGame`, never
+  from `postBet`~~ - **closed, Stage 4G-FINAL Part C.** See §9 below.
+- ~~No licence-mode dimension exists~~ - **closed, Stage 4G-FINAL Part
+  D.** See §10 below.
 - **No role can create a genuinely platform-wide rule via HTTP** -
   `risk_config:manage` is held only by `RoleRiskManager`, which (like
   every non-`platform_admin` `StaffRole`) is always tenant-scoped
@@ -184,6 +166,243 @@ commits - no change to `internal/risk` itself.
   existence of a resource outside the caller's own authorization" pattern
   (identical to `internal/kyc`'s own 404-never-403 precedent, ADR 0029
   §4a) rather than leaking that a differently-scoped rule exists.
+
+## Stage 4G-FINAL: hardening addendum
+
+Stage 4G-FINAL's directive was explicit: no new business functionality,
+harden the platform core so it is safe to build future domains on. The
+sections below are that hardening, not a redesign - `risk.Evaluate`'s
+signature, the rule table's shape, and every Stage 4G decision above are
+unchanged except where a section below says otherwise.
+
+### 9. Jurisdiction context architecture (Part C)
+
+**What authoritative jurisdiction context Risk requires**: a single
+string, `RiskRequest.JurisdictionCode`, matching a real `jurisdictions.
+code` row (or empty, meaning "no jurisdiction context resolved for this
+request"). `internal/risk` has never needed more than this - it is a
+scope-matching value, not a geolocation computation, and this stage does
+not add one.
+
+**Where it originates**: `LaunchGameParams.JurisdictionCode`, resolved by
+whatever caller invokes `LaunchGame` (an HTTP handler today) from
+whatever source that caller trusts - a player's registered country, a
+tenant's own default market, or (still, honestly) nothing at all. This
+stage does not add a geolocation vendor or a per-player jurisdiction
+resolver; `TODO(jurisdiction)` at that root cause is unchanged.
+
+**How it is associated with the player/session/operation**: this is the
+actual gap Stage 4G-FINAL closes. Before this stage, `LaunchGame` used
+its resolved jurisdiction once, to evaluate risk at launch time, then
+discarded it - the value never reached `casino_launch_sessions`. Migration
+0042 adds `casino_launch_sessions.jurisdiction_code`, populated once at
+`CreateLaunchSession` time (denormalized exactly like `provider_game_id`/
+`asset_code` already were) and never updated afterward. The session is
+therefore now the single source of jurisdiction context for its own
+entire lifetime - launch AND every subsequent bet.
+
+**How casino launch uses it**: unchanged - `LaunchGame` still resolves
+`jurisdictionCode` from `params.JurisdictionCode` and evaluates risk with
+it; the only change is that the SAME local value is now also passed to
+`CreateLaunchSession` so it survives past the launch call.
+
+**How casino bet uses it**: `postBet` now reads `session.JurisdictionCode`
+(the value LaunchGame itself resolved and persisted) and forwards it into
+its own `RiskRequest`, instead of leaving the field empty. A
+jurisdiction-scoped `HARD_LIMIT` is therefore reachable from every bet in
+a round, not just the round's own launch - closing the gap Stage 4G's
+completion report disclosed. Regression test:
+`TestReceiveCallback_BetDeniedByJurisdictionScopedRiskRuleViaLaunchSession`.
+
+**How future deposits/withdrawals/sportsbook/bonus operations will use
+it**: the identical pattern - whatever resolves a `RiskRequest` for that
+operation supplies `JurisdictionCode` from whatever source THAT
+operation's own authoritative context provides (e.g. a future
+`wallet`/`player_accounts`-resolved jurisdiction for a deposit, unrelated
+to casino sessions entirely). Nothing in `internal/risk` couples
+jurisdiction resolution to casino specifically - `RiskRequest.
+JurisdictionCode` is a plain string field any caller may populate from
+its own domain's own trusted source.
+
+**How conflicting or unavailable jurisdiction information is handled**
+(simplified per documentation review - the prior wording restated this
+three times): unavailable (empty) matches only jurisdiction-unscoped
+rules, per `matches()`'s general "empty means wildcard, rule side only"
+contract. A `RiskRequest` carries exactly one `JurisdictionCode` value,
+never a set - resolving any genuinely ambiguous signal into that one
+value is the caller's job, not `Evaluate`'s.
+
+**How this remains provider-neutral**: `jurisdictions.code` is a
+platform-registry concept (migration 0002, no RLS, ADR 0006) that predates
+and is unrelated to any casino/payment provider - a jurisdiction code
+means the same thing whether it reached a `RiskRequest` via a casino
+launch, a future deposit, or a future sportsbook bet. No provider-specific
+jurisdiction concept exists or is needed.
+
+### 10. Licensing mode / BYOL architecture (Part D)
+
+**Canonical representation**: `tenants.licensing_model` (migration 0001,
+`'under_platform_licence'` or `'own_licence'`) - the ALREADY-EXISTING
+canonical representation from ADR 0006's hybrid-licensing model, not a
+new taxonomy invented this stage. `Rule.LicensingMode`/`RiskRequest.
+LicensingMode` mirror its two values exactly.
+
+**Policy-resolution contract**: identical shape to every other identity
+field on `RiskRequest` (`TenantID`, `BrandID`, `JurisdictionCode`) -
+resolved server-side by the CALLER, never looked up by `risk.Evaluate`
+itself. `internal/casino` resolves it via the new `identity.
+GetTenantByID` + a shared `resolveLicensingMode` helper, called once in
+`LaunchGame` and once in `postBet` (never cached on the session, unlike
+jurisdiction - a tenant's licensing model is a slow-changing
+platform-registry fact, not a round-specific one, so a fresh lookup per
+operation is correct and cheap).
+
+**Why this matters**: before this stage, a platform-wide `HARD_LIMIT`
+(`tenant_id IS NULL`) bound EVERY tenant identically, with no way to
+express "this rule is OUR OWN platform licence's legal ceiling, not a
+universal one." The moment a bring-your-own-licence tenant onboards
+(operating under a different jurisdiction's own legal regime, ADR 0006),
+that same platform-wide rule would incorrectly bind it too. Scoping such
+a rule with `LicensingMode: "under_platform_licence"` closes this
+exactly the way `JurisdictionCode`/`TenantID` already close their own
+analogous gaps - a platform-wide rule left `LicensingMode`-unscoped still
+applies to every tenant (unchanged default behavior; nothing existing
+rules do today needs updating), and only a NEWLY authored rule that
+needs the distinction sets it explicitly. Specificity ranks it just below
+`JurisdictionCode` (a binary categorization is coarser than an actual
+jurisdiction - see `types.go`'s own doc comment on `specificity()`).
+Regression test:
+`TestEvaluate_LicensingModeScopedHardLimitNeverBindsADifferentLicensingMode`
+(proves isolation using today's single `under_platform_licence` tenant,
+without a real BYOL tenant existing).
+
+**No BYOL operator is onboarded or implemented this stage** - this is
+the architectural contract a future BYOL onboarding will rely on, not a
+BYOL feature itself. Future provider/domain code must resolve
+`LicensingMode` from `tenants.licensing_model` exactly like `internal/
+casino` now does, never assume `"under_platform_licence"` implicitly (the
+one hardcoded assumption this stage specifically closes: before this
+change, NOTHING in `internal/risk` could even express a
+licensing-mode-dependent rule, which is itself a hardcoded single-mode
+assumption by omission).
+
+### 11. `REVIEW` semantics are preserved, not collapsed (Part E)
+
+`Outcome` remains exactly three values - `allow`/`deny`/`review` - in
+`internal/risk`'s own domain model; this stage changes nothing about
+that. What Stage 4G already established and this stage reaffirms
+explicitly:
+
+- `REVIEW` represents a potentially human/compliance-resolvable outcome,
+  semantically distinct from `DENY` (a REVIEW-flagged operation is not
+  asserted to be prohibited, only that it warrants a human/compliance
+  look before proceeding - see `RuleRiskSignal`'s own doc comment).
+- Today's only two enforcement points (`internal/casino`'s `LaunchGame`/
+  `postBet`) block on `REVIEW` exactly like `DENY`, purely because no
+  compliance-review QUEUE exists yet to route a review-flagged operation
+  to - this is an ENFORCEMENT-POINT choice (each caller's own
+  `if riskDecision.Outcome != risk.OutcomeAllow` check), never a
+  narrowing of `Outcome` itself down to two values.
+- A future compliance workflow can be added WITHOUT changing `risk.
+  Evaluate`'s signature or `RiskDecision`'s shape at all: it would consume
+  the SAME `Outcome == review` value the type already carries, adding a
+  new enforcement-point behavior (e.g., "post to a compliance queue and
+  proceed provisionally, pending review") rather than a new field or a
+  new return type. `MatchedRule`/`RiskDecision.Code`/`.Message` already
+  carry enough explainability for such a queue to show a reviewer WHY an
+  operation was flagged, without further design work.
+- The open question from §8 ("should `REVIEW` ever proceed
+  provisionally") is therefore an ENFORCEMENT-POLICY decision for a
+  future stage to make per call site, not a blocker on `internal/risk`'s
+  own architecture - which is precisely why it is recorded as an open
+  decision rather than something this stage needed to resolve.
+
+### 12. Extension model for future limit kinds (Part H)
+
+Adding a genuinely new `LimitKind` (`count`, `velocity`, `exposure`,
+`loss`, or a product-specific one like `stake`/`deposit`/`withdrawal`/
+`bonus`/`session`) requires five additive changes, corrected here after
+specialist review found the original three-step version understated the
+real cost - never a redesign of `Evaluate`, the rule table's shape, or
+the precedence algorithm, but every one of the five is required, not
+optional:
+
+1. **Migration**: widen the `limit_kind` CHECK constraint to accept the
+   new value (and, if it needs a new column - e.g. a future `loss` limit
+   might need a `realized_loss` computation column that `cumulative_amount`
+   does not - add it additively, nullable, with its own CHECK). Also
+   widen migration 0041's SECOND check on this column - the one coupling
+   `limit_kind` to a valid `time_window` (`CHECK ((limit_kind IN
+   ('min_amount','max_amount') AND time_window = 'transaction') OR
+   (limit_kind = 'cumulative_amount' AND time_window <> 'transaction'))`)
+   - a new `LimitKind` needs an explicit branch here too, or every
+   `time_window` value becomes rejected for it.
+2. **`internal/risk/types.go`**: add the new `LimitKind` constant.
+3. **`internal/risk/evaluator.go`**: add a new `case` to `Rule.breach()`'s
+   switch, implementing that limit kind's own comparison logic (the
+   existing three cases - `min_amount`/`max_amount`/`cumulative_amount` -
+   are the worked examples: a `transaction`-window comparison against
+   `req.Amount` directly, or a windowed aggregate query against
+   `ledger_transactions` for a stateful one).
+4. **`internal/httpserver/risk_handlers.go`**: `newCreateRiskRuleHandler`
+   hardcodes its own `v.RequireOneOf("limit_kind", ...)` allowlist,
+   independent of the database CHECK - forgetting this step means the
+   database and evaluator both accept the new kind while the HTTP API
+   still rejects it with a 400, the exact inversion of the fail-closed
+   principle below (evaluable but unconfigurable, rather than
+   configurable but unevaluated).
+5. **`docs/api/openapi/platform-api.yaml`**: the `limit_kind` enum
+   appears twice (the POST request schema and the `RiskRule` response
+   schema) and must be kept in sync with step 4's Go validation.
+
+Nothing about `matches()`, `specificity()`, `isEffective()`, the
+HARD_LIMIT/CONFIGURABLE_LIMIT/RISK_SIGNAL precedence algorithm, the
+fail-closed contract, or any existing enforcement call site changes when
+a new `LimitKind` is added - they are all generic over `LimitKind`
+already. This is precisely WHY `LimitKind` was kept to a small,
+fully-implemented set in Stage 4G rather than accepting every value the
+directive listed: each of `count`/`velocity`/`exposure`/`loss` needs its
+own real aggregation logic designed and tested against real data (a
+"velocity" limit's own time-bucketing semantics, an "exposure" limit's
+own definition of open exposure) - work that belongs to whichever future
+stage actually needs that specific limit kind enforced, not invented
+speculatively here. The architectural promise this section makes is that
+building it later costs exactly the five steps above, never a rewrite -
+"a rule the engine cannot evaluate must never be configurable" (Stage
+4G's own principle) remains true only when ALL FIVE are updated together
+in the same change (documentation review finding: an earlier version of
+this section named only steps 1-3, which would have shipped a `LimitKind`
+the database and evaluator both accept but the HTTP API still 400s -
+corrected before this stage closed).
+
+### 13. Every future domain must declare its own Risk integration (Part B)
+
+Any future operation capable of affecting player financial exposure,
+wagering exposure, payment exposure, bonus exposure, regulatory exposure,
+or platform risk MUST declare its own `risk.RiskRequest` shape and call
+`risk.Evaluate` in the same transaction as its own state-changing effect,
+before that effect commits - exactly the pattern `internal/casino`
+already establishes for `casino_launch`/`casino_bet`. Concretely, for
+each domain listed in the Stage 4G-FINAL directive:
+
+Status values below use CLAUDE.md's own seven-label vocabulary
+("IMPLEMENTED", "PARTIALLY IMPLEMENTED", "MOCK", "STUB", "PROVIDER
+DEPENDENT", "NOT IMPLEMENTED", "BLOCKED") rather than ad hoc wording, per
+a documentation-review finding that the original table's "Enforced"/
+"Designed, not wired" phrasing fell outside that vocabulary.
+
+| Domain | Operation | Status |
+|---|---|---|
+| Casino launch | `casino_launch` | PARTIALLY IMPLEMENTED - `risk.Evaluate` is called and enforced (Stage 4G), and `JurisdictionCode`/`LicensingMode` are both correctly threaded through when supplied, but no HTTP handler populates `LaunchGameParams.JurisdictionCode` yet (`TODO(jurisdiction)` - no per-player jurisdiction resolver exists anywhere in this codebase), so jurisdiction-scoped rules are evaluable but never actually reached by a real production launch today - only by tests that populate it directly |
+| Casino bet | `casino_bet` | PARTIALLY IMPLEMENTED - identical caveat: `risk.Evaluate` is called and enforced on every real bet, `LicensingMode` is always correctly populated (resolved from `tenants.licensing_model`, which is never empty), but `JurisdictionCode` is only non-empty when the session's own launch happened to have one (see Casino launch row) |
+| Payments | `deposit`, `withdrawal` | NOT IMPLEMENTED - `Operation` enum + schema exist, `internal/payments` never calls `risk.Evaluate` - must call it before posting, mirroring `internal/casino`'s exact pattern, when that stage is authorized |
+| Sportsbook | `sportsbook_bet` | NOT IMPLEMENTED - does not exist as a package yet (blocked per this stage's own stop condition) |
+| Bonus | `bonus_grant` | NOT IMPLEMENTED - Bonus Engine is explicitly NOT started this stage (directive §32/Final Governance Rule); when it is, it MUST consume `internal/risk.Evaluate`, never build its own limit engine |
+
+No new `Operation` enum values or schema changes were needed for this
+declaration - `migrations/0041` already accepted all six from Stage 4G.
+This section exists so a future domain's own directive can point here
+rather than re-deriving the integration contract from scratch.
 
 ## Specialist review findings and fixes
 

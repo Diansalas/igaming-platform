@@ -64,3 +64,56 @@ per-jurisdiction reporting engine beyond a pluggable export interface.
 Whether `identity` and `compliance` should be one service or two is
 deferred to Stage 2 design, when the actual KYC vendor contract shape
 (Blueprint §10 Q2 dependency) is known.
+
+## Cross-domain boundary verification (Stage 4G-FINAL)
+
+Still one deployable internally organized by package (ADR 0010 - this
+document remains a target proposal, not yet the built shape). Stage
+4G-FINAL's own directive required verifying that Casino, Payments,
+Financial/Ledger, RG, Identity, KYC, and Risk remain separate domains
+with explicit contracts, none silently duplicating another's authority.
+Verified as of this stage:
+
+| Domain | Package | Sole authority for | Never does |
+|---|---|---|---|
+| Financial/Ledger | `internal/ledger`, `internal/wallet` | Posting money, balance projections, idempotency | Business/eligibility decisions about WHETHER to post |
+| Identity | `internal/identity` | Person/PlayerAccount/StaffUser/Tenant/Brand records | Auth session mechanics (that's `internal/auth`), risk/RG decisions |
+| KYC | `internal/kyc` | Verification/document lifecycle and evidence | Blocking play/withdrawal directly (RG/withdrawal policy enforce, KYC only reports verification state) |
+| Responsible Gaming | `internal/rg` | Self-exclusion/RG eligibility (`EvaluateEligibility`) | Generic risk/limit policy - has no rule/threshold concept beyond RG's own restrictions |
+| Risk Management | `internal/risk` | Configurable risk/limit policy (`Evaluate`) | Self-exclusion - has no player-status concept beyond what a caller passes in as request fields |
+| Casino | `internal/casino` | Game gateway, launch, bet/win/rollback callbacks | Ledger schema, RG/Risk rule logic - calls their interfaces, never reimplements them |
+| Payments | `internal/payments`, `internal/withdrawal` | PSP orchestration, deposit/withdrawal state machine | Ledger schema (calls `ledger.Post` like every other domain) |
+
+Confirmed by inspection (not merely by convention): `internal/risk` has
+zero imports of `internal/rg` and vice versa. `internal/httpserver`
+imports both (`rg_handlers.go`, `risk_handlers.go` - separate files, each
+its own domain's admin API), but `internal/casino/orchestrator.go` is the
+only file that COMPOSES both decisions on a single operation's path
+(`rg.EvaluateEligibility` then `risk.Evaluate`, in that fixed order, RG
+always short-circuiting Risk on denial - ADR 0031 §1; corrected from an
+earlier, imprecise "only caller that imports both" wording per
+documentation review).
+
+`internal/casino`'s one new Stage-4G-FINAL dependency,
+`internal/identity.GetTenantByID` (resolving `LicensingMode` for a
+`RiskRequest`), is a plain read of a platform-registry table Identity
+already owns (`tenants`, no RLS) - it does not cross a domain's WRITE
+authority, and was filed through `integration-protocol.md`'s
+dependency-request procedure (see `task-registry.md`'s Dependency Request
+Log, `DR-4GF-03` - corrected from an earlier version of this paragraph
+that miscited `DR-4GF-01`/`DR-4GF-02`, which cover the risk/casino
+dependencies, not this identity one).
+
+No ambiguous boundary was found this stage. The one PRE-EXISTING
+observation worth naming explicitly (not a defect, already noted in ADR
+0031 §8): `internal/risk`'s generic `Rule` shape COULD, in principle, be
+misused to express an RG-shaped "block this player entirely" rule (e.g.
+a player-scoped `HARD_LIMIT` with a zero `min_amount` threshold on every
+operation) - RBAC already prevents this in practice (`risk_config:manage`
+and RG's own staff permissions are held by different roles), but nothing
+in `internal/risk` itself rejects such a rule at the type level. Recorded
+here as a documentation note, consistent with ADR 0031's own treatment -
+not fixed, since it would require either a policy-level convention (staff
+guidance: "risk rules govern limits, not identity-based prohibition") or
+a schema-level restriction neither this stage's directive nor any
+specialist review this stage flagged as urgent.

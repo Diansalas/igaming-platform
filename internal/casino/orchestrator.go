@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/risk"
@@ -67,7 +68,15 @@ type LaunchGameParams struct {
 	// carries for payment routing. A nil value skips the jurisdiction
 	// check entirely (fails open only in the sense that no jurisdiction
 	// context exists yet to check against - never silently ignores an
-	// actually-resolved jurisdiction).
+	// actually-resolved jurisdiction). MUST be resolved server-side from
+	// the platform's own configuration/resolver, exactly like every other
+	// field on this struct - NEVER from client-supplied input (a request
+	// body, header, or geo hint a caller controls) - multi-tenancy review
+	// finding: this value is now persisted onto the launch session
+	// (migration 0042) and reused as the risk scope for every bet in the
+	// round, so a client-influenced value here would let a player pick a
+	// jurisdiction that dodges a jurisdiction-scoped HARD_LIMIT for the
+	// whole round, not just one request.
 	JurisdictionCode *string
 }
 
@@ -146,6 +155,18 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, tx pgx.Tx, params LaunchG
 		return LaunchGameResult{Denied: true, DenialCode: decision.Code, DenialMessage: decision.Message}, nil
 	}
 
+	// Resolved once, used both by the risk check below (real-mode only)
+	// and persisted onto the launch session unconditionally just below
+	// that (Stage 4G-FINAL Part C) - so a jurisdiction-scoped rule stays
+	// reachable from this SAME round's later bets (postBet), not just at
+	// launch time. Empty when LaunchGame itself had no resolved
+	// jurisdiction to begin with (TODO(jurisdiction) - see
+	// LaunchGameParams' own doc comment) - never silently defaulted.
+	var jurisdictionCode string
+	if params.JurisdictionCode != nil {
+		jurisdictionCode = *params.JurisdictionCode
+	}
+
 	// Stage 4G: the central Risk & Limits boundary, consulted alongside
 	// (never instead of) RG eligibility above - a separate domain, per
 	// ADR 0031 §1. Skipped for demo-mode launches: no real financial
@@ -155,14 +176,20 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, tx pgx.Tx, params LaunchG
 	// review-flagged launch fails safe by blocking rather than proceeding
 	// provisionally).
 	if params.Mode == ModeReal {
-		var jurisdictionCode string
-		if params.JurisdictionCode != nil {
-			jurisdictionCode = *params.JurisdictionCode
+		// Stage 4G-FINAL Part D: resolved server-side from the tenant's
+		// OWN tenants.licensing_model, never assumed - risk.Evaluate
+		// itself never looks this up (see RiskRequest.LicensingMode's doc
+		// comment). Lets a platform-wide HARD_LIMIT expressing the
+		// PLATFORM's own licence's legal ceiling be scoped so it does not
+		// also bind a future bring-your-own-licence tenant.
+		licensingMode, err := resolveLicensingMode(ctx, tx, params.TenantID)
+		if err != nil {
+			return LaunchGameResult{}, err
 		}
 		riskDecision, err := evaluateAndAuditRisk(ctx, tx, risk.RiskRequest{
 			TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID,
 			Operation: risk.OperationCasinoLaunch, Product: "casino", ProviderID: game.ProviderID, GameID: params.GameID,
-			AssetCode: params.AssetCode, JurisdictionCode: jurisdictionCode,
+			AssetCode: params.AssetCode, JurisdictionCode: jurisdictionCode, LicensingMode: licensingMode,
 		}, "casino.launch_denied_by_risk_policy")
 		if err != nil {
 			return LaunchGameResult{}, err
@@ -194,7 +221,7 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, tx pgx.Tx, params LaunchG
 	session, token, err := CreateLaunchSession(ctx, tx, CreateLaunchSessionParams{
 		TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID, WalletID: params.WalletID,
 		GameID: params.GameID, ProviderID: game.ProviderID, ProviderGameID: game.ProviderGameID,
-		AssetCode: params.AssetCode, Mode: params.Mode,
+		AssetCode: params.AssetCode, Mode: params.Mode, JurisdictionCode: jurisdictionCode,
 	})
 	if err != nil {
 		return LaunchGameResult{}, err
@@ -271,6 +298,22 @@ func evaluateAndAuditEligibility(ctx context.Context, tx pgx.Tx, tenantID, brand
 		return rg.Decision{}, fmt.Errorf("casino: audit rg denial: %w", err)
 	}
 	return decision, nil
+}
+
+// resolveLicensingMode resolves tenantID's OWN tenants.licensing_model
+// (Stage 4G-FINAL Part D) for a risk.RiskRequest's LicensingMode field -
+// risk.Evaluate never looks this up itself (see RiskRequest.LicensingMode's
+// doc comment), so every caller resolves it server-side exactly like
+// every other identity field already on RiskRequest. Shared by LaunchGame
+// and postBet so casino never grows two independent copies of this
+// lookup (the same "one shared helper, not duplicated per call site"
+// discipline as evaluateAndAuditEligibility/evaluateAndAuditRisk).
+func resolveLicensingMode(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (string, error) {
+	t, err := identity.GetTenantByID(ctx, tx, tenantID)
+	if err != nil {
+		return "", fmt.Errorf("casino: resolve tenant licensing mode: %w", err)
+	}
+	return t.LicensingModel, nil
 }
 
 // evaluateAndAuditRisk consults the central risk.Evaluate boundary
@@ -496,6 +539,47 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		return ReceiveCallbackResult{}, err
 	}
 
+	// Stage 4G-FINAL flake investigation (TestConcurrent_DuplicateBetDeliveryDuringSelfExclusion):
+	// the idempotency short-circuit immediately below only serializes
+	// SEQUENTIAL redeliveries (one delivery's transaction commits before
+	// the next one's find-query runs). Two GENUINELY CONCURRENT deliveries
+	// of the identical provider_tx_id can each start before the other
+	// commits, so both see "not yet posted" and each independently
+	// re-evaluates live RG/Risk state below - if that state changes
+	// between the two evaluations (e.g. a self-exclusion becomes
+	// effective mid-race), the two deliveries can return DIFFERENT
+	// outcomes for what is, from the provider's perspective, the exact
+	// same bet - even though ledger.Post's own idempotency key still
+	// guarantees at most one financial effect is ever posted. A provider
+	// that treats "declined" as "no stake was taken" would then disagree
+	// with the ledger's own truth about whether this round's stake was
+	// collected. This lock forces a second, truly-concurrent delivery to
+	// wait for the first's transaction to fully commit (or roll back)
+	// before proceeding - by the time it re-reads below, the first
+	// delivery's outcome (posted or not) is settled and visible, so the
+	// two deliveries' results can never diverge. hashtextextended (not
+	// hashtext) for the full 64-bit lock-key space - see
+	// internal/reconciliation.TryRunLedgerVsProjectionForTenant's
+	// identical rationale for why a single 32-bit hashtext component is
+	// an unacceptable collision risk for a shared advisory-lock
+	// namespace. Scoped to (tenantID, providerID, provider_tx_id) - the
+	// tenant component is required, not optional: provider_tx_id
+	// uniqueness is only ever guaranteed WITHIN one tenant (migration
+	// 0021's own "a platform-global unique key on a tenant-partitioned,
+	// RLS-protected table is a cross-tenant collision risk" rule, applied
+	// identically to a lock key - adversarial review finding), so two
+	// different tenants sharing a provider with overlapping
+	// provider_tx_id values would otherwise serialize against each
+	// other. Otherwise scoped narrowly enough (one specific bet, one
+	// specific tenant) that it adds no contention beyond the exact case
+	// it exists to fix.
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended('casino_bet_delivery:' || $1::text || ':' || $2 || ':' || $3, 0))`,
+		tenantID, providerID, event.ProviderTxID,
+	); err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: acquire bet delivery lock: %w", err)
+	}
+
 	// Idempotency short-circuit, BEFORE session/RG/balance evaluation:
 	// financial-transaction-flows.md §5 requires an exact retry (same
 	// provider_tx_id) of an ALREADY-POSTED bet to be "an idempotent no-op
@@ -577,20 +661,30 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	// between the original delivery and a retry can never flip an
 	// already-succeeded bet's own outcome.
 	//
-	// JurisdictionCode is deliberately left empty here (multi-tenancy/
-	// architecture specialist review, disclosed - ADR 0031 §8): unlike
-	// LaunchGameParams, casino_launch_sessions does not persist the
-	// jurisdiction resolved at launch time, and no other source of a
-	// per-bet jurisdiction exists in this codebase today (the same
-	// already-documented "TODO(jurisdiction)" gap LaunchGameParams'
-	// own doc comment names). A jurisdiction-scoped risk rule is
-	// therefore NEVER reachable from postBet, only from LaunchGame -
-	// express a legal/jurisdiction constraint that must also bind
-	// bet-time as a tenant-scoped (or platform-wide) rule instead until
-	// jurisdiction is persisted on the launch session.
+	// JurisdictionCode now comes from THIS SAME session's own persisted
+	// value (migration 0042, Stage 4G-FINAL Part C) - the exact
+	// jurisdiction LaunchGame itself resolved and evaluated risk against
+	// when the round began, denormalized onto casino_launch_sessions
+	// exactly like ProviderGameID/AssetCode already were. Empty only when
+	// LaunchGame itself had no resolved jurisdiction to persist
+	// (TODO(jurisdiction) still applies at its root cause - no per-player
+	// jurisdiction resolution exists yet anywhere in this codebase) -
+	// this closes the previously-disclosed "reachable from LaunchGame but
+	// never from postBet" gap (ADR 0031 §8/§9) without inventing a new,
+	// independent per-bet jurisdiction source.
+	//
+	// LicensingMode is resolved fresh here (Stage 4G-FINAL Part D),
+	// exactly like at LaunchGame - never cached on the session, since a
+	// tenant's own licensing_model is a slow-changing platform-registry
+	// fact, not a round-specific one.
+	licensingMode, err := resolveLicensingMode(ctx, tx, tenantID)
+	if err != nil {
+		return ReceiveCallbackResult{}, err
+	}
 	riskDecision, err := evaluateAndAuditRisk(ctx, tx, risk.RiskRequest{
 		TenantID: tenantID, BrandID: session.BrandID, PlayerAccountID: session.PlayerAccountID,
 		Operation: risk.OperationCasinoBet, Product: "casino", ProviderID: providerID, GameID: session.GameID, AssetCode: event.AssetCode,
+		JurisdictionCode: session.JurisdictionCode, LicensingMode: licensingMode,
 		Amount: event.Amount, CorrelationID: roundCorrelationID(tenantID, providerID, event.RoundID),
 	}, "casino_bet.denied_by_risk_policy")
 	if err != nil {

@@ -219,3 +219,102 @@ func TestRiskRules_CrossTenantNotVisible(t *testing.T) {
 		}
 	}
 }
+
+// TestRiskRules_LicensingModeRoundTrip proves Stage 4G-FINAL's new
+// licensing_mode field survives create -> create-response -> list
+// end to end over HTTP, and that it is genuinely optional (omitted
+// entirely on a second rule, expected to come back empty).
+func TestRiskRules_LicensingModeRoundTrip(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newTestServer(t, pool, issuer)
+
+	tenant := mustCreateTenant(t, pool)
+	riskManager := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleRiskManager, "rm-lm-pw-1")
+	token := mustLoginStaff(t, srv, tenant.Slug, riskManager.Email, "rm-lm-pw-1")
+
+	scopedResp := postJSON(t, srv, "/v1/admin/risk/rules", token.AccessToken, map[string]any{
+		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500,
+		"licensing_mode": "own_licence",
+	})
+	defer scopedResp.Body.Close()
+	if scopedResp.StatusCode != http.StatusCreated {
+		var apiErr apierror.Error
+		decodeBody(t, scopedResp, &apiErr)
+		t.Fatalf("expected 201 creating a licensing_mode-scoped risk rule, got %d: %+v", scopedResp.StatusCode, apiErr)
+	}
+	var scoped riskRuleResponse
+	decodeBody(t, scopedResp, &scoped)
+	if scoped.LicensingMode != "own_licence" {
+		t.Fatalf("expected create response to echo licensing_mode=own_licence, got %+v", scoped)
+	}
+
+	unscopedResp := postJSON(t, srv, "/v1/admin/risk/rules", token.AccessToken, map[string]any{
+		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500,
+	})
+	defer unscopedResp.Body.Close()
+	if unscopedResp.StatusCode != http.StatusCreated {
+		var apiErr apierror.Error
+		decodeBody(t, unscopedResp, &apiErr)
+		t.Fatalf("expected 201 creating a rule with licensing_mode omitted, got %d: %+v", unscopedResp.StatusCode, apiErr)
+	}
+	var unscoped riskRuleResponse
+	decodeBody(t, unscopedResp, &unscoped)
+	if unscoped.LicensingMode != "" {
+		t.Fatalf("expected an omitted licensing_mode to round-trip empty (unscoped), got %+v", unscoped)
+	}
+
+	listResp := getJSON(t, srv, "/v1/admin/risk/rules?operation=casino_bet", token.AccessToken)
+	defer listResp.Body.Close()
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 listing risk rules, got %d", listResp.StatusCode)
+	}
+	var rules []riskRuleResponse
+	decodeBody(t, listResp, &rules)
+	var foundScoped, foundUnscoped bool
+	for _, r := range rules {
+		if r.ID == scoped.ID {
+			foundScoped = true
+			if r.LicensingMode != "own_licence" {
+				t.Fatalf("expected the listed rule to retain licensing_mode=own_licence, got %+v", r)
+			}
+		}
+		if r.ID == unscoped.ID {
+			foundUnscoped = true
+			if r.LicensingMode != "" {
+				t.Fatalf("expected the listed unscoped rule's licensing_mode to remain empty, got %+v", r)
+			}
+		}
+	}
+	if !foundScoped || !foundUnscoped {
+		t.Fatalf("expected both rules to appear in the list, foundScoped=%v foundUnscoped=%v", foundScoped, foundUnscoped)
+	}
+}
+
+// TestRiskRules_LicensingModeInvalidValueRejected proves an invalid
+// licensing_mode is rejected with a clean 400 validation error and never
+// reaches the database (where risk_rules' CHECK constraint would
+// otherwise surface a raw Postgres error instead).
+func TestRiskRules_LicensingModeInvalidValueRejected(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newTestServer(t, pool, issuer)
+
+	tenant := mustCreateTenant(t, pool)
+	riskManager := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleRiskManager, "rm-lm-pw-2")
+	token := mustLoginStaff(t, srv, tenant.Slug, riskManager.Email, "rm-lm-pw-2")
+
+	resp := postJSON(t, srv, "/v1/admin/risk/rules", token.AccessToken, map[string]any{
+		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500,
+		"licensing_mode": "nonsense",
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		var apiErr apierror.Error
+		decodeBody(t, resp, &apiErr)
+		t.Fatalf("expected 400 for an invalid licensing_mode, got %d: %+v", resp.StatusCode, apiErr)
+	}
+	var apiErr apierror.Error
+	decodeBody(t, resp, &apiErr)
+	if apiErr.Code != apierror.CodeValidation {
+		t.Fatalf("expected a validation error code, got %+v", apiErr)
+	}
+}

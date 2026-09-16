@@ -494,14 +494,34 @@ func EvaluateEligibility(ctx context.Context, tx pgx.Tx, params EligibilityParam
 		}, nil
 	}
 
+	// Stage 4G-FINAL flake investigation: clock_timestamp(), never now().
+	// Postgres's now()/CURRENT_TIMESTAMP is STABLE per transaction - it
+	// returns the transaction's OWN start time for every call within it,
+	// not the actual wall-clock time the statement runs. lockPerson just
+	// above can make this transaction WAIT (queued behind another
+	// transaction's self-exclusion insert, or - since Stage 4G-FINAL -
+	// behind internal/casino's own bet-delivery advisory lock, which can
+	// now hold a caller's transaction open for longer before it ever
+	// reaches this query). A self-exclusion committed AFTER this
+	// transaction began, but BEFORE this exact statement runs, is fully
+	// visible under READ COMMITTED (the row IS there) but was silently
+	// EXCLUDED by `starts_at <= now()` whenever now() (frozen at this
+	// transaction's start) predated the restriction's own starts_at -
+	// empirically reproduced and confirmed via direct instrumentation:
+	// a second, lock-queued delivery's fresh eligibility check reported
+	// "allowed" for a person whose self-exclusion had already committed
+	// (and been correctly SEEN as excluded by an earlier check) at that
+	// point - a genuine, real self-exclusion enforcement gap, not a test
+	// artifact. clock_timestamp() re-evaluates the true current instant
+	// on every call, closing it.
 	var excluded bool
 	err = tx.QueryRow(ctx,
 		`SELECT EXISTS (
 			SELECT 1 FROM player_restrictions
 			WHERE person_id = $1
 			  AND restriction_type = $2
-			  AND starts_at <= now()
-			  AND (ends_at IS NULL OR ends_at > now())
+			  AND starts_at <= clock_timestamp()
+			  AND (ends_at IS NULL OR ends_at > clock_timestamp())
 			  AND (brand_id IS NULL OR brand_id = $3)
 			  AND (tenant_id IS NULL OR tenant_id = $4)
 		)`,

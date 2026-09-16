@@ -35,6 +35,7 @@ type riskRuleResponse struct {
 	TenantID         string `json:"tenant_id,omitempty"`
 	BrandID          string `json:"brand_id,omitempty"`
 	JurisdictionCode string `json:"jurisdiction_code,omitempty"`
+	LicensingMode    string `json:"licensing_mode,omitempty"`
 	PlayerAccountID  string `json:"player_account_id,omitempty"`
 	Product          string `json:"product,omitempty"`
 	Operation        string `json:"operation"`
@@ -56,7 +57,7 @@ type riskRuleResponse struct {
 
 func toRiskRuleResponse(r risk.Rule) riskRuleResponse {
 	resp := riskRuleResponse{
-		ID: r.ID.String(), JurisdictionCode: r.JurisdictionCode, Product: r.Product, Operation: string(r.Operation),
+		ID: r.ID.String(), JurisdictionCode: r.JurisdictionCode, LicensingMode: r.LicensingMode, Product: r.Product, Operation: string(r.Operation),
 		ProviderID: r.ProviderID, AssetCode: r.AssetCode, PaymentMethod: r.PaymentMethod,
 		LimitKind: string(r.LimitKind), TimeWindow: string(r.TimeWindow), Threshold: r.Threshold,
 		RuleKind: string(r.RuleKind), Action: string(r.Action), Status: string(r.Status),
@@ -120,6 +121,7 @@ func newListRiskRulesHandler(deps Deps) http.HandlerFunc {
 type createRiskRuleRequest struct {
 	BrandID          string `json:"brand_id"`
 	JurisdictionCode string `json:"jurisdiction_code"`
+	LicensingMode    string `json:"licensing_mode"`
 	PlayerAccountID  string `json:"player_account_id"`
 	Product          string `json:"product"`
 	Operation        string `json:"operation"`
@@ -173,6 +175,9 @@ func newCreateRiskRuleHandler(deps Deps) http.HandlerFunc {
 		if req.Product != "" {
 			v.RequireOneOf("product", req.Product, "casino", "sportsbook", "payments", "bonus")
 		}
+		if req.LicensingMode != "" {
+			v.RequireOneOf("licensing_mode", req.LicensingMode, "under_platform_licence", "own_licence")
+		}
 		if req.Threshold < 0 {
 			v.Add("threshold", "must be non-negative")
 		}
@@ -210,7 +215,7 @@ func newCreateRiskRuleHandler(deps Deps) http.HandlerFunc {
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			created, err = risk.CreateRule(ctx, tx, risk.CreateRuleParams{
-				TenantID: &tc.TenantID, BrandID: brandID, JurisdictionCode: req.JurisdictionCode,
+				TenantID: &tc.TenantID, BrandID: brandID, JurisdictionCode: req.JurisdictionCode, LicensingMode: req.LicensingMode,
 				PlayerAccountID: playerAccountID, Product: req.Product, Operation: risk.Operation(req.Operation),
 				ProviderID: req.ProviderID, GameID: gameID, AssetCode: req.AssetCode, PaymentMethod: req.PaymentMethod,
 				LimitKind: risk.LimitKind(req.LimitKind), TimeWindow: risk.TimeWindow(req.TimeWindow), Threshold: req.Threshold,

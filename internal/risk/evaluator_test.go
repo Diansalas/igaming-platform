@@ -29,6 +29,7 @@ func TestRule_Matches_ScopeDimensions(t *testing.T) {
 	req := RiskRequest{
 		TenantID: tenantA, BrandID: brandA, PlayerAccountID: playerX,
 		Operation: OperationCasinoBet, ProviderID: "mock", GameID: gameX, AssetCode: "EUR",
+		LicensingMode: "under_platform_licence",
 	}
 
 	cases := []struct {
@@ -48,6 +49,8 @@ func TestRule_Matches_ScopeDimensions(t *testing.T) {
 		{"different asset does not match", Rule{Operation: OperationCasinoBet, AssetCode: "USD"}, false},
 		{"matching provider matches", Rule{Operation: OperationCasinoBet, ProviderID: "mock"}, true},
 		{"different provider does not match", Rule{Operation: OperationCasinoBet, ProviderID: "other"}, false},
+		{"matching licensing mode matches", Rule{Operation: OperationCasinoBet, LicensingMode: "under_platform_licence"}, true},
+		{"different licensing mode does not match", Rule{Operation: OperationCasinoBet, LicensingMode: "own_licence"}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -75,9 +78,10 @@ func TestRule_Specificity_Ordering(t *testing.T) {
 	brand := Rule{BrandID: uuidPtr(uuid.New())}
 	tenant := Rule{TenantID: uuidPtr(uuid.New())}
 	jurisdiction := Rule{JurisdictionCode: "KM-ANJ"}
+	licensingMode := Rule{LicensingMode: "under_platform_licence"}
 	platform := Rule{}
 
-	ordered := []Rule{player, game, provider, brand, tenant, jurisdiction, platform}
+	ordered := []Rule{player, game, provider, brand, tenant, jurisdiction, licensingMode, platform}
 	for i := 0; i < len(ordered)-1; i++ {
 		if ordered[i].specificity() <= ordered[i+1].specificity() {
 			t.Fatalf("expected strictly decreasing specificity at index %d: %d <= %d", i, ordered[i].specificity(), ordered[i+1].specificity())

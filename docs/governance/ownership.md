@@ -41,8 +41,12 @@ before any edit occurs, and records the decision in `task-registry.md`.
 2. **Same-file conflicts are serialized.** If two domains' work would
    touch the same file in one stage (e.g. `internal/httpserver/server.go`
    wiring two new `Deps` fields), the Orchestrator assigns ONE owner for
-   that file for that stage; the other's change is described as a
-   dependency request the owner applies.
+   that file for that stage - recorded as that owner in the file's
+   `task-registry.md` row - and the other domain's need is filed as a row
+   in `task-registry.md`'s Dependency Request Log (see
+   `integration-protocol.md`) rather than a second, uncoordinated edit.
+   The owner applies both changes serially, in one pass, never as two
+   agents editing the same file concurrently.
 3. **New tables/migrations are owned by the domain that creates them**,
    even if another domain later adds a read-only foreign key into them
    (e.g. Risk's `risk_rules.player_account_id` composite FK into

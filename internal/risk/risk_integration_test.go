@@ -107,7 +107,14 @@ func TestRiskRules_TenantSeesOwnAndPlatformWideRules(t *testing.T) {
 		t.Fatalf("create tenant A rule: %v", err)
 	}
 
-	// Platform-wide rule.
+	// Platform-wide rule. Disabled via t.Cleanup (Stage 4G-FINAL hardening
+	// fix - see internal/risk/evaluator_test.go's sibling comment): left
+	// active, a platform-wide HARD_LIMIT accumulates forever across every
+	// run of this suite (risk_rules is append-only, never deletable) and
+	// can eventually deny a legitimate future test's own casino_bet once
+	// enough of these threshold=5000 rows exist for evaluator.go's
+	// aggregation to reconsider - confirmed live: this exact row had
+	// silently accumulated many times over before this fix.
 	var platformRuleID uuid.UUID
 	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 		r, err := CreateRule(ctx, tx, CreateRuleParams{
@@ -120,6 +127,12 @@ func TestRiskRules_TenantSeesOwnAndPlatformWideRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create platform-wide rule: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := DisableRule(ctx, tx, DisableRuleParams{RuleID: platformRuleID, ActorType: "staff", ActorID: uuid.New()})
+			return err
+		})
+	})
 
 	// Tenant B sees the platform-wide rule, but NEVER tenant A's own -
 	// existence checks by ID rather than an exact count, since risk_rules
@@ -294,7 +307,8 @@ func TestRiskRules_CoreFieldsAreImmutableAndAppendOnly(t *testing.T) {
 	var ruleID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		r, err := CreateRule(ctx, tx, CreateRuleParams{
-			TenantID: &f.tenantID, Operation: OperationCasinoBet, LimitKind: LimitMaxAmount, TimeWindow: WindowTransaction,
+			TenantID: &f.tenantID, LicensingMode: "under_platform_licence", Operation: OperationCasinoBet,
+			LimitKind: LimitMaxAmount, TimeWindow: WindowTransaction,
 			Threshold: 1000, CreatedByActorType: "staff", CreatedByActorID: uuid.New(),
 		})
 		ruleID = r.ID
@@ -310,6 +324,18 @@ func TestRiskRules_CoreFieldsAreImmutableAndAppendOnly(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected mutating threshold to be refused")
+	}
+
+	// Stage 4G-FINAL regression (risk specialist review): licensing_mode
+	// joined the immutability trigger's core-fields check in migration
+	// 0042 - confirm a future trigger rewrite can't silently drop it from
+	// that comparison without a test catching it.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE risk_rules SET licensing_mode = 'own_licence' WHERE id = $1`, ruleID)
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected mutating licensing_mode to be refused")
 	}
 
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -380,6 +406,56 @@ func TestEvaluate_HardLimitDeniesEvenWithoutAnyConfigurableRule(t *testing.T) {
 	}
 	if decision.Outcome != OutcomeDeny || decision.Code != CodeHardLimitBreach {
 		t.Fatalf("expected a hard-limit deny, got %+v", decision)
+	}
+}
+
+// TestEvaluate_LicensingModeScopedHardLimitNeverBindsADifferentLicensingMode
+// is Stage 4G-FINAL Part D's own regression: a platform-wide HARD_LIMIT
+// expressing the PLATFORM's own licence's legal ceiling (LicensingMode
+// "under_platform_licence") must NEVER also bind a tenant operating
+// under a different licensing arrangement - proven here without a real
+// BYOL tenant existing yet by scoping the rule to "own_licence" (the
+// OTHER value) and confirming seedFixture's own "under_platform_licence"
+// tenant is correctly unaffected by it.
+func TestEvaluate_LicensingModeScopedHardLimitNeverBindsADifferentLicensingMode(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	// Platform-wide rule scoped to "own_licence" tenants only. Disabled
+	// via t.Cleanup - a platform-wide rule is visible to EVERY tenant
+	// fixture in this shared test database and, unlike a tenant-scoped
+	// rule (naturally isolated by each test's own fresh tenant), would
+	// otherwise remain ACTIVE and pollute every other test's Evaluate
+	// call for casino_bet for the rest of the test run (risk_rules is
+	// append-only - it can never be deleted, only disabled). Confirmed
+	// necessary: an earlier version of this test without cleanup left 13
+	// such rows active in the shared dev database mid-session, which
+	// broke unrelated casino/risk tests until manually disabled.
+	rule := createTestRule(t, pool, nil, CreateRuleParams{
+		LicensingMode: "own_licence", Operation: OperationCasinoBet,
+		LimitKind: LimitMaxAmount, TimeWindow: WindowTransaction, Threshold: 100, RuleKind: RuleHardLimit,
+	})
+	t.Cleanup(func() {
+		_ = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := DisableRule(ctx, tx, DisableRuleParams{RuleID: rule.ID, ActorType: "staff", ActorID: uuid.New()})
+			return err
+		})
+	})
+
+	var decision RiskDecision
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		decision, err = Evaluate(ctx, tx, RiskRequest{
+			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID,
+			Operation: OperationCasinoBet, AssetCode: "EUR", Amount: 200,
+			LicensingMode: "under_platform_licence",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if decision.Outcome != OutcomeAllow {
+		t.Fatalf("expected an own_licence-scoped hard limit to never bind an under_platform_licence request, got %+v", decision)
 	}
 }
 
@@ -493,6 +569,63 @@ func TestEvaluate_AdditionalScopeDimensionIsMoreSpecificNotATie(t *testing.T) {
 	}
 	if decision.Outcome != OutcomeDeny {
 		t.Fatalf("expected the more-specific EUR rule (50) to win over the tenant-wide default (200) and deny 75, got %+v", decision)
+	}
+}
+
+// seedJurisdiction creates a real jurisdictions row (risk_rules.
+// jurisdiction_code FKs into it) - mirrors internal/identity/
+// identity_integration_test.go's identical seeding pattern.
+func seedJurisdiction(t *testing.T, pool *db.Pool) string {
+	t.Helper()
+	code := "TEST-" + uuid.NewString()[:8]
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO jurisdictions (code, name) VALUES ($1, 'Test Jurisdiction')`, code)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed jurisdiction: %v", err)
+	}
+	return code
+}
+
+// TestEvaluate_LicensingModePlusJurisdictionIsMoreSpecificThanJurisdictionAlone
+// is the LicensingMode analogue of
+// TestEvaluate_AdditionalScopeDimensionIsMoreSpecificNotATie (risk
+// specialist review finding: the original regression only covered
+// AssetCode as the "additional dimension" - this proves the same
+// property holds for LicensingMode, the newest and lowest-ranked bit in
+// specificity()).
+func TestEvaluate_LicensingModePlusJurisdictionIsMoreSpecificThanJurisdictionAlone(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	jurisdictionCode := seedJurisdiction(t, pool)
+	// Jurisdiction-wide default: max 200.
+	createTestRule(t, pool, &f.tenantID, CreateRuleParams{
+		JurisdictionCode: jurisdictionCode, Operation: OperationCasinoBet,
+		LimitKind: LimitMaxAmount, TimeWindow: WindowTransaction, Threshold: 200,
+	})
+	// Same jurisdiction, additionally scoped by LicensingMode - strictly
+	// more specific, must win without being treated as a tie.
+	createTestRule(t, pool, &f.tenantID, CreateRuleParams{
+		JurisdictionCode: jurisdictionCode, LicensingMode: "under_platform_licence", Operation: OperationCasinoBet,
+		LimitKind: LimitMaxAmount, TimeWindow: WindowTransaction, Threshold: 50,
+	})
+
+	var decision RiskDecision
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		decision, err = Evaluate(ctx, tx, RiskRequest{
+			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID,
+			Operation: OperationCasinoBet, AssetCode: "EUR", Amount: 75,
+			JurisdictionCode: jurisdictionCode, LicensingMode: "under_platform_licence",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("expected the licensing-mode-scoped rule to resolve without a spurious conflict, got: %v", err)
+	}
+	if decision.Outcome != OutcomeDeny {
+		t.Fatalf("expected the more-specific licensing-mode-scoped rule (50) to win over the jurisdiction-wide default (200) and deny 75, got %+v", decision)
 	}
 }
 

@@ -964,3 +964,72 @@ func TestConcurrentSelfExclusionAndEligibilityCheck_Serializes(t *testing.T) {
 		t.Logf("iteration %d: decision.Allowed=%v restrictionCount=%d (either order is correct per ADR 0026 §8)", i, decision.Allowed, count)
 	}
 }
+
+// TestEvaluateEligibility_DetectsSelfExclusionCommittedAfterTransactionBegan
+// is the Stage 4G-FINAL flake-investigation regression: Postgres's now()/
+// CURRENT_TIMESTAMP is STABLE per transaction (frozen at transaction
+// start), never re-evaluated per statement, even under READ COMMITTED.
+// EvaluateEligibility's self-exclusion query previously compared
+// `starts_at <= now()` - a self-exclusion committed by a DIFFERENT,
+// concurrent transaction, strictly AFTER this transaction began but
+// BEFORE this exact query runs, is fully visible under MVCC (the row IS
+// there) but was silently filtered OUT by that comparison whenever
+// now() (this transaction's own start time) predated the restriction's
+// own starts_at - a real, previously-undetected self-exclusion
+// enforcement gap for any transaction that stays open for a while before
+// reaching this check (which internal/casino's own bet-delivery advisory
+// lock, added this same stage, makes meaningfully more likely - empirically
+// reproduced via direct instrumentation during this stage's own adversarial
+// stress testing). Fixed by using clock_timestamp() instead, which
+// re-evaluates the true current instant on every call. This test
+// reproduces the exact mechanism deterministically: open a transaction,
+// commit a self-exclusion from a SEPARATE transaction afterward, then
+// run EvaluateEligibility inside the ORIGINAL (already-open) transaction.
+func TestEvaluateEligibility_DetectsSelfExclusionCommittedAfterTransactionBegan(t *testing.T) {
+	pool := testPool(t)
+	tenantID := seedTenant(t, pool)
+	a := seedAccount(t, pool, tenantID, uuid.Nil)
+	personID := personIDFor(t, pool, a)
+
+	ctx := context.Background()
+	tx, err := pool.Raw().Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin long-lived tx: %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID.String()); err != nil {
+		t.Fatalf("set tenant context: %v", err)
+	}
+
+	// This transaction has now BEGUN (its own now()/CURRENT_TIMESTAMP is
+	// frozen as of this point) but has not yet run any eligibility check.
+	// A separate, independent transaction now creates and COMMITS a
+	// self-exclusion for the same person.
+	err = pool.WithPlayerScope(ctx, tenantID, a.accountID, func(ctx context.Context, ptx pgx.Tx) error {
+		_, err := CreateSelfExclusion(ctx, ptx, CreateSelfExclusionParams{TenantID: tenantID, PlayerAccountID: a.accountID})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create self-exclusion: %v", err)
+	}
+
+	// Now run EvaluateEligibility INSIDE the long-lived transaction that
+	// began before the self-exclusion was even created. It MUST see the
+	// now-committed self-exclusion - clock_timestamp() is re-evaluated
+	// per call, so a real wall-clock delay here (there is none needed,
+	// but even if there were a large one, the fix holds regardless) is
+	// not what closes the gap; the FIX is not using a value frozen at
+	// this transaction's own start.
+	decision, err := EvaluateEligibility(ctx, tx, EligibilityParams{
+		TenantID: tenantID, BrandID: a.brandID, PlayerAccountID: a.accountID, WalletID: a.walletID,
+	})
+	if err != nil {
+		t.Fatalf("evaluate eligibility: %v", err)
+	}
+	if decision.Allowed {
+		t.Fatalf("expected the self-exclusion (committed after this transaction began) to be detected, got Allowed=true (person_id=%s)", personID)
+	}
+	if decision.Code != CodeSelfExcluded {
+		t.Fatalf("expected CodeSelfExcluded, got %q", decision.Code)
+	}
+}

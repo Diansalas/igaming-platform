@@ -16,17 +16,17 @@ import (
 // rg.ErrInvalidInput's own package-local sentinel convention.
 var ErrNotFound = errors.New("risk: rule not found")
 
-const ruleColumns = `id, tenant_id, brand_id, jurisdiction_code, player_account_id, product, operation,
+const ruleColumns = `id, tenant_id, brand_id, jurisdiction_code, licensing_mode, player_account_id, product, operation,
 	provider_id, game_id, asset_code, payment_method, limit_kind, time_window, threshold,
 	rule_kind, action, status, effective_from, effective_until, description,
 	created_by_actor_type, created_by_actor_id, created_at, updated_at`
 
 func scanRule(row pgx.Row) (Rule, error) {
 	var r Rule
-	var jurisdictionCode, product, providerID, assetCode, paymentMethod, description *string
+	var jurisdictionCode, licensingMode, product, providerID, assetCode, paymentMethod, description *string
 	var threshold int64
 	err := row.Scan(
-		&r.ID, &r.TenantID, &r.BrandID, &jurisdictionCode, &r.PlayerAccountID, &product, &r.Operation,
+		&r.ID, &r.TenantID, &r.BrandID, &jurisdictionCode, &licensingMode, &r.PlayerAccountID, &product, &r.Operation,
 		&providerID, &r.GameID, &assetCode, &paymentMethod, &r.LimitKind, &r.TimeWindow, &threshold,
 		&r.RuleKind, &r.Action, &r.Status, &r.EffectiveFrom, &r.EffectiveUntil, &description,
 		&r.CreatedByActorType, &r.CreatedByActorID, &r.CreatedAt, &r.UpdatedAt,
@@ -40,6 +40,9 @@ func scanRule(row pgx.Row) (Rule, error) {
 	r.Threshold = threshold
 	if jurisdictionCode != nil {
 		r.JurisdictionCode = *jurisdictionCode
+	}
+	if licensingMode != nil {
+		r.LicensingMode = *licensingMode
 	}
 	if product != nil {
 		r.Product = *product
@@ -98,6 +101,7 @@ type CreateRuleParams struct {
 	TenantID           *uuid.UUID
 	BrandID            *uuid.UUID
 	JurisdictionCode   string
+	LicensingMode      string
 	PlayerAccountID    *uuid.UUID
 	Product            string
 	Operation          Operation
@@ -148,6 +152,7 @@ func CreateRule(ctx context.Context, tx pgx.Tx, params CreateRuleParams) (Rule, 
 
 	r := Rule{
 		ID: uuid.New(), TenantID: params.TenantID, BrandID: params.BrandID, JurisdictionCode: params.JurisdictionCode,
+		LicensingMode:   params.LicensingMode,
 		PlayerAccountID: params.PlayerAccountID, Product: params.Product, Operation: params.Operation,
 		ProviderID: params.ProviderID, GameID: params.GameID, AssetCode: params.AssetCode, PaymentMethod: params.PaymentMethod,
 		LimitKind: params.LimitKind, TimeWindow: params.TimeWindow, Threshold: params.Threshold,
@@ -156,12 +161,12 @@ func CreateRule(ctx context.Context, tx pgx.Tx, params CreateRuleParams) (Rule, 
 	}
 
 	_, err := tx.Exec(ctx,
-		`INSERT INTO risk_rules (id, tenant_id, brand_id, jurisdiction_code, player_account_id, product, operation,
+		`INSERT INTO risk_rules (id, tenant_id, brand_id, jurisdiction_code, licensing_mode, player_account_id, product, operation,
 			provider_id, game_id, asset_code, payment_method, limit_kind, time_window, threshold,
 			rule_kind, action, status, effective_from, description, created_by_actor_type, created_by_actor_id)
-		 VALUES ($1, $2, $3, NULLIF($4, ''), $5, NULLIF($6, ''), $7, NULLIF($8, ''), $9, NULLIF($10, ''), NULLIF($11, ''),
-			$12, $13, $14, $15, $16, $17, $18, NULLIF($19, ''), $20, $21)`,
-		r.ID, r.TenantID, r.BrandID, r.JurisdictionCode, r.PlayerAccountID, r.Product, r.Operation,
+		 VALUES ($1, $2, $3, NULLIF($4, ''), NULLIF($5, ''), $6, NULLIF($7, ''), $8, NULLIF($9, ''), $10, NULLIF($11, ''), NULLIF($12, ''),
+			$13, $14, $15, $16, $17, $18, $19, NULLIF($20, ''), $21, $22)`,
+		r.ID, r.TenantID, r.BrandID, r.JurisdictionCode, r.LicensingMode, r.PlayerAccountID, r.Product, r.Operation,
 		r.ProviderID, r.GameID, r.AssetCode, r.PaymentMethod, r.LimitKind, r.TimeWindow, r.Threshold,
 		r.RuleKind, r.Action, r.Status, r.EffectiveFrom, r.Description, r.CreatedByActorType, r.CreatedByActorID,
 	)
@@ -180,6 +185,7 @@ func CreateRule(ctx context.Context, tx pgx.Tx, params CreateRuleParams) (Rule, 
 		Metadata: map[string]any{
 			"operation": string(r.Operation), "limit_kind": string(r.LimitKind), "time_window": string(r.TimeWindow),
 			"rule_kind": string(r.RuleKind), "action": string(r.Action), "platform_wide": r.TenantID == nil,
+			"jurisdiction_code": r.JurisdictionCode, "licensing_mode": r.LicensingMode,
 		},
 	}); err != nil {
 		return Rule{}, fmt.Errorf("risk: audit rule creation: %w", err)

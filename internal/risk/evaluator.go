@@ -32,6 +32,38 @@ var ErrConflictingRules = errors.New("risk: conflicting configurable rules match
 // silently skipped just because the caller forgot to populate Amount.
 var ErrMissingAmount = fmt.Errorf("%w: a matched rule requires a non-zero amount", ErrInvalidInput)
 
+// ErrMissingLicensingMode is returned when at least one rule configured
+// for this operation is scoped by LicensingMode but the request supplied
+// none (Stage 4G-FINAL Part D, specialist review finding). Unlike every
+// other optional scope dimension, an empty RiskRequest.LicensingMode is
+// NEVER a legitimate "not yet resolved" value the way JurisdictionCode's
+// empty value can be - tenants.licensing_model is NOT NULL, so a real
+// caller always has a real value to supply. Rule.matches() alone would
+// silently exclude a LicensingMode-scoped rule from ever matching an
+// empty-LicensingMode request (empty on the REQUEST side is not a
+// wildcard - only empty on the RULE side is), which would let a caller
+// that simply forgot to populate the field silently bypass a
+// LicensingMode-scoped HARD_LIMIT meant to protect exactly this
+// operation. Checked once per Evaluate call, independently of whether
+// any individual rule would otherwise match on every other dimension -
+// this is DELIBERATELY operation-wide, not per-rule: a narrower check
+// (only requiring LicensingMode when a rule ALSO matches every other
+// dimension) would itself be a fail-OPEN gap, since determining that
+// requires evaluating the same matches() logic this check exists to
+// backstop. Adversarial review considered this "blast radius" (one
+// platform-wide LicensingMode-scoped rule requires EVERY tenant to
+// supply LicensingMode for that operation) and confirmed it is the
+// correct, intended behavior, not a defect: a platform-wide rule is
+// deliberately visible/binding to every tenant (that is what
+// "platform-wide" means), so every caller for that operation genuinely
+// must resolve its own licensing mode once such a rule exists - exactly
+// the fail-closed contract this whole gate exists to enforce, applied at
+// the same scope the rule itself operates at.
+//
+// as conservative as ErrMissingAmount's own "never silently skip a rule
+// this request cannot be safely evaluated against" principle.
+var ErrMissingLicensingMode = fmt.Errorf("%w: a licensing_mode-scoped rule is configured for this operation but the request supplied no licensing_mode", ErrInvalidInput)
+
 // operationLedgerTransactionTypes maps a risk Operation to the
 // ledger_transactions.transaction_type value(s) a LimitCumulativeAmount
 // rule for that operation aggregates over. Only operations this stage
@@ -116,6 +148,9 @@ func (r Rule) matches(req RiskRequest) bool {
 		return false
 	}
 	if r.JurisdictionCode != "" && r.JurisdictionCode != req.JurisdictionCode {
+		return false
+	}
+	if r.LicensingMode != "" && r.LicensingMode != req.LicensingMode {
 		return false
 	}
 	if r.PlayerAccountID != nil && *r.PlayerAccountID != req.PlayerAccountID {
@@ -265,7 +300,29 @@ func Evaluate(ctx context.Context, tx pgx.Tx, req RiskRequest) (RiskDecision, er
 		return RiskDecision{}, err
 	}
 
+	// ErrMissingLicensingMode fail-closed gate (Stage 4G-FINAL, specialist
+	// review finding): checked against every rule CONFIGURED for this
+	// operation, not just ones that would otherwise match on every other
+	// dimension - conservative by design, mirroring ErrMissingAmount's own
+	// "never silently skip a rule this request cannot be safely evaluated
+	// against" principle. Rule.matches() alone cannot catch this: an empty
+	// req.LicensingMode against a LicensingMode-scoped rule simply returns
+	// false (a non-match), which would silently exclude that rule from
+	// ever applying rather than erroring - exactly the fail-open gap a
+	// forgetful future caller (Evaluate has only one caller, internal/
+	// casino, today) could otherwise introduce. Only a currently
+	// EFFECTIVE rule (isEffective(now), i.e. active and within its
+	// effective window) triggers this gate - a disabled or not-yet-
+	// effective rule is not a live policy and must never force every
+	// unrelated request for this operation to supply LicensingMode.
 	now := time.Now().UTC()
+	if req.LicensingMode == "" {
+		for _, r := range rules {
+			if r.LicensingMode != "" && r.isEffective(now) {
+				return RiskDecision{}, ErrMissingLicensingMode
+			}
+		}
+	}
 	var matched []MatchedRule
 	var hardBreachAction RuleAction
 	hardBreached := false

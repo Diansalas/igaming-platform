@@ -36,6 +36,44 @@ specialist may override an Orchestrator decision; a specialist that
 disagrees escalates via the reasoning in its own findings, and the
 Orchestrator decides.
 
+**Absolute constraint on every specialist (Stage 4G-FINAL, made explicit
+because it was previously only implied by the working pattern above)**:
+a specialist — whether the Orchestrator acting in that capacity, or a
+dispatched `Agent` review/implementation task — MUST NOT (a) implement a
+change in a file outside its own `ownership.md` entry without a recorded
+dependency request first, (b) begin work not assigned to it by the
+Orchestrator (no self-assigned scope expansion — `product-owner-proxy`'s
+job exists precisely to catch this), or (c) mark its own significant
+work "reviewed" or "integrated." Violating any of these three is a
+process defect to be recorded in `task-registry.md`'s Dependency Request
+Log or Integration Approval Log (below) exactly like any other finding,
+even when the Orchestrator itself is the specialist that violated it.
+
+## How the Orchestrator assigns every task to an owner
+
+No task exists un-owned. Concretely:
+
+1. Before any implementation begins, the Orchestrator adds a row to
+   `task-registry.md`'s current stage table with an **Owner** already
+   filled in — never blank, never "TBD." The owner is either a named
+   specialist (`risk`, `casino`, `security`, …) or, per the Working
+   Pattern above, "Orchestrator (implementing as `<domain>`)" when the
+   Orchestrator performs the domain's own implementation directly. Both
+   forms are a real, recorded assignment — "Orchestrator implemented it"
+   is not an exemption from ownership, it is a stated ownership value.
+2. **Files owned** is filled in from `ownership.md` at assignment time,
+   not invented per-task — if a task needs a file `ownership.md` assigns
+   to a different domain, that need becomes a Dependency Request (below)
+   filed on the SAME row, not a silent broadening of "files owned."
+3. A task with no dependencies starts immediately; a task with unresolved
+   **Dependencies** or **Blockers** does not start until the registry
+   shows them resolved.
+4. Reassigning an owner mid-task (rare — e.g., a specialist proves the
+   wrong fit) is itself a recorded event: the old row's Status becomes a
+   terminal note ("Reassigned — see 4X-NN") and a new row is opened; the
+   old row is never edited to silently swap the Owner column, preserving
+   the historical record `task-registry.md` §5 already requires.
+
 ## Specialist roles and their repository mapping
 
 | Directive role | Repository agent | Notes |

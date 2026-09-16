@@ -45,6 +45,35 @@ func GetTenantBySlug(ctx context.Context, pool *db.Pool, slug string) (Tenant, e
 	return t, nil
 }
 
+// GetTenantByID resolves a tenant within an already-open transaction -
+// unlike GetTenantBySlug (used before any tenant context exists, e.g.
+// staff-login resolution), this is for a caller that already holds a
+// tx and needs the tenant's own canonical fields (LicensingMode, in
+// particular - Stage 4G-FINAL Part D's "risk.Evaluate never resolves
+// licensing mode itself, the caller does" contract). tenants has no RLS
+// (see GetTenantBySlug's doc comment), so this resolves identically
+// regardless of the tx's own tenant scope - id MUST therefore always be a
+// server-derived value from the caller's own already-authenticated
+// context (e.g. tenant.FromContext, or a foreign key already scoped to
+// the right tenant), never a client-supplied id, exactly like every
+// other cross-tenant-capable lookup in this codebase. PostgreSQL/RLS
+// review finding: this table has no RLS backstop, so this discipline is
+// enforced entirely by caller convention, not by the database.
+func GetTenantByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (Tenant, error) {
+	var t Tenant
+	err := tx.QueryRow(ctx,
+		`SELECT id, name, slug, licensing_model, status FROM tenants WHERE id = $1`,
+		id,
+	).Scan(&t.ID, &t.Name, &t.Slug, &t.LicensingModel, &t.Status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Tenant{}, ErrNotFound
+	}
+	if err != nil {
+		return Tenant{}, fmt.Errorf("identity: get tenant by id: %w", err)
+	}
+	return t, nil
+}
+
 // CreateTenant provisions a new tenant. Platform-admin-only (see
 // PermTenantWrite) - tenant provisioning is inherently a platform-level
 // action, never tenant-scoped. Takes a pgx.Tx (rather than opening its
