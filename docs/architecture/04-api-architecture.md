@@ -88,20 +88,25 @@ restate those ground rules in full — see doc 25 §0 for the shared baseline
 this section builds on.
 
 **Explicit assumption (`ASSUMPTION`, to reconcile at implementation
-time):** this document was authored in parallel with, and references,
-two sibling Stage 4H-B0 deliverables this specialist does not own and has
-not read (they may not yet exist as committed files at the time of
-writing): `security`'s RBAC/hierarchy-scope enforcement design (how a
-principal's own hierarchy-node/subtree scope is resolved and enforced
-server-side, analogous to how `tenant.FromContext` resolves tenant scope
-today) and `payments`' retail deposit/withdrawal-confirmation idempotency
-and provider-adapter shape. Where this document needs to say something
-about either, it states the *shape* it assumes (based on this codebase's
-existing precedents — ADR 0020's `(provider_id, provider_tx_id)`
-uniqueness and `withdrawal-state-machine.md` §4's tenant+subject-namespaced
-`idempotency_key`) and flags it `OPEN DECISION — reconcile with
-[security|payments]'s Stage 4H-B0 document` rather than inventing a
-mechanism. Nothing here should be read as pre-empting either document.
+time):** this document was authored in parallel with two sibling Stage
+4H-B0 deliverables this specialist does not own: `security`'s hierarchy
+RBAC/audit design (as of writing, expected at `docs/decisions/0036-
+retail-hierarchy-rbac-and-audit.md`, not yet committed) and `architect`'s
+hierarchy data-model design (expected at `docs/architecture/26-retail-
+operations-architecture.md`, not yet committed). Where this document
+needs to say something about either, it states the *shape* it assumes
+(§0/§2 below) and flags it `OPEN DECISION — reconcile with [security|
+architect]'s Stage 4H-B0 document` rather than inventing a mechanism.
+`payments`' sibling deliverable **did** land during this document's
+authorship — a new "Retail cash rail" section appended to
+`07-payments-architecture.md` — and §1/§4 below are written directly
+against its actual decisions (retail cash is explicitly **not** a
+`PaymentProvider` adapter; deposit/withdrawal confirmation idempotency is
+a state-transition guard on the request row, not a DB-uniqueness key),
+superseding this document's own earlier draft assumption of an
+ADR-0020-style `(provider_id, provider_tx_id)` shape for retail. Nothing
+here should be read as pre-empting `security`'s or `architect`'s
+still-unlanded documents.
 
 ### 0. Hierarchy as data — conceptual model (`ARCHITECTURAL DECISION`)
 
@@ -149,8 +154,8 @@ applied to the additional node dimension).
 | Group | Conceptual endpoint(s) | Actor / scope | Idempotency shape |
 |---|---|---|---|
 | Player registration-at-retail | `POST /v1/retail/players` | Cashier session, scoped to their own node — the created `player_account.registered_at_node_id` is set server-side to the caller's own node, never client-supplied | Caller-supplied `client_reference`, unique on `(tenant_id, hierarchy_node_id, client_reference)` — mirrors doc 25's admin-create precedent (mission/badge creation), namespaced by node rather than by player since no player identity exists yet at the point of the call |
-| Deposit confirmation | `POST /v1/retail/deposits/confirm` | Cashier session, scoped to own node; targets a specific `player_account` (looked up, never created implicitly by this call) | `OPEN DECISION — reconcile with payments' Stage 4H-B0 document`: assumed shape is the existing `PaymentProvider` idempotency pattern (ADR 0020's `(provider_id, provider_tx_id)` DB-enforced unique constraint), with a new `retail_cash` (or per-tenant retail) `provider_id` and `provider_tx_id` = a cashier/terminal-supplied reference for that specific cash-in event — **not** a bespoke retail-only uniqueness namespace |
-| Withdrawal confirmation/fulfillment | `POST /v1/retail/withdrawals/{id}/fulfill` | Cashier session, scoped to own node; acts on a `WithdrawalRequest` already in `approved`/`submitted` state (review/approval is centralized and unaffected by channel — see §4) | Matches `WithdrawalRequest`'s existing state-transition concurrency control (`withdrawal-state-machine.md` §4: optimistic concurrency, `UPDATE ... WHERE state = $expected`) — fulfillment is a single state transition, not a re-postable financial write of its own; a repeat call against an already-`completed` request is a no-op returning current state, never a second cash movement |
+| Deposit confirmation | `POST /v1/retail/deposit-requests/{id}/confirm` (naming matches `07-payments-architecture.md`'s landed "Retail cash rail" §2) | Cashier session, scoped to own node; acts on a `RetailDepositRequest` already created (at player-request time) in state `awaiting_cash_handover` for a specific `player_account` — never a call that creates and confirms in one step | Per `07-payments-architecture.md` §1/§2 (landed during this stage, not this document's own invention): **not** an ADR-0020-style `(provider_id, provider_tx_id)` uniqueness key — retail cash is explicitly not a `PaymentProvider` adapter, so there is no `provider_id`. Idempotency is a state-transition guard: `UPDATE ... WHERE state = 'awaiting_cash_handover'`, `RowsAffected()` checked before the ledger-posting call is made; a repeat/racing confirm against an already-resolved request is a no-op returning current state, never a second posting |
+| Withdrawal confirmation/fulfillment | `POST /v1/retail/withdrawal-requests/{id}/complete` (naming matches `07-payments-architecture.md` §3) | Cashier session, scoped to own node; acts on a `WithdrawalRequest` already in `submitted` state, reached via the *existing, unmodified* `requested → pending_review → approved` review/approval chain — review/approval is centralized and unaffected by channel (see §4) | Matches `WithdrawalRequest`'s existing state-transition concurrency control (`withdrawal-state-machine.md` §4: optimistic concurrency, `UPDATE ... WHERE state = $expected`), applied here to the `submitted → completed` transition exactly as `07-payments-architecture.md` §3 specifies — a repeat call against an already-`completed` request is a no-op returning current state, never a second cash movement |
 | Shift/till open/close | `POST /v1/retail/shifts` (open), `POST /v1/retail/shifts/{id}/close` | Cashier session, scoped to own node/terminal | Append-only; at most one open shift per `(tenant_id, hierarchy_node_id or terminal_id)` enforced by a partial unique constraint (`WHERE closed_at IS NULL`) — opening a second shift while one is open is rejected, not silently allowed to coexist |
 | Balance/float inquiry | `GET /v1/retail/shifts/{id}/float`, `GET /v1/retail/players/{id}/balance` | Cashier session, own node/shift for the till float; a specific player's balance only in the presence of that player (see `OPEN DECISION` below) | Read-only, no idempotency concern — a pure projection read, same as `GET /v1/wallets` today; never itself an authoritative source for a subsequent write (a stale float display must not be trusted by a later confirm-deposit call, which re-derives its own state independently) |
 

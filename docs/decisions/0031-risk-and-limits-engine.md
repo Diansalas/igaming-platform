@@ -976,3 +976,555 @@ place. This section is an extension-point specification; the extension
 points stay closed until an authorizing stage opens them with all the
 steps in §12 or §16 executed together in one change.
 
+## Stage 4H-B0: Retail Risk Integration
+
+Status of this section: **architecture/scope freeze only — everything
+below is `NOT IMPLEMENTED`.** Stage 4H-B0's directive is explicit: no
+code. This section adds no `Operation` value, no `LimitKind`, no scope
+dimension, no column, no migration, no HTTP validation, no OpenAPI enum
+entry, and no enforcement wiring. It is a CONTRACT specification and a
+set of extension points, in exactly the form §12 (`LimitKind` extension
+model), §16 (`Operation` extension model) and §14-§18 (the Bonus/
+Gamification freeze) already established. Nothing in §19-§24 changes
+`risk.Evaluate`'s signature, `risk_rules`' shape, the precedence
+algorithm, the fail-closed contract, or any existing enforcement call
+site. Every Stage 4G, 4G-FINAL and 4H-A decision above stands unmodified,
+and §14-§18 are untouched by this section.
+
+**Business context.** A confirmed requirement introduces a retail
+agent-hierarchy network — Operator → Partner → Super Agent → Agent →
+Player/Cashier, configurable per tenant/licence/jurisdiction. The two
+requirements this ADR owns are directive requirement #6 ("funding limits
+and withdrawal limits by hierarchy level") and directive requirement #16
+("Risk, AML/KYC, responsible-gaming and self-exclusion enforcement must
+remain platform-wide and must not be bypassed through retail").
+
+**Assumptions about the hierarchy model — stated so they can be
+verified, not assumed silently.** The retail/agent-hierarchy domain
+design (package ownership, table shape, actor model) is being produced in
+parallel by the `architect` and does not exist in this repository: as of
+this section's authorship, no `internal/retail` package, no hierarchy
+table, no migration, and no retail document exist (the only occurrence of
+"cashier" anywhere in `docs/` is a brand-frontend UI label in
+`00-system-overview.md`). This section therefore describes retail
+concepts abstractly — "however the retail domain represents a hierarchy
+node" — in the same way §14-§18 described the Bonus Engine's Grant. It
+commits to nothing about the retail domain's internal shape, only to
+where `risk.Evaluate` sits relative to it. Four assumptions are
+load-bearing and **must be confirmed by the Orchestrator against the
+architect's parallel document before any of this is built**:
+
+1. A hierarchy **node** is a persistent, server-side-identifiable entity
+   with a stable identifier, owned by exactly one `tenant_id`.
+2. A node has exactly one **level** drawn from a small, tenant/
+   licence/jurisdiction-configurable set (e.g. `partner`, `super_agent`,
+   `agent`, `cashier`) — i.e. level is a configuration value, not a Go
+   type or a code path (CLAUDE.md's "nothing brand-specific may become a
+   code path", applied to hierarchy shape).
+3. A retail-originated operation has exactly ONE acting node resolvable
+   server-side from the authenticated retail session — never a set, and
+   never client-supplied.
+4. A player transacting at retail is an identified `player_accounts` row,
+   not an anonymous over-the-counter bearer ticket. See §22 — if this
+   assumption is false, directive requirement #16 is structurally
+   unsatisfiable and that is a `identity-compliance` blocker, not
+   something Risk can fix.
+
+### 19. The hard rule, restated and specialized for Retail — `ARCHITECTURAL DECISION`
+
+The rule established for Casino in §1/§2, generalized in §13, and
+specialized for Bonus/Gamification in §14 applies to the retail
+agent-hierarchy domain **unchanged, unweakened, and without
+reinterpretation for this domain**:
+
+- Funding limits and withdrawal limits by hierarchy level (requirement
+  #6) are `internal/risk` `Rule`s — rows in `risk_rules` — evaluated
+  through the existing `Evaluate(ctx, tx, req RiskRequest)
+  (RiskDecision, error)` boundary. They are not a retail feature that
+  happens to involve limits.
+- Whatever package ends up owning the retail/agent hierarchy **must not
+  build a second limit engine.** No threshold comparison, no per-agent
+  cap table, no "max float per day" counter, no velocity check, no
+  per-level limit map in retail configuration code. The retail domain
+  authors `risk_rules` rows and interprets `ALLOW`/`DENY`/`REVIEW`; it
+  never re-implements the comparison. This is the identical constraint
+  `internal/casino` already operates under and `internal/payments`, the
+  sportsbook, the Bonus Engine and Gamification are all already bound by.
+- The call happens **inside the same database transaction as the
+  state-changing effect it gates, before that effect commits** (§13,
+  §14). PostgreSQL inside the guarded transaction is the only
+  authoritative correctness boundary for a cumulative check. A float
+  advance evaluated in one transaction and posted in another is not
+  gated; it is merely advised. No cache, and no counter maintained by the
+  retail domain, may stand in for that read.
+- A non-nil error from `Evaluate` is a DENY at every retail call site,
+  per §6. There is no retail-specific softening — not for an offline
+  terminal, not for a degraded-connectivity cashier, not for a
+  store-and-forward queue. See §24's open decision on offline retail:
+  the answer this ADR gives today is that an operation that cannot be
+  risk-evaluated inside its own transaction cannot be authorized, and
+  anything else is a product decision that must be taken explicitly, by a
+  human, with `security` and `identity-compliance` in the room — never
+  arrived at by an implementation detail.
+- **Every existing platform-wide, jurisdiction-scoped, tenant-scoped and
+  player-scoped rule continues to bind a retail-originated operation**,
+  because `matches()` treats an unset scope dimension on the RULE as a
+  wildcard. Retail is a new channel, not a new rulebook. This is the
+  Risk half of requirement #16 and it holds by construction, not by
+  discipline — there is no retail bypass to close because no code path
+  exists by which a retail operation could skip rules that a non-retail
+  operation matches, **provided** the retail domain actually calls
+  `Evaluate` (§21) rather than transacting without it. That proviso is
+  the only real risk here, and it is an integration obligation, not an
+  engine gap.
+
+### 20. Hierarchy scoping — two new scope dimensions, not a new precedence mechanism — `RECOMMENDATION`
+
+Requirement #6 needs two genuinely different things, and they must not be
+collapsed into one field:
+
+- **By LEVEL** — "an `agent`-level node may fund at most €X per day; a
+  `super_agent`-level node at most €Y." A categorical narrowing.
+- **By SPECIFIC NODE** — "this one agent has a negotiated custom limit."
+  An entity narrowing, exactly analogous to today's `player_account_id`
+  override beating a brand default.
+
+**Decision: both fit the existing `Rule` model as ordinary additive scope
+fields, and neither requires a new precedence mechanism.** The extension
+discipline of §12/§16 applies unchanged; nothing about `matches()`'s
+equality contract, `isEffective()`, the HARD_LIMIT/CONFIGURABLE_LIMIT/
+RISK_SIGNAL algorithm, the deny-priority merge, `ErrConflictingRules`, or
+the fail-closed contract changes.
+
+**(a) Shape.** Two fields on both `Rule` and `RiskRequest`, mirroring the
+two shapes the struct already uses:
+
+- `HierarchyLevel string` — mirrors `Product`/`LicensingMode` exactly: a
+  configuration-valued string, empty meaning "applies regardless of
+  level."
+- `HierarchyNodeID *uuid.UUID` on `Rule` / `uuid.UUID` on `RiskRequest` —
+  mirrors `PlayerAccountID`/`BrandID` exactly, including the
+  `NULL`-means-wildcard convention and (on the rule side) the
+  `CHECK (hierarchy_node_id IS NULL OR tenant_id IS NOT NULL)` that
+  `player_account_id` already carries, since a node belongs to exactly
+  one tenant.
+
+Both are resolved **server-side by the caller** from the authenticated
+retail session, never client-supplied and never looked up by
+`risk.Evaluate` itself — the identical resolution contract §10 states for
+`LicensingMode` and CLAUDE.md states for `tenant_id`. A client-supplied
+node id would let a cashier claim a level with a higher limit, which is
+the single most obvious attack on this design.
+
+**(b) Precedence.** `specificity()` is a bitmask summing every present
+scope dimension (the P1 fix recorded in the specialist-review section
+above). Two new dimensions mean two new bits and a renumbering of the
+existing ones. Recommended order, most to least specific:
+
+```
+player > hierarchy_node > game > provider > asset > payment_method >
+product > hierarchy_level > brand > tenant > jurisdiction >
+licensing_mode
+```
+
+Rationale, consistent with the ordering rationale already in
+`types.go`'s own doc comment: `hierarchy_node` names one specific entity
+and so ranks with the entity-identifying dimensions, but immediately
+BELOW `player_account_id`, because a node contains many players and a
+single player is the narrowest possible subject — a player-specific
+override must keep beating a node-specific one. `hierarchy_level` is a
+categorical class, like `product` and `licensing_mode`, so it ranks with
+those: below every entity-identifying and value-carrying dimension, and
+above the operating-entity chain (`brand`/`tenant`/`jurisdiction`/
+`licensing_mode`) that describes WHO operates rather than WHERE in the
+distribution network the operation sits.
+
+Three properties make this safe, and they are the reason this is an
+extension rather than a redesign:
+
+1. **Renumbering existing bits is free.** `specificity()` is computed per
+   evaluation, compared only against other scores within the same
+   request, and **never persisted** — no column, no API field, no stored
+   value depends on the numeric bit positions. Only the relative order is
+   load-bearing.
+2. **One bit per dimension, never shared.** A rule scoped
+   `hierarchy_level = 'agent'` and a rule scoped `hierarchy_node = N` are
+   therefore NOT a tie — the node-scoped rule strictly wins, which is the
+   intended "custom limit for this one agent beats the level default."
+3. **Conflict detection extends automatically.** Two CONFIGURABLE rules
+   both scoped by the same `hierarchy_level` and nothing else, for the
+   same `(limit_kind, time_window)`, are a genuine tie and return
+   `ErrConflictingRules` — fail-closed, per §5. Operationally this means
+   a retail operator must author exactly one per-level default per
+   `(level, limit_kind, time_window)`; a second one takes that level's
+   operations down rather than silently picking one. That is the correct
+   behavior and must be stated in the partner-console UX, not discovered
+   in production.
+
+**(c) What this deliberately does NOT do: subtree/ancestor inheritance.**
+`matches()` is exact equality on every dimension. A rule authored on a
+Partner node therefore binds **that node only** — it does NOT
+automatically bind that Partner's Super Agents, Agents and Cashiers. A
+"rules inherit down the tree" model is a genuinely different matching
+semantic and is **not adopted this stage**, because it cannot be added
+without changing two things §12's extension discipline says an extension
+must not change:
+
+- `matches()` would go from equality to set-membership for one dimension
+  (the request would have to carry its whole ancestor path, or
+  `internal/risk` would have to traverse the retail domain's own
+  hierarchy table — which it must not do, per the constraint §15c already
+  imposes: `internal/risk` does not query another domain's schema).
+- `specificity()` would need a *within-dimension* ordering (nearest
+  ancestor wins) that the bitmask cannot express — a presence bit says
+  "this dimension is scoped", not "scoped at depth 3 rather than depth
+  1". Two matching ancestors at different depths would tie and fail
+  closed, incorrectly.
+
+Recorded as an `OPEN DECISION` in §24. Requirement #6 as written ("by
+hierarchy level") is fully served by (a) + (b) without inheritance: a
+per-level rule binds every node at that level regardless of parentage,
+which is the more predictable model anyway. Inheritance must not be
+retrofitted quietly.
+
+**(d) Schema/ownership dependencies — this is `BLOCKED` on work this
+specialist does not own.** `risk_rules.hierarchy_node_id` wants a
+composite foreign key `(hierarchy_node_id, tenant_id)` into the retail
+domain's own node table, mirroring the existing
+`FOREIGN KEY (player_account_id, tenant_id) REFERENCES player_accounts
+(id, tenant_id)`. That table does not exist and is not Risk's to create.
+`hierarchy_level`'s permitted values likewise belong to the retail
+domain's configuration, not to a `CHECK` constraint invented here (the
+level set is per tenant/licence/jurisdiction per the requirement, so a
+hard-coded `CHECK` would be wrong — an unconstrained `TEXT` scope field,
+like the existing `provider_id` and `payment_method`, is the correct
+shape). Per `docs/governance/change-control.md`, the migration that adds
+these columns needs `architect` (table ownership), `security` (RLS/RBAC
+review of `risk_rules`, which the existing RLS policies' `app.
+player_account_id IS NULL` guard already makes non-trivial), and
+`ledger-finance` where it touches float accounting. None of that happens
+this stage.
+
+### 21. Retail operations — what needs a new `Operation`, and what does not — `RECOMMENDATION` / `OPEN DECISION`
+
+Per §16's extension model, and with the same honest bookkeeping §16
+applied to `tournament_entry`/`marketplace_purchase`: **none of the
+values below exist.** `migrations/0041`'s `operation` CHECK accepts
+exactly `casino_launch`, `casino_bet`, `deposit`, `withdrawal`,
+`sportsbook_bet`, `bonus_grant` and nothing else; `internal/risk/types.
+go` declares exactly those six constants; `newCreateRiskRuleHandler`'s
+own `RequireOneOf("operation", ...)` allowlist repeats those six
+independently of the database; and `docs/api/openapi/platform-api.yaml`
+carries the same enum twice. **No retail operation can be stored in
+`risk_rules` today, and none may be created before all six steps of
+§16's extension model are executed together in one authorized change.**
+That is the intended fail-closed posture, not an oversight.
+
+| Proposed value | Gates | Status | Why not an existing value |
+|---|---|---|---|
+| `retail_funding` | A float advance/replenishment between two hierarchy nodes (e.g. Super Agent → Agent), and its reversal/settlement counterpart | `NOT IMPLEMENTED` — DOCUMENTED ONLY, no constant, no migration, no HTTP validation, no OpenAPI entry | No existing operation describes a value movement between two non-player entities. Reusing `deposit` would retroactively rebind every `deposit` rule an operator has authored to agent float movements — the exact failure §15e rejects for `casino_bet`/`tournament_entry` |
+| `retail_withdrawal` | A player taking cash out at a retail location | `NOT IMPLEMENTED` — DOCUMENTED ONLY, and **CONDITIONAL**, see the decision rule below | Conditional: distinct only if the cash-out is a genuinely different money movement from a rails withdrawal |
+| `retail_deposit` | A player putting cash in at a retail counter | `NOT IMPLEMENTED` — DOCUMENTED ONLY, and **CONDITIONAL on the identical criterion**, decided in the same change as `retail_withdrawal`, never differently for in and out | Same conditional |
+
+**Decision rule for the two conditional values** (recorded so whoever
+closes it does not re-derive it, exactly as §15f does for
+`reward_redemption`): *does the retail cash-out/cash-in debit or credit
+an AGENT'S FLOAT rather than the platform's payment rails?* If yes, it is
+a different money movement with a different counterparty, a different
+ledger mapping, a different settlement path and different thresholds, and
+it needs its own `Operation` — the retail case is then strongly
+analogous to `bonus_conversion` (§15a-ii), not to a channel variant. If
+no — if a retail cash-out is the same withdrawal from the same player
+wallet, merely handed over at a counter — then **no new `Operation`
+should be added**, and the retail distinction is expressible today at
+zero extension cost by narrowing an ordinary `withdrawal`/`deposit` rule
+with `payment_method = 'retail_cash'` (or whatever value the payments
+domain registers): `payment_method` is already a `Rule`/`RiskRequest`
+scope field, is already in the `specificity()` bitmask, is unconstrained
+`TEXT` in migration 0041, and is **not** in the HTTP handler's
+`RequireOneOf` allowlist — so it needs no migration, no Go constant and
+no OpenAPI change at all.
+
+This is the mirror image of §15e's reasoning and the asymmetry is
+deliberate: reuse of an existing `Operation` is WRONG when the amount or
+the money movement differs in kind (a bonus conversion is not a bonus
+grant), and RIGHT when it is the same money leaving the same wallet
+through a different channel. This ADR's own reading is that the first
+branch is more likely (retail cash almost always moves against an agent
+float rather than a PSP), but the decisive fact is the ledger treatment,
+which is `ledger-finance`'s to state with the `architect`'s hierarchy
+model in hand — not Risk's to guess. Recorded as an `OPEN DECISION`
+(§24).
+
+**Consequences that hold whichever branch is chosen:**
+
+- **`product` needs additive widening if retail is a product.**
+  `risk_rules.product`'s CHECK accepts only `('casino','sportsbook',
+  'payments','bonus')`, and `newCreateRiskRuleHandler` repeats that list.
+  A retail rule can today only be authored `product`-unscoped or
+  mislabeled. Same flag §16 already raised for gamification; the product
+  taxonomy is the `architect`'s, not this ADR's.
+- **`min_amount`/`max_amount` work unchanged** for every retail
+  operation once its `Operation` value exists. `Rule.breach()`'s
+  `min_amount`/`max_amount` cases compare `req.Amount` directly and are
+  entirely generic over `Operation`. "Max €X per single float advance to
+  an `agent`-level node" is therefore expressible with no new
+  `LimitKind`.
+- **`cumulative_amount` does NOT work for `retail_funding`, and this is
+  the most important negative result in this section.** Requirement #6's
+  most natural reading — "an Agent may fund at most €X **per day**" — is
+  a `cumulative_amount` limit, and it is not expressible for node-to-node
+  float movement even after the `Operation` value is added, for two
+  independent reasons, either of which alone is fatal:
+  1. `Rule.breach()`'s cumulative case looks `req.Operation` up in
+     `operationLedgerTransactionTypes`, which contains exactly one entry
+     (`casino_bet`), and returns `ErrUnsupportedCumulativeOperation` for
+     anything else. Fixing that needs the ledger transaction type and its
+     reversal counterpart (`operationLedgerRollbackTypes`) — additive
+     facts `ledger-finance` must establish, never Risk's to invent (§16
+     step 5, §15b).
+  2. More fundamentally, the cumulative aggregation query is keyed by
+     `le.player_account_id = $2` and `breach()` returns `ErrInvalidInput`
+     when `req.PlayerAccountID` is `uuid.Nil`. **A float advance between
+     two agent nodes has no player at all.** Cumulative aggregation keyed
+     by hierarchy node does not exist and is a new capability, not a
+     configuration. See §23.
+
+  Until both are closed, a `cumulative_amount` rule on a retail funding
+  operation would be storable (`CreateRule` still does not cross-validate
+  `limit_kind`/`operation` compatibility — an already-recorded P2) and
+  would **fail closed with an error on every matching request**. Treated
+  as unavailable, not as working. Per-transaction funding caps: yes.
+  Per-day funding caps: **not yet, and must not be described as
+  delivered.**
+- **Every retail call site owes §13's declaration**: resolve its own
+  `RiskRequest` (including `JurisdictionCode` and `LicensingMode` from
+  the retail domain's own trusted context per §9/§10 — a retail
+  operation has no casino launch session to read from) and call
+  `Evaluate` in the same transaction as its own state-changing effect,
+  before commit. Adding an enum value without this step yields a
+  configurable rule that nothing consults — §16 step 6's "the inversion
+  most likely to be mistaken for done."
+
+### 22. Responsible Gaming and self-exclusion are NOT a Risk concern in retail either — `ARCHITECTURAL DECISION`
+
+Unchanged from §1 and §14, restated because directive requirement #16
+names RG and self-exclusion in the same sentence as Risk and the two must
+not be blurred by that adjacency:
+
+- `internal/rg.EvaluateEligibility` remains the **sole** authority for
+  self-exclusion, cool-off, account status and wallet status, for retail
+  exactly as for online. `internal/risk` has no self-exclusion concept,
+  never reads or writes `player_restrictions`, and **must not** acquire a
+  "retail RG" rule kind, a `self_excluded` scope dimension, or a
+  `LimitKind` that encodes an RG determination. A self-exclusion
+  expressed as a `risk_rules` row would be an RG bypass wearing a Risk
+  costume: it would be tenant-`risk_manager`-disablable (§8), effective-
+  dated, and overridable by specificity — none of which is acceptable
+  for a self-exclusion.
+- A retail enforcement point **composes both**, in the same fixed order
+  `internal/casino` already uses: RG first, short-circuiting, then Risk
+  (§1). An RG denial returns before Risk is ever evaluated, so Risk's
+  ALLOW can never "override" it. Ownership of the RG half sits with
+  `identity-compliance`, not with this ADR, and the retail domain's RG
+  integration is theirs to specify — this section only confirms the
+  boundary holds for retail and refuses to move it.
+- KYC/AML at retail is likewise `identity-compliance`'s, not Risk's.
+  A `RISK_SIGNAL` rule may contribute a `REVIEW` outcome for a pattern
+  that *looks* like structuring, but a Risk `REVIEW` is not an AML
+  determination, a suspicious-activity report, or a KYC decision, and
+  must never be recorded or reported as one.
+
+**One retail-specific escalation, raised because requirement #16 is a
+hard requirement and this is the realistic way it fails.** RG and
+self-exclusion enforcement both presuppose an identified player
+(assumption 4 above). Anonymous or bearer-instrument retail play — cash
+over the counter with no `player_accounts` row — would structurally
+bypass RG, self-exclusion, KYC thresholds and every player-scoped Risk
+rule simultaneously, and **no amount of Risk configuration can
+compensate**, because `matches()` has nothing to match on and the
+cumulative aggregation has no player to key by. This ADR does not have
+the authority to decide whether anonymous retail play is permitted (it is
+a licensing/legal question per CLAUDE.md's "when to stop and ask", and a
+jurisdiction-by-jurisdiction one). It is escalated to the Orchestrator
+for `identity-compliance` and the human: **if anonymous retail play is in
+scope, requirement #16 is not satisfiable as written and that must be
+surfaced before the retail domain is designed, not after.**
+
+### 23. Hierarchy-wide / subtree aggregate exposure — a real gap, disclosed — `OPEN DECISION`
+
+Checked for, per the directive, against the same class of gap Stage
+4H-A's review found for bonus campaign budgets (§15d) and cross-domain
+player exposure (§17). **The same class of gap exists here, and this ADR
+discloses it rather than claiming coverage.**
+
+The question is whether the platform can bound *an entire hierarchy
+subtree's* cumulative exposure — "total funding flowing through this
+Partner's whole network in a day", "total retail cash-out across every
+Cashier under this Super Agent this week" — as distinct from any single
+node's own limit. **It cannot, today, and nothing in §19-§22 makes it
+possible.** Three independent structural reasons:
+
+1. **No cross-player aggregation exists.** The cumulative query nets
+   `ledger_entries` filtered by `le.player_account_id = $2`. Every scope
+   dimension on `risk_rules` NARROWS toward a single subject; none
+   broadens one across subjects. This is the identical finding §15d
+   recorded for campaign budgets.
+2. **No cross-NODE aggregation exists**, which is a strictly larger gap
+   than (1): a node-keyed cumulative sum does not exist at all, not even
+   for a single node, because the aggregation is player-keyed and
+   `ledger_entries` carries no hierarchy node (§21). Even "this one Agent
+   funded €X today" is not computable by `internal/risk` today.
+3. **No transitive/subtree traversal exists, and adding one is blocked by
+   an existing constraint.** Summing a subtree requires walking the
+   hierarchy, i.e. `internal/risk` reading the retail domain's own
+   schema — which §15c already forbids for exactly this reason, and
+   which would also reintroduce the ancestor-matching problem of §20(c).
+
+**Consequence, stated plainly so nobody infers coverage from §20:**
+per-level and per-node caps (§20) bound each node *individually*. They do
+**not** bound a network's aggregate. A Partner with 200 Agents each
+capped at €10k/day is capped at €2M/day in aggregate, and there is no
+rule that can say otherwise. If network-wide exposure control is a real
+business requirement — and for a retail credit/float model it very
+plausibly is, since the platform is extending float — it is a genuinely
+new capability requiring: a node-keyed (not player-keyed) aggregation, a
+subtree-aware aggregation on top of that, a definition of what "exposure"
+means for an outstanding float advance (settled? outstanding? credit
+extended?), and the `exposure` `LimitKind` reserved in §4/§12. That is a
+joint `ledger-finance` + Risk + `architect` design owned by a future
+stage. **Recorded as an explicitly `OPEN DECISION`. It is NOT partially
+approximated this stage, and a per-node rule must not be described
+anywhere as if it provided network-wide exposure control.**
+
+**The §15d guard, restated for retail — `ARCHITECTURAL DECISION`.** There
+is a legitimate retail-side construct that must not be confused with the
+gap above, and an illegitimate one that this ADR forbids under its §14/§19
+authority:
+
+- **Legitimate**: an agent's float *balance*, and the check "this node
+  cannot advance more float than it holds." That is a balance/accounting
+  invariant, owned by `ledger-finance` and enforced against the ledger in
+  the guarded transaction — the retail analogue of `internal/casino`'s
+  cash-balance lock. It is not a limit engine and Risk does not claim it.
+- **Forbidden**: a retail-side counter of the form "this node may move at
+  most €X per day/week", or "at most N transactions per hour", or any
+  per-node or per-level threshold table in retail configuration code.
+  **The moment a proposed retail-side constraint is a threshold compared
+  against accumulated activity over a window, it is a limit engine under
+  another name and must be a `risk_rules` row instead.** If §23's gap
+  means the rule cannot be expressed yet, the correct response is that
+  the capability does not exist yet — not a shadow implementation in the
+  retail domain.
+
+### 24. Open decisions, RBAC, and what remains impossible to configure after this section
+
+**RBAC — `ARCHITECTURAL DECISION`, with one escalation.** Risk-
+configuration write access stays where it is: `risk_config:manage` is
+held only by `RoleRiskManager`, which is always tenant-scoped (migration
+0011's CHECK), and is deliberately separate from Compliance, Finance,
+Tenant Admin and Platform Admin per `docs/governance/ownership.md`.
+**No retail hierarchy actor — Partner, Super Agent, Agent or Cashier —
+has, or may be given as part of the retail domain's own work, any
+risk-configuration write access.** Retail actors are in all likelihood
+not `StaffRole`s at all but a distinct actor population (the architect's
+call, not this ADR's); either way, a commercial hierarchy participant
+authoring the limits that constrain it is the limit engine defeating
+itself. If the product genuinely requires "a Super Agent sets its
+sub-agents' limits", that is a **delegated-authoring model** — a new
+permission, a bounded authoring scope (a node may only author rules for
+its own descendants), and a hard ceiling the delegate cannot exceed
+(which today would have to be a `HARD_LIMIT`, itself subject to §8's
+unresolved "no role can create a genuinely platform-wide rule via HTTP"
+limitation). Per CLAUDE.md and `docs/governance/change-control.md`, that
+is **not this specialist's to add unilaterally**: it needs the
+`architect` (actor model), `security` (RBAC/RLS review of `risk_rules`)
+and the Orchestrator. Escalated, not designed here. Rule writes already
+audit (`risk.rule_created`/`risk.rule_disabled` with actor, IP, user
+agent, request id) and that requirement extends to any delegated path
+without exception.
+
+**Human/business decisions surfaced — explicitly NOT this ADR's to
+make.** The actual limit **amounts and thresholds** — what a Cashier's
+per-transaction cash-out cap is, what an Agent's daily funding ceiling
+is, per level, per jurisdiction, per licensing mode — are commercial and
+regulatory decisions requiring the human and, where a legal ceiling is
+involved, `identity-compliance`. This ADR specifies only the mechanism by
+which such a number becomes enforceable. No number appears anywhere in
+§19-§24, and none should be inferred from the illustrative €X/€Y
+placeholders above.
+
+**Open decisions introduced by Stage 4H-B0:**
+
+- **Does a retail cash-in/cash-out need its own `Operation`, or is it
+  `deposit`/`withdrawal` narrowed by `payment_method`?** Decision rule in
+  §21; turns on the ledger treatment, owned by `ledger-finance` with the
+  architect's hierarchy model. Must be decided identically for cash-in
+  and cash-out, in one change.
+- **Do rules inherit down the hierarchy (subtree/ancestor matching)?**
+  §20(c). Not adopted; adopting it later is a change to `matches()` AND a
+  new within-dimension ordering in `specificity()`, i.e. the first
+  genuine change to the precedence algorithm since Stage 4G. It must go
+  through the `architect` and be recorded here, never retrofitted
+  quietly.
+- **Is subtree-aggregate exposure a real requirement?** §23. If yes, it
+  is a future stage with `ledger-finance`, landing on the reserved
+  `exposure` `LimitKind`.
+- **Offline / degraded-connectivity retail.** Retail terminals
+  historically operate with intermittent connectivity and
+  store-and-forward settlement. §6/§19's fail-closed contract says an
+  operation that cannot be evaluated cannot be authorized. If the
+  business requires offline retail authorization, that is a deliberate,
+  human, `security`-and-compliance-reviewed acceptance of unbounded
+  exposure between reconnections — **not** a cached limit, **not** a
+  locally-replicated rule set, and **not** an engineering shortcut. This
+  ADR's position is that a local cache of `risk_rules` evaluated outside
+  the guarded transaction is precisely what §19 and CLAUDE.md's
+  "Redis/cache is never authoritative" rule forbid. Flagged, unresolved,
+  and deliberately not designed around.
+- **Is a hierarchy node ever itself a subject of a player-shaped limit?**
+  E.g. a Cashier who is also a player. If a single human can hold both
+  roles, `PlayerAccountID` and `HierarchyNodeID` on the same request
+  refer to different aspects of the same person, and `matches()`'s
+  conjunctive semantics handle it correctly — but the *audit* and
+  *conflict-of-interest* questions are `identity-compliance`'s and
+  `security`'s. Noted, not resolved.
+- **Anonymous retail play** (§22) — escalated as a potential blocker on
+  requirement #16 itself.
+
+**What remains impossible to configure after this section** — the
+load-bearing negative claim, stated the way §18 states it. Everything
+below remains blocked by database CHECK constraint and by HTTP
+validation, and **remains so after this stage**:
+
+- `retail_funding`, `retail_withdrawal`, `retail_deposit` as `operation`
+  values — rejected by migration 0041's CHECK and by
+  `newCreateRiskRuleHandler`'s allowlist. A rule intended to govern an
+  agent float advance **cannot be stored today**, which is correct: it
+  would be a rule nothing evaluates.
+- `hierarchy_level` / `hierarchy_node_id` as scope dimensions — the
+  columns do not exist, the `Rule`/`RiskRequest` fields do not exist,
+  `specificity()` has no bits for them, and the HTTP handler accepts no
+  such input. **Requirement #6 is therefore `NOT IMPLEMENTED` in every
+  respect**, not partially implemented.
+- `retail` as a `product` value — rejected by the same two layers.
+- `cumulative_amount` on any retail operation — unavailable on two
+  independent grounds (§21): no ledger transaction-type mapping, and no
+  node-keyed aggregation. "Per-day funding limit by hierarchy level", the
+  most natural reading of requirement #6, is therefore **not expressible
+  even after the `Operation` and scope dimensions are added** — it
+  additionally needs §23's node-keyed aggregation. This is the single
+  most important thing for the Orchestrator to carry forward.
+- Subtree/network-wide aggregate exposure in any form (§23).
+- Rule inheritance down the hierarchy (§20c).
+- `count`/`velocity`/`exposure`/`loss` limit kinds, cross-operation
+  aggregate exposure, campaign-level caps, points-denominated thresholds,
+  calendar-aligned windows and session-scoped limits — all unchanged from
+  §18.
+
+The principle §4 established holds without exception through this stage
+too: a rule the engine cannot evaluate must never be configurable in the
+first place. §19-§24 are an extension-point specification; the extension
+points stay closed until an authorizing stage opens them with all the
+steps in §12 and §16 executed together in one change.
+

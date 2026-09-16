@@ -594,3 +594,345 @@ review (§6). Risk/RG call sites must not diverge from `risk`/
 `identity-compliance`'s own domain designs (§4, §5). This document is
 Stage 4H-A's Bonus Architecture deliverable — architecture only, no
 implementation authorized by this stage.
+
+## Stage 4H-B0 — MVP Implementation Scope Plan
+
+Status: **architecture/scope-planning only, `NOT IMPLEMENTED`.** Issued as
+part of "STAGE 4H-B0 — BONUS + GAMIFICATION + RETAIL ARCHITECTURE/SCOPE
+FREEZE" per that stage's directive. No schema, no Go code, no migration is
+authorized by this section. It does not redesign anything in §1–§10
+above (Stage 4H-A's frozen architecture) — it narrows *which parts of
+that already-frozen design* the eventual Stage 4H-B1 implementation
+stage would build first, per the Stage 4H-A Wave-2 `product-owner-proxy`
+scope review recorded in `14-mvp-scope-and-roadmap.md`'s "Features
+deliberately deferred" section and its "Bonus Engine implementation
+scope note". Owner: `bonus-engine`.
+
+### 1. Exact bonus types in the first implementation slice
+
+`ARCHITECTURAL DECISION` (scope, not rule content — the rule content for
+every row below is already frozen in §2's type matrix; this only decides
+build order).
+
+**IN the first slice** — exactly these five rows of §2's type matrix,
+naming them by their exact §2 row label:
+
+1. **Deposit bonus** — internal fulfillment, `activated` on
+   `deposit.settled`, eligibility axis governs first-deposit-only/min-
+   max/deposit method. No dependency outside what already exists
+   (`wallet`/`ledger`, `internal/risk`, `internal/rg`).
+2. **Reload bonus** — identical Offer shape to deposit bonus, eligibility
+   axis only distinguishes it (existing depositor). No new lifecycle
+   concept, no new dependency.
+3. **Cashback** — distinct completion trigger (settlement job closing a
+   time window, `clock_timestamp()`-based per §2's specialist-review
+   addition), Payout axis's cashback %/window rather than the Wagering
+   axis. No new dependency; the settlement job itself (a scheduled/cron
+   invocation) is an implementation detail of this slice, not a new
+   architectural component.
+4. **Wagering bonus (generic multiplier bonus, no deposit trigger)** —
+   §2's "generic wagering bonus" row, used as the general-purpose Offer
+   shape for any operator-authored promotion whose eligibility is
+   deposit/segment/coupon-based rather than mission/tournament-triggered.
+   Explicitly: this slice does **not** build the mission/tournament
+   *producers* of such a bonus (item 2 below) — only the Bonus Engine's
+   own ability to run a wagering-multiplier Offer to completion for a
+   Grant issued by one of the other four in-slice triggers.
+5. **Coupon** — the only lifecycle novelty is the `issued`→`activated`
+   trigger being a player-supplied code validated against an Offer,
+   otherwise identical to a deposit/cash bonus. Requires one new
+   surface not named elsewhere in §1–§10: a coupon-code validation/
+   redemption endpoint (input validation + Offer lookup), scoped as
+   ordinary `bonus-engine`-owned HTTP surface under
+   `25-bonus-gamification-api-architecture.md`'s existing API/RBAC
+   contract — no new architectural concept, just an additional handler.
+
+**Explicitly OUT of the first slice**, named individually rather than
+left implied:
+
+- **Free spins / free bets** — Grant *decision* fits the frozen model
+  (§2), but fulfillment does not: `internal/casino`'s `CasinoProvider`
+  interface has no free-round method today, confirmed an `OPEN DECISION`
+  in `08-casino-integration-architecture.md` §1 and restated in §2's own
+  table above; sportsbook free bets are additionally blocked on
+  `internal/sportsbook` not existing at all. Building the Grant-issuance
+  half without a fulfillment path would ship a bonus type that can never
+  leave `issued`/`activated` for a real player — explicitly deferred,
+  not partially built.
+- **Cash reward (no wagering requirement)** — architecturally the
+  simplest row in §2's matrix and fully specified end-to-end by ADR 0032
+  §3's two-entry posting, but it is **not** one of the five types the
+  `product-owner-proxy` scope review named for the first slice
+  (`14-mvp-scope-and-roadmap.md`'s "Bonus Engine implementation scope
+  note" lists exactly deposit/reload/cashback/generic-wagering/coupon).
+  Recorded here rather than silently added: this document does not
+  expand the named list on its own authority (`CLAUDE.md`'s
+  no-uncontrolled-scope-expansion rule cuts both ways — a specialist
+  does not shrink *or* grow an already-scoped list unilaterally). If the
+  Orchestrator/product owner wants goodwill/manual cash grants in the
+  first slice, that is a one-line scope addition to make explicitly, not
+  an assumption this document should make for them.
+- **Tournament reward, Mission reward, Loyalty reward** — all three
+  rows are blocked on the deferred Gamification Engine
+  (`14-mvp-scope-and-roadmap.md`'s "Features deliberately deferred") and
+  the Points accounting design (`docs/architecture/24`), neither of
+  which is authorized for implementation. Per §2's own general rule,
+  Bonus Engine is the common lifecycle substrate for these types but
+  never the producer of the triggering signal — with no producer
+  authorized to exist, there is nothing for these Offer shapes to react
+  to. Out of the first slice, not implied-included, exactly as the
+  `product-owner-proxy` review instructed.
+
+### 2. Package/domain ownership — the Risk & Limits gate, answered directly
+
+`ARCHITECTURAL DECISION` / gate-check finding, `NOT IMPLEMENTED`.
+
+`docs/governance/ownership.md` currently lists `internal/bonus` as "not
+yet created — blocked on Risk & Limits stability per Stage 4G §32"
+(mirrored in `docs/governance/project-status.md`'s Blocked Stages list).
+That block is a real gate, not a formality, and it is answered here
+rather than waved through:
+
+**The Risk & Limits engine's core mechanism is stable enough to unblock
+`internal/bonus` package creation for the first slice named in §1,
+subject to two named, additive, non-redesign conditions below — this is
+a qualified pass, not an unconditional one.**
+
+Evidence for the "core mechanism is stable" half:
+
+- `internal/risk`'s rule precedence, fail-closed contract, RLS shape,
+  and the `postBet`-class concurrency hazard (`pg_advisory_xact_lock`)
+  were independently hardened across Stage 4G, Stage 4G-FINAL (11/11
+  specialist areas reviewed), and the dedicated
+  Stage 4G-FINAL-FINANCE-GATE follow-up, which produced an independent
+  `ledger-finance` **PASS, sign-off GRANTED**, no P0/P1 findings, on the
+  exact concurrency/correctness properties a bonus grant/conversion path
+  would also depend on (`docs/progress.md`'s Stage 4G-FINAL-FINANCE-GATE
+  entry).
+- The Bonus-specific integration *contract* (not just "call
+  `risk.Evaluate` somewhere") is now fully specified, not merely
+  gestured at: ADR 0031 §14–§18 name the exact `Operation` value for
+  each of the three checkpoints this document's §4 requires (grant/
+  activation reuse `OperationBonusGrant`, already a real Go constant
+  accepted by migration 0041; conversion needs a new `bonus_conversion`
+  value, specified in full by §15a-ii but not yet created in code), the
+  exact composition order with RG (§5, unchanged from `internal/casino`'s
+  precedent), and which existing `LimitKind`s already work unmodified for
+  a bonus operation (`min_amount`/`max_amount` with
+  `TimeWindow: transaction` — "no change whatsoever" per ADR 0031 §15b).
+
+Evidence for the "subject to two conditions" half — genuine, named gaps,
+not invented caution:
+
+1. **The first slice's own Risk rules must be restricted to
+   `min_amount`/`max_amount` (transaction-window) limits only** —
+   `cumulative_amount` (a rolling-week bonus cap) is a documented,
+   fail-closed-erroring gap today (ADR 0031 §15b:
+   `operationLedgerTransactionTypes` has no `bonus_grant` entry yet, so
+   `Rule.breach()` returns `ErrUnsupportedCumulativeOperation` for any
+   such rule), and frequency/velocity caps require a `count` `LimitKind`
+   that does not exist yet (§15c). Neither blocks the five bonus types in
+   §1 — a jurisdiction/campaign/tier `max_amount` per-grant ceiling is
+   sufficient for all five, and this restriction is exactly what the
+   `product-owner-proxy`'s minimal-first-slice recommendation already
+   implies. This is a scoping choice for the first slice's *rule
+   authoring*, not a code change.
+2. **A small, already-fully-specified, additive Risk change must land
+   before the conversion checkpoint can be wired**: the `bonus_conversion`
+   `Operation` value (Go constant in `internal/risk/types.go` + an
+   additive widening of migration 0041's `Operation` CHECK constraint).
+   ADR 0031 §15a-ii and §16 already specify its exact shape and naming;
+   this is a scoped, single-item dependency request `bonus-engine` files
+   against `risk` at the start of implementation (per
+   `docs/governance/integration-protocol.md`'s dependency-request
+   procedure), not an open design question and not evidence the engine
+   itself is unstable.
+
+Neither condition requires `internal/risk`'s signature, rule-table shape,
+or precedence algorithm to change, and neither is a new limit engine
+built inside `internal/bonus` — both would violate §4's hard rule if they
+were. On that basis: **the Stage 4G §32 block is lifted for the first
+slice specifically.** It is not lifted for any bonus type this document's
+§1 places outside the first slice (a `cumulative_amount`/`count`-shaped
+rule is more likely to matter for a high-volume mission/tournament reward
+producer than for five simple operator-authored Offer types) — re-assess
+the gate when Gamification is ever authorized.
+
+`internal/bonus` is confirmed as the correct package path, owned by
+`bonus-engine` per `docs/governance/ownership.md`'s existing convention
+(new tables/migrations owned by the domain that creates them, per that
+document's rule 3) — no change to the ownership table's shape is needed,
+only the removal of its current "blocked" qualifier once this scope plan
+is authorized.
+
+### 3. Migration sequencing for the first slice ONLY (ordered list, no SQL)
+
+`ARCHITECTURAL DECISION` (sequencing only), `NOT IMPLEMENTED`. Every item
+below is additive (no existing row/column is altered or dropped), per
+this project's established migration discipline. Table/RLS pairing
+follows the existing per-migration convention (a table and its own RLS
+policies ship together, e.g. migration 0019's `wallets`) — not called out
+per row below.
+
+1. **`bonus_expense` account type** — additive widening of
+   `ledger_accounts.account_type`'s `CHECK` constraint (ADR 0032 §2). No
+   dependency on anything else in this list; the smallest, most isolated
+   change, so it goes first, mirroring how casino's migration 0035 also
+   led with its own `ledger_transactions` CHECK widening before any
+   casino table existed.
+2. **`bonus_grant`, `bonus_conversion`, `bonus_forfeiture`,
+   `bonus_reversal` transaction types** — additive widening of
+   `ledger_transactions.transaction_type`'s `CHECK` constraint (ADR 0032
+   Consequences). Sequenced immediately after (1) rather than before it:
+   a `bonus_conversion` posting's mirror leg debits `bonus_expense`
+   (ADR 0032 §4), so the account type it will reference should exist
+   first even though Postgres does not structurally enforce that
+   ordering between two independent `CHECK` constraints — a practical
+   safety ordering, not a hard schema dependency. Both (1) and (2) are
+   `ledger-finance`-owned migrations (per `ownership.md`'s Financial/
+   Ledger row); `bonus-engine` files a dependency request for them rather
+   than authoring them directly.
+3. **`risk_rules`/`RiskRequest.Operation`'s `bonus_conversion` value** —
+   additive widening of migration 0041's `Operation` CHECK constraint +
+   the corresponding `internal/risk/types.go` constant (ADR 0031 §15a-ii,
+   §16). Cross-domain, `risk`-owned; no structural dependency on (1)–(2)
+   or (4)–(7), but must land before the Grant conversion write path (part
+   of (6)/(7) below) is wired, since conversion cannot be gated by an
+   `Operation` value that does not exist. Listed third because it is the
+   other cross-domain dependency this slice needs before any bonus-owned
+   table's write path can be considered complete, not because of a
+   database-level ordering requirement.
+4. **`bonus_campaigns` table + RLS** — first of doc 10 §1.1's four
+   layers, no FK dependents among the other three yet. `bonus-engine`-
+   owned. Dual/nullable-`tenant_id` scope per §8's Campaign row
+   (platform-wide/tenant-wide/brand-specific).
+5. **`bonus_offers` table + RLS** — FK to `bonus_campaigns`, so it must
+   follow (4). `bonus-engine`-owned. Scope inherits the owning Campaign's
+   scope per §8's Offer row (narrowing only).
+6. **`bonus_grants` table + RLS** — FK to `bonus_offers` (a Grant is
+   always issued against one immutable Offer version, §1.1) and to the
+   player's own `wallets`/`player_accounts` row; must follow (5). This is
+   also the table whose write path needs (3)'s `Operation` value wired at
+   the conversion transition — recorded here, not designed here (no
+   schema detail for that column is specified by this scope plan).
+   `bonus-engine`-owned. Always tenant + brand + player scoped, dual
+   `tenant_staff_scope`/`player_self_scope` RLS per §8's Grant row,
+   mirroring `casino_launch_sessions`/`withdrawal_requests`.
+7. **`bonus_progress` table + RLS** — FK to `bonus_grants`; last, since
+   Progress inherits its owning Grant's tenant/brand/player scope and its
+   completeness requirement (§10.1) presupposes the Grant row it appends
+   against already exists. `bonus-engine`-owned, append-only (mirrors
+   `audit_log`'s enforcement pattern per §10's own audit convention).
+
+No migration for a coupon-specific table is listed separately: per §1
+item 5, a coupon is an alternate `issued`→`activated` trigger against an
+ordinary Offer, not a new persistent layer — its validation/redemption
+endpoint reads (5)/(6), it does not need its own table in this slice
+(a redeemed-code uniqueness constraint, if needed, is a column/index on
+(5), not a new migration item, and is left to the implementation stage to
+specify).
+
+### 4. What is explicitly NOT built in this first slice
+
+`ARCHITECTURAL DECISION`, `NOT IMPLEMENTED` for all four items:
+
+- **The Reward Orchestrator.** Confirmed assumption, matching
+  `14-mvp-scope-and-roadmap.md`'s own "Bonus Engine implementation scope
+  note": until a second concrete reward-producing domain exists (i.e.
+  Gamification is authorized, or a real sportsbook free-bet fulfillment
+  need materializes), Bonus Engine fulfills its two accounting-boundary
+  responsibilities from §6 — split instructions and lifecycle events —
+  **directly** through `wallet`/`ledger` (for the five in-slice types,
+  every one of which is `into_platform_wallet` per §3.2's fulfillment-
+  destination flag) with no separate orchestration package in between.
+  This is not this document's call to make unilaterally — a separate
+  Orchestrator-authored synthesis document is resolving the Reward
+  Orchestrator's own fate across all of Stage 4H-A's frozen domains —
+  but it is the assumption this scope plan is written against, and it
+  matches the product-owner-proxy's own recorded reasoning (building a
+  three-domain-ready orchestration layer ahead of a second concrete
+  reward-producing domain is "generality for a hypothetical future need"
+  under `CLAUDE.md`'s scope test). If the Orchestrator's synthesis
+  resolves it differently, this section — not §6's accounting boundary
+  — is what changes.
+- **Free spins / free bets fulfillment**, including any call into
+  `internal/casino`'s (nonexistent) free-round method or
+  `internal/sportsbook` (nonexistent package) — blocked on those
+  interfaces, per §1's "OUT of the first slice" list above. The Grant-
+  decision *shape* for these types remains as frozen in §2; only its
+  build is deferred.
+- **The `ExternalRewardProvider` contract** — blocked on an actual
+  sportsbook provider relationship existing (`14-mvp-scope-and-roadmap.md`
+  defers `docs/decisions/0033`/`docs/architecture/23` "until sportsbook
+  architecture actually starts"); §3 above remains an explicit
+  **ASSUMPTION** section, not something this slice implements or needs to
+  implement, since every first-slice Campaign is `fulfillment_owner:
+  internal` by construction (no external bonus engine exists to delegate
+  to yet).
+- **Gamification entirely** — points/XP/levels/achievements/badges/
+  missions/tournaments/leaderboards/streaks/the Reward Marketplace, per
+  `14-mvp-scope-and-roadmap.md`'s "Features deliberately deferred". No
+  first-slice table, endpoint, or Risk rule references any Gamification
+  concept.
+
+### 5. Retail interaction — no first-slice change, explicitly deferred rather than assumed
+
+`RECOMMENDATION`, `NOT IMPLEMENTED`. This stage's parallel retail
+agent-hierarchy work (`architect`'s forthcoming
+`26-retail-operations-architecture.md`, `security`'s forthcoming ADR
+0036, and `identity-compliance`'s own Stage 4H-B0 addendum to
+`05-identity-architecture.md` — read for this section, not authored by
+it) does **not** change anything in this first slice, for a reason
+grounded in this document's own existing design rather than a new
+assumption invented here:
+
+- Bonus Engine's `issued`/`activated` automated triggers (§1.3) already
+  react to event-bus facts (`deposit.settled`, `player.registered`), not
+  to *how* those facts were produced. `05-identity-architecture.md`'s
+  Stage 4H-B0 section records that a retail-originated player
+  registration reuses the identical `identity.RegisterPlayer*` call path
+  as an online one, distinguished only by a new `registration_channel`
+  provenance column — an identity-domain fact Bonus Engine has no reason
+  to read for eligibility unless a future Offer's eligibility axis is
+  explicitly configured to key off it (an ordinary, already-supported
+  configuration capability per §8, not a new mechanism). The same
+  reasoning applies to a hypothetical retail cash deposit: **if** a
+  future retail cash-deposit flow emits the same `deposit.settled` event
+  shape the online deposit flow does, a deposit/reload bonus triggers
+  identically with zero Bonus Engine code change. That retail cash flow
+  does not exist yet (per `05-identity-architecture.md`'s own note, it is
+  `payments`/`ledger-finance`'s to design when retail cash handling is
+  implemented) — this document does not build toward it, only records
+  that its own design does not need to change when it arrives.
+- **Explicitly deferred, not assumed impossible**: (a) a retail-specific
+  eligibility axis dimension (e.g. "only at location X" or "only via a
+  specific agent tier") — no Blueprint or MVP-roadmap requirement names
+  this, and §8's existing Campaign/Offer scope table (platform/tenant/
+  brand) has no location dimension; (b) a cashier-initiated Grant
+  issuance/activation as a new *staff action* trigger type (e.g. handing
+  a player a printed coupon in person, or a VIP-desk-style manual
+  activation performed at a retail counter rather than online) — §1.3
+  already has a generic "Staff action" trigger column that would cover
+  this mechanically, but this document does not claim it is validated
+  for a retail cashier specifically (RBAC/permission scoping for a
+  cashier-shaped staff principal is `identity-compliance`'s/`security`'s
+  parallel work, not resolved here); (c) redeeming a coupon in person at
+  a retail counter rather than by the player entering a code themselves
+  — same mechanical fit via the "Staff action" trigger, same deferral for
+  the same RBAC-scoping reason. None of (a)–(c) is required by the
+  Blueprint or by `14-mvp-scope-and-roadmap.md`'s B2C MVP scope; all
+  three are recorded here as deferred so a future retail-bonus need is a
+  documented revisit, not a silent gap discovered in production.
+
+### 6. Cross-references for this section
+
+`14-mvp-scope-and-roadmap.md` ("Features deliberately deferred", "Bonus
+Engine implementation scope note"); `docs/decisions/0032-bonus-
+accounting.md` §§2–4, Consequences; `docs/decisions/0031-risk-and-limits-
+engine.md` §§12–18; `docs/governance/ownership.md`; `docs/governance/
+project-status.md` (Blocked Stages); `05-identity-architecture.md`'s
+Stage 4H-B0 section (read, not authored, by §5 above).
+
+Owner of this section: `bonus-engine`. Nothing in this section
+authorizes writing `internal/bonus`, a migration, or a test — it is the
+scope plan Stage 4H-B1 (if and when authorized) would follow.
