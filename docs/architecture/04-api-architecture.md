@@ -305,29 +305,53 @@ asserts *facts* ("this round happened, this is its outcome") and the
 ledger — never the provider — decides the resulting balance. A POS
 terminal is architecturally the **same shape of client**, just first-party
 instead of third-party: it asserts facts ("cash received", "cash handed
-over", "a shift opened/closed") and the existing `PaymentProvider`/
-withdrawal-orchestration machinery — unchanged, not forked — decides and
-posts the consequence. Concretely:
+over", "a shift opened/closed") and existing platform-owned machinery
+(the ledger-posting API on the deposit side, the *unmodified* withdrawal
+review/approval chain plus one new sibling fulfillment handler on the
+withdrawal side — `07-payments-architecture.md`'s landed "Retail cash
+rail" section, §§1–3) — never the terminal itself — decides and posts the
+consequence. Concretely:
 
-- Deposit confirmation is not a new balance-mutation code path; it is a
-  new **provider adapter** (`retail_cash`, or a per-tenant equivalent) of
-  the *existing* `PaymentProvider` interface (`07-payments-architecture.md`
-  §"Orchestration layer"), reusing the same deposit orchestration, same
-  ledger posting, same idempotency mechanism every other payment method
-  already goes through.
+- Deposit confirmation is not a new balance-mutation code path.
+  **Correction against `07-payments-architecture.md`'s landed "Retail cash
+  rail" section (§1), which this document defers to**: retail cash is
+  deliberately **not** modeled as a `PaymentProvider` adapter — there is
+  no external vendor, no async settlement to be ambiguous about, and no
+  cascade-on-decline candidate set, so forcing it into that interface
+  would mean most of it is a meaningless no-op (CLAUDE.md's "no fake
+  completion," applied to an interface implementation rather than a
+  claimed integration). It is instead a structurally distinct
+  **fulfillment channel**: the cashier's confirm call still ends in the
+  *same* "call into `ledger-finance`'s wallet/ledger posting API, never a
+  direct balance write" rule every other channel already follows — the
+  balance-mutation boundary this section exists to confirm is identical
+  either way — but the mechanism reaching that call is a dedicated retail
+  confirmation handler, not a registered `provider_id` in the adapter
+  registry, and never appears in `provider_capabilities`.
 - Withdrawal fulfillment confirmation is the `submitted` → `completed`
-  transition already defined in `withdrawal-state-machine.md` §1 — the
-  same transition an automated PSP webhook triggers for other channels —
-  never a new terminal-specific approval path. A cashier confirming
-  fulfillment is not granted (and must never be granted, by this
-  permission alone) any part of the KYC/risk/four-eyes review authority
-  that already gated `approved`; that review remains centralized and
+  transition already defined in `withdrawal-state-machine.md` §1, reached
+  via a **sibling handler variant** for this one fulfillment method at
+  `approved → submitted` time (`07-payments-architecture.md` §3) rather
+  than a modification of the existing PSP/custodian submit path — the same
+  transition an automated PSP webhook triggers for other channels, never a
+  new terminal-specific approval path. A cashier confirming fulfillment is
+  not granted (and must never be granted, by this permission alone) any
+  part of the KYC/risk/four-eyes review authority that already gated
+  `approved`; that review remains centralized, unmodified, and
   channel-independent.
-- No retail-specific ledger account, no retail-specific balance
-  projection, and no retail-specific idempotency namespace outside the
-  existing `(provider_id, provider_tx_id)` / withdrawal-`idempotency_key`
-  shapes is introduced by this document. Retail is a new **client and a
-  new provider adapter value**, not a new mechanism.
+- No retail-specific ledger account and no retail-specific balance
+  projection is introduced by this document (that is `ledger-finance`'s
+  ADR 0035, not yet landed). The idempotency mechanism is retail-specific
+  in shape (a state-transition guard on the request row, per §1's table —
+  not the existing `(provider_id, provider_tx_id)` / withdrawal-
+  `idempotency_key` shapes, since there is no provider and no
+  client-supplied key here) but is not a new *class* of financial-write
+  risk: it protects against the same "don't apply the same fact twice"
+  concern every other idempotency mechanism in this codebase protects
+  against, via the same "guarded UPDATE, check `RowsAffected()` before the
+  side-effecting call" pattern `internal/withdrawal` already uses. Retail
+  is a new **client and a new fulfillment channel**, never a new
+  balance-mutation authority.
 
 ### 5. Bonus/Gamification API surface — no changes needed this stage
 
