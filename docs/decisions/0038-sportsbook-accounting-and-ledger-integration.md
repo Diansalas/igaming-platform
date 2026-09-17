@@ -1,0 +1,1087 @@
+# ADR 0038 — Sportsbook Accounting and Ledger Integration
+
+Status: Proposed (Stage 4H-B0-R4, architecture only — **`NOT IMPLEMENTED`**).
+No migration, no Go code, and no `transaction_type`/`account_type` value in
+this document exists yet. Owner: `ledger-finance`. This ADR is the detailed
+financial/ledger-integration companion `docs/architecture/09-sportsbook-
+architecture.md` points to; `sportsbook` owns doc 09's product/build-vs-buy
+framing, this ADR owns exactly how every sportsbook financial fact becomes
+a balanced `LedgerTransaction`. Mirrors `docs/decisions/0032-bonus-
+accounting.md`'s structure throughout, because it is the closest existing
+precedent for a domain-specific accounting ADR and there is no reason to
+invent a second shape for the same kind of document.
+
+Labeling convention inherited from `financial-domain-model.md`: `BLUEPRINT`
+= stated directly in the Blueprint; `ARCHITECTURAL DECISION` = decided here
+or in a named prior ADR; `OPEN DECISION` = deliberately not resolved, with
+the reason and the required decision-maker named; `RECOMMENDATION` = a
+`ledger-finance` position that still needs a business/finance/human
+sign-off before it binds.
+
+## Context
+
+`docs/architecture/09-sportsbook-architecture.md` (Stage 5 scope, being
+substantially rewritten in parallel by `sportsbook` this same stage)
+already establishes the framing this ADR builds on and does not
+relitigate:
+
+- An open sportsbook bet is a liability that can span days or months,
+  unlike a casino round that settles in milliseconds.
+- Stake moves to `player_locked` at placement.
+- An open-bet record carries potential return.
+- Settlement, void, partial settlement (bet-builder legs), and cashout are
+  each **distinct ledger events**, never conflated into one "resolve bet"
+  operation.
+- Markets can be corrected after initial settlement, requiring
+  re-settlement as its own event, never a silent balance edit.
+- Sportsbook GGR is only known at settlement, so every sportsbook report
+  needs an explicit open-liability line.
+- The build/buy line runs through a widget/iframe provider first
+  (RECOMMENDATION, per the Blueprint) with a feed/API in-house-UI shape
+  deferred; **either shape produces the same financial facts** — a bet is
+  placed, accepted or rejected, and later settled, voided, partially
+  settled, cashed out, or corrected. This ADR's postings are written
+  against those facts, not against either integration shape, so they hold
+  unchanged whether the originating event arrives as a provider webhook
+  (widget/iframe or feed/API) or as an internal in-house pricing/settlement
+  engine's own decision. Where the two shapes genuinely differ — who
+  computes an amount, and therefore who is responsible for rounding it —
+  is called out explicitly in §7.
+
+`player_locked` and its allowed transaction types already exist in
+`ledger-accounting-model.md` §2's table (as forward references to this
+ADR) and in `financial-transaction-flows.md` Flows 8–11 (as `ARCHITECTURAL
+DECISION`/`BLUEPRINT`-labeled sketches). This ADR is the authoritative
+detail behind those forward references: where they and this ADR conflict,
+this ADR wins for sportsbook specifics, and a follow-up edit to both
+documents is required (§10).
+
+**What this ADR explicitly does not do.** It does not design the
+sportsbook domain model (`OpenBet`, provider adapter, odds/trading logic —
+`sportsbook`'s), it does not resolve the `player_locked` origin gap for
+bonus-funded stakes (already an `OPEN DECISION` in `ledger-accounting-
+model.md` §6.2 and ADR 0032 §10, referred to `architect` + `sportsbook` +
+`ledger-finance` jointly — this ADR treats it as a still-open blocking
+precondition, not something to re-decide unilaterally here), and it does
+not invent a second rounding convention (§7 confirms reuse of ADR 0021's
+resolved decision without exception).
+
+## Decision
+
+### 0. Position statement — one financial truth system, restated for sportsbook
+
+`ARCHITECTURAL DECISION`, inherited verbatim from ADR 0032 §0 and binding
+here without modification.
+
+The sportsbook engine (whichever integration shape — widget/iframe
+provider callback, feed/API adapter, or a future in-house pricing/trading
+engine) is a **decision system**: it decides which bets are accepted, what
+odds apply, when and how an event settles, whether a cashout offer is
+honored, and when a market needs correcting. It is not an accounting
+system. Every monetary consequence of those decisions is recorded by
+`internal/ledger`, through `ledger.Post`, under the same invariants as a
+deposit, a casino bet, or a bonus grant — append-only, double-entry,
+balanced per asset, DB-enforced idempotency, compensating corrections
+only, projection-never-authoritative, reconciled on a schedule.
+
+Binding consequences, each a blocking `ledger-finance` review finding if
+violated:
+
+- No sportsbook table holds an authoritative monetary balance. An
+  `OpenBet`'s `potential_return` field (§2) is a domain projection, not a
+  balance, and must never be read as one.
+- No sportsbook code path `UPDATE`s a balance, mutates a historical entry,
+  or posts a money movement without an idempotency key.
+- The platform's aggregate open-bet liability is a **derived read** over
+  `player_locked` balances (§6), never a counter maintained by the
+  sportsbook domain that could drift from the ledger entries it claims to
+  summarize — the identical reasoning ADR 0032 §0 applies to wagering
+  progress.
+- `internal/ledger` remains the only package that writes
+  `ledger_accounts`/`ledger_transactions`/`ledger_entries` (ADR 0001). The
+  sportsbook engine or provider adapter supplies the instruction (which
+  event happened, for which bet, for how much); `ledger-finance` owns the
+  posting mechanism that turns it into balanced entries. Identical
+  boundary to `10-bonus-engine-architecture.md` §6's "Bonus Engine
+  computes *what* the split should be; it never issues the ledger
+  posting itself" — the sportsbook engine never issues a
+  `player_cash`/`player_bonus`/`player_locked`/`house_gaming` posting
+  itself either.
+
+Status: **RESOLVED (architecture) — `NOT IMPLEMENTED`.**
+
+### 1. Account types — none new required
+
+`ARCHITECTURAL DECISION`. Unlike bonus accounting (which needed a new
+`bonus_expense` account type), sportsbook needs **zero new account types**.
+Every account sportsbook touches already exists in `ledger-accounting-
+model.md` §2:
+
+| Account type | Role in sportsbook |
+|---|---|
+| `player_cash` | Stake source (cash-funded) and payout destination |
+| `player_bonus` | Stake source (bonus-funded) and payout destination — **blocked** until the `player_locked` origin split is resolved (§2, §9) |
+| `player_locked` | Holds the stake for the life of an open bet |
+| `house_gaming` | Absorbs settled stakes as revenue and pays out wins/cashouts/partial settlements — the same account casino uses, per `ledger-accounting-model.md` §2's existing "Allowed transaction types" column, which already lists the sportsbook transaction types below against `house_gaming` |
+| `promo_liability` / `bonus_expense` | Mirror legs on the bonus-funded portion of any sportsbook posting — **blocked** for the identical reason as `player_bonus` above (§2, §9) |
+| `manual_adjustment` | Staff corrections that are not a market re-settlement (rare; §8's compensating-entry path is preferred whenever the correction traces to a specific bet) |
+
+No `sportsbook_payable`/`sportsbook_liability`/`sportsbook_expense` or any
+other new account type is introduced. `provider_payable` (existing) is
+reused unchanged for periodic GGR-share/fee settlement with a sportsbook
+odds provider, under Flow 17 — sportsbook does not need its own variant of
+that flow.
+
+Status: **RESOLVED — `NOT IMPLEMENTED`.**
+
+### 2. Potential return — a domain fact, never a ledger fact
+
+`ARCHITECTURAL DECISION`, answering doc 09's "an open-bet record carries
+potential return" precisely, because leaving it ambiguous is exactly the
+kind of gap that produces an invented ledger posting later.
+
+**Potential return is a field on the sportsbook domain's `OpenBet` record
+(`OpenBet.potential_return`), computed at acceptance from the locked stake
+and the accepted odds (or, for a bet-builder/combo, the combined odds of
+its legs). It is never posted as a `LedgerEntry` and creates no
+ledger-visible liability of its own.** The only ledger-visible fact for an
+open bet is the stake amount sitting in `player_locked` — an actual,
+posted, reconciliable movement. `potential_return` is a contingent
+projection: real money changes hands only when settlement (§4/§5), a
+partial settlement (§8), or a cashout (§9) determines an actual amount to
+pay, exactly as ADR 0032 §3 treats an unconverted bonus grant as a
+"contingent liability, not a recognized cost" until the value actually
+leaves `player_bonus`. Reusing that same distinction here, rather than
+inventing a second one, keeps "contingent vs. realized" meaning the same
+thing everywhere in the platform's accounting.
+
+**Consequence for reporting (ties to doc 09's reporting-consequence
+section, and to §6 below).** Two different "open sportsbook exposure"
+numbers exist and must never be presented as one:
+
+1. **Open-bet stake liability** — `Σ signed(player_locked)` per
+   tenant+asset (§6). Ledger-derivable, reconciliable, authoritative. This
+   is "what the platform would owe back if every open bet were voided
+   right now."
+2. **Potential payout exposure** — `Σ OpenBet.potential_return` for every
+   open bet, per tenant+asset. **Not** ledger-derivable, because no money
+   has moved for the winnings portion of any open bet. This is a trading/
+   risk number ("what the platform would owe if every open bet won"),
+   owned entirely by the sportsbook domain's own open-bet table, computed
+   as its own derived read (never a maintained counter, for the identical
+   drift-prevention reason `player_locked`'s sum must be a derived read
+   and not a cached total) and out of `ledger-finance`'s scope to specify
+   further. A report that shows number 2 as if it were number 1 (or vice
+   versa) is a defect.
+
+Status: **RESOLVED — `NOT IMPLEMENTED`.**
+
+### 3. Bet placement (Flow 8 detail)
+
+`BLUEPRINT`/`ARCHITECTURAL DECISION`, per `financial-transaction-flows.md`
+Flow 8, restated with the precision this ADR owes it.
+
+| Event | Entries |
+|---|---|
+| Bet placed, stake `S` (cash-funded) | Dr `player_cash` `S` · Cr `player_locked` `S` |
+| Bet placed, stake `S` (bonus-funded) | **Blocked** — see §9. Once unblocked: Dr `player_bonus` `S` · Cr `player_locked_bonus` `S`, plus the ADR 0032 §2 mirror pair (Dr `bonus_expense` `S` · Cr `promo_liability` `S`) is **not** posted at placement, because no value has left `player_bonus` for a non-forfeiture reason yet — the stake is still contingent, exactly like an unconverted grant. The mirror pair only fires when the stake is actually consumed (§5's loss case) or returned unwagered (§6/§9's void/cashout-to-bonus case, which needs no mirror pair since nothing left `player_bonus` net) |
+
+Two entries for the cash-funded case, matching Flow 8 exactly. Insufficient
+funds is checked in the same database transaction that would post the
+lock (invariant #15) — a rejected placement leaves no `LedgerTransaction`
+row at all (§3, `ledger-accounting-model.md` §4), identical to casino's
+insufficient-funds path.
+
+**Idempotency key**: `(tenant_id, provider_id, provider_bet_reference)`,
+where `provider_bet_reference` is the specific, immutable reference the
+provider (or the in-house engine, using its own internally-generated
+reference in the identical role) assigns to **this bet at acceptance** —
+never the player's slip-submission attempt id, which may be retried before
+acceptance. `transaction_type = 'sportsbook_bet'`.
+
+**Correlation.** `correlation_id` is set, at this first transaction, to a
+stable **internal bet id** minted by the sportsbook domain (or the ledger
+posting layer, if the domain has none of its own yet) — not the provider's
+reference. Every later transaction against this same bet (settlement,
+void, partial settlement, cashout, resettlement) carries the **same**
+`correlation_id`, so the bet's full financial history is reconstructable
+by one query without depending on the provider ever correlating its own
+references to each other. `causation_id` on this transaction is the
+provider's acceptance callback's own delivery id (or, in-house, the
+internal acceptance decision's id) — distinct from `provider_bet_reference`
+per the platform's existing `provider_tx_id` vs. `causation_id` distinction
+(`ledger-accounting-model.md` §1.2).
+
+**Audit event**: `sportsbook_bet.locked`.
+
+**Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #12, #15.
+
+Status: **RESOLVED (cash-funded) — `NOT IMPLEMENTED`.** Bonus-funded case
+**BLOCKED**, see §9.
+
+### 4. Bet rejection — no ledger row, ever
+
+`ARCHITECTURAL DECISION`, closing the gap doc 09/Flow 8 leave implicit.
+
+**The ordinary case: no funds ever moved, so no `LedgerTransaction` is
+ever created.** A bet rejected for odds-changed, market-suspended, stake
+outside provider limits, or any other pre-acceptance reason is, by
+`ledger-accounting-model.md` §4's own rule, invisible to the ledger by
+construction — exactly like a declined casino bet or a declined deposit.
+There is nothing to reverse because nothing was ever posted.
+
+**The optimistic-hold case, named explicitly because it is the trap this
+ADR must close.** Some provider/UI flows optimistically place a hold
+(reserve funds client-side or session-side) before the provider's
+acceptance confirms, to avoid a race where the player's balance changes
+between slip submission and acceptance. **If, and only if, that
+optimistic hold is itself backed by a posted `sportsbook_bet`
+`LedgerTransaction`** (i.e., the platform chose to lock the stake before
+knowing acceptance would succeed, rather than holding it in an
+unposted, provider/session-side reservation), rejection **must** be posted
+as its own explicit reversal:
+
+| Event | Entries |
+|---|---|
+| Optimistic lock released on rejection, stake `S` | Dr `player_locked` `S` · Cr `player_cash`/`player_bonus` `S` — exact inverse of §3, `reverses_transaction_id` set to the lock transaction |
+
+`transaction_type = 'sportsbook_void'` (reused — a rejected-after-
+optimistic-lock bet is, from the ledger's point of view, indistinguishable
+from a void-before-settlement: the full stake returns, the bet never
+became a wagering fact). **This is never a silent no-op.** A rejection
+that leaves a posted `player_locked` entry unreleased is a stuck lock —
+exactly the failure mode this section exists to name and prevent — and
+must alert as an integrity problem (a reconciliation break under §6) if it
+is ever observed with no corresponding release within the provider's own
+acceptance-timeout window.
+
+**RECOMMENDATION**: the sportsbook domain should prefer never posting a
+`sportsbook_bet` lock until acceptance is confirmed (holding the
+optimistic reservation entirely outside the ledger, the same "pending
+lives outside the ledger until it's a fact" pattern `ledger-accounting-
+model.md` §4 already uses for deposits/withdrawals), which makes this
+reversal path unnecessary in the common case. Where a specific provider's
+protocol makes pre-acceptance locking unavoidable (e.g. the provider
+requires the platform to reserve first and confirms asynchronously), the
+reversal path above is mandatory, not optional.
+
+**Idempotency key**: the rejection event's own provider reference, distinct
+from the (now-void) acceptance reference — same pattern as Flow 4's
+withdrawal pre-submission rejection.
+
+**Audit event**: `sportsbook_bet.rejected` (no-lock case) /
+`sportsbook_bet.rejected_lock_released` (optimistic-lock case).
+
+**Invariants engaged**: none (no-lock case, `ledger-accounting-model.md`
+§4's own no-op-by-absence rule) / #1, #2, #3, #4, #5, #10, #14 (optimistic-
+lock case).
+
+Status: **RESOLVED — `NOT IMPLEMENTED`.**
+
+### 5. Settlement — win and loss (Flow 9 detail)
+
+`BLUEPRINT`, per `financial-transaction-flows.md` Flow 9, restated with
+the bonus-blocking status made explicit and the rounding boundary named.
+
+| Event | Entries |
+|---|---|
+| Loss, stake `S` | Dr `player_locked` `S` · Cr `house_gaming` `S` |
+| Win, stake `S`, full payout `S+W` | (1) Dr `player_locked` `S` · Cr `house_gaming` `S` — stake absorbed; (2) Dr `house_gaming` `S+W` · Cr `player_cash` `S+W` — full payout, **not** winnings `W` alone (Flow 9's own documented trap: pairing a winnings-only debit against an `S+W` credit does not balance) |
+
+Two balanced pairs on a win, `S`=`S` and `(S+W)`=`(S+W)`, satisfying
+invariant #1 as a whole. This is the exact shape Flow 9 already specifies;
+this ADR adds nothing new to the entries themselves and instead pins down
+what Flow 9 left generic.
+
+**Where the payout amount `S+W` comes from, and who is responsible for it
+being correct — the load-bearing distinction for rounding (§7).** In the
+widget/iframe or feed/API provider-driven shape (the near-term reality per
+doc 09's build/buy line), the provider computes `S+W` from its own
+odds/settlement engine and states it in the settlement callback as an
+already-rounded minor-unit integer. **The ledger posts exactly what the
+callback states; it does not recompute, validate, or re-round the
+odds/payout math.** This is the same posture Flow 11's existing `OPEN
+DECISION` already states for cash-out margin and is restated here for
+ordinary settlement so it is not assumed differently for the two flows.
+Reconciliation for this posting is therefore against the **provider's own
+settlement statement** (mirroring Flow 17's provider-settlement
+reconciliation), not a recomputation from stored odds — the ledger simply
+has no odds of its own to recompute from in this shape.
+
+In a future in-house pricing/settlement engine (the feed/API "platform
+computes its own odds" shape doc 09 explicitly defers), the platform
+itself would compute `S+W = S × decimal_odds` (or a combined-odds product
+for a bet-builder). That computation is a percentage/rate-of-money
+calculation and **must** use ADR 0021's one shared rounding helper
+(round-half-up, applied once at the final monetary boundary, full
+`NUMERIC` precision until then — DS-1/DS-2/DS-3, unchanged, no second
+convention). `decimal_odds` (and any per-leg odds in a combo) would be
+stored `NUMERIC`, never `FLOAT`/`DOUBLE`, exactly as ADR 0021 already
+requires for `exchange_rate`. This case does not exist yet — no in-house
+pricing engine is authorized this stage — and is named here only so it is
+not later "discovered" as a second rounding decision when it is built.
+
+**Bonus-funded win — blocked.** Where the original stake locked from
+`player_bonus`, this settlement is **blocked** by the same `player_locked`
+origin gap as placement (§9) — settlement cannot know which account to
+return the payout to until the origin split exists. Once unblocked, a
+payout crediting `player_bonus` carries the identical ADR 0032 §2 mirror
+pair (`promo_liability`/`bonus_expense`) Flow 6/9 already specify for
+casino, generated by the same shared ledger posting layer — no
+sportsbook-specific mirror logic is invented.
+
+**Idempotency key**: `(tenant_id, provider_id, provider_settlement_reference)`
+— the settlement event's own reference, distinct from
+`provider_bet_reference` (§3). A settlement callback that references a bet
+slip with no matching `player_locked` entry is rejected and escalated as
+an integrity alert, identical to Flow 9's stated failure behavior.
+
+**Correlation**: `correlation_id` = the same internal bet id §3 minted.
+
+**Audit event**: `sportsbook_bet.settled`.
+
+**Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #12, #13, B1 (once
+bonus-funded stakes are unblocked).
+
+Status: **RESOLVED (cash-funded) — `NOT IMPLEMENTED`.** Bonus-funded case
+**BLOCKED**, see §9.
+
+### 6. Exposure and liability accounting — derived read, no maintained counter
+
+`ARCHITECTURAL DECISION`, directly answering doc 09's "every sportsbook
+report needs an explicit open-liability line."
+
+**The platform's aggregate open-bet stake liability, per `(tenant_id,
+asset_code)`, is:**
+
+```sql
+SELECT SUM(le.amount) FILTER (WHERE le.direction = 'credit')
+     - SUM(le.amount) FILTER (WHERE le.direction = 'debit') AS open_liability
+FROM ledger_entries le
+JOIN ledger_accounts la ON la.id = le.ledger_account_id
+WHERE la.account_type = 'player_locked'
+  AND la.tenant_id = $1
+  AND la.asset_code = $2
+  AND le.created_at <= $3;   -- or a join+filter on ledger_transactions.posted_at, per
+                              -- ledger-accounting-model.md §5's note on the two timestamps
+```
+
+This is the **same formula shape** `ledger-accounting-model.md` §5 already
+defines for any single account's balance, summed across every wallet's
+`player_locked` account for the tenant+asset rather than one wallet's. It
+is deliberately **not** a maintained counter (no `open_sportsbook_liability`
+column anywhere), for the identical reason ADR 0032 §0 requires wagering
+progress to be a derived read: a maintained counter is a second truth
+system that can drift from the entries it claims to summarize, and the
+underlying entries already make the number cheap to compute (a single
+indexed aggregate per tenant+asset, no worse than the existing wallet
+balance projection query pattern).
+
+**Materialization, if read performance demands it**: exactly the
+`reconciliation-model.md` §3 pattern — a **subordinate, rebuildable cache**
+(e.g. a periodic materialized view refreshed on the platform's existing
+projection cadence), never a second source of truth, and never read on any
+bet/settlement path (CLAUDE.md: "Redis (or any cache) never holds an
+authoritative balance and is never read on the bet/settlement path").
+
+**Reporting consequence, stated explicitly per doc 09**: a sportsbook
+GGR/NGR report for period `P` is incomplete without this figure as of
+`P`'s end, alongside realized `house_gaming` activity for `P` — a report
+that shows only settled revenue overstates a day with many still-open
+bets and understates the day a large accumulator settles. This is a
+`data-analytics` reporting-layer consumption of the query above, not a new
+ledger write.
+
+**Consequence for reconciliation**: the daily/hourly reconciliation stream
+this figure feeds compares `Σ player_locked` against the sportsbook
+domain's own count of currently-open bets' stakes (a cross-check that the
+domain's own bet-state view and the ledger's locked-funds view agree) —
+the identical "two independently derived views of the same fact must
+match" pattern `ledger-accounting-model.md` §2's `player_withdrawal_hold`
+row already uses ("every held amount must equal exactly one non-terminal
+withdrawal request").
+
+Status: **RESOLVED — `NOT IMPLEMENTED`.**
+
+### 7. Multi-asset — confirmed, no hardcoded currency
+
+`ARCHITECTURAL DECISION`, stated because the directive requires it to be
+confirmed explicitly rather than assumed.
+
+Every posting in this ADR resolves its asset from the **wallet's own
+`asset_code`** — the same 1:1 stake-currency-to-wallet resolution Flow 5/8
+already use for casino/sportsbook, with no cross-asset conversion mid-bet.
+`amount` columns are `NUMERIC(38,0)` minor units per the asset's registered
+`decimal_exponent` (ADR 0001/0007/0021), identically to every other ledger
+posting — no code path in this ADR assumes 2 decimal places, a fiat asset,
+or any specific asset at all. A sportsbook stake, payout, partial-
+settlement amount, or cashout amount in BTC or an 18-exponent asset posts
+through the identical entries and idempotency mechanism as one in EUR;
+only the `asset_code` and its registry-looked-up exponent differ.
+
+**Rounding — reuses ADR 0021's resolved decision, in full, without
+exception.** This ADR does not open a second rounding decision. The two
+places a sportsbook-specific computation could need rounding are named
+precisely, per the directive:
+
+1. **A proportional cashout or partial-settlement amount computed by the
+   platform** (§8/§9's generalized `R`/`P` formula, when `R` or `P` is
+   derived as a percentage/proportion of the stake by the platform itself
+   rather than stated outright by the provider) — **must** use ADR 0021's
+   one shared rounding helper (round-half-up, applied once at the final
+   monetary boundary, full `NUMERIC` precision until then; the applied
+   rule/version denormalized onto the `LedgerTransaction` row exactly as
+   ADR 0021 specifies for every other rounding site).
+2. **An in-house bet-builder/combo payout** (§5's future in-house case) —
+   same helper, same reasoning, no exception for "it's odds, not a bonus
+   percentage." A rate multiplied by an integer amount is a rate multiplied
+   by an integer amount regardless of which domain produced the rate.
+
+**Where no platform-side rounding occurs at all**: the ordinary
+provider-driven case for every flow in this ADR (§5/§8/§9), where the
+provider states `S+W`, `R`, `P`, or a combo payout as an already-rounded
+minor-unit integer in its callback. The ledger posts that integer verbatim
+and performs no arithmetic on it beyond the balancing entries this ADR
+already specifies. This is the common case today and is expected to remain
+so for as long as the widget/iframe or feed/API provider shape is in use;
+§5's in-house case is named for completeness, not because it is scheduled.
+
+Status: **RESOLVED — `NOT IMPLEMENTED`.** No change to ADR 0021's resolved
+rounding decision is required or proposed; this section only identifies
+where sportsbook-specific computations bind to it.
+
+### 8. Void, partial settlement, and cashout — three distinct events, one generalized posting shape
+
+`ARCHITECTURAL DECISION`, per Flows 10/11 and doc 09's explicit "never
+conflated" requirement. All three release some or all of a bet's
+`player_locked` stake before or instead of an ordinary full settlement.
+They are kept as **three distinct `transaction_type` values** — never one
+"resolve bet" type — because they mean different things to a reader of the
+ledger, to reporting, and to a support agent explaining a player's history,
+even where (as below) their entries share one generalized formula.
+
+#### 8.1 Void (Flow 10)
+
+The full stake is returned as if the bet never happened — a market
+cancellation, push, or data error, never a market outcome.
+
+| Event | Entries |
+|---|---|
+| Void before settlement, stake `S` | Dr `player_locked` `S` · Cr `player_cash`/`player_bonus` `S` |
+| Void after settlement, stake `S` (+ any payout already posted) | Full reversal chain: a new `LedgerTransaction` with `reverses_transaction_id` pointing at the original settlement transaction (and, separately, at the original bet transaction if the settlement legs were posted against `player_locked` directly rather than via a prior lock reversal — see Flow 9's two-pair shape), exact inverse entries, landing the stake back in `player_cash`/`player_bonus` |
+
+`transaction_type = 'sportsbook_void'` for both timing variants — the
+economic meaning ("this bet is nullified, full stake returned, never
+became house revenue or a real win") is identical regardless of when the
+provider's void callback arrives; only the entries needed to reach that
+end state differ mechanically. This distinguishes void from:
+
+- **Loss/win settlement** — a market outcome occurred; void asserts no
+  outcome is being recognized at all.
+- **Cancellation** (§8.4) — void is always provider/event-initiated (a
+  market fact external to the player's wishes); cancellation, if it
+  existed, would be player-initiated.
+
+**Idempotency key**: the void's own provider reference, distinct from both
+`provider_bet_reference` and any settlement reference already posted.
+
+**Audit event**: `sportsbook_bet.voided`.
+
+**Invariants engaged**: #1, #2 (post-settlement case), #3, #4, #5, #10
+(post-settlement case), #12, #13 (post-settlement case), #14
+(post-settlement case).
+
+#### 8.2 Partial settlement (bet-builder / multi-leg)
+
+Some legs of a multi-leg (bet-builder, same-game-multi) wager resolve
+before others, or a portion of the wager's stake is otherwise determined
+while the remainder stays open. Let `R` = the portion of the locked stake
+released by this event (attributable to the leg(s) now resolved), and `P`
+= the amount paid out for that released portion (0 if the resolved leg(s)
+lost, a computed win amount if they won). The remainder of the stake
+(`original_stake − R`) stays in `player_locked` against the still-open
+legs.
+
+| Case | Entries |
+|---|---|
+| Always | Dr `player_locked` `R` · Cr `player_cash`/`player_bonus` `P` |
+| `R > P` (resolved leg(s) lost, house keeps the released margin) | + Cr `house_gaming` `R − P` |
+| `P > R` (resolved leg(s) won enough that the payout for this portion exceeds the released stake) | + Dr `house_gaming` `P − R` |
+
+Identical generalized shape to Flow 11's existing formula, deliberately
+reused rather than re-derived, because the underlying arithmetic
+constraint (`R`/`P` may differ in either direction; a zero-amount entry is
+forbidden so the `house_gaming` leg is omitted entirely when `R = P`) is
+the same regardless of *why* a portion of the stake is being released.
+What is new here, per the directive, is that this is now a **named,
+separately-typed** event distinct from full settlement and from cashout:
+`transaction_type = 'sportsbook_partial_settlement'`.
+
+**Idempotency key**: `(tenant_id, provider_id, provider_partial_settlement_reference)`
+— **distinct per partial-settlement occurrence**, since a single bet may
+have multiple legs settle at different times, each independently
+idempotent. The reference must identify *which* leg-settlement event this
+is, not merely the bet — a provider that reuses the bet's own reference
+across successive partial settlements would make the second event collide
+with (and be silently dropped as a duplicate of) the first, which is
+exactly the "stuck lock"-shaped failure this ADR treats as unacceptable.
+
+**Audit event**: `sportsbook_bet.partially_settled`.
+
+**Bonus-funded portion**: blocked, same as §5, until the `player_locked`
+origin split (§9) exists; once unblocked, the `promo_liability`/
+`bonus_expense` mirror pair applies to whichever of `R`/`P`/margin legs
+credit `player_bonus`, exactly as ADR 0032 §2 already specifies for
+casino/sportsbook full settlement.
+
+**Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #12, #13, B1 (once
+unblocked).
+
+#### 8.3 Cashout (early settlement offer accepted)
+
+A player accepts a provider-offered early buyout of some or all of a still
+-open bet's remaining exposure, before the underlying event concludes.
+Mechanically this uses the **same generalized `R`/`P` formula** as §8.2 —
+`R` = the portion of the remaining locked stake being closed out, `P` =
+the provider's cashout payout for that portion — but it is kept as its
+**own, fourth `transaction_type`, `sportsbook_cashout`**, never a variant
+of `sportsbook_partial_settlement`, for a reason that is about meaning, not
+arithmetic:
+
+- A **partial settlement** is triggered by a **market fact becoming known**
+  (a leg's outcome resolves) — the provider is reporting something that
+  happened.
+- A **cashout** is triggered by a **player's voluntary commercial
+  decision** to accept a provider-priced buyout **before** any new market
+  fact exists — the underlying event has not concluded and no leg has
+  necessarily resolved. The price `P` reflects the provider's own current
+  odds/margin view at the moment of acceptance, not a settled outcome.
+
+Conflating the two would make a report unable to answer "how much of our
+sportsbook revenue came from bets actually finishing vs. players buying
+out early" — a materially different commercial question a partner will
+ask, and exactly the kind of loss-of-distinction doc 09's "never
+conflated" rule exists to prevent, even where (as here) the ledger-entry
+shape happens to coincide.
+
+| Case | Entries |
+|---|---|
+| Always | Dr `player_locked` `R` · Cr `player_cash`/`player_bonus` `P` |
+| `R > P` | + Cr `house_gaming` `R − P` |
+| `P > R` (cashing out a bet currently in a winning position pays more than the released stake) | + Dr `house_gaming` `P − R` |
+
+A **full cashout** is the special case `R = original remaining locked
+stake` (the bet closes entirely). A **partial cashout** releases only part
+of it, leaving the rest in `player_locked` — the same "may cash out more
+than once" property Flow 11 already notes, each occurrence independently
+idempotent.
+
+**Idempotency key**: `(tenant_id, provider_id, provider_cashout_reference)`
+— the specific cashout-offer-acceptance event's own reference, distinct
+per occurrence for the identical multiple-partial-cashout reason as §8.2.
+
+**Audit event**: `sportsbook_bet.cashed_out`.
+
+**Rounding**: per §7 — the provider-driven case posts `P` as given; an
+in-house cashout-pricing engine, if ever built, would compute `P` through
+the one shared rounding helper.
+
+**Bonus-funded portion**: blocked, same as §5/§8.2, until §9 resolves.
+
+**Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #12, #13, B1 (once
+unblocked).
+
+#### 8.4 Cancellation (pre-settlement player-initiated withdrawal of a bet) — out of scope
+
+`ARCHITECTURAL DECISION` (scope), answering the directive's explicit
+question directly rather than by omission.
+
+**Cancellation — a player unilaterally un-doing an already-accepted bet,
+distinct from both void (provider/event-initiated) and cashout
+(provider-priced, market-referenced) — is explicitly out of architectural
+scope for this ADR.** Reasoning:
+
+- Neither the Blueprint nor doc 09 describes a player-initiated,
+  no-market-referenced bet cancellation capability.
+- It is not a standard capability of the widget/iframe integration shape
+  doc 09 recommends starting with (Altenar/BetBy/Digitain render the
+  betting experience themselves; a bet, once accepted, is closed to
+  unilateral player cancellation in that shape — only cashout, which is
+  priced, and provider-initiated void exist).
+- Per CLAUDE.md's "no uncontrolled scope expansion": this is not required
+  by the Blueprint, the current stage's path, the future B2B architecture,
+  or security/compliance, and building a bespoke "instant free cancellation
+  window" would be inventing a product capability no integration partner
+  offers, ahead of any stated requirement.
+
+**If a future jurisdiction mandates a cooling-off/cancellation window**
+(some regulators require a short post-acceptance cancellation right,
+distinct from the provider's own cashout mechanic), that is a genuinely
+new requirement, not an extension of this ADR's existing flows, and would
+be recorded as its own decision when a jurisdiction actually requires it —
+architecturally it would most likely reuse the §8.1 void-before-settlement
+shape (full stake returned, player-initiated rather than provider-
+initiated, distinguished by `reason_code`/`causation_id` rather than a new
+`transaction_type`), but that is a recommendation for a future decision,
+not something this ADR builds now.
+
+Status: **RESOLVED (out of scope) — deferred future consideration, not a
+gap.**
+
+Status (§8 overall): **RESOLVED (architecture) — `NOT IMPLEMENTED`.**
+
+### 9. Bonus-funded sportsbook wagering — confirmed BLOCKED, not re-decided here
+
+`OPEN DECISION`, inherited and confirmed, not reopened. `ledger-
+accounting-model.md` §6.2 and ADR 0032 §10 already establish that
+`player_locked` is a **single** account type, so Flow 8 loses whether a
+locked stake came from `player_cash` or `player_bonus`. Two consequences,
+restated because every flow in this ADR depends on them:
+
+1. **Settlement cannot know which account to return a stake or payout to**
+   once locked — every settlement/void/partial-settlement/cashout flow in
+   §5/§8 that would credit `player_bonus` is mechanically unable to
+   determine that it should, for a stake that was locked before this gap
+   is closed.
+2. **Invariant B1 breaks the moment a bonus-funded stake is locked** — the
+   value has left `player_bonus` (so `promo_liability`'s mirror is now
+   wrong by that amount) while the player may still get it back, and
+   nothing in the current account model records that the locked amount's
+   *origin* was bonus rather than cash.
+
+**This ADR does not resolve the gap.** Doing so requires splitting
+`player_locked` into `player_locked_cash`/`player_locked_bonus` (or an
+equally binding, indexable origin dimension) and extending invariant B1's
+covered-account set — a change to a Blueprint-listed account type that ADR
+0032 §10 already correctly scopes as needing `architect` + `sportsbook` +
+`ledger-finance` joint sign-off, not a unilateral `ledger-finance` decision
+inside a single domain's accounting ADR. **Every bonus-funded posting
+sketched in §3/§5/§8 above is therefore BLOCKED, not merely deferred,
+until that joint decision lands** — cash-funded sportsbook wagering is not
+blocked by it and every flow in this ADR is fully specified for the
+cash-funded case.
+
+**What this ADR commits to now, so the eventual unblock is mechanical
+rather than a redesign**: once the origin split exists, every bonus-funded
+leg in §3/§5/§8 carries the identical ADR 0032 §2 `promo_liability`/
+`bonus_expense` mirror pair already established for casino, generated by
+the same shared ledger posting layer (`internal/ledger`), never hand-
+assembled by a sportsbook package — the same "split instruction, ledger
+posts it" boundary `10-bonus-engine-architecture.md` §6 already establishes
+for casino's bonus-funded stakes. The sportsbook engine's own
+responsibility, mirroring that same document's two-part boundary, is
+exactly: (1) compute the cash/bonus split of a stake at placement
+(from the Grant's current balance mix and the sportsbook-equivalent of a
+wagering-contribution rule, if one applies) as a **split instruction**, and
+(2) emit the settlement/void/partial/cashout lifecycle facts with enough
+context (bet id, amounts, reason) for `internal/ledger` to post the
+correct legs including the mirror pair — the sportsbook engine never
+specifies account types or posting order itself, identically to bonus's
+own boundary. No new mechanism is invented for this; it is the existing
+one, extended to a second stake-locking product once the origin gap is
+closed.
+
+Status: **`OPEN DECISION` — not resolved here, deliberately, raised to the
+Master Orchestrator as already flagged by ADR 0032 §10.** Referred-upward
+item, not restated as new.
+
+### 10. Reversal/correction — market corrected after initial settlement
+
+`ARCHITECTURAL DECISION`, per doc 09's explicit requirement and CLAUDE.md's
+standing compensating-entry rule.
+
+A market correction after settlement (a scoring error, a data-feed
+mistake, a result later overturned by the sport's own governing body) is
+handled as a **two-transaction compensating sequence**, never a mutation
+of the original settlement:
+
+1. **Rollback of the original settlement.** A new `LedgerTransaction`,
+   `transaction_type = 'sportsbook_rollback'`, `reverses_transaction_id`
+   pointing at the original settlement/partial-settlement/cashout
+   transaction being corrected, posting the **exact inverse** of whichever
+   of §5/§8.2/§8.3 actually posted. Named `sportsbook_rollback` rather than
+   reusing `sportsbook_void`, deliberately: a void asserts "this bet never
+   happened"; a rollback here asserts "this bet's *settlement* was
+   computed wrong and is being corrected" — the bet itself remains a real,
+   resolved wagering fact, which is a different statement a reader of the
+   ledger needs to be able to tell apart (and mirrors `financial-
+   transaction-flows.md` Flow 7's own `casino_rollback` naming for the
+   identical "reverse a specific posted settlement" role).
+2. **Re-settlement.** If the corrected market produces a new determinate
+   outcome, a **fresh** transaction of whichever type actually applies
+   (`sportsbook_settlement`, `sportsbook_partial_settlement`, or
+   `sportsbook_cashout` — cashout is unaffected by a market correction
+   arriving later and would not normally need re-settlement, but a
+   partial-settlement leg can) is posted, reflecting the corrected result,
+   with its **own new** idempotency key (the correction event's own
+   provider reference — never the original settlement's reference, which
+   is already consumed and would collide). This is a **new economic fact**,
+   posted forward, never an edit of history — identical in spirit to ADR
+   0032 §5's "forfeiture is a new economic fact, not a reversal of the
+   grant" distinction.
+
+**Never-seen-original tombstone case**: if a correction/rollback event
+arrives referencing a settlement `provider_tx_id` the ledger never posted
+(lost callback, out-of-order delivery), the rollback handler writes a
+tombstone occupying that reference's idempotency slot
+(`(tenant_id, provider_id, provider_settlement_reference)`), per CLAUDE.md's
+"a rollback for a transaction never seen writes a tombstone" — identical
+mechanism to Flow 2/7's existing tombstone handling, no sportsbook-specific
+variant.
+
+**Double-reversal protection**: the original settlement transaction is
+selected `FOR UPDATE` and a rollback is rejected if a rollback already
+exists for it — the same row-lock pattern `internal/casino`'s
+`postRollback` already uses, reused unchanged.
+
+**Distinguishing this from void**: a void (§8.1) asserts the bet never
+became a market fact at all; a rollback+re-settlement asserts the bet did
+resolve, but the *recorded outcome* of that resolution was wrong and is
+being corrected to a different (possibly still nonzero) outcome. A market
+that is corrected to "no result stands" (rather than to a different
+result) resolves as rollback-then-void, not rollback-then-nothing — the
+`player_locked` stake must land somewhere, and "nowhere" is not a valid
+end state.
+
+**Bonus-funded portion**: the rollback's inverse entries automatically
+include whatever mirror legs the original settlement posted (once §9
+unblocks bonus-funded settlement) — no special-case rollback code, the
+identical "falls out of reversing the same transaction" property ADR 0032
+§7 already relies on for casino.
+
+**Idempotency key**: rollback keyed by the correction event's own
+provider reference (distinct from the settlement it reverses); re-
+settlement keyed by its own new provider reference (§5/§8.2/§8.3, as
+applicable).
+
+**Audit event**: `sportsbook_bet.rolled_back` / (re-settlement's own event
+name per whichever type it reuses, e.g. `sportsbook_bet.settled` again,
+distinguishable from the first by `causation_id` pointing at the
+correction event rather than the original outcome callback).
+
+**Invariants engaged**: #1, #2, #3, #4, #5, #10, #13, #14, B1 (once
+unblocked).
+
+Status: **RESOLVED — `NOT IMPLEMENTED`.**
+
+### 11. Idempotency — the precise per-lifecycle-event key strategy
+
+`ARCHITECTURAL DECISION`, answering the directive's explicit question:
+how a single Bet's multiple distinct financial events avoid colliding
+under one idempotency mechanism, unlike a casino round's single bet/win
+pair.
+
+**Nothing bespoke is invented — ADR 0020's mechanism applies verbatim, per
+`ledger-accounting-model.md` §3.** What sportsbook adds is a precise
+statement of *which* value plays which role, because a bet's events are
+more numerous than any other product's:
+
+- **`(tenant_id, provider_id, provider_tx_id)` uniqueness is never
+  collision-prone across a bet's lifecycle, because `provider_tx_id` is
+  always the specific event's own reference, never the bet-slip/bet
+  reference reused across events.** Each of placement, rejection-release,
+  settlement, void, partial settlement (per occurrence), cashout (per
+  occurrence), and rollback/re-settlement carries a **distinct** provider-
+  issued (or, for an in-house engine, internally-minted in the identical
+  role) reference. A provider adapter that reuses the bet-slip reference
+  as `provider_tx_id` for more than one of these events is a defect — it
+  would make the second event's insert collide with the first's unique
+  constraint and be silently treated as an idempotent retry of the wrong
+  fact. This is the single most likely way this design fails in practice,
+  the identical class of failure ADR 0032 §8 already calls out for a
+  Reward Orchestrator minting a fresh key per delivery attempt (there:
+  too many keys for one fact; here: too few keys for many facts) — named
+  explicitly for the same reason.
+- **`correlation_id` is the internal bet id, stable across every
+  transaction the bet ever produces** (§3) — this is the mechanism for
+  "show me this bet's full financial history," and it is **not** part of
+  the uniqueness constraint. Two transactions may share a `correlation_id`
+  freely; they may never share a `(tenant_id, provider_id, provider_tx_id)`
+  pair.
+- **`transaction_type` is a second, independent discriminator**, not a
+  substitute for a distinct `provider_tx_id` — even though `sportsbook_bet`
+  and `sportsbook_settlement` could never collide on `provider_tx_id` alone
+  if the provider follows its own protocol correctly, the type still
+  matters for every other invariant/reconciliation query in this ADR that
+  filters by it (§6, §8).
+- **Per-occurrence events (partial settlement, cashout) need a reference
+  per occurrence, not per bet** (§8.2/§8.3) — a provider or in-house engine
+  that assigns one reference per bet-builder and reuses it for every leg's
+  partial settlement would collide the second leg against the first
+  exactly as above; this is called out a second time here because it is
+  the specific case most likely to be overlooked when a bet-builder ships.
+- **Internally-originated events with no natural provider reference**
+  (a rare staff-initiated manual void, distinct from a market correction)
+  use `(tenant_id, idempotency_key)` — the admin action's own id, generated
+  once at approval and reused verbatim on retry — identical to Flow 16's
+  `manual_adjustment` pattern. This is expected to be rare for sportsbook,
+  since the widget/iframe/feed/API shapes make the provider the origin of
+  nearly every event.
+
+**Exact retry / concurrent duplicate / same-key-different-payload
+semantics**: unchanged, inherited from ADR 0020 (`SAVEPOINT`-based exact
+retry, `ErrIdempotencyKeyReused` on a same-key-different-payload attempt,
+database-constraint arbitration of concurrent duplicates — never
+check-then-insert). Nothing in this section modifies that mechanism.
+
+**Authorization**: ADR 0019's actor matrix already needs a row for each
+`sportsbook_*` transaction type (a provider callback scoped to the tenant
+resolved from the credential that verified the callback's signature, never
+from a tenant/player identifier in the payload — the same rule Flow 8's
+preamble already states platform-wide) — adding those rows is an additive
+edit to that matrix (§12), not a new authorization mechanism.
+
+Status: **RESOLVED — `NOT IMPLEMENTED`.**
+
+### 12. Reconciliation — recomputing the posted amount from stored inputs
+
+`ARCHITECTURAL DECISION`.
+
+- **Stake amount (§3)**: the posted amount **is** the input — the accepted
+  stake at placement, with no computation and therefore no rounding
+  question. Reconciliation is a straight match against the provider's own
+  bet-acceptance record.
+- **Settlement/partial-settlement/cashout amounts, provider-driven case
+  (the near-term default, §5/§7/§8)**: the ledger does not recompute these
+  from odds — it has none to recompute from in this shape. Reconciliation
+  is against the **provider's own settlement/cashout statement**,
+  matched by `(provider_id, provider_tx_id)`, the same posture Flow 17
+  already uses for provider-fee settlement and Flow 11's existing `OPEN
+  DECISION` already states for cash-out margin specifically.
+- **Settlement/partial-settlement/cashout amounts, in-house-computed case
+  (future, not built this stage)**: exactly recomputable from stored
+  inputs — stake, stored odds (`NUMERIC`, never `FLOAT`), the stored
+  rounding-rule identifier denormalized onto the `LedgerTransaction`
+  (ADR 0021's existing storage design, reused verbatim) — as `payout =
+  round_half_up(stake × combined_odds, asset_exponent)`. This case does
+  not exist yet; it is specified so that if/when it is built, the
+  recomputation contract is already fixed rather than re-derived per
+  implementer.
+- **Open-bet liability (§6)**: reconciled as a derived read against the
+  sportsbook domain's own open-bet-stakes view, per §6's own reconciliation
+  paragraph — not a recomputation of a single amount but a cross-check
+  between two independently derived totals.
+
+Status: **RESOLVED — `NOT IMPLEMENTED`.**
+
+### 13. Risk & Limits integration — reusing the established pattern, not a new mechanism
+
+`ARCHITECTURAL DECISION`, per ADR 0031 §13–§18's already-established
+"every domain declares its own Risk integration, in the same transaction
+as its own posting, before commit" pattern.
+
+**Current repository state, verified, not assumed**: `sportsbook_bet` is
+**already** one of the six `Operation` values migration 0041's CHECK
+constraint accepts and `internal/risk/types.go` already declares as a Go
+constant (ADR 0031 §13's own table: "`Sportsbook` | `sportsbook_bet` |
+`NOT IMPLEMENTED` — does not exist as a package yet"). **No new `Operation`
+value, migration, HTTP-allowlist entry, or OpenAPI enum entry is required
+for bet placement to be Risk-gated** — the extension point already exists
+and is simply unwired, because `internal/sportsbook` does not exist yet.
+
+**What this ADR specifies for `ledger-finance`'s side of that future
+wiring**, exactly as §16 step 5 of ADR 0031 states the ledger-transaction-
+type mapping is "`ledger-finance`'s to specify, never Risk's to invent":
+
+- **`min_amount`/`max_amount` with `TimeWindow: transaction`** apply to
+  `sportsbook_bet` unchanged the moment the call site exists — `Rule.
+  breach()`'s comparison is already generic over `Operation` and needs no
+  sportsbook-specific change.
+- **`cumulative_amount`** ("no more than X in sportsbook stakes per rolling
+  day") requires `operationLedgerTransactionTypes["sportsbook_bet"] =
+  "sportsbook_bet"`, and its netting counterpart requires
+  `operationLedgerRollbackTypes["sportsbook_bet"]` to net **both**
+  `sportsbook_void` and `sportsbook_rollback` against it — a stake that is
+  voided or rolled back was never actually put at risk (or the wager it
+  represented was undone), so it must not permanently consume a player's
+  cumulative stake capacity, the identical correctness property the
+  existing `casino_bet`/`casino_rollback` netting already establishes.
+  `sportsbook_settlement`/`sportsbook_partial_settlement`/
+  `sportsbook_cashout` are **deliberately not netted** — the stake was
+  genuinely wagered and resolved (whether won or lost), which is not
+  "unconsuming" cumulative capacity, the same reasoning a casino win does
+  not net against a casino bet's cumulative consumption either.
+  `operationLedgerRollbackTypes`'s current shape maps one operation to one
+  ledger type (`casino_bet` → `casino_rollback`); accommodating two
+  netting types for `sportsbook_bet` is a small, additive widening of that
+  map's value type to a list — flagged here as an implementation note for
+  whoever lands the mapping (`risk` + `ledger-finance` jointly, per ADR
+  0031 §16 step 5's own ownership split), not a redesign of `Rule.
+  breach()`'s cumulative case.
+- **Enforcement position**: bet placement calls `risk.Evaluate` in the
+  same database transaction as the `sportsbook_bet` `LedgerTransaction`,
+  before either commits — the identical positional contract `internal/
+  casino`'s `postBet` already implements, with RG evaluated first
+  (`rg.EvaluateEligibility`, short-circuiting on denial) and Risk second,
+  never the reverse (ADR 0031 §1/§14). A non-nil error or a `DENY`/`REVIEW`
+  outcome aborts the whole transaction before any `player_locked` entry
+  exists — no ledger effect has happened yet at that point, mirroring
+  casino's own fail-closed contract exactly.
+- **Settlement, void, partial settlement, cashout, and rollback are
+  provider-driven facts already accepted or already decided elsewhere**
+  (the market resolved, the provider voided it, the player already
+  accepted a cashout price) — they are not new exposure-creating decisions
+  the platform is choosing to allow, so **none of them are additional Risk
+  checkpoints**. This mirrors casino's own scope: Risk gates `casino_bet`
+  (a new exposure-creating decision) but not `casino_win`/`casino_rollback`
+  (facts about an exposure already accepted). The only sportsbook-specific
+  decision point analogous to a *new* exposure being created after
+  placement is a **cashout offer being generated and shown to the player**
+  in the first place — that is a provider/trading decision outside the
+  ledger's or Risk's boundary entirely (the platform does not price
+  cashout offers in the provider-driven shape), so it requires no Risk
+  integration point of its own.
+
+**Cross-domain aggregate exposure** (a rule spanning bonus + casino +
+sportsbook) remains the confirmed, unsolved `OPEN DECISION` ADR 0031 §17
+already records — this ADR does not attempt to close it, and sportsbook's
+own open-bet exposure (§2's "potential payout exposure," specifically) is
+additional evidence for why that future `exposure` `LimitKind` would need
+its own definition of what "exposure" means across three structurally
+different things (a settled casino stake, an unsettled sportsbook
+position, and an outstanding bonus liability) — not a reason to
+approximate it here.
+
+Status: **RESOLVED (architecture) — `NOT IMPLEMENTED`.** No `internal/
+risk` code, migration, or schema change is proposed by this ADR; §13's
+mapping specification is ready for whichever stage wires
+`internal/sportsbook`'s enforcement call site.
+
+## Consequences
+
+- **Follow-up edits required** to documents this ADR does not own the
+  right to change in this stage (all `NOT IMPLEMENTED` until made):
+  `ledger-accounting-model.md` §2 (the `player_locked`/`player_cash`/
+  `house_gaming` rows' "Allowed transaction types" columns already list
+  most sportsbook types as forward references to this ADR — replace the
+  forward reference with a citation to this ADR and add
+  `sportsbook_partial_settlement`/`sportsbook_cashout`/`sportsbook_rollback`
+  where missing); `financial-transaction-flows.md` Flows 8–11 (restate
+  Flow 11 as two flows — partial settlement and cashout — per §8 above,
+  and add the rejection/rollback/re-settlement flows §4/§10 introduce);
+  ADR 0019's actor matrix (add a row per `sportsbook_*` transaction type,
+  scoped to the provider-callback-verified tenant, per §11).
+- **Migrations required before any sportsbook posting** (additive, own
+  stage, no SQL written here, mirroring the "migration order, no SQL"
+  format `docs/architecture/27-stage-4h-b0-scope-and-implementation-
+  plan.md` §1.1 used for bonus):
+  1. `ledger_transactions.transaction_type` CHECK widening to add
+     `sportsbook_bet`, `sportsbook_settlement`, `sportsbook_void`,
+     `sportsbook_partial_settlement`, `sportsbook_cashout`,
+     `sportsbook_rollback` (six values; no new `account_type` values are
+     needed at all, per §1).
+  2. (Deferred, blocked by §9) once the `player_locked` origin split is
+     jointly authorized: the `player_locked_cash`/`player_locked_bonus`
+     split itself (or equivalent origin dimension), plus extending
+     invariant B1's covered-account set — owned jointly per ADR 0032 §10,
+     not sequenced further here.
+  3. (Future, only if `internal/risk`'s `cumulative_amount` support for
+     `sportsbook_bet` is wanted at the same time sportsbook ships) the
+     `operationLedgerTransactionTypes`/`operationLedgerRollbackTypes`
+     mapping entries described in §13 — no migration required for this
+     one (it is a Go map, not a schema change), listed here only for
+     sequencing visibility since it depends on step 1 existing first.
+  Until step 1 lands, every sportsbook posting in this ADR is `BLOCKED` by
+  the existing `CHECK` constraint — the intended behavior, not an obstacle
+  to route around, identical to bonus's own pre-migration state.
+- **No change to ADR 0021's resolved rounding decision.** This ADR reuses
+  DS-1/DS-2/DS-3 verbatim (§7) and adds no new rounding site that isn't
+  already covered by "round once, at the final monetary boundary,
+  round-half-up, one shared helper." The only sportsbook-specific
+  computations that could ever need rounding (an in-house cashout price or
+  bet-builder combo payout) do not exist in the near-term provider-driven
+  shape and are named, not built, in §5/§7/§8.3.
+- **No change to ADR 0032's bonus accounting.** Bonus-funded sportsbook
+  wagering remains `BLOCKED` on the pre-existing `player_locked` origin
+  gap (§9); this ADR adds no new bonus-accounting mechanism and commits
+  only to reusing ADR 0032 §2's mirror-leg pattern unchanged once that gap
+  closes.
+- **No change to the core ledger schema beyond the additive
+  `transaction_type` CHECK widening in migration step 1 above.** No new
+  `account_type`, no new column on `LedgerAccount`/`LedgerTransaction`/
+  `LedgerEntry`, no new table.
+- **New reconciliation consumers, not new reconciliation streams.** §6's
+  open-liability query and §12's provider-statement matching are read
+  patterns against reconciliation machinery that already exists
+  (`reconciliation-model.md`'s ledger-vs-projection and provider-statement
+  streams) — no dedicated new stream is proposed, unlike ADR 0032's B1
+  stream, because sportsbook introduces no new invariant class beyond
+  existing ones (#1–#15) plus B1 once bonus-funded stakes unblock.
+- **Testing floor** (CLAUDE.md's financial test list, non-negotiable, owned
+  by `ledger-finance`, mirroring ADR 0032's format): placement happy path
+  (cash-funded); duplicate/replayed placement callback; concurrent
+  placement vs. insufficient funds; rejection with no lock ever posted;
+  rejection with an optimistic lock correctly released; a stuck-lock
+  integrity alert firing when a rejection's release never arrives within
+  the provider's timeout; settlement win/loss happy paths; a settlement
+  referencing an unknown bet (integrity alert, not a silent accept); void
+  before settlement; void after settlement (full reversal chain);
+  duplicate void; partial settlement of one leg of a multi-leg bet with
+  the remainder correctly still locked; two independent partial-settlement
+  events on the same bet each independently idempotent (regression-testing
+  the exact key-collision failure §11 names); a partial settlement where
+  `P > R` and where `R > P`; full cashout; partial cashout followed by a
+  second cashout on the remainder; a cashout on a bet in a winning position
+  (`P > R`); market correction after full settlement (rollback + correct
+  re-settlement, net effect verified); market correction after a partial
+  settlement; rollback of a never-seen settlement (tombstone, then a
+  late-arriving original settlement rejected); double-rollback race
+  (row-lock rejection); open-liability query correctness against a mix of
+  locked/settled/voided/cashed-out bets across multiple wallets and
+  assets; multi-asset (BTC or an 18-exponent asset) placement/settlement/
+  void/partial/cashout all producing correctly-scaled `NUMERIC(38,0)`
+  entries with no hardcoded exponent. A happy-path bet/settlement pair does
+  not satisfy this list.
+- **`ledger-finance` sign-off is required** on the sportsbook domain
+  model, provider adapter, and (if ever built) in-house pricing/settlement
+  engine before any of them is marked complete, limited to their monetary
+  aspects — identical scope limitation to ADR 0032's own closing statement.
+  Nothing in this ADR gives `ledger-finance` a view on odds/trading logic,
+  provider selection, or UI/UX.
+
+## Open decisions referred upward
+
+1. **`player_locked` origin split for bonus-funded sportsbook wagering**
+   (§9) — `architect` + `sportsbook` + `ledger-finance`, already flagged by
+   `ledger-accounting-model.md` §6.2 and ADR 0032 §10, confirmed here as
+   still blocking every bonus-funded flow in this ADR.
+2. **`sportsbook_bet`'s Risk enforcement wiring** (§13) — not a
+   `ledger-finance` open decision on its own (the `Operation` value and
+   `min_amount`/`max_amount` support already exist); the
+   `operationLedgerRollbackTypes` map-shape widening to accept two netting
+   types is a small joint `risk` + `ledger-finance` implementation item
+   for whichever stage wires `internal/sportsbook`.
+3. **Cross-domain aggregate player exposure spanning bonus + casino +
+   sportsbook** — restated, not newly raised; ADR 0031 §17's existing open
+   decision, for which sportsbook's own "potential payout exposure" (§2)
+   is additional motivating evidence, not a new instance requiring its own
+   answer.
+4. **Whether a future in-house pricing/settlement engine is ever
+   authorized** (§5/§7/§8.3's "if built" cases) — a product/build-vs-buy
+   decision doc 09 already frames as deferred; this ADR takes no position
+   on timing and only pre-specifies the rounding/reconciliation contract
+   that would apply if and when it happens.
+5. **A future jurisdiction-mandated bet-cancellation window** (§8.4) — not
+   a current requirement; recorded so a future reader does not have to
+   re-derive why cancellation is absent from this ADR's flow list.
+
+## Owner
+
+`ledger-finance`. Sportsbook product/domain logic, odds/trading, and the
+provider adapter are owned by `sportsbook`; neither may alter the
+accounting treatments above without `ledger-finance` sign-off, and
+`ledger-finance` does not alter sportsbook's rules, odds handling, or
+provider selection.
+
+## Cross-references
+
+`CLAUDE.md` ("Financial / ledger rules"); ADR 0001, 0007, 0019, 0020, 0021,
+0031 (§1–§18), 0032; `docs/architecture/09-sportsbook-architecture.md`
+(product/build-vs-buy framing, owned by `sportsbook`); `ledger-accounting-
+model.md`, `financial-transaction-flows.md` (Flows 8–11, 17); `10-bonus-
+engine-architecture.md` §6 (the split-instruction/lifecycle-event boundary
+this ADR reuses for the eventual bonus-funded case); `reconciliation-
+model.md`; `docs/architecture/27-stage-4h-b0-scope-and-implementation-
+plan.md` §1.1 (the migration-order format this ADR's Consequences section
+mirrors); `internal/ledger`, `internal/casino` (`postRollback`,
+`postBet`'s Risk-integration position).
