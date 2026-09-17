@@ -1332,6 +1332,60 @@ specialist's authority:
 > will not pick a candidate by default and will not accept a silent
 > extrapolation from C-partial as having answered it.
 
+**`sportsbook`'s input (Stage 4H-B0-R5, Wave 3) — input to the joint
+decision, not a resolution.**
+
+- **Funding mix is neither known to, nor needed by, the trading/cashout-
+  pricing layer at the moment a cashout offer is computed**, in either
+  mode. Doc 09 §3.5 states the in-house engine's cashout price is "a live
+  price to close out an open position," unchanged "whether the cashout
+  price came from an external provider or the in-house trading engine" —
+  the price is a pure function of the market/position (current odds,
+  exposure), never of the wallet's cash/bonus attribution. An external
+  provider's cashout API is equally price-only; it has no visibility into
+  the platform's wallet split at all. **Consequence**: neither Candidate 1
+  nor Candidate 2 requires any change to how a cashout price is quoted or
+  offered — both are decided entirely downstream, after `P` is already
+  accepted, by the same recovery-and-split mechanism §6.3.3.1/case C-win
+  already establish. This is not a consideration that favors either
+  candidate; it only confirms the pricing layer is not where the answer
+  needs to live.
+- **Option 3 (bonus-funded bets not cashout-eligible) is mechanically
+  simple to enforce as a gate** — cashout eligibility is already an
+  existing precondition check (`SportsbookAdapterCapability.supports_cashout`,
+  §2.2, plus the in-house engine's own trading logic deciding whether to
+  offer a price at all); adding "this bet's locked stake carries no
+  bonus-origin amount" is one more boolean precondition against a fact
+  the platform already records at lock time, with no new mechanism.
+- **But it does create real product/UX complexity for a *mixed*-funded
+  bet, which sportsbook flags rather than resolves.** "Bonus-funded bets
+  are not cashout-eligible," read literally, is ambiguous between (a) any
+  bet with *any* bonus-origin amount is excluded, or (b) only a
+  *fully*-bonus-funded bet is excluded. Reading (a) produces exactly the
+  UX problem the task anticipates: a bet that is, say, 95% cash / 5%
+  bonus becomes entirely cashout-ineligible over a small bonus remainder
+  — a player experiences this as "my cash bet won't let me cash out,"
+  with the actual cause (a small bonus attribution) not necessarily
+  surfaced anywhere in the bet slip UI today; neither doc 09 nor ADR 0034
+  establishes that a player-facing bet record displays its cash/bonus
+  funding split. That combination (an eligibility rule keyed on an
+  attribute the player cannot see) is a genuine UX/transparency question
+  for `product-owner-proxy`, not something sportsbook can dismiss as
+  purely a backend simplicity win.
+- **If Option 3 is chosen, sportsbook's recommendation (not a decision)
+  is reading (b)** — exclude only fully-bonus-funded bets from cashout,
+  mirroring the existing all-or-nothing framing ADR 0038 §9 already uses
+  ("bonus-funded sportsbook wagering — confirmed BLOCKED," a whole-bet
+  property, not a partial one). Note this does **not** fully retire the
+  open question by itself: a mixed-funded bet would still be
+  cashout-eligible under reading (b), so Candidate 1 vs. Candidate 2 is
+  still needed for that case. A version of Option 3 broad enough to make
+  the split question disappear entirely would have to exclude *any*
+  bonus attribution, which — per the point above — is the reading with
+  the worse UX/product cost for what sportsbook sees as a small
+  bonus-abuse benefit, since the cash-origin portion of a mixed bet
+  carries no wagering-requirement exposure to protect.
+
 **Wagering-progress attribution (directive's explicit question for case
 B) needs no change at all.** Wagering progress is defined
 (`ledger-accounting-model.md` §6.1 cross-reference; ADR 0032 §0) as "a
@@ -1590,6 +1644,203 @@ when a win or void settlement lands against an **already-terminal bonus
 and is not `ledger-finance`'s to resolve — it is Grant-lifecycle
 semantics, handled separately by `bonus-engine`. Nothing in this round
 should be read as having answered it.
+
+##### 6.3.5.2 `sportsbook` independent review (Stage 4H-B0-R5, Wave 3) — answering focus question 5, and case C-win's boundary question
+
+**Cases C-void/C-loss/C-partial (§6.3.3.2): confirmed, match the intended
+lifecycle events.** Each corresponds 1:1 to an existing ADR 0038
+`transaction_type` (`sportsbook_void` before settlement, total-loss
+settlement, `sportsbook_partial_settlement`) with no additional
+sportsbook-side event needed to trigger the mixed-origin variant — the
+origin split is a posting-shape detail, not a new domain event, exactly
+as §6.3.3.1 frames it.
+
+**§6.3.3.1's `correlation_id`-based recovery: confirmed it matches how
+`internal/sportsbook` reaches settlement**, and the original-ratio vs.
+remaining-balance distinction (variant 1 vs. variant 2) is exactly the
+distinction a settlement/partial-settlement/cashout handler needs —
+sportsbook has no objection to either query shape.
+
+**Case C-win's proportional split — confirms the boundary, and flags
+where the computation must actually live.** From sportsbook's domain
+angle: the provider states the full payout `S+W` as one already-rounded
+integer and sportsbook's settlement handler passes it through
+**verbatim** — it never decomposes `S+W` into stake/winnings, and it
+never derives or caches its own copy of a bet's original `C:B` ratio
+across the lock-to-settlement gap (§6.3.3.1 already rules that cache out,
+correctly, as a drift risk). This means **sportsbook/the provider
+adapter is not, and cannot reliably be, the party that computes the
+proportional split and hands it to the ledger as part of the settlement
+instruction** — the premise that it would needs correcting. The only
+party with a trustworthy, non-drifting view of the original `C:B` ratio
+is the ledger's own tables (§6.3.3.1's query), so the recovery join and
+the rounding-split arithmetic (ADR 0021's shared helper) belong **inside
+`internal/ledger`'s own `sportsbook_bet`-settlement posting handler**,
+triggered automatically whenever the correlated lock transaction was
+mixed-origin — not inside `internal/sportsbook`, and not a new field
+sportsbook supplies.
+
+This does **not** violate ADR 0038 §5's "the ledger posts exactly what
+the callback states; it does not recompute" rule, because that rule is
+scoped to the *provider's own odds/settlement math* (never
+re-deriving/validating `S+W` itself) — the proportional cash/bonus
+attribution is a different, platform-internal computation over an
+already-trusted, unmodified total, the same category of computation the
+ledger already performs for FX conversions and bonus-wagering splits
+elsewhere, not a re-computation of vendor math.
+
+**Consequence for the settlement instruction's shape**: **no new field**
+is needed from sportsbook or the provider adapter — `correlation_id` and
+the verbatim provider-stated total are already sufficient, exactly as
+ADR 0038 §5/§14 specify today. What changes is **not** the instruction's
+shape but the **posting layer's own responsibility**: this section (and
+ADR 0038 §15) should say explicitly that the split computation is a
+ledger-posting-layer concern, so a future implementer does not read §9's
+"sportsbook computes the split, `internal/ledger` posts it" (a placement-
+time statement, where sportsbook genuinely has a live wallet-balance view)
+as also governing settlement-time, where it does not apply and where
+sportsbook has no equivalent live source. `ledger-finance` should confirm
+this ownership statement when it next touches §6.3.3.2/ADR 0038 §15; it is
+recorded here as `sportsbook`'s review finding, not a decision made
+unilaterally.
+
+**Deliberately out of scope**: `bonus-engine`'s substantive policy
+question ("is proportional payout attribution right for wagering-
+requirement accounting and bonus-abuse control") is unaffected by the
+above and remains open per §6.3.5.1's own framing.
+
+##### 6.3.5.3 `bonus-engine` independent review (Stage 4H-B0-R5, Wave 3) — answering focus questions 4 and 6
+
+**Verdict on case C-win's proportional-payout rule: APPROVE-WITH-CHANGES,
+not a clean approve.** Two of the three sub-questions this specialist was
+asked resolve cleanly; the third surfaces a real, previously-unflagged gap
+that must be closed before this rule is implemented, not merely noted.
+
+1. **Wagering-requirement semantics: preserved, no objection.** Wagering
+   progress is derived entirely from the debit to `player_bonus` at
+   **lock** time (§6.3.3.2's own restatement, confirmed correct and
+   confirmed by this review). Case C-win's payout-side split happens
+   strictly after that debit is already counted and cannot inflate or
+   deflate progress already recorded for the bet in question — the
+   proportional-split *rule itself* has no wagering-progress side effect,
+   win or lose.
+2. **Recognition-timing compatibility (ADR 0032 §3): confirmed compatible,
+   no new rule invented.** The mirror pair firing on the bonus-attributable
+   *outbound* stake-absorption leg and again on the bonus-attributable
+   *inbound* payout leg is the same boundary-crossing timing ADR 0032 §3
+   already established for casino (`bonus_expense` going negative between a
+   win and a later conversion is the identical, already-accepted pattern,
+   restated correctly here for the mixed-funded case).
+3. **Bonus-abuse vector — found, not hypothetical, and not addressed by
+   the proposal as written.** The rounding rule's degenerate case ("where
+   `bonus_share` rounds to `0`... the whole payout credits `player_cash`")
+   creates a **structuring vector**: a player who arranges a stake so the
+   bonus-origin fraction `B/(C+B)` is small enough that
+   `round_half_up(payout × B/(C+B))` rounds to `0` for every plausible
+   payout on that bet (e.g. funding a large stake with an overwhelmingly
+   cash-dominant mix and a deliberately tiny bonus sliver) causes **the
+   entire payout to post to `player_cash`, with no inbound mirror at all**,
+   even though the bonus-origin stake's outbound mirror already recognized
+   a real `bonus_expense`. The net effect, repeated across many
+   structured bets, is a **one-directional leak**: a nominally
+   bonus-restricted sliver is converted to fully withdrawable cash on every
+   winning bet that clears this threshold, with no forfeiture, no
+   write-off entry, and no detection trigger, because each individual
+   instance is "correct" under the stated rounding rule. This is exactly
+   the class of exploit this specialist's abuse-control mandate exists to
+   catch (structuring around a threshold, cf. velocity caps), and it is not
+   mitigated by anything in §6.3.3.2 as drafted. **Required before this
+   rule may be implemented**: a bonus-engine-owned control at the
+   split-instruction boundary — e.g. a minimum-viable bonus-attribution
+   floor at lock time (reject or round up a bonus origin fraction too small
+   to ever survive the payout-side rounding), and/or per-player monitoring
+   for repeated bonus-share-rounds-to-zero outcomes as a manual-review
+   trigger — is a `bonus-engine` deliverable, not a `ledger-finance` one,
+   and is not designed here; it is recorded as a blocking precondition on
+   this rule's approval, not a nice-to-have.
+4. **Forfeiture mechanics — the exact gap `ledger-finance`'s own focus
+   question 4 anticipated, confirmed real.** Answering it directly: yes, a
+   bonus-funded stake can be, and architecturally will routinely be,
+   *currently locked in an open sportsbook bet* at the moment a forfeiture
+   trigger fires — a wagering-requirement time limit elapsing, a
+   wagering-rule breach being detected, or an administrative cancellation
+   (`10-bonus-engine-architecture.md` §1.2's `expired`/`forfeited`/
+   `cancelled` states), all of which post the identical Dr `player_bonus` ·
+   Cr `promo_liability` shape against "the currently outstanding bonus
+   attributable balance" (ADR 0032 §3.1/§5). **None of those three states'
+   postings are specified to know what to do when some or all of that
+   outstanding value is sitting in `player_locked_bonus` instead of
+   `player_bonus`** — it cannot be reached by that posting shape at all
+   today, locked or not, until the account exists, and even once it does,
+   forfeiting a stake that is riding on an outcome not yet known raises a
+   question this section does not answer: does the forfeiture wait for the
+   bet's natural settlement and act only on whatever lands back in
+   `player_bonus` afterward, or does it force an immediate void of the open
+   bet (which is a `sportsbook` product/market decision, not a pure ledger
+   one, and interacts with whatever void semantics that domain has for a
+   bet it did not choose to void)? **This is not decided here and is not
+   this specialist's call to make alone** — it needs `sportsbook` +
+   `ledger-finance` + `bonus-engine` joint design, is a blocking
+   precondition for the overall §6.3/§15 proposal's bonus-funded
+   sportsbook unblock (§9 of ADR 0038), and is filed as a new,
+   explicitly-named open item rather than silently left implicit in "the
+   currently outstanding balance."
+
+**Net verdict**: the proportional-split *shape* and its recognition-timing
+placement are sound and approved. The rule as a whole is
+**APPROVE-WITH-CHANGES**: it must not ship without (a) a bonus-engine
+anti-structuring control for the rounding-to-cash degenerate case, and (b)
+an explicit locked-stake forfeiture variant, jointly designed with
+`sportsbook`. Neither is a reason to discard the proportional-split
+approach itself — both are closable gaps, not a rejection of the rule's
+premise.
+
+**Input on the C-cashout `OPEN QUESTION` (focus question 6) — bonus-engine's
+angle, not a decision.** Per this ADR's own framing, this is `sportsbook` +
+`bonus-engine` + `product-owner-proxy` joint territory; the following is
+this specialist's input only, weighted toward wagering-requirement
+integrity and the bonus-abuse surface this specialist owns:
+
+- **Candidate 2 (all proceeds to `player_cash`) — reject.** This is a
+  materially worse abuse surface than case C-win's rounding-dust vector
+  above: it lets a player convert the *entire* bonus-origin content of a
+  mixed-funded stake into withdrawable cash, on demand, at a
+  provider-priced moment the player chooses. Unlike a win (an uncertain
+  outcome the player does not control), a cashout offer is accepted
+  voluntarily once known, so a player funding a bet as bonus-heavy as
+  permitted and then cashing out whenever the quoted price is favorable is
+  a direct, repeatable wagering-requirement bypass with no structuring
+  effort required at all. This specialist will not sign off on candidate 2
+  under any framing that leaves the current wagering-rule model otherwise
+  unchanged.
+- **Candidate 3 (bonus-funded/mixed-funded bets are simply not
+  cashout-eligible, enforced upstream) — this specialist's preferred
+  option.** It closes the abuse surface by construction, needs no
+  proportional-split arithmetic or rounding policy of its own (so it does
+  not inherit case C-win's structuring vector either), and needs no answer
+  to the "does part of a cashout count as restricted funds" consumer-
+  protection question candidate 1 raises — it sidesteps that question
+  instead of answering it. The cost is product/UX, not a bonus-policy
+  cost: a sportsbook feature (cashout) becomes unavailable on any bet
+  carrying bonus content, which is `sportsbook`'s and
+  `product-owner-proxy`'s tradeoff to weigh, not this specialist's.
+- **Candidate 1 (proportional, mirroring the lock ratio) — acceptable only
+  as a fallback, and only with the same rounding-abuse control this review
+  requires for case C-win**, since it is arithmetically the same
+  degenerate-case exposure (a structured, bonus-dust-sized `B` at lock time
+  would round the cashout's bonus share to zero identically). It also
+  carries the "meaning, not arithmetic" UX/consumer-protection concern this
+  ADR itself already names — a player told they are "cashing out $X" while
+  part of $X lands in restricted `player_bonus` is a disclosure question
+  for `product-owner-proxy`, not something this specialist can clear
+  unilaterally.
+- **Recommended ordering for the joint decision: candidate 3, then
+  candidate 1 with the rounding control attached, never candidate 2.**
+  This is input to the joint `sportsbook`/`bonus-engine`/
+  `product-owner-proxy` call this ADR already requires, not a unilateral
+  resolution of the `OPEN QUESTION` — mixed-funded and bonus-funded
+  cashout remains `BLOCKED` until that joint call lands, exactly as
+  §6.3.3.2 already states.
 
 ## 7. Cross-references
 

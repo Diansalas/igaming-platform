@@ -1196,6 +1196,23 @@ how §8.1 already handles any late-arriving void), `transaction_type =
 `transaction_type`** — that enum is `ledger-finance`'s file (ADR 0038) to
 extend, not this one's.
 
+> **Correction flagged by `sportsbook`'s independent review (Stage
+> 4H-B0-R5, Wave 3): the "identical in shape... unchanged" claim above
+> does not hold for every open-bet shape.** ADR 0038 §8.1 defines only two
+> timing variants (before any settlement; after a *complete* settlement).
+> It does not define a third: self-exclusion catching a multi-leg/
+> bet-builder bet **after one or more legs have already partially settled**
+> (ADR 0038 §8.2), leaving only `original_stake − R` locked. This
+> paragraph's "full stake `S`" framing is therefore only correct for a
+> single (or as-yet-fully-unresolved multi-leg) bet; for a
+> partially-settled multi-leg bet, `VOID_ON_SELF_EXCLUSION` needs to void
+> the **remaining** locked balance, not the original `S` — a gap now
+> tracked in ADR 0038's "Open decisions referred upward," item 7, for
+> `ledger-finance` to close. Until that item is closed,
+> `VOID_ON_SELF_EXCLUSION` should not be treated as fully specified for a
+> multi-leg/parlay bet caught mid-partial-settlement, even though it is
+> fully specified for a single bet or an as-yet-untouched multi-leg bet.
+
 **Recommended: yes, record this as a distinguishable void SUB-reason**,
 for reporting/audit clarity, expressed as metadata/reason-code, mirroring
 a pattern ADR 0038 itself already anticipated rather than inventing a new
@@ -1226,6 +1243,27 @@ does not apply to a platform-initiated void; a real implementation would
 need an idempotency key derived from the triggering restriction/bet pair
 (e.g. `(tenant_id, bet_id, self_exclusion_event_id)`) instead — again,
 `ledger-finance`'s to formalize, flagged here only so it is not missed.
+
+> **Finding flagged by `bonus-engine`'s independent review (Stage 4H-B0-R5,
+> Wave 3), from the wagering-requirement-integrity angle, not decided
+> here.** `VOID_ON_SELF_EXCLUSION` reuses ADR 0038 §8.1's void posting
+> verbatim (confirmed above), which means a bonus-funded locked stake that
+> gets voided this way returns its full `player_bonus` amount — but the
+> wagering-progress **debit** that already posted at the bet's lock time is
+> never itself reversed by that void, because the derived-read wagering-
+> progress query (`financial-transaction-flows.md` §13) is not yet
+> specified to net a debit against a later reversal of its own transaction.
+> Net effect as currently specified: a player whose bonus-funded bet is
+> voided by this policy keeps full wagering-requirement credit for a stake
+> that was, financially, never actually risked. This is **not a defect
+> introduced by this section** — the same gap exists for an ordinary
+> (non-self-exclusion) sportsbook void of a bonus-funded lock, and would
+> recur for any future casino contingent-state feature — but
+> `VOID_ON_SELF_EXCLUSION` is a concrete, platform-triggered, high-volume
+> trigger of it once configured, so it is flagged here as well as at its
+> root cause. Filed as the same open item `financial-transaction-flows.md`
+> §13 now tracks; not resolved by this ADR, and not a reason to reconsider
+> §14's two-value policy design itself.
 
 ### 14.8 Future policy evolution — versioned, auditable configuration, never a code constant
 

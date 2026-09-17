@@ -90,6 +90,38 @@ stage directive.
 | `expired` | The Offer's time limit elapsed before `completed` was reached. Terminal, triggers forfeiture instructions. |
 | `cancelled` | The Grant was withdrawn before completion — either by player choice (opt-out) or staff action — before any forfeiture-worthy breach occurred. Terminal. |
 | `forfeited` | An abuse-control or wagering-rule breach (excluded game played, max-bet-while-wagering exceeded, manual-review outcome) ended the Grant before completion. Terminal, always carries a reason code. |
+
+> **Gap flagged (`bonus-engine` self-review, Stage 4H-B0-R5 Wave 3, from
+> reviewing ADR 0037 §C.5's asset-authorization RBAC surface): no state
+> above cleanly covers a Grant that cannot complete because the platform,
+> not the player, made completion impossible.** ADR 0037 §C.5.3
+> deliberately requires **no** dual control to suspend/deactivate an asset
+> (op 4) or revoke its wagering eligibility (layer 7) — a single-actor,
+> fail-closed action that can happen at any time, including mid-campaign,
+> against the exact asset a running bonus Grant is denominated in. If that
+> happens while a Grant is `activated`/`in_progress`, the player can no
+> longer place the bets needed to satisfy the wagering requirement, through
+> no fault of their own — yet neither `forfeited` (defined above as a
+> breach) nor `cancelled` (defined below as "before any forfeiture-worthy
+> breach occurred," but posted with the *identical* Dr `player_bonus`/Cr
+> `promo_liability` write-off shape as forfeiture, per ADR 0032 §3.1)
+> accurately represents "the platform made this Grant uncompletable and
+> extinguished the player's bonus balance anyway." A disputing player
+> shown either reason code would see a state that does not honestly
+> describe why their bonus balance disappeared — a direct conflict with
+> this document's own Progress-trail mandate. This compounds the identical
+> gap `ledger-finance`'s §6.3.5.1 focus question 4 (`ledger-accounting-
+> model.md` §6.3.3.2/§6.3.5.3) already named for a bonus-funded stake
+> **currently locked in an open bet** at forfeiture time — both are the
+> same underlying unspecified case (a forfeiture-class event firing against
+> value the standard write-off posting cannot cleanly reach or should not
+> silently write off), reached by two different triggers. **Not resolved
+> here**: whether a platform-caused inability to complete should write off
+> the balance at all (as opposed to, e.g., converting it, extending the
+> time limit, or refunding it), and whether it needs a distinct terminal
+> state/reason code rather than overloading `cancelled`, is a `bonus-engine`
+> + `ledger-finance` design question, filed as an open item, not decided by
+> this review.
 | `reversed` | A compensating transition applied *after* another terminal state, because the event that justified the Grant was itself reversed upstream (e.g. the triggering deposit was charged back, a round the Grant's wagering credited was rolled back). Never a deletion or edit of the prior terminal state — an additional Progress entry and a new Grant status. |
 
 ### 1.3 Transitions and triggers

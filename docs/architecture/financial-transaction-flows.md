@@ -401,6 +401,33 @@ found no single statement of that boundary anywhere in the Stage 3A set.
   progress... fall out of the data instead of being reconstructed later").
   Listed here for completeness; there is no separate posting logic beyond
   Flows 5/8/6/9 themselves.
+- **`OPEN QUESTION` (Stage 4H-B0-R5 Wave 3, `bonus-engine` review, not
+  decided here) — the derived read is not yet specified to net out a
+  reversed/voided debit.** "A derived read over entries that debited
+  `player_bonus`" is precise for casino (Flow 5/6), where a bet resolves
+  atomically and a debit that posted is final. It is **not** precise once
+  a debit can post at **lock** time and later be undone by a separate
+  compensating transaction before the underlying bet ever settles — which
+  is exactly Flow 8's shape once bonus-funded sportsbook wagering unblocks
+  (`ledger-accounting-model.md` §6.3.3.2 case C-void; ADR 0034 §14's
+  `VOID_ON_SELF_EXCLUSION` reuses the identical void shape as a second,
+  platform-triggered cause). The append-only ledger never deletes the
+  original lock-time debit, so a naive `SUM(debit amounts to
+  player_bonus)` read counts it **permanently**, even for a bet that was
+  fully voided and returned 100% of the stake with zero player risk. A
+  correct derived read must exclude (or net against) any debit whose
+  originating transaction was subsequently reversed via
+  `reverses_transaction_id` — without double-subtracting a legitimate WIN
+  credit, which is a different kind of credit to the same account and must
+  keep counting the original debit as progress. This is a **wagering-
+  requirement-integrity gap**, not merely a display nuance: as drafted,
+  voiding a bonus-funded locked stake (for any reason, including one
+  entirely outside the player's control) leaves the player with wagering
+  credit for a stake they never actually risked. Not resolved here —
+  `ledger-finance` + `bonus-engine` own the exact query definition before
+  any bonus-funded sportsbook stake goes live (ADR 0038 §9's blocking
+  precondition already covers this class of gap; this is filed as one of
+  its specifics, not a new blocker).
 - **Invariants engaged**: none beyond those already listed under Flows
   5/6/8/9 (no new ledger writes).
 

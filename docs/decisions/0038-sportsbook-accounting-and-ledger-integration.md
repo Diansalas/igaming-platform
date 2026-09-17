@@ -494,6 +494,18 @@ cancellation, push, or data error, never a market outcome.
 | Void before settlement, stake `S` | Dr `player_locked` `S` · Cr `player_cash`/`player_bonus` `S` |
 | Void after settlement, stake `S` (+ any payout already posted) | Full reversal chain: a new `LedgerTransaction` with `reverses_transaction_id` pointing at the original settlement transaction (and, separately, at the original bet transaction if the settlement legs were posted against `player_locked` directly rather than via a prior lock reversal — see Flow 9's two-pair shape), exact inverse entries, landing the stake back in `player_cash`/`player_bonus` |
 
+> **`sportsbook`-review flag (Stage 4H-B0-R5, Wave 3), not resolved
+> here.** The table above states exactly two timing variants — before any
+> settlement, and after a *complete* settlement. It does not state a
+> third: void of a multi-leg/bet-builder bet's still-open remainder
+> **after a prior `sportsbook_partial_settlement` (§8.2) has already
+> released `R` of the stake**, leaving `original_stake − R` in
+> `player_locked`. Voiding `S` (the original stake) in that state would
+> be wrong — part of it already left `player_locked`. See "Open decisions
+> referred upward," item 7, for the detail and why it also blocks
+> ADR 0034 §14.7's `VOID_ON_SELF_EXCLUSION` claim of reusing this section
+> "unchanged" for a mid-partial-settlement self-exclusion.
+
 `transaction_type = 'sportsbook_void'` for both timing variants — the
 economic meaning ("this bet is nullified, full stake returned, never
 became house revenue or a real win") is identical regardless of when the
@@ -1801,7 +1813,42 @@ this decision and the resulting migration lands.
    invariant discriminates between them, so the decision is
    bonus-policy/RG/product, not accounting. Bonus- and mixed-funded
    cashout stays **BLOCKED** until it is closed; cash-funded cashout is
-   unaffected.
+   unaffected. **Stage 4H-B0-R5 Wave 3**: `sportsbook`'s input is now
+   recorded in `ledger-accounting-model.md` §6.3.3.2's case C-cashout —
+   funding mix is not known to, or needed by, the cashout-pricing layer in
+   either external or in-house mode (so neither candidate touches
+   pricing); Option 3 is mechanically simple to gate as a precondition
+   check but, if read as "any bonus attribution excludes cashout," creates
+   a real UX/transparency problem for a mostly-cash mixed bet — flagged
+   for `product-owner-proxy`, not resolved by `sportsbook` alone. The
+   question stays open pending `bonus-engine` + `product-owner-proxy`.
+7. **Void of a still-open remainder after a prior partial settlement has
+   already posted — a third void timing variant §8.1 does not enumerate**
+   (`sportsbook`-review finding, Stage 4H-B0-R5 Wave 3). §8.1 states two
+   timing variants only: void "before settlement" (full stake `S`) and
+   void "after settlement" (full reversal chain of a *complete*
+   settlement). §8.2 establishes a multi-leg/bet-builder bet can have `R`
+   of its stake released by a partial settlement while
+   `original_stake − R` remains in `player_locked` against still-open
+   legs — but §8.1 never states what a subsequent void of that
+   still-open remainder posts. Releasing the original `S` would be wrong
+   (part of it already left `player_locked` via the partial settlement);
+   it must be the **currently-remaining locked balance**
+   (`ledger-accounting-model.md` §6.3.3.1 variant 2 — "the same query
+   with the `transaction_type` filter dropped"), not the original lock
+   amount (variant 1) — but this is `sportsbook` inferring the right
+   answer, not `ledger-finance` stating it anywhere in §8. This matters
+   concretely for ADR 0034 §14.7's `VOID_ON_SELF_EXCLUSION`, which claims
+   to reuse "§8.1's existing void flow... unchanged" for a bet
+   self-exclusion may catch at any point in its lifecycle, including
+   mid-partial-settlement — a claim §8.1 does not actually support for
+   this timing. Needs `ledger-finance` to state the entries for this
+   third variant (most likely `Dr player_locked <remaining>` ·
+   `Cr player_cash`/`player_bonus <remaining>`, mirroring §8.1's "before
+   settlement" row but substituting the remaining balance for the
+   original `S`) and to confirm it with `identity-compliance` before
+   `VOID_ON_SELF_EXCLUSION` is treated as fully specified for
+   multi-leg/parlay bets.
 
 ## Owner
 

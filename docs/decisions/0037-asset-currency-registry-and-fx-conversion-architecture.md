@@ -702,6 +702,23 @@ sufficient — condition 9 has no second source to compare against and does
 not fire. B.7 adds two new checks to an already fail-closed system; it
 narrows nothing B.6 already permits and loosens nothing.
 
+**`sportsbook`-review confirmation (Stage 4H-B0-R5, Wave 3), no gap
+found.** Checked specifically for whether B.7 needs to handle "a
+sportsbook settlement priced in one asset but paid in another." It does
+not, by construction, not by omission: ADR 0038 §7 and
+`docs/architecture/09-sportsbook-architecture.md` §11 both confirm every
+sportsbook posting (stake, payout, void, partial settlement, cashout)
+resolves its asset from the wallet's own `asset_code` and "a sportsbook
+bet is never silently settled in a different asset than it was staked
+in" — there is no ledger-posting code path in ADR 0038 that invokes FX
+conversion at all. Any cross-asset movement of sportsbook proceeds is a
+separate, explicit, player-initiated `ConversionOperation` (ADR 0021),
+which is an ordinary conversion B.6/B.7 already govern identically to
+every other conversion on the platform — it needs no sportsbook-specific
+handling because sportsbook contributes nothing special to it (no
+sportsbook-specific rate, pair, or timing requirement). No change
+required to B.7.
+
 **Status, restated**: B.7, like the rest of this ADR, is **NOT
 IMPLEMENTED** — no deviation-bound value, no spread-tolerance value, no
 alerting mechanism, and no provider capability declaration for "issues
@@ -1095,6 +1112,36 @@ layer's grant is reachable only through its own named operation (3, 5,
    decides which administrative operations require dual control and
    states its reasoning; it is explicitly flagged for `security`'s
    independent sign-off, not self-certified.
+7. **No product/vertical dimension in `CheckEligibility`'s `operation`
+   value or in the reused `tenant_jurisdiction_configs.allowed_currencies`
+   (layer 6)** (`sportsbook`-review finding, Stage 4H-B0-R5, Wave 3).
+   `AssetAuthorization.CheckEligibility`'s `operation` enum
+   (`deposit | withdrawal | wagering | settlement | conversion |
+   reporting`, C.2) and layer 6's reused `allowed_currencies` array (A.5)
+   are both scoped to `(tenant, brand, jurisdiction, asset)` with no
+   product/vertical axis — a single `wagering` eligibility answer applies
+   identically to a casino bet and a sportsbook bet placed by the same
+   tenant, in the same jurisdiction, in the same asset. This is in tension
+   with a fact already modeled elsewhere on this platform:
+   `docs/architecture/15-jurisdiction-and-licensing-model.md`'s `Licence`
+   row carries `permitted_products` (jsonb: casino/sportsbook/etc.) *per
+   jurisdiction*, because real licensing regimes routinely license casino
+   and sports betting as distinct, separately-conditioned products (a
+   jurisdiction's sports-betting licence terms can restrict a settlement
+   currency/asset differently than its casino licence, independent of
+   which asset the platform has otherwise made wagering-eligible). As
+   specified, `CheckEligibility` cannot express "BTC is wagering-eligible
+   for casino but not for sportsbook in jurisdiction X" — there is no
+   input parameter for it to key on. This may be a deliberately deferred
+   scope decision (no product currently needs the distinction) rather than
+   an oversight, but it is not stated as such anywhere in this ADR, and
+   `sportsbook` is not positioned to decide whether it is acceptable to
+   defer — flagged for `architect` (does layer 6/7 need a product/vertical
+   parameter, added the same narrow-only-never-widen way brand narrows
+   tenant) and for confirmation against `docs/decisions/0006-hybrid-
+   licensing-and-jurisdiction-model.md`'s and doc 15's product-licensing
+   model before this ADR's eligibility surface is treated as complete for
+   a multi-product tenant.
 
 These are handed to `ledger-finance` (financial correctness of Part B),
 `security` (Part C's authorization/audit design), and `qa`

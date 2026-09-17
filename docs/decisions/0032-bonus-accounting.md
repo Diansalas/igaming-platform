@@ -601,6 +601,35 @@ applies verbatim:
 
 Status: **RESOLVED (inherited) — `NOT IMPLEMENTED`.**
 
+> **Forward-flagged gap (`bonus-engine` independent review, Stage 4H-B0-R5
+> Wave 3, reviewing ADR 0038 §14/§14.6 from the bonus-engine angle — not a
+> finding against this ADR as it stands today, and not this specialist's
+> call to resolve unilaterally).** ADR 0038 §14 closed a real gap for
+> sportsbook: a non-conformant provider adapter reusing the same reference
+> across two genuinely distinct occurrences of the same `transaction_type`
+> (e.g. two settlement legs of equal size) can cause the second, real event
+> to be silently absorbed as an "exact retry" of the first, with no error
+> and a permanently lost posting. The **provider-originated** path this
+> section defines (`UNIQUE (tenant_id, provider_id, provider_tx_id)`, keyed
+> on a reference the external party supplies) is structurally the identical
+> shape — an external reward provider issuing, for example, several
+> free-spin win callbacks under one Grant with a poor own reference scheme
+> and coincidentally-equal per-spin win amounts would hit the same failure
+> mode ADR 0038 §14 was built to close. This is **not yet a live gap**:
+> `10-bonus-engine-architecture.md` confirms free-round/free-bet
+> fulfillment is still an `OPEN DECISION`, unbuilt (`internal/casino` has
+> no free-round method today). It is filed here so that whichever stage
+> designs that fulfillment mechanism adopts ADR 0038 §14.1's
+> `occurrence_ordinal` pattern (or an equivalent per-occurrence
+> discriminator, scoped to `(tenant_id, correlation_id/Grant id,
+> transaction_type)`) for provider-originated bonus postings from the
+> start, rather than rediscovering this exact bug independently. The
+> **internally-originated** path above (grant/conversion/forfeiture/
+> reversal, keyed on a bonus-engine-minted per-business-fact id) is not
+> subject to this risk, because the reference is minted by the platform
+> itself per specific occurrence rather than supplied by an external party
+> with its own, potentially colliding, reference scheme.
+
 ### 9. No floating point anywhere near a bonus calculation
 
 `ARCHITECTURAL DECISION`, restated because bonus configuration is where
