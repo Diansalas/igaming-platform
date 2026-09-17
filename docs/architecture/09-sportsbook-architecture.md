@@ -1399,3 +1399,138 @@ future decision to build in-house first, or both simultaneously for
 different tenants (§5.1's per-tenant/brand/jurisdiction/market routing
 already anticipates exactly that), should the business's priorities or a
 specific commercial opportunity change the calculus above.
+
+## 16. Stage 4H-B0-R6 sportsbook-readiness check on the three foundational primitives
+
+`sportsbook`-authored, documentation-only, per this stage's explicit
+directive: verify (not implement) that the R6 financial primitives
+(`internal/idempotency`, `internal/assetregistry`'s new `(product,
+operation)` dimension, `internal/risk/cumulative.go`'s leg-aware
+cumulative model) are actually sufficient for a future sportsbook
+implementation, in both provider modes, by reading the shipped code and
+its own tests rather than trusting prose. No sportsbook code, migration,
+or provider integration is added by this section.
+
+### 16.1 Idempotency (`internal/idempotency`, commit `68675df`) — **SUFFICIENT**
+
+The canonical identifier set (`PlatformOperationID`, `ProviderOperationID`/
+`ProviderReference`, `ProviderOccurrenceID`, `OccurrenceOrdinal`,
+`CorrelationID`, `CorrectionID`/`ReversalID`) and the composition/routing
+primitives (`ComposeOccurrenceKey`/`DecomposeOccurrenceKey`,
+`ResolveOccurrence`, `Assign`/`Mode`) map cleanly onto every lifecycle
+event a first sportsbook slice reaches:
+
+- **Placement, ordinary settlement, ordinary void** — single-occurrence
+  types, no discriminator required (`RequiresOrdinalFunc` returns false),
+  `ComposeOccurrenceKey(reference, nil)`. Verified against
+  `TestIntegration_CallbackAndSettlementRedelivery`.
+- **Partial settlement, cashout** — multi-occurrence types requiring
+  `OccurrenceOrdinal`, sourced only from an authenticated payload field
+  (`OccurrenceSource`), fail-closed to
+  `ErrOccurrenceOrdinalRequiredButUnavailable` when no such field exists,
+  with `CanonicalOccurrenceIssuer` as the explicit round-trip fallback for
+  a provider with no signed per-occurrence field at all. Verified against
+  `TestIntegration_LegitimateSecondOccurrenceDoesNotCollapse` (two
+  same-payload occurrences of the same reference, distinct ordinals, both
+  post independently — the exact ADR 0038 §14 gap this package exists to
+  close).
+- **Void/rollback/market-correction re-settlement** — `CorrectionID`/
+  `ReversalID` (both `= LedgerTransaction.id` of the transaction being
+  corrected/reversed) plus the existing `FOR UPDATE` double-reversal
+  protection and tombstone-on-never-seen-original mechanism. Verified
+  against `TestIntegration_RollbackRedeliveryCorrectionAndReversal`.
+- **Both provider modes** — `Mode`/`Assign` route external-provider
+  postings through `(tenant_id, provider_id, provider_tx_id)` and
+  in-house postings through the unconditional `(tenant_id,
+  idempotency_key)`, per ADR 0038 §14.6, with `provider_id`/
+  `provider_tx_id` left `NULL` (never a sentinel) for in-house postings.
+  Verified against `TestIntegration_InHouseModeDuplicateDoesNotDoubleDebit`
+  and `TestAssign_InHouseMode`/`TestAssign_ExternalProviderMode`.
+
+No gap found. The package is explicitly provider-neutral (`doc.go`: "does
+not implement a real sportsbook adapter, a real vendor integration... those
+remain the owning domain specialist's work") — confirmed by inspection,
+zero references to any named vendor, sports-data feed, or wire protocol
+anywhere in the package.
+
+### 16.2 Asset authorization `(product, operation)` dimension (`internal/assetregistry`, commits `eed0416`/`4bcd649`/`3b9cad4`) — **CLOSED, confirmed by test, not merely by claim**
+
+Stage 4H-B0-R5's finding (P1-2 had no casino-vs-sportsbook product
+dimension) is genuinely closed: `OperationScope{Product, Operation}` is a
+required parameter on every `CheckEligibility` call (a caller that cannot
+name its product is denied — `ReasonProductContextMissing` — never
+defaulted), and layers 4-7 (`asset_authorizations`,
+`asset_operation_eligibility`) carry a nullable `product` column with
+most-specific-product precedence (`resolveScopeFact`/`resolveEligibility`:
+a row naming the exact product wins over a `product IS NULL` row).
+
+Confirmed against the actual test, not the doc comment's claim:
+`assetregistry_integration_test.go`'s scenario at lines 985-1015
+authorizes an asset for `casino` wagering, proves that grants **no**
+`sportsbook` wagering eligibility (denies at layer 4,
+`ReasonTenantNotAuthorized`, since no sportsbook-scoped tenant
+authorization row exists), then authorizes layers 4-6 for `sportsbook` but
+deliberately leaves layer 7 (operation eligibility) unauthorized and
+confirms the distinguishable `ReasonOperationNotEligible` denial. This is
+the exact "BTC is wagering-eligible for casino but not for sportsbook in
+jurisdiction X" scenario this specialist's Stage 4H-B0-R5 review named as
+missing — it is now expressible and independently tested, not just
+claimed. No gap found. `assetregistry`'s package doc and code are
+vendor/product-neutral: `Product` is a caller-supplied string validated
+against `platform_products`, never a hardcoded enum naming "sportsbook" or
+any vendor.
+
+### 16.3 Risk cumulative-usage leg-awareness (`internal/risk/cumulative.go`/`denomination.go`, commit `9ff8695`) — **SUFFICIENT, with one minor drift note for the future implementer**
+
+The fix (`cumulativeSpec` requiring an explicit `MeasuredAccountTypes`/
+`IgnoredAccountTypes` declaration, the `ledger_accounts` join, and
+`ErrUnrecognizedCumulativeLeg`'s fail-closed behavior for any undeclared
+player-side leg) closes the exact defect this specialist found in Stage
+4H-B0-R5: a cumulative-amount rule over a two-player-owned-leg posting
+shape (stake absorption debiting `player_cash` and crediting a locked
+account, both wallet-scoped) no longer nets to zero. No sportsbook
+operation is wired yet (correctly — no `internal/sportsbook` exists), so
+this is proven by analogy, not by a sportsbook-specific test:
+`TestEvaluate_CumulativeUsageIsLegAwareForATwoPlayerOwnedLegOperation`
+posts a real `withdrawal_requested`-shaped two-player-owned-leg
+transaction (`Dr player_cash / Cr player_withdrawal_hold`) — structurally
+identical to a `sportsbook_bet`'s `Dr player_cash / Cr player_locked_cash`
+— and proves (a) the pre-fix account-type-blind query nets it to exactly
+0 (the bug's own signature, asserted in the same test), (b) the fixed
+leg-aware query measures the full stake, and (c) `Evaluate` denies a
+request the pre-fix evaluator would have wrongly allowed. This generalizes
+to a future `sportsbook_bet` cumulative rule by construction: the fix is
+in the shared `cumulativeUsage` primitive, not in a casino-specific code
+path.
+
+**One drift note, not a gap, for whoever wires `OperationSportsbookBet`
+later.** `cumulative.go`'s own reference comment (line ~111) illustrates
+the shape a future author would need as `{[sportsbook_bet], [sportsbook_void],
+measured=[player_cash], ignored=[player_locked], debit}` — written before
+`ledger-accounting-model.md` §6.4/HR-8 (this same stage, Workstream C
+phase 1) decided that bare `player_locked` is never minted once migration
+`0048` lands; the real ignored account type will be `player_locked_cash`
+(and, once gates G-2/G-3 close, `player_locked_bonus` for a bonus-funded
+stake). Wiring the comment's literal example against post-migration-0048
+data would not silently under-count — `ErrUnrecognizedCumulativeLeg` fails
+closed the moment it observes `player_locked_cash` undeclared — but it
+would surface as an availability defect (every cumulative sportsbook rule
+evaluation erroring) rather than working on the first try. Flagged so the
+Workstream C phase 2 / sportsbook implementer updates this comment's
+account-type names alongside the migration, not found as a code defect.
+
+### 16.4 Provider-neutrality confirmation (this stage's section 16 requirement)
+
+Confirmed by direct inspection of all three packages' source and package
+docs: none references a named sportsbook provider, sports-data vendor,
+wire protocol, or vendor-specific field name. `internal/idempotency`'s
+`OccurrenceSource`/`CanonicalOccurrenceIssuer` interfaces are declared
+against `verifiedEvent any` specifically so the package never depends on
+any domain's own parsed-callback type; `internal/assetregistry`'s
+`Product` is a caller-supplied, registry-validated string with no
+sportsbook-specific literal anywhere in the package; `internal/risk`'s
+`cumulativeSpec` map has exactly one production entry (`casino_bet`) and
+the sportsbook shape exists only as an unwired, explicitly-labeled
+reference comment. All three remain correctly gated behind
+`NOT IMPLEMENTED`/`BLOCKED` for any actual sportsbook capability — nothing
+in this section authorizes wiring any of them.
