@@ -865,13 +865,24 @@ more numerous than any other product's:
   **§14 makes this a required mechanism (`occurrence_ordinal`), not only a
   named risk** — see §14 for exactly how the discriminator is derived and
   supplied.
-- **Internally-originated events with no natural provider reference**
-  (a rare staff-initiated manual void, distinct from a market correction)
-  use `(tenant_id, idempotency_key)` — the admin action's own id, generated
-  once at approval and reused verbatim on retry — identical to Flow 16's
-  `manual_adjustment` pattern. This is expected to be rare for sportsbook,
-  since the widget/iframe/feed/API shapes make the provider the origin of
-  nearly every event.
+- **Internally-originated events with no natural provider reference** use
+  `(tenant_id, idempotency_key)` — a stable, reproducible reference
+  generated once at the originating decision and reused verbatim on
+  retry — identical to Flow 16's `manual_adjustment` pattern. **Amended,
+  Stage 4H-B0-R5 follow-up correction (§14.6):** this path is **not**
+  rare for sportsbook overall — it is the **standard path for every
+  in-house-sportsbook-engine-mode posting** (bet, settlement, void,
+  partial settlement, cashout, rollback alike, whenever `provider_id` is
+  `NULL` per ADR 0033 §2), and remains the **exception path for
+  external-provider-mode postings**, where it continues to cover only the
+  genuinely rare staff-initiated manual void distinct from a market
+  correction. The original text above ("expected to be rare for
+  sportsbook, since the widget/iframe/feed/API shapes make the provider
+  the origin of nearly every event") is corrected by this amendment: it
+  was accurate only for the external-provider-mode shapes it was written
+  against, and did not yet account for in-house-engine mode. See §14.6 for
+  the full routing rule, the exact field/constraint used in each mode, and
+  a worked idempotency example.
 
 **Exact retry / concurrent duplicate / same-key-different-payload
 semantics**: unchanged, inherited from ADR 0020 (`SAVEPOINT`-based exact
@@ -1223,6 +1234,225 @@ is on the **adapter**: for `sportsbook_partial_settlement`,
 **required**, not merely good practice — a conformance-suite check for
 whichever adapter is built first (mirroring §2.4's conformance-suite
 citation in doc 09) must verify it before that adapter is marked complete.
+
+#### 14.6 Stage 4H-B0-R5 follow-up correction — in-house-mode `provider_id`/idempotency routing (closes the `bonus-engine`-identified partial-index gap)
+
+`ARCHITECTURAL DECISION`, `ledger-finance`'s to make (a mechanism-level
+tightening of this ADR's own idempotency design, the same authority basis
+as §14 itself — not a change to the human-approved account-type schema).
+Triggered by an independent `bonus-engine` review of this ADR's
+idempotency design, conducted this same stage.
+
+**The gap.** `ledger-accounting-model.md` §1.2/§3 defines `UNIQUE
+(tenant_id, provider_id, provider_tx_id) WHERE provider_id IS NOT NULL` —
+a **partial** index. §11 (as originally written) said internally-
+originated postings with "no natural provider reference" use `(tenant_id,
+idempotency_key)` instead, but called that path "rare for sportsbook,"
+which reads as: *ordinary* in-house-engine bet/settlement postings were
+expected to go through the `(tenant_id, provider_id, provider_tx_id)`
+path, "using [the in-house engine's] own internally-generated reference in
+the identical role" as an external provider's. Neither this ADR nor doc 09
+ever stated what `provider_id` itself equals on an in-house-originated
+`ledger_transactions` row. If an implementer leaves it `NULL` — a
+plausible default, since there is no external "provider" in in-house mode
+— the partial index above never evaluates for that row at all, and a
+duplicate in-house posting (e.g. a retried bet-placement request) would
+insert twice with **no database-level rejection whatsoever**. That is a
+live violation of CLAUDE.md's "every financial write is idempotent via a
+unique constraint... enforced by the database" rule, for the entirety of
+in-house sportsbook mode, and this section closes it.
+
+**Decision: Option 2 — in-house-mode postings use `(tenant_id,
+idempotency_key)` as their *standard* path, not the `(tenant_id,
+provider_id, provider_tx_id)` path at all.** `provider_id` stays `NULL`
+for every in-house-mode `LedgerTransaction`, exactly as it already is on
+the canonical event (below); it is never populated with a reserved
+pseudo-value. `provider_tx_id` is correspondingly left `NULL` too (never
+half-populated while `provider_id` stays `NULL` — a row with `provider_id
+IS NULL` and `provider_tx_id` populated would be meaningless, since the
+partial index that column exists for never even looks at it in that
+state). §11's bullet on "internally-originated events with no natural
+provider reference" is amended in place (this stage) to say so.
+
+**Why Option 2, not Option 1 (a reserved pseudo-`provider_id`) — two
+independent pieces of existing platform precedent, not just a stylistic
+preference:**
+
+1. **This exact question was already decided, at the architecture layer,
+   one section away.** `docs/decisions/0033-provider-interoperability-
+   and-external-bonus-engines.md` §2 (Stage 4H-B0-R4 Wave-2, `architect`,
+   independent review) states, for the identical in-house-vs-external
+   sportsbook distinction at the canonical-event layer: *"`provider_id`
+   ... is nullable. `NULL` means the event originated from the platform's
+   own in-house sportsbook engine ... **never a reserved sentinel
+   string**."* The canonical `sportsbook_bet`/`sportsbook_settlement`/
+   `sportsbook_void_cancel` events this ADR's postings are written against
+   (Context, above) are the same events ADR 0033 §2 describes. Populating
+   `LedgerTransaction.provider_id` with a reserved pseudo-value for the
+   identical in-house case would make the ledger posting layer disagree
+   with the canonical event it was posted from about what `provider_id`
+   means — the adapter would have to translate a `NULL` it received into a
+   non-`NULL` sentinel it invents, a translation this ADR has no
+   authority to require unilaterally (CLAUDE.md: "no specialist redesigns
+   shared architecture unilaterally"; this would be exactly that, against
+   an `architect`-authored decision, from a different specialist's ADR).
+   Option 2 requires no such translation: `NULL` in, `NULL` stored,
+   consistently.
+2. **The codebase already has a working, precedented pattern for "no
+   external identity" that is a discriminator plus an empty identifying
+   field, never a sentinel stuffed into the identifying field.**
+   `internal/audit/audit.go`'s `Entry`/`Record` (checked for this review,
+   per the directive's own instruction to look for precedent):
+   `ActorType` is the discriminator (`ActorPlayer` / `ActorStaff` /
+   `ActorService` / `ActorSystem`), and `Record` **enforces**, in code,
+   that `ActorID` is empty exactly when `ActorType == ActorSystem` and
+   non-empty otherwise (`internal/audit/audit.go`, `Record`: `"audit:
+   actor_id must be empty for actor_type 'system'"` /
+   `"audit: actor_id is required for actor_type %q"`). No
+   reserved-sentinel `ActorID` value for a system actor exists anywhere in
+   that package. This ADR's own shape is the exact structural analogue —
+   `provider_id` populated or `NULL` is the discriminator (mirroring
+   `ActorType`), and the uniqueness mechanism keyed on the populated field
+   (mirroring `ActorID`'s required-when-non-system rule) is exactly what
+   §11/this section route by. Introducing a sentinel `provider_id` here
+   would be the one inconsistent case in the codebase where "no external
+   counterpart" is represented by a stuffed identifier rather than by
+   `NULL` plus a discriminator — Option 2 keeps sportsbook consistent with
+   both precedents instead of adding a second pattern for the same
+   concept.
+
+   A reserved-sentinel approach (Option 1) would also carry an ongoing
+   registry burden this ADR has no mechanism to own (the sentinel must
+   never collide with any current or future real provider's `provider_id`,
+   forever, across every tenant and every future sportsbook vendor) and
+   would corrupt §12's reconciliation-against-the-provider's-own-
+   settlement-statement logic, which is specifically keyed on a real
+   external provider's statement existing to reconcile against — a
+   sentinel `provider_id` has no such statement, and a reconciliation job
+   that doesn't know to special-case the sentinel would silently treat
+   in-house postings as an unmatched/unreconciled external-provider
+   stream. `NULL` avoids both problems: it is already the platform's
+   existing "no external counterpart" value everywhere else, and §12's own
+   logic already has to branch on provider-driven vs. in-house-driven
+   settlement (§5) for the rounding/reconciliation-source distinction, so
+   branching on `provider_id IS NULL` there costs nothing new.
+
+**The routing rule, precisely, for every `sportsbook_*` transaction type
+(bet, settlement, void, partial settlement, cashout, rollback alike) —
+supersedes nothing in §3/§5/§8's entry tables, only clarifies which
+uniqueness mechanism each mode's posting uses:**
+
+| Mode | `provider_id` | `provider_tx_id` | Uniqueness mechanism (DB-enforced) | `idempotency_key` |
+|---|---|---|---|---|
+| External-provider (widget/iframe, feed/API) | the adapter's provider identifier (opaque, non-`NULL`) | the provider's own per-event reference, `occurrence_ordinal`-composed per §14.1–§14.4 where applicable | `UNIQUE (tenant_id, provider_id, provider_tx_id) WHERE provider_id IS NOT NULL` | populated (schema requires `NOT NULL`) but not the operative uniqueness check for this row — set to a platform-generated value never reused as an idempotency input elsewhere, identical to how any other provider-originated transaction already satisfies the `NOT NULL` constraint today |
+| In-house sportsbook engine | `NULL` (ADR 0033 §2, unchanged, propagated verbatim by the adapter — never translated into a sentinel) | `NULL` (never populated when `provider_id` is `NULL` — nothing for the partial index to key on, so nothing is put there) | `UNIQUE (tenant_id, idempotency_key)` (unconditional — no `WHERE` clause, always evaluated) | the in-house engine's own per-event reference — **the same value, derived under the same rules**, that would have played `provider_bet_reference`/`provider_tx_id`'s role in external-provider mode (§3/§5/§8's "or, for an in-house engine, using its own internally-generated reference in the identical role" language, unchanged by this section) |
+
+**The one thing that must not happen, named explicitly because it is the
+same failure shape as the original gap one field over**: `idempotency_key`
+for an in-house posting must **never** be a freshly-generated value minted
+at insert time (e.g. a new random UUID per attempt). If it were, the
+`UNIQUE (tenant_id, idempotency_key)` constraint would technically still
+be "enforced by the database," but it would never actually *fire*, because
+a retried attempt would submit a different key every time and never
+collide with itself — satisfying the letter of CLAUDE.md's rule while
+defeating its purpose exactly as the original `provider_id IS NULL` gap
+did. `idempotency_key` must instead be derived exactly the way §14.1
+already specifies for the analogous provider-side reference: from a
+per-occurrence signal intrinsic to the specific event (the in-house
+engine's own acceptance/settlement/void decision id) or from the adapter's
+own inbound-delivery deduplication record, assigned once and reused
+verbatim on retry — never recomputed as "the next in a sequence," for the
+identical non-reproducibility reason §14.1 already rules that out for
+`occurrence_ordinal`. This is not a new rule invented here; it is the
+existing "admin action's own id, generated once at approval and reused
+verbatim on retry" pattern §11 already cites from Flow 16's
+`manual_adjustment`, generalized from "rare staff action" to "every
+in-house-mode posting."
+
+**Composition pattern for the three occurrence-ordinal types
+(`sportsbook_partial_settlement`, `sportsbook_cashout`,
+`sportsbook_rollback`/re-settlement) — confirms it generalizes cleanly.**
+§14.1 states the pattern as "the adapter composes the value it submits as
+`provider_tx_id` to already include this ordinal (e.g. `{provider's
+settlement reference}#{occurrence_ordinal}`)" — worded, as written,
+against the external-provider-mode field. **Yes, §14 as originally written
+implicitly assumed a real external `provider_id`/`provider_tx_id` pair for
+that composition** (the example is literally "provider's settlement
+reference"), because §14 was scoped to tightening §11's existing
+`provider_tx_id`-keyed mechanism and did not yet separately address the
+in-house routing question this section resolves. **The composition pattern
+itself is field-agnostic and works identically for the in-house case**:
+for in-house-mode partial settlement/cashout/rollback, the adapter composes
+`{in-house engine's own per-event reference}#{occurrence_ordinal}` and
+submits it as `idempotency_key` (never `provider_tx_id`, which stays
+`NULL`) instead. Nothing about `occurrence_ordinal`'s derivation rules
+(never inferred from ledger state, never "count and add one," always
+intrinsic to the specific occurrence — §14.1) changes; only the column the
+composed string lands in changes, following the same `provider_id IS NULL`
+⇒ `idempotency_key` routing this section establishes for every other
+sportsbook transaction type.
+
+**Worked example — two identical in-house `sportsbook_bet` placement
+attempts, same bet, from a retried request (e.g. a client-side timeout
+that retries an accepted-but-unacknowledged placement).**
+
+1. The in-house engine accepts bet `B`, minting its own internal
+   acceptance reference `iref-B-accept-7f3a` — derived, per the rule
+   above, from the acceptance decision's own intrinsic id (never a fresh
+   UUID minted per attempt), so a retry of the *same* acceptance
+   reproduces this identical string.
+2. First placement attempt: the adapter hands the ledger posting layer a
+   `sportsbook_bet` instruction with `provider_id = NULL` (in-house mode,
+   per ADR 0033 §2), `provider_tx_id = NULL`, `idempotency_key =
+   "iref-B-accept-7f3a"`. `internal/ledger` inserts one `LedgerTransaction`
+   row (`tenant_id = T`) with two balanced entries (Dr `player_cash` `S` ·
+   Cr `player_locked` `S`, cash-funded case) and commits. Audit event
+   `sportsbook_bet.locked` fires.
+3. The client never receives the response (network timeout) and retries
+   the identical placement. The in-house engine's acceptance-decision
+   record is unchanged — it is the same accepted bet, not a new decision —
+   so the adapter reproduces the identical `iref-B-accept-7f3a` reference.
+4. Second attempt reaches `internal/ledger` with the same
+   `(tenant_id = T, idempotency_key = "iref-B-accept-7f3a")`. Because
+   `UNIQUE (tenant_id, idempotency_key)` has **no `WHERE` clause** — unlike
+   mechanism 1, it is evaluated for every row regardless of what
+   `provider_id` holds — the `INSERT` collides with the constraint at the
+   database level, exactly as it would for any other internally-originated
+   posting (a `manual_adjustment`, a bonus-engine-triggered posting) today.
+5. ADR 0020's exact-retry semantics (§11, unchanged) take over from there:
+   same key, same payload ⇒ `SAVEPOINT`-based exact-retry path, the
+   original transaction's result is returned, and **no second
+   `LedgerTransaction` row is created** — `S` is locked exactly once, not
+   twice. Had the retried payload somehow differed (a defect elsewhere),
+   ADR 0020's `ErrIdempotencyKeyReused` would fire instead of a silent
+   double-post — still a database-arbitrated outcome, never a
+   check-then-insert race.
+
+Contrast with the gap as originally reachable: if `provider_id` had been
+left `NULL` **and** the posting had still been (incorrectly) attempted
+through the `provider_tx_id` path, or if `idempotency_key` had been a
+fresh UUID per attempt, step 4 would have inserted a **second**,
+independent `LedgerTransaction` — a second `S` locked against the player's
+`player_cash`/`player_locked` accounts for one accepted bet, a real
+double-debit. The routing rule and the reproducible-reference requirement
+above are what jointly close that off, at the database constraint level,
+not by adapter discipline.
+
+**Requirement flagged for `sportsbook` (doc 09), not implemented by this
+ADR.** `docs/architecture/09-sportsbook-architecture.md` should state, for
+its in-house-engine mode, that: (a) `provider_id` is left `NULL` on every
+posting instruction it hands to the ledger posting layer for in-house-
+originated events (consistent with ADR 0033 §2's canonical-event
+statement, which doc 09 already implicitly relies on); and (b) its adapter
+mints one stable, intrinsic, per-event reference per lifecycle event
+(acceptance, settlement, void, per-occurrence partial settlement/cashout/
+rollback) and supplies it as `idempotency_key` — never as `provider_tx_id`,
+and never freshly regenerated on retry of the same event — per this
+section's routing rule and reproducibility requirement. This is named here
+for the Orchestrator to route to `sportsbook`; this ADR does not edit doc
+09 or ADR 0033 itself, and ADR 0033 §2 needs no edit (it already says the
+right thing at the canonical-event layer; this section only makes the
+ledger-posting-layer consequence of that same fact explicit).
 
 Status: **RESOLVED (architecture) — `NOT IMPLEMENTED`.**
 
