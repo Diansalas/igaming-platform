@@ -4604,6 +4604,274 @@ correctly left to, and correctly supplied by, `ledger-finance`'s table.
 | V-14 / FD-1 | **Confirmed real** (deterministic, variance-free, cheaper than C-win) and **confirmed not blocking** — cashout has no implementation to block. Non-binding engineering lean offered (nullifying by default) for whoever answers FD-1 |
 | ADR 0034 §14.11 cross-check | **Confirmed consistent.** §6.6.5 keys on `correlation_id`, uses `reverses_transaction_id` only to disambiguate lock-reversal from settlement-reversal within the rollback types. One phrasing nuance recorded, not a defect |
 
+#### 6.6.15 `bonus-engine` independent validation (Stage 4H-B0-R7, closing gate G-3)
+
+Answering §6.6.12's V-7 through V-11 as posed, per the same discipline
+§6.4.11 and §6.6.14 used: this does not redesign the predicate, does not
+write a migration, a query, or Go code, and does not authorize
+implementation by itself — `sportsbook`'s (§6.6.14) and `architect`'s
+(V-15/V-16) parallel validation are independent and this section does not
+speak for them.
+
+**V-7 — ACCEPTED. Model C over Models A and B.** The disqualifying
+argument against Model A is re-verified independently, not merely
+trusted: `internal/casino/orchestrator.go`'s loss path (lines 791-792 per
+§6.6.2's citation) posts exactly `Dr player_cash · Cr house_gaming`, one
+transaction, no intervening "resolved" fact separate from the posting
+itself. Model A's finalization event has nothing to attach to for a loss,
+and casino losses are the majority of settled wagering activity on the
+only implemented product. Bonus-engine does not disagree with the
+disqualification — it independently confirms the identical conclusion by
+inspecting doc 10 §2's own bonus-type matrix: every in-slice type that
+carries a wagering requirement is defined to complete on a derived read
+over ledger facts, never on a finalization event bonus-engine would have
+to invent. `P_net`/`P_firm` and invariant W1 are accepted as written.
+
+**V-8 — ACCEPTED.** The refinement narrows ADR 0032 §0's prohibition to a
+*mutable aggregate*, which is what §0 was written to prevent (a bonus
+side-table balance that could drift from the ledger it claims to
+summarize, per §0's own "not a counter... that could drift" wording). An
+append-only, per-event, ledger-sourced, reconciled record that stores no
+aggregate and computes one only by derivation is not the thing §0
+forbids — it is a *stricter* instance of "derived read" than §0's own text
+contemplated, because §0 was written before any call site needed a
+per-Grant weight the ledger has no reason to carry. This does not open a
+door bonus-engine considers unsafe: HR-10's same-transaction write,
+`UNIQUE (tenant_id, grant_id, lock_ledger_transaction_id)`, the
+append-only trigger pair, and WP-R's hourly reconciliation are the exact
+control set that would be demanded of any table claiming this exemption,
+and §6.6.4 supplies all four. Accepted as written.
+
+**V-9 — CONFIRMED.** Independently re-derived against doc 10's own
+lifecycle model, not merely re-read: a `sportsbook_rollback` reversing a
+*settlement* corrects a wrong outcome on a stake the player genuinely
+risked — nothing about the Grant's wagering-relevant facts changes, so
+risk-preserving is correct. A `sportsbook_rollback` reversing the *lock*
+means the acceptance itself is retracted — economically identical to a
+void — so nullifying is correct. This is exactly §6.4.11's own scoping
+("never a `sportsbook_rollback` that reverses a settlement instead...
+which corrects a wrong outcome on a stake that was genuinely risked and
+must keep its progress"), implemented literally, with no drift between
+what bonus-engine asked for and what the predicate does. `bonus_grant`/
+`bonus_conversion`/`bonus_forfeiture`/`bonus_reversal` are correctly
+classified risk-preserving-by-non-applicability rather than by a judgment
+call: none of them are ever posted against a bet's `correlation_id` (they
+key on Grant-level correlation, not bet-level), so condition 1 of §6.6.5's
+predicate already excludes them before the classification table is even
+consulted — the table entry is correct defensive documentation, not a
+load-bearing branch.
+
+**V-10 / WP-1 — RESOLVED, within bonus-engine's own domain authority, as
+ledger-finance's engineering position predicted: the wagering-progress
+quantity is a NEVER-POSTED COMPARISON OPERAND, not money. The vector
+dissolves.** Confirmed independently against every place the platform
+already treats a wagering-related quantity this way: ADR 0032 §3.1's
+"conversion eligibility is a decision, not a movement," ADR 0021/doc 10
+§7's own exemption for the wagering-requirement *target* (`bonus_amount ×
+multiplier`) from DS-2's posting boundary, and the plain fact that no
+Grant, Offer or Progress row has ever been designed to hold a
+sub-minor-unit or accumulated fractional balance (doc 10 §7: "no
+remainder-accumulation mechanism exists anywhere"). Progress is not now,
+and has never been, a monetary balance; §6.6.4's exact-scaled-integer form
+is the correct implementation and needs no control.
+
+**The doc 10 §7 / ADR 0021 §7 ambiguity WP-1 traces to is real, and
+bonus-engine — as the specialist who introduced it at Stage 4H-B0-R3 —
+resolves it here rather than leaving it for a future implementer to
+guess.** "Contribution %"/"contribution weighting" has been used in this
+architecture for two genuinely different quantities that must never share
+one config field or one code path:
+
+1. **Wagering-requirement contribution weight** (per-game/category/
+   provider %, e.g. slots 100%, table games 10%, live dealer/excluded
+   games 0%) — how much of a stake's amount counts toward satisfying the
+   wagering multiplier. This is §6.6.4's `contribution_weight_bp`. It is
+   **never posted to the ledger**, only ever compared (`Σ q_eff ≥ T ×
+   10000`), and is the quantity doc 10 §1.3's transition table means by
+   "the Offer's contribution rules" and §T.11's "wagering-contribution
+   rules (per-game/category/provider %)" row. **Confirmed: exact integer,
+   no rounding, ever.**
+2. **Cash/bonus funding-split ratio** — for a mixed-funded stake, how much
+   of the stake amount is drawn from `player_cash` vs. `player_bonus`
+   (HR-2's deferred case), and symmetrically, for a mixed-funded win, how
+   the payout is divided back (§6.3.3.2's C-win `B/(C+B)` ratio). This
+   *is* genuinely monetary — it determines an actual ledger posting split
+   — and DS-2's "round once, at the split-instruction computation" applies
+   to it, exactly as ADR 0021 §7's text says. **This is the quantity that
+   text was actually describing**, mislabeled with the same name as (1).
+
+**Correction to the historical record, stated plainly**: doc 10 §7 and ADR
+0021 §7's sentence "per-game contribution weighting (`stake ×
+contribution_%`) is monetary... it determines the actual cash/bonus split
+instruction posted for a wagering event" is **wrong as written** and is
+bonus-engine's own error from Stage 4H-B0-R3, not ledger-finance's. A
+game/category's wagering-contribution percentage (quantity 1) has no
+causal role in computing a stake's cash/bonus funding mix (quantity 2) —
+the funding mix is a function of the Grant's available balance and the
+platform's funding-allocation policy at placement time (still
+undesigned — HR-2 defers it), not of which game the player chose to play.
+The two quantities happen to have been named identically and described in
+the same sentence in doc 10 §6's split-instruction paragraph ("...cash/
+bonus contribution split implied by the Offer's Wagering axis (per-game/
+category/provider contribution %) and the Grant's current balance
+mix..."), which reads as though the per-game % drives the split; it does
+not, and never has, in any worked case this document or ADR 0038 has
+produced (§6.4.5 cases B/E/G/I are all single-origin and never consult a
+per-game % to decide funding origin). **Decided here, within bonus-engine's
+own authority**: the two quantities require two distinct config field
+names when the Offer schema is built in Stage 4H-B1 (a
+`wagering_contribution_bp` per game/category/provider, immutable per Offer
+version, never posted; and a separate funding-mix/split-policy field,
+scoped to the still-deferred mixed-funding design, monetary, rounds once).
+This is a documentation correction owed to doc 10 §6/§7 and ADR 0021 §7,
+flagged here rather than made there because doc 10/ADR 0021 are outside
+this dispatch's file scope (`ledger-accounting-model.md` only); bonus-engine
+will carry it into its own next edit of those documents. It changes
+nothing about §6.6.4's design, which already implements quantity 1
+correctly.
+
+**V-11(a) — the "progress-reversed" Progress-trail entry, designed at the
+level this validation owns (no schema, no code):** it is not a Grant
+*state-machine transition* (it does not change `Grant.status`; a full or
+partial void does not, by itself, move a Grant between §1.2's states) — it
+is a **Progress append with no status change**, the same shape doc 10 §1.3
+already uses for ordinary accrual ("`activated` → `in_progress` / Progress
+append"). Symmetric row to add to that table: **"`activated`/`in_progress`
+→ (no status change) / Progress append (reversal)" — Automated rule
+evaluation — every `sportsbook_void`/`casino_rollback`/`sportsbook_rollback`
+event that nullifies (§6.6.5) a previously-counted contribution.** Fields,
+per doc 10 §10.1's existing Progress-entry shape: the contribution's
+`grant_id`/`lock_ledger_transaction_id`, the reversed amount (`b` or
+`b_r`), `q_eff` before and after, the nullifying ledger transaction id, and
+a reason code distinguishing void / rollback-of-lock / settlement-reopened
+(case 8's `T_J1`). **A second, related row this validation also
+resolves**: the transition HR-12's in-transaction re-check produces on a
+rejected conversion is **`completed → in_progress`, not a new state** — a
+conversion HR-12 rejects has posted nothing (the rejection happens before
+the `bonus_conversion` write), so there is no history to compensate for,
+only a completion condition that turned out not to hold; `in_progress` is
+the correct home because wagering/qualifying activity is still what the
+Grant is doing. The Progress entry for this case carries the same shape as
+above plus an explicit "conversion attempt rejected, threshold no longer
+met" reason code. Neither addition requires a new Grant state; §1.2's
+table is unchanged in shape.
+
+**V-11(b) — CONFIRMED: multi-Grant attribution of a single lock is a real,
+not structurally prevented, scenario in bonus-engine's domain model, so the
+fail-closed default is adopted and it is not free.** Checked against the
+domain model rather than assumed either way: ADR 0032 §5 already states
+plainly that "attribution across multiple concurrent grants... is a Bonus
+Engine business rule, not a ledger concern," and ADR 0032's own testing
+floor names "concurrent grants to one wallet" as a required test case —
+both written independently of this question, both confirming concurrent
+Grants are an anticipated, not excluded, state. Because `player_bonus` is
+one pooled balance per `(wallet_id, asset_code)` rather than partitioned
+per Grant, two simultaneously `activated`/`in_progress` Grants funding the
+same wallet's bonus balance can, without any new mechanism, produce a
+single lock whose staked amount is drawn from a balance two Grants jointly
+funded — this is not a hypothetical edge case invented for this answer, it
+is the direct consequence of the pooled-balance design ADR 0032 already
+has. **The fail-closed rejection therefore genuinely costs a capability**
+(simultaneous multi-Grant wagering) rather than costing nothing, exactly
+the honest framing HR-2 was given for the analogous mixed-funding
+rejection — accepted anyway, for the same reason: reject-rather-than-invent
+is correct until the attribution rule is designed with the right
+reviewers (this is a bonus-engine + ledger-finance design question, not a
+unilateral one, mirroring V-2's reasoning for the anti-structuring
+control). Two candidate designs are named for that future work, neither
+selected now: (i) restrict a player to at most one Grant carrying wagering
+exposure at a time per `(player, asset)` (sequencing, avoids the
+attribution problem by construction, but weakens the product); (ii)
+FIFO/per-Grant lot attribution of the pooled balance, extending ADR 0032
+§5's own suggested mechanism for forfeiture to locks as well. WP-R's
+per-lock check (§6.6.4) will catch any future violation of the fail-closed
+rule, so the reject-at-placement default is reversible with no backfill
+once one of these is chosen.
+
+**Worked-case verdict (§6.6.7) — all twelve cases plus the two
+supplementary cases CONFIRMED against bonus-engine's own lifecycle model.**
+Case 5's "partial void" is not an invented extension — `sportsbook`'s own
+§6.6.14 validation (V-13) confirms it is ADR 0038 §8.1's third named
+void-timing variant (void of a still-open remainder after a prior partial
+settlement) and independently checks the arithmetic (`risked = b − returned
+= R`, the already-decided portion, correctly preserved). Bonus-engine's own
+`q_eff` formula agrees with that result exactly — a genuine independent
+cross-check, not a restatement — and confirms `q_eff` stays monotonic and
+bounded regardless of how many partial-void events eventually arrive for
+one lock. Case 8/8b's "no compensating logic, because the derivation is
+stateless" is independently re-verified by hand against ADR 0032 §3's
+worked casino table's own transient-negative-`bonus_expense` precedent
+(the same "toggle, don't accumulate" property that table already
+demonstrates for a different account). No case was found incorrect.
+
+**Completed-bonus-conversion edge case (§6.6.8) — APPROVED WITH ONE
+REQUIRED ADDITION, found independently, not asked for by ledger-finance's
+own questions.** The reused ADR 0032 §7 forfeiture/`manual_adjustment`
+instrument and the `reversed` Grant state are both correctly characterized
+(doc 10 §1.2's `reversed` row already covers exactly this trigger by
+name — "a round the Grant's wagering credited was rolled back" — and needs
+no new state). **The gap**: §6.6.8's steps 1-7 are written as though *any*
+post-conversion nullification of a contributing contribution triggers the
+full reversed/forfeiture/manual-review pipeline, with no check for whether
+the Grant's other, still-firm contributions independently still satisfy
+`T`. That is over-broad and would incorrectly forfeit/reverse a Grant whose
+conversion remains legitimately authorized — e.g. a Grant converted with
+`P_firm = 150` against `T = 100`, where the nullified contribution was
+worth `20`: recomputed `P_firm = 130 ≥ T`, so the conversion was, and
+remains, correctly authorized, and nothing should be clawed back or
+forfeited. **Required addition, stated as a gate on §6.6.8's own step 1,
+not a rejection of it**: recompute `P_firm` excluding the nullified
+contribution immediately after `q_eff` drops; if the recomputed value is
+still `≥ T`, append an **informational** Progress entry only (the fact is
+recorded, nothing financial follows) and stop — steps 2-8 fire only when
+the recomputed `P_firm < T`. This preserves everything §6.6.8 already
+specifies for the genuine shortfall case (including OB-2, confirmed below)
+and closes what would otherwise be a real defect the first time a Grant
+with margin above `T` has any late-arriving correction on one of its many
+contributing bets — not a rare case for a multi-bet wagering requirement.
+
+**OB-2 — CONFIRMED correctly characterized**, on the same reasoning V-4/OB-1
+already established for the analogous business decision: whether to pursue
+`X` from a player after an operator/provider-side correction is
+consumer-protection/collections/legal weight, not an accounting
+question — the instrument (forfeiture + `manual_adjustment` against
+`player_cash`, four-eyes, reason code) is fully specified and needs no
+further engineering input; only the policy of *whether* to use it is open.
+Correctly referred to the orchestrator, not decided here. The margin-check
+addition above narrows *when* OB-2 is even reached (only the
+genuine-shortfall branch) without changing what OB-2 asks.
+
+**Summary for G-3 closure, from bonus-engine's domain angle only**
+(`sportsbook`'s and `architect`'s parallel validation are separate):
+**Model C is accepted (V-7), its ADR 0032 §0 refinement is accepted (V-8),
+its classification table is confirmed (V-9), and WP-1 is resolved —
+progress needs no rounding and the structuring vector does not exist
+(V-10).** The two remaining `bonus-engine` deliverables are named at
+implementation level (V-11): the progress-reversed Progress-append shape
+and the `completed → in_progress` rejected-conversion transition, neither
+requiring a new Grant state; and the multi-Grant fail-closed default is
+confirmed correct and non-free. One genuine gap was found and its fix
+specified (the §6.6.8 margin-check addition) — everything else in §6.6 is
+approved as designed. **Gate G-3 closes on bonus-engine's side once this
+section's V-11 items and the margin-check addition are reflected in the
+eventual `internal/bonus` implementation; it remains open for
+implementation purposes until that code exists** — this validation
+approves the *design*, it does not build it, per this stage's own
+discipline.
+
+| §6.6.12 item | Status after this validation |
+|---|---|
+| V-7 (Model C) | **Accepted**, casino-loss disqualification of Model A independently re-verified against code |
+| V-8 (§0 refinement) | **Accepted**, does not open an unsafe door — HR-10/append-only/WP-R already supply the control set |
+| V-9 (classification table) | **Confirmed**, independently re-derived |
+| V-10 / WP-1 | **Resolved**: comparison operand, not money; vector dissolves. Doc 10 §7/ADR 0021 §7 terminology error identified and attributed to bonus-engine's own Stage 4H-B0-R3 text, correction owed in bonus-engine's own next edit of those documents |
+| V-11(a) (progress-reversed entry) | **Designed at this level**: a non-status-changing Progress append, symmetric to the existing accrual row |
+| V-11(a) (rejected-conversion transition) | **Designed at this level**: `completed → in_progress`, no new state |
+| V-11(b) (multi-Grant fail-closed default) | **Confirmed real scenario, default adopted, cost disclosed** (forgoes simultaneous multi-Grant wagering until an attribution rule is chosen) |
+| §6.6.7 twelve cases + two supplementary | **Confirmed**, one case (partial void) cross-checked against `sportsbook`'s §6.6.14 arithmetic, no discrepancy |
+| §6.6.8 conversion edge case | **APPROVED WITH ONE REQUIRED ADDITION** — the margin-check gate, specified above |
+| OB-2 | **Confirmed correctly characterized**, business decision, not resolved here |
+
 ## 7. Cross-references
 
 - Object scoping, `Wallet` shape: `financial-domain-model.md`.
