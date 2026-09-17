@@ -629,6 +629,109 @@ func TestEnumerationRun_CreateStartCompleteLifecycle(t *testing.T) {
 	}
 }
 
+// TestEnumerationRun_AuditEntriesAllCarryRestrictionID is Stage
+// 4H-B0-R7's audit-ordering closure test: CreateEnumerationRun's own
+// audit entry always carried restriction_id in its metadata, but
+// Start/Complete/Fail did not - a regulator reconstructing the chain
+// from those three entries alone would have had to join back to the
+// (mutable, UPDATE-based) self_exclusion_enumeration_runs table to learn
+// which restriction they belonged to, which is not "from audit records
+// alone." Proves all four now carry it.
+func TestEnumerationRun_AuditEntriesAllCarryRestrictionID(t *testing.T) {
+	pool := testPool(t)
+	tenantID := seedTenant(t, pool)
+	a := seedAccount(t, pool, tenantID, uuid.Nil)
+	personID := personIDFor(t, pool, a)
+
+	var restrictionID uuid.UUID
+	err := pool.WithPlayerScope(context.Background(), tenantID, a.accountID, func(ctx context.Context, tx pgx.Tx) error {
+		r, err := CreateSelfExclusion(ctx, tx, CreateSelfExclusionParams{TenantID: tenantID, PlayerAccountID: a.accountID})
+		restrictionID = r.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create self-exclusion: %v", err)
+	}
+
+	var runID uuid.UUID
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		run, err := CreateEnumerationRun(ctx, tx, CreateEnumerationRunParams{
+			RestrictionID: restrictionID, TenantID: tenantID, PersonID: personID, PolicyAsOf: time.Now().UTC(),
+			ActorType: audit.ActorSystem,
+		})
+		runID = run.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create enumeration run: %v", err)
+	}
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := StartEnumerationRun(ctx, tx, runID, audit.ActorSystem, uuid.Nil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("start enumeration run: %v", err)
+	}
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := CompleteEnumerationRun(ctx, tx, runID, 0, audit.ActorSystem, uuid.Nil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("complete enumeration run: %v", err)
+	}
+
+	// A second run, driven to 'failed' instead, to cover FailEnumerationRun
+	// too (it cannot be exercised on the same run once completed).
+	restrictionID2 := seedSelfExclusionRestriction(t, pool, tenantID, a)
+	var failedRunID uuid.UUID
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		run, err := CreateEnumerationRun(ctx, tx, CreateEnumerationRunParams{
+			RestrictionID: restrictionID2, TenantID: tenantID, PersonID: personID, PolicyAsOf: time.Now().UTC(),
+			ActorType: audit.ActorSystem,
+		})
+		failedRunID = run.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create second enumeration run: %v", err)
+	}
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := FailEnumerationRun(ctx, tx, failedRunID, "test-failure", audit.ActorSystem, uuid.Nil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("fail enumeration run: %v", err)
+	}
+
+	assertAuditMetadataRestrictionID(t, pool, tenantID, "rg.self_exclusion_enumeration_run.created", runID.String(), restrictionID)
+	assertAuditMetadataRestrictionID(t, pool, tenantID, "rg.self_exclusion_enumeration_run.started", runID.String(), restrictionID)
+	assertAuditMetadataRestrictionID(t, pool, tenantID, "rg.self_exclusion_enumeration_run.completed", runID.String(), restrictionID)
+	assertAuditMetadataRestrictionID(t, pool, tenantID, "rg.self_exclusion_enumeration_run.failed", failedRunID.String(), restrictionID2)
+}
+
+// assertAuditMetadataRestrictionID confirms one audit_log row for
+// (tenantID, action, targetID) carries metadata->>'restriction_id'
+// equal to want - the "reconstructable from audit records alone"
+// property this stage's directive requires.
+func assertAuditMetadataRestrictionID(t *testing.T, pool *db.Pool, tenantID uuid.UUID, action, targetID string, want uuid.UUID) {
+	t.Helper()
+	var got string
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT metadata->>'restriction_id' FROM audit_log
+			 WHERE tenant_id = $1 AND action = $2 AND target_id = $3
+			 ORDER BY created_at DESC LIMIT 1`,
+			tenantID, action, targetID,
+		).Scan(&got)
+	})
+	if err != nil {
+		t.Fatalf("query audit_log for %s: %v", action, err)
+	}
+	if got != want.String() {
+		t.Fatalf("expected %s audit entry's restriction_id metadata to be %s, got %q", action, want, got)
+	}
+}
+
 func TestFindMissingEnumerationRuns_DetectsGapAndClearsOnceRecorded(t *testing.T) {
 	pool := testPool(t)
 	tenantID := seedTenant(t, pool)

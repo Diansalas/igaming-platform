@@ -1312,6 +1312,229 @@ selects — a single global default, or a distinct value per jurisdiction —
 can be configured, versioned, audited, and enforced by the architecture
 above without a further redesign or a code change.
 
+### 14.10 Mid-partial-settlement void — resolved (Stage 4H-B0-R7, closes ADR 0038 "Open decisions referred upward" item 7 for `VOID_ON_SELF_EXCLUSION`)
+
+This closes the gap `sportsbook`'s Stage 4H-B0-R5 Wave 3 review flagged
+against §14.7 above ("full stake `S`... is only correct for a single...
+bet") and ADR 0038's own item 7: what a `VOID_ON_SELF_EXCLUSION`
+execution must post for a multi-leg/bet-builder bet caught **after** one
+or more legs have already partially settled (ADR 0038 §8.2), leaving
+`original_stake − R` in `player_locked` rather than the full original
+stake `S`.
+
+**Answer, applying — not redesigning — the mechanism `ledger-finance`
+already specified for exactly this class of problem**
+(`ledger-accounting-model.md` §6.3.3.1/§6.4):
+
+- The void MUST release only the bet's **currently-remaining** locked
+  balance, per origin (cash/bonus), never the original stake `S`. This is
+  §6.3.3.1's own **variant 2** query — the identical `correlation_id`-keyed
+  recovery query used to recover a bet's cash/bonus split at unlock time,
+  with the `transaction_type = 'sportsbook_bet'` filter **dropped** so it
+  nets the original lock against every later `sportsbook_partial_
+  settlement`/`sportsbook_cashout`/`sportsbook_void`/`sportsbook_rollback`
+  transaction sharing the same `correlation_id`.
+- That recovery read MUST execute inside the **same database transaction**
+  as the void posting, after taking the identical lock discipline §6.4's
+  HR-3 requires for every release-authorizing read on a sportsbook posting
+  path: an advisory lock (or `SELECT ... FOR UPDATE`) scoped to
+  `(tenant_id, correlation_id)` — the **bet**, not the delivery/event —
+  taken before the read. `VOID_ON_SELF_EXCLUSION` is not a new,
+  exempt release path; it is one more caller of the same release
+  mechanism every other sportsbook unlock case uses, and it must fail
+  closed on an empty/short/negative-remainder result exactly as HR-3
+  already requires (escalated as an integrity alert, never treated as
+  "release everything" or "release nothing").
+- Entries: `Dr player_locked_cash <remaining cash-origin>` /
+  `Cr player_cash <remaining cash-origin>`, and separately
+  `Dr player_locked_bonus <remaining bonus-origin>` /
+  `Cr player_bonus <remaining bonus-origin>` — `ledger-accounting-
+  model.md` §6.3.3.2's own **case C-void** shape (each origin returns to
+  its own account, no mirror pair, no proportionality question), sized to
+  the **remaining** per-origin amounts rather than the original `C`/`B`
+  split. For a single-origin bet, or a multi-leg bet with no prior partial
+  settlement, remaining equals original, so this changes nothing observable
+  from today's undifferentiated `Dr player_locked S / Cr player_cash|
+  player_bonus S` framing — the fix only changes behavior once a partial
+  settlement has actually posted, which is exactly the state §14.7's
+  "identical in shape... unchanged" claim did not hold for.
+- This confirms `sportsbook`'s own inference in ADR 0038's item 7 ("most
+  likely `Dr player_locked <remaining>` · `Cr player_cash`/
+  `player_bonus <remaining>`, mirroring §8.1's 'before settlement' row but
+  substituting the remaining balance for the original `S`") as the
+  specified answer for `VOID_ON_SELF_EXCLUSION`'s own trigger, per that
+  item's own request that `ledger-finance` state the entries and confirm
+  with `identity-compliance`. **`identity-compliance` confirms this
+  reading.** Formalizing the equivalent third-timing-variant row in ADR
+  0038 §8.1's own text remains `ledger-finance`'s file to edit — this
+  section closes the question only for its own trigger (`VOID_ON_SELF_
+  EXCLUSION`), restating no more of ADR 0038 than item 7 already licenses,
+  per this platform's "no specialist redesigns shared architecture
+  unilaterally" rule.
+- Status: **RESOLVED (architecture) — still `NOT IMPLEMENTED`**, exactly
+  like the rest of §14. No sportsbook void-execution code exists in this
+  codebase yet (`internal/rg`'s own package doc comments are explicit that
+  nothing here enumerates, voids, or settles a bet), so there is no
+  `internal/rg` code to change for this item — it is a specification a
+  future void-execution implementer (`sportsbook` + `ledger-finance`,
+  jointly) must follow, not code this stage delivers.
+
+### 14.11 Wagering-progress netting — the integration requirement `VOID_ON_SELF_EXCLUSION` places on `ledger-finance`'s parallel gate-G-3 design
+
+`financial-transaction-flows.md` §13's `OPEN QUESTION` (`bonus-engine`'s
+Stage 4H-B0-R5 Wave 3 finding, restated for `VOID_ON_SELF_EXCLUSION`
+specifically at §14.7 above) is being designed this round by
+`ledger-finance` as the gate G-3 wagering-progress-integrity fix.
+`identity-compliance` does not redesign that mechanism here — this
+section states the one concrete integration requirement `VOID_ON_SELF_
+EXCLUSION`'s own trigger path places on it, found while checking whether
+the two compose.
+
+**Finding: a netting mechanism keyed solely on `reverses_transaction_id`
+will not see the single most common shape a self-exclusion-triggered void
+produces.** ADR 0038 §8.1 defines two posting shapes for a void: "before
+settlement" (a plain new transaction, `Dr player_locked / Cr player_cash
+|player_bonus` — **no `reverses_transaction_id` at all**; §8.1's own table
+states this, and its prose gives the reason: "nothing was posted in
+error") and "after settlement" (a full reversal chain that DOES set
+`reverses_transaction_id`, pointing at the settlement). Per §14.6/§14.7
+above, a self-exclusion-triggered void of an **open** bet is, by
+construction, the first shape — the bet has not settled, that is why it
+is still open, and settlement is RG-exempt and proceeds normally on the
+rare occasion it beats the void (§14.6) — so the void transaction `VOID_
+ON_SELF_EXCLUSION` produces will typically carry **no `reverses_
+transaction_id` back to the lock at all**. `financial-transaction-
+flows.md` §13's own prose frames the fix as excluding "any debit whose
+originating transaction was subsequently reversed **via `reverses_
+transaction_id`**" — if implemented literally (a join on `reverses_
+transaction_id` only), the fix would correctly net a post-settlement
+reversal but would **silently fail to net the pre-settlement void case**,
+which is exactly the case `VOID_ON_SELF_EXCLUSION` most commonly produces.
+That would reproduce, for the single highest-volume RG-triggered scenario,
+the exact wagering-integrity gap the fix exists to close.
+
+**Integration requirement (binding on whichever mechanism `ledger-finance`
+designs, stated as a contract this section's caller must satisfy, not as
+a design of that mechanism):** the wagering-progress-netting query MUST be
+able to find and net a lock-time `player_bonus` debit against **any**
+later transaction that reverses it economically, keyed on
+**`correlation_id`** (the bet-scoped identifier ADR 0038 §3/§5 already
+establishes and `ledger-accounting-model.md` §6.3.3.1 already uses for
+exactly this class of "find every later event on this same bet" join),
+**not exclusively** on `reverses_transaction_id` — because `correlation_
+id` is the one linking field ADR 0038 guarantees is present on **every**
+transaction type in a bet's lifecycle (lock, partial settlement, cashout,
+void, rollback) regardless of timing, while `reverses_transaction_id` is
+only ever populated on the post-settlement reversal-chain shape.
+Concretely: for each `player_bonus`-debiting lock transaction, net against
+the sum of later `sportsbook_void`/`sportsbook_rollback`/`sportsbook_
+partial_settlement`/`sportsbook_cashout` transactions sharing its
+`correlation_id` that credit the released bonus-origin amount back to
+`player_bonus` — not merely those that also happen to carry `reverses_
+transaction_id`.
+
+If `ledger-finance`'s chosen mechanism already keys on `correlation_id`
+(consistent with §6.3.3.1's own precedent, and the natural join key given
+`identity-compliance`'s reading of ADR 0038 above), no gap exists and this
+section is confirmation, not a defect report. If it keys on `reverses_
+transaction_id` alone, this is the concrete case that will not compose
+with `VOID_ON_SELF_EXCLUSION`'s own trigger path — flagged here for
+`ledger-finance` to close in its own G-3 design. `identity-compliance`
+does not select or build the fix, per this stage's own scope boundary
+(Workstream D does not touch Workstream E's/ledger-finance's wagering-
+progress model design).
+
+No `internal/rg` code change accompanies this section: no wagering-
+progress-netting query exists in this codebase yet to modify
+(`financial-transaction-flows.md` §13 confirms it is a derived read not
+yet built), and no sportsbook void-execution code exists to thread a
+`correlation_id` through. This is a requirement on a not-yet-built
+mechanism, stated now so the two designs compose when both are eventually
+built, not a fix to something that exists today.
+
+### 14.12 As-of timestamp — re-confirmed sufficient; no remaining gap found
+
+Stage 4H-B0-R6 (security finding S-8) made `ResolveOpenBetSelfExclusionPolicy`
+reject a zero `AsOf` outright and require it be the self-exclusion's own
+effective timestamp (`player_restrictions.starts_at`), never a bare "now"
+read at whatever later instant enforcement happens to run — closing the
+tampering window where a permissive config change could be raced into
+effect between the self-exclusion instant and enforcement. Re-checked this
+stage for any remaining gap the directive's re-mention of this item might
+be pointing at:
+
+**Closed — one-line justification**: `AsOf`'s source
+(`player_restrictions.starts_at`) is append-only at the database level
+(confirmed by `rg_integration_test.go`'s `TestPlayerRestrictions_RLS_
+NoUpdatePossible`, which proves a direct `UPDATE` against
+`player_restrictions` is rejected), and the jurisdiction floor it is
+evaluated against can no longer be backdated
+(`ErrJurisdictionFloorBackdated`, same Stage 4H-B0-R6 fix) — with both the
+temporal input and the configuration timeline individually
+immutable-after-the-fact in the direction that matters, no combination of
+the two can reproduce S-8's original race. No code change accompanies
+this section.
+
+### 14.13 Audit ordering — the causal chain, checked end to end, one gap found and closed
+
+The directive's audit-ordering requirement — a regulator must be able to
+reconstruct self-exclusion event → enumeration → policy resolution → void
+execution → wagering-progress netting, in the correct causal order, from
+audit records alone — checked against every audit record this package
+currently produces:
+
+1. **Self-exclusion event**: the `player_restrictions` row itself
+   (append-only, `starts_at` immutable — §14.12) plus its own creation
+   audit trail (ADR 0026).
+2. **Enumeration**: `self_exclusion_enumeration_runs` rows and their
+   `rg.self_exclusion_enumeration_run.{created,started,completed,failed}`
+   audit entries. **Gap found and closed this stage**: the `created`
+   entry already carried `restriction_id` in its metadata, but `started`/
+   `completed`/`failed` did not — a regulator reconstructing the chain
+   from those three entries alone would have had to join back to the
+   (mutable, `UPDATE`-based) `self_exclusion_enumeration_runs` table to
+   learn which restriction a given run belonged to, which is not "from
+   audit records alone." Fixed in `internal/rg/self_exclusion_
+   enumeration.go`: all four enumeration-run audit entries now carry
+   `restriction_id` in metadata. A second, related bug found and fixed
+   while adding test coverage for this: `FailEnumerationRun` had no test
+   coverage before this stage and did not backfill `started_at` the way
+   `CompleteEnumerationRun` already does, so failing a run directly from
+   `pending` (a transition its own `WHERE` clause always allowed) violated
+   migration 0043's `CHECK (dispatch_status = 'pending' OR started_at IS
+   NOT NULL)` outright — fixed to backfill identically.
+3. **Policy resolution**: `rg.open_bet_self_exclusion_policy.resolved`,
+   which already carried `RestrictionID` in metadata when the caller
+   supplied it. Restated this stage as a hard requirement on the caller,
+   not merely optional provenance: `ResolveOpenBetSelfExclusionPolicyParams.
+   RestrictionID`'s own doc comment now states that any real
+   self-exclusion-enforcement call MUST supply it (only a non-enforcement
+   preview/dry-run resolution may omit it), so this link is never missing
+   for a real enforcement decision. The Go type stays a pointer rather
+   than becoming a required field, since Resolve is a general primitive
+   used by more than one caller shape, not itself the enforcement listener.
+4. **Void execution / wagering-progress netting**: does not exist in this
+   codebase yet (no sportsbook implementation). §14.5 already specifies
+   the required per-bet audit entry; this stage adds the explicit
+   chaining requirement a future implementer MUST satisfy for the trail to
+   be reconstructable: that per-bet audit entry's `Metadata` MUST include
+   the triggering `restriction_id` (§14.5's "Actor... attributed to the
+   specific self-exclusion event/restriction row" already implies this in
+   spirit, but an audit query joins on `Metadata`/`TargetID`, not on
+   `Actor`, so it is restated here as an explicit metadata requirement,
+   not merely an actor-attribution one) and the `self_exclusion_
+   enumeration_runs.id` of the run that discovered the bet; and — per
+   §14.11 above — the void's own ledger transaction must carry the
+   standard `correlation_id` ADR 0038 already guarantees for every posting
+   on a bet, so the eventual wagering-progress-netting record is itself
+   joinable back to the same chain via that same field, closing the loop
+   without inventing a new identifier.
+
+With (2)'s fix landed and (3)'s requirement restated as binding, the
+causal chain is reconstructable end to end today for everything this
+stage can actually build, and is stated unambiguously for a future
+implementer for everything it cannot (4).
+
 ### Consequences (§14 addendum)
 
 - `internal/rg`, `internal/kyc`, and ADR 0038's ledger posting shapes
@@ -1333,6 +1556,25 @@ above without a further redesign or a code change.
   `OpenBetSelfExclusionPolicy`, and any specific jurisdiction's mandated
   override, per §14.9 — a human/legal/compliance decision, not a technical
   one this ADR settles.
+- **Stage 4H-B0-R7 (Workstream D) additions, §14.10-§14.13**: the
+  mid-partial-settlement void case is now fully specified (§14.10,
+  applying `ledger-finance`'s existing §6.3.3.1/§6.4 recovery mechanism,
+  not redesigning it); the integration requirement `VOID_ON_SELF_
+  EXCLUSION` places on `ledger-finance`'s in-flight gate-G-3
+  wagering-progress-netting design is stated explicitly (§14.11: net on
+  `correlation_id`, not exclusively `reverses_transaction_id`); the
+  as-of-timestamp fix (S-8) is re-confirmed closed with no remaining gap
+  (§14.12); and the audit-ordering causal chain is checked end to end,
+  with one real "reconstructable from audit records alone" gap found and
+  closed in `internal/rg/self_exclusion_enumeration.go` (started/
+  completed/failed entries now carry `restriction_id`) plus an unrelated
+  latent bug found and fixed in the same file (`FailEnumerationRun` now
+  backfills `started_at`, matching `CompleteEnumerationRun`) (§14.13).
+  `FindMissingEnumerationRuns`/`FindStalledEnumerationRuns` are now wired
+  into an actual running scheduler
+  (`internal/rg/enumeration_sweep.go`), closing Stage 4H-B0-R6's "zero
+  callers in a running system" security finding for both queries (only
+  one of which the finding named, but both had the identical gap).
 
 ### Cross-references (§14 addendum)
 

@@ -547,10 +547,27 @@ type ResolveOpenBetSelfExclusionPolicyParams struct {
 	AuditTenantID uuid.UUID
 	ActorType     audit.ActorType
 	ActorID       uuid.UUID
-	// RestrictionID, if supplied, is recorded in the audit metadata only,
-	// as provenance linking this resolution back to the self-exclusion
-	// event that triggered it - Resolve itself has no restriction/bet
-	// concept.
+	// RestrictionID is recorded in the audit metadata only, as provenance
+	// linking this resolution back to the self-exclusion event that
+	// triggered it - Resolve itself has no restriction/bet concept, so
+	// this is not validated or dereferenced, only carried through.
+	//
+	// Stage 4H-B0-R7 (audit-ordering directive): the pointer stays
+	// optional at the Go type level because a legitimate non-enforcement
+	// call exists (an operator's own dry-run/preview resolution with no
+	// live triggering event), but for ANY real self-exclusion-enforcement
+	// call - the only kind a future sportsbook/rg listener (ADR 0034
+	// §14.5) will ever make - this MUST be supplied. Omitting it on a real
+	// enforcement call leaves the resulting "rg.open_bet_self_exclusion_
+	// policy.resolved" audit entry without the one field that links it
+	// back to the self-exclusion event that caused it, which breaks the
+	// "reconstructable from audit records alone" causal chain ADR 0034
+	// §14.13 requires end to end (self-exclusion event -> enumeration run
+	// -> policy resolution -> void execution). This is a caller contract,
+	// not a Go-level required-field check, for the identical reason
+	// AuditTenantID/ActorType/ActorID are not cross-validated against each
+	// other here - Resolve is a general primitive, not itself the
+	// enforcement listener.
 	RestrictionID *uuid.UUID
 	IPAddress     string
 	UserAgent     string

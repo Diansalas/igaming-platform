@@ -16,6 +16,19 @@
 // named failure modes (never started / wrongly-scoped caller / stalled);
 // see each function's own doc comment for exactly what it can and cannot
 // detect today.
+//
+// Stage 4H-B0-R7, Workstream D additions: (1) FindStalledEnumerationRuns'
+// own Stage 4H-B0-R6 security finding - zero callers in a running system -
+// is closed by enumeration_sweep.go, which wires both reconciliation
+// queries into an actual scheduler loop, mirroring internal/
+// reconciliation's own RunSweep/RunSchedulerLoop pattern. (2) The
+// StartEnumerationRun/CompleteEnumerationRun/FailEnumerationRun audit
+// entries now all carry restriction_id in their own metadata, matching
+// CreateEnumerationRun's - closing a real "from audit records alone"
+// reconstruction gap this stage's audit-ordering directive found (a
+// regulator previously had to join back to this - mutable, UPDATE-based -
+// table to learn which restriction a started/completed/failed run's
+// audit entry belonged to).
 package rg
 
 import (
@@ -227,6 +240,15 @@ func StartEnumerationRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID, actorT
 		TenantID: run.TenantID, ActorType: actorType, ActorID: actorID,
 		Action: "rg.self_exclusion_enumeration_run.started", TargetType: "self_exclusion_enumeration_run", TargetID: run.ID.String(),
 		Outcome: audit.OutcomeSuccess,
+		// Stage 4H-B0-R7 directive's audit-ordering requirement: this
+		// entry alone (TargetID is the run, not the restriction) was not
+		// reconstructable back to the triggering self-exclusion event
+		// without joining the (mutable, UPDATE-based) self_exclusion_
+		// enumeration_runs table - "from audit records alone" failed for
+		// this specific entry even though CreateEnumerationRun's own
+		// "created" entry already carried restriction_id. Closed by
+		// carrying it here too, and on Complete/Fail below.
+		Metadata: map[string]any{"restriction_id": run.RestrictionID.String()},
 	}); err != nil {
 		return EnumerationRun{}, fmt.Errorf("rg: audit enumeration run start: %w", err)
 	}
@@ -263,7 +285,10 @@ func CompleteEnumerationRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID, bet
 	if err := audit.Record(ctx, tx, audit.Entry{
 		TenantID: run.TenantID, ActorType: actorType, ActorID: actorID,
 		Action: "rg.self_exclusion_enumeration_run.completed", TargetType: "self_exclusion_enumeration_run", TargetID: run.ID.String(),
-		Outcome: audit.OutcomeSuccess, Metadata: map[string]any{"bets_in_scope_count": betsInScopeCount},
+		Outcome: audit.OutcomeSuccess,
+		// See StartEnumerationRun's identical comment - audit-ordering
+		// closure, same reasoning.
+		Metadata: map[string]any{"bets_in_scope_count": betsInScopeCount, "restriction_id": run.RestrictionID.String()},
 	}); err != nil {
 		return EnumerationRun{}, fmt.Errorf("rg: audit enumeration run completion: %w", err)
 	}
@@ -273,13 +298,21 @@ func CompleteEnumerationRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID, bet
 // FailEnumerationRun marks a run 'failed' with a required reason -
 // leaving an explicit, queryable failure record rather than the run
 // simply never reaching 'completed'.
+//
+// Stage 4H-B0-R7 fix: this had no test coverage at all before this stage,
+// and calling it directly from 'pending' (which its own WHERE clause
+// always allowed) previously violated migration 0043's own
+// `CHECK (dispatch_status = 'pending' OR started_at IS NOT NULL)` -
+// FailEnumerationRun never set started_at, unlike CompleteEnumerationRun,
+// which already backfills it for the identical 'pending'-to-terminal
+// transition. Fixed by backfilling started_at here too, the same way.
 func FailEnumerationRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID, failureReason string, actorType audit.ActorType, actorID uuid.UUID) (EnumerationRun, error) {
 	if failureReason == "" {
 		return EnumerationRun{}, fmt.Errorf("%w: failure_reason is required", ErrInvalidInput)
 	}
 	tag, err := tx.Exec(ctx,
 		`UPDATE self_exclusion_enumeration_runs
-		 SET dispatch_status = 'failed', failure_reason = $2
+		 SET dispatch_status = 'failed', failure_reason = $2, started_at = COALESCE(started_at, clock_timestamp())
 		 WHERE id = $1 AND dispatch_status IN ('pending', 'in_progress')`,
 		runID, failureReason,
 	)
@@ -296,7 +329,10 @@ func FailEnumerationRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID, failure
 	if err := audit.Record(ctx, tx, audit.Entry{
 		TenantID: run.TenantID, ActorType: actorType, ActorID: actorID,
 		Action: "rg.self_exclusion_enumeration_run.failed", TargetType: "self_exclusion_enumeration_run", TargetID: run.ID.String(),
-		Outcome: audit.OutcomeFailure, Metadata: map[string]any{"failure_reason": failureReason},
+		Outcome: audit.OutcomeFailure,
+		// See StartEnumerationRun's identical comment - audit-ordering
+		// closure, same reasoning.
+		Metadata: map[string]any{"failure_reason": failureReason, "restriction_id": run.RestrictionID.String()},
 	}); err != nil {
 		return EnumerationRun{}, fmt.Errorf("rg: audit enumeration run failure: %w", err)
 	}

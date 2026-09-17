@@ -78,6 +78,27 @@ type Config struct {
 	// wait an hour to observe a sweep; production is expected to run at
 	// the default.
 	ReconciliationInterval time.Duration
+
+	// RGEnumerationSweepInterval is the cadence of the self-exclusion
+	// enumeration-run reconciliation sweep
+	// (internal/rg.RunEnumerationReconciliationSchedulerLoop, Stage
+	// 4H-B0-R7 directive item 4). Deliberately tighter than
+	// ReconciliationInterval's hourly default: a dropped or stalled
+	// enumeration run represents a self-exclusion that may not have had
+	// its open bets acted on at all, a compliance-enforcement gap, not a
+	// financial-drift one - 15 minutes balances catching that quickly
+	// against sweep load. Configurable for the identical reason
+	// ReconciliationInterval is: tests and local development should not
+	// have to wait to observe a sweep.
+	RGEnumerationSweepInterval time.Duration
+	// RGEnumerationStalledThreshold is how old a self_exclusion_
+	// enumeration_runs row may be, without reaching 'completed', before
+	// RunEnumerationReconciliationSweep reports it as stalled
+	// (internal/rg.FindStalledEnumerationRuns' own caller-supplied
+	// olderThan parameter - see that function's doc comment for why this
+	// is an operational tuning value, not a fact this package asserts on
+	// its own).
+	RGEnumerationStalledThreshold time.Duration
 }
 
 // Load reads configuration from the process environment. It returns an
@@ -85,22 +106,24 @@ type Config struct {
 // misconfigured environment explicitly.
 func Load() (Config, error) {
 	cfg := Config{
-		Environment:            getEnvDefault("APP_ENV", "development"),
-		HTTPAddr:               getEnvDefault("HTTP_ADDR", ":8080"),
-		DatabaseURL:            os.Getenv("DATABASE_URL"),
-		DatabaseMaxConns:       10,
-		DatabaseConnTimeout:    5 * time.Second,
-		JWTActiveKID:           getEnvDefault("JWT_ACTIVE_KID", "k1"),
-		JWTSigningSecret:       os.Getenv("JWT_SIGNING_SECRET"),
-		JWTPreviousKID:         getEnvDefault("JWT_PREVIOUS_KID", "k0"),
-		JWTPreviousSecret:      os.Getenv("JWT_PREVIOUS_SECRET"),
-		JWTIssuer:              getEnvDefault("JWT_ISSUER", "igaming-platform"),
-		JWTAudience:            getEnvDefault("JWT_AUDIENCE", "platform-api"),
-		AccessTokenTTL:         15 * time.Minute,
-		RefreshTokenTTL:        30 * 24 * time.Hour,
-		OTelServiceName:        getEnvDefault("OTEL_SERVICE_NAME", "platform-api"),
-		OTelExporter:           getEnvDefault("OTEL_EXPORTER", "stdout"),
-		ReconciliationInterval: time.Hour,
+		Environment:                   getEnvDefault("APP_ENV", "development"),
+		HTTPAddr:                      getEnvDefault("HTTP_ADDR", ":8080"),
+		DatabaseURL:                   os.Getenv("DATABASE_URL"),
+		DatabaseMaxConns:              10,
+		DatabaseConnTimeout:           5 * time.Second,
+		JWTActiveKID:                  getEnvDefault("JWT_ACTIVE_KID", "k1"),
+		JWTSigningSecret:              os.Getenv("JWT_SIGNING_SECRET"),
+		JWTPreviousKID:                getEnvDefault("JWT_PREVIOUS_KID", "k0"),
+		JWTPreviousSecret:             os.Getenv("JWT_PREVIOUS_SECRET"),
+		JWTIssuer:                     getEnvDefault("JWT_ISSUER", "igaming-platform"),
+		JWTAudience:                   getEnvDefault("JWT_AUDIENCE", "platform-api"),
+		AccessTokenTTL:                15 * time.Minute,
+		RefreshTokenTTL:               30 * 24 * time.Hour,
+		OTelServiceName:               getEnvDefault("OTEL_SERVICE_NAME", "platform-api"),
+		OTelExporter:                  getEnvDefault("OTEL_EXPORTER", "stdout"),
+		ReconciliationInterval:        time.Hour,
+		RGEnumerationSweepInterval:    15 * time.Minute,
+		RGEnumerationStalledThreshold: 15 * time.Minute,
 	}
 
 	if v := os.Getenv("DATABASE_MAX_CONNS"); v != "" {
@@ -133,6 +156,26 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config: RECONCILIATION_INTERVAL_SECONDS must be positive")
 		}
 		cfg.ReconciliationInterval = time.Duration(n) * time.Second
+	}
+	if v := os.Getenv("RG_ENUMERATION_SWEEP_INTERVAL_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid RG_ENUMERATION_SWEEP_INTERVAL_SECONDS: %w", err)
+		}
+		if n <= 0 {
+			return Config{}, fmt.Errorf("config: RG_ENUMERATION_SWEEP_INTERVAL_SECONDS must be positive")
+		}
+		cfg.RGEnumerationSweepInterval = time.Duration(n) * time.Second
+	}
+	if v := os.Getenv("RG_ENUMERATION_STALLED_THRESHOLD_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid RG_ENUMERATION_STALLED_THRESHOLD_SECONDS: %w", err)
+		}
+		if n <= 0 {
+			return Config{}, fmt.Errorf("config: RG_ENUMERATION_STALLED_THRESHOLD_SECONDS must be positive")
+		}
+		cfg.RGEnumerationStalledThreshold = time.Duration(n) * time.Second
 	}
 
 	if cfg.DatabaseURL == "" {

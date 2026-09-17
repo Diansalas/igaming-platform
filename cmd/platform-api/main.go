@@ -28,6 +28,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
+	"github.com/Diansalas/igaming-platform/internal/rg"
 )
 
 // kycMockWebhookSecret is MockKYCProvider's dev/test-only HMAC signing
@@ -180,6 +181,21 @@ func run() error {
 		reconciliation.RunSchedulerLoop(ctx, pool, logger, cfg.ReconciliationInterval)
 	}()
 
+	// Stage 4H-B0-R7 directive item 4: operationalize the self-exclusion
+	// enumeration-run reconciliation queries (FindMissingEnumerationRuns,
+	// FindStalledEnumerationRuns), which Stage 4H-B0-R6 built but never
+	// actually scheduled - the exact "index/query with zero running
+	// callers" shape as the ledger-vs-projection sweep had at Stage 3B,
+	// closed the identical way. See internal/rg/enumeration_sweep.go for
+	// the per-tenant isolation/idempotency/observability guarantees
+	// (mirrors reconciliation.RunSchedulerLoop's own).
+	var rgSweepWG sync.WaitGroup
+	rgSweepWG.Add(1)
+	go func() {
+		defer rgSweepWG.Done()
+		rg.RunEnumerationReconciliationSchedulerLoop(ctx, pool, logger, cfg.RGEnumerationSweepInterval, cfg.RGEnumerationStalledThreshold)
+	}()
+
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
@@ -227,6 +243,19 @@ func run() error {
 	case <-reconcilerDone:
 	case <-time.After(10 * time.Second):
 		logger.Error("reconciliation scheduler did not stop within the shutdown timeout")
+	}
+
+	// Identical bounded-wait treatment for the enumeration reconciliation
+	// sweep - same reasoning as reconcilerDone above.
+	rgSweepDone := make(chan struct{})
+	go func() {
+		rgSweepWG.Wait()
+		close(rgSweepDone)
+	}()
+	select {
+	case <-rgSweepDone:
+	case <-time.After(10 * time.Second):
+		logger.Error("self-exclusion enumeration reconciliation scheduler did not stop within the shutdown timeout")
 	}
 
 	logger.Info("shutdown complete")
