@@ -118,11 +118,21 @@ flowchart LR
 ### 2.4 Wallet ↔ sportsbook provider — `BLUEPRINT`
 
 - Same shape as §2.3, additionally reconciling **open liability**: the sum
-  of `player_locked` balances for that provider must match the provider's
+  of the locked-funds family's balances for that provider —
+  `account_type IN ('player_locked_cash', 'player_locked_bonus')`, **both
+  members named explicitly**, migration `0048` having removed the single
+  `player_locked` (`ledger-accounting-model.md` §6.5, invariant L1) — must
+  match the provider's
   own reported open-bets-outstanding figure at the same point in time
   (Blueprint's sportsbook open-liability reporting requirement, per
   `09-sportsbook-architecture.md`) — this is a snapshot comparison, not a
   period-sum comparison, since open bets are a point-in-time state.
+- A query naming only one locked type **silently under-reports** open
+  liability rather than failing — the fail-quiet class this model treats
+  as unacceptable, and the same defect `ledger-accounting-model.md`
+  §6.4.8 item 5 rates P1 against ADR 0038 §6's query. Any future
+  locked-family member must be added here in the same change that adds it
+  to `ledger_accounts_account_type_check` (invariant L1, layer 4).
 
 ### 2.5 Provider payable reconciliation — `BLUEPRINT`
 
@@ -177,7 +187,15 @@ relationship, unlike §2.2–§2.8.
 
 - **Reconciliation key**: `(tenant_id, asset_code)`.
 - **Expected state**: `signed(promo_liability) + Σ signed(player_bonus)
-  == 0` — invariant B1 (`ledger-accounting-model.md` §6.1).
+  + Σ signed(player_locked_bonus) == 0` — invariant B1 in its **extended**
+  form (`ledger-accounting-model.md` §6.1, derived at §6.3.2). The
+  aggregate runs over the set `BONUS_SET = {player_bonus,
+  player_locked_bonus}`, not over `player_bonus` alone: migration `0048`
+  made bonus-origin locked funds their own account type, and a lock
+  (`Dr player_bonus X · Cr player_locked_bonus X`) is a transfer *within*
+  that set, so the set's sum is unchanged by it while `player_bonus`
+  alone is not. Aggregating over `player_bonus` only would therefore
+  report a spurious P1 drift of `X` on every bonus-funded lock.
 - **Cadence**: hourly, the same sweep cadence as §2.1.
 - **Tolerance**: **zero**, no tolerance band.
 - **Severity**: **P1** on any non-zero drift, identical handling to §2.1
@@ -240,8 +258,15 @@ not redesign the job.
   every withdrawing player's spendable balance by the held amount and
   wrongly decline their bets. Neither value is a separately-tracked field;
   both are reads over ledger-derived account balances.
-- **Locked balance** = current `player_locked` balance (open sportsbook
-  stakes).
+- **Locked balance** = the **sum** of the current `player_locked_cash` and
+  `player_locked_bonus` balances (open sportsbook stakes). Migration
+  `0048` split the former single `player_locked` account by the origin of
+  the locked value (`ledger-accounting-model.md` §6.5, invariant L1), so a
+  wallet may hold one, the other, or both, and a read naming only one
+  under-reports the player's locked funds. The per-origin amounts are also
+  exposed separately (`internal/wallet`'s `Summary` carries both alongside
+  the combined figure); this combined definition is what "locked balance"
+  means wherever this model says it without qualification.
 - **Bonus balance** = current `player_bonus` balance.
 - **Materialization**: for read performance, a `wallet_balance_projection`
   table (one row per `ledger_account_id`, carrying `tenant_id NOT NULL`,

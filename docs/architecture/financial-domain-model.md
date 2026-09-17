@@ -143,7 +143,7 @@ it is discharged by posted entries.
 | `PlayerAccount` | Tenant + Brand | Unchanged from Stage 2. |
 | `Asset` | Platform (registry) | **Stage 4H-B0-R3 correction**: an open, extensible platform registry, not a closed Stage-1 seed set — the schema (migrations 0003/0006) already accepts any asset code/exponent with no code change; only the operational surface (admin API, RBAC, audit) is missing. See `docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md` §26 and the recommended future ADR 0037. Which assets a tenant/jurisdiction actually *offers* is `tenant_jurisdiction_configs.allowed_currencies`, not a property of the registry row itself. |
 | `Wallet` | Tenant + Brand + Player + Asset | New this stage. One per `(player_account_id, asset_code)`. |
-| `LedgerAccount` (player-owned types: `player_cash`, `player_bonus`, `player_locked`, `player_withdrawal_hold` — see `ledger-accounting-model.md`) | Tenant + Brand + Player + Asset (via `wallet_id`) | New this stage. |
+| `LedgerAccount` (player-owned types: `player_cash`, `player_bonus`, `player_locked_cash`, `player_locked_bonus`, `player_withdrawal_hold` — the two locked types replace the single `player_locked` per migration `0048`; see `ledger-accounting-model.md` §2 and invariant L1) | Tenant + Brand + Player + Asset (via `wallet_id`) | New this stage. |
 | `LedgerAccount` (house-level types: `house_gaming`, `provider_payable`, `psp_clearing`, `psp_reserve`, `jackpot_contribution`, `promo_liability`, `manual_adjustment`) | Tenant + Asset (no `wallet_id`, no player, no brand) | New this stage. One row per `(tenant_id, account_type, asset_code)` — see `ledger-accounting-model.md` for why these are tenant-scoped, never brand-scoped, even though `player_cash` etc. are brand-scoped via their wallet. |
 | `LedgerTransaction` | Tenant | New this stage. Never spans tenants — every entry it produces belongs to accounts in the same tenant (enforced at the database, not by convention — see the ledger ADR). |
 | `LedgerEntry` | Tenant (inherits from its account/transaction) | New this stage. |
@@ -193,8 +193,10 @@ designed, not implemented: no Stage 3A flow produces one
 
 ## Why house-level accounts are tenant-scoped, not brand-scoped
 
-`player_cash`/`player_bonus`/`player_locked` are brand-scoped because they
-live on a brand-scoped `Wallet`. House-level accounts (`house_gaming`,
+`player_cash`/`player_bonus`/`player_locked_cash`/`player_locked_bonus`
+are brand-scoped because they live on a brand-scoped `Wallet` — both
+locked types for exactly the reason the single `player_locked` they
+replace (migration `0048`) was. House-level accounts (`house_gaming`,
 `provider_payable`, etc.) are deliberately **tenant**-scoped, one level
 up: a Tenant's P&L, provider payables, and PSP reserve position are
 commercial/financial-reporting concerns of the *Tenant* (the licensing/

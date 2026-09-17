@@ -54,9 +54,12 @@ platform's registry row targets. No code path assumes a fixed number of
 decimals or a fixed set of "typical" values; the exponent is always
 looked up from the `Asset` registry, never hardcoded.
 
-### Account types (per wallet, unchanged set, now wallet-scoped)
+### Account types (per wallet, now wallet-scoped; set unchanged since Stage 2 apart from migration `0048`'s locked-origin split)
 
-`player_cash`, `player_bonus`, `player_locked` (open sportsbook stakes),
+`player_cash`, `player_bonus`, `player_locked_cash` /
+`player_locked_bonus` (open sportsbook stakes, split by the origin of the
+locked value — migration `0048`; bare `player_locked` is not an admitted
+value, see `ledger-accounting-model.md` §2 and invariant L1),
 `house_gaming`, `provider_payable`, `psp_clearing`, `psp_reserve`,
 `jackpot_contribution`, `promo_liability`, `manual_adjustment`. Every
 ledger account now carries a `wallet_id` (nullable only for

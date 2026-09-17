@@ -125,13 +125,22 @@ func List(ctx context.Context, tx pgx.Tx, playerAccountID uuid.UUID) ([]Wallet, 
 // the moment a withdrawal is requested (ledger-accounting-model.md §2),
 // so subtracting the hold again would double-count it
 // (reconciliation-model.md §3's own corrected formula).
+//
+// Locked value is reported three ways: LockedBalance is the combined
+// locked total, and LockedCashBalance/LockedBonusBalance are its two
+// per-origin components (migration 0048's locked-origin split, invariant
+// L1 - ledger-accounting-model.md §6.5.4/§6.5.5). The per-origin fields
+// exist because a withdrawable-balance or wagering-requirement caller
+// needs the bonus-attributable portion and cannot recover it from a sum.
 type Summary struct {
-	Wallet            Wallet
-	CashBalance       int64
-	AvailableBalance  int64
-	HeldForWithdrawal int64
-	LockedBalance     int64
-	BonusBalance      int64
+	Wallet             Wallet
+	CashBalance        int64
+	AvailableBalance   int64
+	HeldForWithdrawal  int64
+	LockedBalance      int64 // cash-origin + bonus-origin, combined
+	LockedCashBalance  int64
+	LockedBonusBalance int64
+	BonusBalance       int64
 }
 
 // GetSummary reads every player-owned ledger account for w, creating none
@@ -165,10 +174,27 @@ func GetSummary(ctx context.Context, tx pgx.Tx, w Wallet) (Summary, error) {
 			s.CashBalance = signed
 		case ledger.AccountPlayerWithdrawalHold:
 			s.HeldForWithdrawal = signed
-		case ledger.AccountPlayerLocked:
-			s.LockedBalance = signed
+		case ledger.AccountPlayerLockedCash:
+			// = on the per-origin field (the query returns one row per
+			// account, so each is written at most once, which makes this
+			// assignment order-independent); += on the combined field,
+			// which is fed by BOTH locked rows and would otherwise report
+			// whichever one happened to arrive last.
+			s.LockedCashBalance = signed
+			s.LockedBalance += signed
+		case ledger.AccountPlayerLockedBonus:
+			s.LockedBonusBalance = signed
+			s.LockedBalance += signed
 		case ledger.AccountPlayerBonus:
 			s.BonusBalance = signed
+		default:
+			// Fail closed: an unrecognized player-owned account type means
+			// a migration added one without updating this switch (HR-7).
+			// Reporting a plausible-looking wrong balance is the worse
+			// outcome - ledger-accounting-model.md §6.3.4 item 1. This is
+			// layer 4 of invariant L1's enforcement (§6.5.4): the class
+			// fix, not just the two-missing-cases instance fix.
+			return Summary{}, fmt.Errorf("wallet: get summary: unhandled player-owned account type %q on wallet %s", accountType, w.ID)
 		}
 	}
 	if err := rows.Err(); err != nil {

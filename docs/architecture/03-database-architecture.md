@@ -38,9 +38,14 @@ tenant-scoped, `(tenant_id, provider_id, provider_tx_id)` and
 `player_withdrawal_hold`.
 
 - Append-only `ledger_entries` table: never updated, never deleted.
-- Account types: `player_cash`, `player_bonus`, `player_locked`,
-  `house_gaming`, `provider_payable`, `psp_clearing`, `psp_reserve`,
-  `jackpot_contribution`, `promo_liability`, `manual_adjustment`.
+- Account types: `player_cash`, `player_bonus`, `player_locked_cash`,
+  `player_locked_bonus`, `house_gaming`, `provider_payable`,
+  `psp_clearing`, `psp_reserve`, `jackpot_contribution`,
+  `promo_liability`, `manual_adjustment` (plus `player_withdrawal_hold`,
+  above). The Blueprint's single `player_locked` is carried by **two**
+  types split by the origin of the locked value — migration `0048`;
+  bare `player_locked` is not an admitted value. See
+  `ledger-accounting-model.md` §2 and invariant L1 (§6.1/§6.5.4).
 - Every entry: `tenant_id`, `account_type`, `currency`, `amount` (signed,
   `NUMERIC(38,0)` + exponent), `transaction_group_id`, `provider_id`,
   `provider_tx_id`, `created_at`.

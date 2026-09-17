@@ -239,43 +239,53 @@ found no single statement of that boundary anywhere in the Stage 3A set.
 ## 8. Sportsbook bet / fund lock — `BLUEPRINT`
 
 - **Initiating event**: sportsbook widget/feed places a bet slip.
-- **Accounts**: debit `player_cash`/`player_bonus`, credit `player_locked`
-  (both wallet-scoped) — funds leave spendable balance immediately but are
+- **Accounts**: debit `player_cash` → credit `player_locked_cash`, and/or
+  debit `player_bonus` → credit `player_locked_bonus` (all wallet-scoped) —
+  the locked account is chosen by the **origin** of the funds, so origin
+  is recorded by the account itself (migration `0048`; bare `player_locked`
+  is not an admitted account type — `ledger-accounting-model.md` §6.5,
+  invariant L1). Funds leave spendable balance immediately but are
   not yet house revenue, because the outcome is unknown (unlike a casino
   bet, which resolves near-instantly).
 - **Idempotency key**: `(provider_id, provider_tx_id)` = (sportsbook
   provider id, bet-slip reference).
 - **Balance effect**: `player_cash`/`player_bonus` −stake,
-  `player_locked` +stake.
+  `player_locked_cash`/`player_locked_bonus` +stake, per origin.
 - **Failure behavior**: insufficient funds → rejected pre-posting, same
   pattern as Flow 5.
 - **Audit event**: `sportsbook_bet.locked`.
-- **`OPEN DECISION` / blocking precondition for a future stage —
-  `player_locked` loses stake origin.** `player_locked` is a *single*
-  account type, so this flow does not record whether the locked funds came
-  from `player_cash` or `player_bonus`. Settlement (Flows 9/10/11)
-  therefore cannot know which account to return the stake to, and ADR
-  0032's invariant B1 breaks the moment a bonus-funded stake is locked.
-  Recommended resolution (ADR 0032 §10): split into `player_locked_cash` /
-  `player_locked_bonus`, or carry an equally binding indexable origin
-  dimension, and extend B1's account set accordingly. **Not resolved in
-  Stage 4H-A**; it changes a Blueprint-listed account type and needs
-  `architect` + `sportsbook` + `ledger-finance` sign-off in the stage that
-  implements bonus-funded sportsbook stakes. Full statement:
-  `ledger-accounting-model.md` §6.2.
+- **Stake origin — the former `OPEN DECISION`, resolved at the schema
+  level.** This flow previously credited a *single* `player_locked`
+  account and so did not record whether the locked funds came from
+  `player_cash` or `player_bonus`, leaving settlement (Flows 9/10/11)
+  unable to know which account to return the stake to and breaking ADR
+  0032's invariant B1 on the first bonus-funded lock. Migration `0048`
+  implements ADR 0032 §10's recommended resolution — the
+  `player_locked_cash`/`player_locked_bonus` split — and
+  `ledger-accounting-model.md` §6.1/§6.3.2 extends B1's account set to
+  `{player_bonus, player_locked_bonus}` accordingly. **Still open, and
+  narrower than before:** the *bonus-funded* half of this flow remains
+  gated — no `sportsbook_*` transaction type exists yet, gates G-2/G-3 are
+  undecided, and `internal/ledger`'s HR-9 guard fail-closed rejects any
+  posting against `player_locked_bonus` until ADR 0032's `bonus_expense`
+  account type and the Rule B2 (extended) mirror generator both exist.
+  Mixed cash+bonus stakes are hard-rejected at placement (HR-2). Full
+  statement: `ledger-accounting-model.md` §6.5.
 - **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #12, #15.
 
 ## 9. Sportsbook settlement — `BLUEPRINT`
 
 - **Initiating event**: sportsbook provider confirms an event outcome and
   settles a bet slip (win or loss).
-- **Accounts (loss)**: debit `player_locked`, credit `house_gaming` — the
-  locked stake becomes house revenue.
+- **Accounts (loss)**: debit the locked account the stake was locked into
+  (`player_locked_cash` or `player_locked_bonus`, per origin), credit
+  `house_gaming` — the locked stake becomes house revenue.
 - **Accounts (win)**: four entries as two balanced pairs (not a single net
   entry, so `house_gaming`'s activity shows both the stake absorbed and
   the full payout made, matching casino's bet/win symmetry and keeping GGR
   reporting, `12-audit-reporting-architecture.md`, consistent across
-  products): (1) debit `player_locked` for the stake amount (`S`), credit
+  products): (1) debit `player_locked_cash`/`player_locked_bonus` (per
+  origin) for the stake amount (`S`), credit
   `house_gaming` for `S` — the stake is absorbed exactly as in the loss
   case above; (2) debit `house_gaming` for the **full payout**
   (stake-plus-winnings, `S+W`, not the winnings portion alone), credit
@@ -287,13 +297,16 @@ found no single statement of that boundary anywhere in the Stage 3A set.
 - **Idempotency key**: `(provider_id, provider_tx_id)` = settlement's own
   reference, distinct from the original lock's reference.
 - **Failure behavior**: settlement references a bet slip with no matching
-  `player_locked` entry (already settled, or never locked) → rejected,
-  integrity alert.
+  locked entry in either locked account (already settled, or never locked)
+  → rejected, integrity alert. The lookup must name **both**
+  `player_locked_cash` and `player_locked_bonus`; naming one silently
+  misses stakes of the other origin (invariant L1, layer 4).
 - **Bonus-funded portion — mirror legs required (ADR 0032 §2, Rule B2).**
-  Where the original stake locked from `player_bonus` (subject to the
-  `player_locked` origin gap noted in Flow 8's `OPEN DECISION` — this
-  flow cannot be implemented for a bonus-funded stake until that gap is
-  resolved), the payout leg crediting `player_bonus` carries the same
+  Where the original stake locked from `player_bonus` — i.e. sits in
+  `player_locked_bonus`, which is precisely what makes the origin knowable
+  at settlement time (migration `0048`); this flow remains unimplementable
+  for a bonus-funded stake until the gates in Flow 8 clear — the payout
+  leg crediting `player_bonus` carries the same
   `promo_liability`/`bonus_expense` mirror pair as Flow 6's win. **Wave-2
   ledger-finance review correction (P1-1)**: omitted in an earlier draft.
 - **Audit event**: `sportsbook_bet.settled`.
@@ -303,9 +316,14 @@ found no single statement of that boundary anywhere in the Stage 3A set.
 
 - **Initiating event**: provider voids a bet slip (event cancelled, pushed,
   data error) before or after settlement.
-- **Accounts (void before settlement)**: debit `player_locked`, credit
-  `player_cash`/`player_bonus` — stake returned, never became house
-  revenue.
+- **Accounts (void before settlement)**: debit `player_locked_cash` →
+  credit `player_cash`, and/or debit `player_locked_bonus` → credit
+  `player_bonus` — stake returned to the balance it came from, never
+  became house revenue. The return destination is read off the locked
+  account's own type, which is the whole point of migration `0048`'s
+  split: an undifferentiated locked account would leave this flow either
+  leaking real cash to the player or wrongly re-restricting cash as bonus
+  funds.
 - **Accounts (void after settlement)**: full reversal chain — reverse the
   settlement transaction (Flow 9's entries inverted, `reverses_
   transaction_id` set), landing the stake back in `player_cash`/
@@ -322,14 +340,15 @@ found no single statement of that boundary anywhere in the Stage 3A set.
   accept a callback for.
 - **Accounts**: let `R` = the released (settled) portion of the locked
   stake and `P` = the provider-stated cash-out payout. The remainder of the
-  original stake stays in `player_locked` against the still-open portion of
-  the bet. `P` may be **less than or greater than** `R` — a cash-out on a
+  original stake stays in the locked account it was locked into
+  (`player_locked_cash`/`player_locked_bonus`) against the still-open
+  portion of the bet. `P` may be **less than or greater than** `R` — a cash-out on a
   bet in a winning position pays out more than the released stake — so the
   entries must be written generally, not as "debit `R`, credit margin +
   payout" (which only balances when `P < R` and silently breaks invariant
   #1 otherwise):
-  - always: debit `player_locked` `R`; credit `player_cash`/`player_bonus`
-    `P`;
+  - always: debit `player_locked_cash`/`player_locked_bonus` (per origin)
+    `R`; credit `player_cash`/`player_bonus` (the matching origin) `P`;
   - if `R > P` (house keeps a margin): credit `house_gaming` `R − P`;
   - if `P > R` (payout exceeds the released stake): debit `house_gaming`
     `P − R`.
@@ -665,10 +684,10 @@ in each flow above.
 | 5 | Casino bet | `player_cash`/`player_bonus` → `house_gaming` (+`jackpot_contribution` split) (+ `bonus_expense` → `promo_liability` mirror pair on the bonus-funded portion — ADR 0032 §2) | Flow 7 |
 | 6 | Casino win | `house_gaming` → `player_cash`/`player_bonus` (+ `promo_liability` → `bonus_expense` mirror pair on the bonus-funded portion — ADR 0032 §2) | Flow 7 |
 | 7 | Casino rollback | reverse of Flow 5/6, mirror legs included | — |
-| 8 | Sportsbook lock | `player_cash`/`player_bonus` → `player_locked` | Flow 10 |
-| 9 | Sportsbook settlement | loss: `player_locked` → `house_gaming`. Win: `player_locked` → `house_gaming` (stake) **and** `house_gaming` → `player_cash`/`player_bonus` (stake+winnings) (+ mirror pair on the bonus-funded portion — ADR 0032 §2) | Flow 10 |
+| 8 | Sportsbook lock | `player_cash` → `player_locked_cash` / `player_bonus` → `player_locked_bonus` (locked account chosen by fund origin — migration `0048`) | Flow 10 |
+| 9 | Sportsbook settlement | loss: `player_locked_cash`/`player_locked_bonus` → `house_gaming`. Win: `player_locked_cash`/`player_locked_bonus` → `house_gaming` (stake) **and** `house_gaming` → `player_cash`/`player_bonus` (stake+winnings) (+ mirror pair on the bonus-funded portion — ADR 0032 §2) | Flow 10 |
 | 10 | Sportsbook void | reverse of Flow 8/9 | — |
-| 11 | Sportsbook partial settlement | `player_locked` (released portion `R`) → `player_cash`/`player_bonus` (payout `P`), with `house_gaming` taking the difference on whichever side balances (`R>P` credit, `P>R` debit) (+ mirror pair on the bonus-funded portion of `P` — ADR 0032 §2) | Flow 10 (on the settled portion) |
+| 11 | Sportsbook partial settlement | `player_locked_cash`/`player_locked_bonus` (released portion `R`, per origin) → `player_cash`/`player_bonus` (payout `P`, matching origin), with `house_gaming` taking the difference on whichever side balances (`R>P` credit, `P>R` debit) (+ mirror pair on the bonus-funded portion of `P` — ADR 0032 §2) | Flow 10 (on the settled portion) |
 | 12 | Bonus grant | `promo_liability` → `player_bonus` (two entries; no `bonus_expense` at grant — ADR 0032 §3) | Flow 15 (forfeiture) / `bonus_reversal` (erroneous grant) |
 | 13 | Bonus wagering | (derived read, no posting) | n/a |
 | 14 | Bonus conversion | **Single atomic four-entry transaction** (ADR 0032 §4, `RESOLVED`): `player_bonus` → `player_cash` **and** `bonus_expense` → `promo_liability`. Never retire-and-recredit; never a `ConversionOperation` | — |

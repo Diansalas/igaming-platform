@@ -21,6 +21,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -28,15 +30,29 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
-// AccountType is one of the Blueprint's ten ledger account types plus the
-// Stage 3A architectural addition player_withdrawal_hold. See
-// docs/architecture/ledger-accounting-model.md §2.
+// AccountType names one of the ledger account types this platform posts
+// to. The Blueprint names ten; player_withdrawal_hold is a Stage 3A
+// architectural addition; player_locked_cash/player_locked_bonus replace
+// the Blueprint's origin-indeterminate player_locked (migration 0048,
+// ledger-accounting-model.md §6.3/§6.4/§6.5, invariant L1);
+// bonus_expense (ADR 0032 §2) is approved architecture and not yet
+// migrated. No count is stated here: the previous comment's count was
+// already stale and would go stale again.
 type AccountType string
 
 const (
-	AccountPlayerCash           AccountType = "player_cash"
-	AccountPlayerBonus          AccountType = "player_bonus"
-	AccountPlayerLocked         AccountType = "player_locked"
+	AccountPlayerCash  AccountType = "player_cash"
+	AccountPlayerBonus AccountType = "player_bonus"
+	// The locked-funds family (invariant L1, ledger-accounting-model.md
+	// §6.5.4): value held pending the resolution of a wagering event,
+	// with its origin determinable from the account_type alone. Bare
+	// player_locked is deliberately absent - it is not in migration
+	// 0048's CHECK constraint, and its absence here is what makes every
+	// stale read-side enumeration a compile error rather than a silent
+	// zero (§6.5.3). Membership is explicit and named, never inferred
+	// from the player_locked_ prefix.
+	AccountPlayerLockedCash     AccountType = "player_locked_cash"
+	AccountPlayerLockedBonus    AccountType = "player_locked_bonus"
 	AccountPlayerWithdrawalHold AccountType = "player_withdrawal_hold"
 	AccountHouseGaming          AccountType = "house_gaming"
 	AccountProviderPayable      AccountType = "provider_payable"
@@ -94,6 +110,130 @@ var ErrIdempotencyKeyReused = errors.New("ledger: idempotency key reused with a 
 // non-positive amount) caught before ever reaching the database.
 var ErrInvalidEntry = errors.New("ledger: invalid entry")
 
+// ErrBonusPostingBlocked is HR-9's distinct, non-retryable rejection
+// (ledger-accounting-model.md §6.5.7): a posting against a BONUS_SET
+// account fails closed until BOTH the bonus_expense account type and the
+// Rule B2 (extended) mirror generator exist. Non-retryable by
+// construction - retrying cannot make either precondition appear, so a
+// caller must treat this as a permanent rejection, never as a transient
+// failure to re-attempt.
+//
+// Why a rejection is the safe outcome, per HR-9's own reasoning:
+//   - a player_bonus posting without the mirror generator breaks
+//     invariant B1 (bonus mirror) outright, on the first row;
+//   - a player_locked_bonus lock is B1-safe on its own (it is an internal
+//     BONUS_SET transfer) but could not be SETTLED, because settlement
+//     requires a bonus_expense leg that no CHECK constraint currently
+//     admits - producing a stuck lock, i.e. real player value trapped in
+//     a locked account with no postable resolution. That is strictly
+//     worse than refusing the lock.
+var ErrBonusPostingBlocked = errors.New("ledger: bonus-origin posting blocked until the bonus mirror preconditions exist (HR-9)")
+
+// bonusSetAccountTypes is HR-9's BONUS_SET: the account types no entry
+// may be posted against yet. Both members are REQUIRED as of Stage
+// 4H-B0-R7 (§6.5.7; player_bonus was promoted from recommended to
+// required, and has zero posting call sites at HEAD, so the promotion
+// costs nothing today and converts doc 10 §3 item 2's stated safety
+// ordering into a build-time hard stop).
+//
+// REMOVAL CONDITION - a conjunctive precondition evaluated at removal
+// time, not a co-location rule (§6.5.7, reworded at Stage 4H-B0-R7):
+// this guard may be removed only once BOTH already exist in the tree:
+// (i) bonus_expense is migrated into ledger_accounts_account_type_check,
+// AND (ii) the Rule B2 (extended) mirror generator exists in this package
+// and is exercised by tests. Removal lands WITH the generator (the later
+// of the two), never with the bonus_expense migration. At HEAD neither
+// exists, so the guard is unconditional: there is no partial state to
+// check for.
+// It is a function, not a package-level var, deliberately: a var of slice
+// type can be reassigned or truncated by any code in this package -
+// including a test - which would silently disable HR-9 with no compile
+// error (security finding S-3, Stage 4H-B0-R7). Returning a fresh slice
+// per call makes the set immutable by construction; callers may mutate
+// only their own copy.
+func bonusSetAccountTypes() []string {
+	return []string{
+		string(AccountPlayerBonus),
+		string(AccountPlayerLockedBonus),
+	}
+}
+
+// bonusPostingPreconditions is the message fragment HR-9's error must
+// carry: the error names its own precondition, so a Bonus developer who
+// hits it is told what to build rather than reading a bare rejection
+// (§6.5.7).
+//
+// It is phrased as a REQUIREMENT LIST, not as an assertion that both
+// items are currently missing. §6.5.7 reworked HR-9 into a conjunctive
+// condition evaluated at removal time precisely because the two
+// preconditions can land separately: bonus_expense may be migrated first
+// while the guard stays up awaiting the generator. A "missing precondition
+// (i)" phrasing would be false during exactly that window - the window
+// HR-9 exists to cover.
+const bonusPostingPreconditions = "requires (i) account type 'bonus_expense' in ledger_accounts_account_type_check (ADR 0032 §2) and " +
+	"(ii) the Rule B2 (extended) bonus mirror generator in internal/ledger; " +
+	"at the time this guard was written neither existed (Stage 4H-B0-R7). " +
+	"Both must exist before this guard is removed, and its removal lands with the generator (ledger-accounting-model.md §6.5.7 HR-9)"
+
+// assertNoBonusSetEntries implements HR-9. It resolves each entry's
+// account_type from ledger_accounts and rejects the whole posting if any
+// of them is in BONUS_SET, before Post writes anything at all - so a
+// rejected call leaves no ledger_transactions row, no ledger_entries row,
+// and no half-built transaction for a caller to mistake for a partial
+// success. Accounts already minted by an earlier GetOrCreateAccount call
+// are unaffected: a minted-but-never-posted-to account holds no value and
+// carries no entries.
+//
+// On RLS and fail-open, asked because migration 0048's own pre-flight
+// guard was found to be silently inert under ledger_accounts' FORCE ROW
+// LEVEL SECURITY: this lookup runs in the caller's scope, so in principle
+// a scope that cannot see the account would see no BONUS_SET row and let
+// the posting through. It cannot fail open in practice, for two
+// independent reasons. Postings run under tenant/system scope
+// (db.Pool.WithTenant), where tenant_staff_scope makes every account of
+// the tenant visible - a player-scoped connection cannot insert into
+// ledger_transactions at all (migration 0028). And if an account were
+// somehow invisible here, Post's own entry INSERT resolves asset_code by
+// sub-selecting the SAME row, so it would fail on a NOT NULL violation
+// rather than post. The guard is therefore never the only thing standing
+// between an invisible account and an entry.
+func assertNoBonusSetEntries(ctx context.Context, tx pgx.Tx, entries []EntryInput) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, 0, len(entries))
+	for _, e := range entries {
+		ids = append(ids, e.LedgerAccountID)
+	}
+	rows, err := tx.Query(ctx,
+		`SELECT DISTINCT account_type FROM ledger_accounts
+		 WHERE id = ANY($1) AND account_type = ANY($2)`,
+		ids, bonusSetAccountTypes(),
+	)
+	if err != nil {
+		return fmt.Errorf("ledger: resolve entry account types: %w", err)
+	}
+	defer rows.Close()
+
+	var blocked []string
+	for rows.Next() {
+		var accountType string
+		if err := rows.Scan(&accountType); err != nil {
+			return fmt.Errorf("ledger: scan entry account type: %w", err)
+		}
+		blocked = append(blocked, accountType)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("ledger: read entry account types: %w", err)
+	}
+	if len(blocked) > 0 {
+		sort.Strings(blocked)
+		return fmt.Errorf("%w: entries resolve to account type(s) %s; %s",
+			ErrBonusPostingBlocked, strings.Join(blocked, ", "), bonusPostingPreconditions)
+	}
+	return nil
+}
+
 // EntryInput is one leg of a transaction to post.
 type EntryInput struct {
 	LedgerAccountID uuid.UUID
@@ -144,6 +284,13 @@ type PostResult struct {
 // the original's returns ErrIdempotencyKeyReused rather than silently
 // preferring either payload.
 //
+// HR-9 (ledger-accounting-model.md §6.5.7): a posting any of whose
+// entries resolves to a BONUS_SET account (player_bonus,
+// player_locked_bonus) is rejected with ErrBonusPostingBlocked before
+// anything is written, until the bonus_expense account type and the Rule
+// B2 (extended) mirror generator both exist. See bonusSetAccountTypes for
+// the exact removal condition.
+//
 // Balance (invariant #1): entries are validated to balance per asset by
 // a deferred database constraint trigger (migration 0022), which Post
 // forces to run immediately (rather than at the caller's eventual
@@ -172,6 +319,14 @@ func Post(ctx context.Context, tx pgx.Tx, in TransactionInput) (PostResult, erro
 		if e.Direction != Debit && e.Direction != Credit {
 			return PostResult{}, fmt.Errorf("%w: entry direction must be debit or credit, got %q", ErrInvalidEntry, e.Direction)
 		}
+	}
+
+	// HR-9 (ledger-accounting-model.md §6.5.7): a posting against a
+	// BONUS_SET account fails closed here, before any write, until the
+	// bonus_expense account type and the Rule B2 (extended) mirror
+	// generator both exist.
+	if err := assertNoBonusSetEntries(ctx, tx, in.Entries); err != nil {
+		return PostResult{}, err
 	}
 
 	transactionID := uuid.New()

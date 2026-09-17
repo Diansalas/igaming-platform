@@ -278,13 +278,24 @@ Per-account-type modeling. The Blueprint's list (`player_cash`, `player_bonus`,
 `manual_adjustment`) is `BLUEPRINT`; `player_withdrawal_hold` below is an
 `ARCHITECTURAL DECISION` addition, called out explicitly as such.
 
+The Blueprint's single `player_locked` is implemented as **two** account
+types, `player_locked_cash` and `player_locked_bonus` (migration `0048`;
+design §6.3, invariant **L1** in §6 and §6.5.4). The split is a
+realization of the Blueprint concept, not a departure from it: one
+undifferentiated locked account loses the origin of the value it holds,
+which a rollback or settlement must know. Bare `player_locked` is **not**
+an admitted `account_type` and no Go const for it exists (HR-8, §6.4.7).
+Everything below that is true of the locked family is true of both
+members; where only one applies it is named.
+
 | Account type | Purpose | Owner/scope | Asset applicability | Normal balance | Allowed transaction types | Directly manipulable? | Compensating entries required? | Reconciliation |
 |---|---|---|---|---|---|---|---|---|
 | `player_cash` (`BLUEPRINT`) | Player's real-money balance | Wallet (player+brand+tenant) | Any asset the tenant/jurisdiction offers | Credit (liability — asset owed to player) | deposit, deposit_reversal, withdrawal_requested/_reversed, casino bet/win/rollback, sportsbook bet/settlement/void/partial settlement, bonus conversion-in, jackpot_payout, manual_adjustment | No — only via a `LedgerTransaction` | Yes, always | Wallet projection vs. ledger (hourly); wallet vs. PSP/provider (daily) |
 | `player_bonus` (`BLUEPRINT`) | Non-withdrawable bonus balance subject to wagering | Wallet | Any asset bonuses are offered in | Credit | bonus_grant, casino/sportsbook bet/win (bonus-funded stake), bonus_conversion (bonus→cash), bonus_forfeiture | No | Yes | Wallet projection vs. ledger (hourly); bonus-engine liability vs. `promo_liability` (see below) |
-| `player_locked` (`BLUEPRINT`) | Funds locked against an open sportsbook stake (not yet settled) | Wallet | Any asset sportsbook accepts | Credit while locked (liability — stake still belonging to the player until the outcome is known) | sportsbook_bet (lock), sportsbook_settlement (release), sportsbook_partial_settlement (partial release), sportsbook_void (release) | No | Yes, on void/partial settlement | Open-liability report (see `09-sportsbook-architecture.md`) vs. sum of `player_locked` balances |
+| `player_locked_cash` (`BLUEPRINT`, as the cash half of the Blueprint's `player_locked` — migration `0048`) | Cash-funded funds locked against an open sportsbook stake (not yet settled) | Wallet | Any asset sportsbook accepts | Credit while locked (liability — stake still belonging to the player until the outcome is known) | sportsbook_bet (lock), sportsbook_settlement (release), sportsbook_partial_settlement (partial release), sportsbook_void (release) | No | Yes, on void/partial settlement | Open-liability report (see `09-sportsbook-architecture.md`) vs. the sum of **both** locked types' balances (`player_locked_cash` + `player_locked_bonus`); a query naming only one silently under-reports (§6.4.8 item 5) |
+| `player_locked_bonus` (`BLUEPRINT`, as the bonus half of the Blueprint's `player_locked` — migration `0048`) | Bonus-funded funds locked against an open sportsbook stake (not yet settled) | Wallet | Any asset sportsbook accepts | Credit while locked (liability — stake still belonging to the player until the outcome is known) | sportsbook_bet (lock), sportsbook_settlement (release), sportsbook_partial_settlement (partial release), sportsbook_void (release) | No | Yes, on void/partial settlement | Same open-liability reconciliation as `player_locked_cash`; **additionally** inside invariant B1's extended set `{player_bonus, player_locked_bonus}` (§6.1, §6.3.2), so it is also covered by the B1 reconciliation stream (`reconciliation-model.md` §2.9) |
 | `player_withdrawal_hold` (`ARCHITECTURAL DECISION`) | Funds earmarked for a withdrawal request that has left `player_cash` but is not yet externally sent (pending approval/PSP submission) | Wallet | Any withdrawable asset | Credit while held | withdrawal_requested (in), withdrawal_completed (out, external send), withdrawal_reversed (back to `player_cash`) | No | Yes | Cross-checked against open rows in the withdrawal state machine (`withdrawal-state-machine.md`) — every held amount must equal exactly one non-terminal withdrawal request |
-| `house_gaming` (`BLUEPRINT`) | House's gaming P&L (stakes in, wins out) | Tenant (house-level, no wallet — see `financial-domain-model.md`) | Any asset the tenant accepts stakes in | Credit (revenue) net over time — may legitimately sit debit-side for a period if payouts exceed stakes | casino_bet, casino_win, casino_rollback, sportsbook_settlement, sportsbook_partial_settlement, sportsbook_void (post-settlement), provider_settlement (fee recognition — see Flow 17 `OPEN DECISION`). **Not** `sportsbook_bet`: a sportsbook stake moves `player_cash`/`player_bonus` → `player_locked` only, and does not touch `house_gaming` until settlement | No | Yes | Recomputed GGR (Blueprint §4.9) vs. this account's balance, per tenant per asset |
+| `house_gaming` (`BLUEPRINT`) | House's gaming P&L (stakes in, wins out) | Tenant (house-level, no wallet — see `financial-domain-model.md`) | Any asset the tenant accepts stakes in | Credit (revenue) net over time — may legitimately sit debit-side for a period if payouts exceed stakes | casino_bet, casino_win, casino_rollback, sportsbook_settlement, sportsbook_partial_settlement, sportsbook_void (post-settlement), provider_settlement (fee recognition — see Flow 17 `OPEN DECISION`). **Not** `sportsbook_bet`: a sportsbook stake moves `player_cash` → `player_locked_cash` and/or `player_bonus` → `player_locked_bonus` only, and does not touch `house_gaming` until settlement | No | Yes | Recomputed GGR (Blueprint §4.9) vs. this account's balance, per tenant per asset |
 | `provider_payable` (`BLUEPRINT`) | Amount owed to a casino/sportsbook game provider for GGR-share/fees | Tenant (house-level) | Any asset the provider bills in | Credit (liability) | provider_settlement | No | Yes | Daily reconciliation against provider settlement statements |
 | `psp_clearing` (`BLUEPRINT`) | In-flight funds between a PSP initiating a movement and it landing in `player_cash`/external bank rail | Tenant (house-level) | Any fiat asset with PSP rails | **Debit** (asset — funds receivable from / held at the PSP). Transient: should net toward zero as batches settle to the bank rail | deposit (debit, in), deposit_reversal (credit), withdrawal send (credit, out), psp_settlement_batch (credit, out to bank rail), psp_reserve_movement | No | Yes | PSP settlement file reconciliation (`reconciliation-model.md`) |
 | `psp_reserve` (`BLUEPRINT`) | Funds a PSP holds back (rolling reserve / chargeback buffer) | Tenant (house-level) | Any fiat asset the PSP reserves | **Debit** (asset — platform funds withheld by the PSP and receivable back; a credit normal balance would state the opposite of this account's stated purpose) | psp_reserve_movement (increase = debit `psp_reserve` / credit `psp_clearing`; release = inverse) | No | Yes | PSP reserve statement vs. this account, monthly or per PSP's own cadence |
@@ -445,9 +456,11 @@ type, because a per-account sign convention applied at read time is
 exactly the kind of ambiguity that produces a wrong comparison in
 reconciliation. The "normal balance" column in §2 is therefore only a
 statement of which sign a healthy account is *expected* to carry
-(`player_cash`, `player_bonus`, `player_locked`,
-`player_withdrawal_hold`, `provider_payable`, `jackpot_contribution`,
-`house_gaming` ≥ 0; `psp_clearing`, `psp_reserve`, `promo_liability` ≤ 0),
+(`player_cash`, `player_bonus`, `player_locked_cash`,
+`player_locked_bonus`, `player_withdrawal_hold`, `provider_payable`,
+`jackpot_contribution`, `house_gaming` ≥ 0; `psp_clearing`, `psp_reserve`,
+`promo_liability` ≤ 0 — both locked types carry the same `≥ 0` expectation
+the single `player_locked` carried before migration `0048`),
 and a presentation-layer instruction to negate debit-normal accounts for
 human display. A balance whose sign is the opposite of its normal balance
 is an operational alert, not an error in this formula.
@@ -481,7 +494,7 @@ Stage 3A review):
 | 9 | Authoritative balance rebuildable from ledger | §5 — balance is always `SELECT SUM(...)`, never a mutated field |
 | 10 | Compensating entries only for corrections | `reverses_transaction_id` is the only correction mechanism; no delete/edit path exists |
 | 11 | Withdrawal approval cannot be bypassed | State machine gate before any `withdrawal_completed` `LedgerTransaction` can be created — see `withdrawal-state-machine.md` |
-| 12 | Locked funds cannot be spent twice | `player_locked`/`player_withdrawal_hold` balances are moved by transactions referencing the specific open bet/withdrawal id they lock against, checked before release (`financial-transaction-flows.md`) |
+| 12 | Locked funds cannot be spent twice | The locked-funds family (`player_locked_cash`/`player_locked_bonus` — migration 0048, invariant L1 below; formerly the single `player_locked`) and `player_withdrawal_hold` balances are moved by transactions referencing the specific open bet/withdrawal id they lock against, checked before release (`financial-transaction-flows.md`) |
 | 13 | Settlement cannot be posted twice | Same idempotency mechanism (#3/#4) applied to settlement callbacks specifically |
 | 14 | Reversed operations leave an auditable financial trail; failed ones leave a non-ledger trail | §1.5 — a posted transaction, including one later reversed, is a permanent row, and a reversal adds entries rather than removing them. An operation that never reached a posted fact (declined, abandoned, crashed mid-flow) deliberately has **no** ledger row at all (§4); its trail is the audit log plus the orchestrator/workflow attempt records (`payment-orchestration.md` §5, `withdrawal-state-machine.md` §2) |
 | 15 | Balance sufficiency is checked in the same database transaction as the debit it authorizes | Not a new rule — CLAUDE.md's "the authoritative balance read happens inside the same database transaction as the write", given its own number because `financial-transaction-flows.md` Flows 3/5/8 need one to cite and #9 (balance rebuildability) is a different property. Mechanism: `docs/decisions/0020` (row lock or `SERIALIZABLE`) |
@@ -490,14 +503,23 @@ These are the floor Stage 3B must meet; each transaction flow in
 `financial-transaction-flows.md` states which of these apply to it
 specifically.
 
-### 6.1 Invariant B1 (bonus mirror) — added Stage 4H-A, `NOT IMPLEMENTED`
+### 6.1 Lettered invariants added by later stages — B1 (bonus mirror, Stage 4H-A, `NOT IMPLEMENTED`) and L1 (locked-origin determinacy, Stage 4H-B0-R7, `IMPLEMENTED`)
 
 `docs/decisions/0032-bonus-accounting.md` §2 adds one further invariant,
-listed here so the mandatory list above stays the single place to look:
+and §6.5.4 of this document adds a second, both listed here so the
+mandatory list above stays the single place to look. They are lettered
+rather than numbered so the Stage 3B list above keeps its numbering:
 
 | # | Invariant | Enforcement mechanism |
 |---|---|---|
 | B1 | `signed(promo_liability) + Σ signed(player_bonus) == 0` for every `(tenant_id, asset_code)`, at every instant, **no tolerance band** | Rule B2 in ADR 0032: every `LedgerEntry` against a `player_bonus` account carries an equal, opposite `promo_liability` entry in the **same `LedgerTransaction`**, generated/validated in `internal/ledger` rather than assembled by callers. Verified continuously by a new hourly, zero-tolerance reconciliation stream, P1 on any drift (`reconciliation-model.md`) |
+| L1 | Locked-origin determinacy: every `LedgerEntry` against a locked-funds account is attributable to the origin of the value it holds from the account's own `account_type` alone. Family membership is explicit and named; no origin-indeterminate locked account exists or can be created. Full statement, including the extensibility clause, in §6.5.4 | Five layers (§6.5.4): (1) `ledger_accounts_account_type_check` admits `player_locked_cash`/`player_locked_bonus` and **not** `player_locked` (migration 0048); (2) no `AccountPlayerLocked` Go const exists, so a stale use is a compile error; (3) migration 0048's pre-flight guard proves the pre-state; (4) every read-side `account_type` enumeration is exhaustive with a fail-closed `default` (`internal/wallet.GetSummary`); (5) tests in `internal/ledger` and `internal/wallet` (§6.5.8) |
+
+L1 is `IMPLEMENTED` as of migration 0048 and its accompanying Go changes
+(§6.5's implementation-status note). It is a *determinacy* statement, not
+a sufficiency one: bonus-origin locking remains unusable until
+`bonus_expense` and the Rule B2 (extended) generator exist, which HR-9
+enforces at the posting boundary.
 
 B1 is `NOT IMPLEMENTED`: it becomes enforceable only once the
 `bonus_expense` account type and the `bonus_*` transaction types exist.
@@ -1508,15 +1530,22 @@ domain's stake split (`internal/sportsbook` → `internal/ledger`, per
 before posting — a caller that supplies a split summing to anything else
 must be rejected, not silently reconciled.
 
-**6. Documents requiring a follow-up edit** (all `NOT IMPLEMENTED` until
-made; ownership is marked per group below, because the authorizing stage
-sequences these across domains). **This list was completed at Stage
-4H-B0-R7 from §6.6.16's Omission 2**, which found three canonical
-documents absent from it and two present but under-scoped. The list below
-is the corrected one; the earlier, shorter version of it must not be used
-as a completeness claim.
+**6. Documents requiring a follow-up edit** (ownership is marked per group
+below, because the authorizing stage sequences these across domains).
+**This list was completed at Stage 4H-B0-R7 from §6.6.16's Omission 2**,
+which found three canonical documents absent from it and two present but
+under-scoped. The list below is the corrected one; the earlier, shorter
+version of it must not be used as a completeness claim.
 
-*`ledger-finance`-owned:*
+**Status (Stage 4H-B0-R7 fix wave):** the first two groups — everything
+`ledger-finance`-owned, and the four other architecture documents carrying
+a normative `account_type` enumeration — are `IMPLEMENTED`; the edits were
+made in that wave. The third group (other specialists' files) and the
+agent-definition line remain `NOT IMPLEMENTED` and are **not**
+`ledger-finance`'s to make.
+
+*`ledger-finance`-owned (`IMPLEMENTED`, Stage 4H-B0-R7 fix wave, except
+§6.1/§6.2 as noted):*
 
 - This document, §2's account-type table (line ~285: the `player_locked`
   row splits into two, and `house_gaming`'s row references
@@ -1542,7 +1571,10 @@ as a completeness claim.
 *Other architecture documents carrying a **normative** `account_type`
 enumeration — each states the platform's account-type list as fact, so
 leaving any of them unedited leaves a canonical document naming a value
-the post-`0048` CHECK rejects (all added per Omission 2):*
+the post-`0048` CHECK rejects (all added per Omission 2). All four were
+edited in the Stage 4H-B0-R7 fix wave: they are mechanical, factual
+corrections naming an already-authorized split consistently, not new
+architecture decisions, so they carried no separate `architect` sign-off:*
 
 - `docs/architecture/03-database-architecture.md:41` — the database
   document's own canonical account-type list.
@@ -3145,6 +3177,62 @@ any document owned by another specialist.
 
 ### 6.5 Phase-2 implementation design — migration `0048` and its code changes (Stage 4H-B0-R7 Workstream A, DESIGN ONLY)
 
+> **IMPLEMENTATION STATUS (Stage 4H-B0-R7, later implementation dispatch
+> — supersedes the design-only status line below, which is kept as the
+> record of what this section was when written).**
+> **`IMPLEMENTED`:** `migrations/0048_ledger_locked_account_origin_split.
+> {up,down}.sql`; the `internal/ledger` const changes (§6.5.5 item 1,
+> including the **deletion** of `AccountPlayerLocked`); HR-9's fail-closed
+> posting guard (`ErrBonusPostingBlocked`, §6.5.7); `internal/wallet`'s
+> `Summary` per-origin fields and `GetSummary`'s two new arms plus its
+> erroring `default` (§6.5.5 item 2); invariant L1's five enforcement
+> layers; and the §6.5.8 test set, items 1–8 and 10 in full, item 9 at
+> exponents 0/2/18.
+> **L1 layer 4 (read-side completeness), `ledger-finance`-owned portion:
+> `IMPLEMENTED` in full** — not merely `GetSummary`. That covers
+> `GetSummary`'s exhaustive switch with its erroring `default` **and** the
+> two specifications of locked-balance reads in `reconciliation-model.md`
+> (§2.4's sportsbook open-liability query and §3's locked-balance
+> definition), plus §2.9's B1 stream, all corrected at the Stage 4H-B0-R7
+> fix wave so the reconciliation model no longer specifies the opposite of
+> the shipped code. The two layer-4 sites that are **not**
+> `ledger-finance`'s — ADR 0038 §6's open-liability query and
+> `internal/risk`'s `operationCumulativeSpecs` — remain
+> `NOT IMPLEMENTED` and are listed below; layer 4 is therefore complete on
+> this specialist's side and still open on theirs.
+> **One correction to §6.5.2's literal SQL, made by this specialist at
+> implementation time and caught by the guard's own test:** the
+> designed pre-flight `DO $$ ... EXISTS(SELECT ...)` guard was **silently
+> inert**, because `ledger_accounts` carries `FORCE ROW LEVEL SECURITY`
+> (migration 0020) which applies to the table owner too, so a migration
+> connection with no `app.tenant_id` set sees zero rows regardless of
+> what the table holds. The shipped migration therefore implements the
+> guard with a **single** mechanism that needs no row visibility at all:
+> the `ADD CONSTRAINT` is wrapped so a check violation — which constraint
+> validation raises over **all** rows, RLS being irrelevant to it — is
+> re-raised with a legible, remedy-naming message. An interim revision
+> additionally lifted and restored `FORCE ROW LEVEL SECURITY` around a row
+> count, to put the offending-row count in the message; that was
+> **removed** at security review (finding S-1): the restore is
+> transaction-local, so an operator running the file standalone under
+> `psql -v ON_ERROR_STOP=1 -f` — exactly what they would do to read the
+> guard's message during an incident — stops at the `RAISE` and leaves
+> `ledger_accounts` with `FORCE` permanently off, silently weakening
+> tenant isolation on a financial table. A row count in an error message
+> does not justify that, and no forward migration toggles `FORCE` RLS. The
+> guard's message consequently names the condition and the remedy but
+> carries no count. Nothing else in §6.5.2 changed: same twelve values,
+> same removal of bare `player_locked`, same down migration, no
+> `NOT VALID`.
+> **`NOT IMPLEMENTED` (unchanged, by design):** cases A/D/F/H/J/K as
+> postings (no `internal/sportsbook`, no `sportsbook_*` transaction type);
+> cases B/E/G/I (`BLOCKED` on G-2/G-3 and HR-9); cases C and L; §6.5.5
+> item 4's comment fixes in `internal/risk` (that package was outside the
+> implementing dispatch's authorized scope — zero behavior change, still
+> owed); §6.5.11's ADR 0035 collision (still `NOT IMPLEMENTED` on both
+> sides). §6.2's open item is closed at the *schema* level by this
+> migration; its bonus-origin half remains gated.
+
 **Status: `NOT IMPLEMENTED`. DESIGN ONLY — no migration file, no Go code
 was written by the dispatch that produced this section.** This section
 finalizes §6.4's phase-2 plan into the exact artifacts phase 2 will
@@ -3194,7 +3282,12 @@ now a confirmation of known behavior rather than an exploration.
 
 Design, to be written by phase 2 as
 `migrations/0048_ledger_locked_account_origin_split.{up,down}.sql`,
-styled on `0035`'s precedent:
+styled on `0035`'s precedent. **The shipped `.up.sql` differs from the
+block below in the pre-flight guard only** — see this section's
+implementation-status note: the guard as designed here is inert under
+`FORCE ROW LEVEL SECURITY`, and the shipped file replaces it with a
+single RLS-proof mechanism (the wrapped `ADD CONSTRAINT`), carrying no
+row count and toggling no RLS setting. Everything else shipped verbatim:
 
 ```sql
 -- 0048 ... .up.sql
@@ -3389,6 +3482,18 @@ and the fail-closed default, not in the member count.
 | 4 | **Read-side completeness** | Every `account_type` enumeration, each with a fail-closed default (HR-7, extended at Stage 4H-B0-R7): `GetSummary`'s exhaustive switch with an erroring `default` (§6.5.5); ADR 0038 §6's open-liability query's `IN` list; `internal/risk`'s `operationCumulativeSpecs` (`MeasuredAccountTypes`/`IgnoredAccountTypes`), which must name **both** family members; and the specifications of two of those reads in `reconciliation-model.md` §2.4/§3 (§6.3.4 item 6) | An unhandled locked account type errors loudly instead of reporting zero — or, for a Risk spec, denies rather than mis-measures |
 | 5 | **Test** | A test asserting `INSERT ... account_type = 'player_locked'` fails with a check violation, and a test asserting the Go const is absent by the file simply not compiling if reintroduced | Regression caught in CI |
 
+**A second disclosed gap, at layer 1, recorded rather than papered over
+(`security` S-2, Stage 4H-B0-R7).** Every layer above constrains which
+`account_type` may be **written**; none constrains **rewriting** one. An
+`UPDATE ledger_accounts SET account_type = ...` would retroactively change
+the origin attribution of entries already posted against that account, and
+L1 is stated in terms of the account's current `account_type`. **HR-15**
+(§6.5.7) makes the missing `BEFORE UPDATE` trigger a hard gate on the
+first posting to a locked account; until it lands, layer 1 should be read
+as "constrains inserts and the value set", not "makes the attribution
+permanent". No falsification window exists today, because no
+`transaction_type` posts to a locked account (§6.5.6).
+
 **One disclosed collision at layer 1, recorded rather than left to be
 discovered live (§6.6.16 Omission 1, HIGH).** Layer 1's guarantee is
 stated above as if `ledger_accounts_account_type_check` were the only
@@ -3566,14 +3671,17 @@ traffic, and the first sportsbook slice starts from a schema that already
 satisfies L1. That is the whole content of §6.3.2's
 migration-sequencing recommendation, now realizable literally.
 
-#### 6.5.7 HR-9 … HR-14 — hard requirements added by this design
+#### 6.5.7 HR-9 … HR-15 — hard requirements added by this design
 
 Extending §6.4.7's HR-1 … HR-8, of which HR-1 … HR-6 and HR-8 are
 unchanged and still binding, and **HR-7 gained a second clause** at Stage
 4H-B0-R7 (write-path `account_type` enumerations in `internal/risk`, per
 §6.6.16). HR-9 belongs to phase 2; HR-10 … HR-14 belong to §6.6's model
 and are listed here so the HR series stays in one place. HR-14 is the only
-one of them that binds a decision **not yet taken** (gate G-2).
+one of them that binds a decision **not yet taken** (gate G-2). **HR-15
+was added at Stage 4H-B0-R7's fix wave** from `security` finding S-2; it
+is a gate on the *next* domain to post to a locked account, not on phase 2
+(which posts to none), and is `NOT IMPLEMENTED` by design.
 
 - **HR-9 — a posting against a `BONUS_SET` account fails closed until the
   mirror generator and `bonus_expense` both exist.** `internal/ledger`'s
@@ -3630,10 +3738,16 @@ one of them that binds a decision **not yet taken** (gate G-2).
   10 §3 currently anticipates two — that item should be added to doc 10 §3,
   which is `bonus-engine`'s file and is **not** edited here (§6.4.8's
   name-without-editing convention; recorded in §6.6.17). HR-9's distinct
-  non-retryable error **must name its own precondition in its message**
-  (which of `bonus_expense` / the generator is missing), so a Bonus
-  developer who hits it is told what to build rather than reading a bare
-  rejection. This is defense in depth *below* gates
+  non-retryable error **must name its own preconditions in its message**,
+  so a Bonus developer who hits it is told what to build rather than
+  reading a bare rejection. It states them as a **requirement list**, not
+  as an assertion that both are currently missing (corrected at the Stage
+  4H-B0-R7 fix wave per `code-reviewer` F2): because the two preconditions
+  can land separately — `bonus_expense` first, alone, per doc 10 §3 item
+  1 — a "missing precondition (i)" phrasing would be **false during
+  exactly the window the reworded removal condition exists to cover**. The
+  shipped message names both requirements and records that neither existed
+  when the guard was written. This is defense in depth *below* gates
   G-2/G-3: those gate `internal/sportsbook`'s willingness to offer
   bonus-funded placement; HR-9 gates the ledger's willingness to post it
   at all.
@@ -3652,6 +3766,46 @@ one of them that binds a decision **not yet taken** (gate G-2).
   same change** (§6.6.5; added Stage 4H-B0-R7 per §6.6.16's Inconsistency
   A). Binds prospectively on the resolution of gate G-2 without
   anticipating which resolution is chosen.
+- **HR-15 — `ledger_accounts` identity columns must become immutable
+  before the first posting to a locked account.** A `BEFORE UPDATE` row
+  trigger on `ledger_accounts` rejecting any change to `account_type`,
+  `wallet_id`, `asset_code` or `tenant_id` **MUST** land — as its own
+  migration, with its own review — **before any `transaction_type` posts
+  to `player_locked_cash` or `player_locked_bonus`.** This is a hard gate,
+  not backlog. Added Stage 4H-B0-R7 per `security` finding S-2.
+
+  Reason: nothing in the live schema prevents `UPDATE ledger_accounts SET
+  account_type = 'player_locked_cash' WHERE account_type =
+  'player_locked_bonus'`. Invariant L1 (§6.5.4) says an entry's origin is
+  determined by "the account's own `account_type` alone"; a mutable
+  `account_type` makes that determination **retroactively falsifiable**,
+  and does so silently, since `ledger_entries` is append-only and would
+  keep pointing at an account whose meaning changed underneath it. The
+  same flip would bypass HR-9, which resolves its `BONUS_SET` membership
+  from exactly that column. `wallet_id`/`asset_code`/`tenant_id` are in
+  scope for the same reason: each is an identity fact that entries already
+  posted depend on, and `asset_code` additionally fixes the exponent those
+  amounts were computed in.
+
+  Why it is **not** a blocker on migration `0048` itself: no
+  `transaction_type` that posts to a locked account exists yet (§6.5.6),
+  so the falsification window is empty today. It closes the moment
+  `sportsbook_*` (ADR 0038) or any other locked-account posting lands,
+  which is why the gate is phrased against the first posting rather than
+  against a stage number. Layer 1 of L1 (the CHECK) constrains which
+  values may be written; HR-15 is the missing constraint on **rewriting**
+  them, and L1's layer table should be read as assuming it.
+
+  **Related, lower severity, same migration (`security`, S-2's second
+  half):** nothing enforces that `player_locked_cash`/`player_locked_bonus`
+  accounts are *player-owned* (i.e. `wallet_id IS NOT NULL`). This is a
+  **pre-existing** gap shared with `player_cash`/`player_bonus`, not
+  introduced by `0048`, so it is not itself a gate; it is worth adding as
+  a `CHECK` in HR-15's trigger migration while that table is already being
+  touched under review. Note the interaction with §6.5.11: ADR 0035
+  §1.3.1's proposed `ledger_accounts_owner_family` CHECK is an attempt at
+  the same property, so whoever builds HR-15's migration must reconcile
+  the two rather than add a third overlapping constraint.
 
 #### 6.5.8 Phase-2 test set (owned by `ledger-finance`, non-negotiable)
 
@@ -3667,7 +3821,14 @@ the items this design adds. A happy-path test satisfies none of this:
    `player_locked_bonus` returns a combined `LockedBalance` equal to their
    sum and correct per-origin fields — §6.3.4 item 1's defect caught by a
    test rather than by a player. Run with the two rows in both orders to
-   prove order-independence.
+   prove order-independence — and the harness must **fail loudly if it did
+   not actually achieve the order it intended**, never pass on one order
+   twice. (Implementation note, Stage 4H-B0-R7 fix wave: the shipped
+   harness rewrites the two projection rows to the heap tail in the
+   requested sequence with index/bitmap scans **and** `synchronize_seqscans`
+   disabled for the transaction — synchronized seq scans start mid-table
+   and rotate the rows a query sees, which was observed rotating this
+   test's order during a concurrent full-suite run.)
 4. `GetSummary` returns an error, not a zero, when a player-owned account
    of an unhandled type exists (the `default` arm; constructed by
    inserting a row directly, since no code path can produce one).
