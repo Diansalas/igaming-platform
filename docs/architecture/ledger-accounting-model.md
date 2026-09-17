@@ -4410,6 +4410,200 @@ authority:
 | Gates G-2, G-3 | **G-2 unchanged and open.** G-3's design is proposed here and closes only on `bonus-engine`'s acceptance plus the Progress-trail/Grant-state work that remains theirs |
 | Migration `0048`, all Go code, any `internal/bonus` code | **NOT WRITTEN, NOT AUTHORIZED** |
 
+#### 6.6.14 `sportsbook` independent validation (Stage 4H-B0-R7, gate G-3 sportsbook-side check)
+
+Answering §6.6.12's V-12 through V-14, as posed, plus the cross-check
+against `identity-compliance`'s parallel ADR 0034 §14.10/§14.11 (produced
+the same round, neither dispatch could see the other's final output).
+This subsection does not redesign §6.6's model, does not write a query,
+migration, or Go code, and does not by itself close gate G-3 —
+`bonus-engine`'s acceptance (V-7 … V-11) and `architect`'s (V-15, V-16)
+are independent and unaffected.
+
+**V-12 — the undifferentiated `sportsbook_void` treatment is CONFIRMED
+correct as the default, from this domain; no differentiated mechanism is
+requested at this time.** Weighed both ways rather than accepted at face
+value:
+
+- A push's stake genuinely was at risk until the market determined it,
+  which is a real argument for risk-preserving treatment, and it is not
+  frivolous — a disputing player could reasonably ask why a bet that
+  actually played out to a decided (if refunded) result is treated
+  identically to a bet cancelled before the event ever started.
+- But the abuse-vector direction runs the other way, and more strongly.
+  §6.6.1's own farming description — "repeatedly stake bonus funds on
+  markets... with an above-average void/push rate, carry zero net
+  risk, keep all progress" — names push-prone markets as part of
+  *today's undifferentiated defect*, and the reason a push is dangerous
+  there is exactly what would make it dangerous under a differentiated
+  fix too: a push is the **only** bet-resolution shape that costs the
+  player literally nothing (unlike a loss, which has real expected cost,
+  and unlike a genuine win, which the operator prices for) while still
+  being framed as "the bet was decided." Markets structurally prone to a
+  push are identifiable in advance (whole-number point-spread/total
+  lines in the sports that use them) and selectable by the player without
+  skill. Making push risk-preserving would hand a bonus-abusing player a
+  **zero-cost, repeatable** way to accrue firm wagering progress by
+  targeting exactly those lines — a cleaner vector than the one it would
+  close, not a smaller one, since a push carries no downside at all where
+  even the C-win/cashout vectors this round names cost the player a
+  non-zero few percent.
+- This also matches this domain's own read of common bonus-terms
+  practice: "void, cancelled and pushed bets do not count toward the
+  wagering requirement" is the prevailing convention, not an
+  idiosyncratic one — so §6.6.11 item 3's characterization of nullifying
+  as "the abuse-safe **and** industry-typical answer" is confirmed from
+  this domain's side, not merely asserted from ledger-finance's.
+
+**Conclusion:** treat all three (cancellation, push, data error) as
+nullifying, unchanged, no differentiated mechanism built. This is a
+product/promotions-policy call in principle, not a mechanical one — if a
+future commercial decision wants "pushes count toward wagering" as a
+marketing feature, `ledger-finance` already named the correct instrument
+(a provider-neutral void reason code on the posting, an ADR 0038 + doc 09
+change) and it is not invented here, per the task's own boundary. `identity-
+compliance` should note the same conclusion, since ADR 0034 §14.7's
+`VOID_ON_SELF_EXCLUSION` reuses the same undifferentiated `sportsbook_void`
+type without qualification.
+
+**V-13 — CONFIRMED, and checked against both the partial-settlement and
+the ADR 0038 §8.1 void-after-partial-settlement shapes rather than
+asserted.**
+
+- §6.6.6's predicate (`Σ signed(player_locked_bonus)` over the bet's
+  `correlation_id`, restricted to wallet/asset, `> 0`) is §6.3.3.1
+  **variant 2** reused verbatim, and that is the identical query ADR
+  0034 §14.10 specifies for computing a `VOID_ON_SELF_EXCLUSION`
+  execution's remaining-per-origin release amount. Both designs, produced
+  in parallel, converged on the same mechanism rather than two
+  independently-invented ones — checked, not assumed, by reading both
+  texts side by side.
+- **Partial settlement composes correctly.** ADR 0038 §8.2 posts
+  `Dr player_locked R · Cr player_cash/player_bonus P` per resolved leg
+  and is classified risk-preserving in §6.6.5's table, so it does not
+  contribute to `returned(c)`. This is the right answer for the leg(s)
+  it resolves — their fate is genuinely decided (won or lost) and their
+  share of progress must stand, exactly like a full settlement (case 7).
+  Because the predicate is evaluated over the bet's **total** remaining
+  exposure rather than per leg, a bet with one leg settled and one still
+  open reports `nullifiable = true` for the **whole** contribution until
+  the last leg resolves or the remainder is voided — which is the correct
+  conservative answer, not an approximation of one: the still-open
+  leg(s) genuinely could still be voided, so the contribution's fate is
+  not yet fully decided, and W1 (§6.6.6) is explicit that a contribution
+  may not authorize a conversion while any part of that is true. This
+  costs nothing except, in principle, a slightly later `P_firm` credit
+  for a bet whose first leg already resolved — a conservative, not an
+  unsafe, delay.
+- **The void-after-partial-settlement variant composes correctly, and
+  this is the sharper check.** Take a bet with original bonus stake `b`,
+  a prior partial settlement releasing `R` (won or lost, doesn't matter
+  to this check), leaving `b − R` in `player_locked_bonus`, and then a
+  void of the remainder. Per ADR 0034 §14.10, that void's `player_bonus`
+  credit is sized to the **remaining** locked balance, `b − R`, not the
+  original `b`. §6.6.5's `returned(c)` reads exactly that credit amount
+  off the ledger, so `risked = b − returned = b − (b − R) = R` — precisely
+  the portion whose fate was already decided by the partial settlement,
+  correctly preserved, while the voided remainder is correctly nullified.
+  No double-count, no under-count, no special-cased "was there a prior
+  partial settlement" branch anywhere in the derivation: it falls out of
+  reading the actual ledger facts, which is exactly the property §6.6.3
+  claims for the model generally.
+- **One documentation gap worth naming, not a mechanism defect.** §6.6.7's
+  case table is titled "every required case" but has no explicit row for
+  a bare partial settlement (only "partial void," case 5) or for the
+  void-after-partial-settlement composite just checked above. The
+  derivation handles both correctly by construction (it is fact-driven,
+  not case-driven), so nothing needs to change in the mechanism itself —
+  but a future reader relying on the case table as a completeness proof
+  rather than as illustration could miss this. Recommend `ledger-finance`
+  add these two rows to §6.6.7 the next time that section is touched;
+  not requested as a blocking change to this round's output.
+
+**V-14 (FD-1) — CONFIRMED real from this domain, and CONFIRMED not
+blocking.** The vector is, if anything, understated as "cleaner and
+cheaper" than the C-win/rounding class: a cashout offer is priced off the
+provider's live odds/margin and, for most in-play and pre-match markets,
+is available within seconds of bet acceptance — well before any
+meaningful market movement — at a price that differs from the stake by
+only the provider's built-in margin (commonly a low single-digit-to-
+high-single-digit percentage, not the near-100%-of-stake-at-risk a
+genuine settlement carries). Unlike the void/push vector just discussed,
+which depends on an outcome the player does not fully control, cashout
+timing is entirely player-controlled and requires no favorable market
+event at all — the player simply always cashes out immediately. If
+treated as risk-preserving, this is a **deterministic**, bounded-cost,
+unbounded-repetition conversion of bonus stake into firm wagering
+progress, strictly worse than a probabilistic vector because it has no
+variance for the operator to rely on as a natural throttle. Confirmed
+real.
+
+Confirmed not blocking: no `internal/sportsbook` package, no mock or real
+cashout-offer path, and no cashout posting exists in this codebase
+(§6.5.1, §6.5.10). §6.6.5's fail-closed classification of
+`sportsbook_cashout` (unclassified until FD-1 is answered, so no
+contribution nullified by a cashout can ever reach `P_firm`) is the
+correct interim state precisely because it fails on the safe side of this
+vector — a cashout-affected contribution is blocked from authorizing a
+conversion, never silently permitted to. Nothing this specialist would
+build depends on FD-1 being answered before then. When FD-1 is taken up,
+this domain's engineering observation (not a policy vote, per the same
+"not this specialist's call" boundary `ledger-finance` and
+`product-owner-proxy` already applied to the proceeds question) is that
+the deterministic, variance-free nature of the vector argues for treating
+bonus-funded cashout as nullifying by default unless a specific
+consumer-protection or commercial reason says otherwise — offered to
+whichever dispatch carries FD-1, not decided here.
+
+**Cross-check with `identity-compliance`'s ADR 0034 §14.11 — CONFIRMED
+CONSISTENT, checked clause by clause, not merely by conclusion.**
+§14.11's integration requirement is that the netting mechanism key on
+`correlation_id` and **not exclusively** on `reverses_transaction_id`,
+because a self-exclusion-triggered void of an open (pre-settlement) bet
+is, by ADR 0038 §8.1's own table, the "before settlement" shape that sets
+no `reverses_transaction_id` at all. §6.6.5 condition 1 keys the entire
+predicate on `(tenant_id, correlation_id)` match; condition 3's first
+branch (`V.transaction_type = 'sportsbook_void'`) requires **no**
+`reverses_transaction_id` condition whatsoever — a void nets purely on
+sharing the lock's `correlation_id`. `reverses_transaction_id` appears
+only in condition 3's *second* branch, and only to disambiguate a
+`sportsbook_rollback`/`casino_rollback` reversing the **lock** (nullifying)
+from one reversing a **settlement** (risk-preserving, §6.4.11's named
+trap) — a narrower, additional use, not a substitute for the
+`correlation_id` key. A `VOID_ON_SELF_EXCLUSION` execution of an open bet
+therefore nets correctly under §6.6.5 with zero special-casing: it is a
+`sportsbook_void` sharing the lock's `correlation_id`, full stop. Both
+pieces of work independently arrived at `correlation_id` as the join key
+(§6.6.6 also cites it as "the identical `correlation_id`-keyed recovery
+query" `identity-compliance` uses at ADR 0034 §14.10) — confirmed
+consistent, not merely compatible by accident.
+
+One phrasing nuance worth recording so it is not later over-read: ADR
+0034 §14.11's own concrete example lists `sportsbook_void`/`sportsbook_
+rollback`/`sportsbook_partial_settlement`/`sportsbook_cashout` together as
+the transaction types "sharing its `correlation_id` that credit the
+released bonus-origin amount back to `player_bonus`" a netting query
+should consider. Read as naming the **candidate search space** (every
+transaction type that can appear on a bet's `correlation_id` and credit
+`player_bonus`), this is exactly right and is what §6.6.5's exhaustive
+classification switch scans. It should **not** be read as asserting all
+four types always net — §6.6.5 correctly classifies
+`sportsbook_partial_settlement` as risk-preserving (a leg's payout credit
+to `player_bonus` must stand, per property 2) and `sportsbook_cashout` as
+unclassified/fails-closed pending FD-1, and both classifications are
+necessary: naive netting of a partial-settlement win's payout would
+reproduce the exact "netting a genuine win" trap §6.4.11 named. No
+inconsistency found — `identity-compliance`'s requirement is about the
+join key, which §6.6.5 satisfies; the per-type classification is
+correctly left to, and correctly supplied by, `ledger-finance`'s table.
+
+| §6.6.12 item | Status after this validation |
+|---|---|
+| V-12 | **Confirmed final as designed** — undifferentiated `sportsbook_void` (nullifying for cancellation, push, and data error alike). No differentiated mechanism requested; the reason-code path stays named, not built, for a future product decision |
+| V-13 | **Confirmed correct**, including partial settlement and the void-after-partial-settlement composite, checked by worked arithmetic against ADR 0034 §14.10's release formula. One documentation-only gap flagged (§6.6.7's case table), not a mechanism defect |
+| V-14 / FD-1 | **Confirmed real** (deterministic, variance-free, cheaper than C-win) and **confirmed not blocking** — cashout has no implementation to block. Non-binding engineering lean offered (nullifying by default) for whoever answers FD-1 |
+| ADR 0034 §14.11 cross-check | **Confirmed consistent.** §6.6.5 keys on `correlation_id`, uses `reverses_transaction_id` only to disambiguate lock-reversal from settlement-reversal within the rollback types. One phrasing nuance recorded, not a defect |
+
 ## 7. Cross-references
 
 - Object scoping, `Wallet` shape: `financial-domain-model.md`.
