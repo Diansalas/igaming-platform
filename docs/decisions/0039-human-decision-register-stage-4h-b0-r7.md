@@ -19,6 +19,21 @@ decision's final subsection. Where prior stages named specific candidate
 options, this document uses those exact names — it introduces no new
 option names.
 
+**Correction note (Stage 4H-B0-R7, dispatch following `architect`'s
+independent re-check).** As flagged in Decision 2's own currency caveat
+below, `architect` re-checked this register against technical designs that
+landed after it was written — `bonus-engine`'s Terminal-Grant Technical
+Contract (`docs/architecture/10-bonus-engine-architecture.md` §T.1-T.13)
+and `ledger-finance`'s wagering-progress-integrity model
+(`docs/architecture/ledger-accounting-model.md` §6.5/§6.6) — and recorded
+two findings at `ledger-accounting-model.md` §6.6.16 ("ADR 0039 re-check"
+subsection). Both are corrected in place below, in Decision 2's and
+Decision 3's "Technical consequences"/"The question" sections
+respectively. Neither correction selects an answer to any decision; both
+are corrections to this document's description of the technical
+landscape, made because the landscape changed under it, not because the
+original analysis was wrong when written.
+
 ---
 
 ## Decision 1 — `OpenBetSelfExclusionPolicy` platform-wide default
@@ -169,34 +184,54 @@ architecture.md` §5 and `docs/architecture/ledger-accounting-model.md`
 
 ### Technical consequences
 
-**Options (a) and (b) are close to decision-agnostic from a mechanism
-standpoint** — each reuses a posting shape that already exists elsewhere
-in the ledger (ADR 0032 §5's forfeiture posting for (a); the
-already-adopted mechanical-entitlement-settlement pattern for (b)). For
-both, the primary remaining engineering work is the same regardless of
-which is chosen: defining the missing Grant state-machine transition
-itself (doc 10 §1.2 currently has no transition at all for "a terminal
-Grant receives a late credit").
+**Corrected below** (Stage 4H-B0-R7 dispatch, per `architect`'s
+independent re-check at `ledger-accounting-model.md` §6.6.16 against the
+now-landed Terminal-Grant Technical Contract). This section previously
+read "options (a) and (b) are close to decision-agnostic from a mechanism
+standpoint … the primary remaining engineering work is the same
+regardless of which is chosen." That symmetry claim is now contradicted
+by the landed contract and is corrected here rather than left standing.
 
-**Option (c) is not fully symmetric with (a)/(b) on the evidence
-currently available.** Doc 10's own Open Questions (item 5) states that
-"the manual-adjustment four-eyes-approval workflow... is a requirement,
-not a design — belongs to a future backoffice/RBAC implementation stage."
-That workflow does not yet exist as a designed mechanism. Choosing (c)
-would therefore additionally depend on that not-yet-designed backoffice
-capability being built and operable, on top of the same state-machine
-transition work (a)/(b) also need. This is a materially different
-technical consequence than "none, the mechanism already supports either,"
-and this document states it precisely rather than assuming symmetry.
+**All three options carry increasing technical cost — (a) < (b) < (c) —
+not "(a)≈(b) < (c)".** `docs/architecture/10-bonus-engine-
+architecture.md` §T.7 models all three actions precisely:
 
-**Caveat on this section's currency**: at the time this register was
-written, Workstream C's Terminal-Grant technical contract (this same
-Stage 4H-B0-R7 round, reserved migration `0051`) had not yet landed in the
-repository. The technical-consequence analysis above is grounded in the
-existing cross-reference notes (doc 10 §5, `ledger-accounting-model.md`
-§5 item 7 and §6.3/§6.4) rather than a completed technical contract for
-this exact gap. It should be re-confirmed against that contract once it
-lands, rather than treated as final.
+- **(a) `ACTION_REFORFEIT`** posts the inbound credit using the ordinary
+  settlement/void posting shape unchanged, then, in the same database
+  transaction, posts a second `bonus_forfeiture` transaction (ADR 0032
+  §5's existing shape) for the identical amount. This stays entirely
+  within the settlement/void posting layer's own existing mechanism — it
+  needs no new call into Bonus Engine at posting time.
+- **(b) `ACTION_ROUTE_TO_CASH`** additionally requires the settlement/void
+  posting layer (owned by `ledger-finance`/`casino`/`sportsbook`, not
+  Bonus Engine) to consult Grant status *before* choosing a destination
+  account for this specific credit. Per §T.7 verbatim, this is "a new
+  call-back into Bonus Engine's Grant-status read that does not exist
+  today" — a piece of cross-domain plumbing (a) does not require. Both
+  (a) and (b) still share the same underlying requirement to define the
+  missing Grant state-machine transition for "a terminal Grant receives a
+  late credit" (doc 10 §1.2) — but (b) carries this additional call-back
+  cost on top of that shared work, so the two are not equal-cost.
+- **(c) `ACTION_HOLD_FOR_REVIEW`** remains the most expensive of the
+  three, as this document already found: doc 10's own Open Questions
+  (item 5) states the manual-adjustment four-eyes-approval workflow "is a
+  requirement, not a design — belongs to a future backoffice/RBAC
+  implementation stage," and §T.7 independently confirms "the exact
+  holding mechanism is a `ledger-finance` design question this contract
+  does not resolve." That finding stands and is now corroborated by the
+  landed contract, not merely asserted from cross-reference notes as
+  before.
+
+**This section's earlier currency caveat is resolved by the above.** At
+the time this register was first written, Workstream C's Terminal-Grant
+technical contract had not yet landed, and this section flagged that its
+own analysis should be re-confirmed once it did. `architect` has now
+performed that re-check (`ledger-accounting-model.md` §6.6.16) and found
+the (a)-vs-(b) comparison above needed correction while the (c) finding
+was corroborated as written; both are reflected above. No `0050`/`0051`
+migration file exists — Workstream C landed as documentation only, which
+the task registry's "if needed" wording for that reserved migration
+permits.
 
 ### Regulatory / compliance implications
 
@@ -222,19 +257,61 @@ answered.
 
 ---
 
-## Decision 3 — Mixed cash/bonus-funded sportsbook cashout policy
+## Decision 3 — Bonus-funded sportsbook cashout policy (proceeds split) and its required companion, cashout's wagering-progress treatment (FD-1)
 
 ### The question
 
-If and when the platform ever builds (1) mixed cash-and-bonus funding for
-a single sportsbook bet, and (2) an early cashout/buyout feature for
-sportsbook bets — neither of which exists today — how should a mixed-
-funded bet's cashout proceeds be handled: split proportionally between
-cash and bonus wallets, paid entirely to cash, or should such bets simply
-not be offered a cashout at all?
+**Corrected below** (Stage 4H-B0-R7 dispatch, per `architect`'s
+independent re-check at `ledger-accounting-model.md` §6.6.16). This
+decision previously covered only the mixed-funded proceeds-split
+question. The landed design widens its scope in two ways, neither of
+which selects an answer to anything:
 
-### The options (named exactly as `docs/architecture/ledger-accounting-
-model.md` §6.3.3.2 case C-cashout names them)
+1. **Scope correction — this is not mixed-funding-only.**
+   `ledger-accounting-model.md` §6.5.10 confirms cashout stays `BLOCKED`
+   for **bonus-funded single-origin bets too, not only mixed-funded
+   ones**. The proceeds-split question below therefore applies to
+   bonus-funded sportsbook bets generally (single-origin or mixed), not
+   only to the mixed-funding case this document originally described.
+2. **A second, orthogonal sub-question is added — FD-1.**
+   `ledger-accounting-model.md` §6.6 names a forward dependency, **FD-1**,
+   found this stage and not previously part of this register: cashout's
+   **wagering-progress treatment**. This is a required companion
+   sub-question, not a separate, lower-priority decision — see "FD-1"
+   below.
+
+If and when the platform ever builds (1) bonus-funded sportsbook wagering
+(single-origin or mixed cash-and-bonus funding for a single bet), and
+(2) an early cashout/buyout feature for sportsbook bets — neither of
+which exists today — a complete cashout policy decision must answer
+**both** of the following together:
+
+**3a. Proceeds-split question (as originally registered).** How should a
+bonus-funded bet's cashout proceeds be handled: split proportionally
+between cash and bonus wallets, paid entirely to cash, or should such
+bets simply not be offered a cashout at all?
+
+**3b. FD-1 — wagering-progress question (new).** Independent of how
+proceeds are split: does cashing out a bonus-funded stake **preserve**
+the wagering progress already accrued against that stake
+("risk-preserving"), **nullify** it ("nullifying," netting it away), or
+scale it **proportionally to the cashout price**? `ledger-accounting-
+model.md` §6.5.10 states this is "not derivable from the posting shape"
+of whichever proceeds-split answer is chosen — i.e., answering 3a alone
+does not answer 3b.
+
+**These two sub-questions must be answered together, not separately.** A
+human who answers only 3a and leaves 3b unanswered would leave the
+platform with an unresolved, currently-fail-closed wagering-progress
+treatment for cashout (`ledger-accounting-model.md` §6.6.5 classifies
+`sportsbook_cashout` as unclassified pending FD-1, which fails closed —
+excluded from authorizing progress, with an integrity alert — rather than
+silently defaulting).
+
+### The options
+
+**3a — proceeds-split options (named exactly as `docs/architecture/
+ledger-accounting-model.md` §6.3.3.2 case C-cashout names them):**
 
 - **Proportional split** — cashout proceeds are split between
   `player_cash` and `player_bonus` in the same ratio as the original
@@ -242,27 +319,64 @@ model.md` §6.3.3.2 case C-cashout names them)
 - **All-to-cash** — cashout proceeds are paid entirely to `player_cash`
   regardless of the original funding mix, on the theory that a cashout is
   a voluntary buyout of a contract for cash.
-- **Not cashout-eligible** — mixed/bonus-funded bets are simply excluded
-  from the cashout feature upstream; the split question never arises.
+- **Not cashout-eligible** — bonus-funded bets (single-origin or mixed)
+  are simply excluded from the cashout feature upstream; the split
+  question never arises.
+
+**3b — FD-1 wagering-progress options (named exactly as
+`ledger-accounting-model.md` §6.5.10/§6.6.14 name them):**
+
+- **Risk-preserving** — cashing out leaves accrued wagering progress
+  standing, unchanged.
+- **Nullifying** — cashing out nets the accrued wagering progress away,
+  as if the stake had been voided.
+- **Proportional-to-price** — accrued wagering progress is scaled by the
+  cashout price relative to the original stake.
+
+`sportsbook` (`ledger-accounting-model.md` §6.6.14) has offered a
+**non-binding engineering lean toward "nullifying"** — this document
+records that a lean was offered, exactly as it names the options, without
+adopting it as a recommendation. Per this register's ownership note
+below, no option for either 3a or 3b is selected here.
 
 ### Financial consequences
 
-- **Proportional split**: part of the buyout proceeds lands in restricted
-  (`player_bonus`) funds, remaining subject to any outstanding wagering
-  requirement. The candidate posting shown in `ledger-accounting-model.md`
-  §6.3.3.2 is proven ledger-balanced (Invariant B1 holds).
-- **All-to-cash**: the entire buyout becomes immediately withdrawable
+- **Proportional split (3a)**: part of the buyout proceeds lands in
+  restricted (`player_bonus`) funds, remaining subject to any outstanding
+  wagering requirement. The candidate posting shown in
+  `ledger-accounting-model.md` §6.3.3.2 is proven ledger-balanced
+  (Invariant B1 holds).
+- **All-to-cash (3a)**: the entire buyout becomes immediately withdrawable
   cash, including the portion tracing back to bonus-origin value. This
   candidate is also ledger-balanced, but `bonus-engine`'s review flagged
   it as a **named wagering-requirement bypass / bonus-abuse vector**: a
   player could time the buyout specifically to convert bonus-origin value
   into cash.
-- **Not cashout-eligible**: no proceeds-split posting is ever created, so
-  no financial exposure of this kind arises for mixed-funded bets at all.
+- **Not cashout-eligible (3a)**: no proceeds-split posting is ever
+  created, so no financial exposure of this kind arises for bonus-funded
+  bets at all.
+- **FD-1 (3b) — a separately named, possibly worse abuse vector.**
+  `ledger-accounting-model.md` §6.5.10 and `ledger-finance`/`sportsbook`'s
+  review describe this as potentially a more serious exposure than the
+  proceeds-split question, because it is **deterministic and
+  player-timed rather than probabilistic**: if cashout is risk-preserving,
+  a player can lock a bonus-funded stake, wait for wagering progress to
+  accrue while the bet is open, then cash out almost immediately at a
+  price close to the stake (commonly cited around ~97% of stake) —
+  keeping 100% of the accrued wagering credit for a few percent of
+  guaranteed cost. This is a bounded-cost, unbounded-repetition
+  conversion of bonus funds into wagering progress, exploitable at the
+  player's own chosen timing rather than depending on how a bet
+  happens to settle. If FD-1 is answered "nullifying," a player who
+  genuinely closes a position early for legitimate risk-management
+  reasons loses their accrued progress; "proportional-to-price" avoids
+  both failure modes but introduces a new ratio/rounding computation.
+  This is a real financial-exposure question in its own right, separate
+  from and additional to the proceeds-split exposure above.
 
 ### Technical consequences
 
-- **Proportional split** and **all-to-cash** both require building
+- **Proportional split** and **all-to-cash** (3a) both require building
   cashout ledger-posting logic that does not exist today (no sportsbook
   cashout code exists in any mode, external or in-house). Proportional
   split additionally requires an anti-structuring control `bonus-engine`
@@ -270,28 +384,48 @@ model.md` §6.3.3.2 case C-cashout names them)
   concern raised for the related C-win case: a cash-dominant/bonus-sliver
   stake can be structured so the bonus share rounds to zero, effectively
   laundering bonus value into cash on demand).
-- **Not cashout-eligible** requires only an upstream eligibility check in
-  `internal/sportsbook` — no new ledger posting shape at all.
+- **Not cashout-eligible** (3a) requires only an upstream eligibility
+  check in `internal/sportsbook` — no new ledger posting shape at all.
+- **FD-1 (3b)** is not a `ledger-finance` mechanism choice in the sense
+  Decision 2 is: `ledger-accounting-model.md` §6.5.10 states directly that
+  "all three are postable, all three are B1-safe, and the choice turns on
+  bonus-abuse policy and consumer-protection disclosure" — the same
+  reasoning this document's proceeds-split question already turns on.
+  Until FD-1 is answered, `ledger-accounting-model.md` §6.6.5's
+  classification map deliberately fails closed for `sportsbook_cashout`
+  (unclassified, excluded from authorizing progress, with an integrity
+  alert) rather than silently defaulting — this is a placeholder, not an
+  implemented policy.
 
 ### Regulatory / compliance implications
 
 Potentially a consumer-protection and bonus-abuse question (per
-`bonus-engine`'s flagged concern on all-to-cash), and possibly a
-jurisdiction-rules question about whether bonus funds may be cashed out
-at all in a given jurisdiction. This document does not assert a specific
-legal requirement.
+`bonus-engine`'s flagged concern on all-to-cash, and per FD-1's
+deterministic-exploit concern above), and possibly a jurisdiction-rules
+question about whether bonus funds may be cashed out at all in a given
+jurisdiction. This document does not assert a specific legal requirement
+for either sub-question.
 
 ### Where implementation actually stands
 
-**Nothing is blocked, on any timeline, by this decision remaining
-unmade.** Per Stage 4H-B0-R6's own record, mixed cash+bonus funding is
-deferred entirely for the initial implementation (a fail-closed rejection
-at bet placement), and no sportsbook cashout code exists in any form.
-This decision only becomes relevant if and when the platform separately
-decides to build **both** mixed funding and a cashout feature — two
+**Nothing is blocked, on any timeline, by either sub-question of this
+decision remaining unmade.** This blocking assessment is unchanged by
+the scope correction above and is independently confirmed by
+`ledger-accounting-model.md` §6.5.10 ("Nothing in phase 2 depends on
+FD-1; the first bonus-funded, cashout-eligible slice does") and by
+§6.6.14's V-14. Per Stage 4H-B0-R6's own record, mixed cash+bonus funding
+is deferred entirely for the initial implementation (a fail-closed
+rejection at bet placement), and no sportsbook cashout code exists in any
+form. This decision — now understood as its two required sub-questions,
+3a and 3b together — only becomes relevant if and when the platform
+separately decides to build **both** bonus-funded sportsbook wagering (at
+least at parity with the cash-only case) and a cashout feature — two
 distinct, larger, currently unscheduled pieces of work. This is
-registered formally per the stage directive's request, but is explicitly
-the lowest-urgency of the three decisions in this register.
+registered formally per the stage directive's request, but remains the
+lowest-urgency of the three decisions in this register — with the caveat
+that, once cashout implementation work does begin, 3a and 3b must both be
+resolved before that work can proceed, not just whichever of the two a
+human happens to answer first.
 
 ---
 
@@ -300,8 +434,8 @@ the lowest-urgency of the three decisions in this register.
 | # | Decision | Options | Blocking engineering today? |
 |---|---|---|---|
 | 1 | `OpenBetSelfExclusionPolicy` default | `SETTLE_NORMALLY` / `VOID_ON_SELF_EXCLUSION` | No — architecture is decision-agnostic; blocks launch/feature-enablement for jurisdictions without their own explicit config, not code |
-| 2 | Terminal-Grant settlement-credit resolution | (a) re-forfeit / (b) route to `player_cash` / (c) hold for manual review | Partially — independently confirmed (gate G-2) to block bonus-funded sportsbook wagering specifically; cash-only sportsbook unaffected |
-| 3 | Mixed-funded sportsbook cashout policy | proportional split / all-to-cash / not cashout-eligible | No — mixed funding is already deferred and no cashout code exists in any mode; relevant only if both are built later |
+| 2 | Terminal-Grant settlement-credit resolution | (a) re-forfeit / (b) route to `player_cash` / (c) hold for manual review — increasing technical cost (a) < (b) < (c), corrected Stage 4H-B0-R7 | Partially — independently confirmed (gate G-2) to block bonus-funded sportsbook wagering specifically; cash-only sportsbook unaffected |
+| 3 | Bonus-funded (single-origin or mixed) sportsbook cashout policy, plus companion wagering-progress question (FD-1) | 3a: proportional split / all-to-cash / not cashout-eligible. 3b (FD-1, required companion): risk-preserving / nullifying / proportional-to-price | No — bonus-funded sportsbook wagering and cashout are both currently unimplemented/deferred; relevant only if both are built later, but 3a and 3b must be answered together at that point |
 
 ## Cross-references
 
@@ -310,25 +444,40 @@ the lowest-urgency of the three decisions in this register.
 - `docs/security/security-architecture.md`, Stage 4H-B0-R5 section,
   findings S-8/S-9 (Decision 1's surrounding open engineering gaps).
 - `docs/architecture/10-bonus-engine-architecture.md` §5 (cross-reference
-  note) and its Open Questions item 7 (Decision 2, options as named).
+  note) and its Open Questions item 7, plus the Terminal-Grant Technical
+  Contract §T.7 (Decision 2, options as named and the corrected
+  technical-cost ordering).
 - `docs/architecture/ledger-accounting-model.md` §6.3.3.2 case C-cashout
-  and §6.4's Stage 4H-B0-R6 forward pointer (Decision 3, options as
-  named; the mixed-funding deferral and cashout non-implementation this
-  decision's urgency is scoped against).
+  and §6.4's Stage 4H-B0-R6 forward pointer (Decision 3's proceeds-split
+  sub-question 3a, options as named; the mixed-funding deferral and
+  cashout non-implementation this decision's urgency is scoped against),
+  plus §6.5.10 (the scope widening to bonus-funded single-origin bets, and
+  FD-1's naming) and §6.6/§6.6.14 (FD-1's options and `sportsbook`'s
+  non-binding engineering lean).
+- `docs/architecture/ledger-accounting-model.md` §6.6.16 (`architect`'s
+  independent re-check of this register's Decision 2 and Decision 3 text
+  against the landed Terminal-Grant Technical Contract and
+  wagering-progress-integrity model — the source of both corrections
+  applied in this dispatch).
 - `docs/governance/task-registry.md`, Stage 4H-B0-R7 section (this
-  workstream's origin and the reserved Workstream C migration `0051` for
-  the Terminal-Grant technical contract this register's Decision 2 will
-  need to be re-checked against once it lands).
+  workstream's origin; the reserved Workstream C migration `0051` this
+  register's Decision 2 was to be re-checked against — landed as
+  documentation only, no `0050`/`0051` migration file exists, which the
+  registry's "if needed" wording permits).
 
 ## Ownership and scope note
 
 Owned by `product-owner-proxy`. This document selects no answer to any of
-the three decisions above, and none should be inferred from option
-ordering or presentation — options are listed in the order prior stages
-introduced them, not in a ranked or recommended order. Once a human
-answers any of the three, the recording of that answer belongs in the
-document each decision's options were originally drawn from (ADR 0034
-§14.9 for Decision 1; doc 10 §5 / `ledger-accounting-model.md` for
-Decision 2; `ledger-accounting-model.md` §6.3.3.2 for Decision 3) — not
-in this register, which exists to organize the questions, not to hold
-their answers.
+the three decisions above (including sub-questions 3a/3b), and none
+should be inferred from option ordering or presentation — options are
+listed in the order prior stages introduced them, not in a ranked or
+recommended order. Where a specialist has offered a non-binding
+engineering lean (e.g., `sportsbook`'s lean toward "nullifying" for
+FD-1), this document records that a lean was offered without adopting it.
+Once a human answers any of the three decisions, the recording of that
+answer belongs in the document each decision's options were originally
+drawn from (ADR 0034 §14.9 for Decision 1; doc 10 §5/§T.7 /
+`ledger-accounting-model.md` for Decision 2; `ledger-accounting-model.md`
+§6.3.3.2 and §6.5.10/§6.6 for Decision 3, both sub-questions) — not in
+this register, which exists to organize the questions, not to hold their
+answers.

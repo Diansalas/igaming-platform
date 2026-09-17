@@ -889,6 +889,24 @@ per row below.
    other cross-domain dependency this slice needs before any bonus-owned
    table's write path can be considered complete, not because of a
    database-level ordering requirement.
+3a. **Rule B2 (extended) mirror generator in `internal/ledger`, then
+   removal of HR-9's fail-closed guard** — Go code, not a migration;
+   `ledger-finance`-owned (a third dependency on this slice's critical
+   path, alongside (1) and (2)), for which `bonus-engine` files a
+   dependency request rather than authoring it directly. HR-9
+   (`ledger-accounting-model.md` §6.5.7) rejects every posting against
+   `player_locked_bonus` (required) and `player_bonus` (recommended)
+   until **both** `bonus_expense` (1) and this generator exist — the
+   guard's removal is a conjunctive precondition on both, not on (1)'s
+   migration alone, and it lands with the generator, not earlier.
+   Sequenced after (3) — which the conversion write path also needs — and
+   before (4)-(7): every one of those four tables' write path posts, or
+   will post, against `player_bonus` (the `activated` → `Dr
+   promo_liability · Cr player_bonus` posting (6)'s Grant table exists to
+   support), so none of them can be exercised end to end while HR-9's
+   guard is still up. This item was missing from this list; `bonus-engine`
+   adds it here per `architect`'s Stage 4H-B0-R7 independent validation
+   (`ledger-accounting-model.md` §6.6.16, V-16).
 4. **`bonus_campaigns` table + RLS** — first of doc 10 §1.1's four
    layers, no FK dependents among the other three yet. `bonus-engine`-
    owned. Dual/nullable-`tenant_id` scope per §8's Campaign row
