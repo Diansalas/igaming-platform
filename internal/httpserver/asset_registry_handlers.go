@@ -84,8 +84,20 @@ func writeAssetRegistryError(w http.ResponseWriter, requestID string, logger int
 	case errors.Is(err, assetregistry.ErrNotFound):
 		apierror.Write(w, requestID, apierror.CodeNotFound, err.Error())
 	case errors.Is(err, assetregistry.ErrDualControlRequired),
-		errors.Is(err, assetregistry.ErrSelfApproval):
+		errors.Is(err, assetregistry.ErrSelfApproval),
+		// A duplicate decision is a 409 for the same reason a
+		// self-approval is - the request state already accounts for this
+		// principal - but it is a DISTINCT sentinel, so the response body
+		// says "you already decided this" rather than accusing a retrying
+		// operator of self-dealing (code-reviewer finding F9).
+		errors.Is(err, assetregistry.ErrDuplicateDecision):
 		apierror.Write(w, requestID, apierror.CodeConflict, err.Error())
+	// The principal itself is not eligible to request/decide (not
+	// platform-scoped, no confirmed Person linkage, or not active -
+	// migration 0047). That is a property of the actor, not of the
+	// payload or of the request's state, so 403.
+	case errors.Is(err, assetregistry.ErrApproverNotEligible):
+		apierror.Write(w, requestID, apierror.CodeForbidden, err.Error())
 	case errors.Is(err, assetregistry.ErrWidensPlatformAuthorization):
 		apierror.Write(w, requestID, apierror.CodeForbidden, err.Error())
 	case errors.Is(err, assetregistry.ErrTenantContextMismatch):
@@ -132,7 +144,14 @@ type fileAssetChangeRequestBody struct {
 	AssetType       string `json:"asset_type,omitempty"`
 	DecimalExponent int16  `json:"decimal_exponent,omitempty"`
 	Network         string `json:"network,omitempty"`
-	ReasonCode      string `json:"reason_code"`
+	// Required only for operation = platform_operation_eligibility (ADR
+	// 0037 §C.5.1 op 9's GRANT direction, dual-controlled since migration
+	// 0047). eligibility_product may be omitted, which means EVERY
+	// product - recorded explicitly in the approved payload rather than
+	// left absent, so the approver approves the breadth too.
+	EligibilityOperation string `json:"eligibility_operation,omitempty"`
+	EligibilityProduct   string `json:"eligibility_product,omitempty"`
+	ReasonCode           string `json:"reason_code"`
 }
 
 func newFileAssetChangeRequestHandler(deps Deps) http.HandlerFunc {
@@ -148,8 +167,30 @@ func newFileAssetChangeRequestHandler(deps Deps) http.HandlerFunc {
 		v := validation.New()
 		v.RequireNonEmpty("asset_code", body.AssetCode)
 		v.RequireNonEmpty("reason_code", body.ReasonCode)
-		v.RequireOneOf("operation", body.Operation,
-			string(assetregistry.ChangeCreate), string(assetregistry.ChangeActivate), string(assetregistry.ChangePlatformAuthorize))
+		// Built from assetregistry.ChangeOperations() rather than a
+		// hand-listed set, so this allowlist cannot drift from the
+		// service's own definition (and from migration 0047's CHECK) the
+		// next time one changes.
+		ops := assetregistry.ChangeOperations()
+		allowedOps := make([]string, 0, len(ops))
+		for _, op := range ops {
+			allowedOps = append(allowedOps, string(op))
+		}
+		v.RequireOneOf("operation", body.Operation, allowedOps...)
+		if assetregistry.ChangeOperation(body.Operation) == assetregistry.ChangePlatformOperationEligibility {
+			eligibilityOps := assetregistry.Operations()
+			allowedEligibility := make([]string, 0, len(eligibilityOps))
+			for _, op := range eligibilityOps {
+				allowedEligibility = append(allowedEligibility, string(op))
+			}
+			v.RequireOneOf("eligibility_operation", body.EligibilityOperation, allowedEligibility...)
+		} else if body.EligibilityOperation != "" || body.EligibilityProduct != "" {
+			// Refused rather than ignored: silently dropping fields an
+			// approver may have read in the request body is exactly how a
+			// four-eyes approval ends up describing something other than
+			// what gets applied.
+			v.Add("eligibility_operation", "is only valid for operation=platform_operation_eligibility")
+		}
 		if v.HasErrors() {
 			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
 			return
@@ -166,7 +207,9 @@ func newFileAssetChangeRequestHandler(deps Deps) http.HandlerFunc {
 			req, err = assetregistry.FileChangeRequest(ctx, tx, assetregistry.FileChangeRequestParams{
 				Operation: assetregistry.ChangeOperation(body.Operation), AssetCode: body.AssetCode,
 				AssetType: body.AssetType, DecimalExponent: body.DecimalExponent, Network: body.Network,
-				Actor: actor,
+				EligibilityOperation: assetregistry.Operation(body.EligibilityOperation),
+				EligibilityProduct:   body.EligibilityProduct,
+				Actor:                actor,
 			})
 			return err
 		})
@@ -420,6 +463,15 @@ func (b operationEligibilityBody) validate() *validation.Errors {
 // newSetPlatformOperationEligibilityHandler writes the PLATFORM-WIDE
 // layer-7 default (tenant_id NULL) - platform-admin only, per ADR 0037
 // §C.5.1 op 9's split.
+//
+// GRANTING (eligible = true) additionally requires an approved
+// platform_operation_eligibility change request for this exact
+// (asset, operation, product), filed and decided through the same two
+// change-request endpoints create/activate/platform_authorize use. An
+// attempt without one is a 409 (ErrDualControlRequired), not a 500 and
+// certainly not a success: this one row is a platform-wide gate for every
+// tenant, and until migration 0047 a single credential could flip it.
+// Revoking (eligible = false) needs no approval, deliberately.
 func newSetPlatformOperationEligibilityHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())

@@ -64,10 +64,24 @@ func classifyTriggerError(err error) error {
 	}
 	msg := pgErr.Message
 	switch {
-	case strings.Contains(msg, "four-eyes"):
-		return fmt.Errorf("%w: %s", ErrDualControlRequired, msg)
+	// Migration 0047's principal-eligibility conditions are classified
+	// FIRST, ahead of both the four-eyes and the invalid-input arms.
+	// Their messages legitimately mention four-eyes (that is what the
+	// refusal is protecting), so a later arm would never be reached - and
+	// the distinction matters operationally: an operator hitting this
+	// needs to know the fix is "link this staff account to a Person" or
+	// "reactivate this account", not "obtain an approval" or "correct
+	// your request body". Given migration 0047's deployment-ordering
+	// dependency, this is the most likely first failure mode after it
+	// lands.
+	case strings.Contains(msg, "no confirmed Person linkage"),
+		strings.Contains(msg, "is not active"),
+		strings.Contains(msg, "cannot be resolved"):
+		return fmt.Errorf("%w: %s", ErrApproverNotEligible, msg)
 	case strings.Contains(msg, "self-approval"):
 		return fmt.Errorf("%w: %s", ErrSelfApproval, msg)
+	case strings.Contains(msg, "four-eyes"):
+		return fmt.Errorf("%w: %s", ErrDualControlRequired, msg)
 	case strings.Contains(msg, "narrow") || strings.Contains(msg, "not platform-authorized"):
 		return fmt.Errorf("%w: %s", ErrWidensPlatformAuthorization, msg)
 	case strings.Contains(msg, "immutable") ||
@@ -87,13 +101,30 @@ func classifyTriggerError(err error) error {
 // the approver is approving, and migration 0044 verifies the eventual
 // INSERT matches them exactly - so approving "BTC, exponent 8" cannot be
 // used to insert "BTC, exponent 2".
+//
+// For ChangePlatformOperationEligibility the equivalent facts are
+// EligibilityOperation and EligibilityProduct, and migration 0047's
+// payload-matched consume applies the same rule: an approval for
+// (wagering, casino) can never be spent on (withdrawal, casino) or
+// (wagering, every product). Without that match, one approval would
+// authorize any layer-7 grant for the asset, which is not dual control
+// over the fact actually being granted.
 type FileChangeRequestParams struct {
 	Operation       ChangeOperation
 	AssetCode       string
 	AssetType       string
 	DecimalExponent int16
 	Network         string
-	Actor           ActorContext
+	// EligibilityOperation is the layer-7 operation being granted
+	// (required for ChangePlatformOperationEligibility, ignored
+	// otherwise).
+	EligibilityOperation Operation
+	// EligibilityProduct names the product the grant is for. Empty means
+	// EVERY product - recorded in the payload as the explicit EveryProduct
+	// sentinel so the approver sees the breadth being granted rather than
+	// an absent field.
+	EligibilityProduct string
+	Actor              ActorContext
 }
 
 // FileChangeRequest records a pending request for one of the three
@@ -103,13 +134,43 @@ func FileChangeRequest(ctx context.Context, tx pgx.Tx, p FileChangeRequestParams
 		return ChangeRequest{}, err
 	}
 	if !validChangeOperation(p.Operation) {
-		return ChangeRequest{}, fmt.Errorf("%w: operation must be one of create/activate/platform_authorize (suspend and revoke are deliberately single-actor)", ErrInvalidInput)
+		return ChangeRequest{}, fmt.Errorf("%w: operation must be one of create/activate/platform_authorize/platform_operation_eligibility (suspend and revoke are deliberately single-actor)", ErrInvalidInput)
 	}
 	if strings.TrimSpace(p.AssetCode) == "" {
 		return ChangeRequest{}, fmt.Errorf("%w: asset_code is required", ErrInvalidInput)
 	}
 
 	payload := map[string]any{}
+	if p.Operation == ChangePlatformOperationEligibility {
+		if !validOperation(p.EligibilityOperation) {
+			return ChangeRequest{}, fmt.Errorf("%w: eligibility_operation must be one of ADR 0037 §C.2's six operations, got %q", ErrInvalidInput, p.EligibilityOperation)
+		}
+		product := strings.TrimSpace(p.EligibilityProduct)
+		if product == "" {
+			product = EveryProduct
+		}
+		if product != EveryProduct {
+			// The approver must be shown a product that actually exists
+			// and is usable. Without this, an approval could be collected
+			// for a typo'd product and only fail at apply time, when the
+			// asset_operation_eligibility.product foreign key rejects it -
+			// by which point the four-eyes paperwork looks complete for a
+			// fact that can never be written.
+			var active bool
+			err := tx.QueryRow(ctx, `SELECT active FROM platform_products WHERE code = $1`, product).Scan(&active)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ChangeRequest{}, fmt.Errorf("%w: unknown product %q", ErrInvalidInput, product)
+			}
+			if err != nil {
+				return ChangeRequest{}, fmt.Errorf("assetregistry: read product: %w", err)
+			}
+			if !active {
+				return ChangeRequest{}, fmt.Errorf("%w: product %q is not active", ErrInvalidInput, product)
+			}
+		}
+		payload["eligibility_operation"] = string(p.EligibilityOperation)
+		payload["eligibility_product"] = product
+	}
 	if p.Operation == ChangeCreate {
 		if p.AssetType != AssetTypeFiat && p.AssetType != AssetTypeCrypto {
 			return ChangeRequest{}, fmt.Errorf("%w: asset_type must be 'fiat' or 'crypto'", ErrInvalidInput)
@@ -154,11 +215,17 @@ type DecideChangeRequestParams struct {
 	Actor     ActorContext
 }
 
-// DecideChangeRequest records one approve/reject decision. Migration
-// 0044 enforces, at the database: one decision per principal per request
+// DecideChangeRequest records one approve/reject decision. The database
+// enforces, authoritatively: one decision per principal per request
 // (UNIQUE), the requester may not decide its own request, the approver
 // must be a platform-scoped staff principal, and a decision can never be
-// edited afterwards.
+// edited afterwards (migration 0044) - plus, since migration 0047, that
+// the approver carries a confirmed Person linkage and an active staff
+// account, and that approver and requester are not the same PERSON
+// reached through two staff accounts. That last check existed in 0044 but
+// could never fire, because nothing in this platform sets person_id on a
+// platform-scoped staff account; see migration 0047's header for the
+// deployment-ordering dependency that closure creates.
 func DecideChangeRequest(ctx context.Context, tx pgx.Tx, p DecideChangeRequestParams) (Approval, error) {
 	if err := p.Actor.validate(); err != nil {
 		return Approval{}, err
@@ -181,7 +248,16 @@ func DecideChangeRequest(ctx context.Context, tx pgx.Tx, p DecideChangeRequestPa
 		wrapped := fmt.Errorf("assetregistry: insert approval: %w", err)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return Approval{}, fmt.Errorf("%w: this principal has already decided this request", ErrSelfApproval)
+			// The ONLY unique constraint reachable here is
+			// UNIQUE (request_id, approver_principal_id), so a 23505
+			// means "this principal already decided this request" - a
+			// duplicate submission, not self-approval. Self-approval is
+			// raised by migration 0044/0047's BEFORE INSERT trigger as a
+			// P0001 exception and is classified by classifyTriggerError
+			// below, never here (code-reviewer finding F9: conflating the
+			// two put a false self-dealing signal in front of an operator
+			// who had merely retried).
+			return Approval{}, fmt.Errorf("%w: request %s", ErrDuplicateDecision, p.RequestID)
 		}
 		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
 			return Approval{}, ErrNotFound

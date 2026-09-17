@@ -1324,13 +1324,19 @@ paths:
           $ref: "#/components/responses/InternalError"
   /v1/admin/assets/change-requests:
     post:
-      summary: File a four-eyes change request (create/activate/platform_authorize)
+      summary: File a four-eyes change request
       description: >
-        Requires asset_registry:manage. Only the three dual-controlled
+        Requires asset_registry:manage. Only the four dual-controlled
         operations are representable - suspend/revoke are deliberately
         single-actor kill-switches (ADR 0037 §C.5.3). The requesting
-        principal must resolve to a platform-scoped staff row, enforced by
-        the database.
+        principal must resolve to a platform-scoped staff row that carries
+        a confirmed Person linkage and an active status (migration 0047);
+        a principal failing any of those is 403, not 400.
+        operation=platform_operation_eligibility is the layer-7
+        PLATFORM-WIDE default GRANT (§C.5.1 op 9) and requires
+        eligibility_operation; eligibility_product may be omitted, meaning
+        every product. One approval authorizes exactly that
+        (asset, operation, product) grant, once.
       security:
         - bearerAuth: []
       requestBody:
@@ -1341,11 +1347,24 @@ paths:
               type: object
               required: [operation, asset_code, reason_code]
               properties:
-                operation: { type: string, enum: [create, activate, platform_authorize] }
+                operation:
+                  type: string
+                  enum: [create, activate, platform_authorize, platform_operation_eligibility]
                 asset_code: { type: string }
                 asset_type: { type: string, enum: [fiat, crypto] }
                 decimal_exponent: { type: integer, minimum: 0, maximum: 18 }
                 network: { type: string }
+                eligibility_operation:
+                  type: string
+                  enum: [deposit, withdrawal, wagering, settlement, conversion, reporting]
+                  description: >
+                    Required for operation=platform_operation_eligibility,
+                    rejected for any other operation.
+                eligibility_product:
+                  type: string
+                  description: >
+                    Omit for "every product". Rejected for any operation
+                    other than platform_operation_eligibility.
                 reason_code: { type: string }
       responses:
         "201":
@@ -1363,9 +1382,15 @@ paths:
       summary: Approve or reject a change request
       description: >
         Requires asset_registry:manage. Returns 409 for a self-approval,
-        for a second decision by the same principal, or for a principal
-        that resolves to the same person as the requester - all enforced by
-        the database (migration 0044, mirroring withdrawal_approvals).
+        for a second decision by the same principal (reported as a
+        duplicate decision, distinct from self-approval), or for a
+        principal that resolves to the same PERSON as the requester -
+        all enforced by the database (migrations 0044/0047, mirroring
+        withdrawal_approvals). Returns 403 when the deciding principal is
+        not platform-scoped, carries no confirmed Person linkage, or is
+        not active: that last set is a property of the actor, and the
+        Person-linkage condition is what makes the same-person check real
+        rather than inert (migration 0047).
       security:
         - bearerAuth: []
       parameters:
@@ -1539,6 +1564,17 @@ paths:
         product-specific row always wins over it. Returns 403 if the asset
         is not platform-authorized - nothing may be made eligible for an
         asset the platform has not cleared.
+
+
+        FOUR-EYES: eligible=true is DUAL-CONTROLLED (§C.5.3). It requires
+        an approved platform_operation_eligibility change request for this
+        exact (asset, operation, product); without one the response is
+        409. This row is a platform-wide gate for every tenant, and until
+        migration 0047 a single platform-admin credential could flip it.
+        eligible=false (revocation) is deliberately single-actor - the
+        fail-closed direction must never wait for a second approver - and
+        an idempotent re-write of an already-eligible row needs no new
+        approval.
       security:
         - bearerAuth: []
       parameters:
@@ -1561,6 +1597,8 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/admin/asset-authorizations:

@@ -1155,6 +1155,15 @@ and the correction are both visible.
   same statement as the mutation, so one approval authorizes one mutation,
   once. The create/self-authorize/activate/use chain is refused at every
   link (tested end to end, including over HTTP).
+  **CORRECTED BY §C.7.1 — this bullet was wrong when written.** The
+  same-person half of that self-approval guard could never fire, because
+  nothing in this platform can set `person_id` on a `platform_admin`
+  account, so the control was in fact "two distinct staff UUIDs" and
+  `security` reproduced the full unilateral chain live. It also mirrored
+  migration `0029`, which migration `0034` had already superseded for
+  precisely this reason. Read §C.7.1 before relying on anything in this
+  bullet. Left in place, uncorrected in substance, as the record of what
+  round 1 claimed.
 - **S-6a (zero jurisdiction silently skipped)**: a zero-value tenant or
   jurisdiction is an immediate deny with its own `ReasonCode` and a
   non-nil error. A zero brand remains permitted per §C.2 (layer 5 only
@@ -1173,6 +1182,11 @@ and the correction are both visible.
   `CheckEligibility`'s AND-chain at resolution time (so a row that was
   legal when written cannot take effect after the layer above it is
   revoked).
+  **QUALIFIED BY §C.7.3**: all three mechanisms only ever see a row being
+  written or read. None of them sees a row being **removed**, and
+  migration 0045's `FOR ALL` policy permitted DELETE despite its own
+  comment claiming otherwise — so deleting a brand-level denial widened
+  eligibility past all three. Closed in migration 0047.
 - Every mutating operation writes an `internal/audit` record in the same
   transaction, with actor, tenant (NULL for platform-scoped), entity,
   before/after state and a **mandatory** `reason_code` (a missing reason
@@ -1229,6 +1243,161 @@ and the correction are both visible.
   CLAUDE.md's rule, `security` reviews this implementation independently;
   this record states what was built and what remains open, it does not
   grant sign-off.
+
+### C.7 Review-fix record — Stage 4H-B0-R6, Workstream A round 2 (`architect`)
+
+`security` and `code-reviewer` reviewed §C.6's implementation
+independently, as §C.6.4 said they would, and both found real defects.
+This section records what they found and what migration 0047 and the
+accompanying Go changes do about it. Nothing here is new scope: each fix
+makes a control this ADR already *specified* actually true.
+
+**C.7.1 — The four-eyes person-identity check was inert (P1,
+launch-blocking, reproduced live).** §C.5.3 requires that two staff
+accounts held by one human count as one human. Migration 0044 implemented
+that as a comparison guarded by `person_id IS NOT NULL` on both sides —
+mirroring migration 0029. `security` traced every path that can create a
+`platform_admin` account and established that **no code path in this
+platform can set `person_id` on one**: `cmd/seed-admin` passes `nil`,
+`admin_routes.go`'s staff-creation role allowlist excludes
+`platform_admin` entirely, and the person-link remediation route is
+tenant-scoped, so `staff_users`' own dual-scope RLS hides every
+`tenant_id IS NULL` row from it. The person comparison therefore could
+never fire, and §C.5.3's control degraded to "two distinct staff UUIDs" —
+which one operator defeats by running `seed-admin` twice. The full bypass
+(file → approve through the second account → create → activate) was
+reproduced end to end.
+
+Compounding this: migration 0044 mirrored migration **0029**, but the
+platform's own current precedent is migration **0034**, which explicitly
+REFUSES a withdrawal decision when the approver's `person_id IS NULL` or
+the approver's account is not `active`. 0034 superseded 0029 for exactly
+this reason. Migration 0044 mirrored a withdrawn pattern.
+
+Migration 0047 brings both 0044 trigger functions in line with 0034: on
+the requesting side and the approving side alike, the principal must
+resolve to a staff row, be platform-scoped, carry a confirmed Person
+linkage, and be `active`. The person comparison is now unconditional,
+because neither side may be NULL. There is deliberately **no**
+service-identity carve-out of the kind 0034 has for automated withdrawal
+approvals: §C.1 is explicit that layers 1-3 are reachable only by a
+platform-scoped human principal, so "cannot be resolved to a staff row"
+is a refusal.
+
+> **DEPLOYMENT ORDERING DEPENDENCY — NOT OPTIONAL.** Applied alone, with
+> no way to person-link a platform-scoped staff account, this fix makes
+> the Asset Registry's entire administrative surface **permanently
+> unusable**: no `platform_admin` could file or approve anything, so no
+> asset could ever again be created, activated, platform-authorized, or
+> granted a platform-wide layer-7 default. That is fail-closed, which is
+> the correct direction, but it is a total outage rather than a graceful
+> degradation. Migration 0047 must land **together with, or after**, a
+> path that can person-link platform-scoped staff. That path is owned by
+> `identity-compliance` and is NOT part of this workstream (different
+> package, different owner); the candidates are a `personID` argument on
+> `cmd/seed-admin` and a platform-scoped person-link route running under
+> a transaction that can see `tenant_id IS NULL` staff rows. Pre-deploy
+> gate: `SELECT id, email FROM staff_users WHERE tenant_id IS NULL AND
+> status = 'active' AND person_id IS NULL` must return zero rows.
+> `architect` has not verified that path exists; this ADR records the
+> dependency rather than assuming it is satisfied.
+
+**C.7.2 — The layer-7 platform-wide grant had no four-eyes
+representation (P2, found independently by both reviewers).** §C.5.1
+operation 9 and §C.5.3 both require dual control for granting a
+platform-wide-default operation-eligibility row, and migration 0045's own
+comment asserted that it was "dual-controlled at the API level". It was
+not: migration 0044's `asset_change_requests.operation` CHECK allowed
+only `create`/`activate`/`platform_authorize`, so the request type did not
+exist and one compromised platform-admin credential could flip an
+eligibility gate for **every tenant on the platform** in a single call.
+
+Migration 0047 adds a fourth operation, `platform_operation_eligibility`,
+and enforces it with a **payload-matched** consume: the approved request
+names the exact `(asset, eligibility_operation, eligibility_product)`
+being granted, so an approval for casino wagering cannot be spent on
+sportsbook wagering, on casino withdrawal, or on a broader every-product
+grant. Every-product is recorded as the explicit `'*'` sentinel (matching
+the `COALESCE(product, '*')` convention migration 0045's own unique
+indexes already use) rather than an absent field, so the approver
+approves the breadth too.
+
+Two mechanism notes worth recording, because they are not obvious and a
+future change could easily get them wrong:
+
+- The consume runs in an **AFTER INSERT OR UPDATE** trigger, not the
+  existing BEFORE narrowing trigger. Layer-7 rows are written with
+  `INSERT ... ON CONFLICT DO UPDATE`; PostgreSQL fires BEFORE INSERT
+  first, *then* detects the conflict and fires BEFORE UPDATE, so one
+  upsert fires the BEFORE trigger twice and the first firing's side
+  effects are not undone. Consuming there would demand two approvals for
+  one logical grant. An AFTER row trigger fires exactly once, for the row
+  that survives, with the true `OLD`. A `RAISE` there still aborts the
+  statement, so the control is no weaker.
+- Scope of the requirement: every INSERT of a platform-wide eligible row,
+  and any UPDATE that turns one on, re-points it at a different
+  asset/operation/product, or promotes a tenant row to a platform row. An
+  idempotent re-write of an already-eligible row does not need a new
+  approval (mirroring `assets_enforce_dual_control`'s off→on rule), and a
+  **revocation is never dual-controlled** — §C.5.3's asymmetry, for the
+  same reason suspend/revoke are single-actor at layers 2-3.
+
+**C.7.3 — `asset_authorizations` RLS permitted DELETE (P2, reproduced
+live).** Migration 0045's comment said "No DELETE policy, deliberately"
+and then created `tenant_isolation` as `FOR ALL`, which includes DELETE.
+`security` proved the consequence: deleting a brand-level
+`eligible = false` row silently promotes that brand from denied to
+allowed, because §A.5's nullable-narrowing pattern makes an **absent**
+layer-5 row mean "inherit the tenant answer". The narrowing trigger cannot
+see it (it is BEFORE INSERT OR UPDATE) and nothing is written to the audit
+trail. Migration 0047 splits the policy per command — SELECT / INSERT /
+UPDATE, none for DELETE — matching the shape
+`asset_operation_eligibility` already had.
+
+Two deliberate boundaries on this fix:
+
+- **No BEFORE DELETE deny-trigger.** `asset_authorizations.tenant_id`
+  declares `ON DELETE CASCADE`, and PostgreSQL runs referential-integrity
+  actions with RLS bypassed, so deleting a tenant still removes its
+  authorization rows. A deny-trigger would contradict the table's own
+  declared cascade. (`assets` declares no cascade, which is why it *does*
+  carry such a trigger.) Regression-tested both ways.
+- **TRUNCATE is closed too**, with a statement-level trigger on both
+  layer-4-7 tables. RLS does not apply to TRUNCATE at all — it is an
+  owner-level operation and the application role owns these tables — so
+  the policy split cannot cover it, and one statement would otherwise
+  erase every authorization and eligibility row on the platform, turning
+  every absent-row denial into an inherit. Migration 0044 already carries
+  this exact guard for `assets`, `asset_change_requests` and
+  `asset_change_approvals`; migration 0045's two tables were left without
+  one.
+
+**C.7.4 — Two low-severity correctness fixes.** `CheckEligibility`'s doc
+comment claimed "a non-nil error ALWAYS accompanies `eligible == false`",
+which is backwards: every ordinary layer denial returns
+`(false, reason, nil)`. The invariant is one-directional — `eligible` is
+never true when `err != nil`, and a denial may carry a nil error. A caller
+who believed the old wording would have been entitled to treat a
+fail-closed denial as a non-answer and retry past it. And
+`DecideChangeRequest` classified any `23505` as self-approval, when the
+only reachable unique constraint is
+`UNIQUE (request_id, approver_principal_id)` — i.e. a duplicate
+submission. Duplicate decision now has its own sentinel, so a retrying
+operator is not accused of self-dealing; genuine self-approval still comes
+from the trigger as a distinct condition.
+
+**C.7.5 — Migrations 0044 and 0045 are NOT edited in place.** They are
+applied migrations; rewriting them would make the live schema a different
+thing from what the migration chain says it is. Migration 0047's down
+migration restores 0044/0045's original definitions, with one stated
+limitation: the restored narrow `operation` CHECK is added `NOT VALID`,
+because APPLIED `platform_operation_eligibility` request rows created
+while 0047 was in force cannot be validated without either destroying
+audit history (`asset_change_requests` carries a deny-delete trigger for
+exactly that reason) or rewriting an immutable column to something untrue.
+The constraint is fully enforced for every new row; only pre-existing
+history is left unvalidated. Migration 0044's own down file already states
+this class of limitation for the seven seeded asset rows.
 
 ---
 

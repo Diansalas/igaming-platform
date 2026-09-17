@@ -111,18 +111,46 @@ func seedTenantFixture(t *testing.T, pool *db.Pool) fixture {
 	return f
 }
 
-// seedPlatformAdmin creates a platform-scoped staff principal. personID
-// optionally links it to a Person, which is what the same-person
-// self-approval guard resolves through (migration 0044, mirroring
-// migration 0029's withdrawal precedent).
+// seedPlatformAdmin creates a platform-scoped staff principal that is
+// ALWAYS linked to a Person: passing nil means "link a fresh, unrelated
+// Person", not "leave person_id NULL".
+//
+// That default changed with migration 0047. Before it, the same-person
+// half of the four-eyes guard only compared person ids when BOTH were
+// non-NULL, so an unlinked platform admin sailed through - which is
+// exactly the defect security exploited (and, because no production code
+// path can set person_id on a platform_admin account, the ONLY state a
+// real deployment had). Migration 0047 refuses an unlinked principal on
+// either side, so a test that wants two genuinely distinct approvers must
+// link both. Auto-linking here, once, keeps every existing test in this
+// file exercising the legitimate path without editing each one -
+// mirroring internal/httpserver's mustCreateStaff, which made the same
+// change for the same reason at Stage 3D.
+//
+// A test that specifically needs an UNLINKED or a non-active platform
+// admin - i.e. one proving migration 0047's refusals - uses
+// seedPlatformAdminRaw instead, never this one.
 func seedPlatformAdmin(t *testing.T, pool *db.Pool, personID *uuid.UUID) uuid.UUID {
+	t.Helper()
+	if personID == nil {
+		p := seedPerson(t, pool)
+		personID = &p
+	}
+	return seedPlatformAdminRaw(t, pool, personID, "active")
+}
+
+// seedPlatformAdminRaw inserts a platform-scoped staff row EXACTLY as
+// asked - including person_id NULL and a non-active status. It exists so
+// the migration-0047 regression tests can reproduce the pre-fix state
+// faithfully rather than approximating it.
+func seedPlatformAdminRaw(t *testing.T, pool *db.Pool, personID *uuid.UUID, status string) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
 	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id)
-			 VALUES ($1, NULL, $2, 'x', 'platform_admin', $3)`,
-			id, id.String()+"@platform.example.com", personID)
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status)
+			 VALUES ($1, NULL, $2, 'x', 'platform_admin', $3, $4)`,
+			id, id.String()+"@platform.example.com", personID, status)
 		return err
 	})
 	if err != nil {
@@ -240,12 +268,51 @@ func liveAsset(t *testing.T, pool *db.Pool, adminA, adminB uuid.UUID) string {
 	return code
 }
 
+// fileAndApproveEligibility files and approves the four-eyes request
+// migration 0047 requires before a PLATFORM-WIDE layer-7 default can be
+// granted. product "" means every product, recorded in the approved
+// payload as the explicit EveryProduct sentinel.
+func fileAndApproveEligibility(t *testing.T, pool *db.Pool, code string, op Operation, product string,
+	requester, approver uuid.UUID) {
+	t.Helper()
+	var reqID uuid.UUID
+	err := pool.WithPlatformAdmin(context.Background(), requester, func(ctx context.Context, tx pgx.Tx) error {
+		req, err := FileChangeRequest(ctx, tx, FileChangeRequestParams{
+			Operation: ChangePlatformOperationEligibility, AssetCode: code,
+			EligibilityOperation: op, EligibilityProduct: product, Actor: actor(requester),
+		})
+		reqID = req.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("file platform_operation_eligibility request: %v", err)
+	}
+	err = pool.WithPlatformAdmin(context.Background(), approver, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := DecideChangeRequest(ctx, tx, DecideChangeRequestParams{
+			RequestID: reqID, Approve: true, Actor: actor(approver),
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("approve platform_operation_eligibility request: %v", err)
+	}
+}
+
 // authorizeFullChain grants layers 4-7 so CheckEligibility passes, for
 // one product/operation pair.
 func authorizeFullChain(t *testing.T, pool *db.Pool, f fixture, adminA uuid.UUID, code, product string, op Operation) {
 	t.Helper()
 	// Layer 7 platform default first: migration 0045's narrowing trigger
 	// requires the platform row before a tenant override can exist.
+	//
+	// The GRANT is dual-controlled since migration 0047, so a second
+	// platform principal is needed here. It is seeded locally rather than
+	// taken as a parameter so every existing caller of this helper is
+	// unchanged - the point being tested by those callers is the layer
+	// chain, not the four-eyes flow (which has its own dedicated tests).
+	approver := seedPlatformAdmin(t, pool, nil)
+	fileAndApproveEligibility(t, pool, code, op, product, adminA, approver)
+
 	err := pool.WithPlatformAdmin(context.Background(), adminA, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := ConfigureOperationEligibility(ctx, tx, ConfigureEligibilityParams{
 			AssetCode: code, Product: product, Operation: op, Eligible: true, Actor: actor(adminA),
@@ -511,7 +578,14 @@ func TestDualControl_RequesterAndApproverMustBePlatformScopedStaff(t *testing.T)
 		})
 		return err
 	})
-	if !errors.Is(err, ErrInvalidInput) {
+	// Under staff_users' dual_scope_isolation policy a platform-scoped
+	// transaction cannot see a tenant_id IS NOT NULL row at all, so the
+	// tenant staff id resolves to nothing - which migration 0047
+	// classifies as ErrApproverNotEligible ("cannot be resolved"),
+	// alongside its person-linkage and status refusals. Migration 0044
+	// reported the same condition as generic invalid input; the refusal
+	// is identical, only the classification is now specific.
+	if !errors.Is(err, ErrApproverNotEligible) {
 		t.Fatalf("expected a tenant-scoped requester to be refused, got %v", err)
 	}
 
@@ -534,7 +608,7 @@ func TestDualControl_RequesterAndApproverMustBePlatformScopedStaff(t *testing.T)
 		})
 		return err
 	})
-	if !errors.Is(err, ErrInvalidInput) {
+	if !errors.Is(err, ErrApproverNotEligible) {
 		t.Fatalf("expected a tenant-scoped approver to be refused, got %v", err)
 	}
 }
@@ -1243,17 +1317,32 @@ func TestIsolation_TenantCannotWritePlatformWideEligibilityDefault(t *testing.T)
 	code := liveAsset(t, pool, adminA, adminB)
 	staffID := seedTenantStaff(t, pool, f.tenantID)
 
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `
-			INSERT INTO asset_operation_eligibility
-				(tenant_id, asset_code, product, operation, eligible, created_by_actor_type, created_by_actor_id)
-			VALUES (NULL, $1, 'casino', 'wagering', true, 'staff', $2)`, code, staffID)
-		return err
-	})
-	if err == nil {
-		t.Fatal("a tenant-scoped connection must never write a platform-wide eligibility default")
+	// RLS is still the FIRST refusal here, unchanged by migration 0047:
+	// the WITH CHECK is evaluated before the new AFTER dual-control
+	// trigger runs, so a tenant-scoped connection never even reaches the
+	// four-eyes question. Both controls are real, and either alone
+	// suffices - a tenant-scoped connection could not satisfy the
+	// trigger anyway, because asset_change_requests is
+	// platform-admin-scoped and the consume would find no approval to
+	// spend no matter what was approved elsewhere.
+	//
+	// Asserted for BOTH directions on purpose: a platform-wide denial
+	// (eligible = false) skips the dual-control path entirely by design,
+	// so it is the case that isolates the RLS backstop from the new
+	// trigger.
+	for _, eligible := range []bool{true, false} {
+		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `
+				INSERT INTO asset_operation_eligibility
+					(tenant_id, asset_code, product, operation, eligible, created_by_actor_type, created_by_actor_id)
+				VALUES (NULL, $1, 'casino', 'wagering', $3, 'staff', $2)`, code, staffID, eligible)
+			return err
+		})
+		if err == nil {
+			t.Fatalf("a tenant-scoped connection must never write a platform-wide eligibility row (eligible=%v)", eligible)
+		}
+		assertPgErrorCode(t, err, pgRLSViolation)
 	}
-	assertPgErrorCode(t, err, pgRLSViolation)
 }
 
 // A player-initiated operation runs under WithPlayerScope, and
@@ -1455,4 +1544,730 @@ func TestProductRegistry_IsDataNotAClosedEnum(t *testing.T) {
 		t.Fatal("a tenant-scoped connection must not register a platform product")
 	}
 	assertPgErrorCode(t, err, pgRLSViolation)
+}
+
+// ======================================================================
+// Migration 0047 regression tests - the three defects independent
+// security and code review found in migrations 0044/0045.
+// ======================================================================
+
+// --- Fix 1: the person-identity half of four-eyes was inert ---
+
+// The literal reproduction of security's live exploit, and the headline
+// regression test for this fix: ONE human runs cmd/seed-admin twice.
+//
+// That is not a contrived fixture - it is the only platform_admin state a
+// real deployment can be in, because cmd/seed-admin passes nil for
+// personID, admin_routes.go's staff-creation role allowlist excludes
+// platform_admin entirely, and the person-link remediation route is
+// tenant-scoped (so staff_users' dual-scope RLS hides every
+// tenant_id IS NULL row from it). Under migration 0044 the person
+// comparison was skipped whenever either side was NULL, so those two
+// accounts satisfied "two distinct principals" and one operator completed
+// create -> activate -> platform_authorize alone.
+//
+// This test FAILS against migration 0044 (every step succeeds) and PASSES
+// against 0047 (every step is refused).
+func TestDualControl_TwoUnlinkedPlatformAdminsCannotCompleteAnyDualControlledOperation(t *testing.T) {
+	pool := testPool(t)
+	// Two separate `seed-admin` runs by one person: distinct staff UUIDs,
+	// both person_id NULL.
+	unlinkedA := seedPlatformAdminRaw(t, pool, nil, "active")
+	unlinkedB := seedPlatformAdminRaw(t, pool, nil, "active")
+	code := newAssetCode()
+
+	// Step 1 of the exploit: file the create request. Refused outright -
+	// an unlinked principal cannot even open a four-eyes request, because
+	// the control it is opening cannot be evaluated for it.
+	err := pool.WithPlatformAdmin(context.Background(), unlinkedA, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := FileChangeRequest(ctx, tx, FileChangeRequestParams{
+			Operation: ChangeCreate, AssetCode: code, AssetType: AssetTypeFiat,
+			DecimalExponent: 2, Actor: actor(unlinkedA),
+		})
+		return err
+	})
+	if !errors.Is(err, ErrApproverNotEligible) {
+		t.Fatalf("an unlinked platform principal must not be able to file a change request, got %v", err)
+	}
+
+	// Step 2: with no approved request, the mutation itself is refused
+	// too - so the exploit cannot be completed by skipping the paperwork.
+	err = pool.WithPlatformAdmin(context.Background(), unlinkedA, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := CreateAsset(ctx, tx, CreateAssetParams{
+			Code: code, AssetType: AssetTypeFiat, DecimalExponent: 2,
+			DisplayName: "Exploit", Actor: actor(unlinkedA),
+		})
+		return err
+	})
+	if !errors.Is(err, ErrDualControlRequired) {
+		t.Fatalf("creating an asset with no approved request must be refused, got %v", err)
+	}
+
+	// Step 3: and the same for the other two layer-1-3 operations, on an
+	// asset that DOES exist (created legitimately), so the refusal is
+	// attributable to the principals rather than to the missing row.
+	linkedA := seedPlatformAdmin(t, pool, nil)
+	linkedB := seedPlatformAdmin(t, pool, nil)
+	live := liveAsset(t, pool, linkedA, linkedB)
+
+	for _, op := range []ChangeOperation{ChangeActivate, ChangePlatformAuthorize} {
+		err = pool.WithPlatformAdmin(context.Background(), unlinkedA, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := FileChangeRequest(ctx, tx, FileChangeRequestParams{
+				Operation: op, AssetCode: live, Actor: actor(unlinkedA),
+			})
+			return err
+		})
+		if !errors.Is(err, ErrApproverNotEligible) {
+			t.Fatalf("an unlinked principal must not be able to file a %s request, got %v", op, err)
+		}
+	}
+
+	// And the approval side independently: a LINKED requester's genuine
+	// request cannot be approved by an unlinked account either.
+	freshCode := newAssetCode()
+	var reqID uuid.UUID
+	err = pool.WithPlatformAdmin(context.Background(), linkedA, func(ctx context.Context, tx pgx.Tx) error {
+		req, err := FileChangeRequest(ctx, tx, FileChangeRequestParams{
+			Operation: ChangeCreate, AssetCode: freshCode, AssetType: AssetTypeFiat,
+			DecimalExponent: 2, Actor: actor(linkedA),
+		})
+		reqID = req.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("a linked principal must be able to file a request: %v", err)
+	}
+	err = pool.WithPlatformAdmin(context.Background(), unlinkedB, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := DecideChangeRequest(ctx, tx, DecideChangeRequestParams{
+			RequestID: reqID, Approve: true, Actor: actor(unlinkedB),
+		})
+		return err
+	})
+	if !errors.Is(err, ErrApproverNotEligible) {
+		t.Fatalf("an unlinked platform principal must not be able to approve, got %v", err)
+	}
+
+	// The asset never came into existence, and nothing was activated.
+	err = pool.WithPlatformAdmin(context.Background(), linkedA, func(ctx context.Context, tx pgx.Tx) error {
+		for _, c := range []string{code, freshCode} {
+			var count int
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM assets WHERE code = $1`, c).Scan(&count); err != nil {
+				return err
+			}
+			if count != 0 {
+				return fmt.Errorf("asset %s exists; the unilateral path was not fully closed", c)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The same exploit against the layer-7 platform-wide grant (fix 1 and
+// fix 2 interacting): an unlinked pair cannot obtain a platform-wide
+// eligibility default either.
+func TestDualControl_TwoUnlinkedPlatformAdminsCannotGrantPlatformWideEligibility(t *testing.T) {
+	pool := testPool(t)
+	linkedA := seedPlatformAdmin(t, pool, nil)
+	linkedB := seedPlatformAdmin(t, pool, nil)
+	code := liveAsset(t, pool, linkedA, linkedB)
+
+	unlinkedA := seedPlatformAdminRaw(t, pool, nil, "active")
+	err := pool.WithPlatformAdmin(context.Background(), unlinkedA, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := FileChangeRequest(ctx, tx, FileChangeRequestParams{
+			Operation: ChangePlatformOperationEligibility, AssetCode: code,
+			EligibilityOperation: OperationWagering, EligibilityProduct: "casino", Actor: actor(unlinkedA),
+		})
+		return err
+	})
+	if !errors.Is(err, ErrApproverNotEligible) {
+		t.Fatalf("an unlinked principal must not be able to file a layer-7 grant request, got %v", err)
+	}
+
+	err = pool.WithPlatformAdmin(context.Background(), unlinkedA, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ConfigureOperationEligibility(ctx, tx, ConfigureEligibilityParams{
+			AssetCode: code, Product: "casino", Operation: OperationWagering,
+			Eligible: true, Actor: actor(unlinkedA),
+		})
+		return err
+	})
+	if !errors.Is(err, ErrDualControlRequired) {
+		t.Fatalf("a platform-wide grant with no approval must be refused, got %v", err)
+	}
+}
+
+// A suspended staff account is not an eligible approver, even though it
+// is a distinct, person-linked, platform-scoped principal. Migration
+// 0034's rule for withdrawal decisions, now applied to asset changes:
+// an off-boarded operator's credential must not be able to complete a
+// four-eyes control.
+func TestDualControl_SuspendedApproverIsRefused(t *testing.T) {
+	pool := testPool(t)
+	requester := seedPlatformAdmin(t, pool, nil)
+	suspendedPerson := seedPerson(t, pool)
+	suspended := seedPlatformAdminRaw(t, pool, &suspendedPerson, "suspended")
+
+	code := newAssetCode()
+	var reqID uuid.UUID
+	err := pool.WithPlatformAdmin(context.Background(), requester, func(ctx context.Context, tx pgx.Tx) error {
+		req, err := FileChangeRequest(ctx, tx, FileChangeRequestParams{
+			Operation: ChangeCreate, AssetCode: code, AssetType: AssetTypeFiat,
+			DecimalExponent: 2, Actor: actor(requester),
+		})
+		reqID = req.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("file request: %v", err)
+	}
+
+	err = pool.WithPlatformAdmin(context.Background(), suspended, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := DecideChangeRequest(ctx, tx, DecideChangeRequestParams{
+			RequestID: reqID, Approve: true, Actor: actor(suspended),
+		})
+		return err
+	})
+	if !errors.Is(err, ErrApproverNotEligible) {
+		t.Fatalf("a suspended approver must be refused, got %v", err)
+	}
+
+	// And the request is still unusable afterwards - the refused decision
+	// left no approval behind.
+	err = pool.WithPlatformAdmin(context.Background(), requester, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := CreateAsset(ctx, tx, CreateAssetParams{
+			Code: code, AssetType: AssetTypeFiat, DecimalExponent: 2,
+			DisplayName: "Suspended approval", Actor: actor(requester),
+		})
+		return err
+	})
+	if !errors.Is(err, ErrDualControlRequired) {
+		t.Fatalf("a refused suspended-approver decision must not authorize the mutation, got %v", err)
+	}
+}
+
+// The requester side is checked too: a suspended account cannot open a
+// four-eyes request for someone else to rubber-stamp.
+func TestDualControl_SuspendedRequesterIsRefused(t *testing.T) {
+	pool := testPool(t)
+	person := seedPerson(t, pool)
+	suspended := seedPlatformAdminRaw(t, pool, &person, "suspended")
+
+	err := pool.WithPlatformAdmin(context.Background(), suspended, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := FileChangeRequest(ctx, tx, FileChangeRequestParams{
+			Operation: ChangeCreate, AssetCode: newAssetCode(), AssetType: AssetTypeFiat,
+			DecimalExponent: 2, Actor: actor(suspended),
+		})
+		return err
+	})
+	if !errors.Is(err, ErrApproverNotEligible) {
+		t.Fatalf("a suspended requester must be refused, got %v", err)
+	}
+}
+
+// A principal with no staff_users row at all (e.g. a stale or forged
+// subject claim) is refused rather than treated as an exempt service
+// identity. Unlike withdrawals, no service identity ever files or decides
+// an asset registry change (ADR 0037 §C.1).
+func TestDualControl_UnresolvablePrincipalIsRefused(t *testing.T) {
+	pool := testPool(t)
+	ghost := uuid.New()
+	err := pool.WithPlatformAdmin(context.Background(), ghost, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := FileChangeRequest(ctx, tx, FileChangeRequestParams{
+			Operation: ChangeCreate, AssetCode: newAssetCode(), AssetType: AssetTypeFiat,
+			DecimalExponent: 2, Actor: actor(ghost),
+		})
+		return err
+	})
+	if !errors.Is(err, ErrApproverNotEligible) {
+		t.Fatalf("an unresolvable principal must be refused, got %v", err)
+	}
+}
+
+// --- Fix 2: the layer-7 platform-wide grant is dual-controlled ---
+
+func TestLayer7_PlatformWideGrantRequiresTwoDistinctApprovals(t *testing.T) {
+	pool := testPool(t)
+	adminA := seedPlatformAdmin(t, pool, nil)
+	adminB := seedPlatformAdmin(t, pool, nil)
+	code := liveAsset(t, pool, adminA, adminB)
+
+	grant := func(actorID uuid.UUID, op Operation, product string) error {
+		return pool.WithPlatformAdmin(context.Background(), actorID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := ConfigureOperationEligibility(ctx, tx, ConfigureEligibilityParams{
+				AssetCode: code, Product: product, Operation: op, Eligible: true, Actor: actor(actorID),
+			})
+			return err
+		})
+	}
+
+	// 1. No request at all: refused. This is the defect - before
+	// migration 0047 this single call succeeded and flipped a
+	// platform-wide gate for every tenant on the platform.
+	if err := grant(adminA, OperationWagering, "casino"); !errors.Is(err, ErrDualControlRequired) {
+		t.Fatalf("a platform-wide grant with no approved request must be refused, got %v", err)
+	}
+
+	// 2. A request the filer approves itself: refused at the approval.
+	var reqID uuid.UUID
+	err := pool.WithPlatformAdmin(context.Background(), adminA, func(ctx context.Context, tx pgx.Tx) error {
+		req, err := FileChangeRequest(ctx, tx, FileChangeRequestParams{
+			Operation: ChangePlatformOperationEligibility, AssetCode: code,
+			EligibilityOperation: OperationWagering, EligibilityProduct: "casino", Actor: actor(adminA),
+		})
+		reqID = req.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("file layer-7 grant request: %v", err)
+	}
+	err = pool.WithPlatformAdmin(context.Background(), adminA, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := DecideChangeRequest(ctx, tx, DecideChangeRequestParams{
+			RequestID: reqID, Approve: true, Actor: actor(adminA),
+		})
+		return err
+	})
+	if !errors.Is(err, ErrSelfApproval) {
+		t.Fatalf("self-approval of a layer-7 grant must be refused, got %v", err)
+	}
+	// Still refused, because the pending request carries no valid approval.
+	if err := grant(adminA, OperationWagering, "casino"); !errors.Is(err, ErrDualControlRequired) {
+		t.Fatalf("an unapproved request must not authorize the grant, got %v", err)
+	}
+
+	// 3. Two staff accounts, ONE person: refused (fix 1 and fix 2
+	// together - this is the shape the whole exploit relied on).
+	sharedPerson := seedPerson(t, pool)
+	twinA := seedPlatformAdmin(t, pool, &sharedPerson)
+	twinB := seedPlatformAdmin(t, pool, &sharedPerson)
+	var twinReq uuid.UUID
+	err = pool.WithPlatformAdmin(context.Background(), twinA, func(ctx context.Context, tx pgx.Tx) error {
+		req, err := FileChangeRequest(ctx, tx, FileChangeRequestParams{
+			Operation: ChangePlatformOperationEligibility, AssetCode: code,
+			EligibilityOperation: OperationDeposit, EligibilityProduct: "casino", Actor: actor(twinA),
+		})
+		twinReq = req.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("file twin request: %v", err)
+	}
+	err = pool.WithPlatformAdmin(context.Background(), twinB, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := DecideChangeRequest(ctx, tx, DecideChangeRequestParams{
+			RequestID: twinReq, Approve: true, Actor: actor(twinB),
+		})
+		return err
+	})
+	if !errors.Is(err, ErrSelfApproval) {
+		t.Fatalf("one person approving through a second staff account must be refused, got %v", err)
+	}
+
+	// 4. A genuine second person: the grant goes through.
+	err = pool.WithPlatformAdmin(context.Background(), adminB, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := DecideChangeRequest(ctx, tx, DecideChangeRequestParams{
+			RequestID: reqID, Approve: true, Actor: actor(adminB),
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("a distinct person's approval must be accepted: %v", err)
+	}
+	if err := grant(adminA, OperationWagering, "casino"); err != nil {
+		t.Fatalf("an approved platform-wide grant must be accepted: %v", err)
+	}
+
+	// 5. The approval is consumed: a second grant of the SAME fact needs
+	// its own approval. (Re-granting an already-eligible row is a no-op
+	// re-write and is allowed; a genuinely new grant is not.)
+	if err := grant(adminA, OperationWithdrawal, "casino"); !errors.Is(err, ErrDualControlRequired) {
+		t.Fatalf("a consumed approval must not authorize a second, different grant, got %v", err)
+	}
+}
+
+// An approval names the EXACT (operation, product) being granted. An
+// approval for casino wagering cannot be spent on sportsbook wagering, on
+// casino withdrawal, or on an every-product grant - otherwise the
+// approver approved something other than what was applied, which is the
+// same defect ADR 0037 §C.5.4's payload matching exists to prevent for
+// asset creation.
+func TestLayer7_PlatformWideGrantApprovalIsBoundToItsExactOperationAndProduct(t *testing.T) {
+	pool := testPool(t)
+	adminA := seedPlatformAdmin(t, pool, nil)
+	adminB := seedPlatformAdmin(t, pool, nil)
+	code := liveAsset(t, pool, adminA, adminB)
+
+	fileAndApproveEligibility(t, pool, code, OperationWagering, "casino", adminA, adminB)
+
+	attempt := func(op Operation, product string) error {
+		return pool.WithPlatformAdmin(context.Background(), adminA, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := ConfigureOperationEligibility(ctx, tx, ConfigureEligibilityParams{
+				AssetCode: code, Product: product, Operation: op, Eligible: true, Actor: actor(adminA),
+			})
+			return err
+		})
+	}
+
+	if err := attempt(OperationWagering, "sportsbook"); !errors.Is(err, ErrDualControlRequired) {
+		t.Fatalf("a casino approval must not authorize a sportsbook grant, got %v", err)
+	}
+	if err := attempt(OperationWithdrawal, "casino"); !errors.Is(err, ErrDualControlRequired) {
+		t.Fatalf("a wagering approval must not authorize a withdrawal grant, got %v", err)
+	}
+	// Every-product ("" -> the EveryProduct sentinel) is strictly broader
+	// than casino and must not be reachable with a casino approval.
+	if err := attempt(OperationWagering, ""); !errors.Is(err, ErrDualControlRequired) {
+		t.Fatalf("a casino-specific approval must not authorize an every-product grant, got %v", err)
+	}
+	// The approved fact itself still works.
+	if err := attempt(OperationWagering, "casino"); err != nil {
+		t.Fatalf("the approved (wagering, casino) grant must be accepted: %v", err)
+	}
+}
+
+// Revoking a platform-wide default is deliberately single-actor - the
+// fail-closed direction must never wait for a second approver (ADR 0037
+// §C.5.3's asymmetry, already applied to suspend/revoke at layers 2-3).
+// And re-granting after a revocation needs a NEW approval.
+func TestLayer7_PlatformWideRevocationIsSingleActorButRegrantIsNot(t *testing.T) {
+	pool := testPool(t)
+	adminA := seedPlatformAdmin(t, pool, nil)
+	adminB := seedPlatformAdmin(t, pool, nil)
+	code := liveAsset(t, pool, adminA, adminB)
+
+	fileAndApproveEligibility(t, pool, code, OperationWagering, "casino", adminA, adminB)
+	set := func(eligible bool) error {
+		return pool.WithPlatformAdmin(context.Background(), adminA, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := ConfigureOperationEligibility(ctx, tx, ConfigureEligibilityParams{
+				AssetCode: code, Product: "casino", Operation: OperationWagering,
+				Eligible: eligible, Actor: actor(adminA),
+			})
+			return err
+		})
+	}
+	if err := set(true); err != nil {
+		t.Fatalf("approved grant: %v", err)
+	}
+	// An idempotent re-grant of an already-eligible row needs no new
+	// approval (mirrors assets_enforce_dual_control's off->on rule).
+	if err := set(true); err != nil {
+		t.Fatalf("an idempotent re-write of an already-granted row must not require a new approval: %v", err)
+	}
+	if err := set(false); err != nil {
+		t.Fatalf("revocation must be single-actor: %v", err)
+	}
+	if err := set(true); !errors.Is(err, ErrDualControlRequired) {
+		t.Fatalf("re-granting after a revocation must require a new approval, got %v", err)
+	}
+}
+
+// Raw SQL cannot launder one approval into a grant of a different fact by
+// mutating the row's key columns afterwards.
+func TestLayer7_MutatingAGrantedRowsKeyColumnsRequiresItsOwnApproval(t *testing.T) {
+	pool := testPool(t)
+	adminA := seedPlatformAdmin(t, pool, nil)
+	adminB := seedPlatformAdmin(t, pool, nil)
+	code := liveAsset(t, pool, adminA, adminB)
+
+	fileAndApproveEligibility(t, pool, code, OperationWagering, "casino", adminA, adminB)
+	err := pool.WithPlatformAdmin(context.Background(), adminA, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ConfigureOperationEligibility(ctx, tx, ConfigureEligibilityParams{
+			AssetCode: code, Product: "casino", Operation: OperationWagering,
+			Eligible: true, Actor: actor(adminA),
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("approved grant: %v", err)
+	}
+
+	err = pool.WithPlatformAdmin(context.Background(), adminA, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`UPDATE asset_operation_eligibility SET operation = 'withdrawal'
+			  WHERE tenant_id IS NULL AND asset_code = $1 AND operation = 'wagering'`, code)
+		return err
+	})
+	if err == nil {
+		t.Fatal("re-pointing an approved grant at a different operation must be refused")
+	}
+	pgErr := assertPgErrorCode(t, err, pgRaisedException)
+	if !strings.Contains(pgErr.Message, "four-eyes") {
+		t.Fatalf("expected a four-eyes refusal, got %q", pgErr.Message)
+	}
+}
+
+// --- Fix 3: asset_authorizations DELETE / TRUNCATE ---
+
+// Security's live exploit for fix 3: a brand-level `eligible = false`
+// denial row is the ONLY thing denying that brand, because
+// CheckEligibility treats an ABSENT layer-5 row as "inherit the tenant
+// answer". Deleting it therefore promoted the brand from denied to
+// allowed, with no trigger able to see it (the narrowing trigger is
+// BEFORE INSERT OR UPDATE only) and nothing in the audit trail.
+//
+// This test FAILS against migration 0045 (the delete succeeds and the
+// brand becomes eligible) and PASSES against 0047.
+func TestRLS_DeletingABrandDenialCannotSilentlyWidenEligibility(t *testing.T) {
+	pool := testPool(t)
+	adminA := seedPlatformAdmin(t, pool, nil)
+	adminB := seedPlatformAdmin(t, pool, nil)
+	f := seedTenantFixture(t, pool)
+	code := liveAsset(t, pool, adminA, adminB)
+	authorizeFullChain(t, pool, f, adminA, code, "casino", OperationWagering)
+
+	staffID := seedTenantStaff(t, pool, f.tenantID)
+	setScope(t, pool, f, staffID, ScopeBrand, uuid.Nil, f.brandID, code, "casino", false)
+
+	if _, reason, _ := check(t, pool, f, f.brandID, f.jurisdictionID, code, "casino", OperationWagering); reason != ReasonBrandNotAuthorized {
+		t.Fatalf("precondition: the brand must be denied, got %q", reason)
+	}
+
+	// The exploit: delete the denial row from the tenant's own scope.
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM asset_authorizations WHERE tenant_id = $1 AND scope_kind = 'brand' AND asset_code = $2`,
+			f.tenantID, code)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 0 {
+			return fmt.Errorf("a tenant-scoped connection deleted %d authorization rows; expected 0", tag.RowsAffected())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A platform-admin-scoped connection has no DELETE policy either -
+	// there is no scope from which this row can be removed.
+	err = pool.WithPlatformAdmin(context.Background(), adminA, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM asset_authorizations WHERE asset_code = $1`, code)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 0 {
+			return fmt.Errorf("a platform-admin connection deleted %d authorization rows; expected 0", tag.RowsAffected())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Nor a player-scoped one.
+	err = pool.WithPlayerScope(context.Background(), f.tenantID, f.playerID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM asset_authorizations WHERE asset_code = $1`, code)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 0 {
+			return fmt.Errorf("a player-scoped connection deleted %d authorization rows; expected 0", tag.RowsAffected())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The denial still stands - which is the whole point.
+	if _, reason, _ := check(t, pool, f, f.brandID, f.jurisdictionID, code, "casino", OperationWagering); reason != ReasonBrandNotAuthorized {
+		t.Fatalf("the brand denial must survive every delete attempt, got %q", reason)
+	}
+	// And the row is still there, with its reason_code and actor intact.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var count int
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM asset_authorizations
+			  WHERE tenant_id = $1 AND scope_kind = 'brand' AND asset_code = $2 AND eligible = false`,
+			f.tenantID, code).Scan(&count); err != nil {
+			return err
+		}
+		if count != 1 {
+			return fmt.Errorf("expected the brand denial row to still exist, found %d", count)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The same erasure in bulk. RLS does not apply to TRUNCATE at all (it is
+// an owner-level operation and the application role owns these tables),
+// so the per-command policy split cannot cover it - a statement-level
+// trigger does, matching the guard migration 0044 already gives `assets`,
+// asset_change_requests and asset_change_approvals.
+func TestRLS_AuthorizationTablesCannotBeTruncated(t *testing.T) {
+	pool := testPool(t)
+	adminA := seedPlatformAdmin(t, pool, nil)
+
+	for _, table := range []string{"asset_authorizations", "asset_operation_eligibility"} {
+		err := pool.WithPlatformAdmin(context.Background(), adminA, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `TRUNCATE TABLE `+table)
+			return err
+		})
+		if err == nil {
+			t.Fatalf("%s must not be truncatable - one statement would widen every absent-row denial on the platform", table)
+		}
+		assertPgErrorCode(t, err, pgRaisedException)
+	}
+}
+
+// The tenant_id ... ON DELETE CASCADE migration 0045 declared must keep
+// working: PostgreSQL runs referential-integrity actions with RLS
+// bypassed, so removing a tenant still removes its authorization rows.
+// Fix 3 is not allowed to silently change that contract, which is also
+// why no BEFORE DELETE deny-trigger was added (one would contradict the
+// cascade, unlike `assets`, which declares no cascade).
+func TestRLS_TenantDeletionStillCascadesAuthorizationRows(t *testing.T) {
+	pool := testPool(t)
+	adminA := seedPlatformAdmin(t, pool, nil)
+	adminB := seedPlatformAdmin(t, pool, nil)
+	code := liveAsset(t, pool, adminA, adminB)
+
+	// A deliberately bare tenant - no brand, no player account. Not a
+	// shortcut: seedTenantFixture's player_accounts row has a
+	// non-cascading FK to brands, so deleting that tenant fails for a
+	// reason that has nothing to do with the property under test here.
+	tenantID := uuid.New()
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO tenants (id, slug, name, licensing_model)
+			 VALUES ($1, $2, 'Cascade Tenant', 'under_platform_licence')`,
+			tenantID, "cas-"+tenantID.String()[:8])
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed bare tenant: %v", err)
+	}
+	staffID := seedTenantStaff(t, pool, tenantID)
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := AuthorizeScope(ctx, tx, AuthorizeScopeParams{
+			TenantID: tenantID, ScopeKind: ScopeTenant, AssetCode: code, Product: "casino",
+			Eligible: true, Actor: actor(staffID),
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("authorize tenant scope: %v", err)
+	}
+
+	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, tenantID); err != nil {
+			return err
+		}
+		var count int
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*) FROM asset_authorizations WHERE tenant_id = $1`, tenantID).Scan(&count); err != nil {
+			return err
+		}
+		if count != 0 {
+			return fmt.Errorf("expected the cascade to remove the tenant's authorization rows, %d remain", count)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// --- Fix 5: a duplicate decision is not self-approval ---
+
+func TestDecideChangeRequest_DuplicateDecisionIsDistinctFromSelfApproval(t *testing.T) {
+	pool := testPool(t)
+	adminA := seedPlatformAdmin(t, pool, nil)
+	adminB := seedPlatformAdmin(t, pool, nil)
+	code := newAssetCode()
+
+	var reqID uuid.UUID
+	err := pool.WithPlatformAdmin(context.Background(), adminA, func(ctx context.Context, tx pgx.Tx) error {
+		req, err := FileChangeRequest(ctx, tx, FileChangeRequestParams{
+			Operation: ChangeCreate, AssetCode: code, AssetType: AssetTypeFiat,
+			DecimalExponent: 2, Actor: actor(adminA),
+		})
+		reqID = req.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("file request: %v", err)
+	}
+
+	decide := func(id uuid.UUID) error {
+		return pool.WithPlatformAdmin(context.Background(), id, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := DecideChangeRequest(ctx, tx, DecideChangeRequestParams{
+				RequestID: reqID, Approve: true, Actor: actor(id),
+			})
+			return err
+		})
+	}
+	if err := decide(adminB); err != nil {
+		t.Fatalf("first decision: %v", err)
+	}
+
+	// The SECOND decision by the same approver is a duplicate submission
+	// (a retry, a double-clicked button) - not self-dealing.
+	err = decide(adminB)
+	if !errors.Is(err, ErrDuplicateDecision) {
+		t.Fatalf("expected ErrDuplicateDecision for a repeated decision, got %v", err)
+	}
+	if errors.Is(err, ErrSelfApproval) {
+		t.Fatal("a duplicate decision must NOT be reported as self-approval (code-reviewer F9): it puts a false integrity signal in front of an operator who merely retried")
+	}
+
+	// And the genuine self-approval case is still ErrSelfApproval, from
+	// the trigger - the two conditions stay distinguishable.
+	err = decide(adminA)
+	if !errors.Is(err, ErrSelfApproval) {
+		t.Fatalf("expected ErrSelfApproval for the requester's own decision, got %v", err)
+	}
+	if errors.Is(err, ErrDuplicateDecision) {
+		t.Fatal("self-approval must not be reported as a duplicate decision")
+	}
+}
+
+// --- GetAsset stability (internal/risk's denomination.go will call it) ---
+
+// internal/risk is being changed (separate dispatch) to read
+// assets.decimal_exponent through GetAsset instead of its own raw SQL.
+// This pins the two properties that change depends on: it is readable
+// from a TENANT-scoped transaction (risk evaluates inside one), and a
+// missing asset is ErrNotFound rather than a zero exponent - a silent
+// zero would turn a minor-unit threshold into a major-unit one.
+func TestGetAsset_IsReadableFromTenantScopeAndFailsClosedOnMissing(t *testing.T) {
+	pool := testPool(t)
+	f := seedTenantFixture(t, pool)
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		a, err := GetAsset(ctx, tx, "EUR")
+		if err != nil {
+			return fmt.Errorf("GetAsset from tenant scope: %w", err)
+		}
+		if a.Code != "EUR" || a.DecimalExponent != 2 {
+			return fmt.Errorf("unexpected asset row: %+v", a)
+		}
+		if _, err := GetAsset(ctx, tx, "NO-SUCH-ASSET"); !errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("expected ErrNotFound for an unknown asset, got %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// And from a player-scoped transaction, which is where a
+	// player-initiated financial operation resolves it.
+	err = pool.WithPlayerScope(context.Background(), f.tenantID, f.playerID, func(ctx context.Context, tx pgx.Tx) error {
+		a, err := GetAsset(ctx, tx, "EUR")
+		if err != nil {
+			return err
+		}
+		if a.DecimalExponent != 2 {
+			return fmt.Errorf("unexpected exponent %d", a.DecimalExponent)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }

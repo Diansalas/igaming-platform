@@ -73,10 +73,31 @@ func ensureAssetAtExponent(t *testing.T, pool *db.Pool, code, assetType string, 
 	requestID := uuid.New()
 	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 		for _, id := range []uuid.UUID{requester, approver} {
+			// FIXTURE UPDATE, migration 0047 (made by `architect`, who
+			// owns that migration, and flagged to `risk` for review -
+			// this file's own doc comment above asks for exactly this
+			// when the four-eyes path changes).
+			//
+			// Each principal must now be linked to a DISTINCT Person and
+			// be `active`: migration 0047 refuses a requester or approver
+			// whose person_id IS NULL, because the same-person half of
+			// four-eyes cannot be evaluated without it (security found
+			// that check was unconditionally inert before 0047, and
+			// reproduced a single-operator bypass through two
+			// person_id-NULL platform_admin accounts). Two distinct
+			// persons here is what makes `requester` and `approver`
+			// genuinely two humans rather than two UUIDs.
+			//
+			// Risk's own production code is unaffected: it reads
+			// assets.decimal_exponent and never creates an asset.
+			personID := uuid.New()
+			if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID); err != nil {
+				return err
+			}
 			if _, err := tx.Exec(ctx,
-				`INSERT INTO staff_users (id, tenant_id, email, password_hash, role)
-				 VALUES ($1, NULL, $2, 'x', 'platform_admin')`,
-				id, id.String()+"@platform.example.com"); err != nil {
+				`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status)
+				 VALUES ($1, NULL, $2, 'x', 'platform_admin', $3, 'active')`,
+				id, id.String()+"@platform.example.com", personID); err != nil {
 				return err
 			}
 		}

@@ -37,8 +37,11 @@ func registerAssetRegistryRoutes(mux *http.ServeMux, deps Deps) {
 		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermAssetRegistryManage)(newListAssetsHandler(deps))))
 
 	// Four-eyes: file a change request, then have a DIFFERENT platform
-	// principal decide it. Both are prerequisites for create/activate/
-	// platform-authorize, never optional paperwork around them.
+	// principal (a different PERSON, since migration 0047 - not merely a
+	// different staff UUID) decide it. Both are prerequisites for
+	// create/activate/platform-authorize AND for granting the
+	// platform-wide layer-7 eligibility default, never optional paperwork
+	// around them.
 	mux.Handle("POST /v1/admin/assets/change-requests",
 		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermAssetRegistryManage)(newFileAssetChangeRequestHandler(deps))))
 	mux.Handle("POST /v1/admin/assets/change-requests/{id}/decision",

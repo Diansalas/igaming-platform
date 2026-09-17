@@ -11,12 +11,14 @@ package httpserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/identity"
 )
@@ -139,12 +141,17 @@ func TestAssetRegistryAPI_FullDualControlledPathOverHTTP(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	requestID := func(operation string) string {
+	requestID := func(operation string, extra ...map[string]any) string {
 		t.Helper()
 		body := map[string]any{"operation": operation, "asset_code": code, "reason_code": "new_listing"}
 		if operation == "create" {
 			body["asset_type"] = "fiat"
 			body["decimal_exponent"] = 2
+		}
+		for _, e := range extra {
+			for k, v := range e {
+				body[k] = v
+			}
 		}
 		r := sendAssetJSON(t, srv.URL+"/v1/admin/assets/change-requests", http.MethodPost, tokenA, body)
 		defer r.Body.Close()
@@ -213,11 +220,44 @@ func TestAssetRegistryAPI_FullDualControlledPathOverHTTP(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// Layer 7 platform default (platform tier).
+	// Layer 7 platform default (platform tier). Since migration 0047 this
+	// GRANT is dual-controlled too - it flips a gate for every tenant on
+	// the platform - so an unapproved attempt is a 409, exactly like an
+	// unapproved activation.
+	resp = sendAssetJSON(t, srv.URL+"/v1/admin/assets/"+code+"/operation-eligibility", http.MethodPut, tokenA,
+		map[string]any{"operation": "wagering", "product": "casino", "eligible": true, "reason_code": "cleared"})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 granting a platform-wide eligibility default with no approval, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	approve(requestID("platform_operation_eligibility", map[string]any{
+		"eligibility_operation": "wagering", "eligibility_product": "casino"}), tokenB)
+
 	resp = sendAssetJSON(t, srv.URL+"/v1/admin/assets/"+code+"/operation-eligibility", http.MethodPut, tokenA,
 		map[string]any{"operation": "wagering", "product": "casino", "eligible": true, "reason_code": "cleared"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 setting the platform eligibility default, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// The approval was consumed and was bound to (wagering, casino): a
+	// different operation needs its own.
+	resp = sendAssetJSON(t, srv.URL+"/v1/admin/assets/"+code+"/operation-eligibility", http.MethodPut, tokenA,
+		map[string]any{"operation": "deposit", "product": "casino", "eligible": true, "reason_code": "cleared"})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 reusing a consumed/mismatched approval for a different operation, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Revoking a platform-wide default stays single-actor (the
+	// fail-closed direction must not wait for a second approver), so this
+	// needs no approval at all. Restored immediately afterwards, since
+	// the tenant-tier assertions below depend on the grant.
+	resp = sendAssetJSON(t, srv.URL+"/v1/admin/assets/"+code+"/operation-eligibility", http.MethodPut, tokenA,
+		map[string]any{"operation": "deposit", "product": "casino", "eligible": false, "reason_code": "not_offered"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 revoking a platform-wide default with no approval (single-actor by design), got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 
@@ -316,6 +356,205 @@ func TestAssetRegistryAPI_ReasonCodeIsMandatory(t *testing.T) {
 		"reason_code": "x"})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 with no explicit value, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// ======================================================================
+// Migration 0047 regression tests at the HTTP boundary.
+// ======================================================================
+
+// The exploit as an operator would actually run it: one human who has run
+// cmd/seed-admin twice holds two platform_admin logins with person_id
+// NULL - the only platform_admin state a real deployment can produce -
+// and drives the whole registry flow through the public API. Every call
+// is refused, with a 403 that names the actual reason rather than a
+// generic error.
+//
+// This test FAILS against migration 0044 (the full create ->
+// self-approve -> activate chain returns 201/201/200) and PASSES against
+// 0047.
+func TestAssetRegistryAPI_UnlinkedPlatformAdminsCannotCompleteFourEyes(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newTestServer(t, pool, issuer)
+
+	// Two `seed-admin` runs by one person.
+	unlinkedA := mustCreateUnlinkedStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "pa-unlinked-a-1")
+	unlinkedB := mustCreateUnlinkedStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "pa-unlinked-b-1")
+	tokenA := mustLoginStaff(t, srv, "", unlinkedA.Email, "pa-unlinked-a-1").AccessToken
+	tokenB := mustLoginStaff(t, srv, "", unlinkedB.Email, "pa-unlinked-b-1").AccessToken
+
+	code := newAssetCodeForHTTP()
+
+	// Filing the request is refused - 403, because the refusal is a
+	// property of the principal, not of the payload or the request state.
+	resp := sendAssetJSON(t, srv.URL+"/v1/admin/assets/change-requests", http.MethodPost, tokenA, map[string]any{
+		"operation": "create", "asset_code": code, "asset_type": "fiat",
+		"decimal_exponent": 2, "reason_code": "exploit"})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 filing a change request as an unlinked platform admin, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Creating without one is still a 409 - the mutation itself is gated
+	// independently, so the exploit cannot be completed by skipping the
+	// paperwork step.
+	resp = sendAssetJSON(t, srv.URL+"/v1/admin/assets", http.MethodPost, tokenA, map[string]any{
+		"code": code, "asset_type": "fiat", "decimal_exponent": 2,
+		"display_name": "Exploit", "reason_code": "exploit"})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 creating with no approval, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// And the approval side: a legitimately-filed request (by a properly
+	// person-linked admin) cannot be approved by the unlinked account.
+	linked := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "pa-linked-1")
+	linkedToken := mustLoginStaff(t, srv, "", linked.Email, "pa-linked-1").AccessToken
+	r := sendAssetJSON(t, srv.URL+"/v1/admin/assets/change-requests", http.MethodPost, linkedToken, map[string]any{
+		"operation": "create", "asset_code": code, "asset_type": "fiat",
+		"decimal_exponent": 2, "reason_code": "new_listing"})
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 filing as a person-linked admin, got %d", r.StatusCode)
+	}
+	var filed map[string]any
+	decodeBody(t, r, &filed)
+
+	resp = sendAssetJSON(t, srv.URL+"/v1/admin/assets/change-requests/"+filed["id"].(string)+"/decision",
+		http.MethodPost, tokenB, map[string]any{"decision": "approve", "reason_code": "rubber_stamp"})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 approving as an unlinked platform admin, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Nothing was created.
+	resp = sendAssetJSON(t, srv.URL+"/v1/admin/assets", http.MethodPost, linkedToken, map[string]any{
+		"code": code, "asset_type": "fiat", "decimal_exponent": 2,
+		"display_name": "Exploit", "reason_code": "new_listing"})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 - the unlinked approval must not have authorized anything, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// The new request type's payload is validated at the boundary: the
+// approver must be shown the exact layer-7 fact being granted, and
+// eligibility fields must not be silently ignored when they cannot
+// apply.
+func TestAssetRegistryAPI_PlatformOperationEligibilityRequestPayloadIsValidated(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newTestServer(t, pool, issuer)
+	admin := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "pa-elig-pw-1")
+	token := mustLoginStaff(t, srv, "", admin.Email, "pa-elig-pw-1").AccessToken
+
+	cases := []struct {
+		name string
+		body map[string]any
+	}{
+		{"missing eligibility_operation", map[string]any{
+			"operation": "platform_operation_eligibility", "asset_code": "EUR", "reason_code": "x"}},
+		{"unknown eligibility_operation", map[string]any{
+			"operation": "platform_operation_eligibility", "asset_code": "EUR",
+			"eligibility_operation": "teleport", "reason_code": "x"}},
+		{"eligibility fields on an unrelated operation", map[string]any{
+			"operation": "activate", "asset_code": "EUR",
+			"eligibility_operation": "wagering", "reason_code": "x"}},
+	}
+	for _, c := range cases {
+		resp := sendAssetJSON(t, srv.URL+"/v1/admin/assets/change-requests", http.MethodPost, token, c.body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: expected 400, got %d", c.name, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// eligibility_product may be omitted - that means EVERY product, and
+	// is recorded explicitly in the approved payload rather than left
+	// absent, so the approver approves the breadth too.
+	resp := sendAssetJSON(t, srv.URL+"/v1/admin/assets/change-requests", http.MethodPost, token, map[string]any{
+		"operation": "platform_operation_eligibility", "asset_code": "EUR",
+		"eligibility_operation": "wagering", "reason_code": "every_product"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 filing an every-product eligibility request, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// The ordering dependency migration 0047's header names, proven rather
+// than assumed: the hardened four-eyes control is only usable because a
+// path exists to person-link a PLATFORM-scoped staff account. That path
+// (`identity-compliance`'s POST /v1/admin/platform-staff/{id}/person-link
+// and cmd/seed-admin's new -person-id/-create-person flags) was built in
+// a parallel dispatch, so this test is the seam between the two: it takes
+// an account in the exact state cmd/seed-admin's DEFAULT still produces
+// (unlinked), remediates it through the public route, and then completes
+// four-eyes with it.
+//
+// Without that path, migration 0047 is a permanent outage of the asset
+// registry's administrative surface rather than a hardening. This test is
+// what stops that from being a claim taken on trust.
+func TestAssetRegistryAPI_PersonLinkingARemediatedPlatformAdminRestoresFourEyes(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newTestServer(t, pool, issuer)
+
+	// The requester is properly linked; the approver is in the state a
+	// real `seed-admin` run leaves behind.
+	requester := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "pa-relink-req-1")
+	unlinked := mustCreateUnlinkedStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "pa-relink-app-1")
+	requesterToken := mustLoginStaff(t, srv, "", requester.Email, "pa-relink-req-1").AccessToken
+	unlinkedToken := mustLoginStaff(t, srv, "", unlinked.Email, "pa-relink-app-1").AccessToken
+
+	code := newAssetCodeForHTTP()
+	r := sendAssetJSON(t, srv.URL+"/v1/admin/assets/change-requests", http.MethodPost, requesterToken, map[string]any{
+		"operation": "create", "asset_code": code, "asset_type": "fiat",
+		"decimal_exponent": 2, "reason_code": "new_listing"})
+	if r.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 filing the request, got %d", r.StatusCode)
+	}
+	var filed map[string]any
+	decodeBody(t, r, &filed)
+	reqID := filed["id"].(string)
+
+	// Before remediation: refused, and specifically as a 403 about the
+	// principal rather than a 409 about the approval.
+	resp := sendAssetJSON(t, srv.URL+"/v1/admin/assets/change-requests/"+reqID+"/decision",
+		http.MethodPost, unlinkedToken, map[string]any{"decision": "approve", "reason_code": "reviewed"})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 approving as an unlinked platform admin, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Remediate through the platform-scoped person-link route. A DISTINCT
+	// person from the requester's - linking both to one person would
+	// (correctly) still be refused as self-approval.
+	personID := uuid.New()
+	if err := pool.WithoutTenant(t.Context(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID)
+		return err
+	}); err != nil {
+		t.Fatalf("create person: %v", err)
+	}
+	resp = sendAssetJSON(t, srv.URL+"/v1/admin/platform-staff/"+unlinked.ID.String()+"/person-link",
+		http.MethodPost, requesterToken, map[string]any{"person_id": personID.String()})
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected the platform-staff person-link route to succeed, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// After remediation the same account is an eligible approver, and the
+	// dual-controlled create goes through.
+	resp = sendAssetJSON(t, srv.URL+"/v1/admin/assets/change-requests/"+reqID+"/decision",
+		http.MethodPost, unlinkedToken, map[string]any{"decision": "approve", "reason_code": "reviewed"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 approving as a now-person-linked platform admin, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = sendAssetJSON(t, srv.URL+"/v1/admin/assets", http.MethodPost, requesterToken, map[string]any{
+		"code": code, "asset_type": "fiat", "decimal_exponent": 2,
+		"display_name": "Relinked", "reason_code": "new_listing"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating the asset after a remediated approval, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 }

@@ -28,7 +28,9 @@ import (
 // The ONLY exception to tenant scope is a platform-wide layer-7 default
 // row (tenant_id NULL, ADR 0037 §A.6): that one is platform-admin-only
 // and requires db.Pool.WithPlatformAdmin, enforced by migration 0045's
-// own policy predicate.
+// own policy predicate - and, when GRANTING, an independently approved
+// four-eyes request as well (migration 0047; see
+// ConfigureOperationEligibility's doc comment).
 
 // AuthorizeScopeParams is the input for operations 6-8 (layers 4/5/6).
 //
@@ -203,7 +205,8 @@ func authorizationState(a Authorization) map[string]any {
 // ConfigureEligibilityParams is the input for operation 9 (layer 7).
 // TenantID zero means the PLATFORM-WIDE default row - which requires a
 // db.Pool.WithPlatformAdmin transaction (migration 0045's policy), not a
-// tenant one.
+// tenant one, AND - when Eligible is true - an independently approved
+// ChangePlatformOperationEligibility request (migration 0047).
 type ConfigureEligibilityParams struct {
 	TenantID  uuid.UUID
 	AssetCode string
@@ -217,6 +220,34 @@ type ConfigureEligibilityParams struct {
 // only narrow the platform-wide default; migration 0045's trigger refuses
 // a widening row at write time, and CheckEligibility refuses to honour
 // one at resolution time.
+//
+// FOUR-EYES on the platform-wide GRANT (TenantID zero, Eligible true).
+// That one write flips an eligibility gate for every tenant on the
+// platform at once, and ADR 0037 §C.5.1 op 9 / §C.5.3 always required
+// dual control for it - but migration 0044's operation CHECK had no
+// request type for it, so the requirement had no representation anywhere
+// and a single platform-admin credential was enough (found independently
+// by code-reviewer and security). It now routes through the SAME
+// request/approve flow create/activate/platform_authorize use:
+//
+//  1. FileChangeRequest(ChangePlatformOperationEligibility, asset,
+//     EligibilityOperation, EligibilityProduct)
+//  2. DecideChangeRequest by a DIFFERENT platform person
+//  3. this function, which the trigger lets through exactly once, for
+//     exactly that (asset, operation, product)
+//
+// As with layers 2-3, the control lives in the trigger rather than here
+// on purpose: migration 0047's asset_operation_eligibility_enforce_
+// narrowing() consumes the approval in the same statement as the
+// mutation, so no present or future call site can forget it and no
+// approval can be replayed. This function's job is to surface the
+// refusal as ErrDualControlRequired (409) instead of a generic 500.
+//
+// Deliberately NOT dual-controlled: a platform-wide REVOCATION
+// (Eligible false), an idempotent re-write of an already-eligible row,
+// and every tenant-scoped row. Revocation is the fail-closed direction
+// and must never wait for a second approver - the same asymmetry ADR 0037
+// §C.5.3 draws for suspend/revoke at layers 2-3.
 func ConfigureOperationEligibility(ctx context.Context, tx pgx.Tx, p ConfigureEligibilityParams) (OperationEligibility, error) {
 	if err := p.Actor.validate(); err != nil {
 		return OperationEligibility{}, err
@@ -276,7 +307,11 @@ func ConfigureOperationEligibility(ctx context.Context, tx pgx.Tx, p ConfigureEl
 	if err := recordTenantAudit(ctx, tx, auditTenant, p.Actor,
 		"asset_operation_eligibility.configured", "asset_operation_eligibility", row.ID.String(),
 		map[string]any{"before": beforeState, "after": eligibilityState(row),
-			"platform_wide_default": tenantID == nil}); err != nil {
+			"platform_wide_default": tenantID == nil,
+			// Recorded so the audit trail states whether this specific
+			// write went through four-eyes, rather than leaving a reader
+			// to infer it from the scope and the direction.
+			"dual_controlled": tenantID == nil && p.Eligible}); err != nil {
 		return OperationEligibility{}, err
 	}
 	return row, nil

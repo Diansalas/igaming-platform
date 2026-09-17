@@ -25,9 +25,21 @@ type AssetAuthorization struct{}
 //
 //   - eligible is true ONLY when every layer passed. Any other outcome is
 //     (false, <the failing layer's ReasonCode>, err-or-nil).
-//   - A non-nil error ALWAYS accompanies eligible == false. Callers must
-//     treat a non-nil error as a denial with no exception and no fallback
-//     (ADR 0037 §C.2, mirroring risk.Evaluate's identical rule).
+//   - eligible is NEVER true when err != nil. That is the direction of
+//     the invariant, and the only direction of it: a denial is free to
+//     carry a nil error, and in fact every ordinary layer denial does -
+//     (false, <ReasonCode>, nil) is the normal shape of "configuration
+//     says no", which is not an error condition. A non-nil error means
+//     the question could not be answered (bad input, no tenant scope, a
+//     failed query) and is likewise always a denial, with no exception
+//     and no fallback to a previously-known-good answer (ADR 0037 §C.2,
+//     mirroring risk.Evaluate's identical rule). An earlier version of
+//     this comment stated the converse ("a non-nil error ALWAYS
+//     accompanies eligible == false"), which is backwards and was wrong
+//     about this function's actual behaviour (code-reviewer finding F8):
+//     a caller that believed it would have been entitled to treat
+//     (false, reason, nil) as a non-answer and retry or ignore it,
+//     turning every fail-closed denial into a fail-open one.
 //   - tenant, brand and jurisdiction MUST be resolved server-side from
 //     authenticated context by the caller. tenant is additionally
 //     cross-checked against the transaction's own app.tenant_id GUC, so a

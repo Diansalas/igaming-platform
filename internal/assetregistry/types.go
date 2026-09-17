@@ -54,10 +54,40 @@ var ErrTenantContextMismatch = errors.New("assetregistry: tenant argument does n
 var ErrDualControlRequired = errors.New("assetregistry: operation requires an approved change request by a different platform principal (four-eyes)")
 
 // ErrSelfApproval is returned when a principal tries to approve its own
-// change request. Mirrors withdrawal.ErrSelfApproval's role exactly: a
-// clean application error in front of migration 0044's authoritative
-// trigger, never a replacement for it.
+// change request - including through a second staff account resolving to
+// the same Person (migration 0047 made that half of the check real;
+// migration 0044's version could never fire). Mirrors
+// withdrawal.ErrSelfApproval's role exactly: a clean application error in
+// front of the authoritative trigger, never a replacement for it.
 var ErrSelfApproval = errors.New("assetregistry: a principal may not approve its own change request")
+
+// ErrDuplicateDecision is returned when a principal that has ALREADY
+// decided a request submits a second decision on it.
+//
+// This is a distinct condition from ErrSelfApproval and used to be
+// conflated with it (code-reviewer finding F9): the only reachable
+// unique-constraint violation on asset_change_approvals is
+// UNIQUE (request_id, approver_principal_id), which says "this principal
+// already decided this request" - a duplicate submission, typically a
+// double-clicked button or a retried call. Genuine self-approval is
+// caught separately and authoritatively by migration 0044/0047's
+// BEFORE INSERT trigger, which raises rather than violating a
+// constraint. Reporting a retry as self-dealing would put a false
+// integrity signal in front of an operator.
+var ErrDuplicateDecision = errors.New("assetregistry: this principal has already decided this change request")
+
+// ErrApproverNotEligible is returned when the deciding (or requesting)
+// principal is refused by migration 0047's governance rules for a reason
+// other than self-approval: it is not platform-scoped, it carries no
+// confirmed Person linkage, or its staff account is not active.
+//
+// The Person-linkage condition is load-bearing rather than bureaucratic:
+// without it the four-eyes control cannot distinguish two staff accounts
+// held by one human from two humans, which is exactly the bypass security
+// reproduced against migration 0044 (see migration 0047's header,
+// including its deployment-ordering dependency on a platform-scoped
+// person-linking path).
+var ErrApproverNotEligible = errors.New("assetregistry: principal is not eligible to request or decide an asset change (must be platform-scoped, person-linked and active)")
 
 // ErrWidensPlatformAuthorization is returned when a tenant/brand/
 // jurisdiction/eligibility write would grant more than the layer above it
@@ -174,25 +204,54 @@ type Asset struct {
 	UpdatedAt          time.Time
 }
 
-// ChangeOperation is one of the three dual-controlled layer-1-3
-// operations (ADR 0037 §C.5.3). Suspend/revoke are deliberately absent:
-// turning something off is single-actor by design, an incident
-// kill-switch that must not wait for a second approver.
+// ChangeOperation is one of the four dual-controlled operations
+// (ADR 0037 §C.5.3). Suspend/revoke are deliberately absent: turning
+// something off is single-actor by design, an incident kill-switch that
+// must not wait for a second approver.
 type ChangeOperation string
 
 const (
 	ChangeCreate            ChangeOperation = "create"
 	ChangeActivate          ChangeOperation = "activate"
 	ChangePlatformAuthorize ChangeOperation = "platform_authorize"
+	// ChangePlatformOperationEligibility is the layer-7 PLATFORM-WIDE
+	// default GRANT (ADR 0037 §C.5.1 op 9). ADR 0037 §C.5.3 always
+	// required dual control for it, but migration 0044's operation CHECK
+	// had no value for it, so the control had no representation at all
+	// and one compromised platform-admin credential could flip a
+	// platform-wide eligibility gate for every tenant in a single call
+	// (found independently by code-reviewer and security; closed by
+	// migration 0047).
+	//
+	// Only the GRANT direction. A platform-wide revocation
+	// (eligible = false) stays single-actor, matching the same asymmetry
+	// suspend/revoke have at layers 2-3.
+	ChangePlatformOperationEligibility ChangeOperation = "platform_operation_eligibility"
 )
 
 func validChangeOperation(op ChangeOperation) bool {
 	switch op {
-	case ChangeCreate, ChangeActivate, ChangePlatformAuthorize:
+	case ChangeCreate, ChangeActivate, ChangePlatformAuthorize, ChangePlatformOperationEligibility:
 		return true
 	}
 	return false
 }
+
+// ChangeOperations is the canonical list, for HTTP-layer validation so
+// the route allowlist cannot drift from this file.
+func ChangeOperations() []ChangeOperation {
+	return []ChangeOperation{
+		ChangeCreate, ChangeActivate, ChangePlatformAuthorize, ChangePlatformOperationEligibility,
+	}
+}
+
+// EveryProduct is the payload sentinel for "this layer-7 grant applies to
+// every product", used in an asset_change_requests payload where the
+// authorization row itself carries a NULL product. It mirrors the
+// COALESCE(product, '*') convention migration 0045's own unique indexes
+// already use, so approval matching is a plain text comparison with no
+// JSON-null semantics to get wrong.
+const EveryProduct = "*"
 
 // ChangeRequest is a pending (or decided) four-eyes request.
 type ChangeRequest struct {
