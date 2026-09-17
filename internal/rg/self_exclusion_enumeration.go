@@ -10,10 +10,12 @@
 // "listener on the self-exclusion commit event") records that it started,
 // how many bets it found in scope, and how it finished, so a dropped
 // event or a crashed listener leaves an explicit 'pending'/'failed' row
-// rather than nothing at all. FindMissingEnumerationRuns is a
-// reconciliation query built on top of that record - PARTIALLY
-// IMPLEMENTED, see its own doc comment for exactly what it can and
-// cannot detect today.
+// rather than nothing at all. FindMissingEnumerationRuns and
+// FindStalledEnumerationRuns are the two reconciliation queries built on
+// top of that record - together PARTIALLY IMPLEMENTED, covering three
+// named failure modes (never started / wrongly-scoped caller / stalled);
+// see each function's own doc comment for exactly what it can and cannot
+// detect today.
 package rg
 
 import (
@@ -27,6 +29,61 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 )
+
+// Sentinel errors for the reconciliation-scope assertion below - mirrors
+// internal/risk/evaluator.go's ErrPlayerScopedConnection/
+// ErrTenantScopeMismatch naming and reasoning exactly (Stage 4H-B0-R6 fix
+// 3(a) deliberately reuses that pattern rather than inventing a third
+// one).
+var (
+	// ErrPlayerScopedConnection is returned when the transaction passed to
+	// a reconciliation function has app.player_account_id set - it must
+	// not, since self_exclusion_enumeration_runs and player_restrictions
+	// carry no legitimate player-facing access path.
+	ErrPlayerScopedConnection = errors.New("rg: transaction is player-scoped, not tenant-scoped")
+	// ErrTenantScopeMismatch is returned when the transaction's own
+	// app.tenant_id GUC is unset, or set to a different tenant than the
+	// caller explicitly asked to reconcile.
+	ErrTenantScopeMismatch = errors.New("rg: transaction tenant scope does not match the requested tenant")
+)
+
+// verifyReconciliationScope proves tx is scoped exactly the way
+// FindMissingEnumerationRuns/FindStalledEnumerationRuns' own documented
+// precondition requires (db.WithTenant(tenantID, ...)) BEFORE either
+// query runs, so a wrongly-scoped transaction fails loudly instead of
+// silently returning an empty gap list - code-reviewer's Stage 4H-B0-R6
+// finding: this is the exact fail-open shape
+// internal/risk/evaluator.go's verifyConnectionScope was built to close
+// this same stage, mirrored here rather than promoted to shared
+// infrastructure (that would be an architect-owned change per
+// docs/governance/change-control.md, same reasoning risk's own doc
+// comment gives for keeping its copy package-local).
+func verifyReconciliationScope(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) error {
+	if tenantID == uuid.Nil {
+		return fmt.Errorf("%w: tenant_id is required", ErrInvalidInput)
+	}
+	var scopedTenant, scopedPlayer *string
+	err := tx.QueryRow(ctx,
+		`SELECT NULLIF(current_setting('app.tenant_id', true), ''), NULLIF(current_setting('app.player_account_id', true), '')`,
+	).Scan(&scopedTenant, &scopedPlayer)
+	if err != nil {
+		return fmt.Errorf("rg: read connection scope: %w", err)
+	}
+	if scopedPlayer != nil {
+		return fmt.Errorf("%w: app.player_account_id is set", ErrPlayerScopedConnection)
+	}
+	if scopedTenant == nil {
+		return fmt.Errorf("%w: app.tenant_id is not set on this transaction", ErrTenantScopeMismatch)
+	}
+	parsed, err := uuid.Parse(*scopedTenant)
+	if err != nil {
+		return fmt.Errorf("%w: app.tenant_id %q is not a uuid", ErrTenantScopeMismatch, *scopedTenant)
+	}
+	if parsed != tenantID {
+		return fmt.Errorf("%w: transaction is scoped to %s, requested reconciliation is for %s", ErrTenantScopeMismatch, parsed, tenantID)
+	}
+	return nil
+}
 
 // DispatchStatus mirrors self_exclusion_enumeration_runs.dispatch_status.
 type DispatchStatus string
@@ -256,16 +313,38 @@ type EnumerationGap struct {
 
 // FindMissingEnumerationRuns is the reconciliation query security finding
 // S-9 requires - PARTIALLY IMPLEMENTED, and this comment states exactly
-// how. It detects: a currently-effective self-exclusion restriction
-// affecting a person who holds a player_account in the CALLER's tenant
-// (tx must be db.WithTenant(tenantID, ...)-scoped - self_exclusion_
-// enumeration_runs and player_accounts are both tenant-isolated by RLS,
-// so this check is necessarily run once per tenant, mirroring the
-// platform's own isolation model rather than a fictional single global
-// query) for which NO self_exclusion_enumeration_runs row exists at all
-// for that (restriction, tenant) pair - i.e. enumeration for that tenant
-// never even started, the "dropped event, no record at all" failure mode
-// S-9 names.
+// which THREE failure modes it covers and which it does not (Stage
+// 4H-B0-R6 fix 3 broadened this from an earlier two-case framing that
+// read as exhaustive when it wasn't):
+//
+//  1. Never started: a currently-effective self-exclusion restriction
+//     affecting a person who holds a player_account in the CALLER's
+//     tenant for which NO self_exclusion_enumeration_runs row exists at
+//     all for that (restriction, tenant) pair - a dropped event, no
+//     record whatsoever. This is what the query below actually detects.
+//  2. Wrongly-scoped caller (fix 3(a), code-reviewer finding): tx MUST be
+//     db.WithTenant(tenantID, ...)-scoped, matching self_exclusion_
+//     enumeration_runs' and player_accounts' own RLS - self_exclusion_
+//     enumeration_runs and player_accounts are both tenant-isolated, so
+//     this check is necessarily run once per tenant, mirroring the
+//     platform's own isolation model rather than a fictional single
+//     global query. Before this fix, a wrongly-scoped transaction (no
+//     tenant set, or player-scoped) satisfied RLS by returning zero rows
+//     from the join and this function returned (nil, nil) - an empty gap
+//     list indistinguishable from "genuinely nothing is missing." tenantID
+//     is now a required parameter and verifyReconciliationScope asserts
+//     the transaction is actually scoped to it before the query runs, the
+//     same fail-loud pattern internal/risk/evaluator.go's
+//     verifyConnectionScope established this same stage.
+//  3. Stalled (fix 3(b), security finding): a run that WAS created
+//     (`pending`) and then never progressed - crashed before
+//     StartEnumerationRun, or stuck `in_progress`, or `failed` - all
+//     satisfy "a row exists" and are invisible to THIS function, even
+//     though migration 0043's partial index
+//     (idx_self_exclusion_enumeration_runs_incomplete) exists
+//     specifically to make them cheap to find. See the sibling function
+//     FindStalledEnumerationRuns below, which this fix adds specifically
+//     to close this case - this function alone does not cover it.
 //
 // It deliberately does NOT, and cannot yet, detect the deeper case S-9
 // also describes: a run that DID complete but whose reported bets_in_
@@ -282,7 +361,10 @@ type EnumerationGap struct {
 // cadence (e.g. hourly, alongside the platform's other reconciliation
 // jobs) and investigates any non-empty result as a possible dropped
 // rg.status.changed event.
-func FindMissingEnumerationRuns(ctx context.Context, tx pgx.Tx) ([]EnumerationGap, error) {
+func FindMissingEnumerationRuns(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]EnumerationGap, error) {
+	if err := verifyReconciliationScope(ctx, tx, tenantID); err != nil {
+		return nil, err
+	}
 	rows, err := tx.Query(ctx,
 		`SELECT pr.id, pr.person_id, pr.starts_at
 		 FROM player_restrictions pr
@@ -306,6 +388,79 @@ func FindMissingEnumerationRuns(ctx context.Context, tx pgx.Tx) ([]EnumerationGa
 			return nil, fmt.Errorf("rg: scan enumeration gap: %w", err)
 		}
 		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// StalledEnumerationRun is one reconciliation finding from
+// FindStalledEnumerationRuns - a run row that exists but has not reached
+// 'completed' within the caller-supplied age threshold.
+type StalledEnumerationRun struct {
+	ID             uuid.UUID
+	RestrictionID  uuid.UUID
+	PersonID       uuid.UUID
+	DispatchStatus DispatchStatus
+	CreatedAt      time.Time
+	StartedAt      *time.Time
+	FailureReason  string
+}
+
+// FindStalledEnumerationRuns is fix 3(b)'s reconciliation query: it
+// reports every self_exclusion_enumeration_runs row for tenantID whose
+// dispatch_status is NOT 'completed' and whose created_at is older than
+// olderThan - a listener that crashed before StartEnumerationRun (stuck
+// 'pending'), one that hung mid-run (stuck 'in_progress'), or one that
+// reached 'failed' and was never retried. All three "a row exists but
+// enumeration never actually finished" cases are invisible to
+// FindMissingEnumerationRuns above, which only detects "no row at all."
+//
+// olderThan is deliberately a caller-supplied parameter, never a
+// hardcoded duration: how long a run may legitimately sit 'pending'/
+// 'in_progress' before it counts as stalled is an operational/business
+// tuning question (how fast the eventual listener is expected to run),
+// not a fact this package can assert on its own. A caller with no
+// specific requirement yet can pass a conservative default (e.g. 15
+// minutes) at the call site, not baked in here.
+//
+// Uses migration 0043's idx_self_exclusion_enumeration_runs_incomplete
+// partial index (WHERE dispatch_status <> 'completed') - the index this
+// stage's security review found had zero Go readers before this fix.
+//
+// Same scope precondition as FindMissingEnumerationRuns: tx must be
+// db.WithTenant(tenantID, ...)-scoped, asserted the identical way.
+func FindStalledEnumerationRuns(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, olderThan time.Duration) ([]StalledEnumerationRun, error) {
+	if err := verifyReconciliationScope(ctx, tx, tenantID); err != nil {
+		return nil, err
+	}
+	if olderThan <= 0 {
+		return nil, fmt.Errorf("%w: older_than must be a positive duration", ErrInvalidInput)
+	}
+	rows, err := tx.Query(ctx,
+		`SELECT id, restriction_id, person_id, dispatch_status, created_at, started_at, failure_reason
+		 FROM self_exclusion_enumeration_runs
+		 WHERE tenant_id = $1
+		   AND dispatch_status <> 'completed'
+		   AND created_at < clock_timestamp() - $2::interval
+		 ORDER BY created_at`,
+		tenantID, fmt.Sprintf("%d seconds", int64(olderThan.Seconds())),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("rg: find stalled enumeration runs: %w", err)
+	}
+	defer rows.Close()
+	var out []StalledEnumerationRun
+	for rows.Next() {
+		var s StalledEnumerationRun
+		var status string
+		var failureReason *string
+		if err := rows.Scan(&s.ID, &s.RestrictionID, &s.PersonID, &status, &s.CreatedAt, &s.StartedAt, &failureReason); err != nil {
+			return nil, fmt.Errorf("rg: scan stalled enumeration run: %w", err)
+		}
+		s.DispatchStatus = DispatchStatus(status)
+		if failureReason != nil {
+			s.FailureReason = *failureReason
+		}
+		out = append(out, s)
 	}
 	return out, rows.Err()
 }

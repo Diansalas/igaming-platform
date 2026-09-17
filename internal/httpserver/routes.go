@@ -59,6 +59,17 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/staff/{staffID}/person-link",
 		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermStaffManage)(newLinkStaffPersonHandler(deps))))
 
+	// Stage 4H-B0-R6 fix: the platform-scoped counterpart to the route
+	// above, for a platform_admin (tenant_id IS NULL) staff account,
+	// which the tenant-scoped route can never reach - see
+	// newLinkPlatformStaffPersonHandler's own doc comment. Same
+	// PermStaffManage gate; the handler itself further restricts the
+	// CALLER to a platform-scoped principal (tenant_admin also holds
+	// PermStaffManage but has no legitimate reason to touch a
+	// platform-wide account).
+	mux.Handle("POST /v1/admin/platform-staff/{staffID}/person-link",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermStaffManage)(newLinkPlatformStaffPersonHandler(deps))))
+
 	// Player administration: tenant-scoped only in Stage 2 (a
 	// platform_admin browsing an arbitrary tenant's players is deferred -
 	// see docs/decisions/0011's "Consequences").

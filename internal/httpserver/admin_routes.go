@@ -436,6 +436,111 @@ func newLinkStaffPersonHandler(deps Deps) http.HandlerFunc {
 	}
 }
 
+// newLinkPlatformStaffPersonHandler is the platform-scoped counterpart to
+// newLinkStaffPersonHandler above, for the one class of staff account that
+// handler can never reach: platform_admin (tenant_id IS NULL). Stage
+// 4H-B0-R6 security review traced a real, confirmed gap - no code path
+// anywhere in the platform could ever set person_id on a platform_admin
+// account: cmd/seed-admin always created one with person_id = nil, and the
+// tenant-scoped remediation route above runs inside
+// db.WithTenant(targetTenantID, ...), which staff_users' own dual_scope_
+// isolation policy (migration 0011) makes structurally blind to
+// tenant_id IS NULL rows - a platform_admin account could never be
+// remediated at all, by any caller, through any existing route. This
+// mirrors newLinkStaffPersonHandler's semantics exactly (same
+// identity.LinkStaffPersonID call, same NULL-to-value-only contract, same
+// migration 0034 append-only trigger as the ultimate backstop) but scopes
+// the connection with db.WithoutTenant instead of db.WithTenant, per the
+// same dual-scope pattern GetStaffUserByID's own doc comment describes.
+//
+// Deliberately restricted to a platform-scoped CALLER (tc.TenantID ==
+// uuid.Nil), not merely anyone holding PermStaffManage: PermStaffManage is
+// also held by tenant_admin (see internal/auth/permission.go), and a
+// tenant_admin has no legitimate reason to touch a platform-wide staff
+// account. RequirePermission alone cannot express that distinction (it
+// only sees the permission, not the caller's tenant scope), so this
+// handler checks it explicitly, the same way newCreateTenantHandler's own
+// PermTenantWrite-is-platform_admin-only invariant is actually enforced by
+// permission assignment rather than an explicit check here - this route
+// needs the explicit check because PermStaffManage is broader than
+// PermTenantWrite.
+//
+// Route is deliberately NOT parameterized by tenantID (there is no
+// tenant to target - that is the entire point), unlike the sibling route.
+func newLinkPlatformStaffPersonHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		if tc.TenantID != uuid.Nil {
+			// A tenant-scoped caller (e.g. tenant_admin, who also holds
+			// PermStaffManage) has no legitimate reason to link a
+			// platform-wide staff account's person_id.
+			apierror.Write(w, requestID, apierror.CodeForbidden, "only a platform-scoped caller may act on a platform-wide staff account")
+			return
+		}
+		staffID, err := uuid.Parse(r.PathValue("staffID"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid staff id")
+			return
+		}
+
+		var req linkStaffPersonRequest
+		if err := decodeJSON(r, &req); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			return
+		}
+		personID, err := uuid.Parse(req.PersonID)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "person_id must be a valid UUID")
+			return
+		}
+
+		subjectID, _ := uuid.Parse(tc.Subject)
+		err = deps.DB.WithoutTenant(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+			// staff_users' dual_scope_isolation policy (migration 0011)
+			// already confines this connection to tenant_id IS NULL rows,
+			// so a successful lookup here is, by construction, always a
+			// platform-wide staff account - never a tenant-scoped one.
+			if _, err := identity.GetStaffUserByID(ctx, tx, staffID); err != nil {
+				return err
+			}
+			if err := identity.LinkStaffPersonID(ctx, tx, staffID, personID); err != nil {
+				return err
+			}
+			return audit.Record(ctx, tx, audit.Entry{
+				ActorType: audit.ActorStaff, ActorID: subjectID,
+				Action: "staff.platform_person_linked", TargetType: "staff_user", TargetID: staffID.String(),
+				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+				Metadata: map[string]any{"person_id": personID.String()},
+			})
+		})
+		if errors.Is(err, identity.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "staff user not found")
+			return
+		}
+		if errors.Is(err, identity.ErrPersonNotFound) {
+			apierror.Write(w, requestID, apierror.CodeValidation, "person_id does not reference an existing person")
+			return
+		}
+		if errors.Is(err, identity.ErrAlreadyLinkedOrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeConflict, "staff user not found, or already linked to a person")
+			return
+		}
+		if err != nil {
+			logger.Error("link_platform_staff_person_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to link staff person")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
 // --- Player administration (tenant-scoped) ---
 
 type playerAccountResponse struct {

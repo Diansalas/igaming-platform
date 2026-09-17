@@ -41,7 +41,12 @@ func seedJurisdiction(t *testing.T, pool *db.Pool) string {
 func setFloor(t *testing.T, pool *db.Pool, jurisdiction string, value OpenBetSelfExclusionPolicy) OpenBetSelfExclusionPolicyRow {
 	t.Helper()
 	var row OpenBetSelfExclusionPolicyRow
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	// Stage 4H-B0-R6 fix 5: a jurisdiction-floor write now requires a
+	// genuine platform-admin-scoped connection (migration 0049 aligns
+	// this table with migration 0045's platform_admin_principal_id
+	// precedent) - db.WithoutTenant alone no longer satisfies the write
+	// policy.
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		row, err = SetOpenBetSelfExclusionPolicy(ctx, tx, SetOpenBetSelfExclusionPolicyParams{
 			JurisdictionCode: jurisdiction, PolicyValue: value, ReasonCode: "test-floor", ActorType: audit.ActorSystem,
@@ -424,6 +429,96 @@ func TestConcurrent_RacingPolicyWritesNeverProduceLooserThanFloor(t *testing.T) 
 	}
 }
 
+// --- Fix 4: jurisdiction-floor backdating rejection ---
+
+// TestSetOpenBetSelfExclusionPolicy_RejectsBackdatedJurisdictionFloor is
+// the direct regression test for fix 4: code-reviewer's traced exploit
+// (backdate a permissive floor to an instant before a real self-exclusion
+// already occurred under a stricter one) is closed by rejecting any
+// jurisdiction-floor write whose EffectiveFrom is materially in the past.
+func TestSetOpenBetSelfExclusionPolicy_RejectsBackdatedJurisdictionFloor(t *testing.T) {
+	pool := testPool(t)
+	jurisdiction := seedJurisdiction(t, pool)
+	past := time.Now().UTC().Add(-1 * time.Hour)
+
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := SetOpenBetSelfExclusionPolicy(ctx, tx, SetOpenBetSelfExclusionPolicyParams{
+			JurisdictionCode: jurisdiction, PolicyValue: PolicyVoidOnSelfExclusion,
+			EffectiveFrom: &past, ReasonCode: "attempted backdate", ActorType: audit.ActorSystem,
+		})
+		return err
+	})
+	if !errors.Is(err, ErrJurisdictionFloorBackdated) {
+		t.Fatalf("expected ErrJurisdictionFloorBackdated, got %v", err)
+	}
+
+	// Database-level backstop: a direct INSERT bypassing this package's Go
+	// pre-check entirely must ALSO fail - mirroring the tighten-only
+	// trigger's own two-layer enforcement pattern.
+	err = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO open_bet_self_exclusion_policies
+				(id, jurisdiction_code, tenant_id, policy_value, effective_from, reason_code, created_by_actor_type, created_by_actor_id)
+			 VALUES (gen_random_uuid(), $1, NULL, 'VOID_ON_SELF_EXCLUSION', $2, 'bypass-attempt', 'system', gen_random_uuid())`,
+			jurisdiction, past,
+		)
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected the database trigger to reject a direct backdated floor insert, got nil error")
+	}
+
+	// A future-dated (scheduled) floor change remains permitted - fix 4
+	// only closes retroactive changes, never prospective ones.
+	future := time.Now().UTC().Add(1 * time.Hour)
+	err = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := SetOpenBetSelfExclusionPolicy(ctx, tx, SetOpenBetSelfExclusionPolicyParams{
+			JurisdictionCode: jurisdiction, PolicyValue: PolicyVoidOnSelfExclusion,
+			EffectiveFrom: &future, ReasonCode: "scheduled change", ActorType: audit.ActorSystem,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("expected a future-dated floor change to succeed, got %v", err)
+	}
+}
+
+// TestFloorBackdatingTolerance_MatchesDatabase proves the Go-side
+// floorBackdatingTolerance constant and migration 0049's hardcoded
+// INTERVAL '5 seconds' trigger tolerance actually agree, rather than each
+// independently believing a different window is safe (the identical
+// parity-test rationale TestOpenBetSelfExclusionPolicyStrictness_
+// MatchesDatabase already established in this file). Exercises the raw
+// SQL trigger directly (bypassing the Go layer, which uses the same
+// constant and would trivially "agree with itself") on both sides of the
+// boundary.
+func TestFloorBackdatingTolerance_MatchesDatabase(t *testing.T) {
+	pool := testPool(t)
+
+	insertAt := func(t *testing.T, jurisdiction string, effectiveFrom time.Time) error {
+		t.Helper()
+		return pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx,
+				`INSERT INTO open_bet_self_exclusion_policies
+					(id, jurisdiction_code, tenant_id, policy_value, effective_from, reason_code, created_by_actor_type, created_by_actor_id)
+				 VALUES (gen_random_uuid(), $1, NULL, 'VOID_ON_SELF_EXCLUSION', $2, 'tolerance-boundary', 'system', gen_random_uuid())`,
+				jurisdiction, effectiveFrom,
+			)
+			return err
+		})
+	}
+
+	withinTolerance := seedJurisdiction(t, pool)
+	if err := insertAt(t, withinTolerance, time.Now().UTC().Add(-(floorBackdatingTolerance - time.Second))); err != nil {
+		t.Fatalf("expected an effective_from just inside the tolerance window to be accepted, got %v", err)
+	}
+
+	beyondTolerance := seedJurisdiction(t, pool)
+	if err := insertAt(t, beyondTolerance, time.Now().UTC().Add(-(floorBackdatingTolerance + 5*time.Second))); err == nil {
+		t.Fatal("expected an effective_from well beyond the tolerance window to be rejected, got nil error")
+	}
+}
+
 // --- SQL/Go strictness parity ---
 
 func TestOpenBetSelfExclusionPolicyStrictness_MatchesDatabase(t *testing.T) {
@@ -553,7 +648,7 @@ func TestFindMissingEnumerationRuns_DetectsGapAndClearsOnceRecorded(t *testing.T
 	var gaps []EnumerationGap
 	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		gaps, err = FindMissingEnumerationRuns(ctx, tx)
+		gaps, err = FindMissingEnumerationRuns(ctx, tx, tenantID)
 		return err
 	})
 	if err != nil {
@@ -586,7 +681,7 @@ func TestFindMissingEnumerationRuns_DetectsGapAndClearsOnceRecorded(t *testing.T
 
 	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		gaps, err = FindMissingEnumerationRuns(ctx, tx)
+		gaps, err = FindMissingEnumerationRuns(ctx, tx, tenantID)
 		return err
 	})
 	if err != nil {
@@ -596,5 +691,367 @@ func TestFindMissingEnumerationRuns_DetectsGapAndClearsOnceRecorded(t *testing.T
 		if g.RestrictionID == restrictionID {
 			t.Fatalf("expected the gap to clear once an enumeration run is recorded, still present: %+v", gaps)
 		}
+	}
+}
+
+// --- Fix 2: self_exclusion_enumeration_runs player-scope RLS regression ---
+
+// TestSelfExclusionEnumerationRuns_RLS_PlayerScopedConnectionCannotReadOrWrite
+// is the direct regression test for fix 2: before this fix, tenant_
+// isolation on self_exclusion_enumeration_runs was missing the
+// "app.player_account_id IS NULL" conjunct every sibling table in
+// migration 0043 correctly includes. db.WithPlayerScope sets BOTH
+// app.tenant_id and app.player_account_id - proving a player-scoped
+// transaction can neither read an existing row nor insert/update a new
+// one for its own tenant.
+func TestSelfExclusionEnumerationRuns_RLS_PlayerScopedConnectionCannotReadOrWrite(t *testing.T) {
+	pool := testPool(t)
+	tenantID := seedTenant(t, pool)
+	a := seedAccount(t, pool, tenantID, uuid.Nil)
+	personID := personIDFor(t, pool, a)
+
+	var restrictionID uuid.UUID
+	err := pool.WithPlayerScope(context.Background(), tenantID, a.accountID, func(ctx context.Context, tx pgx.Tx) error {
+		r, err := CreateSelfExclusion(ctx, tx, CreateSelfExclusionParams{TenantID: tenantID, PlayerAccountID: a.accountID})
+		restrictionID = r.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create self-exclusion: %v", err)
+	}
+
+	var runID uuid.UUID
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		run, err := CreateEnumerationRun(ctx, tx, CreateEnumerationRunParams{
+			RestrictionID: restrictionID, TenantID: tenantID, PersonID: personID, PolicyAsOf: time.Now().UTC(),
+			ActorType: audit.ActorSystem,
+		})
+		runID = run.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create enumeration run: %v", err)
+	}
+
+	// Read: a player-scoped connection must see ZERO rows, never the one
+	// just created above.
+	err = pool.WithPlayerScope(context.Background(), tenantID, a.accountID, func(ctx context.Context, tx pgx.Tx) error {
+		var count int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM self_exclusion_enumeration_runs WHERE id = $1`, runID).Scan(&count); err != nil {
+			return err
+		}
+		if count != 0 {
+			t.Fatalf("expected a player-scoped connection to see 0 rows, saw %d", count)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("player-scoped read: %v", err)
+	}
+
+	// Write (forge a completion record): a player-scoped connection must
+	// not be able to update the run's progress fields at all - this is
+	// exactly the "forge a completion record" attack fix 2's own
+	// migration comment names.
+	err = pool.WithPlayerScope(context.Background(), tenantID, a.accountID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`UPDATE self_exclusion_enumeration_runs SET dispatch_status = 'completed', completed_at = clock_timestamp(), started_at = COALESCE(started_at, clock_timestamp()) WHERE id = $1`,
+			runID,
+		)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("player-scoped update unexpectedly errored instead of silently matching zero rows: %v", err)
+	}
+	// RLS silently matches zero rows for a caller that cannot see the
+	// row at all, rather than erroring - confirm the row is genuinely
+	// unchanged from the tenant-scoped view.
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		run, err := scanEnumerationRun(tx.QueryRow(ctx, `SELECT `+enumerationRunColumns+` FROM self_exclusion_enumeration_runs WHERE id = $1`, runID))
+		if err != nil {
+			return err
+		}
+		if run.DispatchStatus == DispatchCompleted {
+			t.Fatalf("player-scoped connection was able to forge a completion record: %+v", run)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("re-check run status: %v", err)
+	}
+
+	// Write (insert): a player-scoped connection must not be able to
+	// create a brand new run row either.
+	err = pool.WithPlayerScope(context.Background(), tenantID, a.accountID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO self_exclusion_enumeration_runs (id, restriction_id, tenant_id, person_id, policy_as_of)
+			 VALUES (gen_random_uuid(), $1, $2, $3, clock_timestamp())`,
+			restrictionID, tenantID, personID,
+		)
+		return err
+	})
+	assertRLSViolation(t, err)
+}
+
+// --- Cross-tenant RLS isolation (QA's separately-found gap: neither
+// table had one despite both having RLS policies) ---
+
+func TestOpenBetSelfExclusionPolicies_RLS_CrossTenantIsolation(t *testing.T) {
+	pool := testPool(t)
+	jurisdiction := seedJurisdiction(t, pool)
+	setFloor(t, pool, jurisdiction, PolicySettleNormally)
+	tenantA := seedTenant(t, pool)
+	tenantB := seedTenant(t, pool)
+
+	var rowA OpenBetSelfExclusionPolicyRow
+	err := pool.WithTenant(context.Background(), tenantA, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		rowA, err = SetOpenBetSelfExclusionPolicy(ctx, tx, SetOpenBetSelfExclusionPolicyParams{
+			JurisdictionCode: jurisdiction, TenantID: &tenantA, PolicyValue: PolicyVoidOnSelfExclusion,
+			ReasonCode: "tenant A override", ActorType: audit.ActorSystem,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("set tenant A override: %v", err)
+	}
+
+	// Tenant B must not SEE tenant A's row.
+	err = pool.WithTenant(context.Background(), tenantB, func(ctx context.Context, tx pgx.Tx) error {
+		var count int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM open_bet_self_exclusion_policies WHERE id = $1`, rowA.ID).Scan(&count); err != nil {
+			return err
+		}
+		if count != 0 {
+			t.Fatalf("expected tenant B to see 0 rows for tenant A's override, saw %d", count)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("tenant B read: %v", err)
+	}
+
+	// Tenant B must not be able to WRITE a row naming tenant A's id.
+	err = pool.WithTenant(context.Background(), tenantB, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO open_bet_self_exclusion_policies
+				(id, jurisdiction_code, tenant_id, policy_value, reason_code, created_by_actor_type, created_by_actor_id)
+			 VALUES (gen_random_uuid(), $1, $2, 'VOID_ON_SELF_EXCLUSION', 'cross-tenant-attempt', 'system', gen_random_uuid())`,
+			jurisdiction, tenantA,
+		)
+		return err
+	})
+	assertRLSViolation(t, err)
+}
+
+func TestSelfExclusionEnumerationRuns_RLS_CrossTenantIsolation(t *testing.T) {
+	pool := testPool(t)
+	tenantA := seedTenant(t, pool)
+	tenantB := seedTenant(t, pool)
+	aAccount := seedAccount(t, pool, tenantA, uuid.Nil)
+	personID := personIDFor(t, pool, aAccount)
+
+	var restrictionID uuid.UUID
+	err := pool.WithPlayerScope(context.Background(), tenantA, aAccount.accountID, func(ctx context.Context, tx pgx.Tx) error {
+		r, err := CreateSelfExclusion(ctx, tx, CreateSelfExclusionParams{TenantID: tenantA, PlayerAccountID: aAccount.accountID})
+		restrictionID = r.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create self-exclusion: %v", err)
+	}
+
+	var runID uuid.UUID
+	err = pool.WithTenant(context.Background(), tenantA, func(ctx context.Context, tx pgx.Tx) error {
+		run, err := CreateEnumerationRun(ctx, tx, CreateEnumerationRunParams{
+			RestrictionID: restrictionID, TenantID: tenantA, PersonID: personID, PolicyAsOf: time.Now().UTC(),
+			ActorType: audit.ActorSystem,
+		})
+		runID = run.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create enumeration run: %v", err)
+	}
+
+	// Tenant B must not SEE tenant A's run.
+	err = pool.WithTenant(context.Background(), tenantB, func(ctx context.Context, tx pgx.Tx) error {
+		var count int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM self_exclusion_enumeration_runs WHERE id = $1`, runID).Scan(&count); err != nil {
+			return err
+		}
+		if count != 0 {
+			t.Fatalf("expected tenant B to see 0 rows for tenant A's enumeration run, saw %d", count)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("tenant B read: %v", err)
+	}
+
+	// Tenant B must not be able to WRITE a row naming tenant A's
+	// restriction/tenant.
+	err = pool.WithTenant(context.Background(), tenantB, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO self_exclusion_enumeration_runs (id, restriction_id, tenant_id, person_id, policy_as_of)
+			 VALUES (gen_random_uuid(), $1, $2, $3, clock_timestamp())`,
+			restrictionID, tenantA, personID,
+		)
+		return err
+	})
+	assertRLSViolation(t, err)
+}
+
+// --- Fix 3: reconciliation scope assertion + stalled-run detection ---
+
+func TestFindMissingEnumerationRuns_RejectsWronglyScopedConnection(t *testing.T) {
+	pool := testPool(t)
+	tenantID := seedTenant(t, pool)
+
+	// (a) No tenant scope at all (db.WithoutTenant) - before this fix,
+	// this silently returned (nil, nil) rather than an error.
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := FindMissingEnumerationRuns(ctx, tx, tenantID)
+		return err
+	})
+	if !errors.Is(err, ErrTenantScopeMismatch) {
+		t.Fatalf("expected ErrTenantScopeMismatch for an unscoped connection, got %v", err)
+	}
+
+	// (b) Scoped to a DIFFERENT tenant than requested.
+	otherTenantID := seedTenant(t, pool)
+	err = pool.WithTenant(context.Background(), otherTenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := FindMissingEnumerationRuns(ctx, tx, tenantID)
+		return err
+	})
+	if !errors.Is(err, ErrTenantScopeMismatch) {
+		t.Fatalf("expected ErrTenantScopeMismatch for a differently-scoped connection, got %v", err)
+	}
+
+	// (c) Player-scoped, even for the CORRECT tenant.
+	a := seedAccount(t, pool, tenantID, uuid.Nil)
+	err = pool.WithPlayerScope(context.Background(), tenantID, a.accountID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := FindMissingEnumerationRuns(ctx, tx, tenantID)
+		return err
+	})
+	if !errors.Is(err, ErrPlayerScopedConnection) {
+		t.Fatalf("expected ErrPlayerScopedConnection for a player-scoped connection, got %v", err)
+	}
+}
+
+func TestFindStalledEnumerationRuns_DetectsStalledAndRejectsWrongScope(t *testing.T) {
+	pool := testPool(t)
+	tenantID := seedTenant(t, pool)
+	a := seedAccount(t, pool, tenantID, uuid.Nil)
+	personID := personIDFor(t, pool, a)
+
+	var restrictionID uuid.UUID
+	err := pool.WithPlayerScope(context.Background(), tenantID, a.accountID, func(ctx context.Context, tx pgx.Tx) error {
+		r, err := CreateSelfExclusion(ctx, tx, CreateSelfExclusionParams{TenantID: tenantID, PlayerAccountID: a.accountID})
+		restrictionID = r.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create self-exclusion: %v", err)
+	}
+
+	var runID uuid.UUID
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		run, err := CreateEnumerationRun(ctx, tx, CreateEnumerationRunParams{
+			RestrictionID: restrictionID, TenantID: tenantID, PersonID: personID, PolicyAsOf: time.Now().UTC(),
+			ActorType: audit.ActorSystem,
+		})
+		runID = run.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create enumeration run: %v", err)
+	}
+
+	// Immediately after creation, a generous threshold finds nothing -
+	// the run is not YET stalled, merely young.
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		stalled, err := FindStalledEnumerationRuns(ctx, tx, tenantID, time.Hour)
+		if err != nil {
+			return err
+		}
+		for _, s := range stalled {
+			if s.ID == runID {
+				t.Fatalf("expected the just-created run to not be reported as stalled yet with a 1-hour threshold, got %+v", s)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("find stalled (before): %v", err)
+	}
+
+	// A threshold of 0 duration - i.e. "anything not completed right
+	// now" - DOES report the still-pending run as stalled, proving the
+	// query and threshold parameter actually work end to end.
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		stalled, err := FindStalledEnumerationRuns(ctx, tx, tenantID, time.Nanosecond)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, s := range stalled {
+			if s.ID == runID {
+				found = true
+				if s.DispatchStatus != DispatchPending {
+					t.Fatalf("expected the stalled run to still be 'pending', got %s", s.DispatchStatus)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("expected the still-pending run to be reported as stalled with a near-zero threshold, got %+v", stalled)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("find stalled (after): %v", err)
+	}
+
+	// Completing the run clears it from the stalled set, even with the
+	// near-zero threshold - only non-completed runs are ever reported.
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := CompleteEnumerationRun(ctx, tx, runID, 0, audit.ActorSystem, uuid.Nil)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("complete run: %v", err)
+	}
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		stalled, err := FindStalledEnumerationRuns(ctx, tx, tenantID, time.Nanosecond)
+		if err != nil {
+			return err
+		}
+		for _, s := range stalled {
+			if s.ID == runID {
+				t.Fatalf("expected a completed run to never be reported as stalled, got %+v", s)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("find stalled (after completion): %v", err)
+	}
+
+	// Scope assertion mirrors FindMissingEnumerationRuns exactly.
+	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := FindStalledEnumerationRuns(ctx, tx, tenantID, time.Hour)
+		return err
+	})
+	if !errors.Is(err, ErrTenantScopeMismatch) {
+		t.Fatalf("expected ErrTenantScopeMismatch for an unscoped connection, got %v", err)
+	}
+
+	// A non-positive threshold is rejected outright as a caller error.
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := FindStalledEnumerationRuns(ctx, tx, tenantID, 0)
+		return err
+	})
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for a non-positive threshold, got %v", err)
 	}
 }

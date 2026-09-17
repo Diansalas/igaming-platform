@@ -40,10 +40,23 @@ func main() {
 
 func run() error {
 	email := flag.String("email", "", "platform admin email (required)")
+	personID := flag.String("person-id", "", "optional: link this platform_admin to an existing person id (mutually exclusive with -create-person)")
+	createPerson := flag.Bool("create-person", false, "optional: create a new person cluster and link this platform_admin to it (mutually exclusive with -person-id)")
 	flag.Parse()
 
 	if *email == "" {
 		return fmt.Errorf("usage: seed-admin -email=admin@example.com (password read from SEED_ADMIN_PASSWORD)")
+	}
+	if *personID != "" && *createPerson {
+		return fmt.Errorf("-person-id and -create-person are mutually exclusive")
+	}
+	var explicitPersonID uuid.UUID
+	if *personID != "" {
+		var err error
+		explicitPersonID, err = uuid.Parse(*personID)
+		if err != nil {
+			return fmt.Errorf("-person-id must be a valid UUID: %w", err)
+		}
 	}
 	password := os.Getenv("SEED_ADMIN_PASSWORD")
 	if password == "" {
@@ -71,24 +84,51 @@ func run() error {
 	}
 
 	var staff identity.StaffUser
+	var linkedPerson identity.Person
 	err = pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		var resolvedPersonID *uuid.UUID
+		switch {
+		case *createPerson:
+			// Stage 4H-B0-R6 fix: born person-linked, rather than always
+			// nil. A fresh person cluster in the same transaction as the
+			// staff row, so the bootstrap never leaves an orphaned
+			// person if staff creation later fails (e.g. email taken).
+			var err error
+			linkedPerson, err = identity.CreatePerson(ctx, tx)
+			if err != nil {
+				return err
+			}
+			resolvedPersonID = &linkedPerson.ID
+		case *personID != "":
+			resolvedPersonID = &explicitPersonID
+		}
+
 		var err error
-		staff, err = identity.CreateStaffUser(ctx, tx, uuid.Nil, *email, passwordHash, identity.StaffRolePlatformAdmin, nil)
+		staff, err = identity.CreateStaffUser(ctx, tx, uuid.Nil, *email, passwordHash, identity.StaffRolePlatformAdmin, resolvedPersonID)
 		if err != nil {
 			return err
+		}
+		metadata := map[string]any{"tool": "cmd/seed-admin"}
+		if resolvedPersonID != nil {
+			metadata["person_id"] = resolvedPersonID.String()
+			metadata["person_created"] = *createPerson
 		}
 		return audit.Record(ctx, tx, audit.Entry{
 			ActorType:  audit.ActorSystem,
 			Action:     "staff.platform_admin_bootstrapped",
 			TargetType: "staff_user", TargetID: staff.ID.String(),
 			Outcome:  audit.OutcomeSuccess,
-			Metadata: map[string]any{"tool": "cmd/seed-admin"},
+			Metadata: metadata,
 		})
 	})
 	if err != nil {
 		return fmt.Errorf("create platform admin: %w", err)
 	}
 
-	fmt.Printf("seed-admin: created platform_admin %s (id: %s)\n", staff.Email, staff.ID)
+	if staff.PersonID != nil {
+		fmt.Printf("seed-admin: created platform_admin %s (id: %s), linked to person %s\n", staff.Email, staff.ID, staff.PersonID)
+	} else {
+		fmt.Printf("seed-admin: created platform_admin %s (id: %s) - WARNING: no person_id set; this account cannot act as a four-eyes requester/approver on any control requiring resolved person linkage (e.g. Asset Registry) until remediated via POST /v1/admin/platform-staff/{staffID}/person-link\n", staff.Email, staff.ID)
+	}
 	return nil
 }

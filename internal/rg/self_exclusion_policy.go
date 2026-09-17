@@ -98,7 +98,42 @@ var (
 	// does not strictly follow the currently-open version for the exact
 	// same scope.
 	ErrNonMonotonicWrite = errors.New("rg: effective_from must be strictly after the current version's effective_from for this exact scope")
+	// ErrJurisdictionFloorBackdated is returned when a jurisdiction-floor
+	// write (TenantID == nil) supplies an EffectiveFrom before the
+	// current instant. Stage 4H-B0-R6 fix 4: code-reviewer traced a
+	// concrete exploit the floor's deliberate tighten-only exemption
+	// otherwise allows - an operator backdates a new, permissive floor
+	// row to an instant BEFORE a real self-exclusion already occurred
+	// under the old, stricter floor, so a later Resolve(asOf=<the
+	// self-exclusion instant>) call would retroactively return the
+	// permissive value for a player who was excluded under the strict
+	// one. The write IS audited either way (detectable after the fact),
+	// but this closes it at write time: a floor change may only take
+	// effect now or later, never retroactively. This is a temporal-
+	// integrity rule, not a compliance-value choice - it does not select
+	// SETTLE_NORMALLY vs VOID_ON_SELF_EXCLUSION, which ADR 0034 §14.9
+	// still leaves to the jurisdiction. Migration 0049's identical
+	// database-level trigger is the authoritative backstop; this is the
+	// fast, cleanly-audited Go-layer rejection, matching the tighten-only
+	// check's own two-layer pattern below.
+	ErrJurisdictionFloorBackdated = errors.New("rg: a jurisdiction-floor write may not be backdated - effective_from must be now or later")
 )
+
+// floorBackdatingTolerance is the Go-side mirror of migration 0049's
+// identical INTERVAL '5 seconds' tolerance in
+// open_bet_self_exclusion_policies_enforce_floor_no_backdating() - see
+// TestFloorBackdatingTolerance_MatchesDatabase for the parity check, and
+// that trigger's own doc comment for why a zero-tolerance comparison
+// against clock_timestamp() would reject every legitimate default "now"
+// write (clock_timestamp() strictly advances between the two separate
+// statements this function issues - the SELECT that resolves "now" and
+// the later INSERT - so a bare "before now" check always fires from
+// ordinary round-trip latency alone, never just from a genuine backdating
+// attempt). Not a security weakening: the exploit this fix closes
+// backdates by the gap between an operator's later action and an
+// earlier self-exclusion instant, which is never a matter of
+// milliseconds.
+const floorBackdatingTolerance = 5 * time.Second
 
 // OpenBetSelfExclusionPolicyRow mirrors one open_bet_self_exclusion_
 // policies row. Its own ID doubles as ADR 0034 §14.8's "stable version
@@ -290,7 +325,16 @@ type SetOpenBetSelfExclusionPolicyParams struct {
 	// authoritative DB time, re-evaluated per call so a write queued
 	// behind lockOpenBetSelfExclusionPolicyScope is stamped with the
 	// instant it actually proceeds, not an application-server wall-clock
-	// value computed before entering the transaction).
+	// value computed before entering the transaction). A future-dated
+	// value schedules a change to take effect later - always permitted.
+	// Stage 4H-B0-R6 fix 4: for a JURISDICTION-FLOOR write (TenantID ==
+	// nil) specifically, a PAST value is now rejected outright
+	// (ErrJurisdictionFloorBackdated) - see that error's own doc comment
+	// for why. A tenant/brand override may still supply a past
+	// EffectiveFrom (its own per-scope monotonicity check below, plus the
+	// tighten-only trigger, are what keep that safe for an override -
+	// this restriction applies only to the floor's tighten-only
+	// exemption).
 	EffectiveFrom *time.Time
 	ReasonCode    string
 	ActorType     audit.ActorType
@@ -327,18 +371,44 @@ func SetOpenBetSelfExclusionPolicy(ctx context.Context, tx pgx.Tx, params SetOpe
 		return OpenBetSelfExclusionPolicyRow{}, err
 	}
 
+	auditTenantID := uuid.Nil
+	if params.TenantID != nil {
+		auditTenantID = *params.TenantID
+	}
+
 	var effectiveFrom time.Time
 	if params.EffectiveFrom != nil {
 		effectiveFrom = *params.EffectiveFrom
+		// Fix 4: a jurisdiction-floor write (TenantID == nil) may never
+		// be backdated - see ErrJurisdictionFloorBackdated's own doc
+		// comment for the exploit this closes. Only the floor is checked
+		// here: a tenant/brand override's own tighten-only trigger
+		// already prevents the equivalent exploit shape for it.
+		if params.TenantID == nil {
+			var dbNow time.Time
+			if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&dbNow); err != nil {
+				return OpenBetSelfExclusionPolicyRow{}, fmt.Errorf("rg: resolve current db time: %w", err)
+			}
+			if effectiveFrom.Before(dbNow.Add(-floorBackdatingTolerance)) {
+				if auditErr := audit.Record(ctx, tx, audit.Entry{
+					TenantID: auditTenantID, ActorType: params.ActorType, ActorID: params.ActorID,
+					Action: "rg.open_bet_self_exclusion_policy.write_denied", TargetType: "open_bet_self_exclusion_policy",
+					TargetID: "", Outcome: audit.OutcomeDenied, IPAddress: params.IPAddress, UserAgent: params.UserAgent, RequestID: params.RequestID,
+					Metadata: map[string]any{
+						"reason": "jurisdiction_floor_backdated", "jurisdiction_code": params.JurisdictionCode,
+						"attempted_effective_from": effectiveFrom, "db_now": dbNow,
+						"attempted_policy_value": string(params.PolicyValue), "reason_code": params.ReasonCode,
+					},
+				}); auditErr != nil {
+					return OpenBetSelfExclusionPolicyRow{}, fmt.Errorf("rg: audit denied open-bet self-exclusion policy write: %w", auditErr)
+				}
+				return OpenBetSelfExclusionPolicyRow{}, ErrJurisdictionFloorBackdated
+			}
+		}
 	} else {
 		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&effectiveFrom); err != nil {
 			return OpenBetSelfExclusionPolicyRow{}, fmt.Errorf("rg: resolve effective_from: %w", err)
 		}
-	}
-
-	auditTenantID := uuid.Nil
-	if params.TenantID != nil {
-		auditTenantID = *params.TenantID
 	}
 
 	newStrictness, _ := openBetSelfExclusionPolicyStrictness(params.PolicyValue)
