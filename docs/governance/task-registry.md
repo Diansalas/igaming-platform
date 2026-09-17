@@ -321,6 +321,34 @@ authoritative-time are IMPLEMENTED; the stalled-run reconciliation
 primitive exists but has no scheduler wiring (4HB0R6-18 finding A).
 Workstream F (Bonus dependency contract) — **DONE** (documentation).
 
+## Stage 4H-B0-R7
+
+Final financial/bonus implementation gate before Stage 4H-B1. Purpose:
+close the remaining implementation-blocking financial dependencies R6
+discovered — `player_locked` phase 2, the G-3 wagering-progress-farming
+P1, the Terminal-Grant and self-exclusion technical contracts, and a
+formal Human Decision Register for the three still-unmade human
+decisions. **No Bonus Engine, no Gamification, no Reward Orchestrator,
+no real provider integration. Stage 4H-B1 NOT authorized by this
+stage.**
+
+Reserved migration numbers: **0048 = Workstream A** (`player_locked`
+phase 2, already reserved from Stage 4H-B0-R6), **0050 = Workstream B**
+(wagering-progress-integrity mechanism, if a schema change proves
+necessary), **0051 = Workstream C** (Terminal-Grant technical contract,
+if needed), **0052 = Workstream D** (self-exclusion further hardening,
+if needed).
+
+| ID | Owner | Status | Dependencies | Files owned | Workstream | Blockers |
+|---|---|---|---|---|---|---|
+| 4HB0R7-01 | Orchestrator | Done | none | `docs/governance/*` | Governance setup | none |
+
+Wave 1 (design/validation, no code — the directive requires the
+`player_locked` phase 2 model and the wagering-progress-integrity model
+to be re-approved by ledger-finance/bonus-engine/sportsbook/architect
+before any migration or Go code is written) and later waves will be
+added as each dispatch reports back.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and
