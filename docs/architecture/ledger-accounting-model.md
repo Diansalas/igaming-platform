@@ -2850,6 +2850,16 @@ V-2 through V-6 are validation requests on this section's own decisions.
 | §6.4.9 V-1 | **New P1 finding**, `bonus-engine`-owned |
 | Migration `0048`, all Go code | **NOT WRITTEN, NOT AUTHORIZED.** Gated on V-1…V-6 plus §6.3.5's standing human approval |
 
+**Stage 4H-B0-R7 forward pointer**: §6.5 is this section's phase-2
+implementation design (migration `0048`'s exact SQL, the legacy-value
+decision §6.3.4 item 2 reserved, invariant L1, the exact Go changes, HR-9,
+and the phase-2 test set), and §6.6 is the wagering-progress integrity
+model addressing gate **G-3** / V-1. Neither approves, reopens or
+supersedes anything above: §6.4.1's mixed-funding deferral, §6.4.3's
+cashout non-implementation, HR-1 … HR-8, and gate G-2 all stand exactly as
+written, and both new sections are themselves `DESIGN ONLY` pending
+independent validation.
+
 #### 6.4.11 `bonus-engine` independent validation (Stage 4H-B0-R6, Workstream C phase 1 gate)
 
 Answering §6.4.9's V-1 through V-4 and OB-1, as posed, per this stage's
@@ -3051,6 +3061,1355 @@ bonus-funded placement in `internal/sportsbook` (G-2, G-3), implement
 mixed funding, implement cashout, implement partial settlement, or edit
 any document owned by another specialist.
 
+### 6.5 Phase-2 implementation design — migration `0048` and its code changes (Stage 4H-B0-R7 Workstream A, DESIGN ONLY)
+
+**Status: `NOT IMPLEMENTED`. DESIGN ONLY — no migration file, no Go code
+was written by the dispatch that produced this section.** This section
+finalizes §6.4's phase-2 plan into the exact artifacts phase 2 will
+consist of, for the **cash-only** cases (§6.4's A/D/F/H/J/K) that §6.4.11
+confirmed carry no bonus-domain objection. It does not re-derive §6.3 or
+§6.4; it cites them, confirms them against `HEAD`, and closes the four
+items those sections deliberately left to "the authorizing stage's call".
+It requires independent `bonus-engine` + `sportsbook` + `architect`
+validation, and §6.3.5's standing human-approval gate is unchanged.
+
+#### 6.5.1 Re-verification against `HEAD` — everything §6.3.4/§6.4 asserts about the live tree is still accurate
+
+Each claim re-checked directly, not assumed from the prior round:
+
+| Prior claim | Where | Status at `HEAD` |
+|---|---|---|
+| `ledger_accounts.account_type`'s CHECK lists exactly eleven values, inline and unnamed | §6.3.1, §6.3.2 | **Confirmed.** `migrations/0020_create_ledger_accounts.up.sql:19-23`, column-level `CHECK (account_type IN (...))`, so PostgreSQL's auto-name `ledger_accounts_account_type_check` is the name to drop |
+| `bonus_expense` appears in zero migrations | §6.3.1 | **Confirmed.** No `migrations/` file mentions it |
+| `player_locked` appears in exactly one migration line and zero real rows can exist | §6.3.2, HR-8 | **Confirmed.** `migrations/0020:20` is the only occurrence; no code path calls `GetOrCreateAccount` with it (see next row), and no migration seeds `ledger_accounts` |
+| `internal/wallet.GetSummary`'s switch is the only Go call site enumerating `player_locked` | §6.3.4 item 1 | **Confirmed.** Repo-wide grep for `AccountPlayerLocked`/`player_locked` across `internal/**/*.go` returns exactly three hits: the const declaration (`internal/ledger/ledger.go:39`), the `GetSummary` switch arm (`internal/wallet/wallet.go:168`), and three **comments** in `internal/risk/cumulative.go` (lines 61, 86, 112) that name `player_locked` illustratively and compile to nothing |
+| `internal/reconciliation`, `GetOrCreateAccount`, `GetProjectedBalance`, `RebuildBalance`, `RebuildProjectionRow` treat `account_type` as opaque | §6.3.4 item 1, §6.4.6 item 3 | **Confirmed** — no change needed in any of them |
+| No new index is required | §6.3.1 reason 2, §6.3.3.1 | **Confirmed**, and now verified for the §6.6 work too: `idx_ledger_transactions_correlation` (migration 0021:54), `idx_ledger_transactions_reverses` (partial, 0021:55), `idx_ledger_entries_transaction` (0022:37) and `idx_ledger_accounts_wallet_type_asset` (0020:41) cover every query either section needs |
+| Migration number `0048` is free | §6.4 | **Confirmed.** `migrations/` jumps `0047` → `0049`; `0048` was reserved by Stage 4H-B0-R6 and no file occupies it |
+| `internal/sportsbook` does not exist | §6.4.2 | **Confirmed.** `internal/` has no sportsbook package; the only `sportsbook` strings in Go are RG policy enums and Risk comments |
+
+**One prior statement is strengthened, not corrected.** §6.3.2 requires
+this migration to "carry a working `.down.sql`... rehearsed against an
+instance that already holds `player_locked_cash` rows to confirm the
+down-migration fails loudly rather than silently orphaning them." An
+operational precedent for exactly that behavior now exists and was missed
+by the earlier rounds: **migration `0035`
+(`0035_create_casino_integration_foundation`) is a CHECK-widening
+migration of the same shape** on `ledger_transactions.transaction_type`,
+using `DROP CONSTRAINT ledger_transactions_transaction_type_check` /
+`ADD CONSTRAINT ...` with the widened list, and its `.down.sql` carries an
+`architect`-reviewed note recording that the narrower re-add "fails with
+SQLSTATE 23514" once a row holds a new value, that the rows cannot be
+deleted first because the table is append-only, and that this is
+"the correct, deliberate behavior for an append-only financial ledger...
+not a bug in this script." §6.3.1's factual correction still stands —
+this is the first **`account_type`** widening — but the *pattern*, the
+failure mode, and the "effectively irreversible in practice" framing are
+already precedented and reviewed. The rehearsal is still required; it is
+now a confirmation of known behavior rather than an exploration.
+
+#### 6.5.2 Migration `0048` — the exact SQL
+
+Design, to be written by phase 2 as
+`migrations/0048_ledger_locked_account_origin_split.{up,down}.sql`,
+styled on `0035`'s precedent:
+
+```sql
+-- 0048 ... .up.sql
+-- Splits player_locked into player_locked_cash / player_locked_bonus.
+-- Shape A, ledger-accounting-model.md §6.3.1/§6.3.2; implementation
+-- contract §6.4; this migration's design §6.5. Postgres has no
+-- ALTER CHECK, so the constraint is dropped and recreated - the same
+-- mechanic migration 0035 used for ledger_transactions.transaction_type.
+-- Unlike 0035 this is NOT purely additive: bare 'player_locked' is
+-- REMOVED from the accepted set (§6.5.3, invariant L1).
+
+-- Pre-flight guard. Zero bare player_locked accounts exist in any
+-- environment (verified §6.5.1) and HR-8 forbids ever minting one. If one
+-- exists, stop with a legible message: the ADD CONSTRAINT below would
+-- fail anyway with a bare SQLSTATE 23514, but the remedy is an
+-- authorized backfill decision, not a retry.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM ledger_accounts WHERE account_type = 'player_locked') THEN
+        RAISE EXCEPTION 'migration 0048: % bare player_locked account(s) exist; a player_locked -> player_locked_cash backfill must be designed and authorized first (ledger-accounting-model.md §6.5.3)',
+            (SELECT count(*) FROM ledger_accounts WHERE account_type = 'player_locked');
+    END IF;
+END $$;
+
+ALTER TABLE ledger_accounts DROP CONSTRAINT ledger_accounts_account_type_check;
+ALTER TABLE ledger_accounts ADD CONSTRAINT ledger_accounts_account_type_check CHECK (account_type IN (
+    'player_cash', 'player_bonus',
+    'player_locked_cash', 'player_locked_bonus',
+    'player_withdrawal_hold',
+    'house_gaming', 'provider_payable', 'psp_clearing', 'psp_reserve',
+    'jackpot_contribution', 'promo_liability', 'manual_adjustment'
+));
+```
+
+```sql
+-- 0048 ... .down.sql
+-- Restores migration 0020's exact eleven-value list. Reversible ONLY on a
+-- database where no player_locked_cash/player_locked_bonus account has
+-- ever been created. Once one exists the ADD CONSTRAINT below
+-- re-validates every row and fails with SQLSTATE 23514. Such an account
+-- cannot be deleted first either, once it holds entries: ledger_entries
+-- is append-only (migration 0022's ledger_deny_mutation) and carries an
+-- FK to ledger_accounts. This is correct, deliberate behavior for an
+-- append-only financial ledger (CLAUDE.md), identical to the position
+-- migration 0035's own down.sql records, not a defect in this script.
+-- NOT VALID is deliberately NOT used: it would let the narrower
+-- constraint be re-added while violating rows remain, which is silent
+-- data/constraint divergence rather than a loud failure.
+ALTER TABLE ledger_accounts DROP CONSTRAINT ledger_accounts_account_type_check;
+ALTER TABLE ledger_accounts ADD CONSTRAINT ledger_accounts_account_type_check CHECK (account_type IN (
+    'player_cash', 'player_bonus', 'player_locked', 'player_withdrawal_hold',
+    'house_gaming', 'provider_payable', 'psp_clearing', 'psp_reserve',
+    'jackpot_contribution', 'promo_liability', 'manual_adjustment'
+));
+```
+
+**Everything migration `0048` deliberately does NOT contain**, each with
+its reason, so a reviewer can confirm the absence is a decision:
+
+- **No new index.** §6.5.1's table verifies every query shape either this
+  section or §6.6 needs is already index-covered. `UNIQUE (wallet_id,
+  account_type, asset_code)` (the partial unique index
+  `idx_ledger_accounts_wallet_type_asset`) covers both new values
+  unchanged, because both are player-owned like every other `player_*`
+  type.
+- **No new column, no RLS change, no trigger change.** RLS on
+  `ledger_accounts` keys on `tenant_id`/`player_account_id`, never on
+  `account_type` (migration 0020:101-117); the
+  `ledger_accounts_populate_from_wallet` trigger is `account_type`-blind.
+- **No `transaction_type` change.** The `sportsbook_*` types are ADR
+  0038's migration step 1 and are independent (§6.3.4 item 3). Migration
+  `0048` therefore ships a schema in which the new locked accounts exist
+  but **no** transaction type that would post to them does — deliberate,
+  see §6.5.6.
+- **No `bonus_expense`.** It is ADR 0032 §2's, approved but unmigrated,
+  and belongs to the stage that builds the Rule B2 (extended) mirror
+  generator. Adding an account type with no posting path would be
+  speculative work. **This is precisely why HR-9 (§6.5.5) is required**:
+  without `bonus_expense` and the generator, a bonus-origin lock would be
+  postable but its settlement would not be, i.e. a stuck lock.
+- **No data migration/backfill.** Zero rows to move (§6.5.1).
+
+**Why `player_locked_bonus` is added now even though nothing may post to
+it yet.** Three reasons, weighed against adding only
+`player_locked_cash`: (1) invariant L1 (§6.5.4) is a statement about the
+*family*, and a schema that admits `player_locked_cash` but not
+`player_locked_bonus` has no expressible bonus-origin locked state at all,
+so the first bonus-funded lock would need a second CHECK swap on the same
+constraint — and per `0035`'s precedent a CHECK swap is irreversible in
+practice once rows exist, so each one is a one-way operational event worth
+not doing twice; (2) invariant B1 (extended) is already written in terms
+of `player_locked_bonus` and `reconciliation-model.md`'s B1 stream is
+queued to aggregate over it — a half-present account set would leave that
+edit in a strange intermediate state; (3) the risk the addition creates (a
+premature bonus-origin posting) is closed by HR-9 at the ledger boundary,
+which is a stronger guarantee than the absence of a schema value, because
+it also protects the pre-existing `player_bonus` account.
+
+#### 6.5.3 The legacy-value decision — bare `player_locked` is **REMOVED**, not retained
+
+§6.3.4 item 2 and HR-8 left this explicitly to "the authorizing stage's
+call". **Decision: remove it — from the CHECK, and from the Go const
+block.** Stated as a decision with its reasoning, because the stage
+directive requires an explicit, justified choice rather than a default:
+
+1. **The stage's own requirement makes retention self-defeating.** The
+   requirement is that the result must not "retain ambiguous semantics
+   where the origin of locked value cannot be determined." Keeping
+   `player_locked` in the CHECK retains exactly the *capability* to create
+   origin-ambiguous locked value; the only thing standing between that
+   capability and a real row would be developer discipline. CLAUDE.md
+   already rejects that standard of enforcement for tenant isolation
+   ("enforced by PostgreSQL row-level security... not by discipline in
+   application code"); the same standard applies to a financial-origin
+   invariant.
+2. **"Defense in depth" has nothing to defend here.** Retaining a legacy
+   value is the right call when historical rows hold it — the migration
+   would otherwise fail and the data would be orphaned. There are zero
+   such rows in any environment, no code path can create one, and the
+   pre-flight guard in §6.5.2 proves it at migration time rather than
+   assuming it.
+3. **Removing the Go const converts the one known silent defect into a
+   compile error.** `internal/wallet.GetSummary`'s
+   `case ledger.AccountPlayerLocked:` arm is §6.3.4 item 1's silent-zero
+   defect (wrong money on a screen, no error, no failing constraint, no
+   reconciliation signal). If the const is deleted, that arm **cannot
+   compile**, so HR-7's "fix the call site in the same change as the
+   migration" stops depending on a checklist being followed and becomes a
+   property of the build. Retaining the const preserves the defect's
+   ability to ship.
+4. **Cost of being wrong is bounded and loud.** If some environment
+   unexpectedly holds a bare `player_locked` row, the up-migration stops
+   with a named exception inside its own transaction and changes nothing
+   — verified, not assumed: `internal/db/migrate.go:148-165` begins a
+   transaction per migration file, `Exec`s the whole file inside it, and
+   rolls back on any error before recording the version (the same property
+   `0035`'s down-migration note relies on). The failure
+   mode of removal is "migration refuses to run"; the failure mode of
+   retention is "ambiguous locked value is postable forever."
+
+The `.down.sql` restores `player_locked` because it restores migration
+`0020`'s list verbatim; that is a schema rollback, not a re-authorization
+of the value.
+
+#### 6.5.4 Invariant **L1** — locked-origin determinacy (new, phase-2-enforced)
+
+Stated as a numbered platform invariant so §6's mandatory list stays the
+single place to look. Following §6.1's `B1` convention (a lettered
+invariant added by a later stage rather than renumbering §6's list):
+
+> **L1 — locked-origin determinacy.** Every `LedgerEntry` against a
+> locked-funds account is unambiguously attributable to the origin of the
+> value it holds: the account's own `account_type` is either
+> `player_locked_cash` (value that came from `player_cash`) or
+> `player_locked_bonus` (value that came from `player_bonus`). No
+> origin-indeterminate locked account exists, and none can be created.
+
+**How the migration enforces it — five layers, database first:**
+
+| # | Layer | Mechanism | Failure mode if violated |
+|---|---|---|---|
+| 1 | **Database CHECK** | `ledger_accounts_account_type_check` admits `player_locked_cash`/`player_locked_bonus` and **not** `player_locked` (§6.5.2) | `INSERT` fails, SQLSTATE 23514. Not bypassable by the application role: unlike a `GRANT`, a CHECK constraint is not a privilege the table owner can decline (contrast invariant #2's reasoning about `UPDATE` grants) |
+| 2 | **Type system** | `ledger.AccountPlayerLocked` does not exist (§6.5.3) | Compile error at every stale use |
+| 3 | **Pre-flight guard** | §6.5.2's `DO $$ ... RAISE EXCEPTION` proves the pre-state before the swap | Migration refuses to run, transaction rolls back, schema unchanged |
+| 4 | **Read-side completeness** | `GetSummary`'s exhaustive switch with an erroring `default` (§6.5.5) and ADR 0038 §6's open-liability query's `IN` list (HR-7) | An unhandled player-owned account type errors loudly instead of reporting zero |
+| 5 | **Test** | A test asserting `INSERT ... account_type = 'player_locked'` fails with a check violation, and a test asserting the Go const is absent by the file simply not compiling if reintroduced | Regression caught in CI |
+
+**L1 is a determinacy statement, not a sufficiency statement.** It
+guarantees the *origin* of every locked posting is knowable from the
+account alone — which is what §6.3.3 case E's "crux" needs, what B1
+(extended) needs for its aggregate, and what the stage directive asks for.
+It does **not** by itself make bonus-origin locking *usable*: that needs
+`bonus_expense`, the Rule B2 (extended) generator, and gates G-2/G-3. L1
+after phase 2 therefore reads as: *every* locked posting the platform can
+make is `player_locked_cash`, and the only other member of the family is
+schema-present but posting-blocked (HR-9) — which satisfies L1 with room
+to spare, since a posting that cannot occur cannot be ambiguous.
+
+L1 must be added to §6's mandatory-invariant table (as `L1`, alongside
+`B1`) by the phase-2 change, together with §6.3.4 item 6's other queued
+document edits. Consistent with §6.4.8's convention, **no such edit is
+made by this section** — this dispatch is design-only and must not leave
+the document asserting an enforcement that does not exist yet.
+
+#### 6.5.5 The exact Go changes — and they are fewer than the case list suggests
+
+**1. `internal/ledger/ledger.go` — the `AccountType` const block
+(lines 36-48) and its doc comment (lines 31-33).**
+
+```go
+// AccountType names one of the ledger account types this platform posts
+// to. The Blueprint names ten; player_withdrawal_hold is a Stage 3A
+// architectural addition; player_locked_cash/player_locked_bonus replace
+// the Blueprint's origin-indeterminate player_locked (migration 0048,
+// ledger-accounting-model.md §6.3/§6.4/§6.5, invariant L1);
+// bonus_expense (ADR 0032 §2) is approved architecture and not yet
+// migrated. No count is stated here: the previous comment's count was
+// already stale and would go stale again.
+```
+
+Add `AccountPlayerLockedCash AccountType = "player_locked_cash"` and
+`AccountPlayerLockedBonus AccountType = "player_locked_bonus"`; **delete**
+`AccountPlayerLocked` (§6.5.3). The deletion is what makes item 2 below
+non-optional.
+
+**2. `internal/wallet/wallet.go` — `GetSummary` (lines 141-180) and
+`Summary` (lines 128-135).** §6.3.4 item 1 identified the defect and the
+one-line fix; this design adopts that fix and **strengthens it in two
+ways it explicitly left open**:
+
+```go
+type Summary struct {
+	Wallet             Wallet
+	CashBalance        int64
+	AvailableBalance   int64
+	HeldForWithdrawal  int64
+	LockedBalance      int64 // cash-origin + bonus-origin, combined
+	LockedCashBalance  int64
+	LockedBonusBalance int64
+	BonusBalance       int64
+}
+```
+
+```go
+		switch accountType {
+		case ledger.AccountPlayerCash:
+			s.CashBalance = signed
+		case ledger.AccountPlayerWithdrawalHold:
+			s.HeldForWithdrawal = signed
+		case ledger.AccountPlayerLockedCash:
+			s.LockedCashBalance = signed
+			s.LockedBalance += signed
+		case ledger.AccountPlayerLockedBonus:
+			s.LockedBonusBalance = signed
+			s.LockedBalance += signed
+		case ledger.AccountPlayerBonus:
+			s.BonusBalance = signed
+		default:
+			// Fail closed: an unrecognized player-owned account type means
+			// a migration added one without updating this switch (HR-7).
+			// Reporting a plausible-looking wrong balance is the worse
+			// outcome - ledger-accounting-model.md §6.3.4 item 1.
+			return Summary{}, fmt.Errorf("wallet: get summary: unhandled player-owned account type %q on wallet %s", accountType, w.ID)
+		}
+```
+
+Four load-bearing details:
+
+- **`+=` on the combined field, `=` on the per-origin fields.** The query
+  returns one row per account, so each per-origin field is written at most
+  once (`=` is correct and order-independent), while `LockedBalance` is fed
+  by two rows and would otherwise report whichever arrived last — §6.3.4
+  item 1's own point, preserved.
+- **The per-origin fields are adopted, not left as a recommendation.**
+  §6.3.4 item 1 marked `LockedCashBalance`/`LockedBonusBalance`
+  `RECOMMENDED` and warned that deferring means revisiting the function
+  twice. Adopted now: any future withdrawable-balance or
+  wagering-requirement caller needs the bonus-attributable portion and
+  cannot recover it from a sum.
+- **The erroring `default` arm is new in this design and is the actual
+  root-cause fix.** The defect §6.3.4 item 1 found was not "this switch
+  lacks two cases"; it was "this switch silently drops what it does not
+  recognize." Adding two cases fixes the instance; the `default` fixes the
+  class, and it is what makes layer 4 of L1's enforcement table real. It
+  is safe: the query filters `la.wallet_id = $1`, so only player-owned
+  types can appear, and after `0048` that set is exactly
+  `{player_cash, player_bonus, player_locked_cash, player_locked_bonus,
+  player_withdrawal_hold}` — all five handled. The error can only fire if
+  HR-7 was violated, which is exactly when it should.
+- **`AvailableBalance = CashBalance` is unchanged** and correct: locked
+  value has already left `player_cash`, so no subtraction is owed
+  (`reconciliation-model.md` §3's corrected formula). No money
+  representation changes: integer minor units throughout, no float
+  anywhere (invariant #7).
+
+**3. `internal/ledger` — HR-9, new, fail-closed guard (see §6.5.7).**
+
+**4. `internal/risk/cumulative.go` lines 61/86/112 — comments only.**
+`sportsbook`'s Stage 4H-B0-R6 readiness review already flagged these as a
+stale reference that "will fail closed, not silently under-count, if
+copied literally." Phase 2 should update the three comment strings to
+`player_locked_cash` for accuracy. **Zero behavior change** — Risk's
+`account_type` handling is data-driven; these are illustrative comments.
+Listed so the grep result in §6.5.1 is fully accounted for rather than
+partially.
+
+#### 6.5.6 What phase 2 does **not** deliver — the six cash-only cases have no call sites to change
+
+Stated plainly because the natural reading of "change the six cash-only
+transaction types to post to `player_locked_cash` instead of bare
+`player_locked`" presupposes code that **does not exist**, and shipping a
+report that implies otherwise would be exactly the fake-completion
+CLAUDE.md forbids:
+
+- **There is no `internal/sportsbook` package** (§6.5.1). Cases A, D, F,
+  H, J and K are *specified* in §6.4.5 and *unimplemented* in every sense:
+  no handler, no adapter, no service.
+- **There is no `sportsbook_*` `transaction_type`.**
+  `ledger_transactions.transaction_type`'s CHECK (migration 0021, widened
+  by `0035`) admits deposit/withdrawal/manual-adjustment/tombstone and the
+  three casino types — nothing else. A `sportsbook_bet` row is
+  **unpostable** at `HEAD`, and migration `0048` deliberately does not
+  change that (§6.5.2).
+- **Therefore the migration + code change has exactly one behavioral
+  effect today**: `internal/wallet.GetSummary` gains two account types it
+  will correctly aggregate the moment something posts them, and loses the
+  ability to silently drop an unknown one. Everything else phase 2 ships
+  is *capability plus enforcement*.
+
+The honest deliverable labels for phase 2 are therefore:
+
+| Deliverable | Label |
+|---|---|
+| Migration `0048`, invariant L1's five enforcement layers, the `GetSummary` fix, HR-9's guard, the phase-2 test set | `IMPLEMENTED` |
+| Cases A/D/F/H/J/K as *postings* | `NOT IMPLEMENTED` — they have no owning code; they are an implementation-ready contract (§6.4.5) awaiting an authorized sportsbook stage |
+| Cases B/E/G/I (bonus-funded) | `BLOCKED` — G-2, G-3, plus HR-9 at the ledger boundary |
+| Case C (mixed), case L (cashout) | `NOT IMPLEMENTED` by decision (§6.4.1, §6.4.3) |
+
+**Consequence for sequencing, and it is a genuine improvement over doing
+this later:** `0048` is a schema+read-model change with no domain code
+depending on it, so it can land, be reconciled, and be rehearsed in
+isolation — no sportsbook posting path is being migrated underneath live
+traffic, and the first sportsbook slice starts from a schema that already
+satisfies L1. That is the whole content of §6.3.2's
+migration-sequencing recommendation, now realizable literally.
+
+#### 6.5.7 HR-9 … HR-13 — hard requirements added by this design
+
+Extending §6.4.7's HR-1 … HR-8, which are unchanged and still binding.
+HR-9 belongs to phase 2; HR-10 … HR-13 belong to §6.6's model and are
+listed here so the HR series stays in one place.
+
+- **HR-9 — a posting against a `BONUS_SET` account fails closed until the
+  mirror generator and `bonus_expense` both exist.** `internal/ledger`'s
+  posting path rejects, with a distinct non-retryable error, any entry
+  whose resolved `account_type` is `player_locked_bonus` (**required**, the
+  account this migration creates) or `player_bonus` (**recommended**, an
+  account that already exists with zero posting call sites at `HEAD`).
+  Reason: Rule B2 (extended)'s generator does not exist and `bonus_expense`
+  is unmigrated, so (a) any `player_bonus` posting would break invariant B1
+  outright, and (b) a `player_locked_bonus` lock — which is B1-safe on its
+  own, being an internal `BONUS_SET` transfer (§6.4.5 case B) — could not
+  be **settled**, because cases G and I both require a `bonus_expense` leg,
+  producing a **stuck lock**: real player value trapped in a locked
+  account with no postable resolution. That is a strictly worse outcome
+  than refusing the lock. The guard is removed **in the same change** that
+  adds `bonus_expense` and the generator, and its removal is the checklist
+  item that forces both to exist. This is defense in depth *below* gates
+  G-2/G-3: those gate `internal/sportsbook`'s willingness to offer
+  bonus-funded placement; HR-9 gates the ledger's willingness to post it
+  at all.
+- **HR-10 — a wagering-progress contribution record is written in the same
+  database transaction as the lock posting it describes, and is
+  DB-idempotent** (§6.6.4).
+- **HR-11 — the nullification classification is exhaustive and fails
+  closed** (§6.6.5).
+- **HR-12 — the conversion-authorizing progress read happens inside the
+  same database transaction as the `bonus_conversion` posting** (§6.6.6).
+- **HR-13 — a re-derived contribution amount uses the inputs recorded on
+  the original contribution, never current configuration** (§6.6.4).
+
+#### 6.5.8 Phase-2 test set (owned by `ledger-finance`, non-negotiable)
+
+§6.3.4 item 7's list, restricted to what phase 2 can actually reach, plus
+the items this design adds. A happy-path test satisfies none of this:
+
+1. `INSERT` of `account_type = 'player_locked'` into `ledger_accounts`
+   fails with a check violation (L1 layer 1).
+2. `GetOrCreateAccount` succeeds for `player_locked_cash` and is
+   idempotent on a second call for the same `(wallet, type, asset)`
+   (the existing partial unique index, re-proved for a new value).
+3. `GetSummary` with a wallet holding **both** `player_locked_cash` and
+   `player_locked_bonus` returns a combined `LockedBalance` equal to their
+   sum and correct per-origin fields — §6.3.4 item 1's defect caught by a
+   test rather than by a player. Run with the two rows in both orders to
+   prove order-independence.
+4. `GetSummary` returns an error, not a zero, when a player-owned account
+   of an unhandled type exists (the `default` arm; constructed by
+   inserting a row directly, since no code path can produce one).
+5. HR-9: a posting against `player_locked_bonus` is rejected with the
+   distinct non-retryable error, and nothing is posted (no partial
+   transaction, no account left minted in a way that implies otherwise).
+6. The up-migration's pre-flight guard fires: with a bare `player_locked`
+   row force-inserted under the pre-`0048` constraint, `0048` fails with
+   the named exception and leaves the schema unchanged.
+7. The down-migration succeeds on a clean database and **fails with
+   SQLSTATE 23514** on a database holding a `player_locked_cash` account —
+   the rehearsal §6.3.2 requires, mirroring `0035`'s documented behavior.
+8. Reconciliation: the existing ledger-vs-projection sweep passes
+   unchanged over a wallet holding both new account types (proving §6.4.6
+   item 3's "opaque pass-through" claim by execution).
+9. Items 2, 3 and 8 repeated on an **18-exponent** and a **0-exponent**
+   asset. §6.4.6 item 5 argues these cases are exponent-independent; the
+   claim is proved by execution, not asserted.
+10. RLS: a player-scoped connection can read its own
+    `player_locked_cash` account and cannot read another player's, and a
+    tenant-staff connection cannot read another tenant's (the existing
+    two-policy shape, re-proved for a new account type).
+
+#### 6.5.9 Mixed funding (case C) — the Stage 4H-B0-R6 decision stands, unmodified
+
+**Confirmed: phase 2 implements HR-2's explicit fail-closed rejection.**
+Nothing is re-derived here; the decision and its five ranked reasons are
+§6.4.1, `bonus-engine` confirmed it at §6.4.11 (V-2, declining to specify
+the anti-structuring control under schedule pressure), and `sportsbook`
+confirmed at V-5 that hard rejection — not a cash-only fallback and not a
+silently reduced stake — is the behavior it wants. This design found **no
+reason to change it**, and one small reason it is now more clearly right:
+`0048` ships no `sportsbook_*` transaction type (§6.5.2), so HR-2's
+rejection is not even reachable in phase 2 — it is a requirement on the
+first sportsbook slice's split-instruction boundary, where §6.4.1's
+paragraph "exactly what would need to be built later" (four named items)
+remains the complete and unamended re-entry plan. HR-2's second, separate
+clause — `internal/ledger` validates that a split instruction's per-origin
+amounts sum exactly to the stated stake — likewise binds that later slice.
+
+#### 6.5.10 Cashout (case L) — confirmed `NOT IMPLEMENTED`, and the one thing a cashout policy decision must also settle
+
+**Confirmed unchanged from §6.4.3: no cashout of any funding origin is
+implemented, no cashout policy is selected here, and none is invented.**
+No sportsbook code exists to offer or accept a cashout price, so there is
+no code path to post against; cash-funded cashout's posting shape stays
+`RESOLVED (architecture) — NOT IMPLEMENTED` at ADR 0038 §8.3 (needing only
+the `player_locked` → `player_locked_cash` rename §6.4.8 item 1 lists);
+bonus/mixed-funded cashout stays `BLOCKED` on §6.3.3.2 case C-cashout's
+`OPEN QUESTION`. `product-owner-proxy`, `bonus-engine` and `sportsbook`
+have each independently recommended "not cashout-eligible"; this section,
+like §6.4.3, **does not select it**.
+
+**Forward dependency this specialist must name rather than guess — FD-1,
+for whichever dispatch carries the cashout decision.** A cashout policy
+decision is incomplete unless it also states **cashout's
+wagering-progress treatment**, and that is not derivable from the posting
+shape:
+
+> A cashout is the only bet resolution whose **timing the player
+> controls** (ADR 0038 §8.3: "a player's voluntary commercial decision...
+> before any new market fact exists"). Under §6.6's model a resolution is
+> either *risk-preserving* (progress stands) or *nullifying* (progress is
+> netted away). If cashout is risk-preserving, a player can place a
+> bonus-funded stake and cash out almost immediately at a price close to
+> the stake, keeping **100% of the wagering progress for a few percent of
+> guaranteed cost** — a bounded-cost, unbounded-repetition conversion of
+> bonus funds into wagering progress, which is the same class of vector as
+> §6.3.5.3 item 3's rounding structuring, reached without any rounding at
+> all. If cashout is nullifying, a player who legitimately closes a
+> position loses progress for a stake that genuinely was at risk. If it is
+> proportional to price, a new ratio-and-rounding computation enters the
+> progress path, which §6.6.10 is otherwise free of.
+
+This is **not** something `ledger-finance` will pick: all three are
+postable, all three are B1-safe, and the choice turns on bonus-abuse
+policy and consumer-protection disclosure — the identical reasoning
+§6.3.3.2 and §6.4.3 already used to decline the proceeds-split question.
+What this section does commit to is that §6.6.5's classification map
+**fails closed** for `sportsbook_cashout` until the answer exists
+(unclassified ⇒ excluded from authorizing progress ⇒ the affected Grant
+cannot convert, with an integrity alert), which is a deliberately unusable
+placeholder rather than a silent default. Nothing in phase 2 depends on
+FD-1; the first bonus-funded, cashout-eligible slice does.
+
+### 6.6 Wagering-progress integrity model — closing gate G-3 (Stage 4H-B0-R7 Workstream A, DESIGN ONLY)
+
+**Status: `NOT IMPLEMENTED`. DESIGN ONLY, and cross-domain by
+construction** — the defect is in a `bonus-engine`-owned definition (ADR
+0032 §0's progress read) with a `ledger-finance`-owned cause (the ledger
+facts it derives from) and a `sportsbook`-owned trigger (void/rollback
+mechanics). §6.4.9 V-1 and §6.4.11 name G-3 a `bonus-engine` deliverable;
+this section is the technical model `ledger-finance` was dispatched to
+design **for `bonus-engine` to validate, amend or reject on its policy
+surface** — every place where the answer is bonus policy rather than
+financial mechanics is marked as such and left open, and §6.6.11 lists
+them together.
+
+#### 6.6.1 The defect, restated exactly, and what must be true of any fix
+
+ADR 0032 §0 binds wagering progress to "a **derived read** over ledger
+entries that debited `player_bonus` — not a counter maintained in a bonus
+side table that could drift." §6.4.5 case B posts that debit at **lock**
+time; §6.4.5 case E (and every `sportsbook_void`) returns the value with a
+**credit**, which the definition does not net. §6.4.9 V-1 found this;
+§6.4.11 confirmed it as a real, P1, **platform-wide** defect (ADR 0032 §7's
+casino rollback has the identical root cause) and a player-reachable
+farming vector: repeatedly stake bonus funds on markets with an
+above-average void/push rate, carry zero net risk, keep all progress.
+
+Six properties any fix must have, derived from the defect rather than from
+either candidate model:
+
+1. **Zero-residue round trip.** lock-then-full-void must return progress
+   to *exactly* its prior value — not approximately, and not with a
+   one-minor-unit residue per cycle, which would itself be farmable.
+2. **No netting of a genuinely risked stake.** A win payout's
+   `player_bonus` credit (case G entry #6) and a settlement correction's
+   re-credit (case J's `T_J1`) share the bet's `correlation_id` and must
+   **not** be netted — §6.4.11's explicitly named trap.
+3. **Progress may never be negative or exceed what was contributed.**
+4. **The number and the explanation must both exist.** A disputing player
+   whose progress bar fell must be able to see why (doc 10 §10.1).
+5. **No second source of financial truth.** The fix may not turn progress
+   into a maintained monetary counter (ADR 0032 §0), and may not distort
+   the postings in cases B/E to carry progress semantics (§6.4.9 V-1's
+   own position, confirmed at §6.4.11).
+6. **Idempotent under redelivery.** Provider callbacks redeliver; the fix
+   must not double-apply.
+
+#### 6.6.2 Model A vs. Model B, decided on merits
+
+The directive requires a reasoned choice between two canonical models, not
+a convenience pick. Both were worked through against the six properties
+and against the live code.
+
+**Model A — provisional contribution, then finalization.** A bonus-funded
+stake's contribution is `PROVISIONAL` at lock time and becomes
+`QUALIFYING` only once the bet resolves favorably; requires a new state on
+the progress record and a finalization event.
+
+*Genuine strength:* it is **fail-closed by construction** for the pending
+window. Progress requires a positive finalization fact, so a void that is
+never reported, or a netting rule with a bug, cannot leak progress — the
+worst case is a player under-credited.
+
+*Three defects, one of them disqualifying:*
+
+- **Disqualifying: for casino, a losing bet produces no finalization
+  fact.** Verified against the code, not inferred:
+  `internal/casino/orchestrator.go:791-792` posts a bet as exactly
+  `Dr player_cash · Cr house_gaming` (and a win, lines 886-887, as the
+  inverse) — a **loss posts nothing at all**. There is no settlement
+  transaction, no "resolved" fact, no row to finalize against. Model A
+  would therefore never finalize a losing casino contribution, which is
+  the majority of all contributions on the platform's only implemented
+  wagering product. The only repairs available are a timer ("finalize if
+  nothing reversed it within N") — which is a maintained, time-driven
+  counter, violating property 5 and ADR 0032 §0 — or a new synthetic
+  "round resolved" ledger fact for every losing bet, which is a posting
+  invented to carry a bonus-domain concept, violating §6.4.9 V-1's own
+  position. CLAUDE.md's "don't break the existing casino
+  wagering-progress mechanism" is not merely inconvenienced by Model A;
+  it is contradicted.
+- **It does not remove the need for Model B's machinery.** An
+  already-finalized contribution can still be reversed later — case J/K's
+  settlement correction, a provider's late rollback (ADR 0032 §7). So
+  Model A needs a de-finalization path, which *is* Model B's compensating
+  mechanism, on top of its own extra state and event. Model A is
+  therefore a strict superset of Model B's complexity, not an
+  alternative to it.
+- **It delays player-visible progress for the entire life of an open
+  bet** — minutes to months for sportsbook (§6.3.3.1's own framing) —
+  which collides with bonus time limits: a player who has staked
+  everything correctly can watch a Grant expire with zero progress
+  recorded, and that lands straight into the unresolved G-2 terminal-Grant
+  gap rather than avoiding it.
+
+**Model B — immediate contribution, then compensating reversal.** The
+contribution counts at lock time (as today) and a later void/rollback
+posts a targeted, auditable reversal of that specific contribution.
+
+*Strengths:* preserves ADR 0032 §0's definition (it *adds a netting term*
+rather than replacing the definition); needs no per-contribution state
+machine; needs no finalization fact, so the casino-loss problem does not
+arise; progress is visible immediately, which is also what the player
+expects.
+
+*One real defect, and it is the one the directive's "completed bonus
+conversion edge case" is pointing at:* under Model B, progress that is
+still nullifiable **can authorize a conversion**. That turns the farming
+vector from "accrues progress" into "realizes withdrawable cash", through
+a race the player partly controls: choose markets that void late, convert
+as soon as the bar fills. Model B alone does not close the vector; it
+relocates it to a harder place to fix (after money has moved).
+
+*A secondary implementation trap:* "posts an explicit compensating
+reversal" invites a **written** negative progress entry, which then needs
+its own idempotency key, its own delivery guarantee, and its own
+reconciliation — and if the event is missed, the leak persists silently.
+Model B is only as good as the mechanism that writes the reversal.
+
+**Both models are the same predicate with a different default for the
+pending window.** A is "pending ⇒ not counted", B is "pending ⇒ counted".
+That framing is what makes the third model below not a compromise but the
+correct decomposition: the pending default should be different for the two
+things progress is used for.
+
+#### 6.6.3 Chosen: **Model C — dual-measure derived progress**
+
+> **Model C.** Wagering progress is expressed as **two derived measures
+> over the same immutable facts**, never as a stored counter:
+>
+> - **`P_net` — accrued progress (Model B's accrual).** Counts every
+>   contribution at lock time, **netted** against a later ledger fact
+>   that nullified the specific lock it came from. This is the
+>   player-facing number and the input to `in_progress` state tracking.
+>   It moves the instant a lock posts and the instant a void posts.
+> - **`P_firm` — authorizing progress (Model A's discipline, applied
+>   once).** The subset of `P_net` whose contributions are **no longer
+>   nullifiable** — i.e. the bet's bonus-origin locked exposure has
+>   reached zero, so its fate is decided. **Only `P_firm` may authorize a
+>   value-transferring operation** (completion → conversion).
+>
+> Neither measure is stored. Both are recomputed from (a) an append-only,
+> per-event contribution record and (b) the ledger's own posted facts. The
+> "compensating reversal" is not a written entry: it is the void/rollback
+> **ledger transaction that already exists**, read by the derivation.
+
+Why this rather than A or B, stated as the tradeoff it is:
+
+1. **It takes B's accrual, so the casino-loss finalization problem never
+   arises and casino behavior is unchanged.** For casino there is no
+   locked account, so no contribution is ever *nullifiable*, so
+   `P_firm == P_net` identically and every existing casino code path and
+   number is untouched. Model C is a strict no-op for casino except that
+   a `casino_rollback` of a bonus-funded bet now nets — which is the
+   platform-wide half of the defect §6.4.11 asked to have recorded.
+2. **It takes A's fail-closed discipline and spends it exactly where
+   irreversibility is.** Progress accrual is reversible (it is a
+   derivation); a conversion is not (it credits withdrawable cash). Gating
+   only the conversion means the farming vector **cannot reach money**,
+   while costing nothing in the 99% of cases where the player's bets have
+   already resolved.
+3. **It needs strictly less machinery than A.** No per-contribution state
+   column, no finalization event, no timer. "Nullifiable" is a
+   single derived predicate over exactly the same locked-exposure query
+   §6.3.3.1 variant 2 already specifies (`Σ signed(player_locked_bonus)`
+   for the bet `> 0`), which is index-covered today (§6.5.1).
+4. **It needs strictly less machinery than B-as-written-entries.** A
+   derived predicate is **idempotent by construction** — there is no
+   counter to decrement twice and no reversal event to deliver
+   exactly-once. This is the single biggest robustness difference and it
+   is why the netting is specified as a derivation rather than as an
+   appended negative row.
+5. **It keeps one source of financial truth.** The authoritative facts are
+   ledger entries; the contribution record holds only per-event inputs
+   the ledger genuinely does not carry (which Grant, which Offer version,
+   which contribution weight), is append-only, and is reconciled against
+   the ledger (§6.6.4 stream WP-R).
+
+**What Model C does not fix, stated so it is not overclaimed.** It closes
+the *open-bet* window completely (sportsbook's dominant exposure: weeks of
+pending, player-steerable). It does **not** close the *post-resolution*
+window: a settlement correction or late provider rollback arriving after a
+conversion has happened. No model can — the fact simply arrives late.
+§6.6.8 defines what happens then, precisely, instead of leaving it to
+produce impossible progress.
+
+#### 6.6.4 The contribution record — what is recorded, what is derived, and why that is not a "counter"
+
+One append-only row per (Grant, lock transaction). Shape constrained by
+`ledger-finance`; the table's name, package and migration belong to
+`bonus-engine`'s own stage.
+
+| Field | Source | Why |
+|---|---|---|
+| `tenant_id` | authenticated context, never the client | CLAUDE.md; RLS key |
+| `grant_id`, `offer_version_id` | Bonus Engine | Grant attribution is a bonus-domain fact the ledger deliberately does not carry (§6.4.5 case E) |
+| `lock_ledger_transaction_id` | the posting | The join key to every ledger fact about this bet |
+| `correlation_id` | the posting (denormalized) | Lets the netting query hit `idx_ledger_transactions_correlation` without a second hop |
+| `asset_code` | the posting | Progress never crosses assets (doc 10 §8) |
+| `staked_bonus_amount` (`b`) `NUMERIC(38,0) CHECK (> 0)` | **read from the posted ledger entry**, never from the caller | Prevents a caller claiming a contribution larger than the debit that justified it |
+| `contribution_weight_bp` `INTEGER CHECK (BETWEEN 0 AND 10000)` | the Offer version, copied immutably | Basis points, exact integer — never a float, never a live reference that could change under an issued Grant |
+| `qualifying_scaled` `NUMERIC(38,0)` = `b × contribution_weight_bp` | computed | See §6.6.10: an **exact scaled integer**, no rounding, because this quantity is never posted |
+| `rounding_rule_id` | ADR 0021's `rounding_rules` | Recorded for HR-13 even though §6.6.10's exact-integer form needs no rounding, so the record survives a future change of §6.6.10's Option 2 |
+| `created_at` | DB | Ordering |
+
+**Constraints that are requirements, not defaults:**
+
+- `UNIQUE (tenant_id, grant_id, lock_ledger_transaction_id)` — **HR-10's
+  DB-enforced idempotency.** Not a "check then insert"; not a per-attempt
+  UUID (CLAUDE.md, HR-5).
+- Written **in the same database transaction as the lock posting**
+  (HR-10). This is what makes "rejected bet" and "duplicate delivery"
+  structurally incapable of producing a phantom contribution: if the
+  posting is refused by the idempotency constraint, the enclosing
+  transaction aborts and the contribution row goes with it.
+- **Append-only**: no `UPDATE`/`DELETE` policy plus the
+  `BEFORE UPDATE OR DELETE` / `BEFORE TRUNCATE` trigger pair invariant #2
+  already uses. A contribution is a historical fact; its *effect* changes
+  by derivation, never by editing the row.
+- **RLS** on `tenant_id`, with the player-self-scope read policy pattern
+  `ledger_accounts` uses, so a player can read their own progress trail.
+- `FOREIGN KEY (lock_ledger_transaction_id) REFERENCES
+  ledger_transactions (id)` — a contribution cannot exist without the
+  posting it claims to describe.
+
+**Why this is not the "counter maintained in a bonus side table" ADR 0032
+§0 forbids, and the distinction is load-bearing.** §0's prohibition is
+aimed at a **mutable aggregate** that can drift from the entries it claims
+to summarize. This record is (i) per-event, not aggregate; (ii)
+immutable; (iii) sourced from the posting rather than from a caller's
+claim; (iv) carrying only fields the ledger genuinely does not have; and
+(v) continuously reconciled. The *aggregate* — `P_net`/`P_firm` — is
+never stored. `ledger-finance` reads §0 as permitting this and states the
+refinement explicitly rather than relying on interpretation:
+
+> **§0 refinement (proposed, `bonus-engine` to validate).** "Derived read"
+> forbids a stored, mutable progress balance. It permits an append-only,
+> immutable, per-event contribution record whose aggregate is always
+> recomputed and which is reconcilable to the ledger entries it
+> references. Any progress figure a player, a report or a decision sees is
+> recomputed; nothing increments.
+
+**Reconciliation stream WP-R (new, `ledger-finance`-owned, hourly,
+alongside the B1 stream).** For every `(tenant_id, grant_id, asset_code)`:
+`Σ staked_bonus_amount` over contributions **must equal** the sum of
+bonus-origin stake debits attributable to that Grant.
+
+- Contributions summing to **more** than the ledger's debits is progress
+  fabrication — it can authorize an unearned conversion, i.e. real money.
+  **P1**, same severity class as a balance drift.
+- Summing to **less** is an under-credited player. **P2**, still an
+  incident.
+- Per-lock check: `Σ staked_bonus_amount` over all contributions sharing
+  one `lock_ledger_transaction_id` must be `≤` that transaction's
+  bonus-origin debit. This is the check that catches a multi-Grant
+  attribution bug (§6.6.11 item 4).
+
+#### 6.6.5 The nullification predicate — exact, and where it fails closed
+
+A contribution `c` with lock transaction `L`. A posted ledger transaction
+`V` is an **effective nullifier** of `L` iff **all** of:
+
+1. `V.tenant_id = L.tenant_id` **and** `V.correlation_id = L.correlation_id`.
+   Tenant scope is not optional: `idx_ledger_transactions_correlation` is
+   on `correlation_id` alone and the column carries no cross-tenant
+   uniqueness guarantee, so the tenant predicate is a correctness
+   requirement, not an optimization.
+2. `V.id <> L.id`.
+3. **Either** `V.transaction_type = 'sportsbook_void'`, **or**
+   `V.transaction_type ∈ {'sportsbook_rollback', 'casino_rollback'}` **and**
+   `V.reverses_transaction_id = L.id` — the lock itself, **never** a
+   rollback that reverses a *settlement* (§6.4.11's named trap; case K and
+   case J's `T_J1` must not net).
+4. `V` has not itself been reversed: `NOT EXISTS (SELECT 1 FROM
+   ledger_transactions r WHERE r.tenant_id = V.tenant_id AND
+   r.reverses_transaction_id = V.id)`. A void posted in error and then
+   rolled back **un-nullifies** the contribution. Index-covered by
+   `idx_ledger_transactions_reverses`.
+
+**The returned amount is measured on the account the lock debited.**
+
+> `returned(c) = Σ` credit amounts to **`player_bonus`**, in `c`'s wallet
+> and `asset_code`, across all effective nullifiers of `L`.
+
+This formulation is deliberate and replaces the more obvious "sum the
+locked-account movement", which is **wrong**: case E posts
+`Dr player_locked_bonus 20 · Cr player_bonus 20`, so a signed sum over
+`BONUS_SET` is zero and a naive sum over both legs double-counts to 40.
+Measuring the `player_bonus` **credit** is exactly the inverse of ADR 0032
+§0's own "entries that debited `player_bonus`", so the netting is the
+minimal possible extension of the binding definition rather than a new
+concept — and it works uniformly for a locked product (case E credits
+`player_bonus`) and for casino (a `casino_rollback` of a bonus-funded bet
+credits `player_bonus` with no locked account in sight).
+
+**Assertions that fail closed (HR-11):**
+
+- `0 ≤ returned(c) ≤ b(c)`. A nullifier returning more than was staked is
+  impossible under HR-3's release checks; if observed, the posting/read is
+  an integrity incident — the Grant's `P_firm` is treated as unavailable
+  (blocking conversion) and an alert is raised. Never clamped silently.
+- **Exhaustive classification.** Every transaction type that can share a
+  bet's `correlation_id` and credit a `BONUS_SET` account is classified
+  **exactly once**, in one place, as *nullifying* or *risk-preserving*:
+
+| `transaction_type` | Classification | Reason |
+|---|---|---|
+| `sportsbook_bet`, `casino_bet` | the lock itself | — |
+| `sportsbook_void` | **nullifying** | The bet is nullified; the stake was never at risk in the end |
+| `sportsbook_rollback` / `casino_rollback` **reversing the lock** | **nullifying** | Same end state as a void; the lock was posted in error |
+| `sportsbook_rollback` **reversing a settlement** (cases J/K) | **risk-preserving** | The stake was genuinely risked; a wrong outcome is being corrected, not nullified |
+| `sportsbook_settlement`, `sportsbook_partial_settlement` | **risk-preserving** | A market fact; case G's payout credit to `player_bonus` must never net |
+| `casino_win` | **risk-preserving** | Same |
+| `bonus_forfeiture`, `bonus_conversion`, `bonus_grant`, `bonus_reversal` | **risk-preserving** (not bet-correlated) | Grant-lifecycle postings; they do not describe a bet's fate |
+| `sportsbook_cashout` | **UNCLASSIFIED — fails closed** | §6.5.10 FD-1: a policy decision, not a mechanical one |
+| any other / future type | **UNCLASSIFIED — fails closed** | See below |
+
+  Implemented as an exhaustive `switch` with a `default` that **returns an
+  error** — deliberately the same shape as §6.5.5's `GetSummary` fix, for
+  the same reason: an allowlist whose unknown case is "not nullifying"
+  fails **open** (a future `retail_void` nobody registered would silently
+  leak progress), and one whose unknown case is "nullifying" fails against
+  the player. Fail-closed here means: the affected contribution is
+  **excluded from `P_firm`** (so no conversion can be authorized by it)
+  **and** the Grant's completion evaluation raises an integrity alert.
+  `P_net`'s display shows the conservative value. Nothing silently picks a
+  side.
+
+**Effective qualifying amount, per contribution** (`risked = b − returned`):
+
+| Condition | `q_eff` |
+|---|---|
+| `risked = 0` (full nullification) | **exactly `0`** — a predicate, not a computation. Zero-residue by construction (property 1) |
+| `risked = b` (nothing returned) | **exactly the recorded `qualifying_scaled`** — no recomputation (HR-13) |
+| `0 < risked < b` (partial nullification) | `risked × contribution_weight_bp`, using the **recorded** weight, asserted `≤ qualifying_scaled` |
+
+`q_eff ∈ [0, qualifying_scaled]` always, so **invariant W2** holds: no
+contribution can go negative, and `P_net = Σ q_eff` can neither be
+negative nor exceed the sum of recorded contributions. "Negative or
+impossible progress" is excluded arithmetically, not by clamping.
+
+#### 6.6.6 Nullifiable, and the completion/conversion gate
+
+> A contribution `c` is **nullifiable** iff its bet still holds
+> bonus-origin locked exposure:
+> `Σ signed(player_locked_bonus) over entries of transactions with
+> (tenant_id, correlation_id) = (c.tenant_id, c.correlation_id)`,
+> restricted to `c`'s wallet and asset, **is `> 0`**.
+
+This is §6.3.3.1 **variant 2** (the remaining-per-origin query) reused
+verbatim — not a new query shape, not a new index. Once the exposure
+reaches zero the bet's fate is decided: the stake was absorbed (case I),
+paid out (case G), or returned (case E / void). For **casino** the
+quantity is always zero, so no casino contribution is ever nullifiable and
+`P_firm == P_net` — the compatibility property §6.6.3 point 1 claims.
+
+> **Invariant W1 — progress authorization.** No value-transferring
+> operation may be authorized by progress that is still nullifiable. The
+> `completed` transition and the `bonus_conversion` posting are gated on
+> **`P_firm ≥ T`** (`T` = the Grant's wagering-requirement target, scaled
+> identically — §6.6.10). `P_net` is a display and state-tracking figure
+> and may authorize nothing.
+
+Two consequences worth being explicit about:
+
+- A player whose progress bar is full **because of a still-open bet**
+  cannot convert until that bet resolves. That is the intended behavior
+  and it is the whole reason the farming vector cannot reach money.
+- An *unrelated* open bet does **not** block conversion, because `P_firm`
+  is a sum over non-nullifiable contributions rather than a Grant-wide
+  "no open bets" condition. A player who has already firmly wagered enough
+  converts immediately.
+
+**HR-12 — the gate is re-evaluated inside the conversion's own database
+transaction.** `P_firm ≥ T` is read in the same database transaction as
+the `bonus_conversion` posting, under the `SELECT ... FOR UPDATE` on the
+`player_bonus` projection row ADR 0032 §4 already requires. This closes
+the window between a `completed` transition and the conversion that acts
+on it: if a late fact moved `P_firm` below `T` in between, the conversion
+is **rejected**, not posted. This is invariant #15's
+same-transaction-authoritative-read rule applied to the non-monetary
+condition that authorizes a monetary write — the same reasoning, one level
+up. What Grant state a rejected conversion lands in
+(`completed → in_progress`, or a new state) is a Grant-state-machine
+question: doc 10 §1.3 has no such row today, and it is `bonus-engine`'s
+(§6.6.11 item 2).
+
+#### 6.6.7 Every required case, and its exact effect
+
+`b` = staked bonus amount, `q` = `qualifying_scaled`. "Trail" = the
+append-only Progress explanation entry (§6.6.9, auditability).
+
+| # | Case | Ledger fact | Effect on `P_net` | Effect on `P_firm` | Trail |
+|---|---|---|---|---|---|
+| 1 | **Accepted bet** (case B lock) | `Dr player_bonus b · Cr player_locked_bonus b` | **`+q` immediately** | **unchanged** — nullifiable (exposure `b > 0`) | contribution counted: `b`, weight, `q`, bet ref, ledger tx id |
+| 2 | **Rejected bet** | **none** (§4, ADR 0038 §4 — a decline posts nothing) | none | none | none — and it is *impossible* to create one, since HR-10 writes the contribution in the posting's transaction |
+| 3 | **Duplicate delivery** of the lock | rejected by `UNIQUE (tenant_id, provider_id, provider_tx_id)` or `(tenant_id, idempotency_key)` | none | none | none. Belt and braces: even a retry that somehow referenced the original transaction id is refused by HR-10's `UNIQUE (tenant_id, grant_id, lock_ledger_transaction_id)` |
+| 4 | **Full void** | `sportsbook_void`: `Dr player_locked_bonus b · Cr player_bonus b` | `returned = b` ⇒ `q_eff = 0` ⇒ **`−q`, exactly** | unchanged (was contributing 0) | contribution reversed: reversed amount, void tx id, bet ref, reason |
+| 5 | **Partial void** | returns `b_r < b` to `player_bonus` | `q_eff = (b − b_r) × weight` ⇒ **`−(q − q_eff)`** | unchanged while exposure remains | contribution partially reversed, with `b_r` |
+| 6 | **Rollback** of the lock | `sportsbook_rollback`/`casino_rollback`, `reverses_transaction_id = L.id` | same as #4 ⇒ **`−q`** | unchanged | contribution reversed (reason distinguishes rollback from void) |
+| 6b | **Rollback of a never-seen lock** | tombstone only, zero entries (§1.4, HR-6) | none — no contribution ever existed | none | none |
+| 7 | **Settlement** (win, case G / loss, case I) | risk-preserving | **unchanged** (`q` stands) | **`+q`** — exposure reaches 0, the contribution becomes firm | contribution confirmed firm |
+| 8 | **Correction** (case J: `T_J1` reverses the settlement, `T_J2` re-settles) | `T_J1` is risk-preserving **and** re-credits `player_locked_bonus` | unchanged | **`−q` then `+q`** — the contribution becomes nullifiable again on `T_J1` and firm again on `T_J2`, with **no compensating logic at all**, because the derivation is stateless | trail entries for both, driven by the ledger facts |
+| 8b | **Correction to "no result stands"** (rollback then void, §6.4.5 case J) | the trailing `sportsbook_void` **is** a nullifier | **`−q`** | unchanged | contribution reversed |
+| 9 | **Reversal** (case K, standalone rollback of a settlement) | risk-preserving, re-opens the lock | unchanged | **`−q`** (nullifiable again) | contribution returned to pending |
+| 9b | **Reversal of a void** | predicate condition 4 disqualifies the void | **`+q`** (restored) | per exposure | contribution restored |
+| 10 | **Provider callback redelivery** of a void | rejected by the unique constraint | none — the derivation is `SUM`/`EXISTS` over posted facts, with no counter to double-apply | none | none |
+| 11 | **In-house sportsbook occurrence** | `provider_id`/`provider_tx_id` `NULL`, `idempotency_key` carries the occurrence (ADR 0038 §14.6) | identical to #1-#9 | identical | identical |
+| 12 | **External sportsbook occurrence** | `provider_id`/`provider_tx_id` set | identical | identical | identical |
+
+Cases 11 and 12 are *identical by construction*, not by coincidence: the
+predicate reads `transaction_type`, `correlation_id`,
+`reverses_transaction_id`, `account_type`, `direction` and `amount` — and
+**no** provider field appears in it anywhere (§6.6.9, provider
+neutrality). Idempotency routing differs upstream and is invisible here.
+
+**Two further cases not in the directive's list but reachable, recorded so
+they are not discovered later:**
+
+- **Self-exclusion-triggered void** (ADR 0034 §14.1 /
+  `VOID_ON_SELF_EXCLUSION`): posts `sportsbook_void` (§6.3.3.2 C-void's
+  note), so it is a nullifier and progress is netted with **no extra
+  rule**. This closes `bonus-engine`'s original Wave-3 finding as a
+  special case of the general one, which is what §6.4.11 said the general
+  fix should do.
+- **Grant goes terminal while a contribution is nullifiable** (expiry,
+  cancellation, forfeiture): the derivation is Grant-state-blind and keeps
+  producing correct numbers; what the *Grant state machine* does with a
+  later credit against a terminal Grant is **G-2**, untouched and still
+  unresolved. Model C neither fixes nor papers over G-2 — §6.4.11 asked
+  specifically that a plausible-looking number not be mistaken for G-2
+  being resolved, and that is honored: `P_firm` for a terminal Grant
+  authorizes nothing, because a terminal Grant cannot convert.
+
+#### 6.6.8 The completed-bonus-conversion edge case, defined rather than left to happen
+
+**Setup.** `P_firm` reached `T`, the Grant went `completed → converted`,
+ADR 0032 §4's four-entry `bonus_conversion` posted
+(`Dr player_bonus X · Cr player_cash X · Dr bonus_expense X ·
+Cr promo_liability X`). *Then* a fact arrives that nullifies a
+contribution: a late provider rollback, or a settlement correction whose
+trailing resolution is a void (case 8b).
+
+**First: how much of this case Model C has already removed.** The
+`P_firm` gate (W1) makes the *open-bet* route to this state
+**structurally impossible** — a contribution that could still be voided
+was never allowed to authorize the conversion. What remains is only a fact
+that arrives **after** the bet's exposure already reached zero, i.e. an
+operator/provider-side correction, not a player-steerable action. That is
+the difference between a designed-in exploit and a rare, auditable
+accident, and it is the main reason Model C was chosen over Model B.
+
+**What happens, in order, when it does occur:**
+
+1. **The derivation is simply correct.** `q_eff` for that contribution
+   drops (to `0`, or to its partial value). `P_net` and `P_firm` fall
+   below `T`. **No negative and no impossible progress occurs** — W2
+   floors each contribution at `0`, so the aggregate stays in
+   `[0, Σ q]`. Nothing is clamped and nothing is back-dated.
+2. **The conversion is never edited.** It is a posted transaction under
+   invariant #2 (no `UPDATE`/`DELETE` policy, plus the trigger pair). The
+   only available instrument is a compensating entry (invariant #10).
+3. **The Grant transitions to `reversed`, an existing state with exactly
+   this documented trigger.** doc 10 §1.2 defines `reversed` as "a
+   compensating transition applied *after* another terminal state, because
+   the event that justified the Grant was itself reversed upstream (e.g.
+   ... a round the Grant's wagering credited was rolled back)" and §1.3
+   lists the trigger "casino/sportsbook rollback of a round the Grant's
+   Progress had already credited". **No new Grant state is invented**;
+   what is missing is only the Progress-trail row type §6.4.11 already
+   named as a `bonus-engine` deliverable.
+4. **A Progress entry is appended** carrying the reversed amount, the bet
+   reference, the nullifying ledger transaction id, and a reason code —
+   so a disputing player's history shows why the bar moved *and* why the
+   Grant went terminal-again (property 4, doc 10 §10.1).
+5. **The financial consequence is a named, four-eyes, reason-coded
+   operation — never an automatic clawback, and never nothing.** ADR 0032
+   §7 already specifies this instrument for the structurally identical
+   situation ("a reversal must fail loudly if the granted value has
+   already been partly consumed... the correct instrument is: forfeit the
+   remaining balance (§5), and handle the consumed portion as a
+   `manual_adjustment` **against `player_cash`**, with a mandatory reason
+   code and four-eyes approval above the configured threshold... It does
+   **not** target `player_bonus`"). Model C reuses it unchanged:
+
+| Step | Posting | Notes |
+|---|---|---|
+| a | Forfeit any bonus balance still outstanding on the Grant | `bonus_forfeiture`, ADR 0032 §5's `Dr player_bonus · Cr promo_liability` |
+| b | Recoup the realized portion, **if** policy says to | `manual_adjustment` `Dr player_cash · Cr promo_liability` (or `house_gaming`, per the reason code), four-eyes above threshold, mandatory reason code |
+| c | If the player has already spent or withdrawn it | step (b) can drive `player_cash` negative. That posting must still happen (§6.4.5 case K's property 4) and the result is an operator **receivable** — the *same* open business decision already referred upward as **OB-1** |
+
+6. **What `ledger-finance` will *not* decide, and why it is genuinely not
+   an accounting question.** A wagering requirement is a **threshold, not
+   a price**: there is no accounting identity mapping "progress fell short
+   by `q`" onto "claw back `Y` of converted cash". The defensible
+   engineering position is that the conversion's *authorizing condition*
+   failed, so the conversion was unauthorized **in full** (`X`), not
+   proportionally — a proportional figure would be an invented price. But
+   *whether* to pursue `X` from a player who did nothing wrong (the
+   nullifying fact was an operator/provider correction) is
+   consumer-protection, collections and possibly jurisdiction policy, in
+   the same family as OB-1. **Named as open business decision OB-2**
+   (§6.6.11 item 1), not decided here.
+7. **Fail-closed default until OB-2 is answered**, so nothing is silently
+   discarded: the event routes to the manual-review queue with a P2
+   integrity alert and an audit record; steps (a) and (b) are not executed
+   automatically; the Grant is `reversed`; the Progress trail explains it;
+   and **no further conversion on that Grant is possible** (terminal
+   state, plus HR-12's in-transaction re-check). No value moves without a
+   human decision, and no value silently stays lost.
+8. **No re-farming.** A `reversed` Grant is terminal and does not re-enter
+   `in_progress`; the `bonus_conversion` idempotency key is already
+   consumed. A player cannot cycle reverse-and-reconvert.
+
+**One reduction available but deliberately not invented.** The residual
+window could be narrowed further by refusing to convert until a
+*settlement-finality period* has elapsed on the contributing bets.
+Whether such a period exists, and how long it is, is a function of
+provider dispute windows and market rules — a `sportsbook` +
+`product-owner-proxy` question, **named as a forward dependency (FD-2)**,
+not guessed. Model C works with or without it; with it, OB-2's residual
+frequency drops further.
+
+#### 6.6.9 The eleven required properties, each addressed
+
+1. **Idempotent.** Nothing increments. The contribution row is
+   DB-unique per `(tenant, grant, lock transaction)` and written inside
+   the posting's transaction (HR-10); the netting is `SUM`/`EXISTS` over
+   posted ledger facts, so a redelivered callback (already refused by
+   `UNIQUE (tenant_id, provider_id, provider_tx_id)` /
+   `(tenant_id, idempotency_key)`) changes nothing, and even a
+   hypothetical second distinct nullifier is absorbed by
+   `returned ≤ b`'s fail-closed assertion. **This is the property that
+   selected a derivation over written negative entries** — the latter
+   would need its own key, its own delivery guarantee and its own
+   reconciliation. If `bonus-engine` later prefers materialized reversal
+   rows for query performance, they must be a **cache** with a
+   `UNIQUE (grant_id, contribution_id, nullifying_transaction_id)`
+   constraint and their own reconciliation against this derivation —
+   never the authority.
+2. **Reversible.** Every transition is reversible *and* re-reversible with
+   no special code: void ⇒ `q_eff = 0`; rollback of the void ⇒ `q` back
+   (predicate condition 4); settlement reversal ⇒ the contribution
+   returns to nullifiable (case 8/9). Because nothing is stored, there is
+   no state to unwind — only facts to re-read.
+3. **Auditable.** Two layers, deliberately separated. The **ledger** says
+   what happened to the money; the **Progress trail** says why a bonus
+   decision changed, carrying per doc 10 §10.1 the sequence number,
+   transition type, trigger reference, before/after, amounts, reason code
+   and the resulting ledger transaction id. A disputing player sees: "your
+   bet X was voided on <date> (ledger tx Y), so the 20.00 of wagering
+   progress it had contributed was removed." **Failure mode named
+   honestly:** because the number is derived and the trail is appended,
+   a missed trail append yields *the right number with a lagging
+   explanation* — recoverable by replaying from ledger facts. The inverse
+   design (stored number, appended explanation) fails as *wrong money with
+   a convincing story*, which is worse. The trail append is itself a
+   `bonus-engine` deliverable (§6.4.11's "new Progress-trail trigger
+   point"), unchanged by this section.
+4. **Tenant-safe.** `tenant_id` is in every predicate of the netting
+   query, the nullifiable query and the contribution table's RLS — and
+   condition 1 of §6.6.5 explains why that is a correctness requirement
+   rather than a filter, given `correlation_id` carries no cross-tenant
+   uniqueness. `tenant_id` comes from authenticated server-side context
+   only (CLAUDE.md).
+5. **Asset-safe.** Every measure is per `(tenant_id, asset_code)`; a Grant
+   is same-asset by doc 10 §8's frozen boundary; `b`, `returned` and `T`
+   are minor-unit integers of that asset, with the exponent read from the
+   Asset registry only where a *display* needs it. No progress figure is
+   ever summed across assets, and no `ConversionOperation` is involved
+   (doc 10 §8).
+6. **Provider-neutral.** The predicate names no provider field, no vendor
+   status string and no vendor void code. It keys only on platform-owned
+   facts (`transaction_type`, `correlation_id`,
+   `reverses_transaction_id`, `account_type`, `direction`, `amount`).
+   Verified against the risk of leakage: the one place a provider concept
+   *could* have entered — "was this void a genuine cancellation or a
+   market push?" — is explicitly **not** used (see §6.6.11 item 3).
+7. **External sportsbook.** Works unchanged; the provider's void/rollback
+   callback becomes a `sportsbook_void`/`sportsbook_rollback` posting and
+   the derivation reads it.
+8. **In-house sportsbook.** Works unchanged; §6.6.7 cases 11/12 are
+   identical because ADR 0038 §14.6's `provider_id IS NULL` discriminator
+   affects only idempotency routing, which is upstream of the derivation.
+9. **Casino — unbroken, and improved.** No casino posting changes. No
+   casino contribution is ever nullifiable (no locked account), so
+   `P_firm == P_net` and every existing casino number is identical to
+   today's. The only behavioral change is that a `casino_rollback`
+   reversing a bonus-funded `casino_bet` now nets its progress — the
+   platform-wide half of the defect §6.4.11 asked to be recorded so a
+   later casino audit would not rediscover it. Model A could not have
+   achieved this at all (§6.6.2).
+10. **Future retail.** ADR 0035's agent/POS wagering posts through the same
+    ledger with the same `correlation_id` discipline, so the derivation
+    needs no new shape — a future `retail_void` type needs one row added
+    to §6.6.5's classification table, and HR-11's erroring `default`
+    guarantees that omitting it **fails closed and loudly** instead of
+    leaking progress. That fail-closed default is the property that makes
+    the classification map safe to extend by a domain that does not exist
+    yet.
+11. **Bonus expiration / cancellation.** The derivation is Grant-state
+    blind, so expiry/cancellation need no netting change; `bonus_forfeiture`
+    is classified risk-preserving (it is a Grant posting, not a bet fate);
+    a terminal Grant's `P_firm` authorizes nothing because a terminal Grant
+    cannot convert; and the unresolved locked-stake-at-forfeiture question
+    remains **G-2**, deliberately untouched.
+
+#### 6.6.10 Anti-structuring compatibility, rounding, and one finding that dissolves rather than needs a control
+
+**The mechanism itself cannot be farmed.** Checked against the ways the
+directive asks about:
+
+- **Repeated small operations through the netting path.** A
+  lock-then-full-void cycle changes `P_net` by `+q` then `−q` where the
+  `−q` is produced by a **predicate** (`risked = 0 ⇒ q_eff = 0`), not by
+  an arithmetic reversal. The round trip is therefore **exactly** zero,
+  with no residue, repeatable without bound — so no number of cycles
+  accumulates anything. This is property 1 of §6.6.1 and it is the
+  property a written-compensating-entry design would have had to prove
+  arithmetically.
+- **Partial cycles.** `q_eff = risked × weight` with `risked` monotonically
+  decreasing in `returned`, and `q_eff ≤ qualifying_scaled` asserted, so no
+  partial-void/re-stake path can make a contribution worth more than it was.
+- **Timing advantage.** Removed by W1: pending progress authorizes
+  nothing, so there is no "convert before the void lands" race. This is
+  the structuring surface Model B alone would have left open.
+- **Extraction through rounding.** None exists on this path, because the
+  path performs no rounding at all — see the finding below.
+
+**DS-1 / DS-2 / DS-3 compatibility, and no floating point.**
+
+- **No floating point anywhere.** `b`, `returned`, `qualifying_scaled` and
+  `T` are `NUMERIC(38,0)` in the database; `contribution_weight_bp` is an
+  exact integer (basis points), never a `FLOAT`/`DOUBLE` and never a
+  language-level percentage literal. Invariant #7 holds on this path
+  trivially.
+- **No hidden fractional balance.** Progress is not money: it never
+  credits an account, never appears in a balance, and never creates an
+  obligation. There is no accumulator, no residual bucket, and nothing
+  owed to a player sub-minor-unit — consistent with doc 10 §7's
+  "no remainder-accumulation mechanism exists anywhere".
+- **Two implementation notes that are requirements.** `qualifying_scaled`
+  is `b × weight_bp`, up to `10^4 ×` a minor-unit amount, so (i) the
+  column must be `NUMERIC(38,0)` and the comparison must be done in
+  `NUMERIC` or `math/big`, **never `int64`** — this is a deliberate,
+  documented departure from `internal/ledger`'s int64 convention
+  (`ledger.go:10-17`), justified because the quantity is a scaled
+  non-monetary comparison value rather than a posted amount; and (ii) the
+  target comparison is `Σ qualifying_scaled ≥ T × 10000` — **a scaled
+  integer inequality with no division anywhere**, so it is exact and
+  exponent-independent at 0, 2, 6, 8 and 18.
+
+> **Finding WP-1 (new, `ledger-finance`, for `bonus-engine` to confirm):
+> the wagering-progress path needs no rounding at all, and rounding it
+> would create a real structuring vector.** doc 10 §7 states that
+> "per-game contribution weighting (`stake × contribution_%`) **is**
+> monetary... and DS-2's boundary for it is the split-instruction
+> computation itself, rounded once there." If that rounding is applied to
+> the *progress* quantity, then with `weight < 100%` and DS-1's
+> round-half-up, **splitting a stake inflates progress**: at
+> `weight = 50%`, a 1-minor-unit bonus stake yields
+> `round_half_up(0.5) = 1` — a 100% contribution. One hundred
+> 1-minor-unit stakes then produce 100 progress against 50 for a single
+> 100-unit stake: a **2× discount on the wagering requirement, purchased
+> purely by structuring**, and at a 0-exponent asset (schema-legal today)
+> "one minor unit" is a whole unit of value, exactly the amplification
+> `security` flagged for the C-win vector. This is **not created by Model
+> C** — Model C inherits it — and it is the *same class* as the C-win
+> rounding vector `bonus-engine` declined to specify a control for.
+>
+> **`ledger-finance`'s engineering position, offered rather than
+> imposed:** the vector **dissolves** if the progress quantity is never
+> rounded, and DS-2 already supplies the reason it needn't be. ADR
+> 0021/doc 10 §7 itself exempts the wagering-requirement **target** from
+> DS-2's posting boundary because it "is a comparison threshold that gates
+> a lifecycle-state transition and is **never itself posted to the
+> ledger**." The contribution amount on the *progress* side is the other
+> operand of that same comparison and is equally never posted — so the
+> same exemption applies, and §6.6.4's exact scaled-integer form
+> (`b × weight_bp` compared against `T × 10000`) is DS-1/DS-2/DS-3
+> compliant by *not reaching* a rounding boundary, rather than by rounding
+> correctly at one.
+>
+> **The likely root cause is an ambiguity in doc 10 §7, not a decision.**
+> "Contribution %" is used there for the *cash/bonus funding split of a
+> stake* (genuinely monetary, genuinely posted, genuinely must round
+> once — no disagreement), whereas the industry-standard meaning, and the
+> meaning doc 10 §1.3/§6 use when they speak of "the Offer's contribution
+> rules" recognizing a stake, is the *weight of a stake toward the
+> wagering requirement* (never posted). Those are two different
+> quantities that happen to share a configuration field name.
+> **`bonus-engine` owns which is meant** (§6.6.11 item 5).
+>
+> **If `bonus-engine` decides progress must be a rounded integer after
+> all**, then WP-1's vector is live and needs a `bonus-engine`-owned
+> control — this specialist will not pick one, for exactly §6.4.1's
+> reasoning — and Model C additionally requires: HR-13's rule-version
+> pinning (a re-derived `q_eff` must use the `rounding_rule_id` recorded
+> on the contribution, never the current rule, or a future DS-3
+> per-jurisdiction override would silently rewrite historical progress),
+> plus the `q_eff ≤ qualifying_scaled` monotonicity assertion as a hard
+> check rather than a comment.
+
+**Interaction with the unresolved C-win anti-structuring requirement:
+none, and checked rather than assumed.** C-win's rounding happens on a
+**payout** (`round_half_up(payout × B / (C + B))`, §6.3.3.2) and only in
+the deferred **mixed**-funding world (§6.4.1). Model C's progress path
+touches neither: a settlement is classified risk-preserving, so a payout's
+rounding never enters a netting computation, and single-origin funding has
+no ratio at all (§6.4.6 item 5). When mixed funding eventually lands, `b`
+is the bonus-origin share **already stated exactly** by the validated
+split instruction (HR-2's sum check), so Model C still performs no
+division. **No compound vector exists**, and the C-win control stays
+exactly where `bonus-engine` left it — unresolved, theirs, and not forced
+here.
+
+#### 6.6.11 What this section deliberately does **not** decide
+
+Each is named rather than guessed, after exhausting this specialist's own
+authority:
+
+1. **OB-2 (open business decision, referred upward via the orchestrator).**
+   Whether, and above what threshold, to recoup converted cash from a
+   player whose progress was later nullified by an operator/provider
+   correction (§6.6.8 step 6). Consumer-protection/collections/legal
+   weight; same family as OB-1. The **instrument** is fully specified (ADR
+   0032 §7's `manual_adjustment` against `player_cash`, four-eyes, reason
+   code); only the *policy* is open.
+2. **The Grant-state rows Model C implies** (`bonus-engine`): a Progress
+   entry type for "previously-counted progress reversed" (already named at
+   §6.4.11), and the transition for a conversion rejected by HR-12's
+   in-transaction re-check (`completed → in_progress`, or a new state).
+   doc 10 §1.3's table has neither row today.
+3. **Whether a *push* should count toward wagering** (`bonus-engine` +
+   `sportsbook`). ADR 0038 §8.1 posts "a market cancellation, **push**, or
+   data error" as the *same* `sportsbook_void` type, so the ledger cannot
+   distinguish them and Model C necessarily treats a push as nullifying.
+   That is the abuse-safe and industry-typical answer, and it is the only
+   answer available without new information — but if a push should count
+   (the player did take a position that resolved), a **void reason code**
+   must exist on the posting as a first-class, provider-neutral fact, and
+   that is an ADR 0038 + doc 09 change, not a progress-query change.
+   `ledger-finance` will not introduce a provider-supplied void taxonomy
+   into the ledger unilaterally.
+4. **Multi-Grant attribution of a single stake** (`bonus-engine`). If one
+   stake may draw bonus funds from two Grants, a void's single
+   `player_bonus` credit must be attributed between them — which requires
+   a proportional division and reintroduces exactly the rounding
+   attribution surface §6.4.1 deferred. **Fail-closed default adopted
+   until `bonus-engine` specifies an attribution rule: a lock drawing on
+   more than one Grant is rejected at placement**, the same
+   reject-rather-than-invent posture as HR-2. Reversible the moment an
+   attribution rule exists; WP-R's per-lock check detects any violation.
+5. **WP-1's ambiguity in doc 10 §7** — whether "contribution %" weights
+   the funding split, the progress amount, or both (§6.6.10).
+6. **FD-1 (cashout's progress treatment)** and **FD-2 (whether a
+   settlement-finality window exists)**, per §6.5.10 and §6.6.8.
+7. **Everything already open stays open**: G-2 (terminal Grant), the C-win
+   anti-structuring control, C-cashout's proceeds split, OB-1, and the
+   `OpenBetSelfExclusionPolicy` default. Nothing in §6.5 or §6.6 selects
+   any of them.
+
+#### 6.6.12 Validation questions — continuing §6.4.9's series
+
+- **V-7 — `bonus-engine`: is Model C accepted over Models A and B?**
+  Specifically the split into `P_net` (accrual, display, authorizes
+  nothing) and `P_firm` (fate-decided, sole authorizer of conversion),
+  and invariant W1. §6.6.2's disqualifying argument against Model A is the
+  casino-loss finalization gap verified in
+  `internal/casino/orchestrator.go`; if `bonus-engine` disagrees that this
+  is disqualifying, say why, because the rest of the choice follows from
+  it.
+- **V-8 — `bonus-engine`: is §6.6.4's ADR 0032 §0 refinement acceptable?**
+  An append-only, immutable, per-event, ledger-sourced, reconciled
+  contribution record, with the aggregate always recomputed — versus §0's
+  literal "derived read over ledger entries", which cannot express a
+  per-Grant contribution weight at all.
+- **V-9 — `bonus-engine`: confirm §6.6.5's classification table**,
+  especially that a `sportsbook_rollback` reversing a **settlement** is
+  risk-preserving while one reversing the **lock** is nullifying (your own
+  §6.4.11 scoping, implemented literally), and that `bonus_*` postings are
+  correctly outside the bet-fate question.
+- **V-10 — `bonus-engine`: WP-1.** Is the progress quantity monetary (⇒ it
+  rounds, and you own a structuring control) or a never-posted comparison
+  operand (⇒ §6.6.4's exact scaled integers, and the vector dissolves)?
+  And which quantity does doc 10 §7's "contribution %" configure?
+- **V-11 — `bonus-engine`: the two Grant-state rows** in §6.6.11 item 2,
+  and the fail-closed default in §6.6.11 item 4 (reject a multi-Grant
+  lock until you specify attribution).
+- **V-12 — `sportsbook`: is `sportsbook_void`'s coverage of "cancellation,
+  push, or data error" as one type final?** §6.6.11 item 3. Model C treats
+  all three as nullifying; a push that should count needs a
+  provider-neutral void reason code on the posting.
+- **V-13 — `sportsbook`: does §6.6.6's nullifiable predicate** (remaining
+  `player_locked_bonus` exposure for a `correlation_id` `> 0`, i.e.
+  §6.3.3.1 variant 2) correctly express "this bet's fate is not yet
+  decided" for every lifecycle you intend, including partial settlement
+  and the §8.1 void-after-partial-settlement variant ADR 0038 leaves open?
+- **V-14 — `sportsbook`: FD-1.** Confirm that cashout's progress
+  treatment must be settled together with the cashout proceeds policy, and
+  that the fail-closed placeholder (a cashout-resolved bet cannot
+  authorize a conversion) is acceptable until then.
+- **V-15 — `architect`: §6.5.3's removal of bare `player_locked`** from
+  both the CHECK and the Go const block, and invariant L1's five-layer
+  enforcement — is anything in §6.5.1's re-verification or L1's layer
+  table missing a call site or a document (the same question §6.3.5.1
+  item 7 asked, re-asked against a now-larger change)?
+- **V-16 — `architect`: HR-9's scope.** Blocking `player_locked_bonus`
+  postings at the `internal/ledger` boundary is required by §6.5.2's
+  stuck-lock argument; extending the same guard to the pre-existing
+  `player_bonus` account is *recommended* here. Does that collide with
+  `bonus-engine`'s own Stage 4H-B1 sequencing (doc 10's first-slice
+  migration order), given the guard must be removed in the same change
+  that adds `bonus_expense` and the Rule B2 generator?
+
+#### 6.6.13 Review status
+
+| Content | Status |
+|---|---|
+| §6.5.1 re-verification against `HEAD` | **Verified this dispatch** (grep/file-level, cited line numbers). Migration `0035` precedent newly identified |
+| §6.5.2 migration `0048` SQL | **Design only, not written.** Gated on V-15 + §6.3.5's human approval |
+| §6.5.3 removal of bare `player_locked` | **DECIDED by `ledger-finance`** as the authorizing stage's call §6.3.4 item 2 reserved; `architect` validation requested (V-15) |
+| §6.5.4 invariant **L1** | **Newly stated this dispatch, unreviewed.** To be added to §6's table by phase 2, not by this dispatch |
+| §6.5.5 Go changes | Adopts §6.3.4 item 1's fix; the erroring `default` arm and the per-origin `Summary` fields are **new decisions** |
+| §6.5.6 "no call sites exist" | **Factual correction to the dispatch's own framing.** Phase 2 ships capability + enforcement, not six posting paths |
+| §6.5.7 HR-9 | **New hard requirement, unreviewed.** Closes a stuck-lock hazard migration `0048` would otherwise create |
+| §6.5.8 test set | **New, unreviewed.** `ledger-finance`-owned and non-negotiable |
+| §6.5.9 mixed funding | **Confirmed unchanged** (§6.4.1 + V-2 + V-5). No reason to change found |
+| §6.5.10 cashout + **FD-1** | **Confirmed `NOT IMPLEMENTED`; no policy selected.** FD-1 is a newly named forward dependency |
+| §6.6.2 Model A/B evaluation | **New.** The casino-loss argument is verified against code, not asserted |
+| §6.6.3 **Model C** (chosen) | **Newly proposed, no independent review.** Gate **G-3**'s technical design; `bonus-engine` owns acceptance (V-7) |
+| §6.6.4-§6.6.7 record, predicate, gate, 12 cases | **Newly proposed, unreviewed** |
+| §6.6.8 post-conversion edge case + **OB-2** | **Newly proposed.** The instrument reuses ADR 0032 §7 unchanged; the policy is referred upward |
+| §6.6.10 **WP-1** | **New finding.** Pre-existing vector, *not* created by Model C; control (if needed) is `bonus-engine`'s |
+| §6.6.11 items 1-7 | **Explicitly not decided here** |
+| Gates G-2, G-3 | **G-2 unchanged and open.** G-3's design is proposed here and closes only on `bonus-engine`'s acceptance plus the Progress-trail/Grant-state work that remains theirs |
+| Migration `0048`, all Go code, any `internal/bonus` code | **NOT WRITTEN, NOT AUTHORIZED** |
+
 ## 7. Cross-references
 
 - Object scoping, `Wallet` shape: `financial-domain-model.md`.
@@ -3064,6 +4423,11 @@ any document owned by another specialist.
   `docs/decisions/0021-multi-asset-accounting.md`.
 - Bonus/reward/promotional accounting (`promo_liability` resolution,
   `bonus_expense`, invariant B1): `docs/decisions/0032-bonus-accounting.md`.
+- Bonus Engine lifecycle, Grant states/transitions, the Progress trail's
+  completeness mandate, and the frozen `rounding_rules`/conversion
+  boundaries §6.6 builds on: `docs/architecture/10-bonus-engine-
+  architecture.md` (§1.1-§1.3, §6, §10.1, and the Dependency Contract
+  Freeze's §7/§8/§9). Owned by `bonus-engine`.
 - Sportsbook accounting and ledger integration (idempotency occurrence
   discriminator §14; sportsbook-specific instantiation of the §6.3
   proposal, §15): `docs/decisions/0038-sportsbook-accounting-and-ledger-
