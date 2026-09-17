@@ -611,7 +611,22 @@ per occurrence for the identical multiple-partial-cashout reason as §8.2.
 in-house cashout-pricing engine, if ever built, would compute `P` through
 the one shared rounding helper.
 
-**Bonus-funded portion**: blocked, same as §5/§8.2, until §9 resolves.
+**Bonus-funded portion**: blocked, same as §5/§8.2, until §9 resolves —
+**and, unlike §5/§8.2, blocked by a second, independent open question
+even after §9 resolves.** Stage 4H-B0-R5 round 2: because this event is
+the player's own voluntary commercial decision rather than a market fact
+becoming known (the "meaning, not arithmetic" distinction above), it is
+**not** settled whether cashout proceeds on a mixed- or bonus-funded bet
+split proportionally cash:bonus (mirroring the lock), pay entirely to
+`player_cash` regardless of origin, or whether bonus-funded bets are
+simply not cashout-eligible at all. Both posting candidates are
+double-entry-balanced and invariant-B1-safe, so the ledger's invariants
+do **not** select between them; the choice is a bonus-policy/RG/product
+question. Worked entry tables for both candidates, and the reasons this
+is referred upward rather than decided, are in
+`ledger-accounting-model.md` §6.3.3.2 case C-cashout. Cash-funded
+cashout — the only shape this ADR actually specifies above — is
+unaffected.
 
 **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #12, #13, B1 (once
 unblocked).
@@ -1521,6 +1536,27 @@ adopt it unilaterally):**
   actually cash-funded, wrongly re-restricting real cash as non-withdrawable
   bonus funds. Both are real financial-integrity defects, not
   rounding-scale errors.
+- **C-void / C-loss / C-win / C-partial / C-cashout — the mixed-funded
+  *unlock* side** (Stage 4H-B0-R5 round 2, added at this specialist's
+  request): case C above proves only the **lock**. The corresponding
+  unlock-side cases for a mixed-funded bet — void (§8.1), total loss
+  (§5), win (§5), partial settlement (§8.2) and cashout (§8.3) — are
+  worked through with full entry tables and invariant checks in
+  `ledger-accounting-model.md` **§6.3.3.2**, and the mechanism for
+  recovering a bet's original `C`/`B` amounts at settlement time (a
+  `correlation_id`-scoped query against the bet's `sportsbook_bet`
+  transaction, joined to `ledger_accounts` for `account_type IN
+  ('player_locked_cash','player_locked_bonus')`) is specified in
+  **§6.3.3.1**. That recovery mechanism is required specifically because
+  **this ADR's lock and settlement are separated in time**, unlike
+  casino's atomic resolution — it was missing from round 1 and is not
+  optional. Two statuses differ from the rest of §15 and must not be
+  read as approved along with it: the **proportional payout split** for
+  a mixed-funded win is **newly proposed and unreviewed**, and
+  **mixed-funded/bonus-funded cashout is an explicit `OPEN QUESTION`**
+  (§8.3's "meaning, not arithmetic" distinction is exactly why it cannot
+  be extrapolated from partial settlement) and stays **BLOCKED**
+  independently of whether Shape A is approved.
 - **F. Win/settlement after a bonus-funded bet** — applies ADR 0032's
   existing casino precedent unchanged, generalized to the extended
   bonus-denominated set (§6.3): the payout returns to `player_bonus`
@@ -1536,6 +1572,29 @@ adopt it unilaterally):**
   `promo_liability`/`bonus_expense` mirror pair also fires alongside it
   (only for the bonus-origin case, never for cash), for the identical
   reason as F.
+
+> **Stage 4H-B0-R5 round-2 factual correction (`architect` review).** An
+> earlier draft of this section — and of the Consequences bullet below
+> that mirrors it — described the split as using "the same kind of
+> additive CHECK-widening ADR 0032 already used for `bonus_expense`,"
+> phrased so as to imply the platform had **already executed** such a
+> migration successfully. **That implication was false and is
+> withdrawn.** ADR 0032 §2 *architecturally decided* to add
+> `bonus_expense` as a twelfth account type; its own status line reads
+> `RESOLVED (architecture) — NOT IMPLEMENTED` and it still lists "an
+> additive migration adding the account type" as outstanding.
+> `bonus_expense` appears in **zero** files under `migrations/`, and
+> migration `0020_create_ledger_accounts.up.sql`'s `account_type` CHECK
+> still lists exactly the original eleven values. Correct statement: ADR
+> 0032 **decided** to use this shape; **nobody has executed it**. If this
+> proposal is migrated before ADR 0032's own migration lands, it would be
+> **the first `account_type` CHECK-widening migration ever executed
+> against this schema** — which raises, not lowers, the operational bar
+> (down-migration, the auto-generated constraint name
+> `ledger_accounts_account_type_check`, and a rehearsal against an
+> instance already holding rows). See `ledger-accounting-model.md`
+> §6.3.1's matching correction and §6.3.2's verified-constraint-identity
+> note.
 
 **Status: `NOT IMPLEMENTED`. Proposal only, requiring `architect` +
 `bonus-engine` + `sportsbook` review and, per CLAUDE.md, human approval
@@ -1562,6 +1621,33 @@ this decision and the resulting migration lands.
   and add the rejection/rollback/re-settlement flows §4/§10 introduce);
   ADR 0019's actor matrix (add a row per `sportsbook_*` transaction type,
   scoped to the provider-callback-verified tenant, per §11).
+- **Follow-up edits required *if and when* the §15 / `ledger-accounting-
+  model.md` §6.3 origin split is approved** — listed separately from the
+  bullet above because they are conditional on a decision nobody has
+  made yet, and `NOT IMPLEMENTED` regardless. The authoritative,
+  exhaustive list (call sites, migrations, documents, tests) is
+  `ledger-accounting-model.md` §6.3.4, not duplicated here. The two
+  entries worth naming in this ADR because they are owned **outside**
+  `ledger-finance` and would otherwise be discovered late:
+  1. `internal/wallet/wallet.go` — `GetSummary`'s `account_type` switch
+     (`ledger-finance` owns the fix; flagged here because it disproves
+     the "purely additive, no code change" reading of §15).
+  2. **`docs/decisions/0034-bonus-gamification-rg-kyc-identity-
+     integration.md` §14.1** — found by `bonus-engine`'s Stage 4H-B0-R5
+     review. That section still writes the **self-exclusion-triggered
+     void** posting as an undifferentiated
+     `Dr player_locked / Cr player_cash|player_bonus`, which under the
+     split must become `Dr player_locked_cash · Cr player_cash` **or**
+     `Dr player_locked_bonus · Cr player_bonus` (or both legs for a
+     mixed-funded bet — the exact shape is
+     `ledger-accounting-model.md` §6.3.3.2 case C-void, which posts all
+     four entries and needs **no** `promo_liability` mirror, since a
+     void's bonus leg is a transfer *within* the extended bonus set).
+     **This edit is deliberately not made by `ledger-finance` and is not
+     made in this round**: ADR 0034 is owned by
+     `identity-compliance`/`architect`, and self-exclusion semantics are
+     theirs. It is recorded here only so the edit is scheduled rather
+     than discovered during implementation.
 - **Migrations required before any sportsbook posting** (additive, own
   stage, no SQL written here, mirroring the "migration order, no SQL"
   format `docs/architecture/27-stage-4h-b0-scope-and-implementation-
@@ -1607,10 +1693,18 @@ this decision and the resulting migration lands.
   proposal, not a decision**: if and when the `player_locked` origin
   split is approved (`ledger-accounting-model.md` §6.3), it adds two
   `account_type` values (`player_locked_cash`/`player_locked_bonus`) via
-  the same kind of additive CHECK-widening ADR 0032 already used for
-  `bonus_expense` — still no new column, no new owner family, no new
+  an additive CHECK-widening — the same *shape* ADR 0032 **decided**
+  (`RESOLVED (architecture) — NOT IMPLEMENTED`) to use for
+  `bonus_expense`, **not** a shape this platform has already executed:
+  `bonus_expense` has never been migrated, so this would be the first
+  such widening ever executed against this schema (see §15's round-2
+  factual correction). Still no new column, no new owner family, no new
   table, but a schema change this ADR does not have the authority to make
-  unilaterally.
+  unilaterally — **and, per `ledger-accounting-model.md` §6.3.4, not a
+  code-free one either**: `internal/wallet/wallet.go`'s `GetSummary`
+  `account_type` switch must change in the same slice or
+  `Summary.LockedBalance` silently reports zero while real locked funds
+  exist.
 - **New reconciliation consumers, not new reconciliation streams.** §6's
   open-liability query and §12's provider-statement matching are read
   patterns against reconciliation machinery that already exists
@@ -1659,7 +1753,16 @@ this decision and the resulting migration lands.
    formalizes a concrete, reviewable proposal (§15, full mechanism in
    `ledger-accounting-model.md` §6.3) — still `NOT IMPLEMENTED`, still not
    decided, now in a form the three named reviewers can review directly
-   rather than re-deriving a shape from the open item's prose.
+   rather than re-deriving a shape from the open item's prose. **Round 2
+   (also Stage 4H-B0-R5)**: all three reviewers approved the *shape*
+   (Shape A) and raised specific gaps, now closed in
+   `ledger-accounting-model.md` §6.3 — but that round **added** unreviewed
+   content of its own (Rule B2 extended, the mixed-funded unlock cases,
+   the split-recovery mechanism, the proportional-payout rule for a
+   mixed-funded win) which needs the **same** review gate; see
+   `ledger-accounting-model.md` §6.3.5.1 for the per-item review status,
+   which is deliberately **not** uniform across §6.3.
+   Human approval is still outstanding.
 2. **`sportsbook_bet`'s Risk enforcement wiring** (§13) — not a
    `ledger-finance` open decision on its own (the `Operation` value and
    `min_amount`/`max_amount` support already exist; `operationLedgerRollbackTypes["sportsbook_bet"]`
@@ -1685,6 +1788,20 @@ this decision and the resulting migration lands.
    a current requirement; recorded so a future reader does not have to
    re-derive why a player-initiated bet withdrawal capability is absent
    from this ADR's flow list.
+6. **Mixed-/bonus-funded cashout proceeds split** (§8.3;
+   `ledger-accounting-model.md` §6.3.3.2 case C-cashout) — **new in Stage
+   4H-B0-R5 round 2**, raised by `sportsbook`'s review of the origin-split
+   proposal. Whether a cashout on a bet with bonus-origin stake pays
+   proportionally into `player_cash`/`player_bonus`, entirely into
+   `player_cash`, or is disallowed upstream in `internal/sportsbook` so
+   the posting question never arises. Requires `bonus-engine` +
+   `sportsbook` + `product-owner-proxy`; **not** answered by resolving
+   item 1, and not answerable by `ledger-finance` alone, because every
+   candidate posting is balanced and invariant-B1-safe — no financial
+   invariant discriminates between them, so the decision is
+   bonus-policy/RG/product, not accounting. Bonus- and mixed-funded
+   cashout stays **BLOCKED** until it is closed; cash-funded cashout is
+   unaffected.
 
 ## Owner
 
