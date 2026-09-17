@@ -1,0 +1,14 @@
+DROP TRIGGER IF EXISTS self_exclusion_enumeration_runs_no_truncate ON self_exclusion_enumeration_runs;
+DROP TRIGGER IF EXISTS self_exclusion_enumeration_runs_deny_delete ON self_exclusion_enumeration_runs;
+DROP TRIGGER IF EXISTS self_exclusion_enumeration_runs_immutable_core ON self_exclusion_enumeration_runs;
+DROP FUNCTION IF EXISTS self_exclusion_enumeration_runs_enforce_rules();
+DROP TABLE IF EXISTS self_exclusion_enumeration_runs;
+
+DROP TRIGGER IF EXISTS open_bet_self_exclusion_policies_no_truncate ON open_bet_self_exclusion_policies;
+DROP TRIGGER IF EXISTS open_bet_self_exclusion_policies_deny_delete ON open_bet_self_exclusion_policies;
+DROP TRIGGER IF EXISTS open_bet_self_exclusion_policies_immutable_core ON open_bet_self_exclusion_policies;
+DROP FUNCTION IF EXISTS open_bet_self_exclusion_policies_enforce_immutability();
+DROP TRIGGER IF EXISTS open_bet_self_exclusion_policies_tighten_only ON open_bet_self_exclusion_policies;
+DROP FUNCTION IF EXISTS open_bet_self_exclusion_policies_enforce_tighten_only();
+DROP FUNCTION IF EXISTS open_bet_self_exclusion_policy_strictness(TEXT);
+DROP TABLE IF EXISTS open_bet_self_exclusion_policies;
