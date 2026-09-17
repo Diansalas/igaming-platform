@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 )
 
 // ErrUnknownAsset is returned when a request's AssetCode is not a row in
@@ -40,16 +42,24 @@ var ErrMissingThresholdDenomination = errors.New("risk: an asset-agnostic amount
 // uncapped) while refusing to invent a cap for it.
 var ErrThresholdDenominationMismatch = errors.New("risk: rule threshold denomination does not match the request asset's exponent")
 
-// assetExponents resolves and memoizes assets.decimal_exponent for the
-// ONE asset a RiskRequest is denominated in.
+// assetExponents resolves and memoizes the decimal exponent for the ONE
+// asset a RiskRequest is denominated in.
 //
-// The `assets` table is the single source of exponent truth (CLAUDE.md:
+// The asset registry is the single source of exponent truth (CLAUDE.md:
 // "per-currency exponent looked up from the Asset registry") - this
 // package never hard-codes a decimal count, never derives one from a
-// currency code, and never caches one across transactions. When
-// internal/assetregistry lands (being built in parallel by another
-// specialist this stage) this resolver is the one place that moves behind
-// it; nothing else in internal/risk reads an exponent.
+// currency code, and never caches one across transactions. Since Stage
+// 4H-B0-R6 that read goes through internal/assetregistry.GetAsset rather
+// than this package's own SELECT against `assets`: the consolidation this
+// comment previously described as pending is DONE, and this resolver
+// remains the one and only place in internal/risk that reads an exponent.
+//
+// GetAsset is the registry's REGISTRY-read accessor, deliberately not an
+// authorization decision (assetregistry ADR 0037 §C.2). Risk asks it only
+// "what denomination is this request in"; whether the asset may be used
+// for the operation at all is assetregistry.CheckEligibility's call, made
+// at the enforcement point, and internal/risk neither duplicates nor
+// substitutes for it.
 //
 // Memoized per Evaluate call: the request's asset is fixed, so at most
 // one query runs no matter how many amount-shaped rules match, and the
@@ -66,9 +76,11 @@ func (a *assetExponents) forRequest(ctx context.Context, assetCode string) (int1
 		return a.exponent, a.err
 	}
 	a.resolved = true
-	var exp int16
-	err := a.tx.QueryRow(ctx, `SELECT decimal_exponent FROM assets WHERE code = $1`, assetCode).Scan(&exp)
-	if errors.Is(err, pgx.ErrNoRows) {
+	// Read inside the SAME transaction the guarded operation runs in, so
+	// the exponent cannot drift between this evaluation and the caller's
+	// own write (and so no exponent is ever cached across transactions).
+	asset, err := assetregistry.GetAsset(ctx, a.tx, assetCode)
+	if errors.Is(err, assetregistry.ErrNotFound) {
 		a.err = fmt.Errorf("%w: %q", ErrUnknownAsset, assetCode)
 		return 0, a.err
 	}
@@ -76,8 +88,8 @@ func (a *assetExponents) forRequest(ctx context.Context, assetCode string) (int1
 		a.err = fmt.Errorf("risk: resolve asset exponent: %w", err)
 		return 0, a.err
 	}
-	a.exponent = exp
-	return exp, nil
+	a.exponent = asset.DecimalExponent
+	return asset.DecimalExponent, nil
 }
 
 // thresholdExponent returns the exponent r's Threshold is denominated in,
