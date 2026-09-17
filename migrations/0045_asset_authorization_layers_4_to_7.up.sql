@@ -226,6 +226,30 @@ CREATE POLICY tenant_isolation ON asset_authorizations
         AND tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
     );
 
+-- READ-ONLY for a player-scoped connection (db.WithPlayerScope), scoped
+-- to that player's own tenant. This is required for correctness, not
+-- convenience: a player-initiated financial operation (deposit, bet,
+-- conversion) runs inside a WithPlayerScope transaction, and CLAUDE.md
+-- requires the authoritative read to happen in the SAME transaction as
+-- the write it authorizes. Without this policy, AssetAuthorization.
+-- CheckEligibility would see zero rows on that path and deny everything -
+-- fail-closed, but a FALSE denial, and one that would push a future
+-- implementer toward evaluating eligibility in a separate transaction,
+-- which is exactly the stale-read pattern the same-transaction rule
+-- exists to prevent.
+--
+-- SELECT only. The write policy above still requires
+-- app.player_account_id to be UNSET, so no player-facing code path can
+-- create or change an authorization row - only observe which assets its
+-- own tenant offers, which is information the player-facing product
+-- surfaces anyway (it is the deposit/wager currency list).
+CREATE POLICY player_read ON asset_authorizations
+    FOR SELECT
+    USING (
+        NULLIF(current_setting('app.player_account_id', true), '')::uuid IS NOT NULL
+        AND tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+    );
+
 -- No DELETE policy, deliberately (on this table and on
 -- asset_operation_eligibility below): revocation is `eligible = false`,
 -- which leaves the fact, its reason_code, and its actor visible, never a
@@ -279,6 +303,21 @@ CREATE POLICY tenant_and_platform_read ON asset_operation_eligibility
     FOR SELECT
     USING (
         NULLIF(current_setting('app.player_account_id', true), '') IS NULL
+        AND (
+            tenant_id IS NULL
+            OR tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+        )
+    );
+
+-- READ-ONLY for a player-scoped connection - same rationale as
+-- asset_authorizations' own player_read policy above (a player-initiated
+-- financial operation must be able to resolve layer 7 in the same
+-- transaction as its write). Platform-wide defaults are visible too,
+-- since the effective answer cannot be computed without them.
+CREATE POLICY player_read ON asset_operation_eligibility
+    FOR SELECT
+    USING (
+        NULLIF(current_setting('app.player_account_id', true), '')::uuid IS NOT NULL
         AND (
             tenant_id IS NULL
             OR tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid

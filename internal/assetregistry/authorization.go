@@ -46,10 +46,14 @@ type AssetAuthorization struct{}
 //     evaluated. Layer 5 can only ever narrow layer 4, so skipping it
 //     cannot widen anything.
 //
-// tx must already be scoped to tenant via db.Pool.WithTenant (or
-// WithPlayerScope for a player-initiated operation): layers 4-7 are
-// RLS-isolated, so a wrongly-scoped transaction sees no rows and every
-// layer fails closed on its own.
+// tx must already be scoped to tenant via db.Pool.WithTenant (staff,
+// system and provider-callback paths) or db.Pool.WithPlayerScope (a
+// player-initiated operation - migration 0045's player_read policies make
+// layers 4-7 READABLE, never writable, on that path, specifically so the
+// eligibility read can happen in the same transaction as the financial
+// write it authorizes, per CLAUDE.md's same-transaction rule). Layers 4-7
+// are RLS-isolated either way, so a wrongly-scoped transaction sees no
+// rows and every layer fails closed on its own.
 func (a AssetAuthorization) CheckEligibility(
 	ctx context.Context,
 	tx pgx.Tx,

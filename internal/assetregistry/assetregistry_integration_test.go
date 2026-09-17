@@ -62,6 +62,7 @@ type fixture struct {
 	brandID        uuid.UUID
 	otherBrandID   uuid.UUID
 	jurisdictionID uuid.UUID
+	playerID       uuid.UUID
 }
 
 func seedTenantFixture(t *testing.T, pool *db.Pool) fixture {
@@ -89,12 +90,23 @@ func seedTenantFixture(t *testing.T, pool *db.Pool) fixture {
 			return err
 		}
 		f.otherBrandID = uuid.New()
-		_, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Brand B')`,
-			f.otherBrandID, f.tenantID, "b-"+f.otherBrandID.String()[:8])
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Brand B')`,
+			f.otherBrandID, f.tenantID, "b-"+f.otherBrandID.String()[:8]); err != nil {
+			return err
+		}
+		f.playerID = uuid.New()
+		personID := uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx,
+			`INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status)
+			 VALUES ($1, $2, $3, $4, $5, 'x', 'active')`,
+			f.playerID, f.tenantID, f.brandID, personID, f.playerID.String()+"@example.com")
 		return err
 	})
 	if err != nil {
-		t.Fatalf("seed brands: %v", err)
+		t.Fatalf("seed brands/player: %v", err)
 	}
 	return f
 }
@@ -1240,6 +1252,82 @@ func TestIsolation_TenantCannotWritePlatformWideEligibilityDefault(t *testing.T)
 	})
 	if err == nil {
 		t.Fatal("a tenant-scoped connection must never write a platform-wide eligibility default")
+	}
+	assertPgErrorCode(t, err, pgRLSViolation)
+}
+
+// A player-initiated operation runs under WithPlayerScope, and
+// CLAUDE.md requires the authoritative read to happen in the SAME
+// transaction as the write it authorizes - so CheckEligibility must work
+// there (read-only) and must still be unable to change any configuration.
+func TestPlayerScope_CanEvaluateEligibilityButNeverConfigureIt(t *testing.T) {
+	pool := testPool(t)
+	adminA := seedPlatformAdmin(t, pool, nil)
+	adminB := seedPlatformAdmin(t, pool, nil)
+	f := seedTenantFixture(t, pool)
+	code := liveAsset(t, pool, adminA, adminB)
+	authorizeFullChain(t, pool, f, adminA, code, "casino", OperationWagering)
+
+	var eligible bool
+	var reason ReasonCode
+	var checkErr error
+	err := pool.WithPlayerScope(context.Background(), f.tenantID, f.playerID, func(ctx context.Context, tx pgx.Tx) error {
+		eligible, reason, checkErr = AssetAuthorization{}.CheckEligibility(
+			ctx, tx, f.tenantID, f.brandID, f.jurisdictionID, code,
+			OperationScope{Product: "casino", Operation: OperationWagering})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checkErr != nil || !eligible {
+		t.Fatalf("a player-scoped transaction must be able to resolve eligibility, got eligible=%v reason=%q err=%v",
+			eligible, reason, checkErr)
+	}
+
+	// A denial still reaches it - the player path reads the same facts,
+	// it does not get a permissive shortcut.
+	staffID := seedTenantStaff(t, pool, f.tenantID)
+	setScope(t, pool, f, staffID, ScopeTenant, uuid.Nil, uuid.Nil, code, "casino", false)
+	err = pool.WithPlayerScope(context.Background(), f.tenantID, f.playerID, func(ctx context.Context, tx pgx.Tx) error {
+		_, reason, _ = AssetAuthorization{}.CheckEligibility(
+			ctx, tx, f.tenantID, f.brandID, f.jurisdictionID, code,
+			OperationScope{Product: "casino", Operation: OperationWagering})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason != ReasonTenantNotAuthorized {
+		t.Fatalf("expected the player path to see the tenant denial, got %q", reason)
+	}
+
+	// And it cannot write - neither an authorization nor an eligibility
+	// row. The UPDATE has no matching policy, so RLS gives it zero row
+	// visibility: it affects nothing rather than flipping the denial the
+	// player is subject to.
+	err = pool.WithPlayerScope(context.Background(), f.tenantID, f.playerID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE asset_authorizations SET eligible = true WHERE asset_code = $1`, code)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 0 {
+			return fmt.Errorf("a player-scoped connection updated %d authorization rows; expected 0", tag.RowsAffected())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = pool.WithPlayerScope(context.Background(), f.tenantID, f.playerID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO asset_operation_eligibility
+				(tenant_id, asset_code, product, operation, eligible, created_by_actor_type, created_by_actor_id)
+			VALUES ($1, $2, 'casino', 'wagering', true, 'staff', $3)`, f.tenantID, code, f.playerID)
+		return err
+	})
+	if err == nil {
+		t.Fatal("a player-scoped connection must not be able to insert an eligibility row")
 	}
 	assertPgErrorCode(t, err, pgRLSViolation)
 }

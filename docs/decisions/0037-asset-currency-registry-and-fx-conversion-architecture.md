@@ -1183,6 +1183,18 @@ and the correction are both visible.
   tenant-scoped permission grants nothing at the platform tier (tested
   against every layer-1-3 endpoint). This resolves open question 2's
   "exact RBAC permission name(s)".
+- **Player-scoped transactions can READ layers 4-7, never write them.**
+  A player-initiated financial operation runs under
+  `db.Pool.WithPlayerScope`, and CLAUDE.md requires the authoritative read
+  to happen in the same transaction as the write it authorizes. Without a
+  read policy for that scope, `CheckEligibility` would see zero rows and
+  deny everything on the player path — fail-closed, but a *false* denial,
+  and one that would push a future implementer toward resolving
+  eligibility in a separate transaction (the stale-read pattern the
+  same-transaction rule exists to prevent). Migration 0045 therefore
+  carries a `player_read` SELECT policy on both tables; every write policy
+  still requires `app.player_account_id` to be unset, so no player-facing
+  path can alter configuration (tested both directions).
 - No HTTP endpoint EVALUATES eligibility. `CheckEligibility` is an
   in-process service only, because an endpoint would have to accept a
   jurisdiction identifier from a caller and no per-player jurisdiction
