@@ -155,6 +155,40 @@ const (
 	// risk-specific judgment call), not RoleCompliance/RoleFinance/
 	// RolePlatformAdmin.
 	PermRiskConfigManage Permission = "risk_config:manage"
+
+	// PermAssetRegistryManage gates ADR 0037 layers 1-3 - creating an
+	// asset, updating its display metadata, activating/suspending it,
+	// granting/revoking its platform authorization, and writing a
+	// PLATFORM-WIDE operation-eligibility default. Deliberately its own
+	// PLATFORM-ONLY permission, granted only to RolePlatformAdmin and
+	// never to any tenant-scoped role: ADR 0037 §C.1's two-tier split is
+	// explicit that "registration and platform-level activation are not a
+	// tenant concern, and must never be reachable by a tenant-scoped role,
+	// full stop". This is the same shape as PermCasinoCatalogueManage
+	// (platform-wide game catalogue) versus PermCasinoConfigWrite (a
+	// tenant's own routing) - and here the blast radius is larger still,
+	// since an asset row is referenced by every tenant's ledger.
+	//
+	// Holding it only answers "may this role attempt the operation". The
+	// three dual-controlled operations (create/activate/platform-authorize,
+	// §C.5.3) additionally require an approved asset_change_requests row
+	// filed by a DIFFERENT platform principal, enforced by migration
+	// 0044's triggers - exactly as holding PermWithdrawalApprove does not
+	// by itself satisfy withdrawal's own distinct-approver checks.
+	PermAssetRegistryManage Permission = "asset_registry:manage"
+
+	// PermAssetAuthorizationWrite gates ADR 0037 layers 4-7 - which assets
+	// this TENANT offers, per brand, per jurisdiction, and per
+	// product/operation. Tenant-scoped by design (§C.1): these mutations
+	// can only ever narrow within what layers 1-3 already authorized
+	// platform-wide, which is what bounds their blast radius to one tenant
+	// and is why §C.5.3 deliberately does NOT require dual control for
+	// them. Granted to RoleTenantAdmin alongside its other
+	// tenant-configuration permissions (PermProviderConfigWrite,
+	// PermCasinoConfigWrite), never to RolePlatformAdmin - a platform
+	// principal has no tenant scope to write these rows in, and
+	// migration 0045's RLS would reject the write anyway.
+	PermAssetAuthorizationWrite Permission = "asset_authorization:write"
 )
 
 // rolePermissions is a static, in-code role -> permission-set mapping.
@@ -166,6 +200,9 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermTenantRead, PermTenantWrite, PermBrandRead, PermBrandWrite,
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead, PermStaffManage,
 		PermCasinoCatalogueManage,
+		// Stage 4H-B0-R6: the sole grantee of PermAssetRegistryManage
+		// (ADR 0037 layers 1-3). See that permission's own doc comment.
+		PermAssetRegistryManage,
 		// Deliberately NOT PermRGRestrictionWrite/Read (Stage 4D-RG, ADR
 		// 0026 §12): platform_admin cannot resolve a specific tenant's
 		// player_account at all today (PermPlayerRead is itself
@@ -219,6 +256,10 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// Stage 4G: read-only Risk & Limits visibility, same reasoning -
 		// never PermRiskConfigManage.
 		PermRiskConfigRead,
+		// Stage 4H-B0-R6: ADR 0037 layers 4-7 (which assets this tenant
+		// offers, per brand/jurisdiction/product). Never
+		// PermAssetRegistryManage - that is platform-only.
+		PermAssetAuthorizationWrite,
 	),
 	RoleSupport: permSet(
 		PermPlayerRead,

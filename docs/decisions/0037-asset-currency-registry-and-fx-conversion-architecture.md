@@ -1,6 +1,15 @@
 # ADR 0037 — Asset/Currency Registry, FX Conversion Architecture, and Asset Authorization Boundary
 
-Status: **NOT IMPLEMENTED — architecture only.** Recorded at the human's
+Status: **PARTIALLY IMPLEMENTED.** Parts A (layers 1-7) and C are
+IMPLEMENTED as of Stage 4H-B0-R6, Workstream A — see **§C.6** for the
+implementation record, the four amendments it makes to this document's
+own earlier text, and the explicit list of what remains undone. Part B
+(FX/Conversion) and layer 8 remain **NOT IMPLEMENTED**: no FX provider,
+Conversion Service, rate binding or plausibility bound exists. Everything
+below §C.6 predates implementation and is read as the design record;
+where §C.6 amends it, §C.6 governs.
+
+Originally recorded as **NOT IMPLEMENTED — architecture only** at the human's
 direction (Stage 4H-B0-R4, `architect`), fulfilling the requirement
 `docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md` §26
 recommended and deferred, and closing that section's flagged **P1**: "the
@@ -1036,6 +1045,179 @@ close. No operation in C.5.1 accepts such a parameter; each downstream
 layer's grant is reachable only through its own named operation (3, 5,
 6-9), never as a flag on operation 1.
 
+### C.6 Implementation record — Stage 4H-B0-R6, Workstream A (`architect`)
+
+**Status change, scoped precisely.** Parts A (layers 1-7) and C are now
+**IMPLEMENTED** in code and migrations. Part B (FX/Conversion) and layer 8
+(market-rate availability) remain **NOT IMPLEMENTED** — Stage 4H-B0-R6 did
+not authorize any FX provider work, and §S-1/§S-2 (the FX control plane's
+own RBAC/dual-control/audit tier, and the circular single-provider
+plausibility baseline) are untouched by this workstream and remain open
+`architect`/`ledger-finance` items.
+
+Artifacts: migrations `0044_asset_registry_failclosed_and_dual_control`
+and `0045_asset_authorization_layers_4_to_7`; `internal/assetregistry`;
+`internal/db.Pool.WithPlatformAdmin`; `internal/auth`'s
+`PermAssetRegistryManage` / `PermAssetAuthorizationWrite`;
+`internal/httpserver/asset_registry_{routes,handlers}.go`.
+
+**C.6.1 — Four decisions that AMEND this ADR's own earlier text.** Each is
+recorded here rather than edited in place above, so the original reasoning
+and the correction are both visible.
+
+1. **Layers 4 and 6 are now SEPARATE facts, superseding §A.5's "layers 4
+   and 6 are the same underlying mechanism".** §A.5's reuse of
+   `tenant_jurisdiction_configs.allowed_currencies` for both layers is
+   incompatible with §C.2's own promise of per-layer distinguishable
+   `ReasonCode`s — one row cannot produce two independent answers, which
+   is exactly what `qa` found in Stage 4H-B0-R5. Layers 4, 5 and 6 are now
+   three independently present-or-absent rows in a new
+   `asset_authorizations` table, discriminated by `scope_kind`. The
+   options considered (extending `tenant_jurisdiction_configs`; one table
+   per layer; the chosen two-table split) and the tradeoffs of the chosen
+   shape are documented in migration `0045`'s header comment, per this
+   stage's requirement that the schema choice be recorded at the schema.
+2. **`tenant_jurisdiction_configs.allowed_currencies` is no longer
+   consulted for authorization**, and `CheckEligibility` deliberately does
+   not read it — two mechanisms answering one question is the drift risk
+   §C.2 exists to prevent. The column is NOT dropped or migrated by this
+   workstream: it has zero readers in Go (verified across `internal/` and
+   `cmd/`), and rewriting a human-approved Stage-1 configuration column is
+   outside this stage's scope. **Follow-up required**: decide whether to
+   drop it, or repurpose it as non-authorizing display configuration. This
+   also resolves open question 1 (JSONB array vs. child table) by
+   sidestepping it — the authoritative facts now live in a proper table
+   with an FK to `assets(code)`.
+3. **The operation dimension is `(product, operation)`, closing open
+   question 7.** `sportsbook`'s finding is accepted, not deferred: a
+   product/vertical axis is required, because real licensing regimes
+   condition products separately (doc 15's `licences.permitted_products`).
+   Every layer 4-7 row carries a nullable `product`; NULL means "every
+   product" and a product-specific row always wins (most-specific-match),
+   so a product axis can narrow but never widen. `product` is a FK to a
+   new `platform_products` registry table — data, not a CHECK-constrained
+   enum — so adding a product is a row, consistent with §A.1's "must be
+   data, looked up, never a compiled-in switch". `operation` stays a
+   six-value CHECK, because this ADR fixes that list and widening it
+   should require an ADR amendment plus a migration.
+   `CheckEligibility` keeps the canonical six-parameter shape §C.2 fixed;
+   its `operation` parameter is now an `OperationScope{Product, Operation}`
+   rather than a bare operation. **A product is REQUIRED on every check**:
+   a caller that cannot name its product cannot be authorized.
+4. **The seeded assets are grandfathered at layer 2 only.** Migration
+   `0003`'s seven rows (EUR/USD/GBP/BRL/MXN/BTC/USDT) are set explicitly
+   to `active = true` (they are already referenced by live wallet/ledger
+   schema; deactivating them is a functional change this stage did not
+   authorize) and explicitly to `platform_authorized = false` (nothing
+   reads layer 3 yet, so fail-closed costs nothing, and §C.5.5's rule is
+   really about this layer). Consequence, stated plainly: until an explicit
+   dual-controlled platform-authorize act is performed per asset,
+   `CheckEligibility` denies every one of the seven with
+   `asset_not_platform_authorized`. That is the intended behaviour of a
+   fail-closed registry on the day it is switched on, not a regression —
+   and because no existing domain calls `CheckEligibility` yet, it changes
+   no current behaviour.
+
+**C.6.2 — How each Stage 4H-B0-R5 security finding was closed.**
+
+- **S-4 (fail-open default)**: `assets.active` now defaults `false`;
+  `platform_authorized` added `NOT NULL DEFAULT false`. Asserted directly
+  against `information_schema` by test, so a future migration that flips a
+  default back fails a test rather than silently reopening the finding.
+- **S-3 (no database backstop for layers 1-3)**: closed with row-level
+  security **on `assets` itself** (`ENABLE` + `FORCE`), with write policies
+  requiring a platform-admin session GUC AND `app.tenant_id`/
+  `app.player_account_id` to be unset — so a tenant-scoped transaction
+  cannot satisfy them even if it also sets the platform GUC (tested).
+  Reads stay open: the registry is reference data every money path reads
+  for `decimal_exponent` with no tenant context, and PostgreSQL bypasses
+  RLS for FK checks anyway. A second, independent mechanism backs it up:
+  no asset can be created, activated or platform-authorized without an
+  approved change request whose requester **and** approver both resolve to
+  platform-scoped (`tenant_id IS NULL`) `staff_users` rows.
+  **Honest residual**: the dedicated-Postgres-role option was evaluated
+  and is not implementable as the platform stands — migrations run as the
+  application role, which also OWNS every table (an owner can re-grant
+  itself anything it revoked) and holds no `CREATEROLE`. A real
+  role-separated backstop needs a second database role plus a second
+  connection pool with separate credentials: **recorded here as a
+  follow-up**, and the GUC-based guard is precedent-consistent with the
+  platform's entire isolation model (`app.tenant_id` binds a code path the
+  same way).
+- **S-5a (four-eyes asserted, not enforced)**: `asset_change_requests` +
+  `asset_change_approvals`, mirroring migration `0026`/`0029`'s withdrawal
+  precedent — `UNIQUE (request_id, approver_principal_id)`, approval
+  immutability via the same `ledger_deny_mutation()` trigger, a
+  self-approval guard that blocks both the same principal and the same
+  person reached through `staff_users.person_id`, and request-payload
+  immutability (so an approved request cannot be rewritten before being
+  applied). The consuming trigger marks the request `applied` inside the
+  same statement as the mutation, so one approval authorizes one mutation,
+  once. The create/self-authorize/activate/use chain is refused at every
+  link (tested end to end, including over HTTP).
+- **S-6a (zero jurisdiction silently skipped)**: a zero-value tenant or
+  jurisdiction is an immediate deny with its own `ReasonCode` and a
+  non-nil error. A zero brand remains permitted per §C.2 (layer 5 only
+  narrows layer 4, so skipping it cannot widen anything).
+
+**C.6.3 — Additional controls implemented beyond the findings.**
+
+- §C.5.4's immutable identity fields (`code`, `decimal_exponent`,
+  `asset_type`, `network`, plus `created_at`) are enforced by a database
+  trigger, not only by the absence of an API operation. `assets` rows are
+  also non-deletable (ledger history references them by code); suspension
+  is the mechanism.
+- Narrow-only-never-widen (§A.5/§A.6) is enforced **three** times: RLS
+  (a tenant writes only its own rows), a write-time trigger (a widening
+  row cannot be STORED — `security`'s explicit requirement), and
+  `CheckEligibility`'s AND-chain at resolution time (so a row that was
+  legal when written cannot take effect after the layer above it is
+  revoked).
+- Every mutating operation writes an `internal/audit` record in the same
+  transaction, with actor, tenant (NULL for platform-scoped), entity,
+  before/after state and a **mandatory** `reason_code` (a missing reason
+  code is a 400, not an empty audit field).
+- RBAC: `asset_registry:manage` (platform-only, `RolePlatformAdmin`) for
+  layers 1-3 and platform-wide layer-7 defaults; `asset_authorization:write`
+  (tenant-scoped, `RoleTenantAdmin`) for layers 4-7. Holding the
+  tenant-scoped permission grants nothing at the platform tier (tested
+  against every layer-1-3 endpoint). This resolves open question 2's
+  "exact RBAC permission name(s)".
+- No HTTP endpoint EVALUATES eligibility. `CheckEligibility` is an
+  in-process service only, because an endpoint would have to accept a
+  jurisdiction identifier from a caller and no per-player jurisdiction
+  resolver exists yet (Stage 4G-FINAL Part C).
+
+**C.6.4 — What is NOT done, explicitly.**
+
+- **Layer 8 is NOT IMPLEMENTED and is likely not a stored fact at all.**
+  §A.7 already says the Registry only exposes whether a rate-source
+  binding is *configured*; whether a rate is currently valid is evaluated
+  live. On implementing layers 1-7 it is now clear that layer 8 is
+  substantially a **runtime FX-provider-health/freshness check** (Part B's
+  §B.6 conditions 1/2/6 plus §B.7), not a row the Registry can hold. No
+  `asset_rate_source_bindings` table was created; creating one before any
+  `FXRateProvider` interface exists would be speculative schema. This is a
+  clarification of §A.2's layer-8 row, not a contradiction of it.
+- **No FX provider, Conversion Service, rate-source binding, deviation
+  bound or spread bound exists.** Part B remains architecture only.
+- **`aliases`/`symbols`** (§A.4's optional metadata) were not added — no
+  consumer needs them, and adding unused columns is the scope expansion
+  CLAUDE.md warns against. `display_name` is the one mutable metadata
+  field.
+- **No existing domain calls `CheckEligibility` yet.** Wiring wallet,
+  payments, casino, withdrawal and (future) sportsbook/FX call sites to
+  the canonical service is deliberately a separate, per-domain change:
+  each call site needs a server-resolved jurisdiction, which does not
+  exist yet. Until that wiring happens, the authorization boundary is
+  available and enforced *where called*, and §C.2's "every downstream
+  domain calls this one function" is an obligation on future work, not a
+  claim about today's code.
+- **This section is not self-certified.** Per §C.5.3's own flag and
+  CLAUDE.md's rule, `security` reviews this implementation independently;
+  this record states what was built and what remains open, it does not
+  grant sign-off.
+
 ---
 
 ## Impact assessment
@@ -1063,11 +1245,13 @@ layer's grant is reachable only through its own named operation (3, 5,
 
 ## Governance
 
-- Status: **NOT IMPLEMENTED.** No migration, admin API, RBAC permission,
-  audit-log wiring, `AssetAuthorization` service, FX Rate Provider
-  adapter, or Conversion Service exists as a result of this ADR. A
-  future implementation stage (already recorded as deferred, doc 27
-  §26.3) is required before any of Parts A–C become real.
+- Status: **superseded by §C.6 for Parts A and C.** As originally
+  recorded, no migration, admin API, RBAC permission, audit-log wiring,
+  `AssetAuthorization` service, FX Rate Provider adapter, or Conversion
+  Service existed. Stage 4H-B0-R6 (Workstream A) built the migrations,
+  admin API, RBAC permissions, audit wiring and `AssetAuthorization`
+  service for layers 1-7 (§C.6). **No FX Rate Provider adapter and no
+  Conversion Service exists** — Part B is still architecture only.
 - This ADR requires no change to ADR 0021's recorded rounding decision.
   DS-1/DS-2/DS-3 are reused by reference (B.4, B.5) and are not restated,
   re-litigated, or reopened anywhere in this document.
@@ -1087,6 +1271,17 @@ layer's grant is reachable only through its own named operation (3, 5,
 - No real FX provider or vendor is named anywhere in this document.
 
 ## Open questions flagged for review (not resolved here)
+
+**Status after Stage 4H-B0-R6, Workstream A (see §C.6):** questions 1, 2,
+4 and 7 are **RESOLVED** — 1 by moving the authoritative facts out of
+`allowed_currencies` into a proper table with an FK to `assets(code)`
+(§C.6.1 item 2), 2 by naming `asset_registry:manage` /
+`asset_authorization:write` (§C.6.3), 4 by the `asset_authorizations`
+`scope_kind = 'brand'` row shape plus a write-time narrowing trigger, and
+7 by adding the `(product, operation)` dimension (§C.6.1 item 3).
+Questions 3, 5 and 6 remain **OPEN**: 3 and 5 are Part B (no FX work was
+authorized), and 6 is `security`'s independent sign-off on the four-eyes
+gating, which §C.6 implements but does not self-certify.
 
 1. **Storage shape of `allowed_currencies`** (A.5): JSONB array vs. a
    proper child table with an FK to `assets.code`. Left to the

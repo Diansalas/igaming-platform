@@ -71,6 +71,55 @@ func (p *Pool) WithoutTenant(ctx context.Context, fn TxFunc) error {
 	return tx.Commit(ctx)
 }
 
+// WithPlatformAdmin runs fn in a genuinely PLATFORM-scoped transaction
+// (app.tenant_id deliberately never set) with the Postgres session
+// variable "app.platform_admin_principal_id" set, for the lifetime of the
+// transaction, to principalID. This is the ONLY sanctioned way to perform
+// an ADR 0037 layer-1-3 asset-registry mutation (create/activate/suspend/
+// platform-authorize an asset, or write a platform-wide operation-
+// eligibility default).
+//
+// It exists because `assets` is platform-wide by design - no tenant_id,
+// nothing for a tenant-match RLS policy to key on - which Stage
+// 4H-B0-R5's security review (finding S-3) identified as leaving layers
+// 1-3 protected by an application permission check with no database
+// backstop at all. Migration 0044's policies on `assets`,
+// `asset_change_requests` and `asset_change_approvals` (and migration
+// 0045's on `platform_products` and platform-wide
+// `asset_operation_eligibility` rows) require exactly this GUC to be set
+// AND app.tenant_id/app.player_account_id to be UNSET, so a tenant-scoped
+// or player-scoped connection is structurally unable to satisfy them.
+//
+// principalID must be the platform-scoped staff principal resolved from
+// the verified token's own subject - never anything a client supplied.
+// Migration 0044 independently requires that principal to resolve to a
+// platform-scoped (tenant_id IS NULL) staff_users row before any
+// four-eyes request or approval it files is accepted, so passing an
+// arbitrary uuid here grants nothing.
+func (p *Pool) WithPlatformAdmin(ctx context.Context, principalID uuid.UUID, fn TxFunc) error {
+	if principalID == uuid.Nil {
+		return fmt.Errorf("db: WithPlatformAdmin called with nil principal id")
+	}
+
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("db: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `SELECT set_config('app.platform_admin_principal_id', $1, true)`, principalID.String()); err != nil {
+		return fmt.Errorf("db: set platform admin context: %w", err)
+	}
+
+	if err := fn(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("db: commit tx: %w", err)
+	}
+	return nil
+}
+
 // WithSessionLookup runs fn in a platform-scoped transaction (no
 // app.tenant_id) with the Postgres session variable
 // "app.session_lookup_hash" set, for the lifetime of the transaction, to
