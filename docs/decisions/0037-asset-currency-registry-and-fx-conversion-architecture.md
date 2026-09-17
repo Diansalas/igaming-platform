@@ -429,10 +429,27 @@ These are **not** the same fields under a different name, and they are
   own idempotency/audit machinery governs.
 - **Field correspondence**: `ConversionOperation.exchange_rate` /
   `.rate_source` / `.rate_timestamp` / `.fee_amount` /
-  `.fee_asset_code` / `.spread` / `.provider_reference` are populated
-  **from** the Conversion record's `rate` / `provider` / `rate_timestamp`
-  / `fee_amount` / `fee_asset` / `spread` / `provider_reference` at the
-  moment the Conversion Service hands off to the ledger. They are the
+  `.fee_asset_code` / `.spread` / `.provider_reference` /
+  `.rounding_rule_id` are populated **from** the Conversion record's
+  `rate` / `provider` / `rate_timestamp` / `fee_amount` / `fee_asset` /
+  `spread` / `provider_reference` / `rounding_rule_id` at the moment the
+  Conversion Service hands off to the ledger. **`rounding_rule_id` crosses
+  this boundary too** (Stage 4H-B0-R4 Wave-2 review correction,
+  `ledger-finance`) — omitting it here, despite B.4 already justifying
+  its presence on the Conversion record by citing ADR 0021's own
+  requirement that the identifier reach the ledger row, would silently
+  violate that same requirement for every FX conversion. **The request
+  context `ConversionOperation` also requires — `tenant_id`,
+  `player_account_id`, `source_wallet_id`, `destination_wallet_id`,
+  `idempotency_key` — is supplied by the calling wallet/ledger layer that
+  invoked the Conversion Service, not by the Conversion record itself**
+  (Stage 4H-B0-R4 Wave-2 review correction, `ledger-finance`): the FX
+  Service is asset-pair-scoped, not wallet-scoped, so the Conversion
+  record carries no tenant/player/wallet identity of its own, and is not
+  itself an RLS-isolated, tenant-scoped table — it is FX-service-internal
+  bookkeeping keyed by `conversion_id` alone, joined to its eventual
+  `ConversionOperation` (which IS tenant-scoped, under existing ledger
+  RLS) via the `conversion_id` FK described below. They are the
   same underlying facts, carried across the boundary — `Conversion` is
   the FX Service's own record of how it arrived at those facts (including
   fields the ledger has no reason to carry, like `rate_precision`,
@@ -505,6 +522,24 @@ narrow this list:
    FX-specific limits mechanism) can be evaluated against before a
    Conversion is allowed to reach `applied` status.
 
+**These 8 checks establish structural fail-closed behavior — they do
+not, by themselves, detect a well-formed rate that is economically
+implausible or the product of a compromised or malicious provider**
+(Stage 4H-B0-R4 Wave-2 review correction, `security` and `ledger-finance`
+independently). A provider returning a rate that is valid, fresh,
+well-formed, for an authorized+active asset pair, from a healthy source,
+at sufficient precision, and within whatever financial-constraint hook
+exists, can still be wrong by an arbitrary factor or a subtle,
+exploitable skew — none of items 1–8 validate the rate's *magnitude*
+against a plausibility bound. A rate-plausibility check (e.g. a maximum-
+deviation bound evaluated against `GetHistoricalRate`, B.2, before a
+Conversion is allowed to reach `applied` status) is a **required
+implementation-time control before any live FX provider is connected —
+not optional hardening, and not resolved by this ADR.** This must be
+stated explicitly rather than left for a future implementer to
+(wrongly) infer that the 8 structural checks are a complete defense
+against an adversarial or malfunctioning rate source.
+
 **No live market rate may be used without recording the exact rate
 used.** Every financially material Conversion record that reaches
 `applied` status must be reconstructable from persisted data alone — the
@@ -534,14 +569,21 @@ Registry API is built — the same shape of gap ADR 0031 §8 already
 discloses for platform-wide risk rules, with larger blast radius here."
 
 This ADR **confirms and refines** that two-tier split as the binding
-authorization design, using the exact precedent already established and
-implemented for the Risk & Limits Engine (ADR 0031): `risk_config:manage`
-is held only by `RoleRiskManager`, which — like every non-`platform_
-admin` `StaffRole` — is always tenant-scoped, so no tenant-scoped role
-can create a genuinely platform-wide rule via the HTTP surface (ADR 0031
-§8). The same shape applies here, with the same rationale, at a larger
-blast radius (an asset row is referenced by every tenant's ledger, not
-just one tenant's risk rules):
+authorization design. **Correction (Stage 4H-B0-R4 Wave-2 review,
+`ledger-finance`)**: the precedent this reuses from ADR 0031 §8 is only
+the *negative* half — tenant-scoped roles structurally cannot reach
+platform-wide data, because every non-`platform_admin` `StaffRole` is
+always tenant-scoped and RLS/role-scoping enforces this mechanically.
+ADR 0031 §8 itself documents, in its own words, that the *positive*
+half — a working platform-admin write path for genuinely platform-wide
+rules — remains an **open, unbuilt gap** there ("a genuinely
+non-negotiable, tenant-proof ceiling requires a future platform-scoped
+write path, not built this stage"). This ADR does not inherit that
+unbuilt half: Part C requires the platform-admin write path for layers
+1–3 to be built as part of implementing this authorization boundary, not
+deferred the way ADR 0031 §8 deferred its own. The same shape applies
+here, with the same rationale, at a larger blast radius (an asset row is
+referenced by every tenant's ledger, not just one tenant's risk rules):
 
 - **Layers 1–3 (existence, activation, platform authorization)** are
   **platform-admin-only** mutations. Only `RolePlatformAdmin` (or an
@@ -560,6 +602,16 @@ just one tenant's risk rules):
   layers 1–3 have already authorized; it can never widen past them
   (restated from A.5/A.6's narrow-only-never-widen rule, which is what
   makes this two-tier split safe rather than merely nominal).
+
+**Fail-closed default for absent configuration (Stage 4H-B0-R4 Wave-2
+review correction, `security`).** Where no row exists at any layer —
+no `tenant_jurisdiction_configs` row for a `(tenant_id, jurisdiction_id)`
+pair (layers 4/6), or no platform-wide `AssetOperationEligibility` row
+for an asset/operation (layer 7's default) — the absence **must** be
+read as ineligible/deny, never as "no restriction configured, therefore
+permitted." This is the identical fail-safe posture B.6 item 2 already
+states for FX rate freshness ("absence of a policy is never read as 'no
+limit'"), applied here to authorization rather than staleness.
 
 ### C.2 One canonical authorization concept — not five reimplementations
 
@@ -599,6 +651,16 @@ layers 1–7 only; the FX/Conversion Service (Part B) separately evaluates
 layer 8 and its own fail-closed rules (B.6) — `AssetAuthorization` is not
 responsible for rate freshness or provider health, which are Part B's
 concern, not an authorization concern.
+
+**Non-nil error is always ineligible, no exception (Stage 4H-B0-R4
+Wave-2 review correction, `security`).** A non-nil `err` from
+`CheckEligibility` is treated as `eligible = false` at every call site,
+with no fallback to a previously-known-good answer and no exception —
+the identical convention ADR 0031 §1/§25 already states for
+`risk.Evaluate` ("a non-nil error... is a DENY at every call site...
+there is no sportsbook-specific softening"). This is stated explicitly
+so a future caller does not treat an error path as a special case to be
+handled more leniently than an ordinary denial.
 
 **Every downstream domain — wallet, payments, sportsbook, casino, bonus,
 FX/Conversion, retail — calls this one function** rather than querying

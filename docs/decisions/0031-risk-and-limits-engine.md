@@ -2064,6 +2064,61 @@ requires — not hand-waved:**
   poses it against), and is **NOT added this stage**, following the
   identical discipline.
 
+**Stage 4H-B0-R4 follow-up, resolved against sportsbook's final domain
+model** — `architect`'s Wave-2 review read `sportsbook`'s FINAL rewrite of
+`docs/architecture/09-sportsbook-architecture.md` (which did not exist yet
+when §27 above was written) and resolved both of the two design questions
+this section originally left open. This paragraph is an addition, not a
+correction — §27's original text above is preserved verbatim and remains
+correct as of when it was written; sportsbook's domain model has simply
+now answered what it explicitly deferred.
+
+1. **Platform registry, not tenant-authored — confirmed, not merely
+   "more likely."** Doc 09 §3.2 states the in-house engine "maintain[s]
+   Sport/Competition/Season/Event/Participant/Market/Selection/Price as
+   its own authoritative catalogue, populated from canonical sports
+   data" — a shared, real-world catalogue (an actual football league, an
+   actual match), not something each tenant invents independently, unlike
+   Retail's hierarchy, which IS tenant-invented org structure (the reason
+   `HierarchyNodeType` needed the `CHECK (... IS NULL OR tenant_id IS NOT
+   NULL)` guard in the first place, §20(a)). Tenant-level control over
+   which of these a tenant actually OFFERS is a separate, later-layered
+   concern: doc 09 §12 states catalogue/market availability is filtered
+   by `TenantJurisdictionConfig`'s existing geo-block/permitted-products
+   mechanism — the same two-tier pattern (platform-registry row +
+   tenant-authorization-narrowing) that ADR 0037 (`docs/decisions/0037-
+   asset-currency-registry-and-fx-conversion-architecture.md`, authored by
+   `architect` this same stage) formalizes for the Asset Registry.
+   **Conclusion: no §20-style tenant-ownership CHECK guard is needed for
+   these new `RiskRequest` dimensions** — `sport`/`competition`/`event`/
+   `market`/`selection` follow the same precedent as `Product`/
+   `LicensingMode` (platform-defined, universally meaningful values), not
+   `HierarchyNodeType`'s precedent (tenant-invented values needing a
+   NULL-or-owned guard).
+2. **`Market` needs the type-plus-instance split; `Selection` does not.**
+   Doc 09 §1.3 explicitly defines `MarketType` (a template, e.g. "Match
+   Winner," "Total Goals Over/Under" — Sport-scoped, carrying
+   selection-shape rules, no live odds, no subject) versus `Market` (a
+   live instance of a `MarketType` attached to a polymorphic subject —
+   an `Event`, or a `Season`/`Competition` for outright/futures markets
+   that have no single Event to key off). This confirms this section's
+   speculation exactly: when the concrete `RiskRequest` field shape for
+   this dimension is eventually specified (not done now, still
+   architecture-only), it should mirror the existing `HierarchyNodeType`/
+   `HierarchyNodeID` pattern — a `MarketTypeCode` field (categorical, for
+   rules like "cap total stake on Total Goals markets platform-wide")
+   plus a separate `MarketID` field (specific instance, for rules like
+   "cap exposure on this specific match's market"). Doc 09 does **not**
+   define an equivalent type-plus-instance split for `Selection` (§1.1/
+   §1.4: Selection is a single dimension, with line/handicap folded into
+   its `Price` snapshot as an attribute, never a sibling entity or a
+   mutable field on Selection itself) — so **`Selection` stays a single
+   `SelectionID` dimension, no split needed.**
+
+Neither resolution is implemented as code or schema this stage — this
+remains architecture-only, recording the resolved design decision for
+whenever these `RiskRequest` dimensions are actually built.
+
 ### 28. Market/trading exposure management — a Sportsbook Engine concern, not a Risk & Limits Engine concern — `ARCHITECTURAL DECISION`
 
 Applying this ADR's own established discipline for exactly this kind of
@@ -2198,6 +2253,21 @@ sportsbook needs no exception to it.
   unresolved shape as §15c/§17's "what does a `count` limit count",
   sportsbook is simply its sharpest motivating case yet. Not resolved
   here.
+
+**Stage 4H-B0-R4 follow-up, resolved (added without editing the two
+bullets above, which are preserved as originally written):**
+
+- **RESOLVED** — "Is 'sport'/'competition'/'market' a platform-registry
+  taxonomy or tenant-authored?" is now answered: **platform-registry**,
+  per doc 09 §3.2/§12. See §27's "Stage 4H-B0-R4 follow-up" block, point 1,
+  for the full resolution and its `ARCHITECTURAL DECISION`-level
+  conclusion that no §20(a)-style `CHECK` guard is needed for these
+  `RiskRequest` dimensions.
+- **RESOLVED** — "Does 'market' need a type-plus-instance split the way
+  `HierarchyNodeType`/`HierarchyNodeID` did for retail?" is now answered:
+  **yes for `Market` (`MarketTypeCode` + `MarketID`), no for `Selection`
+  (stays a single `SelectionID`)**, per doc 09 §1.3/§1.1/§1.4. See §27's
+  "Stage 4H-B0-R4 follow-up" block, point 2, for the full resolution.
 
 ### 31. Confirming no other Risk-side gap blocks sportsbook architecture closure
 

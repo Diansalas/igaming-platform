@@ -419,6 +419,14 @@ settlement amount, or cashout amount in BTC or an 18-exponent asset posts
 through the identical entries and idempotency mechanism as one in EUR;
 only the `asset_code` and its registry-looked-up exponent differ.
 
+> **Stage 4H-B0-R4 Wave-2 review addition (citation only).** ADR 0037
+> (`docs/decisions/0037-asset-currency-registry-and-fx-conversion-
+> architecture.md`), authored by `architect` in parallel this same stage,
+> formalizes the Asset Registry and confirms the `asset_code`/
+> `decimal_exponent` mechanism this section relies on is unchanged. No
+> content in this section is altered by that citation — it names the
+> now-canonical source for the registry this ADR already assumed.
+
 **Rounding — reuses ADR 0021's resolved decision, in full, without
 exception.** This ADR does not open a second rounding decision. The two
 places a sportsbook-specific computation could need rounding are named
@@ -478,9 +486,10 @@ end state differ mechanically. This distinguishes void from:
 
 - **Loss/win settlement** — a market outcome occurred; void asserts no
   outcome is being recognized at all.
-- **Cancellation** (§8.4) — void is always provider/event-initiated (a
-  market fact external to the player's wishes); cancellation, if it
-  existed, would be player-initiated.
+- **Player-initiated bet withdrawal** (§8.4) — void is always
+  provider/event-initiated (a market fact external to the player's
+  wishes), whereas a withdrawal, if it existed, would originate from the
+  player's own unilateral decision instead.
 
 **Idempotency key**: the void's own provider reference, distinct from both
 `provider_bet_reference` and any settlement reference already posted.
@@ -591,31 +600,44 @@ the one shared rounding helper.
 **Invariants engaged**: #1, #3, #4, #5, #6, #7, #8, #12, #13, B1 (once
 unblocked).
 
-#### 8.4 Cancellation (pre-settlement player-initiated withdrawal of a bet) — out of scope
+#### 8.4 Player-initiated bet withdrawal (pre-settlement) — out of scope
+
+> **Stage 4H-B0-R4 Wave-2 review correction.** This subsection was
+> originally labeled "Cancellation." That collided with an unrelated,
+> already-settled use of the same word in `docs/architecture/09-sportsbook-
+> architecture.md` §1.1/§3.5, where "Cancellation" names an Event/Market-
+> level Trading Operation that cascades into a Void settlement for every
+> affected open bet — a different concept entirely from the player-level
+> capability this subsection discusses. Renamed to "player-initiated bet
+> withdrawal" so this ADR stops reusing doc 09's term for a different
+> meaning. Doc 09 itself is untouched — its "Cancellation" terminology is
+> `sportsbook`'s to own, not `ledger-finance`'s to change. Nothing about
+> this subsection's scope decision (still out of scope, still not built)
+> changes.
 
 `ARCHITECTURAL DECISION` (scope), answering the directive's explicit
 question directly rather than by omission.
 
-**Cancellation — a player unilaterally un-doing an already-accepted bet,
-distinct from both void (provider/event-initiated) and cashout
-(provider-priced, market-referenced) — is explicitly out of architectural
-scope for this ADR.** Reasoning:
+**Player-initiated bet withdrawal — a player unilaterally un-doing an
+already-accepted bet, distinct from both void (provider/event-initiated)
+and cashout (provider-priced, market-referenced) — is explicitly out of
+architectural scope for this ADR.** Reasoning:
 
 - Neither the Blueprint nor doc 09 describes a player-initiated,
-  no-market-referenced bet cancellation capability.
+  no-market-referenced bet withdrawal capability.
 - It is not a standard capability of the widget/iframe integration shape
   doc 09 recommends starting with (Altenar/BetBy/Digitain render the
   betting experience themselves; a bet, once accepted, is closed to
-  unilateral player cancellation in that shape — only cashout, which is
+  unilateral player withdrawal in that shape — only cashout, which is
   priced, and provider-initiated void exist).
 - Per CLAUDE.md's "no uncontrolled scope expansion": this is not required
   by the Blueprint, the current stage's path, the future B2B architecture,
-  or security/compliance, and building a bespoke "instant free cancellation
+  or security/compliance, and building a bespoke "instant free withdrawal
   window" would be inventing a product capability no integration partner
   offers, ahead of any stated requirement.
 
-**If a future jurisdiction mandates a cooling-off/cancellation window**
-(some regulators require a short post-acceptance cancellation right,
+**If a future jurisdiction mandates a cooling-off/withdrawal window**
+(some regulators require a short post-acceptance withdrawal right,
 distinct from the provider's own cashout mechanic), that is a genuinely
 new requirement, not an extension of this ADR's existing flows, and would
 be recorded as its own decision when a jurisdiction actually requires it —
@@ -890,24 +912,61 @@ type mapping is "`ledger-finance`'s to specify, never Risk's to invent":
 - **`cumulative_amount`** ("no more than X in sportsbook stakes per rolling
   day") requires `operationLedgerTransactionTypes["sportsbook_bet"] =
   "sportsbook_bet"`, and its netting counterpart requires
-  `operationLedgerRollbackTypes["sportsbook_bet"]` to net **both**
-  `sportsbook_void` and `sportsbook_rollback` against it — a stake that is
-  voided or rolled back was never actually put at risk (or the wager it
-  represented was undone), so it must not permanently consume a player's
-  cumulative stake capacity, the identical correctness property the
-  existing `casino_bet`/`casino_rollback` netting already establishes.
+  `operationLedgerRollbackTypes["sportsbook_bet"]` to net **only**
+  `sportsbook_void` against it — a voided stake is treated as if the bet
+  never happened at all (full stake returned, §8.1), so it must not
+  permanently consume a player's cumulative stake capacity, the identical
+  correctness property the existing `casino_bet`/`casino_rollback` netting
+  already establishes. This is a one-operation-to-one-ledger-type mapping,
+  identical in shape to the existing `casino_bet` → `casino_rollback`
+  entry — no widening of `operationLedgerRollbackTypes`'s value type is
+  needed for `sportsbook_bet`.
+
+  > **Stage 4H-B0-R4 Wave-2 review correction.** An earlier version of this
+  > bullet also netted `sportsbook_rollback` (in addition to
+  > `sportsbook_void`) against `sportsbook_bet`'s cumulative stake usage,
+  > and justified it by reasoning that a rolled-back stake "was never
+  > actually put at risk (or the wager it represented was undone)." That
+  > directly contradicted this ADR's own §10, which is explicit that a
+  > rollback does **not** mean the wager was undone: "the bet itself
+  > remains a real, resolved wagering fact" — a rollback corrects a wrongly
+  > -recorded *settlement outcome*, it does not nullify the underlying
+  > staked bet the way a void does. `sportsbook_rollback` is therefore
+  > **never** netted against cumulative stake usage. Tracing it through:
+  > player stakes `S`, the bet is wrongly settled as a win, the market is
+  > corrected (a `sportsbook_rollback` reversing that settlement), then
+  > re-settled as a loss — the player genuinely staked `S` throughout, and
+  > netting the rollback would incorrectly erase that `S` from their daily
+  > cumulative tally. Worse, in §10's own composite "no result stands"
+  > case (rollback-then-void), netting *both* legs would double-subtract
+  > the stake. The scenario the original text was evidently trying to
+  > cover — that composite case — is already handled correctly without
+  > netting rollback at all: rollback-then-void nets exactly once, via the
+  > trailing `sportsbook_void` transaction alone (the rule stated above),
+  > which is the only leg of that sequence that actually asserts "this
+  > stake was never at risk." No new mechanism is needed to preserve that
+  > property; removing `sportsbook_rollback` from the netting set is a
+  > pure correction, not a gap.
+
   `sportsbook_settlement`/`sportsbook_partial_settlement`/
   `sportsbook_cashout` are **deliberately not netted** — the stake was
   genuinely wagered and resolved (whether won or lost), which is not
   "unconsuming" cumulative capacity, the same reasoning a casino win does
   not net against a casino bet's cumulative consumption either.
-  `operationLedgerRollbackTypes`'s current shape maps one operation to one
-  ledger type (`casino_bet` → `casino_rollback`); accommodating two
-  netting types for `sportsbook_bet` is a small, additive widening of that
-  map's value type to a list — flagged here as an implementation note for
-  whoever lands the mapping (`risk` + `ledger-finance` jointly, per ADR
-  0031 §16 step 5's own ownership split), not a redesign of `Rule.
-  breach()`'s cumulative case.
+
+  > **Non-blocking mapping gap, recorded for later (Stage 4H-B0-R4 Wave-2
+  > review addition).** `cumulative_amount` is not wired for sportsbook
+  > settlement *payouts* today, and this ADR does not propose wiring it
+  > this stage. If a future rule ever needs a cumulative check over
+  > sportsbook settlement payouts specifically,
+  > `operationLedgerTransactionTypes["sportsbook_settlement"]` will need to
+  > widen from its current single value to a list that also includes
+  > `sportsbook_partial_settlement` — the transaction-types-side mirror of
+  > the one-to-many widening this section's earlier (now-corrected) text
+  > mistakenly proposed on the rollback-types side. Recorded here only so
+  > it is not rediscovered as a surprise when that wiring is eventually
+  > attempted; it changes nothing about this ADR's current,
+  > `sportsbook_bet`-only `cumulative_amount` specification.
 - **Enforcement position**: bet placement calls `risk.Evaluate` in the
   same database transaction as the `sportsbook_bet` `LedgerTransaction`,
   before either commits — the identical positional contract `internal/
@@ -1047,10 +1106,15 @@ mapping specification is ready for whichever stage wires
    still blocking every bonus-funded flow in this ADR.
 2. **`sportsbook_bet`'s Risk enforcement wiring** (§13) — not a
    `ledger-finance` open decision on its own (the `Operation` value and
-   `min_amount`/`max_amount` support already exist); the
-   `operationLedgerRollbackTypes` map-shape widening to accept two netting
-   types is a small joint `risk` + `ledger-finance` implementation item
-   for whichever stage wires `internal/sportsbook`.
+   `min_amount`/`max_amount` support already exist; `operationLedgerRollbackTypes["sportsbook_bet"]`
+   nets only `sportsbook_void`, a plain one-to-one mapping requiring no
+   map-shape widening, per §13's Stage 4H-B0-R4 Wave-2 correction). The one
+   recorded-but-non-blocking implementation item is
+   `operationLedgerTransactionTypes["sportsbook_settlement"]`'s eventual
+   widening to a list (§13), needed only if/when `cumulative_amount` is
+   ever wired for sportsbook settlement payouts — a small joint `risk` +
+   `ledger-finance` implementation item for whichever stage does that, not
+   for the stage that wires `internal/sportsbook`'s bet-placement gating.
 3. **Cross-domain aggregate player exposure spanning bonus + casino +
    sportsbook** — restated, not newly raised; ADR 0031 §17's existing open
    decision, for which sportsbook's own "potential payout exposure" (§2)
@@ -1061,9 +1125,10 @@ mapping specification is ready for whichever stage wires
    decision doc 09 already frames as deferred; this ADR takes no position
    on timing and only pre-specifies the rounding/reconciliation contract
    that would apply if and when it happens.
-5. **A future jurisdiction-mandated bet-cancellation window** (§8.4) — not
+5. **A future jurisdiction-mandated bet-withdrawal window** (§8.4) — not
    a current requirement; recorded so a future reader does not have to
-   re-derive why cancellation is absent from this ADR's flow list.
+   re-derive why a player-initiated bet withdrawal capability is absent
+   from this ADR's flow list.
 
 ## Owner
 
@@ -1076,7 +1141,9 @@ provider selection.
 ## Cross-references
 
 `CLAUDE.md` ("Financial / ledger rules"); ADR 0001, 0007, 0019, 0020, 0021,
-0031 (§1–§18), 0032; `docs/architecture/09-sportsbook-architecture.md`
+0031 (§1–§18), 0032, 0037 (Asset Registry and FX-conversion architecture,
+§7's asset-exponent mechanism — cited per Stage 4H-B0-R4 Wave-2 review);
+`docs/architecture/09-sportsbook-architecture.md`
 (product/build-vs-buy framing, owned by `sportsbook`); `ledger-accounting-
 model.md`, `financial-transaction-flows.md` (Flows 8–11, 17); `10-bonus-
 engine-architecture.md` §6 (the split-instruction/lifecycle-event boundary
