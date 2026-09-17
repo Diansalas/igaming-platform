@@ -11,6 +11,22 @@ accounting.md`'s structure throughout, because it is the closest existing
 precedent for a domain-specific accounting ADR and there is no reason to
 invent a second shape for the same kind of document.
 
+**Amended in Stage 4H-B0-R5** (final pre-implementation gate — closes the
+two P1s `qa`'s Stage 4H-B0-R4 review left open): §14 is new and
+**RESOLVES** P1-3 (the idempotency design needed a per-occurrence
+distinguishing field before implementation) as an `ARCHITECTURAL DECISION`
+— `ledger-finance`'s to make, since it is a mechanism-level tightening of
+this ADR's own idempotency design, not a change to the human-approved
+account-type schema. §15 is new and **PROPOSES, for independent
+`architect` + `bonus-engine` + `sportsbook` review, NOT a unilateral
+decision** — a resolution to P1-4 (the pre-existing `player_locked`
+origin-split gap, §9). The full, platform-wide proposal lives in
+`ledger-accounting-model.md` §6.3 (not sportsbook-specific, per that P1's
+own instruction not to build a sportsbook-specific workaround); §15 here
+is the sportsbook-specific instantiation and cross-reference. Neither
+addition changes any entry already specified in §3–§13; both are
+additive.
+
 Labeling convention inherited from `financial-domain-model.md`: `BLUEPRINT`
 = stated directly in the Blueprint; `ARCHITECTURAL DECISION` = decided here
 or in a named prior ADR; `OPEN DECISION` = deliberately not resolved, with
@@ -814,6 +830,20 @@ more numerous than any other product's:
   Reward Orchestrator minting a fresh key per delivery attempt (there:
   too many keys for one fact; here: too few keys for many facts) — named
   explicitly for the same reason.
+
+  > **Stage 4H-B0-R4 `qa` review finding (P1-3), resolved Stage 4H-B0-R5,
+  > see §14.** The paragraph above states this as a **contract** the
+  > provider adapter must honor. `qa` correctly flagged that a contract
+  > alone has a residual gap: if a non-conformant adapter reuses a
+  > reference across two genuinely distinct occurrences of the *same*
+  > `transaction_type` whose payloads also happen to coincide (e.g. two
+  > bet-builder legs that both settle for the same amount), a
+  > payload-comparison idempotency check has nothing left to tell them
+  > apart by, and the second, real occurrence is silently absorbed as a
+  > duplicate of the first with no error raised. §14 closes this with a
+  > required, adapter-supplied **occurrence discriminator**, not a
+  > restatement of the contract. Nothing below in this section is
+  > superseded by §14; §14 only adds the missing mechanism underneath it.
 - **`correlation_id` is the internal bet id, stable across every
   transaction the bet ever produces** (§3) — this is the mechanism for
   "show me this bet's full financial history," and it is **not** part of
@@ -832,6 +862,9 @@ more numerous than any other product's:
   partial settlement would collide the second leg against the first
   exactly as above; this is called out a second time here because it is
   the specific case most likely to be overlooked when a bet-builder ships.
+  **§14 makes this a required mechanism (`occurrence_ordinal`), not only a
+  named risk** — see §14 for exactly how the discriminator is derived and
+  supplied.
 - **Internally-originated events with no natural provider reference**
   (a rare staff-initiated manual void, distinct from a market correction)
   use `(tenant_id, idempotency_key)` — the admin action's own id, generated
@@ -1006,6 +1039,285 @@ risk` code, migration, or schema change is proposed by this ADR; §13's
 mapping specification is ready for whichever stage wires
 `internal/sportsbook`'s enforcement call site.
 
+### 14. Canonical idempotency contract — resolving the Stage 4H-B0-R4 deferred item (P1-3)
+
+`ARCHITECTURAL DECISION`, Stage 4H-B0-R5. Resolves the gap `qa`'s Stage
+4H-B0-R4 review named and §11 flagged forward: §11's `(tenant_id,
+provider_id, provider_tx_id)` uniqueness is only collision-safe if every
+distinct lifecycle event genuinely carries a distinct `provider_tx_id` —
+that was stated as a **contract** the provider adapter must honor, and a
+contract alone has a residual failure mode. If a non-conformant adapter
+reuses a reference across two genuinely distinct occurrences of the
+**same** `transaction_type`, and their payloads also happen to coincide
+(two bet-builder legs that both settle for the same amount is the
+canonical example, but the same shape recurs for two cashout occurrences
+of the same size, or two market corrections on the same bet), a
+payload-comparison-based idempotency check (ADR 0020's
+same-key-different-payload rejection) sees an identical key and an
+identical payload and correctly — by its own rules — treats the second
+event as an exact retry of the first. **The second, real, distinct event
+is silently absorbed, no error is raised, and that leg's settlement is
+permanently lost.** This section closes that gap with a required
+mechanism, not a restatement of the contract.
+
+Nothing in §3–§13 is changed by this section. No new `LedgerTransaction`
+or `LedgerEntry` column is introduced; no migration beyond what §3–§13
+already require is needed. This section binds the **adapter's**
+obligation more precisely and, where noted, extends what the ledger
+posting layer validates.
+
+#### 14.1 Three canonical identifiers
+
+1. **Platform operation ID — `LedgerTransaction.id`.** The platform's own
+   identity for one specific, already-posted financial operation. It does
+   not exist before the row is inserted, so it cannot itself be an input
+   to the idempotency decision for that same insert — its role is
+   downstream: it is what `reverses_transaction_id` (§10) points at, what
+   ties a correction/reversal chain together, and what audit/reconciliation
+   join on once a transaction exists. No pre-generated-before-the-fact
+   operation id pattern exists elsewhere in this codebase to reuse —
+   `internal/casino`'s `RoundID` plays the role of §3's `correlation_id`
+   (grouping a bet and its later win under one business operation), not a
+   distinct pre-minted per-event operation id — so this ADR does not
+   invent one for sportsbook either. `correlation_id` (§3, the internal bet
+   id) remains the "find this bet's whole history" key; `LedgerTransaction.id`
+   remains the "this one specific posted fact" key. They are not
+   interchangeable and neither is part of the idempotency uniqueness
+   constraint.
+2. **Provider operation ID — `provider_tx_id`, unchanged from §3–§13.**
+   The provider's (or in-house engine's) own reference for one specific
+   lifecycle event, opaque, never a provider type or enum
+   (`ledger-accounting-model.md` §1.2). This is the value the `UNIQUE
+   (tenant_id, provider_id, provider_tx_id)` constraint keys on today and
+   continues to key on after this section — no schema change.
+3. **Provider occurrence/event ID — `occurrence_ordinal` — new, closes the
+   gap.** A strictly increasing integer scoped to `(tenant_id,
+   correlation_id, transaction_type)`, **required, not optional**, for
+   every `transaction_type` where §8/§10 establish that more than one
+   occurrence may legitimately exist against the same bet:
+   `sportsbook_partial_settlement`, `sportsbook_cashout`, and
+   `sportsbook_rollback`/its paired re-settlement (a market can, in
+   principle, be corrected more than once). It is `NULL`/not applicable
+   for the single-occurrence types (`sportsbook_bet`, `sportsbook_void`'s
+   ordinary case), which need no discriminator because at most one such
+   event is ever architecturally valid per bet.
+
+   **How it is derived — adapter responsibility, never inferred from
+   ledger state.** Per the directive's explicit constraint, the canonical
+   layer never needs to understand a specific provider's own ID scheme,
+   but the adapter is responsible for mapping whatever the provider gives
+   it into this ordinal before the ledger ever sees the event:
+   - Where the provider's own protocol already carries a per-occurrence
+     signal — a leg index, a settlement sequence number, a cashout attempt
+     counter — the adapter uses it directly. This is not a new concept:
+     ADR 0033 §2's canonical `sportsbook_settlement` event already carries
+     a nullable `leg_reference` for exactly this case; `occurrence_ordinal`
+     is the ledger-layer's binding, required counterpart to that same
+     signal, promoted from "nullable, illustrative" to "required, for the
+     transaction types named above."
+   - Where the provider's protocol gives no such signal at all (the
+     non-conformant case this section exists for), the adapter derives it
+     from its **own** inbound-delivery deduplication record — assigned
+     once, the first time a specific raw delivery is processed, and reused
+     verbatim if that exact delivery is retried. This is always available
+     to the adapter regardless of how poor the provider's own reference
+     scheme is, because it depends only on the adapter's own receipt of a
+     distinct message, never on the provider's business-level payload.
+   - **It is never computed as "count existing rows for this
+     `(correlation_id, transaction_type)` and add one."** That
+     reintroduces exactly the check-then-insert race CLAUDE.md forbids,
+     and — more specifically — it is not reproducible by a legitimate
+     retry: an attempt that crashed before its insert committed would, on
+     retry, recompute a *different* "next" value than a fresh occurrence
+     would, if anything else had posted in between. Deriving the ordinal
+     from something intrinsic to the specific occurrence (the provider's
+     signal, or the adapter's own delivery-dedup record) is what makes it
+     reproducible identically on retry and different for a genuinely new
+     occurrence.
+
+   **How it is carried — no schema change.** The adapter composes the
+   value it submits as `provider_tx_id` to already include this ordinal
+   (e.g. `{provider's settlement reference}#{occurrence_ordinal}`).
+   `provider_tx_id` remains the single opaque `TEXT` the existing `UNIQUE
+   (tenant_id, provider_id, provider_tx_id)` constraint keys on — this is
+   the same "opaque string, never a provider type or enum"
+   (`ledger-accounting-model.md` §1.2) latitude already given to that
+   column, extended to an adapter-composed value rather than only a
+   provider-supplied one. No new column on `LedgerTransaction` is
+   introduced, consistent with this ADR's Consequences section.
+
+   **Secondary, independent check — `causation_id`.** §3 already sets
+   `causation_id` to the specific provider callback's own delivery id,
+   distinct from `provider_tx_id`. This section makes that field do double
+   duty as a cross-check: two `LedgerTransaction` rows that end up with the
+   *same* `provider_tx_id` (an adapter defect, since the ordinal
+   composition above should prevent it) but genuinely different
+   `causation_id` values is the exact signature of the failure mode this
+   section closes, and is treated as an **integrity alert**, not a
+   possible outcome — because with the ordinal composed into
+   `provider_tx_id` as specified, it should be structurally impossible.
+
+#### 14.2 The six cases, precisely
+
+| # | Case | What distinguishes it | Resolution |
+|---|---|---|---|
+| 1 | Retry of the same occurrence | Identical `(tenant_id, provider_id, provider_tx_id)` **and** identical payload **and** identical `causation_id` | ADR 0020 `SAVEPOINT` exact-retry path — returns the original result, no new write |
+| 2 | Duplicate delivery (concurrent or delayed) | Same as #1, arriving concurrently or after a delay | Same as #1 — the database unique constraint, not application locking, arbitrates the race |
+| 3 | Legitimate new occurrence | Different `(tenant_id, provider_id, provider_tx_id)`, because the adapter composed a different `occurrence_ordinal` (or the event is a genuinely different bet/lifecycle-event type) | Always succeeds as a new, independently posted `LedgerTransaction` |
+| 4 | Correction (a new occurrence that revises a previous one) | Its own new provider reference (§10) **and** `reverses_transaction_id` = the platform operation id of the transaction being corrected | New transaction, traceable via `reverses_transaction_id`, never an edit of the original |
+| 5 | Reversal (undoing a specific prior transaction) | Same as #4 | Same as #4 — `reverses_transaction_id` is the one and only correction/reversal traceability mechanism (§10, `ledger-accounting-model.md` §1.2), generalized, not reinvented, for every case in this row and the one above |
+| 6 | Settlement update (partial settlement, cashout — legitimately multiple events on one bet, same `transaction_type`) | Distinct `occurrence_ordinal` per event, composed into a distinct `provider_tx_id`, even when the rest of the payload coincides | Each occurrence posts independently; never collides with a sibling occurrence regardless of payload similarity |
+
+#### 14.3 Deterministic outcomes, per the directive's explicit list
+
+- **Repeated bet (placement retry).** Same `provider_bet_reference` and
+  payload → exact retry (#1/#2), no new lock, original result returned.
+- **Repeated win (settlement retry).** Same composed settlement
+  `provider_tx_id` (including its `occurrence_ordinal`, `NULL`/single-slot
+  for an ordinary full settlement) and payload → exact retry, no new
+  payout posted.
+- **Repeated rollback.** Same correction-event reference → exact retry,
+  returns the original rollback's result; a **second, different**
+  correction event against an original that already has a rollback is
+  rejected by §10's `FOR UPDATE` double-reversal lock, never silently
+  posted as a second rollback.
+- **Repeated settlement (two genuinely distinct partial-settlement or
+  cashout occurrences).** Distinguished by `occurrence_ordinal` per case 6
+  above — both post, neither is absorbed into the other, regardless of
+  payload similarity. This is the exact scenario §11/P1-3 named as
+  unresolved; it is now mechanically prevented rather than merely
+  discouraged by contract.
+- **Correction.** New provider reference, `reverses_transaction_id` set to
+  the platform operation id of the transaction being corrected (§10);
+  same-key retries of the correction itself resolve as case #1.
+- **Provider callback redelivery (general case).** Resolves via the
+  `SAVEPOINT`-based idempotent-retry path keyed on the (now
+  ordinal-inclusive, where applicable) `provider_tx_id`; a same-key,
+  different-`causation_id` collision is impossible by construction and, if
+  ever observed, is an integrity alert per §14.1, not a silently accepted
+  duplicate.
+
+#### 14.4 The core invariant
+
+**Financially equivalent retries must be idempotent — never double-posted.
+Genuinely different legitimate occurrences must never collapse into the
+same idempotency key, even when their payloads happen to be identical.
+Uniqueness is enforced by an identifier the platform controls or requires
+the adapter to supply — `occurrence_ordinal`, composed into the DB-enforced
+`provider_tx_id` — never inferred from payload comparison alone.** A
+payload-comparison check remains necessary (it is what ADR 0020 uses to
+reject a genuine same-key-different-payload defect) but is no longer
+sufficient on its own to distinguish two same-payload occurrences — that
+is exactly the job the occurrence discriminator does instead.
+
+#### 14.5 Scope of this section
+
+This is a tightening of §11's existing mechanism, not a new one. ADR
+0020's exact-retry/concurrent-duplicate/same-key-different-payload
+semantics are unchanged; `internal/ledger` remains the sole writer; no
+account type, no new `LedgerTransaction`/`LedgerEntry` column, and no
+weakening of any invariant #1–#15/B1 is introduced. The one binding change
+is on the **adapter**: for `sportsbook_partial_settlement`,
+`sportsbook_cashout`, and `sportsbook_rollback`/re-settlement, composing an
+`occurrence_ordinal` into the submitted `provider_tx_id` is now
+**required**, not merely good practice — a conformance-suite check for
+whichever adapter is built first (mirroring §2.4's conformance-suite
+citation in doc 09) must verify it before that adapter is marked complete.
+
+Status: **RESOLVED (architecture) — `NOT IMPLEMENTED`.**
+
+### 15. `player_locked` origin-split — proposed resolution (Stage 4H-B0-R5, PROPOSAL ONLY, NOT IMPLEMENTED)
+
+**This section is a cross-reference, not the proposal itself.** Per the
+directive's own reasoning — the underlying gap is not sportsbook-specific
+(`ledger-accounting-model.md` §6.2, ADR 0032 §10 both named it before
+sportsbook existed, and any future bonus-funded casino feature with a
+contingent/locked state would hit the identical gap) — the full proposal
+is written where a platform-wide fix belongs: **`ledger-accounting-
+model.md` §6.3**, a new section replacing that document's §6.2 "open item
+so far" framing with an exact, reviewable proposal, in the same spirit and
+rigor as ADR 0035 §1.3.1's formalization of the agent-float schema
+proposal (worked SQL sketch, row-shape reasoning, explicit
+`NOT IMPLEMENTED` status, explicit non-authority to decide it alone).
+
+**What §6.3 proposes, in one paragraph**: split `player_locked` into two
+`account_type` values, `player_locked_cash` and `player_locked_bonus`
+(an additive `account_type` CHECK widening only — no new column, no new
+owner family, no RLS change, because both new types are player-owned,
+wallet-scoped, and fit the *existing* `UNIQUE (wallet_id, account_type,
+asset_code)` constraint unchanged), and extend invariant B1's covered
+"bonus-denominated player accounts" set from `{player_bonus}` to
+`{player_bonus, player_locked_bonus}`. A second candidate shape — an
+origin-tag column on `ledger_entries` instead of splitting the account —
+was seriously considered and is written up and rejected in §6.3, with
+reasons.
+
+**Confirmed for the sportsbook-specific case, applying §6.3's proposed
+mechanism to §3/§5/§8 above, once and if it is approved (this ADR does not
+adopt it unilaterally):**
+
+- **A. Cash-funded bet** — unaffected by whether this proposal is adopted;
+  §3/§5/§8's cash-funded entries are correct as written today.
+  **Recommendation carried from §6.3**: mint `player_locked_cash` (never
+  bare `player_locked`) from the first cash-funded sportsbook posting
+  onward, so that if/when this proposal is later approved, adding
+  `player_locked_bonus` requires zero backfill of any already-posted
+  `player_locked_cash` row.
+- **B. Bonus-funded bet** — placement becomes `Dr player_bonus X · Cr
+  player_locked_bonus X` (the §3 table's "once unblocked" row, now with
+  the concrete account name). §6.3 shows this needs **no mirror leg at
+  lock time** — the transfer stays entirely inside the extended
+  bonus-denominated set, so B1 holds through the lock unchanged — and that
+  wagering-progress attribution needs **no change at all**, because it is
+  derived from the debit to `player_bonus` (`ledger-accounting-model.md`
+  §6.1/ADR 0032 §0), which already posts at lock time regardless of where
+  the credited leg lands.
+- **C. Mixed cash+bonus bet** — supported, using the same
+  split-instruction boundary §9 already commits to (sportsbook computes
+  the split, `internal/ledger` posts it): `Dr player_cash C · Dr
+  player_bonus B · Cr player_locked_cash C · Cr player_locked_bonus B`,
+  four entries, balanced per asset, no new mechanism beyond crediting two
+  accounts instead of one.
+- **D. Rollback of a cash-funded bet** — `Dr player_locked_cash X · Cr
+  player_cash X`, confirmed, unaffected by this proposal beyond the
+  account name.
+- **E. Rollback of a bonus-funded bet** — `Dr player_locked_bonus X · Cr
+  player_bonus X`. This is the case that breaks today without the split:
+  a rollback handler with only a single undifferentiated `player_locked`
+  balance to release has no reliable, indexable way to know this
+  particular bet's stake was bonus-origin, and either (i) credits
+  `player_cash`, handing the player real, withdrawable money they were
+  never entitled to, or (ii) defaults to `player_bonus` for a bet that was
+  actually cash-funded, wrongly re-restricting real cash as non-withdrawable
+  bonus funds. Both are real financial-integrity defects, not
+  rounding-scale errors.
+- **F. Win/settlement after a bonus-funded bet** — applies ADR 0032's
+  existing casino precedent unchanged, generalized to the extended
+  bonus-denominated set (§6.3): the payout returns to `player_bonus`
+  (continuing wagering progress), never `player_cash`, and the
+  `promo_liability`/`bonus_expense` mirror pair fires at **this** point —
+  the moment value actually leaves `{player_bonus, player_locked_bonus}`
+  for `house_gaming` — rather than at lock time, which is the deferred
+  version of ADR 0032 §3's existing recognition-timing rule, not a new
+  rule invented for sportsbook.
+- **G. Loss after a bonus-funded bet** — the stake absorption itself
+  (`Dr player_locked_{origin} X · Cr house_gaming X`) needs no origin
+  distinction; the *only* origin-dependence is whether the
+  `promo_liability`/`bonus_expense` mirror pair also fires alongside it
+  (only for the bonus-origin case, never for cash), for the identical
+  reason as F.
+
+**Status: `NOT IMPLEMENTED`. Proposal only, requiring `architect` +
+`bonus-engine` + `sportsbook` review and, per CLAUDE.md, human approval
+before any migration is written** — this changes a Blueprint-listed
+account type's shape and is explicitly outside `ledger-finance`'s
+unilateral authority (CLAUDE.md: "no specialist redesigns shared
+architecture unilaterally"). §9's `OPEN DECISION` status is **not** closed
+by this section; it is given a concrete, reviewable form, exactly as ADR
+0035 §1.3.1 did for the agent-float schema question. Every bonus-funded
+sportsbook posting in §3/§5/§8 remains **BLOCKED** until a human closes
+this decision and the resulting migration lands.
+
 ## Consequences
 
 - **Follow-up edits required** to documents this ADR does not own the
@@ -1058,7 +1370,17 @@ mapping specification is ready for whichever stage wires
 - **No change to the core ledger schema beyond the additive
   `transaction_type` CHECK widening in migration step 1 above.** No new
   `account_type`, no new column on `LedgerAccount`/`LedgerTransaction`/
-  `LedgerEntry`, no new table.
+  `LedgerEntry`, no new table. **§14 (Stage 4H-B0-R5) confirms this
+  holds**: the occurrence discriminator it requires is carried inside the
+  existing opaque `provider_tx_id` string, composed by the adapter, not a
+  new column. **§15 (Stage 4H-B0-R5) is the one exception, and it is a
+  proposal, not a decision**: if and when the `player_locked` origin
+  split is approved (`ledger-accounting-model.md` §6.3), it adds two
+  `account_type` values (`player_locked_cash`/`player_locked_bonus`) via
+  the same kind of additive CHECK-widening ADR 0032 already used for
+  `bonus_expense` — still no new column, no new owner family, no new
+  table, but a schema change this ADR does not have the authority to make
+  unilaterally.
 - **New reconciliation consumers, not new reconciliation streams.** §6's
   open-liability query and §12's provider-statement matching are read
   patterns against reconciliation machinery that already exists
@@ -1103,7 +1425,11 @@ mapping specification is ready for whichever stage wires
 1. **`player_locked` origin split for bonus-funded sportsbook wagering**
    (§9) — `architect` + `sportsbook` + `ledger-finance`, already flagged by
    `ledger-accounting-model.md` §6.2 and ADR 0032 §10, confirmed here as
-   still blocking every bonus-funded flow in this ADR.
+   still blocking every bonus-funded flow in this ADR. **Stage 4H-B0-R5**
+   formalizes a concrete, reviewable proposal (§15, full mechanism in
+   `ledger-accounting-model.md` §6.3) — still `NOT IMPLEMENTED`, still not
+   decided, now in a form the three named reviewers can review directly
+   rather than re-deriving a shape from the open item's prose.
 2. **`sportsbook_bet`'s Risk enforcement wiring** (§13) — not a
    `ledger-finance` open decision on its own (the `Operation` value and
    `min_amount`/`max_amount` support already exist; `operationLedgerRollbackTypes["sportsbook_bet"]`
@@ -1141,14 +1467,19 @@ provider selection.
 ## Cross-references
 
 `CLAUDE.md` ("Financial / ledger rules"); ADR 0001, 0007, 0019, 0020, 0021,
-0031 (§1–§18), 0032, 0037 (Asset Registry and FX-conversion architecture,
-§7's asset-exponent mechanism — cited per Stage 4H-B0-R4 Wave-2 review);
-`docs/architecture/09-sportsbook-architecture.md`
-(product/build-vs-buy framing, owned by `sportsbook`); `ledger-accounting-
-model.md`, `financial-transaction-flows.md` (Flows 8–11, 17); `10-bonus-
-engine-architecture.md` §6 (the split-instruction/lifecycle-event boundary
-this ADR reuses for the eventual bonus-funded case); `reconciliation-
-model.md`; `docs/architecture/27-stage-4h-b0-scope-and-implementation-
-plan.md` §1.1 (the migration-order format this ADR's Consequences section
-mirrors); `internal/ledger`, `internal/casino` (`postRollback`,
-`postBet`'s Risk-integration position).
+0031 (§1–§18), 0032, 0033 (§2's `leg_reference` — the precedent §14
+generalizes into `occurrence_ordinal`), 0035 (§1.3.1 — the tone/rigor
+precedent §15/`ledger-accounting-model.md` §6.3 follow for a
+`ledger-finance` schema *proposal*, not a decision), 0037 (Asset Registry
+and FX-conversion architecture, §7's asset-exponent mechanism — cited per
+Stage 4H-B0-R4 Wave-2 review); `docs/architecture/09-sportsbook-
+architecture.md` (product/build-vs-buy framing, owned by `sportsbook`);
+`ledger-accounting-model.md` (§6.2/§6.3 — the `player_locked` origin-split
+proposal §15 cross-references), `financial-transaction-flows.md` (Flows
+8–11, 17); `10-bonus-engine-architecture.md` §6 (the
+split-instruction/lifecycle-event boundary this ADR reuses for the
+eventual bonus-funded case); `reconciliation-model.md`;
+`docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md` §1.1
+(the migration-order format this ADR's Consequences section mirrors);
+`internal/ledger`, `internal/casino` (`postRollback`, `postBet`'s
+Risk-integration position, `RoundID`'s correlation role cited in §14.1).

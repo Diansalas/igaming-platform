@@ -526,6 +526,277 @@ bonus-funded sportsbook stakes, it changes a Blueprint-listed account type,
 and it therefore requires `architect` + `sportsbook` + `ledger-finance`
 sign-off in the stage that needs it.
 
+**Stage 4H-B0-R5**: §6.3 below formalizes this recommendation into a
+concrete, reviewable proposal — still `OPEN DECISION`, still not resolved
+here, now in an exactly-specified form for `architect` + `bonus-engine` +
+`sportsbook` to review, mirroring how ADR 0035 §1.3.1 formalized the
+agent-float schema question. `docs/decisions/0038-sportsbook-accounting-
+and-ledger-integration.md` §15 is the sportsbook-specific instantiation of
+what follows; this section is the platform-wide mechanism, written here
+rather than in that ADR because the gap is not sportsbook-specific (it
+would recur identically for any future bonus-funded casino feature with a
+contingent/locked state) and CLAUDE.md's "no uncontrolled scope
+expansion"/"never invent a sportsbook-specific workaround" reasoning
+belongs with the general model, not a single domain's ADR.
+
+### 6.3 Proposed resolution — `player_locked` origin split (Stage 4H-B0-R5, PROPOSAL ONLY, `NOT IMPLEMENTED`)
+
+**Status: `NOT IMPLEMENTED`. This section is a `ledger-finance` *proposal*
+for independent review, not a decision.** It requires `architect` +
+`bonus-engine` + `sportsbook` review, and human approval, before any
+migration is written — CLAUDE.md's "no specialist redesigns shared
+architecture unilaterally" applies without exception, because this amends
+the practical shape of a Blueprint-listed account type governed by
+human-approved decisions (ADR 0007, ADR 0019, this document). §6.2's
+`OPEN DECISION` status is unchanged by this section; only its form
+changes, from a recommended direction to an exact, implementable shape —
+the identical service ADR 0035 §1.3.1 performed for the agent-float
+schema question, and this section follows that precedent's tone and rigor
+deliberately.
+
+#### 6.3.1 Two shapes considered
+
+Per the constraint that the fix must not be "a new account merely to avoid
+the issue" without justifying it against the alternative, two genuinely
+different shapes were evaluated — one that splits the **account**, one
+that tags the **entry**:
+
+**Shape A — split `player_locked` by `account_type`
+(`player_locked_cash`/`player_locked_bonus`).** Two new, additive
+`account_type` values, both player-owned (`wallet_id NOT NULL`), each
+fitting the **existing** `UNIQUE (wallet_id, account_type, asset_code)`
+constraint unchanged — no new owner family (unlike ADR 0035 §1.3.1's
+`hierarchy_node_id`, which needed one), no new column on
+`ledger_accounts`, no RLS change (RLS keys on `wallet_id`/`tenant_id`/
+`player_account_id`, not `account_type`). The only schema change is the
+same kind of additive `account_type` CHECK widening ADR 0032 already used
+to add `bonus_expense` — a shape this platform has already done once,
+successfully, for exactly the reason "double-entry genuinely needs a new
+bucket," not as a workaround.
+
+**Shape B — an origin-tag column on `ledger_entries` (e.g.
+`funding_origin TEXT NULL CHECK (funding_origin IN ('cash','bonus'))`,
+`NULL` for every entry not against `player_locked`), keeping a single
+`player_locked` account per wallet+asset.** Seriously considered: it adds
+no new `account_type` value, and `ledger_entries` already denormalizes
+per-row dimensions for policy reasons (`wallet_id`, `player_account_id`,
+`tenant_id`, `asset_code` — §1.3), so a further per-row dimension is not
+without precedent in this exact table. A mixed-funded bet (§6.3.3 case C)
+works under Shape B too, via two origin-tagged credit entries into the one
+`player_locked` account instead of two separate accounts — functionally
+equivalent generality to Shape A for that case.
+
+**Shape A is the recommended shape.** Reasons, weighed against Shape B
+rather than asserted:
+
+1. **Smaller schema footprint on the higher-volume, higher-scrutiny
+   table.** `ledger_entries` is append-only and written on every posting
+   in the platform; `ledger_accounts` is written once per
+   wallet/account-type/asset combination and is comparatively small and
+   slow-changing. A new dimension is safer to add to the smaller,
+   slower-changing table.
+2. **Zero new query shape.** Every existing formula in this model that
+   aggregates money — §5's balance formula, §6's open-liability query,
+   B1's `Σ signed(player_bonus)` — aggregates **by `account_type`**.
+   Shape A composes into that pattern with a one-token change (`account_type
+   = 'player_locked_bonus'` instead of `= 'player_locked'`, or an `IN`
+   list across both new types for the combined open-liability figure).
+   Shape B requires a **new kind of query** everywhere those formulas
+   would need the bonus-attributable subset — a filtered aggregate
+   (`WHERE account_type = 'player_locked' AND funding_origin = 'bonus'`)
+   that has no precedent anywhere else in `reconciliation-model.md` or
+   this document, meaning the reconciliation machinery would need to learn
+   a second aggregation shape rather than reuse its existing one.
+3. **Consistency with the platform's own established idiom for this exact
+   problem.** "Same player value, different origin, must not be
+   commingled" is not a new problem this proposal is solving for the first
+   time — it is *exactly* what `player_cash` vs. `player_bonus` already
+   is, and that distinction has always been expressed as separate
+   `account_type` values, never as an origin tag on a shared account's
+   entries. Shape A extends the existing idiom; Shape B introduces a
+   second, inconsistent way of expressing the same kind of distinction
+   elsewhere in the same model.
+4. **Administrative/status granularity.** `ledger-accounting-model.md`
+   §1.1 ties an account's effective status/freeze state to the account
+   itself. Under Shape A, bonus-origin locked exposure is a distinct
+   account and could, if ever needed, be reasoned about, reported on, or
+   (in principle) frozen independently of cash-origin locked exposure —
+   consistent with how `player_cash`/`player_bonus` already can be. Under
+   Shape B, both origins share one account's identity permanently; the
+   distinction exists only inside `ledger_entries`, one level below where
+   this platform's other account-level controls operate.
+5. **No data to migrate.** Sportsbook is `NOT IMPLEMENTED` — zero
+   `player_locked` rows exist in any environment today. Shape A can be
+   adopted with **zero backfill** if the recommendation below (mint
+   `player_locked_cash` from the very first cash-funded posting, never
+   bare `player_locked`) is followed, which removes the one real cost
+   (migrating already-posted rows) that would otherwise favor a
+   less-invasive column addition.
+
+Shape B is not rejected as invalid — it is a coherent alternative — but
+Shape A is recommended on the balance of these five points, particularly
+#2 and #5.
+
+**Not adopted, and why (mirroring ADR 0035 §1.3's format for
+considered-and-rejected alternatives):**
+
+- **Do nothing / infer origin by looking back through `correlation_id` at
+  settlement time.** Rejected: this does not actually fix invariant B1.
+  B1 is an *aggregate*, continuously-checked, zero-tolerance invariant
+  (§6.1) — it needs a **cheap, indexed aggregate** over the
+  bonus-attributable locked amount at every instant, not a per-bet lookup
+  that only helps a settlement handler decide which single account to
+  credit for the bet it is currently processing. The aggregate is what is
+  actually missing; a per-bet lookup does not produce it.
+- **A new mirror-leg pair posted at lock time (`Dr bonus_expense X · Cr
+  promo_liability X` alongside the lock).** Rejected outright: it
+  contradicts ADR 0032 §3's already-`RESOLVED` recognition-timing rule
+  ("no `bonus_expense` is recognized at grant... a bonus becomes a
+  recognized expense at the instant bonus value leaves `player_bonus` for
+  any reason **other than forfeiture**") — a lock is not such a departure,
+  the stake is still contingent, and recognizing expense before the bet
+  even resolves would materially misstate `bonus_expense`/NGR for every
+  open bet. This is exactly the "invent a new mechanism to avoid the
+  issue" failure mode CLAUDE.md warns against, and it is rejected on that
+  basis, not merely because a cleaner alternative exists.
+
+#### 6.3.2 The proposed additive schema change (Shape A)
+
+Illustrative only — **not a migration to run**, per the same convention
+ADR 0035 §1.3.1(2) uses:
+
+```sql
+-- PROPOSED (Stage 4H-B0-R5, NOT IMPLEMENTED, human approval required)
+ALTER TABLE ledger_accounts
+    DROP CONSTRAINT <existing account_type CHECK constraint>;
+ALTER TABLE ledger_accounts
+    ADD CONSTRAINT ledger_accounts_account_type_check
+    CHECK (account_type IN (
+        -- ... every currently-implemented and already-approved value ...
+        'player_locked_cash', 'player_locked_bonus'
+        -- 'player_locked' itself is never added — see the migration-
+        -- sequencing note below.
+    ));
+```
+
+No new column, no new index, no new owner family, no RLS change. The
+`UNIQUE (wallet_id, account_type, asset_code)` constraint already covers
+both new values without modification, because they are player-owned like
+every other `player_*` type.
+
+**Migration-sequencing note.** Because zero `player_locked` rows exist
+anywhere today, this proposal recommends that the **first** sportsbook
+migration (ADR 0038's Consequences §, migration step 1) mint
+`player_locked_cash` directly for the cash-funded case, and never post a
+bare `player_locked` row at all — even though cash-funded sportsbook
+wagering does not, by itself, need the origin split to function correctly
+(§6.3.3, case A). This is a sequencing recommendation, not a schema
+requirement: if cash-funded sportsbook ships before this proposal is
+reviewed and approved, using bare `player_locked` is not incorrect, but it
+creates real rows that would need a backfill migration
+(`player_locked` → `player_locked_cash`) the moment this proposal is later
+approved — a cost this recommendation avoids entirely if followed from the
+start.
+
+**B1 extension.** Invariant B1's covered "bonus-denominated player
+accounts" set (§6.1; ADR 0032 §2 already flags this exact section as "the
+one change that would extend it") widens from `{player_bonus}` to
+`{player_bonus, player_locked_bonus}`:
+
+> **B1 (extended, proposed).** For every `(tenant_id, asset_code)`:
+> `signed(promo_liability) + Σ signed(player_bonus) + Σ
+> signed(player_locked_bonus) == 0`, at every instant, no tolerance band.
+
+**Why this holds through the lock/unlock cycle with no mirror leg at lock
+time.** A lock (`Dr player_bonus X · Cr player_locked_bonus X`) moves
+value **within** the extended set — `player_bonus` decreases by `X`,
+`player_locked_bonus` increases by `X`, net change to the set's sum is
+zero, `promo_liability` is untouched, B1 holds automatically. The same is
+true for a rollback of that lock (the exact inverse, also entirely inside
+the set — this is also why a rollback needs no special-case mirror logic,
+consistent with ADR 0032 §7's existing "falls out of reversing the same
+transaction" property). The mirror pair is only required at the moment
+value actually **leaves** the extended set for `house_gaming` (settlement
+loss, or the stake-absorption leg of a settlement win) for a reason other
+than forfeiture — which is ADR 0032 §3's existing recognition-timing rule,
+applied to the extended set instead of `{player_bonus}` alone. No new
+rule is introduced; an existing one is generalized to the correct account
+set.
+
+#### 6.3.3 Worked cases (also cross-referenced from ADR 0038 §15 for the sportsbook instantiation)
+
+| Case | Entries | Origin-dependence |
+|---|---|---|
+| A. Cash-funded lock | `Dr player_cash X · Cr player_locked_cash X` | None — confirmed unaffected |
+| B. Bonus-funded lock | `Dr player_bonus X · Cr player_locked_bonus X` | Origin now recorded by the account itself; no mirror leg at lock (§6.3.2) |
+| C. Mixed lock | `Dr player_cash C · Dr player_bonus B · Cr player_locked_cash C · Cr player_locked_bonus B` | Split instruction supplied by the wagering domain, posted by `internal/ledger`, identical boundary to `10-bonus-engine-architecture.md` §6 |
+| D. Rollback, cash-funded | `Dr player_locked_cash X · Cr player_cash X` | None — confirmed unaffected |
+| E. Rollback, bonus-funded | `Dr player_locked_bonus X · Cr player_bonus X` | **The crux**: without the split, a rollback handler cannot reliably determine this, and either leaks real cash to the player or wrongly re-restricts real cash as bonus funds |
+| F. Win after bonus-funded bet | Stake-absorption leg + mirror pair at settlement (not at lock) + payout `Cr player_bonus (S+W)`, continuing wagering progress | Same treatment ADR 0032 already gives a bonus-funded casino win — not a new, sportsbook-specific rule |
+| G. Loss after bonus-funded bet | `Dr player_locked_bonus S · Cr house_gaming S` + mirror pair | Stake absorption itself needs no origin distinction; only whether the mirror pair fires does |
+
+**Wagering-progress attribution (directive's explicit question for case
+B) needs no change at all.** Wagering progress is defined
+(`ledger-accounting-model.md` §6.1 cross-reference; ADR 0032 §0) as "a
+derived read over ledger entries that debited `player_bonus`." That debit
+already posts at **lock** time (`Dr player_bonus X`) regardless of this
+proposal — the existing wagering-progress query already correctly counts
+a bonus-funded stake toward its wagering requirement the moment it locks,
+with zero extension needed. What is missing today is not wagering-progress
+attribution; it is invariant B1's aggregate, which is what this section
+fixes.
+
+**Compatibility with future bonus-funded casino activity.** Nothing in
+this section is sportsbook-specific. `player_locked_cash`/
+`player_locked_bonus` are ordinary `player_*` account types available to
+any domain that locks player funds pending a contingent outcome — today
+that is sportsbook only (casino resolves atomically, no locked state), but
+the mechanism, the B1 extension, and the recognition-timing generalization
+are stated at the ledger-account level, not inside a sportsbook-scoped
+document, so a future casino feature that introduces a contingent/locked
+state reuses this unchanged.
+
+#### 6.3.4 Approval and review status
+
+- **`NOT IMPLEMENTED`.** No migration, no column, no CHECK, no Go code
+  exists. Every bonus-funded sportsbook posting in ADR 0038 §3/§5/§8
+  remains `BLOCKED` until this is approved and migrated.
+- **`ledger-finance` proposes; it does not decide.** Required next step:
+  independent `architect` + `bonus-engine` + `sportsbook` review of this
+  section as drafted, then human approval (CLAUDE.md: this changes a
+  Blueprint-listed account type), then a migration in its own authorized
+  stage.
+- §6.2's `OPEN DECISION` stays open. This section changes its *form*, not
+  its *status*.
+
+**Focus questions for the three independent reviewers**, so the review is
+not a re-derivation of this section from scratch:
+
+1. **`architect`**: is Shape A (account-type split) genuinely the
+   better-justified shape against Shape B (entry-level origin tag), or
+   does §6.3.1's weighing miss a consideration — e.g. a future need to
+   query "total locked exposure regardless of origin" cheaply, which Shape
+   A answers with an `account_type IN (...)` list and Shape B would answer
+   with no `WHERE` clause at all (arguably simpler for that one query,
+   though every other query in this model already filters by
+   `account_type` for other reasons)? Is the "no new column" claim
+   correct against the live schema, the way ADR 0035 §1.3.2 verified its
+   own equivalent claim line-by-line against migration 0020?
+2. **`bonus-engine`**: does the B1 extension (§6.3.2) and the generalized
+   recognition-timing rule (mirror pair fires when value leaves
+   `{player_bonus, player_locked_bonus}`, not `{player_bonus}` alone)
+   correctly preserve every invariant ADR 0032 §2/§3 already established,
+   with no unstated edge case (e.g., forfeiture of a bonus-funded stake
+   that is *currently locked* — is that architecturally possible, and if
+   so does §5's existing forfeiture treatment need a locked-stake variant
+   this section did not enumerate)?
+3. **`sportsbook`**: does case C's mixed-funded posting shape match how
+   the sportsbook domain actually intends to compute a split instruction
+   for an in-flight stake (doc 09/ADR 0038 §9), and is the
+   migration-sequencing recommendation (mint `player_locked_cash` from day
+   one) compatible with whatever sequencing sportsbook has already
+   planned for its own first cash-funded implementation slice?
+
 ## 7. Cross-references
 
 - Object scoping, `Wallet` shape: `financial-domain-model.md`.
@@ -539,6 +810,13 @@ sign-off in the stage that needs it.
   `docs/decisions/0021-multi-asset-accounting.md`.
 - Bonus/reward/promotional accounting (`promo_liability` resolution,
   `bonus_expense`, invariant B1): `docs/decisions/0032-bonus-accounting.md`.
+- Sportsbook accounting and ledger integration (idempotency occurrence
+  discriminator §14; sportsbook-specific instantiation of the §6.3
+  proposal, §15): `docs/decisions/0038-sportsbook-accounting-and-ledger-
+  integration.md`.
+- Tone/rigor precedent for a `ledger-finance` schema *proposal* requiring
+  independent review before implementation: `docs/decisions/0035-retail-
+  agent-network-accounting.md` §1.3.1.
 - Loyalty/VIP points (a **separate** ledger, not covered by this model):
   `docs/architecture/24-points-accounting-architecture.md`.
 - RLS design for every table introduced here: kept in one canonical place,
