@@ -2850,6 +2850,196 @@ V-2 through V-6 are validation requests on this section's own decisions.
 | §6.4.9 V-1 | **New P1 finding**, `bonus-engine`-owned |
 | Migration `0048`, all Go code | **NOT WRITTEN, NOT AUTHORIZED.** Gated on V-1…V-6 plus §6.3.5's standing human approval |
 
+#### 6.4.11 `bonus-engine` independent validation (Stage 4H-B0-R6, Workstream C phase 1 gate)
+
+Answering §6.4.9's V-1 through V-4 and OB-1, as posed, per this stage's
+directive that phase 2 (migration `0048`, Go code) may not proceed until
+`bonus-engine` and `sportsbook` have each independently validated §6.4.
+This subsection does not redesign any posting in §6.4.5, does not write a
+migration, a query, or Go code, and does not authorize phase 2 by itself —
+`sportsbook`'s own parallel validation and the §6.3.5 human-approval gate
+are unaffected.
+
+**V-1 — CONFIRMED REAL, P1, from bonus-engine's own domain.** This is not a
+new question needing an answer built from scratch: it is the identical
+root cause bonus-engine's Wave 3 review (Stage 4H-B0-R5) already found in
+`VOID_ON_SELF_EXCLUSION`, correctly generalized by this pass to every
+ordinary sportsbook void and every rollback of a bonus-funded lock. ADR
+0032 §0's own binding definition — "wagering progress remains a **derived
+read** over ledger entries that debited `player_bonus`" — says nothing
+about netting a later credit back, and no document before this pass ever
+specified that it should. The exploit requires no special skill: a player
+can repeatedly place bonus-funded stakes on markets/selections with an
+above-average void or push rate (postponements, palpable errors,
+whole-number totals structurally prone to a push), carry zero real risk on
+each voided stake (the full amount returns to `player_bonus`, case E), and
+keep every unit of wagering-requirement progress the lock-time debit
+(case B) already credited — a one-directional, no-downside farming vector
+against the wagering requirement itself. **It is not sportsbook-specific.**
+The identical gap already exists conceptually for casino: ADR 0032 §7
+already states "a rollback of a bonus-funded casino bet... restores
+`player_bonus`... with no special-case code," and nothing in ADR 0032 §0's
+progress definition nets that restoration either. This pass's finding is a
+defect in the *platform-wide* wagering-progress definition, surfaced here
+because sportsbook's void/push mechanics make it the most player-reachable
+trigger — recorded as platform-wide so a future casino-side audit does not
+have to rediscover it independently (tracked as a new item in
+`10-bonus-engine-architecture.md`'s "Genuine gaps found" list, see below).
+
+**Fix location: the read query, as `ledger-finance` proposes — plus one
+bonus-engine-owned addition that is correctly outside `ledger-finance`'s
+territory to design: a new Progress-trail trigger point.** Bonus-engine
+agrees the ledger entries in cases B and E are correct as posted and must
+not be distorted to carry progress semantics — forcing the posting layer
+to know about "wagering progress" would violate ADR 0032 §0's own "exactly
+one financial truth system" position by leaking a Bonus Engine concept
+into `internal/ledger`. But "fix the query" is not a safe one-line
+instruction on its own, and bonus-engine specifies precisely what the
+query must and must not do so a future implementer does not under- or
+over-net:
+
+- The corrected progress read must net, against each lock-time debit to
+  `player_bonus`/`player_locked_bonus` for a given bet, **only** a later
+  credit whose transaction both (a) shares the lock transaction's
+  `correlation_id` (ADR 0038 §3) and (b) is `sportsbook_void`, or is
+  `sportsbook_rollback` with `reverses_transaction_id` pointing at that
+  same `sportsbook_bet` (lock) transaction specifically — **never** a
+  `sportsbook_rollback` that reverses a *settlement* instead (case K, or
+  `T_J1` inside case J), which corrects a wrong outcome on a stake that was
+  genuinely risked and must keep its progress. Naive netting by "any later
+  credit to `player_bonus` sharing this bet's `correlation_id`" would
+  wrongly net out a bonus-funded win's own payout credit (case G, entry
+  #6, which also shares `correlation_id`) or a correction's re-credit —
+  both represent value the player actually risked and must not lose
+  progress for. This is the one place a query-only fix can go wrong in a
+  way that still passes every existing balance/B1 test, which is why it is
+  stated explicitly here rather than left as "net the credit."
+- A `player_bonus` credit whose Grant has already gone terminal at the
+  moment the void/rollback posts (the **G-2** gap) is a **separate**,
+  not-yet-defined event this netting logic must not silently paper over —
+  G-2 and G-3 close independently, and a query that happens to produce a
+  plausible-looking number for a terminal-Grant case is not evidence G-2
+  is resolved.
+
+**New Progress-trail trigger point (bonus-engine-owned, not yet built).**
+A corrected read-query alone satisfies "the number is right" but not this
+document's own mandate that the Progress trail "must be sufficient to show
+a disputing player exactly why a bonus was forfeited" — here, why progress
+moved. `10-bonus-engine-architecture.md` §1.3's transition table has no
+row today for "a previously-counted stake's progress was reversed because
+the bet voided/rolled back": a disputing player who watched their
+wagering-requirement percentage drop with no lifecycle transition
+explaining why has no answerable audit trail, even once the underlying
+number is correct. Bonus-engine names this as a required addition — not
+designed in full here, no schema, no code — an automated-rule-evaluation
+Progress append entry triggered on the same `sportsbook_void`/
+`sportsbook_rollback`-of-a-lock event the query fix above keys on,
+carrying the reversed amount and the correlated bet reference as its
+reason detail. Tracked as a new "Genuine gaps found" item in
+`10-bonus-engine-architecture.md` (see the edit accompanying this
+validation).
+
+Both pieces together remain **gate G-3**, unchanged in shape from
+§6.4.2/§6.4.9's characterization. Bonus-engine confirms: it is a
+bonus-engine deliverable; it blocks bonus-funded placement (cases
+B/E/G/I) exactly as §6.4.2 states; it does **not** block migration `0048`
+or the cash-only cases (A/D/F/H/J/K), none of which touch a bonus account.
+
+**V-2 — bonus-engine agrees the deferral (§6.4.1) is the right call and is
+not specifying the anti-structuring control now.** This is a restatement
+of bonus-engine's own Wave-3 position (Stage 4H-B0-R5), not a reversal
+prompted by this pass: (1) no product capability regresses — sportsbook
+placement does not exist yet, so deferring mixed funding removes nothing a
+player has today; (2) the control's design genuinely needs `security`'s
+and `product-owner-proxy`'s input alongside bonus-engine's (the
+low-decimal-exponent amplification `security` already flagged, and the
+consumer-protection framing that shaped the C-cashout recommendation),
+and specifying it unilaterally inside this single-domain validation
+dispatch would repeat exactly the "no specialist redesigns shared
+architecture unilaterally" failure `ledger-finance` correctly declined to
+commit on its own side; (3) bonus-engine would rather see the control
+designed once, deliberately, with its own review round, than bolted onto
+this dispatch under the pressure of unblocking phase 2. **Deferral stands,
+unmodified, per bonus-engine.**
+
+**V-3 — CONFIRMED.** Bonus-engine independently re-derived §6.4.6 item 2's
+mirror audit against Rule B2 (extended) and ADR 0032 §3's own worked
+table, rather than trusting the stated conclusion: zero mirrors on
+A/D/F/H (no entry touches `BONUS_SET`, trivially); zero on B and E
+(`player_bonus ↔ player_locked_bonus` is an internal transfer within
+`BONUS_SET`, and Rule B2 extended is symmetric in both directions, so the
+same non-crossing logic applies to the lock and to its reversal
+identically); two on G (two *independent* boundary crossings — stake
+absorption outbound, payout inbound — correctly not netted into one, per
+the "per-crossing, never netted" corollary); one on I, correctly sized to
+the crossing amount rather than to "the stake" as a fixed concept (they
+coincide here only because funding is 100% bonus-origin, which is exactly
+the point §6.4.5 case I itself makes about generalizing to the deferred
+mixed case). The transiently negative `bonus_expense` case G produces is
+independently confirmed as already-precedented, not merely asserted: ADR
+0032 §3's own worked table has an identical transient negative value
+("Win 25 to bonus" row, `bonus_expense` `−15`) years before this
+consolidation pass, under the *original*, unextended Rule B2, for the
+casino case Rule B2 (extended) generalizes. HR-4's "same count, inverted"
+reversal rule is consistent with Rule B2's deterministic, symmetric
+derivation and was checked by hand against case G specifically, matching
+§6.4.6 item 4's own verification. No correction required.
+
+**V-4 — CONFIRMED, stated plainly: G-2 gates bonus-only funding directly,
+not only the deferred mixed-funding case.** Because mixed funding is
+out of scope for this pass (§6.4.1), cases B/E/G/I are the **entire**
+population of bonus-funded cases this section covers — there is no
+narrower "bonus-only, no terminal-Grant risk" subset left for G-2 to
+exclude itself from. The terminal-Grant trigger condition (a Grant going
+terminal — expired, cancelled, or forfeited — while a portion of its value
+sits in a locked account, followed by a later settlement or void/rollback
+credit against it) requires no mixed funding at all: a wholly bonus-funded
+stake locked in `player_locked_bonus` under case B is exactly as exposed
+to the bet-settlement-timing/Grant-lifecycle-timing mismatch as a mixed
+one would be — a Grant's fixed time limit can elapse, or a wagering-rule
+breach on a *different* bet can forfeit the whole Grant, while this bet's
+stake is still locked and unsettled. **This widens what §6.4 leaves
+blocked**: G-2 is not a "later, only-relevant-once-mixed-funding-ships"
+concern riding along with §6.4.1's deferral — it directly blocks the
+narrower bonus-only slice this section otherwise treats as ledger-ready
+(§6.4.2 already states this; this validation confirms the reading is
+correct and asks that the stage's final report not understate it as a
+mixed-funding-only gap).
+
+**OB-1 — confirmed correctly characterized as a genuine business/
+collections/credit-policy decision, outside bonus-engine's and
+`ledger-finance`'s engineering authority.** Bonus-engine agrees this is
+not an accounting question (the posting in case K is correct and must
+happen regardless of the resulting balance sign) and not a bonus-specific
+mechanism at all — case K is a general ledger-correction scenario, not a
+bonus one — but confirms, since the question was addressed to bonus-engine
+for sign-off on the characterization: whether and how to pursue, threshold,
+or write off a player-owed receivable is a collections/legal/consumer-
+credit policy decision no engineering specialist is positioned to resolve.
+Correctly referred to the orchestrator as OB-1; not decided here.
+
+**Summary for phase-2 readiness, from bonus-engine's domain angle only**
+(`sportsbook`'s independent validation is separate and this section does
+not speak for it): **G-1 (migration `0048` plus the cash-only cases
+A/D/F/H/J/K) is clear to proceed from bonus-engine's angle** — none of
+those cases touch a bonus account, and nothing in this validation
+identifies a bonus-domain objection to the schema widening itself.
+**G-2 and G-3 remain open and continue to block bonus-funded placement
+(cases B/E/G/I) in `internal/sportsbook`**, unchanged from §6.4.2/§6.4.10's
+own framing — G-2 pending the named human decision (doc 10 §1.2/§5, ADR
+0032 §5), G-3 pending the query-netting and Progress-trail-trigger design
+this validation specifies but does not build. The mixed-funding deferral
+(§6.4.1) and the cashout non-implementation (§6.4.3) both stand exactly as
+written, per V-2 and this validation's agreement with them.
+
+| §6.4.9 item | Status after this validation |
+|---|---|
+| V-1 | **Confirmed real, P1, platform-wide (not sportsbook-specific).** Fix specified (query-level netting, precisely scoped by `correlation_id` + `transaction_type`/`reverses_transaction_id`, plus a new Progress-trail trigger point) but **not built**. Remains gate **G-3**, open |
+| V-2 | **Confirmed — deferral stands, unmodified.** Anti-structuring control not specified in this pass |
+| V-3 | **Confirmed correct**, independently re-derived, no correction required |
+| V-4 | **Confirmed — gates bonus-only funding directly**, widening what §6.4 leaves blocked as stated in the summary above |
+| OB-1 | **Confirmed correctly characterized** as a business/collections decision, referred upward, not resolved here |
+
 **What phase 2 may do once this section is validated and approved**:
 migration `0048` (the `account_type` CHECK widening, with a working
 `.down.sql`, the verified constraint name

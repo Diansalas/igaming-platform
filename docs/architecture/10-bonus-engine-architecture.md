@@ -1517,6 +1517,12 @@ stage's own "freeze what exists, don't design what doesn't" scope:
    decision required** item with three named candidate resolutions
    (re-forfeit / route to `player_cash` / manual-review queue), none
    selected. Must not be silently resolved by a future implementer.
+   **Confirmed by `bonus-engine`'s Stage 4H-B0-R6 Workstream C phase-1
+   validation** (`ledger-accounting-model.md` §6.4.11, answering V-4): this
+   gap gates **bonus-only** sportsbook funding directly (cases B/E/G/I of
+   §6.4), not only a future mixed-funding case — a wholly bonus-funded,
+   currently-locked stake is exposed to the identical Grant-lifecycle/
+   bet-settlement timing mismatch. Named there as gate **G-2**.
 7. **Campaign-level budget-cap enforcement has no designed mechanism or
    owner** (doc 10 §1.1's flagged P2). Confirmed out of `risk.Evaluate`'s
    scope (§3 above), but nothing else names where or how it would be
@@ -1526,6 +1532,28 @@ stage's own "freeze what exists, don't design what doesn't" scope:
    line vs. contra-revenue) is an explicit `OPEN DECISION` in ADR 0032 §2.
    Does not block Bonus's own build, but must not be silently assumed by
    whoever eventually builds bonus financial reporting.
+9. **Wagering-progress does not net a stake-reversal credit against its
+   own lock-time debit (new P1, found by `ledger-accounting-model.md` §6.4,
+   confirmed by `bonus-engine` at §6.4.11, answering V-1).** ADR 0032 §0's
+   binding progress definition ("a derived read over ledger entries that
+   debited `player_bonus`") has no netting rule for a later
+   `sportsbook_void`/`sportsbook_rollback`-of-a-lock credit (or, by the
+   identical root cause, a casino round-rollback credit, ADR 0032 §7) that
+   returns the same value with the underlying bet nullified — a
+   player-reachable, no-downside wagering-progress-farming vector, not
+   limited to sportsbook. Two things are required, neither built or fully
+   designed here: (i) a corrected progress-read query that nets **only** a
+   credit correlated to the reversal of the *lock* itself (via
+   `correlation_id` plus `transaction_type`/`reverses_transaction_id`,
+   precisely scoped in `ledger-accounting-model.md` §6.4.11 so a win
+   payout or a settlement correction is never wrongly netted), and (ii) a
+   new Progress-trail trigger point — doc 10 §1.3's transition table has no
+   row today for "previously-counted progress reversed because its bet
+   voided/rolled back," which this document's own testing mandate (the
+   Progress trail must explain every state change to a disputing player)
+   requires. Named gate **G-3**; blocks bonus-funded sportsbook placement
+   (cases B/E/G/I) exactly as G-2 does, and does not block cash-only
+   migration `0048` work, which touches no bonus account.
 
 Owner of this section: `bonus-engine`. Nothing in this section authorizes
 writing `internal/bonus`, a migration, or a test.
