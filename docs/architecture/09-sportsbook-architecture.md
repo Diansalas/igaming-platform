@@ -986,6 +986,24 @@ retail cashier placing, viewing, or cashing out a sportsbook bet through
 the same domain/APIs an online player uses, once retail implementation is
 authorized.
 
+**Forward-looking note (Stage 4H-B0-R7 sportsbook financial-contract
+conformance pass) — not a defect, correctly out of scope today.** The
+above holds precisely because the current retail baseline (doc27's First
+Retail Product Baseline) excludes proxy/assisted play and anonymous/
+bearer play for its first slice: the wallet a retail-placed bet debits
+genuinely is the player's own wallet (`player_cash`/`player_bonus`), so
+`correlation_id` and the `player_locked_cash`/`player_locked_bonus`
+lock/settlement flow (`ledger-accounting-model.md` §6.4) need no third
+case. If a future retail/agent-network slice ever adds proxy/assisted
+play (an agent placing on a player's behalf) or a bet funded directly
+from `agent_float` rather than the player's own wallet, the current
+single-origin locked-value model would need the same kind of
+origin-split treatment `player_locked` already needed for cash-vs-bonus,
+and the mixed-funding hard-rejection rule (§6.4.1) would need to decide
+whether agent-float-funded stakes are in or out of scope. Recorded here
+for whenever that retail slice is scoped — not a gap in anything built
+or authorized today.
+
 ---
 
 ## 11. Multi-Asset Compatibility
