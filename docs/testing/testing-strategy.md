@@ -393,3 +393,235 @@ ledger; how the retail RBAC scope is carried on a request) rather than
 assumed to fit it. Item 1.6 (withdrawal exceeding float) is explicitly
 `OPEN DECISION`, referred to `architect`/`ledger-finance`, and its test
 cannot be written until that decision is made.
+
+## Stage 4H-B0-R5 — Testability review of five Stage 4H-B0-R4 P1s (`qa`, independent, first look)
+
+`RECOMMENDATION`, documentation-only — no test code written here. This is
+`qa`'s first, independent review of ADR 0037 (FX/asset-authorization), ADR
+0038 §14 (idempotency), `ledger-accounting-model.md` §6.3 (origin split),
+and ADR 0034 §14 (self-exclusion open-bet policy), none of which `qa`
+authored or previously reviewed, per CLAUDE.md's "no specialist
+self-approves its own work." Findings below are testability gaps only —
+they do not re-litigate financial/authorization correctness, which is
+`ledger-finance`/`security`/`architect`'s domain.
+
+### P1-1 — FX rate-plausibility (ADR 0037 §B.6/§B.7): testable-as-specified, with one named gap
+
+The `FXRateProvider` interface (B.2) exposes `Rate` as a plain struct
+(`value`, `precision`, `as_of`, `provider_reference`) returned directly by
+`GetCurrentRate`/`GetHistoricalRate`, and `HealthCheck` as a separate,
+independently-controllable method. This means a hand-written mock
+implementing the three-method interface can deterministically construct
+every one of B.6/B.7's category-A conditions (zero rate, negative rate,
+future `as_of`, missing/zero-value `as_of`, insufficient `precision`
+relative to a fixed destination-asset `decimal_exponent`, a failing
+`HealthCheck`) and both category-B conditions (B.7.2's magnitude
+plausibility, by controlling what `GetHistoricalRate` returns relative to
+`GetCurrentRate`; B.7.3's provider disagreement, by registering two mock
+providers with independently controlled `HealthCheck`/`GetCurrentRate`
+results) purely through the documented interface — no real-provider
+behavior is required to be simulated. This is a materially better
+position than most provider-abstraction ADRs on this platform start from.
+
+**Named gap 1 — no FX adapter conformance-suite requirement exists.** ADR
+0038 §14.5 requires, for the analogous sportsbook adapter obligation
+(`occurrence_ordinal` composition), that "a conformance-suite check for
+whichever adapter is built first ... must verify it before that adapter is
+marked complete." ADR 0037 states an equivalent adapter obligation (a
+provider binding must declare, as a one-time capability fact, whether it
+issues `provider_reference` values — B.7.1's resolution of the "missing
+provider reference" row) but never requires a conformance suite any real
+`FXRateProvider` adapter must pass before being trusted with the fail-closed
+contract. Without one, a mock that behaves correctly is not evidence a real
+adapter will. **Required test-strategy addition**: an `FXRateProvider`
+conformance suite (mirroring the sportsbook adapter conformance-suite
+citation), covering at minimum: malformed-response handling surfaces
+consistently (whether as an `error` return or a zero-valued `Rate` field —
+B.2 does not say which, so the suite must pin one contract and every real
+adapter must be tested against it), the capability declaration is queryable
+before any quote is requested, and `GetHistoricalRate`'s "not supported"
+error is distinguishable from a zero/failed rate rather than silently
+approximated.
+
+**Named gap 2 — the provider-reference-capability declaration has no
+documented storage/query shape.** B.7.1 states an `FXRateProvider` binding
+"declares... whether it issues `provider_reference` values at all," but
+B.2's interface has no method for it, and Part A/B name no config table for
+it either. A test fixture cannot construct this declaration without
+inventing a shape the architecture doesn't specify. Flagged for
+`architect`/`ledger-finance` to close before implementation, not resolved
+here.
+
+Everything else in B.6/B.7 is testable-as-specified; no other gap found.
+
+### P1-2 — Asset Authorization RBAC (ADR 0037 Part C/§C.5): missing-test-hooks — layers 4 and 6 are not independently distinguishable
+
+`AssetAuthorization.CheckEligibility` (§C.2) is specified to return a
+"specific, distinguishable `ReasonCode`" identifying *which layer* failed,
+and A.3's AND-chain lists tenant-authorization (layer 4) and
+jurisdiction-authorization (layer 6) as two separate, sequentially
+evaluated gates with brand-authorization (layer 5) between them. Layers 1,
+2, 3, 5, and 7 are each independently testable in isolation: for each,
+a fixture can hold every other layer passing and make exactly that one
+layer fail, then assert the returned `ReasonCode` names that layer — this
+works cleanly because each of those layers has its own distinct storage
+fact (`assets.active`, `assets.platform_authorized`, a brand-scoped
+allow-list row, an `AssetOperationEligibility` row).
+
+**Layers 4 and 6 do not have this property, and the architecture says so
+itself.** A.5 states plainly: "Layers 4 and 6 (tenant and jurisdiction
+authorization) are the same underlying mechanism, not two separate ones,
+because `tenant_jurisdiction_configs` is already keyed on `(tenant_id,
+jurisdiction_id)` — a row's presence and its `allowed_currencies` array
+jointly answer [both questions] in one place." Given that, a single query
+against one `(tenant_id, jurisdiction_id)` row cannot, by itself, produce
+"tenant-authorized but jurisdiction-unauthorized" or the reverse — the
+row's presence/content answers both simultaneously. No mechanism is
+documented (a secondary query, e.g. "does this tenant have an authorized
+row for *any* jurisdiction, to decide whether to blame layer 4 or layer 6
+specifically") for `CheckEligibility` to produce a `ReasonCode`
+distinguishing a layer-4 failure from a layer-6 failure on this same
+underlying fact. **Concretely: a test asserting "layer 4 passes, layer 6
+independently fails" (or vice versa) cannot be constructed against the
+design as documented**, which contradicts §C.2's own claim that the
+chain's seven layers are each independently distinguishable failure points.
+This is either (a) an acceptable, deliberate collapse that §C.2's
+"distinguishable per layer" language should be corrected to reflect (e.g.
+one combined `ReasonCode` for "tenant/jurisdiction not authorized for this
+pair"), or (b) evidence that a second, tenant-scoped-only query is needed
+and simply wasn't specified. Either way it needs an explicit answer before
+implementation, not an assumption at test-writing time. Flagged for
+`architect`/`security` to resolve; not a `qa` call.
+
+Everything else in Part C — the fail-closed-on-absent-configuration
+default (C.1), the non-nil-error-is-always-ineligible rule (C.2, directly
+testable via a fault-injected data-access layer, mirroring the existing
+`risk.Evaluate` precedent), the C.5.1 four-eyes/dual-control matrix (one
+test per catalogued operation asserting required-vs-not), the C.5.4
+immutable-field rule (testable as "no operation accepts these fields after
+creation"), and the C.5.5 forced-defaults-on-creation rule — are testable
+as specified, each with a clear, isolable fixture.
+
+### P1-3 — Idempotency design (ADR 0038 §14/§14.6): testable-as-specified for the mechanisms named; missing-test-hooks for one adversarial case
+
+The worked retry example (§14.6) is sufficient to derive a concrete
+sequential-retry test case (same `idempotency_key`, same payload → original
+result returned, no second row; a hypothetically differing payload →
+`ErrIdempotencyKeyReused`, named explicitly). The true-concurrency case
+(two connections racing the same composed key) is **not** re-derived from
+scratch in §14 — it doesn't need to be, because §14 states this mechanism
+is "unchanged" from ADR 0020, and ADR 0020's own "Concurrent-duplicate
+behavior" section already specifies the exact arbitration mechanism
+(Postgres serializes on the unique index; the loser's `SAVEPOINT`
+rollback-and-lookup path is spelled out precisely) and already states, in
+its own Consequences section, that "test coverage for every flow... must
+include: exact retry, same-key-different-payload, concurrent-duplicate,
+and a genuine concurrency race (two goroutines/connections)." So the
+concurrent case for §14's composed keys is testable by applying an already
+-specified, already-required pattern to a new key shape — not a gap, just
+not re-stated in §14 itself.
+
+**Named gap — no adversarial test for out-of-order/gapped
+`occurrence_ordinal` delivery is named anywhere.** §14.1 requires
+`occurrence_ordinal` be derived from something intrinsic to the specific
+occurrence, explicitly never inferred by "counting existing rows and adding
+one," specifically so it survives redelivery and non-sequential arrival.
+But no worked example or named test case anywhere in ADR 0038 exercises
+*why* that matters: e.g., two genuinely distinct partial-settlement
+occurrences whose ordinals are non-adjacent (ordinal 1 then ordinal 5, with
+2–4 never posted because they belong to lifecycle events that never
+occurred or were themselves deduplicated away) or delivered **out of
+order** (ordinal 5's event reaches the ledger before ordinal 1's, e.g. due
+to provider redelivery/network reordering). Nothing in the ledger posting
+layer is documented to depend on ordinal contiguity or arrival order —
+each composed `provider_tx_id`/`idempotency_key` is independently unique —
+so this is very likely a non-issue in practice, but that equivalence is
+never stated explicitly, and ADR 0038 has no "Tests" checklist for §14 at
+all (contrast `ledger-accounting-model.md` §6.3.4 item 7, which names an
+explicit, enumerated test list for the origin-split proposal). **Required
+test-strategy addition**: (1) a named test asserting two occurrences with
+non-adjacent ordinals both post independently and correctly with no gap
+-related validation error; (2) a named test asserting out-of-order delivery
+(higher ordinal's event processed before a lower ordinal's) produces the
+same two independently-correct postings, order-independent — both derived
+from, but not stated in, §14.1's own reasoning.
+
+### P1-4 — `player_locked` origin-split (`ledger-accounting-model.md` §6.3): testable-as-specified — no gap found
+
+The worked cases (C-void, C-loss, C-win, C-partial) are written as literal
+debit/credit tables with exact amounts and running B1 balances after each
+step (§6.3.3.2) — these translate directly into fixture-and-assertion test
+cases with no interpretation required. §6.3.4's implementation checklist
+already names, as item 7, the exact `GetSummary` regression test this
+review was asked to check for: "a regression test asserting
+`GetSummary().LockedBalance` is non-zero and correct when a wallet holds
+**both** `player_locked_cash` and `player_locked_bonus` (item 1's defect,
+caught by a test rather than by a player)" — alongside mixed-funded
+lock/void/loss/win/partial-settlement-ratio-survival/rollback tests, the
+`bonus_share == 0` degenerate no-zero-entry case, B1 (extended) asserted
+after every transaction, Rule B2 (extended)'s no-mirror-on-lock /
+one-pair-per-crossing assertion, and repetition on an 18-exponent asset.
+This is the one P1 of the five where the architecture already anticipates
+and names its own required tests to the same standard `qa` would otherwise
+have to add. No addition made here. Two items remain correctly gated as
+`OPEN QUESTION`/unreviewed (case C-win's proportional-payout rule, case
+C-cashout) and are correctly marked untestable-as-final until resolved —
+that is accurate self-disclosure, not a gap.
+
+### P1-5 — `OpenBetSelfExclusionPolicy` (ADR 0034 §14): missing-test-hooks — two gaps
+
+Both policy values are independently testable at the settlement/void
+level: `SETTLE_NORMALLY` requires only asserting the existing settlement
+path is unaffected plus one new `audit.Entry` (open→open, per §14.5);
+`VOID_ON_SELF_EXCLUSION` reuses ADR 0038 §8.1's existing void posting shape
+verbatim, so it inherits that shape's own tests plus the same new audit
+assertion (open→void). Both are testable independently with no shared
+fixture dependency.
+
+**Named gap 1 — the jurisdiction-floor tighten-only rule (§14.2) does not
+specify whether it is enforced at configuration-write time or at
+resolution-read time, and the two require different tests.** §14.2 says "no
+tenant or brand ... may configure `SETTLE_NORMALLY`" where the
+jurisdiction floor is `VOID_ON_SELF_EXCLUSION` — phrasing that reads as a
+write-time rejection — but also describes "resolution" falling back through
+scopes, which reads as a read-time algorithm that would simply never select
+a looser value regardless of what was written. A write-time-rejection
+design needs a test asserting the write itself is refused; a read-time
+-floor design needs a test asserting a successfully-written loosening
+override is simply never the effective value. These are different code
+paths and only one can be right. **Required test-strategy addition**: this
+must be pinned to one mechanism before a test can be written; recorded here
+as a named gap for `identity-compliance`/`architect` to resolve, not
+decided by `qa`.
+
+**Named gap 2 — the new self-exclusion-commit listener/enumeration step
+(§14.5) has no named test case anywhere, despite ADR 0034 itself stating
+this is "a genuinely new system behavior" with no prior precedent in this
+codebase.** Unlike P1-4's §6.3.4 item 7, ADR 0034 §14 contains no
+enumerated test list for this new component. At minimum the following are
+implied by the architecture's own text but not named as tests anywhere:
+(a) a multi-tenant/brand/jurisdiction fan-out case — one Person with open
+bets under two tenants in two different jurisdictions, self-excludes once,
+and each open bet independently resolves its own policy per its own bet
+-level jurisdiction/tenant/brand scope (§14.4's own example, not yet a
+test); (b) the effective-time rule (§14.3) — a policy version change
+occurring *between* self-exclusion-commit and a `SETTLE_NORMALLY` bet's
+eventual natural settlement must not retroactively change which version
+governed that bet; (c) audit cardinality — zero, one, and many open bets at
+the moment of a single self-exclusion commit each produce the correct
+number of `audit.Entry` rows (one per bet, never one per event, per
+§14.5). None of these currently exist as named test cases in this document
+or in ADR 0034.
+
+Every item in this section is `RECOMMENDATION` (a test strategy binds
+nothing until executed) and `NOT IMPLEMENTED` (no test code exists yet).
+None of it can move to `IMPLEMENTED` — for the retail floor, hierarchy/
+RBAC, or the RG-bypass test — before the corresponding architecture (ADR
+0035, ADR 0036, the retail hierarchy design) is itself frozen and
+authorized for implementation, and this document's test classes are
+re-checked against that design's actual mechanism (closure table vs.
+materialized path vs. recursive CTE; how float is represented in the
+ledger; how the retail RBAC scope is carried on a request) rather than
+assumed to fit it. Item 1.6 (withdrawal exceeding float) is explicitly
+`OPEN DECISION`, referred to `architect`/`ledger-finance`, and its test
+cannot be written until that decision is made.
