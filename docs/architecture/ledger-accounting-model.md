@@ -3574,7 +3574,7 @@ cannot convert, with an integrity alert), which is a deliberately unusable
 placeholder rather than a silent default. Nothing in phase 2 depends on
 FD-1; the first bonus-funded, cashout-eligible slice does.
 
-### 6.6 Wagering-progress integrity model — closing gate G-3 (Stage 4H-B0-R7 Workstream A, DESIGN ONLY)
+### 6.6 Wagering-progress integrity model — closing gate G-3 (Stage 4H-B0-R7 Workstream B, DESIGN ONLY)
 
 **Status: `NOT IMPLEMENTED`. DESIGN ONLY, and cross-domain by
 construction** — the defect is in a `bonus-engine`-owned definition (ADR
