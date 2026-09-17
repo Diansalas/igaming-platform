@@ -1557,3 +1557,563 @@ stage's own "freeze what exists, don't design what doesn't" scope:
 
 Owner of this section: `bonus-engine`. Nothing in this section authorizes
 writing `internal/bonus`, a migration, or a test.
+
+## Terminal-Grant Technical Contract (Stage 4H-B0-R7, Workstream C)
+
+Status: **design-only, `NOT IMPLEMENTED`.** Issued per Stage 4H-B0-R7
+("FINAL FINANCIAL/BONUS IMPLEMENTATION GATE"), Workstream C. This section
+extends §1.2's Grant-state table and §1.3's transition table with the
+exact state-machine mechanics needed so that, once the "Human decision
+required" item (§5's cross-reference note, gate **G-2**, restated
+precisely at §T.13 below) is resolved by a human/product decision, an
+implementer has an unambiguous mechanism to build — no schema, no Go code,
+no migration, and **the human decision itself is not made here.** This
+section also closes, at the technical-contract level only, one half of
+"Genuine gaps found" item 1 (which `AssetAuthorization.Operation` value a
+bonus checkpoint passes remains undecided — that is not resolved here —
+but exactly when `AssetAuthorization.CheckEligibility` is called, in what
+order relative to RG/Risk, and what a denial does to the Grant state
+machine, is fully specified below, so Genuine gap item 1's eventual
+resolution is a one-value substitution, not a re-design).
+
+### T.1 Composition order for Bonus Engine's three-way live gate
+
+Doc10 §5 already fixes, as binding architecture, "RG first, Risk second,
+RG's denial short-circuits before Risk ever runs" at every Bonus Engine
+enforcement point. That relative order is **not revised here.** What this
+document adds is where `AssetAuthorization.CheckEligibility` (ADR 0037
+§C.2) sits relative to that fixed pair, which no prior document decides —
+ADR 0031's own review found this an open, platform-wide gap (item (f):
+"[e]very future enforcement point calls `rg.EvaluateEligibility`,
+`AssetAuthorization.CheckEligibility` and `risk.Evaluate` in the same
+transaction, so the mapping is load-bearing... flagged for `architect`").
+
+**This document's own composition decision, scoped to Bonus Engine's call
+sites only, not a platform-wide resolution of ADR 0031 item (f):**
+
+```
+AssetAuthorization.CheckEligibility  →  rg.EvaluateEligibility  →  risk.Evaluate
+```
+
+Justification: `AssetAuthorization`'s own internal layer chain is ordered
+"cheapest/most platform-global checks first" (ADR 0037 §A.3) precisely
+because a check that does not depend on which player is involved should
+resolve before a check that does. The same reasoning applies one level up
+the call stack: whether this **asset** is even a legitimate instrument for
+this **operation**, in this tenant/jurisdiction, is a pure
+configuration-level fact — it requires no player-row lookup at all for
+layers 1–3, is the cheapest of the three checks, and is entirely
+independent of which player's Grant is being evaluated. It therefore
+belongs before RG's player-specific compliance gate, which itself already
+sits before Risk's player-specific exposure gate. This ordering changes
+nothing about doc10 §5's frozen RG-before-Risk relationship; it only
+prepends a third, more-global gate. If `architect` later fixes a different
+platform-wide order for ADR 0031 item (f), Bonus Engine's call sites
+conform to that resolution instead — this is a placeholder composition
+decision for Bonus Engine's own domain, not a claim of authority over the
+platform-wide question.
+
+**All three calls happen inside the same database transaction as the
+Grant's own state-changing effect, before that effect commits** — no
+exception, mirroring doc10 §4/§5's existing "same transaction, before
+commit" rule for RG/Risk, now extended to include `AssetAuthorization`.
+
+### T.2 Grant creation — what is fixed vs. what is evaluated later
+
+At the instant a Grant row is created (`(none) → issued`), the following
+facts are **captured once and denormalized onto the Grant row, immutable
+for the Grant's entire lifetime**:
+
+- `asset_code` — the wallet asset the Grant will be denominated in. Never
+  re-chosen, never re-derived; a Grant is never re-denominated (ADR 0032
+  §8: bonus accounting is always same-asset; a cross-asset bonus is "a new
+  architecture decision requiring its own ADR and human sign-off," not
+  something this contract permits by silence).
+- `decimal_exponent` — looked up **once**, from the Asset Registry's
+  existence layer (layer 1, a metadata read, not an eligibility decision —
+  doc10's "Bonus Dependency Contract Freeze" §1 already draws this
+  distinction), and frozen on the Grant row. This is safe to freeze,
+  not merely convenient: ADR 0037 §C.5.4 makes `decimal_exponent`
+  immutable at the asset-registry level itself ("no operation... may ever
+  change these, at any layer, for any reason") once any ledger entry can
+  reference the asset, so a live re-lookup at a later checkpoint would, by
+  construction, only ever reproduce the same value — freezing it instead
+  buys auditability (ADR 0032 §9: "the bonus amount must be exactly
+  recomputable from the stored inputs") without giving up any safety a
+  live re-check could add.
+- The **Offer version reference** — the entire immutable rule set: the
+  Eligibility/Reward/Wagering/Payout/Abuse-control axes (§2), the
+  forfeiture rules, the wagering-contribution-per-category table, and the
+  payout ordering rules. Doc10 §1.1 already states a Grant is "always
+  issued against one immutable Offer version, never a 'live' reference
+  that could change underneath an already-issued Grant" — this contract
+  restates that this extends to every rule *content* field, not only the
+  Offer row's identity.
+- `funding_source`/`funding provider_id` where applicable (ADR 0032 §6:
+  "fixed on the grant record at grant time and is immutable thereafter").
+- `fulfillment_destination` (`into_platform_wallet` / `inside_provider`,
+  doc10 §3.2, ADR 0032 §6(c)) — declared at Offer/reward-type
+  configuration time, inherited unchanged by every Grant issued under it.
+- The idempotency key / `trigger_reference` (doc10 §9).
+- A **denormalized snapshot** of the jurisdiction/licensing-mode context
+  and the Offer's own eligibility-axis facts (segment, country, deposit
+  method, first-deposit-only, VIP tier) **as evaluated at that instant** —
+  recorded so the Progress trail can show *why* `issued` was granted, but
+  this snapshot is a historical record, not a value any later checkpoint
+  re-reads to make a new decision (see §T.4).
+
+Evaluated **at** creation but explicitly **not** frozen for reuse
+elsewhere: the RG/Risk decision that gated `issued` itself. Per doc10 §4,
+"[a]ctivation is re-evaluated fresh, never assumed covered by the
+grant-time decision" — the `issued`-time RG/Risk pass authorizes only the
+`issued` transition, nothing downstream.
+
+**Not checked at creation at all**: `AssetAuthorization.CheckEligibility`
+for any operation. `issued` is "a decision, not a movement" (ADR 0032
+§3.1 — no ledger effect), and per T.1's "gate value-moving events, not
+decisions" principle (§T.5), a Grant decision that has not yet moved any
+value into a wallet has nothing for an authorization gate to protect. Only
+the layer-1 existence lookup (for the exponent, above) occurs at this
+point.
+
+### T.3 Grant activation
+
+At `issued → activated` (and identically at `issued`+`activated`
+collapsing into one operation for a no-opt-in, deposit-triggered Offer,
+per ADR 0032 §3.1's "one posting, not two" rule), the following are
+checked **fresh, live, in T.1's order, in the same transaction as the
+`bonus_grant` posting**:
+
+1. `AssetAuthorization.CheckEligibility(tenant, brand, jurisdiction,
+   Grant.asset_code, operation = <candidate: `wagering`, pending Genuine
+   Gap 1's resolution>)` — this is the point bonus value first becomes
+   real, wallet-resident, wagering-relevant value (ADR 0032 §3.1: the
+   `activated` event is what produces the sole `bonus_grant` posting per
+   Grant). A hard denial here (`eligible = false`, or `err != nil`, which
+   is always treated as ineligible per ADR 0037 §C.2) **blocks the
+   `activated` transition outright.**
+2. `rg.EvaluateEligibility` — unchanged from doc10 §5's existing rule.
+3. `risk.Evaluate(Operation: OperationBonusGrant)` — unchanged from doc10
+   §4's existing rule.
+
+**Consequence of a denial at any of the three** is identical, mirroring
+the existing RG/Risk-at-activation rule exactly, now extended to
+`AssetAuthorization`: the `activated` transition does not occur, and the
+Grant is recorded as `cancelled` via a Progress entry carrying the
+denying check's own reason code (`AssetAuthorization`'s `ReasonCode`,
+`rg.Decision.Code`, or the Risk rule's own code — whichever fired) — never
+silently skipped, never a fourth, uninstructed outcome. This is a
+deliberate, low-risk extension of an already-frozen pattern (three checks
+instead of two, same consequence shape), not a new design.
+
+### T.4 Ongoing eligibility — snapshot once, or repeated per event?
+
+**Both — for different classes of fact, and conflating them is exactly the
+mistake the stage directive warns against.**
+
+- The **Offer's own eligibility-axis configuration** (segment, country,
+  deposit method, first-deposit-only, min/max, VIP tier, opt-in) is a
+  **snapshot taken once**, at `issued`, against the player's facts as of
+  that instant, against the frozen Offer version (§T.2). It is never
+  re-evaluated. A Grant already `issued` is not retroactively un-issued
+  because the player's segment, country, or VIP tier later changes — this
+  mirrors casino/sportsbook's own treatment of an already-placed bet's
+  terms.
+- **RG status, Risk exposure, and Asset Authorization** are **not** part of
+  that eligibility-axis snapshot. They are safety/compliance/instrument-
+  legality gates, and are **repeated live** at every subsequent
+  value-moving checkpoint (activation, reward credit, conversion — §T.3,
+  §T.8, §T.7/T.9's conversion path) regardless of what the original
+  `issued`-time snapshot recorded. This is not new: doc10 §4/§5 already
+  establish this for RG/Risk ("[a]ctivation is re-evaluated fresh"); this
+  contract only adds `AssetAuthorization` to that same live-repeated set
+  (§T.11's table makes this the explicit, general rule).
+
+**Jurisdiction eligibility specifically bifurcates into both categories**,
+which is worth stating explicitly because it is the fact most likely to be
+miscategorized: whether *the Offer* is configured to be available in a
+jurisdiction (doc10 §7's "Offer-level eligibility configuration") is
+snapshotted once at `issued`; whether *the asset* is authorized for that
+jurisdiction (`AssetAuthorization` layer 6) and whether a jurisdiction-
+scoped Risk hard-limit currently fires (doc10 §4/§7) are both re-evaluated
+live, fresh, at every subsequent checkpoint.
+
+### T.5 Asset deactivation mid-Grant (`assets.active = false`, layer 2)
+
+**Neither "freeze" (a new Grant state), nor an automatic "force-forfeit,"
+nor "continue fully unaffected."** The correct mechanical answer, derived
+from already-frozen architecture rather than invented here:
+
+- Doc10 §1.2's own flagged gap already establishes, as binding text, that
+  **neither `forfeited` nor `cancelled` "accurately represents" this
+  case**, and explicitly leaves "whether a platform-caused inability to
+  complete should write off the balance at all... [as] a `bonus-engine` +
+  `ledger-finance` design question, filed as an open item, not decided by
+  this review." This contract does not walk that back by inventing an
+  automatic-forfeiture path on deactivation, nor does it invent a new
+  Grant *state* (e.g. `frozen`) unilaterally — adding a lifecycle state is
+  exactly the kind of cross-cutting redesign CLAUDE.md reserves for
+  `architect` + `ledger-finance` agreement, not a state-machine detail this
+  dispatch may settle alone.
+- **The mechanism instead**: the Grant's `status` field is **not
+  transitioned** by asset deactivation. Every subsequent event that would
+  otherwise move value **into** a player-facing balance in that asset —
+  a fresh `activation` (moot, already activated), a **reward credit**
+  event (§T.8; cashback settlement-job credit; a win settlement crediting
+  `player_bonus`, §T.7), or a **conversion** attempt (§T.7) — is
+  individually blocked at its own live `AssetAuthorization.CheckEligibility`
+  gate (T.1/T.3's mechanism), each denial recorded as its own Progress
+  entry with its own reason code (`AssetInactive`, from layer 2). The
+  Grant remains wherever it was (`activated`/`in_progress`/`completed`).
+- **Value-reducing/write-down transitions are never gated by
+  `AssetAuthorization` at all** (see §T.5.1 below) — so the Grant's
+  *existing* terminal paths keep working normally: its own time-limit
+  clock still runs and can fire ordinary `expired` (§T.9); staff can still
+  `cancel` it (§T.10); a `reversed` compensating entry can still post. None
+  of these three require the deactivated asset to authorize anything new —
+  they only extinguish exposure that already exists.
+- **Net effect**: an asset-deactivated, still-`activated`/`in_progress`
+  Grant is functionally stuck (every value-creating event denied,
+  individually and honestly logged) until one of: (a) the asset is
+  reactivated, at which point the Grant resumes exactly where it left off
+  — nothing was lost, because nothing was force-transitioned; (b) its own
+  natural `expired` transition fires; or (c) staff/player-driven
+  `cancelled` fires. This is deliberately the least-destructive mechanism
+  consistent with doc10's own already-stated objection to prematurely
+  extinguishing a player's balance "through no fault of their own."
+
+**T.5.1 — the value-creating/value-reducing asymmetry, stated as a general
+rule** (used throughout this contract, and justified once here rather than
+repeated per section):
+
+`AssetAuthorization.CheckEligibility` gates every Bonus Engine transition
+that **creates** a new bonus-denominated balance or **moves value into a
+less-restricted, player-facing balance** in that asset: `activated`'s
+`bonus_grant` posting, a reward-credit event, a win-settlement credit into
+`player_bonus`, and `converted`'s `bonus_conversion` posting. It **never**
+gates a transition that **extinguishes or reduces** the player's bonus
+exposure: `expired`/`cancelled`-from-activated forfeiture (`Dr player_bonus
+/ Cr promo_liability`), a void/rollback credit that merely **restores** a
+previously-locked stake to its origin account (a reversal, not new value —
+ADR 0032 §7's "restores... with no special-case code"), or a `reversed`
+compensating transaction. This mirrors, one layer up, the exact asymmetry
+ADR 0037 §C.5.3 already establishes for the Asset Registry's own
+administrative actions ("[d]ual control is required for any operation that
+brings a new fact into existence or flips a gate on... deliberately NOT
+required for the reverse direction... [t]urning something off is the
+fail-closed direction"). Applying the identical asymmetry here means a
+deactivated/unauthorized asset can never *block* the platform from writing
+down its own contingent liability — if it could, `promo_liability` and
+`player_bonus` could be left stuck, unreconciled, for as long as an
+incident-response deactivation lasted, which would itself become a new,
+unintended reconciliation gap.
+
+### T.6 Asset authorization removal mid-Grant (narrower than deactivation)
+
+**Mechanically identical to §T.5, for a structural reason worth stating
+explicitly rather than re-deriving per scenario**: `AssetAuthorization.
+CheckEligibility` collapses ADR 0037 §A.3's full seven-layer chain
+(existence → active → platform-authorized → tenant-authorized →
+brand-authorized → jurisdiction-authorized → operation-eligible) into a
+single `(eligible bool, reason ReasonCode, err error)` answer,
+short-circuiting at the first failing layer. Whether the failure is a full
+deactivation (layer 2), a revoked tenant authorization (layer 4), a
+revoked brand authorization (layer 5), a jurisdiction ban (layer 6), or —
+the narrowest case named in the task — the asset becoming ineligible for
+the specific operation Bonus Engine passes (layer 7, e.g. the candidate
+`wagering` value from Genuine Gap 1 being revoked specifically for that
+asset), Bonus Engine's own call site receives the **same shape of answer**
+and therefore needs exactly **one** handling path, not one per layer. This
+is precisely the benefit ADR 0037 §C.2 names as the reason for a single
+canonical `AssetAuthorization` service ("one canonical authorization
+concept — not five reimplementations"): Bonus Engine's state machine does
+not vary its mechanism by which of the seven layers failed. What *does*
+vary, and is preserved in full, is the **specific `ReasonCode`** recorded
+verbatim on the Progress entry — so a disputing player (or a future
+auditor) can see precisely *which* authorization layer changed underneath
+their Grant, even though the mechanical consequence (§T.5's blocked-event
+mechanism) is identical regardless.
+
+### T.7 Settlement — the G-2 decision point, modeled precisely
+
+This is the exact mechanism the human decision (§5's cross-reference note)
+governs. It is modeled here at the level of "what data exists, what are
+the three candidate machine actions" — no option is selected.
+
+**Trigger condition** (either of the two paths doc10 §5 already names as
+the same question, plus the composed path this contract adds in §T.5/T.9):
+a settlement (`round.settled`/`bet.settled` WIN) or a void/rollback event
+arrives, correlated (via `correlation_id`, ADR 0038 §3) to an earlier
+lock-time debit against `player_bonus`/`player_locked_bonus` under Grant
+`G`, and — read live, `FOR UPDATE`, inside the same transaction as the
+settlement posting, using the identical `(tenant_id, grant_id)` advisory
+lock doc10 §9 already specifies for Grant-completion races —
+`G.status ∈ {expired, cancelled, forfeited}` at that instant, **for any
+reason** (natural time-limit expiry, staff/player cancellation, a
+wagering-rule breach on a *different* bet, RG/self-exclusion-driven
+forfeiture, or — per §T.5 — an asset-deactivation-driven expiry that fired
+while this specific stake was still locked). A rare fourth entry path
+exists in principle (a race where `G` reaches `converted` with this stake
+still in flight) and is covered by the identical mechanism below; it is
+not treated as a distinct case.
+
+**Data available at the decision instant** (all read inside the same
+transaction, before the credit posts):
+- `G.status`, `G.terminal_reason_code`, `G.terminal_at` (why and when `G`
+  went terminal).
+- The inbound event's own kind (WIN settlement vs. VOID vs. ROLLBACK) and
+  amount `X`, in `G.asset_code`'s frozen `decimal_exponent` (§T.2).
+- The `correlation_id` linking this event to the original lock transaction,
+  and (for a rollback) `reverses_transaction_id` pointing at that specific
+  lock — the exact discriminator `ledger-accounting-model.md` §6.4.11's V-1
+  fix already specifies must be used, so this decision point and the G-3
+  netting fix key off the same correlation, never a looser "any credit to
+  `player_bonus` for this Grant" match.
+- `G`'s Progress trail up to and including the terminal transition (for
+  the audit narrative any of the three actions below must produce).
+
+**The exact three candidate machine actions** (mutually exclusive, exactly
+one is selected by whichever action the human decision names):
+
+- **ACTION_REFORFEIT**: post the inbound credit to `player_bonus` exactly
+  as the non-terminal case would (the ordinary WIN/void posting shape,
+  unchanged), **then**, in the same database transaction, post a second
+  `bonus_forfeiture` transaction (`Dr player_bonus X / Cr promo_liability
+  X`, ADR 0032 §5's existing shape) for the identical amount `X`, both
+  carrying the same `correlation_id`, the forfeiture leg carrying a
+  distinguishing `reason_code` (e.g. `terminal_grant_reforfeit`) and a
+  reference to the triggering settlement/void event. `G.status` does not
+  change (it is already terminal). A Progress entry is appended recording
+  both transaction ids.
+- **ACTION_ROUTE_TO_CASH**: substitute the credit's destination account at
+  posting time — `Dr [stake-origin account] X / Cr player_cash X` instead
+  of `Cr player_bonus X` — with no `promo_liability`/`bonus_expense` legs
+  at all, since the value never re-enters a bonus-denominated account
+  (mirroring ADR 0032 §3's direct-cash-reward shape, not the bonus-grant
+  shape). This requires the settlement/void posting layer (owned by
+  `ledger-finance`/`casino`/`sportsbook`, not Bonus Engine) to consult
+  Grant status before choosing a destination account for this specific
+  credit — a new call-back into Bonus Engine's Grant-status read that does
+  not exist today and is the one piece of new plumbing this option
+  requires, regardless of which action is ultimately chosen; recording
+  that dependency here so it is not discovered mid-implementation. A
+  distinguishing `reason_code` (e.g. `terminal_grant_cash_route`) is
+  carried on the transaction. `G.status` does not change.
+- **ACTION_HOLD_FOR_REVIEW**: the credit is not posted to either
+  `player_bonus` or `player_cash` at this instant. It is held (a
+  suspense/holding posting, or the underlying settlement posting is itself
+  deferred — the exact holding mechanism is a `ledger-finance` design
+  question this contract does not resolve, flagged as a sub-dependency of
+  this option specifically) and a manual-review queue entry is created
+  referencing `G`, the amount, the `correlation_id`, and both event
+  references (the lock and the triggering settlement/void). `G.status`
+  does not change. Staff later resolves the queue entry by choosing
+  **either** ACTION_REFORFEIT or ACTION_ROUTE_TO_CASH manually — the held
+  amount is then posted per that choice, carrying the staff actor id, a
+  mandatory reason code, and (per CLAUDE.md's four-eyes rule, if the amount
+  exceeds the configured threshold) a second approver.
+
+**Every one of the three actions appends a Progress entry to `G` even
+though `G` is already terminal** — this is not a new mechanism; §1.2
+already establishes that a `reversed` transition can be appended after any
+terminal state without editing the prior terminal record, and this is the
+identical append-only pattern applied to a new trigger reason.
+
+**Distinct from, and not to be confused with, an `AssetAuthorization`
+denial on a WIN-settlement credit against a *non-terminal* Grant.** If the
+asset itself is currently deactivated/unauthorized (§T.5) at the instant a
+WIN settlement would credit `player_bonus` under a still-`activated`/
+`in_progress` Grant, that denial is not G-2 (the Grant is not terminal) —
+but it is also not constructible as a Bonus-Engine-isolated case: the WIN
+settlement's cash-funded and bonus-funded portions post in one atomic
+transaction owned by `casino`/`sportsbook`, and that whole transaction is
+already gated by `casino`/`sportsbook`'s own `AssetAuthorization` check on
+the `settlement`/`wagering` operation for that asset generally — an
+asset-wide deactivation blocks the entire settlement, not a
+bonus-funded portion of it in isolation. This is `casino`/`sportsbook`'s own
+posting-boundary concern, not a fourth silent option this contract needs
+to invent inside Bonus Engine's domain.
+
+### T.8 Reward credit
+
+**Evaluated live, at credit time, never carried forward from grant time**:
+the three-way gate in T.1's order (`AssetAuthorization` →
+`rg.EvaluateEligibility` → `risk.Evaluate`), exactly as at activation
+(§T.3). This applies uniformly to every reward-credit-shaped event: the
+primary `bonus_grant` posting at `activated` (§T.3), and — separately, at
+its own instant, not inherited from whatever passed when the Offer's
+cashback window opened — the cashback settlement job's own credit at
+window close. A cashback settlement job is, for this purpose, an
+`activated`-shaped event requiring its own fresh three-way gate, not a
+mechanical continuation of a check performed when the window started.
+
+**Carried forward from grant time, never re-derived**: the reward
+*amount's* computation inputs — the frozen Offer version's rate/cap/
+formula and rounding rule (§T.2; ADR 0032 §9's "exactly recomputable from
+stored inputs"), and the frozen `decimal_exponent`. The amount is
+recomputed from these stored, immutable inputs for reconciliation, but the
+inputs themselves are never re-looked-up live.
+
+### T.9 Expiry
+
+**Two genuinely different things, not one mechanism wearing two names —
+confirmed explicitly, as the task requires:**
+
+- **Ordinary expiry** (the Offer's time limit elapses with no stake
+  currently locked): this is the existing, already-fully-specified ADR
+  0032 §5 mechanism (`Dr player_bonus / Cr promo_liability` on the
+  outstanding, unlocked balance, clock-triggered via `clock_timestamp()`
+  per §2's cashback note, generalized to every time-limited Offer). Per
+  §T.5.1's asymmetry rule, this posting is **never gated by
+  `AssetAuthorization`** — it is a pure write-down, and gating it would let
+  an unrelated asset-deactivation incident indefinitely block the
+  platform's own ability to extinguish a contingent liability it no longer
+  owes anything against. **This needs no new design; it already exists.**
+- **Expiry while a stake is locked**: the expiry posting can only write off
+  what currently sits in `player_bonus` at that instant — a locked stake
+  sits in `player_locked`/`player_locked_bonus` (provisional, doc10
+  Dependency Contract Freeze §9), not `player_bonus`, so it is untouched by
+  the expiry posting. The Grant goes `expired` while that stake remains
+  outstanding. **This is not a fourth case** — it is one of the named
+  trigger paths into §T.7's G-2 decision point ("for any reason —
+  expiry, cancellation, forfeiture — not only self-exclusion," doc10 §5's
+  own words), reached the moment that locked stake's settlement or
+  void/rollback later arrives.
+
+### T.10 Cancellation
+
+**Symmetric to §T.9, not a new mechanism.** A `cancelled`-from-`activated`/
+`in_progress` transition posts the identical `bonus_forfeiture` shape (ADR
+0032 §3.1: "Dr player_bonus / Cr promo_liability on the outstanding
+balance — identical shape to §5, no `bonus_expense` recognized or
+reversed"), never gated by `AssetAuthorization` for the same §T.5.1
+write-down reasoning, and requires no RG/Risk/AssetAuthorization check of
+its own (cancellation only ever reduces exposure — there is nothing for a
+value-creating gate to protect). If a stake is locked at the moment of
+cancellation, that stake's eventual settlement/void again lands against an
+already-terminal (`cancelled`) Grant — again §T.7's G-2 decision point, one
+more instance of the same trigger set, not a separate mechanism.
+`cancelled`-from-`issued` (before any funds ever entered a wallet) has no
+ledger dependency at all and is unaffected by any of the above.
+
+### T.11 Immutable-vs-live-evaluated table (governing table, stage directive requirement)
+
+| Fact | Captured how | Justification |
+|---|---|---|
+| Asset identity (`asset_code`) | **Immutable at grant creation**, never re-evaluated | No mechanism re-denominates a Grant; ADR 0032 §8 forbids cross-asset bonus math without a new ADR |
+| `decimal_exponent` | **Immutable**, looked up once (layer-1 metadata read) at creation, frozen on the Grant row, reused for every downstream computation | ADR 0037 §C.5.4 makes the registry's own value immutable post-creation, so freezing loses no safety while buying ADR 0032 §9's recomputability requirement |
+| Offer version content (eligibility axis, wagering multiplier, per-category contribution, forfeiture rules, payout ordering) | **Immutable**, bound to the one Offer version the Grant references | Doc10 §1.1: a Grant is issued against one immutable Offer version, never a live reference |
+| Offer-level jurisdiction/segment/country/VIP-tier eligibility (the eligibility *axis*) | **Snapshot once**, at `issued`, against the player's facts at that instant | A Grant is not retroactively un-issued when a player's segment/country/tier later changes (§T.4) |
+| Funding attribution (`funding_source`, provider) | **Immutable** at grant time | ADR 0032 §6: "fixed on the grant record at grant time and is immutable thereafter" |
+| Fulfillment destination flag | **Immutable**, set at Offer/reward-type configuration, inherited by the Grant | ADR 0032 §6(c): "a reward type that does not declare it is rejected at configuration time" |
+| RG status (self-exclusion, restrictions) | **Re-evaluated live** at every value-moving checkpoint (activation, reward credit, conversion) | Doc10 §5: "[a]ctivation is re-evaluated fresh, never assumed covered by the grant-time decision"; mid-lifecycle self-exclusion is prospective, never retroactive |
+| Risk exposure (`risk.Evaluate`) | **Re-evaluated live** at the same three checkpoints | Doc10 §4; ADR 0031 §15a-ii |
+| Asset authorization status (all 7 `AssetAuthorization` layers) | **Re-evaluated live** at every value-moving checkpoint (activation, reward credit, conversion) — **never** frozen from grant time | This document's own extension (§T.3/§T.5/§T.8); freezing this is exactly what would let a since-revoked authorization be silently bypassed, which the stage directive forbids outright |
+| Jurisdiction-scoped Risk hard-limit on `bonus_grant` | **Re-evaluated live**, folded into the `risk.Evaluate` calls above | Doc10 §7 |
+| Wagering-contribution rules (per-game/category/provider %) | **Immutable**, part of the frozen Offer version | Same reasoning as Offer version content, row 3 |
+| Forfeiture rules (excluded games, max-bet-while-wagering, time limit) | **Immutable**, part of the frozen Offer version | Same reasoning as row 3 |
+| Grant's own current lifecycle `status` | **Live, read `FOR UPDATE` at every checkpoint that might act on it**, never assumed from a prior read | §T.7's G-2 mechanism depends entirely on reading current status inside the same transaction as the competing settlement/void event, under the existing `(tenant_id, grant_id)` advisory lock (doc10 §9) |
+
+**Why getting this wrong breaks the platform in exactly the two directions
+the stage directive names**: if RG/Risk/`AssetAuthorization` were frozen at
+grant time instead of re-evaluated live, a Grant issued before a player
+self-excluded, before a jurisdiction revoked an asset, or before an
+authorization was pulled, could keep converting/crediting indefinitely
+against rules that no longer hold — unsafe. If the Offer's own eligibility-
+axis content, wagering rules, or forfeiture rules were re-evaluated live
+against whatever the Campaign's *current* Offer version says, instead of
+the frozen version the Grant was actually issued against, a disputing
+player's Progress trail would explain a decision using rules that were not
+the rules in force when that decision was made — un-auditable, and a
+direct violation of doc10 §1.1's "never a live reference" rule.
+
+### T.12 Guarantee: reward credit can never bypass live asset authorization
+
+Every reward-credit-shaped event this contract defines (§T.3's
+`activated`, §T.8's cashback/other reward credit, §T.7's win-settlement
+credit into `player_bonus`, and the `converted` transition's
+`bonus_conversion` posting) calls `AssetAuthorization.CheckEligibility`
+**fresh, in T.1's order, in the same transaction as the posting**,
+regardless of what authorization state existed at grant-creation time
+(§T.11's table: this is one of the facts explicitly **not** frozen). A
+hard denial (`eligible = false`, or any non-nil `err`, per ADR 0037 §C.2's
+"non-nil error is always ineligible, no exception, no fallback to a
+previously-known-good answer") **blocks that specific transition** — it
+does not silently proceed, does not fall back to the grant-time answer,
+and does not invent a fourth outcome:
+
+- At **activation** (§T.3) and at a **cashback/other reward-credit event**
+  (§T.8): denial blocks the transition outright, recorded as `cancelled`
+  with the `AssetAuthorization` `ReasonCode` — identical consequence shape
+  to an RG/Risk denial at the same checkpoint.
+- At **conversion** (`completed → converted`): denial leaves the Grant in
+  `completed` — non-terminal, retryable — **the identical, already-frozen
+  rule doc10 §5 established for RG/Risk denial at conversion** ("a
+  `Decision.Allowed == false` at CONVERSION time leaves the Grant in
+  `completed`... it is never a `forfeited` or `cancelled` transition").
+  This is **not** G-2: G-2 requires the Grant to already be terminal before
+  a credit arrives, and a Grant denied at conversion is, by definition,
+  still non-terminal (`completed`) at the moment of denial. Extending the
+  already-frozen RG/Risk-at-conversion rule to `AssetAuthorization` is a
+  consistent, low-risk generalization, not a new human decision and not a
+  fourth silent option.
+- At a **win-settlement credit against an already-terminal Grant** (`G`
+  already `expired`/`cancelled`/`forfeited`): this **is** G-2, resolved by
+  whichever of §T.7's three named actions the human decision selects —
+  explicitly not a case this section resolves independently.
+
+No path exists in this model by which a reward credit posts into, or a
+bonus conversion produces, an asset that is not currently authorized for
+that tenant/jurisdiction/operation at the instant of posting — every
+posting-adjacent transition re-checks live, and every denial routes to
+one of the two already-established non-G-2 outcomes above, or explicitly
+to G-2 where the Grant is already terminal.
+
+### T.13 The human decision, restated precisely against the modeled transitions
+
+**Still required, still not selected here.** Restated in the identical
+three-option form doc10 §5 already uses, now grounded in the exact
+transition points §T.7 models:
+
+> When a settlement (`round.settled`/`bet.settled` WIN) or a void/rollback
+> event, correlated to a lock-time debit against `player_bonus`/
+> `player_locked_bonus` under Grant `G`, arrives while `G.status ∈
+> {expired, cancelled, forfeited}` — reached via any of: (i) `G`'s own
+> natural time-limit expiry firing while this stake was still locked
+> (§T.9), including where that expiry was itself caused by an
+> asset-deactivation incident that left `G` unable to complete (§T.5);
+> (ii) staff/player-initiated cancellation of `G` while this stake was
+> still locked (§T.10); (iii) `G` being forfeited for a wagering-rule
+> breach or manual-review outcome on a *different* bet under the same
+> Grant; or (iv) an RG/self-exclusion-driven forfeiture — which of the
+> following three machine actions (§T.7) should fire:
+>
+> **(a) ACTION_REFORFEIT** — post the credit normally, then immediately
+> post a second `bonus_forfeiture` transaction nulling its player-facing
+> effect.
+>
+> **(b) ACTION_ROUTE_TO_CASH** — redirect the credit's destination account
+> from `player_bonus` to `player_cash` at posting time, as a mechanical
+> settlement of an already-earned entitlement.
+>
+> **(c) ACTION_HOLD_FOR_REVIEW** — hold the credit and route it to a
+> manual-review queue, where staff later selects (a) or (b) explicitly,
+> under CLAUDE.md's four-eyes rule where the amount exceeds threshold.
+
+This decision governs exactly **one** transition point in this contract —
+the terminal-grant credit disposition modeled in full at §T.7 — reachable
+by the four trigger paths listed above (all confirmed by
+`ledger-accounting-model.md` §6.4.11's V-4 finding to gate **bonus-only**
+sportsbook funding directly, not only a future mixed-funding case). It
+does **not** govern, and is fully distinct from, the already-resolved
+non-G-2 outcomes this contract specifies independently: RG/Risk/
+`AssetAuthorization` denial at grant/activation (blocks, `cancelled`,
+§T.3/§T.12), or denial at conversion on a still-non-terminal Grant (leaves
+`completed`, retryable, §T.12). Whichever of (a)/(b)/(c) is selected, the
+mechanism to implement it — the exact data available, the exact posting
+shape, the exact Progress-trail append, and the exact idempotency/locking
+discipline — already exists per §T.7 above; only the choice of action
+remains open.
+
+Owner of this section: `bonus-engine`. Nothing in this section authorizes
+writing `internal/bonus`, a migration, or a test.
