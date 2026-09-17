@@ -1238,6 +1238,416 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # --- Asset Registry / Asset Authorization (ADR 0037, Stage 4H-B0-R6) ---
+  #
+  # Split along ADR 0037 §C.1's two tiers: /v1/admin/assets/** is
+  # asset_registry:manage (platform_admin only, layers 1-3), and
+  # /v1/admin/asset-authorizations/** is asset_authorization:write
+  # (tenant-scoped, layers 4-7). There is deliberately NO endpoint that
+  # evaluates eligibility: AssetAuthorization.CheckEligibility resolves
+  # tenant/brand/jurisdiction server-side, and exposing it over HTTP would
+  # mean accepting a jurisdiction identifier from a caller.
+  /v1/admin/assets:
+    get:
+      summary: List the platform asset registry
+      description: Requires asset_registry:manage (platform_admin only).
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The full registry
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Asset"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      summary: Create an asset (layer 1, dual-controlled)
+      description: >
+        Requires asset_registry:manage AND a pending change request for
+        this code, approved by a DIFFERENT platform principal (ADR 0037
+        §C.5.3), whose payload matches the identity fields exactly. The
+        body has no `active`/`platform_authorized` field by design (§C.5.5:
+        creation must never authorize any financial operation) and unknown
+        fields are rejected. Returns 409 when no approved request exists.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, asset_type, decimal_exponent, display_name, reason_code]
+              properties:
+                code: { type: string }
+                asset_type: { type: string, enum: [fiat, crypto] }
+                decimal_exponent: { type: integer, minimum: 0, maximum: 18 }
+                display_name: { type: string }
+                network: { type: string, description: Required for a crypto asset }
+                reason_code: { type: string }
+      responses:
+        "201":
+          description: Created - always inactive and not platform-authorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/assets/change-requests:
+    post:
+      summary: File a four-eyes change request (create/activate/platform_authorize)
+      description: >
+        Requires asset_registry:manage. Only the three dual-controlled
+        operations are representable - suspend/revoke are deliberately
+        single-actor kill-switches (ADR 0037 §C.5.3). The requesting
+        principal must resolve to a platform-scoped staff row, enforced by
+        the database.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operation, asset_code, reason_code]
+              properties:
+                operation: { type: string, enum: [create, activate, platform_authorize] }
+                asset_code: { type: string }
+                asset_type: { type: string, enum: [fiat, crypto] }
+                decimal_exponent: { type: integer, minimum: 0, maximum: 18 }
+                network: { type: string }
+                reason_code: { type: string }
+      responses:
+        "201":
+          description: Request filed (state = pending)
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/assets/change-requests/{id}/decision:
+    post:
+      summary: Approve or reject a change request
+      description: >
+        Requires asset_registry:manage. Returns 409 for a self-approval,
+        for a second decision by the same principal, or for a principal
+        that resolves to the same person as the requester - all enforced by
+        the database (migration 0044, mirroring withdrawal_approvals).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision, reason_code]
+              properties:
+                decision: { type: string, enum: [approve, reject] }
+                reason_code: { type: string }
+      responses:
+        "201":
+          description: Decision recorded (immutable)
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/assets/{code}:
+    patch:
+      summary: Update mutable asset metadata (layer 1)
+      description: >
+        Requires asset_registry:manage. display_name is the ONLY mutable
+        field: code/decimal_exponent/asset_type/network are immutable
+        (ADR 0037 §C.5.4), are not accepted in this body, and are refused
+        by a database trigger regardless.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [display_name, reason_code]
+              properties:
+                display_name: { type: string }
+                reason_code: { type: string }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/assets/{code}/activation:
+    put:
+      summary: Activate or suspend an asset (layer 2)
+      description: >
+        Requires asset_registry:manage. `value: true` additionally requires
+        an approved activate request (409 otherwise); `value: false` is
+        deliberately single-actor - an incident kill-switch must not wait
+        for a second approver (ADR 0037 §C.5.3). `value` is mandatory:
+        defaulting a missing boolean would make granting reachable by
+        omission.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value, reason_code]
+              properties:
+                value: { type: boolean }
+                reason_code: { type: string }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/assets/{code}/platform-authorization:
+    put:
+      summary: Grant or revoke platform authorization (layer 3)
+      description: >
+        Requires asset_registry:manage. ADR 0037 §C.5.1 operation 5 - the
+        asset's own platform clearance, NOT ProviderCapability (ADR 0022),
+        which is a different concept. Granting requires an approved
+        platform_authorize request; revoking does not.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value, reason_code]
+              properties:
+                value: { type: boolean }
+                reason_code: { type: string }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Asset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/assets/{code}/operation-eligibility:
+    put:
+      summary: Set the PLATFORM-WIDE operation eligibility default (layer 7)
+      description: >
+        Requires asset_registry:manage (platform tier of ADR 0037 §C.5.1
+        operation 9). `product` omitted means every product; a
+        product-specific row always wins over it. Returns 403 if the asset
+        is not platform-authorized - nothing may be made eligible for an
+        asset the platform has not cleared.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssetOperationEligibilityInput"
+      responses:
+        "200":
+          description: Platform-wide default written
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/asset-authorizations:
+    get:
+      summary: List this tenant's asset authorizations (layers 4-6)
+      description: Requires asset_authorization:write and a tenant-scoped token.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: asset_code
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Authorization facts visible to the caller's tenant
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/asset-authorizations/{scopeKind}:
+    put:
+      summary: Authorize an asset for this tenant, a brand, or a jurisdiction (layers 4/5/6)
+      description: >
+        Requires asset_authorization:write and a tenant-scoped token. The
+        tenant is ALWAYS taken from the verified token, never from the body
+        (ADR 0038 §11's rule, applied here). brand_id/jurisdiction_id name
+        which brand/jurisdiction is being configured; a composite foreign
+        key plus RLS mean neither can belong to another tenant. Returns 403
+        when the write would widen past the layer above it (a
+        non-platform-authorized asset, or a brand grant with no tenant
+        grant behind it) - refused at write time, not only at resolution
+        time.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: scopeKind
+          in: path
+          required: true
+          schema: { type: string, enum: [tenant, brand, jurisdiction] }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [asset_code, eligible, reason_code]
+              properties:
+                asset_code: { type: string }
+                brand_id: { type: string, format: uuid, description: Required for scopeKind=brand }
+                jurisdiction_id: { type: string, format: uuid, description: Required for scopeKind=jurisdiction }
+                product: { type: string, description: Omitted means every product }
+                eligible: { type: boolean }
+                reason_code: { type: string }
+      responses:
+        "200":
+          description: Authorization fact written
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/asset-authorizations/operation-eligibility/{code}:
+    put:
+      summary: Narrow the operation eligibility for this tenant (layer 7 override)
+      description: >
+        Requires asset_authorization:write and a tenant-scoped token. A
+        tenant override may only NARROW the platform-wide default: a
+        widening write returns 403 and is never stored (ADR 0037 §A.6).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssetOperationEligibilityInput"
+      responses:
+        "200":
+          description: Tenant override written
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1256,6 +1666,40 @@ components:
         This remains PROVIDER DEPENDENT / foundation-only for Stage 2 -
         see docs/architecture/05-identity-architecture.md.
   schemas:
+    Asset:
+      type: object
+      description: >
+        One Asset Registry row (ADR 0037 layers 1-3). `active` (layer 2)
+        and `platform_authorized` (layer 3) are deliberately separate
+        bits - an incident kill-switch and a compliance clearance must not
+        share one. Neither being true implies anything about layers 4-7.
+      properties:
+        code: { type: string }
+        asset_type: { type: string, enum: [fiat, crypto] }
+        decimal_exponent:
+          type: integer
+          description: Immutable after creation - changing it would reinterpret every existing balance.
+        display_name: { type: string }
+        network: { type: string }
+        active: { type: boolean }
+        platform_authorized: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+      required: [code, asset_type, decimal_exponent, display_name, active, platform_authorized]
+    AssetOperationEligibilityInput:
+      type: object
+      description: >
+        Layer 7. `product` omitted means every product; a product-specific
+        row always wins over it, so the product axis narrows and never
+        widens. `operation` is exactly ADR 0037 §C.2's six values.
+      properties:
+        product: { type: string }
+        operation:
+          type: string
+          enum: [deposit, withdrawal, wagering, settlement, conversion, reporting]
+        eligible: { type: boolean }
+        reason_code: { type: string }
+      required: [operation, eligible, reason_code]
     TokenPair:
       type: object
       properties:
@@ -1463,6 +1907,16 @@ components:
             $ref: "#/components/schemas/Error"
     NotFound:
       description: No such resource (or not visible to the caller's tenant scope)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: >
+        A control refused the request - e.g. an asset-registry operation
+        with no independently-approved change request behind it
+        (four-eyes), or a self-approval. Deliberately distinct from 500:
+        the platform is working, a control said no.
       content:
         application/json:
           schema:
