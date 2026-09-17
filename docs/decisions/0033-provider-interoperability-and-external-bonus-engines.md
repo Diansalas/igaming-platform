@@ -304,6 +304,18 @@ discriminator — flagged to the Master Orchestrator's taxonomy doc as the
 recommended shape, open to being overridden if the canonical taxonomy
 prefers a distinct type.
 
+**Stage 4H-B0-R4 Wave-2 review correction (`architect`, independent
+review).** `provider_id` above, and on `sportsbook_settlement`/
+`sportsbook_void_cancel`, is **nullable**. `NULL` means the event
+originated from the platform's own in-house sportsbook engine
+(`09-sportsbook-architecture.md` §3), never a reserved sentinel string —
+this ADR's Context and this section's own examples were written before
+the in-house-engine mode existed as a confirmed architectural requirement
+(Stage 4H-B0-R4), and assumed an external vendor's `provider_id` is always
+present. It is not. A consumer must treat `provider_id IS NULL` as "in-house
+engine," identically to how it would treat any other populated value as
+"this external vendor," never as an error or an unknown-provider case.
+
 **Hard process rule for future stages** (recorded here as directive,
 not merely a suggestion): when Sportsbook Provider #1's documentation
 arrives, its capabilities are analyzed and mapped **onto this canonical
@@ -334,6 +346,17 @@ this is not a one-time tag but the durable answer to "which system is
 currently responsible for fulfilling this," so that, e.g., a player
 support query or a compliance request never has to guess whether an
 odds-boost credit came from our ledger or from the provider's own system.
+
+**Stage 4H-B0-R4 Wave-2 review correction (`architect`, independent
+review).** The "two independent bonus sources" framing above assumes an
+external provider is always in the picture. For a bet placed through the
+platform's own in-house sportsbook engine (`09-sportsbook-architecture.md`
+§3, confirmed this same stage), there is exactly **one** bonus source —
+the platform's own Bonus Engine; `fulfillment_owner` is always `platform`
+and no `external_reward_grant` row is ever created for that activity. This
+is a correct, safe degeneration of the model above, not a defect or a
+sign that coexistence logic is inapplicable — every mechanism in this
+section continues to work unmodified with a single source.
 
 **Decision**: reconstructable total exposure is an audit/ledger
 requirement, not a reporting-mechanism decision (out of scope here). This
