@@ -26,6 +26,14 @@ func createCasinoRiskRule(t *testing.T, pool *db.Pool, f casinoFixture, params r
 	if params.CreatedByActorType == "" {
 		params.CreatedByActorType = "staff"
 	}
+	// Stage 4H-B0-R6 (ADR 0031 §35): an asset-agnostic amount rule must
+	// declare the asset exponent its threshold's minor units are
+	// expressed in. Every case in this file bets in EUR (exponent 2), so
+	// defaulting the declaration preserves each test's original meaning;
+	// a case that cares about denomination sets it explicitly.
+	if params.AssetCode == "" && params.ThresholdExponent == nil {
+		params.ThresholdExponent = risk.ThresholdExponentOf(2)
+	}
 	if params.CreatedByActorID == uuid.Nil {
 		params.CreatedByActorID = uuid.New()
 	}

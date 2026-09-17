@@ -1815,6 +1815,17 @@ reinterpretation for this domain**:
 
 ### 26. New `Operation` values needed for sportsbook — `RECOMMENDATION`, documented only
 
+> **SUPERSEDED IN PART by §36 (Stage 4H-B0-R6).** This section's
+> `sportsbook_settlement`/`sportsbook_cashout` proposals remain on file as
+> the authoritative NAMES, but their characterization below as needed
+> Risk checkpoints is **withdrawn**: settlement is not a Risk checkpoint
+> at all, and cashout is one only in a hypothetical in-house
+> cashout-pricing mode that no document proposes. See §36 for the
+> reasoning and for the resolution of the §32(g) conflict with ADR 0038
+> §13. Everything else in this section (bet placement needs zero Risk-side
+> change; void/cancellation need no `Operation`; the naming-ownership
+> note) is unchanged and still stands.
+
 **`sportsbook_bet` already exists** — `internal/risk/types.go`'s
 `Operation` const block, migration 0041's `operation` CHECK, `internal/
 httpserver/risk_handlers.go`'s `RequireOneOf` allowlist, and both OpenAPI
@@ -2287,6 +2298,13 @@ prior stage's claims):
   HARD_LIMIT/CONFIGURABLE_LIMIT precedence and player-override behavior
   (§5), the moment `internal/sportsbook` exists and calls `Evaluate`
   before locking a stake.
+- ~~**Settlement and cashout are NOT first-slice-deferrable**~~ —
+  **WITHDRAWN by §36 (Stage 4H-B0-R6).** The bullet below is preserved
+  verbatim for the record, but its conclusion is wrong: neither proposed
+  value is a near-term Risk dependency, because neither settlement nor
+  provider-priced cashout is a Risk checkpoint at all (§36). A sportsbook
+  that pays out wins without a Risk gate is exactly what casino already
+  does for `casino_win`. Original text:
 - **Settlement and cashout are NOT first-slice-deferrable, mirroring
   §16a's finding that `bonus_conversion` sat on the Bonus Engine's own
   critical path.** A sportsbook that can accept bets but never pay out a
@@ -2371,7 +2389,8 @@ Nothing in §1-§31 above is modified.
 ### 32. Interaction notes and gaps found against the R4/R5 P1 closures
 
 **(a) `cumulative_amount` netting to zero for any two-player-leg posting
-shape — the one with a fail-OPEN direction.** `Rule.breach()`'s
+shape — the one with a fail-OPEN direction.** [**FIXED in code, Stage
+4H-B0-R6 — see §33.**] `Rule.breach()`'s
 cumulative query (`internal/risk/evaluator.go`) sums
 `SUM(CASE WHEN direction='debit' THEN amount ELSE -amount END)` over
 `ledger_entries` filtered by `tenant_id`/`player_account_id`/`asset_code`/
@@ -2447,7 +2466,9 @@ consistent with this ADR. **No gap** on that axis; (a) and (b) above are
 the two real interactions, and neither is a duplicate-counter problem.
 
 **(d) An `asset_code IS NULL` amount rule is silently re-denominated when a
-new asset is authorized for a tenant.** `Rule.matches()` treats an empty
+new asset is authorized for a tenant.** [**FIXED in code + migration 0046,
+Stage 4H-B0-R6 — see §35.** The Risk-side mitigation this note explicitly
+declined to propose was subsequently directed and implemented.] `Rule.matches()` treats an empty
 `AssetCode` as "applies regardless of asset", while `threshold` is minor
 units interpreted against *the request's* asset exponent (§18 states the
 denomination rule but only for the points case). So a platform- or
@@ -2512,7 +2533,9 @@ these are two distinct concepts that happen to share a type name, and the
 resolution may well be to rename one rather than to reconcile the values.
 
 **(g) A documentation-level conflict on whether settlement and cashout are
-Risk checkpoints.** §26/§31 above propose `sportsbook_settlement` and
+Risk checkpoints.** [**RESOLVED on Risk's side, Stage 4H-B0-R6 — see
+§36**, which adopts ADR 0038 §13's position and withdraws §26/§31's
+framing. One non-blocking cross-check remains open for `ledger-finance`.] §26/§31 above propose `sportsbook_settlement` and
 `sportsbook_cashout` as needed `Operation` values and call them
 "near-term, load-bearing", while ADR 0038 §13's last bullet states
 settlement, void, partial settlement, cashout and rollback are "**not**
@@ -2546,3 +2569,418 @@ denied every subsequent placement by `rg.EvaluateEligibility` first,
 discovered one. The two items §14.7 itself flags for `ledger-finance` (the
 "always provider/event-initiated" framing, and a platform-initiated void's
 idempotency key) are outside Risk's scope and are not Risk-blocking.
+
+## Stage 4H-B0-R6: Risk fail-closed hardening and exponent awareness
+
+Status: **IMPLEMENTED (code + migration 0046), except §36 which is
+documentation only.** Added Stage 4H-B0-R6 (Workstream D) by
+`risk-management`, which was authorized to write production code against
+the EXISTING `internal/risk` package and its EXISTING consumer
+(`internal/casino`). These sections CHANGE decisions recorded above: §33
+changes the cumulative-usage query's definition, §34 changes §9's
+missing-jurisdiction handling and adds request-level preconditions to
+§2's boundary, §35 extends §3's rule model with one new column, and §36
+resolves §32(g)'s cross-document conflict from Risk's side. Where a
+section below contradicts §1-§32, **the section below wins** and says so
+explicitly.
+
+`Evaluate`'s signature is **unchanged**:
+`Evaluate(ctx context.Context, tx pgx.Tx, req RiskRequest) (RiskDecision,
+error)`. `RiskRequest` and `RiskDecision` gain no field. The only model
+extension is on the RULE side (§35) - documented here before it was
+implemented, per this stage's own "if a contract extension is required,
+document it as an ADR before implementation" instruction.
+
+### 33. Cumulative usage is measured per LEG, not per player — closing §32(a)'s fail-OPEN
+
+**The defect, as shipped before this stage** (found and documented by
+this specialist's own prior independent review, §32(a)): `Rule.breach()`'s
+`cumulative_amount` query summed
+`CASE WHEN direction='debit' THEN amount ELSE -amount END` over
+`ledger_entries` filtered by `tenant_id`/`player_account_id`/`asset_code`/
+`transaction_type`, with **no join to `ledger_accounts`** and therefore no
+awareness of `account_type`. It was correct only by accident of
+`casino_bet`'s posting shape (`Dr player_cash` / `Cr house_gaming`, whose
+credit leg is wallet-less so `ledger_entries.player_account_id` is NULL on
+it). For any operation whose debit AND credit are both player-owned
+accounts - `sportsbook_bet` (`Dr player_cash` / `Cr player_locked`),
+`withdrawal` step A (`Dr player_cash` / `Cr player_withdrawal_hold`) - the
+two legs cancel and the query returns **zero usage no matter how much was
+staked**. That is a fail-OPEN in the one limit kind that most needs to
+fail closed, and it would have been introduced silently by following ADR
+0038 §13's own (correct-as-written) instruction to add
+`operationLedgerTransactionTypes["sportsbook_bet"]`.
+
+**The fix - a per-operation LEG SPECIFICATION, not a per-operation
+query.** `operationLedgerTransactionTypes` and
+`operationLedgerRollbackTypes` are replaced by ONE map,
+`operationCumulativeSpecs map[Operation]cumulativeSpec`, whose value
+declares four things that together make the measurement unambiguous:
+
+| Field | Meaning |
+|---|---|
+| `TransactionTypes` | the operation's own `ledger_transactions.transaction_type` value(s) |
+| `ReversalTypes` | the type(s) that RETRACT the operation and therefore un-consume capacity (`casino_rollback` for `casino_bet`) |
+| `MeasuredAccountTypes` | the player-side `ledger_accounts.account_type` value(s) whose entries ARE the usage being limited |
+| `IgnoredAccountTypes` | player-side legs this posting shape is KNOWN to also write, deliberately not measured (e.g. a future `sportsbook_bet`'s `player_locked` counterparty) |
+| `ConsumingDirection` | which `ledger_entries.direction` CONSUMES capacity (`debit` for a stake/withdrawal, `credit` for a deposit/payout) |
+
+Usage is then
+`SUM(CASE WHEN direction = ConsumingDirection THEN amount ELSE -amount END)`
+restricted to `MeasuredAccountTypes`, grouped by `account_type`, over
+`TransactionTypes ∪ ReversalTypes`. `casino_bet` is
+`{[casino_bet], [casino_rollback], measured=[player_cash], ignored=[],
+direction=debit}` - numerically identical to the pre-fix behavior for
+casino (including the rollback netting §32(a) and the earlier financial
+review established), so this is a correctness-preserving change for the
+only operation wired today.
+
+**Why this is also correct for a future two-player-leg operation, without
+another fix.** A hypothetical `sportsbook_bet` spec is
+`{[sportsbook_bet], [sportsbook_void], measured=[player_cash],
+ignored=[player_locked], direction=debit}`: the stake debit on
+`player_cash` counts once (`S`, not `S - S = 0`), the `player_locked`
+counterparty is explicitly excluded rather than accidentally netted, and a
+void's `Cr player_cash` correctly returns the capacity. A credit-to-player
+operation (`deposit`, a settlement payout) sets
+`ConsumingDirection: credit` and is measured with the opposite sign, so
+the "player-side sum is negative, the cap can never be reached" failure
+§32(a) also names is structurally impossible. **No `Operation` is wired by
+this stage** - the map still has exactly one entry, and every other
+operation still fails closed with `ErrUnsupportedCumulativeOperation`
+(§15b/§18/§31 unchanged).
+
+**The self-defending part (new, and the reason "another fix later" is not
+needed).** The query returns usage **grouped by `account_type`**, and the
+evaluator refuses to proceed if it observes a player-side `account_type`
+that the spec declares neither as measured nor as ignored:
+`ErrUnrecognizedCumulativeLeg`, fail-closed. A posting shape that changes
+underneath Risk - a bonus-funded stake leg (`player_bonus`) added by a
+future Bonus Engine, a new hold account introduced by `ledger-finance`, or
+a widening of `TransactionTypes` to a type with a different leg shape -
+therefore **cannot silently under-count**; it stops the operation and
+demands a deliberate spec update. This is the mechanism §32(a) said was
+missing ("the query's single-player-leg assumption is documented nowhere"):
+the assumption is now an explicit, enforced declaration rather than an
+undocumented precondition.
+
+**Naming follow-up for the Orchestrator (not silently ignored).** Three
+documents this specialist does not own refer to the two replaced maps by
+name and are now stale in NAMING only (their substance is unchanged and
+still correct): ADR 0038 §13 and its §14-area cross-references, ADR 0035
+§21-area retail table, and `docs/governance/project-status.md`. Each says
+"add an `operationLedgerTransactionTypes` entry"; the correct instruction
+after this stage is "add an `operationCumulativeSpecs` entry, which also
+requires the measured leg(s), the ignored leg(s) and the consuming
+direction." Flagged for the owning specialists rather than edited here.
+
+**Precondition restated for `ledger-finance` and for whoever wires the
+first new operation** (ADR 0031 §12/§16 step 5 unchanged otherwise): the
+ledger-transaction-type mapping alone is NO LONGER sufficient to wire
+`cumulative_amount`. A new entry must also state the measured leg(s), the
+known-ignored leg(s) and the consuming direction - three facts about the
+posting shape that are `ledger-finance`'s to supply and Risk's to enforce.
+A spec that omits any of them fails closed
+(`ErrInvalidCumulativeSpec`), it does not default.
+
+Regression test proving the original bug would have been caught:
+`TestEvaluate_CumulativeUsageIsLegAwareForATwoPlayerOwnedLegOperation`
+(`internal/risk/risk_integration_test.go`) posts a REAL two-player-owned-leg
+ledger transaction (`withdrawal_requested`: `Dr player_cash` /
+`Cr player_withdrawal_hold`), injects a TEST-ONLY spec for
+`OperationWithdrawal` (production map untouched - the injection is undone
+by `t.Cleanup`), asserts the new query computes the full non-zero stake,
+and asserts IN THE SAME TEST that the pre-fix account-type-blind query
+computes exactly `0` against the same rows. A sibling test
+(`TestEvaluate_UnrecognizedCumulativeLegFailsClosed`) removes
+`player_withdrawal_hold` from the spec's ignored set and proves the
+evaluator errors instead of under-counting.
+
+### 34. Fail-closed audit of every Risk enforcement path
+
+Every call site of `risk.Evaluate` was enumerated (confirmed: `internal/
+casino`'s `LaunchGame` and `postBet`, through the shared
+`evaluateAndAuditRisk` helper, are the ONLY ones in the repository - no
+other package references `risk.Evaluate`). Each of the conditions below
+was traced to a concrete outcome; the ones marked **FIXED** could
+previously resolve to an accidental ALLOW.
+
+| Condition | Before | Now |
+|---|---|---|
+| Database error / statement timeout / cancelled context inside `Evaluate` | error → caller aborts the transaction | unchanged (correct) |
+| Unrecognized `limit_kind` / `rule_kind` | error | unchanged (correct) |
+| Conflicting equally-specific configurable rules | `ErrConflictingRules` | unchanged (correct) |
+| Amount-shaped rule, zero `Amount` | `ErrMissingAmount` | unchanged (correct) |
+| `cumulative_amount` on an unmapped operation | `ErrUnsupportedCumulativeOperation` | unchanged (correct) |
+| Missing `LicensingMode` while a licensing-mode-scoped rule exists | `ErrMissingLicensingMode` | unchanged (correct), now one case of the general gate below |
+| **Unknown/typo'd `Operation` on the request** | **no rule matched → ALLOW** | **FIXED**: `ErrUnknownOperation` |
+| **Missing `PlayerAccountID`** | **player-scoped rules silently skipped → ALLOW** | **FIXED**: required on every request |
+| **Missing `JurisdictionCode` while a jurisdiction-scoped rule exists** | **that rule silently skipped → ALLOW** | **FIXED**: `ErrMissingJurisdiction` (changes §9, see below) |
+| **Missing `AssetCode` on an amount-shaped rule** | **compared with no asset context at all** | **FIXED**: `ErrMissingAsset` |
+| **Missing/unknown asset in the `assets` registry** | **never checked** | **FIXED**: `ErrUnknownAsset` |
+| **Any other scope dimension empty on the request while a rule scopes it** (`Product`, `ProviderID`, `PaymentMethod`, `GameID`) | **rule silently skipped → ALLOW** | **FIXED**: `ErrMissingScopeContext` |
+| **`tx` not tenant-scoped to `req.TenantID`** (e.g. `db.WithoutTenant`) | **RLS returns only platform-wide rules; every tenant rule silently invisible → ALLOW** | **FIXED**: `ErrTenantScopeMismatch` |
+| **`tx` player-scoped** (`db.WithPlayerScope`) | **`risk_rules`' RLS returns ZERO rows → ALLOW for every rule** | **FIXED**: `ErrPlayerScopedConnection` |
+| **A `RiskDecision.Outcome` value outside allow/deny/review** | **`!= OutcomeAllow` happened to block, but an empty/garbage value was indistinguishable from a real decision** | **FIXED**: `Evaluate` self-checks its own output (`ErrUnknownOutcome`) and every enforcement point switches exhaustively with an erroring `default` |
+
+**The generalized missing-scope gate.** The `ErrMissingLicensingMode`
+gate §10 introduced is generalized to EVERY optional scope dimension: if
+any currently-EFFECTIVE rule configured for this operation scopes a
+dimension that the request leaves empty, `Evaluate` fails closed instead
+of letting `matches()` silently treat the rule as a non-match. The
+reasoning is exactly the one already accepted for licensing mode: empty on
+the REQUEST side is not a wildcard (only empty on the RULE side is), so an
+un-resolved dimension cannot prove a rule does not apply - and a caller
+that simply forgot to populate a field must never thereby bypass a
+`HARD_LIMIT` authored for precisely that operation. It is deliberately
+operation-wide (not "only when the rule also matches every other
+dimension"), for the same reason §10's own doc comment gives: deciding
+that requires the very `matches()` logic this gate exists to backstop.
+Blast radius is unchanged in kind from §10's accepted one: a single rule
+scoping a dimension makes that dimension mandatory for every request for
+that operation. The sentinels are distinguishable
+(`ErrMissingJurisdiction`, `ErrMissingLicensingMode`, `ErrMissingAsset`,
+`ErrMissingScopeContext` for the rest); all wrap `ErrInvalidInput`, so the
+existing HTTP mapping is unchanged.
+
+**This CHANGES §9.** §9 recorded that an unavailable (empty)
+`JurisdictionCode` "matches only jurisdiction-unscoped rules, per
+`matches()`'s general contract." That is now true only while NO
+jurisdiction-scoped rule is effective for the operation; once one is, an
+empty `JurisdictionCode` is an error. The change is deliberate: §9's
+framing was written as a scope-matching statement and did not consider
+that the very same shape had already been rejected as a fail-open for
+licensing mode one section later (§10). The operational consequence is
+stated plainly rather than hidden: while `TODO(jurisdiction)` remains
+unresolved (no geolocation vendor, no per-player jurisdiction resolver -
+§9's root cause is NOT fixed by this stage), authoring a
+jurisdiction-scoped rule for an operation whose callers cannot yet resolve
+a jurisdiction will DENY that operation rather than silently ignore the
+rule. That is the correct direction, and it is now the documented
+behavior.
+
+**Four semantically distinct outcomes are preserved in code.** `ALLOW`,
+`REVIEW`, `DENY` and `ERROR-or-UNAVAILABLE` remain four separate things:
+
+- `ALLOW` - proceed.
+- `DENY` - a business decision, reported by the enforcement point as a
+  decline (never a Go error), audited with `Code = hard_limit_breached` /
+  `limit_breached`.
+- `REVIEW` - a business decision with a DIFFERENT meaning (§11:
+  potentially human/compliance-resolvable, not asserted to be
+  prohibited). `internal/casino` still BLOCKS on it, and after this stage
+  it does so through ONE shared, exhaustively-switched classifier
+  (`classifyRiskOutcome`, used by both `LaunchGame` and `postBet`) whose
+  `REVIEW` case is labeled as the simplification it is - not by falling
+  into a "not ALLOW" catch-all. **This is
+  still the deliberate, disclosed simplification §6/§11 recorded, and it
+  is still an OPEN product decision (§8), unchanged in either direction by
+  this stage** - no compliance-review queue exists yet to route a
+  review-flagged operation to, so it fails safe by blocking. The audit
+  record already distinguishes them (`outcome` metadata field).
+- `ERROR-or-UNAVAILABLE` - never a decline with a reason code (which
+  would tell a provider "the player's limits rejected this" when the truth
+  is "the platform could not decide"). It propagates as a Go error and
+  aborts the whole transaction, so no ledger effect can exist. An
+  `Outcome` value outside the three known ones is classified here, not as
+  a decline.
+
+Tests:
+
+- `internal/risk/fail_closed_integration_test.go` - database error,
+  expired deadline, cancelled context, unscoped/wrong-tenant/player-scoped
+  transaction, unknown operation, missing player, missing jurisdiction
+  (and its resolution), missing licensing mode, missing asset, asset-scoped
+  rule with an assetless request, unregistered asset, missing provider
+  scope, a disabled scoped rule NOT triggering the gate, and 8 concurrent
+  evaluations (run under `-race`).
+- `internal/risk/evaluator_test.go` (unit) - the missing-scope gate for
+  every optional dimension, the closed `Operation` set, `Outcome.IsKnown`,
+  and `numericToBigInt`'s PostgreSQL-scale handling.
+- `internal/casino/risk_outcome_test.go` (unit) - all four outcome classes
+  through `classifyRiskOutcome`, including four different unrecognized
+  `Outcome` values.
+- `internal/casino/adversarial_jurisdiction_isolation_test.go` -
+  REWRITTEN: its second case previously asserted the fail-OPEN (an
+  un-jurisdictioned bet posting despite a jurisdiction-scoped HARD_LIMIT)
+  and now asserts the fail-closed error, zero ledger effect, and that the
+  condition is NOT reported as a business decline. Its first case (genuine
+  isolation for a request that DOES carry a jurisdiction) is unchanged.
+- `internal/httpserver/risk_flow_integration_test.go` - the denomination
+  validation at the admin API surface.
+
+### 35. Threshold denomination: closing §32(d)'s exponent gap — `risk_rules.threshold_exponent` (migration 0046)
+
+**The gap (§32(d), verbatim summary)**: `threshold` is `NUMERIC(38,0)`
+minor units, `Rule.matches()` treats an empty `asset_code` as "applies
+regardless of asset", and nothing recorded which asset's minor units the
+threshold meant. A `max_amount` cap authored against an 18-exponent
+crypto asset becomes effectively unlimited when the same rule is read
+against a 2-exponent fiat asset (fail-OPEN); in the other direction it
+denies every ordinary amount (fail-closed outage). Both are silent.
+
+**What was explicitly REJECTED: exponent-scaling the threshold.**
+Re-denominating a threshold by multiplying by `10^(reqExp - ruleExp)`
+would assert that "N major units" of one asset is a comparable limit to
+"N major units" of another. That is the exact design `ledger-finance`
+already rejected in this repository for `withdrawal.defaultApprovalPolicy`
+(see its own doc comment: "decimal precision and real-world VALUE are
+different things a decimal exponent says nothing about"), and a
+value-equivalent normalization would need FX/market-price data, which Risk
+must not consult on an evaluation path (and which §32(e)/§28 keep outside
+Risk entirely). Risk therefore does not convert thresholds. Ever.
+
+**The model extension (one nullable column, migration 0046):**
+`risk_rules.threshold_exponent SMALLINT CHECK (BETWEEN 0 AND 18)`, with
+the invariant that an amount-shaped rule declares its threshold's
+denomination **exactly once**, in one of two ways:
+
+1. **Asset-scoped rule** (`asset_code IS NOT NULL`): the scope IS the
+   denomination. `threshold_exponent` must be NULL, and the exponent is
+   looked up from the `assets` registry at evaluation time - never copied
+   onto the rule row, so there is exactly ONE source of exponent truth
+   (CLAUDE.md's own "per-currency exponent looked up from the `Asset`
+   registry"; `internal/assetregistry` is being built in parallel this
+   stage by another specialist and is NOT a second source - when it lands,
+   this lookup moves behind it without changing this decision).
+2. **Asset-agnostic rule** (`asset_code IS NULL`): `threshold_exponent` is
+   **REQUIRED** and states the decimal exponent the threshold's minor
+   units are expressed in. Such a rule binds every asset of THAT exponent
+   (so one rule still covers EUR/USD/GBP/BRL/MXN, all exponent 2 - the
+   legitimate case §32(d) did not want to lose) and **fails closed** with
+   `ErrThresholdDenominationMismatch` for a request in an asset of any
+   OTHER exponent.
+
+Enforced as a database CHECK (`(asset_code IS NULL) <> (threshold_exponent
+IS NULL)`, guarded by `limit_kind` so it stays correct if a non-amount
+limit kind is ever added), in `CreateRule`, and in the HTTP handler.
+
+**Why fail-closed on exponent mismatch rather than "rule does not
+apply".** Making the rule inert for a different-exponent asset would
+re-create §32(d)'s fail-OPEN in a new place: a newly authorized asset
+would silently have NO limits. Requiring `asset_code` on every amount rule
+would do the same thing (a new asset simply matches nothing). Keeping the
+wildcard rule BINDING and erroring when it cannot be interpreted is the
+only one of the three options that cannot silently under-enforce: the
+operator must author an explicit rule for the new asset, and until they
+do, the operation is denied in that asset rather than uncapped.
+
+**Legacy rows (pre-0046) are grandfathered by the DATA, not by the
+evaluator.** The CHECK is added `NOT VALID`: existing asset-agnostic
+amount rules keep `threshold_exponent = NULL` (their author's intended
+denomination is genuinely unknown and a migration must not guess it), new
+inserts are fully checked. `Evaluate` refuses to evaluate such a row -
+`ErrMissingThresholdDenomination`, fail-closed - so a pre-existing
+wildcard rule denies the operation until it is re-authored with an
+explicit denomination. `risk_rules` is append-only (§3), so
+"re-authored" means a new row plus disabling the old one, which is the
+already-established way every policy change is made.
+
+`threshold_exponent` is added to migration 0041's immutability trigger's
+protected-field list: like every other core scope/threshold field, it can
+never change in place.
+
+**`threshold` remains `int64` in Go, deliberately, and that is a DISCLOSED
+limitation, not an oversight.** The column is `NUMERIC(38,0)`, but
+`Rule.Threshold`/`CreateRuleParams.Threshold` stay `int64` because
+`ledger.EntryInput.Amount` and `RiskRequest.Amount` - the values a
+threshold is compared against - are `int64` everywhere in this platform.
+Widening Risk alone would create a second money-width convention inside
+one comparison. Consequence, stated exactly: for an 18-exponent asset the
+largest authorable threshold is `int64`'s maximum, ~9.22 major units. A
+`NUMERIC(38,0)` threshold larger than that (only reachable by direct SQL,
+not through `CreateRule` or HTTP) makes the row unscannable, which fails
+CLOSED as an `Evaluate` error - never a wrapped or truncated comparison.
+Cumulative USAGE is already summed as `*big.Int` (never `int64`) and is
+unaffected. Widening the platform's money width is `ledger-finance`'s
+decision, not Risk's; recorded here as a cross-domain follow-up.
+
+Tests: `internal/risk/exponent_integration_test.go` validates exponents
+**0, 2, 6, 8 and 18** (registering two synthetic assets for 0 and 18,
+since the registry ships none) - matching-exponent wildcard rules
+breach/allow correctly at every one of the five, a wildcard rule authored
+at one exponent fails closed against all four others, an asset-scoped rule
+resolves its exponent from `assets` with no `threshold_exponent` at all,
+and an over-`int64` threshold written by direct SQL fails closed. No
+decimal count is hard-coded anywhere in `internal/risk`.
+
+### 36. Resolution of §32(g): settlement and cashout are NOT Risk checkpoints — `ARCHITECTURAL DECISION`, documentation only
+
+§32(g) recorded, and escalated to the Orchestrator, a genuine
+documentation conflict: §26/§31 above call `sportsbook_settlement` and
+`sportsbook_cashout` "near-term, load-bearing" Risk `Operation`s, while
+ADR 0038 §13's last bullet states settlement, void, partial settlement,
+cashout and rollback "are **not** additional Risk checkpoints." The
+Orchestrator assigned the Risk-side resolution to this specialist for
+Stage 4H-B0-R6. It is recorded here as RESOLVED WITH A CHANGE OF POSITION,
+not quietly harmonized - §26 and §31 are wrong as written, and this
+section supersedes them on this one point.
+
+**The conflict was real because two different questions were being
+answered as one:**
+
+1. *Is there an enforcement point that calls `risk.Evaluate` to ALLOW or
+   DENY a settlement/cashout?* - ADR 0038 §13 answers this. **No.**
+2. *Does the Risk rule model need `Operation` values distinct from
+   `sportsbook_bet` so that payout-shaped rules are separately
+   authorable?* - §26 answers this. **Yes, IF (1) is ever yes.**
+
+§26/§31 asserted (2) and then described it in (1)'s language
+("near-term, load-bearing", "not first-slice-deferrable"), which reads as
+a claim that a settlement must be gated before it may pay out. Applying
+this ADR's OWN §13 test - *is this a new exposure-creating decision the
+platform is choosing to allow?* - a graded settlement is not: the exposure
+was created and accepted at placement, the grading is a provider-supplied
+fact, and "denying" it would mean refusing to pay a won bet, which is a
+dispute/compliance matter and not a limit decision. ADR 0038 §13's
+reasoning is therefore correct and Risk adopts it. This is the same answer
+Risk already gives for `casino_win`/`casino_rollback`, which have no
+`Operation` value and are never evaluated (§26's own void row already said
+so for `sportsbook_void`).
+
+**Risk's position after this section:**
+
+- `sportsbook_settlement` is **NOT** a Risk checkpoint and is **NOT**
+  near-term. §26's naming proposal stays on file (if a future stage ever
+  needs a payout-shaped rule, that is its name, per §16's "Risk owns
+  `Operation` naming"), with its status downgraded from "near-term,
+  load-bearing" to "proposed, not required by any known enforcement
+  point."
+- `sportsbook_cashout` is **NOT** a Risk checkpoint **in the
+  provider-driven mode ADR 0038 §13 describes**, for the same reason: the
+  player accepts a price the provider computed, and the platform is
+  recording an outcome, not choosing to take on new exposure. ADR 0038 §13
+  scopes its own claim this way in its own words ("the platform does not
+  price cashout offers in the provider-driven shape"), which is precisely
+  the mode-dependence §32(g) suspected.
+- **The one case that would genuinely need it** (recorded so it is not
+  rediscovered): an IN-HOUSE cashout mode, where the PLATFORM prices and
+  offers the buy-back, IS a new exposure-creating decision at the moment
+  the offer is priced/accepted, and would need `sportsbook_cashout` as a
+  real checkpoint with all six of §16's steps. No such mode exists, is
+  designed, or is proposed by any document today. Conditional, not
+  near-term.
+- **What IS load-bearing for sportsbook on Risk's side is unchanged and
+  much smaller than §31 implied**: `sportsbook_bet` at placement (already
+  a valid `Operation`, zero Risk-side change needed - §31's first bullet
+  stands), plus §33's leg specification for `cumulative_amount` if a
+  rolling stake cap is wanted. ADR 0038 §13's `sportsbook_void` netting
+  rule needs no `Operation` and is now safe to wire because of §33.
+- A large settlement payout as a MONITORING/`REVIEW` subject is not a
+  counter-argument: Risk maintains no state and has no asynchronous signal
+  channel (§32(c)), and `Evaluate` is a blocking gate. Flagging unusual
+  payouts is a reporting/compliance capability, not a Risk checkpoint,
+  and Risk does not claim it.
+
+**What this does NOT close, and the required cross-check.** ADR 0038 is
+`ledger-finance`'s document and was not edited by this specialist. No
+change to it is REQUIRED by this resolution (Risk now agrees with its
+conclusion), but one non-blocking cross-check is requested: §13's
+sentence "none of them are additional Risk checkpoints" should be read -
+and ideally stated - as scoped to the provider-driven mode that section
+describes, so that a future in-house cashout mode does not inherit a
+blanket "never a Risk checkpoint" reading. Until `ledger-finance`
+confirms that scoping, §36 is Risk's own position and the cross-domain
+item stays open on ADR 0038's side. Flagged to the Orchestrator per
+`docs/governance/integration-protocol.md`; §32(g) is closed on Risk's
+side only.

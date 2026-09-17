@@ -98,7 +98,7 @@ func TestRiskRules_TenantSeesOwnAndPlatformWideRules(t *testing.T) {
 	err := pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		r, err := CreateRule(ctx, tx, CreateRuleParams{
 			TenantID: &fA.tenantID, Operation: OperationCasinoBet, LimitKind: LimitMaxAmount, TimeWindow: WindowTransaction,
-			Threshold: 1000, CreatedByActorType: "staff", CreatedByActorID: uuid.New(),
+			Threshold: 1000, ThresholdExponent: ThresholdExponentOf(2), CreatedByActorType: "staff", CreatedByActorID: uuid.New(),
 		})
 		tenantARuleID = r.ID
 		return err
@@ -119,7 +119,7 @@ func TestRiskRules_TenantSeesOwnAndPlatformWideRules(t *testing.T) {
 	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 		r, err := CreateRule(ctx, tx, CreateRuleParams{
 			Operation: OperationCasinoBet, LimitKind: LimitMaxAmount, TimeWindow: WindowTransaction,
-			Threshold: 5000, RuleKind: RuleHardLimit, CreatedByActorType: "staff", CreatedByActorID: uuid.New(),
+			Threshold: 5000, ThresholdExponent: ThresholdExponentOf(2), RuleKind: RuleHardLimit, CreatedByActorType: "staff", CreatedByActorID: uuid.New(),
 		})
 		platformRuleID = r.ID
 		return err
@@ -228,7 +228,7 @@ func TestRiskRules_PlayerScopeConnectionCannotReadOrWrite(t *testing.T) {
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		r, err := CreateRule(ctx, tx, CreateRuleParams{
 			TenantID: &f.tenantID, Operation: OperationCasinoBet, LimitKind: LimitMaxAmount, TimeWindow: WindowTransaction,
-			Threshold: 100, CreatedByActorType: "staff", CreatedByActorID: uuid.New(),
+			Threshold: 100, ThresholdExponent: ThresholdExponentOf(2), CreatedByActorType: "staff", CreatedByActorID: uuid.New(),
 		})
 		otherPlayerRuleID = r.ID
 		return err
@@ -288,8 +288,8 @@ func TestRiskRules_CompositeFKRejectsCrossTenantPlayerAccount(t *testing.T) {
 
 	err := pool.WithTenant(context.Background(), fB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO risk_rules (id, tenant_id, player_account_id, operation, limit_kind, time_window, threshold, created_by_actor_type, created_by_actor_id)
-			 VALUES (gen_random_uuid(), $1, $2, 'casino_bet', 'max_amount', 'transaction', 100, 'staff', gen_random_uuid())`,
+			`INSERT INTO risk_rules (id, tenant_id, player_account_id, operation, limit_kind, time_window, threshold, threshold_exponent, created_by_actor_type, created_by_actor_id)
+			 VALUES (gen_random_uuid(), $1, $2, 'casino_bet', 'max_amount', 'transaction', 100, 2, 'staff', gen_random_uuid())`,
 			fB.tenantID, fA.playerID,
 		)
 		return err
@@ -309,7 +309,7 @@ func TestRiskRules_CoreFieldsAreImmutableAndAppendOnly(t *testing.T) {
 		r, err := CreateRule(ctx, tx, CreateRuleParams{
 			TenantID: &f.tenantID, LicensingMode: "under_platform_licence", Operation: OperationCasinoBet,
 			LimitKind: LimitMaxAmount, TimeWindow: WindowTransaction,
-			Threshold: 1000, CreatedByActorType: "staff", CreatedByActorID: uuid.New(),
+			Threshold: 1000, ThresholdExponent: ThresholdExponentOf(2), CreatedByActorType: "staff", CreatedByActorID: uuid.New(),
 		})
 		ruleID = r.ID
 		return err
@@ -366,6 +366,16 @@ func createTestRule(t *testing.T, pool *db.Pool, tenantID *uuid.UUID, params Cre
 	}
 	if params.CreatedByActorType == "" {
 		params.CreatedByActorType = "staff"
+	}
+	// Stage 4H-B0-R6 (ADR 0031 §35): an asset-agnostic amount rule must
+	// declare which asset exponent its threshold's minor units are
+	// expressed in. Every case in this file that does not care about
+	// denomination evaluates against EUR (exponent 2), so defaulting the
+	// declaration here preserves each test's original meaning exactly;
+	// the denomination-specific cases in exponent_integration_test.go set
+	// it explicitly instead.
+	if params.LimitKind.isAmountShaped() && params.AssetCode == "" && params.ThresholdExponent == nil {
+		params.ThresholdExponent = ThresholdExponentOf(2)
 	}
 	var r Rule
 	var err error
@@ -803,15 +813,15 @@ func TestEvaluate_EffectiveWindowIsEnforcedAtEvaluateLevel(t *testing.T) {
 	alreadyExpiredID := uuid.New()
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx,
-			`INSERT INTO risk_rules (id, tenant_id, operation, limit_kind, time_window, threshold, rule_kind, action, effective_from, created_by_actor_type, created_by_actor_id)
-			 VALUES ($1, $2, 'casino_bet', 'max_amount', 'transaction', 10, 'hard_limit', 'deny', now() + interval '1 day', 'staff', gen_random_uuid())`,
+			`INSERT INTO risk_rules (id, tenant_id, operation, limit_kind, time_window, threshold, threshold_exponent, rule_kind, action, effective_from, created_by_actor_type, created_by_actor_id)
+			 VALUES ($1, $2, 'casino_bet', 'max_amount', 'transaction', 10, 2, 'hard_limit', 'deny', now() + interval '1 day', 'staff', gen_random_uuid())`,
 			notYetEffectiveID, f.tenantID,
 		); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx,
-			`INSERT INTO risk_rules (id, tenant_id, operation, limit_kind, time_window, threshold, rule_kind, action, effective_from, effective_until, created_by_actor_type, created_by_actor_id)
-			 VALUES ($1, $2, 'casino_bet', 'min_amount', 'transaction', 1000000, 'hard_limit', 'deny', now() - interval '2 days', now() - interval '1 day', 'staff', gen_random_uuid())`,
+			`INSERT INTO risk_rules (id, tenant_id, operation, limit_kind, time_window, threshold, threshold_exponent, rule_kind, action, effective_from, effective_until, created_by_actor_type, created_by_actor_id)
+			 VALUES ($1, $2, 'casino_bet', 'min_amount', 'transaction', 1000000, 2, 'hard_limit', 'deny', now() - interval '2 days', now() - interval '1 day', 'staff', gen_random_uuid())`,
 			alreadyExpiredID, f.tenantID,
 		)
 		return err

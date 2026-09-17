@@ -194,7 +194,14 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, tx pgx.Tx, params LaunchG
 		if err != nil {
 			return LaunchGameResult{}, err
 		}
-		if riskDecision.Outcome != risk.OutcomeAllow {
+		// ALLOW / REVIEW / DENY / error-or-unavailable are FOUR distinct
+		// outcomes, classified in one shared place rather than collapsed
+		// into "not allow" at each call site (ADR 0031 §34).
+		proceed, err := classifyRiskOutcome(riskDecision.Outcome)
+		if err != nil {
+			return LaunchGameResult{}, err
+		}
+		if !proceed {
 			return LaunchGameResult{Denied: true, DenialCode: riskDecision.Code, DenialMessage: riskDecision.Message}, nil
 		}
 	}
@@ -314,6 +321,39 @@ func resolveLicensingMode(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (s
 		return "", fmt.Errorf("casino: resolve tenant licensing mode: %w", err)
 	}
 	return t.LicensingModel, nil
+}
+
+// classifyRiskOutcome maps a RiskDecision.Outcome to what THIS
+// enforcement point does with it, keeping ALLOW / REVIEW / DENY /
+// error-or-unavailable as four semantically distinct outcomes (ADR 0031
+// §34) instead of one "not allow" catch-all:
+//
+//   - ALLOW -> proceed.
+//   - DENY -> a business decision; the caller declines without a Go
+//     error, exactly like an insufficient-funds decline.
+//   - REVIEW -> also blocks HERE, and that is still the deliberate,
+//     DISCLOSED SIMPLIFICATION ADR 0031 §6/§8/§11 records rather than a
+//     resolved product decision: no compliance-review queue exists yet to
+//     route a review-flagged operation to, so it fails safe by blocking.
+//     REVIEW and DENY remain semantically different (§11) and are
+//     distinguishable in the audit record's own `outcome` metadata field;
+//     a future stage that adds a review queue changes THIS function, not
+//     internal/risk's signature or model.
+//   - anything else -> not a decision at all. Returns an error so the
+//     whole transaction aborts (no ledger effect), and the caller never
+//     reports a policy decline for what is really "the platform could not
+//     decide". Unreachable through risk.Evaluate, which self-checks its
+//     own output; kept because the fourth outcome must have an explicit
+//     home rather than falling into DENY's branch by default.
+func classifyRiskOutcome(o risk.Outcome) (proceed bool, err error) {
+	switch o {
+	case risk.OutcomeAllow:
+		return true, nil
+	case risk.OutcomeDeny, risk.OutcomeReview:
+		return false, nil
+	default:
+		return false, fmt.Errorf("casino: %w: %q", ErrRiskOutcomeUnrecognized, o)
+	}
 }
 
 // evaluateAndAuditRisk consults the central risk.Evaluate boundary
@@ -690,7 +730,18 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	if err != nil {
 		return ReceiveCallbackResult{}, err
 	}
-	if riskDecision.Outcome != risk.OutcomeAllow {
+	// Four distinct outcomes, same shared classification as LaunchGame
+	// above (ADR 0031 §34): DENY/REVIEW are business decisions reported
+	// through this package's established decline-without-error
+	// convention; an unrecognized outcome is not a decision at all and
+	// fails closed as an error, so a provider is never told "the player's
+	// limits declined this" when the truth is "the platform could not
+	// decide".
+	proceed, err := classifyRiskOutcome(riskDecision.Outcome)
+	if err != nil {
+		return ReceiveCallbackResult{}, err
+	}
+	if !proceed {
 		return ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason: riskDecision.Code}, nil
 	}
 

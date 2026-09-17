@@ -136,6 +136,15 @@ var (
 	// tenant-configured row would assert more than the adapter's own
 	// declared capability (mirrors docs/decisions/0022 §2.1).
 	ErrCapabilityWidensAdapter = errors.New("casino: capability configuration widens beyond the adapter's declared capability")
+	// ErrRiskOutcomeUnrecognized is returned when risk.Evaluate returns a
+	// RiskDecision whose Outcome is none of allow/deny/review. Unreachable
+	// through risk.Evaluate itself (which self-checks its own output), and
+	// kept anyway: this enforcement point must classify the FOURTH
+	// outcome - "the platform could not decide" - separately from a real
+	// DENY/REVIEW business decision, so an unrecognized state can never be
+	// reported to a provider or player as a policy decline, nor (far
+	// worse) fall through to ALLOW. See ADR 0031 §34.
+	ErrRiskOutcomeUnrecognized = errors.New("casino: risk evaluation returned an unrecognized outcome")
 	// ErrCallbackSignatureInvalid is returned by a CasinoProvider's
 	// HandleCallback when the payload's authentication does not verify.
 	// Never wrapped with the raw payload or any field from it.

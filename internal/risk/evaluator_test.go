@@ -1,10 +1,13 @@
 package risk
 
 import (
+	"errors"
+	"math/big"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 func uuidPtr(u uuid.UUID) *uuid.UUID { return &u }
@@ -108,5 +111,121 @@ func TestRule_IsEffective_StatusAndWindow(t *testing.T) {
 				t.Fatalf("isEffective() = %v, want %v", got, c.want)
 			}
 		})
+	}
+}
+
+// --- Stage 4H-B0-R6 Workstream D: unit-level fail-closed coverage ---
+
+func TestLimitKind_IsAmountShaped(t *testing.T) {
+	for _, k := range []LimitKind{LimitMinAmount, LimitMaxAmount, LimitCumulativeAmount} {
+		if !k.isAmountShaped() {
+			t.Fatalf("%q must be amount-shaped: it needs an asset context and a threshold denomination", k)
+		}
+	}
+	for _, k := range []LimitKind{LimitKind(""), LimitKind("count"), LimitKind("velocity")} {
+		if k.isAmountShaped() {
+			t.Fatalf("%q must not be treated as amount-shaped", k)
+		}
+	}
+}
+
+func TestIsKnownOperation_ClosedSet(t *testing.T) {
+	for _, o := range []Operation{
+		OperationCasinoLaunch, OperationCasinoBet, OperationDeposit,
+		OperationWithdrawal, OperationSportsbookBet, OperationBonusGrant,
+	} {
+		if !IsKnownOperation(o) {
+			t.Fatalf("%q is declared by this package and accepted by migration 0041, so it must be known", o)
+		}
+	}
+	// A typo, an empty value, or a proposed-but-unstorable operation
+	// (ADR 0031 §26/§36) must never silently match zero rules and ALLOW.
+	for _, o := range []Operation{
+		Operation(""), Operation("casino_bett"), Operation("CASINO_BET"),
+		Operation("sportsbook_settlement"), Operation("sportsbook_cashout"), Operation("bonus_conversion"),
+	} {
+		if IsKnownOperation(o) {
+			t.Fatalf("%q must NOT be a known operation", o)
+		}
+	}
+}
+
+func TestNumericToBigInt_HandlesPostgresScaleAndRefusesFractions(t *testing.T) {
+	cases := []struct {
+		name string
+		in   pgtype.Numeric
+		want string
+	}{
+		{"invalid is zero", pgtype.Numeric{}, "0"},
+		{"plain integer", pgtype.Numeric{Int: big.NewInt(1234), Exp: 0, Valid: true}, "1234"},
+		// PostgreSQL legitimately returns an exact integer SUM in
+		// scientific form (1000 as 1E+3) - rejecting that was an
+		// availability defect in the pre-Stage-4H-B0-R6 version.
+		{"scaled integer", pgtype.Numeric{Int: big.NewInt(1), Exp: 3, Valid: true}, "1000"},
+		{"negative scaled integer", pgtype.Numeric{Int: big.NewInt(-25), Exp: 2, Valid: true}, "-2500"},
+		{"beyond int64", pgtype.Numeric{Int: big.NewInt(99), Exp: 18, Valid: true}, "99000000000000000000"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := numericToBigInt(c.in)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.String() != c.want {
+				t.Fatalf("got %s, want %s", got.String(), c.want)
+			}
+		})
+	}
+	// A fractional minor-unit value cannot exist in this schema, and
+	// truncating one would be silent money-mangling.
+	if _, err := numericToBigInt(pgtype.Numeric{Int: big.NewInt(105), Exp: -1, Valid: true}); err == nil {
+		t.Fatal("expected a fractional NUMERIC to be refused rather than rounded")
+	}
+}
+
+func TestRule_MissingScopeContext_EveryOptionalDimension(t *testing.T) {
+	gameID := uuid.New()
+	base := RiskRequest{Operation: OperationCasinoBet}
+	cases := []struct {
+		name string
+		rule Rule
+		want error
+	}{
+		{"jurisdiction", Rule{Operation: OperationCasinoBet, JurisdictionCode: "KM-ANJ"}, ErrMissingJurisdiction},
+		{"licensing mode", Rule{Operation: OperationCasinoBet, LicensingMode: "own_licence"}, ErrMissingLicensingMode},
+		{"asset", Rule{Operation: OperationCasinoBet, AssetCode: "BTC"}, ErrMissingAsset},
+		{"product", Rule{Operation: OperationCasinoBet, Product: "casino"}, ErrMissingScopeContext},
+		{"provider", Rule{Operation: OperationCasinoBet, ProviderID: "mock"}, ErrMissingScopeContext},
+		{"payment method", Rule{Operation: OperationCasinoBet, PaymentMethod: "card"}, ErrMissingScopeContext},
+		{"game", Rule{Operation: OperationCasinoBet, GameID: &gameID}, ErrMissingScopeContext},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.rule.missingScopeContext(base)
+			if err == nil {
+				t.Fatal("expected a rule scoping a dimension the request left empty to fail closed")
+			}
+			if !errors.Is(err, c.want) {
+				t.Fatalf("expected %v, got %v", c.want, err)
+			}
+			if !errors.Is(err, ErrInvalidInput) {
+				t.Fatalf("every missing-scope error must remain an ErrInvalidInput for its HTTP mapping, got %v", err)
+			}
+		})
+	}
+
+	// A fully-populated request is never gated, and an unscoped rule
+	// never demands anything.
+	full := RiskRequest{
+		Operation: OperationCasinoBet, JurisdictionCode: "KM-ANJ", LicensingMode: "under_platform_licence",
+		AssetCode: "EUR", Product: "casino", ProviderID: "mock", PaymentMethod: "card", GameID: gameID,
+	}
+	for _, c := range cases {
+		if err := c.rule.missingScopeContext(full); err != nil {
+			t.Fatalf("%s: a fully-populated request must not be gated: %v", c.name, err)
+		}
+	}
+	if err := (Rule{Operation: OperationCasinoBet}).missingScopeContext(base); err != nil {
+		t.Fatalf("an unscoped rule must demand nothing: %v", err)
 	}
 }

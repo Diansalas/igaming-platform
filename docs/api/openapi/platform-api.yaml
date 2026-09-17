@@ -1183,7 +1183,19 @@ paths:
                 payment_method: { type: string }
                 limit_kind: { type: string, enum: [min_amount, max_amount, cumulative_amount] }
                 time_window: { type: string, enum: [transaction, rolling_hour, rolling_day, rolling_week, rolling_month] }
-                threshold: { type: integer, format: int64, description: "Minor units, matching the asset's own exponent" }
+                threshold: { type: integer, format: int64, description: "Minor units, denominated by asset_code (if set) or by threshold_exponent" }
+                threshold_exponent:
+                  type: integer
+                  minimum: 0
+                  maximum: 18
+                  nullable: true
+                  description: >-
+                    REQUIRED when asset_code is omitted: the decimal exponent whose minor units
+                    `threshold` is expressed in. Such a rule binds every asset of that exponent and
+                    FAILS CLOSED for an asset of any other exponent, instead of being silently
+                    re-denominated. MUST be omitted when asset_code is set - the asset is then the
+                    threshold's denomination, resolved from the asset registry at evaluation time.
+                    See docs/decisions/0031-risk-and-limits-engine.md §35.
                 rule_kind: { type: string, enum: [hard_limit, configurable_limit, risk_signal], default: configurable_limit }
                 action: { type: string, enum: [deny, review], default: deny }
                 description: { type: string }
@@ -1857,6 +1869,15 @@ components:
         limit_kind: { type: string, enum: [min_amount, max_amount, cumulative_amount] }
         time_window: { type: string, enum: [transaction, rolling_hour, rolling_day, rolling_week, rolling_month] }
         threshold: { type: integer, format: int64 }
+        threshold_exponent:
+          type: integer
+          minimum: 0
+          maximum: 18
+          nullable: true
+          description: >-
+            The decimal exponent `threshold`'s minor units are expressed in, for an
+            asset-agnostic amount rule. Absent for an asset-scoped rule, whose denomination is
+            its own asset_code (ADR 0031 §35).
         rule_kind: { type: string, enum: [hard_limit, configurable_limit, risk_signal] }
         action: { type: string, enum: [deny, review] }
         status: { type: string, enum: [active, disabled] }

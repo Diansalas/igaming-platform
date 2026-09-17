@@ -69,7 +69,7 @@ func TestRiskRules_CreateListDisable(t *testing.T) {
 	token := mustLoginStaff(t, srv, tenant.Slug, riskManager.Email, "rm-pw-1")
 
 	createResp := postJSON(t, srv, "/v1/admin/risk/rules", token.AccessToken, map[string]any{
-		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500,
+		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500, "threshold_exponent": 2,
 	})
 	defer createResp.Body.Close()
 	if createResp.StatusCode != http.StatusCreated {
@@ -130,7 +130,7 @@ func TestRiskRules_TenantAdminCannotManageOnlyRead(t *testing.T) {
 	}
 
 	createResp := postJSON(t, srv, "/v1/admin/risk/rules", token.AccessToken, map[string]any{
-		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500,
+		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500, "threshold_exponent": 2,
 	})
 	defer createResp.Body.Close()
 	if createResp.StatusCode != http.StatusForbidden {
@@ -156,7 +156,7 @@ func TestRiskRules_CrossTenantDisableDenied(t *testing.T) {
 	tokenB := mustLoginStaff(t, srv, tenantB.Slug, riskManagerB.Email, "rm-b-pw-2")
 
 	createResp := postJSON(t, srv, "/v1/admin/risk/rules", tokenA.AccessToken, map[string]any{
-		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500,
+		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500, "threshold_exponent": 2,
 	})
 	defer createResp.Body.Close()
 	var created riskRuleResponse
@@ -203,7 +203,7 @@ func TestRiskRules_CrossTenantNotVisible(t *testing.T) {
 	tokenB := mustLoginStaff(t, srv, tenantB.Slug, riskManagerB.Email, "rm-b-pw-1")
 
 	createResp := postJSON(t, srv, "/v1/admin/risk/rules", tokenA.AccessToken, map[string]any{
-		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500,
+		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500, "threshold_exponent": 2,
 	})
 	defer createResp.Body.Close()
 	var created riskRuleResponse
@@ -233,7 +233,7 @@ func TestRiskRules_LicensingModeRoundTrip(t *testing.T) {
 	token := mustLoginStaff(t, srv, tenant.Slug, riskManager.Email, "rm-lm-pw-1")
 
 	scopedResp := postJSON(t, srv, "/v1/admin/risk/rules", token.AccessToken, map[string]any{
-		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500,
+		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500, "threshold_exponent": 2,
 		"licensing_mode": "own_licence",
 	})
 	defer scopedResp.Body.Close()
@@ -249,7 +249,7 @@ func TestRiskRules_LicensingModeRoundTrip(t *testing.T) {
 	}
 
 	unscopedResp := postJSON(t, srv, "/v1/admin/risk/rules", token.AccessToken, map[string]any{
-		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500,
+		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500, "threshold_exponent": 2,
 	})
 	defer unscopedResp.Body.Close()
 	if unscopedResp.StatusCode != http.StatusCreated {
@@ -303,7 +303,7 @@ func TestRiskRules_LicensingModeInvalidValueRejected(t *testing.T) {
 	token := mustLoginStaff(t, srv, tenant.Slug, riskManager.Email, "rm-lm-pw-2")
 
 	resp := postJSON(t, srv, "/v1/admin/risk/rules", token.AccessToken, map[string]any{
-		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500,
+		"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500, "threshold_exponent": 2,
 		"licensing_mode": "nonsense",
 	})
 	defer resp.Body.Close()
@@ -316,5 +316,68 @@ func TestRiskRules_LicensingModeInvalidValueRejected(t *testing.T) {
 	decodeBody(t, resp, &apiErr)
 	if apiErr.Code != apierror.CodeValidation {
 		t.Fatalf("expected a validation error code, got %+v", apiErr)
+	}
+}
+
+// TestCreateRiskRule_ThresholdDenominationIsRequiredExactlyOnce is the
+// HTTP-layer half of ADR 0031 §35: an amount rule whose threshold has no
+// declared denomination (or two conflicting ones) is a 400, not a stored
+// rule whose meaning silently changes with the asset it is read against.
+func TestCreateRiskRule_ThresholdDenominationIsRequiredExactlyOnce(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newTestServer(t, pool, issuer)
+
+	tenant := mustCreateTenant(t, pool)
+	riskManager := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleRiskManager, "rm-denom-pw-1")
+	token := mustLoginStaff(t, srv, tenant.Slug, riskManager.Email, "rm-denom-pw-1")
+
+	cases := []struct {
+		name string
+		body map[string]any
+		want int
+	}{
+		{"neither asset_code nor threshold_exponent", map[string]any{
+			"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500,
+		}, http.StatusBadRequest},
+		{"both asset_code and threshold_exponent", map[string]any{
+			"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500,
+			"asset_code": "EUR", "threshold_exponent": 2,
+		}, http.StatusBadRequest},
+		{"exponent out of range", map[string]any{
+			"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500,
+			"threshold_exponent": 19,
+		}, http.StatusBadRequest},
+		{"asset-scoped rule needs no exponent", map[string]any{
+			"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500,
+			"asset_code": "EUR",
+		}, http.StatusCreated},
+		{"asset-agnostic rule with a declared exponent", map[string]any{
+			"operation": "casino_bet", "limit_kind": "max_amount", "time_window": "transaction", "threshold": 500,
+			"threshold_exponent": 8,
+		}, http.StatusCreated},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			resp := postJSON(t, srv, "/v1/admin/risk/rules", token.AccessToken, c.body)
+			defer resp.Body.Close()
+			if resp.StatusCode != c.want {
+				var apiErr apierror.Error
+				decodeBody(t, resp, &apiErr)
+				t.Fatalf("expected %d, got %d: %+v", c.want, resp.StatusCode, apiErr)
+			}
+			if c.want != http.StatusCreated {
+				return
+			}
+			var created riskRuleResponse
+			decodeBody(t, resp, &created)
+			// The response must echo the denomination back, so an
+			// operator can see what the rule actually means.
+			if created.AssetCode == "" && (created.ThresholdExponent == nil) {
+				t.Fatalf("expected the created rule to carry a denomination, got %+v", created)
+			}
+			if created.AssetCode != "" && created.ThresholdExponent != nil {
+				t.Fatalf("an asset-scoped rule must not also carry a threshold_exponent, got %+v", created)
+			}
+		})
 	}
 }

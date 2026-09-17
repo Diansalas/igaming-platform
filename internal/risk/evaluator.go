@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // ErrInvalidInput is returned for a structurally invalid RiskRequest
@@ -32,89 +31,108 @@ var ErrConflictingRules = errors.New("risk: conflicting configurable rules match
 // silently skipped just because the caller forgot to populate Amount.
 var ErrMissingAmount = fmt.Errorf("%w: a matched rule requires a non-zero amount", ErrInvalidInput)
 
+// ErrUnknownOperation is returned when req.Operation is not one of the
+// Operation values this package recognizes (knownOperations, mirroring
+// migration 0041's own CHECK constraint).
+//
+// Fail-closed for a caller-side typo: an unrecognized operation matches
+// no rule at all, so before this check a single misspelled operation
+// string resolved to a silent ALLOW for an operation that may well have
+// had a HARD_LIMIT configured under its correct name (Stage 4H-B0-R6
+// fail-closed audit, ADR 0031 §34).
+var ErrUnknownOperation = fmt.Errorf("%w: unrecognized operation", ErrInvalidInput)
+
+// ErrUnknownOutcome is returned if Evaluate ever produced a RiskDecision
+// whose Outcome is not one of the three defined values - a self-check on
+// its own output, so no internal code path can hand a caller a decision
+// it cannot classify. Unreachable today; present because "unclassifiable"
+// must resolve to an error, never to the caller's not-ALLOW-so-decline
+// branch (ADR 0031 §34's four distinct outcomes).
+var ErrUnknownOutcome = errors.New("risk: evaluator produced an unrecognized outcome")
+
+// ErrTenantScopeMismatch is returned when tx's own PostgreSQL tenant
+// context (app.tenant_id, set only by db.WithTenant) is absent or does
+// not equal req.TenantID.
+//
+// This is a fail-closed gate on a genuine fail-OPEN: risk_rules' RLS read
+// policy (migration 0041) returns a tenant's rules ONLY to a connection
+// scoped to that tenant. Evaluated on an unscoped transaction
+// (db.WithoutTenant), the same query silently returns platform-wide rules
+// alone - every tenant-owned limit, including a tenant's own HARD_LIMIT,
+// becomes invisible and the request resolves to ALLOW. Risk must not
+// depend on every present and future caller remembering to open the right
+// kind of transaction (ADR 0031 §34).
+var ErrTenantScopeMismatch = errors.New("risk: transaction is not tenant-scoped to the request's tenant")
+
+// ErrPlayerScopedConnection is returned when tx carries a player scope
+// (app.player_account_id, set by db.WithPlayerScope). Every risk_rules
+// RLS policy requires that setting to be NULL, so such a connection reads
+// ZERO rules - which would resolve every request to ALLOW. risk_rules has
+// no legitimate player-facing access path (migration 0041's own RLS
+// comment), so this is refused outright rather than silently evaluated
+// against an empty rule set.
+var ErrPlayerScopedConnection = errors.New("risk: risk evaluation is not permitted on a player-scoped transaction")
+
+// ErrMissingScopeContext is returned when at least one currently-
+// EFFECTIVE rule configured for this operation is scoped by a dimension
+// the request left empty.
+//
+// Generalizes the ErrMissingLicensingMode gate (ADR 0031 §10) to every
+// optional scope dimension, for the identical reason: empty on the
+// REQUEST side is not a wildcard (only empty on the RULE side is), so
+// Rule.matches() alone would silently treat such a rule as a non-match -
+// letting a caller that simply forgot to populate a field bypass a
+// HARD_LIMIT authored for exactly this operation. Deliberately
+// operation-wide rather than "only when the rule matches on every other
+// dimension too": determining that requires the very matches() logic this
+// gate exists to backstop. See ADR 0031 §34.
+var ErrMissingScopeContext = fmt.Errorf("%w: a rule scoped by a dimension this request left empty is configured for this operation", ErrInvalidInput)
+
+// ErrMissingJurisdiction is the ErrMissingScopeContext case for
+// jurisdiction_code, kept as its own sentinel because it CHANGES a
+// previously documented behavior: ADR 0031 §9 recorded that an empty
+// JurisdictionCode "matches only jurisdiction-unscoped rules". It now
+// fails closed instead, once any jurisdiction-scoped rule is effective
+// for the operation - the same fail-open shape §10 already rejected for
+// licensing mode. Root cause is unchanged and still open: nothing in this
+// codebase resolves a per-player jurisdiction yet (TODO(jurisdiction),
+// ADR 0031 §9/§34).
+var ErrMissingJurisdiction = fmt.Errorf("%w: a jurisdiction-scoped rule is configured for this operation but the request supplied no jurisdiction_code", ErrMissingScopeContext)
+
 // ErrMissingLicensingMode is returned when at least one rule configured
 // for this operation is scoped by LicensingMode but the request supplied
-// none (Stage 4G-FINAL Part D, specialist review finding). Unlike every
-// other optional scope dimension, an empty RiskRequest.LicensingMode is
-// NEVER a legitimate "not yet resolved" value the way JurisdictionCode's
-// empty value can be - tenants.licensing_model is NOT NULL, so a real
-// caller always has a real value to supply. Rule.matches() alone would
-// silently exclude a LicensingMode-scoped rule from ever matching an
-// empty-LicensingMode request (empty on the REQUEST side is not a
-// wildcard - only empty on the RULE side is), which would let a caller
-// that simply forgot to populate the field silently bypass a
-// LicensingMode-scoped HARD_LIMIT meant to protect exactly this
-// operation. Checked once per Evaluate call, independently of whether
-// any individual rule would otherwise match on every other dimension -
-// this is DELIBERATELY operation-wide, not per-rule: a narrower check
-// (only requiring LicensingMode when a rule ALSO matches every other
-// dimension) would itself be a fail-OPEN gap, since determining that
-// requires evaluating the same matches() logic this check exists to
-// backstop. Adversarial review considered this "blast radius" (one
-// platform-wide LicensingMode-scoped rule requires EVERY tenant to
-// supply LicensingMode for that operation) and confirmed it is the
-// correct, intended behavior, not a defect: a platform-wide rule is
-// deliberately visible/binding to every tenant (that is what
-// "platform-wide" means), so every caller for that operation genuinely
-// must resolve its own licensing mode once such a rule exists - exactly
-// the fail-closed contract this whole gate exists to enforce, applied at
-// the same scope the rule itself operates at.
+// none (Stage 4G-FINAL Part D, specialist review finding). Unlike other
+// optional scope dimensions, an empty RiskRequest.LicensingMode is NEVER
+// a legitimate "not yet resolved" value the way JurisdictionCode's empty
+// value can be - tenants.licensing_model is NOT NULL, so a real caller
+// always has a real value to supply. Adversarial review considered the
+// "blast radius" (one platform-wide LicensingMode-scoped rule requires
+// EVERY tenant to supply LicensingMode for that operation) and confirmed
+// it is the correct, intended behavior: a platform-wide rule is
+// deliberately binding on every tenant, so every caller genuinely must
+// resolve its own licensing mode once such a rule exists.
+var ErrMissingLicensingMode = fmt.Errorf("%w: a licensing_mode-scoped rule is configured for this operation but the request supplied no licensing_mode", ErrMissingScopeContext)
+
+// ErrMissingAsset is returned when an amount-shaped rule matches a
+// request that carries no AssetCode, or when an asset-scoped rule is
+// configured for this operation and the request left AssetCode empty.
 //
-// as conservative as ErrMissingAmount's own "never silently skip a rule
-// this request cannot be safely evaluated against" principle.
-var ErrMissingLicensingMode = fmt.Errorf("%w: a licensing_mode-scoped rule is configured for this operation but the request supplied no licensing_mode", ErrInvalidInput)
+// Before this gate, a max_amount/min_amount rule was compared against
+// req.Amount with NO asset context whatsoever - i.e. with no way to know
+// which asset's minor units either side of the comparison was in (ADR
+// 0031 §34/§35). Only the cumulative case checked for an asset at all.
+var ErrMissingAsset = fmt.Errorf("%w: an amount-shaped or asset-scoped rule requires the request to carry an asset_code", ErrMissingScopeContext)
 
-// operationLedgerTransactionTypes maps a risk Operation to the
-// ledger_transactions.transaction_type value(s) a LimitCumulativeAmount
-// rule for that operation aggregates over. Only operations this stage
-// actually enforces (see ADR 0031 §7) have an entry - a cumulative rule
-// configured for an operation with no entry here is a configuration the
-// evaluator cannot compute, surfaced as ErrUnsupportedCumulativeOperation
-// (fail-closed, never silently treated as "no usage yet").
-var operationLedgerTransactionTypes = map[Operation]string{
-	OperationCasinoBet: "casino_bet",
-}
-
-// operationLedgerRollbackTypes maps an operation's own ledger transaction
-// type to its reversal type - a rolled-back operation must not
-// permanently consume the player's cumulative capacity (financial
-// correctness specialist review finding). Empty string means no reversal
-// type exists for that operation.
-var operationLedgerRollbackTypes = map[string]string{
-	"casino_bet": "casino_rollback",
-}
-
-// cumulativeTransactionTypes returns the full set of ledger transaction
-// types a cumulative-amount check must net together for txType: the
-// operation's own type plus its rollback counterpart, if any.
-func cumulativeTransactionTypes(txType string) []string {
-	if rollback, ok := operationLedgerRollbackTypes[txType]; ok {
-		return []string{txType, rollback}
-	}
-	return []string{txType}
-}
-
-// numericToBigInt converts a scanned NUMERIC(38,0) column to *big.Int,
-// never through int64 or float64 - a SUM of many ledger entries for an
-// 18-exponent asset can legitimately exceed int64's range (CLAUDE.md's
-// own crypto-precision rule), and a silent overflow here would fail OPEN
-// exactly where a cumulative limit most needs to fail closed.
-func numericToBigInt(n pgtype.Numeric) (*big.Int, error) {
-	if !n.Valid {
-		return big.NewInt(0), nil
-	}
-	if n.Exp != 0 {
-		return nil, fmt.Errorf("risk: unexpected non-integer NUMERIC exponent %d", n.Exp)
-	}
-	if n.Int == nil {
-		return big.NewInt(0), nil
-	}
-	return n.Int, nil
-}
-
-// ErrUnsupportedCumulativeOperation is returned when a LimitCumulativeAmount
-// rule matches a request whose Operation has no known ledger mapping.
-var ErrUnsupportedCumulativeOperation = errors.New("risk: cumulative_amount is not supported for this operation")
+// ErrMissingPlayer is returned when req.PlayerAccountID is nil.
+//
+// Every Operation this package defines is player-scoped, and a
+// player-scoped rule (the MOST specific rule shape there is - an
+// individual player's own override) is silently skipped by matches() for
+// a request with uuid.Nil. Required unconditionally rather than
+// per-operation: a future genuinely player-less operation (a retail
+// agent-level or house-level check, ADR 0031 §21/§24 - none exists) must
+// opt out here deliberately, with its own documented reasoning.
+var ErrMissingPlayer = fmt.Errorf("%w: player_account_id is required", ErrInvalidInput)
 
 // windowDuration returns w's rolling duration ending now() - only valid
 // for a genuine rolling window (never WindowTransaction, which has no
@@ -137,6 +155,12 @@ func windowDuration(w TimeWindow) (time.Duration, error) {
 // matches reports whether r applies to req - every non-nil/non-empty
 // scope field on r must equal req's corresponding field exactly; a
 // nil/empty field on r means "applies regardless" of that dimension.
+//
+// NOTE: matches() is intentionally NOT the fail-closed boundary. An empty
+// dimension on the REQUEST side returning false here is exactly the
+// silent-skip fail-open that Evaluate's own missing-scope gate
+// (ErrMissingScopeContext and friends) exists to catch BEFORE this
+// function's result can be acted on.
 func (r Rule) matches(req RiskRequest) bool {
 	if r.Operation != req.Operation {
 		return false
@@ -186,31 +210,113 @@ func (r Rule) isEffective(t time.Time) bool {
 	return r.EffectiveUntil == nil || t.Before(*r.EffectiveUntil)
 }
 
+// missingScopeContext reports the fail-closed error for the first scope
+// dimension that r narrows and req leaves empty, or nil if r can be
+// safely evaluated against req.
+//
+// TenantID/BrandID/PlayerAccountID are absent from this list because
+// Evaluate already requires all three on every request. GameID is
+// included: a game-scoped rule cannot be proven inapplicable by a request
+// that carries no game.
+func (r Rule) missingScopeContext(req RiskRequest) error {
+	switch {
+	case r.JurisdictionCode != "" && req.JurisdictionCode == "":
+		return fmt.Errorf("%w (rule %s)", ErrMissingJurisdiction, r.ID)
+	case r.LicensingMode != "" && req.LicensingMode == "":
+		return fmt.Errorf("%w (rule %s)", ErrMissingLicensingMode, r.ID)
+	case r.AssetCode != "" && req.AssetCode == "":
+		return fmt.Errorf("%w (rule %s is scoped to asset %s)", ErrMissingAsset, r.ID, r.AssetCode)
+	case r.Product != "" && req.Product == "":
+		return fmt.Errorf("%w: product (rule %s)", ErrMissingScopeContext, r.ID)
+	case r.ProviderID != "" && req.ProviderID == "":
+		return fmt.Errorf("%w: provider_id (rule %s)", ErrMissingScopeContext, r.ID)
+	case r.PaymentMethod != "" && req.PaymentMethod == "":
+		return fmt.Errorf("%w: payment_method (rule %s)", ErrMissingScopeContext, r.ID)
+	case r.GameID != nil && req.GameID == uuid.Nil:
+		return fmt.Errorf("%w: game_id (rule %s)", ErrMissingScopeContext, r.ID)
+	}
+	return nil
+}
+
+// verifyConnectionScope proves tx is scoped the way risk_rules' RLS
+// policies require BEFORE any rule is read, so an incorrectly-scoped
+// transaction can never produce a silently-empty or silently-partial rule
+// set (see ErrTenantScopeMismatch/ErrPlayerScopedConnection).
+//
+// Reads the same two connection-level settings migration 0041's policies
+// themselves read; deliberately local to this package rather than a new
+// internal/db helper, since promoting it to shared infrastructure is an
+// architect-owned change (docs/governance/change-control.md).
+func verifyConnectionScope(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) error {
+	var scopedTenant, scopedPlayer *string
+	err := tx.QueryRow(ctx,
+		`SELECT NULLIF(current_setting('app.tenant_id', true), ''), NULLIF(current_setting('app.player_account_id', true), '')`,
+	).Scan(&scopedTenant, &scopedPlayer)
+	if err != nil {
+		return fmt.Errorf("risk: read connection scope: %w", err)
+	}
+	if scopedPlayer != nil {
+		return fmt.Errorf("%w: app.player_account_id is set", ErrPlayerScopedConnection)
+	}
+	if scopedTenant == nil {
+		return fmt.Errorf("%w: app.tenant_id is not set on this transaction", ErrTenantScopeMismatch)
+	}
+	parsed, err := uuid.Parse(*scopedTenant)
+	if err != nil {
+		return fmt.Errorf("%w: app.tenant_id %q is not a uuid", ErrTenantScopeMismatch, *scopedTenant)
+	}
+	if parsed != tenantID {
+		return fmt.Errorf("%w: transaction is scoped to %s, request is for %s", ErrTenantScopeMismatch, parsed, tenantID)
+	}
+	return nil
+}
+
 // breach reports whether req breaches r, querying cumulative usage from
 // the ledger when r.LimitKind is LimitCumulativeAmount. tx must already
-// be tenant-scoped.
-func (r Rule) breach(ctx context.Context, tx pgx.Tx, req RiskRequest) (bool, error) {
+// be tenant-scoped (verified by Evaluate). exponents is Evaluate's own
+// per-call asset-exponent resolver - the single source of decimal
+// exponent truth for the comparison (ADR 0031 §35).
+func (r Rule) breach(ctx context.Context, tx pgx.Tx, req RiskRequest, exponents *assetExponents) (bool, error) {
+	if !r.LimitKind.isAmountShaped() {
+		// Unreachable given migration 0041's CHECK constraint, but the
+		// evaluator must never silently ALLOW a limit_kind it doesn't
+		// recognize (fail-closed for a malformed rule - directive §22).
+		return false, fmt.Errorf("risk: unrecognized limit_kind %q", r.LimitKind)
+	}
+
+	// Every amount-shaped comparison needs BOTH sides denominated in the
+	// same asset's minor units. Before this stage only the cumulative
+	// case checked for an asset at all, so a min/max rule could be
+	// compared with no asset context whatsoever (ADR 0031 §34/§35).
+	if req.Amount == 0 {
+		return false, ErrMissingAmount
+	}
+	if req.AssetCode == "" {
+		return false, fmt.Errorf("%w (rule %s, limit_kind=%s)", ErrMissingAsset, r.ID, r.LimitKind)
+	}
+	reqExponent, err := exponents.forRequest(ctx, req.AssetCode)
+	if err != nil {
+		return false, err
+	}
+	if _, err := r.thresholdExponent(reqExponent); err != nil {
+		return false, err
+	}
+
 	switch r.LimitKind {
 	case LimitMinAmount:
-		if req.Amount == 0 {
-			return false, ErrMissingAmount
-		}
 		return req.Amount < r.Threshold, nil
 	case LimitMaxAmount:
-		if req.Amount == 0 {
-			return false, ErrMissingAmount
-		}
 		return req.Amount > r.Threshold, nil
 	case LimitCumulativeAmount:
-		if req.Amount == 0 {
-			return false, ErrMissingAmount
+		if req.PlayerAccountID == uuid.Nil {
+			return false, ErrMissingPlayer
 		}
-		txType, ok := operationLedgerTransactionTypes[req.Operation]
+		spec, ok := operationCumulativeSpecs[req.Operation]
 		if !ok {
 			return false, fmt.Errorf("%w: operation %q", ErrUnsupportedCumulativeOperation, req.Operation)
 		}
-		if req.PlayerAccountID == uuid.Nil || req.AssetCode == "" {
-			return false, fmt.Errorf("%w: player_account_id and asset_code are required for a cumulative_amount rule", ErrInvalidInput)
+		if err := spec.validate(); err != nil {
+			return false, fmt.Errorf("%w (operation %q)", err, req.Operation)
 		}
 		dur, err := windowDuration(r.TimeWindow)
 		if err != nil {
@@ -234,65 +340,57 @@ func (r Rule) breach(ctx context.Context, tx pgx.Tx, req RiskRequest) (bool, err
 		}
 
 		windowStart := time.Now().UTC().Add(-dur)
-		// Net of debits minus credits across BOTH the operation's own
-		// transaction type and its rollback counterpart (financial
-		// correctness specialist review finding): a rolled-back bet's
-		// original debit must not permanently consume the player's
-		// cumulative capacity - postRollback posts an inverted (credit)
-		// entry against the same player_cash account, so summing
-		// (debit - credit) across both types nets a voided round to zero.
-		// Scanned as NUMERIC via pgtype.Numeric, never int64 - the SUM of
-		// many NUMERIC(38,0) entries can legitimately exceed int64's range
-		// for an 18-exponent asset (CLAUDE.md's own crypto-precision
-		// rule), and a naive int64 SUM/addition would silently wrap and
-		// fail OPEN exactly where this rule most needs to fail closed
-		// (financial + security specialist review finding).
-		var existingNumeric pgtype.Numeric
-		err = tx.QueryRow(ctx,
-			`SELECT COALESCE(SUM(CASE WHEN le.direction = 'debit' THEN le.amount ELSE -le.amount END), 0)
-			 FROM ledger_entries le
-			 JOIN ledger_transactions lt ON lt.id = le.ledger_transaction_id
-			 WHERE le.tenant_id = $1
-			   AND le.player_account_id = $2
-			   AND le.asset_code = $3
-			   AND lt.transaction_type = ANY($4)
-			   AND le.created_at >= $5`,
-			req.TenantID, req.PlayerAccountID, req.AssetCode, cumulativeTransactionTypes(txType), windowStart,
-		).Scan(&existingNumeric)
+		existing, err := cumulativeUsage(ctx, tx, spec, req, windowStart)
 		if err != nil {
-			return false, fmt.Errorf("risk: query cumulative usage: %w", err)
-		}
-		existing, err := numericToBigInt(existingNumeric)
-		if err != nil {
-			return false, fmt.Errorf("risk: convert cumulative usage: %w", err)
+			return false, err
 		}
 		total := new(big.Int).Add(existing, big.NewInt(req.Amount))
 		return total.Cmp(big.NewInt(r.Threshold)) > 0, nil
 	default:
-		// Unreachable given migration 0041's CHECK constraint, but the
-		// evaluator must never silently ALLOW a limit_kind it doesn't
-		// recognize (fail-closed for a malformed rule - directive §22).
 		return false, fmt.Errorf("risk: unrecognized limit_kind %q", r.LimitKind)
 	}
 }
 
 // Evaluate is the single authoritative Risk & Limits decision boundary
-// (ADR 0031 §2) - every caller (today: internal/casino) consults this
+// (ADR 0031 §2) - every caller (today: internal/casino's LaunchGame and
+// postBet, the only two call sites in the repository) consults this
 // instead of implementing its own limit comparison. tx must already be
 // tenant-scoped (db.WithTenant) for req.TenantID; the RLS policy on
-// risk_rules (migration 0041) is what actually restricts the SELECT
-// below to req's own tenant's rules plus every platform-wide rule.
+// risk_rules (migration 0041) is what actually restricts the SELECT below
+// to req's own tenant's rules plus every platform-wide rule - and
+// verifyConnectionScope proves that scope rather than trusting it.
 //
 // FAIL-CLOSED CONTRACT: any non-nil error MUST be treated by the caller
-// exactly like a DENY - never as ALLOW. This includes a database error,
-// an unrecognized limit_kind, a conflicting-rule configuration
-// (ErrConflictingRules), and a rule requiring data the request didn't
-// supply (ErrMissingAmount, ErrUnsupportedCumulativeOperation). Evaluate
-// itself never returns a "soft" error meant to be interpreted as ALLOW -
-// there is no such thing in this API.
+// exactly like a DENY - never as ALLOW, and never as a business decline
+// carrying a reason code (an error means "the platform could not decide",
+// not "the player's limits rejected this"). This includes a database
+// error or timeout, an unrecognized limit_kind/rule_kind/operation, a
+// conflicting-rule configuration (ErrConflictingRules), a wrongly-scoped
+// transaction (ErrTenantScopeMismatch/ErrPlayerScopedConnection), missing
+// request context (ErrMissingAmount, ErrMissingPlayer, ErrMissingAsset,
+// ErrMissingJurisdiction, ErrMissingLicensingMode,
+// ErrMissingScopeContext), an undeclared threshold denomination or an
+// exponent mismatch (ErrMissingThresholdDenomination,
+// ErrThresholdDenominationMismatch), and an unmeasurable cumulative rule
+// (ErrUnsupportedCumulativeOperation, ErrInvalidCumulativeSpec,
+// ErrUnrecognizedCumulativeLeg). Evaluate never returns a "soft" error
+// meant to be interpreted as ALLOW - there is no such thing in this API.
+//
+// ALLOW / REVIEW / DENY / error are FOUR distinct outcomes, and an
+// enforcement point must keep them distinct (ADR 0031 §34): REVIEW is
+// semantically not DENY even where today's only consumer blocks on both.
 func Evaluate(ctx context.Context, tx pgx.Tx, req RiskRequest) (RiskDecision, error) {
 	if req.TenantID == uuid.Nil || req.BrandID == uuid.Nil || req.Operation == "" {
 		return RiskDecision{}, fmt.Errorf("%w: tenant_id, brand_id, and operation are required", ErrInvalidInput)
+	}
+	if !IsKnownOperation(req.Operation) {
+		return RiskDecision{}, fmt.Errorf("%w: %q", ErrUnknownOperation, req.Operation)
+	}
+	if req.PlayerAccountID == uuid.Nil {
+		return RiskDecision{}, ErrMissingPlayer
+	}
+	if err := verifyConnectionScope(ctx, tx, req.TenantID); err != nil {
+		return RiskDecision{}, err
 	}
 
 	rules, err := listEffectiveRules(ctx, tx, req.Operation)
@@ -300,29 +398,28 @@ func Evaluate(ctx context.Context, tx pgx.Tx, req RiskRequest) (RiskDecision, er
 		return RiskDecision{}, err
 	}
 
-	// ErrMissingLicensingMode fail-closed gate (Stage 4G-FINAL, specialist
-	// review finding): checked against every rule CONFIGURED for this
-	// operation, not just ones that would otherwise match on every other
-	// dimension - conservative by design, mirroring ErrMissingAmount's own
-	// "never silently skip a rule this request cannot be safely evaluated
-	// against" principle. Rule.matches() alone cannot catch this: an empty
-	// req.LicensingMode against a LicensingMode-scoped rule simply returns
-	// false (a non-match), which would silently exclude that rule from
-	// ever applying rather than erroring - exactly the fail-open gap a
-	// forgetful future caller (Evaluate has only one caller, internal/
-	// casino, today) could otherwise introduce. Only a currently
-	// EFFECTIVE rule (isEffective(now), i.e. active and within its
-	// effective window) triggers this gate - a disabled or not-yet-
-	// effective rule is not a live policy and must never force every
-	// unrelated request for this operation to supply LicensingMode.
 	now := time.Now().UTC()
-	if req.LicensingMode == "" {
-		for _, r := range rules {
-			if r.LicensingMode != "" && r.isEffective(now) {
-				return RiskDecision{}, ErrMissingLicensingMode
-			}
+	exponents := &assetExponents{tx: tx}
+
+	// Missing-scope fail-closed gate (ADR 0031 §34, generalizing §10's
+	// licensing-mode gate to every optional dimension): checked against
+	// every rule CONFIGURED and currently EFFECTIVE for this operation,
+	// not just ones that would otherwise match on every other dimension.
+	// Conservative by design - Rule.matches() alone cannot catch this,
+	// because an empty request-side dimension against a rule that scopes
+	// it simply returns false (a non-match), silently excluding the rule
+	// from ever applying rather than erroring. A disabled or not-yet-
+	// effective rule is not a live policy and must never force every
+	// unrelated request for this operation to supply a dimension.
+	for _, r := range rules {
+		if !r.isEffective(now) {
+			continue
+		}
+		if err := r.missingScopeContext(req); err != nil {
+			return RiskDecision{}, err
 		}
 	}
+
 	var matched []MatchedRule
 	var hardBreachAction RuleAction
 	hardBreached := false
@@ -346,7 +443,7 @@ func Evaluate(ctx context.Context, tx pgx.Tx, req RiskRequest) (RiskDecision, er
 		}
 		switch r.RuleKind {
 		case RuleHardLimit:
-			breached, err := r.breach(ctx, tx, req)
+			breached, err := r.breach(ctx, tx, req, exponents)
 			if err != nil {
 				return RiskDecision{}, err
 			}
@@ -360,7 +457,7 @@ func Evaluate(ctx context.Context, tx pgx.Tx, req RiskRequest) (RiskDecision, er
 		case RuleConfigurableLimit:
 			configCandidates[configKey{r.LimitKind, r.TimeWindow}] = append(configCandidates[configKey{r.LimitKind, r.TimeWindow}], r)
 		case RuleRiskSignal:
-			breached, err := r.breach(ctx, tx, req)
+			breached, err := r.breach(ctx, tx, req, exponents)
 			if err != nil {
 				return RiskDecision{}, err
 			}
@@ -390,7 +487,7 @@ func Evaluate(ctx context.Context, tx pgx.Tx, req RiskRequest) (RiskDecision, er
 		if tie {
 			return RiskDecision{}, fmt.Errorf("%w: operation=%s limit_kind=%s time_window=%s", ErrConflictingRules, req.Operation, best.LimitKind, best.TimeWindow)
 		}
-		breached, err := best.breach(ctx, tx, req)
+		breached, err := best.breach(ctx, tx, req, exponents)
 		if err != nil {
 			return RiskDecision{}, err
 		}
@@ -431,5 +528,10 @@ func Evaluate(ctx context.Context, tx pgx.Tx, req RiskRequest) (RiskDecision, er
 		decision.Outcome, decision.Code, decision.Message = OutcomeReview, CodeRiskSignalFlag, "a risk signal was flagged"
 	}
 
+	// Self-check on our own output: a decision a caller cannot classify
+	// must surface as an error, never as "not ALLOW, so decline".
+	if !decision.Outcome.IsKnown() {
+		return RiskDecision{}, fmt.Errorf("%w: %q", ErrUnknownOutcome, decision.Outcome)
+	}
 	return decision, nil
 }

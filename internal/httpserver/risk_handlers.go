@@ -46,20 +46,24 @@ type riskRuleResponse struct {
 	LimitKind        string `json:"limit_kind"`
 	TimeWindow       string `json:"time_window"`
 	Threshold        int64  `json:"threshold"`
-	RuleKind         string `json:"rule_kind"`
-	Action           string `json:"action"`
-	Status           string `json:"status"`
-	EffectiveFrom    string `json:"effective_from"`
-	EffectiveUntil   string `json:"effective_until,omitempty"`
-	Description      string `json:"description,omitempty"`
-	CreatedAt        string `json:"created_at"`
+	// Which asset exponent's minor units Threshold is expressed in, for
+	// an asset-agnostic amount rule; omitted for an asset-scoped rule,
+	// whose denomination is its own asset_code (ADR 0031 §35).
+	ThresholdExponent *int16 `json:"threshold_exponent,omitempty"`
+	RuleKind          string `json:"rule_kind"`
+	Action            string `json:"action"`
+	Status            string `json:"status"`
+	EffectiveFrom     string `json:"effective_from"`
+	EffectiveUntil    string `json:"effective_until,omitempty"`
+	Description       string `json:"description,omitempty"`
+	CreatedAt         string `json:"created_at"`
 }
 
 func toRiskRuleResponse(r risk.Rule) riskRuleResponse {
 	resp := riskRuleResponse{
 		ID: r.ID.String(), JurisdictionCode: r.JurisdictionCode, LicensingMode: r.LicensingMode, Product: r.Product, Operation: string(r.Operation),
 		ProviderID: r.ProviderID, AssetCode: r.AssetCode, PaymentMethod: r.PaymentMethod,
-		LimitKind: string(r.LimitKind), TimeWindow: string(r.TimeWindow), Threshold: r.Threshold,
+		LimitKind: string(r.LimitKind), TimeWindow: string(r.TimeWindow), Threshold: r.Threshold, ThresholdExponent: r.ThresholdExponent,
 		RuleKind: string(r.RuleKind), Action: string(r.Action), Status: string(r.Status),
 		EffectiveFrom: r.EffectiveFrom.Format(rfc3339), Description: r.Description, CreatedAt: r.CreatedAt.Format(rfc3339),
 	}
@@ -132,9 +136,17 @@ type createRiskRuleRequest struct {
 	LimitKind        string `json:"limit_kind"`
 	TimeWindow       string `json:"time_window"`
 	Threshold        int64  `json:"threshold"`
-	RuleKind         string `json:"rule_kind"`
-	Action           string `json:"action"`
-	Description      string `json:"description"`
+	// REQUIRED for an amount-shaped rule that leaves asset_code empty:
+	// which asset exponent's minor units `threshold` is expressed in.
+	// Must be OMITTED when asset_code is set, since the asset itself is
+	// then the threshold's denomination, resolved from the `assets`
+	// registry at evaluation time. A wildcard-asset rule authored at one
+	// exponent fails CLOSED for an asset of any other exponent rather
+	// than being silently re-denominated (ADR 0031 §35, closing §32(d)).
+	ThresholdExponent *int16 `json:"threshold_exponent"`
+	RuleKind          string `json:"rule_kind"`
+	Action            string `json:"action"`
+	Description       string `json:"description"`
 }
 
 func newCreateRiskRuleHandler(deps Deps) http.HandlerFunc {
@@ -181,6 +193,19 @@ func newCreateRiskRuleHandler(deps Deps) http.HandlerFunc {
 		if req.Threshold < 0 {
 			v.Add("threshold", "must be non-negative")
 		}
+		// Denomination validation mirrors risk.CreateRule's own (which
+		// mirrors migration 0046's CHECK) so an operator gets a field-level
+		// 400 rather than a generic one. Amount-shaped limit kinds are the
+		// only ones that carry a threshold denomination at all.
+		if req.ThresholdExponent != nil && (*req.ThresholdExponent < 0 || *req.ThresholdExponent > 18) {
+			v.Add("threshold_exponent", "must be between 0 and 18")
+		}
+		if req.AssetCode == "" && req.ThresholdExponent == nil {
+			v.Add("threshold_exponent", "required when asset_code is omitted: state which asset exponent the threshold's minor units are expressed in")
+		}
+		if req.AssetCode != "" && req.ThresholdExponent != nil {
+			v.Add("threshold_exponent", "must be omitted when asset_code is set - the asset is already the threshold's denomination")
+		}
 		var brandID, playerAccountID, gameID *uuid.UUID
 		if req.BrandID != "" {
 			parsed, err := uuid.Parse(req.BrandID)
@@ -219,7 +244,8 @@ func newCreateRiskRuleHandler(deps Deps) http.HandlerFunc {
 				PlayerAccountID: playerAccountID, Product: req.Product, Operation: risk.Operation(req.Operation),
 				ProviderID: req.ProviderID, GameID: gameID, AssetCode: req.AssetCode, PaymentMethod: req.PaymentMethod,
 				LimitKind: risk.LimitKind(req.LimitKind), TimeWindow: risk.TimeWindow(req.TimeWindow), Threshold: req.Threshold,
-				RuleKind: risk.RuleKind(req.RuleKind), Action: risk.RuleAction(req.Action), Description: req.Description,
+				ThresholdExponent: req.ThresholdExponent,
+				RuleKind:          risk.RuleKind(req.RuleKind), Action: risk.RuleAction(req.Action), Description: req.Description,
 				CreatedByActorType: "staff", CreatedByActorID: actorID,
 				IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
 			})

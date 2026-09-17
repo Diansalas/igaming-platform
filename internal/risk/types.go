@@ -35,6 +35,23 @@ const (
 	LimitCumulativeAmount LimitKind = "cumulative_amount"
 )
 
+// isAmountShaped reports whether k compares a monetary amount and
+// therefore needs BOTH an asset context on the request and a declared
+// threshold denomination on the rule (ADR 0031 §35). Every limit kind
+// this stage implements is amount-shaped; the predicate exists so a
+// future non-monetary kind (count/velocity - §4/§12) is not forced to
+// carry a denomination it has no meaning for, and so "which kinds need an
+// asset" is stated in exactly one place instead of being re-derived at
+// each call site.
+func (k LimitKind) isAmountShaped() bool {
+	switch k {
+	case LimitMinAmount, LimitMaxAmount, LimitCumulativeAmount:
+		return true
+	default:
+		return false
+	}
+}
+
 // TimeWindow is the aggregation window a limit applies over.
 // 'transaction' is the only valid window for LimitMinAmount/LimitMaxAmount
 // (the request's own amount, no aggregation). Every other value is a
@@ -97,6 +114,30 @@ const (
 	OperationBonusGrant    Operation = "bonus_grant"
 )
 
+// knownOperations is the closed set of Operation values migration 0041's
+// own CHECK constraint accepts. Evaluate validates req.Operation against
+// it (ErrUnknownOperation) rather than querying for rules and finding
+// none: an unknown or misspelled operation would otherwise match zero
+// rules and resolve to a silent ALLOW - a fail-OPEN triggered by a single
+// typo at a caller (Stage 4H-B0-R6 fail-closed audit, ADR 0031 §34).
+var knownOperations = map[Operation]struct{}{
+	OperationCasinoLaunch:  {},
+	OperationCasinoBet:     {},
+	OperationDeposit:       {},
+	OperationWithdrawal:    {},
+	OperationSportsbookBet: {},
+	OperationBonusGrant:    {},
+}
+
+// IsKnownOperation reports whether o is one of the Operation values this
+// package (and migration 0041's CHECK constraint) recognizes. Exported so
+// a caller/handler can reject an operation before ever opening a
+// transaction, using the same single source of truth Evaluate enforces.
+func IsKnownOperation(o Operation) bool {
+	_, ok := knownOperations[o]
+	return ok
+}
+
 // RuleStatus is a rule's own lifecycle state - a rule is disabled, never
 // deleted (migration 0041's append-only trigger enforces this at the
 // database).
@@ -139,9 +180,35 @@ type Rule struct {
 	PaymentMethod   string
 	LimitKind       LimitKind
 	TimeWindow      TimeWindow
-	// Threshold is minor units, matching the asset's own registered
-	// exponent - never floating point (CLAUDE.md's financial rules).
-	Threshold          int64
+	// Threshold is minor units, denominated per ThresholdExponent/
+	// AssetCode below - never floating point (CLAUDE.md's financial
+	// rules). Deliberately int64, matching ledger.EntryInput.Amount and
+	// RiskRequest.Amount (the values it is compared against) even though
+	// the column is NUMERIC(38,0): widening Risk alone would create a
+	// second money width inside one comparison. Consequence, disclosed in
+	// ADR 0031 §35: for an 18-exponent asset the largest AUTHORABLE
+	// threshold is int64's maximum (~9.22 major units), and a larger
+	// NUMERIC value written by direct SQL makes the row unscannable,
+	// which fails CLOSED as an Evaluate error rather than wrapping.
+	Threshold int64
+	// ThresholdExponent is the decimal exponent Threshold's minor units
+	// are expressed in, for an ASSET-AGNOSTIC amount rule (AssetCode
+	// empty). Such a rule binds every asset of that exponent and fails
+	// closed (ErrThresholdDenominationMismatch) for an asset of any
+	// other exponent - never silently re-denominated (ADR 0031 §35,
+	// closing §32(d)'s fail-open).
+	//
+	// nil for an asset-scoped rule, whose denomination IS its own
+	// AssetCode: the exponent is then read from the `assets` registry at
+	// evaluation time and never copied onto the rule, so there is exactly
+	// one source of exponent truth (CLAUDE.md's "per-currency exponent
+	// looked up from the Asset registry").
+	//
+	// nil for an asset-agnostic amount rule only in a row created BEFORE
+	// migration 0046 (whose CHECK is NOT VALID precisely so such rows are
+	// grandfathered as data rather than guessed at): Evaluate refuses to
+	// evaluate one (ErrMissingThresholdDenomination).
+	ThresholdExponent  *int16
 	RuleKind           RuleKind
 	Action             RuleAction
 	Status             RuleStatus
@@ -153,6 +220,12 @@ type Rule struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
+
+// ThresholdExponentOf returns a pointer to e, for populating
+// CreateRuleParams.ThresholdExponent (an asset-agnostic amount rule's
+// required threshold denomination - ADR 0031 §35) without every caller
+// declaring its own local variable.
+func ThresholdExponentOf(e int16) *int16 { return &e }
 
 // specificity ranks how narrowly Rule r is scoped, used ONLY to resolve
 // precedence among RuleConfigurableLimit rules that otherwise match the
@@ -267,6 +340,25 @@ const (
 	OutcomeDeny   Outcome = "deny"
 	OutcomeReview Outcome = "review"
 )
+
+// IsKnown reports whether o is one of the three defined outcomes.
+//
+// Exists so an enforcement point can keep ALLOW / REVIEW / DENY /
+// "error-or-unavailable" as FOUR semantically distinct outcomes (ADR 0031
+// §34) instead of collapsing everything that is not ALLOW into a decline:
+// an Outcome outside this set is not a business decision at all and must
+// be handled like an evaluator error (fail closed as an error, never a
+// decline carrying a reason code, and never ALLOW). Evaluate self-checks
+// its own output with this too, so a future internal code path cannot
+// return an unclassified decision.
+func (o Outcome) IsKnown() bool {
+	switch o {
+	case OutcomeAllow, OutcomeDeny, OutcomeReview:
+		return true
+	default:
+		return false
+	}
+}
 
 // MatchedRule is one rule that contributed to a RiskDecision - reported
 // for explainability (directive §23's "risk decisions must be
