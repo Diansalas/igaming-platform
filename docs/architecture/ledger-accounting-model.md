@@ -1560,6 +1560,15 @@ mixed-funded lock does not satisfy this list.
   stage.
 - §6.2's `OPEN DECISION` stays open. This section changes its *form*, not
   its *status*.
+- **Stage 4H-B0-R6 forward pointer**: §6.4 is the implementation contract
+  derived from this section — a consolidated, twelve-case (A–L) posting
+  reference that **narrows this section's scope** (mixed funding deferred,
+  cashout not implemented), corrects two cross-document inconsistencies
+  found while consolidating, and states the hard implementation
+  requirements HR-1 … HR-8. §6.4 does **not** approve, reopen or supersede
+  anything here; case C-win's sign-off gate and case C-cashout's
+  `OPEN QUESTION` both remain exactly as written above. **Note §6.4 uses a
+  different case lettering** (see its own warning table).
 
 **Focus questions for the three independent reviewers**, so the review is
 not a re-derivation of this section from scratch:
@@ -1841,6 +1850,1016 @@ integrity and the bonus-abuse surface this specialist owns:
   resolution of the `OPEN QUESTION` — mixed-funded and bonus-funded
   cashout remains `BLOCKED` until that joint call lands, exactly as
   §6.3.3.2 already states.
+
+### 6.4 Implementation ADR — consolidated locked-funds posting reference, cases A–L (Stage 4H-B0-R6 Workstream C, phase 1)
+
+**Status: `NOT IMPLEMENTED`. PROPOSAL REQUIRING INDEPENDENT VALIDATION
+BEFORE ANY CODE.** This section is Workstream C phase 1's single
+deliverable: the exact, implementation-ready accounting flow for every
+locked-funds case a first sportsbook implementation slice can reach,
+consolidated into one reference so an implementer never has to reconcile
+§6.3, ADR 0038 and ADR 0032 against each other at the keyboard. It is
+**not** an authorization to migrate or to write Go. Migration number
+`0048` is reserved for the `account_type` CHECK widening §6.3.2 specifies
+and **must not be written until `bonus-engine` and `sportsbook` have each
+independently validated this section** (per this stage's own directive:
+"this must NOT be implemented blindly") and the §6.3.5 human-approval gate
+has been satisfied. §6.2's `OPEN DECISION` and §6.3's `PROPOSAL ONLY`
+status are unchanged by this section; this section only makes §6.3's
+approved shape executable and narrows its scope.
+
+**Relationship to §6.3.** §6.3 is the *design* (why Shape A, what
+Invariant B1 and Rule B2 become, how the split is recovered at unlock
+time). This section is the *implementation contract* derived from it. Where
+the two disagree, §6.3 governs the reasoning and this section governs the
+entries — and every disagreement found while writing this section is
+listed in §6.4.8 rather than silently resolved in one place.
+
+**Case-letter warning, stated first because it is the easiest mistake to
+make.** This section uses the Stage 4H-B0-R6 directive's **twelve-case**
+lettering (A–L). §6.3.3's table uses its own **seven-case** lettering
+(A–G) from Stage 4H-B0-R5. They agree on A–E and **diverge from F
+onward**:
+
+| This section (§6.4, A–L) | §6.3.3 (A–G) |
+|---|---|
+| A cash lock / B bonus lock / C mixed lock / D cash rollback / E bonus rollback | A / B / C / D / E — identical |
+| **F cash-funded win** | *no equivalent* (§6.3.3 never worked the cash-funded win; it is ADR 0038 §5's table) |
+| **G bonus-funded win** | **F** ("Win after bonus-funded bet") |
+| **H cash-funded loss** | *no equivalent* (ADR 0038 §5) |
+| **I bonus-funded loss** | **G** ("Loss after bonus-funded bet") |
+| J correction / K reversal / L cashout | *no equivalent* (ADR 0038 §10 / §10 / §8.3 + §6.3.3.2 case C-cashout) |
+
+Any future cross-reference must name the document as well as the letter
+("§6.3.3 case F" ≠ "§6.4 case F"). This section does not renumber §6.3.3 —
+renumbering a section three independent reviewers have already signed off
+on would invalidate their citations.
+
+#### 6.4.1 Mixed-funding decision — **DEFERRED. Cases C and every mixed-funded downstream case are OUT OF SCOPE for this implementation pass.**
+
+**The decision, stated plainly so `bonus-engine` and `sportsbook` can
+evaluate it directly: mixed cash + bonus funding of a single sportsbook
+stake is NOT supported in this implementation pass.** The first
+implementation slice supports **cash-only** stakes and **bonus-only**
+stakes. A stake is funded entirely from `player_cash` or entirely from
+`player_bonus` (of one Grant), never from both. This is option (1) of the
+two the directive allowed, and it is a **scope** decision, not a
+withdrawal of §6.3's design — §6.3.3 case C, §6.3.3.2 cases C-void,
+C-loss, C-win, C-partial and C-cashout remain the recorded design for
+mixed funding and are not deleted, re-opened, or contradicted here.
+
+**Why, in order of weight:**
+
+1. **The anti-structuring control that case C-win's proportional-split rule
+   requires is not mine to specify, and specifying it here would invert
+   the review gate this stage exists to honor.** `bonus-engine`'s Wave-3
+   review (§6.3.5.3 item 3) returned **APPROVE-WITH-CHANGES** and named
+   the required control's *owner* explicitly: "a bonus-engine-owned
+   control at the split-instruction boundary... is a `bonus-engine`
+   deliverable, not a `ledger-finance` one." The directive's option (2)
+   would have `ledger-finance` author that control unilaterally, against
+   an independent specialist's express statement that it belongs to
+   another domain. That is exactly the "no specialist redesigns shared
+   architecture unilaterally" failure CLAUDE.md forbids, and the fact that
+   the control is *financially* expressible (a floor, a write-off account)
+   does not make it a financial decision — it is a bonus-abuse policy
+   decision with a financial expression, the same category §6.3.3.2's
+   C-cashout note already declines to decide.
+2. **The structuring vector is real, confirmed by two independent
+   specialists, and amplified by precisely the multi-asset generality this
+   platform requires.** `bonus-engine` found it; `security` amplified it
+   at low decimal exponents. A 0-exponent asset (schema-legal today per
+   ADR 0021's own validated exponent range) makes "one minor unit" a whole
+   unit of value, so the `bonus_share == 0` degenerate window is not dust
+   there — it is the dominant case for small payouts. Shipping the
+   proportional rule without the control would put a known,
+   independently-confirmed, one-directional bonus-to-cash leak into the
+   first sportsbook slice.
+3. **Deferring mixed funding removes every rounding computation from this
+   implementation pass entirely.** Single-origin cases contain **no
+   ratio, no percentage, and no division of any kind** — every amount
+   posted is either a provider-stated integer or an amount already present
+   in a locked account. There is therefore no rounding decision, no
+   residual-direction micro-decision, no shared-helper call site, and no
+   exponent sensitivity anywhere in cases A/B/D/E/F/G/H/I/J/K. That is a
+   materially smaller and more provable first slice, and it is why
+   §6.4.6's multi-asset and no-hidden-monetary-creation checks pass
+   trivially rather than by argument.
+4. **Precedent: three independent specialists converged on the analogous
+   simplification for the adjacent open question.** `product-owner-proxy`,
+   `bonus-engine` and `sportsbook` each independently recommended
+   "not cashout-eligible" for C-cashout over inventing a split rule
+   (§6.3.3.2, §6.3.5.3). The same reasoning — lowest risk, trivially
+   reversible later, sidesteps rather than pre-empts a policy question
+   owned elsewhere — applies with equal force to mixed funding itself.
+5. **No product capability is lost that exists today.** Sportsbook is
+   `NOT IMPLEMENTED`; no player has ever placed a mixed-funded sportsbook
+   stake. This defers a capability, it does not remove one, and it needs
+   no backfill or migration to reverse.
+
+**Exactly what would need to be built later to support mixed funding
+(the directive's required one-paragraph statement).** Four things, none of
+them a change to the schema migration `0048` delivers: (i) a
+`bonus-engine`-owned, deterministic anti-structuring control at the
+split-instruction boundary — either a minimum bonus-attribution floor
+below which a stake may not be structured as mixed-funded (rejected at
+placement, not silently coerced), or a rule routing any
+`bonus_share == 0` degenerate settlement outcome to a manual-review /
+write-off account instead of silently crediting `player_cash` — specified
+by `bonus-engine`, reviewed by `ledger-finance` for its ledger
+expression, and by `security` for its structuring surface at every
+schema-legal exponent (0, 2, 6, 8, 18); (ii) removal of the hard
+mixed-split rejection HR-2 below imposes, replaced by the validated
+split-instruction path §6.3.4 item 5 describes; (iii) the settlement-time
+proportional split computation inside `internal/ledger` (per §6.3.5.2:
+**not** in `internal/sportsbook`, which has no non-drifting source for the
+original `C:B` ratio), built on §6.3.3.1's recovery query and ADR 0021's
+one shared rounding helper with the residual credited to the cash leg; and
+(iv) the full mixed-funded test matrix §6.3.4 item 7 already enumerates,
+including the `bonus_share == 0` degenerate case and the
+two-successive-partial-settlements ratio-survival case, on an 18-exponent
+and a 0-exponent asset. Until all four exist, a mixed-funded stake must be
+**rejected at placement**, never posted in a degraded form.
+
+**What this deferral does NOT claim.** It does not claim mixed funding is
+wrong, unnecessary, or permanently out of scope; it does not resolve the
+C-win sign-off gate (that gate stays open); and it does not weaken §6.3's
+approved Shape A, which is what migration `0048` implements and which is
+required for bonus-**only** funding regardless of the mixed-funding
+question.
+
+#### 6.4.2 Bonus-funded placement is separately gated — three named gates, not one
+
+Deferring mixed funding does **not** by itself make bonus-only sportsbook
+placement shippable. Three distinct gates exist, and they must not be
+collapsed into "the origin split is approved":
+
+- **G-1 — schema and ledger capability (this workstream).** Migration
+  `0048` plus the §6.3.4 code checklist. Gated on independent validation
+  of this section + human approval. Delivers the *ledger's* ability to
+  post cases B/E/G/I correctly. `ledger-finance`-owned.
+- **G-2 — locked-stake forfeiture / terminal-Grant semantics
+  (`bonus-engine` + `sportsbook`, human decision required).**
+  §6.3.5.3 item 4 confirmed a bonus-funded stake will routinely be sitting
+  in `player_locked_bonus` when a forfeiture/expiry/cancellation trigger
+  fires, and no posting shape is defined for that state. This is the same
+  unresolved item doc10 §5 / ADR 0032 §5 already carry as **Human decision
+  required**. It applies to **bonus-only** funding, not merely mixed — so
+  it gates cases B/E/G/I directly. `internal/sportsbook` must not offer
+  bonus-funded placement until G-2 closes, even though the ledger will be
+  able to post it once G-1 lands.
+- **G-3 — void/rollback wagering-progress netting (`bonus-engine`, newly
+  identified by this pass; see §6.4.9 item V-1).** Also applies to
+  bonus-only funding.
+
+**Consequence, stated so it cannot be misread as a completion claim:**
+G-1's deliverable is *ledger capability plus a complete, tested posting
+reference*, labeled `IMPLEMENTED` for the ledger and
+`BLOCKED` for the player-facing bonus-funded sportsbook capability until
+G-2 and G-3 close. Cash-funded cases A/D/F/H/J/K are unaffected by G-2 and
+G-3 and are the genuinely shippable set.
+
+#### 6.4.3 Cashout (case L) — **NOT IMPLEMENTED in this pass, regardless of the mixed-funding decision**
+
+Stated plainly, as the directive asks, rather than resolved:
+
+- **No cashout of any funding origin is implemented in this pass.** No
+  sportsbook code exists to offer or accept a cashout price, so there is
+  no code path to post against. Building the posting layer for an event
+  no domain can emit would be speculative work that CLAUDE.md's "no
+  uncontrolled scope expansion" rule excludes.
+- **Cash-funded cashout's posting shape is already fully specified** in
+  ADR 0038 §8.3 (the generalized `R`/`P` formula) and needs nothing from
+  this section beyond the `player_locked` → `player_locked_cash` account
+  rename §6.4.8 item 1 requires. It is `RESOLVED (architecture) — NOT
+  IMPLEMENTED`, unchanged.
+- **Bonus-funded and mixed-funded cashout remains `BLOCKED`** on the
+  `OPEN QUESTION` in §6.3.3.2 case C-cashout. `product-owner-proxy`,
+  `bonus-engine` and `sportsbook` each independently recommended
+  "not cashout-eligible" (§6.3.3.2, §6.3.5.3), and `bonus-engine` rejected
+  candidate 2 outright. **This section does not select that
+  recommendation.** It is a product/consumer-protection policy question
+  reserved for a human/product decision, and `ledger-finance` selecting it
+  — even to agree with three specialists — would be deciding something
+  this specialist has already twice recorded as outside its authority.
+  What this section *does* do is record that no implementation depends on
+  the answer: with cashout unimplemented and mixed funding deferred, the
+  question blocks nothing in this pass.
+
+#### 6.4.4 Scope table — all twelve cases, and where each one's authority lives
+
+| Case | In this pass? | `transaction_type` | Worked entries | Prior authority |
+|---|---|---|---|---|
+| A. Cash-funded lock | **YES** | `sportsbook_bet` | §6.4.5 A | ADR 0038 §3; §6.3.3 A |
+| B. Bonus-funded lock | **Ledger: yes. Player-facing: `BLOCKED` on G-2/G-3** | `sportsbook_bet` | §6.4.5 B | ADR 0038 §3; §6.3.3 B; §6.3.2 `T2` |
+| C. Mixed lock | **NO — out of scope, §6.4.1. Hard-rejected at placement (HR-2)** | n/a | §6.3.3 C (design retained, not implemented) | §6.3.3 C |
+| D. Cash-funded rollback | **YES** | `sportsbook_void` / `sportsbook_rollback` | §6.4.5 D | ADR 0038 §8.1/§10; §6.3.3 D |
+| E. Bonus-funded rollback | **Ledger: yes. Player-facing: `BLOCKED` on G-2/G-3** | `sportsbook_void` / `sportsbook_rollback` | §6.4.5 E | ADR 0038 §8.1/§10; §6.3.3 E |
+| F. Cash-funded win | **YES** | `sportsbook_settlement` | §6.4.5 F | ADR 0038 §5 |
+| G. Bonus-funded win | **Ledger: yes. Player-facing: `BLOCKED` on G-2/G-3** | `sportsbook_settlement` | §6.4.5 G | §6.3.2 `T3` (authoritative); §6.3.3 F; ADR 0038 §5 |
+| H. Cash-funded loss | **YES** | `sportsbook_settlement` | §6.4.5 H | ADR 0038 §5 |
+| I. Bonus-funded loss | **Ledger: yes. Player-facing: `BLOCKED` on G-2/G-3** | `sportsbook_settlement` | §6.4.5 I | §6.3.3 G; §6.3.3.2 C-loss (the `B`-sized-mirror fact) |
+| J. Correction | **YES** (cash); bonus follows B/E/G/I's gating | `sportsbook_rollback` **+** a fresh forward transaction | §6.4.5 J | ADR 0038 §10; invariant #10 |
+| K. Reversal | **YES** (cash); bonus follows B/E/G/I's gating | `sportsbook_rollback` | §6.4.5 K | ADR 0038 §10; §1.4 (tombstone) |
+| L. Cashout | **NO — not implemented, §6.4.3** | `sportsbook_cashout` | ADR 0038 §8.3 (cash); §6.3.3.2 C-cashout (`BLOCKED`) | ADR 0038 §8.3 |
+
+**Also out of scope for this pass, named so their absence is deliberate
+rather than overlooked**: partial settlement
+(`sportsbook_partial_settlement`, ADR 0038 §8.2) — a multi-leg/bet-builder
+capability no first slice needs, and the only in-scope case that would
+reintroduce a remaining-vs-original distinction (§6.3.3.1 variant 2) in
+the single-origin world; and the §8.1 "void after a prior partial
+settlement" timing variant ADR 0038's own `sportsbook`-review flag left
+unresolved. Both are unaffected by anything here and stay as recorded.
+
+#### 6.4.5 The worked cases
+
+**Conventions used by every table below**, so each table can be read
+without re-deriving its context:
+
+- One asset, `EUR`, `decimal_exponent = 2`. **Amounts are written in whole
+  currency units with minor units omitted for readability**, per ADR 0032
+  §3's convention — every stored amount is a `NUMERIC(38,0)` minor-unit
+  integer. **No case below contains any division, ratio or rounding**, so
+  every figure is exponent-independent (§6.4.6 item 5).
+- `Dr`/`Cr` columns name the `account_type`; the concrete
+  `ledger_account_id` is resolved per `(wallet_id, account_type,
+  asset_code)` for player-owned accounts and per tenant for house-level
+  accounts, unchanged from §1.1.
+- `signed` = credits − debits, credit-positive for every account type
+  without exception (§5). `promo_liability` is therefore negative-signed
+  when healthy; `bonus_expense` is quoted **Dr-positive** where noted,
+  matching §6.3.2's tables.
+- **B1 (extended)** = `signed(promo_liability) + Σ signed(player_bonus) +
+  Σ signed(player_locked_bonus) == 0` per `(tenant_id, asset_code)`
+  (§6.3.2). Every case states its post-state B1 sum.
+- **Rule B2 (extended)**: a `promo_liability` mirror pair is generated by
+  `internal/ledger` **iff** an entry crosses the boundary of
+  `BONUS_SET = {player_bonus, player_locked_bonus}`; never for a transfer
+  *within* the set; one pair **per crossing leg**, never netted (§6.3.2).
+  Mirror legs are **never** assembled by `internal/sportsbook`.
+- **Idempotency routing** per ADR 0038 §14.6: external-provider mode keys
+  on `UNIQUE (tenant_id, provider_id, provider_tx_id)`; in-house mode
+  leaves both `NULL` and keys on `UNIQUE (tenant_id, idempotency_key)`.
+  Every case below is idempotency-keyed; none is exempt.
+- **Bare `player_locked` is never posted.** Per §6.3.2's
+  migration-sequencing recommendation, adopted as binding here: the
+  cash-funded case mints `player_locked_cash` from the very first posting.
+
+---
+
+**Case A — cash-funded sportsbook bet (lock).** Stake `S = 50` from a
+`player_cash` balance of `200`. `transaction_type = 'sportsbook_bet'`,
+`correlation_id` = the internal bet id (ADR 0038 §3).
+
+| # | Dr | Cr | Amount |
+|---|---|---|---|
+| 1 | `player_cash` | | 50 |
+| 2 | | `player_locked_cash` | 50 |
+
+Debits `50` == credits `50` ✓ (invariant #1). Two entries, matching
+`financial-transaction-flows.md` Flow 8 and ADR 0038 §3 exactly. **No
+mirror** — no entry touches `BONUS_SET`, so Rule B2 (extended) generates
+nothing; `promo_liability` and `bonus_expense` are not referenced at all.
+B1's three terms are all unchanged, so B1's sum is unchanged ✓. Post-state:
+`player_cash +150`, `player_locked_cash +50`.
+
+Balance sufficiency (`player_cash ≥ S`) is read **inside the same database
+transaction** as this posting (invariant #15, HR-1). An insufficient
+balance posts **no** `LedgerTransaction` at all (§4, ADR 0038 §3) — it is a
+decline, not a zero-amount posting.
+
+---
+
+**Case B — bonus-funded sportsbook bet (lock).** Grant of `20` already
+posted; whole grant staked, `S = 20`.
+`transaction_type = 'sportsbook_bet'`.
+
+`T1` — the grant, shown only so the B1 trace is complete (ADR 0032 §3,
+unchanged, not part of this case):
+
+| # | Dr | Cr | Amount |
+|---|---|---|---|
+| 1 | `promo_liability` | | 20 |
+| 2 | | `player_bonus` | 20 |
+
+`T2` — the lock:
+
+| # | Dr | Cr | Amount |
+|---|---|---|---|
+| 1 | `player_bonus` | | 20 |
+| 2 | | `player_locked_bonus` | 20 |
+
+Debits `20` == credits `20` ✓. **No mirror pair, and this is the
+load-bearing fact of the whole case**: `player_bonus → player_locked_bonus`
+is a transfer *within* `BONUS_SET`, so Rule B2 (extended) generates
+nothing. A generator implementing ADR 0032's *original*, unextended B2
+would wrongly emit `Dr bonus_expense 20 · Cr promo_liability 20` here,
+recognizing promotional expense against a still-contingent stake and
+breaking B1 by `20` from this instant until the next hourly sweep caught
+it (§6.3.2).
+
+B1 after `T2`: `promo_liability −20`, `player_bonus 0`,
+`player_locked_bonus +20` → `−20 + 0 + 20 = 0` ✓. `bonus_expense` `0`.
+
+**Wagering progress** is counted here, at lock time, by the existing
+derived read over entries that debited `player_bonus` (§6.3.3.2) — entry
+#1. No extension is needed for progress to be counted. See §6.4.9 V-1 for
+the newly-found defect on the *reversal* of this debit.
+
+---
+
+**Case C — mixed cash + bonus bet (lock). OUT OF SCOPE (§6.4.1).**
+
+No entry table is given, deliberately: the design shape is recorded in
+§6.3.3 case C and §6.3.3.2, and restating it here would invite an
+implementer to build it. **What is implemented instead is a rejection**
+(HR-2): a split instruction in which both the cash-origin and bonus-origin
+amounts are non-zero is **rejected** by `internal/ledger` with a distinct,
+non-retryable error, before any entry is constructed. It is never coerced
+to cash-only, never coerced to bonus-only, never partially posted, and
+never silently accepted with one leg dropped. Every mixed-funded
+downstream case (mixed void, mixed loss, mixed win, mixed partial
+settlement, mixed cashout) is unreachable by construction as a direct
+consequence, which is the point of enforcing the limit at the boundary
+rather than documenting it as guidance.
+
+---
+
+**Case D — cash-funded rollback.** The locked stake returns to
+`player_cash` as if the bet never happened. `S = 50`.
+
+| # | Dr | Cr | Amount |
+|---|---|---|---|
+| 1 | `player_locked_cash` | | 50 |
+| 2 | | `player_cash` | 50 |
+
+Debits `50` == credits `50` ✓. Exact inverse of case A. **No mirror.** B1
+unchanged ✓.
+
+**Which `transaction_type`, and why this needs saying** (§6.3.3's cases
+D/E are labeled "rollback" while ADR 0038 keeps `sportsbook_void` and
+`sportsbook_rollback` deliberately distinct — §6.4.8 item 3): the **entry
+shape is identical either way**, and the type is selected by *meaning*,
+never by convenience:
+
+- `sportsbook_void` — the ordinary case (ADR 0038 §8.1): a market
+  cancellation, push or data error nullified the bet. No
+  `reverses_transaction_id` is required, because nothing was posted in
+  error; the bet's own resolution is simply "no outcome."
+- `sportsbook_rollback` — the lock itself was posted in error (ADR 0038
+  §4's optimistic-hold rejection case, or a correction of a wrongly-
+  accepted placement). `reverses_transaction_id` **must** point at the
+  `sportsbook_bet` transaction being reversed, and ADR 0038 §10's
+  `FOR UPDATE` double-reversal protection applies.
+
+**Rollback of a lock the ledger never saw** (lost or out-of-order
+callback): a **tombstone** is written occupying that reference's
+idempotency slot, per §1.4 and CLAUDE.md, so a late-arriving original
+placement is rejected rather than posted after its own rollback. Zero
+ledger entries; the tombstone is a `LedgerTransaction` row of type
+`tombstone`. This reuses `internal/casino`'s
+`postRollbackTombstone` mechanism unchanged — no sportsbook-specific
+variant (HR-6).
+
+---
+
+**Case E — bonus-funded rollback.** `S = 20`, continuing case B's state.
+
+| # | Dr | Cr | Amount |
+|---|---|---|---|
+| 1 | `player_locked_bonus` | | 20 |
+| 2 | | `player_bonus` | 20 |
+
+Debits `20` == credits `20` ✓. **No mirror** — a transfer *within*
+`BONUS_SET` in the inbound direction; Rule B2 (extended) is symmetric and
+generates nothing, which is why ADR 0032 §7's "falls out of reversing the
+same transaction" property holds with no rollback-specific mirror code.
+B1 after: `promo_liability −20`, `player_bonus +20`,
+`player_locked_bonus 0` → `−20 + 20 + 0 = 0` ✓. `bonus_expense` `0` — the
+operator recognized **no** promotional expense for a bet that was
+nullified, which is the correct economic statement.
+
+**This is §6.3.3 case E's "crux" case**: without the origin split, this
+same rollback could only debit an undifferentiated `player_locked` and
+credit either `player_cash` (leaking withdrawable cash) or `player_bonus`
+(wrongly restricting real cash). With the split, the routing is a property
+of the account being debited and requires no lookup, no heuristic and no
+per-bet state.
+
+**`player_bonus`'s Grant attribution.** Crediting `player_bonus` returns
+value to the player's bonus balance, but *which Grant* the returned value
+belongs to is a Grant-lifecycle question, not a ledger one. Where the
+Grant has gone terminal between lock and rollback, this posting has no
+defined Grant transition — gate **G-2**, unresolved, `bonus-engine`-owned
+(§6.3.5.3 item 4). The *ledger* entries above are correct regardless; the
+*Grant state machine* is what is undefined.
+
+---
+
+**Case F — cash-funded win.** `S = 50`, provider-stated full payout
+`S + W = 125` (so `W = 75`). `transaction_type = 'sportsbook_settlement'`,
+one transaction.
+
+| # | Leg | Dr | Cr | Amount |
+|---|---|---|---|---|
+| 1 | stake absorption | `player_locked_cash` | | 50 |
+| 2 | stake absorption | | `house_gaming` | 50 |
+| 3 | payout `S+W` | `house_gaming` | | 125 |
+| 4 | payout `S+W` | | `player_cash` | 125 |
+
+Debits `50 + 125 = 175`; credits `50 + 125 = 175` ✓. The two legs also
+happen to balance individually (`50 = 50`, `125 = 125`) but nothing relies
+on that — migration 0022's deferred `ledger_entries_balanced` trigger
+checks the transaction as a whole (§6.3.2). **No mirror.** B1 unchanged ✓.
+Post-state: `house_gaming −75` (the house's net loss on this bet),
+`player_cash +125` credited, `player_locked_cash 0`.
+
+**The payout is `S + W`, not `W`** — Flow 9's own documented trap, restated
+because it is the single most common way to get this case wrong: pairing a
+winnings-only debit against an `S+W` credit does not balance. The ledger
+posts the provider's stated `S+W` **verbatim** and never recomputes,
+re-rounds or validates the odds math (ADR 0038 §5); reconciliation for
+this posting is against the provider's own settlement statement.
+
+---
+
+**Case G — bonus-funded win.** Grant `20`, stake `S = 20` (the whole
+grant), winnings `W = 15`, provider-stated full payout `S + W = 35`.
+`transaction_type = 'sportsbook_settlement'`, **one transaction, eight
+entries**. This table is **pulled forward verbatim from §6.3.2's `T3`**,
+which is its authoritative derivation — it is not re-derived here.
+
+| # | Leg | Dr | Cr | Amount |
+|---|---|---|---|---|
+| 1 | stake absorption | `player_locked_bonus` | | 20 |
+| 2 | stake absorption | | `house_gaming` | 20 |
+| 3 | mirror of #1 (outbound crossing) | `bonus_expense` | | 20 |
+| 4 | mirror of #1 (outbound crossing) | | `promo_liability` | 20 |
+| 5 | payout `S+W` | `house_gaming` | | 35 |
+| 6 | payout `S+W` | | `player_bonus` | 35 |
+| 7 | mirror of #6 (inbound crossing) | `promo_liability` | | 35 |
+| 8 | mirror of #6 (inbound crossing) | | `bonus_expense` | 35 |
+
+Debits `20 + 20 + 35 + 35 = 110`; credits `20 + 20 + 35 + 35 = 110` ✓.
+B1 after: `promo_liability −20 + 20 − 35 = −35`, `player_bonus +35`,
+`player_locked_bonus 0` → `−35 + 35 + 0 = 0` ✓. `bonus_expense` ends
+`20 − 35 = −15`; `house_gaming` ends `20 − 35 = −15`. `bonus_expense`
+being transiently negative is the already-accepted pattern from ADR 0032
+§3's casino table, not a new anomaly (§6.3.2, §6.3.5.3 item 2).
+
+**TWO mirror pairs, not one — the correction this consolidation exists to
+catch.** ADR 0038 §5's bonus-funded-win paragraph says only that "a payout
+crediting `player_bonus` carries the identical ADR 0032 §2 mirror pair,"
+naming the **payout** crossing alone; §6.3.3's case F row likewise says
+"mirror pair" in the singular. An implementer following either text
+literally would post entries #5–#8 and omit #3/#4 — leaving
+`promo_liability` at `−20 − 35 = −55` against `player_bonus +35`, so
+**B1 = −55 + 35 + 0 = −20**, broken by exactly the bonus stake `S`, with
+no error and no failing constraint until the next hourly B1 sweep raised a
+P1. §6.3.2's `T3` is correct; the two summary texts are dangerously
+imprecise. See §6.4.8 item 2 for the required edits.
+
+**Payout destination.** The full `S+W` credits `player_bonus`, not
+`player_cash` — the winnings of a bonus-funded stake remain restricted
+funds subject to the Grant's wagering requirement, exactly as ADR 0032
+already specifies for a bonus-funded casino win. No proportionality
+question arises: the stake was `100%` bonus-origin, so the payout is
+`100%` bonus-attributable, and no ratio is computed.
+
+---
+
+**Case H — cash-funded loss.** `S = 50`, stake fully absorbed by the
+house. `transaction_type = 'sportsbook_settlement'`.
+
+| # | Dr | Cr | Amount |
+|---|---|---|---|
+| 1 | `player_locked_cash` | | 50 |
+| 2 | | `house_gaming` | 50 |
+
+Debits `50` == credits `50` ✓. **No mirror.** B1 unchanged ✓. Post-state
+`house_gaming +50` — ordinary gaming revenue, never promotional expense.
+No payout leg exists; a zero-amount payout entry is forbidden (§1.3,
+`CHECK (amount > 0)`) and is simply **omitted**, not posted at zero.
+
+---
+
+**Case I — bonus-funded loss.** `S = 20`, continuing case B's state.
+`transaction_type = 'sportsbook_settlement'`.
+
+| # | Leg | Dr | Cr | Amount |
+|---|---|---|---|---|
+| 1 | stake absorption | `player_locked_bonus` | | 20 |
+| 2 | stake absorption | | `house_gaming` | 20 |
+| 3 | mirror of #1 (outbound crossing) | `bonus_expense` | | 20 |
+| 4 | mirror of #1 (outbound crossing) | | `promo_liability` | 20 |
+
+Debits `20 + 20 = 40`; credits `20 + 20 = 40` ✓. B1 after:
+`promo_liability −20 + 20 = 0`, `player_bonus 0`, `player_locked_bonus 0`
+→ `0 + 0 + 0 = 0` ✓. `bonus_expense` ends `+20` Dr-positive:
+**this is the instant the operator's promotional cost becomes real** — the
+bonus value the player wagered away is irreversibly gone, and
+`promo_liability` correctly returns to zero because there is no longer any
+bonus value owed to anyone.
+
+**One mirror pair, sized to the bonus amount that crossed the boundary.**
+Here that is the whole stake because the stake was wholly bonus-funded.
+§6.3.3.2's case C-loss generalizes this to the mixed case (mirror sized to
+`B`, not `S`) — out of scope per §6.4.1, but the *rule* "the mirror is
+sized to the crossing, not to the stake" is already the rule being applied
+here, so the single-origin implementation needs no later change in shape
+when mixed funding arrives.
+
+---
+
+**Case J — correction.** A market correction after settlement (a scoring
+error, a data-feed mistake, a result overturned by the sport's governing
+body). Per ADR 0038 §10 and CLAUDE.md, this is a **two-transaction
+compensating sequence, never an edit** of the original settlement's rows,
+and never a `DELETE`.
+
+Worked example continuing **case F** (cash-funded win posted at `125`),
+where the correct payout was `80` (`W = 30`):
+
+`T_J1` — reverse the wrong settlement. `transaction_type =
+'sportsbook_rollback'`, `reverses_transaction_id` = `T_F.id`, its own new
+idempotency key (the correction event's own reference — **never** the
+original settlement's reference, which is already consumed):
+
+| # | Dr | Cr | Amount |
+|---|---|---|---|
+| 1 | `player_cash` | | 125 |
+| 2 | | `house_gaming` | 125 |
+| 3 | `house_gaming` | | 50 |
+| 4 | | `player_locked_cash` | 50 |
+
+Debits `175` == credits `175` ✓. Post-state: the stake is back in
+`player_locked_cash` (the bet is open again), the wrong payout is clawed
+back, `house_gaming` returns to `0` on this bet.
+
+`T_J2` — post the corrected settlement forward. `transaction_type =
+'sportsbook_settlement'`, its **own new** idempotency key, **no**
+`reverses_transaction_id` (it reverses nothing; it is a new economic
+fact):
+
+| # | Leg | Dr | Cr | Amount |
+|---|---|---|---|---|
+| 1 | stake absorption | `player_locked_cash` | | 50 |
+| 2 | stake absorption | | `house_gaming` | 50 |
+| 3 | payout `S+W` | `house_gaming` | | 80 |
+| 4 | payout `S+W` | | `player_cash` | 80 |
+
+Debits `130` == credits `130` ✓. Net across all three transactions:
+`player_cash` net `+80`, `house_gaming` net `−30`, `player_locked_cash`
+`0` — identical to what a correct first settlement would have produced,
+reached by three permanent, individually-auditable transactions rather
+than by editing one. Invariants #2, #10 and #14 are satisfied by
+construction.
+
+**A correction to "no result stands"** resolves as
+`sportsbook_rollback` **then** `sportsbook_void` (case D/E's shape), never
+rollback-then-nothing: the stake must land somewhere, and leaving it in
+`player_locked_cash` forever is a stuck lock, not an end state (ADR 0038
+§10).
+
+**Bonus-funded correction**: identical structure with `player_locked_bonus`
+/`player_bonus` substituted, and the mirror pairs re-derived per HR-4 —
+gated on G-2/G-3 like every other bonus case.
+
+---
+
+**Case K — reversal.** A reversal is `T_J1` **standing alone**: one
+transaction that undoes one specific prior posted transaction in full, with
+nothing posted forward. It is the correct posting when a settlement (or a
+lock, or a void) is determined to have been posted in error and **no
+corrected outcome is yet known**. `transaction_type =
+'sportsbook_rollback'`; `reverses_transaction_id` = the reversed
+transaction's id; exact inverse entries; its own new idempotency key.
+
+The entry table is `T_J1` above; it is not repeated. The distinction
+between J and K is **how many transactions the sequence contains**, not
+what a reversal's entries look like — J is K plus a forward re-posting.
+Naming them separately matters because a reader of the ledger, a report,
+and a support agent all need to tell "this settlement was wrong and we
+have not yet learned the right answer" apart from "this settlement was
+wrong and here is the corrected one."
+
+Four hard properties, each grounded in an existing rule rather than
+invented here:
+
+1. **Never an edit or a delete.** `ledger_entries`/`ledger_transactions`
+   have no `UPDATE`/`DELETE` policy at all under `FORCE ROW LEVEL
+   SECURITY`, plus `BEFORE UPDATE OR DELETE` and `BEFORE TRUNCATE`
+   triggers that unconditionally raise (invariant #2). A reversal is
+   physically the only available mechanism, not merely the preferred one.
+2. **Double-reversal protection.** The original transaction is selected
+   `FOR UPDATE` and the reversal is rejected if a reversal already exists
+   for it under a *different* reference — while a redelivery of the *same*
+   reversal reference falls through to the ordinary idempotent-retry path.
+   This is `internal/casino`'s `postRollback` pattern, reused unchanged,
+   including the empirically-reproduced race it was written to fix
+   (ADR 0038 §10).
+3. **Never-seen original ⇒ tombstone** (§1.4, case D above, HR-6).
+4. **A reversal is never gated on the player's current status or current
+   balance.** Clawing back a wrongly-credited payout can drive
+   `player_cash` below zero if the player has already spent or withdrawn
+   it. That posting must still happen: refusing it would leave the ledger
+   permanently asserting a fact known to be false, and §5 already states
+   that "a balance whose sign is the opposite of its normal balance is an
+   operational alert, not an error in this formula." Precedent is explicit
+   and already in the codebase — `internal/casino.postRollback`
+   deliberately does not call `evaluateAndAuditEligibility`, on the
+   recorded reasoning that "gating corrections on the player's current
+   status would make the ledger un-correctable for exactly the players
+   most likely to need a correction." Invariant #15's
+   same-transaction-sufficiency rule governs **player-authorized debits**
+   (a stake, a withdrawal), not compensating entries. The resulting
+   negative `player_cash` is an operator **receivable**: collection,
+   write-off and any threshold for four-eyes approval on writing it off
+   are a business/collections policy question, **flagged to the
+   orchestrator as an open business decision (OB-1)**, not decided here.
+
+---
+
+**Case L — cashout. NOT IMPLEMENTED in this pass.** See §6.4.3. No entry
+table is given for any funding origin: the cash-funded shape is ADR 0038
+§8.3's and needs only the account rename; the bonus/mixed shapes remain
+`BLOCKED` on a product-policy `OPEN QUESTION` that is not
+`ledger-finance`'s to close.
+
+#### 6.4.6 `ledger-finance`'s own independent-validation checklist
+
+Run by `ledger-finance` against this section's own design **before**
+`bonus-engine` and `sportsbook` review it, as the directive requires. Each
+item states the check performed, not merely the conclusion.
+
+**1. Balance conservation — `SUM(DEBITS) == SUM(CREDITS)` after every
+case. PASS.** Tallied explicitly and independently for each in-scope
+case: A `50/50`; B `20/20`; D `50/50`; E `20/20`; F `175/175`; G
+`110/110`; H `50/50`; I `40/40`; J `175/175` then `130/130`; K
+`175/175`. Every case balances **as one transaction per asset**, which is
+what migration 0022's deferred `ledger_entries_balanced` trigger checks —
+no case relies on individual legs balancing, though several happen to.
+No case posts a zero-amount entry: the `house_gaming` margin leg and the
+payout leg are **omitted** rather than posted at zero where they would be
+(case H; the `R = P` rule ADR 0038 §8.2 already states), respecting
+§1.3's `CHECK (amount > 0)`.
+
+**2. Liability treatment — `promo_liability`/`bonus_expense` mirror
+correctness under Rule B2 extended (§6.3.2). PASS.** Per-case audit of
+whether a mirror fires and why:
+
+| Case | `BONUS_SET` crossings | Mirror pairs | Correct because |
+|---|---|---|---|
+| A, D, F, H (cash) | none | **0** | No entry touches `BONUS_SET` at all |
+| B (bonus lock) | none — `player_bonus → player_locked_bonus` is *internal* | **0** | Set's sum unchanged; a mirror here would *break* B1 and recognize expense on a contingent stake |
+| E (bonus rollback) | none — internal, inbound direction | **0** | Rule B2 extended is symmetric; ADR 0032 §7's "falls out of reversing" property |
+| G (bonus win) | outbound `20` (stake absorption) **+** inbound `35` (payout) | **2** | Per-crossing, never netted (§6.3.2 corollary 1). Netting would produce identical *balances* but destroy leg-level auditability |
+| I (bonus loss) | outbound `20` | **1** | Sized to the crossing, not to the stake |
+| J, K (reversal legs) | inverse of whatever the reversed transaction crossed | **same count, inverted** | HR-4 — re-derived, never both copied *and* re-derived |
+
+Forfeiture remains Rule B2 extended's one special shape and is untouched
+here: it *is* an outbound crossing, so it carries a `promo_liability`
+mirror, but **no `bonus_expense` is recognized** (ADR 0032 §3). No case in
+this section is a forfeiture; the locked-stake forfeiture variant is gate
+**G-2**, open.
+
+**3. Reconciliation — does anything here complicate the hourly sweep?
+NO NEW STREAM, NO NEW AGGREGATION SHAPE — but three existing queries
+must change, and one of them is a previously-unlisted silent-zero defect.**
+- **B1 stream**: aggregate over `{player_bonus, player_locked_bonus}`
+  instead of `{player_bonus}` — a one-token `IN (...)` change to an
+  existing `account_type`-keyed aggregate, already on §6.3.4's checklist.
+  Zero tolerance and hourly cadence are unchanged.
+- **Ledger-vs-projection stream**: **no change.**
+  `internal/reconciliation` treats `account_type` as an opaque
+  pass-through (verified in §6.3.4 item 1's grep), so a new account type
+  is reconciled by the existing sweep with no code change. This is the
+  concrete payoff of Shape A's "zero new query shape" claim (§6.3.1
+  reason 2) and it holds.
+- **ADR 0038 §6's aggregate open-bet liability query hardcodes
+  `WHERE la.account_type = 'player_locked'`** — a bare string, not an
+  `IN` list. Once postings land in `player_locked_cash`/
+  `player_locked_bonus` it returns **`0` open liability while real open
+  bets exist**: no error, no failing constraint, and the ledger and
+  projection agree perfectly, so no reconciliation stream detects it. It
+  is the *same failure class* as the `GetSummary` defect `architect`
+  found, in a different document, and it feeds doc 09's required
+  "explicit open-liability line" in every sportsbook report. **It is not
+  on §6.3.4's checklist** (item 6 lists ADR 0038 §3/§5/§8/§15, not §6) —
+  newly found by this pass, recorded as §6.4.8 item 5 and HR-7.
+- **No new drift source.** Nothing in this section introduces a maintained
+  counter, a cached balance, or a second source of truth; no case reads a
+  cache on the bet or settlement path; the only new read is §6.3.3.1's
+  recovery join, and in the single-origin world it is not even needed for
+  routing (HR-3).
+
+**4. Rollback correctness — never edits or deletes, always a compensating
+entry. PASS**, with one genuine new hazard found. Cases D, E, J, K are all
+new transactions; the reversal mechanism is structurally the only one
+available (invariant #2's no-policy + trigger pair); `reverses_transaction_id`
+is the sole traceability mechanism (invariant #10); double reversal is
+blocked by `FOR UPDATE`; a never-seen original writes a tombstone. The new
+hazard is **mirror double-generation on a reversal** (HR-4): if the
+reversal both inverts the original's mirror legs *and* lets the automatic
+generator re-derive mirrors from the inverted crossings, every mirror is
+posted twice. Verified by hand that the two approaches produce **identical
+entries** for case G's reversal (inverting #3/#4 and #7/#8 gives exactly
+what the generator re-derives from the inverted crossings of `20` inbound
+and `35` outbound), so either is correct alone — doing **both** is the
+defect, and it is silent in `SUM(debits) == SUM(credits)` terms because the
+duplicated pairs balance each other.
+
+**5. Multi-asset behavior — does anything assume a specific decimal
+exponent? NO, trivially. PASS.** Every amount in every in-scope case is
+either a provider-stated minor-unit integer posted verbatim or an amount
+already standing in a locked account, moved in full. **There is no
+division, ratio, percentage or rounding anywhere in cases
+A/B/D/E/F/G/H/I/J/K** — so no shared-rounding-helper call site exists, no
+residual-direction decision exists, and no exponent (0, 2, 6, 8 or 18)
+changes any figure. `decimal_exponent` is never read by this section's
+logic at all. This is a direct consequence of §6.4.1's deferral: the only
+exponent-sensitive computation in the whole §6.3 design is C-win's
+proportional split, which is out of scope. Tests must still cover an
+18-exponent and a **0**-exponent asset (§6.3.4 item 7), because the claim
+"exponent-independent" should be proven by execution rather than asserted.
+
+**6. No hidden monetary creation. PASS.** Checked three ways.
+(a) *Structurally*: every player-account credit in every case is matched,
+within the same transaction, by a debit against either a locked account
+holding value the player already committed or `house_gaming` — no case
+credits a player account against nothing.
+(b) *No cross-origin leak*: no in-scope case debits a bonus-origin account
+and credits `player_cash`, or vice versa. The single-origin restriction
+makes this **structurally impossible**, not merely unintended — which is
+the property mixed funding's deferral buys, since the confirmed
+structuring vector (§6.3.5.3 item 3) is precisely a cross-origin leak
+through a rounding boundary.
+(c) *No expense fabrication*: `bonus_expense` moves only on a genuine
+`BONUS_SET` boundary crossing, and its net across a bet's full lifecycle
+equals the bonus value actually consumed (case I: `+20` on a lost
+bonus-funded stake; case G: `−15`, resolving non-negative only when the
+returned bonus value is later wagered away, converted or forfeited, per
+ADR 0032 §3's already-accepted pattern).
+
+**7. No double release — the settlement-time recovery query must never be
+able to release more than was actually locked. PASS ONLY IF HR-3 IS
+IMPLEMENTED AS STATED, and S-7's control as written is NOT sufficient.**
+`security`'s S-7 requires §6.3.3.1's remaining-per-origin recovery query
+to execute in the same database transaction as the posting it authorizes,
+under "the same `(tenant_id, provider_id, provider_tx_id)` advisory lock
+Stage 4G-FINAL Part F added." Restating that requirement is necessary but
+this pass found it **incomplete in two independent ways**, both verified
+against the live code:
+
+- **That lock key does not serialize the race that causes double
+  release.** `internal/casino/orchestrator.go:576` locks on
+  `hashtextextended('casino_bet_delivery:' || tenant || ':' || providerID
+  || ':' || providerTxID, 0)` — scoped to **one delivery of one event**.
+  It correctly serializes *redeliveries of the same event*. It does
+  **not** serialize **two genuinely different events on the same bet**
+  (e.g. a settlement and a void, or two partial settlements), which have
+  different `provider_tx_id`s by construction (ADR 0038 §14) and
+  therefore take **different locks**. Both can read the same remaining
+  locked balance and both post a release. The correct scope for a
+  release-authorizing read is the **bet**, not the event: an advisory lock
+  keyed on `(tenant_id, correlation_id)` and/or `SELECT ... FOR UPDATE` on
+  the two `ledger_accounts` rows being released against, taken **before**
+  the recovery read, in the same transaction as the posting.
+- **For in-house mode that lock key degenerates entirely.** ADR 0038
+  §14.6 makes `provider_id` and `provider_tx_id` both `NULL` for every
+  in-house-mode posting. Composed into the casino-style key above, every
+  in-house posting for a tenant produces the **same** lock string — either
+  serializing an entire tenant's sportsbook traffic behind one lock or,
+  depending on `NULL` string handling, producing a key that does not
+  distinguish events at all. Any advisory lock on a sportsbook posting
+  path must therefore route on the same `provider_id IS NULL` discriminator
+  §14.6 already establishes for uniqueness, using `idempotency_key` in
+  in-house mode.
+
+Both points are folded into HR-3 as hard implementation requirements.
+Independently of them, the single-origin restriction means **routing never
+needs the recovery query at all** in this pass (HR-3), which shrinks the
+surface this item has to defend to the two amount-checking reads that
+remain.
+
+#### 6.4.7 Hard implementation requirements for whoever builds this (HR-1 … HR-8)
+
+Binding on the phase-2 implementer, not advisory. Each is testable, and
+§6.3.4 item 7's test list is extended accordingly.
+
+- **HR-1 — Same-transaction authoritative balance read.** The
+  balance-sufficiency read authorizing a lock (cases A, B) executes inside
+  the same database transaction as the posting (invariant #15, CLAUDE.md).
+  No cache, no Redis, no prior-request value is ever read on this path.
+- **HR-2 — Mixed funding is hard-rejected, fail-closed.** A split
+  instruction with both a non-zero cash-origin and a non-zero bonus-origin
+  amount is rejected by `internal/ledger` with a distinct, non-retryable
+  error before any entry is built. Never coerced, never partially posted,
+  never silently narrowed to one origin. Additionally, and independently:
+  `internal/ledger` validates that the instruction's per-origin amounts
+  **sum exactly** to the stated stake, rejecting any other sum rather than
+  reconciling it (§6.3.4 item 5).
+- **HR-3 — No double release.** Every release-authorizing read (the
+  remaining locked amount per origin) executes in the **same transaction**
+  as the release posting, **after** taking a lock scoped to the **bet**,
+  not to the delivery: an advisory lock on `(tenant_id, correlation_id)`
+  and/or `SELECT ... FOR UPDATE` on the `ledger_accounts` rows being
+  debited. Any advisory-lock key on a sportsbook posting path routes on
+  `provider_id IS NULL` per ADR 0038 §14.6 (in-house mode composes
+  `idempotency_key`, never a `NULL`-degenerate provider tuple). **Empty,
+  short, or negative-remainder results fail closed** — the posting is
+  rejected and escalated as an integrity alert, never treated as "release
+  the full amount" or "release zero." In this pass, single-origin routing
+  needs **no** origin lookup — the account to debit is determined by the
+  case, not by a query — so §6.3.3.1's query is used **only** for
+  amount checking, which narrows but does not remove this requirement.
+- **HR-4 — Reversal mirror generation: exactly one mechanism.** A
+  reversal either (a) inverts the original transaction's non-mirror legs
+  and lets the Rule B2 (extended) generator re-derive mirrors from the
+  inverted crossings, **or** (b) inverts every leg including mirrors with
+  the generator disabled for that transaction — **never both**.
+  **(a) is RECOMMENDED**: one code path for mirror generation, so the
+  generator cannot drift from the reversal path. Required test: a
+  reversal's mirror-pair count equals the original's, and its
+  `promo_liability`/`bonus_expense` net movement is the exact negation
+  (§6.4.6 item 4).
+- **HR-5 — Every case is idempotency-keyed at the database level.** No
+  money path in this section has an application-level "check then insert."
+  External-provider mode keys on `UNIQUE (tenant_id, provider_id,
+  provider_tx_id)`; in-house mode on the unconditional `UNIQUE (tenant_id,
+  idempotency_key)`, with the key derived from a per-occurrence signal
+  intrinsic to the event and reproduced verbatim on retry — **never** a
+  freshly-minted UUID per attempt, and never "count existing rows and add
+  one" (ADR 0038 §14.1/§14.6).
+- **HR-6 — Tombstone on a rollback with no original.** Reuses
+  `internal/casino`'s existing mechanism unchanged, occupying the
+  referenced original's idempotency slot so a late-arriving original is
+  rejected (§1.4, CLAUDE.md). No sportsbook-specific variant.
+- **HR-7 — Fix every `account_type`-enumerating call site in the same
+  change as the migration.** `internal/wallet.GetSummary`'s switch
+  (§6.3.4 item 1, `+=` not `=`) **and** ADR 0038 §6's open-liability query
+  (§6.4.8 item 5) — both are silent-zero defects that no constraint and no
+  reconciliation stream would catch. A migration that lands without both
+  fixes ships wrong money to a screen.
+- **HR-8 — Bare `player_locked` is never minted.** Cash-funded postings
+  create `player_locked_cash` from the first posting onward (§6.3.2's
+  sequencing recommendation, adopted as binding), so no backfill is ever
+  needed. Whether `AccountPlayerLocked` is removed from the Go const block
+  or retained as a rejected legacy value is the authorizing stage's call
+  (§6.3.4 item 2); if HR-8 holds from day one, removing it is clean and
+  the compiler finds every stale use.
+
+#### 6.4.8 Inconsistencies found between §6.3 and ADR 0038 by this consolidation pass
+
+The directive asked this pass to catch anything still inconsistent between
+the two documents. Six items, in severity order. **None is edited here** —
+items 1–5 are in `ledger-finance`-owned documents and are queued for
+phase 2 so this dispatch stays documentation-of-record for one workstream;
+item 6 is noted for its owner.
+
+1. **`player_locked` vs. the split accounts, throughout ADR 0038
+   (P1, mechanical but pervasive).** ADR 0038 §3, §5, §8.1, §8.2, §8.3 and
+   §14.6's worked example all name bare `player_locked` in their entry
+   tables (§14.6 literally posts "Dr `player_cash` `S` · Cr
+   `player_locked` `S`, cash-funded case"). Under HR-8 no such account is
+   ever minted. Every one of those tables must read `player_locked_cash`
+   (cash) / `player_locked_bonus` (bonus), and the
+   `player_cash`/`player_bonus` slash-notation on the credit side must be
+   replaced by the origin-determined single account.
+2. **ADR 0038 §5's and §6.3.3's bonus-funded-win text says "mirror pair"
+   in the singular (P1, financially load-bearing — the most severe item
+   found).** The bonus-funded win posts **two** pairs (§6.3.2's `T3`,
+   restated as §6.4.5 case G). An implementer following §5's "a payout
+   crediting `player_bonus` carries the identical ADR 0032 §2 mirror pair"
+   literally omits the stake-absorption pair and **breaks B1 by exactly
+   the bonus stake**, silently, until the next hourly sweep. Both texts
+   need correcting to "one mirror pair per boundary crossing — two on a
+   bonus-funded win," with §6.3.2's `T3` cited as authoritative.
+3. **"Rollback" means two different things across the two documents
+   (P2, clarity).** §6.3.3's cases D/E are titled "Rollback" while ADR
+   0038 §8.1/§10 deliberately distinguish `sportsbook_void` (the bet never
+   became a market fact) from `sportsbook_rollback` (a posted settlement
+   was wrong). §6.4.5 case D resolves which type applies when; §6.3.3's
+   titles should cross-reference it rather than leaving a reader to infer
+   that D/E imply `sportsbook_rollback`.
+4. **ADR 0038 §3's no-mirror-at-placement justification is grounded on the
+   wrong rule (P2, right answer, wrong reason).** §3 justifies omitting
+   the mirror at lock time purely by ADR 0032 §3's recognition-timing rule.
+   Under Rule B2 (extended) the operative reason is that the lock is a
+   transfer **within** `BONUS_SET` and therefore not a boundary crossing
+   at all — and §6.3.2 is explicit that a *literal* reading of original
+   B2 would wrongly **require** a mirror there. A reader who grounds the
+   omission on recognition timing alone has no rule telling them what the
+   *generator* should do, which is where the defect would actually be
+   written.
+5. **ADR 0038 §6's open-liability query is a previously-unlisted
+   silent-zero defect (P1, newly found).** `WHERE la.account_type =
+   'player_locked'` returns `0` open liability once postings land in the
+   split accounts, feeding doc 09's required per-report open-liability
+   line. Same failure class as the `GetSummary` defect. Must become an
+   `IN ('player_locked_cash', 'player_locked_bonus')` list, and §6.3.4
+   item 6's document list must gain ADR 0038 **§6** (it currently names
+   §3/§5/§8/§15 only). Folded into HR-7.
+6. **ADR 0034 §14.1's self-exclusion void posting (P2, already known,
+   different owner).** Still specified as undifferentiated `Dr
+   player_locked / Cr player_cash|player_bonus`. Already recorded in
+   §6.3.3.2's C-void note and ADR 0038's Consequences; owned by
+   `identity-compliance`/`architect`, not by `ledger-finance`. Repeated
+   here only so the consolidated list is complete.
+
+#### 6.4.9 Open items flagged for `bonus-engine`'s and `sportsbook`'s independent validation
+
+The specific questions this section needs answered. V-1 is a new finding;
+V-2 through V-6 are validation requests on this section's own decisions.
+
+- **V-1 — `bonus-engine` (NEW FINDING, P1, applies to bonus-ONLY funding,
+  not just mixed).** Wagering progress is a derived read over entries that
+  **debited** `player_bonus` (§6.3.3.2, ADR 0032 §0). Case B's lock posts
+  that debit, so progress is counted at lock time. **Case E's rollback and
+  a `sportsbook_void` credit `player_bonus` back — a credit, not a debit —
+  so the lock-time progress remains counted for a bet that was nullified
+  and carried no risk.** A player can therefore accrue wagering progress
+  by repeatedly staking bonus funds on markets that void or push, with the
+  stake returned every time and progress never reversed. `bonus-engine`
+  found the same root cause in `VOID_ON_SELF_EXCLUSION` in Wave 3; this
+  pass finds it **generalizes to every ordinary market void and every
+  rollback of a bonus-funded lock**, which is a far wider and
+  player-reachable trigger. Either the progress query must net credits
+  back to `player_bonus` that are correlated to a void/rollback of the
+  same bet, or the progress definition must change. **This is a
+  `bonus-engine` deliverable and is gate G-3 on bonus-funded placement.**
+  `ledger-finance`'s position: the ledger entries in cases B and E are
+  correct as written and should not be distorted to carry
+  wagering-progress semantics; the fix belongs in the progress query, not
+  in the postings.
+- **V-2 — `bonus-engine`: is the mixed-funding deferral (§6.4.1) the right
+  call, or do you want the anti-structuring control designed now?** The
+  deferral rests on your own Wave-3 statement that the control is a
+  `bonus-engine` deliverable. If you would rather specify the control now
+  and unblock mixed funding in phase 2, say so explicitly — that is your
+  call to make, not a `ledger-finance` reversal.
+- **V-3 — `bonus-engine`: confirm the per-case mirror audit in §6.4.6
+  item 2.** Specifically: zero mirrors on B and E (internal transfers),
+  two on G, one on I sized to the crossing, and the reversal rule HR-4.
+  This is Rule B2 (extended) applied case by case; it was approved in
+  intent but its *wording* was flagged as unreviewed in §6.3.5.1.
+- **V-4 — `bonus-engine` + `sportsbook`: confirm G-2 (locked-stake
+  forfeiture / terminal-Grant) genuinely gates bonus-ONLY funding and not
+  only mixed funding.** §6.4.2 asserts it does, on the reading that a
+  wholly bonus-funded stake sitting in `player_locked_bonus` hits the
+  identical undefined transition. If that reading is wrong, cases
+  B/E/G/I are shippable in phase 2 and the scope of this workstream
+  widens.
+- **V-5 — `sportsbook`: confirm the single-origin restriction is
+  implementable at your split-instruction boundary, and that rejecting a
+  mixed stake at placement (HR-2) is the behavior you want** rather than,
+  say, falling back to a cash-only stake or reducing the stake to the
+  available cash. `ledger-finance` will not choose a fallback: silently
+  changing a player's stake amount or funding source is a product decision.
+- **V-6 — `sportsbook`: confirm HR-3's bet-scoped lock.** §6.4.6 item 7
+  concludes `security`'s S-7 control as written (a delivery-scoped
+  advisory lock) does not serialize two distinct events on one bet, and
+  degenerates entirely in in-house mode where `provider_id`/
+  `provider_tx_id` are `NULL`. Confirm that `(tenant_id, correlation_id)`
+  is an available and correct lock scope in both provider modes, and that
+  serializing all postings for one bet is acceptable contention.
+- **Also flagged upward, not to a specialist: OB-1 (open business
+  decision).** Case K can leave `player_cash` negative when a wrongly
+  credited payout is clawed back after the player has spent it. The
+  posting is correct and must happen; the resulting operator receivable
+  needs a collections/write-off policy and a four-eyes threshold for
+  writing it off. That is a business decision with legal/credit weight,
+  referred to the orchestrator per this specialist's own limitations, not
+  decided here.
+
+#### 6.4.10 Review status and gating
+
+| Content | Status |
+|---|---|
+| §6.4.1 mixed-funding deferral | **DECIDED by `ledger-finance` as a scope call, pending `bonus-engine` confirmation (V-2).** Reversible: it removes no capability and needs no backfill |
+| §6.4.2 gates G-1/G-2/G-3 | G-1 is this workstream's. **G-2 and G-3 are not `ledger-finance`'s and are not closed** |
+| §6.4.3 cashout not implemented | **DECIDED as scope.** The *policy* question stays open and is not selected here |
+| §6.4.5 cases A, D, F, H, J, K (cash) | Consolidated from already-reviewed sources (ADR 0038 §3/§5/§8.1/§10). **Ready for validation** |
+| §6.4.5 cases B, E, I | Consolidated from §6.3.3/§6.3.3.2 (reviewed in shape). **Ready for validation** |
+| §6.4.5 case G | Pulled forward verbatim from §6.3.2's `T3`. **Corrects ADR 0038 §5's and §6.3.3's singular "mirror pair"** — see §6.4.8 item 2 |
+| §6.4.5 case C | **OUT OF SCOPE.** §6.3.3.2's C-win proportional rule keeps its own unresolved sign-off gate; nothing here approves it |
+| §6.4.6 validation checklist | `ledger-finance`'s own run. Item 7 **fails without HR-3** |
+| §6.4.7 HR-1 … HR-8 | **Newly written this pass, unreviewed.** HR-3 and HR-4 are the two that change what a reviewer previously saw |
+| §6.4.8 items 1–5 | **Newly found this pass.** Item 2 and item 5 are P1 |
+| §6.4.9 V-1 | **New P1 finding**, `bonus-engine`-owned |
+| Migration `0048`, all Go code | **NOT WRITTEN, NOT AUTHORIZED.** Gated on V-1…V-6 plus §6.3.5's standing human approval |
+
+**What phase 2 may do once this section is validated and approved**:
+migration `0048` (the `account_type` CHECK widening, with a working
+`.down.sql`, the verified constraint name
+`ledger_accounts_account_type_check`, and the rehearsal §6.3.2 requires);
+the §6.3.4 code checklist items 1, 2, 4, 5; HR-1 … HR-8; and §6.3.4 item
+7's test list restricted to the single-origin cases plus the
+mixed-rejection test HR-2 requires. **What phase 2 may not do**: enable
+bonus-funded placement in `internal/sportsbook` (G-2, G-3), implement
+mixed funding, implement cashout, implement partial settlement, or edit
+any document owned by another specialist.
 
 ## 7. Cross-references
 
