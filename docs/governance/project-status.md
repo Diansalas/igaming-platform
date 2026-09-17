@@ -26,30 +26,64 @@ stage detail), and the ADRs cited below.
 | 4F | Player verification, documents & authentication foundation | Complete |
 | 4G | Orchestration governance + Risk & Limits engine foundation | Complete |
 | 4G-FINAL | Architectural hardening: operational governance, jurisdiction/licensing context, flake root-cause fix (11/11 specialist reviews complete - financial/ledger closed via the FINANCE-GATE follow-up below) | Complete |
-| 4G-FINAL-FINANCE-GATE | Independent financial-correctness sign-off on the `postBet` lock + `internal/rg` fix (final-gate-only, no business functionality) | Complete (this stage) |
+| 4G-FINAL-FINANCE-GATE | Independent financial-correctness sign-off on the `postBet` lock + `internal/rg` fix (final-gate-only, no business functionality) | Complete |
+| 4H-A | Bonus, Gamification & Reward Orchestration architecture freeze (no code) | Complete |
+| 4H-B0 | Bonus, Gamification & Retail scope/implementation plan (no code) | Complete |
+| 4H-B0-R1 | B0 gate corrections and finalization (no code) | Complete (this stage) |
 
 ## Active stage
 
-Stage 4G-FINAL-FINANCE-GATE — see `docs/active-stage.md` for full detail.
+Stage 4H-B0-R1 — see `docs/active-stage.md` for full detail. **Stage
+4H-B1 (Bonus Engine) is CONDITIONALLY READY, not authorized to start.
+Stage 4H-B2 (Retail Architecture Hardening) awaits the Retail-Legal/
+Business gate. Neither is authorized to begin without explicit human
+confirmation.**
 
 ## Blocked stages
 
-- **Bonus Engine**: architecture frozen (Stage 4H-A) and an MVP
-  implementation-scope plan is now on file (Stage 4H-B0 — 5-type first
-  slice, migration order, package ownership). The Stage 4G §32 block is
-  **qualified-lifted**: `bonus-engine`'s own direct gate-check found the
-  Risk & Limits architecture stable enough (Stage 4G-FINAL 11/11-area
-  review plus the finance-gate follow-up, PASS/no P0/P1) for a first
-  slice restricted to `min_amount`/`max_amount` rules, pending one small
-  dependency request to `risk` (the `bonus_conversion` `Operation`
-  value). **Implementation itself is still not authorized** — this is a
-  scope plan, not a start.
+- **Bonus Engine**: architecture frozen (Stage 4H-A), an MVP
+  implementation-scope plan is on file (Stage 4H-B0 — 5-type first slice,
+  migration order, package ownership), and the gate itself was corrected
+  in Stage 4H-B0-R1. **Corrected status: CONDITIONALLY READY, not
+  independently ready.** An earlier draft understated this as "one small
+  dependency request" to `risk`; verified directly against repository
+  state, `bonus_conversion` is **NOT STARTED — zero of ADR 0031 §16's six
+  extension-process steps complete** (no `Operation` constant, no
+  migration CHECK value, no HTTP-allowlist entry, no OpenAPI enum entry
+  in any of its three required locations, no ledger transaction-type
+  mapping, no enforcement call site), and it sits on the first slice's
+  critical path since all five in-slice bonus types run through
+  `completed → converted`. Production implementation cannot begin until
+  (1) ADR 0021's rounding/precision decision is explicitly resolved by a
+  human — the available architectural choices are now enumerated in
+  `docs/decisions/0021-multi-asset-accounting.md` without one being
+  selected, (2) the `bonus_conversion` dependency above is completed and
+  reviewed, (3) no other P0/P1 financial dependency remains (`risk`
+  confirmed there is none besides `bonus_conversion`). Non-monetary work
+  (lifecycle state machine, Offer/Grant modelling, eligibility) is not
+  gated by item 1. **Implementation itself is still not authorized** —
+  this is a corrected scope plan, not a start.
 - **Retail (agent-hierarchy network)**: architecture/scope frozen (Stage
-  4H-B0) across 10 documents — see `docs/architecture/27-stage-4h-b0-
-  scope-and-implementation-plan.md`. Not started, and not authorizable
-  yet: several P0 human/legal decisions (retail licensing status,
-  node-float vs. ADR 0007 `Wallet` conflict, anonymous-play policy) block
-  even scoping an implementation stage, per that document's §22/§24.
+  4H-B0) across 10 documents, corrected and finalized in Stage 4H-B0-R1
+  — see `docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md`.
+  Not started. The earlier "8 P0 decisions block retail" framing was
+  corrected: only **3** of those items are genuine human/business/legal
+  decisions (retail licensing/jurisdiction status; confirmation of the
+  proposed node-owned `agent_float` extension to ADR 0007 — the design is
+  now drafted and reviewed, only the approval itself remains a human
+  decision; anonymous/bearer retail play policy by jurisdiction) — see
+  doc 27 §23A. The remaining items are **mandatory engineering acceptance
+  criteria**, not human decisions, and do not require human input to
+  resolve — see doc 27 §23B (fail-closed hierarchy RLS with no OR-NULL
+  escape; no retail role holding `PermStaffManage`; RG-before-Risk
+  ordering; closure-table write protection; server-side terminal
+  credential resolution; POS idempotency namespace protection; offline
+  fail-closed baseline; among others). A first retail implementation
+  slice can be scoped once the 3 genuine human decisions above are made
+  and the engineering criteria are designed in a hardening stage — see
+  doc 27 §22's corrected two-path dependency graph (Retail-Legal/Business
+  gate → Stage 4H-B2 Retail Architecture Hardening → Stage 4H-B3 Retail
+  First Implementation).
 - **Sportsbook**: not started — no directive has authorized it yet.
 - **Real KYC/AML vendor integration**: not started — Stage 4F built the
   provider-neutral boundary only; no vendor is contracted.
@@ -243,9 +277,13 @@ Stage 4G-FINAL-FINANCE-GATE — see `docs/active-stage.md` for full detail.
   any target jurisdiction (Stage 4H-B0) — would make RG/KYC/Risk
   enforcement structurally unsatisfiable as currently designed.
 - **Whether a retail hierarchy node's float amends ADR 0007's
-  human-approved multi-wallet-per-player model** (Stage 4H-B0) — see
+  human-approved multi-wallet-per-player model** (Stage 4H-B0, design
+  drafted and reviewed in Stage 4H-B0-R1 — only the approval itself
+  remains human) — see
   `docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md`
-  §24 for the full list of retail-specific human decisions.
+  §24 for the full 15-item register of retail- and bonus-specific human
+  decisions, including the ADR 0021 rounding/precision decision added in
+  Stage 4H-B0-R1.
 
 ## Stage 4H-A: Bonus, Gamification & Reward Orchestration architecture freeze
 
@@ -466,21 +504,84 @@ is more fully designed than its own unresolved commercial terms justify
 — downgraded from binding to "documented for future reference" pending
 those terms.
 
-**8 P0 risks require human/legal/cross-specialist decisions before any
-retail implementation stage can even be scoped** (doc 27 §23/§24):
-retail's licensing status (the platform's only current licence is
-online-only), whether a hierarchy node's float amends ADR 0007's
-human-approved `Wallet` definition, whether anonymous/bearer retail play
-is required in any target jurisdiction (would make RG/KYC/Risk
-enforcement structurally unsatisfiable), delegated limit-authoring by
-hierarchy actors, the existing `audit_log` RLS policy's retail-readiness,
-and others. None resolved this stage — all explicitly escalated, not
-guessed at.
+**This stage's original "8 P0 decisions block retail" framing was
+corrected in Stage 4H-B0-R1** (doc 27 §23A/§23B) — see that stage's
+section below for the reclassification into 3 genuine human/business/
+legal decisions and a longer list of mandatory engineering acceptance
+criteria that do not require human input.
 
 **This stage's directive had no contradictory trailing line** (unlike
 Stage 4H-A's) — it explicitly stated "This stage must NOT automatically
 proceed to implementation. Wait for explicit approval before Stage
 4H-B1," consistent with the detailed body. No ambiguity to flag.
+
+## Stage 4H-B0-R1: B0 gate corrections and finalization
+
+A correction/finalization stage — no architecture redesign, no
+production code, no migrations. Purpose: resolve a contradiction the
+Stage 4H-B0 report itself disclosed (claiming Stage 4H-B1 was
+"independently authorizable" while also disclosing an unresolved ADR
+0021 rounding dependency that blocks it) and correct several
+misclassifications before any further stage is authorized.
+
+Key corrections (full detail: doc 27, this stage's edits):
+- **Bonus gate corrected**: Stage 4H-B1 is `CONDITIONALLY READY`, not
+  independently ready — see the "Blocked stages" entry above for the
+  exact three blocking conditions. `risk` verified `bonus_conversion` is
+  NOT STARTED (zero of ADR 0031 §16's six steps), correcting an earlier
+  understatement of "one small dependency request." `ledger-finance`
+  enumerated ADR 0021's rounding/precision decision as three separable
+  questions (direction, rounding point/precision handling, uniformity
+  scope) with six neutrally-presented direction options, without
+  selecting one.
+- **Retail P0 list reclassified**: split into 3 genuine human/business/
+  legal decisions (doc 27 §23A) and a longer list of mandatory
+  engineering acceptance criteria that are not human decisions at all
+  (doc 27 §23B) — see the "Blocked stages" entry above.
+- **Agent float vs. Player Wallet formalized**: ADR 0007's `Wallet`
+  remains untouched and player-owned; agent float is a hierarchy-node-
+  owned operational ledger account in the same authoritative ledger,
+  never a second ledger, never confused with a physical till.
+  `ledger-finance` drafted a minimum additive schema amendment
+  (`ledger_accounts` gaining a nullable `hierarchy_node_id` + a
+  mutual-exclusion CHECK) — explicitly `NOT IMPLEMENTED`, reviewed by
+  `architect` and `security` this stage, still requiring human approval
+  before any migration is written since it amends the practical shape of
+  a table whose broader design traces to a human-approved ADR (0007/
+  0019). `ledger-finance`'s review also found and corrected a load-
+  bearing error in the original draft: an earlier claim that the
+  amendment "changes no existing constraint" was false — the existing
+  house-level unique index predicate (`wallet_id IS NULL`) would have
+  silently collapsed every hierarchy node's `agent_float` per asset into
+  one shared row per tenant; the corrected proposal widens that
+  predicate to `wallet_id IS NULL AND hierarchy_node_id IS NULL`.
+- **First Retail Product Baseline formalized** (doc 27 §1.3a): identified
+  players only, online-connected, single currency, cash deposit/
+  withdrawal, a fixed shallow hierarchy for the first contracted
+  operator, no automated commissions, no agent-to-agent float transfer,
+  no direct bank agent settlement, no proxy/assisted play — implementation-
+  scope constraints for the first slice, not jurisdiction-wide product
+  claims.
+- **Generic hierarchy model reaffirmed**: Node Type/Structure/Capability
+  stay separate concepts; Operator/Partner/SuperAgent/Agent remain seed
+  data, never hardcoded schema roles; Player is not a hierarchy node;
+  Cashier is a staff identity assigned to a node; Terminal is a service
+  principal (doc 27 §5, unchanged from Stage 4H-B0, reaffirmed this
+  stage).
+- **Stage dependency graph corrected into two independent, parallel
+  paths** (doc 27 §22): Path A (Bonus financial gate → Stage 4H-B1) and
+  Path B (Retail-Legal/Business gate → Stage 4H-B2 Retail Architecture
+  Hardening → Stage 4H-B3 Retail First Implementation). Gamification and
+  the Reward Orchestrator remain independently deferred with no scheduled
+  next stage.
+- **Human Decision Register** (doc 27 §24) rewritten as a clean list
+  containing only genuine human/business/legal decisions — 15 items,
+  including the 14 the directive named plus the ADR 0021 rounding
+  decision.
+
+**No production code, no migrations, no implementation was authorized or
+started this stage.** Full detail, decisions resolved/still open, and the
+exact updated gates: this stage's completion report and doc 27.
 
 ## Production blockers (summary)
 

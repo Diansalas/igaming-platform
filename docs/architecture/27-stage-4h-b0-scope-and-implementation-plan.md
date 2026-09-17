@@ -57,14 +57,45 @@ stage's scope is unambiguous rather than "whatever seems obviously next."
   (blocked — Gamification deferred, see 1.2), Cash reward (architecturally
   ready but deliberately not self-added to the list — a scope call for the
   Orchestrator/product owner, not bonus-engine).
-- **Gate check answered directly by bonus-engine**: the Stage 4G §32
-  block on `internal/bonus` is **lifted, qualified** — Risk & Limits is
-  stable enough (Stage 4G-FINAL 11/11-area review plus the finance-gate
+- **Gate check, corrected (Stage 4H-B0-R1)**: an earlier draft stated
+  Stage 4H-B1 is "independently authorizable." That contradicted this
+  same document's own §23 (formerly), which discloses that ADR 0021's
+  unresolved rounding/precision decision blocks precise computation for
+  3 of the 5 first-slice bonus types (deposit, reload, cashback all
+  multiply money by a percentage). **Corrected status: Stage 4H-B1 is
+  CONDITIONALLY READY, not independently ready.** The Stage 4G §32 block
+  on `internal/bonus` is **lifted, qualified** — Risk & Limits is stable
+  enough (Stage 4G-FINAL 11/11-area review plus the finance-gate
   follow-up, PASS/no P0/P1) and ADR 0031 §14-18 already specifies the
-  bonus-Risk contract. Two conditions attach: first-slice Risk rules are
-  `min_amount`/`max_amount` only (no `cumulative_amount`/velocity yet),
-  and the `bonus_conversion` `Operation` value needs one small dependency
-  request to `risk` before conversion-time checks can be wired.
+  bonus-Risk contract — but production implementation cannot **begin**
+  until all three of:
+  1. **The ADR 0021 rounding/precision decision is explicitly resolved**
+     by a human — `docs/decisions/0021-multi-asset-accounting.md` now
+     carries the exact decision needed and the available architectural
+     choices (rounding direction and precision handling for
+     percentage-of-amount calculations), enumerated by ledger-finance
+     without inventing or selecting one. See §24 #15.
+  2. **The Risk dependency for the `bonus_conversion` Operation is
+     completed and reviewed.** Verified directly against repository
+     state by `risk` (not inferred from prior documentation): **NOT
+     STARTED — zero of ADR 0031 §16's six extension-process steps
+     completed.** `bonus_conversion` exists nowhere in code today (no
+     `Operation` constant, no migration CHECK value, no HTTP-allowlist
+     entry, no OpenAPI enum entry — confirmed present in three places,
+     not the two an earlier draft assumed — no ledger transaction-type
+     mapping, no enforcement call site — `internal/bonus` does not
+     exist). Full detail and exact remaining steps: ADR 0031 §16a.
+     **This is on the first slice's critical path** — all five in-slice
+     bonus types run through `completed → converted`, so the first
+     slice cannot ship without it; it is not deferrable to a later
+     slice.
+  3. **No other P0/P1 financial dependency remains.** `risk` confirmed
+     directly: `bonus_conversion` is the only Risk-owned P0/P1 dependency
+     for the five-type first slice. Grant issuance/activation need zero
+     Risk changes (`bonus_grant` is already a real, working `Operation`);
+     `min_amount`/`max_amount` rules are sufficient for all five types;
+     campaign-level budget caps and RG/self-exclusion are confirmed
+     out of Risk's scope by construction, not blockers.
 - **No Reward Orchestrator this slice** — Bonus Engine fulfills split
   instructions/lifecycle events directly through `wallet`/`ledger` for all
   five in-slice types (all `into_platform_wallet`), per doc 10 §6 and the
@@ -104,9 +135,49 @@ only 2-3 of the configurable levels.
 
 **Retail implementation is not authorized this stage or any adjacent one
 without a separate, explicit stage.** See §22 (dependencies) and §24
-(human decisions) — several P0 items (licensing, node-float/Wallet
-conflict, anonymous-play policy) must be resolved by humans before any
-retail implementation stage can even be scoped, let alone started.
+(human decisions) — the genuine human-decision subset of §23A (licensing,
+node-float/Wallet amendment approval, anonymous-play policy) must be
+resolved before any retail implementation stage can even be scoped, let
+alone started.
+
+### 1.3a First Retail Product Baseline (formal, Stage 4H-B0-R1)
+
+The following is the recorded baseline for the **first** retail
+implementation slice, **if and when** retail is authorized. These are
+**implementation-scope constraints for a first slice, not claims that
+every target jurisdiction permits or requires this exact model** —
+anonymous play, offline operation, and proxy play in particular may be
+evaluated later as separate, jurisdiction-specific product/legal
+decisions (§24), and adopting a narrow first slice today does not
+foreclose a broader one later once the relevant human decisions land.
+
+- **Identified players only** — no anonymous/bearer play (§24 #4 must
+  resolve "no" or be scoped out entirely for this slice).
+- **Online connection required** — no offline/store-and-forward gambling
+  (§23B #8's fail-closed baseline, unrelaxed).
+- **Single retail currency initially** — no multi-currency retail
+  counters (blocked on ADR 0021 regardless, see §1.1).
+- **Cash deposit** — supported.
+- **Cash withdrawal** — supported, through the existing withdrawal hold/
+  state-machine architecture (§6, §8 below).
+- **Fixed, shallow hierarchy for the first contracted operator** — the
+  underlying schema stays fully configurable (§5); the first slice's
+  *workflow* exercises only as many levels as that operator's actual
+  structure needs, not the full generality.
+- **Configurable hierarchy architecture retained in full** — nothing
+  above narrows the frozen doc 26 data model; it narrows which parts of
+  it the first slice's UI/workflow exercises.
+- **No automated commissions initially** — see §9's commission note; the
+  accounting *mechanism* is documented for future reference, not built.
+- **No agent-to-agent float transfer initially** — only node funding/
+  settlement with the node's own direct parent, per doc 26 §4.1's
+  depth-1-default authorization shape.
+- **No direct-bank agent settlement initially**, unless separately
+  approved — funding/settlement over an existing PSP rail is in scope;
+  a new direct-bank rail is not (blocked on Flow 18's own unresolved
+  bank-rail decision regardless, §2).
+- **No proxy/assisted play initially** — an agent placing bets on a
+  player's behalf is out of scope for the first slice (§24 #6).
 
 ---
 
@@ -126,7 +197,8 @@ retail implementation stage can even be scoped, let alone started.
 - **Retail implementation in its entirety** — deferred pending: (a)
   explicit human authorization that retail is in scope at all (no
   Blueprint anchor — see §3), (b) resolution of the licensing question
-  (§24 #1), (c) resolution of the node-float/`Wallet` conflict (§24 #2),
+  (§24 #1), (c) resolution of the node-float/`Wallet` amendment approval
+  (§24 #3),
   (d) resolution of the anonymous-play policy question (§24 #4), and (e)
   a separate implementation-authorization stage, per the stage-gate rule.
 - Within retail's own frozen design, explicitly deferred even once retail
@@ -204,14 +276,96 @@ PSP/bank rails), R2 (pool separation: player / agent-operational /
 commission / house, with a permitted-transition matrix), R3 (shift
 reconciliation against the terminal's *declared* movements, zero
 tolerance). Retail withdrawal is two steps reusing
-`player_withdrawal_hold` unchanged. Commission recognized by a periodic
-run, not per-event. **One P0 blocking precondition, not resolved this
-stage**: `ledger_accounts` today supports only wallet-scoped or
-house-level ownership; a node-scoped `agent_float` account fits neither
-without an additive schema change (a `hierarchy_node_id` column + a third
-partial unique index + a `CHECK num_nonnulls(...) <= 1`) — this changes an
-already-implemented shared table and requires architect + security +
-human sign-off before any retail migration, per §24 #2 below.
+`player_withdrawal_hold` unchanged, through the existing withdrawal
+hold/state-machine architecture with a `cash_at_cashier` fulfillment
+channel — never a parallel withdrawal mechanism. Commission recognized
+by a periodic run, not per-event (and not built in the first slice — see
+§9a).
+
+**Every retail financial operation retains, without exception** (Stage
+4H-B0-R1 restatement of CLAUDE.md's standing financial rules, applied
+explicitly to retail): double-entry posting through the one authoritative
+ledger; DB-enforced idempotency (never check-then-insert); server-side
+authorization (RBAC + hierarchy scope, never client-asserted); RG
+evaluation before Risk, both before commit; audit recording (actor,
+tenant, entity, before/after, reason code); reconciliation against the
+same ledger (never an independent re-derivation); and the same
+concurrency-safety discipline (row-level locking, advisory locks where
+established elsewhere in this codebase) every other financial domain
+already uses.
+
+**Agent float vs. Player Wallet — formal relationship (Stage 4H-B0-R1)**:
+- **Player Wallet (ADR 0007) is completely unchanged** — it remains the
+  player-owned wallet abstraction, one wallet per player per asset.
+- **Agent float is explicitly NOT a Player Wallet.** It is a
+  hierarchy-node-owned **operational financial account**, represented
+  through the SAME authoritative double-entry ledger as every other
+  account in this platform — never a second ledger, never a
+  node-shaped `Wallet` row.
+- **Agent float must never be confused with a physical till/cash
+  drawer.** The till is never an authoritative balance (ADR 0035 §6.2,
+  reconfirmed): physical cash is a **fulfillment/custody concern**, not
+  an independent source of financial truth. `agent_float` is the
+  ledger's own record of what the platform owes/is owed relative to that
+  node; the till is what the cashier physically counts, reconciled
+  *against* the ledger (Invariant R3), never the other way around.
+- **All financial movements — player, agent, and house — remain in the
+  one authoritative ledger.** No domain, retail included, gets its own
+  parallel financial truth system (ADR 0032 §0's "there is exactly one
+  financial truth system" principle, restated here for retail).
+
+**Minimum additive schema change (drafted by ledger-finance, reviewed by
+architect and security this stage — full text: ADR 0035 §1.3.1-§1.3.3)**:
+`ledger_accounts` gains a nullable `hierarchy_node_id` column alongside
+the existing nullable `wallet_id` and house-ownership shape, with a
+`CHECK (num_nonnulls(wallet_id, hierarchy_node_id) <= 1)` plus a second
+CHECK binding `account_type` to the correct owner column, ensuring
+**ownership is mutually exclusive** — a row is wallet-owned, node-owned,
+or house-level, never more than one, and never zero where one is
+required. Reading the actual migration
+(`migrations/0020_create_ledger_accounts.up.sql`) rather than the
+original draft's prose, ledger-finance found and corrected a
+load-bearing error: the claim that this change "changes no existing
+constraint" was false — the existing house-level unique index predicate
+(`wallet_id IS NULL`) would have silently collapsed every hierarchy
+node's `agent_float`/asset into one shared row per tenant. The corrected
+proposal widens that predicate to `wallet_id IS NULL AND
+hierarchy_node_id IS NULL`.
+
+**architect's review (§1.3.2): sound, with caveats** — the SQL was
+verified byte-for-byte against the actual migration; the shape does not
+redefine `Wallet` or create a second ledger; `hierarchy_nodes` (doc 26
+§5.1, itself still `NOT IMPLEMENTED`) does carry `id`/`tenant_id`/
+`status` as assumed, so node-account status can derive from the node's
+own status; the CHECK-enumeration approach matches the platform's
+existing precedent over a registry table; the `ledger-accounting-
+model.md`/ADR 0032 §2 "house-level == `wallet_id IS NULL`" shorthand
+needs matching edits in the same future change (flagged, not fixed —
+out of this stage's scope). **security's review (§1.3.3): safe, with
+implementation-time caveats** — confirmed by direct reading of the RLS
+policies that a player cannot read an agent_float row under current
+policy (`tenant_staff_scope` composes unchanged; `player_self_scope`
+cannot match a node-owned row, and `ledger_accounts` has `FORCE ROW
+LEVEL SECURITY`); confirmed the three new CHECKs are closed-form with no
+OR-NULL fail-open pattern; confirmed the composite FK's MATCH SIMPLE
+reasoning is sound (no cross-tenant leakage) but must ship in the same
+migration as the column, since until it exists a node row's `tenant_id`
+is unvalidated caller input; confirmed the widened index predicate
+closes the schema-level collision, with the caveat that the Go-level
+get-or-create lookup must also be updated to filter on
+`hierarchy_node_id` or the bug persists functionally; confirmed the
+pre-existing owner-family hole (nothing today ties `account_type` to
+`wallet_id`) is real and closed by the new CHECK; found no audit-logging
+gap.
+
+**This amends the practical schema shape of a table whose broader design
+traces back to a human-approved decision (ADR 0007/ADR 0019) — it
+remains explicitly `NOT IMPLEMENTED`. Both specialist reviews are
+commentary, not approval: human sign-off is still required before any
+retail migration is written, and this does NOT redefine `Wallet` itself**
+(ADR 0007 is untouched; this is an additive shape on `ledger_accounts`,
+not a change to what a `Wallet` is). See §24 #3 for the exact human
+decision this narrows to.
 
 ## 7. RBAC/authorization model
 
@@ -243,20 +397,118 @@ dedicated retail endpoints (rejected explicitly, as reproducing the
 "second computation of the same fact" failure CLAUDE.md's ledger-authority
 rule already forbids one layer down).
 
+**Explicit requirement restated (Stage 4H-B0-R1)**: Back Office and any
+future retail/agent frontend consume the **same underlying reporting
+facts and the same reporting API surface** — visibility is controlled
+exclusively by authorized tenant + hierarchy subtree (permissions +
+scope, per ADR 0036 §2.6/§2.4), never by a second, independently-built
+retail reporting calculation. **Report visibility is never hard-coded by
+level** (the exact hard-coded-per-level table Wave-2 review found and
+fixed in doc 12, F10) — one rule applies uniformly: every node's scope is
+itself plus all its descendants. Applied to the directive's own named
+roles, purely as illustrations of the one uniform rule, never as
+special-cased branches in code:
+
+| Role (illustrative node type) | What "itself plus descendants" resolves to |
+|---|---|
+| Operator (network root) | The full authorized network — the widest case of the same rule, not a separate "tenant-wide" branch (ADR 0036 §2.4's multi-network correction) |
+| Partner | Its authorized subtree |
+| Super Agent | Its authorized subtree |
+| Agent | Its authorized subtree/players |
+| Cashier | Operational/transaction reporting appropriate to its own granted permissions (a narrower permission set than a node-administering role, per ADR 0036 §2.7 — the scope mechanism is identical, only the permission grant differs) |
+
+The eventual retail-facing UI naturally narrows what a given role's
+console shows (a Cashier's screen likely never renders the same reports
+a Partner's does) — that is a **frontend/product decision**, not a second
+reporting calculation, and it is out of this architecture-freeze stage's
+scope (frontend/UX work, not backend/reporting architecture).
+
 ## 9. Online + retail shared-domain model
 
-From doc 26 §6's reuse/extend/new assessment: **8 of 16 assessed domains
-reused as-is** (wallet, ledger core postings, RG, KYC state machine,
-identity resolution, audit primitive, tenant/brand, jurisdiction
-config), **7 bounded extensions** owned by their existing specialist
-(identity — provenance; payments — new fulfillment channel; risk — two
-new scope dimensions; audit — two nullable columns; reporting — three new
-dimensions; API — new endpoint groups on the existing surface;
-withdrawal state machine — a `cash_at_cashier` fulfillment-method
-sibling), **1 genuinely new domain** (the hierarchy/agent-network
-primitive itself, `internal/agentnetwork` — see §17). This 8:7:1 ratio is
-architect's own stated test of whether "one platform, not two products"
-is real, and it holds.
+**Formal statement (Stage 4H-B0-R1)**: online and retail are two
+**operating channels/surfaces of one platform**, never two products and
+never two financial systems. Concretely, retail shares, unmodified in
+their core mechanics:
+
+- **Person** — platform-wide, unchanged (ADR 0027).
+- **PlayerAccount** — tenant-owned, unchanged; retail adds only an
+  additive `registration_channel` column and a separate attribution
+  table (`retail_player_origins`), never a parallel account model.
+- **Identity Resolution** — the exact same `identityresolution.
+  RegisterPlayerWithResolution` flow; retail is a different *channel*
+  into the same flow, never a second registration path.
+- **Wallet** — ADR 0007's player-owned wallet abstraction, completely
+  unchanged; see §6 for how a hierarchy node's own account relates to it
+  (it is explicitly not a Wallet).
+- **Ledger** — the one authoritative `internal/ledger`; every retail
+  financial movement posts through it, append-only, double-entry,
+  idempotent, exactly like every other domain (§6).
+- **Risk** — `internal/risk.Evaluate`, never a second limit engine (ADR
+  0031 §19, restated for retail exactly as it was for Bonus/Gamification
+  in Stage 4H-A).
+- **Responsible Gaming** — `internal/rg.EvaluateEligibility`, called
+  identically from retail as from online, never a retail-specific
+  reimplementation (doc 11 §3, ADR 0036 §8).
+- **KYC** — the existing tiered-trigger state machine; retail is a new
+  *evidence channel* (a cashier's in-person check), never a new tier
+  taxonomy.
+- **Payments architecture** — retail cash is a new *fulfillment channel*
+  inside the existing payments domain, not a parallel payments system
+  (doc 07's "Retail cash rail" section).
+- **Bonus** — unaffected this stage; a retail-originated `deposit.
+  settled`/`player.registered` event triggers a deposit/reload bonus
+  with zero Bonus Engine change, if/when both are live (doc 10 §5).
+- **Audit** — the one `internal/audit` primitive, extended additively
+  (two nullable columns), never a second audit trail.
+- **Reporting** — one shared CDC/reporting pipeline, extended with three
+  additive dimensions, never a parallel retail reporting system (§8).
+- **Reconciliation** — retail adds new *streams* onto the existing
+  reconciliation framework, never a second, independently-computed
+  source of truth (§21).
+
+**Retail terminals/POS are API clients of the platform** (§16) — they
+call the platform's own APIs and display platform-returned state; they
+are never a separate financial system, never a second source of
+authoritative balance or decision state, and never granted direct
+database access.
+
+From doc 26 §6's reuse/extend/new assessment underlying the statement
+above: **8 of 16 assessed domains reused as-is** (wallet, ledger core
+postings, RG, KYC state machine, identity resolution, audit primitive,
+tenant/brand, jurisdiction config), **7 bounded extensions** owned by
+their existing specialist (identity — provenance; payments — new
+fulfillment channel; risk — two new scope dimensions; audit — two
+nullable columns; reporting — three new dimensions; API — new endpoint
+groups on the existing surface; withdrawal state machine — a
+`cash_at_cashier` fulfillment-method sibling), **1 genuinely new domain**
+(the hierarchy/agent-network primitive itself, `internal/agentnetwork` —
+see §17). This 8:7:1 ratio is architect's own stated test of whether "one
+platform, not two products" is real, and it holds.
+
+### 9a. Commissions (Stage 4H-B0-R1 restatement)
+
+The commission-accounting **architecture** (ADR 0035 §5) remains
+documented as future reference. **Automated commission calculation,
+accrual, payout, or cascade mechanics are explicitly NOT built in the
+first retail slice** (§1.3a). Per the Wave-2 product-owner-proxy scope
+finding already applied to ADR 0035 (§5.3/§5.4 downgraded from
+`RESOLVED` to `documented for future reference, not binding`), the
+following commercial terms must be defined before this machinery is
+frozen as binding, let alone implemented:
+
+- Commission **rate**.
+- Commission **base** (GGR, NGR, turnover, net-loss, or per-transaction —
+  each implies a different ledger query and a different dispute surface).
+- **Hierarchy cascade** (does an upstream node earn an override on a
+  downstream node's commission, and to what depth).
+- **Overrides** (exceptions to the standard rate/cascade for a specific
+  node or agreement).
+- **Settlement frequency** (how often commission is actually paid out).
+- **Tax treatment** (is commission withheld at source in any
+  jurisdiction — this can change the correct posting shape, per ADR 0035
+  §5's own review finding).
+
+See §24 #7 for the corresponding human decision register entry.
 
 ## 10. Bonus implementation plan
 
@@ -394,34 +646,80 @@ document) read these same streams — never an independent re-derivation.
 
 ## 22. Dependencies between stages
 
+**Stage 4H-B0-R1 correction**: an earlier draft of this graph stated
+Stage 4H-B1 was reachable directly from Stage 4H-B0, contradicting §1.1's
+own disclosure that ADR 0021's rounding decision and the `risk`
+dependency both remain open. Corrected below — Bonus and Retail now each
+have their own explicit gate stage before their respective
+implementation stage.
+
 ```
-Stage 4H-B1 (Bonus Engine implementation) — CAN be authorized independently
-  of retail. Depends only on: this stage's frozen doc 10 scope plan +
-  ADR 0032 (Stage 4H-A) + a small risk dependency request (bonus_conversion
-  Operation value).
+                         B0-R1 (this stage)
+                            |
+              +-------------+-------------+
+              |                           |
+              v                           v
+   Bonus financial gate           Retail-Legal / Business Gate
+   resolution (human +                 (human/business, not
+   ledger-finance + risk):             engineering) — MUST
+   - ADR 0021 rounding/precision       resolve before ANY retail
+     decision (§1.1, §24 #15 —         implementation stage is
+     human chooses among the           even scoped:
+     enumerated options, not           - Licensing status of retail
+     invented by a specialist)           per target jurisdiction
+   - risk dependency for the             (§24 #1)
+     bonus_conversion Operation        - Node-float/ADR 0007
+     completed and reviewed              amendment approval (§24 #3)
+     (§1.1)                            - Anonymous/bearer retail
+   - no other P0/P1 financial            play policy (§24 #4)
+     dependency remaining              - Commercial retail
+              |                          relationship existing at
+              v                          all (no current deal)
+     Stage 4H-B1 — Bonus                        |
+     Engine implementation                      v
+     (5-type first slice,              Stage 4H-B2 — Retail
+     §1.1)                             Architecture Hardening:
+                                        resolve the engineering-
+                                        answerable P0s (§23B: audit_log
+                                        RLS extension, the drafted
+                                        ledger_accounts schema
+                                        amendment's final ratification,
+                                        terminal credential mechanism)
+                                        BEFORE any retail migration is
+                                        written — reviewed by architect
+                                        + security + ledger-finance
+                                        together, still architecture/
+                                        migration-design work, no
+                                        retail code yet
+                                                |
+                                                v
+                                        Stage 4H-B3 — Retail First
+                                        Implementation (per §1.3a's
+                                        formal baseline: identified
+                                        players only, online-required,
+                                        single currency, cash deposit +
+                                        withdrawal, fixed shallow
+                                        hierarchy for the first
+                                        contracted operator, no
+                                        automated commissions, no
+                                        agent-to-agent transfer, no
+                                        direct-bank settlement unless
+                                        separately approved, no proxy
+                                        play)
 
-Stage "Retail-Legal" (human/business, not engineering) — MUST resolve
-  before ANY retail implementation stage is even scoped:
-  - Licensing status of retail per target jurisdiction (§24 #1)
-  - Node-float vs. ADR 0007 Wallet conflict resolution (§24 #2) — needs
-    architect + security + ledger-finance + human
-  - Anonymous/bearer retail play policy (§24 #4)
-  - Commercial retail relationship existing at all (no current deal)
+Gamification — remains deferred, no scheduled next stage (unchanged from
+Stage 4H-A).
 
-Stage 4H-B2 (Retail architecture hardening / Wave 3, if authorized) —
-  would resolve the P0/P1 items in §23 that are engineering-answerable
-  (audit_log RLS extension, ledger_accounts schema extension, terminal
-  credential mechanism hardening) BEFORE any retail migration is written.
-  Depends on Stage "Retail-Legal" landing first — building the hardening
-  stage before the legal gate is answered risks building on an
-  unauthorized premise.
-
-Stage 4H-B3 (Retail implementation, if authorized) — depends on 4H-B2.
+Reward Orchestrator — remains deferred until a second concrete
+reward-producing domain exists (unchanged from Stage 4H-A and this
+stage's own bonus-engine finding).
 ```
 
-Gamification and the Reward Orchestrator have no dependency edge into
-either Bonus Engine's or Retail's implementation stages — they remain
-independently deferred.
+The Bonus gate and the Retail-Legal gate are **independent of each
+other** — resolving one does not require or block the other. Both
+depend only on B0-R1 (this stage) having landed. Gamification and the
+Reward Orchestrator have no dependency edge into either path — they
+remain independently deferred.
 
 ## 22a. Wave-2 cross-document consistency review (code-reviewer) and scope review (product-owner-proxy)
 
@@ -525,55 +823,127 @@ posting shape anyway.
 
 ## 23. P0/P1/P2 risks (aggregated across all ten Wave-1 documents)
 
-### P0 — must resolve before any retail implementation stage is authorized
+**Stage 4H-B0-R1 correction**: an earlier draft of this section listed 8
+items under a single undifferentiated "P0" heading, worded as if all 8
+were open human decisions blocking retail. That conflated two entirely
+different kinds of thing: a small number of genuine human/business/legal
+decisions nobody but a human can make, and a larger number of mandatory
+engineering acceptance criteria that this stage's own specialist
+documents (chiefly ADR 0036) already state as binding design
+requirements — not open questions, and not something a human needs to
+weigh in on. Corrected below into two separate lists per the human
+directive's explicit instruction. The severity label "P0" is kept for
+both — both block retail going live — but only 23A requires a human/
+business decision; 23B requires nothing from a human except confirming
+these are indeed non-negotiable, and requires an implementer/reviewer to
+verify they hold, exactly like any other acceptance test.
+
+### 23A. P0 — genuine human/business/legal decisions
+
+These cannot be resolved by any specialist or by the Orchestrator. See
+§24 for the full, deduplicated human decision register — the items below
+are the subset that specifically blocks any retail implementation stage
+from being scoped at all (§24 carries the complete list, including lower-
+urgency items that don't block scoping).
 
 1. **Licensing gap** (architect) — the platform's only current licence
    (Anjouan) is online-only; land-based retail is typically licensed
    per-jurisdiction separately. This can invalidate the commercial premise
-   entirely, not just the design. **Human/legal.**
-2. **Node-float vs. ADR 0007 `Wallet` conflict** (architect, ledger-finance)
+   entirely, not just the design. **Human/legal.** (= §24 #1)
+2. **Node-float vs. ADR 0007 `Wallet` conflict — confirmation, not design**
+   (architect, ledger-finance, security jointly propose; human approves)
    — `ledger_accounts` supports only wallet-scoped or house-level
-   ownership; a node-scoped `agent_float` fits neither without an
-   additive schema change that touches an already-implemented, human-
-   approved shared table. **Architect + security + ledger-finance +
-   human.**
+   ownership today; §6 below now carries the specific additive-schema
+   amendment ledger-finance has drafted and architect/security are
+   reviewing (Stage 4H-B0-R1). What remains a **human** decision is
+   narrower than an earlier draft implied: not "how should this be
+   designed" (that's now drafted and under specialist review) but
+   **"is this specific amendment to a human-approved decision (ADR 0007)
+   approved?"** — the same authority that approved ADR 0007 approves or
+   rejects amending its practical schema shape. (= §24 #3)
 3. **Anonymous/bearer retail play would make RG/KYC/Risk structurally
    unsatisfiable** (risk, independently corroborated by architect and
    ledger-finance) — every player-scoped enforcement mechanism
    presupposes an identified `player_accounts` row; no Risk/RG
    configuration can compensate for its absence. **Human/legal,
-   jurisdiction by jurisdiction.**
-4. **Delegated limit authoring by hierarchy actors** (risk) — no
-   Partner/SuperAgent/Agent/Cashier may hold `risk_config:manage`; if "a
-   SuperAgent sets its own sub-agents' limits" is a real product
-   requirement, it needs a new bounded-authoring permission with an
-   unexceedable hard ceiling, explicitly not risk's to add unilaterally.
-   **Architect + security + Orchestrator.**
-5. **`audit_log` RLS does not survive retail as designed** (security,
-   finding C1) — the existing ADR 0013 policy is tenant-wide with no
-   subtree guard, and Postgres's OR-of-permissive-policies semantics mean
-   a narrower policy added beside it cannot narrow anything; a naive
-   implementation lets any retail principal with audit-read see the whole
-   tenant's trail. **Architect + a fresh security review of the actual
-   migration** — this modifies an accepted Stage-2 decision.
-6. **Five RBAC/RLS design invariants that must hold by construction**
-   (security): node-reassignment permission must not be bundled with
-   general node-manage; the RLS closure predicate must have no
-   fail-open/`OR NULL` branch; no retail role may hold `PermStaffManage`;
-   no retail money path may skip RG→Risk; the closure table itself must
-   be write-protected as authorization data. These are binding
-   requirements ON the eventual implementation, not open questions.
-7. **POS idempotency namespace-squatting** (ledger-finance) — if a
-   terminal's identity were taken from request payload rather than its
-   authenticated credential, one terminal could replay or squat another
-   terminal's idempotency keys. Closed in design by mandating
-   server-side credential resolution + random operation IDs — a binding
-   implementation requirement, not an open question.
-8. **RG bypass via POS-offline fail-open** (identity-compliance, qa,
-   ledger-finance) — an offline terminal has no valid RG/Risk decision;
-   the binding design position is fail-closed (deny), and any bounded
-   offline tolerance is a separate, explicit human/business decision,
-   never a default.
+   jurisdiction by jurisdiction.** (= §24 #4)
+
+Item 4 from the earlier draft ("delegated limit authoring by hierarchy
+actors") is **reclassified below, into 23B**, per the human directive:
+it is a mandatory engineering acceptance criterion (no hierarchy actor
+may hold `risk_config:manage`) *unless and until* a human confirms
+delegated authoring is a real product requirement — at which point it
+becomes design work for architect+security, not a standing human
+decision that blocks anything today. The current binding default (no
+delegation) requires no human input to remain in force; a human is only
+needed if someone wants to change it. See §24 #13 for the conditional
+framing.
+
+### 23B. P0 — mandatory engineering acceptance criteria (NOT human decisions)
+
+These are binding requirements ON any future implementation, already
+stated as such by the owning specialist's own document (chiefly ADR
+0036). No human sign-off is needed to adopt them — they are not choices,
+they are the frozen architecture's non-negotiable floor. An
+implementation that violates any of these is non-conformant, full stop;
+the acceptance test is "does the code do this," not "should the business
+want this." Human input is genuinely required only where noted below
+(none is, at present).
+
+1. **Fail-closed hierarchy RLS.** The closure-table RLS predicate (ADR
+   0036 §3.3) must deny, never fall through to unrestricted access, when
+   the hierarchy-scope GUC is unset.
+2. **No `OR <guc> IS NULL` RLS escape branch.** Any policy shape that
+   would grant broader access when the scope GUC happens to be unset is
+   non-conformant by construction (ADR 0036 §3.3, and the specific
+   phasing fix in §2.5a for the transaction-scoping contradiction Wave-2
+   review found, F1).
+3. **No retail role may hold `PermStaffManage`.** Structurally prevents a
+   retail-domain permission grant from escalating into general staff
+   administration (ADR 0036 §2.7/§11).
+4. **RG → Risk ordering, unconditionally, inside the posting transaction.**
+   Every money-touching retail operation calls `rg.EvaluateEligibility`
+   before `risk.Evaluate`, both before the posting commits — no retail
+   code path may skip, reorder, or locally reimplement either check (ADR
+   0036 §8.1, ADR 0035 §3.2, ADR 0031 §22; this is also exactly the class
+   of bug Wave-2 review found and fixed in payments' own document, F9).
+5. **Closure-table write protection.** The `hierarchy_node_closure`
+   table is authorization data — anyone who can write a closure row
+   grants themselves ancestry, so it must be trigger-maintained only,
+   with a DML guard trigger preventing direct writes (ADR 0036 §3.3).
+6. **Server-side terminal-credential resolution.** A terminal's identity
+   for idempotency/audit purposes is resolved from its own authenticated
+   credential — never taken from request payload, which is exactly the
+   POS idempotency namespace-squatting attack (see item 7 below and ADR
+   0035 §8.2).
+7. **POS idempotency namespace protection.** The `(tenant_id,
+   idempotency_key)` shape (ADR 0035 §8.1) plus server-side credential
+   resolution (item 6) together close a genuinely new attack class: one
+   terminal replaying or squatting another terminal's idempotency keys.
+   Binding implementation requirement, not an open question.
+8. **Offline fail-closed baseline.** An offline/degraded-connectivity
+   terminal has no valid RG/Risk decision and must therefore deny, never
+   default-allow (ADR 0031 §19/§24, ADR 0035 §8.4, doc 11 §4). This is
+   the **binding default** — a human decision is only needed if someone
+   wants a *bounded exception* to it (§24 #5), not to adopt the default
+   itself.
+
+Two items from the earlier draft's undifferentiated P0 list are also
+engineering acceptance criteria, not decisions, and are retained as such
+(not renumbered above to avoid disturbing existing cross-references, but
+reclassified in substance):
+
+9. **`audit_log` RLS extension** (security, finding C1) — the existing
+   ADR 0013 policy is tenant-wide with no subtree guard; a retail
+   principal with audit-read would see the whole tenant's trail unless
+   this is fixed. This is engineering work (a migration + a fresh
+   security review of that migration, since it touches an accepted
+   Stage-2 decision) — no human business/legal input is needed to know
+   this must be fixed before retail audit reads are meaningful.
+10. **Delegated limit-authoring self-defeat prevention** — see the note
+    under 23A above: the *default* (no hierarchy actor holds
+    `risk_config:manage`) is a binding engineering criterion requiring
+    no human sign-off; only a *change* to that default needs one.
 
 ### P1
 
@@ -625,82 +995,126 @@ posting shape anyway.
 
 ---
 
-## 24. Human business decisions still required
+## 24. Human Decision Register
 
-1. **Is retail licensed to operate at all, in which jurisdictions, under
-   what structure** (own licence vs. local partner/sub-licensee)? — legal,
-   blocks everything.
-2. **Does a hierarchy node's float amend ADR 0007's `Wallet` definition,
-   or fit inside it unchanged?** — this is a human-approved architecture
-   decision (ADR 0007 itself), so amending it needs the same authority
-   that approved it, not a specialist's unilateral resolution.
-3. **Are hierarchy agents independent legal entities/sub-licensees, or
-   platform staff?** — determines RBAC/liability/tax treatment.
-4. **Is anonymous/bearer retail play permitted or required in any target
-   jurisdiction?** — fundamentally different accounting object and
-   compliance posture; common in some LATAM retail markets.
-5. **Is any bounded offline/store-and-forward terminal tolerance
-   commercially required?** — the binding default is fail-closed
-   (online-required); relaxing it is a deliberate, recorded trade-off, not
-   a convenience.
-6. **Commission structure, base, rate, and cascade** — commercial contract
-   terms; also determines whether commission is tax-withheld at source.
-7. **Do agents ever hold player funds or operate on credit (post-pay
-   float)?** — credit-risk and, in several jurisdictions, a legal question
-   (credit-funded gambling is regulated or prohibited in some markets).
-8. **Is retail proxy/assisted play (an agent placing bets on a player's
-   behalf) a requirement?** — common in some retail markets, serious
+**Stage 4H-B0-R1**: this register contains **only** decisions that
+genuinely require human/business/legal input — no engineering acceptance
+criterion appears here (those are §23B, binding regardless of human
+input). Kept deliberately concise; each item states what's being decided
+and why it can't be resolved by a specialist or the Orchestrator.
+
+1. **Retail licensing/jurisdiction structure.** Is retail licensed to
+   operate at all, in which jurisdictions, under what structure (own
+   licence vs. local partner/sub-licensee)? The platform's only current
+   licence (Anjouan) is online-only. Legal; blocks everything else in
+   this register from mattering if the answer is "not licensable."
+2. **Are hierarchy agents independent legal entities/sub-licensees, or
+   platform/company-operated entities?** Determines RBAC/liability/tax
+   treatment.
+3. **Confirmation of the proposed node-owned `agent_float` extension to
+   ADR 0007.** The technical amendment is now drafted (ledger-finance)
+   and under architect + security review (§6) — what remains is
+   confirming this specific amendment to a human-approved decision is
+   approved, not designing it (that part is done).
+4. **Anonymous/bearer retail play policy, by jurisdiction.** Would make
+   RG/KYC/Risk enforcement structurally unsatisfiable as currently
+   designed if permitted anywhere (§23A #3). Common in some LATAM retail
+   markets.
+5. **Offline retail policy.** Is any bounded offline/store-and-forward
+   terminal tolerance commercially required? The binding default is
+   fail-closed (online-required, §23B #8); relaxing it is a deliberate,
+   recorded trade-off with a hard per-terminal exposure cap, never a
+   convenience default.
+6. **Proxy/assisted play policy.** Is an agent placing bets on a
+   player's behalf a requirement? Common in some retail markets, serious
    RG/KYC hazard if so; not designed this stage.
-9. **Franchised vs. company-owned retail locations** — determines custody/
+7. **Commission commercial terms**: rate, base (GGR/NGR/turnover/net-loss/
+   per-transaction), hierarchy cascade, overrides, settlement frequency,
+   tax treatment (§9a). Also determines whether commission is
+   tax-withheld at source.
+8. **Agent credit/post-pay policy.** Do agents ever hold player funds or
+   operate on credit (post-pay float)? Credit-risk and, in several
+   jurisdictions, a legal question (credit-funded gambling is regulated
+   or prohibited in some markets).
+9. **Franchised vs. company-owned retail model.** Determines custody/
    insurance/AML treatment of physical cash and whether a
    `retail_cash_on_hand` account is even meaningful.
-10. **Cash-specific AML reporting thresholds by jurisdiction** —
-    compliance/legal, feeds a transaction-monitoring engine that doesn't
+10. **Cash-specific AML reporting thresholds by jurisdiction.**
+    Compliance/legal; feeds a transaction-monitoring engine that doesn't
     exist yet.
-11. **Does in-person presence at a retail counter satisfy any part of a
-    jurisdiction's KYC evidence requirement?** — jurisdiction-configurable,
-    not a platform default.
-12. **Terminal fleet ownership and decommissioning process** (own hardware
-    vs. third-party POS vendor) — commercial/vendor decision.
-13. **Whether "a SuperAgent sets its own sub-agents' limits" is a real
-    product requirement** — if yes, needs new bounded-authoring RBAC
-    design (§23 P0 #4); if no, the current "no hierarchy actor holds
-    `risk_config:manage`" design stands as-is.
-14. Confirm which stage to authorize next: Bonus Engine implementation
-    (independently ready, per §1.1/§22), a dedicated legal/licensing
-    workstream for retail, both, or neither yet.
+11. **KYC evidence requirements for retail presence.** Does in-person
+    presence at a retail counter satisfy any part of a jurisdiction's
+    KYC evidence requirement? Jurisdiction-configurable, not a platform
+    default.
+12. **Terminal ownership/fleet model.** Own hardware vs. third-party POS
+    vendor, and the decommissioning process. Commercial/vendor decision.
+13. **Whether hierarchy actors may author subordinate Risk limits.**
+    The binding default (§23B #10) is no — no Partner/SuperAgent/Agent/
+    Cashier holds `risk_config:manage`, and this default requires no
+    human input to remain in force. A human decision is needed **only
+    if** "a SuperAgent sets its own sub-agents' limits" is a genuine
+    product requirement; if so, it becomes a bounded-authoring RBAC
+    design task for architect + security, not a standing block.
+14. **Confirmation of the first contracted retail market/operator, when
+    known.** Feeds §1.3a's "fixed shallow hierarchy for the first
+    contracted operator" baseline — the actual shape (how many levels,
+    what they're called) is this operator's real structure, not a
+    platform default.
+15. **ADR 0021 rounding/precision decision** — see §1.1. Blocks precise
+    computation for 3 of the Bonus Engine's 5 first-slice bonus types
+    (deposit, reload, cashback). `docs/decisions/0021-multi-asset-
+    accounting.md` now enumerates the available architectural choices
+    (rounding direction, precision handling) without selecting one —
+    a human picks among them. This is the one item in this register that
+    blocks the **Bonus** gate rather than the **Retail** gate; listed
+    here for completeness since it is, like every other item above, a
+    decision only a human can make.
+
+Two items from an earlier draft of this register are corrected/removed:
+"does a hierarchy node's float amend ADR 0007" is narrowed to item 3
+above (the design is now drafted, only approval remains); "confirm which
+stage to authorize next" is removed from this register entirely — it is
+not a business/legal decision, it is the ordinary end-of-stage
+authorization request every stage in this project ends with (see the
+completion report).
 
 ---
 
 ## 25. Recommended implementation order
 
+**Stage 4H-B0-R1 correction**: superseded by §22's corrected dependency
+graph, which this section now matches exactly rather than restating
+inconsistently. See §22 for the diagram; summarized here for quick
+reference:
+
 ```
-Immediately authorizable (no blocking human decision, per bonus-engine's
-own direct gate-check):
-  Stage 4H-B1 — Bonus Engine implementation (5-type first slice, §1.1)
+Path A — Bonus:
+  Resolve the Bonus financial gate (§1.1: ADR 0021 rounding decision by
+    a human, per §24 #15; the bonus_conversion Risk dependency, NOT
+    STARTED per ADR 0031 §16a; confirm no other P0/P1 remains)
+  → THEN Stage 4H-B1 — Bonus Engine implementation (5-type first slice)
+  Not "immediately authorizable" — CONDITIONALLY READY, per §1.1's
+  correction.
 
-Requires a human/legal decision BEFORE any engineering work starts:
-  Stage "Retail-Legal" — resolve licensing (§24 #1), node-float/Wallet
-    conflict (§24 #2), anonymous-play policy (§24 #4), and confirm a
-    commercial retail relationship exists at all
-
-Only after Retail-Legal resolves:
-  Stage 4H-B2 — Retail architecture hardening: close the engineering-
-    answerable P0s (§23: audit_log RLS extension, ledger_accounts schema
-    extension, terminal credential mechanism, RBAC invariant
-    implementation) — still architecture/migration-design work, reviewed
-    by architect + security + ledger-finance together, before any retail
-    code is written
-  Stage 4H-B3 — Retail implementation (first slice per §1.3's narrowed
-    recommendation: fixed shallow hierarchy, cash deposit/withdrawal
-    only, single currency, online-only, no anonymous play, no commission
-    automation)
+Path B — Retail (independent of Path A):
+  Resolve the Retail-Legal / Business Gate (human/legal, before ANY
+    engineering work starts): licensing (§24 #1), node-float/ADR 0007
+    amendment approval (§24 #3), anonymous-play policy (§24 #4), confirm
+    a commercial retail relationship exists at all
+  → THEN Stage 4H-B2 — Retail Architecture Hardening: close the
+    engineering-answerable P0s (§23B: audit_log RLS extension, final
+    ratification of the drafted ledger_accounts schema amendment,
+    terminal credential mechanism) — still architecture/migration-design
+    work, reviewed by architect + security + ledger-finance together,
+    before any retail code is written
+  → THEN Stage 4H-B3 — Retail First Implementation (per §1.3a's formal
+    baseline)
 
 Gamification and the Reward Orchestrator: remain deferred with no
 scheduled next stage, per Stage 4H-A's standing finding, unchanged by
 this stage.
 ```
 
-This stage (4H-B0) explicitly STOPS here per its own directive. **No
+This stage (4H-B0-R1) explicitly STOPS here. **No
 Stage 4H-B1, "Retail-Legal," 4H-B2, or 4H-B3 work has been started.**
 Await explicit human authorization naming which of the above to begin.

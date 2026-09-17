@@ -6,6 +6,18 @@ Scope Freeze) — **architecture and accounting design only,
 `transaction_type` or `Operation` value in this document exists yet.
 Owner: `ledger-finance`.
 
+**Amended in Stage 4H-B0-R1** (governance correction): §1.3.1 is new — it
+formalizes the ADR 0007 / ADR 0035 relationship (a `Wallet` remains
+strictly player-owned and is **not** redefined; agent float is a distinct
+hierarchy-node-owned account family recorded in the **same** authoritative
+ledger; a till is never an authoritative balance) and states the proposed
+**additive** `ledger_accounts` schema amendment exactly, with a proof that
+no currently-implemented account type's row shape changes. §1.3.1 is
+`NOT IMPLEMENTED`, is a `ledger-finance` **proposal** rather than a
+decision, and requires `architect` + `security` review followed by human
+approval. Other Stage 4H-B0-R1 edits are marked inline as
+"Stage 4H-B0-R1 correction"; none is silent.
+
 This ADR specifies **only the monetary/accounting treatment** of a retail
 agent network. The hierarchy/role model, the node object itself, the
 who-may-fund-whom authorization predicate, and the RBAC shape are owned by
@@ -166,7 +178,7 @@ discipline.
 |---|---|---|---|---|
 | `agent_float` | A hierarchy node's spendable operating capacity — the platform's liability to that node | **Node** + asset: one row per `(tenant_id, hierarchy_node_id, asset_code)` | **Credit** (liability owed to the node) | No — only via a `LedgerTransaction` |
 | `agent_commission_payable` | Commission earned by a node and recognized, not yet discharged | **Node** + asset: one row per `(tenant_id, hierarchy_node_id, asset_code)` | **Credit** (liability owed to the node) | No |
-| `agent_commission_expense` | The operator's recognized cost of the agent network | House-level, per `(tenant_id, asset_code)`, `wallet_id IS NULL` | **Debit** (expense) | No |
+| `agent_commission_expense` | The operator's recognized cost of the agent network | House-level, per `(tenant_id, asset_code)`, `wallet_id IS NULL` **and `hierarchy_node_id IS NULL`** — see the §1.3.1 correction below | **Debit** (expense) | No |
 
 Two further account types are **proposed conditionally** and are not
 adopted by default:
@@ -175,6 +187,23 @@ adopted by default:
 |---|---|---|
 | `retail_cash_on_hand` | **No — `OPEN DECISION`** | Required **only** if the retail network is company-owned (the operator owns the cash in the till) rather than franchised (the agent owns it). See §6.2 and §11.1. Debit-normal asset, scoped per `(tenant_id, hierarchy_node_id, asset_code)` if adopted. |
 | `cash_rounding_difference` | **`RECOMMENDATION`** | Needed only once an asset/jurisdiction requires physical-cash rounding (§9.3). House-level per `(tenant_id, asset_code)`, clearing-style (no normal balance, like `manual_adjustment`). The alternative — folding the residue into `house_gaming` — is a finance/reporting call, not an engineering one. |
+
+> **Stage 4H-B0-R1 correction (owner-family shorthand).** Everywhere this
+> ADR — and every document predating it — writes "`wallet_id IS NULL`" to
+> mean "house-level", that shorthand was written when `ledger_accounts` had
+> exactly two owner families and is **no longer sufficient once a third
+> exists**: a node-owned row also has `wallet_id IS NULL`. Under §1.3.1 the
+> correct predicate for house-level is **`wallet_id IS NULL AND
+> hierarchy_node_id IS NULL`**. The `agent_commission_expense` row above is
+> corrected accordingly; the two node-scoped rows and the conditional
+> `retail_cash_on_hand` row already state a node scope and need no change.
+> The same shorthand appears in `ledger-accounting-model.md` §1.1/§2 and in
+> ADR 0032 §2's `promo_liability`/`bonus_expense` definitions and must be
+> corrected there too when §1.3.1 is approved — those documents are not
+> edited by this ADR, and the correction is listed under Consequences.
+> This is a precision fix to wording, not a change to any account's
+> intended scope: every account type listed as house-level was always meant
+> to be tenant-wide and owner-less, and stays exactly that.
 
 `signed_balance` remains credit-positive for every account type without
 exception (`ledger-accounting-model.md` §5). Expected signs for the new
@@ -246,8 +275,12 @@ Three resolutions were considered:
   `wallet_balance_projection` by the same `BEFORE INSERT` trigger pattern
   ADR 0019 already uses for `player_account_id`/`wallet_id`, for the same
   reason (a policy needs the column on the row it protects).
-  **`RECOMMENDATION`.** It is additive, changes no existing constraint,
-  invalidates no existing row, and preserves every current invariant.
+  **`RECOMMENDATION`.** It invalidates no existing row and preserves every
+  current invariant. **Stage 4H-B0-R1 correction**: this bullet also claimed
+  it "changes no existing constraint" — that was **wrong**. Three existing
+  objects encode "house-level" as `wallet_id IS NULL`, which a node-owned
+  row also satisfies, and must be amended; §1.3.1 states exactly which and
+  proves that no currently-implemented row shape changes.
 - **(c) A single house-level `agent_float` control account plus a
   per-node subsidiary ledger** maintained by the retail subsystem.
   Rejected outright: that subsidiary ledger *is* a second financial truth
@@ -284,6 +317,674 @@ Two consequences that fall out and must be decided with it:
   row to reconcile and a row to lock. Node-scoped accounts inherit that
   with **no change** — the prior decision already accommodates this case.
 
+#### 1.3.1 Stage 4H-B0-R1 — the formalized ADR 0007 relationship and the proposed additive `ledger_accounts` amendment
+
+**Status: `NOT IMPLEMENTED`. This subsection is a `ledger-finance`
+*proposal*, not a decision.** It requires explicit **human approval**
+before implementation, and `architect` + `security` review before that,
+because it amends the practical shape of a table whose broader design was
+settled by human-approved decisions (ADR 0007, ADR 0019). `ledger-finance`
+is not exercising a unilateral change here and does not claim the authority
+to: CLAUDE.md's "no specialist redesigns shared architecture unilaterally"
+applies, and §1.3's `OPEN DECISION` therefore stays open until a human
+closes it. What this subsection adds is that the open decision is now
+**stated in a reviewable, implementable, exactly-specified form** rather
+than as a recommended direction.
+
+Added in Stage 4H-B0-R1 to formalize the resolution the project's human
+direction supplied for the P0 conflict Stage 4H-B0 disclosed between ADR
+0007 (a `Wallet` is strictly player-owned) and this ADR's need for a
+hierarchy-node-owned `agent_float`.
+
+##### (1) The ADR 0007 / ADR 0035 relationship, stated from this ADR's side
+
+This is a **clarification of scope, not a redefinition of `Wallet`**.
+`docs/decisions/0007-multi-wallet-per-player-model.md` is human-approved and
+is **not amended, narrowed or reinterpreted by this ADR**; nothing below
+changes a single word of what a `Wallet` is or does. The relationship, as
+this ADR relies on it:
+
+1. **A `Wallet` remains exactly what ADR 0007 says it is** — the
+   player-owned, per-asset wallet abstraction, one per `(player, asset)`,
+   with its own identity, its own `player_*` ledger account types, its own
+   projection and its own history. Unchanged in every respect.
+2. **Agent float is explicitly NOT a Player Wallet.** It is a
+   **hierarchy-node-owned operational financial account**: a different
+   owner family, a different counterparty class, a different account type
+   set, no player, no KYC/RG state, no brand scope (§12 assumption 4). The
+   rejection of "give each node a `Wallet`" in §1.3(a) stands and is the
+   reason this subsection exists: representing a node as a pseudo-player
+   would break `wallets.player_account_id`'s NOT NULL composite FK and
+   pollute every player-scoped policy, count and report in the platform.
+   The similarity between a node's float and `player_cash` is **structural
+   analogy only** (§1.1) — both are credit-normal platform liabilities —
+   and analogy is not identity.
+3. **There is no second ledger.** Agent float is represented through the
+   **same authoritative double-entry ledger** — the same
+   `ledger_accounts`/`ledger_transactions`/`ledger_entries` tables, the
+   same `internal/ledger` posting path, the same invariants, the same
+   idempotency mechanism, the same projection-and-reconciliation model.
+   §0's position statement is the binding form of this and is not weakened
+   by the fact that the owner is a node.
+4. **Agent float must never be confused with a physical till or cash
+   drawer.** §6.2's position is re-checked in Stage 4H-B0-R1 and **still
+   holds unchanged**: in the franchised model this ADR designs for, the
+   cash in a cashier's till belongs to the agent, is not a `LedgerAccount`,
+   is not a platform asset and is **never an authoritative balance**. An
+   `agent_float` balance is a ledger-derived projection of what the
+   platform *owes a node*; a till is physical cash someone is holding.
+   They can move in opposite directions on the same transaction (a retail
+   deposit *reduces* float while *increasing* till cash, §3.2), which is
+   the clearest demonstration that they are not two views of one number.
+5. **Physical cash is a fulfillment/custody concern, not an independent
+   authoritative balance.** The ledger records the *consequence* of a cash
+   movement (a transfer of platform liability between an agent and a
+   player), never custody of the note itself. The only thing the platform
+   holds about physical cash is the §6.2 *declaration* stream, which is an
+   observation reconciled against the ledger (invariant R3), never a
+   balance the ledger defers to. The one case where physical cash *would*
+   become a platform asset — the company-owned model and its
+   `retail_cash_on_hand` account — remains the explicit custody
+   `OPEN DECISION` in §11.1 and is not decided here.
+6. **All financial movements remain in the one authoritative ledger.**
+   There is no agent-side ledger, no till ledger, no per-node subsidiary
+   ledger (§1.3(c), rejected), and no retail table carrying an
+   authoritative monetary balance (§0).
+
+##### (2) The minimum additive schema change
+
+`RECOMMENDATION` / proposal. This is the §1.3(b) shape made exact. It is
+**illustrative SQL for review, not a migration to run** — no migration file
+exists and none may be written before human approval.
+
+Current implemented shape (migration `0020_create_ledger_accounts.up.sql`,
+`IMPLEMENTED`), with only the parts this amendment touches shown:
+
+```sql
+-- CURRENT (implemented)
+wallet_id         UUID REFERENCES wallets (id),          -- NULL for house-level
+player_account_id UUID,                                  -- lockstep with wallet_id
+status            TEXT CHECK (status IN ('active','frozen','closed')),
+CHECK ((wallet_id IS NULL) = (player_account_id IS NULL)),
+CHECK ((wallet_id IS NOT NULL) OR (status IS NOT NULL)),  -- house rows must have a status
+CHECK ((wallet_id IS NULL)     OR (status IS NULL));      -- wallet rows must not
+
+CREATE UNIQUE INDEX idx_ledger_accounts_wallet_type_asset
+    ON ledger_accounts (wallet_id, account_type, asset_code)
+    WHERE wallet_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_ledger_accounts_tenant_type_asset
+    ON ledger_accounts (tenant_id, account_type, asset_code)
+    WHERE wallet_id IS NULL;                              -- "house-level" == wallet_id IS NULL
+```
+
+Proposed additive amendment:
+
+```sql
+-- PROPOSED (Stage 4H-B0-R1, NOT IMPLEMENTED, human approval required)
+
+-- 1. The third owner dimension.
+ALTER TABLE ledger_accounts
+    ADD COLUMN hierarchy_node_id UUID NULL;               -- FK added with architect's
+                                                          -- hierarchy_nodes table (see notes)
+
+-- 2. Ownership is MUTUALLY EXCLUSIVE: at most one non-house owner.
+--    Holds for every row, including future account types nobody has
+--    defined yet. Existing rows satisfy it unchanged (node id is NULL).
+ALTER TABLE ledger_accounts
+    ADD CONSTRAINT ledger_accounts_single_owner
+    CHECK (num_nonnulls(wallet_id, hierarchy_node_id) <= 1);
+
+-- 3. Ownership is REQUIRED where the account type requires it, and
+--    forbidden where it does not. This is the "never zero for a row that
+--    requires an owner" half, which (2) alone cannot express.
+ALTER TABLE ledger_accounts
+    ADD CONSTRAINT ledger_accounts_owner_family
+    CHECK (
+      CASE
+        WHEN account_type IN ('player_cash','player_bonus',
+                              'player_locked','player_withdrawal_hold')
+          THEN wallet_id IS NOT NULL AND hierarchy_node_id IS NULL
+        WHEN account_type IN ('agent_float','agent_commission_payable')
+          THEN hierarchy_node_id IS NOT NULL AND wallet_id IS NULL
+        ELSE  wallet_id IS NULL     AND hierarchy_node_id IS NULL
+      END
+    );
+
+-- 4. Status follows the owner family. Replaces the two existing status
+--    CHECKs with one that is exactly equivalent for every existing row
+--    (see the row-shape proof below) and correct for node-owned rows.
+ALTER TABLE ledger_accounts DROP CONSTRAINT <existing status check 1>;
+ALTER TABLE ledger_accounts DROP CONSTRAINT <existing status check 2>;
+ALTER TABLE ledger_accounts
+    ADD CONSTRAINT ledger_accounts_status_owner_family
+    CHECK ((status IS NOT NULL)
+           = (wallet_id IS NULL AND hierarchy_node_id IS NULL));
+
+-- 5. The house-level uniqueness index must stop meaning "wallet_id IS NULL"
+--    and start meaning "no owner at all". Without this, every node's
+--    agent_float/EUR collides into ONE tenant-wide row - the exact silent
+--    failure §1.3 describes.
+DROP INDEX idx_ledger_accounts_tenant_type_asset;
+CREATE UNIQUE INDEX idx_ledger_accounts_tenant_type_asset
+    ON ledger_accounts (tenant_id, account_type, asset_code)
+    WHERE wallet_id IS NULL AND hierarchy_node_id IS NULL;
+
+-- 6. The node-scoped uniqueness rule: one account per node per type per asset.
+CREATE UNIQUE INDEX idx_ledger_accounts_node_type_asset
+    ON ledger_accounts (tenant_id, hierarchy_node_id, account_type, asset_code)
+    WHERE hierarchy_node_id IS NOT NULL;
+
+CREATE INDEX idx_ledger_accounts_hierarchy_node
+    ON ledger_accounts (hierarchy_node_id) WHERE hierarchy_node_id IS NOT NULL;
+```
+
+**Stage 4H-B0-R1 correction to §1.3(b).** §1.3(b) asserted that shape (b)
+"changes no existing constraint". **That was wrong, and it is corrected
+here rather than left to be discovered during implementation.** Three
+existing objects must change, because all three currently encode
+"house-level" as the single predicate `wallet_id IS NULL`, which a
+node-owned row also satisfies:
+
+- `idx_ledger_accounts_tenant_type_asset` (item 5) — otherwise every node's
+  float collapses into one tenant-wide account. This is the P0 failure
+  §1.3 predicted; the fix is in the index predicate, not only in a new
+  index.
+- `CHECK ((wallet_id IS NOT NULL) OR (status IS NOT NULL))` (item 4) —
+  currently **forces a node-owned row to carry its own `status`**, which
+  would create exactly the second source of truth for freeze state that
+  `ledger-accounting-model.md` §1.1 rejected for player-owned accounts.
+- `CHECK ((wallet_id IS NULL) OR (status IS NULL))` (item 4) — the other
+  half of the same pair, replaced by the single equivalent constraint.
+
+Everything else is genuinely additive: one nullable column, two new CHECKs,
+two new indexes, no data migration, no backfill, no behaviour change to any
+existing code path.
+
+**Row-shape proof — no currently-implemented account type changes shape.**
+The new column defaults to `NULL` on every existing row, so:
+
+| Row family (today) | `wallet_id` | `player_account_id` | `hierarchy_node_id` | `status` | Single-owner (2) | Owner-family (3) | Status (4) | Which unique index |
+|---|---|---|---|---|---|---|---|---|
+| Player-owned (`player_cash`, `player_bonus`, `player_locked`, `player_withdrawal_hold`) | NOT NULL | NOT NULL | **NULL** | NULL | `num_nonnulls = 1` ✔ | wallet set, node NULL ✔ | `FALSE = FALSE` ✔ | wallet index, predicate unchanged ✔ |
+| House-level (`house_gaming`, `psp_clearing`, `psp_reserve`, `provider_payable`, `jackpot_contribution`, `promo_liability`, `manual_adjustment`, and later `bonus_expense`, `agent_commission_expense`) | NULL | NULL | **NULL** | NOT NULL | `num_nonnulls = 0` ✔ | ELSE branch: both NULL ✔ | `TRUE = TRUE` ✔ | tenant index; predicate widened but the matching row set is **identical**, since every existing row has `hierarchy_node_id IS NULL` ✔ |
+| **New** node-owned (`agent_float`, `agent_commission_payable`, and `retail_cash_on_hand` if §11.1 ever adopts it) | NULL | NULL | **NOT NULL** | NULL | `num_nonnulls = 1` ✔ | node set, wallet NULL ✔ | `FALSE = FALSE` ✔ | node index ✔ |
+
+Both existing families keep unchanged behaviour, unchanged uniqueness
+semantics and unchanged RLS visibility. No existing row is invalidated and
+no existing row needs rewriting.
+
+**Composition with the existing owner-family concept
+(`ledger-accounting-model.md` §1.1/§2).** The model today has two owner
+families; this makes it three, expressed the same way it already is — by
+which owner column is non-NULL, with uniqueness per family via partial
+indexes. Constraint (3) additionally closes a **pre-existing latent hole**
+`ledger-finance` notes while here: today nothing in the database prevents a
+`player_cash` row with `wallet_id IS NULL` (it would be accepted as a
+house-level account and would silently share one row per tenant). §2's
+account-type table has always *stated* the owner family per type; (3) is
+the first time the database *enforces* it. That is a strict tightening and
+breaks no existing row (see the proof table).
+
+**Notes for `architect`/`security` review** — each is a requirement this
+ADR places, not a design it makes:
+
+- **FK and tenant safety.** `hierarchy_node_id` gets its FK when
+  `architect`'s `hierarchy_nodes` table exists. `ledger-finance`'s
+  requirement: it must be a **composite** FK `(hierarchy_node_id, tenant_id)
+  REFERENCES hierarchy_nodes (id, tenant_id)`, so a node from tenant A can
+  never own an account in tenant B. Unlike the nullable-composite-FK
+  problem migration 0020's comment records for `wallet_id`, MATCH SIMPLE is
+  safe here: `tenant_id` is `NOT NULL`, so the FK is trivially satisfied
+  **only** when `hierarchy_node_id IS NULL`, which is exactly the
+  "no node owner" case.
+- **Trigger.** `ledger_accounts_populate_from_wallet()` returns early when
+  `wallet_id IS NULL` and therefore leaves node rows untouched — correct,
+  but it means a node row's `tenant_id` is caller-supplied. Either the
+  composite FK above or a parallel node branch in the trigger must validate
+  it. `ledger-finance` requires one of the two, not a particular one.
+- **Status derivation.** A node-owned account carries `status IS NULL` in
+  the shape above, i.e. its effective status derives from the owning
+  hierarchy node exactly as a player-owned account's derives from its
+  `Wallet`. This is the consistent choice and the one that avoids a second
+  freeze-state truth; it presumes `architect`'s node object has a status.
+  If it does not, this is the item to revisit — not by storing a status on
+  the ledger account by default.
+- **RLS.** The existing `tenant_staff_scope` policy admits node rows
+  unchanged (they are tenant-scoped and the posting path runs with no
+  player principal), and `player_self_scope` cannot match them
+  (`player_account_id IS NULL`), so **no player can read an agent float row
+  under the current policies** — a property worth preserving explicitly.
+  The third, agent-principal read scope remains §1.3's open item for
+  `security` + `architect`, under §1.3's binding constraint: the
+  `wallet_balance_projection` `SELECT` policies must stay OR'd permissive
+  policies, never a single policy that ANDs an agent scope in.
+- **Denormalization.** §1.3(b)'s requirement stands: `hierarchy_node_id` is
+  denormalized onto `ledger_entries` and `wallet_balance_projection` by the
+  same `BEFORE INSERT` trigger pattern ADR 0019 uses for
+  `player_account_id`/`wallet_id`, so a policy can read it on the row it
+  protects.
+
+##### (3) Approval and review status
+
+- **`NOT IMPLEMENTED`.** No migration, no column, no constraint, no index
+  and no Go code in this subsection exists. Until it does, every retail
+  posting remains `BLOCKED` by the existing `account_type` CHECK, which is
+  the intended behaviour.
+- **`ledger-finance` proposes; it does not decide.** This amends a shared,
+  already-implemented, human-approved table. The decision belongs to a
+  human, on the advice of `architect` (owner-family model, hierarchy
+  object, denormalization) and `security` (RLS third scope, the terminal
+  actor class, tenant isolation on the new FK).
+- **Required next step:** `architect` + `security` review of this subsection
+  as drafted, then human approval, then a migration in its own authorized
+  stage. Those reviews are dispatched separately; nothing in this
+  subsection anticipates or substitutes for their findings.
+- §1.3 remains an **`OPEN DECISION` and a blocking precondition for any
+  retail posting**. This subsection changes its *form*, not its *status*.
+
+#### 1.3.2 `architect` review (Stage 4H-B0-R1)
+
+**This subsection is review commentary, not a decision.** It is `architect`'s
+cross-domain review of §1.3.1 as drafted, requested by the Stage 4H-B0-R1
+governance/correction stage. Per `CLAUDE.md` ("no specialist redesigns
+shared architecture unilaterally") and the stage's own scope (governance
+review only — no code, no migrations), **this review does not approve
+§1.3.1**. §1.3's `OPEN DECISION` stays open; a human must still approve
+before any migration is written, exactly as §1.3.1(3) already states.
+
+**(1) Architectural soundness — sound, with two items for `security` to
+close, not blockers to the shape itself.**
+
+- The nullable `hierarchy_node_id` + mutual-exclusion CHECK (2) +
+  owner-family CHECK (3) is the minimal shape that expresses a third owner
+  family without touching the two existing ones' row layout, matches the
+  platform's existing owner-family pattern (`ledger-accounting-model.md`
+  §1.1: "which owner column is non-NULL"), and is verified against the
+  live schema in `migrations/0020_create_ledger_accounts.up.sql`: the
+  "CURRENT (implemented)" code block in §1.3.1(2) is a byte-for-byte match
+  of the two status CHECKs (lines 33–34) and the house-level index
+  predicate (lines 44–46) in that file. The row-shape proof table is
+  correct: every existing row has `hierarchy_node_id IS NULL` by column
+  default, so `num_nonnulls`, the owner-family CASE and the status
+  equivalence all evaluate identically to today's constraints for both
+  existing families.
+- **It does not redefine ADR 0007's `Wallet`.** Nothing in the diff touches
+  `wallets` or any `player_*` account type's row shape; `Wallet` stays
+  exactly what ADR 0007 says. §1.3.1(1)'s "clarification of scope, not a
+  redefinition" framing is accurate.
+- **It does not create a second ledger.** Agent float is a new owner
+  family on the *same* `ledger_accounts`/`ledger_transactions`/
+  `ledger_entries` tables, posted through the same `internal/ledger` path.
+  There is no parallel table, schema or posting mechanism anywhere in the
+  proposal.
+- **The "changes no existing constraint" correction is verified right.**
+  I independently re-checked all three objects §1.3.1 says must change
+  against migration 0020: `idx_ledger_accounts_tenant_type_asset`
+  (`WHERE wallet_id IS NULL`, line 44–46) and both status CHECKs (lines
+  33–34) do encode "house-level" as the single predicate `wallet_id IS
+  NULL`, which a node-owned row (also `wallet_id IS NULL`) would silently
+  satisfy. The original §1.3(b) claim of "no existing constraint changes"
+  was false; §1.3.1's correction is the accurate statement. The amended
+  forms in §1.3.1(2) items 4–5 are the minimal fix (predicate/CHECK text
+  only, no behavioural change for existing rows, per the row-shape proof).
+- **Not fully closed:** the trigger note in §1.3.1(2) ("either the
+  composite FK or a parallel node branch in the trigger must validate
+  [node `tenant_id`]") is correctly flagged but not resolved — it names
+  two options without picking one. My recommendation: prefer the composite
+  FK alone (see (2) below); it is declarative, always-on, and does not
+  depend on a trigger author remembering to add the node branch. If a
+  parallel trigger branch is added anyway for defense-in-depth, it must
+  not become a second source of truth for validity — the FK stays
+  authoritative.
+
+**(2) `hierarchy_nodes` FK and status — confirmed, with one gap to name
+explicitly.**
+
+- `docs/architecture/26-retail-operations-architecture.md` §5.1 (entity 5)
+  defines `hierarchy_nodes` with columns including `id` (implied PK),
+  `tenant_id`, `parent_node_id`, `node_type_id`, **`status`**,
+  `jurisdiction_code`, `effective_from/to`, `external_ref`, and states it
+  is **tenant-scoped**. So: **yes, `hierarchy_nodes` has a `status`
+  column** — §1.3.1(2)'s status-derivation note ("presumes architect's
+  node object has a status... if it does not, this is the item to
+  revisit") is answered: it does, and deriving a node-owned
+  `ledger_accounts` row's effective status from the node's own `status`
+  (rather than storing a second copy) is the correct call, exactly
+  parallel to how a player-owned row derives from its `Wallet`.
+- **`(hierarchy_node_id, tenant_id) REFERENCES hierarchy_nodes (id,
+  tenant_id)` is the right shape and is precedented on this table
+  already**: migration 0020 itself adds
+  `ledger_accounts_id_tenant_asset_key UNIQUE (id, tenant_id, asset_code)`
+  as an FK target for `ledger_entries`' own composite FK (migration 0022).
+  A `UNIQUE (id, tenant_id)` on `hierarchy_nodes` for this FK to target is
+  the same pattern, one column narrower. `ledger-finance`'s MATCH SIMPLE
+  reasoning is also correct: `tenant_id NOT NULL` on `ledger_accounts`
+  means the FK is trivially satisfiable only when `hierarchy_node_id IS
+  NULL`, so it cannot silently pass a cross-tenant node reference the way
+  a nullable-composite FK with more than one nullable column could.
+- **Gap to name explicitly: `hierarchy_nodes` does not exist yet.** There
+  is no migration for it anywhere under `migrations/` — it is design-only,
+  documented in doc 26 and listed `NOT IMPLEMENTED` (doc 27's Wave-1
+  source-documents header). §1.3.1's FK is therefore necessarily
+  forward-looking: it cannot be added until `hierarchy_nodes` (with a
+  `UNIQUE (id, tenant_id)`, or equivalent, that this FK can target) is
+  itself migrated. This is not a defect in §1.3.1 — it correctly scopes
+  the FK as "added with architect's `hierarchy_nodes` table" — but it is
+  a sequencing dependency the eventual migration plan must respect:
+  `hierarchy_nodes` before (or in the same migration as) the
+  `ledger_accounts` FK, never after.
+
+**(3) Generic hierarchy model consistency — confirmed, no violation
+found.**
+
+I searched §1.3.1 and the surrounding §1.3/§1.4 text for any hard-coded
+role name. None appears: the proposal refers throughout to "hierarchy
+node", `hierarchy_node_id`, and "node-owned account", never to Operator,
+Partner, SuperAgent, Agent, Shop or any other role as a schema element,
+column value, or CHECK branch. The `account_type` CHECK values
+(`agent_float`, `agent_commission_payable`) name the *account's economic
+function*, not a network role or position, which is consistent with doc
+26 §1.2's three-way separation of **Node Type** (what kind of thing),
+**Structure** (what may sit under what) and **Capability** (what a node
+may do) — this schema amendment adds a fourth, orthogonal concept
+(**owner family on a financial account**) without collapsing it into any
+of the three, and without adding a `level` integer or a role name
+anywhere. Consistent.
+
+**(4) Shared platform model — confirmed accurate, and preserved by this
+amendment.**
+
+`docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md` §9's
+list (Person, PlayerAccount, Identity Resolution, Wallet, Ledger, Risk,
+RG, KYC, Payments, Bonus, Audit, Reporting, Reconciliation shared
+unmodified or by additive extension between online and retail) matches
+what doc 26 and `docs/architecture/02-domain-and-service-boundaries.md`
+say about those domains' ownership and boundaries; I found no
+contradiction. §1.3.1's proposal preserves this directly: agent float is
+posted through `ledger_accounts`/`ledger_transactions`/`ledger_entries` —
+the same tables and the same `internal/ledger` path every other domain
+uses — never a parallel retail-only ledger. Doc 27 §9's "Ledger — the one
+authoritative `internal/ledger`... exactly like every other domain"
+statement holds for this amendment as drafted.
+
+**(5) `account_type` CHECK vs. an owner-family registry table — my
+recommendation: keep the CHECK-enumeration approach. This is ordinary
+engineering judgment, not the human decision this ADR needs (that
+decision is whether to approve the ADR 0007 relationship and schema
+amendment at all, per §1.3.1(3)).**
+
+The platform already amends enumerated CHECK constraints in place when a
+new type is introduced, rather than maintaining a separate registry
+table: `ledger_transactions.transaction_type` was defined with a fixed
+`CHECK (... IN (...))` list in migration `0021_create_ledger_transactions.
+up.sql` and was later widened by `DROP CONSTRAINT` / `ADD CONSTRAINT` in
+migration `0035_create_casino_integration_foundation.up.sql` when casino
+types were added — the exact same drop-and-replace shape §1.3.1(2) item 4
+uses for the status CHECK. A registry table would be more extensible in
+the abstract, but it would introduce a second mechanism (data-driven
+ownership rules read at runtime or via a second CHECK-via-trigger) for a
+concept — the account-type-to-owner-family mapping — that changes only
+when someone adds a new account type, i.e. only via a reviewed migration
+either way. Given the existing precedent and that new account types are
+already rare, migration-gated events (verified in `ledger-accounting-
+model.md` §2's account table and ADR 0032's `bonus_expense` addition),
+the two-CHECK approach is more consistent with the codebase's existing
+convention and does not justify the added indirection of a registry
+table. If the number of account types grows substantially or ownership
+rules need to vary per-tenant (neither is true today), this should be
+revisited.
+
+**(6) `ledger-accounting-model.md` / ADR 0032 §2 contagion — confirmed
+real, tracked, not addressed in this stage (correctly out of scope).**
+
+I read both:
+
+- `docs/architecture/ledger-accounting-model.md` §1 (line ~49) states the
+  house-level unique index as `UNIQUE (tenant_id, account_type,
+  asset_code) WHERE wallet_id IS NULL`, and §2's account-type table (e.g.
+  the `house_gaming`, `provider_payable`, `promo_liability`,
+  `manual_adjustment` rows) describes ownership as "Tenant (house-level,
+  no wallet)" — i.e. the same `wallet_id IS NULL` shorthand §1.3.1 amends.
+- `docs/decisions/0032-bonus-accounting.md` §2 ("`promo_liability` —
+  definition, and the mirror invariant") describes `promo_liability` and,
+  later in the same document, `bonus_expense`, the same way: "house-level,
+  per `(tenant_id, asset_code)`, `wallet_id IS NULL`".
+
+Both are real instances of the exact wording §1.3.1 says needs correction
+to "`wallet_id IS NULL AND hierarchy_node_id IS NULL`" if this amendment
+is approved. This confirms `ledger-finance`'s own Consequences-section
+entry (below §1.4, "Stage 4H-B0-R1 addition — owner-family wording
+corrections elsewhere") is accurate and not overstated. I did **not**
+edit `ledger-accounting-model.md` or ADR 0032 — both are out of scope for
+this governance/correction stage and are not owned by this ADR. This is
+recorded here as a **required follow-up**, contingent on §1.3.1 being
+approved: if a human approves the schema amendment, the wording fix in
+those two documents must ship in the same review pass as the migration,
+not be forgotten afterward, since a stale "house-level == `wallet_id IS
+NULL`" statement left in either document would misdescribe the
+post-migration schema to the next reader.
+
+**Overall verdict: sound with caveats.** The schema shape is minimal,
+additive to the two existing owner families, verified against the actual
+migration 0020 schema, and does not redefine `Wallet` or create a second
+ledger. The caveats are the still-open trigger-vs-FK choice (recommend
+FK), the `hierarchy_nodes` migration-sequencing dependency (must precede
+or accompany the `ledger_accounts` FK), and the tracked-but-not-yet-made
+documentation corrections to `ledger-accounting-model.md` and ADR 0032.
+None of these are blockers to the shape being reviewable; all of them are
+implementation-sequencing or follow-up items for whoever executes this
+after human approval. **This review is not an approval.** §1.3 remains an
+`OPEN DECISION`; a human must approve before any migration is written,
+and `security`'s review (RLS third scope, terminal actor class, the
+`ledger_accounts_populate_from_wallet` trigger's tenant-validation gap)
+is still outstanding and required per §1.3.1(3).
+
+#### 1.3.3 `security` review (Stage 4H-B0-R1)
+
+**This subsection is review commentary, not approval.** It is `security`'s
+review of §1.3.1 as drafted (and of §1.3.2's `architect` review, which it
+does not duplicate where already settled), requested by the Stage
+4H-B0-R1 governance/correction stage. Per `CLAUDE.md` ("no specialist
+redesigns shared architecture unilaterally" / "Security-sensitive
+functionality requires explicit review by the `security` specialist
+before being marked complete") and this stage's own scope (governance
+review only — no code, no migrations), **this review does not approve
+§1.3.1 or close §1.3's `OPEN DECISION`.** The underlying change amends a
+human-approved table's constraints (ADR 0007, ADR 0019 territory) and
+still requires explicit **human approval** before any migration is
+written, exactly as §1.3.1(3) and §1.3.2 already state. Nothing below is
+sign-off to implement.
+
+**(1) RLS compatibility — confirmed by direct reading of
+`migrations/0020_create_ledger_accounts.up.sql` lines 100–117, not taken
+on `ledger-finance`'s characterization alone.**
+
+- `tenant_staff_scope` (`FOR ALL`): both `USING` and `WITH CHECK` reduce to
+  `tenant_id = <current tenant> AND <player_account_id GUC> IS NULL`. It
+  never references `wallet_id`, so it composes unchanged with node-owned
+  rows — any row in the caller's tenant is visible to a non-player
+  (staff/service) principal, exactly as §1.3.1 claims.
+- `player_self_scope` (`FOR SELECT`): `USING` is `player_account_id IS NOT
+  NULL AND player_account_id = <current player_account_id GUC>`. Node-owned
+  rows can never satisfy this — and not merely because today's
+  `ledger_accounts_populate_from_wallet` trigger returns early when
+  `wallet_id IS NULL`. It is independently guaranteed by the **pre-existing,
+  unmodified** CHECK `(wallet_id IS NULL) = (player_account_id IS NULL)`
+  (line 32), which §1.3.1 does not touch. Because the new owner-family
+  CHECK forces `wallet_id IS NULL` for every node-owned row, that unmodified
+  equality CHECK forces `player_account_id IS NULL` too — a hard database
+  invariant, not an artifact of one code path's current behavior.
+- **Explicit confirmation requested in the review charge: can a player read
+  an agent_float row under current RLS? No.** Every `agent_float` row has
+  `player_account_id IS NULL` by the combination above; no other policy
+  grants players read access to node-owned rows; and `ledger_accounts` has
+  `FORCE ROW LEVEL SECURITY`, so this holds even for the table owner. `NO`,
+  confirmed, as required.
+
+**(2) Fail-closed construction — no OR-NULL escape introduced; no new RLS
+policy is even proposed here yet.**
+
+- §1.3.1 explicitly declines to add the "third, agent-principal read scope"
+  — it is left as an open item for `security` + `architect`, bound by
+  §1.3's own constraint that any future scope must be an OR'd permissive
+  policy on `wallet_balance_projection`, never a single ANDed policy. So
+  none of ADR 0036 §2.3/§3's fail-closed-GUC machinery (session-scope
+  resolution, `SECURITY DEFINER` accessors bypassing `closure_scope`,
+  closure-table fail-open traps) is implicated by this subsection — no
+  hierarchy-closure RLS is being added here at all. That review has to
+  happen separately, against the same fail-closed bar ADR 0036 already
+  sets, when that scope is actually proposed.
+- The three new/changed CHECKs (`ledger_accounts_single_owner`,
+  `ledger_accounts_owner_family`, `ledger_accounts_status_owner_family`)
+  are closed-form: `num_nonnulls(...) <= 1`, an exhaustive `CASE` over the
+  already-closed `account_type IN (...)` list, and a strict boolean
+  equality. None use an `OR` that widens a match on an unexpected NULL —
+  the specific pattern ADR 0036 line 331 flags as fail-open. If a future
+  account type is ever added to the `account_type` CHECK without a
+  matching branch in `ledger_accounts_owner_family`'s `CASE`, the `ELSE`
+  branch (`wallet_id IS NULL AND hierarchy_node_id IS NULL`) means an
+  attempt to insert that new type *with* an owner is **rejected**
+  (constraint violation), not silently accepted with the wrong owner —
+  fail-closed by construction. Worth stating explicitly in the eventual
+  migration's comment so it isn't rediscovered as a mystery later.
+- No existing fail-closed guarantee on `ledger_accounts` is weakened: RLS
+  itself is untouched by this subsection.
+
+**(3) Composite FK reasoning — sound; agrees with §1.3.2(2).**
+
+- MATCH SIMPLE skips the FK check only when *any* referencing column is
+  NULL. `ledger_accounts.tenant_id` is `NOT NULL` (line 10), so the only
+  column that can ever be NULL is `hierarchy_node_id` — precisely the "no
+  node owner" case, where there is nothing to validate. Whenever
+  `hierarchy_node_id IS NOT NULL`, both columns participate and Postgres
+  requires an exact match against `hierarchy_nodes (id, tenant_id)`; a node
+  from tenant A cannot satisfy the FK against tenant B's row. No
+  cross-tenant leakage vector exists. This is a real structural difference
+  from the flagged `wallet_id` case (more than one nullable column there
+  interacting with derivation-by-trigger), not a re-statement of the same
+  risk with the labels changed.
+- Agreeing with `architect`'s (2): the FK should be the **sole** mechanism
+  validating a node row's `tenant_id`, not a "pick one of FK or trigger"
+  choice left open. Until the FK exists (it cannot, until `hierarchy_nodes`
+  is migrated — confirmed a real sequencing dependency, not a defect, per
+  §1.3.2(2)), a node row's `tenant_id` is unvalidated caller input. That is
+  a genuine tenant-isolation gap for any interim wiring or test code
+  written against the column before the FK lands, so the FK (or, at
+  minimum, an equivalent trigger check) must ship in the *same* migration
+  that adds `hierarchy_node_id` — never a follow-up.
+- Implementation-time note for `architect`'s `hierarchy_nodes` design (not
+  a blocker on this table): the default `NO ACTION` FK behavior blocks
+  reparenting a node to a different tenant while it owns live
+  `ledger_accounts` rows, rather than silently moving the float. That is
+  the conservative, correct default here — confirm it is intended before
+  it is discovered as a migration failure.
+
+**(4) Widened index predicate — closes the identified P0, with one
+application-layer caveat that is not a schema gap.**
+
+- Under the old predicate (`wallet_id IS NULL`), a second node's attempted
+  `INSERT` of its own `agent_float` row for the same `(tenant_id, asset)`
+  would not "silently" succeed by itself — it's a `UNIQUE` index, so a
+  second bare `INSERT` errors loudly. The real failure mode is at *lookup*
+  time: a "get-or-create the account for `(tenant, type, asset)`" pattern
+  has no `hierarchy_node_id` column to filter on today, so the first node
+  to post creates the tenant's only `agent_float` row and every other
+  node's lookup finds and posts against *that same row* — silently
+  misattributing float across agents. That is the correctly identified P0.
+- The new predicate (`wallet_id IS NULL AND hierarchy_node_id IS NULL`)
+  removes node-owned rows from the house-level unique index entirely; they
+  get their own uniqueness domain via `idx_ledger_accounts_node_type_asset`
+  on `(tenant_id, hierarchy_node_id, account_type, asset_code)`. The
+  owner-family CHECK guarantees a node-owned `account_type` can never take
+  the both-NULL shape, so a node row cannot land in the house-level index
+  by construction. This closes the collision at the schema level, and
+  introduces no new isolation gap — tenant_id remains part of both indexes,
+  and the two index domains (house vs. node) are mutually exclusive by the
+  same CHECK.
+- Caveat: closing the *schema*-level collision does not, by itself, fix an
+  application "get-or-create" code path that still looks up by `(tenant_id,
+  account_type, asset_code)` without `hierarchy_node_id`. That Go-level
+  query/upsert key must include `hierarchy_node_id` when this ships, or the
+  P0 persists functionally even after the index is correct. This is the
+  other half of actually closing the bug, and belongs to whoever implements
+  the Go changes, not to this SQL.
+
+**(5) Latent owner-family hole — confirmed real; the new CHECK closes it
+without affecting any row that should exist today.**
+
+- Read literally, today's two status CHECKs constrain only `status`'s
+  presence relative to `wallet_id`, and the equality CHECK constrains only
+  `player_account_id` relative to `wallet_id` — none of the three says
+  anything about `account_type`. Nothing today prevents inserting
+  `account_type = 'player_cash'` with `wallet_id IS NULL`, `player_account_id
+  IS NULL`, and a non-NULL `status`: `CHECK ((wallet_id IS NULL) OR (status
+  IS NULL))` is satisfied by its first disjunct alone whenever `wallet_id IS
+  NULL`, independent of `status`. Such a row would be indistinguishable, to
+  the unique index and to any owner-family assumption in
+  `ledger-accounting-model.md` §1.1/§2, from a legitimate house-level
+  account. This is a genuine pre-existing gap, correctly identified — a
+  defense-in-depth hole today rather than one there is evidence of being
+  exploited.
+- `ledger_accounts_owner_family`'s branch for the four `player_*` types
+  requires `wallet_id IS NOT NULL`, closing exactly this hole. Per the
+  row-shape proof, every currently-implemented player-owned row already has
+  `wallet_id NOT NULL` (required for the existing `BEFORE INSERT` trigger to
+  populate `player_account_id`/`asset_code` at all), so this should affect
+  zero existing rows. "Should," per the proof table, is not the same as a
+  count against real data: recommend the eventual migration PR run a
+  pre-migration audit (`SELECT count(*) FROM ledger_accounts WHERE
+  account_type IN ('player_cash','player_bonus','player_locked',
+  'player_withdrawal_hold') AND wallet_id IS NULL`, and the symmetric query
+  for house-level types with a non-house owner shape) and confirm zero rows
+  before the CHECK is added, as a standard migration-safety step — not
+  because the proof's logic is doubted.
+
+**(6) Audit implications — no genuine gap found.**
+
+- `audit_log` (`migrations/0014_create_audit_log.up.sql`) is already
+  owner-family-agnostic: `target_type`/`target_id` are free-form and
+  `metadata` is JSONB, with no assumption anywhere that a financial
+  account's owner is a `Wallet`. An `agent_float` `ledger_accounts` row is
+  auditable through the identical shape as any other row (`target_type =
+  'ledger_account'`, `target_id = <id>`, `metadata` carrying whatever
+  context a write needs, e.g. `hierarchy_node_id`). Adding
+  `hierarchy_node_id` requires no new column, policy, or table on
+  `audit_log`.
+- `docs/decisions/0036-retail-hierarchy-rbac-and-audit.md` §7.1 already
+  plans `actor_node_id` as a recorded field on retail audit records
+  generally, so node-scoped actor attribution for retail actions is handled
+  at the ADR 0036 layer already, not something this subsection needs to add.
+- No gap is flagged. (Whether every `ledger_accounts` mutation — including
+  administrative account creation — is *currently* wired end-to-end through
+  `internal/audit` is a pre-existing question that applies equally to
+  today's wallet- and house-level accounts; it is not introduced or
+  worsened by adding `hierarchy_node_id`, so this review does not raise it
+  as a new requirement of §1.3.1.)
+
+**Overall verdict: safe, with implementation-time caveats — not a
+blocker to the shape, not an approval to build it.** The RLS composition
+claims in §1.3.1 are confirmed correct by direct reading of the live
+policies, including the explicit "can a player read agent_float" question
+(**no**). No OR-NULL or other fail-open pattern is introduced by the new
+CHECKs, and none of ADR 0036's fail-closed-GUC concerns apply because no
+new RLS policy is proposed in this subsection. The composite FK's MATCH
+SIMPLE reasoning is sound and introduces no cross-tenant leakage path. The
+widened index predicate closes the P0 row-collision bug at the schema
+level (the matching application-layer lookup fix is a separate,
+necessary follow-up). The owner-family CHECK closes a real, previously
+unenforced gap and should affect zero existing rows, pending the
+pre-migration audit query recommended above. No genuine audit-logging gap
+was found.
+
+**This is `security` review commentary, not approval.** Per `CLAUDE.md`'s
+stage-gate rule and its "no specialist redesigns shared architecture
+unilaterally" rule, the underlying ADR 0007-adjacent `ledger_accounts`
+schema amendment (new column, new/changed CHECKs, changed index, future
+composite FK) still requires explicit **human approval** before any
+migration is written. §1.3 remains an `OPEN DECISION` and a blocking
+precondition for any retail posting until a human closes it; this
+subsection changes neither its status nor its scope.
+
 #### 1.4 Negative float — a credit line is a business decision, not an account shape
 
 `agent_float` going negative means the node owes the operator: the same
@@ -317,7 +1018,9 @@ to decide:
 
 Status: **§1.1/§1.2/§1.4 RESOLVED (architecture) — `NOT IMPLEMENTED`.
 §1.3 is an `OPEN DECISION` and a blocking precondition for any retail
-posting.**
+posting; §1.3.1 (Stage 4H-B0-R1) states the proposed resolution in exact,
+reviewable form and is itself `NOT IMPLEMENTED` and pending `architect` +
+`security` review and human approval.**
 
 ### 2. The four pools and the non-commingling invariant
 
@@ -1159,13 +1862,13 @@ Master Orchestrator sign-off, never silently redesigned.
 
 | Prior decision | Conflict? | Disposition |
 |---|---|---|
-| **ADR 0019 / `ledger-accounting-model.md` §1.1** — two owner families (`wallet_id` or house) | **YES — real conflict** | §1.3. A node-scoped account fits neither unique constraint and would silently collapse into one shared tenant-wide float. `OPEN DECISION`, recommended shape (b), **blocking precondition** for any retail posting. |
+| **ADR 0019 / `ledger-accounting-model.md` §1.1** — two owner families (`wallet_id` or house) | **YES — real conflict** | §1.3. A node-scoped account fits neither unique constraint and would silently collapse into one shared tenant-wide float. `OPEN DECISION`, recommended shape (b), **blocking precondition** for any retail posting. **Stage 4H-B0-R1**: §1.3.1 now states the proposed additive amendment exactly (nullable `hierarchy_node_id`, mutual-exclusion + owner-family CHECKs, amended house-level index predicate, amended status CHECK), with a row-shape proof that no implemented account type changes. Still `NOT IMPLEMENTED`, still pending `architect` + `security` review and human approval — the *form* is settled, the *decision* is not. |
 | **ADR 0019 actor matrix** — four actor classes | **YES — gap, not contradiction** | A POS/cashier terminal is a fifth originating actor class and must be added, with its own permitted `transaction_type` set and the §8.2 credential-resolved-identity rule. `architect` + `security` own the matrix edit; §8 states the requirements it must satisfy. |
 | **ADR 0019 RLS model** — tenant scope + player scope + staff RBAC | **YES — gap** | §1.3. Node-scoped accounts need a third read scope. `security` + `architect`'s call; `ledger-finance`'s binding constraint is the OR'd-permissive-policy requirement so retail postings do not silently update zero projection rows. |
 | **ADR 0019 projection grain** (one row per `ledger_account_id`) | **No** | Already accommodates node-scoped accounts with no change. The earlier decision was right and is reused, not amended. |
 | **ADR 0020** — idempotency and concurrency | **No** | §8 uses the existing `(tenant_id, idempotency_key)` mechanism and the existing `SAVEPOINT`/`FOR UPDATE` patterns verbatim. No new mechanism. |
 | **ADR 0021** — asset/exponent/`NUMERIC(38,0)` model | **No** | Inherited unchanged (§9). Retail *depends on* ADR 0021's unresolved conversion clearing account for multi-currency counters (§9.4) and on its unresolved rounding direction (§9.3) — a dependency, not a contradiction. |
-| **ADR 0007** — multi-wallet per player | **No** | Extended by analogy (one float per node per asset), explicitly **not** by reusing `Wallet` for nodes (§1.3(a), rejected). |
+| **ADR 0007** — multi-wallet per player | **No** | Extended by analogy (one float per node per asset), explicitly **not** by reusing `Wallet` for nodes (§1.3(a), rejected). **Stage 4H-B0-R1**: the relationship is now formalized in §1.3.1(1) — `Wallet` stays strictly player-owned and textually unchanged; agent float is a distinct hierarchy-node-owned account family in the **same** ledger. ADR 0007 itself is human-approved and is **not edited** by this ADR. |
 | **ADR 0032 / invariant B1** — bonus mirror | **No** | Retail posts no `player_bonus` entry, so B1 is untouched. A retail-funded player playing a bonus-funded round is ordinary Flow 5 and carries B1's mirror legs exactly as today. |
 | **ADR 0031** — one risk engine, no per-domain limit engines | **No** | §4 consumes `risk.Evaluate` and builds nothing. Two honest gaps named: node-keyed cumulative aggregation, and the three DOCUMENTED-ONLY `Operation` values. |
 | **`reconciliation-model.md` §2.1–§2.10** | **No** | Two new streams added (§6.1); no existing stream changes. §2.6's "`psp_clearing` drains toward zero" expectation is *protected* by invariant R1 rather than threatened by it. |
@@ -1266,9 +1969,20 @@ engineering choice.
   actor matrix (the terminal actor class) and RLS section (node scope);
   ADR 0031 §13's table (three retail rows) and §16 (three proposed
   `Operation` values, DOCUMENTED ONLY).
+- **Stage 4H-B0-R1 addition — owner-family wording corrections elsewhere.**
+  If §1.3.1 is approved, the "house-level == `wallet_id IS NULL`" shorthand
+  must be corrected to "`wallet_id IS NULL AND hierarchy_node_id IS NULL`"
+  in `ledger-accounting-model.md` §1.1/§2 and in ADR 0032 §2
+  (`promo_liability`, `bonus_expense`). Those documents are **not** edited
+  by this ADR; the correction is listed here so it is not missed. It is a
+  precision fix, not a scope change — no account's intended ownership
+  changes.
 - **Migrations required before any retail posting** (additive, own stage):
-  the `ledger_accounts` third owner dimension and its partial unique index
-  (§1.3, pending that `OPEN DECISION`); the `agent_float`,
+  the `ledger_accounts` third owner dimension, its node-scoped partial
+  unique index, the **amended** house-level index predicate and the
+  **amended** status CHECK — exact proposed shape in §1.3.1(2), pending
+  §1.3's `OPEN DECISION`, `architect` + `security` review and human
+  approval; the `agent_float`,
   `agent_commission_payable`, `agent_commission_expense` account types;
   the `retail_deposit`, `retail_deposit_reversal`,
   `retail_withdrawal_authorization`,
@@ -1337,8 +2051,16 @@ engineering choice.
 ## Open decisions referred upward
 
 1. **Third owner family on `ledger_accounts`** (§1.3) — `architect` +
-   `security` + `ledger-finance`. **Blocking precondition** for any retail
-   posting; recommended shape stated, not adopted unilaterally.
+   `security` + `ledger-finance`, **and a human approval** because the
+   table's broader design (ADR 0007, ADR 0019) was human-approved.
+   **Blocking precondition** for any retail posting. **Stage 4H-B0-R1**:
+   §1.3.1 now carries the exact proposed additive shape, the row-shape
+   proof for existing account types, and the formalized ADR 0007
+   relationship (a `Wallet` stays player-owned and unchanged; agent float
+   is a node-owned account in the same single ledger; a till is never an
+   authoritative balance). Proposed by `ledger-finance`, **not adopted
+   unilaterally**, `NOT IMPLEMENTED`, and awaiting `architect` + `security`
+   review followed by human approval.
 2. **Commission structure, base, rate and cascade terms** (§5.2) —
    **commercial contract, human sign-off** (CLAUDE.md "stop and ask"),
    exactly the class of ADR 0032's provider-funding decision.

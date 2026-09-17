@@ -398,7 +398,7 @@ a documentation-review finding that the original table's "Enforced"/
 | Payments | `deposit`, `withdrawal` | NOT IMPLEMENTED - `Operation` enum + schema exist, `internal/payments` never calls `risk.Evaluate` - must call it before posting, mirroring `internal/casino`'s exact pattern, when that stage is authorized |
 | Sportsbook | `sportsbook_bet` | NOT IMPLEMENTED - does not exist as a package yet (blocked per this stage's own stop condition) |
 | Bonus - issuance AND activation | `bonus_grant` (both checkpoints) | NOT IMPLEMENTED - Bonus Engine is explicitly NOT started this stage (directive §32/Final Governance Rule); when it is, it MUST consume `internal/risk.Evaluate`, never build its own limit engine. Contract specified in full by Stage 4H-A, §15a-§15d below: `min_amount`/`max_amount` apply unchanged, `cumulative_amount` is NOT usable for this operation until `operationLedgerTransactionTypes` gains a bonus entry, and frequency requires a `count` `LimitKind` that does not exist. Both the `issued` creation and the `issued` → `activated` transition call `Evaluate` under this same operation value - activation is re-evaluated, not assumed covered by the grant-time decision (§15a-ii); no new `Operation` value is needed for either, and `bonus_activate` is explicitly rejected |
-| Bonus - completion/conversion | `bonus_conversion` (PROPOSED, documented only - §16) | NOT IMPLEMENTED - the `Operation` value does not exist in `internal/risk/types.go` or migration 0041's CHECK constraint, and is deliberately not added this stage (architecture-freeze). The `completed` → `converted` release MUST be gated separately with the ACTUAL released amount (max-cashout/partial-wagering capped), which is why it cannot reuse `bonus_grant` (§15a-ii) |
+| Bonus - completion/conversion | `bonus_conversion` (PROPOSED, documented only - §16) | NOT IMPLEMENTED - the `Operation` value does not exist in `internal/risk/types.go` or migration 0041's CHECK constraint, and is deliberately not added this stage (architecture-freeze). The `completed` → `converted` release MUST be gated separately with the ACTUAL released amount (max-cashout/partial-wagering capped), which is why it cannot reuse `bonus_grant` (§15a-ii). **Verified current status and the exact remaining steps: §16a (`NOT STARTED`, zero of six)** |
 | Gamification - tournament entry | `tournament_entry` (PROPOSED, documented only - §16) | NOT IMPLEMENTED - the `Operation` value does not exist in `internal/risk/types.go` or migration 0041's CHECK constraint, and is deliberately not added this stage (architecture-freeze) |
 | Gamification - marketplace purchase | `marketplace_purchase` (PROPOSED, documented only - §16) | NOT IMPLEMENTED - same: proposed value, no code, no migration this stage |
 | Rewards - redemption | `reward_redemption` (PROPOSED, CONDITIONAL - §16) | NOT IMPLEMENTED - needed only if a redemption can create player value WITHOUT going through a Bonus Engine Grant; if every redemption materializes as a Grant, `bonus_grant` already covers it and no new value should be added. Open decision, §17 |
@@ -641,7 +641,9 @@ defers the `Operation` question to this ADR. Resolved here:
   pair, not twice - otherwise activation is denied by the very grant
   being activated. That is `ledger-finance`'s to specify, per (b).
 - **Completion/conversion (`completed` → `converted`) - YES, and it needs
-  a DISTINCT `Operation`: `bonus_conversion` (§16, DOCUMENTED ONLY).**
+  a DISTINCT `Operation`: `bonus_conversion` (§16, DOCUMENTED ONLY;
+  verified status and remaining steps in §16a - `NOT STARTED`, zero of
+  §16's six steps done).**
   Conversion releases withdrawable cash, so it is exposure-affecting in
   the strongest sense. It must NOT reuse `OperationBonusGrant`: the
   amount differs by design (max-cashout capping, partial wagering), and
@@ -892,6 +894,150 @@ Unlike a new `LimitKind`, a new `Operation` needs NO new `Rule.breach()`
 case - the comparison logic is generic over `Operation` already. That is
 why these are cheaper, and why the analysis above preferred new
 operations over new limit kinds wherever both could have worked.
+
+### 16a. `bonus_conversion` — verified current status (added Stage 4H-B0-R1)
+
+**STATUS: `NOT STARTED` — zero of §16's six extension-process steps are
+completed. `bonus_conversion` exists today as documentation only, in this
+ADR and in `docs/architecture/10-bonus-engine-architecture.md`. It blocks
+any Bonus Engine `completed` → `converted` risk-gated check until closed.**
+
+This subsection exists so no future reader has to infer readiness from
+prose elsewhere. It was written by the `risk` specialist during Stage
+4H-B0-R1 (governance correction) against the actual repository state at
+that commit, not from memory of a prior stage's claims. It is Risk's
+authoritative position and supersedes any readiness characterization of
+this dependency made in another document.
+
+**Verified repository state (each row checked directly, not assumed):**
+
+| §16 step | Artifact | Verified state |
+|---|---|---|
+| 1. Migration CHECK | `migrations/0041_risk_limits_engine.up.sql`, `operation` CHECK | **NOT DONE** — accepts exactly `casino_launch, casino_bet, deposit, withdrawal, sportsbook_bet, bonus_grant`. A `bonus_conversion` rule row is rejected by the database today (the intended fail-closed posture, §18) |
+| 2. Go constant | `internal/risk/types.go` | **NOT DONE** — the `Operation` const block declares exactly the same six values; `OperationBonusGrant` exists, there is no `OperationBonusConversion` |
+| 3. HTTP allowlist | `internal/httpserver/risk_handlers.go`, `newCreateRiskRuleHandler`'s `RequireOneOf("operation", ...)` | **NOT DONE** — same six values |
+| 4. OpenAPI enum | `docs/api/openapi/platform-api.yaml` | **NOT DONE** — same six values in all occurrences |
+| 5. Ledger type mapping | `operationLedgerTransactionTypes` / `operationLedgerRollbackTypes` (`internal/risk/evaluator.go`) | **NOT DONE**, and conditional — the maps contain exactly one entry each (`casino_bet` → `casino_bet` / `casino_bet` → `casino_rollback`). Required only if `cumulative_amount` must work for `bonus_conversion`; see the caveat below |
+| 6. Enforcement call site | `internal/bonus` | **NOT DONE, and cannot be done** — the package does not exist. No Bonus Engine code has ever been authorized (Stage 4G §32 / Stage 4H-A / Stage 4H-B0 were all architecture-only) |
+
+Nothing partial exists: there is no half-landed constant, no dormant
+migration, no feature-flagged path. The dependency has not been started.
+
+**One correction to §16's own step 4, found during this verification.**
+Step 4 says the `operation` enum appears in "both the POST request schema
+and the `RiskRule` response schema." It appears in **three** places: those
+two plus the `GET /v1/admin/risk/rules` `operation` **query parameter**
+enum. The Go list handler (`newListRiskRulesHandler`) validates that
+parameter only for non-emptiness, so omitting the third occurrence does
+not break the running API — it produces a spec that declares a value
+invalid which the implementation accepts, which is a documentation defect,
+not a fail-open. Step 4 is to be read as "all three occurrences."
+
+**Exactly what remains, as a single authorized change.** All six steps
+land together (§16's closing rule, restated in §18 and §24: the extension
+points stay closed until an authorizing stage opens them with all steps
+executed in one change). Per-step, for `bonus_conversion` specifically:
+
+1. Additively widen migration 0041's `operation` CHECK to include
+   `'bonus_conversion'` — a new forward migration, never an edit to 0041.
+2. Add `OperationBonusConversion Operation = "bonus_conversion"` to
+   `internal/risk/types.go`. Naming is fixed by §15a-ii and is not
+   re-openable: `bonus_conversion`, superseding doc 10 §4's placeholder
+   `bonus_convert`; `bonus_activate` remains rejected.
+3. Add it to `newCreateRiskRuleHandler`'s `RequireOneOf("operation", ...)`.
+4. Add it to all three OpenAPI `operation` enum occurrences (above).
+5. `operationLedgerTransactionTypes` / `operationLedgerRollbackTypes` —
+   **omit deliberately for the first slice, with the consequence stated.**
+   The mapping values are `ledger-finance`'s to specify (§15b), and the
+   `bonus_conversion` `ledger_transactions.transaction_type` does not
+   exist in that table's CHECK constraint yet either (ADR 0032). Omitting
+   this step is safe (fail-closed), not free: once step 1 lands, a
+   `cumulative_amount` rule on `bonus_conversion` becomes **storable**
+   (`CreateRule` does not cross-validate `limit_kind`/`operation`
+   compatibility — an already-recorded P2) and will then
+   `ErrUnsupportedCumulativeOperation` on every conversion it matches.
+   That is correct fail-closed behavior and a genuine configuration
+   foot-gun; whoever authorizes the change must decide explicitly whether
+   to land step 5 with `ledger-finance` or to accept the foot-gun and
+   restrict first-slice rule authoring to `min_amount`/`max_amount` with
+   `TimeWindow: transaction`.
+6. Wire the enforcement call site in `internal/bonus`'s conversion path:
+   apply payout rules FIRST, then call `Evaluate` with `Amount` set to the
+   **actual amount to be released** (never the original grant value), in
+   the same transaction as the conversion posting, before commit (§15a-ii,
+   §13). A `DENY`/`REVIEW`/error leaves the Grant in `completed`, which is
+   non-terminal and retryable — it never forfeits a player entitlement.
+   This is the step most likely to be mistaken for "done" when only
+   steps 1–4 have landed: an `Operation` value nothing consults is a
+   configurable rule with no enforcement, §16 step 6's inversion.
+
+**Ownership and sequencing.** Steps 1–5 are `risk`-owned. Step 6 is
+`bonus-engine`-owned and is the only step that cannot precede
+`internal/bonus` existing. Steps 1–4 have no structural dependency on ADR
+0032's ledger CHECK widenings and may land before them; step 5 depends on
+them. The dependency-request procedure in
+`docs/governance/integration-protocol.md` is the route by which
+`bonus-engine` requests steps 1–5 — Risk does not land them speculatively,
+because an `Operation` value with no call site is precisely the inversion
+step 6 warns about.
+
+**Is anything ELSE on Risk's side blocking the Bonus Engine's first slice
+(deposit, reload, cashback, generic wagering bonus, coupon)?** Checked
+against `docs/architecture/10-bonus-engine-architecture.md` §1–§3 (read
+only). Risk's authoritative answer: **no — `bonus_conversion` is the only
+Risk-owned P0/P1 dependency.** Specifically:
+
+- **Grant issuance and activation need ZERO Risk changes.**
+  `OperationBonusGrant` is a real constant, accepted by migration 0041,
+  present in the HTTP allowlist and the OpenAPI enums. `min_amount`/
+  `max_amount` with `TimeWindow: transaction` work unmodified for it,
+  with full HARD_LIMIT/CONFIGURABLE_LIMIT precedence and player-override
+  behavior (§15b). `risk_rules.product` already accepts `'bonus'`; no
+  widening is needed for the Bonus Engine (the §16 `product`-CHECK flag
+  concerns *gamification*, which is out of the first slice).
+- **`cumulative_amount` on `bonus_grant` is a known gap, correctly
+  characterized by doc 10 §2 condition 1, and is NOT a blocker.** It fails
+  closed (`ErrUnsupportedCumulativeOperation`), and restricting the first
+  slice's rule authoring to `min_amount`/`max_amount` avoids it entirely.
+  Risk confirms that restriction is sufficient for all five in-slice
+  types and confirms it is a rule-authoring scope choice, not a code
+  change. Note the same storable-but-erroring foot-gun applies here today.
+- **Bonus frequency (`count` `LimitKind`) is not configurable at all**
+  (§15c) and is confirmed NOT a first-slice blocker — none of the five
+  types requires a frequency cap to function.
+- **Campaign-level budget caps are NOT a Risk dependency and must never
+  become one** (§15d). They belong to the Bonus Engine's campaign object,
+  under the non-negotiable guard that a campaign budget counter must never
+  be keyed by player — the moment it is, it is a limit engine under
+  another name and must be a `risk_rules` row instead.
+- **Self-exclusion / RG is out of scope by construction** (§1, §14).
+  `rg.EvaluateEligibility` remains the sole authority; the Bonus Engine
+  composes both at its enforcement point, exactly as `internal/casino`
+  does. Nothing here is blocked on Risk.
+- **§17's open decisions** (cross-domain aggregate player exposure,
+  campaign budget as a Risk concern, what a `count` counts, points
+  convertibility) are confirmed as genuine open decisions that do **not**
+  block the first slice.
+
+**One correction to doc 10 §2's condition 2, issued from Risk's own
+authority.** That document describes the dependency as "the
+`bonus_conversion` `Operation` value (Go constant in
+`internal/risk/types.go` + an additive widening of migration 0041's
+`Operation` CHECK constraint)" — two artifacts. Per §16, it is **six
+steps**, of which that description names two. The omitted ones are not
+cosmetic: skipping step 3 ships an operation the database accepts but the
+API 400s (§12's documented inversion), and skipping step 6 ships a
+configurable rule nothing consults. Doc 10's substantive claim — that this
+is scoped, additive, fully specified, and not an open design question —
+**stands and is confirmed by Risk.** Its *size* was understated. Doc 10 is
+not edited by this stage; this paragraph is the authoritative correction.
+
+**Also correct in doc 10, and confirmed:** conversion is on the first
+slice's critical path, not a later slice's. All five in-slice types run
+`issued` → `activated` → `completed` → `converted`, so the conversion
+checkpoint cannot be deferred out of the first slice while still shipping
+those five types end to end. A first slice that stopped at `completed`
+would ship five bonus types that can never release value to a player.
 
 ### 17. Open decisions introduced or confirmed by Stage 4H-A
 

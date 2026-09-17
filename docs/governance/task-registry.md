@@ -152,6 +152,23 @@ migrations, and no implementation were started.**
 | 4HB0-13 | product-owner-proxy (scope-discipline review) | Done | 4HB0-02..11 | n/a (review only) | n/a | n/a | Blueprint-anchor finding independently confirmed (zero retail content); concrete MVP/deferred scope split provided; 1 scope-creep finding (ADR 0035 §5's commission machinery downgraded from RESOLVED to documented-not-binding pending commercial terms) | none | No P0/P1/P2 (scope findings). Findings applied to ADR 0035 §5 status and `docs/architecture/27-*` §1.3/§2 |
 | 4HB0-14 | Orchestrator | Done | 4HB0-01..13 | `docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md` (new, master synthesis), `docs/progress.md`, `docs/active-stage.md`, this registry, `docs/governance/project-status.md`, `docs/governance/ownership.md` | none | full validation gate (docs-only; `go build ./...` clean, no code touched) | this stage's completion report | none | n/a — **stage explicitly STOPS here; no Stage 4H-B1/4H-B2/4H-B3 (implementation) or "Retail-Legal" workstream authorized** |
 
+## Stage 4H-B0-R1
+
+Correction/finalization stage over the Stage 4H-B0 architecture set,
+responding to a directive that identified specific errors in the Stage
+4H-B0 completion report (a bonus-gate contradiction, a misclassified
+retail P0 list, and several items needing formalization). **No
+production code, no migrations, and no implementation were started.**
+
+| ID | Owner | Status | Dependencies | Files owned | Interfaces affected | Tests | Docs | Blockers | Integration |
+|---|---|---|---|---|---|---|---|---|---|
+| 4HB0R1-01 | Orchestrator | Done | none | `docs/governance/*` | none | n/a (documentation) | this registry + siblings | none | n/a |
+| 4HB0R1-02 | risk | Done | none | `docs/decisions/0031-risk-and-limits-engine.md` (new §16a) | none (documentation only) | n/a | verified `bonus_conversion` NOT STARTED (0/6 ADR 0031 §16 steps) directly against repository state | none | n/a |
+| 4HB0R1-03 | ledger-finance | Done | none | `docs/decisions/0021-multi-asset-accounting.md` (new "Rounding and precision" section), `docs/decisions/0035-retail-agent-network-accounting.md` (new §1.3.1) | none (documentation only, illustrative SQL, no migration) | n/a | ADR 0021 rounding-decision enumeration (3 questions, 6 neutral direction options, none selected); ADR 0035 agent-float/ADR 0007 formalization + minimum additive schema amendment draft, corrected a load-bearing error in the original scope-freeze draft (house-level index predicate collision) | none | Amendment explicitly `NOT IMPLEMENTED`, requires architect + security + human sign-off before any migration |
+| 4HB0R1-04 | architect | Done | 4HB0R1-03 | `docs/decisions/0035-retail-agent-network-accounting.md` (new §1.3.2, review only) | none | n/a | Reviewed ledger-finance's schema amendment: sound with caveats; confirmed `hierarchy_nodes` (doc 26) has `id`/`tenant_id`/`status`; confirmed generic-hierarchy-model and shared-platform-model statements accurate; flagged `ledger-accounting-model.md`/ADR 0032 §2 shorthand as required follow-up | none | Review only, not approval — §1.3 remains an `OPEN DECISION` |
+| 4HB0R1-05 | security | Done | 4HB0R1-03 | `docs/decisions/0035-retail-agent-network-accounting.md` (new subsection, review only) | none | n/a | Reviewed RLS compatibility, composite-FK tenant-isolation safety, and the widened index predicate's collision fix | none | Review only, not approval — §1.3 remains an `OPEN DECISION` |
+| 4HB0R1-06 | Orchestrator | Done | 4HB0R1-01..05 | `docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md` (corrections across §1.1, §1.3a new, §6, §8, §9, §9a new, §22, §23A/§23B split, §24, §25), `docs/progress.md`, `docs/active-stage.md`, this registry, `docs/governance/project-status.md` | none | full validation gate (docs-only; `go build ./...` clean, no code touched) | this stage's completion report | none | n/a — **stage explicitly STOPS here; no Stage 4H-B1 or 4H-B2/4H-B3 authorized** |
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and
