@@ -554,6 +554,12 @@ design a second Risk engine here.
   trading actions specifically, since a market suspension or a Result
   correction has direct financial consequences for every open Bet
   referencing it.
+- **Ledger-posting instruction for every event above** (bet acceptance,
+  settlement, void, partial settlement, cashout, rollback/re-settlement):
+  `provider_id`/`provider_tx_id` stay `NULL` and a stable, intrinsic,
+  per-event reference is supplied as `idempotency_key` instead — see §6.1
+  for the full statement of this rule and ADR 0038 §14.6 for the
+  underlying database-constraint design it satisfies.
 
 ### 3.6 The rule that must never be relaxed
 
@@ -741,6 +747,52 @@ the Stage 0 version of this document's own `player_locked` model
 8–11 (bet lock, settlement, void, partial settlement/cashout), all of which
 remain the binding specification for entry shapes pending ADR 0038's final
 detail.
+
+### 6.1 In-house-mode ledger-posting idempotency routing (Stage 4H-B0-R5 addition)
+
+`ARCHITECTURAL DECISION`, closing a gap `ledger-finance` identified this
+stage in ADR 0038 §14.6 (triggered by an independent `bonus-engine`
+review) and explicitly flagged back to this document to state, rather
+than fix unilaterally in ADR 0038 alone. Restated here at the level of
+detail this document owns — what the in-house engine's own adapter/
+posting layer must do when it hands a posting instruction to
+`internal/ledger`/`internal/wallet` for an in-house-originated event — not
+re-derived; ADR 0038 §14.6 is authoritative on the underlying database
+constraint design, the full rationale (including why a reserved
+`provider_id` sentinel was rejected), and a worked two-attempt retry
+example.
+
+(a) **`provider_id` is left `NULL`** on every ledger-posting instruction
+the in-house engine hands to `internal/ledger`/`internal/wallet` for an
+in-house-originated event (bet acceptance, settlement, void, partial
+settlement, cashout, or rollback/re-settlement alike) — consistent with
+ADR 0033 §2's canonical-event statement that this document already
+implicitly relies on (§0's design test that a consumer cannot tell,
+from the event shape, whether the originating engine was external or
+in-house). `provider_id` is **never** translated into a reserved
+sentinel value at the ledger-posting boundary: `NULL` in from the
+canonical event, `NULL` stored on the `LedgerTransaction` row.
+`provider_tx_id` correspondingly stays `NULL` too — it is never
+half-populated while `provider_id` is `NULL`.
+
+(b) **The in-house engine's adapter/posting layer mints one stable,
+intrinsic, per-event reference** for each lifecycle event — bet
+acceptance, settlement, void, and per-occurrence partial settlement/
+cashout/rollback alike — and supplies it as `idempotency_key`, **never**
+as `provider_tx_id` (which stays `NULL` per (a)). This reference must be
+derived from a signal intrinsic to the specific event (e.g. the in-house
+engine's own acceptance/settlement/void decision id), assigned once and
+reused verbatim on every retry of that same event — **never** freshly
+regenerated per attempt (a fresh UUID per retry would satisfy the letter
+of "enforced by a database constraint" while never actually causing the
+constraint to fire, defeating the point). This is what routes in-house
+postings through `UNIQUE (tenant_id, idempotency_key)` (unconditional, no
+`WHERE` clause) rather than the provider-keyed partial index `UNIQUE
+(tenant_id, provider_id, provider_tx_id) WHERE provider_id IS NOT NULL`,
+which never evaluates for a `provider_id IS NULL` row and would otherwise
+leave in-house postings with no database-level duplicate protection at
+all. See ADR 0038 §14.6 for the full routing table (by mode) and the
+worked retry example this rule is built to satisfy.
 
 ---
 
