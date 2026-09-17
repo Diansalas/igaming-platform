@@ -33,22 +33,29 @@ stage detail), and the ADRs cited below.
 | 4H-B0-R2 | Bonus financial gate clarification (no code) | Complete |
 | 4H-B0-R3 | Bonus rounding decision validation and financial gate closure (no code) | Complete |
 | 4H-B0-R4 | Asset/Currency Registry, FX/Conversion, and dual-mode Sportsbook architecture closure (no code) | Complete |
-| 4H-B0-R5 | Implementation readiness and final P1 closure — five R4 P1s architecturally resolved, residual findings catalogued (no code) | Complete (this stage) |
+| 4H-B0-R5 | Implementation readiness and final P1 closure — five R4 P1s architecturally resolved, residual findings catalogued (no code) | Complete |
+| 4H-B0-R6 | Foundational implementation hardening — first authorized implementation stage; Asset Registry, idempotency, Risk fail-closed/exponent-awareness, RG self-exclusion hardening implemented and independently verified (real code + migrations) | Complete (this stage) |
 
 ## Active stage
 
-Stage 4H-B0-R5 — see `docs/active-stage.md` for full detail. **All five
-Stage 4H-B0-R4 P1s (FX rate-plausibility, Asset Authorization RBAC,
-idempotency per-occurrence design, `player_locked` origin-split,
-`OpenBetSelfExclusionPolicy`) are ARCHITECTURALLY RESOLVED. None is fully
-IMPLEMENTATION-READY — each carries a catalogued residual-findings list
-(see Blocked-stages below) that must be closed before or during
-implementation. Stage 4H-B1 (Bonus Engine) remains READY FOR HUMAN
-AUTHORIZATION after completion of the `bonus_conversion` Risk dependency
-(still NOT STARTED), unaffected by this stage. Stage 4H-B2 (Retail
-Architecture Hardening) awaits the Retail-Legal/Business gate. No
-implementation stage is authorized to begin without explicit human
-confirmation.**
+Stage 4H-B0-R6 — see `docs/active-stage.md` for full detail. **Six
+foundational-hardening workstreams implemented with real production
+code and migrations, each independently reviewed, with a fix wave
+closing every confirmed defect (including one live, exploited P1) and a
+final independent re-verification pass confirming the fixes hold.
+Labels at close: Asset Registry (Workstream A) and Risk fail-closed
+hardening (Workstream D) IMPLEMENTED; idempotency hardening (Workstream
+B) IMPLEMENTED as a shared primitive with no production call sites yet;
+RG self-exclusion hardening (Workstream E) PARTIALLY IMPLEMENTED (one
+non-launch-blocking scheduler-wiring gap); `player_locked` origin-split
+(Workstream C) phase 1 (implementation ADR) DONE, phase 2 (migration +
+code) NOT STARTED pending a human decision and a not-yet-built
+wagering-progress-netting design; Bonus dependency contract freeze
+(Workstream F) DONE. No implementation stage is authorized to begin
+without explicit human confirmation — Stage 4H-B1 (Bonus Engine) remains
+READY FOR HUMAN AUTHORIZATION after the `bonus_conversion` Risk
+dependency (still NOT STARTED), unaffected by this stage. Stage 4H-B2
+(Retail Architecture Hardening) awaits the Retail-Legal/Business gate.**
 
 ## Blocked stages
 
@@ -112,71 +119,86 @@ confirmation.**
   (ADR 0034 §9-13/§14) — see `docs/architecture/09-sportsbook-
   architecture.md`. No vendor named, no provider adapter built.
   Sequencing recommendation (not a constraint): external-first (doc 09
-  §15). **Implementation-readiness residual findings from Stage
-  4H-B0-R5** (none blocks architecture status; all block implementation):
-  - `player_locked` origin-split: Shape A (split into
-    `player_locked_cash`/`player_locked_bonus`) approved by sportsbook,
-    architect, and bonus-engine — `ledger-accounting-model.md` §6.3 —
-    but the C-win proportional payout rule needs an anti-structuring
-    control before implementation (bonus-engine found a real rounding-
-    based bonus-abuse vector), C-cashout is an explicit unresolved OPEN
-    QUESTION (recommendation from bonus-engine/product-owner-proxy/
-    sportsbook: bonus-funded bets simply not cashout-eligible), the
-    settlement-time split-recovery query needs same-transaction locking
-    and server-sourced identifier validation (security finding S-7), and
-    `VOID_ON_SELF_EXCLUSION` doesn't currently net the lock-time
-    wagering-progress debit against its own reversal (bonus-engine
-    finding).
-  - Idempotency (`occurrence_ordinal`, ADR 0038 §14/§14.6): the fallback
-    path for a provider with no signed per-occurrence field derives
-    distinguishability from an unauthenticated transport-level delivery
-    observation, not signed payload data — security found this a real
-    double-post vector; the composed-key string concatenation also has
-    no delimiter/escaping discipline (collision risk). Both require a
-    fix before any adapter is built.
-  - Self-exclusion policy (ADR 0034 §14): the platform-wide default
-    value between `SETTLE_NORMALLY`/`VOID_ON_SELF_EXCLUSION` remains an
-    unmade human/legal decision (unchanged from Stage 4H-B0-R4); security
-    additionally found the "resolved fresh, never cached" resolution
-    mechanism has no as-of timestamp anchor (a tampering window between
-    self-exclusion and listener execution) and its per-bet audit records
-    cannot prove enumeration completeness; sportsbook found the void
-    shape is unspecified for a multi-leg bet caught mid-partial-
-    settlement.
-  - Risk integration: a latent fail-open exists today in
-    `internal/risk`'s `Rule.breach()` cumulative-usage query (blind to
-    `account_type`, not sportsbook-specific) that must be fixed before
-    any `sportsbook_bet` cumulative-amount Risk rule is wired — see ADR
-    0031 §32. A real cross-document conflict (ADR 0031 §26/§31 vs. ADR
-    0038 §13, whether settlement/void/cashout are Risk checkpoints)
-    needs Orchestrator-assigned resolution.
-- **Asset/Currency Registry + FX/Conversion**: not started — architecture
-  closed (Stage 4H-B0-R4: `docs/decisions/0037-asset-currency-registry-
-  and-fx-conversion-architecture.md`, 8-layer Asset Authorization model,
-  4-component FX architecture), P1s architecturally resolved (Stage
-  4H-B0-R5: §B.7 rate-plausibility, §C.5 administrative API surface).
-  **Implementation-readiness residual findings from Stage 4H-B0-R5**
-  (security, independent review; none blocks architecture status, all
-  block implementation): the FX control-plane's own bounds (deviation/
-  staleness/spread thresholds) have no RBAC tier, no dual control, and no
-  mandatory audit requirement — a tenant-scoped actor can legally widen
-  them to make the fail-closed checks vacuous; the single-provider
-  plausibility check is circular (baseline supplied by the same provider
-  being checked); Asset Authorization layers 1-3 (platform-admin-only)
-  have no RLS backstop despite an "structurally cannot reach" claim (the
-  `assets` table isn't tenant-scoped — verified against
-  `migrations/0003`); `assets.active` defaults to `true` in the live
-  schema, contradicting the fail-closed design (needs a default flip in
-  the implementing migration); four-eyes for create/activate/platform-
-  authorize is asserted with no enforcement mechanism (no equivalent of
-  the `withdrawal_approvals` precedent); `CheckEligibility`'s
-  tenant/jurisdiction inputs aren't required to be server-sourced (no
-  per-player jurisdiction resolver exists anywhere in the codebase yet,
-  per Stage 4G-FINAL Part C). Risk also found asset-agnostic `risk_rules`
-  thresholds have no decimal-exponent awareness (ADR 0031 §32) and no
-  Asset/FX row in ADR 0031 §13's domain-integration table despite ADR
-  0037 §B.6 item 8 naming `internal/risk` as the required home for a
-  per-conversion notional-cap hook.
+  §15). **Foundational primitives IMPLEMENTED as of Stage 4H-B0-R6**
+  (real code, independently verified — none is sportsbook-specific
+  production code, all are the shared platform primitives a future
+  sportsbook implementation will consume):
+  - The latent Risk fail-open (`Rule.breach()`'s cumulative-usage query
+    blind to `account_type`) is **fixed** (`internal/risk/cumulative.go`)
+    — a future `sportsbook_bet` cumulative-amount rule will now correctly
+    measure stake rather than netting to zero. Confirmed by sportsbook's
+    own independent readiness review.
+  - The idempotency `occurrence_ordinal`/composed-key vulnerabilities
+    security found (unauthenticated fallback discriminator, unescaped
+    collision-prone composition) are **fixed** in the new
+    `internal/idempotency` shared package, though it has **zero
+    production call sites yet** — no domain has wired it in.
+  - The Asset Authorization `(product, operation)` dimension sportsbook
+    itself flagged as missing in Stage 4H-B0-R5 is **closed and
+    independently tested** — a casino/sportsbook eligibility split for
+    the same asset is now a genuinely distinguishable fact.
+  - `OpenBetSelfExclusionPolicy`'s technical hardening (as-of resolution,
+    tighten-only at both write and read time, authoritative DB time,
+    stalled-enumeration detection) is **implemented**
+    (`internal/rg/self_exclusion_*.go`, migrations `0043`/`0049`) —
+    labeled PARTIALLY IMPLEMENTED only because the stalled-run detector
+    has no scheduler wiring yet. **The platform-wide default policy
+    value remains an unmade human/legal decision** (unchanged since
+    Stage 4H-B0-R4) — this stage deliberately did not select it.
+  - The ADR 0031 §26/§31 vs. ADR 0038 §13 cross-document conflict is
+    **resolved on Risk's side** (ADR 0031 §36: adopts ADR 0038 §13's
+    conclusion, `sportsbook_settlement`/`sportsbook_cashout` are not Risk
+    checkpoints in provider-driven mode) with one non-blocking cross-check
+    still open for `ledger-finance` regarding a hypothetical future
+    in-house cashout-pricing mode.
+  - `player_locked` origin-split: Shape A (`player_locked_cash`/
+    `player_locked_bonus`) has a full **implementation-ready ADR**
+    (`ledger-accounting-model.md` §6.4, Stage 4H-B0-R6) covering 10 of 12
+    named accounting flows, independently validated by bonus-engine and
+    sportsbook. **Migration and code (phase 2) are NOT STARTED.** Mixed
+    cash+bonus funding and cashout are explicitly deferred/out of scope
+    for the first implementation (a fail-closed rejection at placement,
+    not a silent workaround). Bonus-funded placement specifically remains
+    blocked on two gates: **G-2** (the terminal-Grant settlement-credit
+    question — still an unmade human decision) and **G-3** (a new,
+    real, confirmed P1: wagering progress is not netted against a later
+    void/rollback of the same bonus-funded lock, a player-reachable
+    progress-farming vector — the fix design is specified but not yet
+    built). Cash-only cases and the schema widening itself have no
+    remaining objection from any specialist.
+- **Asset/Currency Registry + FX/Conversion**: **Part A/C (Asset
+  Authorization) IMPLEMENTED as of Stage 4H-B0-R6** —
+  `internal/assetregistry`, migrations `0044`/`0045`/`0047`. All 7 layers
+  real and independently security-verified; the four-eyes control
+  (create/activate/platform-authorize, and now also the layer-7
+  platform-wide eligibility grant) is DB-enforced, after a live-exploited
+  P1 was found (the person-identity self-approval check was
+  unconditionally inert — no code path anywhere in the platform could
+  set `person_id` on a `platform_admin` account) and fixed this same
+  stage; RLS/FORCE RLS backstop on `assets` confirmed by adversarial
+  testing (including a forged-GUC attempt); `assets.active` now defaults
+  `false` (the 7 seeded assets are explicitly grandfathered
+  `active=true` but `platform_authorized=false`, so every one denies at
+  layer 3 until a dual-controlled platform-authorize act runs per
+  asset — disclosed and intentional, not yet performed anywhere).
+  `asset_authorizations`' RLS no longer permits a DELETE-based
+  eligibility-widening exploit security also found and reproduced live.
+  Layer 8 (market-rate availability) remains **NOT IMPLEMENTED** —
+  concluded to be substantially a runtime FX-provider health/freshness
+  check, not a stored fact, so no schema was built for it. **Part B
+  (FX/Conversion itself) remains NOT IMPLEMENTED** — the Stage 4H-B0-R5
+  security findings on the FX control-plane (no RBAC tier/dual control/
+  mandatory audit on the deviation/staleness/spread bounds; the
+  single-provider plausibility check is circular) are unchanged and
+  still open, since Stage 4H-B0-R6's authorized scope was Asset
+  Authorization only. Risk's exponent-awareness gap (ADR 0031 §32) is
+  now closed (migration `0046`, `internal/risk/denomination.go`, reading
+  through `internal/assetregistry.GetAsset` as the single source of
+  truth). No domain wires `CheckEligibility` yet (confirmed by repo-wide
+  grep) — the first domain that does will deny every operation until the
+  seven seeded assets are platform-authorized; this is correct
+  fail-closed behavior, recorded as a hard precondition on that first
+  wiring task, not a defect.
 - **Real KYC/AML vendor integration**: not started — Stage 4F built the
   provider-neutral boundary only; no vendor is contracted.
 - **Real casino provider integration**: not started — `MockCasinoProvider`
@@ -235,6 +257,13 @@ confirmation.**
     `product-owner-proxy`, and `sportsbook` all independently recommend
     "not cashout-eligible" as the lowest-risk, most easily reversible
     starting point, but this has not been formally decided.
+11. Whether a settlement or void credit landing against a bonus-funded
+    locked stake whose Grant has already gone terminal should re-forfeit,
+    route to `player_cash`, or hold for manual review — the same
+    question as item 9, now confirmed (Stage 4H-B0-R6) to gate
+    BONUS-ONLY funding directly, not only mixed funding, since cash-only
+    and bonus-only are the entire population `ledger-accounting-model.md`
+    §6.4 covers with mixed funding deferred.
 
 ## Known P0/P1/P2 risks (carried forward, not silently closed)
 
@@ -253,25 +282,56 @@ confirmation.**
   sole domain) — see ADR 0031 §1 for why these stay separate domains.
 - Bonus Engine accounting decisions not yet made.
 - Sportsbook provider documentation not yet available (no vendor).
-- **Latent fail-open in `internal/risk`'s `Rule.breach()` cumulative-usage
-  query** (found Stage 4H-B0-R5, `risk` independent review, ADR 0031
-  §32): the query never joins `ledger_accounts`, so it is blind to
-  `account_type`. Works correctly today only because `casino_bet`'s
-  counterparty leg (`house_gaming`) is wallet-less; a `sportsbook_bet`
-  cumulative-amount rule would always compute zero usage (both legs are
-  player-owned and net to zero) once wired. Not exploitable today (only
-  `casino_bet` is mapped in `operationLedgerTransactionTypes`) but must
-  be fixed — an `account_type` join or equivalent per-operation leg-
-  selection rule, plus a regression test — before that map ever widens.
-  `risk` owns this fix.
-- **Cross-document conflict on sportsbook Risk checkpoints** (found Stage
-  4H-B0-R5, `risk` independent review): ADR 0031 §26/§31 call
-  `sportsbook_settlement`/`sportsbook_cashout` "near-term, load-bearing"
-  Risk Operations; ADR 0038 §13 states they are "not additional Risk
-  checkpoints." Both are internally reasoned; the disagreement may be
-  only about ADR 0038's external-provider framing, but as written they
-  give an implementer opposite instructions. Spans `risk` and
-  `ledger-finance` — Orchestrator to assign in a future stage.
+- ~~**Latent fail-open in `internal/risk`'s `Rule.breach()` cumulative-usage
+  query**~~ **RESOLVED Stage 4H-B0-R6.** Found Stage 4H-B0-R5 (`risk`
+  independent review, ADR 0031 §32): the query never joined
+  `ledger_accounts`, so it was blind to `account_type`. Fixed via
+  `internal/risk/cumulative.go`'s explicit, self-defending leg-selection
+  model (`operationCumulativeSpecs`); a regression test proves the
+  pre-fix query computed exactly zero against a real two-player-owned-leg
+  posting while the fix correctly measures it, and a mutation-tested
+  TOCTOU race test proves the advisory lock genuinely prevents overshoot.
+- ~~**Cross-document conflict on sportsbook Risk checkpoints**~~
+  **RESOLVED Stage 4H-B0-R6 (Risk's side).** ADR 0031 §36 adopts ADR 0038
+  §13's conclusion and withdraws §26/§31's "near-term, load-bearing"
+  framing for `sportsbook_settlement`/`sportsbook_cashout` in
+  provider-driven mode (visible superseded-in-part markers, not a silent
+  rewrite). One non-blocking cross-check remains open for
+  `ledger-finance`: scope ADR 0038 §13's unconditional headline sentence
+  to the provider-driven mode it describes, so a future in-house
+  cashout-pricing mode (which would create genuine new exposure) doesn't
+  inherit a blanket "never a Risk checkpoint" reading.
+- **New Stage 4H-B0-R6 P1: bonus-funded sportsbook wagering progress is
+  not netted against a later void/rollback of the same lock.** Found by
+  `bonus-engine` while validating the `player_locked` implementation ADR
+  (`ledger-accounting-model.md` §6.4.9 V-1, §6.4.11): wagering progress is
+  a derived read over lock-time debits to `player_bonus`; an ordinary
+  market void or rollback credits `player_bonus` back without netting
+  the earlier debit, so progress stays counted for a bet that was never
+  actually risked — a player-reachable farming vector (generalizes far
+  beyond the Stage 4H-B0-R5 self-exclusion-specific finding this
+  originated from). Fix design specified (net a lock debit only against
+  a same-`correlation_id` void, or a rollback whose
+  `reverses_transaction_id` points at the lock transaction itself — never
+  a rollback of a settlement) but not yet built; also needs a new
+  Progress-trail audit trigger point. This is gate **G-3**, blocking
+  bonus-funded sportsbook placement (cases B/E/G/I of `ledger-accounting-
+  model.md` §6.4) alongside gate **G-2** (the pre-existing terminal-Grant
+  human decision, item 9/11 above, now confirmed to gate bonus-only
+  funding directly). `bonus-engine` owns this fix.
+- **Stage 4H-B0-R6 finding: RG self-exclusion stalled-enumeration-run
+  detection has no operational wiring.** `internal/rg.FindStalledEnumerationRuns`
+  (added this stage) is correctly implemented and tested, but has zero
+  callers — the platform's one running reconciliation scheduler
+  (`internal/reconciliation/scheduler.go`) only runs the ledger-vs-
+  projection sweep. A stalled self-exclusion enumeration run (crashed
+  before dispatch completed) is therefore still never surfaced in a
+  running system. Confirmed by security's final Stage 4H-B0-R6
+  verification. Not launch-blocking (no sportsbook self-exclusion
+  enforcement exists to stall yet) but must be wired into a scheduler
+  before any such enforcement ships. Labeled `PARTIALLY IMPLEMENTED` per
+  CLAUDE.md's no-fake-completion rule, not silently reported as closed.
+  `identity-compliance`/`devops` own wiring this.
 - Five Stage 4H-B0-R4 P1s (FX rate-plausibility, Asset Authorization RBAC,
   idempotency design, `player_locked` origin-split,
   `OpenBetSelfExclusionPolicy`) are architecturally resolved as of Stage

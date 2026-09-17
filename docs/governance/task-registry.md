@@ -288,11 +288,38 @@ after its implementation ADR is independently validated).
 | 4HB0R6-04 | risk | Dispatched | none | `internal/risk` (extended), `docs/decisions/0031-*.md` | D: Risk fail-closed hardening + exponent-awareness | none |
 | 4HB0R6-05 | ledger-finance | Dispatched | none | `docs/architecture/ledger-accounting-model.md` (implementation ADR update only, no code yet) | C (phase 1): implementation ADR for `player_locked` flows A-L | Code gated on independent bonus-engine + sportsbook validation of this ADR |
 | 4HB0R6-06 | integrations | Dispatched | none | `internal/idempotency` (new, or extends existing shared pattern) | B: Idempotency hardening (canonical, provider-authenticated occurrence identifiers) | none |
-| 4HB0R6-07 | bonus-engine | Dispatched | none | `docs/architecture/10-bonus-engine-architecture.md` (new Bonus Dependency Contract section) | F: Bonus dependency contract freeze | none |
+| 4HB0R6-07 | bonus-engine | Done | none | `docs/architecture/10-bonus-engine-architecture.md` (new Bonus Dependency Contract Freeze section) | F: Bonus dependency contract freeze | none |
+| 4HB0R6-08 | sportsbook (Wave 2) | Done | 4HB0R6-05 | `docs/architecture/ledger-accounting-model.md` §6.4.9 V-5/V-6, `docs/architecture/09-sportsbook-architecture.md` §16 | Validates Workstream C phase 1; sportsbook-readiness check on B/A/D | none |
+| 4HB0R6-09 | architect (Wave 2, cross-workstream) | Done | 4HB0R6-02..07 | `docs/governance/task-registry.md` (DR-4HB0R6-01/02/03) | Cross-workstream consistency; confirms repo-wide build/vet/fmt clean | none |
+| 4HB0R6-10 | qa (Wave 2) | Done | 4HB0R6-02, -03, -04, -06 | none (analysis reported, no file edits) | Test-coverage verification across A/B/D/E; found 3 real gaps (B mislabeled test, D missing TOCTOU test, E missing cross-tenant RLS test) | 3 gaps found, routed to fix wave |
+| 4HB0R6-11 | bonus-engine (Wave 2) | Done | 4HB0R6-05 | `docs/architecture/ledger-accounting-model.md` §6.4.11, `docs/architecture/10-bonus-engine-architecture.md` | Validates Workstream C phase 1 (V-1..V-4, OB-1); confirms V-1 as a new real P1 (wagering-progress farming) with a precise fix design | G-3 gate not yet closed (query fix + Progress-trail trigger not built) |
+| 4HB0R6-12 | code-reviewer (Wave 2) | Done | 4HB0R6-02, -03, -04, -06 | none (analysis reported, no file edits) | Code-level review across A/B/D/E; found F1 (High, layer-7 eligibility grant had no four-eyes representation) and F2 (High, RLS conjunct missing) plus 7 lower-severity findings | 9 findings, F1/F2/F3 routed to fix wave as must-fix |
+| 4HB0R6-13 | security (Wave 2) | Done | 4HB0R6-02, -04, -06 | none (analysis reported, no file edits) | Independent security review of A/D/E; **confirmed and live-reproduced P1-A1** (four-eyes person-identity check unconditionally inert — no code path could ever set person_id on a platform_admin account); found P2-A2 (RLS DELETE-widening), P2-A3 (sequencing hazard, informational), P2-E1 (stalled-run detection gap); D confirmed sound, IMPLEMENTED | P1-A1 launch-blocking, routed to fix wave |
+| 4HB0R6-14 | architect (fix wave) | Done | 4HB0R6-12, -13 | `migrations/0047_asset_registry_dual_control_hardening.*`, `internal/assetregistry/*`, `internal/httpserver/asset_registry_*.go`, `docs/decisions/0037-*.md` §C.7, `docs/api/openapi/platform-api.yaml`, `internal/risk/exponent_integration_test.go` (fixture only) | Closes P1-A1, P2-A2, F1/F4/F5; verified fail-before/pass-after against a literal reproduction of the exploit at both DB and HTTP layers | none — verified closed by final security/QA re-pass |
+| 4HB0R6-15 | identity-compliance (fix wave) | Done | 4HB0R6-12, -13 | `migrations/0049_self_exclusion_enumeration_rls_and_floor_write_hardening.*`, `internal/rg/self_exclusion_*.go`, `cmd/seed-admin/main.go`, `internal/httpserver/admin_routes.go`, `internal/httpserver/routes.go`, `internal/httpserver/platform_staff_person_link_test.go` | Provides the person-linking path required to unblock 4HB0R6-14's fix; closes P2-E1, F2, F3, F4 (backdating), F5 (RLS alignment); self-resolved a migration-number collision with 4HB0R6-14 by using 0049 | none — verified closed by final security/QA re-pass |
+| 4HB0R6-16 | integrations (fix wave) | Done | 4HB0R6-12 | `internal/idempotency/*` | Closes F6 (dead-code trim) and QA's changed-asset test gap | none |
+| 4HB0R6-17 | risk (fix wave) | Done | 4HB0R6-10, -12 | `internal/risk/denomination.go`, `internal/risk/cumulative_race_integration_test.go` | Closes F7 (exponent-lookup consolidation through `internal/assetregistry`) and QA's TOCTOU concurrency test gap; mutation-tested the fix (temporarily removed the advisory lock, confirmed the new test fails 10/10, restored byte-identical) | none |
+| 4HB0R6-18 | security (final re-verification) | Done | 4HB0R6-14, -15, -16, -17 | none (analysis reported, no file edits) | Re-ran the original P1-A1 exploit against the fixed code — CONFIRMED CLOSED, could not reconstruct by any route tried. Confirmed all other fix-wave items closed. Found 5 new minor items (A-E); only A (stalled-run reconciliation has no scheduler wiring) is non-trivial, labeled PARTIALLY IMPLEMENTED | Finding A carried forward, not launch-blocking |
+| 4HB0R6-19 | qa (final re-verification) | Done | 4HB0R6-14, -15, -16, -17 | none (analysis reported, no file edits) | Independently re-verified all 3 originally-flagged test gaps are genuinely closed (non-tautological, real assertions) plus the 2 new four-eyes-bypass regression tests; full 588-test integration suite green, 0 skips/failures; confirmed migration 0039's down-migration data-consistency issue is real, pre-existing (Stage 4E), and fresh-DB-safe | none |
+| 4HB0R6-20 | Orchestrator | Done | 4HB0R6-01..19 | `docs/governance/*`, `docs/active-stage.md`, `docs/progress.md` | full validation gate (gofmt/go build/go vet/go test clean) | this stage's completion report | none — **stage explicitly STOPS here; Stage 4H-B1 NOT authorized** |
 
-Rows will be added/updated as each dispatch reports back and independent
-review rounds are commissioned. No specialist's Wave 1 implementation is
-considered accepted until its assigned independent reviewer(s) report.
+All rows Done. Labels at close: Workstream A (Asset Registry) —
+**IMPLEMENTED** for the four-eyes control, RLS backstop, and layers 1-7
+(security's explicit final verdict); layer 8 (market-rate availability)
+remains **NOT IMPLEMENTED** (concluded to be substantially a runtime
+FX-provider check, not a stored fact). Workstream B (idempotency) —
+**IMPLEMENTED** as a shared primitive, explicitly disclosed as having
+zero production call sites yet (no adapter has adopted it). Workstream C
+(player_locked) — phase 1 (ADR) **DONE**; phase 2 (migration 0048 +
+code) **NOT STARTED**, gated on G-2 (human decision, terminal-Grant) and
+G-3 (query-netting + Progress-trail design, not yet built) for
+bonus-funded cases; cash-only cases and the schema widening itself have
+no remaining objection. Workstream D (Risk) — **IMPLEMENTED**, security
+sign-off granted, no findings. Workstream E (RG self-exclusion) —
+**PARTIALLY IMPLEMENTED**: policy config/resolution/tighten-only/as-of/
+authoritative-time are IMPLEMENTED; the stalled-run reconciliation
+primitive exists but has no scheduler wiring (4HB0R6-18 finding A).
+Workstream F (Bonus dependency contract) — **DONE** (documentation).
 
 ## How to use this registry (for future stages)
 
