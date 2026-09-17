@@ -18,6 +18,8 @@ before any edit occurs, and records the decision in `task-registry.md`.
 | KYC | identity-compliance | `internal/kyc`, `internal/email`, `migrations/*kyc*`, `migrations/*credential_token*` |
 | Responsible Gaming | identity-compliance | `internal/rg`, `migrations/*restriction*` |
 | Risk Management | risk | `internal/risk`, `migrations/*risk*` |
+| Asset Registry + Authorization | architect | `internal/assetregistry`, `migrations/0044-0045_asset_*`, `migrations/0047_asset_registry_*`, `internal/httpserver/asset_registry_*.go`, `docs/decisions/0037-*.md` |
+| Idempotency (shared adapter scaffolding) | integrations | `internal/idempotency` — a reusable primitive; a domain wiring it into a real posting path (casino, sportsbook, payments) owns that call site, not this package |
 | Casino | casino | `internal/casino`, `migrations/*casino*`, `internal/httpserver/*casino*` |
 | Sportsbook | sportsbook | `internal/sportsbook` (not yet created) |
 | Bonus Engine | bonus-engine | `internal/bonus` (not yet created — Stage 4G §32 block qualified-lifted per Stage 4H-B0's MVP scope plan for a first slice; implementation not yet authorized) |
