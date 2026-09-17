@@ -1,5 +1,151 @@
 # Active Stage
 
+## Stage 4H-B0-R4 — Asset/Currency Registry, FX/Conversion, and Dual-Mode Sportsbook Architecture Closure — Complete
+
+Status: **Complete. Architecture READY FOR IMPLEMENTATION for the Asset/
+Currency Registry, FX/Conversion, and Sportsbook (external + in-house)
+domains. None authorized to begin. Bonus Stage 4H-B1's own gate and
+Retail's Stage 4H-B2 gate are unaffected by this stage.**
+
+Architecture-only stage — no code, no migrations, no provider
+integration, no real vendor named. Closes doc 27 §26's deferred Asset/
+Currency Registry requirement and formalizes a new mandatory
+requirement: the platform must architecturally support both an external
+sportsbook-provider integration and a strong in-house sportsbook engine,
+provider-neutral, co-equal from day one.
+
+**Two waves of specialist work, no self-review:**
+
+**Wave 1 (5 specialists, parallel authorship, distinct file ownership):**
+- `architect` — new `docs/decisions/0037-asset-currency-registry-and-fx-
+  conversion-architecture.md`: an 8-layer Asset Authorization model
+  (existence → activation → platform authorization → tenant → brand →
+  jurisdiction → operation eligibility → market-rate availability, each
+  independently gated, none implying the others); a 4-component FX
+  architecture (Registry / FX Rate Provider interface / Conversion
+  Service / Ledger's existing `ConversionOperation`, never coupled) with
+  an 8-condition fail-closed rule; one canonical
+  `AssetAuthorization.CheckEligibility` service every domain must
+  consume, closing Stage 4H-B0-R3's flagged authorization-boundary P1.
+- `sportsbook` — rewrote `docs/architecture/09-sportsbook-architecture.md`
+  (48 → ~1050 lines): canonical domain model (Sport/Competition/Event/
+  Market — split into MarketType template vs. Market instance/
+  Participant/Selection/Price, with Exposure explicitly distinguished
+  from Liability to prevent a "second wallet" mistake), provider-neutral
+  `SportsbookProvider`/`DataFeedProvider` abstractions, a five-layer
+  in-house engine (Sports Data → Business Logic → Ledger → Risk →
+  Trading Operations), tenant/brand/jurisdiction mode-selection routing.
+  The original Stage-0 "start with widget/iframe" recommendation is
+  preserved as operational sequencing guidance, not an architectural
+  constraint the new dual-mode requirement would otherwise contradict.
+- `ledger-finance` — new `docs/decisions/0038-sportsbook-accounting-and-
+  ledger-integration.md`: no new account types, 6 new transaction types
+  (`sportsbook_bet`/`_settlement`/`_void`/`_partial_settlement`/
+  `_cashout`/`_rollback`), an idempotency key design keyed on
+  `(tenant_id, provider_id, provider_tx_id)` with a `correlation_id`
+  tying a bet's full lifecycle together, aggregate open-bet liability as
+  a derived read (never a maintained counter), market-correction
+  reversal as a two-transaction compensating sequence (never a balance
+  edit).
+- `risk` — added ADR 0031 §25-31: confirmed `sportsbook_bet` already
+  exists as a real `Operation`; proposed `sportsbook_settlement`/
+  `sportsbook_cashout` as new gated checkpoints; determined market/
+  selection-level trading-exposure management is a Sportsbook Engine
+  trading concern, not gated by `risk.Evaluate` (mirroring the existing
+  Bonus-campaign-budget-cap precedent), while per-player stake/payout/
+  cashout limits remain ordinary Risk rules.
+- `identity-compliance` — added ADR 0034 §9-13: RG evaluated fresh at
+  placement and at cashout (a discretionary, time-displaced,
+  value-crediting action), RG-exempt at settlement (no intervening
+  player-contributed progress between acceptance and outcome, unlike a
+  Bonus wagering requirement); flagged the open-bet self-exclusion
+  question as a genuine human/compliance decision, not decided
+  unilaterally.
+
+**Wave 2 (4 specialists, independent review — none reviewed its own
+authored work):**
+- `architect` reviewed the other four documents, reconciling `risk`'s
+  Operation proposals and `sportsbook`'s final domain model (both had
+  been drafted in parallel without seeing each other's final output) —
+  found and fixed two precision gaps in ADR 0033 (in-house
+  `provider_id`/bonus-source degeneracy), found one real contradiction
+  in ADR 0038 (below), flagged a terminology collision ("Cancellation"
+  meaning two different things in doc 09 vs. ADR 0038 — routed to
+  `ledger-finance`, fixed), and independently re-verified extensibility
+  items 10-18.
+- `ledger-finance` independently reviewed `architect`'s ADR 0037 (not
+  its own ADR 0038) — found a missing `rounding_rule_id` field-mapping
+  gap, an unstated tenant/wallet-context sourcing question, a missing
+  rate-plausibility caveat, and a mischaracterized ADR 0031 §8 precedent
+  ("already established and implemented" — actually itself an open,
+  unbuilt gap by ADR 0031's own words).
+- `security` independently reviewed all five documents — found the same
+  rate-plausibility gap `ledger-finance` found (independent convergence)
+  plus two fail-closed/error-contract gaps in the Asset Authorization
+  boundary, confirmed provider-callback authentication is already
+  correctly specified (citing the existing hardened casino-callback
+  precedent), confirmed tenant isolation and audit coverage, and flagged
+  one operational (non-blocking) gap: an RG denial after a widget/iframe
+  provider already accepted a bet should trigger the adapter's own
+  cancel call back to the provider.
+- `qa` ran the full 20-item extensibility test — **all 20 answered YES**,
+  each independently verified against actual document content, not
+  documents' own summary claims. Designed (architecture-level only) an
+  adversarial idempotency-collision test category and an authorization-
+  widening defense-in-depth test category, both flagged as required
+  future test-plan additions, not present defects.
+
+**One real, substantive contradiction found and fixed**: ADR 0038 §13
+originally proposed netting `sportsbook_rollback` against a player's
+cumulative daily stake usage, alongside `sportsbook_void` — this
+contradicted the same ADR's own §10, which is explicit that a rollback
+corrects a wrongly-recorded settlement outcome without nullifying the
+underlying staked bet (unlike void, which returns the full stake as if
+the bet never happened). Netting both would have zeroed out, or in a
+composite rollback-then-void case gone negative on, a player's genuinely
+staked amount after any market-correction event. `ledger-finance`
+corrected this directly once identified: `sportsbook_rollback` is never
+netted against cumulative stake usage; the composite case is already
+handled correctly by the void leg alone.
+
+**Five smaller gaps closed** as narrow, explicitly-attributed additions
+(all in `docs/decisions/0037-*.md` and `0038-*.md`; no redesign): two
+fail-closed/error-contract statements for the Asset Authorization
+boundary (absent config = deny; non-nil error = ineligible, both
+mirroring existing platform conventions from ADR 0031/CLAUDE.md's
+Redis-never-authoritative rule); a rate-plausibility caveat on the FX
+fail-closed rule (structural checks don't catch a well-formed-but-wrong
+rate from a compromised provider — named as a required implementation-
+time control); a missing `rounding_rule_id` field-mapping between the
+Conversion record and `ConversionOperation`; and the mischaracterized
+ADR 0031 §8 precedent, corrected.
+
+**Final gate — see `docs/governance/project-status.md`'s Stage 4H-B0-R4
+section for the full A-L verdict.** Bottom line: all closed, no P0. Five
+disclosed, non-blocking P1s recorded for implementation time: a
+rate-plausibility check requirement; the Asset Authorization boundary's
+concrete RBAC/API surface still to be designed; ADR 0038's idempotency
+scheme's residual same-type/coincidental-payload collision risk needing
+a per-occurrence distinguishing mechanism; the pre-existing
+`player_locked` origin-split decision still blocking bonus-funded (not
+cash-funded) sportsbook wagering; and the open-bet self-exclusion policy
+as a genuine human/compliance decision.
+
+**No production code, no migrations, no provider integration, no real
+vendor was named or implemented this stage.** `go build ./...` remains
+clean (docs-only diff).
+
+### Decisions/input needed before the next stage
+
+None block architecture closure. Before a real implementation stage:
+(1) the open-bet self-exclusion policy decision (above); (2) the
+`player_locked` origin-split decision for bonus-funded sportsbook
+wagering (pre-existing, ADR 0032 §10); (3) selecting and contracting a
+real sportsbook provider and/or committing engineering resources to the
+in-house engine — neither is authorized by this stage.
+
+---
+
 ## Stage 4H-B0-R3 — Bonus Rounding Decision Validation and Financial Gate Closure — Complete
 
 Status: **Complete. Stage 4H-B1 is READY FOR HUMAN AUTHORIZATION after

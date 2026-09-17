@@ -210,6 +210,30 @@ were started.**
 | 4HB0R3-07 | qa | Done | none | none (analysis reported to Orchestrator, no file edits) | none | n/a | multi-asset genericity validation across 0/2/6/8/18-decimal exponents, refined 9-category test-plan design, confirmed no Bonus MVP expansion | none | n/a |
 | 4HB0R3-08 | Orchestrator | Done | 4HB0R3-01..07 | `docs/decisions/0021-multi-asset-accounting.md` (rounding decision recorded), `docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md` (§1.1/§22/§24/§25 updated, new §26), `docs/architecture/28-bonus-financial-gate-decision-sheet.md` (marked RESOLVED), `docs/architecture/financial-domain-model.md`, `docs/architecture/14-mvp-scope-and-roadmap.md`, `docs/governance/project-status.md`, `docs/active-stage.md`, this registry, `docs/progress.md` | none | full validation gate (docs-only; `go build ./...` clean, no code touched) | this stage's completion report | none | n/a — **stage explicitly STOPS here; Stage 4H-B1 NOT started, READY FOR HUMAN AUTHORIZATION after `bonus_conversion`** |
 
+## Stage 4H-B0-R4
+
+Architecture-only closure stage. Purpose: close the Asset/Currency
+Registry requirement doc 27 §26 deferred, and formalize a new mandatory
+dual-mode (external provider + in-house engine) Sportsbook architecture.
+**No production code, no migrations, no provider integration, no real
+vendor named.**
+
+| ID | Owner | Status | Dependencies | Files owned | Interfaces affected | Tests | Docs | Blockers | Integration |
+|---|---|---|---|---|---|---|---|---|---|
+| 4HB0R4-01 | Orchestrator | Done | none | `docs/governance/*` | none | n/a (documentation) | this registry + siblings | none | n/a |
+| 4HB0R4-02 | architect | Done | none | `docs/decisions/0037-asset-currency-registry-and-fx-conversion-architecture.md` (new) | none (design only) | n/a | Asset Registry 8-layer authorization model, FX/Conversion 4-component architecture with 8-condition fail-closed rule, canonical `AssetAuthorization.CheckEligibility` service | none | Resolves Stage 4H-B0-R3's flagged authorization-boundary P1 |
+| 4HB0R4-03 | sportsbook | Done | none | `docs/architecture/09-sportsbook-architecture.md` (rewritten) | none (design only) | n/a | canonical sportsbook domain model, `SportsbookProvider`/`DataFeedProvider` abstractions, five-layer in-house engine, mode-selection routing | none | Superseded Stage-0 external-only recommendation with dual-mode architecture; original recommendation preserved as operational sequencing guidance |
+| 4HB0R4-04 | ledger-finance | Done | none | `docs/decisions/0038-sportsbook-accounting-and-ledger-integration.md` (new) | none (design only) | n/a | sportsbook financial/ledger posting contract, 6 new transaction types, idempotency key design | none | n/a |
+| 4HB0R4-05 | risk | Done | none | `docs/decisions/0031-risk-and-limits-engine.md` (new §25-31) | none (design only) | n/a | sportsbook Risk integration, Operation proposals, trading-vs-Risk boundary | none | n/a |
+| 4HB0R4-06 | identity-compliance | Done | none | `docs/decisions/0034-bonus-gamification-rg-kyc-identity-integration.md` (new §9-13) | none (design only) | n/a | sportsbook RG integration; flagged open-bet self-exclusion policy as genuine human/compliance decision, not decided unilaterally | none | n/a |
+| 4HB0R4-07 | architect (independent review) | Done | 4HB0R4-02..06 | `docs/decisions/0033-provider-interoperability-and-external-bonus-engines.md` (2 narrow fixes) | none | n/a | cross-document consistency review across 4HB0R4-03..06 (did not review own 4HB0R4-02); found the ADR 0038 rollback-netting contradiction, routed to `ledger-finance`; resolved 2 open questions in ADR 0031 §27/§30 against sportsbook's final model, routed to `risk`; re-verified extensibility items 10-18 | none | n/a |
+| 4HB0R4-08 | ledger-finance (independent review) | Done | 4HB0R4-02 | none (analysis reported to Orchestrator, no file edits) | none | n/a | independent financial-correctness review of ADR 0037 (not own ADR 0038); found `rounding_rule_id` field-mapping gap, tenant/wallet-context sourcing question, rate-plausibility gap, mischaracterized ADR 0031 §8 precedent — folded into ADR 0037 by the Orchestrator | none | n/a |
+| 4HB0R4-09 | security (independent review) | Done | 4HB0R4-02..06 | none (analysis reported to Orchestrator, no file edits) | none | n/a | 5 fail-closed/error-contract/audit gaps found — folded into ADR 0037 by the Orchestrator; confirmed provider-callback authentication, tenant isolation, audit coverage | none | n/a |
+| 4HB0R4-10 | qa (independent review) | Done | 4HB0R4-02..06 | none (analysis reported to Orchestrator, no file edits) | none | n/a | full 20-item extensibility test, all YES; adversarial idempotency-collision and authorization-widening test-plan designs | none | n/a |
+| 4HB0R4-11 | ledger-finance (follow-up correction) | Done | 4HB0R4-07 | `docs/decisions/0038-sportsbook-accounting-and-ledger-integration.md` | none | n/a | fixed the rollback-netting contradiction; disambiguated "Cancellation" terminology; added ADR 0037 cross-reference; recorded a non-blocking settlement-side mapping gap | none | n/a |
+| 4HB0R4-12 | risk (follow-up correction) | Done | 4HB0R4-07 | `docs/decisions/0031-risk-and-limits-engine.md` | none | n/a | closed the two open questions in §27/§30 using sportsbook's final domain model | none | n/a |
+| 4HB0R4-13 | Orchestrator | Done | 4HB0R4-01..12 | `docs/decisions/0037-*.md` (5 security-flagged fixes applied), `docs/governance/project-status.md`, `docs/active-stage.md`, this registry, `docs/progress.md` | none | full validation gate (docs-only; `go build ./...` clean, no code touched) | this stage's completion report | none | n/a — **stage explicitly STOPS here; no implementation authorized** |
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and
