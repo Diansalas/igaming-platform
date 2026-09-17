@@ -492,3 +492,397 @@ reimplementation of jurisdiction resolution.
   unchanged and reaffirmed by this ADR for its newest consumer.
 - `docs/architecture/11-kyc-aml-rg-architecture.md` — Blueprint §4.7
   source material; tiered KYC trigger model referenced in §6.
+
+## Sportsbook RG/KYC Integration (directive extension, Stage 4H-B0-R4)
+
+Status: Accepted (architecture-freeze), added by Stage 4H-B0-R4
+("Sportsbook architecture — dual-mode external/in-house — closing the
+architecture before implementation"). Owner: `identity-compliance`,
+unchanged.
+
+This section extends this ADR to a **second domain** — Sportsbook — under
+the same title's own scope ("...RG, KYC and Identity integration"). It
+does not touch, restate for the purpose of changing, or supersede anything
+in the Bonus/Gamification sections above (§1-§8): those stand as written.
+It also does not design the Sportsbook domain model itself (bet
+placement, acceptance, cashout, settlement, void, partial settlement) —
+that is owned, concurrently and in parallel this same stage, by
+`sportsbook` in the rewrite of `docs/architecture/09-sportsbook-
+architecture.md`. This section defines exactly the boundary that rewrite
+MUST integrate against, using the identical method §1-§2 above already
+established for Bonus/Gamification: RG remains the sole authority, no
+parallel self-exclusion/limit logic is ever built in `internal/sportsbook`,
+and every conclusion below is reasoned from the same precedents (`postBet`/
+`postWin`'s existing, hardened discipline; ADR 0034 §2's own "prospective,
+not retroactive" principle), not assumed by analogy alone.
+
+At the time of writing, `docs/architecture/09` is Stage-0 content (see
+this ADR's own Cross-references pulling it in fresh) that frames bet
+placement as effectively one step and does not yet define acceptance,
+cashout, or settlement as separately-named lifecycle events with their own
+ledger semantics — that richer lifecycle is exactly what `sportsbook`'s own
+parallel rewrite this stage is producing. Every conclusion below is
+written against the general shape doc 09 already commits to (an open bet
+is a liability that can span days or months; placement, settlement, void,
+partial settlement, and cashout are each distinct ledger events — doc 09's
+own "What is genuinely platform-owned" section) and is explicitly flagged
+where it needs reconciliation once `sportsbook`'s rewritten doc 09 lands
+with its own concrete state machine.
+
+### 9. Where RG must be evaluated relative to each sportsbook lifecycle event
+
+**Bet placement — before the stake locks.** This is the direct sportsbook
+analogue of `postBet`'s own pre-posting check (ADR 0026 §7; `internal/
+casino/orchestrator.go`'s `postBet`): `rg.EvaluateEligibility` is called
+with `WalletID` set to the wallet the stake is about to debit, immediately
+before the stake moves to `player_locked` (doc 09's own term for the
+placement-time ledger effect) and before any other observable financial
+effect. A denial means **no stake is locked, no open-bet record is
+created** — the same "zero financial effect on denial" shape `postBet`
+already guarantees, not a new one invented for sportsbook.
+
+**Bet acceptance — flagged as needing reconciliation with `sportsbook`'s
+parallel doc 09 rewrite, not resolved here as a settled fact.** Some
+sportsbook integrations (particularly a feed-and-API, in-house-UI mode)
+genuinely separate "player submits a bet slip at displayed odds" from "the
+bet is confirmed accepted," most commonly when odds moved between display
+and submission and the player must confirm the new price (an
+odds-change/confirmation flow) — a real, distinct step in that shape, not
+a formality. Doc 09's current (Stage-0, pre-rewrite) framing treats
+placement as effectively one step and does not name a separate acceptance
+event; this ADR does not invent one where doc 09 does not yet define one.
+**The rule this ADR fixes regardless of how that resolves**: if and when
+`sportsbook`'s rewritten doc 09 defines acceptance as a genuinely distinct
+step from initial submission, acceptance is the point where the stake
+actually locks and the wager becomes binding — so it, not the earlier
+submission, is the point `EvaluateEligibility` must gate, following
+exactly the same "gate immediately before the financial/binding effect,
+never at an earlier step that could go stale" principle §1 above already
+applies to Bonus (e.g. "grant vs. activation are distinct points, and the
+gate belongs at activation" — §6). If placement and acceptance collapse
+into one step (the widget/iframe mode, and doc 09's current framing), the
+single placement-time check above already covers it and no second check is
+needed or introduced. `sportsbook` must confirm which shape applies, per
+integration mode, in its own rewritten doc 09; this ADR does not decide it
+unilaterally because the fact pattern (is there a real intervening step?)
+is `sportsbook`'s domain model to define, not RG's.
+
+**Cashout — yes, a fresh RG check is required, reasoned explicitly, not
+assumed.** A cashout is not a passive wait for an outcome; it is a new,
+discretionary, player-initiated action, taken at a point in time that can
+be hours, days, or months after placement, that causes the platform to
+proactively credit funds to the player's wallet *before* the bet's natural
+outcome is known. That combination — player-initiated, time-displaced from
+the original gate, and result-crediting — is structurally the same shape
+as Bonus's marketplace redemption (§1: "exactly like a bet, this is a
+value-crediting operation... immediately before the ledger... work"), not
+the shape of a passive settlement. The player's RG status can genuinely
+have changed in the interim (this is precisely the scenario §2 above
+already contemplates for Bonus's longer-lived grants, and a sportsbook bet
+can outlive any Bonus grant lifecycle in this codebase today). Therefore:
+`EvaluateEligibility` runs fresh, in the same transaction as the cashout's
+ledger posting, immediately before crediting the cashout amount, using the
+same wallet-scoped params as placement. A denial means **the cashout does
+not execute — no funds are credited early** — and the bet is left exactly
+as it was: open, unsettled, proceeding toward its normal settlement (see
+below). This is not a punitive action against the bet itself; it simply
+means early/discretionary access to funds is gated exactly like every
+other forward-going, value-crediting action on this platform, while the
+bet's own eventual, non-discretionary settlement is unaffected by the same
+denial (reasoned next).
+
+**Settlement — no RG check, reasoned by the closer precedent (`postWin`),
+not the more distant one (Bonus conversion).** ADR 0034 §2's own
+already-flagged ambiguity for Bonus (whether unlocking a wagering
+requirement's wagered-through balance is a mechanical settlement or further
+bonus-lifecycle progress) is the right MODEL for how to reason about this
+question, but it does not transfer its answer here, because sportsbook
+settlement lacks the one feature that made Bonus's case genuinely
+ambiguous: in Bonus, real player activity (wagering) occurs *after* the
+grant and *contributes* to unlocking value that did not previously exist
+in usable form — that is arguably new player-initiated progress happening
+inside the window where RG status could have changed. A sportsbook bet's
+settlement has no analogous intervening player activity: between
+acceptance and settlement, the player does nothing that contributes to or
+changes the bet's outcome — the outcome is entirely determined by the
+sporting event, external to the player and to the platform, and the bet's
+potential return was already fully fixed and disclosed at acceptance. This
+is exactly the shape `postWin` already resolved for casino, stated in its
+own doc comment verbatim: *"a win settles a bet that was already
+legitimate when placed (postBet's own RG check already gated it). Blocking
+the settlement of an already-placed bet because the player's status
+changed AFTER the bet would strand the stake in house_gaming with no
+compensating entry — the opposite of player protection, not an enforcement
+of it."* A sportsbook WIN settlement is the same operation in substance:
+crediting the disclosed, already-priced potential return of a bet that was
+correctly gated at acceptance is realizing a pre-existing, already-fixed
+entitlement, not initiating new player activity — so settlement (WIN,
+LOSS, void, and partial settlement/bet-builder-leg resolution and market
+correction/re-settlement alike, per doc 09's own list of distinct
+settlement-family events) is **RG-exempt**, mirroring `postWin`/
+`postRollback`'s existing exemption exactly, not a new exemption invented
+for sportsbook. This is a reasoned conclusion, not an assumption carried
+over from Bonus's different answer — the deciding difference is the
+absence of intervening player-contributed progress between the RG-gated
+event and the crediting event, which Bonus's flagged case has and
+sportsbook settlement does not.
+
+One consequence worth stating plainly, since §11 below depends on it: RG
+being exempt at settlement, combined with cashout requiring a fresh (and
+therefore possibly denying) check, means a self-excluded player with an
+open bet has exactly one route to it resolving — waiting for normal
+settlement — and no route to early access. No separate rule is needed to
+produce that outcome; it falls out of §9's two conclusions directly.
+
+### 10. How the architecture avoids a bypass
+
+Every RG check introduced by this section follows the identical,
+already-hardened discipline `postBet`/`internal/rg.EvaluateEligibility`
+already established, with no new discipline invented for sportsbook:
+
+- **Evaluated fresh, every time** — never cached, never read from a
+  session flag, a widget-reported status, or any prior check's stored
+  result (including the placement-time check itself: cashout and, where
+  applicable, acceptance each call `EvaluateEligibility` again,
+  independently, exactly as `postBet` already re-evaluates independently
+  of `LaunchGame`'s own check — ADR 0026 §7's "re-evaluating
+  independently... is deliberate, not redundant," restated here for a
+  third caller).
+- **`clock_timestamp()` semantics, not `now()`** — if a sportsbook
+  placement/cashout check is implemented as a similar SQL-transaction
+  pattern (a lock-then-check sequence analogous to `lockPerson` +
+  `EvaluateEligibility`'s own restriction query), it inherits
+  `internal/rg`'s existing fix for exactly this reason (`rg.go`'s own
+  Stage 4G-FINAL comment: `now()` is STABLE per transaction and can miss a
+  self-exclusion that committed after the transaction began but before the
+  statement ran; `clock_timestamp()` re-evaluates the true current
+  instant on every call). This is not a new fix `identity-compliance`
+  proposes for sportsbook — it is `internal/rg.EvaluateEligibility`'s
+  existing, unmodified behavior, which every caller (including a future
+  sportsbook one) gets automatically by calling the same function; it is
+  stated here only so a sportsbook-specific caller is never tempted to
+  hand-roll its own eligibility SQL with `now()`.
+- **Inside the same database transaction as the financial posting, before
+  commit** — the placement check runs in the same transaction as the
+  `player_locked` stake movement; the cashout check runs in the same
+  transaction as the cashout credit. No sportsbook code path may post a
+  financial effect first and check RG afterward, or in a separate
+  transaction/best-effort follow-up call.
+- **No override parameter, ever.** `rg.EligibilityParams` carries no
+  "skip," "force," or "bypass" field, and this section does not ask for
+  one to be added. A sportsbook operational need (e.g. a support agent
+  manually completing a stuck settlement) is never satisfied by a runtime
+  flag that skips this check — if a genuine administrative override is
+  ever needed, it must be its own separately-audited, four-eyes-gated
+  administrative action (per CLAUDE.md's own "manual balance adjustments
+  require a reason code and four-eyes approval above a configurable
+  threshold"), never a parameter on the eligibility call itself. This
+  mirrors the standing pattern already established elsewhere in this
+  codebase for exactly this class of risk — ADR 0036's RLS policies for
+  the retail channel are designed to **fail closed** when their scoping
+  GUC is unset, specifically so a bypass requires a code change (a new,
+  deliberately-written code path) and can never arise from a runtime
+  misconfiguration or an unset value. The same property holds here by
+  construction: there is no configuration value, feature flag, or unset
+  parameter that causes `EvaluateEligibility` to be skipped — the only way
+  a sportsbook code path stops calling it is to be written that way,
+  which is exactly the kind of change this ADR's own "Consequences"
+  section (below) puts in scope for `identity-compliance`/architect review.
+
+### 11. Self-exclusion mid-lifecycle for an OPEN, unsettled sportsbook bet
+
+This is the genuinely new case sportsbook introduces. Bonus/Gamification's
+existing answer (§2: "prospective, not retroactive... already-committed
+effects stand") was reasoned for events that resolve in milliseconds to,
+at most, the life of one launch session. A sportsbook bet can remain open
+for days or months (doc 09's own framing), so "what happens if self-
+exclusion commits while a bet is open" is a real, extended window, not a
+race-condition edge case — it deserves its own reasoning, not a one-line
+extension of §2 by analogy.
+
+**Options considered:**
+
+- **(a) The bet settles normally when the event concludes, regardless of
+  the self-exclusion having commenced in the interim.** Funds already
+  staked on a legally-placed wager are not returned mid-flight; the bet
+  runs its course exactly as it would have absent the self-exclusion, and
+  §9's own conclusion (settlement is RG-exempt) already produces this
+  outcome with zero new logic.
+- **(b) The bet is voided/refunded early because of the later
+  self-exclusion.** Considered and rejected as a default: voiding a
+  bet that was legitimately placed and correctly gated at the time changes
+  the sportsbook's own priced exposure and liability after the fact (the
+  bet was accepted, and — in an external-provider mode — very likely
+  already hedged/laid off by that provider, against the ORIGINAL odds and
+  outcome distribution; unwinding it later is not merely a wallet
+  operation, it is re-opening a trading/risk position that was already
+  closed). It also raises its own fairness question the other direction:
+  returning a stake after the event has partially or fully played out (or
+  after odds have since moved) is not a neutral no-op the way voiding an
+  unlaunched casino round is.
+- **(c) Something else** (e.g., a jurisdiction-specific carve-out, a
+  discretionary compliance-team void on a case-by-case basis) — not ruled
+  out as a POSSIBILITY, but not something this ADR can specify generically,
+  since by construction it would be jurisdiction- or case-specific, not a
+  platform-wide default.
+
+**Recommended default: (a).** This is the closest available extension of
+ADR 0034's own already-established principle — "prospective, not
+retroactive... already-committed effects stand" — applied to a
+already-committed effect (the bet) whose window before its own effects
+fully resolve happens to be long, not to a fundamentally different
+principle. It is also the general gambling-industry norm for an
+already-accepted wager, and it composes cleanly with §9's own conclusions
+with no additional mechanism: settlement is RG-exempt (§9), and the ONLY
+alternative route to early resolution — cashout — is already denied fresh
+by RG the moment self-exclusion is active (§9), so a self-excluded player
+cannot accelerate or alter the bet's outcome after the fact; they can only
+wait for the same natural settlement any other bettor would.
+
+**This is flagged explicitly as needing human/compliance confirmation,
+not silently decided by this ADR as a closed question.** Unlike Bonus's
+"prospective, not retroactive" principle — which was a fairly direct
+carry-over of an existing, already-accepted casino precedent — this
+specific case (an open wager spanning a genuinely long window, across
+potentially many jurisdictions with different regulatory expectations
+about what a self-excluding player's open positions must do) is exactly
+the shape of question CLAUDE.md's "When to stop and ask" section names:
+"jurisdiction selection," RG-adjacent legal interpretation, and decisions
+this specialist is not positioned to make unilaterally on the platform's
+behalf. Some jurisdictions may have an explicit regulatory expectation
+(e.g. a specific self-exclusion regime that requires open wagers to be
+voided and stakes returned, or conversely one that explicitly permits (a))
+that this ADR has no visibility into and must not assume either way. **(a)
+is `identity-compliance`'s recommended engineering default, not a claim
+that it is the compliant answer in every jurisdiction this platform will
+ever operate in** — `sportsbook`/product/legal-compliance must confirm it
+(and, per jurisdiction, whether option (c)'s carve-out is required) before
+this ships as a real rule, exactly the same posture ADR 0034 §7/§8 already
+takes toward its own two flagged, unresolved questions.
+
+### 12. KYC boundary — no new requirement introduced by sportsbook
+
+Confirmed explicitly, not silently assumed: sportsbook introduces **no**
+new KYC requirement, threshold, or trigger beyond what ADR 0028 and the
+platform's existing jurisdiction-configured model already establish.
+KYC thresholds/triggers (cumulative deposit thresholds, first withdrawal,
+a large-win payout threshold, etc.) remain a **jurisdiction-configured,
+vendor-agnostic concern**, read the same way §4/§6 above already establish
+for Bonus (a read into `internal/kyc`'s existing verification-status
+surface, never a duplicated status concept, never evidence copied into a
+sportsbook-owned table). A sportsbook-specific trigger (e.g. "a large
+sportsbook win payout requires KYC tier ≥ X before the win settlement
+credits a withdrawable balance") is not a new KYC concept — it is the
+identical jurisdiction-configured tier-threshold pattern §6 already
+defines for Bonus activation, applied to a different triggering event, and
+belongs in the platform's existing jurisdiction/threshold configuration
+(and, if it needs to gate a specific step, in `sportsbook`'s own
+settlement/payout logic calling into `internal/kyc`'s read surface — never
+a new gate inside `internal/kyc` itself). `internal/kyc` and `internal/rg`
+remain unchanged and jurisdiction-agnostic exactly as §8 above already
+states for Bonus; nothing in this section revises that.
+
+### 13. External-provider vs. in-house mode — RG enforcement must be identical
+
+Stated as a hard architectural requirement, not a preference: **RG
+enforcement must be byte-for-byte identical regardless of which
+integration mode placed the bet** — widget/iframe (an external provider
+rendering the betting experience against the platform's own wallet, doc
+09's "start here" recommendation) or a future in-house feed-and-API engine.
+The enforcement point is always the platform's own boundary — wherever
+the platform's own wallet/ledger posting for that lifecycle event
+(placement, cashout) actually occurs — never delegated to, inferred from,
+or trusted from an external provider's own systems.
+
+Concretely:
+
+- An external provider's widget may have its own, provider-side
+  responsible-gambling UI (deposit/session limits, its own self-exclusion
+  affordance inside the widget). That UI is the provider's own product
+  surface and may exist for regulatory reasons of the provider's own
+  jurisdiction/licence — it is never treated as a substitute for, input
+  to, or evidence for this platform's own `EvaluateEligibility` decision.
+  The platform does not read, trust, or short-circuit its own check based
+  on any status the widget reports about itself.
+- For a widget/iframe integration specifically, the platform's own
+  `EvaluateEligibility` call runs at the moment the platform's own
+  wallet/ledger posts the effect — i.e., when the platform receives and
+  processes the provider's confirmation callback for the bet (the direct
+  sportsbook analogue of `postBet` receiving and posting a provider
+  callback) — never at the moment the provider's own widget merely
+  displays a bet slip or accepts a click inside its own iframe. That
+  earlier moment produces no platform-side financial effect yet and is not
+  a boundary the platform controls or can atomically gate; the platform's
+  callback-handling code is the first point it truly owns, so that is
+  where the check belongs.
+- For an in-house feed-and-API mode, the same rule applies identically —
+  RG runs at the platform's own placement/cashout posting code, with no
+  behavioral difference from the external-provider mode's check. This ADR
+  does not carve out a lighter-weight or differently-timed check for
+  either mode; the whole point of "the platform's own boundary" is that it
+  does not move depending on who rendered the bet slip.
+- This is the same discipline CLAUDE.md's "Provider abstraction" section
+  already states platform-wide ("provider specifics never leak into core
+  domain logic"; "the vendor supplies the API; the platform still owns the
+  adapter, idempotency/retry semantics... the state machine") and the same
+  reason an external provider integration is exactly the kind of boundary
+  where a bypass could otherwise creep in — a provider's own widget
+  offering its own RG controls is the most likely place a future
+  implementer could be tempted to reason "the provider already checks
+  this, so the platform's own check is redundant here." This section
+  makes explicit that it is not: the platform's own `EvaluateEligibility`
+  call is never optional, never provider-delegated, and never contingent
+  on what the provider's own widget does on its own side, regardless of
+  integration mode.
+
+### Consequences (Sportsbook addendum)
+
+- `internal/rg` and `internal/kyc` remain unchanged by this section, as
+  they were by §1-§8 above — this is a consumption contract for a second
+  domain, not a redesign.
+- `sportsbook`'s implementation must, at minimum: call
+  `rg.EvaluateEligibility` fresh, in-transaction, before posting the
+  `player_locked` stake at placement (and at acceptance, if and where its
+  own rewritten doc 09 defines a genuinely distinct acceptance step — §9)
+  and before crediting a cashout amount; must NOT call it at settlement
+  (WIN/LOSS/void/partial-settlement/re-settlement alike); and must resolve
+  `JurisdictionCode`/`LicensingMode` the same server-side way §8 above
+  already requires for Bonus, never inventing a sportsbook-local
+  resolution path.
+- One question in this section is explicitly flagged as needing human/
+  compliance confirmation before it is implemented, not resolved here:
+  whether an open, unsettled sportsbook bet should settle normally
+  regardless of a self-exclusion that commenced while it was open (this
+  section's recommended default, §11), or whether a specific jurisdiction
+  requires voiding/refunding it instead — a jurisdiction-dependent
+  regulatory question, not a purely technical one.
+- The bet-acceptance question in §9 (whether it is ever a real, distinct
+  lifecycle step) is left for `sportsbook`'s own rewritten doc 09 to
+  settle as a domain-model fact; this section states only the rule that
+  applies once that fact is known, not the fact itself.
+
+### Cross-references (Sportsbook addendum)
+
+- `docs/architecture/09-sportsbook-architecture.md` — Stage-0 sportsbook
+  domain shape (open-bet-as-long-lived-liability; placement/settlement/
+  void/partial-settlement/cashout as distinct ledger events); being
+  rewritten in parallel this stage by `sportsbook`, whose rewrite this
+  section's §9 acceptance-step question must be reconciled against.
+- `internal/rg/rg.go` — `EvaluateEligibility`, `lockPerson`, and the
+  `clock_timestamp()` vs. `now()` fix (Stage 4G-FINAL), unchanged and
+  reused verbatim by this section, not re-implemented for sportsbook.
+- `internal/casino/orchestrator.go` — `postBet` (pre-posting RG gate,
+  mandatory template for sportsbook placement/cashout) and `postWin`
+  (RG-exempt settlement precedent, mandatory template for sportsbook
+  settlement), both cited verbatim in §9 above.
+- `docs/decisions/0036-retail-hierarchy-rbac-and-audit.md` — fail-closed
+  discipline (a bypass requires a code change, never a runtime
+  misconfiguration), cited in §10 as the parallel precedent for "no
+  override parameter."
+- `docs/decisions/0028-kyc-provider-abstraction-and-verification-model.md`
+  — KYC verification state machine and jurisdiction-configured trigger
+  model, confirmed unaffected by sportsbook in §12.
+- `docs/decisions/0031-risk-and-limits-engine.md` — RG/Risk composition
+  order and `JurisdictionCode`/`LicensingMode` contract, which §9's
+  Consequences bullet requires `sportsbook` to reuse rather than
+  reinvent.
