@@ -7,6 +7,10 @@ recommended and deferred, and closing that section's flagged **P1**: "the
 asset-creation/activation authorization boundary is undefined" (§26.8).
 This ADR designs; it does not build. No migration, admin API, provider
 adapter, or FX implementation exists as a result of this document.
+**Extended at Stage 4H-B0-R5** (`architect`) by B.7 (rate-plausibility
+contract) and C.5 (administrative API surface), closing that stage's P1-1
+and P1-2; both additions are architecture-only, like everything else in
+this document.
 
 This ADR **does not**:
 - expand the Bonus MVP (Stage 4H-B1's scope, gate, and rounding decision
@@ -554,6 +558,160 @@ best-effort — the Conversion Service returns a distinguishable error
 distinguishable sentinel outcomes rather than a generic failure) and no
 `ConversionOperation` is produced.
 
+### B.7 Rate plausibility — resolving the Stage 4H-B0-R4 deferred item (Stage 4H-B0-R5, `architect`)
+
+B.6's eight conditions (unchanged, referenced here, not restated) are
+exhaustive for **structural** fail-closed behavior. The Wave-2 correction
+appended to B.6 named the remaining gap precisely: none of the eight
+validate a well-formed rate's **economic plausibility**, and named a
+rate-deviation-bound check as a required implementation-time control, not
+resolved by that ADR. This section resolves it, at the architecture level,
+without touching B.6's text or numbering.
+
+**B.7.1 — Classifying every named failure mode.** The ten failure modes
+this stage's directive names are classified below into **A — universal
+financial validity checks** (apply to every conversion, every pair,
+unconditionally) and **B — configurable market-specific plausibility
+checks** (need per-asset-pair or platform-default configuration to
+evaluate). This is not a re-derivation of B.6 — eight of the ten are
+already-resolved structural checks, restated here only so the two-kind
+split is explicit and so the two genuinely new checks are visibly the only
+additions.
+
+| Failure mode | Kind | Resolution |
+|---|---|---|
+| Malformed rate (missing field, non-`NUMERIC` value) | **A** | B.6 item 3 — already resolved, unchanged. |
+| Zero rate (where not economically meaningful) | **A** | B.6 item 3 — already resolved, unchanged. |
+| Negative rate | **A** | B.6 item 3 — already resolved, unchanged. |
+| Missing timestamp (`as_of` absent) | **A** | B.6 item 3 ("missing a required field"). A `Rate` with no `as_of` cannot even be evaluated for staleness (item 2), so this is refused before staleness is checked — the two checks compose, neither substitutes for the other. |
+| Missing provider reference (`provider_reference` absent) | **A, with one precision — resolved here** | B.2 already states `provider_reference` is populated "if [the provider] issues one," so bare absence is not automatically a failure. **Resolution**: an `FXRateProvider` binding declares, as a one-time capability fact (not a per-pair configuration), whether it issues `provider_reference` values at all. If it declares that it does and a quote omits one, that quote is malformed under B.6 item 3 (fail closed). If it declares that it does not, absence is expected. This stays category **A** — it depends on a fixed per-provider-binding fact, not a market judgment — so it does not become a category-B tolerance. |
+| Future timestamp (`as_of` after `now()`) | **A** | B.6 item 3 — already resolved, unchanged. |
+| Stale rate | **A**, universal rule / configurable threshold | B.6 item 2 — already resolved, unchanged. The requirement to fail closed on staleness (including "no configured policy means stale") is universal; only the numeric `max_age` is per-pair/platform-default data. |
+| Invalid/insufficient precision | **A**, universal rule / Registry-derived bound | B.6 item 7 — already resolved, unchanged. The bound is the destination asset's own `decimal_exponent` (a Registry fact, Part A), not a business/risk judgment, so it is not category B. |
+| Rate source unavailable | **A** | B.6 item 6 — already resolved, unchanged. |
+| **Implausible magnitude** (well-formed, fresh, authorized, from a healthy source, but wrong by an arbitrary or subtly exploitable factor) | **B — new** | Resolved in B.7.2. |
+| **Provider disagreement** (two configured, healthy providers for the same pair return meaningfully different current rates) | **B — new** | Resolved in B.7.3, as new fail-closed condition 9. |
+
+**B.7.2 — Magnitude plausibility (category B).** For a given
+`(source_asset, destination_asset)` pair, the Conversion Service evaluates
+the selected provider's `GetCurrentRate` result against that **same
+provider's own** `GetHistoricalRate` for a recent, configured lookback
+window (the window length is configurable per pair or platform-default —
+this ADR does not fix it, the same way B.6 item 2 does not fix `max_age`).
+If the proportional deviation between the current rate and that historical
+baseline exceeds a configured **maximum deviation bound** (per-pair, or a
+platform default when no pair-specific bound is configured), the rate is
+implausible and the conversion fails closed.
+
+- **Fail-closed default for absent configuration**, restated a third time
+  for consistency (B.6 item 2, C.1, now here): if no deviation bound is
+  configured for a pair and no platform default exists, the check cannot
+  be evaluated, and an unevaluable check fails closed — absence of a bound
+  is never read as "no limit."
+- If the selected provider does not support `GetHistoricalRate` for this
+  pair (B.2 already permits a distinguishable "not supported" response
+  rather than an approximated one), the check cannot run for that
+  provider. This is **not** "check passed" — a provider that cannot supply
+  its own historical baseline cannot have its current quote's plausibility
+  verified, and the conversion fails closed on the same "absence is never
+  read as permission" principle.
+- This check is per-provider and single-source: it asks only "does this
+  provider's own current rate look like a plausible continuation of this
+  provider's own recent history," independent of whether any other
+  provider is configured. It therefore runs even when only one provider is
+  configured for a pair.
+
+**B.7.3 — Provider disagreement (category B) — new fail-closed condition
+9.** This resolves the case B.3's existing "ordered priority list, first
+healthy wins" design does not address: a second, lower-priority,
+independently configured, healthy provider bound to the same pair returns
+a **meaningfully different** rate from the priority provider's, at the
+same evaluation time.
+
+**Decision: priority order alone is not sufficient here. Material
+cross-provider disagreement is itself a new fail-closed trigger —
+condition 9 — not a tolerated, silently-resolved-by-priority outcome.**
+
+Rationale: B.3's priority list answers a *selection* question ("which one
+rate do we use") on the assumption that a lower-priority provider exists
+as a fallback for *unavailability*. It was never designed to, and does
+not, catch the case where both providers are reachable, healthy, and each
+independently passes B.7.2's own magnitude check against its *own*
+history — and still disagree with each other by more than noise. That
+combination is exactly what a compromised, mis-configured, or
+malfunctioning provider produces when its own historical baseline has
+*also* drifted (so B.7.2 alone cannot catch it) — and it is the same
+posture CLAUDE.md's ledger-reconciliation rule already takes elsewhere
+("any non-zero drift is a P1 incident"): an unexplained mismatch between
+two things that should agree is never silently accepted. Extending that
+posture to FX rates is a direct application of an existing platform
+principle, not a new one invented here.
+
+**Mechanism, using `GetHistoricalRate` (B.2) as the mechanism, per the
+task's own naming of it:**
+
+1. This check runs only when **two or more configured providers for the
+   same pair are simultaneously healthy**, and each has **already,
+   independently, passed B.7.2** (its own current-vs-its-own-history
+   check). If only one provider is healthy/available, there is nothing to
+   disagree with — condition 9 does not apply, and B.3's selection is
+   unmodified.
+2. Requiring each side to pass its own historical-deviation check first
+   matters: it prevents one known-bad provider from being used to falsely
+   "prove" a good provider wrong, or vice versa — disagreement is only
+   evaluated between two providers that each already look internally
+   plausible on their own.
+3. The Conversion Service computes the spread between the priority
+   provider's current rate and the next-priority healthy provider's
+   current rate. If that spread exceeds a configured **maximum acceptable
+   spread** (per-pair or platform default; same "absent configuration
+   fails closed" rule as B.7.2), the conversion fails closed under
+   condition 9.
+4. On condition 9, the Conversion Service does **not** fall through to a
+   third provider or otherwise route around the disagreement — a
+   disagreement between two independently-plausible sources is evidence
+   about the *pair's rate environment*, not evidence a third source would
+   be more trustworthy. It is a hard refusal (the same distinguishable-
+   error contract as every B.6 condition), and it additionally raises an
+   operational alert to a human, mirroring the reconciliation-drift P1
+   posture — this is new: none of B.6's original eight require a human
+   alert, only a refusal. Condition 9 requires both, because a
+   disagreement between two independently-plausible, healthy, configured
+   sources is worth a human's attention even after the conversion has
+   already been correctly refused.
+
+**Condition 9, stated in B.6's own list format, for direct incorporation
+by an implementing stage** (additive — B.6's exhaustiveness statement is
+amended to admit exactly this one new condition, per this ADR's own
+governance rule that "an implementing stage may add platform-specific
+checks but may not narrow this list"):
+
+> 9. **Configured-provider material disagreement** — two or more
+>    configured `FXRateProvider` bindings for the same pair are
+>    simultaneously healthy, each independently passes B.7.2's magnitude-
+>    plausibility check, and their current rates diverge beyond a
+>    configured maximum-acceptable-spread bound (or no bound is
+>    configured, which fails closed identically). The conversion is
+>    refused and an operational alert is raised; the Conversion Service
+>    does not proceed using the priority provider's rate regardless of its
+>    individual plausibility.
+
+**What is unchanged**: when only one provider is configured or healthy for
+a pair, B.3's priority-order-first-healthy-wins design is unmodified and
+sufficient — condition 9 has no second source to compare against and does
+not fire. B.7 adds two new checks to an already fail-closed system; it
+narrows nothing B.6 already permits and loosens nothing.
+
+**Status, restated**: B.7, like the rest of this ADR, is **NOT
+IMPLEMENTED** — no deviation-bound value, no spread-tolerance value, no
+alerting mechanism, and no provider capability declaration for "issues
+quote references" exists in code. This section fixes the architecture-
+level contract (what must be checked, against what, and what happens on
+failure); the specific numeric bounds and the alerting channel are
+implementation-stage decisions, the same way B.6 item 2 leaves `max_age`'s
+value to implementation. No real FX vendor is named or implied anywhere in
+this section.
+
 ---
 
 ## Part C — Asset Authorization Boundary (resolves doc 27 §26.8's flagged P1)
@@ -698,6 +856,168 @@ service's own tenant-scoped reads still go through the same
 connection-scoped tenant context every other tenant-scoped query uses;
 centralizing the *decision logic* in one service does not centralize or
 bypass the *data access* pattern each table already follows.
+
+### C.5 Administrative API surface — resolving the Stage 4H-B0-R4 deferred item (Stage 4H-B0-R5, `architect`)
+
+Doc 27 §26.8's P1 is closed above (C.1-C.4) at the *model* level: who may
+mutate which layer, and that every mutation is audited. What was still
+missing, per this stage's own disclosure, is the concrete **write-side
+operation catalogue** — not handler code, but which distinct
+administrative operations exist, at what layer, callable by whom, and
+under what control. This section defines that catalogue. No API,
+handler, or migration is built here.
+
+**C.5.1 — Canonical administrative operations.**
+
+| # | Operation | Layer(s) touched | Caller (per C.1's two-tier split) | Audit (C.3, inherited unchanged) | Four-eyes / dual control |
+|---|---|---|---|---|---|
+| 1 | **Create asset** | 1 (existence) | Platform-admin only | Yes — before = NULL, after = full new row | **Required** (C.5.3) |
+| 2 | **Update metadata** (mutable fields only — C.5.4) | 1 | Platform-admin only | Yes | Not required |
+| 3 | **Activate** (`active` → true) | 2 | Platform-admin only | Yes | **Required** |
+| 4 | **Suspend/deactivate** (`active` → false) | 2 | Platform-admin only | Yes | Not required — deliberately asymmetric, see C.5.3 |
+| 5 | **Configure platform authorization** (`platform_authorized` flip — naming note below) | 3 | Platform-admin only | Yes | **Required** when granting (→ true); not required when revoking (→ false) |
+| 6 | **Authorize tenant** | 4 | Tenant-scoped (tenant-configuration permission) | Yes | Not required |
+| 7 | **Authorize brand** | 5 | Tenant-scoped | Yes | Not required |
+| 8 | **Authorize jurisdiction** | 6 | Tenant-scoped | Yes | Not required |
+| 9 | **Configure operation eligibility** | 7 | **Split**: platform-wide default row (`tenant_id IS NULL`, A.6) is platform-admin only; tenant-scoped override row is tenant-scoped | Yes | Platform-wide-default row, granting: **required**. Tenant-scoped override, and any revoking direction: not required |
+
+**Naming note, stated because this is exactly the kind of collapse this
+ADR exists to prevent**: "configure capabilities" in this task's operation
+list refers to layer 3's `platform_authorized` toggle (row 5) — the
+platform-wide "cleared to be tenant-facing at all" gate (A.4) — and
+**must not** be confused with `ProviderCapability` (ADR 0022), a different
+concept answering a different question (a *payment provider's* capability,
+not the asset's own platform clearance). No operation in this table
+mutates `ProviderCapability`; that table's own administrative surface is
+ADR 0022's, unchanged and out of scope here.
+
+**C.5.2 — Audit, restated once, not per-row.** Every operation above
+inherits C.3's mandatory audit record (actor, tenant — NULL for a
+platform-scoped mutation — entity, before/after state, IP, reason code)
+unmodified. This is not a new audit design; the table's "Audit" column
+exists only to confirm no operation is exempt, per C.3's own "no
+exception" wording.
+
+**C.5.3 — Four-eyes / dual control: an explicit decision, not a silent
+default either way.**
+
+CLAUDE.md requires four-eyes approval for manual balance adjustments above
+a configurable threshold. Asset registry mutations are not balance
+adjustments, but C.1's own reasoning already establishes that layers 1-3
+carry comparable blast radius: an asset row (and its `active`/
+`platform_authorized` status) is referenced by *every* tenant's ledger,
+with no tenant-level checkpoint downstream capable of catching a
+platform-level mistake before it takes effect everywhere at once. This ADR
+decides, explicitly:
+
+- **Dual control is required** for any operation that either (a) brings a
+  **new, irreversible identity fact** into existence (create asset), or
+  (b) flips a **platform-wide gate from off/absent to on** (activate;
+  grant platform authorization; grant a platform-wide-default
+  operation-eligibility row). Each of these is the *only* checkpoint
+  standing between "not yet live anywhere" and "live for every tenant,
+  immediately," per A.3's evaluation chain — there is no narrower,
+  tenant-scoped gate downstream that could still catch a mistake, because
+  layers 4-7 can only ever narrow what 1-3 already opened (A.5/A.6). A
+  single compromised or mistaken platform-admin credential must not be
+  sufficient, by itself, to make a wrong asset (wrong exponent, wrong
+  type) or a not-yet-ready asset live platform-wide.
+- **Dual control is deliberately NOT required for the reverse direction**
+  — suspend/deactivate, revoke platform authorization, revoke a
+  platform-wide eligibility row — at any layer. Turning something **off**
+  is the fail-closed direction, and CLAUDE.md's own fail-closed posture
+  treats "fail closed fast" as the safe default to protect, not slow
+  down. Requiring a second approver on an emergency kill-switch (e.g.
+  deactivating an asset mid-custody-incident, C.1's own example) would
+  work directly against the incident-response need that switch exists
+  for. This asymmetry — dual control going live, single-actor going dark
+  — is a deliberate design choice, not an oversight.
+- **Dual control is NOT required for layers 4-7's tenant-scoped
+  mutations** (authorize tenant/brand/jurisdiction, tenant-scoped
+  eligibility overrides), including their granting direction, because the
+  narrow-only-never-widen rule (A.5/A.6) structurally bounds their blast
+  radius to at most one tenant, and to at most what platform layers 1-3
+  have already, separately, dual-control-approved. A compromised
+  tenant-scoped actor can turn on for their tenant only what the platform
+  already turned on for everyone; it cannot expose an asset platform-wide.
+- This is flagged, per governance, for `security`'s explicit sign-off in
+  the next review wave (per C.1's own attribution of the authorization
+  boundary to `security`, and CLAUDE.md's "security-sensitive
+  functionality requires explicit review by the `security` specialist"
+  rule) — it is recorded here as a considered decision with stated
+  reasoning, not left silently either way, but it is not self-certified.
+
+**C.5.4 — Immutable vs. mutable fields: a hard rule, not a convention.**
+
+**Immutable once the row is created — no operation in C.5.1's catalogue
+may ever change these, at any layer, for any reason**:
+- `code` (the asset's identity/primary key — every ledger and wallet
+  reference is keyed on this)
+- `decimal_exponent` (changing this after any ledger entry references the
+  asset would silently reinterpret every existing balance's minor-unit
+  meaning — CLAUDE.md's ledger-integrity rules make this unrecoverable,
+  not merely undesirable)
+- `asset_type` (fiat / crypto / internal-custom classification — changing
+  it could silently re-route eligibility/authorization logic keyed on
+  type without any new authorization decision having actually been made)
+- `network` (for a network-specific crypto variant — changing it after any
+  deposit-address or custody binding exists would misattribute funds to
+  the wrong chain)
+
+**Mutable, via the operations above**:
+- `display_name`, `aliases`/`symbols` (op 2)
+- `active` (ops 3/4)
+- `platform_authorized` (op 5)
+- Layer 4-6 tenant/brand/jurisdiction authorization rows (ops 6-8)
+- Layer 7 `AssetOperationEligibility` rows, both scopes (op 9)
+
+This is a **hard rule enforced by the administrative API's own operation
+catalogue**, not a documentation convention an implementer could route
+around: there is, by design, **no "update asset identity" operation**
+anywhere in C.5.1 — `code`, `decimal_exponent`, `asset_type`, and `network`
+are set exactly once, at creation (op 1), and never again by any
+subsequent operation this ADR defines. An implementing stage that adds a
+way to change any of these four fields after creation is not implementing
+this ADR; it is contradicting it.
+
+**C.5.5 — Minimum field set for asset creation, and what creation must
+never imply.**
+
+`Create asset` (op 1) requires, at minimum:
+- `code` (identity, immutable)
+- `asset_type` (immutable)
+- `decimal_exponent` (immutable, 0-18 per the existing `CHECK` constraint,
+  A.4)
+- `network` (immutable; required when `asset_type` is a network-specific
+  crypto variant, null/not-applicable otherwise)
+- `display_name` (mutable display metadata)
+- `aliases`/`symbols` (optional, mutable)
+
+And **forces**, regardless of any value the caller supplies or omits:
+- `active = false`
+- `platform_authorized = false`
+- **no** `AssetOperationEligibility` row is created for any operation, at
+  any scope — the asset starts with **zero** eligibility rows, which
+  C.1's fail-closed-default-for-absent-configuration rule already reads
+  as "ineligible for everything," correctly, with no additional code
+  needed to enforce it
+
+**Stated explicitly and emphatically, because it is the entire point of
+this section**: **asset creation must never automatically authorize any
+financial operation.** Creating the layer-1 row must never imply
+activation (layer 2), platform authorization (layer 3), tenant/brand/
+jurisdiction authorization (layers 4-6), or any operation eligibility
+(layer 7). Each of those is a **separate, deliberate administrative act**,
+from C.5.1's catalogue, with its own audit record and — where C.5.3
+requires it — its own dual-control approval. This is A.1's "presence in
+the registry never implies depositable/withdrawable/etc." principle
+(read-side, Part A), restated here on the **write** side: an API that let
+`Create asset` accept an `active: true` or `platform_authorized: true`
+parameter, or that auto-provisioned any eligibility row as a creation side
+effect, would silently reopen exactly the gap this whole ADR exists to
+close. No operation in C.5.1 accepts such a parameter; each downstream
+layer's grant is reachable only through its own named operation (3, 5,
+6-9), never as a flag on operation 1.
 
 ---
 
