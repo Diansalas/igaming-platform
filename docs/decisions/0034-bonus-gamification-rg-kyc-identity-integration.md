@@ -1427,11 +1427,27 @@ transaction type in a bet's lifecycle (lock, partial settlement, cashout,
 void, rollback) regardless of timing, while `reverses_transaction_id` is
 only ever populated on the post-settlement reversal-chain shape.
 Concretely: for each `player_bonus`-debiting lock transaction, net against
-the sum of later `sportsbook_void`/`sportsbook_rollback`/`sportsbook_
-partial_settlement`/`sportsbook_cashout` transactions sharing its
-`correlation_id` that credit the released bonus-origin amount back to
-`player_bonus` — not merely those that also happen to carry `reverses_
-transaction_id`.
+the sum of later `sportsbook_void` transactions, and `sportsbook_rollback`
+transactions that reverse the lock itself (never a rollback that reverses
+a *settlement*), sharing its `correlation_id` and crediting the released
+bonus-origin amount back to `player_bonus` — not merely those that also
+happen to carry `reverses_transaction_id`. **`sportsbook_void` and a
+lock-reversing `sportsbook_rollback` are the only transaction types named
+here because they are the only ones that unconditionally nullify: they
+mean the stake was never genuinely at risk.** `sportsbook_partial_
+settlement` and `sportsbook_cashout` are explicitly **not** unconditional
+nullifiers and are not part of this list — a partial settlement is a
+market fact (risk-preserving: the stake was genuinely risked, and its
+payout credit to `player_bonus` must never net against the lock), and a
+cashout's treatment is a live, unresolved policy question, not a
+mechanical one (`ledger-accounting-model.md` §6.5.10 FD-1 — as of this
+writing that document's §6.6.5 predicate fails closed on
+`sportsbook_cashout` rather than treating it as nullifying). Whether and
+how partial-settlement/cashout transactions ever net against a lock is
+governed entirely by `ledger-accounting-model.md` §6.6.5's exhaustive
+per-type classification table, not by this list — a future implementer
+MUST consult that table rather than infer nullification from this
+section's example.
 
 If `ledger-finance`'s chosen mechanism already keys on `correlation_id`
 (consistent with §6.3.3.1's own precedent, and the natural join key given
