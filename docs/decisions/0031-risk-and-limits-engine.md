@@ -2357,3 +2357,192 @@ first place. §25-§31 are an extension-point specification; the extension
 points stay closed until an authorizing stage opens them with all the
 steps in §12 or §16 executed together in one change.
 
+## Stage 4H-B0-R5: Risk-side cross-reference notes on four other specialists' P1 closures
+
+Status: **documentation only — cross-reference notes, no decision, no
+design, no code, no migration.** Added Stage 4H-B0-R5 by `risk-management`
+during an independent review (this specialist authored and reviewed none of
+the four documents below, per CLAUDE.md's no-self-approval rule). Each note
+below names a Risk-side interaction the cited document does not currently
+name, and points at that document rather than restating or redesigning
+its proposal — every one of the four remains its own owner's to resolve.
+Nothing in §1-§31 above is modified.
+
+### 32. Interaction notes and gaps found against the R4/R5 P1 closures
+
+**(a) `cumulative_amount` netting to zero for any two-player-leg posting
+shape — the one with a fail-OPEN direction.** `Rule.breach()`'s
+cumulative query (`internal/risk/evaluator.go`) sums
+`SUM(CASE WHEN direction='debit' THEN amount ELSE -amount END)` over
+`ledger_entries` filtered by `tenant_id`/`player_account_id`/`asset_code`/
+`transaction_type` — it does **not** join `ledger_accounts` and is
+therefore blind to `account_type`. That is correct for `casino_bet`, whose
+only player-scoped leg is the stake debit (its credit counterparty
+`house_gaming` is wallet-less, so `ledger_entries.player_account_id` is
+NULL on it — migration 0020's trigger). It is **wrong for any transaction
+whose debit and credit are both player-owned accounts**, because
+`player_account_id` is denormalized identically onto both legs and the two
+cancel:
+
+- `sportsbook_bet` (the lock) is `Dr player_cash S · Cr player_locked S`
+  (`financial-transaction-flows.md` Flow 8) — both wallet-scoped. Summed
+  per-player, `S - S = 0`. A `cumulative_amount` rule on `sportsbook_bet`
+  ("no more than X staked per rolling day") would therefore compute **zero
+  usage no matter how much was staked, and never breach** — a fail-OPEN in
+  the one limit kind that most needs to fail closed. This is triggered by
+  following `docs/decisions/0038-sportsbook-accounting-and-ledger-
+  integration.md` §13's wiring instruction (`operationLedgerTransaction
+  Types["sportsbook_bet"] = "sportsbook_bet"`) exactly as written; §13 does
+  not name the leg-shape precondition, and the query's single-player-leg
+  assumption is documented nowhere in this ADR either.
+- The `player_locked` origin split (`docs/architecture/ledger-accounting-
+  model.md` §6.3, PROPOSAL) neither causes nor worsens this: a mixed lock
+  (§6.3.3 case C) is four player-owned legs that still net to zero, so the
+  total is identical before and after the split. **Answering P1-4's own
+  question directly: no Risk read anywhere reads `player_locked` (or any
+  `account_type`) at all, so summing both new account types is trivially
+  equal to the pre-split total and §6.3 introduces no Risk regression.**
+  The defect is in the leg-shape assumption, not the split.
+- Same shape, same consequence, for `withdrawal` Step A
+  (`Dr player_cash · Cr player_withdrawal_hold`, Flow 3) and, with an
+  inverted sign, for any credit-to-player operation (`deposit`,
+  `bonus_grant`, `sportsbook_settlement`): the player-side sum is
+  *negative*, so an amount-shaped cumulative cap can never be reached.
+- **Not currently exploitable**: `operationLedgerTransactionTypes` has
+  exactly one entry (`casino_bet`), so every other operation fails closed
+  with `ErrUnsupportedCumulativeOperation` today (§15b, §18, §31). The gap
+  is latent and materializes at the moment any of those mappings is added.
+  Owned by `risk` (the query and its documented precondition) jointly with
+  `ledger-finance` (which posting shapes exist); to be resolved before, not
+  during, the first `operationLedgerTransactionTypes` widening.
+
+**(b) Idempotency short-circuit must precede `risk.Evaluate`, and ADR 0038
+§14 does not say so.** `internal/casino`'s `postBet` deliberately places
+`findPostedBetTransaction` **before** RG and Risk evaluation, because
+`ledger.Post`'s own idempotency resolution happens too late — a
+redelivered, already-posted bet that reaches `Evaluate` a second time is
+compared with its own already-posted ledger entries plus `req.Amount`,
+which can flip an already-succeeded bet to a cumulative-rule DENY and
+return "declined" for a stake the platform already took (empirically
+reproduced; recorded as a financial-correctness finding in that function's
+own comment and in `financial-transaction-flows.md` §5's retry contract).
+`docs/decisions/0038-sportsbook-accounting-and-ledger-integration.md` §14/
+§14.2-§14.3 resolve retry *detection* via the `SAVEPOINT` path inside the
+ledger poster and §13 specifies "the identical positional contract" only as
+RG-then-Risk inside the posting transaction — neither states the
+pre-idempotency ordering. Fails closed (a false decline), so not a
+fail-open, but it produces the same provider-voids-a-posted-round outcome
+casino had to fix. Flagged for `ledger-finance`/`sportsbook` to state
+explicitly at §14's level, mirroring casino's precedent.
+
+**(c) P1-3's literal question, answered: Risk maintains no exposure
+counter.** `internal/risk` persists no usage state of any kind —
+`risk_rules` holds configuration only, and cumulative usage is a derived
+read over `ledger_entries` inside the guarded transaction (§6, and
+CLAUDE.md's ledger rule). A duplicate/retried bet-placement event that the
+ledger correctly rejects posts no entries and therefore cannot
+double-count anything in Risk; ADR 0038 §6's "derived read, no maintained
+counter" decision for sportsbook exposure is the identical posture and
+consistent with this ADR. **No gap** on that axis; (a) and (b) above are
+the two real interactions, and neither is a duplicate-counter problem.
+
+**(d) An `asset_code IS NULL` amount rule is silently re-denominated when a
+new asset is authorized for a tenant.** `Rule.matches()` treats an empty
+`AssetCode` as "applies regardless of asset", while `threshold` is minor
+units interpreted against *the request's* asset exponent (§18 states the
+denomination rule but only for the points case). So a platform- or
+tenant-scoped `max_amount` rule authored when a tenant offered one
+2-exponent fiat asset keeps its numeric threshold when
+`docs/decisions/0037-asset-currency-registry-and-fx-conversion-
+architecture.md` Part C/§C.5's layer-4/5/6/7 authorization later adds a
+second asset with a different exponent. Concretely: a cap of `10^18` minor
+units authored for an 18-exponent asset is ~1 unit of that asset, but
+becomes ~`10^16` units of a newly authorized 2-exponent asset —
+effectively unlimited, a fail-OPEN; in the opposite direction the same rule
+denies every ordinary amount, a fail-closed outage. **This is a real
+interaction gap**, and it answers P1-2's question affirmatively: ADR 0037's
+asset-authorization operations 6-9 (§C.5.1) should require review of the
+authorizing tenant's existing asset-agnostic `risk_rules` as part of that
+grant, because `risk_rules` has no exponent awareness and no mechanism to
+detect that a wildcard rule now spans two exponents. Whether the control is
+an authorization-time warning, a reviewer checklist item, or a constraint
+is not decided here — it is `architect`/`security`'s call on ADR 0037's
+own surface, with `risk` as the affected owner. A Risk-side mitigation
+(requiring `asset_code` on amount-shaped rules, or exponent-normalizing
+thresholds) would be a change to this ADR's own model and is **not**
+proposed here.
+
+**(e) No `Operation` exists for an asset conversion, so ADR 0037 §B.6
+item 8's hook has no landing point.** ADR 0037 §B.6 item 8 requires the
+Conversion Service to expose a financial-constraint hook and names
+`internal/risk` as its natural home (its Open Question 3 assigns the values
+to `risk`/`ledger-finance`). But FX/Conversion has **no row in §13's
+domain-integration table and no proposed `Operation` value anywhere in
+§16/§26** — it is the only domain with an acknowledged Risk hook and no
+declared Risk integration, which §13 requires of every domain. Practical
+consequence, and the answer to P1-1's second half: **rate plausibility is
+correctly outside Risk** (it is keyed by an asset pair and a provider, with
+no player subject and no `RiskRequest` to gate — exactly §28's test, and
+§28's own conclusion for market-level trading exposure), but a
+*plausible-but-large* conversion (a whale converting a large balance) is a
+per-player, amount-shaped, exposure-affecting decision that **is** Risk's
+by §13's own test and is **not storable today** — migration 0041's
+`operation` CHECK rejects any conversion operation, which is the intended
+fail-closed posture rather than a silent hole, but it means the hook ADR
+0037 requires cannot be satisfied until an `Operation` is proposed through
+§16's six-step model. Naming and proposing it is `risk`'s under §16 and is
+deliberately **not** done in this note (no `Operation` value is coined
+here); recorded so it is not rediscovered when ADR 0037 is implemented.
+
+**(f) Two different `Operation` vocabularies meet at every enforcement
+point, with no defined mapping.** ADR 0037 §C.2's
+`AssetAuthorization.CheckEligibility` takes an `operation` drawn from
+`{deposit, withdrawal, wagering, settlement, conversion, reporting}`, while
+`risk.Operation` is `{casino_launch, casino_bet, deposit, withdrawal,
+sportsbook_bet, bonus_grant}` (+ §16/§26's proposals). `deposit` and
+`withdrawal` are spelled identically in both with different granularity,
+and no document states which asset-eligibility operation a given
+`risk.Operation` corresponds to (`casino_bet`/`sportsbook_bet` →
+`wagering`? `bonus_grant` → none?). Every future enforcement point calls
+`rg.EvaluateEligibility`, `AssetAuthorization.CheckEligibility` and
+`risk.Evaluate` in the same transaction, so the mapping is load-bearing at
+exactly those call sites. Flagged for `architect`; §16's "`risk` owns
+`Operation` naming" is not asserted over ADR 0037's separate vocabulary —
+these are two distinct concepts that happen to share a type name, and the
+resolution may well be to rename one rather than to reconcile the values.
+
+**(g) A documentation-level conflict on whether settlement and cashout are
+Risk checkpoints.** §26/§31 above propose `sportsbook_settlement` and
+`sportsbook_cashout` as needed `Operation` values and call them
+"near-term, load-bearing", while ADR 0038 §13's last bullet states
+settlement, void, partial settlement, cashout and rollback are "**not**
+additional Risk checkpoints" because they are provider-driven facts about
+an already-accepted exposure. Both positions are internally reasoned and
+the disagreement may be only about the external-provider mode ADR 0038 §13
+describes, but as written the two documents give an implementer opposite
+instructions. Not resolved here — escalated to the Orchestrator per
+`docs/governance/integration-protocol.md`, as it spans `risk` and
+`ledger-finance`.
+
+**(h) `OpenBetSelfExclusionPolicy` — no Risk change required.**
+`docs/decisions/0034-bonus-gamification-rg-kyc-identity-integration.md`
+§14 stays entirely inside RG's domain, consistent with §1/§22/§29: it reads
+and reacts to a `player_restrictions`-driven self-exclusion event, adds no
+`LimitKind`, no `Operation`, no scope dimension, and no `risk_rules` read
+or write. The `VOID_ON_SELF_EXCLUSION` path needs **no notification to
+Risk that in-flight exposure was released**, because Risk holds no
+in-flight exposure state to invalidate (see (c)) and reads no balances at
+all — the void's own ledger entries are what any future cumulative or
+`exposure` rule would read, at the instant it reads them. One consequence
+worth naming rather than a gap: because §14.7 keeps
+`transaction_type = 'sportsbook_void'` unchanged, a compliance-initiated
+void nets against `sportsbook_bet`'s cumulative stake usage identically to
+a market-initiated void under ADR 0038 §13's netting rule — i.e. the
+voided stake stops consuming the player's rolling-window stake capacity.
+That is the correct and intended reading of "the stake was never at risk"
+for a returned stake, and it is not exploitable (a self-excluded player is
+denied every subsequent placement by `rg.EvaluateEligibility` first,
+§1/§29); recorded only so it is a deliberate consequence rather than a
+discovered one. The two items §14.7 itself flags for `ledger-finance` (the
+"always provider/event-initiated" framing, and a platform-initiated void's
+idempotency key) are outside Risk's scope and are not Risk-blocking.
