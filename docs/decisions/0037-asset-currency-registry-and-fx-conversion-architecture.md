@@ -1085,6 +1085,16 @@ layer's grant is reachable only through its own named operation (3, 5,
 4. **Brand-layer default table shape** (A.5, layer 5) — this ADR fixes
    the narrow-only-from-tenant semantics; the concrete table/column
    design is implementation-stage work.
+5. **Magnitude/spread bound values** (B.7.2/B.7.3, added Stage 4H-B0-R5)
+   — this ADR fixes that a deviation bound and a cross-provider spread
+   bound must exist and must fail closed when unconfigured; the actual
+   numeric defaults and per-pair overrides are `ledger-finance`/`risk`
+   implementation-stage work, mirroring how B.6 item 8's financial-
+   constraint hook is likewise left unvalued here.
+6. **Four-eyes gating decision** (C.5.3, added Stage 4H-B0-R5) — this ADR
+   decides which administrative operations require dual control and
+   states its reasoning; it is explicitly flagged for `security`'s
+   independent sign-off, not self-certified.
 
 These are handed to `ledger-finance` (financial correctness of Part B),
 `security` (Part C's authorization/audit design), and `qa`

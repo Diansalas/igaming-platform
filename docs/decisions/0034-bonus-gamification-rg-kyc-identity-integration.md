@@ -886,3 +886,439 @@ Concretely:
   order and `JurisdictionCode`/`LicensingMode` contract, which §9's
   Consequences bullet requires `sportsbook` to reuse rather than
   reinvent.
+
+## §14 OpenBetSelfExclusionPolicy — configurable architecture (Stage 4H-B0-R5)
+
+Status: Accepted (architecture-freeze), added by Stage 4H-B0-R5 ("final
+pre-implementation gate — architecture/ADR only"). Owner:
+`identity-compliance`, unchanged. This section does not modify, restate
+for the purpose of changing, or supersede §9-13 above — they stand as
+written, including §11's own reasoning and its recommended default. What
+changed is the directive's framing: §11 reasoned toward a single
+recommended default and flagged it as needing human confirmation. This
+section instead defines the CONFIGURABLE POLICY ARCHITECTURE that lets a
+human/compliance decision be expressed and enforced per jurisdiction/
+tenant/brand — the "how the platform represents and applies whichever
+answer is chosen," not a second attempt at the same answer. Nothing here
+selects (a) or (b) as the shipped default; that remains open, restated
+precisely in §14.9.
+
+This section does not design Sportsbook's domain model (that is
+`sportsbook`'s rewrite of `docs/architecture/09-sportsbook-architecture.md`,
+already landed) and does not redesign the ledger posting shape ADR 0038
+§8.1 already specifies for void — it is reused verbatim. It also does not
+touch ADR 0038's `transaction_type` enum or `internal/rg`/`internal/kyc`
+themselves, consistent with every prior section of this ADR.
+
+### 14.1 The policy's value domain — two values, a third considered and rejected as unnecessary
+
+`OpenBetSelfExclusionPolicy` is a configuration value with exactly two
+members:
+
+```
+OpenBetSelfExclusionPolicy ∈ { SETTLE_NORMALLY, VOID_ON_SELF_EXCLUSION }
+```
+
+- **`SETTLE_NORMALLY`** — §11(a): the bet proceeds to its natural
+  settlement (WIN/LOSS/push/partial-settlement/re-settlement) when the
+  underlying event concludes, exactly as if self-exclusion had not
+  occurred. This is the "zero new mechanism" branch — it is what already
+  happens by construction today, per §9's conclusion that settlement is
+  RG-exempt, so selecting this value requires no new financial code path,
+  only the audit record §14.5 below adds.
+- **`VOID_ON_SELF_EXCLUSION`** — §11(b): the bet is voided immediately
+  upon self-exclusion becoming effective, full stake returned, using the
+  existing void posting shape ADR 0038 §8.1 already defines (`Dr
+  player_locked` / `Cr player_cash`/`player_bonus`, full stake `S`, or the
+  post-settlement reversal-chain variant if settlement has already posted
+  by the time the void is processed) — not redesigned here, only
+  triggered by a new cause (§14.7).
+
+**A third value — "settle normally but withhold the payout pending
+compliance review" — is considered and rejected as a separate policy
+value, not because the underlying operational need is illegitimate, but
+because it does not require its own value in this enum.** That behavior
+is already fully expressible as a COMPOSITION of `SETTLE_NORMALLY` with a
+mechanism this ADR has already established for an unrelated trigger: §6's
+KYC-tier gate on bonus activation, and §12's confirmation that a
+sportsbook payout threshold is "the identical jurisdiction-configured
+tier-threshold pattern §6 already defines... applied to a different
+triggering event" (a large win requiring KYC tier ≥ X before the
+settlement credits a withdrawable balance). A jurisdiction or tenant that
+wants "settle normally, but hold the resulting balance for review before
+it is spendable/withdrawable" gets exactly that by (1) selecting
+`SETTLE_NORMALLY` for this policy, so the ledger settles cleanly and no
+new void/reversal mechanism is invoked, and (2) separately configuring a
+withdrawal-side or KYC/AML-side hold — which is Stage 3D withdrawal
+governance's and/or KYC/AML's own configuration surface, not a value of
+THIS policy. Collapsing the two into one enum member would conflate a
+settlement-shape decision (does the bet resolve as a normal financial
+event) with an access-control decision (can the resulting funds move
+right away) — exactly the kind of two-different-concerns-modeled-as-one
+mistake CLAUDE.md's provider-abstraction and domain-boundary principles
+already warn against elsewhere in this ADR (e.g. §7's careful separation
+of entitlement scope from anti-abuse rule). **If a genuine, additional
+compliance-hold requirement surfaces that composition cannot express, it
+is a new decision for whoever owns withdrawal-gating (`ledger-finance`/
+Stage 3D) to raise, not something this section invents preemptively.**
+
+### 14.2 Policy scope — jurisdiction is the primary axis; tenant/brand may only tighten, never loosen
+
+**Primary scope: `JurisdictionCode`.** Self-exclusion's regulatory
+expectations (per §11's own reasoning: "potentially many jurisdictions
+with different regulatory expectations about what a self-excluding
+player's open positions must do") are the kind of requirement this
+platform already treats as jurisdiction-mandated, not brand-discretionary
+— the same category as the jurisdiction-scoped `HARD_LIMIT`s ADR 0031 §9
+already makes reachable platform-wide, and the same category §8 above
+already assigns to "a jurisdiction requiring KYC tier ≥ X before ANY bonus
+may activate" or "a jurisdiction banning a bonus TYPE outright." A
+jurisdiction's regulator, not an individual tenant's product team, is the
+party positioned to require one answer or the other for that
+jurisdiction's licensed operators.
+
+**Secondary scope: tenant and/or brand, using the same nullable-scope
+pattern `player_restrictions` and §7's anti-abuse rule already
+establish** (`tenant_id`/`brand_id` nullability as the scope dimension,
+never a separate mutable "level" field) — but with a directional
+constraint this policy needs and ADR 0031's limit engine already has a
+proven precedent for: **`§5`'s HARD_LIMIT/CONFIGURABLE_LIMIT precedence,
+where "a breach of ANY [hard limit] denies... never overridden by a more
+specific configurable rule," applied here as "a jurisdiction's configured
+value is a floor a tenant/brand-scoped override may only tighten, never
+loosen."**
+
+Concretely, ordering `VOID_ON_SELF_EXCLUSION` as the stricter/more
+protective value (it removes the bet and the player's exposure to its
+outcome immediately, at the cost of unwinding an already-accepted
+wager — the exact trade-off §11(b) reasoned through) and
+`SETTLE_NORMALLY` as the more permissive/default value (the bet runs its
+ordinary course, the general industry norm §11 already cites):
+
+- A jurisdiction's configured value is a **floor**. If a jurisdiction
+  mandates `VOID_ON_SELF_EXCLUSION`, no tenant or brand licensed under
+  that jurisdiction (or operating there under `own_licence` per ADR 0006/
+  0031 §10's `LicensingMode`) may configure `SETTLE_NORMALLY` for that
+  jurisdiction — exactly the "legal floor... never overridden downward by
+  a more permissive tenant setting" rule this section is asked to mirror.
+- A tenant or brand MAY configure `VOID_ON_SELF_EXCLUSION` even where its
+  jurisdiction's floor is `SETTLE_NORMALLY` (or has no explicit
+  requirement at all) — a brand adopting a stricter, more
+  player-protective posture than its jurisdiction's legal minimum is
+  always permitted, mirroring every other floor/ceiling pattern already
+  established on this platform (a tenant may always be stricter than a
+  jurisdiction's HARD_LIMIT floor by adding its own more restrictive
+  CONFIGURABLE_LIMIT; RG's own restrictions are never something a tenant
+  can loosen). The reverse direction is never permitted.
+- Where no jurisdiction value AND no tenant/brand override is configured,
+  resolution falls back to the platform-wide default — precisely the
+  value §14.9 states remains an open human/compliance decision, not
+  something this section assigns.
+
+This is a genuine, if narrow, generalization of ADR 0031 §5's precedence
+algorithm to a categorical (not numeric) policy value: "most specific
+wins" does not directly apply (there is no meaningful "value" ordering
+analogous to a betting limit's magnitude across most of ADR 0031's
+existing limit kinds), so this section defines the ordering explicitly as
+`VOID_ON_SELF_EXCLUSION` ≥ `SETTLE_NORMALLY` on a single "strictness" axis
+with exactly two points, rather than importing ADR 0031's specificity
+ladder unmodified. **This is the one place this section introduces
+anything beyond direct reuse of an existing mechanism, and it is scoped
+narrowly to this specific two-valued policy — it is not a new
+general-purpose precedence primitive for `internal/risk` or any other
+domain, and does not touch ADR 0031 §5's own algorithm or code.**
+
+### 14.3 Effective time — the policy version in effect when self-exclusion becomes effective governs
+
+The scenario is fixed: the bet is always placed before the self-exclusion
+event; the only thing that can vary in time is which VERSION of this
+platform's configured policy exists at the moment self-exclusion actually
+becomes effective. **The policy version governing a given open bet is
+resolved at, and only at, the instant that specific bet's player's
+self-exclusion becomes effective — not the version in effect when the bet
+was placed, and not the version in effect at any later time (e.g. when
+the event eventually concludes, for `SETTLE_NORMALLY`).** This mirrors
+`internal/rg`'s own `clock_timestamp()` discipline in spirit (§10: read the
+true current state at the moment the triggering instant occurs, never a
+value cached from an earlier point), applied here to a configuration read
+rather than a live eligibility check: the decision this policy answers is
+"what do we do about this open bet NOW that self-exclusion has occurred,"
+not something decided in advance at placement or deferred to settlement
+time. Once resolved, that specific version is the one applied to that
+bet's disposition and is what the audit record (§14.5) captures — it is
+not re-resolved again later even if the platform's configured policy
+changes again before the bet's eventual natural settlement (for
+`SETTLE_NORMALLY`) or before a queued void executes.
+
+### 14.4 Jurisdiction interaction — reuses ADR 0031's contract; is orthogonal to whether self-exclusion itself varies by jurisdiction
+
+The `JurisdictionCode`/`LicensingMode` resolution mechanism this policy's
+jurisdiction scope (§14.2) depends on is not redesigned here — it is ADR
+0031 §9/§10's existing contract, restated by §8 above for Bonus and
+reused verbatim: resolved server-side by the caller, matching a real
+`jurisdictions.code` row, never hardcoded or inferred client-side.
+
+**Important distinction this section must not blur**: self-exclusion
+**itself** — the restriction mechanism `internal/rg` enforces — is, per
+`docs/architecture/11-kyc-aml-rg-architecture.md`'s Implementation status
+section, **platform-wide by default for player self-service today**, with
+no jurisdiction-varying rule in `internal/rg`'s own model (staff-initiated
+restrictions are tenant/brand-scoped; player self-service self-exclusion
+is platform-wide, full stop — doc 11 and ADR 0026 §2 do not vary this by
+jurisdiction). `OpenBetSelfExclusionPolicy` does **not** change that: it
+does not make self-exclusion itself apply differently per jurisdiction. It
+answers an entirely separate, downstream question — once a (still
+platform-wide) self-exclusion has taken effect for a given Person, what
+happens to THAT Person's open sportsbook bets in the jurisdiction(s) each
+bet's own tenant/brand operates under — which is why the policy is scoped
+by the BET's jurisdiction context (mirroring §9 above and ADR 0031 §9's
+`casino_launch_sessions.jurisdiction_code` precedent — a sportsbook bet
+would carry the equivalent denormalized jurisdiction context from its own
+placement time), not by the excluding Person's registration jurisdiction.
+If Person P has open bets under two different tenants/brands in two
+different jurisdictions when P's platform-wide self-exclusion commits,
+each open bet resolves its OWN policy independently, from its own bet's
+jurisdiction/tenant/brand scope — there is no single platform-wide answer
+to "what happens to P's open bets," only a per-bet one, exactly as
+self-exclusion's own enforcement is already per-action (§2, §9) rather
+than a single global effect.
+
+### 14.5 Audit — a genuinely new audit trigger point, not an inherited one
+
+Confirmed per CLAUDE.md's standing audit rule and this ADR's own §3
+pattern ("RG denials are audited... exactly as established"): **whichever
+policy path is taken for a specific open bet, at the moment self-exclusion
+takes effect, itself produces an `audit.Entry`** — one per affected open
+bet, not one per self-exclusion event, since a single self-exclusion may
+have zero, one, or many open bets in scope across tenants/brands/
+jurisdictions (§14.4).
+
+- **Actor**: system, attributed to the specific self-exclusion
+  event/restriction row that triggered it (the `created_by_actor_type`/
+  `created_by_actor_id`-shaped attribution ADR 0026 already uses for
+  restriction records, referenced by id here rather than a human staff
+  actor or an IP address — there is no request/IP context for a
+  system-triggered background effect, unlike a staff-initiated action).
+- **Tenant**: the specific bet's own tenant (not the excluding Person's
+  registration tenant, which may differ — §14.4).
+- **Entity**: the specific bet (its id/`provider_bet_reference`).
+- **Before/after state**: for `VOID_ON_SELF_EXCLUSION`, `open` →
+  `void`(as ADR 0038 §8.1's own before/after shape already implies for any
+  void); for `SETTLE_NORMALLY`, `open` → `open` (unchanged) — the
+  record's purpose in this branch is not to show a state transition but to
+  evidence that the platform affirmatively considered this specific bet
+  and applied a deliberate policy decision to it, not that it was silently
+  skipped or simply never examined.
+- **Reason code**: which policy value applied (`SETTLE_NORMALLY` /
+  `VOID_ON_SELF_EXCLUSION`), the resolved scope it came from
+  (jurisdiction-floor / tenant-override / brand-override / platform
+  default — §14.2), and the policy version read (§14.3/§14.8) — mirroring
+  §5 above's `Metadata` shape exactly (`{"policy": "...", "scope":
+  "...", "policy_version": "..."}`), never any KYC evidence per §4/§5's
+  standing prohibition.
+
+**This is stated explicitly as NEW, not merely inherited**: nothing in
+this codebase today treats self-exclusion COMMITTING as an event that
+itself touches or even enumerates a player's existing open financial
+positions. Every prior mechanism (§2's Bonus precedent, §9's Sportsbook
+placement/cashout/settlement gates) is a **per-action, request-time**
+check — self-exclusion changes what happens the NEXT time the player (or
+the platform, at natural settlement) acts, but nothing today reaches back
+into currently-open positions the instant self-exclusion commits. This
+policy requires a genuinely new system behavior: on self-exclusion
+becoming effective, enumerate that Person's currently-open sportsbook bets
+(across every tenant/brand the Person is linked to, per §14.4), resolve
+the applicable policy for each, and — for `VOID_ON_SELF_EXCLUSION` —
+execute the void and its audit record synchronously with that resolution;
+for `SETTLE_NORMALLY`, write only the audit record, with zero financial
+effect. This enumeration/dispatch step is a new architectural component
+this policy introduces (conceptually, a listener on the self-exclusion
+commit event, per doc 22's canonical event taxonomy pattern already used
+elsewhere in this ADR for `rg.status.changed`), not something `internal/
+rg` itself needs to own or implement — `internal/rg` remains, as always,
+ignorant of sportsbook/bonus specifics; the listener lives with whichever
+domain owns the open-bet enumeration (`sportsbook`), consuming `rg.status.
+changed` exactly as it is already "consumed — never produced — by
+sportsbook" per doc 09 §8.
+
+### 14.6 Settlement interaction (`SETTLE_NORMALLY`) — consistent with the existing settlement-is-RG-exempt precedent, not a new exception
+
+If the resolved policy is `SETTLE_NORMALLY`, the eventual settlement (WIN,
+LOSS, push, partial-settlement, re-settlement) proceeds exactly as §9
+above already establishes for every open bet regardless of self-exclusion
+— a WIN credits `player_cash`/`player_bonus` through the normal ADR 0038
+posting shape, with **no new exception, no new gate, and no new
+conditional logic keyed on the player's self-excluded status inside the
+settlement path itself.** This is not a new rule being introduced here; it
+is §9's already-reasoned conclusion ("settlement... is RG-exempt... a
+sportsbook WIN settlement is... realizing a pre-existing, already-fixed
+entitlement, not initiating new player activity") simply being confirmed
+as unaffected by the existence of this policy — selecting
+`SETTLE_NORMALLY` does not add anything to the settlement code path beyond
+the audit record in §14.5, which is emitted at the self-exclusion instant,
+not at settlement time.
+
+**On what the player can subsequently do with that newly-settled
+balance** — this ADR checked rather than assumed. Neither
+`docs/architecture/11-kyc-aml-rg-architecture.md` nor this ADR's own §1-13
+establishes an explicit "self-excluded players may withdraw but not
+wager" rule anywhere in this codebase; no such rule exists to cross-
+reference. What IS established, precisely, is narrower: **every
+forward-going, value-consuming or wagering action remains blocked** (§1,
+§9 — placement, cashout, new bonus/gamification actions all deny on
+`CodeSelfExcluded`), while **crediting an already-earned entitlement
+through settlement is exempt and proceeds** (§9, restated above) — a
+distinction between "can the player DO something new" (blocked) and "does
+an already-fixed, already-legitimate financial outcome get realized"
+(not blocked), not a distinction between "withdraw" and "wager"
+specifically. Whether the player can subsequently WITHDRAW the resulting
+balance is a **Stage 3D withdrawal-governance question this ADR does not
+cover and does not resolve**: `docs/decisions/0024-stage3d-withdrawal-
+governance-final-gate.md` and `docs/architecture/withdrawal-state-
+machine.md` contain no RG/self-exclusion gate today — withdrawal has never
+been wired to `rg.EvaluateEligibility` or any self-exclusion check in this
+codebase. This is a **pre-existing gap this section neither introduces nor
+closes**, consistent with CLAUDE.md's "no uncontrolled scope expansion" —
+flagged here only so `SETTLE_NORMALLY`'s crediting behavior is not
+mistaken for an implicit claim about withdrawal access, which is a
+separate, currently-open surface owned by `ledger-finance`/Stage 3D.
+
+### 14.7 Financial correction requirements (`VOID_ON_SELF_EXCLUSION`) — a new void sub-reason, not a new `transaction_type`
+
+If the resolved policy is `VOID_ON_SELF_EXCLUSION`, the ledger posting is
+**identical in shape** to ADR 0038 §8.1's existing void flow — `Dr
+player_locked` / `Cr player_cash`/`player_bonus`, full stake `S` (or the
+post-settlement reversal-chain variant, §8.1's second row, if settlement
+had already posted between the event concluding and the void being
+processed — a race this section does not need to resolve differently from
+how §8.1 already handles any late-arriving void), `transaction_type =
+'sportsbook_void'`, unchanged. **This section does not propose a new
+`transaction_type`** — that enum is `ledger-finance`'s file (ADR 0038) to
+extend, not this one's.
+
+**Recommended: yes, record this as a distinguishable void SUB-reason**,
+for reporting/audit clarity, expressed as metadata/reason-code, mirroring
+a pattern ADR 0038 itself already anticipated rather than inventing a new
+one: §8.4's own treatment of a hypothetical future player-initiated
+withdrawal recommends it be "distinguished by `reason_code`/`causation_id`
+rather than a new `transaction_type`" if it is ever built — a
+self-exclusion-triggered void is the same shape of problem (a
+player-status-driven cause sharing an identical ledger posting with a
+market-driven cause) and should be resolved the identical way: a
+`void_reason` (or equivalently-named) metadata value such as
+`player_self_exclusion`, sitting alongside whatever `market_cancelled` /
+`data_error` / `push`-class reasons ADR 0038's void flow already
+distinguishes, never a fork in `transaction_type`.
+
+**One distinction worth flagging to `ledger-finance` explicitly, not
+resolved here**: ADR 0038 §8.1 currently states void "is always
+provider/event-initiated," and distinguishes it from a hypothetical
+player-initiated withdrawal (§8.4) on exactly that axis. A
+self-exclusion-triggered void is neither — it is **platform/compliance-
+initiated**, a third causation category `sportsbook`/`ledger-finance`'s
+own void model does not yet name. This section flags that ADR 0038 §8.1's
+"always provider/event-initiated" framing would need a small amendment
+(by `ledger-finance`, in their own file) if `VOID_ON_SELF_EXCLUSION` is
+ever the value actually configured for a real jurisdiction/tenant — it is
+not this section's place to make that edit, only to surface that it would
+be needed. Likewise, §8.1's idempotency key (a provider void reference)
+does not apply to a platform-initiated void; a real implementation would
+need an idempotency key derived from the triggering restriction/bet pair
+(e.g. `(tenant_id, bet_id, self_exclusion_event_id)`) instead — again,
+`ledger-finance`'s to formalize, flagged here only so it is not missed.
+
+### 14.8 Future policy evolution — versioned, auditable configuration, never a code constant
+
+`OpenBetSelfExclusionPolicy` is stored as **versioned, auditable
+configuration**, resolvable as-of a point in time, exactly mirroring two
+patterns already established elsewhere on this platform rather than
+inventing a third: ADR 0031's rule versioning (a jurisdiction/tenant/brand
+-scoped rule row, evaluated at request time against currently-effective
+rows) and ADR 0021's rounding-rule versioning ("versioned and stored with,
+or resolvable as-of, the transaction... a versioned, stored rule
+identifier per transaction"). Concretely, the same shape as those two:
+a scoped configuration row keyed on `(JurisdictionCode, tenant_id NULL-
+able, brand_id NULLable)` per §14.2, carrying `policy_value`, an
+`effective_from` (and, if ever needed, `effective_to`), and a stable
+version identifier — resolved fresh at the moment self-exclusion becomes
+effective (§14.3), never cached, never a Go constant or `if jurisdiction
+== "X"` branch. A jurisdiction's regulatory requirement changing later
+(a regulator newly mandating `VOID_ON_SELF_EXCLUSION` where it previously
+required or allowed `SETTLE_NORMALLY`, or vice versa) is then a
+**configuration change**, auditable exactly like any other rule change on
+this platform, never a code deployment.
+
+### 14.9 What remains a human/legal/compliance decision — restated crisply
+
+The architecture above makes either answer expressible, per jurisdiction
+and per tenant/brand, without this document choosing one. What it
+explicitly does NOT decide, and what §11 above already flagged in
+narrative form, restated now as a precise configuration question:
+
+**Which of the two policy values — `SETTLE_NORMALLY` or
+`VOID_ON_SELF_EXCLUSION` — should be the platform-wide DEFAULT for any
+jurisdiction/tenant/brand that has not explicitly configured one, and does
+either specific jurisdiction this platform is actively targeting (Anjouan,
+per the fixed licence; or any of the Europe/LATAM jurisdictions under
+consideration) have an existing legal requirement one way or the other —
+remains a human/legal/compliance decision this document does not make.**
+This document has no visibility into Anjouan's or any candidate European
+or LATAM jurisdiction's specific regulatory text on this exact question,
+and does not assume an answer for any of them either way, for the same
+reason §11 already gave: this is squarely the shape of question CLAUDE.md's
+"When to stop and ask" section names — jurisdiction-specific legal
+interpretation this specialist is not positioned to make unilaterally on
+the platform's behalf. `identity-compliance`'s only claim in this section
+is that whichever value(s) a human/compliance decision ultimately
+selects — a single global default, or a distinct value per jurisdiction —
+can be configured, versioned, audited, and enforced by the architecture
+above without a further redesign or a code change.
+
+### Consequences (§14 addendum)
+
+- `internal/rg`, `internal/kyc`, and ADR 0038's ledger posting shapes
+  remain unchanged by this section — it defines a new, jurisdiction/
+  tenant/brand-scoped configuration surface and a new self-exclusion-
+  commit-triggered enumeration/audit step, not a redesign of any existing
+  mechanism.
+- A real implementation of this policy requires, at minimum: the scoped,
+  versioned configuration table (§14.8); a listener on self-exclusion
+  becoming effective that enumerates the affected Person's open sportsbook
+  bets across tenants/brands and resolves + applies the policy per bet
+  (§14.5); the void-sub-reason metadata convention, once `ledger-finance`
+  formalizes it (§14.7); and no change at all to the settlement code path
+  itself for the `SETTLE_NORMALLY` branch (§14.6). None of this is built
+  in this stage — architecture only, per this stage's own gate.
+- One question is carried forward, unresolved, exactly as §11 already
+  flagged it, now stated as a configuration default rather than a
+  narrative recommendation: the platform-wide default value of
+  `OpenBetSelfExclusionPolicy`, and any specific jurisdiction's mandated
+  override, per §14.9 — a human/legal/compliance decision, not a technical
+  one this ADR settles.
+
+### Cross-references (§14 addendum)
+
+- §9-13 above (this same ADR, Stage 4H-B0-R4) — the reasoning this section
+  builds a configurable architecture around, unmodified.
+- `docs/architecture/09-sportsbook-architecture.md` §8 — sportsbook's own
+  confirmed RG consumption points (acceptance, cashout, settlement-exempt),
+  which §14.6 relies on without restating its detail.
+- `docs/decisions/0038-sportsbook-accounting-and-ledger-integration.md`
+  §8.1 (void posting shape, reused verbatim by §14.1/§14.7) and §8.4
+  (the `reason_code`/`causation_id` precedent §14.7 extends to a second,
+  platform-initiated causation category).
+- `docs/decisions/0031-risk-and-limits-engine.md` §5 (HARD_LIMIT/
+  CONFIGURABLE_LIMIT precedence, generalized narrowly by §14.2) and §9/§10
+  (`JurisdictionCode`/`LicensingMode` contract, reused verbatim by §14.2/
+  §14.4).
+- `docs/decisions/0021-multi-asset-accounting.md` (ADR 0021) — versioned,
+  resolvable-as-of-transaction-time rounding-rule configuration pattern,
+  reused by §14.8.
+- `docs/architecture/11-kyc-aml-rg-architecture.md` — confirms self-
+  exclusion's own platform-wide-by-default scope is unchanged by this
+  section (§14.4) and confirms no "withdraw-only" rule for self-excluded
+  players is currently documented anywhere on this platform (§14.6).
+- `docs/decisions/0024-stage3d-withdrawal-governance-final-gate.md` and
+  `docs/architecture/withdrawal-state-machine.md` — confirmed to carry no
+  RG/self-exclusion gate today, cited in §14.6 as a pre-existing,
+  out-of-scope gap this section does not close.

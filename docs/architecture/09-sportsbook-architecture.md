@@ -359,6 +359,69 @@ model (§1), the ledger contract (§6), or the event taxonomy (§7) — those
 are derived from the general shape of sports betting, not from Provider
 #1's shape, per §0's supersession statement.
 
+### 2.5 Canonical identity is platform-owned; provider references are non-authoritative (Stage 4H-B0-R5 correction, `architect`)
+
+**Verification finding, Stage 4H-B0-R5 (directive §9):** §4.2 already
+states, explicitly, that a feed adapter maps a vendor's own fixture/
+participant/market/result identifiers onto this document's canonical
+`Sport`/`Competition`/`Season`/`Event`/`Participant`/`Result` shapes, and
+that the vendor's own identifiers are retained only as a **non-
+authoritative external reference**, never as the row's primary identity.
+§2.3 and §9 separately state the same property for `Bet` (idempotency
+keyed on `(provider_id, provider_bet_reference)`, but the platform's own
+row — "keyed by the platform's own identity" — is what every canonical
+event and audit record points at). Those statements are correct and are
+**not** edited here.
+
+**Gap found and closed here**: §4.2's enumeration is scoped to the
+`DataFeedProvider` pipeline (§4, used by the in-house engine, §3) and does
+not name `Market` or `Selection` — because for the in-house engine, Market
+and Selection are constructed by the engine's own trading logic (§3.2)
+from canonical `MarketType`/`Event`/`Season` identifiers, not raw-ingested
+from a feed, so they were correctly out of scope for §4.2's specific list.
+But the **external** `SportsbookProvider` path (§2) has no equivalent
+statement anywhere: `Catalogue`/`Markets`/`Odds` (§2.1) return a real
+external provider's own Event/Competition/Participant/Market/Selection
+objects directly, and nothing in §2 said explicitly that these are
+re-keyed onto platform-owned canonical identifiers with the provider's own
+identifiers retained as non-authoritative references only. Left
+unstated, a reader could wrongly infer that in external mode a provider's
+own `market_id`/`selection_id`/`event_id` might be used *as* the canonical
+row's identity rather than mapped onto one.
+
+**Correction, closing the gap**: this document states explicitly, for
+every entity the directive asked to verify, that the rule already
+established for the feed path (§4.2) and for `Bet` (§2.3/§9) is universal
+across **all** of them, regardless of which path (external provider,
+Stage 4H-B0-R5 data feed, or in-house engine) produced the row:
+
+- `Event`, `Competition`, `Season`, `Participant` — platform-generated
+  canonical identifiers (as §4.2 already states for the feed path; this
+  extends the identical rule to `Catalogue`/`Markets` results ingested
+  through a `SportsbookProvider`, §2.1). A provider's own fixture/
+  competition/participant identifier is stored as a non-authoritative
+  external reference field on the canonical row, never as the row's
+  primary key.
+- `Market`, `Selection` — the one addition this correction makes: these
+  carry their own platform-generated identifiers exactly like every other
+  entity in §1's model, whether they were constructed by the in-house
+  engine from `MarketType`+subject (§1.3, §3.2) or ingested from an
+  external provider's `Markets`/`Odds` calls (§2.1). In the latter case,
+  the provider's own market/selection identifier is retained as a
+  non-authoritative external reference only, following the exact pattern
+  §4.2 already established for Event/Participant.
+- `Bet`, `Settlement` — unchanged, already explicit (§2.3, §9): the Bet's
+  platform-generated identity is the domain's source of truth;
+  `provider_bet_reference` and any provider-issued settlement reference
+  are non-authoritative references used for idempotency and
+  reconciliation, never for identity. This applies identically to a
+  settlement produced via `HandleCallback` (§2.1) or by the in-house
+  engine (§3.5) — both post the same canonical Settlement shape (§1.6).
+
+No other part of §1-§9 is changed by this correction; it generalizes an
+already-correct principle to close one naming gap, it does not introduce a
+new one.
+
 ---
 
 ## 3. In-House Sportsbook Engine Architecture
