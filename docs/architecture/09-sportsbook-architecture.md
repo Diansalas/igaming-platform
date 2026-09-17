@@ -1050,3 +1050,237 @@ starts.
    persisted, resumable aggregate after all; if so, it would need its own,
    narrowly-scoped state machine that still never competes with `Bet` as
    the settlement-relevant record.
+
+---
+
+## 15. External-first vs. in-house-first — implementation sequencing recommendation (Stage 4H-B0-R5)
+
+`RECOMMENDATION` — a business/engineering sequencing recommendation only,
+owned by `sportsbook`, for whichever specialist/Orchestrator eventually
+authorizes a real Stage 5 sportsbook implementation. **This is not an
+architectural constraint and does not amend §0–§14 above.** The directive
+for this stage is explicit and is restated here so it cannot be
+misread by a future implementer: the platform continues to
+architecturally support **both** external-provider integration (§2) and
+an in-house engine (§3) as co-equal, first-class capabilities, regardless
+of which is built first, and regardless of anything concluded below.
+Nothing in this section authorizes building either one — Stage 5 remains
+unauthorized (§ "Ownership and stage mapping" above), and this document's
+own status line (`NOT IMPLEMENTED`) is unchanged by this section. No real
+vendor, sports-data feed, or commercial term is named anywhere below.
+
+### 15.1 Method
+
+Each dimension below is evaluated for *this* platform's actual, currently
+specified architecture — citing doc 09's own sections and ADR 0038's own
+financial contract — not for sportsbook implementations in the abstract.
+
+### 15.2 Dimension-by-dimension
+
+**1. Time to production.** Concretely asymmetric, per what §2 and §3
+actually specify. External-first (once a real vendor contract exists)
+requires: one adapter implementing §2.1's `SportsbookProvider` interface
+(`Capabilities`, `Catalogue`/`Markets`/`Odds`, `PlaceBet`/`GetBet`/
+`BetStatus`/`CancelBet`/`Cashout`, `HandleCallback`, `HealthStatus`), a
+`SportsbookAdapterCapability` declaration (§2.2), per-tenant credentials/
+routing config (§5), and the conformance suite (§2.4) — the same shape of
+work ADR 0025 already proved out for `CasinoProvider` and ADR 0022 for
+`PaymentProvider`, i.e. an incremental extension of an existing,
+already-implemented pattern, not new architectural ground. In-house-first
+requires building all five layers of §3.1 from nothing — SPORTS DATA
+ingestion/canonicalization (§4), the SPORTSBOOK BUSINESS LOGIC catalogue/
+market/odds-line management (§3.2), bet validation/acceptance (§3.3),
+TRADING OPERATIONS (odds-setting, suspension, exposure management, §3.6),
+and settlement/result-ingestion/cashout logic (§3.5) — plus every ADR 0038
+posting path currently specified but `NOT IMPLEMENTED` (§3–§10 there). None
+of this exists anywhere in `internal/` today (ADR 0038 §13 confirms even
+the Risk `Operation` enum value is unwired because `internal/sportsbook`
+does not exist as a package). This is a materially larger, first-of-its-
+kind build, not a difference of degree.
+
+**2. External dependency.** The one dimension that does not point the same
+direction as the rest, and is stated honestly as such. External-first
+requires a **signed commercial relationship with a real sportsbook
+provider before any implementation can start at all** — per §13's
+historical framing (no such relationship exists yet) — a dependency
+entirely outside engineering's control and subject to another party's
+contracting timeline, exactly the caveat MVP doc 14's "What still requires
+human/vendor/legal involvement" section already names generally for
+provider/PSP contracts. In-house-first requires no betting-platform vendor
+relationship for the trading/acceptance/settlement logic itself, but does
+require a sports-data-feed relationship (§4) to have real events/odds to
+trade against before the engine is anything more than an empty catalogue —
+a smaller-scope dependency (a data feed, not a full betting-platform
+vendor with regulatory/trading-certification weight), but still an
+external dependency, not a clean "no dependency" case for in-house. Net:
+in-house-first can begin **engineering** work (schema, catalogue,
+validation pipeline) without waiting on any contract; it cannot reach a
+*meaningfully tradeable* state without one.
+
+**3. Canonical model validation.** Favors external-first. §0's own stated
+test for this document is that the canonical model (§1) is
+provider-neutral "by construction," verified on paper by the R4
+extensibility exercise but **not yet verified against any real vendor's
+actual API shape** — nothing has stress-tested §1.3's Market
+template/instance split, §1.4's Price/Line versioning, or §1.7's
+Exposure/Liability distinction against a real vendor's actual field names,
+event/market taxonomy, or settlement-callback shape. Building the first
+real *external* integration is what forces that mapping exercise
+cheaply and early — mirroring exactly how ADR 0025's `CasinoProvider`
+mapping and ADR 0022's `PaymentProvider` mapping each surfaced real model
+gaps against a real vendor's documentation, not in the abstract. Building
+the in-house engine first risks the opposite failure mode: the model
+"looks" clean because the in-house engine's own code was written to fit
+it, with no external pressure ever testing whether §1 actually
+generalizes past this platform's own assumptions — the precise blind spot
+a from-scratch build cannot see in itself.
+
+**4. Trading complexity.** Favors external-first, and this is the
+dimension this recommendation weighs most heavily. §3's own five-layer
+design — specifically the TRADING OPERATIONS layer (§3.6): odds-setting,
+market suspension, exposure management — is exactly the functionality the
+original Stage 0 framing (preserved verbatim in §13) identified as never
+built in-house, a position §0/§13 correctly demote from an architectural
+constraint to a sequencing input, not discard. In-house-first means this
+platform's first-ever experience pricing risk (Bonus and Casino, per §13's
+restated framing, never price risk the way a sportsbook trading desk
+does) would happen simultaneously with standing up the rest of the
+sportsbook stack — RG (§8), Risk integration (§3.4), the full ADR 0038
+financial contract — compounding a genuinely new risk discipline on top
+of every other new-to-this-platform piece at once. External-first defers
+that specific expertise requirement to the vendor while the platform
+proves out the parts it already has direct experience with (wallet,
+ledger, RG, provider-adapter discipline).
+
+**5. Data feed dependency.** Favors external-first. The in-house engine
+needs a live, accurate, adequately-covered sports-data feed (§4) from day
+one merely to have anything to trade against — an empty in-house catalogue
+with correct code but no real events is not a shippable capability.
+External-first needs no data-feed relationship at all: per §2, the
+provider supplies and owns its own event/market/odds data internally.
+
+**6. Financial risk.** Favors external-first, decisively. §1.7's own
+Exposure/Liability distinction exists specifically because an in-house
+engine that mis-prices a Market or fails to suspend it fast enough during
+a fast-moving live event creates real, potentially large, **uncapped**
+exposure — not a bounded engineering-bug cost, a trading-book loss. §3.6's
+own load-bearing rule ("the sportsbook never becomes a second wallet")
+protects the ledger's integrity but does not, and cannot, protect the
+*trading book* from a bad Price or a late suspension — that risk lives
+entirely in the TRADING OPERATIONS layer (§3.6) an in-house-first sequence
+would be building and operating soonest, with the least accumulated
+platform experience behind it. External-first transfers this specific
+category of risk to the vendor's own book entirely; the platform's
+exposure is limited to the ordinary provider-integration risk already
+covered under dimension 7.
+
+**7. Operational risk.** Favors external-first, though both paths carry
+real risk of different categories. External-first's risk — provider
+outage, upstream API changes, callback unreliability — is already
+substantially mitigated by §2.3's specified hardened callback pattern
+(signature verification, tenant resolved from the authenticated URL never
+the payload, ambiguous-outcome handling via the `Unknown` state and
+tombstone discipline rather than guessing, `HealthStatus`-driven failover
+per §5.1). In-house-first's risk is categorically harder to catch before
+it costs money: a latent bug in trading/settlement logic (a bad payout
+formula, a settlement rule misapplied for a MarketType, a race in market
+suspension) has no vendor absorbing or catching the mistake — it surfaces
+as either a wrong ledger posting (caught by ADR 0038's reconciliation
+discipline, §6/§12, but only after the fact) or a mispriced Market
+generating exposure before anyone notices, with the platform itself as
+the sole backstop in both cases.
+
+**8. Regulatory readiness.** Generally favors external-first, stated as a
+general consideration only, since this document does not hold
+jurisdiction-specific licensing detail. A widget/iframe external
+integration is commonly the shape a new operator's licence conditions are
+already built around, since the vendor typically already carries its own
+trading/odds-compliance certifications for the product it operates; an
+in-house trading engine may need its own, separate certification effort
+before it can be licensed to price and accept bets in a given
+jurisdiction — consistent with, and not contradicting, §12's existing
+"no jurisdiction or licensing assumption hardcoded" framing, since this
+is a general operational observation about certification burden, not a
+jurisdiction-specific rule asserted here.
+
+**9. Ability to replace the provider later.** Not a differentiator between
+the two sequencing choices, and stated as such rather than silently
+omitted. §2.4 already guarantees swapping or adding a `SportsbookProvider`
+requires only a new adapter, capability declaration, and conformance pass
+— never a change to §1's canonical model, §6's financial contract, or
+§7's event taxonomy — regardless of which mode was built first. This
+factor does not move the recommendation in either direction.
+
+### 15.3 Recommendation
+
+**Sequence: external-provider-first, then in-house-engine second (if and
+when a specific commercial reason or strategic priority emerges, per
+§14's existing condition, restated and not weakened by this section).**
+This is the same operational conclusion §14 (Stage 0, preserved through
+R4) already reached; this section's contribution is the explicit
+9-dimension analysis above, done for this stage's specific instruction,
+confirming rather than revising it.
+
+**The two or three dimensions that most drove this recommendation**:
+
+1. **Dimension 4 (trading complexity) and dimension 6 (financial risk)
+   together** — building genuine odds-setting/market-suspension/exposure-
+   management expertise (§3.6) this platform has never needed before, and
+   the uncapped trading-book exposure that comes with getting it wrong
+   early, is the single largest and most asymmetric risk in the entire
+   in-house-first path. External-first defers this specific risk category
+   to the vendor's own book while the platform proves out its own
+   already-familiar territory (wallet/ledger integration, provider-adapter
+   discipline, RG/Risk wiring) against a live sportsbook product for the
+   first time.
+2. **Dimension 3 (canonical model validation)** — the first real
+   integration, whichever it is, is what actually proves §1's canonical
+   model is provider-neutral rather than merely claimed to be. Doing that
+   proof against a real external vendor's documentation is cheaper and
+   faster than doing it for the first time against an in-house engine that
+   has had no external pressure testing its own assumptions.
+3. **Dimension 1 (time to production), as a supporting factor, not the
+   primary driver** — the external path reuses an already-proven adapter
+   pattern (ADR 0025, ADR 0022) and is materially smaller in scope than
+   standing up all five layers of §3.1 plus ADR 0038's full financial
+   contract from nothing.
+
+**Honest tradeoffs on the other side, not minimized**:
+
+- **Dimension 2 cuts the other way.** External-first makes the entire
+  sportsbook program hostage to a signed commercial relationship with a
+  real provider before any implementation work can begin at all — a
+  dependency outside engineering's control. In-house-first could begin
+  real engineering work (catalogue schema, canonical data-feed
+  ingestion, validation pipeline scaffolding) against a lighter-weight
+  data-feed relationship without waiting on that negotiation, at the cost
+  of taking on dimensions 4/5/6's risks sooner and with less platform
+  experience behind them.
+- **Deferring in-house indefinitely does not make the trading-expertise
+  gap disappear.** If the business ever wants genuine in-house trading
+  capability — the original Blueprint guidance's "never built in-house"
+  notwithstanding, since the confirmed product requirement (§0) already
+  overrides that as an architectural constraint — that expertise has to
+  be built at some point regardless of sequencing. External-first spends
+  that effort later, with more platform maturity behind it but also more
+  elapsed time before the platform has any in-house trading capability at
+  all; in-house-first spends it sooner, at higher near-term risk. This
+  recommendation weighs the near-term risk reduction more heavily than
+  the deferred-capability cost, consistent with doc 14's B2C-MVP-first,
+  avoid-premature-generality philosophy (sportsbook itself is out of MVP
+  scope and sequenced at P3/Stage 5 in doc 14's own build order, after
+  the wallet/ledger/compliance spine the platform has direct experience
+  with) — but this is a judgment call, not a determined fact, and is
+  exactly the kind of "does the business consider this a strategic
+  priority independent of any single deferral condition" question §14
+  already reserves for a future business decision rather than resolving
+  unilaterally here.
+
+**What this recommendation does not do**: it does not authorize building
+either path (Stage 5 remains unauthorized); it does not change §1's
+canonical model, §2's or §3's architecture, §5's mode-selection design, or
+ADR 0038's financial contract in any way; and it does not foreclose a
+future decision to build in-house first, or both simultaneously for
+different tenants (§5.1's per-tenant/brand/jurisdiction/market routing
+already anticipates exactly that), should the business's priorities or a
+specific commercial opportunity change the calculus above.
