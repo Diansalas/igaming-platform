@@ -29,15 +29,18 @@ stage detail), and the ADRs cited below.
 | 4G-FINAL-FINANCE-GATE | Independent financial-correctness sign-off on the `postBet` lock + `internal/rg` fix (final-gate-only, no business functionality) | Complete |
 | 4H-A | Bonus, Gamification & Reward Orchestration architecture freeze (no code) | Complete |
 | 4H-B0 | Bonus, Gamification & Retail scope/implementation plan (no code) | Complete |
-| 4H-B0-R1 | B0 gate corrections and finalization (no code) | Complete (this stage) |
+| 4H-B0-R1 | B0 gate corrections and finalization (no code) | Complete |
+| 4H-B0-R2 | Bonus financial gate clarification (no code) | Complete (this stage) |
 
 ## Active stage
 
-Stage 4H-B0-R1 — see `docs/active-stage.md` for full detail. **Stage
-4H-B1 (Bonus Engine) is CONDITIONALLY READY, not authorized to start.
-Stage 4H-B2 (Retail Architecture Hardening) awaits the Retail-Legal/
-Business gate. Neither is authorized to begin without explicit human
-confirmation.**
+Stage 4H-B0-R2 — see `docs/active-stage.md` for full detail. **Stage
+4H-B1 (Bonus Engine) remains BLOCKED — a human decision sheet
+(`docs/architecture/28-bonus-financial-gate-decision-sheet.md`) now
+exists and awaits explicit human answers to the ADR 0021 rounding
+questions; it is not authorized to start. Stage 4H-B2 (Retail
+Architecture Hardening) awaits the Retail-Legal/Business gate. Neither
+is authorized to begin without explicit human confirmation.**
 
 ## Blocked stages
 
@@ -63,6 +66,21 @@ confirmation.**
   (lifecycle state machine, Offer/Grant modelling, eligibility) is not
   gated by item 1. **Implementation itself is still not authorized** —
   this is a corrected scope plan, not a start.
+
+  **Stage 4H-B0-R2 update**: a formal, plain-language human decision
+  sheet now exists — `docs/architecture/28-bonus-financial-gate-
+  decision-sheet.md` — enumerating the exact ADR 0021 rounding/precision
+  questions (direction, rounding point/precision handling, uniformity/
+  scope) with numerical worked examples, the precise bonus-type impact
+  (the rounding decision affects the grant amount itself for Deposit/
+  Reload/Cashback, and only the wagering-requirement/contribution
+  tracking for the generic Wagering bonus and Coupon), and a formatted
+  six-step engineering checklist for the `bonus_conversion` Risk
+  dependency (informational, not a decision for the human). `architect`
+  performed a focused 12-area financial-gate review this stage and found
+  **no additional P0/P1 blocker** beyond the two already-known gates.
+  **Stage 4H-B1 remains BLOCKED and is NOT authorized**, pending the
+  human decision on the rounding sheet.
 - **Retail (agent-hierarchy network)**: architecture/scope frozen (Stage
   4H-B0) across 10 documents, corrected and finalized in Stage 4H-B0-R1
   — see `docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md`.
@@ -582,6 +600,98 @@ Key corrections (full detail: doc 27, this stage's edits):
 **No production code, no migrations, no implementation was authorized or
 started this stage.** Full detail, decisions resolved/still open, and the
 exact updated gates: this stage's completion report and doc 27.
+
+## Stage 4H-B0-R2: Bonus financial gate clarification
+
+A financial-gate clarification stage — no architecture redesign, no
+production code, no migrations. Purpose: close the remaining financial-
+design gate for Bonus implementation by preparing an exact, plain-
+language human decision package for ADR 0021's rounding decision and
+independently re-verifying the `bonus_conversion` Risk dependency and
+every other financial-gate area, so Stage 4H-B1 can be authorized the
+moment the human decision is made, with nothing left to discover
+afterward.
+
+**New document**: `docs/architecture/28-bonus-financial-gate-decision-
+sheet.md` — written for a non-accountant business owner, containing
+only the decisions genuinely requiring human approval (the three linked
+questions inside ADR 0021's rounding decision: direction, rounding
+point/precision handling, uniformity/scope), each with plain-language
+options, financial consequences, and a numerical worked example; a
+precise bonus-type impact table; the `bonus_conversion` six-step
+engineering checklist (informational, explicitly not a decision for the
+human); and confirmation that no other blocker exists.
+
+Six specialists reviewed in parallel, each independently verifying
+against current repository state rather than trusting prior-stage prose:
+
+- **`ledger-finance`**: produced numerical worked examples (a 50% match
+  on a €133.33 deposit landing exactly on a half-cent tie; a repeating
+  7.3% weekly cashback showing the truncate-and-carry mechanism
+  concretely); confirmed no rounding option (A-F/P1-P3) can break
+  `SUM(DEBITS)==SUM(CREDITS)` — for options A-E there is no separable
+  residue to drop at the bonus-grant/cashback posting site (the mirrored
+  `promo_liability`/`player_bonus` legs are always posted with the same
+  already-rounded integer), while option F introduces a genuine new
+  piece of financial state (a remainder accumulator) that would need the
+  same concurrency-safe, auditable, reconciliation-capable discipline as
+  the ledger itself, plus an unresolved reversal/forfeiture policy for
+  an unreleased remainder; confirmed the five-type first slice is
+  otherwise fully compatible with the ledger, wallet, idempotency, and
+  reconciliation design regardless of which option is chosen; flagged a
+  concrete implementation trap (PostgreSQL's default numeric-to-integer
+  cast silently implements round-half-up, so whichever option is chosen
+  must be an explicit function in the one shared rounding helper, never
+  an implicit cast).
+- **`bonus-engine`**: produced a precise, non-blanket bonus-type impact
+  table — the rounding decision affects the grant amount itself for
+  Deposit bonus, Reload bonus, and Cashback, but only the derived
+  wagering-requirement/contribution-tracking computation (not the flat
+  grant/face amount) for the generic Wagering bonus and Coupon;
+  independently confirmed (not merely trusted) that all five in-slice
+  types reach `completed → converted` and therefore all five require the
+  `bonus_conversion` Risk dependency.
+- **`risk`**: re-verified `bonus_conversion` is still NOT STARTED against
+  the current repository state (no code had changed since Stage
+  4H-B0-R1); produced a formatted six-step engineering checklist (owner,
+  affected file, dependency, required test, and whether each step can
+  land before Stage 4H-B1 is authorized) for the decision sheet's
+  informational appendix; reconfirmed `bonus_conversion` is the only
+  Risk-owned P0/P1 dependency for the five-type slice.
+- **`architect`**: performed a focused 12-area financial-gate review
+  (ledger accounting, wallet architecture, idempotency, concurrency,
+  Risk, RG, audit, RLS, reconciliation, transaction/account types,
+  multi-asset precision, bonus conversion) against the current
+  repository state and **found no additional P0/P1 blocker** beyond the
+  two already-known gates; flagged one non-blocking documentation
+  cross-reference gap (ADR 0034 §2's RG mid-lifecycle nuance vs. doc 10
+  §5's already-correct resolution).
+- **`security`**: found no additional blocker; flagged that whichever
+  rounding rule is eventually built must ship with an explicit manage
+  permission and mandatory audit logging on any rule change (a
+  forward-looking implementation requirement, not a gap in today's
+  system, since no rounding-rule config exists yet); confirmed a player
+  cannot influence or bypass the `bonus_conversion` enforcement point
+  under the existing server-side-resolution discipline; found one minor,
+  non-blocking audit-table completeness gap (a `reversed` bonus
+  transition has no explicit row in doc 10 §10's audit table, though the
+  Progress-trail requirement already covers it).
+- **`qa`**: confirmed the core CLAUDE.md financial test matrix (normal
+  transactions, duplicates, concurrency, retries, rollback) is already
+  well-mapped to bonus scenarios via ADR 0032's testing floor; designed
+  the property-based test approach needed to prove whichever rounding
+  rule is chosen is deterministic, exactly recomputable, and never
+  breaks debit/credit balance; flagged several non-blocking test-plan
+  additions for engineering's backlog (a self-exclusion mid-lifecycle
+  race test for Bonus specifically, a bonus actor-matrix authorization
+  test, a coupon-redemption concurrency test, and others) — none require
+  new architecture or a human decision.
+
+**No production code, no migrations, no implementation was authorized or
+started this stage.** `go build ./...` re-run after all edits and
+remains clean (docs-only diff). **Stage 4H-B1 remains BLOCKED and is NOT
+authorized** — this stage produced the decision package, it did not make
+the decision or approve the next stage.
 
 ## Production blockers (summary)
 

@@ -3734,3 +3734,200 @@ corrected in Stage 4H-B0-R1 (see that stage's entry below) — this
 document's own §1.1/§23 disclosed the ADR 0021 rounding dependency that
 contradicted "independently ready." Retained here unmodified for the
 historical record of what this stage concluded before that correction.
+
+---
+
+## Stage 4H-B0-R2 — Bonus Financial Gate Clarification
+
+Directive: "STAGE 4H-B0-R2 — BONUS FINANCIAL GATE CLARIFICATION,"
+issued after Stage 4H-B0-R1's completion, with explicit instructions:
+**do NOT start Stage 4H-B1 implementation, do NOT write production code
+or migrations.** Purpose: close the remaining financial-design gate for
+Bonus implementation by preparing an exact human decision package for
+ADR 0021 and verifying the remaining Risk dependency. Six specialists
+(`ledger-finance`, `bonus-engine`, `risk`, `architect`, `security`,
+`qa`) were dispatched in parallel, each instructed to verify against
+current repository state at HEAD rather than trust prior-stage prose,
+and none was authorized to select an answer to the rounding decision on
+the user's behalf.
+
+### 1. Authoritative sources read
+
+`docs/decisions/0021-multi-asset-accounting.md` (the rounding "OPEN
+DECISION" section added in Stage 4H-B0-R1), `docs/architecture/
+10-bonus-engine-architecture.md`, `docs/decisions/0031-risk-and-limits-
+engine.md` §14-§18/§16a, `docs/decisions/0032-bonus-accounting.md`,
+`docs/architecture/ledger-accounting-model.md`, `reconciliation-
+model.md`, and Stage 4H-B0/4H-B0-R1 documentation, all read at the
+current commit (`42d50da`, working tree clean at stage start).
+
+### 2. The exact remaining ADR 0021 decision
+
+Confirmed genuine, not manufactured: ADR 0021's rounding/precision
+`OPEN DECISION` (added in full in Stage 4H-B0-R1) is stated as three
+separable questions — **Q1** rounding direction (6 neutrally-presented
+options: round-half-up, round-half-even, truncate, ceiling,
+directional-by-beneficiary, truncate-and-carry-remainder), **Q2**
+rounding point/precision handling (round once at the end vs. at each
+step; how the sub-minor-unit residue is treated), **Q3** uniformity/
+scope (one platform-wide rule vs. per-asset/jurisdiction/direction
+variants). Answering only Q1 leaves the computation non-deterministic.
+It gates deposit-match, reload, and cashback bonus grant-amount
+computation directly, and the generic wagering bonus's and coupon's
+wagering-requirement/contribution-tracking computation indirectly (see
+§4 below for the precise breakdown — `bonus-engine` found this is
+**not** a blanket "all five types identically affected" situation).
+
+### 3. Options presented, none selected
+
+`ledger-finance` produced two numerical worked examples grounded in the
+platform's actual representation (`NUMERIC(38,0)` minor-unit integers,
+per-asset `decimal_exponent`): a 50% deposit-match on a €133.33 deposit
+landing exactly on a €66.665 tie (showing each of the six Q1 options'
+result: €66.67/€66.66/€66.66/€66.67/€66.67/€66.66-plus-carried-remainder
+respectively), and a repeating 7.3% weekly cashback on €16.90 net loss
+(showing the truncate-and-carry mechanism accumulate a leftover fraction
+across three weeks until it releases an extra cent on the third). Found
+that options A-E have literally no separable residue to drop at the
+bonus-grant/cashback posting site — the mirrored `promo_liability`/
+`player_bonus` legs are always posted with the same already-rounded
+integer (ADR 0032's Rule B2 mirror construction) — so `SUM(DEBITS)==
+SUM(CREDITS)` is protected by construction for those five options.
+Option F introduces genuine new financial state (a per-player remainder
+accumulator) that would need the same concurrency-safe, idempotent,
+auditable, reconciliation-capable discipline as the ledger itself, plus
+an explicit, still-undecided policy for what happens to an unreleased
+remainder if the originating bonus is reversed, forfeited, or the
+player self-excludes before it's paid out. Flagged a concrete
+implementation trap: PostgreSQL's default numeric-to-integer cast
+silently implements round-half-up (Option A), so whichever option is
+selected must be built as an explicit function in the platform's one
+shared rounding helper (ADR 0021 point 4), never left to an implicit
+cast or language/database default. No option was selected — `ledger-
+finance` is not authorized to make this call.
+
+### 4. Bonus type verification
+
+`bonus-engine` produced a precise per-type table, correcting a
+would-be blanket assumption: the rounding decision affects the **grant
+amount itself** for Deposit bonus, Reload bonus, and Cashback (all
+three compute `amount × percentage` directly), but for the generic
+Wagering bonus and Coupon the grant/face amount is a flat, pre-set
+value — rounding-independent — and the decision affects **only** the
+derived wagering-requirement/contribution-tracking computation that
+follows activation. `bonus-engine` also independently re-derived (not
+merely trusted) that all five in-slice types reach `completed →
+converted`, confirming `risk`'s ADR 0031 §16a claim that the
+`bonus_conversion` Risk dependency blocks all five types, even though
+only three have their payout amount affected by the rounding decision
+itself. No new bonus type was added; the MVP was not expanded.
+
+### 5. Bonus accounting compatibility confirmed
+
+`ledger-finance` and `architect` jointly confirmed the five-type first
+slice remains fully compatible with: the append-only ledger,
+double-entry accounting, the existing wallet architecture, bonus
+liability/expense treatment (`promo_liability`/`bonus_expense`),
+idempotency, compensating entries (reversals), multi-asset
+representation, Risk, RG, audit, and reconciliation — regardless of
+which rounding option is eventually chosen. The one non-trivial
+compatibility caveat is scoped to option F specifically (its remainder
+accumulator needs new reconciliation/audit discipline of its own, and
+its reversal-time policy remains a genuinely open, separate follow-up
+question if F is chosen) — this does not block options A-E.
+
+### 6. `bonus_conversion` Risk dependency verification
+
+`risk` re-verified, against the current repository state at HEAD (no
+code had changed since Stage 4H-B0-R1's commit), that `bonus_conversion`
+remains **NOT STARTED — zero of ADR 0031 §16's six extension-process
+steps complete**. No documentary correction was needed; §16a was left
+unmodified. Produced a formatted six-step checklist (owning specialist,
+affected file(s), whether documentation or code, upstream dependency,
+required test, and whether the step can land before Stage 4H-B1 is
+authorized) — steps 1-4 (migration CHECK widening, Go constant, HTTP
+allowlist, OpenAPI enum in all three locations) are `risk`-owned and
+structurally independent; step 5 (ledger transaction-type mapping) is
+`risk`-owned but depends on `ledger-finance` finalizing the related ADR
+0032 ledger CHECK widening, and may be deliberately deferred with a
+disclosed fail-closed consequence; step 6 (the enforcement call site) is
+`bonus-engine`-owned and cannot precede `internal/bonus` existing. This
+checklist is explicitly **not implemented during this stage** and is
+recorded in the decision sheet as informational context, not a decision
+for the human.
+
+### 7. Focused financial gate review — no additional blocker
+
+`architect` performed a focused 12-area review (ledger accounting,
+wallet architecture, idempotency, concurrency, Risk, RG, audit, RLS,
+reconciliation, transaction/account types, multi-asset precision, bonus
+conversion) against the current repository state, verifying claims
+directly (e.g. reading the actual `ledger_accounts`/`ledger_transactions`
+CHECK constraints in migrations 0020/0021) rather than trusting prior
+documentation. **Result: no additional P0/P1 blocker found** beyond the
+two already-known gates. One non-blocking documentation
+cross-reference gap was flagged (ADR 0034 §2's RG mid-lifecycle nuance
+is already functionally answered by doc 10 §5's mechanism but the two
+documents don't explicitly cross-reference each other) — not a new gate,
+not fixed this stage per the directive's "do not reopen unrelated
+architecture" instruction. `security` and `qa` each independently
+confirmed no additional blocker in their respective areas (security:
+rounding-rule config permissions/audit, `bonus_conversion` call-site
+authorization, bonus-lifecycle audit coverage, bonus-table RLS; qa:
+financial test-matrix coverage), each flagging only small,
+explicitly-non-blocking items for engineering's own backlog (a
+`reversed`-transition audit-table row; a handful of test-plan
+additions), none requiring a human decision or new architecture.
+
+### 8. Human Decision Sheet
+
+New document: `docs/architecture/28-bonus-financial-gate-decision-
+sheet.md`. Written for a non-accountant business owner. Contains only
+the three ADR 0021 rounding sub-decisions (DS-1 direction, DS-2
+rounding point/precision, DS-3 uniformity/scope) with plain-language
+options, financial consequences, and worked numerical examples for
+each; the precise bonus-type impact table; the `bonus_conversion`
+six-step checklist (explicitly labeled informational, not a decision
+for the human); confirmation that no other blocker was found; and a
+table of the six specialist reviews completed this stage. No rounding
+option is selected or recommended anywhere in the document.
+
+### 9. Governance update
+
+`docs/governance/project-status.md`: updated the Bonus Engine "Blocked
+stages" entry with a Stage 4H-B0-R2 update paragraph, added a full Stage
+4H-B0-R2 section, and updated the Completed-stages table and Active-stage
+pointer. `docs/active-stage.md`: added a full Stage 4H-B0-R2 section at
+the top. `docs/governance/task-registry.md`: added Stage 4H-B0-R2 rows
+(Orchestrator, `ledger-finance`, `bonus-engine`, `risk`, `architect`,
+`security`, `qa`, Orchestrator finalization). Stage 4H-B1 is explicitly
+recorded as remaining BLOCKED and NOT authorized — this stage produced a
+decision package, it did not make the decision or approve the next stage.
+
+### 10. Final verification
+
+`go build ./...` re-run after all edits and remains clean (docs-only
+diff — one new file, `docs/architecture/28-*.md`; the rest are edits to
+`docs/governance/project-status.md`, `docs/active-stage.md`,
+`docs/governance/task-registry.md`, `docs/progress.md`). No production
+migrations, no production Bonus code, no production Risk code, no
+production API changes were created.
+
+### Files changed this stage
+
+`docs/architecture/28-bonus-financial-gate-decision-sheet.md` (new),
+`docs/governance/project-status.md`, `docs/governance/task-registry.md`,
+`docs/active-stage.md`, `docs/progress.md` (this entry). No specialist
+edited a file directly this stage — all six reported findings back to
+the Orchestrator, who synthesized them into doc 28 and the governance
+updates, per the directive's "no specialist may silently change an
+approved financial rule" and "no specialist may choose a human
+accounting/business decision on the user's behalf" rules.
+
+### Next stage
+
+Not started. The human reviews `docs/architecture/28-bonus-financial-
+gate-decision-sheet.md` and answers DS-1/DS-2/DS-3. Once recorded in ADR
+0021, and once the `bonus_conversion` six-step checklist is completed as
+part of Stage 4H-B1's own work, Stage 4H-B1 can be authorized. **Stage
+4H-B1 is NOT authorized by this stage.**

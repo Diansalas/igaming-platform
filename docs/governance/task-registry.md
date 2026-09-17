@@ -169,6 +169,26 @@ production code, no migrations, and no implementation were started.**
 | 4HB0R1-05 | security | Done | 4HB0R1-03 | `docs/decisions/0035-retail-agent-network-accounting.md` (new subsection, review only) | none | n/a | Reviewed RLS compatibility, composite-FK tenant-isolation safety, and the widened index predicate's collision fix | none | Review only, not approval — §1.3 remains an `OPEN DECISION` |
 | 4HB0R1-06 | Orchestrator | Done | 4HB0R1-01..05 | `docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md` (corrections across §1.1, §1.3a new, §6, §8, §9, §9a new, §22, §23A/§23B split, §24, §25), `docs/progress.md`, `docs/active-stage.md`, this registry, `docs/governance/project-status.md` | none | full validation gate (docs-only; `go build ./...` clean, no code touched) | this stage's completion report | none | n/a — **stage explicitly STOPS here; no Stage 4H-B1 or 4H-B2/4H-B3 authorized** |
 
+## Stage 4H-B0-R2
+
+Financial-gate clarification stage. Purpose: close the remaining
+financial-design gate for Bonus implementation by preparing an exact
+human decision package for ADR 0021's rounding decision and verifying
+the remaining `bonus_conversion` Risk dependency and every other
+financial-gate area. **No production code, no migrations, and no
+implementation were started.**
+
+| ID | Owner | Status | Dependencies | Files owned | Interfaces affected | Tests | Docs | Blockers | Integration |
+|---|---|---|---|---|---|---|---|---|---|
+| 4HB0R2-01 | Orchestrator | Done | none | `docs/governance/*` | none | n/a (documentation) | this registry + siblings | none | n/a |
+| 4HB0R2-02 | ledger-finance | Done | none | none (analysis reported to Orchestrator, no file edits) | none | n/a | numerical worked examples, debit/credit-balance-safety confirmation for all rounding options, PostgreSQL implicit-cast trap flagged — folded into doc 28 by the Orchestrator | none | n/a |
+| 4HB0R2-03 | bonus-engine | Done | none | none (analysis reported to Orchestrator, no file edits) | none | n/a | precise per-bonus-type rounding-dependency table; independently confirmed all five types reach `completed → converted` — folded into doc 28 | none | n/a |
+| 4HB0R2-04 | risk | Done | none | none (analysis reported to Orchestrator; ADR 0031 §16a re-verified, left unmodified since still accurate) | none | n/a | re-verified `bonus_conversion` NOT STARTED against current repository state; formatted six-step checklist — folded into doc 28 | none | n/a |
+| 4HB0R2-05 | architect | Done | none | none (analysis reported to Orchestrator, no file edits) | none | n/a | focused 12-area financial-gate review; no additional P0/P1 blocker found | none | n/a |
+| 4HB0R2-06 | security | Done | none | none (analysis reported to Orchestrator, no file edits) | none | n/a | rounding-rule config-security requirements (future manage permission + audit logging); confirmed no bypass at the `bonus_conversion` enforcement point; one minor non-blocking audit-table gap flagged | none | n/a |
+| 4HB0R2-07 | qa | Done | none | none (analysis reported to Orchestrator, no file edits) | none | n/a | confirmed core financial test matrix already mapped to bonus scenarios; designed rounding-determinism test approach; flagged non-blocking test-plan additions | none | n/a |
+| 4HB0R2-08 | Orchestrator | Done | 4HB0R2-01..07 | `docs/architecture/28-bonus-financial-gate-decision-sheet.md` (new), `docs/governance/project-status.md`, `docs/active-stage.md`, this registry, `docs/progress.md` | none | full validation gate (docs-only; `go build ./...` clean, no code touched) | this stage's completion report | none | n/a — **stage explicitly STOPS here; Stage 4H-B1 NOT authorized** |
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and
