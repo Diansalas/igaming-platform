@@ -1023,3 +1023,509 @@ Stage 4H-B0 section (read, not authored, by §5 above).
 Owner of this section: `bonus-engine`. Nothing in this section
 authorizes writing `internal/bonus`, a migration, or a test — it is the
 scope plan Stage 4H-B1 (if and when authorized) would follow.
+
+## Bonus Dependency Contract Freeze (Stage 4H-B0-R6)
+
+Status: **documentation-freeze only, `NOT IMPLEMENTED`.** Issued per Stage
+4H-B0-R6's Workstream F directive ("Bonus dependency contract freeze").
+This section does not design, redesign, or implement anything — it
+collects, verbatim where a concrete signature/invariant already exists in
+an approved document, the exact contract Bonus Engine's eventual Stage
+4H-B1 implementers must build against for each of the ten named
+dependencies, so that stage does not re-derive or silently vary any of
+them. No schema, no Go code, no migration is authorized by this section.
+Every citation below is traceable to an already-approved document; where
+no approved document gives a clear enough answer, that is named in
+"Genuine gaps" below as an open item requiring a future ADR, not decided
+here.
+
+### 1. Asset Registry
+
+Bonus needs exactly three facts about an asset, and must obtain them the
+same way every other domain does — by lookup, never by hardcoding a
+decimal count or an asset list (ADR 0037 §A.1, restating ADR 0007/0021's
+standing rule):
+
+- **Existence** — the asset's `code` row exists in the registry (`assets`,
+  migrations 0003/0006, ADR 0037 Part A layer 1).
+- **`decimal_exponent`** — looked up from the registry, never assumed
+  (0–18, `CHECK`-constrained, ADR 0037 §A.4). Every bonus amount (grant
+  face value, wagering-requirement target, per-game contribution split) is
+  computed in that asset's own minor units against this value — the same
+  discipline `06-wallet-ledger-architecture.md`'s Money representation
+  section already requires of every domain.
+- **`active`** (layer 2) — whether the asset currently functions at all.
+  Doc 10 §1.2's flagged gap (an asset suspended mid-Grant via ADR 0037
+  §C.5.3's deliberately single-actor, no-dual-control suspend path) is
+  restated here, not re-litigated: this document's existing open item
+  stands unchanged.
+
+**How Bonus looks these up**: for a plain metadata read (exponent, display
+name) needed to *compute* an amount, Bonus reads the Asset Registry the
+same way `wallet`/`ledger` already do today — this is not an "eligibility
+decision" and does not require `AssetAuthorization`. For any question of
+the form "is this asset *allowed* for this operation" (deposit/withdrawal/
+wagering/settlement/conversion/reporting), Bonus MUST NOT read
+`assets`/`tenant_jurisdiction_configs`/the eligibility tables directly —
+that is `AssetAuthorization`'s exclusive job (§2 below), per ADR 0037
+§C.2's "one canonical authorization concept — not five reimplementations"
+rule. A Bonus code path that queries those tables directly to make its own
+allow/deny call is a `code-reviewer` blocking finding, identically to any
+other domain (ADR 0037 §C.2).
+
+### 2. AssetAuthorization
+
+**Frozen signature** (ADR 0037 §C.2 — architecture-only; no
+`internal/assetregistry` package or `AssetAuthorization` Go type exists in
+this repository as of this stage, confirmed by direct search. **Cite the
+ADR text verbatim below and re-verify it against whatever Workstream A
+actually commits before Stage 4H-B1 starts** — see Genuine gaps item 2):
+
+```go
+func (a AssetAuthorization) CheckEligibility(
+    ctx context.Context,
+    tenant TenantID,
+    brand BrandID,          // may be zero-value where an operation is not brand-scoped
+    jurisdiction JurisdictionID,
+    asset AssetCode,
+    operation Operation,    // deposit | withdrawal | wagering | settlement
+                            // | conversion | reporting
+) (eligible bool, reason ReasonCode, err error)
+```
+
+Binding rules Bonus must follow, all restated from ADR 0037 §C.2, not
+re-derived:
+
+- `CheckEligibility` walks the full layer chain (existence → active →
+  platform-authorized → tenant-authorized → brand-authorized →
+  jurisdiction-authorized → operation-eligible), short-circuiting at the
+  first failing layer, and returns a specific, distinguishable
+  `ReasonCode` — the same "specific sentinel, never a generic denial"
+  convention `rg.Decision`/`risk.RiskDecision` already use.
+- **A non-nil `err` is always `eligible = false`, no exception, no
+  fallback to a previously-known-good answer** — identical to `risk`'s own
+  fail-closed error contract (ADR 0031 §1/§25), restated for this
+  boundary by ADR 0037 §C.2.
+- Absence of any configuration row at any layer is read as ineligible/deny,
+  never as "no restriction configured, therefore permitted" (ADR 0037
+  §C.1's fail-closed default).
+- `AssetAuthorization` is the only component permitted to read the
+  underlying tables for an eligibility decision — Bonus is one of the
+  named downstream domains in ADR 0037 §C.2's list ("wallet, payments,
+  sportsbook, casino, bonus, FX/Conversion, retail") that must call this
+  function rather than reimplement any part of the layer chain.
+
+### 3. Risk
+
+**Frozen signature** (ADR 0031 line 35, already real code — this one, and
+only this one of the three central decision points, has a committed Go
+signature to cite verbatim):
+
+```go
+func Evaluate(ctx context.Context, tx pgx.Tx, req RiskRequest) (RiskDecision, error)
+```
+
+**Four-outcome contract**: `RiskDecision.Outcome` is `ALLOW` / `REVIEW` /
+`DENY`, and a non-nil `error` is treated as the fourth outcome — an
+unconditional `DENY` at every call site, no bonus-specific softening (ADR
+0031 §1/§25, doc 10 §4). Priority order is fixed: `DENY` (hard or
+configurable) > `REVIEW` > `ALLOW` (ADR 0031 §6/§8).
+
+**Three checkpoints, exactly as doc 10 §4 already states and ADR 0031
+§15a-ii resolves**:
+
+1. **Grant (`issued`)** and **Activation (`issued`→`activated`)** both call
+   `Evaluate` with `Operation: OperationBonusGrant` — already a real Go
+   constant, accepted by migration 0041. Activation is re-evaluated fresh,
+   never assumed covered by the grant-time decision, because activation —
+   not grant — is the point funds actually enter the wallet.
+2. **Completion/conversion (`completed`→`converted`)** requires a
+   **distinct** `Operation`, `bonus_conversion` — documented in full (ADR
+   0031 §15a-ii, §16) but **NOT STARTED as of the last verification (Stage
+   4H-B0-R3): zero of the six required extension-process steps are
+   complete.** This is a real, named, outstanding dependency (Genuine gaps
+   item 4), not a design gap — the contract itself is fully specified.
+3. Fail-closed behavior differs by checkpoint, and this is binding, not
+   optional: at grant/activation, `DENY`/`REVIEW`/error blocks the
+   transition outright (no compliance queue exists yet to route a
+   `REVIEW` to, so it fails closed like `DENY` — ADR 0031 §17). **At
+   conversion, `DENY`/`REVIEW`/error leaves the Grant in `completed`**
+   (non-terminal, retryable after review) — it never forfeits (ADR 0031
+   §15a-ii, doc 10 §5's own specialist-review correction). Forfeiting a
+   fully-wagered-through balance on a conversion-time Risk denial would
+   destroy an already-earned entitlement, which neither `internal/risk`
+   nor `internal/rg`'s own precedent permits.
+
+**Campaign-budget-cap boundary — restated so it is never re-litigated**:
+per ADR 0031 §15d/§17, **campaign-level (cross-player) budget caps are NOT
+a Risk dependency and must never become one.** They belong to the Bonus
+Engine's own Campaign object. The non-negotiable guard: a campaign budget
+counter must never be keyed by player — the moment it is, it is a limit
+engine under another name and must be a `risk_rules` row instead. Doc 10
+§1.1 already flags that this enforcement mechanism itself is
+`NOT IMPLEMENTED` and has no assigned owner yet (Genuine gaps item 7) —
+that gap is not closed here, only its boundary (outside `risk.Evaluate`)
+is confirmed frozen.
+
+**First-slice `LimitKind` restriction, confirmed by `risk` (ADR 0031
+§15b/§16)**: `min_amount`/`max_amount` with `TimeWindow: transaction` apply
+to a bonus grant with no change whatsoever. `cumulative_amount` on
+`bonus_grant` is storable but fails closed
+(`ErrUnsupportedCumulativeOperation`) until `ledger-finance` adds a
+`bonus_grant` entry to `operationLedgerTransactionTypes` and its rollback
+counterpart to `operationLedgerRollbackTypes`. Bonus frequency/velocity
+(`count` `LimitKind`) is not configurable at all — no fake approximation
+via `cumulative_amount` is permitted (ADR 0031 §4/§15c).
+
+### 4. RG
+
+**Frozen signature** (ADR 0034 §1, already real code):
+
+```go
+func rg.EvaluateEligibility(ctx context.Context, tx pgx.Tx, params rg.EligibilityParams) (rg.Decision, error)
+
+type rg.EligibilityParams struct {
+    TenantID        uuid.UUID
+    BrandID         uuid.UUID
+    PlayerAccountID uuid.UUID
+    WalletID        uuid.UUID // uuid.Nil skips the wallet-status check
+}
+
+type rg.Decision struct {
+    Allowed  bool
+    Code     string // rg.CodeAllowed / CodePlayerAccountNotActive / CodeSelfExcluded / CodeWalletNotActive
+    Message  string
+    PersonID uuid.UUID
+}
+```
+
+**Ordering (binding, cited not re-derived)**: `rg.EvaluateEligibility`
+first, short-circuiting on denial; `risk.Evaluate` second — the fixed
+composition order ADR 0031 §1 established and ADR 0034 §1 explicitly does
+not revise, mirroring `internal/casino/orchestrator.go`'s existing
+`postBet` precedent exactly. Both calls happen in the **same transaction**
+as the Grant's own state-changing effect, before that effect commits — no
+bonus-specific carve-out.
+
+**Consequence at each checkpoint**: a `Decision.Allowed == false` at
+**grant or activation** time blocks that transition outright and is
+recorded as a `cancelled` Progress entry carrying the RG decision's own
+`Code` as the reason — never silently skipped (doc 10 §5). A
+`Decision.Allowed == false` at **conversion** time leaves the Grant in
+`completed` (non-terminal, retryable) — it is **never** `forfeited` or
+`cancelled` on RG denial, mirroring Risk's identical conversion-time rule
+above and ADR 0034 §2's explicit "already-committed effects are never
+retroactively reversed or clawed back" position (doc 10 §5's corrected
+rule).
+
+**Mid-lifecycle self-exclusion is prospective, not retroactive** — the
+`internal/casino` precedent, adopted by ADR 0034 §2 without modification:
+self-exclusion blocks every *future* RG-gated transition; it does not
+retroactively void wagering progress or forfeit an already-satisfied
+entitlement.
+
+### 5. Wallet/Ledger
+
+**Posting boundary (absolute, restated from doc 10 §6 and
+CLAUDE.md)**: Bonus Engine computes *what happened* — split instructions
+and lifecycle events. `internal/ledger` posts it and enforces every
+invariant. Bonus Engine never posts a ledger entry itself and never
+maintains a shadow/side-table balance that isn't reconstructable from
+ledger entries.
+
+**Account types (ADR 0032 §2, verbatim)**:
+
+- **`promo_liability`** — house-level, per `(tenant_id, asset_code)`,
+  `wallet_id IS NULL`. The platform's counter-side for bonus funds in
+  circulation. Debited when bonus value enters a player's bonus balance,
+  credited when it leaves. Credit-positive `signed_balance` is negative.
+- **`bonus_expense`** — the twelfth account type, house-level, per
+  `(tenant_id, asset_code)`, `wallet_id IS NULL`, debit-normal. The
+  operator's *recognized* promotional cost.
+
+**Invariant B1 (bonus mirror), verbatim**:
+
+> For every `(tenant_id, asset_code)`: `signed(promo_liability) +
+> Σ signed(bonus-denominated player accounts) == 0` at every instant, with
+> no tolerance band.
+
+**Rule B2 (mirror rule), verbatim**:
+
+> Every `LedgerEntry` against a `player_bonus` account is accompanied, in
+> the **same `LedgerTransaction`**, by an entry of the opposite direction
+> and equal amount against `promo_liability` for the same `(tenant_id,
+> asset_code)`.
+
+Rule B2 admits no exception by transaction type — it binds
+`manual_adjustment`, `bonus_reversal`, casino/sportsbook postings and any
+future type identically (ADR 0032 §2).
+
+**Binding lifecycle event → posting map** (ADR 0032 §3.1, the single
+authoritative answer — Bonus Engine's own §6 lifecycle events map onto it
+exactly, never a Bonus-invented variant):
+
+| Bonus Engine lifecycle event | Ledger effect | `transaction_type` |
+|---|---|---|
+| `granted` (`issued`) | None — a decision, not a movement | — |
+| `activated` (funds enter `player_bonus`) | Dr `promo_liability` · Cr `player_bonus` | `bonus_grant` |
+| `completed` | None — eligibility, not a movement | — |
+| `converted` | Dr `player_bonus` · Cr `player_cash` · Dr `bonus_expense` · Cr `promo_liability` | `bonus_conversion` |
+| `expired` / `cancelled` (forfeiture) | Dr `player_bonus` · Cr `promo_liability` on the outstanding balance — no `bonus_expense` recognized or reversed | `bonus_forfeiture` |
+| `reversed` | Compensating entries per ADR 0032 §7 (not restated here — cite that section directly when building) | `bonus_reversal` |
+
+A direct cash reward (no wagering requirement) is **never** modeled as a
+zero-wagering `player_bonus` grant plus an immediate conversion — it is
+two entries only, `Dr bonus_expense` · `Cr player_cash`, and
+`promo_liability`/Invariant B1 are not involved at all (ADR 0032 §3).
+
+### 6. Activity/Event taxonomy
+
+Bonus subscribes only to canonical event `type`s from
+`22-canonical-activity-event-taxonomy.md`'s table, never to a
+domain-internal channel (doc 22's Consumer contract, items 1–4). Every
+canonical event carries, at minimum, the frozen envelope fields Bonus must
+read: `event_id`, `type`, `source`, `tenant_id`, `brand_id`,
+`person_id`/`player_account_id`, `occurred_at`, `recorded_at`,
+`is_real_money`, `funding_source` (monetary events only), `correlation_id`,
+`reverses_ref` (reversal events only), `operation_ref`/`provider_ref`,
+`asset_code`/`amount_minor_units` (monetary events only),
+`idempotency_key`, `schema_version`, `payload` (doc 22, envelope table).
+
+**Binding dedupe rule**: Bonus MUST dedupe on `idempotency_key`, never on
+`event_id` — the two are deliberately distinct (`event_id` is unique per
+*publish*, `idempotency_key` is unique per *business fact*), and deduping
+on the wrong one is a double-award bug already found and corrected in this
+taxonomy's sibling documents (doc 22).
+
+Events never themselves authorize a payout — Bonus still calls
+`risk.Evaluate`/`rg.EvaluateEligibility` synchronously at the moment of any
+money-affecting action; an event is a progression/re-evaluation trigger
+only (doc 22, Consumer contract item 3).
+
+### 7. `rounding_rules`
+
+**Frozen from ADR 0021, Stage 4H-B0-R3 DECISION RECORDED, verbatim
+positions**:
+
+- **DS-1** = round-half-up (ties away from zero).
+- **DS-2** = round once, at the final monetary boundary, with every
+  intermediate value carried at full `NUMERIC` precision — never an
+  implicit database cast, never a bare `ROUND()` call, never a
+  language/library default.
+- **DS-3** = one platform-wide deterministic rounding rule by default,
+  with room for a future per-asset/per-jurisdiction override without
+  redesign, not exercised today.
+
+**Exact algorithm**: round half away from zero — `result = sign(x) ×
+floor(|x| + 0.5)` — via one named, shared function operating in minor-unit
+terms with no hardcoded scale.
+
+**Storage**: an immutable, append-only `rounding_rules` reference table
+(one row per composite Q1+Q2 version); the applied identifier is
+denormalized onto `ledger_transactions.rounding_rule_id` at post time,
+immutable thereafter, and the upstream computation row (the Grant/Offer)
+should store the same identifier alongside its own inputs.
+
+**Per-bonus-type application, binding, not re-derivable**: for
+Deposit-match/Reload/Cashback, round `min(exact_amount × rate_%, cap)`
+**once**, after both the percentage multiply and the cap comparison — the
+cap is part of computing what is actually granted. The
+**wagering-requirement target** (`bonus_amount × multiplier`) is a
+comparison threshold that gates a lifecycle-state transition and is
+**never itself posted to the ledger** (ADR 0032 §3.1: "conversion
+eligibility is a decision, not a movement") — DS-2's "final monetary
+boundary" language does not apply to it in the posting sense, though the
+same deterministic `NUMERIC` discipline still applies. **Per-game
+contribution weighting** (`stake × contribution_%`) **is** monetary — it
+determines the actual cash/bonus split instruction posted for a wagering
+event — and DS-2's boundary for it is the split-instruction computation
+itself, rounded once there, capped by the Grant's remaining bonus balance.
+
+**Cashback residual, confirmed consequence**: no remainder-accumulation
+mechanism exists anywhere in the architecture. Each cashback calculation
+rounds independently and immediately, round-half-up, with no
+accumulation; the discarded sub-minor-unit fraction is not owed to the
+player and never becomes a ledger fact.
+
+### 8. Conversion boundary
+
+**Frozen constraint, stated as a boundary, not merely an observation**:
+**Bonus accounting is always same-asset. Bonus Engine's grant, wagering,
+and conversion computations never invoke a `ConversionOperation`.** This
+is grounded in doc 27 §26.7's confirmed finding ("bonus computations
+operate on wallets already denominated in already-registered assets;
+nothing about bonus grant/wagering/conversion math depends on whether the
+asset list is open or closed, or on whether an FX boundary exists") and
+restated unchanged by ADR 0037's own Impact Assessment ("Bonus Stage
+4H-B1: none... ADR 0021's rounding decision remains as recorded, reused by
+reference, never reopened").
+
+Concretely: a Grant's reward, its wagering contribution, and its payout
+are always denominated and settled in the single asset the Grant's own
+wallet already uses. **A future feature that would grant or convert value
+across two different assets (e.g. "match a EUR deposit with a BTC-
+denominated bonus") is a new architecture decision requiring its own ADR
+and human sign-off — it is not something this document, ADR 0037, or the
+first-slice scope plan already permits by silence.** No Bonus Engine code
+path may call `ConversionOperation` without that decision being made
+first.
+
+### 9. `player_locked` origin — PROVISIONAL, not frozen
+
+**Explicitly not settled.** Per `ledger-accounting-model.md` §6.3, Shape A
+(splitting `player_locked` into `player_locked_cash`/`player_locked_bonus`
+via an additive `account_type` CHECK widening) and Rule B2 extended
+(`BONUS_SET = {player_bonus, player_locked_bonus}` for a given
+`(tenant_id, asset_code)`; the mirror pair fires on value crossing that
+set's boundary, never on an internal `player_bonus ↔ player_locked_bonus`
+transfer) were **approved in shape** by all three independent Wave-2
+reviewers (`sportsbook`, `architect`, `bonus-engine` itself) at Stage
+4H-B0-R5. But `ledger-accounting-model.md` §6.3.5.1 states plainly: **"Still
+requires human approval before migration,"** and several sub-pieces
+(the C-win proportional-payout rule, C-cashout) remain explicit, unresolved
+`OPEN QUESTION`s with no review at all.
+
+**Therefore**: Bonus Engine's dependency on `player_locked_cash`/
+`player_locked_bonus` — relevant the moment any locked-stake product
+(sportsbook or otherwise) needs to track wagering contribution from a
+bonus-funded, currently-locked stake — is **provisional, not frozen**,
+pending Workstream C's continuing implementation-ADR review this same
+stage (4H-B0-R6) and eventual human approval. A future Bonus Engine build
+must re-check this section's status before assuming the split exists as
+described.
+
+The related, still-open **Human decision required** item (doc 10 §1.2's
+flagged gap / §5's cross-reference note: what happens when a settlement or
+void credit, or a platform-caused inability to complete, arrives against
+an already-terminal Grant) is carried forward unchanged — not resolved
+here, not to be silently assumed by a future implementer.
+
+### 10. External provider-native bonus coexistence
+
+**`fulfillment_owner`** (ADR 0033 §1): every Campaign/promotional context
+carries an explicit, queryable `fulfillment_owner` — `platform` |
+`external_provider:<provider_id>` — resolved from tenant-owned
+promotion-campaign configuration, **never** inferred by an adapter or
+guessed from provider capability at grant time.
+
+**Two-independent-bonus-sources model, degenerating to one for in-house**
+(ADR 0033 §3, Stage 4H-B0-R4 correction): for an external sportsbook
+provider, two independent bonus sources can exist on the same player at
+the same time (our own Bonus Engine, and the provider's own native bonus
+engine). For the platform's own in-house sportsbook engine, there is
+exactly **one** bonus source — `fulfillment_owner` is always `platform`
+and no `external_reward_grant` row is ever created for that activity. This
+is a correct, safe degeneration of the coexistence model, not a defect.
+
+**Ledger treatment, frozen** (ADR 0032 §6(c), doc 10 §3.2's corrected
+text): a Grant's lifecycle events carry an explicit fulfillment-destination
+flag, `into_platform_wallet` vs `inside_provider`, declared at Offer/
+reward-type configuration time — a reward type that does not declare it is
+rejected at configuration time, never guessed at posting time.
+`into_platform_wallet` Grants (internal, or provider-funded-but-platform-
+fulfilled) post through `ledger-finance`'s ordinary posting logic
+unchanged. `inside_provider` Grants post **zero** ledger entries — Bonus
+Engine still records the Grant/Progress trail (reporting, RG/limit
+visibility, player-support answerability) but emits no lifecycle event to
+the ledger boundary at all; reconciliation for these is the memo/audit
+stream (`reconciliation-model.md` §2.10), never a ledger-vs-ledger
+comparison.
+
+## Bonus must never build
+
+Every prohibition below is a restatement of an already-approved boundary,
+not a new rule invented by this section:
+
+- **A parallel wallet or shadow balance** — because a Grant's financial
+  state must be reconstructable from ledger entries alone; a
+  Bonus-Engine-owned balance that isn't reconciled against
+  `internal/ledger` is exactly the "side table nobody can reconcile"
+  CLAUDE.md and doc 10 §6 both forbid outright.
+- **A parallel ledger** — because only `wallet`/`ledger` may write ledger
+  tables (`02-domain-and-service-boundaries.md`), and `SUM(DEBITS) ==
+  SUM(CREDITS)` is a platform-wide invariant, not a per-subsystem one — a
+  second ledger would fork the one thing the whole platform's
+  reconciliation model depends on being singular.
+- **A parallel risk/limit engine** — because `internal/risk` is "one
+  reusable engine, never a separate limit engine per product" (ADR 0031's
+  standing principle, restated by doc 10 §4's own hard rule: "MUST NOT
+  build its own limit engine, cap table, or velocity-threshold concept");
+  two independent, unreconciled policy engines governing the same player
+  would silently diverge over time with no mechanism to detect it.
+- **A parallel RG/self-exclusion engine** — because RG/AML/KYC are a
+  single compliance subsystem behind vendor-agnostic interfaces, with
+  enforcement as platform code, not duplicated per domain (CLAUDE.md's
+  Compliance section; ADR 0034 §1: "Bonus/Gamification code MUST NOT read
+  `player_restrictions` directly... must not invent its own restriction
+  table or enum"); a second self-exclusion concept could disagree with the
+  authoritative one and let an excluded player receive value.
+- **A parallel asset registry** — because "adding a new asset must never
+  require touching `internal/wallet` or `internal/ledger` code" and every
+  downstream domain must call the one canonical
+  `AssetAuthorization.CheckEligibility` rather than reimplement any layer
+  of its eligibility chain (ADR 0037 §A.1/§C.2); a Bonus-owned asset
+  concept would drift from the platform's own layered
+  existence/active/platform/tenant/brand/jurisdiction/operation
+  authorization and could let a bonus be denominated in, or paid out in,
+  an asset the platform itself has deactivated or never authorized.
+
+## Genuine gaps found (named, not resolved here)
+
+None of these is decided by this document. Each requires a future ADR or
+an explicit human/architect decision before Stage 4H-B1 implementation
+reaches the affected surface — inventing an answer here would violate this
+stage's own "freeze what exists, don't design what doesn't" scope:
+
+1. **No document names which `AssetAuthorization.CheckEligibility`
+   `Operation` value a bonus grant/activation/conversion should pass.**
+   ADR 0037's six operation values (`deposit`/`withdrawal`/`wagering`/
+   `settlement`/`conversion`/`reporting`) do not include anything named
+   "bonus," and no document maps a Bonus lifecycle transition onto one of
+   them. A plausible candidate is `wagering` (bonus value is only ever
+   usable for wagering), but this is not decided anywhere and must not be
+   assumed by a future implementer without an explicit decision.
+2. **No `internal/assetregistry` package or `AssetAuthorization` Go type
+   exists in this repository as of this stage** (confirmed by direct
+   search of `internal/`). The §2 signature above is cited from ADR 0037
+   §C.2 as architecture only; whoever implements Workstream A's Asset
+   Registry work must be the source of truth for the final committed
+   signature, and Bonus's Stage 4H-B1 implementers must re-verify §2
+   above against that final code before relying on it.
+3. **Doc 10 §1.3's five named event-bus inputs
+   (`player.registered`/`deposit.settled`/`round.settled`/`bet.settled`/
+   `session.started`) are not formally reconciled against doc 22's actual
+   canonical, namespaced taxonomy** (`identity.person.registered`/
+   `payments.deposit.settled`/`casino.bet.settled`/`casino.win.settled`/
+   `casino.launch.started`). Doc 22 has no `round.settled` type at all —
+   settlement is split into separate bet/win events — and doc 10 already
+   flags this as an open assumption (its own "Open questions" item 4). A
+   future stage must confirm the exact `type` strings before wiring any
+   real subscription.
+4. **`bonus_conversion`'s Risk `Operation` value is fully specified but
+   not started** (ADR 0031 §16, zero of six steps complete as of the last
+   verification, Stage 4H-B0-R3). Not a specification gap — a real,
+   outstanding, scoped dependency that must close before §3's conversion
+   checkpoint can be wired.
+5. **The `player_locked` origin split (Shape A) is approved-in-shape but
+   not human-approved**, with named unresolved sub-questions (C-win's
+   proportional-payout/anti-structuring control, C-cashout). Bonus's
+   dependency on it (§9) is provisional until Workstream C's review this
+   stage closes and a human approves the migration.
+6. **The Grant-state-machine gap for a settlement/void credit (or a
+   platform-caused inability to complete) arriving against an
+   already-terminal Grant** (doc 10 §1.2/§5) is an explicit **Human
+   decision required** item with three named candidate resolutions
+   (re-forfeit / route to `player_cash` / manual-review queue), none
+   selected. Must not be silently resolved by a future implementer.
+7. **Campaign-level budget-cap enforcement has no designed mechanism or
+   owner** (doc 10 §1.1's flagged P2). Confirmed out of `risk.Evaluate`'s
+   scope (§3 above), but nothing else names where or how it would be
+   enforced. Needs its own design before any Campaign budget cap can
+   actually be enforced.
+8. **`bonus_expense`'s statutory/reporting presentation** (P&L expense
+   line vs. contra-revenue) is an explicit `OPEN DECISION` in ADR 0032 §2.
+   Does not block Bonus's own build, but must not be silently assumed by
+   whoever eventually builds bonus financial reporting.
+
+Owner of this section: `bonus-engine`. Nothing in this section authorizes
+writing `internal/bonus`, a migration, or a test.
