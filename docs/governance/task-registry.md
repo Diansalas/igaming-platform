@@ -342,12 +342,31 @@ if needed).
 | ID | Owner | Status | Dependencies | Files owned | Workstream | Blockers |
 |---|---|---|---|---|---|---|
 | 4HB0R7-01 | Orchestrator | Done | none | `docs/governance/*` | Governance setup | none |
+| 4HB0R7-02 | ledger-finance | Done | none | `ledger-accounting-model.md` §6.5 | A design | none |
+| 4HB0R7-03 | architect/bonus-engine/sportsbook | Done | 4HB0R7-02 | (review only) | A design validation | none |
+| 4HB0R7-04 | ledger-finance | Done | 4HB0R7-03 | `ledger-accounting-model.md` §6.6 | B design (G-3, Model C) | none |
+| 4HB0R7-05 | sportsbook/bonus-engine/architect | Done | 4HB0R7-04 | (review only) | B design validation | none |
+| 4HB0R7-06 | bonus-engine | Done | none | `10-bonus-engine-architecture.md` T.1-T.13 | C (Terminal-Grant contract) | none |
+| 4HB0R7-07 | identity-compliance | Done | none | ADR 0034 §14.10-§14.13 | D (self-exclusion hardening) | none |
+| 4HB0R7-08 | sportsbook | Done | none | (review only) | E (conformance validation) | none |
+| 4HB0R7-09 | product-owner-proxy/architect | Done | none | ADR 0039 | F (Human Decision Register) | none |
+| 4HB0R7-10 | ledger-finance | Done | 4HB0R7-02, 4HB0R7-03 | `migrations/0048_*`, `internal/ledger/ledger.go`, `internal/wallet/wallet.go`, three new test files | A implementation | none |
+| 4HB0R7-11 | security/code-reviewer/qa | Done | 4HB0R7-10 | (review only) | A independent review, round 1 | S-1 (blocking), F1/F2/F3 (code-reviewer), S-2/S-3/S-4 (security, non-blocking) — all routed to 4HB0R7-12 |
+| 4HB0R7-12 | ledger-finance | Done | 4HB0R7-11 | same files as 4HB0R7-10, plus `reconciliation-model.md`, `03-database-architecture.md`, `06-wallet-ledger-architecture.md`, `financial-domain-model.md`, `financial-transaction-flows.md` | A fix wave | none |
+| 4HB0R7-13 | security | Done | 4HB0R7-12 | (review only) | A final re-verification (S-1 close-out) | none — S-1 CONFIRMED CLOSED |
+| 4HB0R7-14 | Orchestrator | Done | 4HB0R7-10 through 4HB0R7-13 | `docs/active-stage.md`, this file, `docs/governance/project-status.md`, `docs/progress.md` | Governance close-out | none |
 
-Wave 1 (design/validation, no code — the directive requires the
-`player_locked` phase 2 model and the wagering-progress-integrity model
-to be re-approved by ledger-finance/bonus-engine/sportsbook/architect
-before any migration or Go code is written) and later waves will be
-added as each dispatch reports back.
+**Migration-number reservation outcome**: only `0048` was used (Workstream
+A). Workstreams B/C/D did not require a schema change this stage (design/
+validation only, no code authorized), so `0050`/`0051`/`0052` were never
+consumed and remain reserved for whichever future stage implements those
+workstreams.
+
+**Integration status**: Workstream A's migration `0048` and its
+`internal/ledger`/`internal/wallet` changes are **Integrated** — committed
+to `claude/focused-wright-jw88w9` at `17f1057`, pushed, full integration
+suite green. No other workstream produced code this stage, so no other
+integration action applies.
 
 ## How to use this registry (for future stages)
 

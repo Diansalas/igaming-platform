@@ -1109,6 +1109,73 @@ AUTHORIZATION after `bonus_conversion`) or Retail's Stage 4H-B2 gate
 vendor was named or implemented this stage.** `go build ./...` remains
 clean (docs-only diff).
 
+## Stage 4H-B0-R7: Final Financial/Bonus Implementation Gate
+
+**Note on this file's own gap, disclosed rather than hidden**: this
+document has no dedicated sections for Stage 4H-B0-R5 (Implementation
+Readiness and Final P1 Closure) or Stage 4H-B0-R6 (Foundational
+Implementation Hardening) — it jumps from Stage 4H-B0-R4 directly to this
+R7 entry. `docs/active-stage.md`, `docs/progress.md`, and
+`docs/governance/task-registry.md` all correctly carry the full R5/R6
+record; this file was simply never updated for those two stages. Not
+backfilled as part of this stage — recording R5/R6 retroactively here was
+not authorized by this stage's directive — but disclosed here so it is
+not silently perpetuated. A future stage should backfill it.
+
+Closed the implementation-blocking financial dependencies Stage 4H-B0-R6
+discovered: `player_locked` phase 2, gate G-3 (bonus-funded wagering-
+progress farming after a later void/rollback), the Terminal-Grant and
+self-exclusion technical contracts, and a formal Human Decision Register.
+**No Bonus Engine, Gamification, Reward Orchestrator, or real provider
+code was authorized or written this stage.**
+
+**Workstream A — `player_locked` phase 2 (migration `0048`): IMPLEMENTED,
+independently reviewed twice over, fixed, and re-verified.** Splits the
+ledger account type `player_locked` into
+`player_locked_cash`/`player_locked_bonus` (invariant L1, 5-layer
+enforcement), adds the HR-9 fail-closed posting guard against
+`player_bonus`/`player_locked_bonus` until `bonus_expense` and the Rule
+B2 mirror generator both exist, and extends `wallet.GetSummary` with
+per-origin balances and an erroring default arm. A real defect
+(the pre-flight guard's `SELECT count(*)` was silently inert under
+`ledger_accounts`' `FORCE ROW LEVEL SECURITY`) was found and fixed during
+implementation; the first fix attempt (toggling `FORCE ROW LEVEL
+SECURITY` around the count) was itself found blocking by independent
+`security` review (finding S-1: the restore is transaction-local, risking
+a silent, permanent loss of tenant isolation on a standalone migration
+run) and replaced with a mechanism that is RLS-immune by construction.
+`security`, `code-reviewer`, and `qa` each independently reviewed the
+implementation (no self-review); all findings routed to one consolidated
+fix wave and re-verified. New governance item **HR-15** (not
+implemented): a `BEFORE UPDATE` trigger guarding `ledger_accounts`'
+identity columns is a required gate before any code posts to a
+locked-origin account. Full detail: `docs/active-stage.md`'s Stage
+4H-B0-R7 section and `docs/architecture/ledger-accounting-model.md`
+§6.5.
+
+**Workstreams B/C/D/E/F — design/validation only, no code authorized.**
+Gate G-3 (bonus-funded wagering-progress farming) closed at the design
+level via Model C, independently validated by `sportsbook`, `bonus-
+engine`, and `architect` — BLOCKED on Stage 4H-B1 authorization, not on
+further design. The Terminal-Grant technical contract (gate G-2) and
+self-exclusion technical hardening are both design-complete without
+selecting their respective human decisions. Sportsbook financial-contract
+conformance confirmed consistent (read-only, no sportsbook code). The
+Human Decision Register (`docs/decisions/0039-*.md`) formalizes the three
+still-unmade human decisions.
+
+**Verification**: `gofmt`, `go build ./...`, `go vet ./...`,
+`golangci-lint run` (0 issues) all clean. Full `go test -tags=integration
+./...` suite run repeatedly (5+ times) with zero failures. Migration
+round-trip confirmed. Commit `17f1057` on `claude/focused-wright-jw88w9`,
+pushed, working tree clean.
+
+**B1 readiness: NOT READY.** `player_locked` phase 2's cash-only ledger
+capability is implementation-complete, but Bonus Engine, Gamification,
+and the Reward Orchestrator remain entirely unbuilt, and three human
+decisions (G-2, the self-exclusion default, cashout policy) remain
+unmade. **Stage 4H-B1 is NOT authorized by this stage.**
+
 ## Production blockers (summary)
 
 Every item in "Blocked stages" and "External dependencies" above is a

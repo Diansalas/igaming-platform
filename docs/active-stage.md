@@ -1,5 +1,201 @@
 # Active Stage
 
+## Stage 4H-B0-R7 — Final Financial/Bonus Implementation Gate — Complete
+
+Status: **Complete. Workstream A (`player_locked` ledger-account origin
+split) IMPLEMENTED, independently reviewed, fixed, and re-verified.
+Workstreams B/C/D/E/F closed at the design-validation level (no code
+authorized for them this stage). Three human decisions (G-2 Terminal-
+Grant settlement-credit resolution, `OpenBetSelfExclusionPolicy` default,
+mixed/bonus-funded cashout policy) remain unmade and are NOT selected by
+any agent. Stage 4H-B1 (Bonus Engine) NOT started. No automatic
+progression — explicit human authorization required.**
+
+Purpose: close the implementation-blocking financial dependencies Stage
+4H-B0-R6 discovered — `player_locked` phase 2, gate G-3 (bonus-funded
+wagering-progress farming after a later void/rollback), the Terminal-
+Grant and self-exclusion technical contracts, and a formal Human Decision
+Register — while explicitly forbidding any Bonus Engine/Gamification/
+Reward Orchestrator/real-provider code.
+
+**Workstream A — `player_locked` phase 2 (migration 0048): IMPLEMENTED.**
+
+Design/validation (pre-implementation, no code): `ledger-finance` re-
+verified R6's claims against live HEAD and produced the exact migration
+SQL, Go changes, and a ten-item test set (§6.5 of
+`ledger-accounting-model.md`); independently cross-validated by
+`architect`, `bonus-engine`, and `sportsbook` before any code was
+written, closing two real cross-workstream inconsistencies neither
+authoring specialist's own review caught (a G-2-dependent blind spot in
+the wagering-progress netting measure, fixed via new **HR-14**; a
+self-contradiction between two of `bonus-engine`'s own R7 deliverables on
+whether forfeiture postings share a bet's `correlation_id`).
+
+Implementation: `ledger-finance` split the ledger account type
+`player_locked` into `player_locked_cash`/`player_locked_bonus`
+(migration `0048`, invariant **L1** — locked-origin determinacy,
+enforced across a 5-layer stack: CHECK constraint, Go type system,
+migration pre-flight guard, `wallet.GetSummary`'s erroring default arm,
+tests). Added the **HR-9** fail-closed posting guard
+(`assertNoBonusSetEntries` in `internal/ledger`), rejecting any posting
+against `player_bonus`/`player_locked_bonus` until `bonus_expense` and
+the Rule B2 (extended) mirror generator both exist. `internal/wallet`'s
+`GetSummary` gained `LockedCashBalance`/`LockedBonusBalance` alongside
+the combined `LockedBalance`, with a new erroring `default` arm replacing
+a prior silent-zero risk.
+
+**A real defect was found and fixed during implementation, not before
+it**: the migration's own pre-flight guard, as designed, was a bare
+`SELECT count(*)` — silently inert, because `ledger_accounts` carries
+`FORCE ROW LEVEL SECURITY` and a migration connection sets no
+`app.tenant_id`, so the count always reads zero regardless of what the
+table holds. `ledger-finance`'s own test caught this on first run. The
+first fix attempt toggled `NO FORCE`/`FORCE ROW LEVEL SECURITY` around
+the count — independent `security` review found this **blocking**
+(finding **S-1**): the restore is transaction-local, so a standalone
+`psql -v ON_ERROR_STOP=1 -f` run of the file (exactly what an operator
+would do to read the guard's message during an incident) leaves
+`ledger_accounts` with tenant isolation silently, permanently off.
+Resolved by removing the RLS toggle entirely: the sole guard mechanism is
+now `ADD CONSTRAINT ... EXCEPTION WHEN check_violation`, which is immune
+to RLS by construction (constraint validation scans every row regardless
+of role or policy). `security` independently re-confirmed this fix in a
+dedicated follow-up pass: zero RLS statements remain in the migration,
+the sole mechanism is genuinely RLS-immune, and the regression-guard test
+would actually catch a reintroduction of the toggle.
+
+**Independent review (two rounds, no self-review)**: `security`,
+`code-reviewer`, and `qa` each reviewed the implementation independently.
+`qa` cleared it with no blocking gaps (test coverage judged sufficient
+for the narrow schema-reclassification-plus-guard scope; concurrency
+testing correctly judged unnecessary for this guard's shape). `security`
+found S-1 (blocking, above), plus three Low/informational items
+(a mutable package-level guard list; unenforced player-ownership on the
+new account types; a deploy-ordering note). `code-reviewer` independently
+converged on the same RLS defect from a different angle (**F4**, a
+factually-incorrect fallback-degradation claim in the migration comment)
+and additionally found: **F1** — the completion-status note overclaimed
+invariant L1 as fully addressed while five `ledger-finance`-owned
+documents (`reconciliation-model.md`'s three sites,
+`03-database-architecture.md`, `06-wallet-ledger-architecture.md`,
+`financial-domain-model.md`, `financial-transaction-flows.md`) still
+carried the pre-split `player_locked` enumeration; **F2** — the HR-9
+rejection message hardcoded "both preconditions missing," which would go
+factually stale in the exact window HR-9's reworded conjunctive-removal
+condition creates (`bonus_expense` landing first, alone); **F3** — a
+CI-reachable test-fixture race (two packages' test files creating the
+same synthetic asset codes concurrently).
+
+**Fix wave**: `ledger-finance` (same specialist, fixing its own code
+after independent reviewers found the defects — not self-review) removed
+the RLS toggle entirely; reworded the HR-9 message to a requirement list
+rather than a "missing" assertion; made the BONUS_SET guard list
+immutable by construction; gave the two test files distinct synthetic
+asset codes; completed all of its own owed §6.3.4 item 6 document edits;
+and — while re-running the full suite as part of its own verification —
+found and fixed a **second, previously-undetected defect**: a flaky test
+(`TestGetSummary_CombinesBothLockedOriginsInEitherRowOrder`) whose
+row-order-forcing harness disabled index/bitmap scans but not
+`synchronize_seqscans`, letting PostgreSQL's synchronized sequential
+scans rotate the observed row order under concurrent load. Fixed with
+`SET LOCAL synchronize_seqscans = off` plus a bounded, still-hard-failing
+retry. Also recorded **HR-15** (new, not implemented): a `BEFORE UPDATE`
+trigger on `ledger_accounts` guarding `account_type`/`wallet_id`/
+`asset_code`/`tenant_id` immutability is a required gate — its own
+migration, its own review — before any `transaction_type` posts to a
+locked-origin account (security finding **S-2**: nothing currently
+prevents an `UPDATE` from retroactively falsifying invariant L1's origin
+attribution or bypassing HR-9). Not a migration-0048 blocker, since
+nothing posts to these accounts yet.
+
+**Final independent re-verification**: `security` re-confirmed S-1 fully
+resolved with no new defect introduced. The Orchestrator independently
+verified throughout (not merely trusting specialist claims): `gofmt`,
+`go build ./...`, `go vet ./...`, `golangci-lint run` (0 issues) all
+clean before and after the fix wave; the full `go test -tags=integration
+./...` suite run repeatedly (5+ times across both rounds) with zero
+failures and no flake recurrence after the `synchronize_seqscans` fix;
+migration round-trip (`up`/`down`/`up`, dirty-database down-rejection)
+confirmed against both a throwaway database and the shared dev database;
+every file changed was read and its diff inspected directly, not taken
+on the implementing specialist's word.
+
+**Sportsbook/Bonus Engine posting call sites remain NOT IMPLEMENTED** (no
+`internal/sportsbook` package exists; cases A/D/F/H/J/K stay as
+architecture only) — deliberately, per this stage's explicit boundary.
+
+**Workstreams B/C/D/E/F — design/validation only, no code authorized:**
+
+- **Workstream B (wagering-progress integrity, gate G-3)**: CLOSED at the
+  design level via **Model C** ("dual-measure derived progress" — P_net/
+  P_firm, invariant **W1**/**W2**), independently validated by
+  `sportsbook`, `bonus-engine`, and `architect` across two rounds
+  (`architect`'s independent cross-check found two real inconsistencies —　
+  Inconsistency A/B — that neither original author's own review caught;
+  both fixed). **NOT IMPLEMENTED** — no Bonus Engine package exists, and
+  building one is explicitly out of scope for this stage. Status:
+  **BLOCKED on Stage 4H-B1 authorization**, not on any further design
+  work.
+- **Workstream C (Terminal-Grant technical contract, gate G-2)**: T.1-T.13
+  fully modeled (value-creating/value-reducing asymmetry; full
+  immutable-vs-live-evaluated table; all three candidate posting actions
+  modeled at instruction level). Does **NOT** select the human decision.
+  **DESIGN COMPLETE, NOT IMPLEMENTED** (no code path exists for any of
+  the three candidate actions).
+- **Workstream D (self-exclusion technical hardening)**: new ADR 0034
+  §14.10-§14.13 (mid-partial-settlement void resolution, `correlation_id`-
+  keyed nullification per §14.11, as-of re-confirmation, audit ordering).
+  Does **NOT** select the `OpenBetSelfExclusionPolicy` default.
+  **DESIGN COMPLETE, NOT IMPLEMENTED** beyond what R6 already shipped
+  (the policy config/resolution infrastructure itself).
+- **Workstream E (sportsbook financial contract conformance)**: read-only
+  validation confirming ADR 0038's accounting design is internally
+  consistent with the Workstream A/B changes; no sportsbook code written.
+  **DONE** (as a review, not an implementation).
+- **Workstream F (Human Decision Register)**: new
+  `docs/decisions/0039-human-decision-register-stage-4h-b0-r7.md`,
+  formalizing the three still-unmade human decisions (G-2 settlement-
+  credit resolution; `OpenBetSelfExclusionPolicy` default; mixed/bonus-
+  funded cashout policy, widened to include forward dependency **FD-1** —
+  cashout's wagering-progress treatment must be decided together with its
+  proceeds-split policy) with exact options, financial/technical/
+  regulatory consequences, and an honest engineering-vs-configuration
+  impact assessment. Corrected twice by `architect`'s independent
+  cross-checks. **DONE.**
+
+**Disclosed, not fixed this stage (each attributed, none hidden):**
+- `LF-0048-1` — a pre-existing (confirmed unrelated to this stage's
+  changes) false-positive in `internal/reconciliation`'s ledger-vs-
+  projection sweep for any ledger account with no entries yet, pinned by
+  a characterization test. Owner: `ledger-finance`; needs its own change.
+- `HR-15` (above) — a required future gate, explicitly not built.
+- The ADR 0035 `ledger_accounts_owner_family` CHECK collision (§6.5.11):
+  ADR 0035's proposed constraint would reject every locked-origin account
+  creation in either landing order. Owed by whichever of {migration 0048,
+  ADR 0035's amendment} lands second — 0048 has now landed first.
+- Two Low, optional security follow-ups from the final S-1 re-check
+  (L-1: a standalone non-transactional migration run could briefly leave
+  no `account_type` CHECK constraint at all; L-2: the RLS-toggle
+  regression-guard test is case-sensitive and skipped without a test
+  database) — neither blocks, both cheap, left as backlog.
+- **Pre-existing governance-doc gap, found during this stage's own
+  close-out, not introduced by it**: `docs/governance/project-status.md`
+  has no dedicated sections for Stage 4H-B0-R5 or Stage 4H-B0-R6 (it stops
+  at Stage 4H-B0-R4); `docs/active-stage.md`, `docs/progress.md`, and
+  `docs/governance/task-registry.md` all correctly carry the full R5/R6
+  record. Not backfilled this stage — recording R5/R6 retroactively into
+  `project-status.md` is not this stage's purpose and was not authorized —
+  but disclosed here rather than silently perpetuated.
+
+**B1 readiness: B1 NOT READY.** `player_locked` phase 2's cash-only
+ledger capability is implementation-complete and reviewed, but Bonus
+Engine, Gamification, and the Reward Orchestrator remain entirely
+unbuilt, and three human decisions (G-2, the self-exclusion default,
+cashout policy) remain unmade. "Architecture/design exists" is not
+treated as sufficient, per this stage's own directive.
+
+---
+
 ## Stage 4H-B0-R6 — Foundational Implementation Hardening — Complete
 
 Status: **Complete. The first implementation stage since a long
