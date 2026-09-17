@@ -57,24 +57,31 @@ stage's scope is unambiguous rather than "whatever seems obviously next."
   (blocked — Gamification deferred, see 1.2), Cash reward (architecturally
   ready but deliberately not self-added to the list — a scope call for the
   Orchestrator/product owner, not bonus-engine).
-- **Gate check, corrected (Stage 4H-B0-R1)**: an earlier draft stated
-  Stage 4H-B1 is "independently authorizable." That contradicted this
-  same document's own §23 (formerly), which discloses that ADR 0021's
-  unresolved rounding/precision decision blocks precise computation for
-  3 of the 5 first-slice bonus types (deposit, reload, cashback all
-  multiply money by a percentage). **Corrected status: Stage 4H-B1 is
-  CONDITIONALLY READY, not independently ready.** The Stage 4G §32 block
-  on `internal/bonus` is **lifted, qualified** — Risk & Limits is stable
-  enough (Stage 4G-FINAL 11/11-area review plus the finance-gate
-  follow-up, PASS/no P0/P1) and ADR 0031 §14-18 already specifies the
-  bonus-Risk contract — but production implementation cannot **begin**
-  until all three of:
-  1. **The ADR 0021 rounding/precision decision is explicitly resolved**
-     by a human — `docs/decisions/0021-multi-asset-accounting.md` now
-     carries the exact decision needed and the available architectural
-     choices (rounding direction and precision handling for
-     percentage-of-amount calculations), enumerated by ledger-finance
-     without inventing or selecting one. See §24 #15.
+- **Gate check, corrected (Stage 4H-B0-R1), then closed (Stage 4H-B0-R3)**:
+  an earlier draft stated Stage 4H-B1 is "independently authorizable."
+  That contradicted this same document's own §23 (formerly), which
+  discloses that ADR 0021's unresolved rounding/precision decision blocks
+  precise computation for 3 of the 5 first-slice bonus types (deposit,
+  reload, cashback all multiply money by a percentage). Stage 4H-B0-R1
+  corrected this to CONDITIONALLY READY pending three items. **Stage
+  4H-B0-R3 update: item 1 is now RESOLVED.** The human decided DS-1 =
+  round-half-up, DS-2 = round once at the final monetary boundary (full
+  precision until then, explicit function, never an implicit cast), DS-3
+  = one platform-wide rule by default — validated by six specialists
+  (`ledger-finance`, `bonus-engine`, `risk`, `architect`, `security`,
+  `qa`) with no contradiction, financial problem, or unsafe consequence
+  found. Full recorded decision, algorithm, storage location, and a
+  handful of non-blocking implementation-time clarifications:
+  `docs/decisions/0021-multi-asset-accounting.md`'s "Rounding and
+  precision — RESOLVED" section. **Corrected status: Stage 4H-B1 is
+  READY FOR HUMAN AUTHORIZATION after completion of `bonus_conversion`.**
+  The Stage 4G §32 block on `internal/bonus` is **lifted, qualified** —
+  Risk & Limits is stable enough (Stage 4G-FINAL 11/11-area review plus
+  the finance-gate follow-up, PASS/no P0/P1) and ADR 0031 §14-18 already
+  specifies the bonus-Risk contract — but production implementation
+  cannot **begin** until:
+  1. ~~The ADR 0021 rounding/precision decision is explicitly resolved
+     by a human.~~ **RESOLVED, Stage 4H-B0-R3** — see §24 #15.
   2. **The Risk dependency for the `bonus_conversion` Operation is
      completed and reviewed.** Verified directly against repository
      state by `risk` (not inferred from prior documentation): **NOT
@@ -85,17 +92,25 @@ stage's scope is unambiguous rather than "whatever seems obviously next."
      not the two an earlier draft assumed — no ledger transaction-type
      mapping, no enforcement call site — `internal/bonus` does not
      exist). Full detail and exact remaining steps: ADR 0031 §16a.
-     **This is on the first slice's critical path** — all five in-slice
-     bonus types run through `completed → converted`, so the first
-     slice cannot ship without it; it is not deferrable to a later
-     slice.
+     Re-verified unchanged by `risk` in both Stage 4H-B0-R2 and Stage
+     4H-B0-R3 — no code has been touched since Stage 4H-B0-R1, and the
+     rounding decision introduces no new Risk-side dependency (Risk
+     evaluates only the already-rounded, posted minor-unit integer, by
+     construction of `RiskRequest.Amount`'s `int64` type — confirmed,
+     not assumed, Stage 4H-B0-R3). **This is on the first slice's
+     critical path** — all five in-slice bonus types run through
+     `completed → converted`, so the first slice cannot ship without it;
+     it is not deferrable to a later slice. **This is now the sole
+     remaining blocker to Stage 4H-B1.**
   3. **No other P0/P1 financial dependency remains.** `risk` confirmed
      directly: `bonus_conversion` is the only Risk-owned P0/P1 dependency
      for the five-type first slice. Grant issuance/activation need zero
      Risk changes (`bonus_grant` is already a real, working `Operation`);
      `min_amount`/`max_amount` rules are sufficient for all five types;
      campaign-level budget caps and RG/self-exclusion are confirmed
-     out of Risk's scope by construction, not blockers.
+     out of Risk's scope by construction, not blockers. `architect`
+     independently re-confirmed this with a focused 12-area review in
+     both Stage 4H-B0-R2 and Stage 4H-B0-R3 — no additional P0/P1 found.
 - **No Reward Orchestrator this slice** — Bonus Engine fulfills split
   instructions/lifecycle events directly through `wallet`/`ledger` for all
   five in-slice types (all `into_platform_wallet`), per doc 10 §6 and the
@@ -663,22 +678,25 @@ implementation stage.
    resolution (human +                 (human/business, not
    ledger-finance + risk):             engineering) — MUST
    - ADR 0021 rounding/precision       resolve before ANY retail
-     decision (§1.1, §24 #15 —         implementation stage is
-     human chooses among the           even scoped:
-     enumerated options, not           - Licensing status of retail
-     invented by a specialist)           per target jurisdiction
-   - risk dependency for the             (§24 #1)
-     bonus_conversion Operation        - Node-float/ADR 0007
-     completed and reviewed              amendment approval (§24 #3)
-     (§1.1)                            - Anonymous/bearer retail
-   - no other P0/P1 financial            play policy (§24 #4)
-     dependency remaining              - Commercial retail
-              |                          relationship existing at
-              v                          all (no current deal)
-     Stage 4H-B1 — Bonus                        |
-     Engine implementation                      v
-     (5-type first slice,              Stage 4H-B2 — Retail
-     §1.1)                             Architecture Hardening:
+     decision — RESOLVED, Stage        implementation stage is
+     4H-B0-R3 (§1.1, §24 #15)          even scoped:
+   - risk dependency for the         - Licensing status of retail
+     bonus_conversion Operation        per target jurisdiction
+     — STILL OPEN, NOT STARTED,        (§24 #1)
+     0/6 steps, re-verified          - Node-float/ADR 0007
+     Stage 4H-B0-R3 (§1.1)             amendment approval (§24 #3)
+   - no other P0/P1 financial        - Anonymous/bearer retail
+     dependency remaining              play policy (§24 #4)
+     — re-confirmed Stage             - Commercial retail
+     4H-B0-R2 and 4H-B0-R3              relationship existing at
+              |                          all (no current deal)
+              v                                |
+     Stage 4H-B1 — Bonus                       v
+     Engine implementation             Stage 4H-B2 — Retail
+     (5-type first slice,              Architecture Hardening:
+     §1.1) — READY FOR HUMAN
+     AUTHORIZATION once
+     bonus_conversion lands
                                         resolve the engineering-
                                         answerable P0s (§23B: audit_log
                                         RLS extension, the drafted
@@ -1060,15 +1078,20 @@ and why it can't be resolved by a specialist or the Orchestrator.
     contracted operator" baseline — the actual shape (how many levels,
     what they're called) is this operator's real structure, not a
     platform default.
-15. **ADR 0021 rounding/precision decision** — see §1.1. Blocks precise
-    computation for 3 of the Bonus Engine's 5 first-slice bonus types
-    (deposit, reload, cashback). `docs/decisions/0021-multi-asset-
-    accounting.md` now enumerates the available architectural choices
-    (rounding direction, precision handling) without selecting one —
-    a human picks among them. This is the one item in this register that
-    blocks the **Bonus** gate rather than the **Retail** gate; listed
-    here for completeness since it is, like every other item above, a
-    decision only a human can make.
+15. **ADR 0021 rounding/precision decision — RESOLVED (Stage 4H-B0-R3).**
+    Previously blocked precise computation for 3 of the Bonus Engine's 5
+    first-slice bonus types (deposit, reload, cashback). The human
+    decided DS-1 = round-half-up, DS-2 = round once at the final
+    monetary boundary, DS-3 = one platform-wide rule by default; six
+    specialists (`ledger-finance`, `bonus-engine`, `risk`, `architect`,
+    `security`, `qa`) validated the decision against the existing
+    architecture and found it safe, deterministic, and reconciliation-
+    compatible, with no contradiction requiring a change to the human's
+    proposal. Full recorded decision: `docs/decisions/0021-multi-asset-
+    accounting.md`'s "Rounding and precision — RESOLVED" section. Retained
+    here, marked resolved rather than removed, since this register is an
+    append-only historical record of every decision requiring human
+    input, not only the still-open ones.
 
 Two items from an earlier draft of this register are corrected/removed:
 "does a hierarchy node's float amend ADR 0007" is narrowed to item 3
@@ -1089,12 +1112,13 @@ reference:
 
 ```
 Path A — Bonus:
-  Resolve the Bonus financial gate (§1.1: ADR 0021 rounding decision by
-    a human, per §24 #15; the bonus_conversion Risk dependency, NOT
-    STARTED per ADR 0031 §16a; confirm no other P0/P1 remains)
+  Resolve the Bonus financial gate (§1.1: ADR 0021 rounding decision —
+    RESOLVED, Stage 4H-B0-R3, per §24 #15; the bonus_conversion Risk
+    dependency — STILL OPEN, NOT STARTED per ADR 0031 §16a, re-verified
+    Stage 4H-B0-R3; no other P0/P1 remains, re-confirmed)
   → THEN Stage 4H-B1 — Bonus Engine implementation (5-type first slice)
-  Not "immediately authorizable" — CONDITIONALLY READY, per §1.1's
-  correction.
+  READY FOR HUMAN AUTHORIZATION after completion of bonus_conversion,
+  per §1.1's Stage 4H-B0-R3 update.
 
 Path B — Retail (independent of Path A):
   Resolve the Retail-Legal / Business Gate (human/legal, before ANY
@@ -1118,3 +1142,173 @@ this stage.
 This stage (4H-B0-R1) explicitly STOPS here. **No
 Stage 4H-B1, "Retail-Legal," 4H-B2, or 4H-B3 work has been started.**
 Await explicit human authorization naming which of the above to begin.
+
+---
+
+## 26. Extensible Asset/Currency Registry + FX/Conversion architecture (Stage 4H-B0-R3, analysis only)
+
+New confirmed product requirement, analyzed this stage by `architect` at
+the Master Orchestrator's direction: the platform must not hard-code a
+closed list of currencies/assets — an extensible Asset/Currency Registry
+must let authorized operators create/activate assets as needed (EUR,
+USD, GBP, MXN, BRL, ARS, BTC, USDT and future/custom assets are
+illustrative, not exhaustive). **Analysis only. Not implemented. Does
+not expand the Bonus MVP, does not trigger FX implementation, does not
+add a payment/custody provider, does not add retail implementation** —
+confirmed explicitly by `bonus-engine` and `qa` as having zero effect on
+the five-type first slice's scope or test plan.
+
+### 26.1 Current architecture — partial support, additive extension needed
+
+The `assets` table (migrations 0003/0006) is already generic in spirit:
+an open `TEXT` primary key with no closed enum, per-row `decimal_
+exponent` (0-18) that every consumer already looks up rather than
+assuming a fixed value, and no code path anywhere in `internal/` that
+hardcodes a decimal count (confirmed by `qa`/`architect` independently).
+A new asset row could be inserted today with zero schema change and
+nothing downstream would break. **What is missing is the entire
+operational surface the requirement actually needs**: no admin API, no
+RBAC/authorization model, no audit logging on the mutation, and none of
+the additional per-asset eligibility columns the requirement names
+(wallet/deposit/withdrawal/settlement eligibility — currently expressed
+only indirectly, and only per-provider, through `ProviderCapability`,
+which is a different concept). Tenant/jurisdiction availability is
+**already solved** by the existing `tenant_jurisdiction_configs.allowed_
+currencies` mechanism — the Registry design does not need to reinvent
+that dimension.
+
+**Conclusion: not "already satisfied" — an explicit, additive extension
+is required**, not a redesign of the storage shape.
+
+### 26.2 Recommended documentation changes (not drafted this stage)
+
+- **A new ADR** (recommended: ADR 0037, parallel to how payments/KYC/risk
+  each got their own ADR rather than being folded into ADR 0021) to
+  define the extended Registry field set, the FX Rate Provider interface
+  (no vendor named), the Conversion Service boundary, and an explicit
+  cross-reference to ADR 0021's existing `ConversionOperation` as the
+  ledger-side terminus — not a redefinition of it.
+- `docs/architecture/financial-domain-model.md`'s scoping table (the
+  `Asset | Platform (registry) | Unchanged from Stage 1` row) needs a
+  pointer to the new ADR once written, and its framing corrected from
+  "Stage-1 seed set" to "open, extensible platform registry" so a future
+  reader doesn't mistake the 7 currently-seeded rows for a closed set.
+- `docs/architecture/06-wallet-ledger-architecture.md`'s already-
+  superseded cross-currency sketch needs a forward pointer to the new
+  ADR for the Registry/FX-provider boundary specifically.
+- `docs/architecture/13-dependency-map-and-risk-register.md` and
+  `docs/architecture/14-mvp-scope-and-roadmap.md` should record the
+  deferred future stage (§26.3) so it is not lost — done this stage, see
+  the "Features deliberately deferred" section of doc 14.
+
+None of the above ADR/document content was drafted this stage — only
+the requirement and the plan to draft it later were recorded, per this
+stage's explicit "analysis only" scope.
+
+### 26.3 Deferred future stage
+
+A dedicated future Asset/FX implementation stage should be recorded as
+deferred (not numbered/sequenced now), covering: the Registry admin API
++ RBAC, the FX Rate Provider interface + a mock/sandbox implementation,
+the Conversion Service, and the conversion-clearing-account open
+decision ADR 0021 already parks (see 26.4). Recorded in doc 14's
+deferred-features list this stage.
+
+### 26.4 FX/Conversion boundary — four distinct components, never coupled
+
+Per the human directive's explicit requirement, the design (analysis
+only) keeps four things separate: (1) the Asset/Currency Registry (what
+assets exist and their properties), (2) an FX Rate Provider interface
+(external market-data source, no vendor named), (3) a Conversion
+Service (applies a rate to produce a conversion, sitting between the
+Rate Provider and the Ledger), (4) the Ledger transaction itself (ADR
+0021's existing `ConversionOperation`). A live FX provider response must
+never be the sole historical source of truth for a completed conversion
+— the following must be persisted at conversion time: source asset,
+destination asset, source amount, destination amount, exchange rate
+used, rate timestamp, provider/source identifier, the provider's own
+rate/reference ID if available, a conversion operation ID, the
+precision/exponent used, the rounding policy/version applied (tying back
+to this stage's resolved ADR 0021 rounding decision), and placeholder
+fields for fees/spread if introduced later. Most of these map directly
+onto fields ADR 0021's `ConversionOperation` already reserves
+(`exchange_rate`, `rate_source`, `rate_timestamp`, `fee_amount`/
+`fee_asset_code`/`spread`, `provider_reference`); the new ADR needs to
+make the rounding-rule-version field and the provider's own reference ID
+(distinct from the platform's internal `provider_reference`) explicit.
+
+**Genuine pre-existing blocker, not new**: the conversion-clearing
+account type does not exist in the ledger's account-type list and
+remains an `OPEN DECISION` (ADR 0021, `ledger-accounting-model.md` §2).
+No FX conversion can post to the ledger until that is resolved,
+independent of how the Registry/FX-provider boundary is designed — the
+Registry work makes this visible sooner but does not itself unblock it.
+
+### 26.5 Rounding + conversion interaction — no hidden double-rounding
+
+Confirmed, not assumed: Bonus-amount rounding, FX-conversion rounding,
+and ledger minor-unit normalization are **three separate financial
+boundaries**, even though ADR 0021 item 4 requires them to share **one
+implementation** (the shared rounding helper). Because ADR 0021 scoped
+Q1/Q2/Q3 as one platform-wide decision from the start (its own
+dependent-set table lists FX conversion alongside bonus), this stage's
+resolution of DS-1/DS-2 for Bonus **does** also set the FX-conversion
+rounding rule, by design. What does **not** follow automatically: the
+future Conversion Service must still explicitly invoke the shared
+rounding helper with the *destination asset's* exponent as its own
+deliberate step — it must never inherit "already rounded" from an
+upstream, unrelated computation. A value must never be rounded once for
+a bonus-grant purpose and rounded again for an unrelated FX-conversion
+purpose on the same figure without both roundings being separately
+recorded, deliberate steps.
+
+### 26.6 Custom/future asset handling
+
+An asset without a valid, approved conversion-rate source must never be
+presented as having a real exchange rate. A conversion requiring a
+market rate must **fail closed** when no valid rate exists — never
+substitute, infer, or peg a rate from an unrelated asset without an
+explicit, separately-approved conversion path. A custom/internal asset
+with no external market at all needs its own explicit conversion path
+(or none) rather than a fallback/default rate.
+
+### 26.7 Impact assessment
+
+- **Bonus Stage 4H-B1**: none. Bonus computations operate on wallets
+  already denominated in already-registered assets; nothing about
+  bonus grant/wagering/conversion math depends on whether the asset
+  list is open or closed, or on whether an FX boundary exists.
+- **Retail (ADR 0035)**: no new blocker. ADR 0035 §9.4 already states
+  multi-currency retail counters are `BLOCKED` on the same conversion-
+  clearing-account decision; Registry extensibility makes it easier to
+  register a new single-currency counter's asset but does not unblock
+  cross-currency retail, which was never in this analysis's scope.
+- **Dependencies**: the Registry itself has no ledger dependency (a
+  lookup table); the FX/Conversion boundary depends entirely on the
+  existing `ConversionOperation` design and inherits its currently-open
+  clearing-account blocker.
+
+### 26.8 New risks flagged (not resolved this stage)
+
+- **P1** — asset-creation/activation authorization boundary is
+  undefined: `assets` is platform-wide with no RLS, so a poorly-scoped
+  "authorized operator" grant could let one tenant's actor add a row
+  every tenant's ledger then references. `security` recommends the
+  eventual design evaluate a two-tier split (platform-admin-only
+  registration vs. tenant-scoped activation) before any Registry API is
+  built — the same shape of gap ADR 0031 §8 already discloses for
+  platform-wide risk rules, with larger blast radius here. Mandatory
+  audit logging on this mutation, no exception (CLAUDE.md).
+- **P1** — fail-closed FX behavior (§26.6) should be written into the
+  new ADR as a binding rule now, so it isn't improvised at
+  implementation time.
+- **P2** — documentation drift risk until the new ADR exists (addressed
+  this stage via the doc 14 deferred-stage entry and this section).
+- **P2** — no test today exercises "insert a new asset row and confirm
+  every consuming code path picks up its exponent/type with no hardcoded
+  assumption" — recorded for `qa`'s backlog once a Registry API exists.
+
+**No code, no migrations, no ADR 0037, and no Registry/FX implementation
+were created this stage.** This section records the confirmed
+requirement and the analysis needed to scope a future stage — nothing
+more.

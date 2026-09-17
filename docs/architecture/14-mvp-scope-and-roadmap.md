@@ -53,6 +53,22 @@ ISO 27001 posture (year-two per Blueprint §8).
   than the Bonus Engine's own core lifecycle received, for a feature with
   zero scheduled build, and will need re-review against whatever RG/
   Risk/identity-resolution shape exists by then).
+- **Extensible Asset/Currency Registry admin API + FX/Conversion
+  architecture** (Stage 4H-B0-R3 confirmed product requirement, analysis
+  only — `docs/architecture/27-stage-4h-b0-scope-and-implementation-
+  plan.md` §26). The underlying schema (`assets`, migrations 0003/0006)
+  is already an open, extensible registry with no closed enum and no
+  hardcoded decimal count anywhere in the codebase; what's missing is
+  the operational surface — an admin API, an authorization/RBAC model
+  for who may register/activate an asset, mandatory audit logging on
+  that mutation, additional per-asset eligibility columns (wallet/
+  deposit/withdrawal/settlement), an FX Rate Provider interface, and a
+  Conversion Service sitting between it and the ledger's existing
+  `ConversionOperation` (ADR 0021). A dedicated future stage should
+  define these in a new ADR (recommended: ADR 0037) before any of it is
+  built. Not started; no impact on Bonus Stage 4H-B1 or Retail beyond
+  the pre-existing, independently-tracked conversion-clearing-account
+  open decision (ADR 0021, `ledger-accounting-model.md` §2).
 - **The `ExternalRewardProvider`/External Reward Provider contract**
   (`docs/decisions/0033-provider-interoperability-and-external-bonus-
   engines.md`, `docs/architecture/23-external-reward-provider-contract.md`)

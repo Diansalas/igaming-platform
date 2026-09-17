@@ -1,8 +1,28 @@
 # 28 — Bonus Financial Gate: Human Decision Sheet
 
-**Status: awaiting human decision. Stage 4H-B0-R2 (financial-gate
-clarification). Documentation only — no code, no migrations, no
-implementation.**
+**Status: RESOLVED (Stage 4H-B0-R3).** DS-1, DS-2, and DS-3 below were
+answered by the human and independently validated against the platform's
+existing architecture by `ledger-finance`, `bonus-engine`, `risk`,
+`architect`, `security`, and `qa` — no contradiction, financial problem,
+precision problem, reconciliation problem, or unsafe consequence was
+found. **The recorded answer**: DS-1 = round-half-up (ties away from
+zero); DS-2 = round once, at the final monetary boundary, full precision
+until then, via an explicit function, never an implicit database cast;
+DS-3 = one platform-wide rule by default, with room for a future
+per-asset/jurisdiction override if genuinely required. The authoritative,
+full text of the recorded decision — including the exact algorithm, where
+the applied rule/version must be stored, and a small number of
+non-blocking implementation-time clarifications found during
+validation — lives in `docs/decisions/0021-multi-asset-accounting.md`'s
+"Rounding and precision — RESOLVED" section; this document is retained
+below, unmodified, as the historical record of the question as originally
+put to the human. **Stage 4H-B1 is now READY FOR HUMAN AUTHORIZATION
+after completion of the separate `bonus_conversion` Risk dependency
+(§6 below, still NOT STARTED)** — see this stage's completion report.
+
+Originally written Stage 4H-B0-R2, when its status was "awaiting human
+decision" and documentation-only. Retained below exactly as originally
+written.
 
 **Owner of this document: Master Orchestrator, synthesizing input from
 `ledger-finance`, `bonus-engine`, `risk`, `architect`, `security`, `qa`.**

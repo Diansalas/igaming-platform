@@ -30,57 +30,49 @@ stage detail), and the ADRs cited below.
 | 4H-A | Bonus, Gamification & Reward Orchestration architecture freeze (no code) | Complete |
 | 4H-B0 | Bonus, Gamification & Retail scope/implementation plan (no code) | Complete |
 | 4H-B0-R1 | B0 gate corrections and finalization (no code) | Complete |
-| 4H-B0-R2 | Bonus financial gate clarification (no code) | Complete (this stage) |
+| 4H-B0-R2 | Bonus financial gate clarification (no code) | Complete |
+| 4H-B0-R3 | Bonus rounding decision validation and financial gate closure (no code) | Complete (this stage) |
 
 ## Active stage
 
-Stage 4H-B0-R2 — see `docs/active-stage.md` for full detail. **Stage
-4H-B1 (Bonus Engine) remains BLOCKED — a human decision sheet
-(`docs/architecture/28-bonus-financial-gate-decision-sheet.md`) now
-exists and awaits explicit human answers to the ADR 0021 rounding
-questions; it is not authorized to start. Stage 4H-B2 (Retail
-Architecture Hardening) awaits the Retail-Legal/Business gate. Neither
-is authorized to begin without explicit human confirmation.**
+Stage 4H-B0-R3 — see `docs/active-stage.md` for full detail. **Stage
+4H-B1 (Bonus Engine) is READY FOR HUMAN AUTHORIZATION after completion
+of the `bonus_conversion` Risk dependency (still NOT STARTED). Stage
+4H-B2 (Retail Architecture Hardening) awaits the Retail-Legal/Business
+gate. Neither is authorized to begin without explicit human
+confirmation.**
 
 ## Blocked stages
 
 - **Bonus Engine**: architecture frozen (Stage 4H-A), an MVP
-  implementation-scope plan is on file (Stage 4H-B0 — 5-type first slice,
-  migration order, package ownership), and the gate itself was corrected
-  in Stage 4H-B0-R1. **Corrected status: CONDITIONALLY READY, not
-  independently ready.** An earlier draft understated this as "one small
-  dependency request" to `risk`; verified directly against repository
-  state, `bonus_conversion` is **NOT STARTED — zero of ADR 0031 §16's six
+  implementation-scope plan is on file (Stage 4H-B0), and the gate was
+  corrected in Stage 4H-B0-R1, clarified in Stage 4H-B0-R2, and **closed
+  down to a single remaining item in Stage 4H-B0-R3**: the human
+  answered the ADR 0021 rounding/precision decision (DS-1 = round-half-
+  up; DS-2 = round once at the final monetary boundary, full precision
+  until then, explicit function, never an implicit database cast; DS-3
+  = one platform-wide rule by default with room for a future override)
+  and six specialists (`ledger-finance`, `bonus-engine`, `risk`,
+  `architect`, `security`, `qa`) validated it against the existing
+  architecture with no contradiction or unsafe consequence found. Full
+  recorded decision: `docs/decisions/0021-multi-asset-accounting.md`'s
+  "Rounding and precision — RESOLVED" section. **Corrected status:
+  Stage 4H-B1 is READY FOR HUMAN AUTHORIZATION after completion of
+  `bonus_conversion`.** That dependency was re-verified in Stage
+  4H-B0-R3, unchanged: **NOT STARTED — zero of ADR 0031 §16's six
   extension-process steps complete** (no `Operation` constant, no
   migration CHECK value, no HTTP-allowlist entry, no OpenAPI enum entry
   in any of its three required locations, no ledger transaction-type
   mapping, no enforcement call site), and it sits on the first slice's
   critical path since all five in-slice bonus types run through
-  `completed → converted`. Production implementation cannot begin until
-  (1) ADR 0021's rounding/precision decision is explicitly resolved by a
-  human — the available architectural choices are now enumerated in
-  `docs/decisions/0021-multi-asset-accounting.md` without one being
-  selected, (2) the `bonus_conversion` dependency above is completed and
-  reviewed, (3) no other P0/P1 financial dependency remains (`risk`
-  confirmed there is none besides `bonus_conversion`). Non-monetary work
-  (lifecycle state machine, Offer/Grant modelling, eligibility) is not
-  gated by item 1. **Implementation itself is still not authorized** —
-  this is a corrected scope plan, not a start.
-
-  **Stage 4H-B0-R2 update**: a formal, plain-language human decision
-  sheet now exists — `docs/architecture/28-bonus-financial-gate-
-  decision-sheet.md` — enumerating the exact ADR 0021 rounding/precision
-  questions (direction, rounding point/precision handling, uniformity/
-  scope) with numerical worked examples, the precise bonus-type impact
-  (the rounding decision affects the grant amount itself for Deposit/
-  Reload/Cashback, and only the wagering-requirement/contribution
-  tracking for the generic Wagering bonus and Coupon), and a formatted
-  six-step engineering checklist for the `bonus_conversion` Risk
-  dependency (informational, not a decision for the human). `architect`
-  performed a focused 12-area financial-gate review this stage and found
-  **no additional P0/P1 blocker** beyond the two already-known gates.
-  **Stage 4H-B1 remains BLOCKED and is NOT authorized**, pending the
-  human decision on the rounding sheet.
+  `completed → converted`. No other P0/P1 financial dependency remains
+  (`architect` re-confirmed this with a focused 12-area review in both
+  Stage 4H-B0-R2 and Stage 4H-B0-R3). Non-monetary work (lifecycle state
+  machine, Offer/Grant modelling, eligibility) was never gated and
+  remains unblocked. **Implementation itself is still not authorized** —
+  this is a closed gate, not a start. See `docs/architecture/
+  28-bonus-financial-gate-decision-sheet.md` for the plain-language
+  decision record (now marked RESOLVED).
 - **Retail (agent-hierarchy network)**: architecture/scope frozen (Stage
   4H-B0) across 10 documents, corrected and finalized in Stage 4H-B0-R1
   — see `docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md`.
@@ -300,8 +292,10 @@ is authorized to begin without explicit human confirmation.**
   remains human) — see
   `docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md`
   §24 for the full 15-item register of retail- and bonus-specific human
-  decisions, including the ADR 0021 rounding/precision decision added in
-  Stage 4H-B0-R1.
+  decisions. Item 15 (the ADR 0021 rounding/precision decision) is
+  **RESOLVED as of Stage 4H-B0-R3** — see `docs/decisions/
+  0021-multi-asset-accounting.md`'s "Rounding and precision — RESOLVED"
+  section; retained in the register per its own append-only convention.
 
 ## Stage 4H-A: Bonus, Gamification & Reward Orchestration architecture freeze
 
@@ -692,6 +686,90 @@ started this stage.** `go build ./...` re-run after all edits and
 remains clean (docs-only diff). **Stage 4H-B1 remains BLOCKED and is NOT
 authorized** — this stage produced the decision package, it did not make
 the decision or approve the next stage.
+
+## Stage 4H-B0-R3: Bonus rounding decision validation and financial gate closure
+
+A financial-gate closure stage. The human proposed answers to the three
+ADR 0021 rounding questions from the Stage 4H-B0-R2 decision sheet; this
+stage's purpose was to independently validate those proposed answers
+against the existing architecture (never to select or silently change
+them), and, once validated, formally record them and re-check the
+overall Bonus financial gate one final time. **No production code, no
+migrations, no implementation was authorized or started.**
+
+**Decisions validated and recorded**: DS-1 = round-half-up (ties away
+from zero); DS-2 = round once, at the final monetary boundary, full
+`NUMERIC` precision until then, via an explicit shared function, never
+an implicit database cast, no truncate-and-carry remainder mechanism;
+DS-3 = one platform-wide rule by default, with room for a future
+per-asset/jurisdiction override if genuinely required. Six specialists
+(`ledger-finance`, `bonus-engine`, `risk`, `architect`, `security`,
+`qa`) independently validated these against the current repository
+state and found them **safe, deterministic, and reconciliation-
+compatible — no contradiction, financial problem, precision problem, or
+architecturally unsafe consequence requiring the human to change the
+decision.** A small number of non-blocking implementation-time
+clarifications were found and folded into the recorded decision (a
+zero-rounding-result edge case needing a Bonus Engine eligibility guard;
+disambiguation between the wagering-requirement target, which is a
+non-posted comparison threshold, and per-game contribution weighting,
+which is genuinely monetary and does have a rounding boundary; the exact
+multiply-then-cap rounding order; and an open Coupon Offer-template
+scoping question) — none of these reopen or change DS-1/DS-2/DS-3
+themselves. Full recorded decision, algorithm, and storage
+specification: `docs/decisions/0021-multi-asset-accounting.md`'s
+"Rounding and precision — RESOLVED" section.
+
+**Cashback residual confirmed**: repeated cashback events leave a small
+fractional residue every time. The existing architecture has no
+remainder-accumulation mechanism anywhere; building one would be new,
+unauthorized architecture. **What DS-1+DS-2 as recorded actually mean
+for cashback is: each calculation rounds independently and immediately,
+with no accumulation** — recorded explicitly rather than left implicit.
+
+**`bonus_conversion` re-verified, unchanged**: `risk` re-checked all six
+ADR 0031 §16 artifacts directly against current repository state — still
+**NOT STARTED, zero of six steps**. The rounding decision introduces no
+new Risk-side dependency: Risk evaluates only the already-rounded,
+posted minor-unit integer, confirmed by construction of
+`RiskRequest.Amount`'s `int64` type, not assumed. `architect`
+re-confirmed no other P0/P1 financial dependency exists.
+
+**Final financial gate: Stage 4H-B1 is READY FOR HUMAN AUTHORIZATION
+after completion of `bonus_conversion`.** No P0, no P1 financial
+blocker, no unresolved accounting decision, no unresolved precision
+decision, no unresolved rounding ambiguity remains. `bonus_conversion`
+is not implemented this stage, consistent with the directive's
+instruction to prefer keeping it for Stage 4H-B1 unless closing the
+rounding decision required it internally (it did not).
+
+**New confirmed product requirement analyzed (not implemented): an
+extensible Asset/Currency Registry and future FX/Conversion
+architecture.** `architect` found the underlying `assets` schema is
+already open and extensible (no closed enum, no hardcoded decimal
+count) but lacks the operational surface the requirement needs (admin
+API, authorization model, audit logging, additional eligibility
+columns) — an additive extension, not a redesign. Recommended: a future
+ADR (0037) and a dedicated future implementation stage, both recorded as
+deferred in `docs/architecture/14-mvp-scope-and-roadmap.md` and detailed
+in `docs/architecture/27-*.md` §26. The FX/Conversion boundary was
+designed on paper (Registry / FX Rate Provider / Conversion Service /
+Ledger transaction, kept structurally separate) with the required
+immutable audit fields for any future conversion specified. **Confirmed:
+no impact on Bonus Stage 4H-B1; no new blocker for Retail** beyond the
+pre-existing, independently-tracked conversion-clearing-account open
+decision. Two P1 risks flagged for the eventual Registry design (the
+asset-creation/activation authorization boundary is undefined; fail-
+closed FX behavior must be written into the new ADR as a binding rule).
+**No code, no migrations, no new ADR, and no Registry/FX implementation
+were created this stage** — analysis and documentation-scoping only, as
+directed.
+
+Full detail: this stage's completion report, `docs/decisions/
+0021-multi-asset-accounting.md`, `docs/architecture/27-stage-4h-b0-
+scope-and-implementation-plan.md` §1.1/§22/§24/§25/§26, and
+`docs/architecture/28-bonus-financial-gate-decision-sheet.md` (now
+marked RESOLVED).
 
 ## Production blockers (summary)
 

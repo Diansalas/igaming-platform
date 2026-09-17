@@ -189,6 +189,27 @@ implementation were started.**
 | 4HB0R2-07 | qa | Done | none | none (analysis reported to Orchestrator, no file edits) | none | n/a | confirmed core financial test matrix already mapped to bonus scenarios; designed rounding-determinism test approach; flagged non-blocking test-plan additions | none | n/a |
 | 4HB0R2-08 | Orchestrator | Done | 4HB0R2-01..07 | `docs/architecture/28-bonus-financial-gate-decision-sheet.md` (new), `docs/governance/project-status.md`, `docs/active-stage.md`, this registry, `docs/progress.md` | none | full validation gate (docs-only; `go build ./...` clean, no code touched) | this stage's completion report | none | n/a — **stage explicitly STOPS here; Stage 4H-B1 NOT authorized** |
 
+## Stage 4H-B0-R3
+
+Financial-gate closure stage. Purpose: validate the human's proposed
+answers to ADR 0021's rounding questions (DS-1/DS-2/DS-3) against the
+existing architecture, record them if safe, re-verify the
+`bonus_conversion` Risk dependency, and analyze (not implement) a new
+confirmed Asset/Currency Registry + FX/Conversion architecture
+requirement. **No production code, no migrations, and no implementation
+were started.**
+
+| ID | Owner | Status | Dependencies | Files owned | Interfaces affected | Tests | Docs | Blockers | Integration |
+|---|---|---|---|---|---|---|---|---|---|
+| 4HB0R3-01 | Orchestrator | Done | none | `docs/governance/*` | none | n/a (documentation) | this registry + siblings | none | n/a |
+| 4HB0R3-02 | ledger-finance | Done | none | none (analysis reported to Orchestrator, no file edits) | none | n/a | validated DS-1/DS-2 numerically, exact algorithm specification, cashback-residual finding, zero-rounding-result edge case — folded into ADR 0021 by the Orchestrator | none | n/a |
+| 4HB0R3-03 | bonus-engine | Done | none | none (analysis reported to Orchestrator, no file edits) | none | n/a | per-bonus-type DS-2 validation, wagering-requirement/contribution-weighting monetary distinction, cap-rounding-order clarification, Coupon scoping question — folded into ADR 0021 | none | n/a |
+| 4HB0R3-04 | risk | Done | none | none (analysis reported to Orchestrator; ADR 0031 §16a re-verified, left unmodified) | none | n/a | confirmed Risk evaluates only the post-rounded amount by construction; re-verified `bonus_conversion` unchanged, NOT STARTED | none | n/a |
+| 4HB0R3-05 | architect | Done | none | none (analysis reported to Orchestrator, no file edits) | none | n/a | validated DS-3, confirmed no other cross-document contradiction, focused 12-area financial-gate re-review, Asset/Currency Registry + FX architecture analysis | none | n/a |
+| 4HB0R3-06 | security | Done | none | none (analysis reported to Orchestrator, no file edits) | none | n/a | rounding-decision determinism/reconstructability confirmation, exact rounding-rule storage-location specification, Asset Registry authorization/audit requirement | none | n/a |
+| 4HB0R3-07 | qa | Done | none | none (analysis reported to Orchestrator, no file edits) | none | n/a | multi-asset genericity validation across 0/2/6/8/18-decimal exponents, refined 9-category test-plan design, confirmed no Bonus MVP expansion | none | n/a |
+| 4HB0R3-08 | Orchestrator | Done | 4HB0R3-01..07 | `docs/decisions/0021-multi-asset-accounting.md` (rounding decision recorded), `docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md` (§1.1/§22/§24/§25 updated, new §26), `docs/architecture/28-bonus-financial-gate-decision-sheet.md` (marked RESOLVED), `docs/architecture/financial-domain-model.md`, `docs/architecture/14-mvp-scope-and-roadmap.md`, `docs/governance/project-status.md`, `docs/active-stage.md`, this registry, `docs/progress.md` | none | full validation gate (docs-only; `go build ./...` clean, no code touched) | this stage's completion report | none | n/a — **stage explicitly STOPS here; Stage 4H-B1 NOT started, READY FOR HUMAN AUTHORIZATION after `bonus_conversion`** |
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

@@ -1,5 +1,151 @@
 # Active Stage
 
+## Stage 4H-B0-R3 — Bonus Rounding Decision Validation and Financial Gate Closure — Complete
+
+Status: **Complete. Stage 4H-B1 is READY FOR HUMAN AUTHORIZATION after
+completion of the `bonus_conversion` Risk dependency.**
+
+The human proposed answers to the three ADR 0021 rounding questions
+(DS-1/DS-2/DS-3) raised in Stage 4H-B0-R2's decision sheet. This stage's
+job was to validate those proposals against the existing architecture —
+never to select or silently change them — using six specialists in
+parallel (`ledger-finance`, `bonus-engine`, `risk`, `architect`,
+`security`, `qa`), then formally record the decision if safe and
+re-check the overall financial gate.
+
+**Proposed and recorded**: DS-1 = round-half-up (ties away from zero);
+DS-2 = round once, at the final monetary boundary, full `NUMERIC`
+precision until then, via an explicit shared function, never an implicit
+database cast, no truncate-and-carry unless the architecture requires
+it; DS-3 = one platform-wide rule by default, room for a future
+per-asset/jurisdiction override if genuinely required.
+
+**Validation verdict: VALID AND READY TO RECORD.** No specialist found a
+contradiction, financial problem, precision problem, reconciliation
+problem, or architecturally unsafe consequence requiring the human to
+change the proposal. Specific findings folded into the recorded decision
+as clarifications, not changes:
+
+- **Zero-rounding-result edge case** (`ledger-finance`): a bonus that
+  computes to exactly 0 minor units cannot post (`ledger_entries.amount
+  > 0`). This is a Bonus Engine eligibility/config question (e.g. a
+  minimum-deposit guard), not a rounding-rule question — flagged for
+  Stage 4H-B1, does not block recording the decision.
+- **Wagering-requirement vs. contribution-weighting distinction**
+  (`bonus-engine`, resolving an ambiguity `ledger-finance` had flagged):
+  the wagering-requirement target is a comparison threshold, never
+  posted to the ledger, so DS-2's "final monetary boundary" language
+  doesn't apply to it in the posting sense. Per-game contribution
+  weighting **is** monetary — it determines the actual cash/bonus split
+  posted for a wagering event — and DS-2's boundary for it is the
+  split-instruction computation. Recorded explicitly in ADR 0021 so this
+  is not left ambiguous for Stage 4H-B1.
+- **Cashback residual — confirmed consequence, not silently assumed**:
+  the existing architecture has no remainder-accumulation mechanism
+  anywhere (`ledger-finance` searched all four relevant documents).
+  Building one (truncate-and-carry) would be new, unauthorized
+  architecture. What DS-1+DS-2 as recorded actually mean for cashback:
+  each calculation rounds independently and immediately, no
+  accumulation — recorded explicitly rather than left implicit, per
+  `ledger-finance`'s own recommendation to surface this back to the
+  human.
+- **Exact multiply→cap-compare→round ordering** (`bonus-engine`): DS-2
+  says "round once at the final boundary" — the only reading consistent
+  with that language is rounding `min(exact_%_result, cap)` once, after
+  both the percentage multiply and the cap comparison, not the raw
+  percentage result before the cap decision. Recorded explicitly.
+- **Coupon's Reward-axis shape** (`bonus-engine`): doc 10 does not pin
+  down whether an in-slice Coupon is configured as a flat grant or a
+  %-based Offer — flagged as an open Stage 4H-B1 template-authoring
+  scoping question, unrelated to the rounding decision.
+- **Exact algorithm specified** (`ledger-finance`): round half away from
+  zero — `sign(x) × floor(|x| + 0.5)` — via one named, shared function,
+  never a bare `ROUND()` call or an implicit `NUMERIC(38,0)` column-scale
+  coercion (PostgreSQL's own implicit coercion happens to match
+  round-half-up for positive values today — a coincidence, not a
+  specification, and must never be relied upon). Negative-input contract
+  specified for future FX/commission reuse even though no bonus call
+  site produces a negative input today.
+- **Storage location specified** (`security`): an immutable, append-only
+  `rounding_rules` reference table (one composite version per Q1+Q2
+  combination) plus the applied identifier denormalized onto
+  `ledger_transactions` at post time — mirroring the existing
+  denormalization rationale already used for `tenant_id`/`wallet_id`/
+  `player_account_id`/`asset_code` on `LedgerEntry`.
+- **Risk evaluates only the post-rounded amount** (`risk`, settled by
+  construction, no ambiguity found or manufactured): `RiskRequest.
+  Amount`'s `int64` type cannot hold a pre-rounding exact value, and the
+  one live precedent (`postBet`) already passes Risk the identical
+  integer that becomes the ledger posting. No Risk-side change is a
+  prerequisite for recording this decision.
+- **Multi-asset genericity confirmed** (`qa`): the algorithm is exponent-
+  agnostic by construction (operates on minor-unit integers, never
+  hardcodes a decimal count) — validated across 0-, 2-, 6-, 8-, and
+  18-decimal assets, with two schema-legal-but-not-yet-populated
+  exponents (0 and 18) needing synthetic test fixtures rather than live
+  registry rows.
+
+**Full recorded decision**: `docs/decisions/0021-multi-asset-
+accounting.md`'s "Rounding and precision — RESOLVED" section — the
+authoritative text, including the algorithm, storage specification, and
+all clarifications above. `docs/architecture/28-bonus-financial-gate-
+decision-sheet.md` is now marked RESOLVED and retained as the
+historical record of the question as originally put to the human.
+
+**`bonus_conversion` re-verified, unchanged**: `risk` re-checked all six
+ADR 0031 §16 artifacts directly against current repository state (commit
+`aa4a926`, confirmed docs-only) — still **NOT STARTED, zero of six
+steps**. Per the directive's explicit instruction ("prefer keeping
+implementation for Stage 4H-B1... do not silently implement it unless
+this stage's final gate explicitly determines it is necessary"), `risk`
+confirmed the rounding decision requires no Risk-side implementation now
+— it was not implemented.
+
+**Final B1 gate review**: **Stage 4H-B1 is READY FOR HUMAN
+AUTHORIZATION after completion of `bonus_conversion`.** No P0, no P1
+financial blocker, no unresolved accounting decision, no unresolved
+precision decision, no unresolved rounding ambiguity remains —
+confirmed by `architect`'s re-run of the same 12-area focused review
+from Stage 4H-B0-R2.
+
+**New confirmed product requirement — extensible Asset/Currency Registry
++ FX/Conversion architecture (analysis only, not implemented)**:
+`architect` found the `assets` schema is already open/extensible
+(no closed enum, no hardcoded decimal count anywhere in `internal/`) but
+lacks the operational surface the requirement needs — an admin API, an
+authorization model for who may register/activate an asset, mandatory
+audit logging on that mutation, and additional per-asset eligibility
+columns. Recommended a future ADR (0037) and a dedicated future
+implementation stage, both recorded as deferred
+(`docs/architecture/14-mvp-scope-and-roadmap.md`,
+`docs/architecture/27-*.md` §26). The FX/Conversion boundary was
+designed on paper only — Asset/Currency Registry, FX Rate Provider,
+Conversion Service, and the Ledger's existing `ConversionOperation` kept
+structurally separate, with the immutable audit fields any future
+conversion must retain specified. Confirmed: **no impact on Bonus Stage
+4H-B1; no new blocker for Retail** beyond the pre-existing conversion-
+clearing-account open decision. Confirmed: **no expansion of the Bonus
+MVP, no FX implementation, no new payment/custody provider, no retail
+implementation** this stage. Two P1 risks flagged for the eventual
+Registry design (undefined asset-creation authorization boundary;
+fail-closed FX behavior must be written into the new ADR as a binding
+rule now).
+
+**No production code, no migrations, no implementation was authorized or
+started this stage.** `go build ./...` remains clean (docs-only diff).
+
+### Decisions/input needed before the next stage
+
+None remain for the Bonus rounding decision — it is resolved. Stage
+4H-B1 can be authorized once `bonus_conversion`'s six-step checklist
+(ADR 0031 §16a) is completed as part of that stage's own work. The
+Asset/Currency Registry + FX architecture requires no immediate human
+decision — it is recorded as a deferred future stage with a
+recommended future ADR number, not something blocking any currently
+open stage.
+
+---
+
 ## Stage 4H-B0-R2 — Bonus Financial Gate Clarification — Complete
 
 Status: **Complete, pending an explicit human decision on the ADR 0021

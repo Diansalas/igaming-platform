@@ -5,20 +5,34 @@ formalizing ADR 0007's multi-wallet decision down to the exact numeric
 representation and cross-asset movement architecture, which Stage 3A
 re-evaluates explicitly rather than assuming carried forward unchanged.
 
-> **Stage 4H-B0-R1 status correction (`ledger-finance`).** One item in this
-> ADR is **not** a background open item: the **rounding/precision `OPEN
-> DECISION`** (now stated in full in "Rounding and precision — the open
-> decision, stated precisely" below) is a **blocking precondition for any
-> bonus amount computation**, specifically for **deposit-match, reload and
-> cashback** bonuses, all three of which multiply money by a percentage and
-> therefore cannot produce a deterministic, reproducible minor-unit amount
-> until the rule is fixed. `docs/decisions/0032-bonus-accounting.md` §9 is
-> the concrete dependent case and explicitly refuses to invent a second
-> convention for bonuses; `docs/decisions/0035-retail-agent-network-
-> accounting.md` §9.3 (physical-cash rounding) and §5.2 (commission rates)
-> inherit the same decision. Until it is resolved by a human, the
-> corresponding implementation gate is **CONDITIONALLY READY, not
-> independently ready** — see the gate statement in that section.
+> **Stage 4H-B0-R3 — rounding/precision decision RESOLVED.** The
+> rounding/precision `OPEN DECISION` that Stage 4H-B0-R1 identified as a
+> blocking precondition for bonus amount computation (deposit-match,
+> reload, cashback) has been decided by the human and validated by
+> `ledger-finance`, `bonus-engine`, `risk`, `architect`, `security`, and
+> `qa` against the existing architecture. **DS-1 = round-half-up (ties
+> away from zero); DS-2 = round once, at the final monetary boundary,
+> full `NUMERIC` precision until then, via an explicit shared function,
+> never an implicit database cast; DS-3 = one platform-wide rule by
+> default, with room for a future per-asset/per-jurisdiction override if
+> a genuine legal/business need arises.** See "Rounding and precision —
+> RESOLVED (Stage 4H-B0-R3)" below for the full recorded decision,
+> validation findings, and the small number of non-blocking
+> implementation-time clarifications flagged during validation. This
+> closes the rounding/precision item as a blocker; `docs/decisions/
+> 0032-bonus-accounting.md` §9, `docs/decisions/0035-retail-agent-
+> network-accounting.md` §9.3 (physical-cash rounding) and §5.2
+> (commission rates), and FX conversion (this ADR) all inherit the same
+> resolved decision — each remains independently gated by its own other
+> open items (see doc 27 §22's dependency graph), which this resolution
+> does not itself unblock.
+>
+> *(Historical, Stage 4H-B0-R1): One item in this ADR was flagged as
+> **not** a background open item — the rounding/precision decision was a
+> blocking precondition for any bonus amount computation, specifically
+> for deposit-match, reload and cashback bonuses. That blocking status is
+> superseded by the resolution above; retained here for the historical
+> record.*
 
 ## Context
 
@@ -150,13 +164,17 @@ document's brand denormalization rule).
   described feature and is not designed here).
 - **Rounding**: destination_amount is computed from source_amount ×
   exchange_rate, rounded to the destination asset's own `decimal_exponent`
-  using a fixed rounding rule (`OPEN DECISION` — a business/finance
-  decision, not invented here) with any rounding residue absorbed as part
-  of the platform's spread, never left as an unbalanced fractional unit.
-  **Stage 4H-B0-R1**: this open decision is no longer scoped to FX alone
-  and is no longer a two-way "half-up vs. half-even" question. It is
-  stated in full, with the complete option set and its blocking scope, in
-  the dedicated section below.
+  using the platform's shared rounding rule (**RESOLVED, Stage
+  4H-B0-R3** — round-half-up, applied once at the final monetary
+  boundary; see the dedicated section below) with any rounding residue
+  absorbed as part of the platform's spread, never left as an unbalanced
+  fractional unit. **Stage 4H-B0-R1**: this decision was never scoped to
+  FX alone and was never a two-way "half-up vs. half-even" question — it
+  was stated in full, with the complete option set and its blocking
+  scope, in the dedicated section below, and has since been resolved
+  there. As noted in doc 27 §26.5, recording this rule does not by
+  itself unblock FX conversion, which remains separately gated by the
+  conversion-clearing-account `OPEN DECISION` immediately below.
 - **Fees and spread**: modeled as explicit fields and, where they
   represent platform revenue, post to a fee-revenue account — `OPEN
   DECISION` on whether that's a new account type or folded into
@@ -169,15 +187,16 @@ document's brand denormalization rule).
   (`rate_timestamp`); the platform never runs its own market-making or
   order-matching logic.
 
-### Rounding and precision — the open decision, stated precisely
+### Rounding and precision — RESOLVED (Stage 4H-B0-R3)
 
-`OPEN DECISION` (finance/business, human sign-off required). Added in full
-by **Stage 4H-B0-R1** (`ledger-finance`), replacing the one-line "half-up
-vs. half-even" note that previously stood in for it. That note was too
-narrow in two ways: it named only two of the realistic options, and it
-scoped the question to FX, when the same rule now gates bonus, commission
-and physical-cash amounts. **Nothing here selects a rule.** This section
-exists so a human can select one from a complete, concrete option set.
+**RESOLVED.** The three-question decision below was answered by the human
+and validated against the existing architecture by six specialists
+(`ledger-finance`, `bonus-engine`, `risk`, `architect`, `security`, `qa`)
+in Stage 4H-B0-R3. The original Q1/Q2/Q3 option set, added in full by
+**Stage 4H-B0-R1** (`ledger-finance`), is preserved below unmodified as
+the rationale record — every option was presented neutrally, none was
+selected by any specialist, and the human's answer is recorded separately
+in the "DECISION RECORDED" subsection after the gate statement.
 
 #### What the decision actually is — three separable questions
 
@@ -290,41 +309,174 @@ the open decision:
    shared helper (ADR 0032 §9) so that exactly one line changes when the
    human answers, rather than a rule being re-derived in each campaign.
 
-#### Gate statement — Stage 4H-B1 is CONDITIONALLY READY, not independently ready
+#### Gate statement — Stage 4H-B1 is READY FOR HUMAN AUTHORIZATION after `bonus_conversion` (Stage 4H-B0-R3 update)
 
-**Stage 4H-B0-R1 correction.** Stage 4H-B0's completion report described
-Stage 4H-B1 (Bonus Engine implementation) as independently authorizable,
-while the same stage's own risk register (`docs/architecture/27-stage-4h-
-b0-scope-and-implementation-plan.md`, originating in ADR 0032 §9) recorded
-this ADR's unresolved rounding decision as blocking precise computation for
-deposit, reload and cashback bonuses. Both cannot be true. The
-authoritative status, recorded here because this ADR owns the blocking
-item:
+**Stage 4H-B0-R1 correction (historical).** Stage 4H-B0's completion
+report described Stage 4H-B1 (Bonus Engine implementation) as
+independently authorizable, while the same stage's own risk register
+(`docs/architecture/27-stage-4h-b0-scope-and-implementation-plan.md`,
+originating in ADR 0032 §9) recorded this ADR's unresolved rounding
+decision as blocking precise computation for deposit, reload and
+cashback bonuses. Both could not be true; Stage 4H-B0-R1 corrected the
+gate to `CONDITIONALLY READY` pending three items.
 
-> **Stage 4H-B1 is `CONDITIONALLY READY`.** Design and scope are frozen and
-> reviewed; **production implementation of any bonus amount computation
-> must not begin** until all three of the following hold:
+**Stage 4H-B0-R3 update: item 1 of those three is now RESOLVED** (see
+"DECISION RECORDED" above). Item 3 was independently re-confirmed with
+no additional P0/P1 found (`architect`'s focused 12-area review, Stage
+4H-B0-R2, re-confirmed unchanged in Stage 4H-B0-R3). The gate now reads:
+
+> **Stage 4H-B1 is READY FOR HUMAN AUTHORIZATION after completion of
+> `bonus_conversion`.** Design and scope are frozen and reviewed; the
+> rounding/precision decision is resolved; no other P0/P1 financial
+> dependency remains. **Production implementation of any bonus amount
+> computation must not begin until:**
 >
-> 1. This ADR's rounding/precision `OPEN DECISION` (Q1, Q2 and Q3 above) is
->    **explicitly resolved** by the human decision-maker and recorded here.
+> 1. ~~This ADR's rounding/precision `OPEN DECISION` (Q1, Q2 and Q3
+>    above) is explicitly resolved by the human decision-maker and
+>    recorded here.~~ **RESOLVED, Stage 4H-B0-R3.**
 > 2. The Risk dependency for the `bonus_conversion` `Operation` value is
 >    **completed and reviewed** (ADR 0031's extension model, all steps in
->    one authorized change).
+>    one authorized change) — **still NOT STARTED, zero of six steps**,
+>    re-verified by `risk` in Stage 4H-B0-R3 against current repository
+>    state. See ADR 0031 §16a for the full checklist.
 > 3. **No other P0/P1 financial dependency remains** open against the
->    first-slice bonus types.
+>    first-slice bonus types — re-confirmed, none found.
 >
 > Work that does not compute a monetary amount from a percentage (lifecycle
-> state machine, Offer/Grant modelling, eligibility, Progress trail) is not
-> gated by item 1. `ledger-finance` does not decide whether item 1 is worth
-> waiting for — it decides only that an amount cannot be computed
-> deterministically before it is answered.
+> state machine, Offer/Grant modelling, eligibility, Progress trail) was
+> never gated by item 1 and remains unblocked.
 
 `ledger-finance` is **not authorized to, and does not, select a rounding
 rule here.** Options A–F and P1–P3 are enumerated for a human to choose
 from; the choice carries player-facing, commercial and (for cash rounding)
-jurisdictional weight.
+jurisdictional weight. *(Historical — decision recorded below.)*
 
-Status: **`OPEN DECISION` — unresolved, blocking as scoped above.**
+#### DECISION RECORDED (Stage 4H-B0-R3)
+
+**DS-1 (Q1, rounding direction) = Option A, round-half-up (ties away from
+zero).**
+
+**DS-2 (Q2, rounding point/precision) = Option P1, round once, at the
+final monetary boundary, with every intermediate value carried at full
+`NUMERIC` precision.** Explicit constraints from the human decision,
+confirmed compatible with the architecture by validation: no implicit
+rounding of intermediate calculations; a database numeric-to-integer cast
+must never be relied on as the business rule; no truncate-and-carry
+remainder mechanism (Option F/P3) unless the existing architecture
+already requires it — validated finding: **it does not** (see the
+cashback clarification below).
+
+**DS-3 (Q3, uniformity/scope) = one platform-wide deterministic rounding
+rule by default**, with the architecture able to support a future
+per-asset/per-jurisdiction override if a genuine legal/business
+requirement arises, without redesign — validated as fully compatible with
+ADR 0035 §9.3's cash-rounding note (a future override is a legitimate
+path, not an ungoverned second convention) and requiring no extra
+implementation cost now, given item 2 below already requires a
+versioned, stored rule identifier per transaction.
+
+**Exact algorithm** (validated by `ledger-finance`, confirmed exponent-
+agnostic by `qa`): round half away from zero — `result = sign(x) ×
+floor(|x| + 0.5)` — applied via one named, shared function operating on
+the exact pre-rounding `NUMERIC` value and the target asset's minor unit,
+never via a bare `ROUND()` call, an implicit `NUMERIC(38,0)` column-scale
+coercion, or a language/library default (`ledger-finance` confirmed
+PostgreSQL's own implicit numeric-to-integer coercion happens to match
+round-half-up for positive values today — this is a coincidence of
+today's Postgres behavior, not a specification, and must never be relied
+upon). The function's interface must be expressed in "minor unit" /
+"base unit" terms, never "cents," and takes no hardcoded scale (`qa`).
+**Negative-input contract, specified now though no current bonus call
+site produces a negative input** (all `ledger_entries.amount` values are
+strictly positive; reversals post the exact inverse of an already-posted
+positive integer, never a stored negative — `ledger-finance` confirmed
+negative amounts are not applicable to any current bonus posting): "ties
+away from zero" means `-2.5 → -3`, not `-2.5 → -2`, so the same function
+is unambiguous if DS-3's one shared rule is later reused for FX or
+commission, where a signed delta is more plausible.
+
+**Where the applied rule/version must be stored** (`security`,
+confirmed compatible with DS-1/DS-2/DS-3): an immutable, append-only
+`rounding_rules` reference table, one row per composite version encoding
+both the Q1 direction and the Q2 rounding-point/residue-treatment
+together (never two independently-versioned axes, which would create an
+ambiguous cross-product) — new rule, new row, existing rows never
+edited, mirroring this codebase's standing append-only convention. The
+identifier actually applied must be **denormalized onto the
+`LedgerTransaction` row itself** at post time (e.g.
+`ledger_transactions.rounding_rule_id`), immutable thereafter under the
+same no-mutation enforcement every other column on that table already
+has — the same rationale already applied to `tenant_id`/`wallet_id`/
+`player_account_id`/`asset_code` on `LedgerEntry` (denormalized so RLS
+and reconciliation never depend on a join to a table that could evolve
+independently). The upstream computation row (the Grant/Offer, the
+future `ConversionOperation`) should also store the same identifier
+alongside its own inputs (rate, cap, base amount) — that is where the
+recomputation inputs live; the ledger-row copy is what makes the audit
+trail self-sufficient even if the upstream row is later archived or
+restructured. **Not implemented this stage** — this is the specified
+target for whichever migration builds it.
+
+**Per-bonus-type clarification** (`bonus-engine`, `ledger-finance`,
+resolving an ambiguity flagged during validation rather than leaving it
+open): for Deposit-match, Reload, and Cashback, the "final monetary
+boundary" DS-2 rounds at is **after both the percentage multiply and the
+cap comparison** — i.e., round `min(exact_amount × rate_%, cap)` once,
+not the raw percentage result before the cap decision. This is the only
+reading consistent with "the final boundary," since the cap is part of
+computing what is actually granted. The **wagering-requirement target**
+(`bonus_amount × multiplier`) is a comparison threshold that gates a
+lifecycle-state transition and is never itself posted to the ledger
+(ADR 0032 §3.1: "conversion-eligibility is a decision, not a movement")
+— DS-2's "final monetary boundary" language does not apply to it in the
+ledger-posting sense, though the same deterministic `NUMERIC` discipline
+still applies so the same comparison always resolves the same way. **Per-
+game contribution weighting** (`stake × contribution_%`), by contrast,
+**is monetary** — it determines the actual cash/bonus split posted for a
+wagering event (doc 10 §6) — and DS-2's final boundary for it is the
+split-instruction computation, capped by the Grant's remaining bonus
+balance, rounded once there. Generic Wagering bonus's and Coupon's flat/
+pre-configured grant amounts are unaffected by DS-1/DS-2 entirely (no
+percentage computation produces them); their wagering-requirement/
+contribution tracking, once activated, follows the same rule as above.
+
+**Cashback residual — confirmed consequence, not silently assumed.**
+Repeated cashback events (e.g. a fixed weekly percentage of net loss)
+leave a small fractional residue every time that never resolves to zero
+on its own. **Validated finding: the existing architecture has no
+remainder-accumulation mechanism anywhere** (no such account in
+`ledger-accounting-model.md`, no such stream in `reconciliation-
+model.md`, no such object in ADR 0032) — building one (Option F/P3)
+would be new, unauthorized architecture requiring its own ADR and human
+sign-off, not something DS-1+DS-2 imply or require. **What DS-1+DS-2 as
+recorded actually mean for cashback is: each cashback calculation is
+rounded independently and immediately, round-half-up, with no
+accumulation.** The discarded sub-minor-unit fraction each period is not
+owed to the player and never becomes a ledger fact; it is a bounded,
+one-directional-only-on-exact-ties commercial cost already described in
+Option A's own trade-off row above, not a new finding. This is recorded
+explicitly here so it is not silently assumed later.
+
+**Non-blocking implementation-time items flagged during validation, for
+Stage 4H-B1 to resolve when building — none of these change or reopen
+DS-1/DS-2/DS-3, and none blocks recording this decision:**
+1. A bonus computation that rounds to exactly 0 minor units cannot be
+   posted (`ledger_entries.amount > 0`). This is a Bonus Engine
+   eligibility/configuration question (e.g. a minimum-deposit/minimum-
+   bonus guard), not a rounding-rule question — `ledger-finance` flagged
+   it, Stage 4H-B1 must close it before implementation.
+2. Whether a conversion's max-cashout cap can ever be percentage-derived
+   (rather than a flat configured figure) is unspecified by any existing
+   document (`bonus-engine`) — if it ever is, that derivation needs its
+   own single DS-2 rounding point, most naturally at Offer-configuration
+   or Grant-issuance time, not recomputed per conversion.
+3. Coupon's Reward-axis shape (a flat grant vs. a %-based Offer, e.g. a
+   coupon-triggered deposit-match) is not pinned down by doc 10 today
+   (`bonus-engine`) — an open scoping question for whoever authors the
+   Coupon Offer templates in Stage 4H-B1, unrelated to the rounding
+   decision itself.
+
+Status: **RESOLVED — DS-1/DS-2/DS-3 recorded above, Stage 4H-B0-R3.**
 
 ## Consequences
 
@@ -339,18 +491,21 @@ Status: **`OPEN DECISION` — unresolved, blocking as scoped above.**
   that if/when cross-asset movement is needed (e.g. a future "convert my
   BTC winnings to EUR" feature), the schema and invariant story are
   already settled.
-- Two open business decisions (rounding direction, fee/spread revenue
-  account) are explicitly deferred, not resolved by engineering judgment
-  alone, since they affect displayed amounts and reported revenue.
-- **Stage 4H-B0-R1 correction**: the rounding decision is **not** a
-  deferred FX-only item. It gates every percentage-of-money computation on
-  the platform — deposit-match, reload and cashback bonuses (ADR 0032 §9),
-  wagering contribution weighting, agent commission (ADR 0035 §5.2) and
-  physical-cash rounding (ADR 0035 §9.3) — and therefore makes Stage 4H-B1
-  `CONDITIONALLY READY` rather than independently ready. See the gate
-  statement in "Rounding and precision — the open decision, stated
-  precisely". The fee/spread revenue account remains FX-scoped and is not
-  a bonus gate.
+- One open business decision (fee/spread revenue account) remains
+  explicitly deferred, not resolved by engineering judgment alone, since
+  it affects reported revenue. The rounding direction decision below is
+  **RESOLVED** as of Stage 4H-B0-R3.
+- **Stage 4H-B0-R1 correction, resolved Stage 4H-B0-R3**: the rounding
+  decision was never a deferred FX-only item — it gates every
+  percentage-of-money computation on the platform (deposit-match, reload
+  and cashback bonuses per ADR 0032 §9; wagering contribution weighting;
+  agent commission per ADR 0035 §5.2; physical-cash rounding per ADR 0035
+  §9.3) and, before this stage, made Stage 4H-B1 `CONDITIONALLY READY`
+  rather than independently ready. **Now resolved**: see "Rounding and
+  precision — RESOLVED (Stage 4H-B0-R3)" for the recorded decision and
+  the gate statement immediately below it, updated to "READY FOR HUMAN
+  AUTHORIZATION after `bonus_conversion`." The fee/spread revenue account
+  remains FX-scoped and was never a bonus gate.
 
 ## Owner
 
