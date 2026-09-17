@@ -79,12 +79,3 @@ func TestAssign_UnknownModeRejected(t *testing.T) {
 		t.Fatal("expected an error for an unrecognized mode")
 	}
 }
-
-func TestMode_String(t *testing.T) {
-	if ModeExternalProvider.String() != "external_provider" {
-		t.Fatalf("unexpected string: %q", ModeExternalProvider.String())
-	}
-	if ModeInHouse.String() != "in_house" {
-		t.Fatalf("unexpected string: %q", ModeInHouse.String())
-	}
-}

@@ -77,21 +77,28 @@ func TestComposeOccurrenceKey_S6ConcreteExampleDoesNotCollide(t *testing.T) {
 	}
 }
 
+// TestComposeOccurrenceKeyWithOrdinal_RoundTrips proves
+// ComposeOccurrenceKeyWithOrdinal's output round-trips through the
+// general-purpose DecomposeOccurrenceKey (this package does not ship a
+// dedicated decompose-with-ordinal convenience function with no current
+// caller - see ComposeOccurrenceKeyWithOrdinal's own doc comment); a
+// caller wanting the typed OccurrenceOrdinal back parses the returned
+// discriminator string itself.
 func TestComposeOccurrenceKeyWithOrdinal_RoundTrips(t *testing.T) {
 	ord := OccurrenceOrdinal(3)
 	composed, err := ComposeOccurrenceKeyWithOrdinal("leg-ref", &ord)
 	if err != nil {
 		t.Fatalf("compose: %v", err)
 	}
-	ref, gotOrd, err := DecomposeOccurrenceKeyOrdinal(composed)
+	ref, disc, err := DecomposeOccurrenceKey(composed)
 	if err != nil {
 		t.Fatalf("decompose: %v", err)
 	}
 	if ref != "leg-ref" {
 		t.Fatalf("expected reference %q, got %q", "leg-ref", ref)
 	}
-	if gotOrd == nil || *gotOrd != 3 {
-		t.Fatalf("expected ordinal 3, got %v", gotOrd)
+	if disc == nil || *disc != "3" {
+		t.Fatalf("expected discriminator %q, got %v", "3", disc)
 	}
 }
 
@@ -100,12 +107,12 @@ func TestComposeOccurrenceKeyWithOrdinal_NilOrdinalRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compose: %v", err)
 	}
-	ref, ord, err := DecomposeOccurrenceKeyOrdinal(composed)
+	ref, disc, err := DecomposeOccurrenceKey(composed)
 	if err != nil {
 		t.Fatalf("decompose: %v", err)
 	}
-	if ref != "bet-ref" || ord != nil {
-		t.Fatalf("expected (\"bet-ref\", nil), got (%q, %v)", ref, ord)
+	if ref != "bet-ref" || disc != nil {
+		t.Fatalf("expected (\"bet-ref\", nil), got (%q, %v)", ref, disc)
 	}
 }
 
@@ -135,17 +142,6 @@ func TestDecomposeOccurrenceKey_RejectsMalformedInput(t *testing.T) {
 		} else if !errors.Is(err, ErrInvalidComposedKey) {
 			t.Errorf("input %q: expected ErrInvalidComposedKey, got %v", c, err)
 		}
-	}
-}
-
-func TestDecomposeOccurrenceKeyOrdinal_RejectsNonNumericDiscriminator(t *testing.T) {
-	d := "not-a-number"
-	composed, err := ComposeOccurrenceKey("ref", &d)
-	if err != nil {
-		t.Fatalf("compose: %v", err)
-	}
-	if _, _, err := DecomposeOccurrenceKeyOrdinal(composed); !errors.Is(err, ErrInvalidComposedKey) {
-		t.Fatalf("expected ErrInvalidComposedKey, got %v", err)
 	}
 }
 

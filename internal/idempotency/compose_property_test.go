@@ -3,6 +3,7 @@ package idempotency
 import (
 	"fmt"
 	"math/rand"
+	"strconv"
 	"testing"
 )
 
@@ -123,7 +124,11 @@ func discEqual(a, b *string) bool {
 // same property specialized to the OccurrenceOrdinal convenience
 // wrapper, over adversarial references (including references containing
 // digits, colons, and hashes that could be mistaken for another
-// encoding) and every legal ordinal 1..N.
+// encoding) and every legal ordinal 1..N. Round-tripping goes through
+// the general-purpose DecomposeOccurrenceKey (this package ships no
+// dedicated decompose-with-ordinal function with no current caller - see
+// ComposeOccurrenceKeyWithOrdinal's own doc comment), parsing the
+// recovered discriminator back into an OccurrenceOrdinal inline.
 func TestComposeOccurrenceKeyWithOrdinal_NoTwoDistinctPairsCollide(t *testing.T) {
 	refs := []string{"A", "A#1", "1:A", "A#", "5:B", "ref", "ref#2", "ref#3"}
 	var ordinals []*OccurrenceOrdinal
@@ -146,12 +151,21 @@ func TestComposeOccurrenceKeyWithOrdinal_NoTwoDistinctPairsCollide(t *testing.T)
 			}
 			seen[composed] = key
 
-			gotRef, gotOrd, err := DecomposeOccurrenceKeyOrdinal(composed)
+			gotRef, gotDisc, err := DecomposeOccurrenceKey(composed)
 			if err != nil {
 				t.Fatalf("decompose(%q): %v", composed, err)
 			}
 			if gotRef != ref {
 				t.Fatalf("reference mismatch: want %q got %q", ref, gotRef)
+			}
+			var gotOrd *OccurrenceOrdinal
+			if gotDisc != nil {
+				n, parseErr := strconv.ParseInt(*gotDisc, 10, 64)
+				if parseErr != nil {
+					t.Fatalf("recovered discriminator %q does not parse as an ordinal: %v", *gotDisc, parseErr)
+				}
+				o := OccurrenceOrdinal(n)
+				gotOrd = &o
 			}
 			if (ord == nil) != (gotOrd == nil) || (ord != nil && *ord != *gotOrd) {
 				t.Fatalf("ordinal mismatch: want %v got %v", ord, gotOrd)

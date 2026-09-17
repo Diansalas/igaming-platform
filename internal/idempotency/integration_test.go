@@ -55,6 +55,14 @@ type fixture struct {
 	clearingAccountID uuid.UUID
 	adjustmentAcctID  uuid.UUID
 	houseGamingAcctID uuid.UUID
+	// walletIDUSD/cashAccountIDUSD/clearingAccountIDUSD are a SECOND
+	// wallet for player 1 in a genuinely different asset (USD, not EUR) -
+	// per ADR 0007's multi-wallet-per-player model, one player legitimately
+	// holds a distinct wallet per asset. Used only by the changed-asset
+	// replay case in TestIntegration_ReplayWithChangedAmountAssetOrPlayerIsWhyTheContractMatters.
+	walletIDUSD          uuid.UUID
+	cashAccountIDUSD     uuid.UUID
+	clearingAccountIDUSD uuid.UUID
 }
 
 func seedFixture(t *testing.T, pool *db.Pool) fixture {
@@ -133,6 +141,26 @@ func seedFixture(t *testing.T, pool *db.Pool) fixture {
 			return err
 		}
 		f.houseGamingAcctID, err = ledger.GetOrCreateAccount(ctx, tx, f.tenantID, nil, ledger.AccountHouseGaming, "EUR")
+		if err != nil {
+			return err
+		}
+
+		// A second wallet for player 1, in USD rather than EUR - the
+		// multi-wallet-per-player model (ADR 0007) means this is a
+		// perfectly ordinary, legitimate second wallet for the SAME
+		// player, not a different player. Used to exercise a genuine
+		// changed-asset replay below.
+		f.walletIDUSD = uuid.New()
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO wallets (id, tenant_id, brand_id, player_account_id, asset_code) VALUES ($1, $2, $3, $4, 'USD')`,
+			f.walletIDUSD, f.tenantID, f.brandID, f.playerAccountID); err != nil {
+			return err
+		}
+		f.cashAccountIDUSD, err = ledger.GetOrCreateAccount(ctx, tx, f.tenantID, &f.walletIDUSD, ledger.AccountPlayerCash, "USD")
+		if err != nil {
+			return err
+		}
+		f.clearingAccountIDUSD, err = ledger.GetOrCreateAccount(ctx, tx, f.tenantID, nil, ledger.AccountPSPClearing, "USD")
 		return err
 	})
 	if err != nil {
@@ -166,6 +194,16 @@ func tryPost(pool *db.Pool, tenantID uuid.UUID, in ledger.TransactionInput) (led
 }
 
 func externalVehicleInput(f fixture, tenantID uuid.UUID, providerID string, cashAccountID uuid.UUID, composed string, correlationID uuid.UUID, amount int64) ledger.TransactionInput {
+	return externalVehicleInputWithClearing(f, tenantID, providerID, f.clearingAccountID, cashAccountID, composed, correlationID, amount)
+}
+
+// externalVehicleInputWithClearing is externalVehicleInput generalized to
+// accept an explicit clearing account, so a test can post entries in a
+// SPECIFIC asset (the clearing and cash accounts must share one asset for
+// the transaction to balance - see ledger.Post's per-asset balance
+// invariant) rather than always the fixture's default EUR pair. Used by
+// the changed-asset replay case below.
+func externalVehicleInputWithClearing(f fixture, tenantID uuid.UUID, providerID string, clearingAccountID, cashAccountID uuid.UUID, composed string, correlationID uuid.UUID, amount int64) ledger.TransactionInput {
 	// A deposit-shaped vehicle: Dr psp_clearing / Cr player_cash - stands
 	// in for "an external-provider-mode multi-occurrence event" (e.g. a
 	// sportsbook settlement/cashout/partial-settlement occurrence),
@@ -183,7 +221,7 @@ func externalVehicleInput(f fixture, tenantID uuid.UUID, providerID string, cash
 		ProviderTxID:    assignment.ProviderTxID,
 		CorrelationID:   correlationID,
 		Entries: []ledger.EntryInput{
-			{LedgerAccountID: f.clearingAccountID, Direction: ledger.Debit, Amount: amount},
+			{LedgerAccountID: clearingAccountID, Direction: ledger.Debit, Amount: amount},
 			{LedgerAccountID: cashAccountID, Direction: ledger.Credit, Amount: amount},
 		},
 	}
@@ -363,6 +401,27 @@ func TestIntegration_ReplayWithChangedAmountAssetOrPlayerIsWhyTheContractMatters
 	// player 2's cash account received NOTHING - the "replay" was fully
 	// absorbed into player 1's original transaction.
 	assertBalance(t, pool, f.tenantID, f.cashAccountID2, 0)
+
+	// "Replay" with a changed ASSET - a genuinely different currency
+	// (USD, not the original EUR), on a second wallet belonging to the
+	// SAME player (f.playerAccountID, per ADR 0007's multi-wallet-
+	// per-player model - this is deliberately NOT the changed-player case
+	// above), SAME composed key. Both legs of this "replayed" input are
+	// internally USD-consistent (so it would post as a perfectly valid,
+	// independently balanced transaction if the key were NOT reused) -
+	// the only defect is the adapter incorrectly reusing the original
+	// EUR occurrence's key for a distinct USD fact.
+	changedAsset, err := tryPost(pool, f.tenantID, externalVehicleInputWithClearing(f, f.tenantID, "mock-provider", f.clearingAccountIDUSD, f.cashAccountIDUSD, composed, corr, 100))
+	if err != nil {
+		t.Fatalf("changed-asset replay: %v", err)
+	}
+	if !changedAsset.AlreadyPosted || changedAsset.TransactionID != original.TransactionID {
+		t.Fatal("expected the reused key to short-circuit regardless of which asset's account the new entries named")
+	}
+	// The USD cash account received NOTHING - the "replay" was fully
+	// absorbed into the original EUR transaction, exactly like the
+	// changed-amount and changed-player cases above.
+	assertBalance(t, pool, f.tenantID, f.cashAccountIDUSD, 0)
 }
 
 // TestIntegration_CallbackAndSettlementRedelivery proves an ordinary

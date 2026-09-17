@@ -37,18 +37,6 @@ const (
 	ModeInHouse
 )
 
-// String implements fmt.Stringer for readable audit/log output.
-func (m Mode) String() string {
-	switch m {
-	case ModeExternalProvider:
-		return "external_provider"
-	case ModeInHouse:
-		return "in_house"
-	default:
-		return fmt.Sprintf("idempotency.Mode(%d)", int(m))
-	}
-}
-
 // Assignment is where a composed occurrence key lands on the resulting
 // posting call's identity fields (internal/ledger.TransactionInput's own
 // ProviderID/ProviderTxID/IdempotencyKey fields, named generically here
@@ -98,7 +86,7 @@ func Assign(mode Mode, composed string, providerID string, externalIdempotencyKe
 	switch mode {
 	case ModeExternalProvider:
 		if providerID == "" {
-			return Assignment{}, fmt.Errorf("idempotency: provider id is required for %s", ModeExternalProvider)
+			return Assignment{}, fmt.Errorf("idempotency: provider id is required for ModeExternalProvider")
 		}
 		if externalIdempotencyKey == "" {
 			return Assignment{}, fmt.Errorf("idempotency: an external-mode idempotency_key value is required (NOT NULL column, must not be reused as an idempotency input elsewhere - see Assignment.IdempotencyKey)")

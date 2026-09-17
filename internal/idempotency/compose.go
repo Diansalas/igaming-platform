@@ -61,9 +61,9 @@ const occurrenceLengthSep = ":"
 // ComposeOccurrenceKey losslessly encodes reference and an optional
 // discriminator (nil for a single-occurrence transaction type that needs
 // none - ADR 0038 §14.1's "NULL/not applicable" case) into the single
-// opaque string an adapter submits as ProviderOperationID (provider_tx_id
-// in external-provider mode, idempotency_key in in-house mode - see
-// Mode/Assignment in routing.go).
+// opaque string an adapter submits as provider_tx_id (external-provider
+// mode) or idempotency_key (in-house mode) - see Mode/Assignment in
+// routing.go.
 //
 // Encoding: "<decimal length of reference in bytes>:<reference bytes>"
 // followed by "#<discriminator>" if discriminator is non-nil (which may
@@ -94,7 +94,12 @@ func ComposeOccurrenceKey(reference string, discriminator *string) (string, erro
 // ordinal == nil composes with no discriminator at all (the single-
 // occurrence case); a non-nil ordinal must be >= 1 (an ordinal of 0 or
 // negative is never a legitimate "first occurrence, second occurrence, ..."
-// count and is rejected rather than silently accepted).
+// count and is rejected rather than silently accepted). A caller that
+// later needs the ordinal back out of a composed key uses the general
+// DecomposeOccurrenceKey and parses its string discriminator itself
+// (strconv.ParseInt) - this package does not duplicate that handful of
+// lines behind a dedicated decompose-with-ordinal function with no
+// current caller.
 func ComposeOccurrenceKeyWithOrdinal(reference string, ordinal *OccurrenceOrdinal) (string, error) {
 	if ordinal == nil {
 		return ComposeOccurrenceKey(reference, nil)
@@ -155,24 +160,4 @@ func DecomposeOccurrenceKey(composed string) (reference string, discriminator *s
 	default:
 		return "", nil, fmt.Errorf("%w: unexpected trailing bytes after reference", ErrInvalidComposedKey)
 	}
-}
-
-// DecomposeOccurrenceKeyOrdinal is DecomposeOccurrenceKey specialized for
-// the OccurrenceOrdinal case: it additionally requires the discriminator
-// (if present) to parse as a strictly-increasing integer >= 1, matching
-// ComposeOccurrenceKeyWithOrdinal's own contract.
-func DecomposeOccurrenceKeyOrdinal(composed string) (reference string, ordinal *OccurrenceOrdinal, err error) {
-	ref, disc, err := DecomposeOccurrenceKey(composed)
-	if err != nil {
-		return "", nil, err
-	}
-	if disc == nil {
-		return ref, nil, nil
-	}
-	n, err := strconv.ParseInt(*disc, 10, 64)
-	if err != nil || n < 1 {
-		return "", nil, fmt.Errorf("%w: discriminator %q is not a valid occurrence ordinal", ErrInvalidComposedKey, *disc)
-	}
-	o := OccurrenceOrdinal(n)
-	return ref, &o, nil
 }

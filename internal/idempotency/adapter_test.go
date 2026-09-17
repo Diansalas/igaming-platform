@@ -4,18 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
-
-	"github.com/google/uuid"
 )
-
-func mustUUID(t *testing.T, s string) uuid.UUID {
-	t.Helper()
-	id, err := uuid.Parse(s)
-	if err != nil {
-		t.Fatalf("parse uuid %q: %v", s, err)
-	}
-	return id
-}
 
 func alwaysRequiresOrdinal(string) bool { return true }
 func neverRequiresOrdinal(string) bool  { return false }
@@ -58,9 +47,14 @@ func TestResolveOccurrence_UsesAuthenticatedDiscriminatorWhenAvailable(t *testin
 // required proof that a provider with no authenticated occurrence field
 // is correctly REJECTED for an occurrence-ordinal-requiring transaction
 // type, rather than silently falling back to a transport-derived
-// approach (the exact S-5 defect this package closes).
+// approach (the exact S-5 defect this package closes). noSignedFieldSrc
+// stands in for a real adapter's OccurrenceSource for a provider it has
+// confirmed supplies no signed per-occurrence field of any kind.
 func TestResolveOccurrence_FailsClosedWhenNoAuthenticatedSource(t *testing.T) {
-	_, err := ResolveOccurrence(context.Background(), alwaysRequiresOrdinal, NoAuthenticatedOccurrenceField, "sportsbook_cashout", "cashout-ref-1", "signed-event-placeholder")
+	noSignedFieldSrc := OccurrenceSourceFunc(func(context.Context, any) (ProviderOccurrenceID, error) {
+		return "", ErrNoAuthenticatedOccurrenceField
+	})
+	_, err := ResolveOccurrence(context.Background(), alwaysRequiresOrdinal, noSignedFieldSrc, "sportsbook_cashout", "cashout-ref-1", "signed-event-placeholder")
 	if !errors.Is(err, ErrOccurrenceOrdinalRequiredButUnavailable) {
 		t.Fatalf("expected ErrOccurrenceOrdinalRequiredButUnavailable, got %v", err)
 	}
@@ -80,8 +74,10 @@ func TestResolveOccurrence_FailsClosedWhenSourceIsNil(t *testing.T) {
 // a caller cannot even construct a passing OccurrenceSource without a
 // real authenticated field, because ResolveOccurrence only ever accepts
 // a value returned from OccurrenceSource.AuthenticatedOccurrenceReference,
-// and the ONLY zero-configuration OccurrenceSource this package ships
-// (NoAuthenticatedOccurrenceField) always fails closed by design.
+// and an OccurrenceSource that honestly reports
+// ErrNoAuthenticatedOccurrenceField (see
+// TestResolveOccurrence_FailsClosedWhenNoAuthenticatedSource above)
+// always fails closed by design.
 func TestResolveOccurrence_DoesNotFallBackToATransportDerivedSignal(t *testing.T) {
 	// A deliberately-misbehaving adapter author trying to smuggle a
 	// transport-level delivery id through as if it were authenticated -
@@ -89,9 +85,9 @@ func TestResolveOccurrence_DoesNotFallBackToATransportDerivedSignal(t *testing.T
 	// caller from lying inside its own OccurrenceSource implementation),
 	// but the point is structural: nothing in ResolveOccurrence itself
 	// ever generates, requests, or requires such a value, and the
-	// package's own doc comments and the one no-op source it ships both
-	// push an honest implementer toward ErrNoAuthenticatedOccurrenceField
-	// instead. This test documents that failure mode is a defect in a
+	// package's own doc comments push an honest implementer toward
+	// returning ErrNoAuthenticatedOccurrenceField instead. This test
+	// documents that failure mode is a defect in a
 	// non-conformant OccurrenceSource implementation, not something this
 	// package's own logic does on a caller's behalf.
 	transportDeliveryID := "delivery-000123" // NOT part of any signed payload
@@ -142,64 +138,4 @@ func TestResolveOccurrence_PropagatesOtherSourceErrorsVerbatim(t *testing.T) {
 	if errors.Is(err, ErrOccurrenceOrdinalRequiredButUnavailable) {
 		t.Fatal("a non-occurrence-field error must not be reported as the fail-closed sentinel")
 	}
-}
-
-// TestCanonicalOccurrenceIssuer_RoundTripGraduatesIntoAnOrdinarySource
-// demonstrates the documented flow for a provider with NO native
-// per-occurrence field: the platform mints a canonical id, the provider
-// echoes/signs it, and the NEXT event's OccurrenceSource reads it back as
-// an ordinary authenticated field - CanonicalOccurrenceIssuer is never
-// consulted a second time for the same occurrence.
-func TestCanonicalOccurrenceIssuer_RoundTripGraduatesIntoAnOrdinarySource(t *testing.T) {
-	// A minimal, reproducible-on-retry issuer: derives the id from a
-	// stable map keyed on (correlationID, transactionType) rather than a
-	// fresh random value per call - the reproducibility contract
-	// IssueCanonicalOccurrenceID's doc comment requires.
-	issued := map[string]ProviderOccurrenceID{}
-	var issuer CanonicalOccurrenceIssuer = issuerFunc(func(_ context.Context, correlationID CorrelationID, transactionType string) (ProviderOccurrenceID, error) {
-		key := correlationID.String() + ":" + transactionType
-		if v, ok := issued[key]; ok {
-			return v, nil
-		}
-		v := ProviderOccurrenceID("canonical-" + key)
-		issued[key] = v
-		return v, nil
-	})
-
-	corr := mustUUID(t, "11111111-1111-1111-1111-111111111111")
-	first, err := issuer.IssueCanonicalOccurrenceID(context.Background(), corr, "sportsbook_cashout")
-	if err != nil {
-		t.Fatalf("issue: %v", err)
-	}
-	retry, err := issuer.IssueCanonicalOccurrenceID(context.Background(), corr, "sportsbook_cashout")
-	if err != nil {
-		t.Fatalf("issue (retry): %v", err)
-	}
-	if first != retry {
-		t.Fatalf("issuer must be reproducible on retry: got %q then %q", first, retry)
-	}
-
-	// Once the provider has echoed/signed `first`, the adapter's own
-	// OccurrenceSource for the resulting event reads it back as an
-	// ordinary authenticated field.
-	graduatedSrc := OccurrenceSourceFunc(func(_ context.Context, verifiedEvent any) (ProviderOccurrenceID, error) {
-		return verifiedEvent.(ProviderOccurrenceID), nil
-	})
-	composed, err := ResolveOccurrence(context.Background(), alwaysRequiresOrdinal, graduatedSrc, "sportsbook_cashout", "cashout-ref-1", first)
-	if err != nil {
-		t.Fatalf("resolve: %v", err)
-	}
-	ref, disc, err := DecomposeOccurrenceKey(composed)
-	if err != nil {
-		t.Fatalf("decompose: %v", err)
-	}
-	if ref != "cashout-ref-1" || disc == nil || ProviderOccurrenceID(*disc) != first {
-		t.Fatalf("expected the issued canonical id to flow through as the discriminator, got (%q, %v)", ref, disc)
-	}
-}
-
-type issuerFunc func(ctx context.Context, correlationID CorrelationID, transactionType string) (ProviderOccurrenceID, error)
-
-func (f issuerFunc) IssueCanonicalOccurrenceID(ctx context.Context, correlationID CorrelationID, transactionType string) (ProviderOccurrenceID, error) {
-	return f(ctx, correlationID, transactionType)
 }
