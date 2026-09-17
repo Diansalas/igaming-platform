@@ -1,5 +1,185 @@
 # Active Stage
 
+## Stage 4H-B0-R6 — Foundational Implementation Hardening — Complete
+
+Status: **Complete. The first implementation stage since a long
+architecture-only period. Six foundational workstreams implemented with
+real production code and migrations, each independently reviewed, and a
+fix wave closing every confirmed defect — including one live,
+exploited P1 — with a final independent re-verification pass confirming
+every fix holds. No implementation stage is authorized to begin next.
+Stage 4H-B1 (Bonus Engine) NOT started.**
+
+Six authorized workstreams, per the stage directive: **A** Asset
+Registry + Authorization implementation, **B** financial idempotency
+hardening, **C** `player_locked` accounting implementation, **D** Risk
+fail-closed hardening, **E** RG self-exclusion technical hardening, **F**
+Bonus dependency contract closure.
+
+**Wave 1 (6 parallel implementation dispatches, distinct file
+ownership, exclusive reserved migration-number ranges to prevent
+collision):**
+- `architect` — Workstream A: `internal/assetregistry` (new), migrations
+  `0044`-`0045`. Fixed `assets.active`'s fail-open default; added a
+  `platform_authorized` layer with an RLS+FORCE+trigger backstop (no
+  second Postgres role exists to do this properly — disclosed limitation);
+  immutable identity-field enforcement; a `(product, operation)`
+  dimension on layers 4-7 (closing sportsbook's own Stage 4H-B0-R5
+  finding); four-eyes (`asset_change_requests`/`asset_change_approvals`)
+  mirroring the `withdrawal_approvals` precedent.
+- `identity-compliance` — Workstream E: migration `0043`,
+  `internal/rg/self_exclusion_*.go`. Policy config schema (jurisdiction-
+  primary, tenant/brand tighten-only, enforced at both write time via a
+  DB trigger and read time via `max(strictness)` aggregation), as-of
+  temporal resolution, authoritative `clock_timestamp()` throughout, a
+  stalled-enumeration-run detection primitive. Explicitly did NOT select
+  the platform-wide default policy value.
+- `risk` — Workstream D: `internal/risk/{cumulative,denomination}.go`,
+  migration `0046`. Fixed the ADR 0031 §32 latent fail-open (leg-aware
+  cumulative-usage query, self-defending against an undeclared leg);
+  closed seven accidental-ALLOW paths in `evaluator.go`; added
+  decimal-exponent awareness to `risk_rules` (validated at 0/2/6/8/18);
+  resolved the ADR 0031/0038 Risk-checkpoint conflict on Risk's side
+  (new §36, visible superseded-in-part markers).
+- `ledger-finance` — Workstream C, phase 1 only (implementation ADR,
+  explicitly not blind-implemented): `ledger-accounting-model.md` §6.4,
+  the 12-case (A-L) accounting-flow reference. Deferred mixed cash+bonus
+  funding for this pass (a fail-closed rejection at placement, HR-2 —
+  the anti-structuring control it would need is bonus-engine's to design,
+  not ledger-finance's to invent unilaterally) and cashout (no sportsbook
+  code exists to offer one). No migration or code written this phase.
+- `integrations` — Workstream B: new `internal/idempotency` package
+  closing the two vulnerabilities security found in Stage 4H-B0-R5
+  (unauthenticated fallback discriminator; unescaped collision-prone key
+  composition), proven collision-free over 262k+ adversarial pairs. Zero
+  production call sites — a shared primitive, not yet adopted by any
+  domain.
+- `bonus-engine` — Workstream F: `docs/architecture/10-*.md`'s new "Bonus
+  Dependency Contract Freeze" — the exact contracts Bonus will depend on
+  (Asset Registry, AssetAuthorization, Risk, RG, Wallet/Ledger, Activity/
+  Event taxonomy, rounding_rules, conversion boundary, `player_locked`
+  origin, external provider-native bonus coexistence), plus an explicit
+  "Bonus must never build" list. Documentation only.
+
+**Wave 2 (6 independent reviewers, none reviewing their own Wave 1
+work):**
+- `sportsbook` and `bonus-engine` each validated Workstream C's
+  implementation ADR against the exact questions ledger-finance posed.
+  `bonus-engine` confirmed a real, structurally-triggered gap while
+  answering one of them: bonus-funded sportsbook wagering progress is
+  never netted against a later void/rollback of the same lock — a
+  player-reachable progress-farming vector, generalizing far beyond a
+  Stage 4H-B0-R5 self-exclusion-specific finding — with a precise fix
+  design specified (gate **G-3**). `sportsbook` also confirmed the
+  terminal-Grant human-decision gap (gate **G-2**) blocks bonus-only
+  funding directly, not only the deferred mixed-funding case.
+- `product-owner-proxy` and `sportsbook` also each did a dedicated
+  sportsbook-readiness/scope-check pass, finding the three foundational
+  primitives (idempotency, asset authorization, risk) sufficient for a
+  future sportsbook slice in both provider modes, and no scope creep in
+  this stage's output.
+- `architect` (independent of its own Workstream A) did a
+  cross-workstream consistency pass: single exponent source of truth
+  confirmed load-bearing (not just tidy — routing Risk's exponent lookup
+  through `CheckEligibility` would have denied every live casino bet,
+  since all seven seeded assets are `platform_authorized=false`); RLS/
+  backstop idiom consistent between Workstreams A and E; no idempotency
+  routing conflict; repo-wide build/vet/fmt independently reconfirmed
+  clean. Filed two real documentation-level cross-references (a stale
+  `CheckEligibility` signature citation in Workstream F; confirmation
+  that Workstream C's §6.4 neither resolves nor contradicts the ADR
+  0031/0038 conflict).
+- `qa` independently re-ran and read the actual test bodies (not just
+  names) across A/B/D/E — confirmed the bulk of it genuine, but found
+  three real gaps: Workstream B's changed-asset replay test didn't
+  actually vary the asset; Workstream D had no TOCTOU race test for the
+  cumulative-limit advisory lock; Workstream E had no cross-tenant RLS
+  test for either of its two new tables.
+- `code-reviewer` found two real High-severity defects: **F1** the
+  platform-wide layer-7 eligibility grant had no four-eyes representation
+  at all despite ADR 0037 requiring one; **F2** `self_exclusion_enumeration_runs`'
+  RLS policy was missing the `app.player_account_id IS NULL` conjunct
+  every sibling table in the same migration correctly carried — a real
+  cross-player compliance-data exposure. Plus F3 (a silent fail-open on
+  a wrongly-scoped reconciliation call, the same shape Workstream D
+  explicitly fixed elsewhere this stage) and six lower-severity findings.
+- `security` independently reproduced a **live P1**: the four-eyes
+  self-approval person-identity check was unconditionally inert, because
+  no code path anywhere in the platform could ever set `person_id` on a
+  `platform_admin` account — a single human running `seed-admin` twice
+  could complete every dual-controlled operation (create/activate/
+  platform-authorize) alone. Reproduced end-to-end against the live dev
+  database. Also confirmed code-reviewer's F1/F2 independently, found a
+  DELETE-based RLS-widening exploit on `asset_authorizations`, and
+  confirmed Workstream D clean (IMPLEMENTED, no findings).
+
+**Fix wave (4 dispatches, each to the specialist owning the affected
+code, closing every confirmed defect):**
+- `architect` hardened the four-eyes trigger to require a resolved,
+  non-NULL `person_id` and active status on both sides (migration 0047,
+  mirroring the withdrawal-governance precedent instead of an earlier,
+  since-withdrawn version); added a fourth dual-controlled operation for
+  the layer-7 eligibility grant (an `AFTER` trigger, after a failing
+  test caught that a `BEFORE` trigger double-fires on `ON CONFLICT DO
+  UPDATE`); split `asset_authorizations`' RLS to remove the DELETE-
+  widening path; added TRUNCATE deny-triggers. Verified fail-before/
+  pass-after against a literal reproduction of security's exploit.
+- `identity-compliance` built the person-linking path the above fix
+  depends on (new `cmd/seed-admin` flags; a new platform-scoped
+  remediation route, explicitly checked against a `tenant_admin` caller
+  who also holds the same permission) — confirmed the two fixes land
+  together with an end-to-end test proving the dependency is satisfied,
+  not assumed. Also closed the RLS conjunct gap, the reconciliation
+  scope-verification gap, a jurisdiction-floor backdating exploit (with
+  a real bug of its own caught and fixed: a naive check failed every
+  legitimate write due to `clock_timestamp()` drift), and an RLS-policy
+  alignment gap. Self-resolved a migration-number collision with
+  architect's parallel dispatch by using `0049`.
+- `integrations` trimmed genuinely dead code from `internal/idempotency`
+  (four zero-value type aliases, an unimplemented interface, several
+  unreferenced functions) per CLAUDE.md's no-uncontrolled-scope-expansion
+  rule, and closed the changed-asset test gap.
+- `risk` consolidated the exponent lookup through `internal/assetregistry.GetAsset`
+  and added a genuine, mutation-tested TOCTOU race test proving the
+  cumulative-limit advisory lock actually prevents overshoot (confirmed
+  by temporarily removing the lock and watching the test fail 10/10
+  runs, then restoring the file byte-identical).
+
+**Final independent re-verification (2 dispatches):** `security`
+re-reproduced the original P1 exploit against the fixed code and could
+not reconstruct it by any route tried — **CONFIRMED CLOSED**; Workstream
+A's four-eyes control and RLS backstop are now labeled IMPLEMENTED.
+Found five new minor items, only one non-trivial (the stalled-run
+detector has no scheduler wiring — labeled PARTIALLY IMPLEMENTED, not
+launch-blocking). `qa` independently re-verified all three originally-
+flagged test gaps are genuinely closed and confirmed the two new
+four-eyes regression tests are real; full 588-test integration suite
+green, zero skips/failures; migration round-trip clean (one pre-existing,
+unrelated Stage 4E migration-0039 down-migration limitation confirmed
+real but fresh-database-safe).
+
+**Final labels** (CLAUDE.md's no-fake-completion rule): Workstream A
+(Asset Registry) — **IMPLEMENTED** (layer 8 market-rate-availability
+NOT IMPLEMENTED, concluded to be a runtime FX-provider check, not a
+stored fact). Workstream B (idempotency) — **IMPLEMENTED** as a shared
+primitive, zero production call sites. Workstream C (`player_locked`) —
+phase 1 (ADR) **DONE**; phase 2 (migration `0048` + code) **NOT
+STARTED**, gated on G-2 (human decision) and G-3 (fix design specified,
+not built) for bonus-funded cases; cash-only cases unblocked. Workstream
+D (Risk) — **IMPLEMENTED**, security sign-off granted, no findings.
+Workstream E (RG self-exclusion) — **PARTIALLY IMPLEMENTED** (scheduler-
+wiring gap, non-launch-blocking; default policy value remains an unmade
+human/legal decision). Workstream F (Bonus dependency contract) —
+**DONE**.
+
+**No fake completion**: every residual finding — the two open gates
+blocking bonus-funded sportsbook (G-2, G-3), the unwired stalled-run
+scheduler, FX/Conversion Part B's untouched security findings, the
+pre-existing migration-0039 limitation — is recorded, attributed, and
+routed to its owning specialist, none hidden or downgraded.
+
+---
+
 ## Stage 4H-B0-R5 — Implementation Readiness and Final P1 Closure — Complete
 
 Status: **Complete. All five Stage 4H-B0-R4 P1s are ARCHITECTURALLY
