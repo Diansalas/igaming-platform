@@ -4872,6 +4872,441 @@ discipline.
 | §6.6.8 conversion edge case | **APPROVED WITH ONE REQUIRED ADDITION** — the margin-check gate, specified above |
 | OB-2 | **Confirmed correctly characterized**, business decision, not resolved here |
 
+#### 6.6.16 `architect` independent validation (Stage 4H-B0-R7, V-15/V-16 + cross-workstream pass)
+
+Answering §6.6.12's **V-15** and **V-16** as posed, verifying §6.5.1's
+newly-claimed migration-`0035` precedent, and running the cross-workstream
+consistency pass against the other four Stage 4H-B0-R7 Wave 1 deliverables.
+`architect` authored neither §6.5 nor §6.6. This subsection writes no
+migration, no SQL and no Go code, redesigns nothing, and does not authorize
+phase 2 — §6.3.5's human-approval gate is unchanged. §6.6.14
+(`sportsbook`) and §6.6.15 (`bonus-engine`) landed while this pass was in
+flight and are treated as prior art below, with attribution, rather than
+duplicated.
+
+**V-15 — APPROVED. Removing bare `player_locked` from both the CHECK and
+the Go const block is correct, and §6.5.3's four reasons hold. Three
+omissions found in the surrounding completeness claims, one load-bearing.**
+
+*Verified independently of the document's own claims.* The Go surface is
+exactly five lines repo-wide (`grep -rE
+"player_locked|AccountPlayerLocked" --include="*.go" .`, no test-file
+hits): `internal/ledger/ledger.go:39` (const),
+`internal/wallet/wallet.go:168` (the `GetSummary` arm),
+`internal/risk/cumulative.go:61/86/112` (three comments). §6.5.1's
+"exactly three hits" counts categories rather than lines; the content is
+accurate. Line citations re-checked and correct: const block 36-48 with its
+doc comment at 31-33; `Summary` 128-135; `GetSummary` 141-180.
+`GetOrCreateAccount`, `GetProjectedBalance`, `RebuildBalance`,
+`RebuildProjectionRow` and `internal/reconciliation` were each read, not
+assumed — all genuinely treat `account_type` as an opaque pass-through, and
+`wallet.GetSummary`'s is the **only** `AccountType` `switch` anywhere in
+the tree. Verified against the **live dev database**
+(`igaming_platform_dev`, `schema_migrations.version = 49`), not only the
+migration files: the constraint's auto-generated name is literally
+`ledger_accounts_account_type_check`, it holds exactly the eleven values,
+no other constraint on the table references `account_type`, and
+`ledger_accounts` holds **zero rows of any type** — so §6.5.2's pre-flight
+guard is provably a no-op today and §6.5.3 reason 2 is confirmed by data
+rather than by inference. `0048` is free (`0047` → `0049`), and no
+`hierarchy_node_id` column exists (relevant to Omission 1).
+
+*The `internal/risk/cumulative.go` question is answered affirmatively:*
+**this design does account for Stage 4H-B0-R6's doc09 §16.3 finding**, at
+§6.5.5 item 4, and goes further than §16.3 asked (three comment strings,
+not the one §16.3 cited). Its "zero behavior change" claim is verified:
+`operationCumulativeSpecs` has a single entry (`OperationCasinoBet`,
+`MeasuredAccountTypes: ["player_cash"]`, `IgnoredAccountTypes: nil`), no
+migration seeds `risk_rules` with any account type, and the three
+references compile to nothing. **One item §6.5.5 item 4 drops from §16.3's
+guidance, and it is a specification requirement rather than a comment
+fix:** §16.3 says the real ignored type is `player_locked_cash` "and, once
+gates G-2/G-3 close, `player_locked_bonus`". When `OperationSportsbookBet`
+is eventually wired, its `cumulativeSpec` must declare **both** locked
+types in `IgnoredAccountTypes`, or `ErrUnrecognizedCumulativeLeg` fails
+closed and denies every cumulative-rule-covered sportsbook bet. HR-7 states
+this obligation for read-side call sites; it should state it for the Risk
+spec too, since a Risk spec is an `account_type` enumeration in exactly
+HR-7's sense.
+
+*Omission 1 (HIGH — a constraint-level collision, not a documentation
+nit).* **ADR 0035 §1.3.1's proposed `ledger_accounts_owner_family` CHECK is
+missing from §6.3.4 item 6's document list, from §6.5.1's re-verification
+table, and from L1's layer table.** That proposal
+(`docs/decisions/0035-retail-agent-network-accounting.md`, the agent-float
+amendment — `NOT IMPLEMENTED`, human-approval-pending, confirmed absent
+from the live schema) adds to the **same table** a CHECK whose first branch
+enumerates the four player-owned types by name and whose `ELSE` branch
+requires `wallet_id IS NULL`:
+
+```sql
+CASE WHEN account_type IN ('player_cash','player_bonus',
+                           'player_locked','player_withdrawal_hold')
+       THEN wallet_id IS NOT NULL AND hierarchy_node_id IS NULL
+     WHEN account_type IN ('agent_float','agent_commission_payable')
+       THEN hierarchy_node_id IS NOT NULL AND wallet_id IS NULL
+     ELSE  wallet_id IS NULL     AND hierarchy_node_id IS NULL END
+```
+
+Migration `0048` and this amendment are each individually correct and
+**jointly broken in either landing order**: `player_locked_cash` /
+`player_locked_bonus` fall through to the `ELSE` branch, which demands
+`wallet_id IS NULL`, while a locked account is by construction
+wallet-owned. Every `GetOrCreateAccount` call for a locked account would
+fail with SQLSTATE 23514. It fails **loudly**, not silently, and is latent
+until the retail amendment is authorized — so this is not a correction to
+§6.5.2's SQL and does not block phase 2. It is a required addition to a
+checklist that claims to list "every call site and document that must
+change alongside the migration", and it is cheap to record now and
+expensive to discover during a retail implementation stage. ADR 0035's
+row-shape proof table (line ~508), its owner-family table (line ~1038) and
+its recommended pre-migration audit query (line ~936) carry the same
+four-name enumeration and need the same edit. Filed here as a
+cross-reference per §6.4.8's name-without-editing convention;
+**`ledger-finance` and `architect` jointly own the reconciliation**,
+whichever migration is authorized first.
+
+*Omission 2 (MEDIUM — three canonical documents absent from §6.3.4 item 6,
+two present-but-under-scoped).* Every remaining bare `player_locked`
+reference in the repository was enumerated and classified. Absent from the
+list, each carrying a **normative account-type enumeration** rather than
+narrative: `docs/architecture/03-database-architecture.md:41` (the database
+document's own canonical account-type list);
+`docs/architecture/06-wallet-ledger-architecture.md:59` (likewise — and it
+is the document `financial-transaction-flows.md` §13 cites as the authority
+for why wagering progress "falls out of the data");
+`docs/architecture/financial-domain-model.md:146` (the player-owned-type
+list) and `:196` (the brand-scoping statement), which §7 of this document
+cites as canonical for object scoping. Present but under-scoped:
+`reconciliation-model.md` is listed **only** for its B1 stream (§2.9), yet
+§3's "**Locked balance** = current `player_locked` balance" (line ~243) is
+the *specification* of the very field §6.5.5 fixes in code, and §2.4's
+sportsbook open-liability reconciliation (line ~121) is the same
+silent-zero class as ADR 0038 §6's query — which §6.4.8 item 5 correctly
+rated P1; both need the same `IN (...)` widening.
+`financial-transaction-flows.md` is listed as "Flows 8–11", but the Summary
+table's rows 8/9/11 (lines ~668-671) also name bare `player_locked`.
+Remaining references are narrative, historical or illustrative and need no
+edit for correctness: doc 09 (11), ADR 0031 (8 — the `IgnoredAccountTypes`
+comment examples mirroring `cumulative.go`, same class), doc 10 (6), ADR
+0032 §10 / ADR 0034 §14.1 / ADR 0038 (already listed), ADR 0007 ("etc."),
+doc 22, ADR 0025, ADR 0033, `testing-strategy.md`, `docs/progress.md`,
+`docs/active-stage.md`, the governance documents. One file outside `docs/`,
+`internal/` and `migrations/` names it and is worth a line because it
+*instructs a future specialist*: `.claude/agents/sportsbook.md:18/26`.
+
+*Omission 3 (LOW, cheap now and awkward later).* **L1 is worded as a closed
+two-member enumeration where every other mechanism in §6.5/§6.6 uses a
+family-plus-fail-closed-default idiom.** Two landed Stage 4H-B0-R7
+deliverables already anticipate a third member: doc 09 §10's new
+forward-looking note (an `agent_float`-funded or proxy-placed retail stake
+"would need the same kind of origin-split treatment"), and §6.6.9 property
+10's own future `retail_void`. Recommend L1 read *"every locked account's
+`account_type` determines the origin of the value it holds; the
+currently-defined members are `player_locked_cash` and
+`player_locked_bonus`; a new member may be added only together with its
+classification in §6.6.5 and its arm in every read-side switch"* — which
+preserves L1's determinacy guarantee, keeps §6.5.5's erroring `default` as
+the enforcement, and avoids re-opening L1 when retail lands.
+
+*L1's five-layer table otherwise: complete and correctly reasoned.* Layer 1
+(a CHECK is not a declinable privilege), layer 2 (const deletion ⇒ compile
+error), layer 3 (the pre-flight guard inside `internal/db/migrate.go`'s
+per-file transaction — verified at `migrate.go`), layer 4 (the erroring
+`default`) and layer 5 (tests) are each real and independently verifiable.
+Layer 4's enumeration of read-side sites is the only incomplete part, and
+only by the two `reconciliation-model.md` sites named above. §6.5.3 reason
+3 is the strongest argument in the section and is correct on the merits:
+deleting the const converts a silent wrong-money defect into a build
+failure, which is the standard CLAUDE.md sets for tenant isolation.
+
+**V-16 — HR-9's required half is clean and well-isolated. Its recommended
+half is also right — `architect` recommends promoting it to required — but
+one clause of HR-9's wording is unsafe as written, and doc 10 §3's
+migration list is missing the item HR-9 implies.**
+
+*The required half (`player_locked_bonus`) collides with nothing.* doc 10
+§3's seven first-slice migration items touch
+`ledger_accounts.account_type` (item 1),
+`ledger_transactions.transaction_type` (item 2), `risk_rules` (item 3) and
+four `bonus_*` tables (items 4-7). None creates, reads or posts to a locked
+account. Stage 4H-B1's first slice never reaches `player_locked_bonus`, so
+a ledger-boundary rejection for it is invisible to B1 and removable
+independently. Clean precondition.
+
+*The recommended half (`player_bonus`) does interact with doc 10 §3 — and
+the interaction is the useful kind.* doc 10's Dependency Contract Freeze §5
+freezes the lifecycle→posting map in which `activated` posts
+`Dr promo_liability · Cr player_bonus` (`bonus_grant`), and all five
+in-slice bonus types reach `completed → converted`. HR-9's recommended
+guard therefore blocks **the entire first slice's grant path** until
+removed. That is not an obstruction: Rule B2 and Invariant B1 *require* the
+mirror generator to exist before any `player_bonus` entry is posted, and
+doc 10 §3 item 2 already reaches for this ordering ("a practical safety
+ordering, not a hard schema dependency" — i.e. it knows Postgres cannot
+enforce it). HR-9 is the mechanism that makes that documented preference a
+build-time hard stop, exactly as §6.5.3 reason 3 does for the const.
+**Recommend HR-9's `player_bonus` clause be promoted from *recommended* to
+*required* on that basis.** Verified safe today: `player_bonus` has
+**zero** posting call sites at `HEAD` (`AccountPlayerBonus` occurs only at
+`ledger.go:38` and `wallet.go:170`'s read), and the one anticipated future
+non-bonus caller — `cumulative.go`'s comment about a Bonus Engine funding a
+casino stake from `player_bonus` — is a path that would break B1
+identically without the generator, so blocking it is correct rather than
+collateral.
+
+*The unsafe clause, and it is a one-line fix.* HR-9 says the guard "is
+removed **in the same change** that adds `bonus_expense` and the
+generator." doc 10 §3 item 1 deliberately makes `bonus_expense` the **first
+and most isolated** migration of the slice, alone and explicitly
+`ledger-finance`-owned ("the smallest, most isolated change, so it goes
+first, mirroring how casino's migration `0035` also led with its own CHECK
+widening"), and the Rule B2 (extended) generator is Go code in
+`internal/ledger` that doc 10 §3 does not list at all (§3 is migrations
+only). A literal implementer therefore has two bad options: remove the
+guard alongside item 1's migration — before the generator exists,
+reopening on the first `bonus_grant` posting the exact B1 hazard HR-9
+exists to prevent — or collapse item 1 and the generator into one commit,
+defeating the isolation item 1 was designed for. **Recommend rewording HR-9
+as a conjunctive precondition evaluated at removal time** ("the guard may
+be removed only once `bonus_expense` is migrated **and** the Rule B2
+(extended) generator exists; removal lands with the generator, not with the
+`bonus_expense` migration"). This is a phrasing correction, not a design
+change — HR-9's conjunction already says "and"; only the co-location claim
+is wrong.
+
+*One coordination gap, not a safety one.* HR-9 adds a **third**
+`ledger-finance`-owned dependency to Stage 4H-B1's critical path — "build
+the Rule B2 (extended) mirror generator in `internal/ledger`, then remove
+HR-9's guard" — sequenced after doc 10 §3 item 3 and before items 4-7's
+write paths can be exercised end to end. doc 10 §3 currently anticipates
+only two (items 1 and 2, for which "`bonus-engine` files a dependency
+request rather than authoring them directly"). Recommend doc 10 §3 gain
+that item explicitly, `bonus-engine`'s file to edit. Also recommend HR-9's
+distinct non-retryable error **name its own precondition** in the message,
+so a Bonus developer who hits it is told what is missing rather than
+discovering a bare rejection.
+
+*Checked and found not to collide:* HR-9 blocks ADR 0034 §14.10's
+`VOID_ON_SELF_EXCLUSION` bonus leg and all three of doc 10 §T.7's candidate
+actions — correctly, since all live in the bonus-funded world that is
+already `BLOCKED`. HR-9 does **not** block ADR 0032 §3's direct-cash-reward
+shape (`Dr bonus_expense · Cr player_cash`), which touches no
+bonus-denominated player account.
+
+**Migration-`0035` precedent claim — VERIFIED ACCURATE, and §6.3.1's "first
+`account_type` widening ever" framing needs NO correction. The two
+statements are not in tension, and the precedent is slightly stronger than
+§6.5.1 claims.**
+
+Read directly from
+`migrations/0035_create_casino_integration_foundation.{up,down}.sql`: the
+up-migration performs `DROP CONSTRAINT
+ledger_transactions_transaction_type_check` / `ADD CONSTRAINT …` with the
+widened list, and the down-migration carries an `architect`-reviewed note
+stating the narrower re-add "fails with SQLSTATE 23514" once a row holds a
+new value, that the rows cannot be deleted first because
+`ledger_transactions` is append-only (`ledger_deny_mutation()`, migration
+0021), that this is "the correct, deliberate behavior for an append-only
+financial ledger … not a bug in this script", that `0035` is "effectively
+irreversible in practice", and that `MigrateDown` wraps it in one
+transaction so a failed attempt leaves the schema intact. §6.5.1's
+characterization is accurate to the point of being near-verbatim, and
+`0035` is the **only** prior CHECK-widening migration of this shape in the
+repository.
+
+§6.3.1's framing is separately accurate: `account_type`'s CHECK appears in
+exactly one place ever (`migrations/0020:19-23`) and has never been
+widened, confirmed both by `grep -rn "account_type_check\|account_type IN"
+migrations/` and against the live schema. "The *pattern* is precedented,
+the *column* is not" is the correct joint reading, and it is what §6.5.1
+already says.
+
+**One point the precedent supports more strongly than §6.5.1 claims.**
+`0021`'s `transaction_type` CHECK was, like `0020`'s `account_type` CHECK,
+an **unnamed column-level inline** constraint — and `0035` successfully
+dropped it by the PostgreSQL auto-generated name
+`ledger_transactions_transaction_type_check`. That is *executed* evidence
+that this repository's auto-naming assumption holds, which is exactly what
+§6.5.2's `DROP CONSTRAINT ledger_accounts_account_type_check` depends on.
+Independently confirmed against the live schema (the name is literally
+`ledger_accounts_account_type_check`; `ledger_accounts`' three unnamed
+*table*-level CHECKs auto-name to `ledger_accounts_check`/`_check1`/
+`_check2`, so no collision is possible). §6.5.2's constraint name is safe.
+
+**Cross-workstream consistency pass — two real inconsistencies found that
+no other validation caught, one concurrence with `sportsbook`'s §6.6.14,
+one missing edit list, and two characterization corrections owed to ADR
+0039.**
+
+*Strong positive convergence, stated first.* ADR 0034 §14.11's binding
+requirement (key on `correlation_id`, **not exclusively** on
+`reverses_transaction_id`, because a `VOID_ON_SELF_EXCLUSION` void of an
+open bet is ADR 0038 §8.1's "before settlement" shape and carries no
+`reverses_transaction_id`) is satisfied exactly by §6.6.5's predicate, and
+was satisfied without either dispatch seeing the other. `sportsbook`'s
+§6.6.14 verified this clause by clause and `architect` re-derived the same
+result independently; doc 10 §T.7 makes it a third independent arrival at
+the same discriminator, and doc 09 §16.3 a fourth. `architect` **concurs
+with §6.6.14's reading** that §14.11's four-type list names a candidate
+search space rather than a netting set — and adds one recommendation
+§6.6.14 stops short of: because the ledger cannot distinguish "released
+stake" from "payout" on a `sportsbook_partial_settlement` by
+`transaction_type` alone, and because §14.11 is written as a *binding
+integration requirement* on an unbuilt mechanism, **§14.11's example list
+should be corrected to point at §6.6.5's classification table** rather than
+left to be read correctly. `identity-compliance`'s file; §14.11's own
+closing sentence already invites it.
+
+*Inconsistency A (MEDIUM, design-composition, found by neither §6.6.14 nor
+§6.6.15): doc 10 §T.7's `ACTION_ROUTE_TO_CASH` would make §6.6.5's
+`returned(c)` measure structurally blind.* §6.6.5 measures the returned
+amount as "Σ credit amounts to **`player_bonus`**" — a deliberate,
+well-argued choice (the exact inverse of ADR 0032 §0's definition, and it
+avoids the double-count a `BONUS_SET` signed sum would produce on case E).
+§T.7's `ACTION_ROUTE_TO_CASH` substitutes the credit's destination:
+`Dr [stake-origin account] X · Cr player_cash X`, "with no
+`promo_liability`/`bonus_expense` legs at all". If the human answers G-2
+with that action, a void of a bonus-funded stake under a terminal Grant
+returns the full stake while crediting **no** `player_bonus` — so
+`returned(c) = 0`, `q_eff` stays at full `qualifying_scaled`, and **a
+fully-returned stake keeps 100% of its wagering progress**. The
+money-reaching path is closed (a terminal Grant cannot convert, §6.6.7 and
+§6.6.9 property 11), so the farming vector is not re-opened; but §6.6.1
+property 1's "exactly zero residue" does not hold in that branch, an
+inflated `P_net` would be displayed to the player and to support on a
+terminal Grant, and §6.6.15's new §6.6.8 margin-check would never fire
+because `q_eff` never drops. **Required follow-up: whoever records the G-2
+answer, if it is `ACTION_ROUTE_TO_CASH`, must amend §6.6.5's `returned`
+measure in the same change** — either by measuring the
+`player_locked_bonus`/`player_bonus` **debit-side release** rather than the
+credit destination, or by carrying §T.7's `terminal_grant_cash_route`
+reason code into §6.6.5's classification. Neither §6.5.10's FD-1 nor
+§6.6.11 lists this consequence; recorded here so the G-2 decision is not
+answered without its ledger-side consequence attached.
+
+*Inconsistency B (MEDIUM — two `bonus-engine` deliverables from this same
+stage contradict each other on a factual premise used to justify a
+sign-off).* §6.6.5's classification table gives the reason
+"**risk-preserving** (not bet-correlated)" for `bonus_forfeiture`/
+`bonus_conversion`/`bonus_grant`/`bonus_reversal`, and §6.6.15's V-9
+hardens that into a claim: "none of them are ever posted against a bet's
+`correlation_id` (they key on Grant-level correlation, not bet-level), so
+condition 1 of §6.6.5's predicate already excludes them before the
+classification table is even consulted — the table entry is correct
+defensive documentation, **not a load-bearing branch**." doc 10 §T.7's
+`ACTION_REFORFEIT` — `bonus-engine`'s own Workstream C deliverable, same
+stage — posts its second `bonus_forfeiture` transaction **deliberately
+carrying the same `correlation_id`** as the triggering settlement/void
+("both carrying the same `correlation_id`"). So if G-2 is answered with
+`ACTION_REFORFEIT`, condition 1 does **not** exclude it and the table entry
+**is** load-bearing. The **classification remains correct** (a
+re-forfeiture must not net progress, and it is a debit, so §6.6.5's
+credit-side measure never sees it regardless), so nothing financial is at
+risk — but the stated basis for the V-9 sign-off is false under
+`bonus-engine`'s own parallel contract, and an implementer filtering
+nullifier candidates by "shares the bet's `correlation_id`" will find
+`bonus_forfeiture` rows there. Recommend the reason column read
+"Grant-lifecycle postings; they do not describe a bet's fate, even where
+one is bet-correlated (doc 10 §T.7 `ACTION_REFORFEIT`)", and §6.6.15's V-9
+drop the "not a load-bearing branch" characterization.
+
+*§T.7's G-2 modeling otherwise composes with §6.6 — no contradiction on the
+progress mechanism itself.* §T.7 assumes only that the decision point keys
+on `correlation_id` plus, for a rollback, `reverses_transaction_id` against
+the lock — which is §6.6.5's predicate verbatim. §T.7's "rare fourth entry
+path" (a Grant reaching `converted` with a stake still in flight) is **not**
+made impossible by invariant W1 and §T.7 is right to keep it: `P_firm`
+excludes *this* nullifiable contribution, but §6.6.6's second consequence
+explicitly allows an unrelated firm contribution set to authorize the
+conversion, so a Grant can convert while this stake is still locked. §T.7
+is the more conservative of the two and they compose. One joint gap worth a
+line: a bonus-funded settlement would take HR-3's
+`(tenant_id, correlation_id)` advisory lock **and** §T.7/doc 10 §9's
+`(tenant_id, grant_id)` advisory lock in one transaction, while a
+conversion takes `(tenant_id, grant_id)` plus HR-12's `FOR UPDATE` on the
+`player_bonus` projection row. No cycle exists among those orders as
+written, but **no document states the acquisition order jointly**;
+recommend it be pinned before either path is built.
+
+*Missing rather than contradictory: §6.6 has no queued-document-edit list,
+and the document it most needs to correct is
+`financial-transaction-flows.md` §13.* §6.5.4 correctly defers its document
+edits to §6.3.4 item 6; §6.6 has no equivalent, and §6.5/§6.6 contain
+**zero** occurrences of the string `financial-transaction-flows`. Yet §13
+of that document holds the canonical `OPEN QUESTION` Model C answers, and
+§13's own prose ("must exclude … any debit whose originating transaction
+was subsequently reversed **via `reverses_transaction_id`**") is the exact
+formulation ADR 0034 §14.11 identified as insufficient and §6.6.5
+supersedes. A future implementer reading the flows document first — which
+is what it is for — gets the superseded rule with no pointer to Model C.
+Recommend §6.6 gain a short edit list on §6.3.4 item 6's model, naming at
+minimum `financial-transaction-flows.md` §13, ADR 0032 §0 (§6.6.4's
+refinement), doc 10 §6/§7 (the terminology correction §6.6.15 now owes) and
+ADR 0034 §14.11.
+
+**ADR 0039's characterization of decisions 2 and 3, re-checked against the
+now-landed text exactly as its own Decision-2 caveat requests — one
+correction each.**
+
+- **Decision 2 — the symmetry claim is now wrong, in the direction ADR 0039
+  itself flagged.** ADR 0039 states "(a) and (b) are close to
+  decision-agnostic from a mechanism standpoint … the primary remaining
+  engineering work is the same regardless of which is chosen: defining the
+  missing Grant state-machine transition." doc 10 §T.7 contradicts this for
+  (b): `ACTION_ROUTE_TO_CASH` "requires the settlement/void posting layer
+  (owned by `ledger-finance`/`casino`/`sportsbook`, not Bonus Engine) to
+  consult Grant status before choosing a destination account … a new
+  call-back into Bonus Engine's Grant-status read that does not exist
+  today." (a) needs no such change — it posts the ordinary shape and
+  appends a second `bonus_forfeiture`. So (b) carries a cross-domain
+  plumbing cost (a) does not, **plus** Inconsistency A's amendment to
+  §6.6.5's netting measure. ADR 0039's asymmetry finding for (c) stands and
+  is corroborated by §T.7's own "the exact holding mechanism is a
+  `ledger-finance` design question this contract does not resolve". Net
+  effect: all three options are asymmetric, in increasing order
+  (a) < (b) < (c), not "(a)≈(b) < (c)". ADR 0039's caveat and its
+  cross-reference to reserved migration `0051` are otherwise accurate — no
+  `0050`/`0051` file exists and Workstream C landed as documentation only,
+  which the registry's "if needed" wording permits.
+- **Decision 3 — the blocking assessment is still accurate; the scope and
+  option set are now incomplete.** "Nothing is blocked, on any timeline" is
+  confirmed by §6.5.10 ("Nothing in phase 2 depends on FD-1; the first
+  bonus-funded, cashout-eligible slice does") and by §6.6.14's V-14. But
+  ADR 0039 frames the decision as **mixed**-funded cashout with three
+  proceeds-split options, whereas the landed design widens it twice: (i)
+  §6.5.10 keeps **bonus-funded (single-origin) as well as mixed** cashout
+  `BLOCKED`, so the scope is bonus-origin cashout generally, not mixed
+  only; and (ii) **FD-1 adds a fourth, orthogonal sub-question ADR 0039
+  does not carry at all** — cashout's *wagering-progress* treatment
+  (risk-preserving / nullifying / proportional-to-price), which §6.5.10
+  argues is not derivable from the proceeds-split answer, on which §6.6.14
+  has now offered a non-binding engineering lean (nullifying), and which
+  §6.6.5 currently answers with a deliberately unusable fail-closed
+  placeholder. A human answering only the proceeds-split question would
+  leave the platform in that placeholder state. Recommend ADR 0039's
+  Decision 3 gain FD-1 as a named sub-question and widen its scope line;
+  `product-owner-proxy`'s file to edit.
+
+*One trivial labeling mismatch, recorded only so the governance record is
+self-consistent:* §6.6's heading labels itself "Stage 4H-B0-R7 Workstream
+A", while `docs/governance/task-registry.md` reserves "**0050** =
+Workstream **B** (wagering-progress-integrity mechanism)". One of the two
+should change; no technical content depends on it.
+
+**Repo-wide state, independently re-run at this dispatch: `gofmt -l .` →
+empty; `go build ./...` → clean; `go vet ./...` → clean.** Consistent with
+a documentation-only stage; `identity-compliance`'s Workstream D changes
+build cleanly alongside everything else.
+
+| §6.6.12 item | Status after this validation |
+|---|---|
+| V-15 | **APPROVED.** Removal of bare `player_locked` is correct and §6.5.3's reasoning holds; verified against the live schema, the live dev database and the Go tree rather than the document's claims. Three omissions recorded: **Omission 1 (HIGH)** ADR 0035 §1.3.1's `ledger_accounts_owner_family` CHECK collides with `0048` in either landing order and is absent from every list; **Omission 2 (MEDIUM)** three canonical documents absent and two under-scoped in §6.3.4 item 6; **Omission 3 (LOW)** L1's closed-enumeration wording. The doc09 §16.3 `cumulative.go` finding **is** accounted for (§6.5.5 item 4), with one spec-level addition owed to HR-7 |
+| V-16 | **No unsafe collision.** HR-9's required half is cleanly isolated from doc 10 §3's seven items; its recommended `player_bonus` half should be **promoted to required** because it converts doc 10 §3 item 2's own safety ordering into a build-time hard stop. One clause needs rewording (HR-9's "in the same change" contradicts doc 10 §3 item 1's deliberate isolation of the `bonus_expense` migration) and doc 10 §3 should gain the generator/guard-removal item it currently omits |
+| Migration `0035` precedent | **VERIFIED ACCURATE**, near-verbatim; `§6.3.1`'s "first `account_type` widening" framing needs **no** correction — the pattern is precedented, the column is not. Precedent is stronger than claimed: `0035` proves this repo's CHECK auto-naming assumption by execution |
+| Cross-workstream | **Two real inconsistencies found** (A: §T.7 `ACTION_ROUTE_TO_CASH` × §6.6.5's `returned` measure, MEDIUM; B: §6.6.15 V-9's "never bet-correlated" premise falsified by `bonus-engine`'s own §T.7 `ACTION_REFORFEIT`, MEDIUM), **one concurrence** with §6.6.14 on ADR 0034 §14.11 plus a recommendation to correct §14.11's example list, **one missing edit list** (§6.6 ↛ `financial-transaction-flows.md` §13), **two ADR 0039 characterization corrections** (Decision 2's symmetry claim; Decision 3's scope and missing FD-1 sub-question), and one lock-acquisition-order gap no document states jointly |
+| Repo-wide build state | `gofmt`/`go build`/`go vet` all **clean** |
+
 ## 7. Cross-references
 
 - Object scoping, `Wallet` shape: `financial-domain-model.md`.
