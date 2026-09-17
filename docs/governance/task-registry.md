@@ -262,6 +262,35 @@ Implementation-readiness closure stage. Purpose: close the five P1s Stage
 | 4HB0R5-18 | risk (Wave 3, independent) | Done | none | `docs/decisions/0031-*.md` (new §32) | none | n/a | first independent look at all five P1s verified against actual code; found no gap in P1-1/P1-4/P1-5; found a real P1-2 exponent-awareness gap; discovered a pre-existing latent fail-open in `internal/risk`'s own cumulative-usage query while investigating P1-3; flagged a cross-document Risk-checkpoint conflict (ADR 0031 vs. ADR 0038) | none | n/a |
 | 4HB0R5-19 | Orchestrator | Done | 4HB0R5-01..18 | `docs/governance/project-status.md`, `docs/active-stage.md`, this registry, `docs/progress.md` | none | full validation gate (docs-only; `go build ./...` clean, no code touched) | this stage's completion report | none | n/a — **stage explicitly STOPS here; no implementation authorized; all five P1s architecturally resolved but not implementation-ready, residual findings catalogued by owner** |
 
+## Stage 4H-B0-R6
+
+Foundational implementation-hardening stage. **AUTHORIZED for production
+code and migrations, but ONLY for the six workstreams below.** No Bonus
+Engine, no Gamification, no Reward Orchestrator, no real
+sportsbook/data-feed/FX/KYC/PSP/custody provider integration.
+
+Reserved migration numbers (assigned upfront to prevent collision across
+parallel dispatches): **0043 = Workstream E** (RG self-exclusion policy
+config), **0044-0045 = Workstream A** (Asset Registry + Authorization),
+**0046 = Workstream D** (Risk, if a schema change proves necessary),
+**0047 = Workstream B** (idempotency, if a schema change proves
+necessary), **0048 = Workstream C** (`player_locked` origin-split, only
+after its implementation ADR is independently validated).
+
+| ID | Owner | Status | Dependencies | Files owned | Workstream | Blockers |
+|---|---|---|---|---|---|---|
+| 4HB0R6-01 | Orchestrator | Done | none | `docs/governance/*` | Governance setup | none |
+| 4HB0R6-02 | architect | Dispatched | none | migrations `0044`-`0045`, `internal/assetregistry` (new), `docs/decisions/0037-*.md` | A: Asset Registry + Authorization implementation | none |
+| 4HB0R6-03 | identity-compliance | Dispatched | none | migration `0043`, `internal/rg` (extended), `docs/decisions/0034-*.md` | E: RG self-exclusion technical hardening | none |
+| 4HB0R6-04 | risk | Dispatched | none | `internal/risk` (extended), `docs/decisions/0031-*.md` | D: Risk fail-closed hardening + exponent-awareness | none |
+| 4HB0R6-05 | ledger-finance | Dispatched | none | `docs/architecture/ledger-accounting-model.md` (implementation ADR update only, no code yet) | C (phase 1): implementation ADR for `player_locked` flows A-L | Code gated on independent bonus-engine + sportsbook validation of this ADR |
+| 4HB0R6-06 | integrations | Dispatched | none | `internal/idempotency` (new, or extends existing shared pattern) | B: Idempotency hardening (canonical, provider-authenticated occurrence identifiers) | none |
+| 4HB0R6-07 | bonus-engine | Dispatched | none | `docs/architecture/10-bonus-engine-architecture.md` (new Bonus Dependency Contract section) | F: Bonus dependency contract freeze | none |
+
+Rows will be added/updated as each dispatch reports back and independent
+review rounds are commissioned. No specialist's Wave 1 implementation is
+considered accepted until its assigned independent reviewer(s) report.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and
