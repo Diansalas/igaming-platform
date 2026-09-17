@@ -359,6 +359,52 @@ block `activated`→`in_progress` progression even for an already-activated
 Grant) — this document's contribution is the calling contract, not new RG
 policy content.
 
+**Cross-reference — sportsbook's locked-stake window is a second, concrete
+trigger path for the same open question above (Human decision required).**
+The "unlock an already-wagered-through balance post-exclusion" nuance
+flagged two paragraphs up (ADR 0034 §2, restated at its §14.9) is not the
+only route into this one open question. `ledger-accounting-model.md` §6.3
+/ ADR 0038 §15's sportsbook locked-stake window (`player_locked`, pending
+the `player_locked`-origin-split reviewed by `bonus-engine` this stage, ADR
+0032 §5/§10) creates a second, independent trigger: a sportsbook bet's
+stake can remain locked past the point its funding Grant has separately
+gone terminal (`expired`/`cancelled`/`forfeited`), because bet-settlement
+timing and Grant-lifecycle timing are not coupled. When that locked stake's
+later WIN settlement — or a `VOID_ON_SELF_EXCLUSION` void (ADR 0034 §14.7)
+returning a bonus-funded locked stake to `player_bonus` — credits
+`player_bonus` "continuing wagering progress" against a Grant that has
+nothing left to continue, the Grant state machine (§1.2) has no transition
+defined for a settlement/void credit arriving against an already-terminal
+Grant.
+
+This is the **identical unresolved question** as the ADR 0034 §2 nuance
+above, reached by a different path — not a second question needing a
+separate answer. Both trigger paths (i) completing an already-fully-
+satisfied wagering requirement after self-exclusion, and (ii) a locked
+stake settling or voiding against a Grant that has already gone terminal
+for any reason (expiry, cancellation, forfeiture — not only
+self-exclusion) — resolve to the same single choice among:
+
+- **(a) Re-forfeit the credit immediately on arrival against a terminal
+  Grant** — post `Dr player_bonus / Cr promo_liability` again on the
+  newly-arrived amount, per ADR 0032 §5's existing forfeiture shape.
+- **(b) Route it to `player_cash`** as a mechanical settlement of an
+  already-earned entitlement — mirroring the `postWin`/`postRollback` "a
+  rollback is itself a correction" precedent ADR 0034 §2 already applies to
+  the self-exclusion case.
+- **(c) Hold it in a manual-review/staff queue** pending a per-Grant human
+  decision, rather than auto-resolving either way.
+
+**Human decision required.** This document does not choose among (a)/(b)/
+(c) — it is a genuine bonus-terms/product judgment call, exactly as ADR
+0034 §2 already flagged it, and not an architecture decision `bonus-engine`
+or any other specialist makes unilaterally. Whichever option a human/
+product decision selects must be expressed as an explicit state-machine
+transition in §1.2, with its own Progress-trail entry and reason code
+(§10) covering both trigger paths identically — never silently inherited
+from either precedent without that confirmation, and never resolved
+differently depending on which of the two paths produced it.
+
 ## 6. Accounting boundary — CRITICAL, owned entirely by `ledger-finance`
 
 All monetary movement — promo liability, bonus liability, bonus expense,
@@ -586,6 +632,15 @@ cross-referenceable without being the same record.
 6. Whether a genuinely platform-wide Campaign write path exists — same
    open gap ADR 0031 §8 already records for platform-wide Risk rules; not
    newly resolved here.
+7. **Human decision required**: what happens when a settlement or void
+   credit arrives against a Grant that has already gone terminal (§5's
+   cross-reference note, above) — re-forfeit, route to `player_cash`, or
+   hold for manual review. One open question with two trigger paths (an
+   already-fully-satisfied wagering requirement post-self-exclusion, ADR
+   0034 §2; and a sportsbook locked stake settling/voiding after its Grant
+   went terminal, ADR 0038 §15/ledger-accounting-model.md §6.3) — not two
+   separate questions. Flagged for `bonus-engine`/product, not resolved by
+   this document.
 
 ## Ownership and stage mapping
 

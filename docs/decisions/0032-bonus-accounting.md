@@ -399,6 +399,14 @@ Status: **RESOLVED (architecture) — `NOT IMPLEMENTED`.** Closes
   auditable, not reproducible as-of a past date, and unanswerable when a
   player disputes it. There will be such players every week.
 
+- **Cross-reference, not resolved here**: whether this forfeiture shape
+  applies to a settlement/void credit that arrives *after* the Grant it
+  belongs to has already gone terminal (e.g. a locked sportsbook stake
+  settling or voiding post-Grant-terminal, §10 below) is an open Grant
+  state-machine question owned by `bonus-engine` —
+  `10-bonus-engine-architecture.md` §5's cross-reference note, "Human
+  decision required."
+
 Status: **RESOLVED (architecture) — `NOT IMPLEMENTED`.**
 
 ### 6. Who bears the cost — three genuinely different scenarios
