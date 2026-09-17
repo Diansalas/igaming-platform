@@ -1727,3 +1727,563 @@ first place. §19-§24 are an extension-point specification; the extension
 points stay closed until an authorizing stage opens them with all the
 steps in §12 and §16 executed together in one change.
 
+## Stage 4H-B0-R4: Sportsbook Risk Integration
+
+Status of this section: **architecture-only, no implementation — added
+Stage 4H-B0-R4.** The directive for this stage is explicit: no code, no
+migrations. §25-§31 below add no `Operation` value, no `LimitKind`, no
+scope dimension, no column, no migration, no HTTP validation, no OpenAPI
+enum entry, and no enforcement wiring. This is a CONTRACT specification
+and a set of extension points, in exactly the form §12 (`LimitKind`
+extension model), §16 (`Operation` extension model), §14-§18 (Bonus/
+Gamification) and §19-§24 (Retail) already established. Nothing in
+§25-§31 changes `risk.Evaluate`'s signature, `risk_rules`' shape, the
+precedence algorithm, the fail-closed contract, or any existing
+enforcement call site. Every prior stage's decision above stands
+unmodified.
+
+**Sources read for this section.** `docs/architecture/09-sportsbook-
+architecture.md` (Stage-0 proposal — bet placement, settlement, void,
+partial settlement, cashout, and re-settlement-after-correction each
+named as distinct ledger events, never a single "resolve bet" operation)
+and `internal/risk/types.go` / `internal/risk/evaluator.go` at this
+stage's own commit (not from memory of a prior stage's claims — every
+field, constant and query below is checked directly against that code).
+`docs/decisions/0038-sportsbook-accounting-and-ledger-integration.md`
+does **not exist in this repository as of this section's authorship**
+(`ledger-finance`'s parallel work); this section therefore proceeds on
+doc 09's own lifecycle framing per the directive's explicit fallback
+instruction, and every claim below that would depend on ADR 0038's actual
+ledger-transaction-type choices is named as depending on it, not guessed.
+The sportsbook domain model itself (Bet/BetLeg/BetSlip/Market/Selection/
+Event/Settlement/Cashout/Exposure/Liability — owned by `sportsbook`, in
+parallel this stage) is treated exactly as §14 treated the unfrozen Bonus
+Grant shape and §19 treated the unfrozen retail hierarchy: described
+abstractly ("however the sportsbook domain represents a Market/
+Selection"), committing to nothing about its internal shape, only to
+where `risk.Evaluate` sits relative to it.
+
+### 25. The hard rule, restated and specialized for Sportsbook — `ARCHITECTURAL DECISION`
+
+The rule established for Casino in §1/§2, generalized in §13, specialized
+for Bonus/Gamification in §14, and specialized for Retail in §19 applies
+to the sportsbook domain **unchanged, unweakened, and without
+reinterpretation for this domain**:
+
+- Every exposure-affecting decision in the sportsbook domain MUST consult
+  `internal/risk.Evaluate`. "Exposure-affecting" means the same thing it
+  means in §13: capable of affecting player financial exposure, wagering
+  exposure, payment exposure, regulatory exposure, or platform risk.
+- The sportsbook — whether built on an external provider's widget/feed
+  integration or, later, an in-house trading stack (doc 09's build/buy
+  line; this section does not depend on which one) — **must not build a
+  second limit or risk engine.** No threshold comparison, no per-player
+  stake-cap table, no "max daily sportsbook loss" counter, no velocity
+  check, may live inside `internal/sportsbook` (or an equivalent package
+  name — not yet created) as its own structure. It authors `risk_rules`
+  rows and interprets `ALLOW`/`DENY`/`REVIEW`; it never re-implements the
+  comparison. This is the identical constraint `internal/casino` already
+  operates under and the identical one `internal/payments`, the Bonus
+  Engine and Gamification, and Retail are all already bound by. It binds
+  equally whether the actual stake/odds/settlement computation happens
+  inside the platform or inside a third-party provider's own systems —
+  the provider computes the bet's terms; the platform still owns whether
+  that bet is *permitted* to be placed/settled/cashed out, exactly as
+  §12/CLAUDE.md's provider-abstraction rule already states for every
+  other vendor-backed capability ("the vendor supplies the API; the
+  platform still owns... the state machine").
+- The call happens **inside the same database transaction as the
+  state-changing effect it gates, before that effect commits** (§13,
+  §14, §19). PostgreSQL inside the guarded transaction is the only
+  authoritative correctness boundary for a cumulative check. A stake
+  evaluated in one transaction and locked in another is not gated; it is
+  merely advised. No cache, and no counter maintained by the sportsbook
+  domain (in-house or provider-adjacent), may stand in for that read.
+  This applies with equal force to the **widget/iframe** integration
+  shape doc 09 recommends starting with: even though the provider renders
+  the betting experience, the platform's own wallet debit/credit for
+  stake and settlement is still a platform-owned ledger write, and that
+  write is the one `risk.Evaluate` gates — a provider-hosted UI is never
+  a reason to skip the platform's own transaction-boundary discipline.
+- A non-nil error from `Evaluate` is a DENY at every sportsbook call site,
+  per §6. There is no sportsbook-specific softening — not for a
+  provider-widget bet, not for a live/in-play bet under latency pressure,
+  not for a cashout offer about to expire. An unavailable evaluator, a
+  malformed rule, conflicting rules, or a missing scope value must never
+  resolve to "place/settle/pay it anyway."
+- Risk does NOT absorb Responsible Gaming for sportsbook either — see §29.
+
+### 26. New `Operation` values needed for sportsbook — `RECOMMENDATION`, documented only
+
+**`sportsbook_bet` already exists** — `internal/risk/types.go`'s
+`Operation` const block, migration 0041's `operation` CHECK, `internal/
+httpserver/risk_handlers.go`'s `RequireOneOf` allowlist, and both OpenAPI
+`operation` enum occurrences all already accept it (verified directly,
+this stage — not assumed from §13's table). No new proposal is made for
+it; it already covers **bet placement** (the stake debit at the moment a
+bet is accepted), exactly as `casino_bet` covers a casino stake. `risk_
+rules.product` also **already** accepts `'sportsbook'` (migration 0041's
+`product` CHECK: `casino, sportsbook, payments, bonus`) — unlike Bonus/
+Gamification (§16) and Retail (§21), **no `product` CHECK widening is
+needed for sportsbook.** This is the single most important positive
+result of this section: sportsbook bet placement requires zero Risk-side
+schema or code change to become risk-gated once `internal/sportsbook`
+exists and calls `Evaluate`.
+
+Checked against doc 09's own named lifecycle events — bet placement,
+settlement, void, partial settlement, cashout, and re-settlement after a
+market correction — plus cancellation and reversal per this stage's
+directive, using the identical decision rule §15a-ii/§15e/§21 already
+apply: *does the money movement, and the amount it is computed against,
+differ in KIND from an existing operation, such that reusing that
+operation's `Operation` value would retroactively rebind rules never
+intended to govern it?* Reuse is wrong when the answer is yes (a bonus
+conversion is not a bonus grant, §15a-ii; a tournament entry is not a
+casino bet, §15e); reuse is right when the money is the same wallet
+movement through a different channel, and needs no new plumbing at all
+(a retail cash withdrawal is the same withdrawal, §21).
+
+**Two new values are proposed, and two lifecycle events need none:**
+
+| Lifecycle event (doc 09) | Needs its own `Operation`? | Reasoning |
+|---|---|---|
+| Bet placement | No — **`sportsbook_bet` already exists** | Covers it unchanged; see above |
+| Settlement (full) | **Yes — `sportsbook_settlement` (proposed)** | Settlement credits the player with the *realized* return on a graded outcome. That amount is computed from the bet's odds and doc 09's stated "potential return", not the stake — it can be many multiples of the stake by design (a long-odds accumulator). Reusing `sportsbook_bet` would silently bind every existing stake-sized `max_amount`/`min_amount` rule to a *payout*, which is the exact `bonus_grant`-vs-`bonus_conversion` failure mode §15a-ii rejects: the released amount legitimately and routinely exceeds the value that produced it, so a stake-scoped rule and a payout-scoped rule must be independently authorable |
+| Partial settlement (bet-builder legs) | No — **reuses `sportsbook_settlement`** | Doc 09 states partial settlement is "each a distinct ledger event", but it is the *same policy question* §15a-ii's activation reasoning already resolved: a partial settlement is still "crediting realized winnings at bet resolution", just for a subset of legs/stake at a given instant. A distinct operation per settlement *shape* would force every settlement-payout rule to be authored twice (full and partial) with one forgotten copy a silent gap — exactly the trap §15a-ii names |
+| Re-settlement after a market correction | No — **reuses `sportsbook_settlement`** | Doc 09: "requiring re-settlement as its own event, not a silent balance edit." The rules in force at the CORRECTED settlement's own instant are the rules that must govern it — identical reasoning to §15a-ii's "the rules in force at *that* moment... are the rules that must govern it" for activation. It is the same money question re-evaluated later, not a new kind of money movement |
+| Cashout | **Yes — `sportsbook_cashout` (proposed)** | A cashout credits the player with a *live, provider/platform-computed buy-back price* before the bet naturally resolves — not a graded outcome. Its risk profile is a different kind of risk from settlement's: settlement risk is "was the payout correctly graded and is it unusually large" (a regulatory/integrity concern on a realized result); cashout risk is "is this pricing/timing being exploited" (mid-event arbitrage, latency abuse, collusion between a bettor and a confederate feeding live information) — an industry-recognized distinct fraud surface. Reusing `sportsbook_settlement` would conflate two genuinely different risk postures under one rule set, the same failure §15a-ii/§21 reject; a cashout-specific `max_amount`/`REVIEW` signal must be authorable without also constraining ordinary settlement payouts, and vice versa |
+| Void (market/event cancelled, stake returned) | No — **not a Risk operation at all; a ledger reversal, like `casino_rollback`** | A void returns exactly the original stake — it creates no new exposure, it *retracts* an existing one, symmetric to the debit `sportsbook_bet` already gated. This is structurally identical to `casino_rollback`, which today is not its own `Operation` and is never itself evaluated by `risk.Evaluate` — it exists only as `operationLedgerRollbackTypes["casino_bet"]`, netted against `casino_bet`'s own cumulative-amount usage so a voided round doesn't permanently consume capacity. The sportsbook analogue is `operationLedgerRollbackTypes["sportsbook_bet"] = "<sportsbook void ledger transaction_type>"` — a fact `ledger-finance` must establish (ADR 0038), never a new `Operation` |
+| Cancellation | No — **same as void**, for the same reason | Doc 09 does not distinguish cancellation from void as a separate money shape; both retract a stake rather than creating new exposure. If `ledger-finance`'s ADR 0038 gives cancellation a *different* `ledger_transactions.transaction_type` than void, both types are added to `operationLedgerRollbackTypes["sportsbook_bet"]`'s reversal set — still no new `Operation` |
+| Reversal (general correction, e.g. clawback of an incorrectly-paid win) | No — **reuses `sportsbook_settlement`**, per the re-settlement row above | A correction that pays *less* than originally settled is the same re-settlement event, evaluated at the corrected amount; CLAUDE.md's own "corrections are compensating entries, never edits" already governs how this is *posted* — this ADR only adds that the compensating entry's gate, if the correction is a NEW payout, is `sportsbook_settlement` re-evaluated, not a bespoke path |
+
+Following §16's own extension model exactly (six steps: migration CHECK,
+Go constant, HTTP allowlist, all three OpenAPI enum occurrences per
+§16a's own correction, ledger transaction-type mapping if `cumulative_
+amount` must work for it, enforcement call site) — **none of the six
+steps are executed this stage** for either proposed value. Both remain
+unstorable in `risk_rules` today (migration 0041's `operation` CHECK
+rejects everything outside the existing six), which is the intended
+fail-closed posture, not an oversight.
+
+**Naming discipline note, mirroring §21's Wave-2 correction (F4).** If
+`docs/architecture/09-sportsbook-architecture.md`'s rewrite (in progress
+in parallel by `sportsbook`) or a future ADR 0038 independently proposes
+different names for these two checkpoints (e.g. a "resolve" or "grade"
+verb for settlement, a "buyout" noun for cashout), **`risk` owns
+`Operation` naming per §16**, exactly as it already does for Bonus and
+Retail — `sportsbook_settlement`/`sportsbook_cashout` are this ADR's
+authoritative proposal, and any other document's naming must be
+reconciled to it, not the reverse, following the exact correction §21
+already had to make for `docs/architecture/26-retail-operations-
+architecture.md` and `docs/decisions/0036`.
+
+**One gap surfaced, not closed, mirroring §21's `agent_settlement` gap.**
+An operator-side correction that pays an agent/partner (e.g. a provider
+revenue-share settlement, or a manual trading-desk adjustment credited
+directly to the platform's own account rather than a player's) is
+outside doc 09's player-facing lifecycle entirely and has no candidate
+`Operation` above. Whether such a movement needs its own gate, or is
+purely a back-office/ledger concern outside Risk's player-protection
+scope, is not resolved here — flagged in §30.
+
+### 27. Sportsbook `RiskRequest` dimensions — existing coverage vs. genuinely new dimensions — `RECOMMENDATION`
+
+Checked field-by-field against `internal/risk/types.go`'s actual current
+`RiskRequest`/`Rule` shape (`TenantID`, `BrandID`, `PlayerAccountID`,
+`JurisdictionCode`, `LicensingMode`, `Product`, `Operation`, `ProviderID`,
+`GameID`, `AssetCode`, `PaymentMethod`, `Amount`, `CorrelationID`), not
+assumed.
+
+**Already covered, zero extension needed:**
+
+| Directive dimension | Existing field | Note |
+|---|---|---|
+| Player | `PlayerAccountID` | Unchanged; resolved server-side by the caller, never client-supplied, per every existing field's contract |
+| Tenant | `TenantID` | Unchanged |
+| Brand | `BrandID` | Unchanged |
+| Jurisdiction | `JurisdictionCode` | Unchanged — resolved from the sportsbook domain's own trusted context per §9's own generalization ("whatever resolves a `RiskRequest` for that operation supplies `JurisdictionCode` from whatever source THAT operation's own authoritative context provides"); a sportsbook bet has no casino launch session to read from, exactly as §15a and §21 already state for bonus and retail |
+| Asset | `AssetCode` | Unchanged; a sportsbook stake/payout is minor units of a registered asset like any other |
+| Operation | `Operation` | `sportsbook_bet` (exists) plus `sportsbook_settlement`/`sportsbook_cashout` (§26, proposed) |
+| Stake | `Amount` | Unchanged — `Amount` is already operation-generic ("minor units for THIS operation"); a sportsbook stake at placement, a realized payout at settlement, and a buy-back price at cashout are each just `Amount` for their own `Operation`, exactly as `bonus_conversion`'s released amount reuses `Amount` rather than needing its own field (§15a-ii) |
+| Provider | `ProviderID` | **Already has precedent — reusable, not new.** `ProviderID` is unconstrained `TEXT` (migration 0041), already used to scope a casino rule to one game-content vendor. A sportsbook widget/feed vendor (Altenar/BetBy/Digitain, per doc 09's own examples — named descriptively, not as a real commercial relationship, per this stage's own constraint) is the identical kind of "which vendor" scope. No schema change, no HTTP change |
+
+**Genuinely new — no current analogue, would require additive fields:**
+
+`sport`, `competition`, `event`, `market`, `selection` have **no existing
+field to map to.** `GameID` is not a stand-in: it is declared `game_id
+UUID REFERENCES casino_games (id)` in migration 0041 — a literal foreign
+key into the casino game catalogue. Reusing it for a sportsbook Event or
+Selection would either violate that FK outright or require weakening it
+to a bare `UUID` with no referential integrity, either of which is a
+worse outcome than adding sportsbook-specific fields, and it is exactly
+the kind of misleading dimension-reuse this ADR's own Wave-2 review
+corrected elsewhere (§20's `hierarchy_node_type`/"level" naming
+correction, §21's `Operation`-naming correction) — reuse must never
+create false coupling between two domains' unrelated entities.
+
+**How they would extend `RiskRequest`/`Rule` — additively, mirroring §20
+exactly, not designed here.** Each of the five is a categorical-or-entity
+scope dimension of the identical shape every existing one already has:
+a plain field, empty/nil on the RULE side meaning "applies regardless of
+that dimension" (`matches()`'s existing general contract, unchanged), and
+an entity ID or a code, resolved server-side by the caller from the
+sportsbook domain's own trusted context, never client-supplied. Per §12/
+§16/§20's own extension discipline, adding any of them needs: an additive
+migration column (with, per §20(a)'s own `hierarchy_node_type` precedent,
+a possible `CHECK (dimension IS NULL OR tenant_id IS NOT NULL)` guard if
+the value is tenant-authored rather than a platform registry row — see
+below), the corresponding `Rule`/`RiskRequest` Go field, a new bit in
+`specificity()`'s bitmask (renumbering existing bits is free per §20(b)(1)
+— specificity scores are computed per evaluation and never persisted), and
+an HTTP/OpenAPI change **only if** the dimension needs an allowlist
+(most would not — `ProviderID`/`PaymentMethod`'s free-form `TEXT`
+precedent, not `Product`/`LicensingMode`'s fixed-vocabulary precedent, is
+the likely shape, since sports/competitions/events/markets/selections are
+each large, frequently-changing catalogues, not small fixed enums).
+**None of this is implemented or even named as fixed field names this
+stage** — `SportCode`/`CompetitionID`/`EventID`/`MarketID`/`SelectionID`
+above are illustrative only, to show the shape fits without redesigning
+`Evaluate`, and MUST be reconciled to whatever `sportsbook`'s own parallel
+domain-model work actually names these entities before any of it is
+built — this ADR does not redesign that domain model, per this stage's
+own scope.
+
+**Two design questions this section deliberately does not resolve, flagged
+for whoever eventually implements this (not this stage):**
+
+1. **Platform registry or tenant-authored?** `Product`/`LicensingMode` are
+   fixed platform vocabularies (no `CHECK (... IS NULL OR tenant_id IS
+   NOT NULL)` guard needed). `HierarchyNodeType` (§20) is tenant-authored
+   and needed that guard specifically because doc 26 §1.4 allows two
+   tenants' same code to mean different things (a Wave-2, P1 correction
+   after an earlier draft got this wrong). Whether "sport"/"competition"/
+   "market" are platform-registry rows (more likely — sports and markets
+   are largely universal across operators, unlike a retail hierarchy's
+   tenant-invented org chart) or tenant-authored codes is the sportsbook
+   domain model's decision, not Risk's, and determines whether the
+   §20(a)-style guard is needed at all.
+2. **One field per level, or type-plus-instance per level?** §20(a) itself
+   split ONE conceptual dimension (hierarchy position) into TWO fields
+   (`HierarchyNodeType` categorical, `HierarchyNodeID` specific-entity)
+   because both a categorical rule ("agents get X") and an entity-specific
+   override ("this one agent gets Y") were real, distinct requirements.
+   "Market" plausibly needs the identical split (a market *type* — e.g.
+   "1X2", "over/under" — versus one specific market *instance* on one
+   specific event) and possibly "selection" does too. This section
+   deliberately does not decide that split, because it depends on
+   entity shapes `sportsbook`'s parallel domain-model work owns, not on
+   anything `internal/risk` needs to pre-judge.
+
+**`exposure`, `velocity`, and `cumulative activity`, addressed precisely
+against this ADR's own already-disclosed §17 gap, as the directive
+requires — not hand-waved:**
+
+- **Cumulative activity maps to the EXISTING `cumulative_amount`
+  `LimitKind` mechanism, and is NOT a new gap in kind — it is the same
+  missing ledger-mapping fact every other new operation already needs.**
+  `Rule.breach()`'s cumulative case (`internal/risk/evaluator.go`) sums
+  `ledger_entries` over a rolling window for whatever `ledger_
+  transactions.transaction_type` `operationLedgerTransactionTypes[req.
+  Operation]` names, and today that map has exactly one entry
+  (`casino_bet`). A `cumulative_amount` rule on `sportsbook_bet` (e.g.
+  "no more than X staked per rolling day") or `sportsbook_settlement`
+  (e.g. "no more than X paid out per rolling day", a plausible
+  responsible-gambling-adjacent control) is **storable today** once
+  §26's `Operation` values exist, but will `ErrUnsupportedCumulativeOperation`
+  on every matching request until `ledger-finance`'s ADR 0038 supplies
+  `sportsbook_bet`'s (and, if adopted, `sportsbook_settlement`'s) own
+  `transaction_type` and its rollback/void counterpart — the identical
+  gap pattern already disclosed for `bonus_grant` (§15b) and
+  `retail_funding` (§21), not a new architectural problem.
+- **Exposure is a GENUINELY DIFFERENT, sportsbook-specific gap from §17's
+  cross-domain gap — not automatically the same mechanism, and not
+  automatically solved by closing cumulative-activity above.** §17's
+  disclosed gap is that `Evaluate` cannot express a rule spanning
+  MULTIPLE operations ("total exposure across bonus + casino +
+  sportsbook"), because `listEffectiveRules`/`matches()` both key on
+  exactly one `Operation`. Sportsbook's own trading concept of "exposure"
+  (doc 09: "An open-bet record carries potential return"; the parallel
+  domain model's own `Exposure`/`Liability` entities) is a **different
+  kind of quantity than either §17's or the existing `cumulative_amount`
+  mechanism can express, even within sportsbook alone**, for a structural
+  reason neither §17 nor §21/§23 needed to name: `cumulative_amount`
+  sums **realized, already-posted ledger entries over a trailing time
+  window** ("how much has this player staked in the last 24 hours").
+  "Exposure" in the trading sense is **the platform's current
+  outstanding contingent liability on OPEN, unsettled bets right now** —
+  a state query over live positions and their potential (not yet
+  realized) payout, not a windowed sum of past transactions. Doc 09
+  itself distinguishes these: the stake move to `player_locked` at
+  placement is a real ledger fact `cumulative_amount` could in principle
+  aggregate; the "potential return" an open bet carries is explicitly
+  described as something the open-bet record carries, not necessarily
+  anything posted to the ledger at all. A `LimitKind` that could express
+  "this player's total potential payout across every currently-open bet
+  must not exceed X" would need to aggregate a **contingent, computed
+  quantity that may never become a ledger entry** (most open bets lose
+  and post no payout) — a shape none of `min_amount`/`max_amount`/
+  `cumulative_amount` have, and one §12/§4 already anticipated in the
+  abstract ("an exposure limit's own definition of open exposure") but
+  never had a concrete consumer for until now.
+- **Does sportsbook make §17's cross-domain gap MORE urgent, or is it
+  separate?** Both, precisely: **separate as a requirement, but coupled
+  as a design problem if the cross-domain requirement is ever adopted.**
+  Sportsbook's own single-operation, single-domain open-position exposure
+  (the bullet above) does not require solving §17's harder cross-domain
+  aggregation to be useful on its own — a future `exposure` `LimitKind`
+  scoped to `sportsbook_bet`/`sportsbook_settlement` alone would already
+  answer a real trading/RG-adjacent question ("this player's live
+  sportsbook liability") without touching casino or bonus at all. But if
+  the business need is ever framed as this ADR's own §17 language already
+  anticipates — "this player's total exposure across bonus + casino +
+  sportsbook" — sportsbook makes that STRICTLY HARDER than §17 already
+  disclosed, not merely more urgent: §17 was written against operations
+  whose "exposure" is at least always a realized or grantable ledger
+  quantity (a settled casino stake, an issued bonus liability). Sportsbook
+  introduces a genuinely unrealized, contingent quantity into the same
+  proposed sum, so a future cross-domain `exposure` design must first
+  answer how to make a settled ledger amount and an open, possibly-never-
+  realized contingent liability commensurable before they can be summed
+  at all — a harder question than §17 flagged, not a restatement of it.
+  **Recorded as a refinement of the existing §17 OPEN DECISION** (added to
+  §30 below), not a new one: the `exposure` `LimitKind` reserved in §4/§12
+  remains the landing point either way, and remains a joint `ledger-
+  finance` + Risk + `sportsbook` design for a future stage, never invented
+  speculatively here.
+- **Velocity is unimplemented exactly as it already is for Bonus (§15c)
+  — sportsbook is simply its most natural motivating case so far, not a
+  reason to add it early.** "No more than N bets per minute" (a genuine,
+  industry-standard control against latency-arbitrage/courtsiding on
+  live/in-play markets) is a COUNT-over-a-time-window, identical in shape
+  to the bonus-frequency gap §15c already named and rejects faking via
+  `cumulative_amount`. It requires the same reserved `count`/`velocity`
+  `LimitKind` (§4/§12), the same open "what does it count" question §17
+  already records (ledger rows vs. a domain table's rows — sportsbook's
+  in-play bet-slip submissions may not even post a ledger entry until
+  accepted, making this arguably harder than the bonus-grant case §17
+  poses it against), and is **NOT added this stage**, following the
+  identical discipline.
+
+### 28. Market/trading exposure management — a Sportsbook Engine concern, not a Risk & Limits Engine concern — `ARCHITECTURAL DECISION`
+
+Applying this ADR's own established discipline for exactly this kind of
+question — the one already applied to Bonus campaign budget caps (§15d)
+and generalized for Retail network-wide exposure (§23) — rather than
+assuming everything sportsbook-shaped belongs in Risk because the
+directive's own framing ("sportsbook-trading/risk") juxtaposes the two
+words.
+
+**The test this ADR has consistently applied**: a constraint keyed by a
+single PLAYER (or a specific player-scoped entity like a hierarchy node
+acting as a funding subject) is a limit-engine concern and MUST be a
+`risk_rules` row. A constraint keyed by an aggregate that spans MANY
+players/subjects, expressing the platform's OWN commercial or operational
+position rather than a bound on any one player's activity, is NOT a
+limit-engine concern and belongs to the owning domain's own object —
+§15d's campaign budget cap and §23's hierarchy-subtree exposure cap are
+both already-decided instances of the second case.
+
+**Market/selection/event-level liability management — odds-setting,
+margin adjustment, and market suspension in response to how much money is
+riding on a given outcome ACROSS ALL PLAYERS — is the second case, and is
+therefore the Sportsbook (trading) Engine's own internal operational
+concern, not gated by `risk.Evaluate`:**
+
+- It is keyed by a MARKET or SELECTION (a betting object), aggregated
+  across every player who has staked on it — never keyed by one player.
+  This is structurally identical in shape to §15d's campaign budget
+  ("this campaign may issue at most X across ALL players") and §23's
+  subtree cap ("this Partner's whole network may move at most X"): every
+  scope dimension `risk_rules` has narrows toward a single subject
+  (player, tenant, brand, node); none of them broadens one across
+  subjects, and this ADR's position (§15d, §23) has been consistently
+  that adding cross-subject aggregation would change what a "limit" means
+  in this engine, not extend it.
+- The DECISION a trading system makes in response to that aggregate
+  (suspend the market, move the price, cut the maximum stake it will
+  accept on a selection going forward) is not an `ALLOW`/`DENY`/`REVIEW`
+  verdict on one player's specific pending operation — it changes what
+  the platform is willing to OFFER to the NEXT bettor, before any request
+  from them exists to evaluate. `risk.Evaluate`'s entire contract is a
+  per-request decision boundary (§2); a decision that has no specific
+  `RiskRequest` to gate is outside that boundary by construction, not a
+  gap in it.
+- It CONSUMES the same underlying fact ("how much is staked on this
+  outcome") that the sportsbook domain's own `Exposure`/`Liability`
+  entities (per this stage's directive framing) will own — exactly as
+  §15d's campaign object consumes ledger facts without being a Risk
+  concern, and exactly as §23's legitimate float-balance check ("this
+  node cannot advance more float than it holds") is a `ledger-finance`-
+  owned accounting invariant, not a Risk one. Consuming risk-adjacent data
+  is not the same thing as being gated by Risk.
+
+**What stays a genuine `risk_rules` concern, and must not be confused
+with the above — the split, restated in the sportsbook domain exactly as
+§15d states it for Bonus:**
+
+- **A per-player stake, payout, or cashout limit is a Risk rule**, even
+  when the THRESHOLD for that specific player was set using trading
+  intelligence (a known professional/"sharp" bettor given a lower max
+  stake than a recreational player; a player flagged for suspicious
+  betting patterns given a reduced max payout). The rule is still scoped
+  by `PlayerAccountID` — a single subject — and belongs in `risk_rules`
+  exactly like any other player-specific override (§5's own worked
+  example: player=50 beats brand=200). Who or what INFORMS the threshold
+  value (a trading analyst's judgement, an automated model) is irrelevant
+  to where the CHECK lives; the check itself is always Risk's.
+- **A market/selection-scoped rule that narrows toward a specific,
+  identifiable market or selection (§27's proposed dimensions) is also a
+  Risk rule**, provided it is still evaluated per-request against a
+  specific player's specific bet (e.g. "no player may stake more than X
+  on selection Y" is expressible with §27's proposed `SelectionID`
+  dimension, unchanged from how `GameID` scopes a casino rule today). The
+  line is not "does it mention a market" — it is "is it evaluated as one
+  player's request against a threshold, or as a standing aggregate across
+  every player."
+
+**The non-negotiable guard, restated verbatim from §15d/§23's own
+authority under §14/§19**: **a market/selection liability counter must
+never be used to express or substitute for a per-player limit.** The
+moment a proposed trading-side constraint is keyed by PLAYER rather than
+by market/selection, it is a limit engine under another name and must be
+a `risk_rules` row instead — the identical guard already stated for
+campaign budgets and hierarchy subtrees, extended here rather than
+re-derived, per this ADR's own consistency discipline.
+
+### 29. Responsible Gaming relationship for sportsbook — pointer only, unchanged — `ARCHITECTURAL DECISION`
+
+Unchanged from §1, §14, and §22 — restated briefly here because sportsbook
+is a real-money wagering surface and the relationship must be confirmed
+for it explicitly, not left to be inferred from casino's precedent alone.
+`internal/rg.EvaluateEligibility` remains the **sole** authority for
+self-exclusion, cool-off, account status and wallet status for sportsbook
+exactly as for casino, bonus, and retail. `internal/risk` acquires no
+self-exclusion concept, no `player_restrictions` read or write access,
+and no RG-flavored `RuleKind`/`LimitKind` for sportsbook specifically. A
+sportsbook enforcement point (bet placement, settlement, cashout) composes
+BOTH, in the same fixed order every other domain already uses: RG first,
+short-circuiting; Risk second (§1). The detailed sportsbook-specific
+RG/KYC/AML integration design (deposit limits, loss limits, time-outs,
+and self-exclusion as they apply to live/in-play betting specifically) is
+`identity-compliance`'s to write in `docs/decisions/0034-bonus-
+gamification-rg-kyc-identity-integration.md` (or a sportsbook-specific
+successor, per that specialist's own scoping) this same stage, in
+parallel — this ADR does not redesign that relationship and confirms
+sportsbook needs no exception to it.
+
+### 30. Open decisions introduced or refined by Stage 4H-B0-R4
+
+- **Sportsbook exposure as a cross-domain `exposure`-`LimitKind` design
+  question — refines §17, does not replace it.** As detailed in §27: a
+  future `exposure` `LimitKind` design must define open-position,
+  contingent (not-yet-ledger-posted) liability before it can be summed
+  with settled casino/bonus amounts. Owned jointly by `ledger-finance`,
+  Risk, and `sportsbook`, landing on the `exposure` `LimitKind` already
+  reserved in §4/§12. Not resolved here.
+- **Is "sport"/"competition"/"market" a platform-registry taxonomy or
+  tenant-authored?** §27. Determines whether the §20(a)-style
+  `CHECK (... IS NULL OR tenant_id IS NOT NULL)` guard is needed for any
+  new scope dimension. Owned by the sportsbook domain model, not Risk.
+- **Does "market" need a type-plus-instance split, the way `Hierarchy
+  NodeType`/`HierarchyNodeID` did for retail (§20(a))?** §27. Same answer:
+  depends on entity shapes not yet frozen; not resolved here.
+- **Does an operator-side payment to a provider/partner (e.g. a revenue-
+  share settlement) arising from sportsbook activity need its own
+  `Operation`, or is it outside Risk's player-protection scope entirely?**
+  §26's closing gap. Mirrors §21's disclosed-but-unresolved
+  `agent_settlement`/`agent_commission_payout` gap in shape; not resolved
+  here, and owned jointly by `risk` and `ledger-finance` once ADR 0038
+  exists.
+- **Velocity ("bets per minute") for live/in-play markets** — §27, same
+  unresolved shape as §15c/§17's "what does a `count` limit count",
+  sportsbook is simply its sharpest motivating case yet. Not resolved
+  here.
+
+### 31. Confirming no other Risk-side gap blocks sportsbook architecture closure
+
+Re-using this ADR's own established self-check discipline (§16a's "is
+anything else on Risk's side blocking..." section) rather than assuming
+completeness. Checked against doc 09 and the directive's own six lifecycle
+events, this stage's actual verified repository state (not memory of a
+prior stage's claims):
+
+- **Bet placement needs ZERO Risk-side changes.** `sportsbook_bet` is a
+  real `Operation` constant, accepted by migration 0041, present in the
+  HTTP allowlist and both OpenAPI enums, TODAY. `risk_rules.product`
+  already accepts `'sportsbook'` — unlike every other domain integration
+  recorded in this ADR (Bonus §16, Gamification §16, Retail §21), **no
+  `product` CHECK widening is needed here.** `min_amount`/`max_amount`
+  with `TimeWindow: transaction` work unmodified for a stake, with full
+  HARD_LIMIT/CONFIGURABLE_LIMIT precedence and player-override behavior
+  (§5), the moment `internal/sportsbook` exists and calls `Evaluate`
+  before locking a stake.
+- **Settlement and cashout are NOT first-slice-deferrable, mirroring
+  §16a's finding that `bonus_conversion` sat on the Bonus Engine's own
+  critical path.** A sportsbook that can accept bets but never pay out a
+  win, or never offer a cashout the product requires, is not shippable.
+  §26's two proposed `Operation` values (`sportsbook_settlement`,
+  `sportsbook_cashout`) should therefore be treated by whoever authorizes
+  sportsbook implementation as a near-term, load-bearing dependency —
+  exactly the correction §16a made explicit for `bonus_conversion` after
+  an earlier draft understated it — not as a "nice to have later" the way
+  velocity or exposure genuinely are.
+- **`cumulative_amount` on any sportsbook operation is a known,
+  correctly-characterized gap, not a blocker.** It fails closed
+  (`ErrUnsupportedCumulativeOperation`) exactly as it does for `bonus_
+  grant` (§15b) and `retail_funding` (§21) until `ledger-finance`'s ADR
+  0038 supplies the ledger transaction-type mapping. Restricting initial
+  rule authoring to `min_amount`/`max_amount` with `TimeWindow:
+  transaction` avoids it entirely, the identical mitigation §16a already
+  confirmed sufficient for Bonus's first slice.
+- **The new hierarchy dimensions (§27) are NOT needed for architecture
+  closure or a first slice.** Player/tenant/brand/jurisdiction/asset/
+  provider/operation/amount already fully support a first slice's stake
+  and payout limits with zero schema change. Sport/competition/event/
+  market/selection become necessary only once market- or selection-level
+  limits are wanted, which is a later refinement, not a blocker.
+- **`exposure`/`velocity` remain correctly unimplemented, per §18/§24's
+  own standing principle**, restated here rather than re-derived: a rule
+  the engine cannot evaluate must never be configurable in the first
+  place, and neither is needed for a first slice to function.
+- **RBAC introduces no sportsbook-specific gap.** `risk_config:manage`
+  stays with `RoleRiskManager` exactly as for every other domain; unlike
+  Retail (§24), sportsbook introduces no new class of actor (an "agent"
+  or "cashier") that could plausibly be handed risk-configuration write
+  access, so §24's delegated-authoring escalation does not recur here.
+- **Self-exclusion/RG introduces no sportsbook-specific gap** (§29) —
+  confirmed, not redesigned.
+- **§17's cross-domain aggregate exposure gap is not a blocker to
+  closure**, exactly as it was not a blocker for Bonus (§17) or Retail
+  (§23) — it is refined, not newly created, by §27/§30, and remains an
+  explicitly open decision for a future stage, never partially
+  approximated.
+
+**What remains impossible to configure after this section** — the
+load-bearing negative claim, stated the way §18 and §24 state it.
+Everything below remains blocked by database CHECK constraint and by HTTP
+validation, and **remains so after this stage**:
+
+- `sportsbook_settlement`, `sportsbook_cashout` as `operation` values —
+  rejected by migration 0041's CHECK and by `newCreateRiskRuleHandler`'s
+  allowlist. A rule intended to govern a settlement payout or a cashout
+  **cannot be stored today**, which is correct: it would be a rule
+  nothing evaluates.
+- `sport`/`competition`/`event`/`market`/`selection` as scope dimensions
+  — no columns, no `Rule`/`RiskRequest` fields, no `specificity()` bits,
+  no HTTP input for any of them exist.
+- `cumulative_amount` on `sportsbook_bet`, `sportsbook_settlement`, or any
+  other sportsbook operation — unavailable until `ledger-finance` supplies
+  the transaction-type mapping (§27), identical in kind to the same
+  standing gap for `bonus_grant` (§15b) and `retail_funding` (§21).
+- `count`/`velocity`/`exposure`/`loss` limit kinds, cross-operation
+  aggregate exposure, campaign-level caps, subtree-aggregate exposure,
+  points-denominated thresholds, calendar-aligned windows and
+  session-scoped limits — all unchanged from §18/§24; sportsbook adds no
+  new path to any of them.
+
+The principle §4 established holds without exception through this stage
+too: a rule the engine cannot evaluate must never be configurable in the
+first place. §25-§31 are an extension-point specification; the extension
+points stay closed until an authorizing stage opens them with all the
+steps in §12 or §16 executed together in one change.
+
