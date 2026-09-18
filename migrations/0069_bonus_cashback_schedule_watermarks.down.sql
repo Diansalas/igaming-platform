@@ -1,0 +1,4 @@
+DROP TRIGGER IF EXISTS bonus_cashback_schedule_watermarks_no_truncate ON bonus_cashback_schedule_watermarks;
+DROP TRIGGER IF EXISTS bonus_cashback_schedule_watermarks_immutable_identity ON bonus_cashback_schedule_watermarks;
+DROP FUNCTION IF EXISTS bonus_cashback_schedule_watermarks_enforce_immutable_identity();
+DROP TABLE IF EXISTS bonus_cashback_schedule_watermarks;

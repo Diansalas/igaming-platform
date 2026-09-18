@@ -1,0 +1,4 @@
+DROP TRIGGER IF EXISTS bonus_ledger_sweep_watermarks_no_truncate ON bonus_ledger_sweep_watermarks;
+DROP TRIGGER IF EXISTS bonus_ledger_sweep_watermarks_immutable_identity ON bonus_ledger_sweep_watermarks;
+DROP FUNCTION IF EXISTS bonus_ledger_sweep_watermarks_enforce_immutable_identity();
+DROP TABLE IF EXISTS bonus_ledger_sweep_watermarks;
