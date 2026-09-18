@@ -26,6 +26,22 @@ whole did **not** close SEC-W15-02. This revision replaces §3.4, extends
 change is mapped to the finding that required it inline. Still
 **DESIGN/ARCHITECTURE ONLY** — nothing below authorizes implementation.
 
+**Revision (Wave 1.5 Fix Round 2, closing pass, `architect`)**: two further
+items from this round's re-verification. First, `code-reviewer`'s NEW-7
+found that closing NEW-2 exposed a real internal contradiction between
+§5.4's (then-uniform) "the approval is spent on the first effecting write"
+rule and §5.5's corrected worked example, which requires up to 5,000
+effecting writes under one approval. Closed by adding a **Consumption
+shape** column to §3.1 (single-consumption vs. standing authorization,
+declared per `operation_type`, never inferred), splitting §5.4's
+state-transition behavior accordingly, revising §2.2's `approval_state`
+row, adding a cross-reference row to §5.5, and adding invariant EOI-18.
+Second, the `bonus_held_disposition_resolution` four-eyes threshold
+framing is formally ratified in §3.1, with `risk`'s dissenting
+threshold-independence argument recorded and the reasoning for not
+adopting it stated inline, per the same disclosed-disagreement discipline
+this document already uses elsewhere.
+
 ## 0. What this is, in one paragraph — and what it is not
 
 An `EconomicOperationIdentity` (**EOI**) is a row that names **the real
@@ -135,7 +151,7 @@ context the authorization needs to be reconstructable.
 | | `root_operation_id` | Denormalized for query sanity; equals `operation_id` for a root. A closure/recursive query is correct but makes the enforcement path a recursive CTE, which is the wrong thing to put on a write path. **This is the field the whole enforcement mechanism turns on (§3.4): every budget is a subtree-wide aggregate keyed on `root_operation_id`, never on `parent_operation_id` alone** — code-reviewer's NEW-2 finding, closed below |
 | | **`lineage_kind`** | `root` \| `retry` \| `resume` \| `page` \| `item` \| `compensation`. §3.2 |
 | | `batch_ordinal` / `batch_total` | For `page`/`item`: position and declared total. Reuses ADR 0038 §14's `occurrence_ordinal` discipline for repeated same-type operations |
-| **Approval** | **`approval_state`** | `not_required` \| `pending` \| `approved` \| `rejected` \| `expired` \| `consumed` \| `revoked`. **`not_required` is never a default** — it is a recorded determination with the policy row and threshold that produced it |
+| **Approval** | **`approval_state`** | `not_required` \| `pending` \| `approved` \| `rejected` \| `expired` \| `consumed` \| `revoked`. **`not_required` is never a default** — it is a recorded determination with the policy row and threshold that produced it. **`consumed` is reserved exclusively for single-consumption `operation_type`s (§3.1's Consumption shape column, NEW-7)** — it is written once, in the same transaction as that type's one and only effecting write (§5.4). A **standing-authorization** `operation_type` never writes `consumed` to this field, no matter how many effecting writes occur under it: it remains `approved` throughout, and is retired instead via `status` (`exhausted` \| `completed`, §2.2 Lifecycle row) when its budget/recipient-ceiling/window naturally closes it, or via an explicit staff-initiated transition to `revoked` — never as a side effect of an ordinary item execution |
 | | `required_approvals` / `approvals_received` | Counts, with the fail-closed default of `2` / threshold `0` when no policy row matches (`internal/withdrawal/policy.go`'s `defaultApprovalPolicy`, `policy.go:136`) |
 | | `approval_refs[]` | The approval rows. **Referenced here, CONSUMED at the enforcement point** — a reference is not a control (`security` SEC-W15-12; §5.3) |
 | | `threshold_at_decision`, `required_approvals_at_decision` | By value, so a later policy change cannot make a historical decision unauditable |
@@ -166,17 +182,83 @@ An EOI is minted **only** by an authorization event, and the list is
 closed. If an execution path is not downstream of one of these, it has no
 EOI and (per §5.1) is rejected.
 
-| `operation_type` | Minted at | Root authorization |
-|---|---|---|
-| `bonus_bulk_grant` | `BulkGrantJob` creation (doc 10 W5) | The job's own four-eyes approval |
-| `bonus_manual_grant` | A staff single-Grant action (doc 10 §1.3) | The staff action, plus four-eyes above threshold |
-| `bonus_campaign_activation` | A **Bonus** Campaign being activated | Its activation approval |
-| `crm_engagement_campaign_activation` | `EngagementCampaignVersion` activation (doc 31 §7.2.3) | Always four-eyes if it contains an `offer_request` step; otherwise four-eyes above an audience-size threshold with a fail-closed default |
-| `affiliate_commission_settlement` | A `CommissionSettlementInstruction` being approved (doc 32 §6.5/§7) | The three-conjunct four-eyes of doc 32 §6.5.1 |
-| `affiliate_reattribution` | A `PlayerAttribution` supersede (doc 32 §5.3.1) | Same three conjuncts |
-| `manual_balance_adjustment` | A staff adjustment (`CLAUDE.md`) | Reason code + four-eyes above threshold |
-| `api_initiated_grant` | An authenticated `ActorService` call to a grant surface (doc 10 N2.3 mode 7) | The service credential's own authorization grant — which is exactly the case that has no human approval today, and therefore the case §5.1's rejection rule is most important for |
-| `bonus_held_disposition_resolution` | A staff action clearing a `HeldDispositionRecord` (doc 10 §N1.4.1/5c: `ACTION_REFORFEIT` or `ACTION_ROUTE_TO_CASH`, introduced by this round's LF-2 fix) | The staff action's reason code, plus four-eyes above `CLAUDE.md`'s threshold — same shape as `manual_balance_adjustment`, but scoped to a specific Grant's holding representation rather than an arbitrary ledger posting. **Resolves RK-W15P2-8 part B**: doc 10's LF-2 fix introduces a new staff-authorized, value-creating operation with no `operation_type` in the version of this table Phase 2 reviewed. Added here via this document's own §2.2 extension discipline rather than left as a gap. Value is known exactly at this point (the `HeldDispositionRecord`'s captured amount) — this is not an instance of §3.4's value-unknown-at-execution case, which applies to the *issuing* Grant's own EOI (e.g. cashback at `issued`), not to this later, amount-known disposition step |
+| `operation_type` | Minted at | Root authorization | **Consumption shape (NEW-7)** |
+|---|---|---|---|
+| `bonus_bulk_grant` | `BulkGrantJob` creation (doc 10 W5) | The job's own four-eyes approval | **Standing authorization** — one approval, many effecting writes (one per `BulkGrantJobItem`), until budget/recipient-ceiling exhaustion or completion |
+| `bonus_manual_grant` | A staff single-Grant action (doc 10 §1.3) | The staff action, plus four-eyes above threshold | **Single-consumption** — one approval, one effecting write, `approval_state → consumed` on that write |
+| `bonus_campaign_activation` | A **Bonus** Campaign being activated | Its activation approval | **Standing authorization** — an activated campaign causes many subsequent grant-issuing effecting writes over its life, under the one activation approval |
+| `crm_engagement_campaign_activation` | `EngagementCampaignVersion` activation (doc 31 §7.2.3) | Always four-eyes if it contains an `offer_request` step; otherwise four-eyes above an audience-size threshold with a fail-closed default | **Standing authorization** — this is §5.5's worked example: up to `recipient_ceiling` item executions under the one activation approval |
+| `affiliate_commission_settlement` | A `CommissionSettlementInstruction` being approved (doc 32 §6.5/§7) | The three-conjunct four-eyes of doc 32 §6.5.1 | **Single-consumption** — one instruction, one posting, `approval_state → consumed` on that posting |
+| `affiliate_reattribution` | A `PlayerAttribution` supersede (doc 32 §5.3.1) | Same three conjuncts | **Single-consumption** — one supersede act, one effecting write |
+| `manual_balance_adjustment` | A staff adjustment (`CLAUDE.md`) | Reason code + four-eyes above threshold | **Single-consumption** — one adjustment, one posting |
+| `api_initiated_grant` | An authenticated `ActorService` call to a grant surface (doc 10 N2.3 mode 7) | The service credential's own authorization grant — which is exactly the case that has no human approval today, and therefore the case §5.1's rejection rule is most important for | **Standing authorization** — a service credential's grant authorizes repeated calls over its life, not one call; each call is a separate effecting write consuming the same budget |
+| `bonus_held_disposition_resolution` | A staff action clearing a `HeldDispositionRecord` (doc 10 §N1.4.1/5c: `ACTION_REFORFEIT` or `ACTION_ROUTE_TO_CASH`, introduced by this round's LF-2 fix) | The staff action's reason code, plus four-eyes above `CLAUDE.md`'s threshold — same shape as `manual_balance_adjustment`, but scoped to a specific Grant's holding representation rather than an arbitrary ledger posting. **Resolves RK-W15P2-8 part B**: doc 10's LF-2 fix introduces a new staff-authorized, value-creating operation with no `operation_type` in the version of this table Phase 2 reviewed. Added here via this document's own §2.2 extension discipline rather than left as a gap. Value is known exactly at this point (the `HeldDispositionRecord`'s captured amount) — this is not an instance of §3.4's value-unknown-at-execution case, which applies to the *issuing* Grant's own EOI (e.g. cashback at `issued`), not to this later, amount-known disposition step. **Four-eyes threshold decision and `risk`'s recorded dissent: see the paragraph immediately following this table.** | **Single-consumption** — one `HeldDispositionRecord`, one resolving act (REQ-SEP-BONUS-4's scalar, one-shot nature), `approval_state → consumed` on that resolution |
+
+**This column is the explicit encoding NEW-7 requires (`code-reviewer`,
+Round 2 re-verification).** It is not left as a property a reader must
+infer from an operation's description: every `operation_type` this
+document mints declares, in this table, whether one approval governs
+exactly one effecting write (**single-consumption**, `approval_state`
+genuinely flips to `consumed`, exactly as §5.4 originally specified — this
+is the `asset_change_consume_approved_request` shape) or one approval
+governs many effecting writes bounded by budget/window/ceiling rather than
+by single use (**standing authorization**, `approval_state` stays
+`approved` across all of them — see §5.4's revised consume table and §2.2's
+`approval_state` field for the mechanism this drives). The ambiguity
+NEW-7 identified was that §5.4's prior text, read literally, applied the
+single-consumption behavior to every `operation_type` including the
+standing ones — directly contradicting §5.5's corrected worked example,
+which requires up to 5,000 successful item executions under one approval.
+The fix is this column plus §5.4's split, not a new field elsewhere: the
+consuming function reads this declared shape before deciding whether it
+is permitted to write `consumed`.
+
+**Four-eyes threshold for `bonus_held_disposition_resolution` — ratified,
+with `risk`'s dissent on record.** `architect` certifies doc 34's original
+framing as correct: the four-eyes control on `bonus_held_disposition_
+resolution` is **tenant-configurable, above `CLAUDE.md`'s threshold
+(default 0)** — not unconditional. `security` has since self-corrected its
+earlier `security-architecture.md` §W15.1.12 text ("threshold 0, always")
+to match this framing, so the two source documents this table row once
+conflicted with (flagged inline in doc 10's own N2.9-area SEP-1
+reconciliation paragraph) are now in agreement. `risk`'s independent
+Phase 2 review reached the opposite conclusion and that dissent is
+recorded here rather than silently overridden: `risk` argued threshold-
+independence is required for this operation_type for the same reason
+`SEP-1` itself is unconditional — a self-dealing/structuring attack is
+optimally executed at the smallest amount below whatever threshold
+applies, so a configurable, possibly-zero-default four-eyes control is
+exactly the kind of gate a patient attacker routes around by choosing
+amounts under it. This dissent was considered and not adopted, for a
+reason specific to this operation_type rather than a rejection of the
+general structuring concern: `SEP-1` (§4.4 — actor≠subject, unconditional,
+no threshold of any kind, no configuration able to weaken it) already
+fully closes the self-dealing scenario `risk`'s structuring argument is
+about, at every amount — a self-dealing operator cannot pass `SEP-1`
+regardless of how the `payout_amount` is sized. And unlike a manual grant,
+where the acting staff member freely chooses the amount and can split one
+large grant into many small ones specifically to land under a threshold,
+`bonus_held_disposition_resolution`'s `payout_amount` is a fixed,
+non-attacker-splittable fact — it is the `HeldDispositionRecord`'s
+already-captured win amount (doc 10 §N1.4.1/5c), not a number the
+resolving staff member chooses or can decompose. There is no smaller
+amount to structure down to; the value is what the win already made it.
+The four-eyes threshold therefore serves a genuinely different purpose
+here than `SEP-1`'s — catching errors or collusion between two
+non-beneficiary staff members on a large, correctly-attributed
+disposition — not defending against the self-dealing/structuring pattern
+`SEP-1` already blocks unconditionally. Threshold-independence would still
+be a defensible belt-and-suspenders choice, but `risk`'s stated rationale
+(the `SEP-1` anti-structuring argument) does not, on inspection, transfer
+to an amount that is not attacker-chosen; if `risk` has a further concern
+beyond that rationale, it is a new finding, not a re-litigation of this
+one. **Required follow-up, not this document's to make**: doc 10's own
+N2.9-area SEP-1/four-eyes reconciliation paragraph still states it
+"defers to `security`'s stricter, unconditional reading" of `security`'s
+now-superseded §W15.1.12 position and does not yet cite `security`'s
+self-correction or this ratification. `bonus-engine` owns doc 10 and must
+update that citation to match; per this round's constraints, `architect`
+does not edit doc 10.
 
 **Deliberately absent from this list**: an ordinary player-initiated bet,
 deposit or withdrawal. Those are single-subject, self-authorized, already
@@ -611,27 +693,59 @@ This makes the EOI row lock's hold time exactly one effecting write, not
 a whole gate chain — the throughput property the prior ambiguity put at
 risk.
 
-### 5.4 Budget and approval are CONSUMED, atomically, in the effecting transaction
+### 5.4 Budget and approval are CONSUMED, atomically, in the effecting transaction — and "consumed" means two different things depending on the operation's shape (NEW-7)
 
 Both use the pattern this platform already implements and has already
 reviewed — `asset_change_consume_approved_request` (migrations
 `0044_asset_registry_failclosed_and_dual_control.up.sql:474`, hardened in
-`0047_asset_registry_dual_control_hardening.up.sql:271`):
+`0047_asset_registry_dual_control_hardening.up.sql:271`) — with one
+correction this revision makes explicit, in response to `code-reviewer`'s
+NEW-7 re-verification finding.
 
-| Property | Why it is needed here |
-|---|---|
-| `SELECT … FOR UPDATE` on the **root** EOI row (§5.3 rule 3, §3.4) | Two concurrent executions — anywhere in the subtree, whichever page or item they belong to — cannot both read the same remaining budget |
-| The four-eyes predicate (`approver_principal_id <> requested_by_principal_id`) **inside the selection predicate**, not as a separate check | A caller that forgets to check cannot succeed — an unapproved operation is simply not selectable |
-| Payload containment (`payload @> match`) | The execution must match the **pinned** payload (§2.2), not merely reference an approval that exists |
-| State transition in the same transaction | The approval is **spent**; a replay finds nothing and raises |
-| `RAISE EXCEPTION` on no match | Fail closed and loud, aborting the whole statement |
+**The defect NEW-7 found, restated precisely:** the prior text of the
+"State transition in the same transaction" row below read "the approval
+is spent; a replay finds nothing and raises," applied uniformly to every
+`operation_type`. Taken literally, that flips `approval_state` to
+`consumed` on the FIRST effecting write of ANY operation, which would
+make §5.1's entry rule ("Resolved EOI's `approval_state` is not `approved`"
+⇒ Reject) reject the SECOND of §5.5's 5,000 required item executions —
+directly contradicting this document's own, now-corrected §5.5 worked
+example. The row was correct only for the `asset_change_*` precedent's own
+case, which is single-execution by construction (one asset-registry
+change, one approval, one effect); it was never correct for a
+`bonus_bulk_grant`/`crm_engagement_campaign_activation`-shaped
+authorization, where one approval must survive up to `recipient_ceiling`
+effecting writes.
+
+**The fix is one function with a branch on §3.1's Consumption shape
+column, not two functions and not a new mechanism.** Every property below
+except the state transition itself is identical for both shapes; only
+whether the function is permitted to write `consumed` differs:
+
+| Property | Single-consumption (§3.1: `bonus_manual_grant`, `affiliate_commission_settlement`, `affiliate_reattribution`, `manual_balance_adjustment`, `bonus_held_disposition_resolution`) | Standing authorization (§3.1: `bonus_bulk_grant`, `bonus_campaign_activation`, `crm_engagement_campaign_activation`, `api_initiated_grant`) |
+|---|---|---|
+| `SELECT … FOR UPDATE` on the **root** EOI row (§5.3 rule 3, §3.4) | Taken on every consume | Same — taken on every consume, including the 5,000th |
+| Four-eyes predicate (`approver_principal_id <> requested_by_principal_id`) **inside the selection predicate** | Evaluated on the one consume | Evaluated on **every** consume, not only the first — the predicate is cheap, and re-checking it on item 4,999 closes off "approval revoked mid-run, but the row was already matched once" |
+| Payload containment (`payload @> match`) | The one write must match the pinned payload | **Every** item's write must still match the pinned payload — a payload swap mid-run is rejected exactly like a first-write mismatch, not grandfathered in because an earlier item already matched |
+| Budget decrement (§3.4) | N/A — the whole authorized value/recipient count is consumed in the one write; there is no per-item slice | `remaining_value_budget`/`remaining_recipient_budget` decrements by this write's slice only. This single write does **not** by itself retire the authorization unless it is the write that exhausts the budget or reaches the ceiling |
+| **`approval_state` transition** | Flips `approved → consumed` **in the same transaction as the one and only effecting write** — unchanged from the original text, and correct exactly here. A replay of this authorization after this point matches nothing (`approval_state` is no longer `approved`) and `RAISE EXCEPTION`s | **Does not change.** `approval_state` stays `approved` across every one of the (potentially thousands of) effecting writes this authorization causes. The consuming function is structurally forbidden from writing `consumed` for a declared standing-authorization `operation_type` — that value is reserved for the single-consumption shape (§2.2, EOI-18). The authorization retires only via `status` (`exhausted` when budget/recipient-ceiling naturally closes it, `completed` when its window ends or last recipient is reached) or via an explicit staff-initiated `revoked` transition — never as a side effect of an ordinary item execution |
+| Per-execution replay protection | The one write's own existing idempotency key (the settlement instruction's, the adjustment's `adjustment_request_id`, etc.) | **A separate mechanism from the EOI's `approval_state`, and must never be conflated with it — this is precisely the conflation NEW-7 identified.** Each individual effecting write is protected against replay by its OWN existing idempotency key: `BulkGrantJobItem`'s `UNIQUE (tenant_id, bulk_grant_job_id, player_account_id)`, or the equivalent per-recipient key for a `crm_engagement_campaign_activation`'s or `api_initiated_grant`'s item-level writes. That per-item key is what stops item 4,317 from executing twice; it says nothing about whether the *authorization* still has budget, which remains §3.4's job, computed over the whole subtree |
+| `RAISE EXCEPTION` on no match | Fail closed and loud, aborting the whole statement | Same — a standing authorization whose `status` has already moved to `exhausted`/`completed`/`aborted`, or whose `approval_state` has been `revoked`, is simply not selectable by the next item's consume, and that item is rejected exactly as any other no-match case |
+
+Nothing about the root-lock, the four-eyes predicate, or payload
+containment differs between the two shapes — the branch is narrow and
+lives entirely in the state-transition row, which is exactly why this is
+a correction to one row of an existing mechanism, not a second
+enforcement path.
 
 `security` referred to this as the `bonus_change_consume_approved_request`
 pattern; the function implemented in this repository is the
-`asset_change_*` one named above, and it is the concrete precedent. Whether
-the EOI version is a generalization of it or a sibling is `security`'s and
-`ledger-finance`'s call (doc 32 DEP-AFF-6, doc 31 DEP-CRM-5); the
-properties are binding either way.
+`asset_change_*` one named above, and it is the concrete precedent —
+itself a single-consumption case, which is exactly why transcribing its
+state-transition behavior verbatim, without branching on shape, was the
+defect NEW-7 found. Whether the EOI version is a generalization of it or a
+sibling is `security`'s and `ledger-finance`'s call (doc 32 DEP-AFF-6,
+doc 31 DEP-CRM-5); the properties are binding either way.
 
 ### 5.5 Worked example — the SEC-W15-02 attack, before and after
 
@@ -655,6 +769,7 @@ grant execution is, wherever it falls.**
 | Retrying the *activation* | A second activation | Hits `UNIQUE (tenant_id, operation_type, idempotency_key)` ⇒ resolves to the existing EOI with its already-**consumed** approval |
 | A journey step calling the single-Grant surface instead | Same bypass, different door | Same rejection — the check is on the **surface**, not on the shape of the call |
 | A recipient granted, then clawed back, then targeted again by a later page | Not modeled | `recipient_ceiling` consumption is `COUNT(DISTINCT subject_ref)` and never releases on the clawback (RK-W15P2-2) — the recipient still counts once against the 5,000, permanently |
+| `approval_state` across all 100,000 executions | Not modeled — and if modeled naively, execution #2 would already be rejected (NEW-7) | `crm_engagement_campaign_activation` is a **standing authorization** (§3.1's Consumption shape column). `approval_state` stays `approved` from execution 1 through execution 5,000 — it is never set to `consumed`. The authorization retires to `status = exhausted` only when the 5,001st execution is rejected for lack of budget (or to `completed` if the campaign's window ends first), never as a side effect of any single item's write (§5.4) |
 
 ---
 
@@ -679,6 +794,7 @@ grant execution is, wherever it falls.**
 | **EOI-15** *(new, RK-W15P2-4)* | Every `operation_type` declares, exhaustively, the child-row table(s)/column(s) that constitute its consumption record; a child row bearing a `parent_operation_id` whose shape is not named in that declaration causes the consumption function to **raise**, never to under-count silently | Test mirroring `internal/risk/cumulative.go`'s `ErrUnrecognizedCumulativeLeg` pattern: introduce an undeclared second consumption-row shape for one `operation_type` and assert the enforcing query fails closed rather than returning a smaller-than-true sum |
 | **EOI-16** *(new, RK-W15P2-5)* | An `operation_type` whose value is not known at execution time consumes the Offer's declared maximum against `remaining_value_budget` at that execution, never zero or a placeholder; a null `asset_code` EOI has no enforceable value budget at all | Test: a cashback-shaped `issued` execution with value unknown consumes the declared ceiling, not 0; a separate test asserts an attempt to enforce a value budget against a null-`asset_code` EOI is rejected as a configuration error, not silently treated as unlimited or zero |
 | **EOI-17** *(new, DEP-EOI-4)* | `operation_type` is never derived from, aliased to, or mapped to `internal/risk.Operation`; the two enums' value sets are disjoint and no function converts one into the other | The vocabulary-disjointness test (§3.1) |
+| **EOI-18** *(new, NEW-7)* | An `operation_type`'s declared Consumption shape (§3.1) governs its `approval_state` lifecycle exclusively: a **single-consumption** type transitions `approved → consumed` on its one effecting write; a **standing-authorization** type never writes `consumed` to `approval_state` regardless of how many effecting writes occur under it (§5.4), and retires only via `status` (`exhausted` \| `completed`) or an explicit staff-initiated `revoked` transition | Test: run N>1 effecting writes under one standing-authorization EOI (e.g. a `crm_engagement_campaign_activation` with `recipient_ceiling ≥ 3`) and assert `approval_state` reads `approved` after every write and is never `consumed`; a second test asserts the consuming function raises rather than silently succeeding if ever invoked in a code path attempting to write `consumed` for a declared-standing `operation_type` |
 
 ---
 
