@@ -2928,6 +2928,31 @@ per the dispatch's own instruction, not silently assumed.
 
 ### N1. Grant terminal-state invariant — formal definition and proof (gate §A.9)
 
+> **Status: REVISED, Stage 4H-B1 Wave 1.5 Fix Wave (dispatch `4HB1FW-01`),
+> closing P0 `LF-2` and P1 `LF-11`.** `ledger-finance`'s P0 finding
+> (`docs/governance/task-registry.md`) is accepted in full: N1.4 step 5 as
+> originally written posted a late WIN credit to `player_bonus` using the
+> ordinary settlement shape and then, in the same transaction, reforfeited
+> whatever that posting freed up — economically indistinguishable from
+> selecting `ACTION_REFORFEIT`, regardless that the Grant's status was
+> labelled `pending_settlement` rather than `expired` at the instant of
+> posting. The original §N1.8's argument that G-2's premise "does not
+> occur" was, as `ledger-finance` correctly identified, a relabelling of
+> the state, not a change to the money's path. **What changed, in one
+> sentence**: a value-creating (WIN) credit against exposure that was
+> already open when a Grant's wagering-eligibility closed is now never
+> posted to `player_bonus` or `player_cash` at all until a human resolves
+> G-2; it is captured in a Grant-attributed, ledger-visible holding
+> representation instead. Value-reducing (loss) resolution of the
+> identical exposure is unchanged — it was never the problem
+> `ledger-finance` flagged and remains fully automatic. Every subsection
+> below is corrected in place, named as such; nothing outside `N1` is
+> edited, and this revision selects nothing from the Human Decision
+> Register (the revised §N1.8 restates the non-selection argument more
+> rigorously than the version it replaces). `LF-11` (the
+> `FOR UPDATE`-on-`ledger_entries` claim) is fixed at N1.3/N1.4/N1.5 below,
+> named individually where it occurred.
+
 #### N1.1 What this closes
 
 This closes the engineering resolution the Orchestrator's Wave 1
@@ -2980,6 +3005,22 @@ permitted to become terminal while that credit remains possible.** This
 is the precise, checkable form of "never crediting against an
 already-terminal Grant, by construction."
 
+**Corollary TI-1a, added by this revision — TI-1 binds the forward-going
+transition, not facts discovered afterward.** TI-1 is a claim about the
+information available *at* the instant a transition into `TERMINAL` is
+evaluated: the transition mechanism (N1.4) may never fire while `AOE`,
+computed from every event observed as of that instant, is nonzero. It
+does not, and cannot, claim that no fact bearing on `G` will ever surface
+after a transition that was valid given everything knowable at the time —
+N1.7 already discloses one such residual (a casino `win` callback
+violating its own provider settlement-window SLA) and this revision
+preserves that disclosure rather than papering over it. A fact of that
+kind is handled exactly as §1.2 already handles an upstream reversal
+discovered after terminality: an append-only correction on top of the
+terminal record, never a retroactive claim that the earlier transition
+itself violated TI-1. N1.6's Scenario 4 below proves this precisely for
+the one place it matters — a late WIN.
+
 #### N1.3 Attributable Open Exposure (AOE) — the concrete definition the gate directive asks for
 
 `AOE(G, t)` is the union of two components, because this platform's two
@@ -2993,7 +3034,9 @@ against.
 
 **Component 1 — `LockedExposure(G, t)`** (sportsbook-shaped, once
 Dependency Contract Freeze §9's `player_locked_bonus` split is
-unblocked): the signed sum, read live and `FOR UPDATE`, of every
+unblocked): the signed sum, read live (see N1.5 for the corrected
+description of what actually serializes this read against a concurrent
+settlement — **not** the `FOR UPDATE` clause itself, `LF-11`), of every
 `player_locked_bonus` ledger entry attributable to `G` via
 `GrantLedgerAttribution` (W2.5) that has not yet been nullified per
 `ledger-accounting-model.md` §6.6.5/§6.6.7's own classification.
@@ -3017,10 +3060,6 @@ been observed. `InFlightExposure(G, t) ≠ ∅` means a bonus-funded casino
 stake placed under `G` could still, at some future point, cause a
 `casino_win` credit to `player_bonus` under `G`.
 
-`AOE(G, t) = LockedExposure(G, t) ∪ InFlightExposure(G, t)`, and
-`AOE(G, t) = ∅` (both components empty) is the precondition N1.4's
-mechanism enforces before `G` may become `TERMINAL`.
-
 **Why casino needs a second component at all, verified against code, not
 assumed**: `internal/casino`'s `postBet` debits `player_bonus` (once
 wagering split instructions post there) straight into `house_gaming` —
@@ -3033,7 +3072,87 @@ precisely the exposure this gate exists to close, per `architect`'s doc
 29 §4.3 finding that G-2 is reachable in the casino-only slice with no
 locked account and no sportsbook at all.
 
+**Component 3 — `HeldDisposition(G, t)`** (added by this revision,
+closing `LF-2`; applies uniformly to both shapes): the set of
+Grant-attributed holding-representation records (N1.4.1) for which a
+value-creating (WIN) credit, correlated to exposure that was open at the
+instant `G`'s `NewStakeEligibility` (N1.4) closed, has been observed and
+captured, but whose G-2 disposition has not yet been recorded.
+`HeldDisposition(G, t) ≠ ∅` means: a win happened, its value is parked,
+and it is waiting on a human to answer G-2 (or on staff to apply an
+already-answered G-2 to this specific occurrence) — not that anything
+further will arrive from a provider for this stake. This is the
+component the original proposal, and this document's own pre-revision
+text, omitted entirely, which is exactly how the pre-revision N1.4 step 5
+was able to observe the underlying bet's `InFlightExposure`/
+`LockedExposure` member clear (the win *arrived*) and treat that as
+license to also treat `G`'s overall exposure as resolved (the win's
+*disposition* was decided) — conflating "the bet is over" with "the
+money's fate is decided." Once a value-creating credit is captured into a
+`HeldDisposition` record, its originating `LockedExposure`/
+`InFlightExposure` member is removed (nothing further will arrive for
+that specific stake — the underlying bet truly is resolved) but is
+**replaced, not cleared**, by the new `HeldDisposition` member — `AOE`'s
+total does not move to zero merely because the bet resolved.
+
+`AOE(G, t) = LockedExposure(G, t) ∪ InFlightExposure(G, t) ∪
+HeldDisposition(G, t)`, and `AOE(G, t) = ∅` (all three components empty)
+is the precondition N1.4's mechanism enforces before `G` may become
+`TERMINAL` (subject to N1.2's Corollary TI-1a for a fact that only
+surfaces after a valid transition). Extending `AOE` with
+`HeldDisposition` is the exact, minimal change this revision makes to
+close `LF-2`: without it, the moment a WIN callback for the last open
+stake arrived, `AOE` would read `∅` and the deferred disposition would
+auto-finalize using whatever balance the WIN just created — precisely
+the relabelled `ACTION_REFORFEIT` `ledger-finance` found. With it, `AOE`
+correctly stays nonzero until the win's *disposition*, not merely its
+*arrival*, is resolved. This is also the direct, non-new answer to this
+revision's own conversion question (N1.10): a Grant with an outstanding
+`HeldDisposition` record has `AOE ≠ ∅` by this same definition, so Path
+A's existing block on `completed → converted` already covers it — no
+second, parallel blocking rule is needed.
+
 #### N1.4 The mechanism
+
+**Revised by this fix wave to separate two concerns the pre-revision text
+conflated (the fix wave's own unifying technical contract):**
+
+> **`NewStakeEligibility(G, t) ∈ {open, closed}`.** Purely technical,
+> carries **no claim** about what happens to value already at risk.
+> `NewStakeEligibility(G, t) = open` whenever `G.status(t) ∈ {issued,
+> activated, in_progress}`. It flips to `closed`, immediately and
+> uncontestedly, the instant **any** termination trigger fires against
+> `G` — natural time-limit expiry, staff/player cancellation, a
+> wagering-rule-breach or manual-review forfeiture finding, or a
+> conversion attempt (`completed → converted`, successful or blocked) —
+> **regardless of whether `AOE(G, ·)` is zero at that instant.** No new
+> stake may be authorized against `G` once `NewStakeEligibility(G, ·) =
+> closed`; this is enforced at whichever domain's wagering-authorization
+> checkpoint reads `G.status` before funding a stake from `player_bonus`
+> (casino or sportsbook), not by N1.4's mechanism itself, and requires no
+> G-2 involvement, ever — a pure eligibility gate, symmetric to every
+> other live-re-evaluated gate this contract already specifies (§T.11).
+> **Closing `NewStakeEligibility` is TECHNICAL in every case, including
+> forfeiture**: a forfeiture-causing breach closes eligibility the instant
+> it is detected, before any question about the already-open exposure's
+> *disposition* is even asked. `NewStakeEligibility` closing and
+> `G.status` flipping to a terminal value are **not the same event** —
+> that gap is exactly what `pending_settlement` (below) exists to
+> represent honestly: eligibility already closed, financial disposition
+> of exposure open at that instant not yet finished.
+
+The **financial disposition** of exposure that was open at the instant
+`NewStakeEligibility` closed is where G-2 lives, and — this is the
+correction this fix wave requires, `LF-2`'s exact subject — **only for
+the value-creating sub-case.** Value-reducing resolution (a loss) of the
+identical exposure is not G-2, creates nothing to dispute, and proceeds
+immediately and technically, exactly as `casino`'s own `B(G)`/`L(G)`
+split intended and as `ledger-finance` endorsed as correct; a balance
+that was never at risk (free, unwagered bonus balance) at the moment of
+the trigger is disposed of by the ordinary, already-authorized,
+non-G-2, expiry/cancellation write-down (step 4 below) — a bonus
+expiring unused being forfeited is standard, uncontested behavior, not
+G-2.
 
 Two distinct handling paths, deliberately not one, because the two
 transition families already have structurally different holding
@@ -3068,9 +3187,13 @@ named status:
 
 > **`pending_settlement`** — additive to §1.2's Grant-state table, not a
 > replacement of any existing row. A Grant in `pending_settlement` has
-> already had a terminal trigger fire against it; its financial and
-> lifecycle fate is decided; only the timing of the status flip is
-> deferred, pending `AOE(G, ·)` reaching `∅`.
+> already had a terminal trigger fire against it (`NewStakeEligibility(G,
+> ·) = closed`); its lifecycle fate (which terminal value it will
+> eventually flip to) is decided; only the timing of the status flip is
+> deferred, pending `AOE(G, ·)` reaching `∅` — where, per N1.3's revision,
+> `AOE` reaching `∅` requires not merely that every open bet has
+> *resolved*, but that every value-creating credit those bets produced
+> has had its G-2 *disposition* recorded (N1.4 step 5, `HeldDisposition`).
 
 Fields carried on `pending_settlement` (additive to the Grant row, no
 new persistent object — mirroring `GrantActivation`'s "typed projection,
@@ -3091,9 +3214,13 @@ own effect:**
 
 1. The trigger fires exactly as §1.3/T.9/T.10 already specify (time
    limit elapsed, staff cancellation, wagering-rule breach, manual-review
-   forfeiture outcome).
-2. `AOE(G, ·)` is computed live, `FOR UPDATE` on the `LockedExposure`
-   component's ledger rows, per N1.3.
+   forfeiture outcome). `NewStakeEligibility(G, ·)` flips to `closed` at
+   this instant — TECHNICAL, automatic, no G-2 involvement (see N1.8.1's
+   exhaustive transition classification).
+2. `AOE(G, ·)` is computed live, per N1.3, inside the same transaction —
+   see N1.5 for the corrected description of what actually serializes
+   this against a concurrent settlement (`LF-11`: not a `FOR UPDATE`
+   claim on `ledger_entries`).
 3. **If `AOE(G, ·) = ∅`**: proceed exactly as already specified — write
    the terminal status directly, no behavior change from §1.2/§T.9/§T.10.
    This is the ordinary case today and remains fully unmodified.
@@ -3109,23 +3236,102 @@ own effect:**
    deferral, enumerating every outstanding exposure record (each open
    `WageringProgress` contribution id / each nonzero locked-balance
    attribution) so the trail is inspectable, not merely asserted.
-5. **Resolution**: every ledger event that is itself one of `AOE`'s
-   closing events (a WIN settlement credit, a VOID, a ROLLBACK, or —
-   casino only, N1.7 — an elapsed settlement window) re-checks, in the
-   same transaction, under the same advisory lock, whether `G` is
-   `pending_settlement` and whether this event brings `AOE(G, ·)` to
-   `∅`. If so: the credit (if any) posts first, using the **ordinary**
-   settlement/void posting shape — because `G` is not yet terminal at
-   the instant this posts, this is **not** G-2, it is an ordinary
-   in-progress credit to a non-terminal Grant, needing no special
-   handling — and then, in the same transaction, the deferred terminal
-   disposition applies to whatever balance is now free (the ordinary
-   §7.7 shape, for whatever newly became free) and `G.status` flips
-   from `pending_settlement` to `terminal_resolution`. If the closing
-   event does not bring `AOE` to `∅` (another stake is still open),
-   `G` stays `pending_settlement`, unchanged, and the newly-closed
-   component is simply removed from the enumerated set on the next
-   Progress entry.
+5. **Resolution — corrected by this revision to close `LF-2`.** Every
+   ledger event that could change one of `AOE`'s three components
+   re-checks, in the same transaction, under the same advisory lock,
+   whether `G` is `pending_settlement` (or already fully terminal, N1.6
+   Scenario 4) and what **kind** of event this is. The two kinds are
+   handled **differently in kind, not merely in outcome** — this is the
+   exact distinction the pre-revision text collapsed, and un-collapsing
+   it is this revision's entire fix:
+
+   **5a. Value-reducing closing event** (a LOSS-grading settlement, a
+   VOID, a ROLLBACK, or — casino only, N1.7 — an elapsed settlement
+   window with no WIN observed) — **TECHNICAL, fires automatically, no
+   G-2 involvement**, exactly as `casino`'s own `B(G)`/`L(G)` split
+   intended and as `ledger-finance` endorsed as correct. Nothing is
+   credited; the stake is absorbed/written off using whatever posting
+   shape already applies to an ordinary loss (no new shape). The closed
+   `LockedExposure`/`InFlightExposure` member is removed from
+   `AOE(G, ·)`. If this brings the full three-component `AOE(G, ·)` to
+   `∅`, the deferred disposition applies to whatever balance is now free
+   (the ordinary §7.7 write-down, unchanged from the pre-revision text)
+   and `G.status` flips `pending_settlement → terminal_resolution` in the
+   same transaction. If `AOE` is still nonzero (another open bet, or an
+   outstanding `HeldDisposition` record, remains), `G` stays
+   `pending_settlement`.
+
+   **5b. Value-creating closing event** (a WIN settlement credit
+   correlated to exposure that was part of `AOE(G, ·)` at the instant
+   `NewStakeEligibility(G, ·)` closed) — **this is G-2's exact scenario.
+   The corrected behavior: the credit is never posted to `player_bonus`,
+   `player_cash`, or any other player-accessible balance.** Instead:
+      i. The fact that a WIN of amount `X` occurred, correlated to this
+         stake, is captured — not in dispute, and preserved so the
+         eventual disposition and the Progress trail have something
+         correct to act on and explain.
+      ii. `X` is posted into the **holding representation** (N1.4.1) — a
+          real, ledger-visible, Grant-attributed posting, in the same
+          transaction, under the same locks, as the settlement event
+          itself. It is never posted to `player_bonus` first and then
+          reversed — there is no such intermediate posting at all.
+      iii. A `HeldDispositionRecord` (N1.3 Component 3, N1.9) is created
+           for this occurrence, and the closed `LockedExposure`/
+           `InFlightExposure` member it replaces is removed from `AOE` —
+           `AOE(G, ·)` **does not** reach `∅` merely because the
+           underlying bet resolved; it remains nonzero, via the new
+           `HeldDisposition` member, until that member itself clears.
+      iv. `G.status` **does not change** at this step — it stays
+          `pending_settlement`, or, for N1.7's residual case, stays
+          whatever terminal status it already validly reached (N1.2
+          Corollary TI-1a, N1.6 Scenario 4). Nothing about this step
+          selects, or even narrows, which of G-2's three answers
+          applies — N1.8's revised argument proves this explicitly.
+
+   **5c. Clearing a `HeldDispositionRecord` — POLICY-DEPENDENT, requires
+   a human-supplied G-2 answer, never automatic.** `casino`'s own `08
+   §16.9` already names the seam
+   (`bonusengine.ResolveTerminalGrantCredit`); this revision generalizes
+   it to operate on a *held*, not-yet-posted amount rather than an
+   already-posted one — the one structural change this revision requires
+   of that seam, flagged for `casino`'s parallel fix to reconcile
+   (N1.10):
+      - **`ACTION_REFORFEIT`**: the held amount posts directly from the
+        holding representation into the ordinary §7.7 forfeiture
+        destination (`promo_liability`) — **never via `player_bonus`**,
+        even transiently. The net player-facing effect is identical to
+        the pre-revision text's outcome (the player nets zero on this
+        credit), but it now happens only after an explicit human
+        decision, carrying that decision's actor id and reason code on
+        the `HeldDispositionRecord` and a Progress entry — never as an
+        automatic, structurally-forced side effect of the win simply
+        arriving. This is the exact distinction `ledger-finance`'s
+        finding turns on: the *outcome* `ACTION_REFORFEIT` was never the
+        defect; auto-selecting it **without a human decision, while
+        calling it something else,** was.
+      - **`ACTION_ROUTE_TO_CASH`**: the held amount posts directly from
+        the holding representation into `player_cash`.
+      - **`ACTION_HOLD_FOR_REVIEW`**: a no-op on the money — the amount
+        is already exactly where this action says it should be. Staff's
+        later choice of (REFORFEIT) or (ROUTE_TO_CASH), per §T.7's
+        existing text, is an instance of one of the two bullets above,
+        applied manually with a reason code and (above CLAUDE.md's
+        four-eyes threshold) a second approver.
+      - Whichever action clears the record: if this was the **last**
+        outstanding `AOE` component for `G`, `G.status` flips
+        `pending_settlement → terminal_resolution` in the same
+        transaction. For N1.7's residual case (the record was created
+        atop a Grant already fully terminal), no status flip occurs —
+        only the `HeldDispositionRecord` and a new Progress entry are
+        appended, exactly as §T.7 already specifies ("every one of the
+        three actions appends a Progress entry to `G` even though `G` is
+        already terminal").
+
+   N1.4.1 (below) specifies the holding representation's required
+   properties. N1.6 Scenarios 1, 4 and 5 walk this mechanism through the
+   sportsbook-shaped, casino-shaped, late-arrival, and duplicate-delivery
+   cases in full.
+
 6. **Re-entry while already `pending_settlement`**: a second terminal
    trigger firing on a Grant already `pending_settlement` (e.g. a
    wagering-rule breach on a *different* bet fires while the Grant is
@@ -3156,58 +3362,186 @@ atomic, all-or-nothing posting per Grant, and this section does not
 reopen that. The full amount available at the moment `AOE` finally
 clears converts in one posting, exactly as §7.6 already specifies.
 
-#### N1.5 Locking and concurrency
+#### N1.4.1 The holding representation — required properties (added by
+this revision; a `ledger-finance` design question this section
+constrains, not finalizes)
 
-No new lock primitive. Step 2/5 above read `LockedExposure` `FOR UPDATE`
-and the `InFlightExposure` set under the **existing** `(tenant_id,
-grant_id)` advisory lock (doc10 §9), acquired in `ledger-accounting-
-model.md` §7.11's already-pinned order (HR-21: `correlation_id →
-grant_id → player_bonus projection`) — a settlement/void posting takes
-its own `(tenant_id, correlation_id)` lock first (HR-3), then `G`'s
-`(tenant_id, grant_id)` lock, then the `player_bonus` projection row —
-identical order whether the settlement event is closing out ordinary
-progress or resolving a `pending_settlement` deferral. No new
-lock-acquisition order is introduced; this section is a new **caller**
-of an order the ledger contract already fixed.
+Per this fix wave's own unifying technical contract ("a win credit
+reaching the G-2 seam is never posted to any player-accessible balance...
+held... until a human supplies G-2"), and closing `security`'s Phase 2
+finding (`SEC-W15-08`) that the prior design let a held credit leak into
+a **different** Grant's wagering pool through the shared, fungible
+`player_bonus` account — this section names the requirements any
+concrete holding representation must satisfy. **The exact account/schema
+shape remains `ledger-finance`'s to finalize** (§7.7 already flags
+"held" as needing either a dedicated holding account type or a
+non-ledger staff queue, calling it "a `ledger-finance` design question
+this section does not pre-empt" — unchanged by this revision), but the
+properties below are binding on whichever shape is chosen, because they
+are what closes the actual defects found:
+
+1. **Ledger-visible, not a side table.** The held value is a real posted
+   `LedgerTransaction`, in the same database transaction as the
+   settlement event, reachable by the same reconciliation machinery every
+   other account already uses. CLAUDE.md: "no side-table-only bonus
+   tracking that can't be reconciled"; doc10's own "Bonus must never
+   build... a parallel wallet or shadow balance" applies identically to
+   a held credit.
+2. **Grant-attributed, never fungible with another Grant's exposure —
+   the specific fix for `SEC-W15-08`.** The posting must be attributable
+   to the specific `G` via `GrantLedgerAttribution` (W2.5), the same
+   mechanism `LockedExposure` already uses, and must **not** be a credit
+   to the shared, per-`(tenant_id, player, asset_code)` `player_bonus`
+   account, which is fungible across every Grant that player holds —
+   crediting `player_bonus` even momentarily is exactly how the prior
+   design let a held amount leak into a different Grant's wagering pool.
+   Two structurally sound realizations exist; which applies depends on a
+   fact only `casino`'s parallel, not-yet-seen fix determines (N1.10):
+   - **If the exposure originates from an already-locked account**
+     (sportsbook, always; casino too, if `08 §16.10.1`'s routed
+     recommendation to adopt the lock shape for bonus-funded casino bets
+     is ratified): the held value stays exactly where it already sits,
+     in `player_locked_bonus`, attributed to `G` — instead of releasing
+     the lock into `player_bonus` at settlement (the ordinary, non-held
+     case), the WIN settlement's net proceeds are posted **within** the
+     locked-account family, still tagged to `G`, still excluded from
+     `player_bonus`. No new account type is needed for this shape; it
+     reuses exactly the Grant-attribution and reconciliation machinery
+     `LockedExposure` already reads.
+   - **If no locked account exists for the exposure** (casino's current,
+     unmodified immediate-absorb shape): a new, dedicated, Grant-attributed
+     holding account type is required. This section does not name its
+     `account_type` string — that is `ledger-finance`'s call, exactly as
+     `08 §16.9` already deferred the identical question for
+     `ACTION_HOLD_FOR_REVIEW`'s mechanism specifically; this section only
+     widens that same deferred question to cover the ordinary in-window
+     case too, since this revision has just shown the ordinary case needs
+     identical treatment.
+3. **Excluded from wagering-progress and spend/withdrawal projections,
+   for every Grant, not only `G`.** A held amount contributes to no
+   Grant's `P_net`/`P_firm` (Model C) while held, is never counted in the
+   player's withdrawable-cash projection, and is never a valid funding
+   source for a new stake's authorization check, under **any** Grant,
+   including `G` itself. This is a second, independent layer closing the
+   same leak item 2 closes at the account level: even if a future defect
+   made the holding account readable by a progress/authorization query,
+   this rule requires that query to explicitly exclude the holding
+   representation's `transaction_type`(s), not merely rely on it being a
+   different account.
+4. **Idempotent, keyed off the settlement event's own correlation, not
+   per-Grant.** `bonus_g2_hold:<correlation_id>` (naming convention only,
+   `ledger-finance`'s to finalize) — one hold posting per settlement
+   occurrence, mirroring §7.7's `bonus_forfeiture:<forfeiture_occurrence_id>`
+   discipline exactly, so a redelivered WIN callback can never create a
+   second hold for the same occurrence (N1.6 Scenario 5).
+5. **Reconcilable on its own, not folded silently into an existing sweep
+   it would corrupt.** A held amount is neither `player_bonus` exposure
+   (must never be read as available balance) nor yet a forfeiture/cash-out
+   (its fate is undecided) — folding it into either sweep's existing
+   zero-tolerance invariant would either overstate available bonus
+   balance or misstate a disposition that has not happened. N1.10 names
+   the new reconciliation stream this requires (`LF-12`).
+
+#### N1.5 Locking and concurrency — corrected (`LF-11`)
+
+**Corrected by this revision.** The pre-revision text claimed a `SELECT
+... FOR UPDATE` on `player_locked_bonus`/`ledger_entries` rows was part
+of what serializes N1.4's steps against a concurrent settlement. That
+claim is wrong and is withdrawn: `ledger_entries` is **append-only**
+(doc10's own standing rule, restated throughout `ledger-accounting-
+model.md`) — a row lock taken on existing rows cannot block, delay, or
+serialize a *new* `INSERT` from a concurrent transaction, because there
+is no row for the lock to hold until after that `INSERT` commits. A
+`FOR UPDATE` read in N1.3/N1.4 has exactly one legitimate purpose:
+**read-consistency of the sum being computed within the current
+transaction** (defense in depth against a concurrent mutation of a row
+this computation is mid-reading) — it is **not**, and was never, the
+mechanism preventing two concurrent transactions from both observing a
+stale `AOE` and both proceeding as if exposure were still open (or both
+closed).
+
+**What actually provides that serialization, restated plainly**: the
+`(tenant_id, grant_id)` advisory lock (doc10 §9), acquired by *every*
+transaction that reads or writes anything about `G` — the expiry-timer
+job, a settlement posting, a conversion attempt, a manual-review
+resolution, N1.4 step 5c's hold-clearing step — before that transaction
+reads `AOE` or writes `G.status`. Composed with the settlement/void
+posting's own `(tenant_id, correlation_id)` lock (HR-3), acquired first,
+in the pinned order `ledger-accounting-model.md` §7.11 already specifies
+(HR-21: `correlation_id → grant_id → player_bonus projection`). Two
+transactions contending for the same `G` literally cannot both be inside
+their `AOE`-reading/`G`-writing critical section at once — one blocks at
+`pg_advisory_xact_lock` until the other commits or rolls back. This is
+Postgres's actual serialization primitive for this design, and the only
+one; no `FOR UPDATE` claim is required or made for this purpose anywhere
+in this revision. Every remaining reference in N1.3/N1.4 to a live
+`FOR UPDATE` read is a read-consistency read only, retained for that
+narrower reason, never cited as a concurrency guarantee.
+
+No new lock primitive. N1.4.1's holding-representation posting acquires
+no lock beyond the two already named above — it is posted inside the
+same transaction, under the same `(tenant_id, grant_id)` lock, as the
+settlement event that produced it. Identical order whether the
+settlement event is closing out ordinary progress, resolving a
+`pending_settlement` deferral's value-reducing branch, or capturing a
+value-creating credit into a new `HeldDispositionRecord` (5b) or clearing
+an existing one (5c).
 
 #### N1.6 Scenario-by-scenario proof
 
 **Scenario 1 — bet placed → grant expires before win arrives → win
-arrives late.**
+arrives late (revised).**
 
 *Sportsbook-shaped (locked account exists).* `t0`: bet locks stake under
-`G`, `LockedExposure(G, t0) ≠ 0`. `t1 > t0`: `G`'s time limit elapses.
-Step 2 computes `AOE(G, t1) ⊇ LockedExposure(G, t1) ≠ ∅` (the lock has
-not been released — no settlement/void has occurred). Step 4 fires:
-`G.status = pending_settlement`, `terminal_resolution = expired`. `t2 >
-t1`: the WIN settlement arrives, correlated to the original lock. It is
-read under the same lock; because `G.status = pending_settlement`, not
-`expired`, this is an **ordinary** settlement credit to a
-non-terminal-in-the-TI-1-sense Grant (case F's shape: `Cr player_bonus
-(S+W)`) — posts normally. `LockedExposure(G, t2)` now reaches `0`.
-`AOE(G, t2) = ∅` (no other bet open). The deferred disposition applies:
-the just-credited balance (now entirely free) is forfeited via the
-ordinary §7.7 shape (the Offer's time limit already elapsed — the player
-does not keep a wagering-multiplier bonus past its own expiry merely
-because a bet was in flight; TI-1 only defers the **status flip**, it
-does not extend the Offer's own terms), and `G.status` flips
+`G`, `LockedExposure(G, t0) ≠ 0`. `t1 > t0`: `G`'s time limit elapses;
+`NewStakeEligibility(G, t1)` flips to `closed`. Step 2 computes
+`AOE(G, t1) ⊇ LockedExposure(G, t1) ≠ ∅` (the lock has not been
+released — no settlement/void has occurred). Step 4 fires: `G.status =
+pending_settlement`, `terminal_resolution = expired`. `t2 > t1`: the WIN
+settlement (amount `W`) arrives, correlated to the original lock, read
+under the same lock. Since eligibility already closed before this credit
+arrived, **step 5b applies (the corrected mechanism)**: the credit is
+**not** posted to `player_bonus`. `W` is captured and posted into the
+holding representation (N1.4.1) attributed to `G`; a
+`HeldDispositionRecord` is created; `LockedExposure(G, t2)` reaches `0`
+but is **replaced**, not cleared — `AOE(G, t2) = HeldDisposition(G, t2) ≠
+∅` (assuming no other bet is open). `G.status` **stays**
+`pending_settlement`. **No forfeiture posts at `t2`** — there is nothing
+to forfeit, because nothing was ever credited to a player-accessible
+balance. `t3 > t2`: a human answers G-2; say the answer is
+`ACTION_REFORFEIT`. Step 5c fires: `W` posts directly from the holding
+representation into `promo_liability`, carrying the staff actor id,
+reason code, and a Progress entry. This clears the last outstanding
+`AOE` component; `AOE(G, t3) = ∅`; `G.status` flips
 `pending_settlement → expired`. **Invariant holds**: at no instant did
-`G.status = expired` while `AOE(G, ·) ≠ ∅`; the WIN credit never landed
-against an already-terminal Grant.
+`G.status = expired` while `AOE(G, ·) ≠ ∅` (`HeldDisposition` is part of
+`AOE` precisely so this remains true across the whole episode); the WIN
+credit never landed against an already-terminal Grant, **and — the
+actual defect this revision closes — the WIN credit never landed
+against `player_bonus` at all before its disposition was decided**, so
+no post-then-reforfeit sequence exists anywhere in this trace to
+relabel.
 
 *Casino-shaped (no locked account).* `t0`: `postBet` posts a bonus-funded
 stake straight to `house_gaming`; a `WageringProgress` row records the
 contribution, `InFlightExposure(G, t0) = {that row}`. `t1 > t0`: `G`'s
-time limit elapses. Step 2 computes `AOE(G, t1) ⊇ InFlightExposure(G,
-t1) ≠ ∅`. Step 4 fires identically: `pending_settlement`,
-`terminal_resolution = expired`. `t2 > t1`: `postWin` delivers the round's
-win, correlated via `roundCorrelationID`. Handled identically to the
-sportsbook case above (this is exactly `architect`'s doc 29 §4.3
-scenario, now closed): the credit posts as an ordinary event against a
-`pending_settlement` (not yet terminal) Grant, `InFlightExposure` clears
-for that row, `AOE(G, t2) = ∅`, the newly-credited balance is forfeited,
-`G` flips to `expired`. **Invariant holds**, subject to N1.7's disclosed
-bound.
+time limit elapses; `NewStakeEligibility` closes. Step 2 computes
+`AOE(G, t1) ⊇ InFlightExposure(G, t1) ≠ ∅`. Step 4 fires identically:
+`pending_settlement`, `terminal_resolution = expired`. `t2 > t1`:
+`postWin` delivers the round's win (amount `W`), correlated via
+`roundCorrelationID`. **Corrected behavior, identical in kind to the
+sportsbook case (this is exactly `architect`'s doc 29 §4.3 scenario, now
+genuinely closed rather than relabelled)**: `W` is captured and parked in
+the holding representation (N1.4.1's casino-shape branch — a dedicated
+holding account type, since casino's current shape has no locked account
+to hold it in-place, pending casino's own parallel fix determining
+otherwise, N1.10); a `HeldDispositionRecord` is created; `InFlightExposure`'s
+member is replaced by it; `G` stays `pending_settlement`; nothing is
+credited or reforfeited automatically. Resolution proceeds identically to
+the sportsbook case once a human answers G-2 (step 5c). **Invariant
+holds, subject to N1.7's disclosed bound** — and, unlike the pre-revision
+text, holds in the sense `ledger-finance` actually required: no
+credit-then-reforfeit sequence exists anywhere in this trace.
 
 **Scenario 2 — Grant cancelled by staff while a bet is in flight.**
 Identical mechanism, different trigger: staff cancellation is one more
@@ -3219,7 +3553,10 @@ mandatory-reason-code rule for cancellation is satisfied at the
 *original* trigger, carried through to the eventual `cancelled` Progress
 entry — never lost by the deferral). The open bet resolves exactly as in
 Scenario 1 (win, loss/timeout, or void — N1.7 covers the loss/timeout
-case) and the Grant finalizes to `cancelled` only once `AOE = ∅`.
+case; a win is captured and held per step 5b, never posted-then-
+reforfeited) and the Grant finalizes to `cancelled` only once `AOE = ∅`
+— inclusive of any outstanding `HeldDisposition` member, per N1.3's
+revision.
 **Invariant holds identically** — cancellation is not a structurally
 different trigger from expiry for this mechanism's purposes, exactly as
 §T.10 already states expiry and cancellation share one posting shape.
@@ -3233,21 +3570,28 @@ about `G`. Whichever acquires the lock first commits its full effect
 of the relevant balance/status even begins evaluating. Two orderings,
 both safe:
 - **Expiry wins the race**: it observes `AOE(G, ·) ≠ ∅` (the win has not
-  posted yet from this transaction's point of view) and defers to
-  `pending_settlement`. The win-settlement transaction, now second,
-  observes `G.status = pending_settlement`, posts its ordinary credit,
-  clears `AOE`, and finalizes to `expired` in the same transaction —
-  exactly Scenario 1's sequence, just compressed to near-simultaneous
+  been observed yet from this transaction's point of view) and defers to
+  `pending_settlement`, closing `NewStakeEligibility`. The win-settlement
+  transaction, now second, observes `G.status = pending_settlement` —
+  since eligibility already closed before this credit arrived, step 5b
+  applies: the credit is captured into the holding representation, a
+  `HeldDispositionRecord` is created, and `AOE` remains nonzero (now via
+  that record) rather than clearing. `G` stays `pending_settlement` until
+  a human later answers G-2 for this occurrence (step 5c) — exactly
+  Scenario 1's corrected sequence, just compressed to near-simultaneous
   timestamps.
-- **Win-settlement wins the race**: it posts its ordinary credit first
-  (`G` is still `activated`/`in_progress` at this instant — the expiry
-  trigger has not yet run), which clears that bet's contribution to
-  `InFlightExposure`/`LockedExposure`. The expiry-timer transaction, now
-  second, computes `AOE(G, ·)` **after** the win has posted; if no other
-  bet is open, `AOE = ∅` and expiry writes the terminal status directly
-  (N1.4 step 3's ordinary path — the mechanism this section adds never
-  even engages, because by the time expiry's own transaction reads
-  `AOE`, there is nothing left to defer for).
+- **Win-settlement wins the race**: it posts its **ordinary** credit
+  first (`G` is still `activated`/`in_progress` at this instant —
+  `NewStakeEligibility` has not yet closed, the expiry trigger has not
+  yet run — so this is genuinely **not** G-2 at all: an ordinary
+  in-progress credit against a fully-eligible Grant), which clears that
+  bet's contribution to `InFlightExposure`/`LockedExposure`. The
+  expiry-timer transaction, now second, computes `AOE(G, ·)` **after**
+  the win has posted; if no other bet is open, `AOE = ∅` and expiry
+  writes the terminal status directly (N1.4 step 3's ordinary path — the
+  mechanism this section adds never even engages, because by the time
+  expiry's own transaction reads `AOE`, there is nothing left to defer
+  for).
 
 Both orderings are serialized by the same lock and produce the identical
 final state (`G.status = expired`, the bet's stake fully accounted for)
@@ -3258,7 +3602,75 @@ provides for every other Grant-completion race this document specifies
 interleaving is reachable**, because both participants take the same
 lock before observing or mutating `G`.
 
-#### N1.7 The honest gap — this does not eliminate G-2 for casino, only bounds it
+**Scenario 4 — new, added by this revision — a late WIN arrives after
+`G` has already validly reached full terminal status (N1.7's disclosed
+residual).** `t0`: bonus-funded bet placed under `G` (casino-shaped, no
+locked account). `t1`: `G`'s time limit elapses; `AOE(G, t1)` is
+computed — using N1.7's settlement-window mechanism, no WIN has been
+observed within the configured window, so the bet is presumed a loss for
+`AOE`-clearing purposes only (N1.7; this presumption is TECHNICAL,
+value-reducing, no G-2 involvement); `AOE(G, t1)` reaches `∅` (nothing
+else open) and `G` finalizes directly to `expired` (N1.4 step 3's
+ordinary path). At this instant, TI-1 holds exactly: `AOE(G, t1) = ∅`
+while `G.status(t1) = expired`, using every fact knowable at `t1`. `t2 >
+t1`: the provider, in violation of its own settlement-window SLA,
+delivers a genuine WIN callback (amount `W`) for the presumed-lost bet.
+This is a **new fact**, not a re-evaluation of `t1` — N1.2's Corollary
+TI-1a governs it: TI-1 is not retroactively falsified. **Corrected
+handling, closing the actual danger the pre-revision text left open**:
+this WIN is handled by the *identical* step 5b/N1.4.1 mechanism as any
+other value-creating closing event against exposure that was open when
+eligibility closed — `W` is captured and parked in the holding
+representation, attributed to `G`, with a new `HeldDispositionRecord`,
+**without reopening or changing `G.status`** (`G` is already, validly,
+`expired`; nothing here contests that). A Progress entry is appended atop
+the terminal record exactly as §T.7 already specifies for this case. A
+human answers G-2 exactly as in Scenario 1, acting on the
+`HeldDispositionRecord`, never on a posted-then-reforfeited balance.
+**This is the one place TI-1 is disclosed, not proven, to hold only
+probabilistically/by-SLA (N1.7) — but the disposition mechanism itself
+is now identical in every branch**: whether the win is early (Scenario
+1, `G` still `pending_settlement`) or late (this scenario, `G` already
+fully terminal), the money takes the same path — captured, held, never
+posted-then-reforfeited, disposed of only by a human-supplied G-2
+answer. This uniformity is itself part of the fix: the pre-revision
+text's defect was specifically that the "in-window" path (Scenario 1)
+was handled differently — and incorrectly — from what §T.7 already
+required for the "out-of-window" path (this scenario); this revision
+removes that divergence rather than narrowing it.
+
+**Scenario 5 — new, added by this revision — a duplicate/late-duplicate
+delivery of a held WIN never creates unrestricted cash (proves item 4 of
+the fix-wave directive).** A WIN callback for the stake in Scenario 1 or
+4 is redelivered (provider retry, at-least-once delivery) after its
+`HeldDispositionRecord` already exists (still `held`, or already
+resolved). Two sub-cases: **(a) still held** — the redelivered event
+carries the identical `correlation_id`/`provider_tx_id` as the first
+delivery; `ledger.Post`'s own `(tenant_id, idempotency_key)` uniqueness
+no-ops the settlement transaction itself before N1.4's mechanism re-runs
+at all (N1.5's confirmation, unchanged by this revision) — no second
+`HeldDispositionRecord`, no second hold posting; N1.4.1 item 4's own
+idempotency key (`bonus_g2_hold:<correlation_id>`) is a second,
+independent line of defense that would also reject a duplicate hold
+posting even if the outer idempotency check were somehow bypassed. **(b)
+already resolved** (say `ACTION_ROUTE_TO_CASH` already posted `W` to
+`player_cash`) — the redelivery hits the same outer idempotency key and
+no-ops before reaching N1.4.1 at all; the already-resolved
+`HeldDispositionRecord` is never re-read, re-posted, or re-decided. **In
+neither sub-case does any additional value reach `player_bonus` or
+`player_cash`.** No interleaving of duplicate delivery and G-2
+resolution produces unrestricted cash, because the only two things
+capable of moving value out of the holding representation are (i) the
+outer, DB-enforced idempotency key rejecting the duplicate before it is
+ever seen as "new," or (ii) a specific, once-only
+`HeldDispositionRecord.status` transition (`held → resolved_reforfeit` /
+`held → resolved_route_to_cash`) gated on that record's own current
+status — a second attempt to resolve an already-resolved record is
+rejected exactly as a second reversal of an already-reversed transaction
+is rejected today (§7.7's double-reversal protection, reused unmodified,
+not a new mechanism).
+
+#### N1.7 The honest gap — a technical loss-side presumption, and its residual (revised)
 
 **Stated plainly, not papered over**: `internal/casino`'s provider
 protocol has exactly three callback kinds — `bet`, `win`, `rollback`
@@ -3284,20 +3696,39 @@ provider could still violate its own delivery SLA and deliver a `win`
 callback after the window has already let `G` finalize to `expired`/
 `cancelled`/`forfeited`.
 
-**Consequence, stated as the proof requires**: TI-1, for the casino
-shape, holds **exactly and unconditionally within the settlement
-window**, and holds only **probabilistically/by-SLA** outside it. A
-`win` callback delivered after the window has elapsed and `G` has
-already finalized reproduces **exactly** G-2's original failure mode —
-narrowed from "the normal path for every bonus-funded bet's timing gap"
-(the framing this gate exists to fix) to "a rare, monitored, provider-
-SLA-violation exception," but **not eliminated in principle**. This
-section does not select which of §T.7's three actions (`ACTION_
-REFORFEIT`/`ACTION_ROUTE_TO_CASH`/`ACTION_HOLD_FOR_REVIEW`) handles that
-residual case — G-2 remains genuinely open for it, exactly as ADR 0039
-leaves it, just reached far less often and only under conditions that are
-themselves alarm-worthy (a provider violating its own settlement-window
-SLA is independently something `casino`'s monitoring should flag).
+**Correction this revision makes to the original framing (this is the
+core of `LF-2`'s fix, restated here as a correction to N1.7
+specifically):** the settlement-window mechanism above governs **only**
+the loss-side (value-reducing) presumption used to clear
+`InFlightExposure` for `AOE`'s purposes — it has **no bearing whatsoever
+on how a WIN is handled**. The pre-revision text's error was treating
+"still within the settlement window" as if it also meant "therefore any
+WIN arriving now is not G-2." It is not: per step 5b/N1.4.1, **every**
+WIN correlated to exposure that was open when eligibility closed is
+handled by the hold-then-human-decide mechanism, regardless of how much
+or how little time has elapsed. The settlement window's only job is:
+after this much time with no WIN observed, presume the bet lost, for the
+narrow, disclosed, value-reducing purpose of letting `AOE` clear and `G`
+finalize — a purely **TECHNICAL** mechanism, because a genuine loss has
+no dispute to have and nothing is credited.
+
+**Consequence, restated precisely**: the settlement-window presumption
+can be wrong exactly once per bet, in exactly one direction — it can
+presume a loss that turns out to have been a win. When that happens,
+N1.6 Scenario 4 is the mechanism that fires — **not** a bypass of G-2 and
+**not** a return to post-then-reforfeit; the late WIN is captured and
+held exactly as an in-window WIN would be. This is a materially smaller
+residual than the pre-revision text disclosed: the earlier version's own
+bound only protected "the normal path" from the P0 defect and left both
+the late-arriving case *and* the normal case dependent on G-2-selection
+risk (since the normal path itself silently reforfeited); this
+revision's residual is purely about **how long a Grant may sit in
+`pending_settlement`/already-terminal-with-an-open-hold before staff
+notices** (an operational/monitoring concern, closed by N1.10's new
+reconciliation stream, `LF-12`), not about any risk of silent G-2
+selection, which no longer exists on any path. This section does not
+select which of §T.7's three actions handles the held record — G-2
+remains genuinely open for it, exactly as ADR 0039 leaves it.
 
 **Two ways this residual could later be closed, named, neither designed
 here**: (a) `casino` defines and contractually/technically enforces a
@@ -3317,38 +3748,97 @@ grading event, `docs/decisions/0038`), `LockedExposure` clears only by a
 real event, never a timeout — TI-1 holds **exactly and unconditionally**
 for the sportsbook shape, with no residual.
 
-#### N1.8 Confirmation: this resolves G-2's original failure mode, without selecting G-2's answer
+#### N1.8 Confirmation: this resolves G-2's original failure mode, without selecting G-2's answer (revised — the non-selection argument `LF-2` found missing)
 
 ADR 0039 Decision 2's question is: "when a settlement or void credit
 arrives against a bonus Grant that has **already gone terminal**... what
-should the platform do with that credit?" Under N1.4's mechanism, **the
-premise of that question — a credit arriving against a Grant already
-recorded as terminal — does not occur** for any credit that arrives
-within N1.7's bound: the Grant is `pending_settlement`, not `expired`/
-`cancelled`/`forfeited`/`converted`, for exactly as long as that credit
-remains possible, by TI-1's construction. §T.7's three candidate actions
-therefore have **no case to act on** in the normal (in-window) path —
-not because one of them was chosen, but because the scenario they were
-built to resolve is prevented from arising. This is precisely what
-`docs/governance/task-registry.md`'s finding 1 anticipated ("never
-crediting against an already-terminal Grant, by construction") and what
-this section proves rather than asserts.
+should the platform do with that credit?" This revision answers a
+narrower, prior question first — **where does the credit's value
+physically sit while that question is unanswered** — and the answer is:
+nowhere a player, another Grant's wagering, or a withdrawal can reach,
+and nowhere `ledger-finance`'s reconciliation cannot see (N1.4.1).
 
-**This selects nothing from the Human Decision Register.** It does not
-choose `ACTION_REFORFEIT`/`ACTION_ROUTE_TO_CASH`/`ACTION_HOLD_FOR_REVIEW`
-(§T.7's mechanism, and the fully-specified data/posting shapes it
-describes, remain exactly as built — they now apply only to N1.7's
-narrow residual, not to the general case). It does not touch
-`OpenBetSelfExclusionPolicy` (Decision 1): a self-exclusion-driven void
-or forfeiture is just one more Path B trigger, handled by the identical
-mechanism, and this section takes no position on `SETTLE_NORMALLY` vs.
-`VOID_ON_SELF_EXCLUSION`. It does not touch the cashout proceeds-split or
-FD-1 (Decision 3): no cashout code exists, and nothing here creates or
-assumes one. Wave 1's W9 human-decision safety analysis stands
-unchanged — none of the three decisions is defaulted, guessed, or
-selected by this mechanism.
+**Why parking the value is not itself a fourth, silent answer — the
+argument `ledger-finance`'s finding showed the pre-revision text needed
+and did not have.** Each of G-2's three named actions requires a
+subsequent, distinguishable act before the player's position is actually
+settled:
 
-#### N1.9 Additive edits this section makes (named, not silently applied)
+- `ACTION_REFORFEIT` requires an act that **extinguishes** the value (a
+  `promo_liability` write-down).
+- `ACTION_ROUTE_TO_CASH` requires an act that **releases** the value to
+  `player_cash`.
+- `ACTION_HOLD_FOR_REVIEW` requires an act that **queues** the value for
+  a human, who then performs one of the two acts above.
+
+**Parking the value performs none of these three acts.** It extinguishes
+nothing (the value is still fully present, ledger-visible, in the
+holding representation — reconcilable, not written off). It releases
+nothing (the player cannot spend, withdraw, or wager against it, N1.4.1
+item 3). It does not even, by itself, constitute "queuing for review" in
+the operational sense `ACTION_HOLD_FOR_REVIEW` names, because parking
+happens **automatically and identically regardless of which of the three
+answers G-2 eventually receives** — it is not a queue entry created
+*because* `ACTION_HOLD_FOR_REVIEW` was chosen; it is the substrate every
+one of the three answers is applied *to*. That is exactly why N1.4.1
+describes it as the parking state any of G-2's three eventual answers
+would need to exist regardless of which is chosen, not as
+`ACTION_HOLD_FOR_REVIEW` under a different name. (N1.10's new
+reconciliation stream additionally guarantees a parked value can never
+simply be forgotten, which is the one respect in which parking resembles
+a queue — but resembling a queue's *visibility* property is not the same
+as *being* the `ACTION_HOLD_FOR_REVIEW` *decision*.) Parking satisfies
+none of the three actions' defining acts, and forecloses none of them —
+a human choosing any of the three later finds the value exactly where it
+needs to be to execute that choice, undamaged and undiminished by the
+parking itself.
+
+**Contrast with the defect this replaces, stated once more for the
+record.** The pre-revision mechanism performed `ACTION_REFORFEIT`'s
+exact defining act (a credit to `player_bonus` immediately followed by
+an extinguishing `bonus_forfeiture` debit) automatically, on every
+occurrence, with no human decision — that this happened while
+`G.status = pending_settlement` rather than `expired` changed the
+state-machine label, not the act performed. This revision's mechanism
+performs **none** of the three defining acts until a human supplies the
+missing answer; that is the actual, substantive difference
+`ledger-finance`'s finding required, not a re-description of the same
+behavior.
+
+**This still selects nothing from the Human Decision Register.**
+`ACTION_REFORFEIT`/`ACTION_ROUTE_TO_CASH`/`ACTION_HOLD_FOR_REVIEW` (§T.7)
+remain unselected — they now apply uniformly to **every** value-creating
+credit reaching G-2 (not narrowed to N1.7's residual, as the
+pre-revision text incorrectly claimed) and are executed exactly as §T.7
+already specifies, only now against a held amount rather than a
+posted-then-reversed one. `OpenBetSelfExclusionPolicy` (Decision 1) is
+untouched — a self-exclusion-driven void or forfeiture is one more Path
+B trigger, using the identical mechanism, and this section takes no
+position on `SETTLE_NORMALLY` vs. `VOID_ON_SELF_EXCLUSION`. The cashout
+proceeds-split/FD-1 (Decision 3) is untouched — no cashout code exists,
+and nothing here creates or assumes one. Wave 1's W9 human-decision
+safety analysis stands unchanged.
+
+#### N1.8.1 Every state transition, classified TECHNICAL or POLICY-DEPENDENT (exhaustive, per the fix wave's directive)
+
+| # | Transition / event | Classification | Why |
+|---|---|---|---|
+| 1 | `issued`→`activated` and all pre-exposure transitions (§1.3), unaffected by N1 | TECHNICAL | No exposure exists yet |
+| 2 | `activated`/`in_progress` → `pending_settlement` (any Path B trigger fires while `AOE ≠ ∅`) | TECHNICAL | `NewStakeEligibility` closing is, by definition, purely a "no new stakes" signal; it carries no claim about disposition and needs no G-2 answer to fire |
+| 3 | `activated`/`in_progress` → terminal directly (Path B trigger fires while `AOE = ∅`) | TECHNICAL | No exposure existed to dispute |
+| 4 | `completed` blocked (stays `completed`) at a conversion attempt while `AOE ≠ ∅` (including a nonzero `HeldDisposition`) | TECHNICAL | Same class of precondition-block T.12 already establishes for RG/Risk/`AssetAuthorization` denial; a block is not a disposition choice |
+| 5 | `completed → converted`, once every `AOE` component (including every `HeldDisposition` record) clears | TECHNICAL | Mechanical re-trigger of an already-satisfied precondition — the flip itself is mechanical even though satisfying the precondition may itself depend on row 8/9/10 below having already resolved |
+| 6 | Value-reducing closing event clears a `LockedExposure`/`InFlightExposure` member (loss, VOID, ROLLBACK, or presumed-loss settlement-window elapse) | TECHNICAL | No credit is created; nothing to dispute; matches `casino`'s endorsed `B(G)`/`L(G)` split |
+| 7 | Value-creating closing event (WIN) captured into a new `HeldDispositionRecord`, replacing a `LockedExposure`/`InFlightExposure` member (step 5b) | TECHNICAL | Recording-and-parking a fact is not a disposition choice (N1.8's proof); it performs none of G-2's three defining acts |
+| 8 | `HeldDispositionRecord` resolves via `ACTION_REFORFEIT` | POLICY-DEPENDENT | Requires a human-supplied G-2 answer before this act may occur |
+| 9 | `HeldDispositionRecord` resolves via `ACTION_ROUTE_TO_CASH` | POLICY-DEPENDENT | Same |
+| 10 | `HeldDispositionRecord` resolves via `ACTION_HOLD_FOR_REVIEW`'s own later manual sub-choice of row 8 or 9 | POLICY-DEPENDENT | Same, plus an additional manual step §T.7 already specifies |
+| 11 | `pending_settlement → terminal_resolution`, once all `AOE` components (including every `HeldDisposition` record) clear | TECHNICAL trigger, gated on a precondition that may itself be POLICY-DEPENDENT | The flip is mechanical once the precondition holds; if the last outstanding component was a `HeldDisposition` record, satisfying the precondition required row 8/9/10 to have already happened |
+| 12 | A late WIN captured into a `HeldDispositionRecord` atop a Grant already fully `TERMINAL` (N1.7 residual, N1.6 Scenario 4) | TECHNICAL | Identical reasoning to row 7; does not reopen or change `G.status` |
+| 13 | Second/re-entry Path B trigger while already `pending_settlement`, severity-ranking `terminal_resolution` | TECHNICAL | Mechanical comparison of reason-code severity; unchanged from the pre-revision text |
+| 14 | `Any → reversed` (append-only compensating transition) | TECHNICAL | Excluded from `TERMINAL` by N1.2; not a forward-settlement-credit case |
+
+#### N1.9 Additive edits this section makes (named, not silently applied) — revised
 
 - §1.2's Grant-state table gains one row: `pending_settlement` (N1.4),
   inserted as an additional non-`TERMINAL` status, no existing row
@@ -3356,51 +3846,175 @@ selected by this mechanism.
 - §1.3's transition table gains: `activated`/`in_progress →
   pending_settlement` (trigger: any Path B trigger firing while `AOE ≠
   ∅`) and `pending_settlement → {expired|cancelled|forfeited}` (trigger:
-  the `AOE`-clearing event that brings exposure to `∅`) — both additive
-  rows, no existing row's trigger conditions changed except that they are
-  now understood to gate on `AOE(G, ·) = ∅` as a precondition (N1.4 step
-  2/3), which was previously unstated because `AOE` did not exist as a
-  concept until this section.
-- §T.7's "rare fourth entry path... covered by the identical mechanism"
-  claim is now backed by N1.4/N1.6 instead of asserted.
+  every `AOE` component, including every `HeldDisposition` record,
+  reaching `∅`) — both additive rows, no existing row's trigger
+  conditions changed except that they are now understood to gate on
+  `AOE(G, ·) = ∅` as a precondition (N1.4 step 2/3), which was previously
+  unstated because `AOE` did not exist as a concept until this section.
+- **`AOE`'s definition gains a third component, `HeldDisposition(G, t)`**
+  (N1.3), closing `LF-2`: without it, a WIN's mere *arrival* was
+  indistinguishable from its *disposition*, which is exactly how the
+  pre-revision mechanism auto-selected `ACTION_REFORFEIT`.
+- **A new typed projection, `HeldDispositionRecord`** (Bonus-Engine-owned,
+  "typed projection, not a side table" discipline, mirroring
+  `GrantActivation`): `grant_id`, `correlation_id`, `amount`,
+  `asset_code`, `observed_at`, `origin_kind` (`locked_release` /
+  `in_flight_credit` / `post_terminal_late_arrival`), `status` (`held` /
+  `resolved_reforfeit` / `resolved_route_to_cash`), `resolved_at`,
+  `resolved_by`, `resolution_reason_code`.
+- **Two new Progress reason codes**: `g2_credit_held` (a value-creating
+  credit was captured and parked, not posted) and
+  `g2_disposition_applied` (a human-supplied G-2 answer was applied to a
+  specific `HeldDispositionRecord`) — both required by this document's
+  own Progress-trail completeness mandate; N1.11 names the adversarial
+  tests proving neither is ever skipped.
+- **A correction to §T.7's `ACTION_REFORFEIT` bullet's literal
+  posting-order text, routed here rather than edited in place** (§T.7 is
+  frozen Technical Contract text this section may only extend, per this
+  document's own Wave 1.5 dispatch instruction): wherever
+  `ACTION_REFORFEIT` is applied, per this section's N1.4 step 5c, it
+  posts from the holding representation directly to `promo_liability` —
+  it never performs §T.7's literally-described "post the inbound
+  credit... then... post a second `bonus_forfeiture`" sequence, because
+  the inbound credit is never posted in the first place. Flagged for
+  `ledger-finance` ratification, since §T.7's text is jointly relevant to
+  this document's Terminal-Grant Technical Contract and `ledger-finance`'s
+  own §7.7.
+- **`ledger-finance`'s own §7.7 "Gated on G-2" paragraph's
+  `ACTION_HOLD_FOR_REVIEW`-only holding-mechanism framing is
+  generalized**: N1.4.1's holding representation is required for
+  **every** value-creating G-2 occurrence, not only ones where staff has
+  additionally chosen `ACTION_HOLD_FOR_REVIEW` as the eventual answer —
+  restated as a correction routed to `ledger-finance`, not adopted
+  unilaterally (N1.10).
+- **`LF-11` correction** (N1.5): the `FOR UPDATE` claim is withdrawn as a
+  concurrency-serialization claim; the advisory-lock composition is
+  restated as the actual mechanism, unchanged in substance from what
+  N1.5 always relied on operationally — only the prior text's
+  *description* of why it works was wrong.
 - §T.9's "expiry while a stake is locked... reached the moment that
   locked stake's settlement or void/rollback later arrives" is
   unchanged in substance; N1.4 is the mechanism that makes "reached the
-  moment" precise (previously it meant "G-2 fires then"; now it means
-  "the deferred finalization runs then").
+  moment" precise (previously it meant "G-2 fires then, auto-resolved";
+  now it means "the credit is captured and held then, disposed of only
+  once a human answers G-2").
 - A new Progress reason code, `open_exposure_outstanding` (N1.4 Path A),
   alongside the existing RG/Risk/`AssetAuthorization` reason codes at the
-  conversion checkpoint (T.12).
-- No change to §6/§7 (ledger interaction) beyond what `ledger-finance`'s
-  own §7.7 "Gated on G-2" paragraph already anticipates as
-  answer-independent — the ordinary settlement/void/forfeiture posting
-  shapes are reused verbatim; only the **Grant-side status-flip timing**
-  changes.
+  conversion checkpoint (T.12) — unchanged from the pre-revision text,
+  restated here because Path A's block now also fires on a nonzero
+  `HeldDisposition` component (N1.3).
+- A new reconciliation stream is named, not designed (N1.10), closing
+  `LF-12`.
 
-#### N1.10 Cross-domain dependencies
+#### N1.10 Cross-domain dependencies — revised
 
-- **`casino`** (parallel `4HB1W15-01` dispatch, not yet seen): the exact
-  settlement-window value/mechanism (N1.7) and any `postWin`/
+- **`casino`** (parallel `4HB1FW-02` dispatch this fix wave, not yet
+  seen): the exact settlement-window value/mechanism (N1.7, now scoped
+  strictly to the loss-side presumption) and any `postWin`/
   `postRollback` destination-resolution design are `casino`'s to
   propose; this section states only the Bonus-Engine-side precondition
-  (`AOE`-clearing must be observable to Bonus Engine) that any such
-  design must satisfy. If `casino`'s independent analysis reaches a
-  different mechanism for the same problem, this section's own claim is
-  the one that should yield, per this dispatch's own instruction.
+  (`AOE`-clearing, and now hold-capture, must be observable to and
+  callable from Bonus Engine) that any such design must satisfy. **New
+  dependency this revision introduces**: whether casino's bonus-funded
+  bet posting adopts the locked-account shape (`08 §16.10.1`'s routed
+  recommendation) determines which of N1.4.1 item 2's two holding-
+  representation branches applies to casino's `InFlightExposure` case.
+  This section states the requirement (Grant-attributed, never fungible
+  with `player_bonus`) that either branch must satisfy; it does not
+  choose between them, and does not see casino's own parallel fix this
+  round, per this dispatch's own instruction. `casino`'s `08 §16.9` seam
+  (`bonusengine.ResolveTerminalGrantCredit`) is generalized by N1.4 step
+  5c to operate on a held, not-yet-posted amount — flagged for
+  `casino`'s parallel fix to reconcile against, since `casino`'s own text
+  (not seen this round in its revised form) previously described the
+  seam as acting on an amount `postWin` was about to post.
 - **`ledger-finance`**: confirmation that the `AOE`-clearing read path
   (N1.3's `LockedExposure`/`InFlightExposure` queries) is exactly
-  §7.10's already-specified R1–R4 reads, no new query shape; and that
-  the "post now, flip status later" split in N1.4 step 4 does not
-  conflict with §7.7's existing partial-forfeiture idempotency
-  (`bonus_forfeiture:<forfeiture_occurrence_id>`, per-occurrence, not
-  per-Grant — already compatible, re-confirmed here, not re-designed).
-- **`security`**: no new actor/privilege surface — the `pending_
-  settlement` transition is system-triggered exactly like the terminal
-  transitions it replaces; no new RBAC role is needed.
-- **`qa`**: N1.6's three scenarios (plus their sportsbook/casino
-  sub-cases and N1.7's settlement-window-exceeded case) are the minimum
-  adversarial test set for this mechanism — named for the parallel
-  `4HB1W15-05` test-matrix dispatch, not designed here.
+  §7.10's already-specified R1–R4 reads, no new query shape for those two
+  components; `HeldDisposition`'s own read is new and is named, not yet
+  specified as a query shape, for `ledger-finance` to confirm fits the
+  same R1–R4 family or requires a fifth. Ratification of N1.4.1's
+  holding-representation property list and the concrete account/schema
+  shape (item 2's two branches). Ratification of the §T.7
+  `ACTION_REFORFEIT` posting-order correction and the §7.7
+  `ACTION_HOLD_FOR_REVIEW`-framing generalization (both N1.9). Design of
+  the reconciliation stream named immediately below (`LF-12`).
+- **Reconciliation, new — closes `LF-12`.** The pre-revision design left
+  a Grant sitting in `pending_settlement` with an outstanding
+  `HeldDisposition` invisible to every existing sweep — neither the
+  hourly ledger-vs-projection sweep, nor B1's `promo_liability`-vs-
+  `player_bonus` invariant, reads the holding representation at all (by
+  design, N1.4.1 item 5: it is neither). This section names, but does
+  not build or fully specify, a new reconciliation stream: (i) an
+  **aging check** — every Grant with an open `HeldDispositionRecord`
+  older than a configurable threshold surfaces as an ops alert, not
+  merely a manual-review queue entry a human might not check; (ii) a
+  **balance check** — the holding representation's ledger-posted total,
+  per `(tenant_id, asset_code)`, reconciles exactly against the sum of
+  open `HeldDispositionRecord.amount` values, the same zero-tolerance
+  discipline B1 already applies elsewhere. Both are `ledger-finance`/
+  `reconciliation-model.md`'s to design and own; this section states only
+  that the gap exists and what it must close.
+- **`security`**: confirmation that N1.4.1 items 2/3 actually close
+  `SEC-W15-08` (the prior design's leak of a held credit into a different
+  Grant's wagering pool via the shared `player_bonus` account) — this
+  section's own claim, not yet independently verified; and confirmation
+  that `pending_settlement`'s existing four-eyes/RBAC treatment
+  (`security`'s own Wave 1.5 Phase 2 promise) extends correctly to
+  `HeldDispositionRecord` resolution, which is itself a manual,
+  financially-consequential staff action requiring the same reason-
+  code/four-eyes discipline as any other manual bonus adjustment
+  (CLAUDE.md). No new actor/privilege surface beyond that — the
+  `pending_settlement` transition itself is still system-triggered
+  exactly like the terminal transitions it replaces.
+- **`qa`**: N1.6's five scenarios (the original three plus this
+  revision's Scenario 4 late-arrival case and Scenario 5
+  duplicate-delivery case), plus N1.11's two named adversarial tests, are
+  the minimum test set for this mechanism — named for the parallel
+  `4HB1W15-05`/fix-wave test-matrix dispatch, not designed here.
+
+#### N1.11 Adversarial tests this revision adds (design-level; `qa` owns the implementation, per the fix wave's own dispatch split)
+
+- **Test `G2-HOLD-1` — "no post-then-reforfeit path exists."** Setup: a
+  Grant `G` with open exposure (either shape) whose `NewStakeEligibility`
+  has already closed (`pending_settlement`, or fully terminal per
+  Scenario 4). Deliver a WIN settlement correlated to that exposure.
+  Assertion (must hold for **any** implementation, not just the
+  reference design): there is no point in the resulting ledger history at
+  which a credit to `player_bonus` (or `player_cash`) attributable to
+  this settlement's `correlation_id` exists **unless** it is immediately
+  preceded, in Progress-trail order, by a `HeldDispositionRecord` for the
+  identical `correlation_id`/amount whose `status` transitioned away from
+  `held` carrying a `resolution_reason_code` and (above threshold) a
+  second approver. Concretely: assert that no single database transaction
+  ever contains **both** a `player_bonus` credit for this `correlation_id`
+  **and** a `bonus_forfeiture` debit for the same amount, unless a
+  `HeldDispositionRecord.resolved_at` timestamp for that `correlation_id`
+  strictly predates that transaction. This test is written specifically to
+  **fail** against a reimplementation of the pre-revision mechanism
+  (post-then-reforfeit in one transaction, no prior `HeldDispositionRecord`
+  at all) — the exact regression this fix wave exists to prevent.
+- **Test `G2-HOLD-2` — "a held credit is never spendable or wagerable
+  before resolution."** Setup: a `HeldDispositionRecord` with `status =
+  held`, amount `W`, under Grant `G`, for a player who also holds a
+  second, unrelated Grant `G2` on the same `(player, asset_code)`.
+  Assertions, each independently sufficient to fail the test: (i) a
+  wagering-authorization check for a new stake under `G2` returns an
+  available-funding amount that does not include `W`; (ii) `W` does not
+  appear in Model C's computed `P_net`/`P_firm` for `G`, `G2`, or any
+  other Grant; (iii) `W` does not appear in the player's withdrawable-cash
+  projection; (iv) a direct attempt to construct a funding-split
+  instruction referencing `W` as a `player_bonus` or `player_cash` source
+  is rejected for lack of a source balance, because no such balance was
+  ever created. This test is written specifically to **fail** the instant
+  any implementation posts a held credit into `player_bonus` even
+  transiently before G-2 resolves it (closing `SEC-W15-08`'s exact leak) —
+  a fungible-account posting would pass (i)–(iii) only by accident of
+  timing, and the test must exercise `G2`'s wagering concurrently with
+  `G`'s hold, not merely assert statically, to catch that accident.
+
+Both named here for `qa`'s test-matrix ownership, not designed as code by
+this section.
 
 ### N2. Bonus targeting / bulk-assignment validation (gate §C)
 
