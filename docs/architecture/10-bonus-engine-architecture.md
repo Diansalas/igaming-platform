@@ -3750,11 +3750,20 @@ Bonus Engine's own implementation of it, adopted verbatim from `08
 bonusengine.RecheckGrantExposure(
     ctx context.Context,
     tx <db tx>,
+    tenantID uuid.UUID,
     grantID uuid.UUID,
     triggeringLedgerTransactionID uuid.UUID,
     triggerKind GrantExposureTriggerKind,
 ) (newStatus bonusengine.GrantStatus, err error)
 ```
+
+**Signature reconciled against the real, shipped, tested code (Stage
+4H-B1 Wave 2 Phase 3/7 — see `08 §16.21`'s identical correction for the
+full reasoning, adopted here verbatim): this pseudocode is widened by one
+parameter, `tenantID uuid.UUID`, present in `internal/bonus.
+RecheckGrantExposure`'s real signature and needed to scope its live
+`AOE` recompute's tenant-scoped read queries. `casino`'s two real call
+sites (`internal/casino/bonus_settlement.go`) already hold and pass it.**
 
 **What "recompute `AOE(G, ·)` live" means concretely, against this
 document's own model.** Nothing new is computed — this seam re-enters the

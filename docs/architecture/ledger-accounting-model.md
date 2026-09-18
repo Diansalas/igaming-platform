@@ -7322,17 +7322,27 @@ anywhere. Closed here using only mechanisms this design already has — no
 new posting shape, no new economic outcome:
 
 - A rollback naming `settlement_ledger_transaction_id` as its target,
-  while that record's `status = 'held'`, is handled by `postRollback`'s
-  **existing, unmodified generic entry-inversion** (`08 §16.1`) — the
-  exact inverse of every entry the hold-capture posting made (`Cr
-  house_gaming payout_amount`, and `Cr player_locked_bonus
-  released_lock_amount` if present — restoring the locked balance is
-  deliberately **not** attempted, since `L(G)` already closed to zero and
-  reversing a win that never should have happened is a straight reversal
-  to `house_gaming`, not a resurrection of a lock; if the underlying bet
-  itself also needs unwinding, that is `postRollback`'s existing, separate
-  "two independent reversals" rule, `08 §16.11`, unaffected here), posted
-  in the **same transaction** as a guarded status update:
+  while that record's `status = 'held'`, is handled by `postRollback` —
+  **not** a literal, leg-by-leg inversion of the hold-capture posting
+  (a prior revision of this bullet said exactly that, and then
+  self-contradicted its own very next clause by writing the released-lock
+  leg's inverse as `Cr player_locked_bonus released_lock_amount` —
+  literally restoring the lock — while that same clause simultaneously
+  said restoring the locked balance is "deliberately not attempted"; found
+  and corrected during Stage 4H-B1 Wave 2's real implementation, `08
+  §16.15`'s identical correction, adopted here verbatim since this section
+  is the source `08 §16.15` quotes). **Both legs reverse straight to
+  `house_gaming`, debiting `player_bonus_held` for the full amount each
+  originally credited it**: `Dr player_bonus_held payout_amount / Cr
+  house_gaming payout_amount`, and `Dr player_bonus_held
+  released_lock_amount / Cr house_gaming released_lock_amount` if present
+  — restoring the locked balance is deliberately **not** attempted, since
+  `L(G)` already closed to zero and reversing a win that never should have
+  happened is a straight reversal to `house_gaming`, not a resurrection of
+  a lock; if the underlying bet itself also needs unwinding, that is
+  `postRollback`'s existing, separate "two independent reversals" rule,
+  `08 §16.11`, unaffected here. This is posted in the **same transaction**
+  as a guarded status update:
   `UPDATE bonus_held_dispositions SET status = 'voided_by_rollback',
   resolution_ledger_transaction_id = <the reversal's own id> WHERE id = ?
   AND status = 'held'` — the `WHERE status = 'held'` clause is the

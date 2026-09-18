@@ -614,6 +614,65 @@ Wave 2, CRM, Affiliate, Gamification, or Back Office/Partner
 Console/B2C frontend implementation proceeds without a new human
 directive.
 
+## Stage 4H-B1, Wave 2 — Real Bonus Engine Implementation (Phases 1-10)
+
+**AUTHORIZED** (human directive, real code this time — not design).
+Commits `d145ba1`..`be2eed6` (Phases 1-9) plus this Phase 10
+(architect, independent cross-domain composition certification — this
+entry). `docs/progress.md`/`docs/active-stage.md` have not yet been
+re-narrated for this Wave at the time of this entry (both still end at
+the Wave 1.5 Fix Round 2 gate) — recorded here first, per this Phase's
+own governance-update task, so the real implementation state is not left
+undocumented anywhere.
+
+| ID | Owner | Status | Dependencies | Files owned | Tests | Docs | Blockers |
+|---|---|---|---|---|---|---|---|
+| W2-P1 | ledger-finance | Done | Wave 1.5 Fix Round 2 (§7.7.2 frozen) | `internal/ledger/bonus_mirror.go` (Rule B2 generator), `internal/money` (shared rounding), migrations `0050`-`0052` | `bonus_mirror_integration_test.go`, `bonus_migrations_integration_test.go`, `money_test.go` | none this phase | none |
+| W2-P2 | backend | Done | W2-P1 | migrations `0053`-`0060`, `internal/bonus` schema/repository skeleton, `internal/economicop` skeleton, RBAC wiring | `bonus_integration_test.go`, `economicop_integration_test.go` | none this phase | none |
+| W2-P3 | bonus-engine | Done | W2-P1, W2-P2 | `internal/bonus` (lifecycle, AOE/eligibility, attribution, `held_disposition_ops.go`'s `ResolveTerminalGrantCredit`/`RecheckGrantExposure`, 5 bonus types, EOI enforcement, SEP-1, four-eyes, HTTP handlers), migrations `0061`-`0064` | `lifecycle_integration_test.go`, `bonus_integration_test.go` | none this phase (doc reconciliation deferred to Phase 10) | Signature drift vs. doc 08 §16.9/§16.21, doc 10 §N1.4.2 pseudocode — **closed this Phase 10** (docs corrected to match shipped code) |
+| W2-P4 | risk | Done | W2-P3 | `internal/risk/cumulative.go` (new `bonus_conversion` entry), migration `0065` | risk integration suite | ADR 0031 §16 checklist completed | none |
+| W2-P5 | identity-compliance | Done | W2-P3 | `internal/bonus/held_disposition_ops.go` (T.1 gate fix), posting-shape fix found in passing | `TestHeldDisposition_ResolveRouteToCash_BlockedBySelfExclusion`/`_BlockedByRiskDeny`/`_AllowedPlayerSucceeds` | inline doc comments | **Real gap closed**: `ACTION_ROUTE_TO_CASH` previously bypassed RG/Risk/AssetAuthorization entirely — see `ErrHeldDispositionActionDenied`'s doc comment |
+| W2-P6 | security | Done | W2-P3 | migration `0066` (SEP-1 Step-0 self-proof), bulk-worker error-masking fix (`targeting.go`'s `ConsumeRootBudget` error-conflation bug) | new SEP-1 core-case test (first ever exercise of it) | none this phase | none |
+| W2-P7 | casino | Done | W2-P3, W2-P4, W2-P5, W2-P6 | `internal/casino/bonus_settlement.go` (new), `types.go`, `orchestrator.go` (`postWin`/`postRollback` G-2 wiring) | `bonus_settlement_integration_test.go` (incl. 2 real-race tests under `-race`) | doc 08 §16 implemented against — **§16.15's self-contradictory prose found here, closed this Phase 10** | LF-10 (rollback of an already-resolved disposition) correctly still routed to ledger-finance, not worked around |
+| W2-P8 | sportsbook | Done | W2-P7 | none (read-only boundary review, no code) | n/a | n/a | No P0/P1 found; no `internal/sportsbook` package exists, confirming Phase 7's boundary claims have no live sportsbook counter-example yet |
+| W2-P9 | qa | Done | W2-P1..P8 | `internal/bonus/lifecycle_integration_test.go` (3 new adversarial tests: concurrent-terminate, concurrent-reversal, cross-brand isolation), `docs/testing/testing-strategy.md` reconciliation | full suite re-run `-race -tags=integration`, zero flakes across 3-5x repeats per touched package | testing-strategy.md test-ID reconciliation | QA-W2P9-1..6 (P2/P3, non-blocking, recorded) |
+| W2-P10 | architect | Done | W2-P1..P9 | `docs/architecture/08-casino-integration-architecture.md` (§16.9/§16.15/§16.21 signature-drift + self-contradiction fixes), `docs/architecture/10-bonus-engine-architecture.md` (§N1.4.2 signature-drift fix), `docs/governance/ownership.md`, `docs/governance/task-registry.md` (this entry) | full validation floor re-run (`gofmt`, `go build`, `go vet`, `go test -count=1 ./...`, `go test -tags=integration -count=1 ./...`, `go test -race -tags=integration -count=1 ./...`) | this entry | **New finding, not closed here** — EOI/Risk lock-ordering reversal in `IssueSingleManualGrant`/`RunStaticBulkGrantJob` (see Dependency Request Log `DR-4HB1W2-01` below), dormant today, **adjudicated as a real pre-condition that must be fixed before any `bonus_grant`-scoped cumulative Risk rule is added, not a permanently-acceptable "documented risk"** |
+
+**Certification verdict (Phase 10, independent — this session did not
+author any Phase 1-9 code): CERTIFY**, with one finding routed forward
+(not blocking today, blocking a specific future change — see
+`DR-4HB1W2-01`) and no new composition gap found across the full 9-phase
+chain. Full reasoning in this Phase's completion report to the human.
+
+**What Phase 10 fixed (docs only, no domain-logic redesign):**
+- `08 §16.15` item 1's genuine internal self-contradiction (wrote `Cr
+  player_locked_bonus released_lock_amount` — literally restoring the
+  lock — one sentence before stating restoration is "deliberately never
+  attempted"). The same contradictory phrasing, being the source `08
+  §16.15` quoted "verbatim" from, was also present in
+  `ledger-accounting-model.md` §7.7.2.7 and is corrected there identically
+  (ledger-finance's own frozen text, corrected by architect as a
+  cross-cutting fix per CLAUDE.md's "no specialist redesigns shared
+  architecture unilaterally... cross-cutting changes go through the
+  architect" rule — this is a wording correction of already-decided
+  content, not a new design decision). Both now state, unambiguously,
+  matching the real code and §16.18's worked proof: both legs reverse
+  straight to `house_gaming`; `player_locked_bonus` is never touched.
+- `08 §16.9`/`§16.21` and `10 §N1.4.2`'s pseudocode signatures, reconciled
+  against the real, shipped, tested Go signatures: `correlationID string`
+  → `uuid.UUID`; `payoutAmount`/`releasedLockAmount decimal.Decimal` →
+  `*big.Int` (this platform has no `decimal.Decimal` dependency anywhere);
+  `RecheckGrantExposure` gained its missing `tenantID uuid.UUID`
+  parameter. No implementation defect found — the code is correct per
+  CLAUDE.md's own money-representation rule; only the illustrative
+  pseudocode was stale.
+
+**What Phase 10 found and did NOT fix — routed as a Dependency Request:**
+
+| ID | Stage | Requesting task | Target domain | What's needed | Filed | Resolved |
+|---|---|---|---|---|---|---|
+| DR-4HB1W2-01 | 4H-B1 Wave 2 Phase 10 | Architect's independent composition review | bonus-engine (+ risk, on the other side of the dependency) | `IssueSingleManualGrant` (`internal/bonus/targeting.go`) and `RunStaticBulkGrantJob`'s `runBulkGrantJobItem` both call `economicop.ConsumeRootBudget` (the EOI root row's `FOR UPDATE`, doc 34 §5.4) **before** calling `ActivateGrant`, which runs its own full `AssetAuthorization → RG → Risk` gate chain (T.1) — including Risk's own `pg_advisory_xact_lock` (`internal/risk/evaluator.go:338`) whenever a matching cumulative rule exists. This reverses doc 34 §5.3 rule 4's canonical order ("Risk's advisory lock is always acquired BEFORE the EOI row lock, never after") for this second, later gate chain, and places the EOI consume before the true "effecting write" (`ActivateGrant`'s ledger posting), not immediately before it as §5.3 rule 3 requires. **Currently dormant**: verified against live code that no seeded `risk_rules` row scopes a cumulative kind to `bonus_grant`/activation (only `bonus_conversion` exists, Phase 4), so `Rule.breach()`'s advisory lock is never actually reached from this path today — confirmed by reading `internal/risk/cumulative.go` and `evaluator.go` directly, not asserted. **Not a small, mechanical fix**: `ActivateGrant` is shared by every bonus type (deposit/reload/cashback templates in `types.go` call it with no EOI involvement at all), so moving the EOI consume to "immediately before `ActivateGrant`'s posting" requires either widening `ActivateGrant`'s own signature with an EOI-consume callback/parameter (leaking EOI-specific concerns into an EOI-agnostic shared function) or restructuring `IssueSingleManualGrant`/`runBulkGrantJobItem` to interleave EOI consumption inside a currently-atomic activation call — a real design decision bonus-engine should make, not one this review should make unilaterally from outside the package. **Adjudicated, not merely re-disclosed**: this is upgraded from "documented, monitored, acceptable as-is" to an explicit **must-fix-before** condition — risk must not add a `bonus_grant`/`bonus_grant_activation`-scoped cumulative rule, and bonus-engine must not treat this Wave as fully closed on the EOI/Risk composition question, until this ordering is corrected. The dormancy is a reason it did not block this Wave's certification, not a reason to leave it unscheduled indefinitely | Stage 4H-B1 Wave 2 Phase 10 | Open |
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

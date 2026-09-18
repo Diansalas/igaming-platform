@@ -1351,13 +1351,30 @@ bonusengine.ResolveTerminalGrantCredit(
     ctx context.Context,
     tx <db tx>,
     grantID uuid.UUID,
-    correlationID string,
+    correlationID uuid.UUID,
     creditKind CreditKind,
-    payoutAmount decimal.Decimal,      // W, §16.4's win payout
-    releasedLockAmount decimal.Decimal, // X, Step 1b's net_outstanding_locked
+    payoutAmount *big.Int,      // W, §16.4's win payout
+    releasedLockAmount *big.Int, // X, Step 1b's net_outstanding_locked
     settlementLedgerTransactionID uuid.UUID, // new this round — see below
 ) (heldDispositionID uuid.UUID, err error)
 ```
+
+**Signature reconciled against the real, shipped, tested code (Stage
+4H-B1 Wave 2 Phase 3/7; certified by Wave 2's independent composition
+review) — this pseudocode previously carried `correlationID string` and
+`decimal.Decimal` amounts, both illustrative placeholders never actually
+ratified against a concrete type. The platform has no `decimal.Decimal`
+dependency anywhere (money is integer minor-units throughout, per
+CLAUDE.md); `correlation_id` is a `uuid.UUID` column, like every other
+identity field this document already types that way. `internal/bonus.
+ResolveTerminalGrantCredit`'s real signature (`internal/bonus/
+held_disposition_ops.go`) uses `correlationID uuid.UUID` and
+`payoutAmount, releasedLockAmount *big.Int` — CLAUDE.md's own money rule
+made `*big.Int` the only correct choice once implementation reached
+these two amount parameters, not a divergence from this document's
+intent. No `tenantID` parameter exists on this seam, in either the
+pseudocode above or the real code — `tenantID` is resolved from the
+Grant row itself, exactly as this section's own prose already states.**
 
 Called from exactly the one site in §16.8, inside the same database
 transaction as the settlement posting, under the same `(tenant_id,
@@ -1899,19 +1916,33 @@ transition ... inside `postRollback`").
 
 **The mechanism, adopted verbatim — one transaction, two effects:**
 
-1. **The existing, unmodified generic entry-inversion** (§16.1) — the
-   exact inverse of every entry the hold-capture posting made: `Cr
-   house_gaming payout_amount`, and `Cr player_locked_bonus
-   released_lock_amount` **only if that leg was present**. Restoring the
-   locked balance is **deliberately never attempted** — `L(G)` already
-   closed to zero at hold-capture time, and reversing a win that never
-   should have happened is a straight reversal to `house_gaming`, not a
-   resurrection of a lock (`ledger-accounting-model.md` §7.7.2.7, quoted
-   verbatim). If the underlying **bet** itself also needs unwinding, that
-   is a second, independent rollback naming the bet's own
-   `provider_tx_id` — this document's existing "two independent
-   reversals" rule (§16.11's concurrent win/rollback row), unaffected
-   here.
+1. **Not a literal, leg-by-leg entry-inversion — corrected here (this
+   document's own prior wording self-contradicted, caught during Phase 7's
+   real implementation, resolved against §16.18's unambiguous worked proof
+   and the actual shipped code, `internal/casino/bonus_settlement.go`'s
+   held-win rollback path).** A prior revision of this bullet described the
+   reversal as "the exact inverse of every entry the hold-capture posting
+   made," and then, inconsistently with its own very next sentence, wrote
+   the released-lock leg's inverse as `Cr player_locked_bonus
+   released_lock_amount` — literally restoring the lock — while the next
+   sentence simultaneously said restoring the locked balance is
+   "deliberately never attempted." Only one of those can be true; per
+   `ledger-accounting-model.md` §7.7.2.7 (quoted verbatim) and §16.18 Part
+   B step 3's worked numeric proof, the **never-restore** reading is
+   correct and is what ships. **Both legs reverse straight to
+   `house_gaming`, debiting `player_bonus_held` for the full amount each
+   leg originally credited it:** `Dr player_bonus_held payout_amount / Cr
+   house_gaming payout_amount`, and `Dr player_bonus_held
+   released_lock_amount / Cr house_gaming released_lock_amount` **only if
+   that leg was present**. Restoring the locked balance is **deliberately
+   never attempted** — `L(G)` already closed to zero at hold-capture time,
+   and reversing a win that never should have happened is a straight
+   reversal to `house_gaming`, not a resurrection of a lock
+   (`ledger-accounting-model.md` §7.7.2.7). If the underlying **bet**
+   itself also needs unwinding, that is a second, independent rollback
+   naming the bet's own `provider_tx_id` — this document's existing "two
+   independent reversals" rule (§16.11's concurrent win/rollback row),
+   unaffected here.
 2. **In the same transaction**, a guarded status update:
    `UPDATE bonus_held_dispositions SET status = 'voided_by_rollback',
    resolution_ledger_transaction_id = <the reversal's own id> WHERE id = ?
@@ -2433,11 +2464,29 @@ closes that gap, symmetrically.
 bonusengine.RecheckGrantExposure(
     ctx context.Context,
     tx <db tx>,
+    tenantID uuid.UUID,
     grantID uuid.UUID,
     triggeringLedgerTransactionID uuid.UUID,
     triggerKind GrantExposureTriggerKind,
 ) (newStatus bonusengine.GrantStatus, err error)
 ```
+
+**Signature reconciled against the real, shipped, tested code (Stage
+4H-B1 Wave 2 Phase 3/7) — this pseudocode previously omitted `tenantID`
+entirely. `internal/bonus.RecheckGrantExposure`'s real signature
+(`internal/bonus/held_disposition_ops.go`) takes an explicit `tenantID
+uuid.UUID` parameter alongside `grantID`, used to scope its live `AOE`
+recompute's read queries (§7.10's R1–R4 family plus the `player_bonus_
+held` balance read) — every one of which is tenant-scoped by
+construction elsewhere in this codebase, so a seam that reads across
+those queries needs `tenantID` explicitly rather than re-deriving it a
+second time from the Grant row (`ResolveTerminalGrantCredit`, by
+contrast, performs exactly one such re-derivation via its own
+`GetGrantByID` call and needs no separate parameter — the two seams are
+not required to share an identical resolution strategy, and do not).
+`casino`'s three call sites (§16.21 below) already hold `tenantID` from
+their own enclosing transaction and pass it through unchanged; this is
+not a new value `casino` must derive.**
 
 **This is a named seam, not a direct write — matching this document's own
 domain-boundary discipline everywhere else in §16 (§16.9's identical
