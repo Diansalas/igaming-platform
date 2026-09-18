@@ -330,6 +330,93 @@ branch anywhere in Bonus/Gamification or in the canonical event shape
 itself. This mirrors ADR 0025's closing consequence that "adding a second
 provider never touches the orchestration/routing code."
 
+### 2.1 Correlation field for provider-native bonus activity the platform never dispatched (Stage 4H-B1, `sportsbook`, non-blocking documentation extension)
+
+`ARCHITECTURAL DECISION`, additive only — no change to any field already
+listed in §2, no new `transaction_type`, no ledger schema change. Raised
+during Stage 4H-B1 Wave 1's Bonus Engine dispatch (`docs/architecture/10-
+bonus-engine-architecture.md`'s parallel Terminal-Grant work) while
+confirming this ADR's coexistence boundary holds for the Bonus Engine to
+build against.
+
+**The gap this closes.** §1/§3 already cover the case where **our own**
+Bonus Engine's Campaign configuration decided to delegate fulfillment of a
+promotion to a provider (`fulfillment_owner = external_provider:<id>`, an
+`external_reward_grant` row exists, and reconciliation runs against that
+row per §1.3). They do not cover — and were never meant to cover, but the
+gap is worth naming precisely rather than leaving implicit — a **provider
+running its own promotion entirely outside our Campaign/Offer/Grant model
+altogether** (e.g. a provider's own always-on "odds boost" or a
+provider-issued free bet that never passed through our Reward
+Orchestrator at all). In that case no `external_reward_grant` row is ever
+created, because our platform never made a fulfillment-ownership decision
+about it — it simply shows up as a bet whose accepted price, or whose
+settlement amount, already reflects the provider's own promotional
+adjustment.
+
+**What does *not* change because of this.** Per §0's restated position and
+`10-bonus-engine-architecture.md` §3.2/§10 (frozen ledger treatment): this
+is, and remains, `inside_provider` value from the platform's point of
+view even though no Grant was ever issued for it — the platform did not
+decide it, does not fund it, and must not recognize it as platform Bonus
+liability/expense. ADR 0038 §5/§12 already establish that a provider-driven
+settlement amount is posted and reconciled exactly as the provider states
+it, with no platform-side recomputation from odds — so a provider's own
+odds boost or free-bet promotion, baked into the amount the provider's
+callback already reports, requires **no new ledger posting shape and no
+new invariant**. This section adds a **correlation/audit field only**, for
+reporting and player-support answerability, never a financial mechanism.
+
+**The field.** An optional, nullable, provider-opaque `TEXT` field —
+`provider_promo_reference` — carried on `sportsbook_bet`,
+`sportsbook_settlement`, and `sportsbook_void_cancel` (the same three
+canonical events §2 already defines; no fourth event type, mirroring §2's
+own "cashout is a `sportsbook_settlement` discriminator, not a new event"
+precedent):
+
+- **Populated only when the provider's own payload includes such a
+  reference** — never fabricated, never inferred, never required. Most
+  providers will not report one; the field is absent (`NULL`) in that
+  case, identical in spirit to `potential_return`'s "nullable — never
+  fabricated when a provider doesn't report it" rule already stated on
+  `sportsbook_bet` in §2.
+- **Opaque and provider-specific by construction** — never parsed,
+  branched on, or given meaning by Bonus/Gamification or by
+  `internal/ledger`. Its only permitted use is as a correlation tag: a
+  support agent or an audit/reporting query can show "this bet/settlement
+  carried the provider's own promo reference `X`" without the platform
+  ever computing, crediting, or validating anything from it.
+- **Distinct from, and never conflated with, `fulfillment_owner`/
+  `external_reward_grant`.** A populated `provider_promo_reference` does
+  **not** imply an `external_reward_grant` row exists, and its absence
+  does not imply a provider promotion is absent (a provider that does not
+  report a reference may still have applied one internally — the field's
+  absence is "unknown," never "none," the identical "unknown, not
+  invented" discipline §2 already uses for `potential_return`).
+- **Never merged into platform Bonus accounting or wagering-progress
+  math.** `ledger-accounting-model.md` §6.6.9 property 6 (provider
+  neutrality) already states Model C's derivation "keys only on
+  platform-owned facts" and names no provider field at all — this field
+  is deliberately excluded from that derivation, restated here so a future
+  implementer is not tempted to read `provider_promo_reference` as a
+  wagering-progress signal. This is the specific, narrow instance of this
+  ADR's coexistence boundary the task asked to be either found or written
+  down: **provider-native bonus state is provider-scoped and never merged
+  into the platform's internal Bonus accounting, unless an explicit future
+  contract says otherwise** (per this ADR's own "hard process rule," §2
+  above, which already requires `architect`/Reward-Orchestrator sign-off
+  before the canonical contract is generalized for anything a future
+  provider's documentation reveals) — restated here explicitly because,
+  before this addition, no single sentence in this ADR said so for the
+  specific case of a provider bonus the platform never dispatched.
+
+**Status**: `NOT IMPLEMENTED` — documentation only, per this stage's
+scope. No adapter, migration, or Go type exists yet. Flagged for
+`bonus-engine` co-review (it is the intended non-consumer of this field)
+and for the Master Orchestrator's canonical Activity/Event taxonomy doc
+(`docs/architecture/22-canonical-activity-event-taxonomy.md`), which owns
+the eventual shared envelope §2 already defers field-naming finality to.
+
 ### 3. Coexistence — tracking which system owns fulfillment, and reconstructable total exposure
 
 For one sportsbook integration, two independent bonus sources exist on the

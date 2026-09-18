@@ -876,6 +876,80 @@ model is *stated*, not architectural defects requiring a new mechanism —
 consistent with ADR 0033's own precedent of flagging refinements to the
 Orchestrator rather than silently substituting a competing design.
 
+### 7.3 Stage 4H-B1 Wave 1 confirmation — coexistence boundary, correlation contract, and wagering-progress interaction
+
+`ARCHITECTURAL DECISION` (confirmation, one additive extension), recorded
+because Stage 4H-B1's Bonus Engine implementation dispatch asked this
+document and ADR 0038 to confirm three things hold, rather than re-derive
+them from the Bonus Engine side.
+
+1. **Coexistence boundary confirmed, not reopened.** ADR 0033 §0/§1/§3 and
+   `10-bonus-engine-architecture.md` §3.2/§10 already state, jointly, that
+   an external sportsbook provider's own bonus engine and its provider-
+   native bonus state are provider-scoped and never merged into the
+   platform's own Bonus accounting: an `inside_provider`-destined Grant
+   posts zero ledger entries (ADR 0032 §6(c)), and a provider's own
+   promotion that never passed through our Reward Orchestrator at all
+   (never even producing an `external_reward_grant` row) is, a fortiori,
+   never recognized as platform Bonus liability. ADR 0033 §2.1 (added this
+   stage) closes the one narrow sentence that was previously implied but
+   not written down: this holds "unless an explicit future contract says
+   otherwise," per ADR 0033 §2's own hard process rule requiring
+   `architect`/Reward-Orchestrator sign-off before the canonical contract
+   is ever generalized.
+2. **Correlation contract**: ADR 0033 §2.1 adds one optional, nullable,
+   provider-opaque `provider_promo_reference` field to the
+   `sportsbook_bet`/`sportsbook_settlement`/`sportsbook_void_cancel`
+   canonical events (cashout and partial settlement are
+   `sportsbook_settlement` discriminators, per §2, and inherit the field
+   identically) — populated only when a provider's own payload supplies
+   one, never inferred, never required, and never given meaning outside a
+   correlation/audit lookup. No new event type, no new
+   `transaction_type`, no ledger-schema change.
+3. **Wagering-progress interaction (Model C) confirmed sufficient as-is.**
+   `ledger-accounting-model.md` §6.6.7 cases 11 ("in-house sportsbook
+   occurrence") and 12 ("external sportsbook occurrence") are explicitly
+   worked and confirmed **identical by construction** — the derivation
+   reads only `transaction_type`, `correlation_id`,
+   `reverses_transaction_id`, `account_type`, `direction`, and `amount`,
+   never a provider field (§6.6.9 property 6). **Nothing further is needed
+   from this document's side** for Wave 1's Bonus domain-model dispatch to
+   consume sportsbook's ledger facts correctly: the contribution record
+   Model C requires is a `bonus-engine`-owned table keyed off
+   `lock_ledger_transaction_id`, sourced entirely from facts this
+   document's §6/ADR 0038 already commit to posting (correlation_id
+   stability across a bet's lifecycle, per §6's `sportsbook_bet`/
+   `sportsbook_settlement`/etc. discipline). This confirmation is scoped to
+   the mechanism only — it does not resolve, and does not need to resolve,
+   any of the still-open items §6.6.11 lists (G-2, the push-counts-as-
+   wagering question, multi-Grant attribution, FD-1/FD-2), all of which
+   remain `bonus-engine`'s/upward-referred, unchanged by this section.
+4. **Mixed/bonus-funded cashout stays gated; what Bonus can safely build
+   now is unaffected.** FD-1 (`ledger-accounting-model.md` §6.5.10) —
+   cashout's wagering-progress treatment, to be decided together with its
+   proceeds-split policy (ADR 0038 §8.3's `OPEN DECISION`, item 6) — is
+   **not** selected here, consistent with this document's own limitation
+   against deciding a multi-month commercial/product tradeoff unilaterally.
+   What is already safe to build without that decision: (a) cash-funded
+   cashout's posting shape is unaffected (ADR 0038 §8.3, `RESOLVED
+   (architecture) — NOT IMPLEMENTED`) and never touches bonus wagering-
+   progress at all, since no `player_locked_bonus`/`player_bonus` account
+   is involved; (b) bonus- and mixed-funded cashout is **already
+   BLOCKED** at the ledger-posting level pending the `player_locked`
+   origin split (ADR 0038 §9/§15) — sportsbook cannot post one today even
+   if it wanted to; (c) `ledger-accounting-model.md` §6.6.5's exhaustive
+   classification switch already specifies the correct fail-closed
+   behavior for the day cashout does ship: `sportsbook_cashout` is
+   explicitly **UNCLASSIFIED**, excluded from `P_firm`, and raises an
+   integrity alert rather than silently defaulting either way — this is
+   exactly the "reject deterministically, fail-closed" posture the Bonus
+   Engine dispatch asked to confirm is buildable, and it requires no
+   sportsbook code change to hold, since sportsbook has not built cashout
+   at all yet (confirmed, `ledger-accounting-model.md` §6.5.10: "no
+   sportsbook code exists to offer or accept a cashout price"). No part of
+   this document authorizes building cashout, bonus-funded or otherwise,
+   this stage.
+
 ---
 
 ## 8. Responsible Gaming
