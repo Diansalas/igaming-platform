@@ -2875,3 +2875,259 @@ it has been written.
   consumption function raises rather than silently under-counting against
   the new shape — named here so it is not rediscovered as a fresh gap once
   `DEP-EOI-6` is authored.
+
+## Stage 4H-B1 Wave 2 Phase 9 (`qa`) — real-code test verification, gap closure, and consolidated register
+
+Status: **verification against real code**, not design review. Phases 1-7
+(commits `d145ba1`..`a79db4a`) built the real `internal/bonus`,
+`internal/economicop`, and casino's G-2 wiring this document's own prior
+sections only specified. This section is `qa`'s independent check of what
+of those specifications actually landed as real, passing tests — per
+CLAUDE.md's "no fake completion," every status below was confirmed by
+reading the cited test function's actual assertions and by actually
+running it against real PostgreSQL 16, not inferred from a commit message.
+No Human Decision Register item is selected here.
+
+### 1. Named test-ID reconciliation — design-time IDs vs. the real test functions that now exist
+
+The design sections above (Wave 1.5 Fix Wave/Fix Round 2) invented test
+IDs before any code existed. The real implementation phases did not carry
+those IDs into the actual `_test.go` files (confirmed by grep: none of
+`G2-HOLD-1/2/3`, `EOI-DECOMPOSITION-1`, `EOI-BUDGET-RACE-1`, `SEP-1-
+CARDINALITY-RLS-1`, `CASINO-LF18-*` appear verbatim anywhere in
+`internal/`). This is not itself a defect — the real tests are more
+numerous and more specific than the design-time composites they descend
+from — but it means the mapping below had to be done by reading each
+real test's actual assertions against the original specification's own
+assertion list, not by string search.
+
+| Design-time ID | Real status | Real test(s) (file, function) | Assessment |
+|---|---|---|---|
+| `G2-HOLD-1` (two-leg hold-capture posting shape) | **IMPLEMENTED** | `internal/casino/bonus_settlement_integration_test.go`: `TestPostWin_LockedBonusTerminalGrant_CapturesUnconditionally` (table-driven across expired/cancelled/forfeited/pending_settlement); `internal/ledger/bonus_mirror_integration_test.go`: `TestBonusMirror_WorkedPostingShapes` | Confirmed the exact `player_bonus_held` two-leg shape (payout leg always present, lock-release leg present iff the origin was locked), the `bonus_held_dispositions` row with correct `payout_amount`/`released_lock_amount`, and `player_locked_bonus → 0`. Assertion 2's specific fault-injection sub-claim ("kill the connection between the two legs' INSERTs") is **not** separately proven — see §4 below, a real, disclosed gap, not unique to this test. |
+| `G2-HOLD-2` | **IMPLEMENTED** (folded into the above and into `TestPostWin_LockedBonusOrdinary_GrantNonTerminal`) | Same files | The non-terminal ordinary case and the terminal held case are both exercised as separate table cases/tests, each independently assertable, matching the design's "each assertion its own failing sub-test" tightening. |
+| `G2-HOLD-3` / `HELD-ROLLBACK-CAS-RACE-1` (C28 closure: guarded compare-and-swap under real concurrency) | **IMPLEMENTED**, with one disclosed scope gap | `internal/casino/bonus_settlement_integration_test.go`: `TestPostRollback_HeldWinRollback_RollbackRacesDirectResolution` (the genuine two-goroutine race, real `pg_advisory_xact_lock`, real `FOR UPDATE`), `TestPostRollback_HeldWinRollback_ConcurrentDistinctRollbacks` (duplicate-rollback race), `TestPostRollback_HeldWinRollback_AlreadyResolved_FailsClosed` (LF-10, sequential-after-race) | This is a **real** PostgreSQL concurrency test (two actual goroutines, two actual connections, a real shared advisory lock, `sync.WaitGroup`), not a mocked one — the exact upgrade the design section demanded. Two things the design specified are **not** present: (a) the barrier is not constructed to force **both** lock-acquisition orderings explicitly (it relies on the Go scheduler to interleave, unlike `cumulative_race_integration_test.go`'s pattern of an explicit start barrier) — a `t.Run` sub-test per forced ordering was not built; (b) the **mandatory negative control** (assertion 5: re-run with the `WHERE status = 'held'` guard replaced by a check-then-update, and assert it deterministically double-resolves) does not exist anywhere in this file. Recorded as `P2` finding `QA-W2P9-1` below, not fixed in this phase (adding it is straightforward — mirrors `cumulative_race_integration_test.go`'s own established negative-control technique — but is additional net-new test-writing, and this phase's own time budget was prioritized toward the directive's named, currently-**zero**-coverage gaps in §3 below over deepening an already-real, already-passing concurrency test). |
+| `EOI-DECOMPOSITION-1` (API-splitting/retry/pagination/concurrent-worker composite) | **PARTIALLY IMPLEMENTED** | `internal/bonus/lifecycle_integration_test.go`: `TestEOI_BulkGrantRecipientCeiling_RejectsBeyondBudget` (sequential ceiling enforcement), `TestAdversarial_ConcurrentBulkGrantWorkers_NeverExceedRecipientCeiling` (genuine concurrent-worker version), `TestEOI_SingleManualGrant_RejectsUnresolvableParent`; `internal/economicop/economicop_integration_test.go`: root/child lineage, idempotency-key resolution, cross-tenant RLS | Item 4 (concurrent workers cannot jointly overspend) and item 6 (duplicate top-level mint request) are genuinely covered. Item 1 (API-splitting across three distinct call surfaces sharing one budget) is **not** built as a single composite test — no test exercises `BulkGrantJob` execution, a staff single-Grant action, and a simulated direct `ActorService` call all against the same EOI root in one scenario; each surface's own budget-consumption is tested in isolation instead. Item 3 (pagination cannot exceed the ceiling, corrected framing) and item 5 (partial batch/crash-and-resume re-attaching to `root_operation_id`) have **no** dedicated test. |
+| `EOI-BUDGET-RACE-1` (+ negative control) | **IMPLEMENTED** for the single-EOI-row case; **NOT IMPLEMENTED** for the multi-page/subtree-wide case the design specifically calls for | `internal/bonus/lifecycle_integration_test.go`: `TestAdversarial_ConcurrentBulkGrantWorkers_NeverExceedRecipientCeiling` | This test is a real, deliberate, and honestly-documented concurrency proof (its own comment explains why `n=2`, not `n≥20`, after finding and naming a genuine Postgres multi-waiter deadlock pathology under 3+-way contention — itself a P2 finding, §5 below). It proves the ceiling holds under genuine concurrency for **one** EOI root with no child pages. The design's own root-subtree-budget scenario (100 child pages, workers spread across all of them, `COUNT(DISTINCT subject_ref)` aggregated by `root_operation_id` rather than by page) is **not** built — `MintRootOperation`/`ConsumeRootBudget`'s child-page/lineage mechanics are exercised only in `economicop_integration_test.go`'s sequential `TestCreate_ChildInheritsParentsRoot`, never under concurrency. Neither of the design's two named negative controls (lock removed; aggregate scoped to the wrong row) exists as a test. |
+| `SEP-1-CARDINALITY-RLS-1` | **BLOCKED** (unchanged from the design-time status, confirmed still accurate) | — | Confirmed by direct grep: no `household`, `REQ-SEP-BONUS-3`, `CARDINALITY_MISMATCH`, or `expected_count`/`subject_set_count` resolver logic exists anywhere in `internal/bonus/*.go`. The household/linked-account detection resolver this test depends on was never built (correctly out of scope — Phase 3's own report lists it as deferred, and `docs/security/security-architecture.md` §W15.1.5 keeps it "detection only, never a block," unimplemented). What **did** get built and tested is a related but distinct mechanism — Step 0's tenant-scope self-proof (`TestAdversarial_SEP1_Step0_FiresEvenWhenPlayerListWouldOtherwiseHide`, migration `0066`) and the SEP-1 actor-is-beneficiary core case (`TestAdversarial_SEP1_StaffMemberIsGrantBeneficiary_Refused`) — both genuinely new and correctly closing Phase 6's own findings, but neither substitutes for the cardinality-mismatch resolver-truncation test this ID names. Still `BLOCKED`, not `IMPLEMENTED`. |
+| `CASINO-LF18-QUERY-RACE-1` (Layer 1: the Step-1b read is race-safe under real concurrent commits) | **PARTIALLY IMPLEMENTED** — the exploit is closed and proven, but not via the specific real-concurrency mechanism the design demanded | `internal/casino/bonus_settlement_integration_test.go`: `TestPostWin_LockAlreadyReleased` | This test is **sequential**, not concurrent: it posts the bet, then sequentially drains the lock via `drainRoundLock` (standing in for the not-yet-built sweep), then sequentially delivers the late win and asserts `ErrLockAlreadyReleased`. It correctly proves Step 1b's query reflects the drain once committed and proves outcome 6 aborts cleanly with no double-release (LF-18's actual exploit, closed). It does **not** prove the design's specific claim: that the query is race-safe when a genuine second worker's read and the drain's commit are actually interleaved by the Go scheduler under a shared `pg_advisory_xact_lock`, nor does it include the mandatory negative control (lock removed, artificially delayed read observes stale state). The production code path genuinely does take the advisory lock (confirmed in `internal/casino/bonus_settlement.go`), so the mechanism this test would prove is real; the proof itself, in the specific real-concurrency shape the design insisted on ("not an application-level assertion"), was not built. `P2` finding `QA-W2P9-2`, §5 below. |
+| `CASINO-LF18-FULL-1` (Layer 2) | **BLOCKED**, correctly | — | `casino_settlement_timeout` remains unratified/unmigrated (confirmed: no such transaction type or sweep job exists in `internal/casino` or `migrations/` at `HEAD`); Phase 7's own commit message states this was deliberately not built ("building it here would be unauthorized architecture"). Status carried forward unchanged, correctly. |
+
+### 2. `CASINO-STO-*` and `SEG-MEMBER-OF-*`/`SEG-INCSAFE-*` — confirmed still exactly as blocked as the design left them
+
+Both directly checked against `HEAD`, per the task's explicit instruction:
+
+- **`CASINO-STO-1` through `-5`** (settlement-timeout sweep): confirmed
+  `BLOCKED`. No `casino_settlement_timeout` transaction type, no sweep job,
+  no migration for either exists anywhere in `migrations/` or
+  `internal/casino/*.go`. Phase 7 explicitly and correctly declined to
+  build this (own commit message, quoted in §1's `CASINO-LF18-FULL-1` row
+  above) — this is the right call, not a gap: the architecture document
+  itself states the sweep is "NOT SAFE to implement" pending a ratified
+  window/jurisdiction decision, a Human Decision Register matter this `qa`
+  phase does not touch.
+- **`SEG-MEMBER-OF-1` through `-5`, `SEG-INCSAFE-1` through `-3`**: confirmed
+  `BLOCKED`/`NOT APPLICABLE`. `internal/segment` does not exist (confirmed:
+  no such package anywhere in `internal/`), correctly out of this Wave's
+  scope per this dispatch's own constraints (Segmentation was explicitly
+  never authorized for this Wave). No drift from the design-time status.
+
+### 3. The human directive's own §19/§20 test-floor audit against real test files
+
+Checked directly against every `_test.go` file this Wave touched
+(`internal/ledger/bonus_mirror_integration_test.go`,
+`internal/money/money_test.go`, `internal/bonus/*_test.go`,
+`internal/economicop/*_test.go`,
+`internal/risk/cumulative_bonus_conversion_integration_test.go`,
+`internal/casino/bonus_settlement_integration_test.go`,
+`internal/httpserver/admin_routes_test.go`) rather than assumed from
+commit messages.
+
+**Financial-write floor (retry/replay class):**
+
+| Required | Status | Evidence |
+|---|---|---|
+| Sequential retry | Covered | `TestBonusMirror_ExactRetryIsIdempotent`; `TestLifecycle_IssueActivateWagerComplete`'s own second-delivery assertion; `TestHeldDisposition_ResolveReforfeit_WithFourEyesAndSEP1`'s `ResolveTerminalGrantCredit` redelivery |
+| Concurrent retry | Covered | `TestBonusMirror_ConcurrentGrantsSameKeyOnlyOnePosts` |
+| Mismatched retry (same key, different payload) | Covered | `TestBonusMirror_SameKeyDifferentTypeRejected`; `TestCreateGrant_DuplicateTriggerReferenceIsRejected` |
+| Callback replay | Covered | `TestPostRollback_HeldWinRollback_DuplicateIsIdempotent`; `TestHeldDisposition_ResolveReforfeit_WithFourEyesAndSEP1` |
+| Worker retry | Covered | `TestAdversarial_ConcurrentBulkGrantWorkers_NeverExceedRecipientCeiling`'s own retry-on-`40P01`/`40001` loop (a real transient-error retry, not merely business-logic retry) |
+| Pagination retry | **Not covered** | No test drives a paginated bulk-grant delivery (`lineage_kind = 'page'`) through a retried page. `EOI-DECOMPOSITION-1` item 3's pagination scenario (§1 above) was never built. |
+| Bulk decomposition | Covered | `TestAdversarial_ConcurrentBulkGrantWorkers_NeverExceedRecipientCeiling` (concurrent-worker decomposition); item 1's API-splitting-across-three-surfaces composite (§1 above) is **not** covered |
+| Process restart | **Not covered** | No test simulates a crash-and-resume of a `BulkGrantJob` (`lineage_kind = 'resume'`) reattaching to the same root with the already-consumed remainder intact. |
+| Partial failure (mid-transaction fault injection) | **Not covered** | Confirmed by grep: no test in `internal/bonus`, `internal/casino`, or `internal/ledger` kills a connection mid-transaction. This is a **pre-existing, repo-wide** gap, not unique to the Bonus Engine — no package's test suite does true fault injection anywhere in this codebase; every "partial failure" claim in this document instead rests on Postgres's own single-statement/single-transaction atomicity guarantee, which is a reasonable and defensible substitute (the guarantee is real and does not need re-proving per feature) but is not the literal fault-injection test several design sections (`G2-HOLD-1` assertion 2, `G2-HOLD-3` assertion 4) called for. Named as `P3` finding `QA-W2P9-6` below — a testing-infrastructure investment for a future stage, not a Bonus-Engine-specific defect. |
+| Transaction retry | Covered | Same as "worker retry" above |
+
+**Concurrency floor (state-mutation class):**
+
+| Required | Status | Evidence |
+|---|---|---|
+| Concurrent grant | Covered | `TestBonusMirror_ConcurrentGrantsSameKeyOnlyOnePosts`; `TestBonusMirror_ConcurrentGrantsDifferentKeysBothPost` |
+| Concurrent activation | Covered | `TestAdversarial_ConcurrentActivation_ExactlyOneWins` |
+| Concurrent wagering progress | **Not directly covered** | No test races two concurrent `RecordWageringContribution` calls against the same Grant. `RecordWageringContribution`'s own concurrency-safety was not independently verified this phase; named as a gap, not fixed (see §4). |
+| Concurrent conversion | **Not directly covered, but structurally identical to an already-proven mechanism** | `ConvertGrant` (`internal/bonus/conversion.go`) uses the identical `AdvisoryLockGrant` + `LockGrantForUpdate` + status-guard composition `TestAdversarial_ConcurrentActivation_ExactlyOneWins` already proves safe for `ActivateGrant` — the same mechanism, not independently re-tested for this call site. Stated honestly as **not literally tested**, not claimed covered by analogy. |
+| Concurrent expiry | **Was a real gap — closed this phase** | New: `TestAdversarial_ConcurrentTerminate_ExpireVsCancel_ExactlyOneWins` (§4) |
+| Concurrent cancellation | **Was a real gap — closed this phase** | Same new test (expire and cancel race against each other directly) |
+| Concurrent reversal | **Was a real gap — closed this phase** | New: `TestAdversarial_ConcurrentReversal_ExactlyOneWins` (§4) |
+| Duplicate callbacks | Covered | `TestPostRollback_HeldWinRollback_DuplicateIsIdempotent`; `TestLifecycle_IssueActivateWagerComplete` |
+| Bulk worker races | Covered | `TestAdversarial_ConcurrentBulkGrantWorkers_NeverExceedRecipientCeiling` |
+| Same player across multiple brands | **Was a real gap — closed this phase** | New: `TestAdversarial_SamePlayerAcrossMultipleBrands_ConcurrentGrantsIsolated` (§4) |
+| Same campaign across multiple workers | Covered | `TestAdversarial_ConcurrentBulkGrantWorkers_NeverExceedRecipientCeiling` runs all workers against one shared `campaignID`/`offerVersionID` |
+
+### 4. Three real gaps found and closed with new tests (real PostgreSQL, no domain-logic change)
+
+All three are appended to `internal/bonus/lifecycle_integration_test.go`
+(the file already covering this exact class of adversarial/concurrency
+test for the Grant lifecycle). None required any change to
+`internal/bonus`'s production code — `TerminateGrant`, `MarkGrantReversed`,
+and the ordinary brand-scoped Grant path were all already correctly built
+for these properties (advisory lock + compare-and-swap, or a single
+guarded `UPDATE`); only the adversarial test itself was missing, exactly
+the kind of gap this phase's mandate is to find and close.
+
+1. **`TestAdversarial_ConcurrentTerminate_ExpireVsCancel_ExactlyOneWins`**
+   closes both "concurrent expiry" and "concurrent cancellation" in one
+   test: two different terminal triggers (`TerminalResolutionExpired`,
+   `TerminalResolutionCancelled`) race `TerminateGrant` against the same
+   Grant with no open exposure (so either would resolve immediately, not
+   defer to `pending_settlement`, if it won). Asserts exactly one winner,
+   exactly one loser (`ErrIllegalTransition`), and that the final
+   committed row matches the winner's own returned resolution — never a
+   third value, never the loser's. Proves `TerminateGrant`'s
+   `AdvisoryLockGrant` + `LockGrantForUpdate` + re-read-status-under-lock
+   composition (`internal/bonus/lifecycle.go`) is actually safe under two
+   genuinely concurrent, genuinely different callers, not merely against
+   itself.
+2. **`TestAdversarial_ConcurrentReversal_ExactlyOneWins`** closes
+   "concurrent reversal": two goroutines call `MarkGrantReversed`
+   (`internal/bonus/grant.go`) on the same already-terminal Grant at
+   nearly the same instant, with different reason codes. Unlike
+   `TerminateGrant`, `MarkGrantReversed` takes **no** explicit advisory
+   lock — it relies entirely on a single atomic `UPDATE ... WHERE status
+   <> 'reversed'` and ordinary Postgres row-lock serialization. This test
+   proves that reliance is actually safe (exactly one winner, one loser
+   via `ErrGrantStateConflict`, the final row carries exactly one
+   `reversal_reason_code`) rather than merely plausible from reading the
+   SQL.
+3. **`TestAdversarial_SamePlayerAcrossMultipleBrands_ConcurrentGrantsIsolated`**
+   closes "same player across multiple brands," a scenario with **zero**
+   prior coverage anywhere in this package. One `person_id` is given two
+   `player_accounts` rows under the same tenant, one per brand (a real,
+   schema-supported shape — `player_accounts.person_id` carries no
+   uniqueness constraint, migration `0010`). Two Grants, one per brand,
+   are issued and activated concurrently for that one person. Asserts
+   both succeed (no accidental cross-brand serialization or denial), and
+   — the property that actually matters — each resulting Grant is
+   attributed to exactly its own `brand_id`/`player_account_id`/
+   `wallet_id`, never swapped or shared, proving
+   `AdvisoryLockGrant`/`ActivateGrant`'s locking is genuinely keyed by
+   `grant_id`, never by `person_id`, which is the only way two brands'
+   concurrent activity for one underlying person could otherwise
+   interfere.
+
+All three pass, including under `-race`, across 5 repeated runs each with
+zero flakes (§6 below has the exact commands and timings). No test in
+this set revealed a genuine business-logic defect — all three passed on
+first write, confirming (not merely assuming) `internal/bonus`'s existing
+locking design already had these properties; the gap was purely in test
+coverage, consistent with Phases 1-7's `code-reviewer`/`security` findings
+never flagging the underlying mechanisms themselves as broken.
+
+**Deliberately not attempted this phase, named rather than silently
+dropped:** the `EOI-BUDGET-RACE-1` subtree/multi-page scenario, the
+`EOI-DECOMPOSITION-1` API-splitting composite, pagination retry, and
+process-restart/resume are all real, currently-uncovered gaps this
+review's own §1/§3 tables name — each would require either
+`economicop.MintRootOperation`'s child-page mechanics under genuine
+concurrency (a materially larger fixture than the three tests above) or
+inventing a resumability harness `internal/bonus` does not yet expose a
+seam for outside the existing `BulkGrantJob`/`BulkGrantJobItem` resumption
+already covered sequentially. Recorded as open items in the register (§5)
+rather than built under this phase's time budget, per this document's own
+"NOT IMPLEMENTED, not skipped-and-forgotten" discipline.
+
+### 5. New finding this phase surfaced
+
+**`QA-W2P9-3` (P3, informational, not a defect).** While tracing every
+production call site of each of the five in-slice bonus types (doc 10 §2),
+`IssueAndActivateCashback` (`internal/bonus/types.go`) has **zero** live
+callers anywhere in `internal/httpserver` or any job/scheduler — confirmed
+by grep across the whole repo; its only callers are its own tests. This
+matches, and independently confirms, the same item already named in the
+task's own consolidated-register prompt; recorded here as `qa`-verified
+rather than merely repeated. Not a defect (the function itself is
+implemented and tested correctly, per `TestConversion_*`'s general
+coverage of the shared conversion path it feeds into) — it is a feature-
+completeness gap: no HTTP surface or automated trigger issues a cashback
+bonus today, so this bonus type is `IMPLEMENTED` at the domain-logic layer
+and `NOT IMPLEMENTED` at the product-surface layer. Owner: `bonus-engine`/
+`backend` (HTTP surface), not `qa`'s to build.
+
+### 6. Full validation floor, actual output — every command, exact result, repeated runs for flake-checking
+
+Run against real PostgreSQL 16 (already-running dev cluster, migrations
+`0001`-`0066` confirmed at `HEAD`, `go run ./cmd/migrate status` reporting
+"nothing to apply" before any test ran).
+
+| Command | Result | Notes |
+|---|---|---|
+| `go build ./...` | **PASS** | Clean, no output, exit 0. |
+| `go vet ./...` | **PASS** | Clean, no output, exit 0. |
+| `gofmt -l .` | **PASS** | Empty output (nothing needs formatting), including the three new tests. |
+| `go test -count=1 ./...` | **PASS** | 2.173s wall. Every package with non-integration tests reports `ok`; `internal/bonus`/`internal/economicop`/`internal/ledger` correctly report `[no test files]` for the default build (all three packages' real tests are `//go:build integration`-gated, by design). |
+| `go test -race -count=1 ./...` | **PASS** | 10.614s wall. Same package set, all `ok`, zero races reported. |
+| `go test -tags=integration -count=1 ./...` | **PASS** | 1m58.255s wall. Every package `ok`, including `internal/bonus` (3.220s), `internal/casino` (4.713s), `internal/economicop` (0.103s), `internal/ledger` (4.307s) — the three new tests included and passing. `internal/reconciliation` (110.960s) and `internal/rg` (103.093s) dominate total wall time; both pre-date this Wave and are unrelated to it. |
+| `go test -race -tags=integration -count=1 ./...` | **PASS** | 2m54.105s wall. Every package `ok`, zero races. This is the directive's own explicit floor command; ran once in full, then the four concurrency-heavy packages were re-run in isolation multiple times (below) for dedicated flake-checking. |
+
+**Flake-checking: concurrency-heavy suites repeated 3× minimum, the new
+tests repeated 5×, per the directive's explicit "repeat sufficiently to
+establish no flakes" instruction.**
+
+| Suite | Runs | Command | Result each run |
+|---|---|---|---|
+| `internal/bonus` + `internal/economicop` | 3 | `go test -race -tags=integration -count=1 ./internal/bonus/... ./internal/economicop/...` | Run 1: `bonus` 4.028s, `economicop` 1.162s — PASS. Run 2: `bonus` 3.068s, `economicop` 1.151s — PASS. Run 3: `bonus` 4.173s, `economicop` 1.165s — PASS. Zero flakes. |
+| `internal/casino` + `internal/ledger` | 3 | `go test -race -tags=integration -count=1 ./internal/casino/... ./internal/ledger/...` | Run 1: `casino` 5.817s, `ledger` 5.271s — PASS. Run 2: `casino` 5.775s, `ledger` 5.344s — PASS. Run 3: `casino` 5.821s, `ledger` 5.706s — PASS. Zero flakes. |
+| `internal/risk` | 3 | `go test -race -tags=integration -count=1 ./internal/risk/...` | 2.706s, 2.607s, 2.649s — PASS all 3. Zero flakes (includes `cumulative_bonus_conversion_integration_test.go`, this Wave's Phase 4 addition). |
+| The three new tests specifically, `-v` | 5 | `go test -race -tags=integration -count=1 -run 'TestAdversarial_ConcurrentTerminate_ExpireVsCancel_ExactlyOneWins\|TestAdversarial_ConcurrentReversal_ExactlyOneWins\|TestAdversarial_SamePlayerAcrossMultipleBrands_ConcurrentGrantsIsolated' -v ./internal/bonus/...` | All 5 runs: all 3 tests `--- PASS`, total suite time 1.33s-1.40s per run. Zero flakes. |
+
+No suite in this Wave's scope produced a `FAIL`, an unexplained `FLAKE`,
+or a `BLOCKED` result. No suite was skipped.
+
+### 7. Consolidated P0/P1/P2/P3 register — Wave 2 (Phases 1-9), as verified against real code
+
+Severity/owner assignments below are `qa`'s own independent
+classification, cross-checked against each phase's own commit-message
+report where one exists; `qa` does not re-litigate an owning domain's
+severity call, only records it and confirms the current CLOSED/OPEN state
+against real code at `HEAD`.
+
+| ID | Finding | Status | Owner | Severity |
+|---|---|---|---|---|
+| LF-18 | Late win after a silent lock-drain could double-release stake value | **CLOSED** — Phase 7, `TestPostWin_LockAlreadyReleased` proves `ErrLockAlreadyReleased` aborts cleanly, no double-credit | casino/ledger-finance | P0 (was) |
+| `ACTION_ROUTE_TO_CASH` T.1 gate gap | Held-bonus route-to-cash bypassed AssetAuthorization→RG→Risk, unlike every other value-creating checkpoint | **CLOSED** — Phase 5, `TestHeldDisposition_ResolveRouteToCash_BlockedBySelfExclusion`/`_BlockedByRiskDeny`/`_AllowedPlayerSucceeds` | identity-compliance | P0 (was) |
+| `ACTION_ROUTE_TO_CASH` reason_code posting-shape bug | Unconditional non-nil `reason_code` on a `TxBonusConversion` posting violated migration 0051's own CHECK, so the posting could never have completed even pre-fix | **CLOSED** — fixed in passing by Phase 5, same tests above exercise the corrected nil reason_code | identity-compliance | P1 (was) |
+| SEP-1 step-0 tenant-scope self-proof missing from `bonus_change_approvals_enforce_separation()` | A BEFORE INSERT trigger runs before RLS's own WITH CHECK; without its own scope proof it is not protected by RLS incidentally | **CLOSED** — Phase 6, migration `0066`, `TestAdversarial_SEP1_Step0_FiresEvenWhenPlayerListWouldOtherwiseHide` | security | P1 (was) |
+| SEP-1 core case (actor IS beneficiary) untested | The one pre-existing SEP-1 test explicitly substituted the ordinary four-eyes check instead of proving the SEP-1-specific case | **CLOSED** — Phase 6, `TestAdversarial_SEP1_StaffMemberIsGrantBeneficiary_Refused` | security/qa | P1 (was) |
+| `ConsumeRootBudget` error-masking bug | Any error (including a transient Postgres deadlock) was treated as an ordinary budget-exhausted denial, masking the true error and triggering a further write on an aborted transaction | **CLOSED** — Phase 6, `runBulkGrantJobItem` now only treats `ErrBudgetExhausted` this way | bonus-engine/security | P1 (was) |
+| AOE-attribution and redelivery-idempotency bugs (casino G-2 wiring) | Casino's postWin/postRollback did not attribute reversals back to the funding Grant, and redelivery of a settlement could double-process | **CLOSED** — Phase 7, `TestPostRollback_PlainLockRollback_RecomputesExposure`, `TestPostRollback_HeldWinRollback_DuplicateIsIdempotent` | casino | P1 (was) |
+| Dormant EOI/Risk lock-ordering risk (doc 34 §5.3 canonical order reversed for `IssueSingleManualGrant`'s second Risk acquisition) | Currently dormant only because `operationCumulativeSpecs` has no entry for `OperationBonusGrant` | **DOCUMENTED-RISK**, not fixed — correctly Phase 6's own call, an architecture question (how Bonus's two-phase lifecycle composes with doc 34's single-gate-chain assumption), not a security-mechanics fix | architect/bonus-engine/risk | P2 |
+| 3+-way EOI-row deadlock under true concurrency | Postgres's own documented multi-waiter tuple-lock behavior under 3+ concurrent `FOR UPDATE` waiters on one EOI root row; no transaction that deadlocks ever commits, so no correctness defect, but a real availability/robustness gap for any future concurrent bulk executor | **DOCUMENTED-RISK**, not fixed — correctly Phase 6's own call (today's only executor, `RunStaticBulkGrantJob`, is sequential and never reaches this shape) | architect/bonus-engine/risk | P2 |
+| LF-10 general case (rollback of an already-resolved held disposition) | Fails closed via `ErrHeldDispositionRollbackUnsupported`, proven by `TestPostRollback_HeldWinRollback_AlreadyResolved_FailsClosed` — but ledger-finance's own general-case design question (beyond this specific fail-closed behavior) remains open per Phase 7's own commit note | **OPEN** (the fail-closed behavior itself is `CLOSED`/tested; the general design question is not) | ledger-finance | P2 |
+| KYC-tier-taxonomy gate (ADR 0034 §6) | No bonus activation is gated on `player_accounts.kyc_tier` today; the contract is designed but not wired into `internal/bonus`'s gate chain | **OPEN** | architect/bonus-engine/identity-compliance | P2 |
+| Multi-account-abuse-detector (ADR 0034 §7/§19, Person-keyed cross-brand anti-abuse rule) | Designed (recommended default: per-brand scope with an optional Person-keyed anti-abuse rule) but not implemented in `internal/bonus` | **OPEN** | identity-compliance/bonus-engine/risk | P2 |
+| Missing HTTP surface: four-eyes filing/approval, campaign-activate, offer-publish, bulk-job-execute | Confirmed by grep and by Phase 6's own review: `bonus_change_requests` file/approve has no HTTP surface; `manual_grant_issue`'s handler cannot itself mint a `parent_operation_id`; no bulk-population `BonusSuggestion` activation path | **OPEN** (feature-incompleteness, not a security defect — correctly Phase 6's own characterization) | backend/bonus-engine | P3 |
+| `IssueAndActivateCashback` zero live callers | Correct, tested domain logic with no HTTP/job trigger anywhere | **OPEN** | backend/bonus-engine | P3 |
+| `QA-W2P9-1` — `HELD-ROLLBACK-CAS-RACE-1`'s negative control and forced-both-orderings barrier missing | The real concurrency test exists and passes; the design's own mandatory negative control (guard removed, deterministic double-resolution) and explicit both-orderings barrier were never built | **OPEN** — newly named this phase | qa | P2 |
+| `QA-W2P9-2` — `CASINO-LF18-QUERY-RACE-1`'s real-concurrency proof not built | The exploit is closed and proven sequentially (`TestPostWin_LockAlreadyReleased`); the specific real-concurrency two-worker-plus-negative-control proof the design demanded was not built | **OPEN** — newly named this phase | qa | P2 |
+| `QA-W2P9-3` — `IssueAndActivateCashback` zero live callers (qa-independent confirmation) | See row above; listed once, cross-referenced | **OPEN** | backend/bonus-engine | P3 |
+| `QA-W2P9-4` — `EOI-DECOMPOSITION-1`/`EOI-BUDGET-RACE-1`'s multi-page/API-splitting/pagination/resume scenarios not built | Single-EOI-row concurrency is proven; the subtree/multi-page and cross-surface scenarios the design specifically called out are not | **OPEN** — newly named this phase | qa | P2 |
+| `QA-W2P9-5` — `RecordWageringContribution` concurrency not independently tested | No test races two concurrent wagering-contribution postings against the same Grant | **OPEN** — newly named this phase | qa | P3 |
+| `QA-W2P9-6` — no true mid-transaction fault-injection test exists anywhere in this repo | Every "partial failure" claim in this document rests on Postgres's own atomicity guarantee rather than an actual killed connection; a reasonable substitute, but not the literal test several design sections call for | **OPEN**, repo-wide pre-existing gap, not unique to this Wave — newly named this phase | qa | P3 |
+| Concurrent expiry / concurrent cancellation / concurrent reversal / same-player-multi-brand (human directive §19/§20 floor items) | Zero prior coverage anywhere in `internal/bonus` | **CLOSED this phase** — three new tests, §4 above | qa | P1 (was; the directive named these explicitly as required floor items) |
+
+No item above is marked `IMPLEMENTED` without a cited, actually-passing
+test, and no item is marked `CLOSED` without a cited fix commit or test.
+Every `OPEN`/`DOCUMENTED-RISK` item was already disclosed by its owning
+phase except the five newly-named `QA-W2P9-*` items, which this phase
+found and is naming for the first time, per CLAUDE.md's "no fake
+completion" and this document's own "gaps this test-writing exercise
+surfaced" precedent (§6 of the Fix Round 2 section above).

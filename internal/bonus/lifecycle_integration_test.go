@@ -1548,3 +1548,329 @@ func TestAdversarial_ConcurrentBulkGrantWorkers_NeverExceedRecipientCeiling(t *t
 		t.Fatalf("expected exactly %d denied, got %d", n-int(ceiling), denied)
 	}
 }
+
+// --- Stage 4H-B1 Wave 2 Phase 9 (qa): three real gaps this phase's own
+// review of the human directive's §19/§20 test floor found and closed
+// with real PostgreSQL tests, none of which required any domain-logic
+// change - TerminateGrant, MarkGrantReversed and the brand-scoped Grant
+// path were all already correctly built for these properties; only the
+// adversarial test itself was missing. See docs/testing/testing-
+// strategy.md's Phase 9 section for the full gap analysis (concurrent
+// expiry/cancellation/reversal and "same player across multiple brands"
+// were named in the directive's own required-coverage list but had no
+// test anywhere in internal/bonus or internal/casino before this).
+
+// TestAdversarial_ConcurrentTerminate_ExpireVsCancel_ExactlyOneWins closes
+// the "concurrent expiry" and "concurrent cancellation" gap in one test:
+// two DIFFERENT terminal triggers (expire, cancel) race on the SAME Grant
+// with no open exposure, so each is eligible to resolve immediately
+// (never deferred to pending_settlement) if it wins. TerminateGrant's own
+// AdvisoryLockGrant + LockGrantForUpdate + ComputeNewStakeEligibility-
+// re-read sequence (grant.go/lifecycle.go) is the ONLY thing that can
+// make this safe under genuine concurrency - this test exists to prove
+// that composition, not assume it from reading the code.
+func TestAdversarial_ConcurrentTerminate_ExpireVsCancel_ExactlyOneWins(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	co := seedCampaignOffer(t, pool, f.tenantID, f.brandID, f.staffID)
+
+	var grantID uuid.UUID
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		g := newTestOfferGrant(f, co, "concurrent-terminate-1")
+		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{
+			Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode,
+		})
+		if err != nil || !outcome.Allowed {
+			return fmt.Errorf("issue/activate: %v / %+v", err, outcome)
+		}
+		grantID = result.ID
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed activated grant: %v", err)
+	}
+
+	type attempt struct {
+		resolution TerminalResolution
+		wantStatus GrantStatus
+		result     Grant
+		err        error
+	}
+	attempts := []*attempt{
+		{resolution: TerminalResolutionExpired, wantStatus: GrantExpired},
+		{resolution: TerminalResolutionCancelled, wantStatus: GrantCancelled},
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(len(attempts))
+	for _, a := range attempts {
+		a := a
+		go func() {
+			defer wg.Done()
+			_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				result, err := TerminateGrant(ctx, tx, f.tenantID, grantID, TerminateGrantParams{
+					Resolution: a.resolution, ReasonCode: "concurrent-terminate-test", ActorType: ActorSystem, TriggerType: TriggerAutomatedRuleEvaluation,
+				})
+				a.result, a.err = result, err
+				if err != nil {
+					// Roll back the loser's transaction explicitly rather
+					// than committing a call that itself returned an error.
+					return err
+				}
+				return nil
+			})
+		}()
+	}
+	wg.Wait()
+
+	wins, losses := 0, 0
+	var winner *attempt
+	for _, a := range attempts {
+		switch {
+		case a.err == nil:
+			wins++
+			winner = a
+		case errors.Is(a.err, ErrIllegalTransition), errors.Is(a.err, ErrGrantStateConflict):
+			losses++
+		default:
+			t.Fatalf("unexpected error: %v", a.err)
+		}
+	}
+	if wins != 1 || losses != 1 {
+		t.Fatalf("expected exactly 1 winner and 1 loser, got wins=%d losses=%d (expire err=%v, cancel err=%v)", wins, losses, attempts[0].err, attempts[1].err)
+	}
+	if winner.result.Status != winner.wantStatus {
+		t.Fatalf("winner's own returned Grant disagrees with its own resolution: got %s, want %s", winner.result.Status, winner.wantStatus)
+	}
+
+	// The final, committed row must agree with whichever attempt actually
+	// won - never a third value, and never the loser's resolution.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		g, err := GetGrantByID(ctx, tx, grantID)
+		if err != nil {
+			return err
+		}
+		if g.Status != winner.wantStatus {
+			return fmt.Errorf("final committed status %s does not match the winner's resolution %s", g.Status, winner.wantStatus)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAdversarial_ConcurrentReversal_ExactlyOneWins closes the "concurrent
+// reversal" gap: two goroutines call MarkGrantReversed on the same
+// already-terminal Grant at nearly the same instant, with different
+// reason codes. MarkGrantReversed (grant.go) has no explicit advisory
+// lock - it relies entirely on a single atomic `UPDATE ... WHERE status
+// <> 'reversed'` to be safe under concurrency (ordinary Postgres row-lock
+// serialization, not an application-level check-then-write). This test
+// proves that reliance is actually safe, not merely plausible.
+func TestAdversarial_ConcurrentReversal_ExactlyOneWins(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	co := seedCampaignOffer(t, pool, f.tenantID, f.brandID, f.staffID)
+
+	var grantID uuid.UUID
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		g := newTestOfferGrant(f, co, "concurrent-reversal-1")
+		created, err := CreateGrant(ctx, tx, g)
+		grantID = created.ID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed grant: %v", err)
+	}
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := TerminateGrant(ctx, tx, f.tenantID, grantID, TerminateGrantParams{
+			Resolution: TerminalResolutionCancelled, ReasonCode: "pre-reversal-setup", ActorType: ActorSystem, TriggerType: TriggerAutomatedRuleEvaluation,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("terminate grant before reversal race: %v", err)
+	}
+
+	const n = 2
+	results := make([]struct {
+		grant Grant
+		err   error
+	}, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				g, err := MarkGrantReversed(ctx, tx, f.tenantID, grantID, fmt.Sprintf("concurrent-reversal-%d", i), time.Now().UTC())
+				results[i].grant, results[i].err = g, err
+				return err
+			})
+		}()
+	}
+	wg.Wait()
+
+	wins, losses := 0, 0
+	for _, r := range results {
+		switch {
+		case r.err == nil:
+			wins++
+		case errors.Is(r.err, ErrGrantStateConflict):
+			losses++
+		default:
+			t.Fatalf("unexpected error: %v", r.err)
+		}
+	}
+	if wins != 1 || losses != n-1 {
+		t.Fatalf("expected exactly 1 winner and %d loser(s), got wins=%d losses=%d", n-1, wins, losses)
+	}
+
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		g, err := GetGrantByID(ctx, tx, grantID)
+		if err != nil {
+			return err
+		}
+		if g.Status != GrantReversed {
+			return fmt.Errorf("expected exactly one reversal to have committed, got status %s", g.Status)
+		}
+		if g.ReversalReasonCode == nil {
+			return fmt.Errorf("expected a reversal_reason_code to be recorded")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAdversarial_SamePlayerAcrossMultipleBrands_ConcurrentGrantsIsolated
+// closes the "same player across multiple brands" gap: ONE person holds
+// TWO player_accounts under the SAME tenant, one per brand (a real,
+// supported shape - player_accounts.person_id carries no uniqueness
+// constraint, migrations/0010). Concurrent issue+activate for that same
+// person's two brand-scoped Grants must not cross-contaminate: each
+// Grant must end up attributed to its own brand/player_account/wallet,
+// and AdvisoryLockGrant's per-grant-id lock (never a per-person lock)
+// must not serialize or block the two brands' grants against each other.
+func TestAdversarial_SamePlayerAcrossMultipleBrands_ConcurrentGrantsIsolated(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	co1 := seedCampaignOffer(t, pool, f.tenantID, f.brandID, f.staffID)
+
+	var brand2ID, player2ID, wallet2ID, sharedPersonID uuid.UUID
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// The FIRST brand's player_account was created by seedFixture with
+		// its own fresh person_id - recover it so the SECOND brand's
+		// player_account can share that exact person_id (the "same
+		// player" property under test).
+		if err := tx.QueryRow(ctx, `SELECT person_id FROM player_accounts WHERE id = $1`, f.playerID).Scan(&sharedPersonID); err != nil {
+			return err
+		}
+
+		brand2ID = uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO brands (id, tenant_id, slug, name) VALUES ($1, $2, $3, 'Second Test Brand')`,
+			brand2ID, f.tenantID, "b2-"+brand2ID.String()[:8]); err != nil {
+			return err
+		}
+		player2ID = uuid.New()
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status) VALUES ($1,$2,$3,$4,$5,'x','active')`,
+			player2ID, f.tenantID, brand2ID, sharedPersonID, player2ID.String()+"@example.com"); err != nil {
+			return err
+		}
+		wallet2ID = uuid.New()
+		_, err := tx.Exec(ctx, `INSERT INTO wallets (id, tenant_id, brand_id, player_account_id, asset_code) VALUES ($1,$2,$3,$4,$5)`,
+			wallet2ID, f.tenantID, brand2ID, player2ID, f.assetCode)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed second brand + shared-person player account: %v", err)
+	}
+	co2 := seedCampaignOffer(t, pool, f.tenantID, brand2ID, f.staffID)
+
+	f2 := f
+	f2.brandID, f2.playerID, f2.walletID = brand2ID, player2ID, wallet2ID
+
+	type brandAttempt struct {
+		fx      lifecycleFixture
+		co      campaignOffer
+		trigger string
+		result  Grant
+		err     error
+	}
+	attempts := []*brandAttempt{
+		{fx: f, co: co1, trigger: "multi-brand-1a"},
+		{fx: f2, co: co2, trigger: "multi-brand-1b"},
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(len(attempts))
+	for _, a := range attempts {
+		a := a
+		go func() {
+			defer wg.Done()
+			_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				g := newTestOfferGrant(a.fx, a.co, a.trigger)
+				result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{
+					Grant: g, Amount: big.NewInt(500), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode,
+				})
+				if err == nil && !outcome.Allowed {
+					err = fmt.Errorf("denied: %s / %s", outcome.DeniedBy, outcome.Code)
+				}
+				a.result, a.err = result, err
+				return err
+			})
+		}()
+	}
+	wg.Wait()
+
+	for i, a := range attempts {
+		if a.err != nil {
+			t.Fatalf("brand attempt %d: unexpected error/denial issuing to the SAME person's OTHER brand concurrently: %v", i, a.err)
+		}
+	}
+	if attempts[0].result.ID == attempts[1].result.ID {
+		t.Fatalf("expected two DISTINCT Grants (one per brand), got the same id twice")
+	}
+
+	// Each Grant must be attributed to exactly its OWN brand/player/wallet
+	// - never swapped, never shared - proving the concurrent path did not
+	// cross-contaminate the two brands despite them sharing one person.
+	for i, a := range attempts {
+		if a.result.BrandID != a.fx.brandID {
+			t.Fatalf("attempt %d: Grant attributed to wrong brand: got %s, want %s", i, a.result.BrandID, a.fx.brandID)
+		}
+		if a.result.PlayerAccountID != a.fx.playerID {
+			t.Fatalf("attempt %d: Grant attributed to wrong player_account: got %s, want %s", i, a.result.PlayerAccountID, a.fx.playerID)
+		}
+		if a.result.WalletID != a.fx.walletID {
+			t.Fatalf("attempt %d: Grant attributed to wrong wallet: got %s, want %s", i, a.result.WalletID, a.fx.walletID)
+		}
+		if a.result.Status != GrantActivated {
+			t.Fatalf("attempt %d: expected activated, got %s", i, a.result.Status)
+		}
+	}
+
+	// Confirm both player_accounts really do share one person_id - the
+	// precondition this test's whole "same player" claim rests on, proven
+	// rather than assumed from the seeding code above.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var p1, p2 uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT person_id FROM player_accounts WHERE id = $1`, f.playerID).Scan(&p1); err != nil {
+			return err
+		}
+		if err := tx.QueryRow(ctx, `SELECT person_id FROM player_accounts WHERE id = $1`, player2ID).Scan(&p2); err != nil {
+			return err
+		}
+		if p1 != p2 || p1 != sharedPersonID {
+			return fmt.Errorf("precondition violated: the two player_accounts do not share one person_id (p1=%s p2=%s shared=%s)", p1, p2, sharedPersonID)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
