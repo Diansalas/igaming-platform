@@ -991,3 +991,480 @@ corresponding Wave 2–6 implementation exists to test, and rows flagged
 `BLOCKED` in §6 above cannot move to `IMPLEMENTED` before their named
 architecture/product decision is made, regardless of implementation
 progress elsewhere in Bonus Engine.
+
+## Stage 4H-B1, Wave 1.5 — Cross-Domain Test Matrix (Commercial Ecosystem + Casino Win + Segmentation Architecture Reconciliation Gate)
+
+Status: `RECOMMENDATION`, `NOT IMPLEMENTED`. Issued for the Wave 1.5
+architecture-reconciliation gate (`docs/governance/task-registry.md`,
+Stage 4H-B1 Wave 1.5 section; dispatch `4HB1W15-05`). **Design/strategy
+only** — no `internal/segment`, `internal/crm`, `internal/affiliate`, or
+bonus-funded-wagering code exists yet, and none is authorized by this
+section. This section extends, and does not restate, the Stage 4H-B1 Wave
+1 test matrix immediately above: the concurrency table's numbering
+continues from **C18** (Wave 1 ended at C17), the adversarial-abuse
+table's numbering continues from **A15** (Wave 1 ended at A14), and every
+mechanism cited (advisory locks, idempotency keys, RLS dual-scope
+patterns, the `(tenant_id, grant_id)`/`(tenant_id, provider_id,
+provider_tx_id)` lock families) is the same one Wave 1 already specified —
+no new locking primitive is invented here.
+
+**What this section is written against, and what it is not**: casino's
+own postWin financial-resolution design (`4HB1W15-01`), bonus-engine's
+Grant terminal-state formal proof (`4HB1W15-02`, §A.9), and architect's
+Segmentation/CRM/Affiliate architecture documents (`4HB1W15-03`) are
+parallel Phase 1 dispatches not visible to this document at the time it
+was written. Every item below that depends on one of those three is
+explicitly flagged as provisional and re-verifiable, not silently assumed
+correct — consistent with this document's own Wave 1 §6 practice of
+naming dependencies rather than inventing answers to unresolved
+architecture. §6 below (the severity framework) is the one part of this
+section that does not depend on any of the three and can be applied
+immediately to Phase 2's findings once they exist.
+
+### 1. Casino postWin financial-resolution adversarial scenarios (C18–C27)
+
+Per gate directive §A.10, formalized as test cases in the identical
+"mechanism under test / invariant that must hold" shape Wave 1's C1–C17
+table already established. These scenarios are the concrete adversarial
+instances of the **G-2** gap the Wave 1 reconciliation escalated
+(`docs/governance/task-registry.md`, Stage 4H-B1 reconciliation finding
+1: "gate G-2 is reachable in the casino-only slice, not only sportsbook")
+and of the Terminal-Grant Technical Contract's §T.7/§T.13 mechanism
+(`10-bonus-engine-architecture.md`). **Every row's actual expected
+posting/consequence is re-derived, not invented, from §T.7's already-
+modeled data and the three named candidate actions — this table does not
+select among ACTION_REFORFEIT/ACTION_ROUTE_TO_CASH/ACTION_HOLD_FOR_REVIEW,
+exactly as §T.13 itself does not.**
+
+| # | Scenario | Mechanism under test | Invariant that must hold |
+|---|---|---|---|
+| C18 | **Win after grant state change** — a WIN settlement for a bonus-funded, previously-locked stake arrives after Grant `G`'s own status changed (`activated`→`expired`/`cancelled`/`forfeited`) between lock and settlement | The `(tenant_id, grant_id)` `FOR UPDATE` read at settlement time, T.7's exact mechanism, same lock family as C4–C6/C16 | If `G` is still non-terminal at the live read, ordinary settlement proceeds and progress increments correctly (this branch is testable today). If `G` is terminal at the live read, the credit is never posted to `player_bonus` as though `G` were still active — **`BLOCKED` on G-2** for this branch only, identically to C16; what must be provable now is that the race is *detected* and routed to a defined, non-silent outcome |
+| C19 | **Win after wagering completion** — a stake locked under `G` is still open when `G`'s wagering requirement is separately satisfied by other bets and `G` reaches `converted`; the locked stake's own WIN settlement arrives afterward (§T.7's "rare fourth entry path," explicitly folded into G-2, "not treated as a distinct case") | Identical to C18, with `G.status == converted` observed at the live read | The system must not silently double-count this stake as still contributing to an already-satisfied wagering requirement (no second `bonus_conversion` posting is ever produced) and must not credit `player_bonus` on a Grant with no further wagering use for it — **`BLOCKED` on G-2**, same action space as C18/C16, restated here because a `converted` Grant is easy to mis-treat as "no longer relevant" rather than as a fourth G-2 entry path |
+| C20 | **Rollback after win** — a WIN settlement posts (crediting `player_bonus`/`player_cash` per the funding split), then a `casino_rollback`/`sportsbook_rollback` of that same round arrives afterward | Existing `postRollback` compensating-entry mechanism (ADR 0032 §7, ADR 0038), extended by the G-3 netting fix (`ledger-accounting-model.md` §6.4.11 V-1) to net the wagering-progress credit the WIN produced, not only the cash/bonus payout | The compensating entry restores both the ledger balance **and** the wagering-progress derivation to exactly their pre-WIN state — no residual progress credit survives the rollback of the WIN that produced it; Invariant B1 holds after the compensating entry. **`BLOCKED` on the G-3 netting-query fix landing** (Wave 1 §6, dependency item 2) for the bonus-funded case; unaffected and testable today for cash-only, and that cash-only case is a required regression test in its own right (mirrors A3's "this is a regression test for a fix" framing) |
+| C21 | **Win after rollback (reordering/tombstone)** — the round's rollback is processed *before* its own original WIN settlement event (out-of-order delivery), so the rollback initially finds no original to reverse | Rollback-of-a-never-seen-original tombstone mechanism (ADR 0032 §7, mirrors `payments.postDepositReversalTombstone` and casino's existing rollback-of-never-seen handling) | The rollback writes a tombstone; the late-arriving original WIN settlement is then rejected outright — for **both** the cash and bonus-funded portions of the split. The bonus-specific gap this test must prove beyond the existing cash-only tombstone test: the tombstone also blocks the wagering-progress side (a late WIN must not retroactively credit progress against a Grant whose stake was already tombstoned as void), not only the ledger posting |
+| C22 | **Duplicate win** — two identical WIN-settlement callbacks for the same occurrence (provider redelivery), at least one racing concurrently | ADR 0038 §14's composed idempotency key / `occurrence_ordinal`, identical to C11 | Exactly one WIN posting and one wagering-progress increment regardless of delivery order/concurrency. Restated as its own row (rather than assumed covered by C11's generic "activity events" framing) because the gate directive names the WIN-callback path explicitly |
+| C23 | **Duplicate rollback** — two identical rollback callbacks for the same occurrence, at least one racing concurrently | Same idempotency key as C22, plus the existing double-reversal-protection `FOR UPDATE` row lock (mirrors this document's Stage 4H-B0 §1.8 retail-reversal pattern) | Exactly one compensating entry posts; the second rollback is a no-op returning the original result, never a second reversal of an already-reversed transaction |
+| C24 | **Concurrent win and rollback** — a WIN settlement and a rollback for the *same* round/occurrence are delivered concurrently, racing to be processed first | The `(tenant_id, provider_id, provider_tx_id)`-scoped advisory lock this platform's own `postBet` precedent already establishes for exactly this race class, serializing the two attempts | Exactly one of the two effects is authoritative and the loser observes the winner's already-committed state: if WIN wins, the round settles and the rollback then correctly reverses that settlement (never a race-losing no-op that silently drops the rollback); if the rollback wins first (rollback-of-not-yet-seen-original), C21's tombstone mechanism applies and the WIN is rejected on arrival. There is never a state where both an unreconciled WIN posting and an unreconciled rollback-with-no-original-found coexist |
+| C25 | **Late callback** — a WIN or rollback callback for a bonus-funded stake arrives with unusually high latency (hours/days), well after other lifecycle events for the same Grant/player have already occurred | The same live, `clock_timestamp()`-consistent, in-transaction re-evaluation this document already requires for RG/Risk/AssetAuthorization (C13–C15) and G-2's own live `FOR UPDATE` read (T.7) | The callback's outcome is a pure function of the CURRENT committed state at processing time (Grant status, RG status, asset authorization) — never of how long the callback took to arrive, and never of a value cached or assumed from whenever the bet was originally placed |
+| C26 | **Callback after grant expiry** — the WIN/rollback callback for a locked stake arrives after `G` has already naturally expired (time-limit reached) while that stake was still outstanding — G-2 trigger path (i), §T.13 | Identical mechanism to C18 | **This is G-2 itself**, restated as its own named row because the gate directive names it as a distinct scenario — `BLOCKED` on G-2's selection exactly as C16/C18; what must be provable now (mirroring C16's "what can be tested now" carve-out) is that the race is detected and routed to a defined, non-silent outcome, never silently posted to `player_bonus` as though `G` were still active |
+| C27 | **Callback after grant cancellation** — identical to C26, substituting a staff/player-initiated `cancelled` transition (G-2 trigger path (ii), §T.13) for natural expiry | Identical mechanism to C18/C26 | Same `BLOCKED`-on-G-2 status and the same "detect and route, never silently post" minimum bar as C26 |
+
+**Stress-test requirement, restated from Wave 1 §1, applies unchanged**:
+C22, C23, C24 each require the N-way (minimum 8 concurrent goroutines,
+real Postgres, `-race`) stress variant in addition to the two-actor race,
+before being credited as tested — a burst-size requirement is
+particularly load-bearing for C24 (win/rollback racing), since a lock
+that only serializes correctly at low contention is not proof it holds
+under a real redelivery storm.
+
+**Re-verification flag**: every mechanism cited above (T.7's live `FOR
+UPDATE` read, the `postWin`/`postRollback` destination-resolution fix the
+Wave 1 reconciliation already ordered independently of G-2) is written
+against the architecture as it stands today. Casino's own postWin
+financial-resolution design (`4HB1W15-01`) may specify additional
+adversarial detail (e.g. a specific destination-resolution algorithm for
+mixed cash/bonus splits) this table does not yet know about — this table
+must be re-checked against that design once it lands, not assumed to
+anticipate it fully.
+
+### 2. Grant terminal-state invariant test plan
+
+This is a test-shape specification, not a test — bonus-engine's own
+formal proof of the deferred-terminal design (`4HB1W15-02`, §A.9) is a
+parallel dispatch not yet visible here, and the Wave 1 reconciliation's
+own description of the design (`docs/governance/task-registry.md`, Stage
+4H-B1 reconciliation finding 1) is itself only an engineering-design
+sketch, not a finished mechanism: "a Grant may only reach a genuinely
+terminal status... once its attributable locked balance... reaches zero.
+A terminal trigger firing while locked funds remain outstanding defers
+the Grant into a pending-settlement sub-state that finalizes
+automatically once the locked stake resolves."
+
+**The category of test this design requires, once it exists, stated now
+so Wave 2+ does not have to re-derive it:**
+
+1. **The core millisecond-race test** (the exact scenario the task names):
+   construct Grant `G` with a locked stake `L` attributable to it
+   (non-zero, via `correlation_id`, per the G-3 netting discriminator
+   `ledger-accounting-model.md` §6.4.11 already specifies). Hold two
+   competing transactions at a synchronization barrier immediately before
+   commit — `G`'s own terminal trigger (an expiry-timer firing, a staff
+   cancellation, a forfeiture) and `L`'s settlement/void event — and
+   release them simultaneously, forcing genuine commit-order contention
+   rather than a scripted two-step sequence. This requires a test-only
+   synchronization hook (e.g. a `SAVEPOINT`-and-wait pattern, or an
+   injected barrier channel two goroutines block on before their final
+   `COMMIT`), mirroring the harness class this platform's own
+   `postBet`/`rg.lockPerson` adversarial-lock stress tests already use to
+   force real contention rather than relying on incidental scheduler
+   timing.
+2. **The invariant under test, stated precisely**: at no committed instant
+   does `G` show a hard-terminal status (`expired`/`cancelled`/
+   `forfeited`, final) while its attributable locked balance is non-zero.
+   Regardless of which of the two racing transactions the database
+   actually serializes first, the only two legal outcomes are (a) the
+   terminal trigger's effect is deferred into the pending-settlement
+   sub-state because live-read locked balance was still non-zero at that
+   instant, or (b) the locked stake had already resolved to zero before
+   the terminal trigger's own live read, in which case ordinary hard-
+   terminal transition proceeds normally — there is no third, "half-
+   applied" outcome (e.g. a hard-terminal status written while `L` is
+   later discovered still outstanding).
+3. **Automatic finalization, tested as its own transition, not assumed**:
+   once the last outstanding locked stake attributable to a
+   pending-settlement Grant resolves (settles or voids to zero), the
+   Grant's finalization to its correct hard-terminal status must be
+   proven to fire automatically, exactly once, with its own Progress
+   entry — mirroring this document's own "assert the job fires, not just
+   that the query is right" standard (Stage 4H-B0 §1.7) rather than
+   assuming a query being correct implies the transition actually
+   happens.
+4. **Idempotency of the finalization step itself**: the automatic
+   finalization must be provably idempotent under redelivery/re-invocation
+   (e.g. two near-simultaneous resolving events for two different locked
+   stakes under the same Grant, both observing "now zero" and racing to
+   finalize) — exactly one finalization transition and one Progress entry
+   results, using the same `(tenant_id, grant_id)` advisory lock family
+   already governing every other Grant-mutating race in this matrix.
+5. **N-way / multi-stake variant**: a Grant with several outstanding
+   locked stakes at the moment its terminal trigger fires must remain in
+   the pending-settlement sub-state until **all** of them resolve to
+   zero, tested with concurrent partial resolutions (some stakes settling
+   while others are still locked) to prove no premature finalization on a
+   stale or partial read of "locked balance."
+6. **Non-regression on the ordinary case**: a Grant whose terminal trigger
+   fires with zero locked balance outstanding must transition immediately
+   and normally — the deferred sub-state must never introduce latency or
+   an extra Progress entry for the overwhelming majority case where no
+   race exists at all.
+7. **B1 continuously, not only at the end**: Invariant B1 must be asserted
+   after every state transition in this sequence (deferral, partial
+   resolution, finalization), not only after the final state, per this
+   document's own property-testing-plan discipline (§3 of the Wave 1
+   section, "Ledger conservation").
+
+**What is explicitly not specified here, pending the formal proof**:
+whether "attributable locked balance" is a stored, incrementally
+maintained counter or a live-derived read (Model C's own read-time
+derivation approach, `ledger-accounting-model.md` §6.6, would suggest the
+latter, for the same reasons Model C rejected a stored counter for
+ordinary wagering progress) — the test design above is written to be
+agnostic to that choice (it asserts the *outcome*, "no hard-terminal
+status while locked balance is nonzero," not a specific query shape), but
+the exact SQL/locking primitive the proof settles on must be re-checked
+against item 1's harness once it lands, since a stored-counter design and
+a live-derived-read design have different concurrency hazards worth
+naming explicitly in a future revision of this section.
+
+### 3. Segmentation Engine test requirements
+
+Architect's Segmentation Engine architecture document (`4HB1W15-03`, §B)
+is a parallel dispatch not yet visible here. This section is written
+against the task's own description of the required properties
+(deterministic AND/OR/NOT composability, static-vs-dynamic membership,
+DENY-survival) and this platform's own established patterns (the RLS
+dual-scope pattern already used for `bonus_grants`, the fail-closed
+composition order RG/Risk/AssetAuthorization already establish) — not
+against a concrete schema, which does not exist yet.
+
+**Example dynamic segments** (illustrative criteria trees, not literal
+config syntax, chosen to exercise AND/OR/NOT composition and nesting):
+
+1. **"VIP retention"** — `tier ∈ {gold, platinum} AND lifetime_deposits_minor_units > threshold` (a two-leaf AND).
+2. **"Reactivation target"** — `(days_since_last_deposit > 90 OR account_status == dormant) AND NOT self_excluded` — exercises OR nested inside an AND, and a NOT leaf. **Flag**: `self_excluded` must never be a Segmentation-owned fact read directly from `player_restrictions` — if a segment criterion needs it at all, it must be a read-only, denormalized copy the Segmentation Engine is fed, never a second reader of RG's own authoritative table, mirroring ADR 0034 §1's "must not invent its own restriction table or enum" rule applied one layer up. This is a required architectural check on `4HB1W15-03`'s actual design, not assumed satisfied here.
+3. **"New depositor, geo-scoped"** — `country ∈ {ES, MX, CO} AND first_deposit_at IS NOT NULL AND first_deposit_at > (now - 30 days)` — a three-leaf AND with a time-window leaf, chosen specifically to exercise the static-vs-dynamic and as-of-time properties below (a "new depositor" segment is definitionally time-relative).
+4. **"Churn-risk with open bonus exposure"** — `(session_frequency_7d < 0.5 * session_frequency_28d_avg) AND has_active_grant == true` — exercises a criterion that reads a fact from a different domain (Bonus Engine's own Grant state) as a segment input, which is the kind of cross-domain read §4 below's boundary tests must confirm is read-only.
+5. **"Suspected multi-accounting"** — `device_fingerprint_link_count > 1 OR payment_instrument_link_count > 1` — deliberately the same identity-graph fact this document's Wave 1 §2 already named as an unresolved dependency for abuse test A8; recorded here as the same open dependency reached from the segmentation side, not a new one.
+
+**Deterministic evaluation, property-based**: generate random AND/OR/NOT
+trees of arbitrary depth over a fixed set of boolean/numeric leaf
+predicates and random player-fact fixtures; assert the Segmentation
+Engine's evaluation result exactly matches an independent, naively-written
+reference evaluator (a straightforward recursive boolean-tree walker) for
+every generated tree/fixture pair, and that repeated evaluation of the
+identical tree against the identical fixture always yields the identical
+result (no hidden non-determinism, e.g. floating-point comparison on a
+monetary threshold — every numeric leaf must compare in integer minor
+units, mirroring CLAUDE.md's money rule extended to segment criteria).
+
+**Static vs. dynamic membership — two genuinely different tests, not one**:
+
+- **Static segment** (an explicit, staff-curated list of player ids,
+  snapshotted at creation/edit time): a direct-SQL/API test confirming
+  membership is exactly the persisted list — adding or removing a player
+  from the underlying criteria that originally justified their inclusion
+  must have **zero** effect on a static segment's membership until a
+  staff actor explicitly edits the list.
+- **Dynamic segment** (computed live from criteria): membership must be
+  re-derived at the moment of use, not cached indefinitely — a test that
+  changes an underlying player fact (e.g. crosses `lifetime_deposits`
+  over the threshold) and confirms the very next evaluation reflects the
+  new membership, with no stale-cache window longer than whatever
+  explicit staleness bound the architecture states (if the architecture
+  permits a bounded cache, the test must assert the bound is actually
+  enforced, not merely documented).
+
+**As-of reconstructability — the audit requirement, tested explicitly**:
+per the gate directive, a player's segment membership must be
+reconstructable as of any past eligibility decision. This requires more
+than a live-evaluation test: `TestSegmentMembership_ReconstructableAsOfPastDecision`
+— given a historical Grant's `issued`-time Progress entry (which already,
+per doc10 §1.3/§10.1, records "why `issued` was granted" as a snapshot),
+re-run the dynamic segment's own criteria evaluation using the exact
+player-fact-history **as of** that recorded instant (not current facts)
+and assert the result is identical to what the Progress entry's own
+recorded eligibility snapshot states. **This is flagged as a genuine
+open architecture dependency, not assumed satisfiable by construction**:
+it requires either (a) player facts to be themselves time-versioned/
+event-sourced so an "as of T" read is possible at all, or (b) the
+Segmentation Engine's own evaluation result to be snapshotted and stored
+at decision time (in which case "reconstructable" means "stored," not
+"re-derivable," and the test changes shape accordingly to a direct
+snapshot-equality check rather than a re-evaluation). Which of these two
+shapes `4HB1W15-03`'s design commits to changes which test is actually
+written — this section names the requirement and both candidate test
+shapes; it does not resolve the design question, which belongs to
+`architect`.
+
+**The DENY-survival test, named exactly as the gate directive requires**:
+
+`TestSegmentMembership_NeverOverridesAuthoritativeDeny` — construct a
+player who satisfies 100% of a segment's criteria (segment-eligible by
+criteria alone), independently combined with each of the following,
+tested as four separate cases, at each of Bonus Engine's three live
+checkpoints (grant, activation, conversion — T.1's composition order):
+
+1. An active self-exclusion (RG `Decision.Allowed == false`).
+2. A Risk `DENY`/hard-limit hit (`risk.Evaluate` `Outcome == DENY`).
+3. A KYC-blocking status (however identity-compliance's own Bonus/KYC
+   integration expresses it — cited, not re-derived, from ADR 0034).
+4. An `AssetAuthorization.CheckEligibility` denial for the Grant's asset.
+
+In every one of the four cases, the eligibility **decision** must be
+DENY (the transition blocked, per T.3/T.12's already-frozen consequence
+shape), while the segment-**match** fact itself is still correctly
+recorded as "matched" in the Progress/audit trail — i.e. the system must
+never misreport a segment non-match to make the denial look like
+ordinary ineligibility; segment membership and the RG/Risk/KYC/
+AssetAuthorization gate are two independent, separately auditable facts,
+and composition order is fixed: segment membership is an input to
+*whether an Offer is offered/considered at all*, never a bypass of, or
+substitute for, the mandatory live gates. This is C13/C14/C15's shape
+extended to segment-targeted grants specifically, and must be re-run
+identically for CRM-triggered and Affiliate-attributed grants (§4/§5
+below) once those trigger paths exist, per §5's A19.
+
+### 4. CRM/Affiliate integration-boundary tests
+
+Architect's CRM Engine and Affiliate Engine architecture documents
+(`4HB1W15-03`, §E/§F) are parallel dispatches not yet visible here. The
+following states the **shape** of the required boundary-invariant tests
+— mirroring the pattern `architect`'s own cross-domain boundary-invariant
+documents elsewhere in this project use (an enumerated, independently
+checkable list of "X cannot do Y" architectural invariants) — without
+inventing a schema or literal Go test name for either domain, since
+neither exists yet.
+
+- **BI-CRM-1 — CRM cannot post to the ledger directly.** A direct-SQL/
+  role-grant test proving whatever database role/credential the CRM
+  service runs under has no `INSERT`/`UPDATE`/`DELETE` grant on
+  `ledger_transactions`/`ledger_entries` — proven at the database
+  permission layer, mirroring this document's own "never an application-
+  path-only test" standard for RLS (Wave 1 §4), not merely "the CRM
+  codebase doesn't currently call a ledger-write function."
+- **BI-CRM-2 — CRM cannot directly mutate a Grant's status or a player's
+  wallet balance.** Both a DB-role test (same shape as BI-CRM-1, scoped
+  to `bonus_grants`/wallet balance tables) and an application-layer test:
+  a CRM-authenticated request against any Grant-mutation endpoint
+  reserved for Bonus Engine's own internal call path is rejected
+  (403/equivalent), including a direct-object-reference attempt against a
+  known `grant_id`.
+- **BI-CRM-3 — a CRM-triggered Grant goes through the identical RG/Risk/
+  AssetAuthorization gate as a player-self-triggered Grant.** Issue two
+  Grants under an identical Offer/eligibility fixture, one via the
+  ordinary automated/player-triggered path and one via a CRM-initiated
+  manual/bulk-assignment path; assert (a) equivalent RG/Risk/
+  AssetAuthorization calls occur for both (spy/mock assertion on call
+  parameters), and (b) a fixture where RG/Risk/AssetAuthorization would
+  deny the player-triggered path denies the CRM-triggered one identically
+  — a CRM-initiated grant attempt against a self-excluded player must
+  never silently succeed because "staff/CRM initiated it."
+- **BI-CRM-4 — CRM tenant/brand isolation.** A CRM actor scoped to
+  tenant A must never read, list, or trigger a Grant for a player of
+  tenant B — direct-SQL RLS test at whatever new CRM-owned tables land,
+  mirroring the standing cross-tenant baseline (this document's own
+  "Baseline requirement" section) and Wave 1 §4's dual cross-tenant/
+  cross-player discipline.
+- **BI-CRM-5 — audit parity.** Every CRM-triggered Grant or segment-based
+  bulk assignment writes the identical `audit.Record` shape doc10 §10
+  already requires for a staff-driven manual grant, with `ActorType`
+  distinguishing a CRM-system actor from a human staff actor, and a
+  reason code where doc10 §10's table requires one for the corresponding
+  human-equivalent action.
+- **BI-Affiliate-1 — Affiliate cannot credit a player balance directly.**
+  Same DB-role-grant shape as BI-CRM-1, scoped to whatever affiliate-
+  commission/attribution tables exist. An affiliate-attribution event
+  must never itself be a ledger-posting instruction — it must route
+  through the identical Bonus Engine Grant/Offer mechanism (for a
+  referral bonus) or a `ledger-finance`-owned commission posting (for an
+  affiliate payout), never an Affiliate-owned write path into
+  `ledger_transactions`.
+- **BI-Affiliate-2 — affiliate attribution is read-only eligibility input,
+  never a bypass.** An affiliate-referred player must traverse the
+  identical RG/Risk/AssetAuthorization/segment-eligibility chain as an
+  organically-registered one — a test asserting an affiliate-sourced
+  signup carrying a self-exclusion flag is denied a referral bonus
+  identically to a non-affiliate signup with the same flag.
+- **BI-Affiliate-3 — Affiliate tenant/brand isolation.** Same shape as
+  BI-CRM-4, applied to whatever Affiliate-owned attribution/commission
+  tables land.
+- **BI-Affiliate-4 — idempotency.** A redelivered/duplicate affiliate
+  conversion-attribution event must not produce two Grants or two
+  commission postings — mirrors C1/C10's mechanism, applied to whatever
+  idempotency key the (not-yet-designed) affiliate attribution event
+  carries.
+
+**Cannot be fully specified without `4HB1W15-03` landing**: the exact
+table/schema for a CRM-triggered grant request, the affiliate
+attribution event's own idempotency-key shape, whether CRM runs under its
+own database role or a scoped view of Bonus Engine's, and whether
+"affiliate commission" is itself a financial ledger posting (in which
+case it inherits the full CLAUDE.md financial-testing floor in its own
+right, not merely the boundary tests above) or a non-ledger side record
+reconciled separately — all four are named here as open items the
+Segmentation/CRM/Affiliate architecture must answer before BI-CRM-1
+through BI-Affiliate-4 can be written as literal tests rather than
+invariant statements.
+
+### 5. Bulk-assignment abuse/correctness matrix (A15–A19)
+
+Extends Wave 1's A1–A14 (cross-referenced, not duplicated) with the new
+targeting/triggering surfaces this gate introduces: segment-based
+targeting, CRM-triggered grant issuance, affiliate attribution, and
+promo-code redemption at scale.
+
+| # | Abuse vector | What a real attempt looks like | What the test must prove |
+|---|---|---|---|
+| A15 | Segment-boundary gaming | A player deliberately times an action (a deposit, a withdrawal, a dormancy-then-return cycle) to repeatedly cross into/out of a favorable dynamic segment's boundary, attempting to re-qualify for a segment-targeted Campaign more than once | The segment's own "scope of uniqueness"/dedup for that Campaign (cross-references A9's already-flagged open gap: no document yet confirms an Offer's eligibility axis carries a "scope of uniqueness" concept) prevents repeat qualification; boundary-timing manipulation must not create a race allowing double-claim, extending A7/C1's idempotency mechanism to segment re-evaluation specifically. **`NOT APPLICABLE (open dependency)`** until the "scope of uniqueness" concept A9 already flagged is designed — restated here as the identical gap reached from the segmentation side |
+| A16 | CRM-triggered bulk-assignment amplification | A compromised, over-permissioned, or buggy CRM bulk-assignment tool issues N Grants beyond a Campaign's own configured tenant/brand/segment targeting (e.g. mass-assigning a brand-specific Campaign platform-wide) | (a) A bulk job cannot target a scope broader than the Campaign's own configuration (§8) — rejected at the same RLS/authorization boundary as any other request, not merely a UI guardrail; (b) the bulk job is itself audited per-recipient, one `audit.Record`/Progress row per Grant, never one row per bulk job hiding N grants — mirrors ADR 0034 §14.5's "one audit row per bet, never per event" cardinality rule applied to a different bulk fan-out case |
+| A17 | Affiliate self-referral / attribution fraud | An affiliate refers an account they themselves control, or manipulates attribution (cookie-stuffing, referral-link replay across many self-controlled accounts) to claim N referral Grants | Extends the identical A8 identity-duplication dependency (device/payment fingerprint linking) to the affiliate-attribution path specifically. **`NOT APPLICABLE (open dependency)`**, identical status to A8 itself — not a new mechanism to design, the same unresolved gap reached via a second trigger path |
+| A18 | Promo-code abuse at scale | (a) Brute-force/enumeration of coupon codes rather than legitimate receipt of one; (b) redemption-volume abuse — a single-use(-per-player) code redeemed N times before a uniqueness constraint catches it, under real concurrent load | (a) An enumeration attempt (many sequential/parallel invalid-code guesses) must not leak, via timing or error-message variance, whether a guessed code is "close" to a valid one — a security-adjacent correctness property named here as a required test but owned by `security`'s own review, not resolved by `qa`; (b) the coupon redemption-uniqueness constraint (per-code or per-code-per-player, per the Offer's configuration) is enforced at the database layer under N≥20 concurrent redemption attempts against the coupon-validation HTTP endpoint specifically (doc10 §1's "one new surface," an endpoint rather than an event-bus consumer, so it needs its own concurrency proof rather than inheriting A7's event-delivery-shaped one) |
+| A19 | Cross-reference: abuse-control parity for new trigger paths | A CRM-initiated or Affiliate-attributed Grant is assumed, without being tested, to inherit the protections A1–A18 already prove for player-triggered/automated Grants | Rather than re-deriving a parallel A-series for CRM/Affiliate, this item requires A1 (deposit farming), A2/A3 (void/rollback farming), A5 (Offer-version manipulation), A7 (grant duplication), A11 (replay), A12 (tampering), and A13 (race/burst) each be **re-run once with a CRM-triggered or Affiliate-attributed origin substituted for the ordinary origin** — not assumed covered by the original run, exactly as this document's "No fake completion" standard requires for any new trigger surface reaching an already-tested effect through a new path |
+
+### 6. P0/P1/P2/P3 severity framework for Phase 2 findings
+
+Not filled in here — Phase 2 reviews (`ledger-finance`, `security`,
+`code-reviewer`, `bonus-engine` on the Segmentation doc, `product-owner-
+proxy`) have not yet run. This is the criteria `qa` will apply when
+triaging their findings into the "complete P0/P1/P2/P3 register" the
+gate directive asks for, stated in advance so triage is consistent rather
+than improvised per finding, and consistent with how this project has
+applied these labels at every prior gate (Stage 4G-FINAL, Stage
+4H-B0-R6's fix-wave findings, Stage 4H-B0-R7's S-1).
+
+- **P0 — Critical, launch-blocking, no deferral without an explicit
+  orchestrator/human decision.** A finding that permits real financial
+  loss, a compliance/RG bypass (self-exclusion, KYC, or a jurisdiction
+  ban circumvented), a cross-tenant or cross-player fund/data leak, or a
+  privilege escalation — exploitable today, or the moment the affected
+  code ships, with no compensating control already in place. Cannot be
+  quietly fixed-later or quarantined; per CLAUDE.md, deferring a P0 past
+  its blocking point is the orchestrator's decision to make and record
+  explicitly, never a quiet `qa` call. Precedent: Stage 4H-B0-R6's
+  four-eyes-unconditionally-inert bug (`4HB0R6-13`'s P1-A1, later
+  confirmed exploitable and treated as launch-blocking despite its
+  original P1 label — this framework deliberately places an
+  unconditionally-inert dual-control gate at P0, not P1, given that
+  precedent).
+- **P1 — High, must-fix (or explicitly resolved) before the affected
+  capability is labeled `IMPLEMENTED`.** A genuine correctness,
+  financial-integrity, or security gap that is either (a) not yet
+  reachable in the currently authorized scope (gated behind an
+  unresolved human decision or an unbuilt dependency — e.g. this
+  document's own `BLOCKED` rows C16/C18/C19/C26/C27, A6, C3, C12), or (b)
+  reachable but with a narrower blast radius than P0 (a single domain's
+  double-posting risk under a specific race, a missing test for an
+  already-designed control). May ship as `BLOCKED`/`NOT IMPLEMENTED` on
+  the specific affected sub-scope while the rest of the capability
+  proceeds, per this document's own C3/C12/C16/A6 labeling precedent —
+  but the affected sub-scope itself is never labeled `IMPLEMENTED` while
+  the P1 stands. **Any finding touching a CLAUDE.md financial invariant
+  (`SUM(DEBITS) == SUM(CREDITS)`, idempotency, RG/self-exclusion bypass,
+  tenant isolation) defaults to at least P1 even if narrowly scoped,
+  never silently P2, absent a specific, documented reason it is already
+  fully mitigated elsewhere.**
+- **P2 — Medium, hardening, non-blocking.** An observability, defense-
+  in-depth, reconciliation-latency, or precision/rounding-boundary gap
+  that does not itself permit fund loss or compliance bypass under
+  currently authorized scope, but should close before broader production
+  exposure. Recorded as a residual risk with an owner in the completion
+  report; may be deferred to a follow-up wave with reasoning stated,
+  mirroring Stage 4G-FINAL-FINANCE-GATE's precedent (6 P2s recorded, none
+  fixed that stage, judged non-blocking with reasoning given).
+- **P3 — Low, cosmetic/documentation.** Naming or terminology drift, a
+  redundant check, a minor cross-document inconsistency, or a finding
+  whose only cost is future-reader confusion rather than a correctness
+  defect. Never blocks sign-off; tracked so it is not silently lost,
+  mirroring this project's existing practice of recording P3s in a
+  consolidated list rather than omitting them (Stage 4H-B0-R6's
+  `4HB0R6-12` consolidated-P3-list precedent).
+
+**Triage rule, stated once rather than per severity level**: severity is
+assessed against *actual reachable impact given the currently authorized
+scope*, not a theoretical worst case unrelated to what is actually being
+built — but a finding gated behind an unresolved human decision (G-2
+being the live example) is never *downgraded* on account of being
+gated; its severity is assessed as if the gate were resolved in the
+worst available direction, and it is the `BLOCKED` label — not a lowered
+severity number — that defers it, exactly as this document's own Wave 1
+§5 already insists a `BLOCKED` row is never silently treated as passing
+or low-priority. A P0 or P1 finding is never downgraded by the specialist
+whose own design produced the underlying gap — closing or re-rating it
+requires an independent reviewer, mirroring CLAUDE.md's "no specialist
+self-approves its own work."
+
+### 7. Status, labels, and what remains unverifiable pending parallel deliverables
+
+Every item in this section is `RECOMMENDATION` (a test strategy binds
+nothing until executed) and `NOT IMPLEMENTED` (no test code exists yet).
+Named explicitly, per this section's own opening note, rather than
+silently assumed resolved:
+
+1. **§1 (C18–C27)** is written against the Terminal-Grant Technical
+   Contract (§T.7/§T.13) and the existing casino rollback/idempotency
+   precedent, not against casino's own postWin financial-resolution
+   design (`4HB1W15-01`), which may add adversarial detail (e.g. a
+   specific mixed-funding destination-resolution algorithm) this table
+   does not yet account for. Re-verify before Wave 2 relies on it.
+2. **§2** is written against the Wave 1 reconciliation's own engineering-
+   sketch description of the deferred-terminal design, not against
+   bonus-engine's formal proof (`4HB1W15-02`, §A.9). The test *shape* is
+   designed to be agnostic to a stored-counter-vs-live-derived-read
+   implementation choice, but the exact harness/locking primitive named
+   in item 1 of §2 must be re-checked once the proof lands.
+3. **§3 and §4** are written against the task's own description of the
+   required properties and this platform's own established patterns
+   (RLS dual-scope, fail-closed composition order), not against
+   architect's Segmentation/CRM/Affiliate architecture documents
+   (`4HB1W15-03`), which do not exist yet. Two genuine open design
+   questions are flagged inline rather than resolved: whether dynamic
+   segment membership is reconstructable-as-of-a-past-instant via
+   time-versioned player facts or via a stored per-decision snapshot
+   (§3), and the exact schema/idempotency-key shape for CRM-triggered
+   grants and affiliate attribution events (§4).
+4. **§5's A15 and A17** both restate already-open Wave 1 dependencies
+   (the Offer eligibility axis's undesigned "scope of uniqueness"
+   concept, A9; the undesigned device/payment fingerprint identity-graph
+   fact, A8) reached via new trigger paths — they are not new gaps this
+   section discovered, and do not become testable until those two Wave 1
+   items are separately closed.
+5. **§6 (the severity framework) has no external dependency** and can be
+   applied to Phase 2's findings as soon as they exist.
+
+None of this section's items can move toward `IMPLEMENTED` before the
+corresponding Segmentation/CRM/Affiliate/casino-postWin/Terminal-Grant
+implementation exists to test, and rows flagged `BLOCKED` (C18's terminal
+branch, C19, C20 pending G-3, C26, C27) or `NOT APPLICABLE (open
+dependency)` (A15, A17) cannot move to `IMPLEMENTED` before their named
+human decision or architecture dependency is resolved, regardless of
+implementation progress elsewhere.
