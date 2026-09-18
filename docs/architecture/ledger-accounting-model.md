@@ -347,9 +347,14 @@ a **new `bonus_expense` account type** (house-level, per `(tenant_id,
 asset_code)`, `wallet_id IS NULL`, debit-normal), is added to carry
 *recognized* promotional cost at the moment bonus value leaves
 `player_bonus` for any reason other than forfeiture. The resulting
-zero-tolerance invariant is **B1**: `signed(promo_liability) + Σ
-signed(player_bonus) == 0` per `(tenant_id, asset_code)` at every instant
-(see §6). ADR 0032 holds the full reasoning, the per-event entry tables
+zero-tolerance invariant is **B1**, in its **extended** form — the only
+form this document recognizes (§6.1, finding LF-17):
+`signed(promo_liability) + Σ signed(player_bonus) + Σ
+signed(player_locked_bonus) == 0` per `(tenant_id, asset_code)` at every
+instant (see §6.1; §6.3.2 for the widening and why the lock/unlock cycle
+needs no mirror leg). ADR 0032 §2 states the pre-migration-`0048` form
+over `{player_bonus}` alone; read §6.1 as governing. ADR 0032 holds the
+full reasoning, the per-event entry tables
 (grant / conversion / forfeiture / reversal), the operator- vs.
 provider-funded vs. externally-fulfilled cost treatments, and the
 recognition position; it is not duplicated here. Status: **architecture
@@ -512,9 +517,22 @@ and §6.5.4 of this document adds a second, both listed here so the
 mandatory list above stays the single place to look. They are lettered
 rather than numbered so the Stage 3B list above keeps its numbering:
 
+> **B1 is stated below in its EXTENDED form, and that is the only form
+> this document recognizes.** *(Corrected Stage 4H-B1, Wave 1.5, finding
+> **LF-17**.)* ADR 0032 §2 originally covered `{player_bonus}` alone,
+> because `player_locked_bonus` did not exist. §6.3.2 widened the covered
+> set to `{player_bonus, player_locked_bonus}` when the locked-origin
+> split was proposed, and migration `0048` made that split real
+> (`IMPLEMENTED`), so the unextended form is **no longer a correct
+> statement of B1 against this schema** — it would report a bonus-funded
+> sportsbook lock as `X` of drift. The row below previously carried the
+> unextended form, which defeated the purpose of this table being the
+> single place to look. Any surviving unextended statement elsewhere is a
+> documentation bug, not an alternative reading.
+
 | # | Invariant | Enforcement mechanism |
 |---|---|---|
-| B1 | `signed(promo_liability) + Σ signed(player_bonus) == 0` for every `(tenant_id, asset_code)`, at every instant, **no tolerance band** | Rule B2 in ADR 0032: every `LedgerEntry` against a `player_bonus` account carries an equal, opposite `promo_liability` entry in the **same `LedgerTransaction`**, generated/validated in `internal/ledger` rather than assembled by callers. Verified continuously by a new hourly, zero-tolerance reconciliation stream, P1 on any drift (`reconciliation-model.md`) |
+| B1 | **B1 (extended)** — `signed(promo_liability) + Σ signed(player_bonus) + Σ signed(player_locked_bonus) == 0` for every `(tenant_id, asset_code)`, at every instant, **no tolerance band**. The aggregated account set is named `BONUS_SET = {player_bonus, player_locked_bonus}` (§7.4.2) | **Rule B2 (extended)**: every `LedgerTransaction` is mirrored on its **net** movement across `BONUS_SET` per asset — an equal, opposite `promo_liability` leg generated/validated in `internal/ledger` rather than assembled by callers (§7.4.2's four-step generator; HR-17 forbids a caller-supplied mirror leg). A movement *within* `BONUS_SET` (a lock, `Dr player_bonus · Cr player_locked_bonus`, or its release) nets to zero and is correctly **unmirrored**. Verified continuously by a new hourly, zero-tolerance reconciliation stream, P1 on any drift (`reconciliation-model.md` §2.9) |
 | L1 | Locked-origin determinacy: every `LedgerEntry` against a locked-funds account is attributable to the origin of the value it holds from the account's own `account_type` alone. Family membership is explicit and named; no origin-indeterminate locked account exists or can be created. Full statement, including the extensibility clause, in §6.5.4 | Five layers (§6.5.4): (1) `ledger_accounts_account_type_check` admits `player_locked_cash`/`player_locked_bonus` and **not** `player_locked` (migration 0048); (2) no `AccountPlayerLocked` Go const exists, so a stale use is a compile error; (3) migration 0048's pre-flight guard proves the pre-state; (4) every read-side `account_type` enumeration is exhaustive with a fail-closed `default` (`internal/wallet.GetSummary`); (5) tests in `internal/ledger` and `internal/wallet` (§6.5.8) |
 
 L1 is `IMPLEMENTED` as of migration 0048 and its accompanying Go changes
@@ -648,7 +666,9 @@ rather than asserted:
    slower-changing table.
 2. **Zero new query shape.** Every existing formula in this model that
    aggregates money — §5's balance formula, §6's open-liability query,
-   B1's `Σ signed(player_bonus)` — aggregates **by `account_type`**.
+   B1's `Σ signed(player_bonus)` (the pre-extension form; §6.3.2 below
+   widens it to `Σ signed(BONUS_SET)`, which aggregates by `account_type`
+   identically) — aggregates **by `account_type`**.
    Shape A composes into that pattern with a one-token change (`account_type
    = 'player_locked_bonus'` instead of `= 'player_locked'`, or an `IN`
    list across both new types for the combined open-liability figure).
@@ -3604,6 +3624,11 @@ type Summary struct {
 	BonusBalance       int64
 }
 ```
+
+*(The `int64` fields follow `internal/ledger`'s existing representation
+choice, `ledger.go:10-17`, and inherit its magnitude ceiling — see
+**finding LF-16b**, §7.9. Not changed here; this struct is described as
+implemented, not redesigned.)*
 
 ```go
 		switch accountType {
@@ -6739,6 +6764,130 @@ ledger state (§4: the ledger has no pending) — it would need either a
 dedicated holding account type or a non-ledger staff queue, and that is
 a `ledger-finance` design question this section does not pre-empt.
 
+#### 7.7.1 Advance note — can a held credit be parked in `player_locked_bonus`? (Stage 4H-B1, Wave 1.5, `ledger-finance`)
+
+`bonus-engine` is redesigning its Grant terminal-state mechanism in
+parallel this round, to close a P0 in which a win credit was posted to a
+closed Grant and then re-forfeited. That redesign is not visible to this
+specialist this round. One shape it may reach is: **hold the win credit
+in `player_locked_bonus`, attributed to the specific Grant, while G-2 is
+unanswered.** This note answers, in advance and against this document's
+own semantics, whether that shape is consistent. It is a note **on this
+document only** — nothing here edits, constrains or pre-approves doc 10.
+
+**Verdict: consistent on the invariant, NOT consistent as written on the
+account-type semantics. Two of the dispatch's premises hold, one does
+not, and three named amendments are required before the shape is safe.**
+
+**1. B1 (extended) — consistent. ✅** `player_locked_bonus ∈ BONUS_SET`
+(§6.1, §7.4.2 step 1), so value parked there is inside the set B1
+aggregates over, and B1 holds exactly as it does for `player_bonus`,
+**provided the mirror leg is present**. It is not "free": B1 is satisfied
+*because* the value is mirrored, not because the account is exempt.
+
+**2. L1 (locked-origin determinacy) — consistent. ✅** The parked value
+is bonus-origin and sits in the bonus-origin locked account, so its
+origin is recoverable from `account_type` alone (§6.5.4). No
+origin-indeterminate account is created.
+
+**3. "Doesn't need `bonus_expense` / the Rule B2 generator" — FALSE. ❌
+This premise is wrong and must not be relied on.** A lock is unmirrored
+only because it moves value *within* `BONUS_SET` (§7.4.2's case-B row). A
+held win credit does **not**: it arrives from `house_gaming`, i.e. from
+**outside** the set, so `net ≠ 0` and the generator fires. Traced through
+§7.4.2 for a caller-supplied `Dr house_gaming Y · Cr player_locked_bonus
+Y`:
+
+| Step | Result |
+|---|---|
+| 1 — net over `BONUS_SET` | `+Y` (one credit, no debit) |
+| 2 — mirror | `Dr promo_liability Y` |
+| 3 — residual `r = Σcr − Σdr` = `Y − (Y + Y)` | `−Y` → `Cr bonus_expense Y` |
+| 4 — assert | balances; **4 entries** |
+
+This is §7.4.2's "casino win to bonus" row with `player_locked_bonus`
+substituted, and the substitution changes nothing, which is the
+generator's no-`transaction_type`-switch property working as intended.
+So:
+
+- **Migration `0050` (`bonus_expense`) and the Rule B2 (extended)
+  generator are both hard preconditions** for this shape. HR-9's guard
+  blocks any `BONUS_SET` posting until they exist, so the shape is not
+  available earlier than §7.2/§7.4 regardless of what doc 10 decides.
+- The `bonus_expense` leg is a **credit** — a *reduction* of recognized
+  promotional cost, offsetting the `Dr bonus_expense` that case I booked
+  when the stake was absorbed. The dispatch's intuition ("not yet a
+  recognized expense, just parked") is right about the *economics* and
+  wrong about the *mechanics*: no new expense is recognized, but the
+  expense account still moves, in the credit direction.
+- The value must be posted **directly** into `player_locked_bonus` in
+  **one** transaction. Routing it via `player_bonus` first and moving it
+  in a second transaction is two postings with a visible intermediate
+  state — the same class of defect as the posted-then-re-forfeited P0
+  this redesign exists to close.
+
+**4. Account-type semantics — INCONSISTENT as written. ❌ This is the
+finding, and it is not a wording nit.** §7.5 defines
+`player_locked_bonus` as *bonus-origin value locked against the
+resolution of a **specific open wagering event***, and explicitly says it
+does **not** mean "restricted", "not yet wagerable" or "pending
+activation". A held-for-review credit is the inverse case: the wagering
+event is **resolved**; what is unresolved is an *administrative*
+question. Parking it there overloads the account type with a second,
+contradictory meaning — and §6.6.6 turns that overload into a concrete
+money defect:
+
+> §6.6.6's nullifiable predicate is
+> `Σ signed(player_locked_bonus) over (tenant_id, correlation_id) > 0`.
+> A hold naturally carries the settled bet's `correlation_id` — it exists
+> *because of* that bet. The predicate would then read the parked value
+> as **live locked exposure**, so every contribution under that
+> `correlation_id` stays **permanently nullifiable**, `P_firm` never
+> reaches `T`, and — since `P_firm ≥ T` is the **sole** authorization for
+> `bonus_conversion` (invariant W1, HR-12) — **no conversion under that
+> Grant can ever be authorized.** This is the exact failure mode §7.5
+> already names for grant-parking, reached by a different route, and it
+> fails *silently*: the player simply never becomes eligible.
+
+**5. What must change for the shape to be safe — three amendments,
+named precisely so the Phase-2 reconciliation round catches them rather
+than assuming they were handled:**
+
+- **A-1 (blocking).** §6.6.6's predicate must exclude held value, and
+  **HR-14 already binds this**: §6.6.5's `returned(c)` measures the
+  `player_bonus` credit, and HR-14 requires any return destination other
+  than `player_bonus` to carry an **explicit marker the predicate keys
+  on**, amended in the **same change** that introduces it. A hold in
+  `player_locked_bonus` is exactly such a destination. Either the marker
+  lands with the redesign, or A-1 is open and the shape is unsafe. A
+  distinct `correlation_id` for the hold is **not** sufficient on its
+  own — it would decouple the hold from the bet it arose from, breaking
+  the audit trail the `correlation_id` exists to carry.
+- **A-2.** §7.5's definition of `player_locked_bonus`, and §6.5.4's L1
+  statement, must be widened *deliberately* to admit a second, named
+  sub-meaning — or a **separate account type** (e.g. a bonus-origin held
+  account) must be added. A new account type is shared-architecture work
+  requiring the `architect` and human approval (§6.3's precedent); this
+  specialist **does not choose between these** here, and records rather
+  than resolves. Silently widening the meaning by using the account is
+  the one option that is not available.
+- **A-3.** §7.11's forfeiture/conversion rows take `SELECT … FOR UPDATE`
+  on the **`player_bonus`** projection row. A later re-forfeiture of held
+  value sources from `player_locked_bonus` (§7.7's generic wording
+  already permits this; §7.11's table does not), so the sufficiency check
+  and its lock must extend to that account's projection row — and if a
+  path ever locks both, that pair becomes **HR-21's fourth participant**
+  and must be pinned into the lock order in the same change, never
+  afterwards.
+
+**6. What this note does not do.** It does not choose G-2's answer (§7.13
+— human-gated, ADR 0039 Decision 2), does not select between A-2's two
+options, and does not assert what `bonus-engine`'s redesign actually
+says. If their design lands without A-1, that is a **blocking
+cross-document finding for the Phase-2 reconciliation round**, not
+something to be waved through on the strength of B1 holding — B1 holding
+is necessary and, as §4 above shows, nowhere near sufficient.
+
 ### 7.8 Rounding integration
 
 **Bonus MUST use the one shared function. Never a second implementation,
@@ -6765,12 +6914,32 @@ unenforceable while the function is anonymous:
 > // pre-rounding value, at the target asset's own precision. The
 > // interface is expressed in minor units / base units, never "cents",
 > // and carries no hardcoded scale (ADR 0021, qa's constraint).
-> func RoundToMinorUnits(exact *big.Rat, decimalExponent int32, ruleID uuid.UUID) (int64, error)
+> //
+> // The result is *big.Int, NOT int64: the value it represents is a
+> // NUMERIC(38,0) minor-unit quantity, and at decimalExponent 18 an
+> // int64 saturates at ~9.2 whole units of the asset. See the note
+> // below.
+> func RoundToMinorUnits(exact *big.Rat, decimalExponent int32, ruleID uuid.UUID) (*big.Int, error)
 > ```
 >
 > - `exact` is the full-precision value: `*big.Rat` (stdlib; the module
 >   has no decimal dependency and does not need one). **Never `float64`,
 >   at any point in the call chain** — invariant #7, ADR 0032 §9.
+> - **The return type is `*big.Int`, never `int64`.** *(Corrected Stage
+>   4H-B1, Wave 1.5, finding **LF-16**; the original text here said
+>   `int64`.)* This function's output is a minor-unit quantity destined
+>   for a `NUMERIC(38,0)` column, and the codebase's established
+>   representation for a scanned/computed `NUMERIC(38,0)` value is
+>   `*big.Int` — see `internal/risk/cumulative.go`'s `numericToBigInt`,
+>   whose own doc comment states the rule ("never through `int64` or
+>   `float64` — a SUM of many ledger entries for an 18-exponent asset can
+>   legitimately exceed `int64`'s range"). `int64` here was a real defect,
+>   not a style choice: at `decimalExponent = 18`, `int64`'s maximum
+>   (~9.22 × 10^18) is **~9.2 whole units** of the asset, so a
+>   10-token grant overflows. It also contradicted §7.10's own
+>   "`qualifying_scaled NUMERIC(38,0)` … **never `int64`**" and doc 32
+>   §6.2's identical rule. `int32` remains correct for
+>   `decimalExponent` — that is a scale, not an amount.
 > - `decimalExponent` comes from the `Asset` registry
 >   (`internal/assetregistry`, `assets.decimal_exponent`), never a
 >   constant and never inferred from the asset code (invariant #8).
@@ -6781,6 +6950,14 @@ unenforceable while the function is anonymous:
 > - Exactly one rounding happens per computation, at the call site that
 >   is the final monetary boundary (DS-2). Intermediate `*big.Rat`
 >   values are passed through unrounded.
+> - **The `*big.Int` → posting-API narrowing is an explicit, range-checked
+>   conversion that fails closed.** `internal/ledger` currently carries
+>   amounts as `int64` (§7.9); a caller handing a rounded amount to
+>   `Post` therefore crosses a width boundary. That crossing must be a
+>   single named helper that returns an **error** when the value does not
+>   fit — never `x.Int64()`, which silently returns an undefined value for
+>   an out-of-range `*big.Int` and would post a wrong amount with every
+>   database constraint satisfied. **HR-22.**
 
 Every bonus amount computation routes through it: deposit-match, reload
 and cashback percentages, the per-game contribution weighting that
@@ -6851,7 +7028,8 @@ from the registry, and no step divides, scales or compares across assets:
 
 - `ledger_entries.amount` is `NUMERIC(38,0)`; `internal/ledger` carries
   it as `int64` minor units, a representation choice already recorded
-  (`ledger.go:10-17`) and unchanged here.
+  (`ledger.go:10-17`) and unchanged here — but see **finding LF-16b**
+  below, which this section previously left unstated.
 - The generator's steps 1–3 are **addition and subtraction of same-asset
   integers only**. No multiplication, no division, no rate, no exponent
   appears anywhere in `bonus_mirror.go`. An amount of `1` means one
@@ -6867,7 +7045,9 @@ from the registry, and no step divides, scales or compares across assets:
   0021's `ConversionOperation`, which needs an FX clearing account that
   does not exist (§2's third `OPEN DECISION`).
 - The only exponent-sensitive step is `money.RoundToMinorUnits`, and it
-  takes the exponent as a parameter from the registry (invariant #8).
+  takes the exponent as a parameter from the registry (invariant #8) and
+  returns `*big.Int`, so **the rounding step itself has no magnitude
+  ceiling at any exponent** (§7.8, finding LF-16).
 - Grant/conversion/forfeiture amounts are all `> 0` integers, so no
   fractional or negative path exists. ADR 0021's negative-input contract
   (`-2.5 → -3`) is specified but unreachable from any bonus call site.
@@ -6875,6 +7055,45 @@ from the registry, and no step divides, scales or compares across assets:
 Proved by execution, not asserted, following migration `0048`'s own test
 precedent (§6.5.8 item 9): §7.15's set repeats the core cases at
 exponents **0, 2, 8 and 18**.
+
+> **Finding LF-16b (`ledger-finance`, disclosed rather than fixed;
+> `architect` + Orchestrator).** "Exponent-agnostic" above is a claim
+> about the **arithmetic shape** — no step divides, scales, or compares
+> across assets, so the mechanism is identical at every exponent. It is
+> **not** a claim about representable **magnitude**, and this section
+> previously blurred the two.
+>
+> `internal/ledger`'s `int64` amount representation (`ledger.go:10-17`)
+> caps a single entry at ~9.22 × 10^18 minor units. Its recorded
+> rationale reasons explicitly about **BTC at 8 decimals** ("about
+> 9.2 × 10^10 whole bitcoin"), which is ample. It does **not** address
+> exponent **18**, where the same ceiling is **~9.2 whole units of the
+> asset** — a number an ordinary grant, deposit or win exceeds trivially.
+> CLAUDE.md names 18 as an in-scope per-asset exponent, and §7.15 item 27
+> requires the core cases to be exercised **at exponent 18**, so this is
+> a live contradiction between an implemented representation and a
+> documented requirement, not a theoretical one.
+>
+> **Scope and status.** This is a pre-existing property of
+> `internal/ledger` at `HEAD`; it is **not** introduced by §7, and
+> nothing in §7 makes it worse. Widening `EntryInput.Amount` /
+> `PostResult` to `*big.Int` is a change to the platform's central
+> posting API touching every money-moving caller — a code change well
+> outside this DESIGN-ONLY section, and shared-architecture work
+> requiring the `architect`. It is recorded here so it is discovered
+> before an exponent-18 asset is registered, not during.
+>
+> **What holds in the meantime, and is enforceable today:**
+> (1) HR-22's range-checked narrowing means an over-range amount is
+> **rejected loudly**, never silently truncated into a wrong posting —
+> failing closed is acceptable, posting `math.MinInt64` is not;
+> (2) no exponent-18 asset exists in the `Asset` registry at `HEAD`, so
+> no live path can reach the ceiling; (3) §7.15 item 27's exponent-18
+> cases must therefore be written with amounts **inside** `int64`'s
+> range, and item 29 below pins the boundary behavior explicitly, so the
+> suite does not silently redefine "exponent-18 support" as "exponent-18
+> arithmetic on small numbers". **Registering a real exponent-18 asset is
+> gated on LF-16b being resolved.**
 
 ### 7.10 Wagering-progress ledger interaction — confirmed, not redesigned
 
@@ -7043,6 +7262,12 @@ Additional cross-domain dependencies, not `bonus-engine`'s:
   that the missing `bonus-finance` role is adequately covered by the
   `ledger-finance`/`bonus-engine` split, per the task registry's Wave-1
   instruction.
+- **`architect`** — **finding LF-16b** (§7.9): `internal/ledger`'s
+  `int64` amount representation cannot hold an ordinary exponent-18
+  amount. Widening `EntryInput.Amount` to `*big.Int` touches every
+  money-moving caller in the platform and is shared-architecture work.
+  Disclosed, not fixed here; **gates registering a real exponent-18
+  asset**, gates nothing in §§7.2–7.11.
 
 ### 7.13 Gated on a human decision — `ledger-finance` does not choose
 
@@ -7052,14 +7277,14 @@ whichever answer is chosen needs no redesign of §§7.2–7.11.**
 
 | Gate | What it blocks in §7 | Why §7 survives either answer |
 |---|---|---|
-| **G-2 — Terminal-Grant settlement-credit resolution** (ADR 0039 Decision 2: re-forfeit / route-to-cash / hold-for-review) | The posting shape for a credit arriving against an already-terminal Grant (§7.7's final paragraph) | (a) is §7.7's existing shape posted twice; (b) is a destination change already bound by **HR-14**; (c) alone has no ledger shape and would need its own design. Nothing in §§7.2–7.6 depends on the answer |
+| **G-2 — Terminal-Grant settlement-credit resolution** (ADR 0039 Decision 2: re-forfeit / route-to-cash / hold-for-review) | The posting shape for a credit arriving against an already-terminal Grant (§7.7's final paragraph) | (a) is §7.7's existing shape posted twice; (b) is a destination change already bound by **HR-14**; (c) alone has no ledger shape and would need its own design. Nothing in §§7.2–7.6 depends on the answer. **§7.7.1** assesses the specific (c)-variant `bonus-engine` may reach — parking the credit in `player_locked_bonus` — and finds it B1-consistent but **not** consistent with §7.5's account-type semantics without amendments A-1…A-3 |
 | **Self-exclusion open-bet default** (ADR 0039 Decision 1) | Which lifecycle event fires, and when, for a self-exclusion-triggered void | The void posts `sportsbook_void`, which §6.6.5's predicate already treats as a nullifier with **no extra rule** (§6.6.7). The ledger shape is answer-independent |
 | **Bonus-funded sportsbook cashout policy + FD-1** (ADR 0039 Decision 3) | Case L; the proceeds split between `player_cash` and `player_bonus` on a cashed-out bonus-funded bet | §7.4.2's generator handles **any** split: whatever the caller posts, steps 1–3 complete it correctly. Only HR-14's marker requirement binds in advance |
 | **`bonus_expense` statutory presentation** (P&L expense vs. contra-revenue) — ADR 0032 §2's `OPEN DECISION` | **Nothing.** A reporting/finance decision | It does not change any posting; §7.2's migration is correct either way |
 | **Provider-funded settlement terms** — ADR 0032 §6(b)'s commercial `OPEN DECISION` | Whether provider-funded promotions settle by invoice offset (making `provider_payable` correct) or otherwise | `PROVIDER DEPENDENT`. Compounded by **BF-1**; the first slice avoids it by being operator-funded only |
 | **Mixed cash+bonus funding of one stake** (case C) | Deferred, unchanged (§6.4.1, §6.5.9) | Not reopened here |
 
-### 7.14 HR-16 … HR-21 — hard requirements added by this section
+### 7.14 HR-16 … HR-22 — hard requirements added by this section
 
 Continuing §6.4.7's and §6.5.7's series, so the HR list stays in one
 place.
@@ -7118,6 +7343,21 @@ place.
   introduces it, never afterwards. Closes §6.6.17's joint gap for the
   conversion path specifically; the sportsbook settlement path inherits
   it when it is built.
+- **HR-22 — a monetary value crosses from `*big.Int` to `int64` through
+  exactly one range-checked helper that returns an error, never through
+  `(*big.Int).Int64()`.** *(Added Stage 4H-B1, Wave 1.5, finding
+  LF-16.)* `money.RoundToMinorUnits` returns `*big.Int` (§7.8);
+  `internal/ledger` accepts `int64` (§7.9, LF-16b). Every narrowing at
+  that boundary is explicit and **fails closed**. `(*big.Int).Int64()`
+  is defined to return an *undefined* value when the receiver does not
+  fit, so an out-of-range amount would post as a plausible-looking wrong
+  number that satisfies `amount > 0`, balances per asset, mirrors
+  correctly under Rule B2, and is therefore invisible to **every**
+  constraint and to the B1 sweep. A direct `.Int64()` on a monetary
+  value is a blocking review finding, not a style note. The same rule
+  applies in reverse to any `int64` → `*big.Int` widening (always safe,
+  but must be explicit rather than an implicit conversion buried in an
+  expression).
 
 ### 7.15 Test set — `ledger-finance`-owned, non-negotiable
 
@@ -7233,6 +7473,31 @@ tests against a real PostgreSQL instance, following
     cannot read another tenant's `promo_liability`/`bonus_expense`; a
     player-scoped connection cannot post at all.
 
+**Rounding width and the `*big.Int` → `int64` boundary (HR-22, finding
+LF-16) — added Stage 4H-B1, Wave 1.5:**
+
+29. `money.RoundToMinorUnits` at `decimalExponent = 18` on an exact
+    value of **10 whole units** (`10 × 10^18` minor units) returns the
+    **exact** `*big.Int`, with **no** error and **no** truncation —
+    the case the previous `int64` signature could not represent. Asserted
+    against a `*big.Int` literal parsed from its decimal string, never
+    against an `int64`-derived expected value (which would reintroduce
+    the defect inside the test).
+30. The same value handed to HR-22's narrowing helper returns an
+    **error**, and **nothing is posted**. Asserted by entry count and by
+    the absence of a `ledger_transactions` row — not merely by a non-nil
+    error. A value at exactly `math.MaxInt64` narrows successfully;
+    `math.MaxInt64 + 1` does not. This is the test that would have
+    caught a `.Int64()` call, and it must fail if HR-22's helper is ever
+    replaced by one.
+31. **Round-trip at every exponent (0, 2, 8, 18):** an amount posted
+    through the full path (`RoundToMinorUnits` → narrow → `Post`) is read
+    back from `ledger_entries` as `NUMERIC(38,0)`, widened to `*big.Int`,
+    and compared to the rounding function's original `*big.Int` output
+    for **exact** equality. Proves the width boundary is lossless inside
+    its range, and documents by execution where that range ends
+    (LF-16b).
+
 ### 7.16 Migration numbers — claimed, requested, and why
 
 | Number | Content | Status |
@@ -7251,12 +7516,23 @@ not crowded out by reservations this specialist may not need in Wave 2.
 ### 7.17 Review status
 
 `NOT IMPLEMENTED`, design only. Requires, before any code is written:
-independent `bonus-engine` validation (§7.12's D-1…D-9 and finding
-BF-1), `architect` validation (HR-16's widening of HR-15; `internal/money`
-placement; the §7.12 cross-domain list), `security` review (the actor
-matrix row, HR-16, the migration's RLS-immune guard), and `qa` review of
-§7.15. The human-gated items in §7.13 are **not** resolved by this
-section and none of them blocks §§7.2–7.6.
+independent `bonus-engine` validation (§7.12's D-1…D-9, finding BF-1, and
+**§7.7.1's A-1…A-3**), `architect` validation (HR-16's widening of HR-15;
+`internal/money` placement; **finding LF-16b**; §7.7.1's A-2 if a new
+account type is chosen; the §7.12 cross-domain list), `security` review
+(the actor matrix row, HR-16, the migration's RLS-immune guard), and `qa`
+review of §7.15. The human-gated items in §7.13 are **not** resolved by
+this section and none of them blocks §§7.2–7.6.
+
+**Stage 4H-B1, Wave 1.5 fix-wave amendments** (`ledger-finance`'s own
+previously-disclosed defects, closed this round):
+
+| Finding | What changed | Status |
+|---|---|---|
+| **LF-16** | `money.RoundToMinorUnits` returns **`*big.Int`**, not `int64` (§7.8). New **HR-22** (range-checked narrowing, never `.Int64()`); new tests 29–31 (§7.15); §7.9 restated | **FIXED** |
+| **LF-16b** | Newly disclosed while fixing LF-16: `internal/ledger`'s `int64` amount representation cannot hold an ordinary exponent-18 amount (§7.9) | **DISCLOSED, NOT FIXED** — code change outside this DESIGN-ONLY section; `architect`-owned; gates registering a real exponent-18 asset |
+| **LF-17** | §6.1's B1 row now states **B1 (extended)**, matching §6.3.2/§6.4.4/§7.4.2. §2's and §6.3.1's stale mentions corrected | **FIXED** |
+| **§7.7.1** | Advance consistency note for `bonus-engine`'s parallel Grant terminal-state redesign | **ADVISORY** — A-1 is a blocking Phase-2 reconciliation dependency if their design lands without it |
 
 ## 8. Cross-references
 
