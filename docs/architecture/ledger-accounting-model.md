@@ -7995,11 +7995,14 @@ place.
   it when it is built. **Fourth participant, added Stage 4H-B1 Wave 1.5
   Fix Round 2 (§7.7.2.9):** a `SELECT ... FOR UPDATE` on the specific
   `bonus_held_dispositions` row, taken during held-disposition resolution
-  or rollback, acquired after the `(tenant_id, grant_id)` advisory lock
-  and, only for `ACTION_REFORFEIT`, before the `player_bonus` projection
-  lock — see HR-25. This path never acquires `(tenant_id, correlation_id)`
-  at all, which is order-safe (a subsequence of an already-pinned total
-  order), not a new order.
+  or rollback, acquired after the `(tenant_id, grant_id)` advisory lock —
+  see HR-25. **There is no fifth, `player_bonus`-projection participant
+  for this path, for either disposition-bearing action** (corrected this
+  pass, §7.7.2.9: `ACTION_REFORFEIT` posts directly out of
+  `player_bonus_held`, never via `player_bonus`, so no such lock is ever
+  taken). This path never acquires `(tenant_id, correlation_id)` at all,
+  which is order-safe (a subsequence of an already-pinned total order),
+  not a new order.
 - **HR-23 — HR-9's fail-closed guard extends to `player_bonus_held`.**
   *(Added Stage 4H-B1, Wave 1.5, Fix Round 2, §7.7.2.3.)* A posting
   against `player_bonus_held` is rejected under the identical rule and
@@ -8018,13 +8021,19 @@ place.
   `correlation_id` remains on the record as an audit-trail/lookup field
   only, never load-bearing for uniqueness.
 - **HR-25 — resolving or rolling back an open `bonus_held_dispositions`
-  row is the fourth HR-21 participant, in a fixed sub-order.** *(Added
-  Stage 4H-B1, Wave 1.5, Fix Round 2, §7.7.2.9.)* `(tenant_id, grant_id)`
-  advisory lock, then `SELECT ... FOR UPDATE` on the specific
-  `bonus_held_dispositions` row, then — only for `ACTION_REFORFEIT` — the
-  `player_bonus` projection `FOR UPDATE`. The status transition itself is
-  a guarded, single-statement compare-and-swap (`UPDATE ... WHERE
-  status = 'held'`), never check-then-update.
+  row is the fourth HR-21 participant. There is no third lock
+  participant.** *(Added Stage 4H-B1, Wave 1.5, Fix Round 2, §7.7.2.9;
+  corrected this pass.)* `(tenant_id, grant_id)` advisory lock, then
+  `SELECT ... FOR UPDATE` on the specific `bonus_held_dispositions` row —
+  and nothing further, for either `ACTION_REFORFEIT` or
+  `ACTION_ROUTE_TO_CASH`: both debit `player_bonus_held` directly (into
+  `promo_liability` or `player_cash` respectively), neither ever via
+  `player_bonus`, so neither ever acquires a `player_bonus` projection
+  `FOR UPDATE`. (An earlier draft of this item required that lock for
+  `ACTION_REFORFEIT`, on the premise — since withdrawn as false, §7.7.2.9
+  — that it releases into `player_bonus` before reforfeiting.) The status
+  transition itself is a guarded, single-statement compare-and-swap
+  (`UPDATE ... WHERE status = 'held'`), never check-then-update.
 - **HR-22 — a monetary value crosses from `*big.Int` to `int64` through
   exactly one range-checked helper that returns an error, never through
   `(*big.Int).Int64()`.** *(Added Stage 4H-B1, Wave 1.5, finding

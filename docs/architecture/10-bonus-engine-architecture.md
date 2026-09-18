@@ -3446,11 +3446,16 @@ own effect:**
    (not part of the original settlement transaction, and not the
    `(correlation_id) → (grant_id)` order 5b uses): (1) `(tenant_id,
    grant_id)` advisory lock; (2) `SELECT ... FOR UPDATE` on the specific
-   `bonus_held_dispositions` row (the new, fourth HR-21 participant);
-   (3) **only for `ACTION_REFORFEIT`**, a `player_bonus` projection `FOR
-   UPDATE` (identical to §7.11's existing forfeiture lock) — never taken
-   for `ACTION_ROUTE_TO_CASH`, which debits `player_bonus_held` straight
-   to `player_cash` and never touches `player_bonus`.
+   `bonus_held_dispositions` row (the new, fourth HR-21 participant) —
+   **and nothing further, for either disposition-bearing action.** An
+   earlier draft of this step took a third lock, a `player_bonus`
+   projection `FOR UPDATE`, for `ACTION_REFORFEIT` specifically —
+   withdrawn as false, per HR-25 corrected this pass
+   (`ledger-accounting-model.md` §7.7.2.9): `ACTION_REFORFEIT` debits
+   `player_bonus_held` directly, never via `player_bonus`, so there is
+   nothing for such a lock to protect. Neither `ACTION_REFORFEIT` nor
+   `ACTION_ROUTE_TO_CASH` ever acquires a `player_bonus` projection `FOR
+   UPDATE`.
       - **`ACTION_REFORFEIT`**: `Dr player_bonus_held payout+released_
         lock_amount / Cr promo_liability` — the held amount posts
         directly from `player_bonus_held` into the ordinary §7.7
@@ -4460,8 +4465,12 @@ safety analysis stands unchanged.
   discipline-based, guarantee) and specifies exactly how `pending_
   settlement`'s existing four-eyes/RBAC treatment extends to `bonus_held_
   dispositions` resolution: a **new, dedicated** permission,
-  `bonus_held_disposition:resolve`, `SEP-1`-gated, four-eyes at threshold
-  0 always — not folded into `bonus_adjustment:write`/`bonus_bulk:execute`.
+  `bonus_held_disposition:resolve`, `SEP-1`-gated, four-eyes
+  tenant-configurable above `CLAUDE.md`'s threshold (default 0) — per
+  N1.12's own table, the ratified position (`architect`'s doc 34 §3.1,
+  `security`'s self-correction, commit `6745e10`), not the superseded
+  "threshold 0, always" reading — not folded into
+  `bonus_adjustment:write`/`bonus_bulk:execute`.
 - **`architect` — REQ-BONUS-VOL-1/DEP-EOI-1 specified this round (N2.4
   rewrite), the CRM/Segmentation/Affiliate items from Round 1 still open
   and unaffected by this round's work.** `architect`'s doc 34
