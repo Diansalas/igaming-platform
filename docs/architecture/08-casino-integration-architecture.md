@@ -388,6 +388,72 @@ All five are fixed below, in §16.3, §16.4, new §16.4a, new §16.5a, §16.7,
   decision, not casino's, and this document no longer pre-selects an
   answer.
 
+**Fix-wave Round 2 revision note (Stage 4H-B1, Wave 1.5 Fix Wave, Phase 2
+closure — task 4HB1FW2-01).** Phase 2 independent re-verification
+(`ledger-finance`) found a real, reachable ledger-invariant violation in
+this section's own Round-1 fix, vetoed it, and named it **LF-18** — a P0
+the human directive authorizing this round requires closed. This
+section's own Phase 2 self-review found three more gaps. All four are
+fixed below, together with one binding contract adopted from
+`ledger-finance`'s own just-completed Round 2 decision
+(`ledger-accounting-model.md` §7.7.2), which is this section's
+load-bearing dependency for the rest of this round — read it before
+reading anything below.
+
+- **LF-18** (fixed in §16.4, exploit re-walked in new §16.17). §16.4 Step
+  1's query answered the wrong question: it summed only the *original*
+  bet-time credit leg (`ledger-accounting-model.md` §6.3.3.1 "variant 1"),
+  never the *currently outstanding* net-locked amount (variant 2), and
+  §16.5a's lock-release step then treated that stale bet-time figure as
+  "the exact quantity to release." Concrete, reachable exploit: §16.5a(a)'s
+  settlement-timeout sweep posts a new `casino_settlement_timeout`
+  transaction debiting the lock to zero on a presumed loss (it does not
+  reverse the original bet); a genuine late win then arrives; Step 1 still
+  returned the unchanged original bet-time amount; no outcome branch
+  detected the lock had already been zeroed by the sweep; §16.5a released
+  the (already-released) amount a second time — `player_locked_bonus`
+  driven negative and restricted bonus value materialized into
+  `player_bonus` from nothing, invisible to `SUM(DEBITS)==SUM(CREDITS)`.
+  **Fixed**: Step 1 is split into an identity query (unchanged — still
+  needed for LF-7/LF-8) and a new Step 1b running `ledger-accounting-
+  model.md` §6.3.3.1's "variant 2" shape (no `transaction_type` filter,
+  signed sum) to get the currently-outstanding net-locked amount, plus a
+  new, sixth named outcome that aborts — never releases — when that net is
+  zero or negative.
+- **Held-win rollback gap** (this section's own Phase 2 self-review,
+  corroborated by `qa` test `C28`; addressed in new §16.15). A provider
+  rollback targeting a WIN currently parked `held` in a
+  `bonus_held_dispositions` row had no defined state transition anywhere.
+  `ledger-finance`'s Round 2 (`ledger-accounting-model.md` §7.7.2.7)
+  already closed the *still-held* sub-case on its own initiative, via the
+  new `player_bonus_held` account and a guarded compare-and-swap status
+  update. This section adopts that transition into `postRollback` and
+  proves it under concurrency. The *already-resolved-then-rolled-back*
+  case remains **LF-10**'s general, still-open question, explicitly routed
+  to `ledger-finance` and not re-decided here (new §16.20).
+- **Idempotency key correction (LF-22, adopted from `ledger-finance`).**
+  A round-scoped key (`correlation_id`) is wrong, proven so by this
+  document's own §16.4a multi-bet-round analysis (one `correlation_id` can
+  legitimately contain several, separately-settled bets, each needing its
+  own hold record). `ledger-finance` fixed this at the hold-record level:
+  the real per-occurrence key is `settlement_ledger_transaction_id`, never
+  `correlation_id` and never `grant_id` (`ledger-accounting-model.md`
+  §7.7.2.6). Adopted verbatim here, new §16.14.
+- **`ACTION_HOLD_FOR_REVIEW` contradiction** (this document's §16.7 stated
+  it releases the lock; `bonus-engine`'s text was read as stating it is a
+  pure money no-op). **Resolved** (new §16.16), conforming exactly to
+  `ledger-finance`'s actual status vocabulary (`held` /
+  `resolved_reforfeit` / `resolved_route_to_cash` / `voided_by_rollback` —
+  no invented fourth "reviewing" sub-state).
+
+This round adopts `ledger-finance`'s `player_bonus_held` account, the
+two-leg hold-capture posting, and the widened `ResolveTerminalGrantCredit`
+seam signature (§16.9, §16.14) exactly as specified in `ledger-accounting-
+model.md` §7.7.2.10's contract for `casino`. Nothing in this round selects
+G-2, decides §16.10.1's lock-shape ratification, or re-decides LF-10's
+general (already-resolved) case — all three remain explicitly open,
+restated in §16.20 and the revised §16.13.
+
 No G-2 selection is made anywhere below. No code or migration is written.
 
 ### 16.1 The defect, confirmed against live code (not asserted from memory)
@@ -498,7 +564,7 @@ ever used to choose an account. This is not a new design decision — it is
 the existing, reviewed rule (`postWin`'s own doc comment, lines 820-829)
 extended one field further (`account_type`, not just `wallet_id`).
 
-### 16.4 `postWin`'s exact destination-resolution design (revised — LF-1, LF-7)
+### 16.4 `postWin`'s exact destination-resolution design (revised — LF-1, LF-7, LF-18)
 
 **Defect in the original draft, confirmed by `ledger-finance` (LF-1) and
 accepted in full.** The original design replaced `orchestrator.go:843-874`
@@ -524,30 +590,54 @@ ambiguity: `player_bonus` as a debit leg is legitimately produced by
 *both* an ordinary immediate-absorb bonus shape (ADR 0032 §3's original,
 now-disallowed-for-casino shape, §16.10.1) *and*, incidentally, by the
 first half of the mandated lock shape — the debit leg alone cannot tell
-these apart, and more importantly it carries no **amount** for the
-quantity §16.5a's lock-release mechanism needs (the locked stake `X`,
-which is a different number from the win's own payout amount). Reading
-the **credit** leg of the lock instead — genuinely reusing
-`ledger-accounting-model.md` §6.3.3.1's own "variant 1" query verbatim,
-restricted to the locked account types, with a wallet/asset-scoped
-aggregate amount — answers "is this bet currently locked, in which
-account, for how much" directly, which is the actual question `postWin`
-needs answered, and gives §16.5a's release step the exact `X` it needs
-without a second query or a second design.
+these apart. Reading the **credit** leg of the lock instead answers "is
+this bet currently locked, and in which account" directly, which is the
+actual question `postWin` needs answered for destination purposes.
 
-**Step 1 — locked-origin resolution** (only outcome that ever requires a
-G-2 read; only outcome a bonus-funded bet under the mandated shape can
-produce):
+**Corrected by LF-18, Round 2 — this is not the same fix as Round 1
+claimed.** Round 1's text stopped there and additionally used this same
+credit-leg read's `SUM(e.amount)`, filtered to `transaction_type =
+'casino_bet'` only, as "the locked stake `X`" — i.e. it answered the
+destination question and the *quantity-to-release* question with the
+same single query. `ledger-finance` (LF-18) found this wrong: a
+bet-time-only credit-leg sum is `ledger-accounting-model.md` §6.3.3.1's
+**"variant 1"** — the *original* lock amount, frozen at the moment the
+bet posted. It is silently stale the instant *any* later transaction has
+already touched the same locked account under this `correlation_id` — a
+prior win, a prior rollback, or (the concrete exploit) §16.5a(a)'s
+settlement-timeout sweep. The *quantity* question needs
+**"variant 2"** instead — the same query with the `transaction_type`
+filter dropped and the sum signed, netting the original lock against
+*every* later transaction sharing the round — because that is the only
+read that reports what is genuinely still outstanding right now. Round 1
+conflated "which account is this bet's origin" (a question the bet-time
+credit leg answers correctly and permanently) with "how much of that
+origin is still locked" (a question only variant 2 answers correctly,
+because the answer can change after bet time). The fix below splits these
+into two independent reads, Step 1 (identity, permanent, variant-1
+shaped) and Step 1b (outstanding amount, live, variant-2 shaped, new this
+round) — never conflates them again.
+
+**Step 1 — bet-identity resolution** (unchanged from Round 1; still the
+correct, permanent answer to "which bet, which account, which wallet" —
+LF-7/LF-8's outcomes 2–4 below depend on exactly this shape and are
+unaffected by the LF-18 fix):
 
 ```sql
 -- DESIGN ONLY. ledger-accounting-model.md §6.3.3.1 "variant 1", reused
 -- verbatim (transaction_type substituted). Reads the CREDIT leg -- the
--- account the stake is actually SITTING IN today -- restricted to the
+-- account the stake was ORIGINALLY posted into -- restricted to the
 -- locked account types only, grouped so multi-row outcomes (LF-7/LF-8)
 -- are visible to the caller rather than collapsed by a bare LIMIT 1.
 -- Never reads event.PlayerAccountID or any other payload field.
+--
+-- IDENTITY ONLY (LF-18). This is a permanent, bet-time fact -- WHICH bet,
+-- WHICH account_type, WHICH wallet -- and remains correct forever, no
+-- matter what posts later. It is NEVER used as a release quantity. The
+-- release quantity is Step 1b, below, and nothing in this query's result
+-- set may be substituted for it.
 SELECT t.id AS bet_transaction_id, la.account_type, la.wallet_id,
-       la.asset_code, SUM(e.amount) AS locked_amount
+       la.asset_code
   FROM ledger_entries      e
   JOIN ledger_accounts     la ON la.id = e.ledger_account_id
   JOIN ledger_transactions t  ON t.id  = e.ledger_transaction_id
@@ -560,6 +650,58 @@ SELECT t.id AS bet_transaction_id, la.account_type, la.wallet_id,
                     WHERE r.reverses_transaction_id = t.id)
  GROUP BY t.id, la.account_type, la.wallet_id, la.asset_code;
 ```
+
+**Step 1b — outstanding-lock resolution (NEW, LF-18's fix).** Run only
+once Step 1's result set has been narrowed, by the outcome classification
+below, to exactly one `(account_type, wallet_id, asset_code)` triple —
+i.e. only when identity is already unambiguous and the only remaining
+question is amount:
+
+```sql
+-- DESIGN ONLY. ledger-accounting-model.md §6.3.3.1 "variant 2" -- THE
+-- LF-18 FIX. Drops the transaction_type filter entirely and signs the
+-- sum, so it nets the original lock against EVERY later transaction
+-- sharing this round's correlation_id against this exact account --
+-- casino_win, casino_rollback, casino_settlement_timeout, and any future
+-- bonus-engine hold-capture/resolution posting alike, whichever of them
+-- have posted so far. Answers "how much is actually still locked right
+-- now", never "how much was locked at bet time" (Step 1's question).
+--
+-- This is the IDENTICAL shape INV-TG's own L(G) already uses (08
+-- §16.10.2: "L(G) = Σ signed(player_locked_bonus) attributable to G ...
+-- the §6.3.3.1/§6.6.6 recovery-query pattern, reused verbatim") -- not a
+-- new invention, a second, consistent application of an invariant this
+-- document already relies on elsewhere. §16.4's post-fix divergence from
+-- that invariant is exactly what LF-18 found (see §16.6's revised
+-- Sportsbook row and §16.17).
+SELECT SUM(CASE WHEN e.direction = 'credit' THEN e.amount ELSE -e.amount END)
+         AS net_outstanding_locked
+  FROM ledger_entries      e
+  JOIN ledger_accounts     la ON la.id = e.ledger_account_id
+  JOIN ledger_transactions t  ON t.id  = e.ledger_transaction_id
+ WHERE t.tenant_id      = $1
+   AND t.correlation_id = $2
+   -- NO transaction_type filter -- the load-bearing difference from Step 1
+   AND la.account_type  = $3   -- the single account_type Step 1 identified
+   AND la.wallet_id      = $4  -- the single wallet_id Step 1 identified
+   AND la.asset_code     = $5; -- the single asset_code Step 1 identified
+```
+
+**Interaction with §16.4a's future `OriginatingProviderTxID` field, named
+now so it is not rediscovered later.** Once that field lands and a
+multi-bet round becomes resolvable per-bet rather than only via the
+manual-reconciliation queue, Step 1's identity query gains `AND
+t.provider_tx_id = $6` (§16.4a already specifies this for Step 1/Step 2).
+**Step 1b must gain the identical `AND t.provider_tx_id = $6` clause at
+the same time** — without it, a multi-bet round's Step 1b would net *all*
+that round's bets' locked/settled activity together under one
+`correlation_id`, silently reintroducing a cross-bet aggregation error of
+the same shape LF-8 named for the identity query, one level down in the
+amount query instead. This is a required extension to make at that time,
+not a gap in today's design (today, outcome 3 below routes every
+multi-bet round to the manual queue before Step 1b ever runs, so the two
+queries cannot yet be run against an ambiguous `correlation_id`
+simultaneously).
 
 **Step 2 — direct-absorb (cash) resolution**, run only if Step 1 returns
 zero rows (no lock exists for this round):
@@ -589,7 +731,10 @@ SELECT t.id AS bet_transaction_id, la.account_type, la.wallet_id,
 
 **Shared outcome classification, applied identically to whichever step's
 result set is non-empty** — evaluated in this fixed order, each a named,
-fail-closed branch, none a guess:
+fail-closed branch, none a guess. Outcomes 1–4 are Round 1's, unchanged
+(they resolve *identity*, which LF-18 does not touch); outcome 5 is
+Round 1's "clean case" **narrowed**, and outcome 6 is **new — this is
+LF-18's required sixth branch**:
 
 1. **Zero rows from both steps** → `ErrBetNotFound`, unchanged from today
    (no bet, or the bet was rolled back).
@@ -606,7 +751,10 @@ fail-closed branch, none a guess:
    condition than an ordinary same-wallet multi-bet round.
 3. **More than one distinct `bet_transaction_id`** (all sharing one
    wallet) → the **multi-bet-round case**, handled by §16.4a below (LF-8)
-   — **not** an automatic abort-forever condition.
+   — **not** an automatic abort-forever condition. Step 1b is **not** run
+   for this outcome (see the `OriginatingProviderTxID` interaction note
+   above) — resolution is deferred to a human until the round is
+   disambiguated.
 4. **Exactly one `bet_transaction_id`, but that single transaction's own
    result rows span more than one distinct `account_type`** → a genuine
    same-instruction mixed-origin posting. This is the case HR-2 is
@@ -616,21 +764,39 @@ fail-closed branch, none a guess:
    operator can tell "this looks like an HR-2 regression" apart from
    "this is an expected, unhandled multi-bet round."
 5. **Exactly one `bet_transaction_id`, one `account_type`, one
-   `wallet_id`** → the clean, single-bet case. Proceed to the destination
-   map below, using this row's `locked_amount` (Step 1) as the exact
-   quantity §16.5a's lock-release step debits.
+   `wallet_id`, and Step 1b's `net_outstanding_locked > 0`** → the clean
+   case. Proceed to the destination map below, using Step 1b's
+   `net_outstanding_locked` — **never** Step 1's identity-only result —
+   as the exact quantity §16.5a's lock-release step debits.
+6. **[NEW, LF-18] Exactly one `bet_transaction_id`, one `account_type`,
+   one `wallet_id`, but Step 1b's `net_outstanding_locked ≤ 0`.** A
+   `casino_bet` credit leg genuinely exists — this is not outcome 1's "no
+   bet at all" — yet nothing is actually left locked: some earlier
+   transaction under this `correlation_id` has already driven this
+   account's balance to zero (an ordinary prior win or rollback already
+   correctly handled by `ledger.Post`'s idempotency key, **or** — the
+   exploit LF-18 named — §16.5a(a)'s settlement-timeout sweep having
+   already posted `casino_settlement_timeout` against this exact lock).
+   **Abort the whole win with a new, distinct sentinel,
+   `ErrLockAlreadyReleased`, raised as a loud integrity/ops alert exactly
+   like outcome 2. Never release. Never post.** This is the branch that
+   did not exist in Round 1 and whose absence LF-18 exploited — see
+   §16.17 for the exploit walked step by step against this fix.
 
 **Destination map** (the only part of `postWin` that changes what account
 receives the credit; the posting mechanics — `ledger.Post`, idempotency
-key, audit record — are unchanged):
+key, audit record — are unchanged). Every `locked_amount` reference below
+is Step 1b's `net_outstanding_locked`, per outcome 5 — **never** Step 1's
+identity-only result:
 
 | Resolution | Win credit destination | Lock release (§16.5a)? | G-2 involved? |
 |---|---|---|---|
-| Step 1: `player_locked_cash` | `player_cash` | Yes — `Dr player_locked_cash locked_amount / Cr player_cash locked_amount`, bundled in the same transaction | No — G-2 is defined only over `player_bonus`/`player_locked_bonus` (doc10 §T.7). Not producible by today's `postBet` (§16.10); included for completeness only |
-| Step 1: `player_locked_bonus`, Grant non-terminal | `player_bonus` | Yes — `Dr player_locked_bonus locked_amount / Cr player_bonus locked_amount`, bundled in the same transaction | No — ordinary case. This is the shape LF-1 restores as actually reachable |
-| Step 1: `player_locked_bonus`, Grant terminal | §16.9's seam decides | Yes, but bundled into whatever §16.9's disposition specifies (§16.5a) | **Yes — this is G-2 itself** |
+| Outcome 5: `player_locked_cash` | `player_cash` | Yes — `Dr player_locked_cash net_outstanding_locked / Cr player_cash net_outstanding_locked`, bundled in the same transaction | No — G-2 is defined only over `player_bonus`/`player_locked_bonus` (doc10 §T.7). Not producible by today's `postBet` (§16.10); included for completeness only |
+| Outcome 5: `player_locked_bonus`, Grant non-terminal | `player_bonus` | Yes — `Dr player_locked_bonus net_outstanding_locked / Cr player_bonus net_outstanding_locked`, bundled in the same transaction | No — ordinary case. This is the shape LF-1 restores as actually reachable |
+| Outcome 5: `player_locked_bonus`, Grant terminal | §16.9's seam decides — `ACTION_REFORFEIT`/`ACTION_ROUTE_TO_CASH`/`ACTION_HOLD_FOR_REVIEW` per §16.16 | Yes, but bundled into whatever §16.9's disposition specifies (§16.5a, §16.14) | **Yes — this is G-2 itself** |
 | Step 2: `player_cash` | `player_cash` | No — never locked | No. **Unchanged** from today's actual behavior for every bet `postBet` can currently produce |
 | Step 2: `player_bonus`, no Step-1 lock found | **Abort** — new sentinel `ErrBonusBetNotLocked`, integrity alert | N/A | N/A — under the mandated shape (§16.10.1) this is unreachable in correctly-functioning code; never silently credited, since guessing its destination is exactly the exploit this section closes |
+| **Outcome 6 (LF-18): identity found, `net_outstanding_locked ≤ 0`** | **Abort** — `ErrLockAlreadyReleased`, integrity alert | **No — never. This is the branch that prevents a second release** | N/A — never reaches a G-2 read; this is a pure integrity abort on the *amount* dimension, orthogonal to whichever Grant status a live read would have found |
 
 A `default`/unmatched case in the eventual Go `switch` **must** return an
 error, mirroring the exhaustive-classification discipline
@@ -712,7 +878,8 @@ a code change and not decided by this section.
 | Mixed funding (single-instruction, HR-2 regression) | §16.4's outcome 4 (`ErrMixedFundingUnsupported`) — whole transaction aborts, nothing posted | N/A — rejected before any credit is considered |
 | Multi-bet round (legitimate, LF-8) | §16.4's outcome 3 → §16.4a's manual-reconciliation path, **not** an automatic permanent abort | Deferred to manual review; may involve G-2 once disambiguated |
 | Correlation-ID wallet collision (LF-7) | §16.4's outcome 2 (`ErrCorrelationWalletCollision`) — whole transaction aborts, integrity alert | N/A — rejected before any credit is considered |
-| Rollback | `postRollback`'s existing generic entry-inversion (§16.1) — reverses whatever the original actually posted, origin-safe by construction. **A rollback of a WIN that already credited `player_bonus`, where the Grant has since gone terminal and swept that balance into `promo_liability` (§16.10), can find insufficient `player_bonus` balance to debit.** What happens then — permit the negative balance as a recorded clawback, route the shortfall to a receivable, or reject-and-alert — is **`ledger-finance`'s decision, not casino's** (LF-10); this document does not pre-select an answer (§16.11, §16.12) | Not casino's call — see note |
+| Rollback (of an already-resolved win) | `postRollback`'s existing generic entry-inversion (§16.1) — reverses whatever the original actually posted, origin-safe by construction. **A rollback of a WIN that already credited `player_bonus`, where the Grant has since gone terminal and swept that balance into `promo_liability` (§16.10), can find insufficient `player_bonus` balance to debit.** What happens then — permit the negative balance as a recorded clawback, route the shortfall to a receivable, or reject-and-alert — is **`ledger-finance`'s decision, not casino's** (LF-10, still open per `ledger-accounting-model.md` §7.7.2.11 — see §16.20); this document does not pre-select an answer (§16.11, §16.12) | Not casino's call — see note |
+| Rollback (of a still-`held` win) | **Closed this round.** `ledger-finance`'s guarded compare-and-swap (§7.7.2.7, adopted in new §16.15) — the generic entry-inversion above, plus an atomic `UPDATE bonus_held_dispositions SET status='voided_by_rollback' ... WHERE status='held'` in the same transaction. Zero rows affected is the loud failure signal if the record already left `held` | No — a rollback is never a G-2 answer, it is a technical undo |
 | Loss (no callback exists) | No inbound event signals a loss at all (§16.2). §16.5a designs the resolution mechanism a locked bonus-funded stake requires | No — value-reducing, never gated by G-2 (§16.8) |
 | Late settlement | Timing is invisible to §16.4's query — a win arriving an hour or a month after its bet resolves identically. Only the *outcome* of the live Grant-status read at settlement time can differ, which is exactly G-2's own subject matter, not a separate "lateness" mechanism | See above |
 | Idempotent replay | Unaffected by this section — `ledger.Post`'s existing `(tenant_id, idempotency_key)` uniqueness already no-ops a redelivered win before any destination decision is re-evaluated. §16.5's own concern (destination) is decided once, at first delivery, and never re-decided on replay | No |
@@ -727,31 +894,43 @@ table: only bet/win/rollback exist), so a losing bonus-funded round left
 `player_locked_bonus` permanently nonzero with no event to post the
 loss-absorption case against. Both halves are fixed here.
 
-**Win case — falls out of §16.4's fix, with one addition.** Once §16.4
-correctly resolves a `player_locked_bonus` origin and its `locked_amount`
-`X` (Step 1), the settlement transaction bundles **two** entry pairs in
-one `ledger.Post` call (a single balanced transaction, `ledger.Post`'s
-existing multi-entry-pair support — no new capability):
+**Win case — falls out of §16.4's fix, with one addition, and revised
+this round (LF-18) to source the release quantity correctly.** Once
+§16.4 correctly resolves a `player_locked_bonus` origin (outcome 5) and
+Step 1b's `net_outstanding_locked` (**not** Step 1's identity-only
+result — LF-18), the settlement transaction bundles **two** entry pairs
+in one `ledger.Post` call (a single balanced transaction, `ledger.Post`'s
+existing multi-entry-pair support — no new capability). Let `X =
+net_outstanding_locked` (Step 1b) and `W` = the win's own payout amount
+(from the provider's callback, cross-checked, never trusted blindly for
+destination — §16.3):
 
 1. The ordinary win payout: `Dr house_gaming W / Cr player_bonus W`
    (Grant non-terminal) or whatever §16.9's disposition specifies (Grant
-   terminal).
+   terminal — §16.14's `player_bonus_held` two-leg posting for the `held`
+   branch specifically).
 2. The lock release: `Dr player_locked_bonus X / Cr player_bonus X` (or,
    under a terminal-Grant disposition, credited to wherever that
-   disposition routes it instead — see below).
+   disposition routes it instead — see below and §16.14).
 
 This closes `L(G)` to zero on every win, including the terminal-Grant
 branch — **explicitly required by this fix, not left to `bonus-engine`**:
 per the fix-wave directive, `internal/casino` does not need to design
 `bonus-engine`'s own holding mechanism for a *held* win payout (if G-2 is
 answered `ACTION_HOLD_FOR_REVIEW`), but it **does** need the lock itself
-to resolve rather than dangle. **New cross-dependency found during this
-fix, not previously named**: `ACTION_HOLD_FOR_REVIEW`'s seam disposition
+to resolve rather than dangle. **Cross-dependency found during Round 1,
+closed this round (§16.14):** `ACTION_HOLD_FOR_REVIEW`'s seam disposition
 must name a destination for the *released lock amount* `X` (distinct from
-wherever it holds the *payout* `W`) — a suspense/hold account this
-document does not name, since it belongs to `bonus-engine`'s own parallel
-hold-mechanism design. Flagged in §16.13 as an open cross-dependency for
-that design to specify, not invented here.
+wherever it holds the *payout* `W`) — `ledger-finance`'s
+`player_bonus_held` account (§7.7.2.2) is that destination for both, in
+one balanced transaction, adopted in full in §16.14 below.
+
+**Hold case (`ACTION_HOLD_FOR_REVIEW`) — adopted this round from
+`ledger-finance`'s §7.7.2.2/§7.7.2.10 contract, in full, in place of the
+suspense/hold placeholder Round 1 left open.** See §16.14 for the exact
+two-leg posting shape, §16.15 for the rollback-of-a-held-win transition,
+and §16.16 for the resolution of the `ACTION_HOLD_FOR_REVIEW`
+lock-releases-but-doesn't-spend contradiction.
 
 **Loss case — the harder, previously entirely unaddressed gap.** No
 inbound event signals a loss. Two designs, per this fix-wave's own (a)/(b)
@@ -761,7 +940,8 @@ menu:
   window — RECOMMENDED.** A scheduled sweep (operationally the same
   pattern as the existing hourly reconciliation sweep, not a new
   architectural primitive) finds `player_locked_bonus` locks — identified
-  by a `casino_bet` transaction with a Step-1-shaped credit leg — that are
+  by a `casino_bet` transaction with a Step-1-shaped identity (§16.4) whose
+  Step-1b-shaped `net_outstanding_locked` is **still `> 0`** — that are
   **both** (i) older than a configured window `W` and (ii) genuinely
   unresolved: no `casino_win` or `casino_rollback` transaction exists
   under the same `correlation_id`, **and** no `ErrTerminalGrantCreditUnresolved`
@@ -770,8 +950,10 @@ menu:
   genuinely unresolved, expired lock, the sweep posts a new,
   system-initiated transaction type, `casino_settlement_timeout`,
   resolving the stake as a loss with the identical case-I accounting
-  shape a real loss would use: `Dr player_locked_bonus locked_amount /
-  Cr house_gaming locked_amount`, mirrored per the existing `BONUS_SET`
+  shape a real loss would use: `Dr player_locked_bonus
+  net_outstanding_locked / Cr house_gaming net_outstanding_locked`
+  (Step 1b's amount, read fresh at sweep time — never a cached bet-time
+  figure), mirrored per the existing `BONUS_SET`
   rule (B1 extended) exactly as an ordinary loss would be — no new
   posting shape, reused verbatim.
 
@@ -866,12 +1048,12 @@ durations — that this section does not select.
 | **Wagering Progress (Model C)** | **Requires a correction, not a design change**: §6.6.6's "for casino the quantity is always zero, so `P_firm == P_net`" claim shares §16.2.1's false premise and is incorrect for the identical reason once a bonus-funded casino bet exists — casino's `player_locked_bonus` exposure is nonzero between `postBet` and `postWin`/`postRollback`, exactly like sportsbook. §6.6.5's classification table already lists `casino_bet`/`casino_win`/`casino_rollback` correctly (risk-preserving/nullifying, identical to the sportsbook types) — only §6.6.6's summary sentence is wrong. **Routed to `ledger-finance`, not edited here** (§16.12, item 2) | |
 | **Bonus Conversion** | No change. §16.4/§16.9 never touch `bonus_conversion`; a terminal Grant cannot convert regardless (§6.6.6, `P_firm` for a terminal Grant authorizes nothing) | — |
 | **Casino (this domain)** | Yes — this section's own deliverable. `postWin`'s two hardcoded lines change; `postBet`/`postRollback` are unaffected | — |
-| **Sportsbook** | No casino-specific assumption breaks sportsbook's own future design — §16.4 reuses sportsbook's own §6.3.3.1 query verbatim rather than diverging from it, and §16.9's seam is written product-agnostically (keyed on `correlation_id`/Grant, not on casino specifically) so `internal/sportsbook` can call the identical seam later without a second design pass | Confirmed no divergence introduced |
+| **Sportsbook** | **Round 1's "no divergence" claim was wrong, and LF-18 is exactly where the divergence lived — re-examined here as this fix-wave directive requires.** Round 1's §16.4 reused §6.3.3.1's variant-1 query for a purpose §6.3.3.1 itself warns against conflating (§6.3.3.1's own text: "using (1) where (2) is meant would over-release"). That is precisely what happened: Round 1 used variant 1 (the original split) where variant 2 (the currently-remaining amount) was required, for the exact reason §6.3.3.1 names. **Corrected this round**: §16.4 Step 1 (identity, variant-1-shaped) is unchanged and legitimately variant-1 — it answers "what was the original split," which is a permanent fact and the correct question for *identity*. §16.4 Step 1b (new) is variant-2-shaped, used only for the *amount* question, exactly as §6.3.3.1 itself prescribes. Casino now applies both variants exactly as sportsbook's own document defines them, for exactly the questions each variant is meant to answer — no remaining divergence, and §16.9's seam is unaffected (still product-agnostic) | **Was a real divergence (LF-18); closed this round by applying both of §6.3.3.1's variants for their own stated purposes, not by inventing a casino-specific rule** |
 | **Risk** | No change. `risk.Evaluate` is not consulted by `postWin` today (doc comment, lines 830-837) and this section does not add a call — a terminal-Grant credit decision is not a Risk-shaped exposure/limit question | — |
 | **RG** | No change. `postWin` deliberately does not call `evaluateAndAuditEligibility` (unchanged rationale, lines 830-837) — settling an already-legitimately-placed bet is not gated by the player's current RG status. G-2's own resolution (whichever action a human selects) may itself have RG/AML implications (a routed-to-cash credit becoming withdrawable) but that is Decision 2's own province, not a new RG call site this design adds | — |
 | **Reconciliation** | No change to the hourly ledger-vs-projection sweep mechanism. A held/failed-closed G-2 credit (§16.9) must not create an unreconciled ledger residue — see §16.13's open item on the holding mechanism, explicitly deferred by doc10 §T.7 itself to `ledger-finance`. **New (LF-4):** §16.5a's settlement-timeout sweep is a second, distinct scheduled job operating on the same locked-balance projections — it must run and be reconciled independently of the hourly ledger-vs-projection sweep, and its own postings (`casino_settlement_timeout`) are ordinary, audited ledger transactions the existing sweep already covers without modification | Open item (holding mechanism) plus one new, not-yet-authorized mechanism (settlement-timeout sweep, §16.5a) |
 
-### 16.7 Exploit closure proof — a bonus-funded win can never become unrestricted cash before wagering/conversion rules permit it (re-walked, LF-1)
+### 16.7 Exploit closure proof — a bonus-funded win can never become unrestricted cash before wagering/conversion rules permit it (re-walked, LF-1; amount references updated for LF-18 — see §16.17 for the LF-18 exploit itself)
 
 **This proof did not hold as originally written.** LF-1 found that the
 original query/destination-map mismatch meant branch 2 below was
@@ -888,10 +1070,13 @@ bet: `Dr player_bonus X / Cr player_locked_bonus X` (case B, no mirror —
 is required). The player later wins. Two exhaustive branches:
 
 1. **Grant `G` is non-terminal at settlement time** (the overwhelmingly
-   common case). §16.4 Step 1 finds the credit leg `player_locked_bonus`,
-   wallet `w`, `locked_amount = X` — this is now actually reached, because
-   Step 1 reads the credit leg, not the debit leg the original design
-   read. §16.5's "Grant non-terminal" row applies: the live `FOR UPDATE`
+   common case). §16.4 Step 1 finds the credit leg's identity —
+   `player_locked_bonus`, wallet `w` — this is now actually reached,
+   because Step 1 reads the credit leg, not the debit leg the original
+   design read. Outcome 5 fires (net_outstanding_locked > 0), so Step 1b
+   resolves `net_outstanding_locked = X` — **the currently outstanding
+   amount, confirmed nonzero, not the possibly-stale bet-time figure**
+   (LF-18). §16.5's "Grant non-terminal" row applies: the live `FOR UPDATE`
    Grant-status read finds `G` non-terminal, so the win posts **both**
    entry pairs from §16.5a — (i) the payout `Dr house_gaming W / Cr
    player_bonus W`, and (ii) the lock release `Dr player_locked_bonus X /
@@ -908,12 +1093,13 @@ is required). The player later wins. Two exhaustive branches:
    (ADR 0032 §4), which is itself gated by W1. **Never `player_cash`
    directly, at any point. Holds.**
 2. **Grant `G` is already terminal at settlement time.** §16.4 Step 1
-   still resolves the same credit leg = `player_locked_bonus`, wallet `w`,
-   `locked_amount = X` (unchanged from branch 1 — the *origin* resolution
-   never depends on Grant status, only the *destination* decision does —
-   and, unlike the original design, this resolution path is actually
-   reachable now that it keys off the credit leg rather than a debit leg
-   the destination map mis-mapped). §16.5's "Grant terminal" row applies:
+   still resolves the same identity — credit leg `player_locked_bonus`,
+   wallet `w` — and Step 1b still resolves `net_outstanding_locked = X`
+   (unchanged from branch 1 — the *origin*/*amount* resolution never
+   depends on Grant status, only the *destination* decision does — and,
+   unlike the original design, this resolution path is actually reachable
+   now that it keys off the credit leg rather than a debit leg the
+   destination map mis-mapped). §16.5's "Grant terminal" row applies:
    the credit is **not** posted to either `player_bonus` or `player_cash`
    by `postWin` itself — it is handed to §16.9's seam, which today (no
    G-2 answer exists, `bonusengine.ResolveTerminalGrantCredit` does not
@@ -936,12 +1122,19 @@ is required). The player later wins. Two exhaustive branches:
    per the seam's override (`L(G) → 0`, and this is the **only** route by
    which a bonus-origin stake ever reaches `player_cash` directly — gated
    entirely behind a human decision, never `postWin`'s default);
-   `ACTION_HOLD_FOR_REVIEW` releases the lock into a suspense/hold
-   destination `bonus-engine`'s own hold mechanism must name (§16.5a's
-   newly-found cross-dependency) — `L(G) → 0` there too, the lock is never
-   left dangling once a disposition exists. **No withdrawable cash is
-   ever created by this branch until a human selects and `bonus-engine`
-   implements one of these three actions. Holds.**
+   `ACTION_HOLD_FOR_REVIEW` posts both legs into `ledger-finance`'s
+   `player_bonus_held` account per §16.14's two-leg hold-capture posting —
+   `Dr house_gaming W / Cr player_bonus_held W` always, plus `Dr
+   player_locked_bonus X / Cr player_bonus_held X` since the stake was
+   locked — in one balanced transaction, `L(G) → 0` there too, the lock is
+   never left dangling once a disposition exists, **and the value is not
+   spendable**: `player_bonus_held` is disjoint from `player_bonus` and
+   `player_cash` alike, readable only by the G-2 resolution flow (§16.16
+   resolves the precise sense in which this both "releases the lock" and
+   "does not create spendable value" — both are true, of different
+   accounts). **No withdrawable cash is ever created by this branch until
+   a human selects and `bonus-engine` implements one of these three
+   actions. Holds.**
 
 In neither branch does `player_cash` receive value that traces back to a
 bonus-origin stake without first passing through either (a) the existing,
@@ -1014,16 +1207,27 @@ to the ordinary balance-sufficiency check (§16.5's rollback row).
 
 ### 16.9 The G-2 injection boundary — preserving human ownership
 
-**Named seam, not built**: `bonusengine.ResolveTerminalGrantCredit(ctx,
-tx, grantID, correlationID, creditKind, amount) (disposition, err)` —
-called from exactly the one site in §16.8, inside the same database
-transaction as the settlement posting, under the same `(tenant_id,
-grant_id)` advisory lock doc10 §9 already specifies. This mirrors doc10
-§T.7's own framing verbatim ("a new call-back into Bonus Engine's
-Grant-status read that does not exist today... regardless of which action
-is ultimately chosen") — this section names the exact function shape so
-it is not discovered mid-implementation, per that framing's own stated
-intent.
+**Named seam, widened this round (LF-18/§7.7.2.10 item 2 — the signature
+below supersedes Round 1's single-`amount` form):**
+`bonusengine.ResolveTerminalGrantCredit(ctx, tx, grantID, correlationID,
+creditKind, payoutAmount, releasedLockAmount) (disposition, err)` — called
+from exactly the one site in §16.8, inside the same database transaction
+as the settlement posting, under the same `(tenant_id, grant_id)` advisory
+lock doc10 §9 already specifies. `payoutAmount` (`W`, §16.4's win payout)
+and `releasedLockAmount` (`X`, Step 1b's `net_outstanding_locked`, LF-18)
+are **separate parameters, never a single combined `amount`** — required
+because `ledger-finance`'s §7.7.2.2 two-leg hold-capture posting (§16.14)
+needs both quantities independently to build its two legs, and collapsing
+them into one parameter would make that posting unbuildable from this
+seam's return value alone. This mirrors doc10 §T.7's own framing verbatim
+("a new call-back into Bonus Engine's Grant-status read that does not
+exist today... regardless of which action is ultimately chosen") — this
+section names the exact function shape so it is not discovered
+mid-implementation, per that framing's own stated intent, and now also
+carries `ledger-finance`'s own binding requirement on that shape
+(§7.7.2.10 item 2, "casino must... widen `ResolveTerminalGrantCredit`'s
+signature to carry `payout_amount`/`released_lock_amount` as SEPARATE
+parameters").
 
 **Today, before G-2 is answered, and before `internal/bonus` exists at
 all**: this function does not exist. `postWin` cannot call it. The
@@ -1045,23 +1249,25 @@ ACTION_REFORFEIT (post normally, then a compensating `bonus_forfeiture`,
 both owned by the settlement-posting layer, no new cross-domain call
 needed beyond the seam itself), ACTION_ROUTE_TO_CASH (the seam returns a
 destination override, which `postWin` substitutes for `player_bonus`),
-or ACTION_HOLD_FOR_REVIEW (the seam returns a "hold" disposition; the
-actual holding mechanism is explicitly out of scope here, per doc10
-§T.7's own disclaimer that it is "a `ledger-finance` design question this
-contract does not resolve"). **No code in this section selects among
-these three or implements any of them.**
+or ACTION_HOLD_FOR_REVIEW (the seam returns a "hold" disposition,
+**now fully specified, not out of scope** — §16.14 adopts
+`ledger-finance`'s `player_bonus_held` two-leg posting in full). **No code
+in this section selects among these three or implements any of them —
+this section adopts the *destination* `ledger-finance` has now decided
+for the hold branch specifically, which is a mechanical consequence of
+§7.7.2's binding decision, not a G-2 selection.**
 
-**One requirement on all three, found while designing §16.5a's lock-
-release step, not previously stated:** whichever disposition
+**The requirement on all three, found while designing §16.5a's
+lock-release step, closed this round.** Whichever disposition
 `ResolveTerminalGrantCredit` returns must also specify where the
 *released lock amount* (`X`, distinct from the win payout `W`) lands —
 `ACTION_REFORFEIT`/`ACTION_ROUTE_TO_CASH` already imply an answer
 (`promo_liability` via re-forfeiture, or `player_cash` via the override,
-respectively), but `ACTION_HOLD_FOR_REVIEW`'s disposition must additionally
-name a suspense/hold account for `X` — this document does not name one,
-since it is part of `bonus-engine`'s own hold-mechanism design (§16.13),
-but the lock must not be left dangling regardless of which action is
-eventually selected.
+respectively). `ACTION_HOLD_FOR_REVIEW` is where Round 1 left this open —
+**closed now**: `player_bonus_held` (§16.14) is that destination for
+both `W` and `X`, in one balanced transaction, exactly as
+`ledger-finance`'s §7.7.2.2 specifies. The lock is never left dangling
+regardless of which action is eventually selected.
 
 ### 16.10 The Grant terminal-state invariant — formalized, stress-tested, and found insufficient as originally proposed
 
@@ -1214,11 +1420,21 @@ model?** Stress-tested against §16.2's full lifecycle:
 
 ### 16.11 Adversarial scenarios
 
+**Round 2 note.** The eight scenarios the human directive names explicitly
+(duplicate win, duplicate rollback, concurrent win/rollback, late
+callback, callback after expiry, callback after cancellation, rollback of
+a held win, rollback of a resolved win) are all present in this table
+already or added below — restated as their own named, numbered set in new
+§16.19, per that directive's explicit format requirement, rather than
+only inline here.
+
 | Scenario | Expected behavior | Why safe |
 |---|---|---|
 | Win after Grant state change (non-terminal → terminal, no lock outstanding) | Ordinary termination already completed (INV-TG step 2's `L(G)=0` branch) before the win arrives; the win then finds no matching, non-reversed bet under this Grant's lock — but the bet's own ledger row still exists, so §16.4 still resolves an origin. If `G` is already fully terminal with `L(G)` having been zero at trigger time, no `pending_settlement` interval ever existed for this stake, meaning the win could only be a genuinely late artifact of a *different*, still-locked amount — in which case `pending_settlement` (still active) is found and §16.9 fires | INV-TG's `L(G)` check is re-evaluated live, not cached from trigger time |
 | Win after wagering completion (`completed`/`converted`) | Not a terminal status (§1.2) — G-2 does not apply; ordinary settlement path, credit posts to `player_bonus` normally, subject to whatever `bonus_conversion` has already released | `completed`/`converted` are excluded from G-2's trigger set by definition (doc10 §T.13) |
-| Rollback after win | `postRollback`'s generic inversion (§16.1) debits `player_bonus` for the win amount; if the Grant went terminal and swept that balance into `promo_liability` in the interim, the debit finds insufficient balance. **What happens then is `ledger-finance`'s decision, not casino's (LF-10) — this document does not pre-select "fail closed," "permit negative as a clawback," or "route to a receivable."** Whichever `ledger-finance` decides, it must generalize `ledger.Post`'s existing sufficiency mechanism to `player_bonus` (not yet built, HR-9 currently blocks all `player_bonus` posting regardless), flagged in §16.13 | Never posts a negative/impossible balance *without an explicit, ledger-finance-owned decision permitting one*; the mechanism generalizes the existing `SELECT ... FOR UPDATE` pattern (already used for `player_cash`, `orchestrator.go` line 762) — the treatment of a failed check is the open item, not the check's existence |
+| Rollback of a **resolved** win (`player_bonus`/`player_cash` already credited, or a `bonus_held_dispositions` row already `resolved_*`) | `postRollback`'s generic inversion (§16.1) debits the resolved account for the win amount; if the Grant went terminal and swept that balance into `promo_liability` in the interim (or the hold already resolved and moved on), the debit finds insufficient balance. **What happens then is `ledger-finance`'s decision, not casino's (LF-10, confirmed still open by `ledger-finance`'s own Round 2 text, §7.7.2.11 — see §16.20) — this document does not pre-select "fail closed," "permit negative as a clawback," or "route to a receivable."** Whichever `ledger-finance` decides, it must generalize `ledger.Post`'s existing sufficiency mechanism to `player_bonus` (not yet built, HR-9 currently blocks all `player_bonus` posting regardless), flagged in §16.13 | Never posts a negative/impossible balance *without an explicit, ledger-finance-owned decision permitting one*; the mechanism generalizes the existing `SELECT ... FOR UPDATE` pattern (already used for `player_cash`, `orchestrator.go` line 762) — the treatment of a failed check is the open item, not the check's existence |
+| Rollback of a **still-`held`** win (`bonus_held_dispositions.status = 'held'`) | **Closed this round (§16.15, adopting `ledger-finance` §7.7.2.7).** `postRollback`'s generic inversion (`Cr house_gaming payout_amount`, and `Cr player_locked_bonus released_lock_amount` if present — never a lock resurrection) plus, in the **same** transaction, `UPDATE bonus_held_dispositions SET status='voided_by_rollback', resolution_ledger_transaction_id=<reversal id> WHERE id=? AND status='held'` | The `WHERE status='held'` clause is a DB-enforced compare-and-swap — zero rows affected is the loud, checkable failure signal, never check-then-update; gated under the same row `FOR UPDATE` HR-25 already requires for resolution (§16.15) |
+| Genuine win event resolves to §16.4's **outcome 6** (LF-18: identity found, `net_outstanding_locked ≤ 0`) | Whole win aborted with `ErrLockAlreadyReleased`, integrity alert, held for manual reconciliation — never released a second time | This is precisely the branch LF-18's exploit needed and Round 1 did not have (§16.17) |
 | Win after rollback | `postWin`'s existing `NOT EXISTS (... reverses_transaction_id ...)` clause (line 849, reused unchanged in §16.4's query) finds no valid origin → `ErrBetNotFound`, an integrity alert | Unchanged, already correct |
 | Duplicate win | `ledger.Post`'s `(tenant_id, idempotency_key)` uniqueness no-ops the second delivery before §16.4/§16.9 re-run | Idempotency key is provider-namespaced and DB-enforced, not "check then insert" |
 | Duplicate rollback | Existing `postRollback` logic (distinguishes a same-reference redelivery, idempotent no-op, from a distinct new reference against an already-reversed original, `ErrAlreadyRolledBack`) — unaffected by this section | Unchanged, already correct and tested (Stage 4A completion report §17) |
@@ -1268,11 +1484,24 @@ file directly"):
    It also proposes reusing the existing case-I loss-accounting shape
    verbatim for the sweep's posting, which `ledger-finance` should confirm
    is a correct reuse, not a divergence.
-6. **New (LF-10 fix wave).** §16.5's and §16.11's rollback-insufficient-
-   balance rows no longer assert "fail closed" as this document's answer.
-   The actual treatment (permit negative balance as a recorded clawback /
-   route to a receivable / reject-and-alert) is explicitly routed to
-   `ledger-finance` as an open decision, not pre-selected here.
+6. **LF-10 (unchanged posture, reconfirmed Round 2).** §16.5's and
+   §16.11's rollback-of-a-**resolved**-win insufficient-balance rows still
+   do not assert "fail closed" as this document's answer. `ledger-finance`
+   itself, in the course of closing the *still-held* rollback sub-case
+   this round, explicitly reconfirmed the resolved-win sub-case "remains
+   open, still routed to `ledger-finance` generally" (`ledger-accounting-
+   model.md` §7.7.2.7/§7.7.2.11) — this document does not attempt to close
+   it either, for the reasons detailed in new §16.20 (it is a
+   ledger-wide compensating-entry policy question, not a casino-specific
+   one, and CLAUDE.md/this project's ownership model reserves it for
+   `ledger-finance` + `architect`).
+7. **New (LF-18 fix wave — for `ledger-finance`'s own required independent
+   re-verification, not an open decision).** §16.4's Step 1b (variant-2
+   query) and its sixth outcome branch are `casino`'s own fix to `casino`'s
+   own defect, per the Phase 2 report's explicit ownership ("Owner:
+   casino, reviewed by ledger-finance"). This is recorded here so
+   `ledger-finance`'s review has an exact, named target — not because the
+   fix itself is `ledger-finance`'s decision to make.
 
 ### 16.13 What remains open
 
@@ -1297,24 +1526,25 @@ file directly"):
   `ledger-finance` agreement" — this section proposes it and stress-tests
   it from casino's own angle, but does not have authority to adopt it
   unilaterally.
-- **§16.9's `ACTION_HOLD_FOR_REVIEW` holding mechanism** remains, as
-  doc10 §T.7 itself already discloses, an unresolved `ledger-finance`
-  design question — a held G-2 credit's interaction with the hourly
-  reconciliation sweep (§16.6's Reconciliation row) is unspecified. **New
-  (LF-4 fix wave):** that mechanism must additionally name a destination
-  for the *released lock amount* `X` (distinct from the held payout `W`)
-  — found while designing §16.5a, flagged in both §16.5a and §16.9,
-  not resolved here.
+- **§16.9's `ACTION_HOLD_FOR_REVIEW` holding mechanism — CLOSED this
+  round, adopted from `ledger-finance`.** Round 1 left this an unresolved
+  `ledger-finance` design question, including the released-lock-amount
+  destination. `ledger-finance`'s Round 2 (§7.7.2, adopted in §16.14) now
+  names `player_bonus_held` as the destination for both the payout and the
+  released lock, in one balanced transaction. **Still open, unchanged by
+  this closure**: that account's interaction with the hourly
+  reconciliation sweep is specified by `ledger-finance`'s own new `LF-12`
+  stream (§7.7.2.8), not by this document — this document adopts that
+  stream's existence but does not design it.
 - **The rollback-of-a-credited-win-against-a-later-forfeited-balance
-  insufficient-balance case** (§16.11) depends on `ledger-finance`'s
+  insufficient-balance case (the *resolved*-win sub-case, LF-10) —
+  STILL OPEN, reconfirmed this round.** Depends on `ledger-finance`'s
   balance-sufficiency check generalizing to `player_bonus`, not yet built
-  (HR-9 currently blocks all `player_bonus` posting regardless). **Revised
-  (LF-10 fix wave):** this document no longer asserts "fail closed" as
-  its own answer for what a failed check should do — that treatment
-  (permit negative balance as a recorded clawback / route to a
-  receivable / reject-and-alert) is `ledger-finance`'s decision. Only the
-  need for the check to exist and to cover `player_bonus` is asserted
-  here.
+  (HR-9 currently blocks all `player_bonus` posting regardless). This
+  document still does not assert "fail closed" as its own answer — see
+  §16.20 for why this document does not attempt to close it now, even
+  though the *still-held* sub-case of the same rollback gap is closed
+  this round (§16.15).
 - **§16.5a's settlement-timeout sweep (LF-4)** is a new mechanism and a
   new transaction type (`casino_settlement_timeout`), proposed but not
   authorized — requires `ledger-finance`/`architect` ratification
@@ -1336,12 +1566,625 @@ file directly"):
   provider-side free-round is normalized into the platform's bet/win
   shape, not the settlement-credit destination question this section
   answers.
+- **LF-18 — CLOSED this round** (§16.4, exploit re-walked in §16.17).
+  Pending `ledger-finance`'s independent re-verification per the Phase 2
+  report's own required review posture (§16.12 item 7).
+- **The held-win rollback gap — CLOSED for the still-held sub-case this
+  round** (§16.15, adopting `ledger-finance` §7.7.2.7). The
+  already-resolved sub-case remains LF-10, still open (§16.20).
+- **Idempotency key (LF-22) — CLOSED, adopted from `ledger-finance`**
+  (§16.14): `settlement_ledger_transaction_id` per hold occurrence, never
+  `correlation_id`.
+- **`ACTION_HOLD_FOR_REVIEW`'s semantics — CLOSED this round** (§16.16):
+  it both releases the lock (a real posting, `L(G) → 0`) and creates no
+  spendable value (the value lands in `player_bonus_held`, disjoint from
+  `player_bonus`/`player_cash`) — these are not contradictory once stated
+  against the correct pair of accounts.
+- **Step 1b's `OriginatingProviderTxID` extension** (§16.4's interaction
+  note) is a required but not-yet-needed follow-up: today no multi-bet
+  round ever reaches Step 1b (outcome 3 routes it to the manual queue
+  first), so the gap is dormant, not live — it must be closed in the same
+  change that adds `OriginatingProviderTxID` to Step 1/Step 2 (§16.4a),
+  not before.
+
+### 16.14 Adopting `ledger-finance`'s `player_bonus_held` account and the two-leg hold-capture posting
+
+**Adopted in full from `ledger-accounting-model.md` §7.7.2 — this section
+selects nothing new, it implements the contract already decided there
+(§7.7.2.10, "what `casino` must do").** Round 1 left `ACTION_HOLD_FOR_
+REVIEW`'s destination as an unnamed cross-dependency (§16.5a, §16.9,
+§16.13). `ledger-finance`'s Round 2 named it. This section adopts that
+answer at every site Round 1 flagged as open, and nowhere invents a
+variant of it.
+
+**The account.** `player_bonus_held` — a third, disjoint, Grant-attributed
+ledger account type (per `(wallet_id, account_type, asset_code)`, the same
+shape every other `player_*` type already has), a member of `BONUS_SET`
+(§7.7.2.3). `casino` never creates this account type (that is `ledger-
+finance`'s migration `0055`, §7.7.2.4) — `casino` only posts against it,
+through `ledger.GetOrCreateAccount`, exactly as it already does for every
+other account type today.
+
+**The posting — one balanced `LedgerTransaction`, built in `postWin` at
+exactly the site §16.9's seam returns `ACTION_HOLD_FOR_REVIEW`:**
+
+> - `Dr house_gaming payout_amount(W) / Cr player_bonus_held W` — **always**
+>   present, the win's own value-creating credit, captured rather than
+>   posted to `player_bonus`.
+> - `Dr player_locked_bonus released_lock_amount(X) / Cr player_bonus_held
+>   X` — present **only if** the originating stake was locked (true for
+>   every bonus-funded casino bet reachable under §16.10.1's mandated
+>   shape; would be absent entirely for a hypothetical never-locked
+>   origin, which §16.10.1 makes structurally unreachable for casino
+>   today).
+>
+> Both legs post in the **same** `ledger.Post` call — never as two
+> transactions — so there is no intermediate state where `L(G)` has
+> closed but the payout has not yet been captured, or vice versa (`ledger-
+> accounting-model.md` §7.7.2.2, quoted verbatim in this round's
+> dispatch).
+
+`W` is `postWin`'s own resolved payout amount (from the provider's
+callback, §16.3 — an *amount*, never a *destination*: the provider
+supplies how much was won, never which account receives it). `X` is
+§16.4's Step 1b `net_outstanding_locked` — **the LF-18-corrected,
+currently-outstanding figure, never Step 1's stale bet-time amount**. Both
+are threaded through `ResolveTerminalGrantCredit`'s widened signature
+(§16.9) as `payoutAmount`/`releasedLockAmount`, separately, so the
+posting layer never needs to re-derive either from a single combined
+`amount`.
+
+**The record.** `bonus_held_dispositions` (§7.7.2.5) is `bonus-engine`-
+owned, not `casino`-owned — `casino`'s only obligation is to post the
+hold-capture transaction above and hand `bonus-engine`'s seam
+implementation the transaction id it posted under
+(`settlement_ledger_transaction_id`), so `bonus-engine` can write the
+corresponding row in the **same** database transaction. `casino` does not
+design, migrate, or query this table directly.
+
+**Idempotency (LF-22, adopted verbatim).** The per-occurrence key is
+`settlement_ledger_transaction_id` — **not** `correlation_id` (this
+document's own §16.4a already proved a round-scoped key wrong: one round
+can legitimately contain several, separately-settled bets, each needing
+its own hold) and **not** `grant_id`. `ledger.Post`'s own `(tenant_id,
+idempotency_key)` uniqueness has already collapsed a redelivered win into
+one settlement transaction *before* hold-creation logic ever runs, so
+`settlement_ledger_transaction_id` is guaranteed to name exactly one real
+occurrence by construction — `casino` inherits this guarantee for free
+from its own existing idempotency mechanism (§16.2's lifecycle table);
+`bonus_held_dispositions`'s own `UNIQUE (tenant_id,
+settlement_ledger_transaction_id)` constraint is `bonus-engine`'s
+independent second line of defense, not something `casino` needs to
+build.
+
+**Concurrency (HR-21/HR-25, confirmed unaffected on the creation side).**
+The hold-capture posting runs inside `postWin`'s own transaction, under
+the same `(tenant_id, correlation_id)` then `(tenant_id, grant_id)` lock
+order this document already uses (§16.9) — it acquires no new lock
+participant, exactly as `ledger-accounting-model.md` §7.7.2.9 confirms
+("HR-21 is not violated and needs no new participant for creation").
+Resolution (a human applying G-2's eventual answer) and the rollback
+transition (§16.15) are the paths that introduce the new, fourth
+participant (HR-25, the `bonus_held_dispositions` row lock) — neither is
+part of `postWin`'s own write path.
+
+**Not casino's to build alone.** `bonus_held_dispositions`'s schema,
+migration, and `HeldDisposition(G, t)` redefinition are `bonus-engine`'s
+(§7.7.2.10's own ownership split). This section only specifies what
+`casino` itself must do — post the two-leg transaction, widen the seam
+signature, hand over the transaction id — per that same contract's
+`casino`-facing items 1–4.
+
+### 16.15 Held-win rollback transition (`postRollback`, adopting `ledger-finance` §7.7.2.7)
+
+**The gap, closed for the reachable case this document owns.** A provider
+rollback naming a `settlement_ledger_transaction_id` whose
+`bonus_held_dispositions` record is still `status = 'held'` had no
+defined transition in Round 1 (`casino`'s own Phase 2 finding,
+corroborated by `qa` test `C28`). `ledger-finance` closed the mechanism in
+§7.7.2.7; this section is `casino`'s adoption of it into `postRollback`,
+per §7.7.2.10 item 4 ("implement §7.7.2.7's rollback-of-a-held-win
+transition ... inside `postRollback`").
+
+**The mechanism, adopted verbatim — one transaction, two effects:**
+
+1. **The existing, unmodified generic entry-inversion** (§16.1) — the
+   exact inverse of every entry the hold-capture posting made: `Cr
+   house_gaming payout_amount`, and `Cr player_locked_bonus
+   released_lock_amount` **only if that leg was present**. Restoring the
+   locked balance is **deliberately never attempted** — `L(G)` already
+   closed to zero at hold-capture time, and reversing a win that never
+   should have happened is a straight reversal to `house_gaming`, not a
+   resurrection of a lock (`ledger-accounting-model.md` §7.7.2.7, quoted
+   verbatim). If the underlying **bet** itself also needs unwinding, that
+   is a second, independent rollback naming the bet's own
+   `provider_tx_id` — this document's existing "two independent
+   reversals" rule (§16.11's concurrent win/rollback row), unaffected
+   here.
+2. **In the same transaction**, a guarded status update:
+   `UPDATE bonus_held_dispositions SET status = 'voided_by_rollback',
+   resolution_ledger_transaction_id = <the reversal's own id> WHERE id = ?
+   AND status = 'held'`. The `WHERE status = 'held'` clause **is** the
+   compare-and-swap — one atomic statement, DB-enforced, never
+   check-then-update. Zero rows affected is the loud, checkable failure
+   signal.
+
+**New lock-order requirement on `postRollback` specifically, stated so it
+is not missed during implementation.** Before today, `postRollback` only
+ever needed a `FOR UPDATE` on the named original transaction's own row
+(`orchestrator.go:939`). Resolving *this* transition additionally requires
+HR-25's lock order (`ledger-accounting-model.md` §7.7.2.9): (1) the
+`(tenant_id, grant_id)` advisory lock, **then** (2) `SELECT ... FOR
+UPDATE` on the specific `bonus_held_dispositions` row. `postRollback`
+must acquire both, in that order, **whenever its target transaction has
+an associated hold record** (a lookup by
+`settlement_ledger_transaction_id` that `postRollback` must perform before
+deciding which of the two rollback shapes — ordinary generic inversion,
+or this held-aware variant — applies). This is a genuinely new
+requirement on `postRollback`, not a restatement of its existing
+same-original-row lock.
+
+**Proof this prevents double-resolution under concurrent callbacks**
+(the human directive's explicit requirement) — three interleavings,
+exhaustive:
+
+- **Rollback races a human resolution (`ACTION_REFORFEIT`/
+  `ACTION_ROUTE_TO_CASH`) of the same held record.** Both acquire
+  `(tenant_id, grant_id)` first, then contend for the row's `FOR UPDATE`
+  — they serialize. Whichever commits first leaves `status` in a terminal
+  state (`voided_by_rollback`, or `resolved_reforfeit`/
+  `resolved_route_to_cash`); the second finds `status ≠ 'held'` and its
+  own guarded `UPDATE ... WHERE status = 'held'` affects zero rows —
+  rejected, never applied, never a second disposition of the same value.
+  **No interleaving resolves the same held value twice.**
+- **Duplicate rollback of the same held record.** The redelivered
+  rollback's own reversal transaction hits `ledger.Post`'s idempotency key
+  first (same `provider_tx_id`, same target) — an idempotent no-op,
+  identical to the existing, already-tested duplicate-rollback path
+  (§16.11's "Duplicate rollback" row). The guarded status update is never
+  even re-attempted, because the reversal transaction itself never
+  re-posts.
+- **Two genuinely distinct rollback attempts naming the same held
+  record** (a defensive case beyond simple redelivery — e.g. a
+  provider-side retry with a *new* `provider_tx_id` by mistake): both
+  reach the row's `FOR UPDATE` and serialize exactly as the first bullet
+  describes; the loser's guarded update is a zero-row no-op regardless of
+  which reversal transaction it is attached to.
+
+**What this does not close — LF-10, restated precisely, not silently
+worked around here.** A rollback naming an **already-resolved**
+(`resolved_reforfeit`/`resolved_route_to_cash`) record is the harder,
+general case: the held value has already moved to a different account
+entirely, potentially already spent or converted. This is **not** the
+transition this section closes. §16.20 states precisely why it stays open
+and routed to `ledger-finance`, not decided here.
+
+### 16.16 `ACTION_HOLD_FOR_REVIEW` — resolving the contradiction, conforming to `ledger-finance`'s actual vocabulary
+
+**The contradiction, stated precisely.** This document's own §16.7 (Round
+1) said `ACTION_HOLD_FOR_REVIEW` "releases the lock ... into a
+suspense/hold destination." Read against `bonus-engine`'s parallel text,
+this was interpreted as conflicting with a claim that the action is a
+"money no-op." Both readings are half-right, about **different
+accounts**, and the ambiguity is resolved — not by picking one, but by
+stating both halves against the correct pair of accounts, conforming
+exactly to `ledger-accounting-model.md` §7.7.2's now-binding vocabulary.
+
+**The resolution.** `ACTION_HOLD_FOR_REVIEW` posts a real, balanced
+ledger transaction — **never a literal no-op** — that does exactly two
+things, simultaneously, in the one hold-capture posting (§16.14):
+
+1. **It releases the lock, unconditionally.** `Dr player_locked_bonus X /
+   Cr player_bonus_held X` is a real posting; `Σ signed(player_locked_bonus)`
+   for this stake reaches zero, exactly as every other win outcome
+   requires (§16.5a's `L(G) → 0` mandate). §16.7's "releases the lock"
+   claim is **true**, and remains true this round.
+2. **It creates no spendable value.** Neither leg credits `player_bonus`
+   or `player_cash` — the entire value (`W` and `X` alike) lands in
+   `player_bonus_held`, an account disjoint from every player-facing
+   balance, unreadable by `WageringProgress`, `bonus_conversion`, or any
+   withdrawal path. From the perspective of "has anything become
+   wagerable, convertible, or withdrawable," **nothing has** — the
+   "money no-op" reading is **true of spendable balances specifically**,
+   and remains true this round.
+
+Neither claim needed to be withdrawn; they were never actually about the
+same account. `player_locked_bonus` genuinely empties (claim 1);
+`player_bonus`/`player_cash` genuinely do not move (claim 2).
+`player_bonus_held` is the account both claims were describing without
+naming.
+
+**No fourth "reviewing" sub-state — conforming to the actual schema.**
+`bonus_held_dispositions.status` admits exactly `held`,
+`resolved_reforfeit`, `resolved_route_to_cash`, `voided_by_rollback`
+(`ledger-accounting-model.md` §7.7.2.5). **`held`, persisting, *is*
+`ACTION_HOLD_FOR_REVIEW`'s complete state** — there is no separate
+"under review" or "reviewing" value, and this document does not introduce
+one. A prior looser reading of this document might have implied a
+distinct in-flight sub-state between "captured" and "resolved"; there is
+none — the row exists with `status = 'held'` from the instant the
+hold-capture posting commits until a human (via `bonus-engine`'s
+resolution flow) or a rollback (§16.15) moves it to one of the three
+terminal values. Nothing here selects G-2, or which of the two
+disposition-bearing terminal values a given hold eventually receives —
+only the vocabulary and the interim state are conformed to the schema
+`ledger-finance` has already fixed.
+
+### 16.17 LF-18 exploit-closure proof — walked against the fix, not asserted
+
+**The exploit, walked step by step, exactly as found.** Bonus-funded bet,
+Grant `G`, wallet `w`, stake `X = 500`, correlation_id `C`.
+
+1. **Bet.** `postBet` posts `T_bet`: `Dr player_bonus 500 / Cr
+   player_locked_bonus 500` under `C`. Ledger fact: `player_locked_bonus`
+   for `C` = `+500`.
+2. **Silence.** No win, no rollback arrives — casino has no loss callback
+   (§16.2). §16.5a(a)'s settlement-timeout sweep, per its configured
+   window, finds this lock old and unresolved and posts `T_sweep`:
+   `Dr player_locked_bonus 500 / Cr house_gaming 500` (case-I loss shape,
+   §16.5a) — **it does not reverse `T_bet`**; it is a new, independent
+   transaction. Ledger fact after: `player_locked_bonus` for `C` =
+   `500 (T_bet, credit) − 500 (T_sweep, debit) = 0`.
+3. **A genuine late win callback arrives** (the round actually won; the
+   provider's message was merely slow, or a prior delivery was lost —
+   indistinguishable from `postWin`'s point of view). `postWin` runs
+   §16.4.
+
+**Under Round 1's design (the defect).** Step 1 (old) computed
+`SUM(e.amount) WHERE transaction_type = 'casino_bet' AND direction =
+'credit'` — this reads **only `T_bet`**, which `T_sweep` never touches
+(`T_sweep` is not a `casino_bet` transaction and does not reverse `T_bet`
+either, so the `NOT EXISTS (reverses_transaction_id)` guard does not
+exclude it). Old Step 1 returns `locked_amount = 500`, **unchanged by
+`T_sweep`**. The old classification finds one bet, one account, one
+wallet — the "clean" case — and §16.5a releases `500` a **second time**:
+`Dr player_locked_bonus 500 / Cr player_bonus 500`. This transaction is
+internally balanced (`500` debit `=` `500` credit — it passes `SUM(DEBITS)
+== SUM(CREDITS)` for itself, and for the ledger overall, trivially,
+because every well-formed transaction does). What it is **not** checked
+against is whether `player_locked_bonus` actually had `500` left to give:
+it did not (step 2 already reduced it to `0`). The debit drives the
+account to `−500` — a locked-bonus balance below zero, violating the
+ledger's own "never negative" invariant — while the credit manufactures
+`500` of live, spendable-eventually `player_bonus` value with no
+corresponding real exposure behind it. **This is value created from
+nothing, and it is invisible to the balanced-transaction check
+specifically because that check only ever verifies internal balance, never
+sufficiency against a live account balance** — exactly the gap LF-18
+named.
+
+**Under this round's fix.** Step 1 (identity, unchanged) still correctly
+identifies `T_bet`/`player_locked_bonus`/`w` — a permanent fact, unaffected
+by `T_sweep`. Because that identity is unambiguous, Step 1b now runs:
+
+```
+net_outstanding_locked = Σ signed(player_locked_bonus) over C
+                        = (+500 from T_bet's credit)
+                        + (−500 from T_sweep's debit)
+                        = 0
+```
+
+`net_outstanding_locked ≤ 0` → **outcome 6 fires.** `ErrLockAlreadyReleased`
+is raised as a loud integrity/ops alert. **Nothing posts. No debit, no
+credit, no transaction at all.** `player_locked_bonus` for `C` remains
+exactly `0` — correct, matching the true ledger state — and no
+`player_bonus` value is manufactured. The genuine late win is now a
+named, alerted, manually-reconciled incident (an ops reviewer determines
+whether the player is owed a compensating credit for the sweep's
+incorrect loss-write-off, posted only through the existing four-eyes,
+reason-coded manual-adjustment path — never through `postWin`'s automatic
+path), exactly the accepted trade-off §16.5a(a) already discloses for a
+genuine late win racing the settlement-timeout window.
+
+**Why the ordinary, non-exploited case is unaffected (no false positive
+introduced).** Re-run the same walkthrough without step 2 (no sweep, no
+intervening posting): Step 1b nets only `T_bet`'s `+500` → `net_outstanding_
+locked = 500 > 0` → outcome 5, the ordinary path, unchanged from what a
+correctly-functioning Round 1 design would have done for a never-touched
+lock. LF-18's fix only changes behavior when something has already
+touched the lock — precisely the condition the defect required and the
+ordinary case never has.
+
+**Why a duplicate delivery of the *original* win cannot itself trigger
+outcome 6.** A redelivered win event carries the same `provider_tx_id` as
+whichever win already posted (if any) — `ledger.Post`'s own `(tenant_id,
+idempotency_key)` uniqueness intercepts it **before** §16.4 ever runs
+again (§16.2's existing, unmodified mechanism). Outcome 6 is reached only
+by a **new** settlement attempt (a distinct `provider_tx_id`, or the
+first-ever win attempt) finding the lock already exhausted by some
+**other**, already-posted transaction — never by the ordinary
+redelivery-of-the-same-event path already handled upstream.
+
+**This closes LF-18.** The exploit required an outcome that reported "the
+lock is still `X`" after some other transaction had already reduced it to
+`0`. Step 1b cannot report that: it is defined as the live net over every
+transaction sharing `C`, so by construction it reflects `T_sweep` (or any
+other intervening transaction) the instant that transaction commits. There
+is no query in this design that still reads the stale, bet-time-only
+figure at the point a release decision is made.
+
+### 16.18 State-machine proof, end to end
+
+**Scope and reading of the human directive's chain.** The requested
+sequence — Bet → Hold → Win → Rollback → late Win → duplicate Win →
+duplicate Rollback → concurrent Win/Rollback — is proved below in two
+parts. **Part A** reads "Hold" as the *locked state* itself (the stake
+resting in `player_locked_bonus` between bet and settlement — this
+document's ordinary usage of "the lock"/"the hold on funds") and proves
+the ordinary, non-G-2 chain end to end with concrete numbers. **Part B**
+separately proves the chain's distinct, explicitly-required "held value"
+sense — a WIN parked in `bonus_held_dispositions` pending G-2 — since
+Part A's chain, read literally, never actually produces a
+`bonus_held_dispositions` row, and the human directive explicitly requires
+proving "no held value is resolved after being consumed/reversed," which
+only Part B's chain can exercise. Both parts share every mechanism this
+section has already specified; nothing new is introduced here.
+
+**Standing invariant, restated crisply before either walkthrough, per the
+human directive's explicit requirement.** At every step below, the
+provider's callback payload supplies **amounts** (the win payout `W`; the
+identity of which `provider_tx_id`/`RoundID` a callback concerns) — it
+never supplies, and is never consulted for, **which ledger account
+receives a credit**. Every destination in both parts below is derived
+exclusively from §16.3's server-side facts (`correlation_id`, `ledger_
+transactions.transaction_type`, `ledger_accounts.account_type`) via
+§16.4's Step 1/Step 1b queries and the live Grant-status read — never from
+`event.PlayerAccountID`, never from any other payload field. This is
+Round 1's invariant, reused, not weakened, by every mechanism this round
+adds.
+
+**Part A — ordinary chain (Grant non-terminal throughout).** Stake `X =
+500`, payout `W = 300`, correlation_id `C2`.
+
+| # | Transition | Posting | Running balance: `player_bonus` / `player_locked_bonus` / `house_gaming` | Balanced? |
+|---|---|---|---|---|
+| 1 | **Bet** | `T1`: `Dr player_bonus 500 / Cr player_locked_bonus 500` | `−500 / +500 / 0` | `500=500` ✓ |
+| 2 | **Hold** (state, not a posting) | Stake rests locked; Step 1b, if queried now, reads `net_outstanding_locked = 500` | `−500 / +500 / 0` (unchanged) | n/a |
+| 3 | **Win** | §16.4 outcome 5 (`net_outstanding_locked=500>0`); `T2`: `Dr house_gaming 300/Cr player_bonus 300` + `Dr player_locked_bonus 500/Cr player_bonus 500`, one transaction | `−500+300+500=+300 / 500−500=0 / −300` | `800=800` ✓; `L(G)=0` |
+| 4 | **Rollback** (of `T2`) | Generic inversion of `T2`: `Cr house_gaming 300/Dr player_bonus 300` + `Cr player_locked_bonus 500/Dr player_bonus 500` | `+300−300−500=−500 / 0+500=+500 / −300+300=0` — **identical to the post-Bet state** | `800=800` ✓ |
+| 5 | **late Win** | A further, separate provider event under `C2` arrives after the round sits unresolved past the settlement-timeout window: `T3` (sweep) posts `Dr player_locked_bonus 500/Cr house_gaming 500` first (net now `500−500+500−500=0`); the late win then runs §16.4 → Step 1b nets `0` → **outcome 6**, `ErrLockAlreadyReleased`, abort | `−500 / 0 / 0+500−500=0` — **unchanged by the aborted win** | n/a (nothing posts) |
+| 6 | **duplicate Win** | Redelivery of `T2`'s original event (same `provider_tx_id`) — `ledger.Post`'s idempotency key returns `T2` unchanged; §16.4 never re-runs | Unchanged | n/a |
+| 7 | **duplicate Rollback** | Redelivery of step 4's rollback event (same `OriginalProviderTxID = T2`) — recognized as a same-reference redelivery, idempotent no-op (existing, unmodified `postRollback` logic) | Unchanged | n/a |
+| 8 | **concurrent Win/Rollback** | A second provider round under a fresh correlation_id `C3` (stake `500`, no prior events): a win callback and a rollback-of-the-bet callback arrive concurrently. The rollback takes `FOR UPDATE` on `T_bet(C3)`; whichever commits first determines the other's outcome — if the rollback commits first, `T_bet(C3)` is now reversed and the win's Step 1 (its `NOT EXISTS (reverses_transaction_id)` clause) finds zero rows → `ErrBetNotFound`; if the win commits first, it posts normally and the round now requires a **second**, explicit rollback of the *win* itself to fully undo it (this document's existing "two independent reversals" rule, §16.11) — no interleaving double-credits or loses a debit | — | Both outcomes individually balanced; no interleaving violates `SUM(DEBITS)=SUM(CREDITS)` or double-releases a lock |
+
+**Balance proof, Part A.** At every row, the transaction posted (if any)
+has equal debits and credits (checked per row above), and the *cumulative*
+state after row 4 exactly equals the state after row 1 — a rollback of a
+win is a true inverse, not an approximation. Row 5 proves outcome 6
+prevents the exact LF-18 exploit from firing inside this same chain (a
+second worked instance, independent of §16.17's dedicated walkthrough).
+Rows 6–7 prove idempotency prevents duplicate application regardless of
+which transaction type is redelivered. Row 8 proves the one legitimate
+interleaving this document has always disclosed (§16.11) is unaffected by
+any Round 2 change.
+
+**Part B — the `held` chain (Grant terminal, `ACTION_HOLD_FOR_REVIEW`),
+proving the still-held-rollback case explicitly.** Stake `X = 400`,
+payout `W = 250`, correlation_id `C4`, Grant `G2` (terminal at settlement
+time).
+
+1. **Bet.** `T4`: `Dr player_bonus 400 / Cr player_locked_bonus 400`
+   under `C4`.
+2. **Win, resolved as `held`.** §16.4 finds `net_outstanding_locked = 400
+   > 0` (outcome 5); the live Grant-status read finds `G2` terminal;
+   §16.9's seam returns `ACTION_HOLD_FOR_REVIEW`. `postWin` posts the
+   two-leg hold-capture transaction (§16.14) `T5`: `Dr house_gaming 250 /
+   Cr player_bonus_held 250` + `Dr player_locked_bonus 400 / Cr
+   player_bonus_held 400`, one balanced transaction (`650=650` ✓).
+   `bonus-engine` writes `bonus_held_dispositions` row `H1`:
+   `settlement_ledger_transaction_id = T5.id`, `payout_amount=250`,
+   `released_lock_amount=400`, `status='held'`. `L(G2)=0`.
+   `player_bonus_held` balance for `H1` `= 650`.
+3. **Rollback of the still-held win.** A rollback naming `T5`'s
+   `provider_tx_id` arrives. `postRollback` looks up
+   `bonus_held_dispositions` by `settlement_ledger_transaction_id = T5.id`,
+   finds `H1` with `status='held'`, and — per §16.15 — acquires `(tenant_
+   id, grant_id=G2)` then `H1`'s row `FOR UPDATE`. `T5`'s original entries
+   were `Dr house_gaming 250 / Cr player_bonus_held 250` (payout leg) and
+   `Dr player_locked_bonus 400 / Cr player_bonus_held 400` (released-lock
+   leg). Per §7.7.2.7, the reversal does **not** credit
+   `player_locked_bonus` back (that would resurrect a lock that has
+   already, correctly, closed to zero) — both legs reverse straight to
+   `house_gaming` instead. `postRollback` posts, in the **same**
+   transaction as the guarded status update, `T6`: `Dr player_bonus_held
+   250 / Cr house_gaming 250` **+** `Dr player_bonus_held 400 / Cr
+   house_gaming 400` — debiting `player_bonus_held` for the full `650`
+   the hold-capture posting credited it, crediting `house_gaming` back the
+   same `650` it originally paid out, and **never** touching
+   `player_locked_bonus`. In the same transaction:
+   `UPDATE bonus_held_dispositions SET status='voided_by_rollback',
+   resolution_ledger_transaction_id=T6.id WHERE id=H1.id AND
+   status='held'` — one row affected, succeeds. `player_bonus_held`
+   balance for `H1` after: `650 − 650 = 0`. **Balanced** (`650=650`), and
+   `H1` is now terminal (`voided_by_rollback`) — **no held value remains
+   to ever be resolved.**
+4. **A late resolution attempt arrives after the void** (e.g. a queued
+   staff action to apply G-2's answer, processed after the rollback
+   already committed). It attempts the same guarded update pattern
+   (`UPDATE ... WHERE status='held'`) as part of its own resolution
+   transaction (HR-25, `ledger-accounting-model.md` §7.7.2.9) — finds
+   `status='voided_by_rollback' ≠ 'held'` — **zero rows affected,
+   rejected**. **No held value is resolved after being reversed.** This
+   is the exact property the human directive requires proved.
+5. **duplicate Rollback of `H1`.** A redelivered rollback naming the same
+   `T5`/`provider_tx_id` hits `ledger.Post`'s idempotency key on the
+   reversal transaction itself — no second `T6`, and thus no second
+   attempt at the guarded update at all.
+6. **concurrent Win/Rollback, generalized to concurrent
+   Resolve/Rollback of the same held record** (the directive's
+   requirement to prove no double-resolution under concurrency, restated
+   for the `held` chain specifically). Suppose instead of step 4's
+   sequential late arrival, a human's resolution action and a rollback of
+   `T5` are dispatched **at the same instant**. Both follow HR-25's lock
+   order: `(tenant_id, G2)` advisory lock first (they serialize on this
+   alone already), **then** `H1`'s row `FOR UPDATE`. Whichever acquires
+   the row lock first commits its guarded update
+   (`status: 'held' → {'voided_by_rollback' | 'resolved_reforfeit' |
+   'resolved_route_to_cash'}`) and releases it; the second finds
+   `status ≠ 'held'` and its own guarded update is a zero-row no-op —
+   its enclosing transaction is rejected before positing any further
+   money movement (a resolution action that finds its guard clause
+   affected zero rows does not proceed to move value at all, by the same
+   "guarded update, never check-then-act" discipline). **No
+   interleaving produces two dispositions of `H1`, and no interleaving
+   resolves value that the other side has already reversed or the
+   reverse.**
+
+**Balance proof, Part B.** `T5` and `T6` are each internally balanced. At
+the total-value level, `T5` credited `player_bonus_held` `650` and `T6`
+debited it back to `0` — no value survives in a held state after the
+void, which is the property that matters for "no held value is resolved
+after being reversed." **One sub-detail flagged, not fully re-derived
+here, per this document's own discipline against inventing ledger-finance's
+posting shapes**: because `T6`'s reversal of the released-lock leg
+deliberately credits `house_gaming` rather than restoring
+`player_locked_bonus` (§7.7.2.7's own instruction), that leg's reversal
+newly crosses `BONUS_SET`'s boundary in the outward direction, which by
+Rule B2 (extended, §6.3.2) may itself require a mirror pair
+(`Dr promo_liability` against the reversed `bonus_expense`, or equivalent)
+that `T5`'s original leg never needed (it was `BONUS_SET`-internal).
+Whether `T6` needs such a mirror, and its exact shape, is a posting-detail
+question for `ledger-finance`'s own mirror-generator design (§6.3.2's Rule
+B2 is `ledger-finance`-owned) — this document proves the **state-machine**
+property (no double-resolution, no resurrection of a closed lock, `H1`
+correctly terminal) and flags the mirror-completeness question rather than
+asserting a specific answer it has not verified against Rule B2's actual
+implementation. No step manufactures value at the level this document can
+verify, no step destroys the audit trail (both `T5` and `T6` remain as
+permanent, append-only ledger rows; `H1`'s row is never deleted, only
+status-transitioned), and no step in either race (step 4 or step 6) allows
+a `held` record to be resolved twice or resolved after being voided.
+
+### 16.19 Adversarial scenarios, Round 2 — the human directive's named set
+
+The eight scenarios named explicitly by the human directive authorizing
+this round, each restated as its own item with the invariant tested and
+why this design satisfies it (or, for #8, why it explicitly does not yet
+and is routed elsewhere):
+
+1. **Duplicate win.** *Invariant*: no double credit. *Satisfied*:
+   `ledger.Post`'s `(tenant_id, idempotency_key)` uniqueness intercepts a
+   redelivered win before §16.4/§16.9 ever re-run (§16.2, unchanged this
+   round; proved again in §16.18 Part A row 6).
+2. **Duplicate rollback.** *Invariant*: no double reversal. *Satisfied*:
+   existing same-reference-redelivery detection in `postRollback`
+   (unchanged), now confirmed to also cover a rollback targeting a `held`
+   record (§16.15 — the reversal's own idempotency key prevents a second
+   `T6`-shaped transaction, so the guarded status update is never even
+   re-attempted).
+3. **Concurrent win/rollback.** *Invariant*: no interleaving
+   double-credits, loses a debit, or double-resolves a held record.
+   *Satisfied*: the original bet/win race is serialized by the original
+   transaction's row lock (§16.11, unchanged); the held-record-specific
+   race is serialized by HR-25's `(tenant_id, grant_id)`-then-row lock
+   order, proved exhaustively in §16.15 and walked concretely in §16.18
+   Part B step 6.
+4. **Late callback.** *Invariant*: correctness independent of elapsed
+   time. *Satisfied*: §16.10.4's timing-invariance proof (unchanged) plus,
+   new this round, LF-18's outcome 6 specifically guarantees a late
+   callback arriving after an intervening settlement-timeout sweep can
+   never over-release (§16.17).
+5. **Callback after Grant expiry.** *Invariant*: no stale Grant-status
+   snapshot is ever used. *Satisfied*: INV-TG's live `FOR UPDATE`
+   Grant-status read, re-evaluated every time, never cached from trigger
+   time (§16.10.4, unchanged).
+6. **Callback after Grant cancellation.** *Invariant*: identical to
+   expiry. *Satisfied*: §T.10's symmetry between expiry and cancellation,
+   unchanged, confirmed to extend to every mechanism this round adds
+   (nothing in §16.14–§16.18 distinguishes trigger *kind*, only trigger
+   *timing* relative to settlement).
+7. **Rollback of a held win.** *Invariant*: a `held` disposition is never
+   resolved after being voided, and voiding never resurrects a lock that
+   has already, correctly, closed to zero. *Satisfied*: §16.15's guarded
+   compare-and-swap, proved against concurrent resolution in §16.15's own
+   three-interleaving proof and walked concretely in §16.18 Part B steps
+   3–4 and 6. **Closed this round.**
+8. **Rollback of a resolved win.** *Invariant*: a rollback must never
+   silently succeed against value that has already left the ledger's
+   held/locked representation, nor silently fail in a way that loses the
+   audit trail or posts an impossible (negative, unbalanced, or
+   unauthorized) balance. *Not satisfied by a decided mechanism* — this
+   is **LF-10**, `ledger-finance`'s general, still-open question (its own
+   Round 2 text reconfirms it: `ledger-accounting-model.md` §7.7.2.11).
+   This document's own contribution is negative but load-bearing: it
+   never guesses an answer, never posts a negative/impossible balance
+   without an explicit `ledger-finance`-owned decision permitting one, and
+   never silently reuses the `held`-case mechanism (§16.15) for this
+   structurally different case (the value is no longer in a ledger
+   account this document's own mechanisms can locate and reverse
+   symmetrically — see §16.20).
+
+### 16.20 LF-10's posture, stated precisely — why this document does not close it now
+
+**What is being asked, precisely.** A rollback arrives for a win whose
+credit already left the ledger's held/locked representation entirely —
+either an ordinary win that posted to `player_bonus` and was later swept
+into `promo_liability` by an unrelated forfeiture (§16.11's "resolved
+win" row), or a `bonus_held_dispositions` record already moved to
+`resolved_reforfeit`/`resolved_route_to_cash` (this round's new case,
+enabled by §16.14's own mechanism). In both shapes, the debit `postRollback`
+would need to post has no guarantee of finding a sufficient balance to
+debit, because the value has already been spent, converted, or
+re-forfeited by a transaction with no knowledge that a rollback might one
+day arrive.
+
+**Why `casino` does not decide this, even though it now owns strictly
+more of the mechanism than it did in Round 1.** Three independent
+reasons, none of which weaken with this round's other closures:
+
+1. **It is a ledger-wide policy question, not a casino-specific one.**
+   The identical shape arises for sportsbook (a settled bet's win swept
+   into `promo_liability`, then rolled back) and, after this round, for
+   the `bonus_held_dispositions` resolved case too. Deciding "permit a
+   negative balance as a recorded clawback / route the shortfall to a
+   receivable / reject-and-alert" once, for casino only, would produce
+   exactly the kind of per-domain divergence §16.6's Sportsbook row (as
+   revised this round) already found to be a defect, not a feature, when
+   Round 1 made a smaller version of the same mistake with the LF-18
+   query itself.
+2. **`ledger-finance` has already, explicitly, kept this open — twice.**
+   Round 1's own LF-10 finding withdrew this document's prior "fail
+   closed" pre-commitment specifically because that was casino unilaterally
+   answering a question `ledger-finance` owns. This round, `ledger-
+   finance`'s own text — closing the *adjacent*, narrower still-held
+   sub-case in the same section — states in its own words that the
+   resolved-win sub-case "remains open, still routed to `ledger-finance`
+   generally" (`ledger-accounting-model.md` §7.7.2.7, §7.7.2.11). Deciding
+   it here now would silently override `ledger-finance`'s own, just-made,
+   explicit choice not to decide it yet — a worse violation of ownership
+   than Round 1's original mistake, not a correction of it.
+3. **CLAUDE.md's own ownership rule applies directly.** "No specialist
+   redesigns shared architecture unilaterally — cross-cutting changes go
+   through the architect and are recorded in `docs/decisions/`." A
+   balance-insufficiency/compensating-entry policy for a late rollback is
+   exactly this kind of cross-cutting ledger invariant (it interacts with
+   B1's aggregate, `ledger.Post`'s sufficiency-check mechanism, and
+   whatever HR-9-gated `player_bonus` posting eventually ships) — squarely
+   `ledger-finance` + `architect` territory, not a casino integration
+   detail.
+
+**What this document does assert, and has always asserted, per CLAUDE.md's
+own compensating-entry rule** ("Corrections are compensating entries,
+never edits or deletions of historical entries"): whatever shape
+`ledger-finance` eventually chooses, it is a **new posting**, never an
+edit to `T5` (or any historical transaction), and the `bonus_held_
+dispositions`/ledger audit trail for the original event remains intact
+regardless of the eventual answer. This constrains the *shape* any answer
+must take without selecting *which* of the three named options
+(clawback / receivable / reject-and-alert) it is.
+
+**Status: `NOT IMPLEMENTED`, routed to `ledger-finance`, unchanged in
+substance from Round 1's own posture — this round only narrows its scope**
+(the still-held sub-case is no longer part of what LF-10 covers; the
+resolved-win sub-case is all that remains of it).
 
 ## Cross-references
 
 - ADR: `docs/decisions/0025-casino-provider-abstraction-and-game-session-model.md`
 - Financial flows: `docs/architecture/financial-transaction-flows.md` §5-7
 - Ledger model: `docs/architecture/ledger-accounting-model.md` §6.3.3.1, §6.4 (cases A/B/F/G/H/I), §6.5 (migration 0048), §6.6 (Model C)
+- Bonus-origin holding representation (load-bearing this round): `docs/architecture/ledger-accounting-model.md` §7.7.2 (`player_bonus_held`, `bonus_held_dispositions`, HR-25, LF-12, LF-19/LF-20/LF-22)
+- Phase 2 findings this round closes/adopts: `docs/governance/wave-1.5-fixwave-phase2-report.md` (LF-18, held-win rollback gap), `docs/governance/task-registry.md`
 - Bonus accounting: `docs/decisions/0032-bonus-accounting.md` §3, §5
 - Terminal-Grant Technical Contract: `docs/architecture/10-bonus-engine-architecture.md` §T.1-T.13
 - Human Decision Register: `docs/decisions/0039-human-decision-register-stage-4h-b0-r7.md`, Decision 2
