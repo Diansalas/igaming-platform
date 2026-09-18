@@ -406,9 +406,39 @@ coverage is sufficient before Wave 1 closes.
 | 4HB1-09 | architect | In progress | none | new cross-domain implementation-contract doc | Wave 1: master architecture→ADR→object→service→API→event→ledger→audit→test mapping | none |
 | 4HB1-10 | qa | In progress | none | `docs/testing/testing-strategy.md` addendum | Wave 1: full test-matrix design | none |
 
-Wave 1 independent review round and reconciliation to be added once these
-report back. No coding dispatch is authorized until reconciliation is
-complete, per the directive's explicit gate.
+**Wave 1 status: COMPLETE, all 9 dispatches reported back, reviewed, and
+committed** (`41c029f`, `0171e02`, `39be4af`, `b0442b1`, `5b7e7ed`,
+`89a09ab`, `29490dc`). Reconciliation performed by the Orchestrator below.
+
+**Migration-number ledger** (claimed during Wave 1, none written yet —
+Wave 1 was design-only):
+- `0050` — `bonus_expense` account-type CHECK widening (`ledger-finance`, §7.2)
+- `0051` — `bonus_grant`/`bonus_conversion`/`bonus_forfeiture`/`bonus_reversal` transaction types + `reason_code` constraint widening (`ledger-finance`, §7.3)
+- `0052` — `rounding_rules` table + `ledger_transactions.rounding_rule_id` (`ledger-finance`, §7.8 — requested, now assigned)
+- `0053` — `ledger_accounts` identity-immutability trigger, HR-15/HR-16 (`ledger-finance`, §7.14 — requested, now assigned; **hard gate: must land before the first `player_bonus` posting**, not merely before the first locked-account posting)
+- `0054`+ — reserved for `bonus-engine`'s own domain tables (`bonus_campaigns`, `bonus_offers`, `bonus_grants`, `bonus_progress`, and any others Wave 2's schema design determines are needed); `bonus-engine` claims sequentially and self-resolves any collision with `0052`/`0053` per the standing protocol (check `git log`/`ls migrations/` before writing)
+- ADR `0040` reserved for `architect` to formally ratify the activity-consumption transport decision (ledger-derived + in-process adapter, no broker) made in `docs/architecture/29-bonus-implementation-contract.md` §2 — to be written by `architect` as part of its Wave 2 role, not minted speculatively now
+
+**Reconciliation findings and resolutions:**
+
+1. **P1 escalation (`architect`, doc 29 §4.1) — gate G-2 is reachable in the casino-only slice, not only sportsbook as ADR 0039 originally framed it**, because `internal/casino`'s `postBet`/`postWin` are separate provider callbacks with an arbitrary time gap: a bonus-funded bet can have its Grant go terminal (expired/cancelled/forfeited) before its win settles. Compounding this, `internal/casino`'s `postWin` hardcodes the credit destination to `AccountPlayerCash` — verified directly against `orchestrator.go` — so wiring bonus-funded casino stakes today, without a fix, would let a bonus-funded win credit withdrawable cash with zero wagering requirement enforced. **Resolution, within engineering authority (does not require selecting G-2's answer):**
+   - `casino` must fix `postWin`'s destination resolution to route a bonus-funded bet's win back to `player_bonus`/`player_locked_bonus` per the already-specified case E (`ledger-accounting-model.md` §6.4) — required before any bonus-funded casino stake is wired, independent of G-2.
+   - A Grant may only reach a genuinely terminal status (expired/cancelled/forfeited-final) once its attributable locked balance (`player_locked_bonus` tied to that Grant) reaches zero. A terminal trigger firing while locked funds remain outstanding defers the Grant into a pending-settlement sub-state that finalizes automatically once the locked stake resolves (win or loss) — never crediting against an already-terminal Grant, by construction. This is a named engineering design choice (not a selection of ACTION_REFORFEIT/ACTION_ROUTE_TO_CASH/ACTION_HOLD_FOR_REVIEW), reversible, and does not touch the separately-tracked `OpenBetSelfExclusionPolicy` gate (self-exclusion-triggered voids remain gated exactly as already recorded).
+   - Both are Wave 2/3 dependencies for `casino` and `bonus-engine`/`ledger-finance` jointly, flagged prominently to the human before dispatch (see completion message).
+
+2. **OI-1 (the `bonus-finance` roster gap) — 5 of 7 named concerns have a confirmed owner and design** (posting map, Model C derivation queries, HR-9 sequencing, rounding boundaries, `bonus_expense` reporting deferred to `data-analytics` for a future reporting wave). **2 remain genuinely unowned, assigned now:** campaign/global budget-cap enforcement — assigned to `bonus-engine` (not `risk`: `risk`'s own Wave 1 report confirms `campaign` is not an implemented Risk dimension and recommends against forcing it into one) — Wave 2 dependency; the Bonus reconciliation stream (WP-R/B1 extension) — assigned to `ledger-finance`, Wave 2+ dependency, not blocking Wave 2's core schema.
+
+3. **OI-2 (doc 22 event-taxonomy defects)** — fixed directly: `docs/architecture/22-canonical-activity-event-taxonomy.md` now splits `bonus.grant.cancelled` (posts `bonus_forfeiture`) from `bonus.grant.reversed` (posts `bonus_reversal`), adds the previously-missing `bonus.grant.forfeited`, and adds `bonus.grant.activated`/`bonus.grant.progress_changed`/`bonus.grant.converted`/a reserved `bonus.reward.requested`.
+
+4. **OI-3 (segmentation placement)** — ratified. `docs/governance/ownership.md` updated: `internal/segment` is a new, separate, capability-minimal shared package (`architect` owns the interface/contract/schema, `bonus-engine` owns the first consumer's call sites), per `architect`'s reasoning in doc 29 §3 (two already-frozen future consumers, not speculative generality; explicitly no rule DSL/recompute job/CRM engine authorized inside it).
+
+5. **OI-4 (AssetAuthorization checkpoint decision)** — `architect` made this decision within its own ownership (doc 29 §4.2: every Bonus checkpoint passes `CheckEligibility(operation = wagering)`, no new seventh `bonus` operation value). The physical reflection into ADR 0037 §C.2 is assigned to `architect` as a Wave 2 task (a small, mechanical edit recording an already-made decision into its source-of-truth document).
+
+6. **BF-1 (`ledger-finance`'s finding — concurrent operator-funded and provider-funded Grants share one fungible `player_bonus` balance with no lot-attribution mechanism)** — correctly deferred to `architect` + human decision, not resolved. Wave 2's first slice is restricted to **operator-funded Grants only**, per `ledger-finance`'s own recommendation, until this is resolved.
+
+7. **No contradictions found** between the nine reports beyond the two closed above (OI-2, OI-4) — `architect`'s independent cross-domain read of all nine (via doc 29's master map) and this Orchestrator's own review agree.
+
+**Wave 2 authorization**: Wave 2 (core Bonus domain + database) may proceed for the domain model, schema, and the cash-settled/operator-funded/non-locked-stake bonus lifecycle (deposit/reload/cashback/coupon issuance and conversion). Bonus-funded stake wagering (the locked-account wagering path) is **staged**, not authorized to code yet, pending the casino `postWin` fix and the deferred-terminal design being implemented together — flagged to the human before dispatch.
 
 ## How to use this registry (for future stages)
 
