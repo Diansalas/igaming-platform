@@ -5445,3 +5445,37 @@ three human decisions (G-2 Terminal-Grant settlement-credit resolution,
 `OpenBetSelfExclusionPolicy` default, mixed/bonus-funded cashout policy
 plus its companion FD-1 question) remain unmade. "Architecture/design
 exists" is not treated as sufficient.
+
+## Stage 4H-B1: Bonus Engine implementation — Wave 1, Wave 1.5, Wave 1.5 Fix Wave
+
+Human-authorized in three successive directives. All work to date is
+**design/documentation only** — no `internal/bonus`, `internal/crm`,
+`internal/affiliate`, `internal/gamification`, or `internal/economicop`
+package exists, no migration beyond `0049` was written, no route exists.
+
+- **Wave 1** (9 specialists): full Bonus Engine domain model, catalogue,
+  targeting/bulk-assignment, Bonus Suggestions, segmentation placement.
+  Reviewed; 2 real corrections found and fixed.
+- **Wave 1.5** (architecture reconciliation gate — CRM/Affiliate/
+  Segmentation/G-2/Casino postWin): gate report returned **NOT READY**,
+  4 P0s (LF-2, SEC-W15-01/02/03) + ~20 P1s.
+- **Wave 1.5 Fix Wave, Phase 1** (6 dispatches, commits `3ce48f4`..`a1f6fd4`):
+  redesigned the Grant terminal-state invariant (eligibility vs.
+  disposition split, `HeldDispositionRecord`), fixed casino postWin's
+  query/lock-release defects, designed `SEP-1` (actor≠beneficiary) and
+  `AFF-4E-1` (affiliate four-eyes), created `EconomicOperationIdentity`
+  (doc 34) to close the CRM bulk-decomposition vector.
+- **Wave 1.5 Fix Wave, Phase 2** (11 independent re-verification
+  dispatches, commit `08d10e3`): **Verdict: NOT READY.** Full report at
+  `docs/governance/wave-1.5-fixwave-phase2-report.md`. None of the four
+  original P0s independently certified closed; four new P0-severity
+  findings surfaced, three of them defects inside this round's own
+  fixes (a reachable ledger-invariant violation in casino's
+  lock-release logic; the LF-2 fix's own disposition-resolution step
+  is an ungated self-dealing surface; `SEP-1`'s shared resolver fails
+  open on a partial RLS read); bonus-engine's and casino's two largest
+  fixes were independently found architecturally incompatible by three
+  reviewers from three angles. No Human Decision Register item was
+  selected. Per the authorizing directive, the Orchestrator **stops**
+  here — no Wave 2, no CRM/Affiliate/Gamification/bonus-funded-wagering
+  implementation without a new human directive.

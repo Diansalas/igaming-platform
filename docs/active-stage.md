@@ -1440,3 +1440,34 @@ standard).
    - see `docs/governance/project-status.md`'s consolidated list.
 3. All other already-open, non-blocking items from Stages 0-4G remain
    open (see `docs/governance/project-status.md`).
+
+## Current stage: Stage 4H-B1 Wave 1.5 Fix Wave, Phase 2 — CONCLUDED, awaiting human authorization for next round
+
+**Status: NOT READY for Wave 2.** Full detail:
+`docs/governance/wave-1.5-fixwave-phase2-report.md` and
+`docs/governance/task-registry.md`'s corresponding section.
+`docs/progress.md`'s "Stage 4H-B1" entry has the running narrative.
+
+All work remains design/documentation only (no code, no migration
+beyond `0049`). Eleven independent Phase 2 reviews found: none of the
+four original Wave 1.5 P0s independently certified closed; four new
+P0-severity findings, three of them inside this fix wave's own output;
+and a confirmed architectural incompatibility between the two largest
+Phase 1 fixes (bonus-engine's Grant terminal-state redesign and
+casino's postWin fix). No Human Decision Register item was touched.
+
+### Decisions/input needed from the human before any further B1 work
+
+1. **Authorize (or not) a second fix-and-reverify round** scoped per
+   the readiness report's §7 minimum-closure list — this is a
+   materially larger remaining-work list than the original Fix Wave
+   directive anticipated, since Phase 2 both re-opened parts of the
+   original four P0s and surfaced new ones.
+2. Stage 4H-B1 Wave 2, CRM implementation, Affiliate implementation,
+   Gamification implementation, and any bonus-funded-wagering
+   implementation remain **NOT authorized**.
+3. The four Human Decision Register items (G-2, `OpenBetSelfExclusionPolicy`
+   default, mixed/bonus-funded cashout policy, FD-1) remain unmade and
+   are not on this round's critical path to close — every finding this
+   round is a technical/architectural defect, not a disguised policy
+   choice requiring one of these answers.

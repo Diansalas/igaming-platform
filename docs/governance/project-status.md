@@ -1176,6 +1176,23 @@ and the Reward Orchestrator remain entirely unbuilt, and three human
 decisions (G-2, the self-exclusion default, cashout policy) remain
 unmade. **Stage 4H-B1 is NOT authorized by this stage.**
 
+**Update — Stage 4H-B1 Wave 1.5 Fix Wave, Phase 2 (independent
+re-verification, 11 specialists) concluded: NOT READY.** Design/
+documentation only throughout (no code, no migration beyond `0049`).
+None of the four Wave 1.5 P0s (LF-2, SEC-W15-01/02/03) independently
+certified closed; four new P0-severity findings surfaced this round,
+three inside the fix wave's own output (a reachable ledger-invariant
+violation in casino's lock-release logic; the LF-2 fix's own
+disposition-resolution step is an ungated self-dealing surface; the
+shared `SEP-1` actor≠beneficiary resolver fails open, not closed, on a
+partial RLS read); bonus-engine's and casino's two largest fixes were
+independently found architecturally incompatible by three reviewers.
+No Human Decision Register item was selected or narrowed. Full report:
+`docs/governance/wave-1.5-fixwave-phase2-report.md`. Wave 2, CRM,
+Affiliate, Gamification, and bonus-funded-wagering implementation
+remain unauthorized pending a new human directive scoping a further
+fix round.
+
 ## Production blockers (summary)
 
 Every item in "Blocked stages" and "External dependencies" above is a

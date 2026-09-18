@@ -529,6 +529,46 @@ No human decision (G-2, `OpenBetSelfExclusionPolicy`, cashout policy, FD-1) will
 
 **Wave 2 readiness decision (prior gate, superseded by this fix wave's own eventual verdict): NOT READY.** Three P0s block implementation authorization outright (per `security`'s explicit blocking position, which stands under schedule pressure); a fourth P0 (LF-2) means the central G-2-avoidance claim this entire gate exists to validate does not currently hold as designed. This is not a documentation-polish backlog — it is unresolved design defects in the mechanisms meant to prevent silent human-decision selection, self-dealing, and mass-grant abuse. A fix wave is required, routed to the owning specialists per each finding's source report, followed by a second independent re-verification pass, before Wave 2 (or any narrower re-scoped implementation) can be authorized.
 
+## Stage 4H-B1, Wave 1.5 Fix Wave, Phase 2 — Independent Re-Verification Results
+
+All 11 Phase 2 dispatches listed above have reported. Full synthesis:
+`docs/governance/wave-1.5-fixwave-phase2-report.md`.
+
+**Verdict: NOT READY.** Summary (full detail in the report above):
+
+- None of the four original P0s (LF-2, SEC-W15-01, SEC-W15-02,
+  SEC-W15-03) is independently certified as closed. LF-2's core
+  mechanism is sound but has no buildable holding-representation shape.
+  SEC-W15-01 has a fail-open/deadlock defect in its corrected resolver
+  (`code-reviewer` NEW-6, one-word fix identified, not yet applied).
+  SEC-W15-02 is fully open on the Bonus enforcement side, and its
+  intended closer (`EconomicOperationIdentity`'s budget projection) was
+  independently proven not to work as specified. SEC-W15-03 is adopted
+  at 2 of 5 required enforcement points.
+- **Four new P0-severity findings** surfaced this round, three of them
+  defects in this round's own fixes: LF-18 (`ledger-finance` — casino's
+  lock-release step can drive a locked balance negative and materialize
+  restricted bonus value into a spendable one, vetoed outright),
+  REQ-SEP-BONUS-4 (`security` — the LF-2 fix's own disposition-resolution
+  step is an ungated self-dealing surface), a held-win-rollback gap
+  (`casino`, corroborated by `qa` as test `C28`), and RK-W15P2-1 (`risk`
+  — the shared `SEP-1` mechanism fails open, not closed, on a partial
+  RLS-filtered read).
+- `architect`'s independent cross-domain review found bonus-engine's and
+  casino's two largest fixes do not compose — three concrete,
+  independently-reproduced incompatibilities (posting-sequence
+  contradiction, circular holding-representation branch selection, no
+  destination for the released lock amount). Quoted verdict: "I would
+  not certify this pair as architecturally consistent for a Wave 2
+  readiness call."
+- No Human Decision Register item was selected, narrowed, or defaulted
+  in Phase 1 or Phase 2.
+
+Required scope for the next (not yet authorized) fix round is recorded
+in the report's §7. Per the authorizing directive, the Orchestrator
+stops here: no Wave 2, no CRM/Affiliate/Gamification/bonus-funded-
+wagering implementation proceeds without a new human directive.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and
