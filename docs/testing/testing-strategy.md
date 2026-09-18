@@ -1468,3 +1468,707 @@ branch, C19, C20 pending G-3, C26, C27) or `NOT APPLICABLE (open
 dependency)` (A15, A17) cannot move to `IMPLEMENTED` before their named
 human decision or architecture dependency is resolved, regardless of
 implementation progress elsewhere.
+
+## Stage 4H-B1, Wave 1.5 Fix Wave, Phase 2 — Test-plan update (`qa`, design/strategy only)
+
+Status: `RECOMMENDATION`, `NOT IMPLEMENTED`. `qa` did not author any of
+this round's fixes (`bonus-engine`'s N1 revision, `casino`'s doc 08 §16
+revision, `architect`'s docs 30/31/32/33/34, `security`'s Wave 1.5 fix-wave
+contract additions) — this section is independent review-and-extend, per
+CLAUDE.md's "no specialist self-approves its own work." **No test code is
+written here.** No Human Decision Register item (G-2,
+`OpenBetSelfExclusionPolicy`, cashout policy, FD-1) is selected, referenced
+as resolved, or defaulted by any test below — every test that touches one
+is explicitly marked `BLOCKED` on it, exactly as this document's own Wave
+1.5 §6 severity framework requires.
+
+This section extends, and does not restate, the Wave 1.5 matrix
+immediately above. Numbering continues: casino's concurrency table
+continues from **C28** (Wave 1.5 ended at C27); the new fixes each get
+their own named test IDs rather than forced into the C-/A- numbering,
+since they are new mechanisms (`EconomicOperationIdentity`, `SEP-1`,
+`AFF-4E-1`, the settlement-timeout sweep, the `member_of`/`InclusionSafety`
+correction), not new instances of the existing bonus-Grant race class.
+
+### 1. G-2 non-selection tests — `G2-HOLD-1`/`G2-HOLD-2` confirmed, `G2-HOLD-3` added
+
+**`G2-HOLD-1` and `G2-HOLD-2` (doc10 §N1.11) are adequately specified as
+written.** Both name a concrete setup, a precise ledger-history assertion
+(not "the request succeeded"), and both are explicitly written to **fail**
+against a reimplementation of the exact pre-revision P0 defect
+(post-then-reforfeit in one transaction; a held credit posted transiently
+to the fungible `player_bonus` account) — the standard this document's own
+Wave 1.5 §1 already applies to C18–C27. No extension to either is required
+to make them adequate. Two small tightenings, not corrections:
+
+- `G2-HOLD-1` should be run against **both** of N1.4.1 item 2's holding-
+  representation branches (the sportsbook-shaped in-place
+  `player_locked_bonus` branch, and the casino-shaped dedicated
+  holding-account branch) — the assertion is identical in both, but the
+  ledger rows it inspects differ, and a suite that only exercises one
+  branch has not actually proven the invariant for the other.
+- `G2-HOLD-2`'s four independently-sufficient assertions should each be
+  run as their own failing sub-test (not one test with four `assert`
+  statements that stops at the first failure), so a partial regression
+  (e.g. only the withdrawable-cash projection leaks `W`) is distinguishable
+  from a total one.
+
+**New test, closing the gap the task identifies — `G2-HOLD-3`: "a
+`HeldDispositionRecord`'s resolution is exactly one of the three actions,
+applied atomically, never partial or ambiguous."**
+
+Setup: a `HeldDispositionRecord` with `status = held`, amount `W`, lock-
+release amount `X` (distinct, per §16.5a), under Grant `G`. A resolution is
+submitted naming one of `ACTION_REFORFEIT` / `ACTION_ROUTE_TO_CASH` /
+`ACTION_HOLD_FOR_REVIEW`'s own later manual sub-choice (N1.8.1 rows 8–10).
+This test's *shape* is agnostic to which of the three G-2 eventually
+selects — exactly as `G2-HOLD-1`/`G2-HOLD-2` already are — so it is
+buildable and runnable against a test harness that simply parameterizes
+the chosen action, without selecting G-2 itself.
+
+Assertions, each independently sufficient to fail the test:
+
+1. **Exactly one terminal status is ever reached.** After resolution,
+   `HeldDispositionRecord.status` is exactly one of `resolved_reforfeit` /
+   `resolved_route_to_cash` — never both across two rows for the same
+   `correlation_id`, never a third, undocumented value, and never left at
+   `held` after a resolution attempt that the system reports as having
+   succeeded.
+2. **The payout `W` and the lock-release `X` resolve in the same
+   transaction, to a coherent pair of destinations.** No committed state
+   exists where `W` has moved (to `promo_liability` or `player_cash`) but
+   `X` is still sitting in `player_locked_bonus`, or the reverse. This
+   directly tests doc 08 §16.5a's "the lock itself must resolve, never
+   dangle" requirement against doc10 N1's disposition mechanism, at the
+   seam between the two documents — a boundary neither document's own
+   text tests in isolation. **Flagged as `NOT APPLICABLE (open
+   dependency)` for the `ACTION_HOLD_FOR_REVIEW` sub-case specifically**:
+   §16.5a and §16.13 both disclose that `ACTION_HOLD_FOR_REVIEW`'s
+   destination for the *released lock amount* `X` (distinct from the held
+   payout `W`) is an unresolved `ledger-finance`/`bonus-engine` cross-
+   dependency — this assertion cannot be written concretely for that one
+   sub-case until that destination is named.
+3. **Concurrent resolution attempts on the same record never both
+   commit.** Two staff sessions submit different dispositions for the
+   same `HeldDispositionRecord` at nearly the same instant (mirrors N1.6
+   Scenario 5(b)'s reuse of §7.7's double-reversal protection, applied
+   here to first-time resolution rather than replay): exactly one
+   transitions `held → resolved_*`; the loser's attempt finds the record
+   already transitioned and is rejected outright, under the same
+   `(tenant_id, grant_id)` advisory lock N1.5 specifies.
+4. **A crash between the two halves of step 2 cannot leave a partial,
+   ambiguous state** — proven, not assumed, per this document's own
+   "assert the job fires, not just that the query is right" standard
+   applied to atomicity: kill the connection mid-transaction (the same
+   fault-injection technique ADR 0032 §7's partial-failure tests already
+   use) between the notional debit of the holding representation and the
+   notional credit of the destination account; on recovery, the record
+   must be found still `held`, with no partial ledger entries of either
+   half — `ledger.Post`'s single-balanced-transaction discipline (N1.5)
+   provides this structurally, and the test exists to prove that claim
+   rather than take it on faith.
+5. **Progress-trail cardinality is exactly one.** Exactly one
+   `g2_disposition_applied` Progress entry is written per resolution —
+   never zero (a silent resolution) and never two (a double-recorded
+   one), reusing this document's own "one audit row per event, never
+   per bulk fan-out or per retry" cardinality discipline (ADR 0034
+   §14.5, restated for bulk assignment at A16).
+
+**Status**: `G2-HOLD-3`'s mechanism-level assertions (1, 3, 4, 5) are
+buildable today against a stubbed/parameterized resolution action, since
+they test the resolution mechanism's exclusivity and atomicity, not which
+action G-2 selects. Assertion 2's `ACTION_HOLD_FOR_REVIEW` sub-case is
+`BLOCKED` on the named open cross-dependency (lock-release destination for
+that action), independent of G-2 itself. The full end-to-end test
+(constructing a genuine `HeldDispositionRecord` via a live settlement
+event and a live resolution call) is `BLOCKED` on `internal/bonus` and
+`bonus-engine`'s own Wave 2+ schema existing at all (N1's own standing
+disclosure) — the same status every other N1-dependent test in this
+document already carries.
+
+### 2. CRM decomposition tests (`SEC-W15-02`) — the `EconomicOperationIdentity` lineage adversarial test
+
+The directive's Testing-section requirement (items 5/11) asks for one
+adversarial test proving a bulk economic operation retains its
+authorization boundary across API splitting, retries, pagination,
+concurrent workers, partial batches, resumed jobs, and duplicate requests.
+Doc 34's own worked example (§5.4) already walks this scenario narratively
+against the before/after design; the test below operationalizes it as one
+composite scenario plus the supporting per-invariant tests doc 34 itself
+names (§6, `EOI-1`–`EOI-13`) so a partial regression is attributable to a
+specific invariant, not merely "the composite test failed somewhere."
+
+**Primary test — `EOI-DECOMPOSITION-1`, mirroring doc 34 §5.4's worked
+example exactly, run as one continuous scenario:**
+
+Setup: a `crm_engagement_campaign_activation` EOI is minted at activation
+(four-eyes consumed, `recipient_ceiling = 10,000`,
+`intended_aggregate_value` = 10,000 × the offer's face value,
+`subject_set_hash` pinned over a 10,000-row materialized audience).
+
+1. **API splitting is not a bypass.** Issue grants against the pinned
+   audience through three different call surfaces that all name the
+   identical `parent_operation_id`: (a) the ordinary `BulkGrantJob` path,
+   (b) a staff single-Grant action against individual members of the same
+   audience, (c) a simulated `ActorService` caller invoking the
+   single-grant surface directly. Assert the **combined** consumption
+   across all three surfaces is checked against **one shared** remaining
+   budget — a grant issued through surface (c) must see surfaces (a)/(b)'s
+   already-consumed budget, and the 10,001st grant issued through *any*
+   surface is rejected. This is the direct regression test for
+   `SEC-W15-02`'s literal shape ("N individually-sub-threshold calls,
+   none of which is a `BulkGrantJob`") — it must **fail** against any
+   implementation where the ceiling is checked only inside the
+   `BulkGrantJob` path.
+2. **Retry never re-mints (`EOI-2`/`EOI-3`).** A lost-response retry of
+   the activation approval itself resolves, via
+   `UNIQUE (tenant_id, operation_type, idempotency_key)`, to the
+   already-existing EOI — no second approval consumed, no budget reset.
+   A retried *execution* (one grant call repeated after a timeout)
+   inherits `parent_operation_id` from its first attempt's record and
+   does not double-consume.
+3. **Pagination cannot exceed the ceiling (`EOI-4`).** The 10,000-row
+   audience is delivered as 10 pages of 1,000 (`lineage_kind = page`,
+   `batch_ordinal`/`batch_total` declared). Lower `recipient_ceiling` to
+   5,000 for this sub-case and assert page 6 (the 5,001st–6,000th
+   subjects) is rejected in full — not truncated to the remaining 4,000
+   and not silently queued — reusing doc 31 §7.2.3 item 4's "aborts on
+   deviation, never warns, never truncates" rule, restated here as doc
+   34 §5.1's "rejection, never degradation."
+4. **Concurrent workers cannot jointly overspend (`EOI-5`/`EOI-6`).**
+   With `remaining_recipient_budget = 10` on a fresh EOI, launch N≥20
+   concurrent goroutines (this document's own stress-test floor, Wave 1
+   §1, restated) each attempting to consume 1 unit. Assert exactly 10
+   succeed and 10+ fail cleanly, serialized by the `FOR UPDATE` on the
+   EOI row — not by an accidental low-contention pass, per this
+   document's own stress-test discipline.
+5. **Partial batch / crash-and-resume never re-authorizes the unspent
+   remainder as a fresh budget (`EOI-3`).** Inject a crash after a bulk
+   job has consumed 400 of a 1,000-unit budget. Resume the job
+   (`lineage_kind = resume`). Assert the resumed job re-attaches to the
+   same `root_operation_id`, the already-consumed 400 stays consumed (the
+   existing `BulkGrantJobItem` rows are the record, per doc 34 §3.2), and
+   the resumed job can consume at most 600 more — not a fresh 1,000.
+6. **Duplicate top-level requests (`EOI-2`).** An operator double-clicks
+   "activate": the second request resolves to the existing EOI with its
+   already-consumed approval; no second approval row, no second mint.
+
+**Supporting invariant-level tests, named for completeness, each smaller
+than the composite scenario and each independently useful for isolating a
+regression:**
+
+- `EOI-4` **property test**: generate the five §3.2 containment checks
+  (wider `recipient_ceiling`, wider `intended_aggregate_value`, a
+  `subject_set` not a subset of the parent's, a mismatched `asset_code`,
+  a later `expires_at` than the parent's) independently, and assert each
+  alone is a rejected write.
+- `EOI-9`/`EOI-10` **RLS test**: a CRM-class or affiliate-class principal
+  has zero read access to `economic_operations`; a cross-tenant read of
+  another tenant's EOI returns zero rows, mirroring this document's own
+  "never an application-path-only test" RLS standard.
+- `EOI-8` **correlation-id inheritance test**: compare the root EOI's
+  `correlation_id` against every leaf execution's — a re-minted value
+  anywhere in the chain fails the test.
+- **`EOI-9` "enforced by the value-creating domain" test** (doc 34 §5.2):
+  a CRM-authenticated caller invoking Bonus's grant surface directly,
+  bypassing CRM's own journey-execution code path entirely, with a stale
+  or absent `parent_operation_id`, is rejected **at Bonus's own entry** —
+  proving Bonus does not rely on CRM having already checked. This is the
+  defense-in-depth companion to item 1 above: item 1 proves splitting
+  across surfaces doesn't multiply the budget; this proves the enforcing
+  domain doesn't trust the calling domain to have enforced anything at
+  all.
+
+**Cannot be fully specified without more of Phase 2's reconciliation**:
+`DEP-EOI-5` (doc 34 §8) — the unresolved conflict between `security`'s
+"pin the materialized set, never re-resolve" and `bonus-engine`'s doc 10
+W5 "resolve live at run time" — is exactly the kind of cross-dependency
+this test's subject-set assertions depend on, and doc 34 itself states
+neither owner has confirmed the "pin is a ceiling, live resolution may
+only shrink it" reconciliation it proposes. Item 1 and item 3 above are
+written against that proposed reconciliation; if it is not adopted as
+written, the exact assertion (does a since-added, in-pin-but-not-yet-
+live-resolved subject ever receive a grant, or not) changes. `EOI-DECOMPOSITION-1`
+is also entirely `BLOCKED` on `internal/economicop` not existing (doc 34
+§7's own explicit "no implementation authorized") — every assertion above
+is a specification, not a runnable test, until that package and its
+consumption function (`DEP-EOI-2`, `security` + `ledger-finance`'s to
+decide) exist.
+
+### 3. Actor≠subject (`SEP-1`) tests
+
+`security`'s own §W15.1.8 already names a solid baseline test list; `qa`'s
+addition here is (a) insisting it is run identically, not sampled, across
+every one of §W15.1.7's routed enforcement points, and (b) specifying the
+regression guard the task calls out by name.
+
+**Run identically at every adopting enforcement point, not sampled** —
+mirroring this document's own Stage 4H-B0 §3 "tested against every
+mutating endpoint, not sampled" standard, applied to `SEP-1`'s own
+enforcement points:
+
+| Enforcement point | Domain |
+|---|---|
+| Grant issuance, Grant activation | Bonus |
+| Bonus adjustment, staff-forced conversion, manual release override | Bonus |
+| `BulkGrantJob` execution (set-membership form) | Bonus |
+| `BonusSuggestion` review and activation | Bonus |
+| Journey/campaign activation containing an `offer_request` step | CRM |
+| `CommissionApproval`, settlement instruction, re-attribution, agreement/rule-version activation | Affiliate |
+
+For **each** row: direct self-dealing (actor's `person_id` equals the
+resolved beneficiary), indirect self-dealing (a second, distinct
+`staff_users` row sharing the same `person_id` as the actor), self-dealing
+via the **approver** rather than the requester on an otherwise-clean
+request, and — for the set/audience rows — the beneficiary present
+*anywhere inside* the pinned, materialized set rather than as the sole
+named subject (tested against the pin, per §W15.1.2's own instruction,
+never a live re-resolution, so the test also catches a set-swap-after-pin
+attack). Every legitimate-operation-succeeds control case (`SEP-1-H1`)
+must also be run at each row — a permanently-inert trigger passes every
+refusal-shaped test trivially, and only the positive case distinguishes
+"working" from "structurally unable to fire."
+
+**The regression guard the task names — `SEP-1-NULL-REGRESSION`, the exact
+shape of migration 0029's original inertness:**
+
+Two sub-cases, both required, both asserting **refusal**, never a skip:
+
+1. **NULL beneficiary.** The domain's beneficiary resolver returns a
+   non-empty set containing at least one element whose `person_id` is
+   NULL. Assert the operation is refused at §W15.1.3 step 5 specifically
+   ("any element whose `person_id` is NULL → refuse"), with the `SEP-1`
+   error — not merely "some error occurred," and not a silent pass
+   because the NULL comparison evaluated to `NULL` (SQL's own three-valued
+   logic) rather than `true`, which is precisely the mechanism that made
+   migration `0029`'s `IS NOT NULL AND requester_person_id =
+   approver_person_id` check inert: a NULL on the left side made the
+   whole `AND` false, so the comparison was skipped rather than the
+   statement aborting.
+2. **NULL actor.** The acting or approving principal's own `staff_users
+   .person_id` is NULL. Assert refusal at step 2, before the beneficiary
+   resolver is even invoked. Distinguishing steps 2 and 5 in the
+   assertion (not merely "an error occurred somewhere in the trigger")
+   matters because a naive implementation could satisfy "an error is
+   raised" by letting a NULL comparison surface a Postgres type error
+   several steps later, which would pass a loosely-written test while
+   still being the wrong mechanism — the test must assert the specific,
+   named refusal path fires, mirroring `SEP-1-H1`'s own "asserts the
+   specific error, not merely 'an error'" instruction.
+
+Also required, restated from §W15.1.8 because the task asks for "direct
+and indirect self-dealing" explicitly: **concurrency** — two approvals
+racing on the same request, one of them self-dealing, must never both
+commit; and **audit** — a `SEP-1` refusal writes an `audit.Record` with
+`Outcome: denied` (a control that fires silently leaves no evidence it
+fired, the same lesson this document's own DENY-survival test already
+encodes at §3 above).
+
+**A `qa` recommendation, not a requirement being invented here**: `SEP-1`
+is deliberately one shared mechanism reused across Bonus/CRM/Affiliate
+specifically so the `IS NOT NULL AND` mistake cannot recur three times
+independently (§W15.1's own stated rationale). The test suite should
+mirror that design decision: one shared, parameterized `SEP-1` conformance
+suite (resolver-in, refusal-out) run against each domain's own resolver
+implementation, rather than three independently-authored test files that
+could each individually miss the NULL-guard regression while believing
+they'd covered it — the same gap this document flagged as "Named gap 1"
+for the FX rate-provider adapter at Stage 4H-B0-R5 (P1-1), applied here to
+a security control instead of a financial one.
+
+**Status**: `BLOCKED` on `internal/economicop` not existing for the CRM/
+Affiliate enforcement points that compose with it, and on each domain's
+own resolver implementation (§W15.1.2, `REQ-SEP-BONUS-*`/`REQ-SEP-CRM-1`/
+`REQ-SEP-AFF-1`) not yet being written. The regression-guard shape itself
+(`SEP-1-NULL-REGRESSION`) is fully specifiable today against the
+withdrawal-governance precedent (`0034_stage3d_withdrawal_governance`)
+`SEP-1` explicitly reuses, and should be run against that existing trigger
+too, as a live confirmation the platform's one already-shipped instance of
+this pattern doesn't already carry the defect `SEP-1` is designed to avoid
+reintroducing.
+
+### 4. Affiliate four-eyes tests (`AFF-4E-1` + `SEP-1`, ancestor-chain resolver)
+
+The task asks for a test proving two colluding affiliate accounts under
+one entity cannot satisfy `AFF-4E-1` and `SEP-1` together. Read literally
+against `security`'s own design, this is actually the **easy** case —
+`AFF-4E-1` alone (conjunct B, §6.5.1) refuses **any** `external_affiliate`-
+class approver unconditionally, so two colluding affiliate accounts never
+reach the point where `SEP-1`'s graph even needs to be checked. The test
+plan below states that case, then states the harder case the task's
+framing gestures toward — the one `AFF-4E-1` explicitly does **not**
+close (§6.5.2's own disclosure) — because a test suite that only proves
+the easy case would misreport the actual residual risk.
+
+**`AFF-4E-1-TRIVIAL` — the literal task scenario.** Two `staff_users` rows,
+`principal_class = external_affiliate`, distinct `person_id`s, both
+affiliated with (or controlled by) the same commercial entity — the
+platform has no capability to model "entity" at all, so the fixture
+asserts collusion by construction (both accounts act in coordination in
+the test), not by any entity-resolution mechanism. Account `a1` requests
+a `CommissionApproval` on its own node's accrual; account `a2` attempts to
+record the approval. Assert refusal, **and assert it is `AFF-4E-1`
+(conjunct B) that fires**, independently of whether `SEP-1` would also
+have refused — per `security`'s own W15.2.6 item 3 instruction ("both must
+be asserted separately — a test that only proves 'refused' cannot tell
+which control is carrying the weight").
+
+**`AFF-4E-1-ANCESTOR-DIRECTION-REGRESSION` — the corrected resolver,
+tested at the exact defect it fixes.** This is the test that actually
+exercises "the corrected ancestor-chain resolver" the task names, because
+`AFF-4E-1-TRIVIAL` above never reaches the resolver at all. Construct a
+sub-affiliate override agreement (doc 32 §6.4) where parent node `P`
+benefits from child node `C`'s accrual. `C`'s own account requests approval
+on `C`'s accrual (clean, non-self-dealing on its face). `P`'s account —
+an `internal`-class principal this time, since only `internal`-class can
+reach the approval predicate at all per `AFF-4E-1` — attempts to approve
+it. Assert refusal **by `SEP-1`**, via the resolver's ancestor-chain walk
+finding `P` in `C`'s beneficiary set. This test must be written to **fail**
+against a reimplementation of doc 32's own first Fix-Wave draft error (a
+resolver walking the **subtree**/descendants instead of the **ancestor
+chain**) — under that defective direction, `P` is not a descendant of `C`,
+the resolver would find no conflict, and this exact scenario would
+incorrectly succeed. Restated for the reverse direction too
+(`AFF-4E-1-DESCENDANT-NONCONFLICT`): `C` approving `P`'s own accrual, where
+no override agreement runs the other way, must **succeed** (a sub-
+affiliate does not automatically benefit from its parent's ordinary
+accrual) — the positive case proving the resolver isn't simply refusing
+every cross-node approval regardless of direction.
+
+**`AFF-4E-1-INTERNAL-BENEFICIARY` — the honest residual, tested as a
+detection, never as a block, per its own documented limitation.** Two
+colluding affiliate accounts (both `external_affiliate`-class, so
+`AFF-4E-1-TRIVIAL` already blocks either of them from approving directly)
+attempt to route the approval through a recruited or complicit **internal**
+staff member who beneficially owns one of the colluding nodes:
+
+1. **If the interest is declared** (`affiliate_beneficial_interest_
+   attestations.declaration = internal_interest_declared` naming that
+   staff member's `person_id`): assert the internal approver is refused by
+   `SEP-1`, via `declared_interest_person_ids` joining the node's
+   beneficiary set (§6.5.2.1) — this is the case the attestation mechanism
+   exists to close, and it must be proven, not assumed from the design
+   prose.
+2. **If the node is `undeclared`**: assert every approval on that node's
+   objects is refused outright (§6.5.2's fail-closed table), regardless of
+   who attempts it — the commercial consequence (stuck `pending_approval`)
+   is the intended trade, and the test should assert the accrual remains
+   `pending_approval`, not merely that one approval attempt failed.
+3. **If the interest is falsely declared `none_internal`** (the actual
+   collusion path the task's framing is really asking about): assert, and
+   **document as an assertion the platform does not claim to make**, that
+   no engineering control detects this at approval time — per §6.5.2.1's
+   own stated limitation, this is a compliance/HR residual, not a testable
+   negative. What **is** testable: the payout-instrument correlation
+   **detection signal** §W15.2.5 names (a commission settlement whose
+   payout destination/instrument correlates with a known internal staff
+   person's instrument) fires and creates a review item, and — per
+   §W15.1.5's detection-only discipline, reused here — never auto-blocks,
+   auto-reverses, or auto-suspends on that signal alone. A test asserting
+   this signal is wired and non-blocking is the honest ceiling of what
+   this control class can prove; a test claiming it "catches the lie" would
+   misstate the architecture's own documented limitation.
+
+**Also required, restated from `security`'s own W15.2.6 because the task's
+framing is a superset of what that list already names**: same-user
+self-approval (item 1), same-person-two-accounts (item 2), undeclared node
+(item 8), stale attestation (item 9), the positive "two unrelated internal
+approvers, neither a declared interest holder, neither in the ancestor
+chain, succeeds" case (item 10, `SEP-1-H1`'s affiliate instance), replay
+(item 11), concurrent approvals (item 12), approve-then-reject/reject-
+then-approve (item 13), payload mutation after approval (item 14),
+unclassified principal (item 15, the `AFF-C1` regression guard for a
+future role added without classification), cross-tenant (item 16), and
+cross-subtree read (item 17).
+
+**Status**: `BLOCKED` on `agentnetwork`'s hierarchy-node-scope RLS
+dimension (`DEP-AFF-5`/`AFF-C2`) and the `affiliate_beneficial_interest_
+attestations` table (§6.5.2.1) neither existing yet, and on the ancestor-
+chain resolver itself not being built. The distinction between
+`AFF-4E-1-TRIVIAL` (testable today in principle, once affiliate
+`principal_class` exists) and `AFF-4E-1-ANCESTOR-DIRECTION-REGRESSION`
+(additionally requires the sub-affiliate override agreement and the
+resolver) should be preserved when Wave 2+ actually schedules these —
+the trivial case is cheaper to build and should not be allowed to stand in
+for the harder one in a completion report.
+
+### 5. Casino postWin tests
+
+**Destination/query resolution fix (§16.4, LF-1/LF-7):**
+
+- `CASINO-PW-1` — **credit-leg resolution, not debit-leg (LF-1's own
+  regression test).** Construct a bonus-funded bet posting the case-B
+  shape (`Dr player_bonus X / Cr player_locked_bonus X`, no mirror). On
+  win, assert `postWin`'s resolution reads the **credit** leg
+  (`player_locked_bonus`) to determine origin. Written to **fail** against
+  a reimplementation of the original debit-leg query — the specific defect
+  that made the terminal-Grant branch structurally unreachable (LF-1),
+  mirroring N1.11's own "must fail against the pre-revision mechanism"
+  discipline applied on the casino side of the same seam.
+- `CASINO-PW-2` — **correlation-ID wallet collision (LF-7).** Two
+  different players' rounds collide on `correlation_id` (a namespace
+  collision or a posting-layer defect): assert `ErrCorrelationWalletCollision`,
+  the whole win aborts, an integrity alert is raised, and neither wallet is
+  guessed.
+- `CASINO-PW-3` — **multi-bet-round ambiguity (LF-8), including the
+  "coincidence must not become a shortcut" case.** A win event names a
+  `RoundID` under which more than one distinct `bet_transaction_id`
+  exists, and `WinRequest`/`CallbackEvent` carries no
+  `OriginatingProviderTxID`. Assert the event routes to
+  `ErrAmbiguousMultiOriginRound`'s manual-reconciliation queue. The
+  adversarial variant required beyond the obvious case: construct the win
+  amount to **exactly equal** one specific candidate bet's stake, and
+  assert the system still routes to manual reconciliation rather than
+  silently inferring that bet is the target — §16.4a explicitly rejects
+  amount-matching heuristics as unsafe guessing, and a test that never
+  constructs the tempting coincidental case cannot prove the rejection
+  holds under the one condition an implementer would be most tempted to
+  special-case.
+- `CASINO-PW-3b` — **per-bet resolution once `OriginatingProviderTxID`
+  exists.** `NOT APPLICABLE (open dependency)` — the field does not exist
+  on `WinRequest`/`CallbackEvent` today (confirmed against
+  `internal/casino/types.go`); named here so Wave 2+ does not have to
+  re-derive the test once the field is added, per §16.4a's own explicit
+  future-dependency framing, and so no multi-bet-capable title is marked
+  launch-eligible for bonus-funded wagering before this test exists and
+  passes (§16.13).
+- `CASINO-PW-4` — **lock release bundled with payout, one balanced
+  transaction (LF-4/§16.5a).** On a win against a non-terminal Grant,
+  assert the settlement posts **both** entry pairs (the payout, and the
+  lock release `Dr player_locked_bonus X / Cr player_bonus X`) in one
+  `ledger.Post` call, and that `L(G)` reaches exactly `0`. Assert no
+  committed intermediate state exists where one pair posted and the other
+  did not — the identical "no partial state" discipline `G2-HOLD-3`
+  assertion 2 applies to the terminal-Grant branch, applied here to the
+  ordinary, non-terminal branch.
+
+**Settlement-timeout sweep (§16.5a(a)):**
+
+- `CASINO-STO-1` — **fail-closed default, both directions.** Absent an
+  explicit configured window, run the sweep and assert **zero** postings
+  and that locks remain visible (via `LockedBonusBalance`, migration
+  0048) rather than silently written off. This is the inverse of this
+  document's usual "assert the job fires" standard (Stage 4H-B0 §1.7) —
+  here the required proof is that the job does **not** fire absent
+  configuration, since a sweep that runs on an invented default duration
+  is exactly the "guessed number wrongly writing off a stake" failure mode
+  §16.5a itself names.
+- `CASINO-STO-2` — **genuine unresolved-loss sweep.** A locked bonus-funded
+  stake with no `casino_win`/`casino_rollback` under its `correlation_id`,
+  older than the configured window, is swept via a new
+  `casino_settlement_timeout` posting, reusing the case-I loss-accounting
+  shape verbatim, audited as `actor = system`.
+- `CASINO-STO-3` — **late win after sweep raises an alert, never
+  resurrects.** A genuine `casino_win` for an already-swept round arrives
+  after the window: assert a new, distinct integrity alert, held for
+  manual reconciliation, and that the timeout posting is **not**
+  auto-reversed and no double-credit occurs.
+- `CASINO-STO-4` — **the exclusion test, named explicitly per the task:
+  a G-2-pending round must never be swept as a loss.** A round whose win
+  callback already arrived and was rejected via
+  `ErrTerminalGrantCreditUnresolved` (genuinely `pending_settlement`, with
+  a recorded rejection audit event) is aged past the sweep's window.
+  Assert the sweep does **not** touch it — it remains `pending_settlement`
+  for a human to resolve via G-2, never auto-resolved as a loss. The test
+  must also prove the **discriminator**, not just the outcome: construct a
+  near-miss control case (a round that is old enough to sweep and
+  happens to carry an unrelated audit event at a similar timestamp) and
+  confirm the exclusion is driven specifically by the recorded
+  `ErrTerminalGrantCreditUnresolved` rejection event keyed to that
+  `correlation_id` — never by a coincidental timing proxy.
+- `CASINO-STO-5` — **per-tenant/jurisdiction configuration, tighten-only.**
+  Mirrors the test shape this document already specified for
+  `OpenBetSelfExclusionPolicy` (Stage 4H-B0-R5, P1-5): jurisdiction-
+  primary, tenant/brand may only shorten the window, never lengthen it.
+  **Named gap, not resolved here, same shape as P1-5's own named gap 1**:
+  §16.5a does not state whether the tighten-only rule is enforced at
+  configuration-write time or at resolution-read time, and this document
+  cannot pin the test to one mechanism until that is specified — recorded
+  here as a second instance of an already-open pattern, not a new
+  question independently invented.
+
+**Status**: every `CASINO-STO-*` test is `BLOCKED`, explicitly and by the
+architecture's own words — §16.5a states the settlement-timeout sweep is
+"**NOT SAFE to implement**" until `ledger-finance`/`architect` ratify the
+new transaction type and posting shape **and** a human/jurisdiction
+decision sets the actual window duration, neither of which has happened.
+`CASINO-PW-1`/`PW-2`/`PW-4` are buildable today (they exercise mechanisms
+that exist or are pure Go/SQL changes inside `internal/casino` with no new
+account type). `CASINO-PW-3`'s manual-reconciliation-queue routing is
+buildable today; `PW-3b` is `NOT APPLICABLE (open dependency)` until the
+provider-protocol field exists.
+
+**New gap found while re-verifying Wave 1.5's C18–C27 against this fix,
+not previously named — recorded here rather than silently absorbed:**
+
+The fix wave's N1.9 enumerates `HeldDispositionRecord.status` as exactly
+`held` / `resolved_reforfeit` / `resolved_route_to_cash`. Re-walking C24
+("concurrent win and rollback") against the corrected mechanism surfaces a
+case neither doc10 §N1 nor doc08 §16.11 appears to name: **a rollback
+arriving while the win's value sits in a `HeldDispositionRecord` with
+`status = held`** (the WIN won the C24 race, was captured into the holding
+representation because the Grant was already terminal, and *before* a
+human answers G-2, a rollback for the same round arrives). Neither
+document specifies whether the rollback (a) reverses the held record
+directly (requiring a fourth status, e.g. `reversed`/`voided`, not
+currently in N1.9's enum), (b) is rejected until the hold resolves, or (c)
+some other treatment. This is named as **new test `C28` — "rollback of a
+held, undisposed win"** — its assertions cannot be written until
+`bonus-engine`/`casino`'s Phase 2 reconciliation states which of (a)/(b)/(c)
+applies; flagged for that reconciliation, not resolved here.
+
+**Re-verification of C18/C19/C20/C26/C27 against the landed fix,
+per Wave 1.5 §7 item 1's own instruction to re-check once casino's design
+existed:**
+
+- **C18, C26, C27** (win/callback after grant expiry/cancellation): the
+  mechanism these already point to (§16.8/§16.9's re-confirmed G-2 call
+  site) is unchanged in shape; the "what must be provable now" bar is
+  sharper than Wave 1.5 stated it — it is no longer merely "detected and
+  routed to a defined outcome," it is specifically "captured into the
+  `HeldDispositionRecord` holding representation, per N1.4.1," matching
+  `G2-HOLD-1`'s own assertion. No change to which rows are `BLOCKED`.
+- **C19** (win after wagering completion): unchanged in status; N1.3's
+  `AOE` third component (`HeldDisposition`) is the mechanism that now
+  makes this case's "no silent double-count" assertion precise where Wave
+  1.5 left it as a named risk rather than a mechanism.
+- **C20** (rollback after win, G-3 netting): **gains a new dependency**.
+  §16.11 now discloses that a rollback of a win that already credited
+  `player_bonus`, where the Grant subsequently went terminal and swept
+  that balance into `promo_liability`, can find **insufficient**
+  `player_bonus` balance to debit — and explicitly states the treatment
+  (permit a negative balance as a clawback / route to a receivable /
+  reject-and-alert) is `ledger-finance`'s undecided call (`LF-10`), not
+  casino's. C20's test cannot be completed until that decision lands;
+  recorded as an added dependency on C20's existing `BLOCKED` status
+  rather than a new row.
+- **C24** (concurrent win and rollback): unchanged in its two named
+  orderings, but see the new `C28` gap above — the "WIN wins, Grant
+  terminal" sub-branch of C24 now needs to additionally route into the
+  holding representation rather than post-then-reforfeit (already implied
+  by N1.6 Scenario 3's revision), and the *subsequent* rollback of that
+  held win is the newly-discovered gap.
+
+### 6. Segmentation tests — the `member_of`/`InclusionSafety` regression
+
+**Primary regression test — `SEG-MEMBER-OF-1` (the disabled-exclusion-
+segment case the task names).** Construct doc 30 §6's own canonical hybrid
+shape, `And(criteria, Not(member_of(exclusion_segment)))`. Player `P`
+satisfies `criteria` and is a genuine member of `exclusion_segment` while
+it is `active`. Assert `P` is `not_member` (excluded). Disable
+`exclusion_segment` — an ordinary, low-privilege, non-financial operator
+action, per §3.1's own "disable-never-delete" discipline — without editing
+its criteria. Re-evaluate the **identical** tree for the **identical**
+player with no other change. **Assert `P` is still `not_member`**, with
+reason `segment_fact_unavailable` (boundary) carrying the innermost
+`segment_reference_disabled` reason (`leaf_outcomes[]`) — never `member`.
+Written to **fail** against a reimplementation of the exact defect
+`code-reviewer`'s P1-1 found: mapping an interior `member_of`'s
+absent/disabled result straight to `false`, which `Not()` then inverts to
+`true`, sweeping every previously-excluded player back into the audience.
+
+**Companion cases, same assertion, different trigger:**
+
+- `SEG-MEMBER-OF-2` — the referenced segment has **only a `draft`
+  version**, no `active`/`superseded` version effective at `as_of`: same
+  exclude-not-include result, reason `segment_reference_not_effective`.
+- `SEG-MEMBER-OF-3` — the reference is **unresolvable** (deleted segment,
+  a `version_pin` naming a nonexistent/foreign/ineffective version, or a
+  cross-tenant/cross-brand reference not visible in the evaluating scope):
+  same result, reason `segment_reference_unresolvable` /
+  `segment_reference_pin_unresolvable`.
+- `SEG-MEMBER-OF-4` — **Kleene propagation at depth, property-based.**
+  Reusing this document's own Wave 1.5 §3 property-testing design
+  (random AND/OR/NOT trees, compared against an independent reference
+  evaluator): generate trees of random depth with a disabled/draft/
+  unresolvable `member_of` leaf injected at a random interior position
+  (not only as the tree's top-level node), and assert the exact §5.3
+  truth table (`And`: false-dominant, else unknown-dominant, else true;
+  `Or`: true-dominant, else unknown-dominant, else false; `Not`:
+  swaps true/false, **fixes unknown**) holds at every level, for every
+  generated tree — not only the canonical two-node case §6 illustrates.
+- `SEG-MEMBER-OF-5` — **no interior collapse.** A white-box test of the
+  evaluator (not merely its `Resolve()` black-box outcome) asserting that
+  an interior `Not(member_of(disabled_segment))` node's own intermediate
+  value is `unknown`, never `true` — the specific, previously-defective
+  behavior — with the two-value collapse (`member`/`not_member`) provable
+  to occur **only** at the `Resolve()` return boundary and nowhere else in
+  the evaluation trace.
+
+**`InclusionSafety` regression tests, named together since the task's own
+heading pairs the two mechanisms, kept brief since the task's primary ask
+is the `member_of` exclusion case above:**
+
+- `SEG-INCSAFE-1` (Path 1, nested-segment laundering): Segment `X` carries
+  an RG-restriction criterion classified `exclusion_only`; Segment `Y` is
+  a plain `member_of(X)` used in an inclusion position. Assert `Y`'s
+  computed `InclusionSafety` is `exclusion_only` **transitively** (not
+  `safe`), and that a validator inspecting only `Y`'s own leaf key
+  (`member_of`) would incorrectly pass it — written to fail against
+  exactly that leaf-key-only validator.
+- `SEG-INCSAFE-2` (Path 2, CRM-lifecycle laundering): a criterion using
+  `lifecycle_state_in(['excluded', ...])`, where `excluded` is doc 31's
+  own RG-derived projection: assert this leaf is classified
+  `exclusion_only` via `protective_signal_inputs` satisfiability, not
+  missed because no predicate key literally names RG.
+- `SEG-INCSAFE-3` (recomputation, not caching): simulate a deploy that
+  adds a new `protective_signal_inputs` entry to a previously-safe
+  predicate key. Assert every already-frozen `active` `SegmentVersion`
+  referencing that key is **recomputed** at evaluator startup (not read
+  from its stored `InclusionSafety` cache value), and that a
+  stored-vs-recomputed divergence is a **hard startup failure**, mirroring
+  CLAUDE.md's balance-drift-is-P1 discipline applied to a safety
+  classification rather than a financial one.
+
+**Status**: `internal/segment` does not exist (doc 30 remains
+architecture-only per its own status line), so every test in this
+subsection is `NOT IMPLEMENTED`, `RECOMMENDATION`. `SEG-MEMBER-OF-1`
+through `-5` and `SEG-INCSAFE-1` through `-3` are, however, fully
+specifiable today against doc 30's corrected §5.1.1/§5.3/§8.4.1 text with
+no further architecture dependency — unlike most of this section, this is
+not blocked on a parallel document landing, only on implementation.
+
+### 7. What cannot be fully specified pending Phase 2's parallel reconciliation — stated honestly
+
+- **§1's `G2-HOLD-3` assertion 2** (the `ACTION_HOLD_FOR_REVIEW` lock-
+  release destination) cannot be completed until `ledger-finance`/
+  `bonus-engine` name that destination (§16.5a/§16.13's own open
+  cross-dependency).
+- **§2's `EOI-DECOMPOSITION-1`** depends on `DEP-EOI-5` (the pin-vs-
+  live-resolution reconciliation between `security` and `bonus-engine`,
+  doc 34 §8) being resolved as proposed or otherwise — this document
+  wrote the test against the proposed reconciliation and flags it as
+  provisional, consistent with this section's own opening note.
+- **§3's `SEP-1` tests** depend on each domain's own resolver
+  (`REQ-SEP-BONUS-*`, `REQ-SEP-CRM-1`, `REQ-SEP-AFF-1`) and on
+  `identity-compliance`'s `REQ-SEP-ID-1` confirmation of the underlying
+  Person-linkage primitive (`4HB1FW-05`), which this document has not
+  seen in its landed form.
+- **§4's `AFF-4E-1` ancestor-chain tests** depend on `agentnetwork`'s
+  hierarchy-scope RLS (`DEP-AFF-5`) and the beneficial-ownership
+  attestation table, neither built.
+- **§5's `CASINO-STO-*` tests** are `BLOCKED` on both an architectural
+  ratification and a human/jurisdiction decision, per the architecture's
+  own explicit "NOT SAFE to implement" statement — not a `qa` finding, a
+  restated fact from doc 08 itself.
+- **The new `C28` gap** (rollback of a held, undisposed win) is a genuine
+  finding this review produced, not previously named in either doc10 §N1
+  or doc08 §16 as read — it is routed to `bonus-engine`/`casino`'s
+  parallel Phase 2 reconciliation rather than resolved here, since
+  resolving it would mean designing a new `HeldDispositionRecord.status`
+  value, which is production-design work outside `qa`'s remit.
+- **This document has not seen**, and could not re-verify against,
+  whichever parts of Phase 2's own reconciliation (`ledger-finance`,
+  `security`, `code-reviewer`, `bonus-engine` on the Segmentation doc,
+  `product-owner-proxy`) are running in parallel to this dispatch — per
+  this section's own opening note, every test above that depends on one
+  of those reviewers' findings is stated against the documents as they
+  stand today and may need re-checking once that parallel work lands,
+  exactly as Wave 1.5 §7 already disclosed for its own C18–C27/§2/§3/§4.
+
+Every item in this section is `RECOMMENDATION` (a test strategy binds
+nothing until executed) and `NOT IMPLEMENTED` (no test code exists yet).
+No item moves toward `IMPLEMENTED` before its named architecture/human
+dependency resolves, regardless of implementation progress elsewhere —
+this document's own standing rule, restated once more because this
+section's dependency list is longer than most.
