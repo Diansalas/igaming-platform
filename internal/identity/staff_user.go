@@ -42,6 +42,19 @@ const (
 	// Finance, TenantAdmin, or PlatformAdmin (directive §24, migration
 	// 0041).
 	StaffRoleRiskManager StaffRole = "risk_manager"
+	// StaffRolePromotionsManager / StaffRoleBonusOperations are Stage
+	// 4H-B1 Wave 2's two bonus roles (security-architecture.md §B1.1,
+	// migration 0064's additive widening of staff_users.role's CHECK -
+	// Phase 2 wired the Go-level RBAC permission sets
+	// (internal/auth/permission.go's RolePromotionsManager/
+	// RoleBonusOperations) but left the database CHECK constraint and
+	// this StaffRole enum unaware of them, and admin_routes.go's staff-
+	// creation allowlist did not admit them either - both closed here,
+	// together, per security doc's own P1 finding ("both new roles MUST
+	// be added to the allowlist AND to the platform-scoped-caller
+	// restriction, in the same change that mints them").
+	StaffRolePromotionsManager StaffRole = "promotions_manager"
+	StaffRoleBonusOperations   StaffRole = "bonus_operations"
 )
 
 // StaffUser operates the platform/back office - distinct from

@@ -111,6 +111,7 @@ func New(deps Deps) http.Handler {
 	registerKYCRoutes(mux, deps)
 	registerRiskRoutes(mux, deps)
 	registerAssetRegistryRoutes(mux, deps)
+	registerBonusRoutes(mux, deps)
 
 	instrumented := otelhttp.NewHandler(mux, deps.ServiceName)
 

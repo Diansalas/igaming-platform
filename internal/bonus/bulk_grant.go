@@ -222,9 +222,16 @@ type BulkGrantJobItem struct {
 	ErrorDetail     *string
 	CreatedAt       time.Time
 	ProcessedAt     *time.Time
+	// ParentOperationID is doc 34 §N2.4a's additive column (migration
+	// 0064): denormalized from the owning BulkGrantJob at item-creation
+	// time, so ConsumeRootBudget's subtree-wide consumption join
+	// (internal/economicop.ConsumeRootBudget) can read this table
+	// directly, keyed on parent_operation_id, without a second hop
+	// through bulk_grant_jobs on every budget check.
+	ParentOperationID *uuid.UUID
 }
 
-const bulkGrantJobItemColumns = `id, tenant_id, bulk_grant_job_id, player_account_id, outcome, reason_code, grant_id, granted_amount, error_detail, created_at, processed_at`
+const bulkGrantJobItemColumns = `id, tenant_id, bulk_grant_job_id, player_account_id, outcome, reason_code, grant_id, granted_amount, error_detail, created_at, processed_at, parent_operation_id`
 
 func scanBulkGrantJobItem(row rowScanner) (BulkGrantJobItem, error) {
 	var (
@@ -232,7 +239,7 @@ func scanBulkGrantJobItem(row rowScanner) (BulkGrantJobItem, error) {
 		outcome       string
 		grantedAmount pgtype.Numeric
 	)
-	err := row.Scan(&it.ID, &it.TenantID, &it.BulkGrantJobID, &it.PlayerAccountID, &outcome, &it.ReasonCode, &it.GrantID, &grantedAmount, &it.ErrorDetail, &it.CreatedAt, &it.ProcessedAt)
+	err := row.Scan(&it.ID, &it.TenantID, &it.BulkGrantJobID, &it.PlayerAccountID, &outcome, &it.ReasonCode, &it.GrantID, &grantedAmount, &it.ErrorDetail, &it.CreatedAt, &it.ProcessedAt, &it.ParentOperationID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return BulkGrantJobItem{}, ErrNotFound
 	}
@@ -266,10 +273,10 @@ func CreateBulkGrantJobItem(ctx context.Context, tx pgx.Tx, it BulkGrantJobItem)
 		it.Outcome = ItemPending
 	}
 	row := tx.QueryRow(ctx, `
-		INSERT INTO bulk_grant_job_items (id, tenant_id, bulk_grant_job_id, player_account_id, outcome)
-		VALUES ($1,$2,$3,$4,$5)
+		INSERT INTO bulk_grant_job_items (id, tenant_id, bulk_grant_job_id, player_account_id, outcome, parent_operation_id)
+		VALUES ($1,$2,$3,$4,$5,$6)
 		RETURNING `+bulkGrantJobItemColumns,
-		it.ID, it.TenantID, it.BulkGrantJobID, it.PlayerAccountID, string(it.Outcome),
+		it.ID, it.TenantID, it.BulkGrantJobID, it.PlayerAccountID, string(it.Outcome), it.ParentOperationID,
 	)
 	item, err := scanBulkGrantJobItem(row)
 	if err != nil && db.IsUniqueViolation(err) {

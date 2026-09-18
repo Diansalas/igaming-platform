@@ -259,7 +259,7 @@ func newCreateStaffHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeValidation, "password too short")
 			return
 		}
-		v.RequireOneOf("role", req.Role, "tenant_admin", "support", "compliance", "finance", "risk_manager")
+		v.RequireOneOf("role", req.Role, "tenant_admin", "support", "compliance", "finance", "risk_manager", "promotions_manager", "bonus_operations")
 		var personID *uuid.UUID
 		if req.PersonID != "" {
 			parsed, err := uuid.Parse(req.PersonID)
@@ -285,6 +285,25 @@ func newCreateStaffHandler(deps Deps) http.HandlerFunc {
 		// specialist review found for finance.
 		if identity.StaffRole(req.Role) == identity.StaffRoleRiskManager && tc.TenantID != uuid.Nil {
 			apierror.Write(w, requestID, apierror.CodeForbidden, "the risk_manager role may only be created by a platform administrator")
+			return
+		}
+		// Stage 4H-B1 Wave 2 (security-architecture.md's P1 finding,
+		// "the staff-creation allowlist must be extended, or constraint 1
+		// and 2 are both defeated on day one"): identical reasoning to
+		// finance/risk_manager above - a tenant_admin's own
+		// PermStaffManage would otherwise let it mint a bonus_operations
+		// account (of a password/person_id entirely of its own choosing)
+		// and self-escalate into bonus_grant:issue/bonus_adjustment:write/
+		// bonus_bulk:execute/bonus_held_disposition:resolve authority it
+		// was never meant to hold, and a promotions_manager account would
+		// let it self-escalate into Campaign/Offer authoring authority.
+		// Both roles are platform-admin-creatable only, mirroring
+		// finance/risk_manager's own precedent exactly - this is a real
+		// operational cost (a tenant cannot self-serve its own promotions
+		// staffing), not a free win, but it is the correct trade per the
+		// security doc's own analysis.
+		if (identity.StaffRole(req.Role) == identity.StaffRolePromotionsManager || identity.StaffRole(req.Role) == identity.StaffRoleBonusOperations) && tc.TenantID != uuid.Nil {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "the promotions_manager and bonus_operations roles may only be created by a platform administrator")
 			return
 		}
 
