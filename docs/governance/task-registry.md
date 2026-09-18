@@ -569,6 +569,51 @@ in the report's §7. Per the authorizing directive, the Orchestrator
 stops here: no Wave 2, no CRM/Affiliate/Gamification/bonus-funded-
 wagering implementation proceeds without a new human directive.
 
+## Stage 4H-B1, Wave 1.5 Fix Round 2 — Final Financial/Security Closure + Product Surfaces Roadmap Gate
+
+**AUTHORIZED** (human directive), started at HEAD `34aeb82`. Full synthesis:
+`docs/governance/wave-1.5-fix-round-2-report.md`.
+
+**Verdict: READY** for Wave 2 authorization, subject to two routed,
+non-blocking P1s (LF-10 — rollback of an already-resolved disposition;
+`SEP-1`'s `ancestor_closure` resolver's dependency on an `agentnetwork`
+tenant-boundary invariant, awaiting `architect` confirmation).
+
+24 specialist dispatches this round, in three phases:
+
+- **Phase 1 (8 dispatches, parallel/sequenced)**: `ledger-finance` decided
+  the final G-2 holding-representation design (`player_bonus_held`
+  account + `bonus_held_dispositions` table); `casino` and `bonus-engine`
+  adopted it (sequenced, not parallel, specifically to avoid repeating
+  last round's composition failures); `security` fixed `SEP-1`'s
+  fail-open defect and the reflexive-ancestor-closure bug's contract;
+  `architect` redesigned `EconomicOperationIdentity` to actually close
+  SEC-W15-02 and started the Product Surfaces roadmap; `backoffice` and
+  `frontend` wrote the Back Office/Partner Console/B2C architecture.
+- **Phase 2 (10 independent re-verification dispatches)**: all four
+  original P0s and all four Wave-1.5-Phase-2-discovered new P0s
+  independently certified closed by reviewers who did not author the
+  fixes. Found and fixed in the same round: NEW-2/NEW-6/NEW-7, the
+  `ACTION_REFORFEIT` posting-sequence contradiction (relocated but not
+  resolved by Phase 1), a missing Grant-status-finalization seam, a
+  genuine disagreement between `risk` and `security`/`architect` on a
+  four-eyes threshold (resolved with dissent recorded), and
+  `REQ-SEP-STAFF-1`'s two required changes (one of which surfaced a real
+  NULL-comparison bug in `SEP-1` step 4, also fixed).
+- **Closing pass (6 further dispatches)**: `ledger-finance`,
+  `security`, `architect` (×2), `casino`, `bonus-engine` closed every
+  Phase-2 finding above, ending with `architect`'s final composition
+  re-certification (which itself found and fixed three residual
+  text-drift defects the fix-chain left behind — disclosed, not hidden).
+
+No Human Decision Register item was selected. No code, migration, or UI
+was written — all 24 dispatches stayed within the authorized
+design/documentation scope, confirmed by `product-owner-proxy`'s explicit
+audit. Per the authorizing directive, the Orchestrator stops here: no
+Wave 2, CRM, Affiliate, Gamification, or Back Office/Partner
+Console/B2C frontend implementation proceeds without a new human
+directive.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

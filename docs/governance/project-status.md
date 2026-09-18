@@ -1193,6 +1193,26 @@ Affiliate, Gamification, and bonus-funded-wagering implementation
 remain unauthorized pending a new human directive scoping a further
 fix round.
 
+**Update — Stage 4H-B1 Wave 1.5 Fix Round 2 concluded: READY** for
+Wave 2 authorization, subject to two routed, non-blocking P1s (LF-10;
+`SEP-1`'s `ancestor_closure` resolver's `agentnetwork` tenant-edge
+dependency, awaiting `architect` confirmation). 24 specialist dispatches
+across three phases (authorship, independent re-verification, closing
+pass) closed all four original P0s and all four Phase-2-discovered new
+P0s, each independently certified by a reviewer who did not author the
+fix; the composition failure between bonus-engine's and casino's
+designs that blocked the prior round was root-caused, fixed, and
+re-certified by `architect`. Also delivered the human-directed Product
+Surfaces roadmap gate: Stage 6A (Back Office MVP), 6B (Partner Console
+MVP, blocked on a not-yet-built partner-scoped RBAC role), 6C (B2C
+Brand Frontend MVP), 6D (Retail/POS) — none authorized for
+implementation. Design/documentation only throughout (no code, no
+migration beyond `0049`, no UI). No Human Decision Register item was
+selected. Full report: `docs/governance/wave-1.5-fix-round-2-report.md`.
+Wave 2, CRM, Affiliate, Gamification, bonus-funded-wagering, and Back
+Office/Partner Console/B2C frontend implementation remain unauthorized
+pending a new human directive.
+
 ## Production blockers (summary)
 
 Every item in "Blocked stages" and "External dependencies" above is a

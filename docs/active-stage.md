@@ -1441,33 +1441,41 @@ standard).
 3. All other already-open, non-blocking items from Stages 0-4G remain
    open (see `docs/governance/project-status.md`).
 
-## Current stage: Stage 4H-B1 Wave 1.5 Fix Wave, Phase 2 — CONCLUDED, awaiting human authorization for next round
+## Current stage: Stage 4H-B1 Wave 1.5 Fix Round 2 — CONCLUDED, awaiting human authorization for Wave 2
 
-**Status: NOT READY for Wave 2.** Full detail:
-`docs/governance/wave-1.5-fixwave-phase2-report.md` and
+**Status: READY** for Wave 2 authorization, subject to two routed,
+non-blocking P1s. Full detail:
+`docs/governance/wave-1.5-fix-round-2-report.md` and
 `docs/governance/task-registry.md`'s corresponding section.
 `docs/progress.md`'s "Stage 4H-B1" entry has the running narrative.
 
 All work remains design/documentation only (no code, no migration
-beyond `0049`). Eleven independent Phase 2 reviews found: none of the
-four original Wave 1.5 P0s independently certified closed; four new
-P0-severity findings, three of them inside this fix wave's own output;
-and a confirmed architectural incompatibility between the two largest
-Phase 1 fixes (bonus-engine's Grant terminal-state redesign and
-casino's postWin fix). No Human Decision Register item was touched.
+beyond `0049`, no UI). 24 specialist dispatches across three phases
+(authorship, independent re-verification, closing pass) closed all
+four original Wave-1.5 P0s and all four Wave-1.5-Phase-2-discovered new
+P0s, each independently certified by a reviewer who did not author the
+fix. The composition failure between bonus-engine's and casino's
+designs that blocked the prior round was root-caused, fixed, and
+re-certified. This stage also delivered the Product Surfaces roadmap
+gate (`docs/architecture/35-37`): Stage 6A (Back Office MVP), 6B
+(Partner Console MVP), 6C (B2C Brand Frontend MVP), 6D (Retail/POS),
+none authorized for implementation yet.
 
 ### Decisions/input needed from the human before any further B1 work
 
-1. **Authorize (or not) a second fix-and-reverify round** scoped per
-   the readiness report's §7 minimum-closure list — this is a
-   materially larger remaining-work list than the original Fix Wave
-   directive anticipated, since Phase 2 both re-opened parts of the
-   original four P0s and surfaced new ones.
-2. Stage 4H-B1 Wave 2, CRM implementation, Affiliate implementation,
-   Gamification implementation, and any bonus-funded-wagering
-   implementation remain **NOT authorized**.
-3. The four Human Decision Register items (G-2, `OpenBetSelfExclusionPolicy`
-   default, mixed/bonus-funded cashout policy, FD-1) remain unmade and
-   are not on this round's critical path to close — every finding this
-   round is a technical/architectural defect, not a disguised policy
-   choice requiring one of these answers.
+1. **Authorize (or not) Stage 4H-B1 Wave 2** — the Bonus Engine's
+   design is now READY per independent re-verification. Two
+   non-blocking P1s remain routed (LF-10; the `SEP-1` `agentnetwork`
+   tenant-edge confirmation) and should be closed early in whatever
+   round follows, but do not block starting Wave 2's own scope.
+2. **Authorize (or not) Stage 6A** (Back Office MVP) — `architect`'s
+   reasoned recommendation is to sequence it after Bonus Engine Wave 2
+   to avoid rework on ledger/wallet-shape read views still being
+   reshaped, but nothing technically blocks starting it in parallel if
+   preferred.
+3. CRM implementation, Affiliate implementation, Gamification
+   implementation, bonus-funded-wagering implementation, and Partner
+   Console/B2C frontend implementation remain **NOT authorized**.
+4. The four Human Decision Register items (G-2, `OpenBetSelfExclusionPolicy`
+   default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
+   none of this round's work required or selected one.
