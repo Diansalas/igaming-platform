@@ -446,6 +446,30 @@ reading anything below.
   `resolved_reforfeit` / `resolved_route_to_cash` / `voided_by_rollback` —
   no invented fourth "reviewing" sub-state).
 
+**Fix Round 2, final closing pass — two more items resolved, both
+`ledger-finance`/`bonus-engine`-adjacent, neither selecting G-2:**
+
+- **Hold-capture invocation timing** (`ledger-finance`'s new finding this
+  round, surfaced while fixing the `ACTION_REFORFEIT` posting-sequence
+  contradiction). §16.9/§16.14 previously implied the two-leg hold-capture
+  posting into `player_bonus_held` fires only once `ACTION_HOLD_FOR_REVIEW`
+  specifically is the eventual outcome — flagged as an unresolved
+  contradiction against `10-bonus-engine-architecture.md` §N1.4 step
+  5b/5c's own text at the end of §16.7's re-walk. **Resolved this round**:
+  capture is **unconditional** for every terminal-Grant win credit,
+  decided before any of the three dispositions is known; see the rewritten
+  §16.9 and §16.14.
+- **The missing Grant-status-finalization seam** (`casino`'s own Phase 2
+  finding against `bonus-engine`'s work this round, not previously fixed).
+  Doc 10's value-reducing closing-event mechanism (N1.4 step 5a, and the
+  `voided_by_rollback` sub-case of step 5c) asserts `G.status` flips out of
+  `pending_settlement` "in the same transaction" as casino's own
+  `postRollback`/settlement-timeout-sweep posting, "with no window" — but
+  names no concrete call through which that transaction would actually
+  reach `bonus-engine`'s Grant-status write. **Resolved this round**: new
+  §16.21 names the seam, `bonusengine.RecheckGrantExposure`, symmetric to
+  §16.9's `ResolveTerminalGrantCredit`.
+
 This round adopts `ledger-finance`'s `player_bonus_held` account, the
 two-leg hold-capture posting, and the widened `ResolveTerminalGrantCredit`
 seam signature (§16.9, §16.14) exactly as specified in `ledger-accounting-
@@ -793,7 +817,7 @@ identity-only result:
 |---|---|---|---|
 | Outcome 5: `player_locked_cash` | `player_cash` | Yes — `Dr player_locked_cash net_outstanding_locked / Cr player_cash net_outstanding_locked`, bundled in the same transaction | No — G-2 is defined only over `player_bonus`/`player_locked_bonus` (doc10 §T.7). Not producible by today's `postBet` (§16.10); included for completeness only |
 | Outcome 5: `player_locked_bonus`, Grant non-terminal | `player_bonus` | Yes — `Dr player_locked_bonus net_outstanding_locked / Cr player_bonus net_outstanding_locked`, bundled in the same transaction | No — ordinary case. This is the shape LF-1 restores as actually reachable |
-| Outcome 5: `player_locked_bonus`, Grant terminal | §16.9's seam decides — `ACTION_REFORFEIT`/`ACTION_ROUTE_TO_CASH`/`ACTION_HOLD_FOR_REVIEW` per §16.16 | Yes, but bundled into whatever §16.9's disposition specifies (§16.5a, §16.14) | **Yes — this is G-2 itself** |
+| Outcome 5: `player_locked_bonus`, Grant terminal | §16.9's seam **always** captures into `player_bonus_held` (§16.14) — never `ACTION_REFORFEIT`/`ACTION_ROUTE_TO_CASH`/`ACTION_HOLD_FOR_REVIEW` decided inline; those three are a **later**, separate resolution (§16.16) | Yes, bundled into the same unconditional two-leg hold-capture posting (§16.5a, §16.14) | **The credit enters G-2's held state here, but nothing about G-2 is decided at this call site — capture is technical and unconditional (§16.9). G-2's own selection happens only later, in a separate resolution transaction, if/when a human resolves the `held` record (§16.16)** |
 | Step 2: `player_cash` | `player_cash` | No — never locked | No. **Unchanged** from today's actual behavior for every bet `postBet` can currently produce |
 | Step 2: `player_bonus`, no Step-1 lock found | **Abort** — new sentinel `ErrBonusBetNotLocked`, integrity alert | N/A | N/A — under the mandated shape (§16.10.1) this is unreachable in correctly-functioning code; never silently credited, since guessing its destination is exactly the exploit this section closes |
 | **Outcome 6 (LF-18): identity found, `net_outstanding_locked ≤ 0`** | **Abort** — `ErrLockAlreadyReleased`, integrity alert | **No — never. This is the branch that prevents a second release** | N/A — never reaches a G-2 read; this is a pure integrity abort on the *amount* dimension, orthogonal to whichever Grant status a live read would have found |
@@ -872,7 +896,7 @@ a code change and not decided by this section.
 |---|---|---|
 | Cash-funded wager | §16.4 origin = `player_cash`/`player_locked_cash` → credit `player_cash` | No — G-2 is defined only over `player_bonus`/`player_locked_bonus` credits (doc10 §T.7) |
 | Bonus-funded wager, Grant non-terminal | §16.4 origin = `player_locked_bonus` → live `FOR UPDATE` read of `G.status` under the `(tenant_id, grant_id)` advisory lock (doc10 §9) finds a non-terminal status → credit `player_bonus` normally | No — this is the ordinary case; G-2 is specifically about a **terminal** Grant |
-| Bonus-funded wager, Grant already terminal | §16.9's seam is invoked | **Yes — this is G-2 itself** |
+| Bonus-funded wager, Grant already terminal | §16.9's seam is invoked — **always** performs the unconditional hold-capture posting (§16.14); never decides among the three G-2 actions inline | G-2-relevant (the credit enters the `held` state), but **not decided here** — the three actions are a later, separate resolution (§16.16) |
 | Locked cash | Same row as cash-funded above; a lock has no Grant, so no G-2 dimension exists | No |
 | Locked bonus | Same row as "Grant non-terminal"/"Grant terminal" above — "locked bonus" *is* the `player_locked_bonus` origin case, not a fifth case | See above |
 | Mixed funding (single-instruction, HR-2 regression) | §16.4's outcome 4 (`ErrMixedFundingUnsupported`) — whole transaction aborts, nothing posted | N/A — rejected before any credit is considered |
@@ -905,32 +929,43 @@ net_outstanding_locked` (Step 1b) and `W` = the win's own payout amount
 (from the provider's callback, cross-checked, never trusted blindly for
 destination — §16.3):
 
-1. The ordinary win payout: `Dr house_gaming W / Cr player_bonus W`
-   (Grant non-terminal) or whatever §16.9's disposition specifies (Grant
-   terminal — §16.14's `player_bonus_held` two-leg posting for the `held`
-   branch specifically).
-2. The lock release: `Dr player_locked_bonus X / Cr player_bonus X` (or,
-   under a terminal-Grant disposition, credited to wherever that
-   disposition routes it instead — see below and §16.14).
+1. The ordinary win payout: `Dr house_gaming W / Cr player_bonus W` (Grant
+   non-terminal) or, for a **terminal** Grant, `Dr house_gaming W / Cr
+   player_bonus_held W` — **always**, unconditionally, regardless of which
+   of the three G-2 actions this credit will eventually receive
+   (§16.9/§16.14's corrected framing, closed this round — see the note
+   below).
+2. The lock release: `Dr player_locked_bonus X / Cr player_bonus X` (Grant
+   non-terminal) or, for a terminal Grant, `Dr player_locked_bonus X / Cr
+   player_bonus_held X` — again always, in the same posting as 1, never
+   conditioned on a disposition.
 
 This closes `L(G)` to zero on every win, including the terminal-Grant
 branch — **explicitly required by this fix, not left to `bonus-engine`**:
 per the fix-wave directive, `internal/casino` does not need to design
-`bonus-engine`'s own holding mechanism for a *held* win payout (if G-2 is
-answered `ACTION_HOLD_FOR_REVIEW`), but it **does** need the lock itself
-to resolve rather than dangle. **Cross-dependency found during Round 1,
-closed this round (§16.14):** `ACTION_HOLD_FOR_REVIEW`'s seam disposition
-must name a destination for the *released lock amount* `X` (distinct from
-wherever it holds the *payout* `W`) — `ledger-finance`'s
-`player_bonus_held` account (§7.7.2.2) is that destination for both, in
-one balanced transaction, adopted in full in §16.14 below.
+`bonus-engine`'s own holding mechanism, but it **does** need the lock
+itself to resolve rather than dangle, on every win, unconditionally —
+capture into `player_bonus_held` is *itself* that resolution for a
+terminal Grant; it does not wait for G-2 to be answered `ACTION_HOLD_FOR_
+REVIEW` or anything else. **Cross-dependency found during Round 1, closed
+this round (§16.14):** the seam must name a destination for the *released
+lock amount* `X` (distinct from wherever it holds the *payout* `W`) —
+`ledger-finance`'s `player_bonus_held` account (§7.7.2.2) is that
+destination for both, in one balanced transaction, adopted in full in
+§16.14 below.
 
-**Hold case (`ACTION_HOLD_FOR_REVIEW`) — adopted this round from
-`ledger-finance`'s §7.7.2.2/§7.7.2.10 contract, in full, in place of the
-suspense/hold placeholder Round 1 left open.** See §16.14 for the exact
-two-leg posting shape, §16.15 for the rollback-of-a-held-win transition,
-and §16.16 for the resolution of the `ACTION_HOLD_FOR_REVIEW`
-lock-releases-but-doesn't-spend contradiction.
+**The hold-capture posting — adopted this round from `ledger-finance`'s
+§7.7.2.2/§7.7.2.10 contract, in full, in place of the suspense/hold
+placeholder Round 1 left open, and corrected this round (Fix Round 2,
+final closing pass) to be unconditional rather than conditioned on
+`ACTION_HOLD_FOR_REVIEW` specifically.** See §16.9 for the seam's
+corrected invocation semantics, §16.14 for the exact two-leg posting
+shape, §16.15 for the rollback-of-a-held-win transition, and §16.16 for
+the resolution of the `ACTION_HOLD_FOR_REVIEW` lock-releases-but-doesn't-
+spend contradiction. `ACTION_HOLD_FOR_REVIEW` itself is not a posting at
+all (§16.16) — it is simply the name for "the `held` record has not yet
+been resolved," so it cannot be what gates whether the posting above
+occurs.
 
 **Loss case — the harder, previously entirely unaddressed gap.** No
 inbound event signals a loss. Two designs, per this fix-wave's own (a)/(b)
@@ -956,6 +991,19 @@ menu:
   figure), mirrored per the existing `BONUS_SET`
   rule (B1 extended) exactly as an ordinary loss would be — no new
   posting shape, reused verbatim.
+
+  **Grant-status finalization, closed this round (§16.21).** Each swept
+  lock's `casino_settlement_timeout` posting is exactly the kind of
+  value-reducing closing event that can clear a Grant's last outstanding
+  `AOE` component. Per Grant, in the **same** transaction as that Grant's
+  own `casino_settlement_timeout` posting, and only if the live
+  Grant-status read finds it `pending_settlement`, the sweep calls
+  `bonusengine.RecheckGrantExposure(ctx, tx, grantID,
+  triggeringLedgerTransactionID, TriggerCasinoSettlementTimeout)` (§16.21)
+  before committing that Grant's batch — the sweep does not itself decide
+  whether this was the last remaining exposure; it only ensures
+  `bonus-engine` gets the chance to decide, in the same transaction, every
+  time it might have been.
 
   Required properties, per the fix-wave directive:
   - **Per-tenant and per-jurisdiction configurable**, jurisdiction-primary
@@ -1101,67 +1149,98 @@ is required). The player later wins. Two exhaustive branches:
    now that it keys off the credit leg rather than a debit leg the
    destination map mis-mapped). §16.5's "Grant terminal" row applies:
    the credit is **not** posted to either `player_bonus` or `player_cash`
-   by `postWin` itself — it is handed to §16.9's seam, which today (no
-   G-2 answer exists, `bonusengine.ResolveTerminalGrantCredit` does not
-   exist) **fails closed**: the whole win-posting transaction is rejected
-   with `ErrTerminalGrantCreditUnresolved`, a distinct, loud, alerting
-   error (mirroring `ErrBetNotFound`'s "integrity alert, not a routine
-   failure" framing, §7), and — per §16.5a's exclusion, found during this
-   re-walk — that rejection is itself recorded so the settlement-timeout
-   sweep (§16.5a(a)) can never later misclassify this genuine win as a
-   silent loss. **Nothing posts. No money moves.** `G` remains in
-   `pending_settlement` (§16.10.2) with `L(G) = X > 0` — a real, disclosed
-   residual: the lock does **not** release in this sub-branch, by design,
-   because releasing it would require choosing a destination, which is
-   exactly G-2's undecided question. Once a human selects and
-   `bonus-engine` builds one of the three actions, the retried transaction
-   posts the win **and** the lock release together, per whichever
-   disposition applies: `ACTION_REFORFEIT` posts the payout and released
-   lock amount straight into `promo_liability` — **never via
-   `player_bonus`, not even transiently, not even within the same
-   transaction** (corrected this round: this sentence formerly read
-   "releases into `player_bonus` then immediately re-forfeits," which
-   `ledger-accounting-model.md` §7.7.2.9/HR-25 has now confirmed is wrong
-   and withdrawn — that document made and repeated the identical error,
-   independently corrected there this same round); `ACTION_ROUTE_TO_CASH`
-   releases directly to `player_cash`
-   per the seam's override (`L(G) → 0`, and this is the **only** route by
-   which a bonus-origin stake ever reaches `player_cash` directly — gated
-   entirely behind a human decision, never `postWin`'s default);
-   `ACTION_HOLD_FOR_REVIEW` posts both legs into `ledger-finance`'s
-   `player_bonus_held` account per §16.14's two-leg hold-capture posting —
-   `Dr house_gaming W / Cr player_bonus_held W` always, plus `Dr
-   player_locked_bonus X / Cr player_bonus_held X` since the stake was
-   locked — in one balanced transaction, `L(G) → 0` there too, the lock is
-   never left dangling once a disposition exists, **and the value is not
-   spendable**: `player_bonus_held` is disjoint from `player_bonus` and
-   `player_cash` alike, readable only by the G-2 resolution flow (§16.16
-   resolves the precise sense in which this both "releases the lock" and
-   "does not create spendable value" — both are true, of different
-   accounts). **No withdrawable cash is ever created by this branch until
-   a human selects and `bonus-engine` implements one of these three
-   actions. Holds.**
+   by `postWin` itself — it is handed to §16.9's seam.
 
-   > **Flagged, not resolved here (`ledger-finance`, for `casino` and
-   > `architect`).** This sub-branch's "fails closed today, retries once
-   > a human decides" framing describes `ACTION_REFORFEIT`/
-   > `ACTION_ROUTE_TO_CASH` as posting for the first time only once a
-   > disposition is already known — but `10-bonus-engine-architecture.md`
-   > N1.4 step 5b (adopting `ledger-accounting-model.md` §7.7.2.2) requires
-   > the hold-capture posting into `player_bonus_held` to happen
-   > **unconditionally, for every** value-creating credit reaching a
-   > terminal Grant, before any disposition is known — and its own N1.4
-   > step 5c states resolution "never posts the win credit for the first
-   > time, it only moves an already-`player_bonus_held`-resident value
-   > onward," for **all three** actions, not only `ACTION_HOLD_FOR_REVIEW`.
-   > Whether this sub-branch's synchronous fail-closed/retry model (and
-   > §16.14's own framing of the hold-capture posting as built "at exactly
-   > the site §16.9's seam returns `ACTION_HOLD_FOR_REVIEW`") needs to be
-   > retired in favor of an unconditional hold-then-later-resolve model is
-   > a seam-invocation-timing question this section does not decide — it
-   > is `casino`'s and `architect`'s to reconcile against doc 10's already-
-   > decided mechanism, not a restatement of a posting shape this
-   > specialist can make unilaterally.
+   **Today, before `internal/bonus` exists** (`bonusengine.
+   ResolveTerminalGrantCredit` does not exist, and the `player_bonus_held`
+   account type itself does not exist either, HR-9-gated) — the whole
+   win-posting transaction is rejected with `ErrTerminalGrantCreditUnresolved`,
+   a distinct, loud, alerting error (mirroring `ErrBetNotFound`'s
+   "integrity alert, not a routine failure" framing, §7), and — per
+   §16.5a's exclusion, found during this re-walk — that rejection is
+   itself recorded so the settlement-timeout sweep (§16.5a(a)) can never
+   later misclassify this genuine win as a silent loss. **Nothing posts.
+   No money moves.** `G` remains in `pending_settlement` (§16.10.2) with
+   `L(G) = X > 0` — a real, disclosed residual.
+
+   **Once the seam exists** (§16.9, §16.14, corrected this round —
+   Fix Round 2, final closing pass): capture is **unconditional**, decided
+   the instant this branch is reached, **before** any of the three G-2
+   actions is known, let alone selected. `ResolveTerminalGrantCredit`
+   posts, in the same transaction as the rest of the settlement, `Dr
+   house_gaming W / Cr player_bonus_held W` (always) plus `Dr
+   player_locked_bonus X / Cr player_bonus_held X` (since the stake was
+   locked) — §16.14's two-leg hold-capture posting, in full. `L(G) → 0`
+   immediately, on capture, regardless of which G-2 action this credit
+   will eventually receive. **Nothing here waits for a human decision, and
+   nothing here is "the fail-closed behavior retried once G-2 is
+   answered" — capture is TECHNICAL, exactly like an ordinary win, once
+   the mechanism exists; only what happens *afterward* to the captured
+   value is POLICY-DEPENDENT.** `bonus-engine` also writes a
+   `bonus_held_dispositions` row, `status = 'held'`, in the same
+   transaction (§16.14).
+
+   The three G-2 actions never fire inline here at all — they are a
+   **later, separate resolution transaction** (doc10 §N1.4 step 5c,
+   adopted in §16.16), keyed by the `bonus_held_dispositions` row's own
+   `id`, run whenever a human actually resolves it (which may be seconds
+   or months after capture, or never): `ACTION_REFORFEIT` posts `Dr
+   player_bonus_held (W+X) / Cr promo_liability (W+X)` — **never via
+   `player_bonus`, not even transiently** (corrected in Round 2: this
+   sentence formerly read "releases into `player_bonus` then immediately
+   re-forfeits," which `ledger-accounting-model.md` §7.7.2.9/HR-25 has
+   confirmed is wrong and withdrawn); `ACTION_ROUTE_TO_CASH` posts `Dr
+   player_bonus_held (W+X) / Cr player_cash (W+X)` — the **only** route by
+   which a bonus-origin stake ever reaches `player_cash` directly, gated
+   entirely behind a human decision, never `postWin`'s default, and never
+   something `postWin`/capture itself performs; `ACTION_HOLD_FOR_REVIEW`
+   is not a posting at all — it is simply the record staying `held`,
+   i.e. no resolution transaction has run yet (§16.16). In every case,
+   resolution **moves** an already-`player_bonus_held`-resident value
+   onward — it never posts the win credit for the first time (doc10 §N1.4
+   step 5c, quoted verbatim). **No withdrawable cash is ever created until
+   a human selects and `bonus-engine` runs one of `ACTION_REFORFEIT`/
+   `ACTION_ROUTE_TO_CASH`. Holds.**
+
+   **Why unconditional capture, not capture-on-`ACTION_HOLD_FOR_REVIEW`,
+   is correct — reasoning, not assertion.** An earlier reading of this
+   section (Round 2, pre-closing-pass) implied capture happens only when
+   the eventual disposition turns out to be `ACTION_HOLD_FOR_REVIEW`
+   specifically — i.e., that `ACTION_REFORFEIT`/`ACTION_ROUTE_TO_CASH`
+   post directly to their final destination the moment a human decides,
+   with no intervening capture step at all. This was flagged as an
+   unresolved contradiction against `10-bonus-engine-architecture.md`
+   N1.4 step 5b, which requires the hold-capture posting **unconditionally,
+   for every** value-creating credit reaching a terminal Grant, before any
+   disposition is known, and whose step 5c states resolution "never posts
+   the win credit for the first time... for all three actions." The two
+   models are genuinely different, not a wording variance: conditional
+   capture means the credit sits **nowhere in the ledger** between
+   settlement and a human's eventual decision (an unbalanced, unrecorded
+   gap the moment the win callback is accepted but not yet resolved);
+   unconditional capture means the credit is posted, balanced, and
+   auditable in `player_bonus_held` from the instant settlement completes,
+   with only its *final resting place* still undecided. Given the entire
+   reason `player_bonus_held` and `bonus_held_dispositions` exist —
+   closing the original P0 (LF-2: a terminal-Grant win credit reaching a
+   player-visible balance before a human decides its disposition) — a
+   design that leaves the credit unposted anywhere until a human acts
+   reopens exactly that gap for every credit awaiting `ACTION_REFORFEIT`
+   or `ACTION_ROUTE_TO_CASH`, not only ones awaiting `ACTION_HOLD_FOR_
+   REVIEW`: it would mean `postWin`'s own transaction either (a) blocks
+   indefinitely on a synchronous human decision, which no financial
+   settlement callback can safely do, or (b) fails closed and is retried
+   later, in which case the "win happened" fact is not durably recorded
+   anywhere until that retry succeeds — a redelivery/crash window with no
+   ledger-visible trace of the win at all. `ledger-finance`'s own §7.7.2.2/
+   §7.7.2.10 contract settles this: it requires `casino` to "post the
+   hold-capture transaction... in the same `ledger.Post` call as the rest
+   of the settlement, never as a second transaction" (§7.7.2.10 item 1,
+   with no conditional on which action later applies), and doc10 N1.4 step
+   5b is equally unconditional. **Unconditional capture is therefore not
+   merely "very likely intended" — it is what both of this document's own
+   upstream dependencies already specify; this document's prior
+   conditional framing was the outlier, now corrected.**
 
 In neither branch does `player_cash` receive value that traces back to a
 bonus-origin stake without first passing through either (a) the existing,
@@ -1170,10 +1249,14 @@ not-yet-built G-2 action the human has not authorized. The specific
 exploit `architect` flagged — `postWin`'s hardcode routing a bonus-funded
 win straight to `player_cash` — is closed by §16.4's fixed resolution
 alone, **unconditionally, independent of G-2's eventual answer**: even if
-G-2 is one day answered `ACTION_ROUTE_TO_CASH`, that routing only ever
-fires through §16.9's named seam, deliberately, for the narrow
-terminal-Grant case — never as `postWin`'s default behavior for an
-ordinary, non-terminal settlement.
+G-2 is one day answered `ACTION_ROUTE_TO_CASH` for a given held record,
+that routing only ever fires through the later, separate resolution
+transaction §16.9/§16.16 name — never inline in `postWin`, and never as
+`postWin`'s default behavior for an ordinary, non-terminal settlement.
+`postWin`'s own, unconditional act is capture into `player_bonus_held`
+(§16.9/§16.14) — a disjoint, non-spendable account — never a direct
+credit to `player_cash`, regardless of which G-2 action a human eventually
+selects.
 
 **What this re-walk changed versus the original proof:** branch 2 is now
 actually reachable (LF-1); both branches now explicitly close `L(G)` to
@@ -1224,7 +1307,12 @@ confused with it (mirroring doc10 §T.12's own distinction):
   `bonus-engine`/`architect` reconciliation, not decided here**, because
   doc10 §T.7's own trigger-condition text currently folds this case into
   the same G-2 bucket as a WIN settlement without distinguishing them
-  (§16.10.3).
+  (§16.10.3). **Independent of how that tension resolves**, this rollback
+  is, either way, a value-reducing closing event under doc10 N1.4 step 5a
+  — so whichever posting shape §16.10.3 eventually settles on, `postRollback`
+  must call §16.21's `RecheckGrantExposure` seam in the same transaction
+  whenever the live Grant-status read finds `pending_settlement`, exactly
+  as the settlement-timeout sweep now does (§16.5a(a)).
 
 `postRollback` itself never reaches G-2 for a rollback **of a win** that
 already credited `player_bonus` before the Grant went terminal — that
@@ -1234,72 +1322,124 @@ to the ordinary balance-sufficiency check (§16.5's rollback row).
 
 ### 16.9 The G-2 injection boundary — preserving human ownership
 
-**Named seam, widened this round (LF-18/§7.7.2.10 item 2 — the signature
-below supersedes Round 1's single-`amount` form):**
-`bonusengine.ResolveTerminalGrantCredit(ctx, tx, grantID, correlationID,
-creditKind, payoutAmount, releasedLockAmount) (disposition, err)` — called
-from exactly the one site in §16.8, inside the same database transaction
-as the settlement posting, under the same `(tenant_id, grant_id)` advisory
-lock doc10 §9 already specifies. `payoutAmount` (`W`, §16.4's win payout)
-and `releasedLockAmount` (`X`, Step 1b's `net_outstanding_locked`, LF-18)
-are **separate parameters, never a single combined `amount`** — required
-because `ledger-finance`'s §7.7.2.2 two-leg hold-capture posting (§16.14)
-needs both quantities independently to build its two legs, and collapsing
-them into one parameter would make that posting unbuildable from this
-seam's return value alone. This mirrors doc10 §T.7's own framing verbatim
-("a new call-back into Bonus Engine's Grant-status read that does not
-exist today... regardless of which action is ultimately chosen") — this
-section names the exact function shape so it is not discovered
-mid-implementation, per that framing's own stated intent, and now also
-carries `ledger-finance`'s own binding requirement on that shape
-(§7.7.2.10 item 2, "casino must... widen `ResolveTerminalGrantCredit`'s
-signature to carry `payout_amount`/`released_lock_amount` as SEPARATE
-parameters").
+**Corrected this round (Fix Round 2, final closing pass) — this seam
+performs unconditional capture, never a disposition decision.** Round 1
+and Round 2's earlier text described this seam as returning one of
+`ACTION_REFORFEIT`/`ACTION_ROUTE_TO_CASH`/`ACTION_HOLD_FOR_REVIEW`
+synchronously, from inside `postWin`'s own settlement transaction — i.e.,
+as if G-2's answer were decided at this call site. It is not. Reconciled
+against `10-bonus-engine-architecture.md` §N1.4 step 5b/5c (built against
+`ledger-accounting-model.md` §7.7.2.2's binding contract, §16.7's
+sub-branch 2 now walks the reasoning in full): the three actions are a
+**separate, later resolution**, run by a human via `bonus-engine`'s own
+resolution flow, in its own transaction, keyed by the `bonus_held_
+dispositions` row's `id` — never inline in `postWin`, never decided by
+this seam. This seam's entire job, every time it is called, is the
+**unconditional hold-capture posting** (§16.14) plus handing off enough
+information for `bonus-engine` to record the resulting `held` row — full
+stop. See §16.7 sub-branch 2 for the reasoning this correction rests on
+(why conditional-on-`ACTION_HOLD_FOR_REVIEW` capture would reopen the
+exact P0, LF-2, this mechanism exists to close).
 
-**Today, before G-2 is answered, and before `internal/bonus` exists at
-all**: this function does not exist. `postWin` cannot call it. The
-correct, fail-closed behavior for `internal/casino` in this state is:
-detect the terminal-Grant condition (§16.8's live status read, which
-*can* be built today — it needs only a Grant status table to query, not
-the resolution function) and **reject the whole settlement transaction
-with a distinct sentinel error** (e.g. `ErrTerminalGrantCreditUnresolved`),
-surfaced as an integrity/ops alert exactly like `ErrBetNotFound` — never
-silently posted to either account, never retried automatically, never
-guessed. This is the "fails closed / queues for review rather than
-guessing" behavior this gate requires (§A.8), and it requires **no
-G-2 answer to build** — only the live Grant-status read, itself
-independent of which action is eventually selected.
+**Named seam, widened this round (LF-18/§7.7.2.10 item 2 for the
+`payoutAmount`/`releasedLockAmount` split; widened again this round to
+carry the posted transaction id, closing the gap between this signature
+and §16.14's own prose, which already required handing it over):**
 
-**Once G-2 is answered**, exactly one of the three bodies from doc10
-§T.7 is dropped into `ResolveTerminalGrantCredit`'s implementation:
-ACTION_REFORFEIT (posts the held payout/released-lock amount straight
-into `promo_liability` — **never via `player_bonus`, not even
-transiently**; the §T.7 phrasing this bullet previously carried, "post
-normally, then a compensating `bonus_forfeiture`," described exactly the
-posted-then-reversed shape `ledger-accounting-model.md` §7.7.2.9/HR-25
-now confirms is wrong, and is withdrawn here to match — same document,
-same round, per the sub-branch-2 correction above), ACTION_ROUTE_TO_CASH
-(the seam returns a
-destination override, which `postWin` substitutes for `player_bonus`),
-or ACTION_HOLD_FOR_REVIEW (the seam returns a "hold" disposition,
-**now fully specified, not out of scope** — §16.14 adopts
-`ledger-finance`'s `player_bonus_held` two-leg posting in full). **No code
-in this section selects among these three or implements any of them —
-this section adopts the *destination* `ledger-finance` has now decided
-for the hold branch specifically, which is a mechanical consequence of
-§7.7.2's binding decision, not a G-2 selection.**
+```
+bonusengine.ResolveTerminalGrantCredit(
+    ctx context.Context,
+    tx <db tx>,
+    grantID uuid.UUID,
+    correlationID string,
+    creditKind CreditKind,
+    payoutAmount decimal.Decimal,      // W, §16.4's win payout
+    releasedLockAmount decimal.Decimal, // X, Step 1b's net_outstanding_locked
+    settlementLedgerTransactionID uuid.UUID, // new this round — see below
+) (heldDispositionID uuid.UUID, err error)
+```
+
+Called from exactly the one site in §16.8, inside the same database
+transaction as the settlement posting, under the same `(tenant_id,
+grant_id)` advisory lock doc10 §9 already specifies. `payoutAmount` (`W`)
+and `releasedLockAmount` (`X`) remain **separate parameters, never a
+single combined `amount`**, per LF-18/§7.7.2.10 item 2's binding
+requirement, unchanged this round. `payoutAmount`/`releasedLockAmount`
+are threaded through **not** so this seam can pick a destination for them
+— capture's destination is fixed, always `player_bonus_held` — but so
+`bonus-engine`'s `bonus_held_dispositions` row can carry `payout_amount`/
+`released_lock_amount` as its own columns (doc10 N1.4 step 5b.iii)
+without re-deriving them from the ledger.
+
+**Call order, made explicit this round (previously left implicit, and
+inconsistent with §16.14's own prose, which already assumed a posted
+transaction id existed to hand over):**
+
+1. `postWin` (already inside its settlement transaction, `tx`) builds and
+   posts the two-leg hold-capture `LedgerTransaction` **itself**, via its
+   own existing `ledger.Post` call — the identical mechanism, idempotency
+   key shape, and audit record every other settlement uses (§16.14) —
+   landing in `player_bonus_held`. This is `casino`'s own posting; the
+   seam does not perform it. This yields `settlementLedgerTransactionID`.
+2. `postWin` then calls `ResolveTerminalGrantCredit`, passing that id
+   along with `grantID`/`correlationID`/`creditKind`/`payoutAmount`/
+   `releasedLockAmount`. Inside the same transaction, `bonus-engine`'s
+   implementation writes the `bonus_held_dispositions` row (`status =
+   'held'`, `settlement_ledger_transaction_id` = the id from step 1,
+   `payout_amount = W`, `released_lock_amount = X`) and returns that row's
+   own `id` as `heldDispositionID`.
+
+`postWin` does **not** branch on `heldDispositionID` — it exists for
+logging/observability/testing only (mirroring §16.14's "hand over the
+transaction id" framing, now completed with an explicit return value on
+the `bonus-engine` side). There is no return value here that could carry
+a disposition, because no disposition is decided at this call site.
+
+**Today, before `internal/bonus` exists at all, and before the
+`player_bonus_held` account type exists (HR-9-gated, §7.7.2.3)**: neither
+half of the two-step sequence above can run. `ledger.Post` has no valid
+account type to post step 1 against, and `ResolveTerminalGrantCredit`
+does not exist for step 2. The correct, fail-closed behavior for
+`internal/casino` in this state is unchanged from Round 1 in *outcome*,
+but reframed in *reasoning* — it is a mechanism-does-not-exist-yet
+rejection, never a G-2-unanswered rejection, because capture never needed
+G-2 answered in the first place: detect the terminal-Grant condition
+(§16.8's live status read, which *can* be built today — it needs only a
+Grant status table to query, not the resolution function) and **reject
+the whole settlement transaction with a distinct sentinel error** (e.g.
+`ErrTerminalGrantCreditUnresolved`), surfaced as an integrity/ops alert
+exactly like `ErrBetNotFound` — never silently posted to either account,
+never retried automatically, never guessed. This is the "fails closed /
+queues for review rather than guessing" behavior this gate requires
+(§A.8).
+
+**Once `internal/bonus` and the `player_bonus_held` account type both
+exist**, capture runs on **every** terminal-Grant win credit,
+unconditionally — this requires no G-2 answer, ever, and is never gated
+on which of the three actions a human will eventually pick. G-2's own
+answer only governs the **separate, later** resolution transaction
+(doc10 §N1.4 step 5c, adopted in §16.16): `ACTION_REFORFEIT` posts the
+held amount straight into `promo_liability` — **never via `player_bonus`,
+not even transiently** (the §T.7 phrasing this bullet previously carried,
+"post normally, then a compensating `bonus_forfeiture`," described
+exactly the posted-then-reversed shape `ledger-accounting-model.md`
+§7.7.2.9/HR-25 confirms is wrong, and remains withdrawn); `ACTION_ROUTE_
+TO_CASH` posts the held amount into `player_cash`; `ACTION_HOLD_FOR_
+REVIEW` performs no posting at all — it is simply the absence of a
+resolution act, the record remaining `status = 'held'` (§16.16). **No
+code in this section selects among these three or implements any of
+them — this section only names the boundary at which capture happens
+(unconditionally) and the boundary at which resolution happens (later,
+separately, never here).**
 
 **The requirement on all three, found while designing §16.5a's
-lock-release step, closed this round.** Whichever disposition
-`ResolveTerminalGrantCredit` returns must also specify where the
-*released lock amount* (`X`, distinct from the win payout `W`) lands —
-`ACTION_REFORFEIT`/`ACTION_ROUTE_TO_CASH` already imply an answer
-(`promo_liability` via re-forfeiture, or `player_cash` via the override,
-respectively). `ACTION_HOLD_FOR_REVIEW` is where Round 1 left this open —
-**closed now**: `player_bonus_held` (§16.14) is that destination for
-both `W` and `X`, in one balanced transaction, exactly as
-`ledger-finance`'s §7.7.2.2 specifies. The lock is never left dangling
-regardless of which action is eventually selected.
+lock-release step, closed this round.** The released lock amount (`X`,
+distinct from the win payout `W`) must land somewhere alongside `W` at
+capture time, regardless of which action a human eventually selects —
+`player_bonus_held` (§16.14) is that destination for both, in the single
+unconditional two-leg posting above, exactly as `ledger-finance`'s
+§7.7.2.2 specifies. The lock is never left dangling, and never waits for
+a disposition to exist before it closes to zero.
 
 ### 16.10 The Grant terminal-state invariant — formalized, stress-tested, and found insufficient as originally proposed
 
@@ -1618,6 +1758,22 @@ file directly"):
   first), so the gap is dormant, not live — it must be closed in the same
   change that adds `OriginatingProviderTxID` to Step 1/Step 2 (§16.4a),
   not before.
+- **Hold-capture invocation timing — CLOSED this round (Fix Round 2, final
+  closing pass)** (§16.9, §16.14, reasoning in §16.7 sub-branch 2).
+  Capture into `player_bonus_held` is unconditional for every
+  terminal-Grant win credit, decided before any of the three G-2 actions
+  is known — never conditioned on the credit eventually staying
+  `ACTION_HOLD_FOR_REVIEW`. `ResolveTerminalGrantCredit`'s signature is
+  widened again to carry `settlementLedgerTransactionID` and return
+  `heldDispositionID`, closing the gap between §16.9's prior signature and
+  §16.14's own prose (which already required handing the id over).
+- **The Grant-status-finalization seam for value-reducing closing
+  events — CLOSED this round** (new §16.21). `casino`'s own Phase 2
+  finding against `bonus-engine`'s work this round — that doc10 N1.4 step
+  5a/5c's "`G.status` flips in the same transaction, no window" claim
+  named no concrete call by which `postRollback` or the settlement-timeout
+  sweep would reach it — is closed by naming `bonusengine.
+  RecheckGrantExposure`, symmetric to `ResolveTerminalGrantCredit`.
 
 ### 16.14 Adopting `ledger-finance`'s `player_bonus_held` account and the two-leg hold-capture posting
 
@@ -1629,6 +1785,21 @@ REVIEW`'s destination as an unnamed cross-dependency (§16.5a, §16.9,
 answer at every site Round 1 flagged as open, and nowhere invents a
 variant of it.
 
+**Corrected this round (Fix Round 2, final closing pass): this posting is
+unconditional, not conditioned on `ACTION_HOLD_FOR_REVIEW`.** An earlier
+reading of this section framed the posting below as built "at exactly the
+site `ACTION_HOLD_FOR_REVIEW` is returned" — implying it fires only for
+that one outcome, with `ACTION_REFORFEIT`/`ACTION_ROUTE_TO_CASH` posting
+directly to their final destination instead. That is not what `doc10`
+§N1.4 step 5b (built against this document's own §7.7.2.2 contract)
+requires, and §16.9/§16.7 sub-branch 2 now state the corrected model in
+full: this posting happens for **every** terminal-Grant win credit,
+**before** any of the three actions is known, let alone selected. What
+`ACTION_HOLD_FOR_REVIEW` actually names is not this posting — it is the
+**absence of any further posting**, i.e. the record staying `status =
+'held'` because no one has resolved it yet (§16.16). The text below is
+revised accordingly.
+
 **The account.** `player_bonus_held` — a third, disjoint, Grant-attributed
 ledger account type (per `(wallet_id, account_type, asset_code)`, the same
 shape every other `player_*` type already has), a member of `BONUS_SET`
@@ -1637,8 +1808,12 @@ finance`'s migration `0055`, §7.7.2.4) — `casino` only posts against it,
 through `ledger.GetOrCreateAccount`, exactly as it already does for every
 other account type today.
 
-**The posting — one balanced `LedgerTransaction`, built in `postWin` at
-exactly the site §16.9's seam returns `ACTION_HOLD_FOR_REVIEW`:**
+**The posting — one balanced `LedgerTransaction`, built and posted by
+`postWin` itself, unconditionally, at exactly the one site §16.8 names
+(the live Grant-status read finds a terminal/`pending_settlement` Grant),
+*before* `ResolveTerminalGrantCredit` is even called (§16.9's corrected
+call order) — never conditioned on which of the three G-2 actions this
+credit will eventually receive:**
 
 > - `Dr house_gaming payout_amount(W) / Cr player_bonus_held W` — **always**
 >   present, the win's own value-creating credit, captured rather than
@@ -1670,9 +1845,13 @@ posting layer never needs to re-derive either from a single combined
 owned, not `casino`-owned — `casino`'s only obligation is to post the
 hold-capture transaction above and hand `bonus-engine`'s seam
 implementation the transaction id it posted under
-(`settlement_ledger_transaction_id`), so `bonus-engine` can write the
-corresponding row in the **same** database transaction. `casino` does not
-design, migrate, or query this table directly.
+(`settlement_ledger_transaction_id`, now an explicit parameter on
+`ResolveTerminalGrantCredit`, §16.9), so `bonus-engine` can write the
+corresponding row (`status = 'held'`) in the **same** database
+transaction and return its own `heldDispositionID` (§16.9). `casino` does
+not design, migrate, or query this table directly, and does not branch on
+`heldDispositionID` — it is a hand-off and a confirmation, not a decision
+input.
 
 **Idempotency (LF-22, adopted verbatim).** The per-occurrence key is
 `settlement_ledger_transaction_id` — **not** `correlation_id` (this
@@ -1802,9 +1981,11 @@ accounts**, and the ambiguity is resolved — not by picking one, but by
 stating both halves against the correct pair of accounts, conforming
 exactly to `ledger-accounting-model.md` §7.7.2's now-binding vocabulary.
 
-**The resolution.** `ACTION_HOLD_FOR_REVIEW` posts a real, balanced
-ledger transaction — **never a literal no-op** — that does exactly two
-things, simultaneously, in the one hold-capture posting (§16.14):
+**The resolution.** The hold-capture posting itself — which, per §16.9's
+correction this round, happens **unconditionally for every terminal-Grant
+win credit, not only ones that end up staying `ACTION_HOLD_FOR_REVIEW`**
+— is a real, balanced ledger transaction, **never a literal no-op**, that
+does exactly two things, simultaneously, in the one posting (§16.14):
 
 1. **It releases the lock, unconditionally.** `Dr player_locked_bonus X /
    Cr player_bonus_held X` is a real posting; `Σ signed(player_locked_bonus)`
@@ -1990,23 +2171,28 @@ which transaction type is redelivered. Row 8 proves the one legitimate
 interleaving this document has always disclosed (§16.11) is unaffected by
 any Round 2 change.
 
-**Part B — the `held` chain (Grant terminal, `ACTION_HOLD_FOR_REVIEW`),
-proving the still-held-rollback case explicitly.** Stake `X = 400`,
-payout `W = 250`, correlation_id `C4`, Grant `G2` (terminal at settlement
-time).
+**Part B — the `held` chain (Grant terminal, disposition never resolved —
+`ACTION_HOLD_FOR_REVIEW` is simply the name for this state), proving the
+still-held-rollback case explicitly.** Stake `X = 400`, payout `W = 250`,
+correlation_id `C4`, Grant `G2` (`pending_settlement` at settlement time).
 
 1. **Bet.** `T4`: `Dr player_bonus 400 / Cr player_locked_bonus 400`
    under `C4`.
-2. **Win, resolved as `held`.** §16.4 finds `net_outstanding_locked = 400
-   > 0` (outcome 5); the live Grant-status read finds `G2` terminal;
-   §16.9's seam returns `ACTION_HOLD_FOR_REVIEW`. `postWin` posts the
-   two-leg hold-capture transaction (§16.14) `T5`: `Dr house_gaming 250 /
-   Cr player_bonus_held 250` + `Dr player_locked_bonus 400 / Cr
-   player_bonus_held 400`, one balanced transaction (`650=650` ✓).
-   `bonus-engine` writes `bonus_held_dispositions` row `H1`:
-   `settlement_ledger_transaction_id = T5.id`, `payout_amount=250`,
-   `released_lock_amount=400`, `status='held'`. `L(G2)=0`.
-   `player_bonus_held` balance for `H1` `= 650`.
+2. **Win, captured unconditionally.** §16.4 finds `net_outstanding_locked
+   = 400 > 0` (outcome 5); the live Grant-status read finds `G2`
+   terminal/`pending_settlement`. Per §16.9's corrected call order,
+   `postWin` **first** posts the two-leg hold-capture transaction (§16.14)
+   `T5`: `Dr house_gaming 250 / Cr player_bonus_held 250` + `Dr
+   player_locked_bonus 400 / Cr player_bonus_held 400`, one balanced
+   transaction (`650=650` ✓) — unconditionally, before any of the three
+   G-2 actions is known. `postWin` then calls `ResolveTerminalGrantCredit`
+   with `settlementLedgerTransactionID = T5.id`; `bonus-engine` writes
+   `bonus_held_dispositions` row `H1`: `settlement_ledger_transaction_id =
+   T5.id`, `payout_amount=250`, `released_lock_amount=400`,
+   `status='held'`, and returns `heldDispositionID = H1.id`. `L(G2)=0`.
+   `player_bonus_held` balance for `H1` `= 650`. No human has acted yet —
+   `H1` simply sits `held`; this **is** `ACTION_HOLD_FOR_REVIEW`'s
+   complete state (§16.16), not a distinct posting.
 3. **Rollback of the still-held win.** A rollback naming `T5`'s
    `provider_tx_id` arrives. `postRollback` looks up
    `bonus_held_dispositions` by `settlement_ledger_transaction_id = T5.id`,
@@ -2029,7 +2215,13 @@ time).
    status='held'` — one row affected, succeeds. `player_bonus_held`
    balance for `H1` after: `650 − 650 = 0`. **Balanced** (`650=650`), and
    `H1` is now terminal (`voided_by_rollback`) — **no held value remains
-   to ever be resolved.**
+   to ever be resolved.** Since `H1` was `G2`'s only outstanding `AOE`
+   component, `postRollback` also calls `bonusengine.
+   RecheckGrantExposure(ctx, tx, G2, T6.id, TriggerHeldDispositionResolved)`
+   in the **same** transaction (§16.21) — `bonus-engine` finds
+   `AOE(G2, ·) = ∅` and flips `G2.status` from `pending_settlement` to its
+   already-recorded `terminal_resolution` value, with a Progress entry
+   citing `T6`.
 4. **A late resolution attempt arrives after the void** (e.g. a queued
    staff action to apply G-2's answer, processed after the rollback
    already committed). It attempts the same guarded update pattern
@@ -2210,6 +2402,152 @@ substance from Round 1's own posture — this round only narrows its scope**
 (the still-held sub-case is no longer part of what LF-10 covers; the
 resolved-win sub-case is all that remains of it).
 
+### 16.21 The Grant-status-finalization seam — naming `bonusengine.RecheckGrantExposure` (`casino`'s own Phase 2 finding, closed this round)
+
+**The gap, stated precisely.** `10-bonus-engine-architecture.md` N1.4
+step 5a asserts that every value-reducing closing event — a loss-grading
+settlement, a VOID, a ROLLBACK, or (casino only, N1.7) an elapsed
+settlement window with no WIN observed — that clears a Grant's last
+outstanding `AOE` component flips `G.status` from `pending_settlement` to
+its already-recorded `terminal_resolution` value **"in the same
+transaction"** as the closing event itself, with (per doc10's own
+concurrency proof, N1.5) **no window** between the two. Step 5c makes the
+identical claim for the `voided_by_rollback` sub-case (a held win rolled
+back). Both claims are correct **as a requirement on the outcome** — but
+neither claim, nor anything else in doc10, nor this document's own prior
+text, ever named a concrete call, seam, or function through which
+`casino`'s own transaction (`postRollback`, or §16.5a(a)'s
+settlement-timeout sweep) would actually reach `bonus-engine`'s
+Grant-status write. This is the exact same category of gap §16.9 already
+closed for the *value-creating* side (`ResolveTerminalGrantCredit`,
+named against doc10 §T.7's own "a new call-back... that does not exist
+today" framing) — left open here, on the *value-reducing* side, until
+now. Contrast the WIN path, which has always correctly named
+`ResolveTerminalGrantCredit` as this seam (§16.9); no equivalent existed
+for a LOSS, VOID, ROLLBACK, or settlement-timeout resolution. This section
+closes that gap, symmetrically.
+
+**The seam:**
+
+```
+bonusengine.RecheckGrantExposure(
+    ctx context.Context,
+    tx <db tx>,
+    grantID uuid.UUID,
+    triggeringLedgerTransactionID uuid.UUID,
+    triggerKind GrantExposureTriggerKind,
+) (newStatus bonusengine.GrantStatus, err error)
+```
+
+**This is a named seam, not a direct write — matching this document's own
+domain-boundary discipline everywhere else in §16 (§16.9's identical
+framing for the value-creating side; §16.14's "`casino` does not design,
+migrate, or query [`bonus_held_dispositions`] directly" for the holding
+record).** `casino` never executes `UPDATE bonus_grants SET status =
+... WHERE id = ?` itself, in any of the call sites below — it only calls
+this function and lets `bonus-engine`'s own implementation read `AOE(G,
+·)` live (N1.3) and decide.
+
+**Inputs, and why each is there:**
+- `grantID` — which Grant's exposure to recheck. `casino` already has
+  this at every call site below, from the same live Grant-status read
+  each site already performs for its own, unrelated reason (deciding how
+  to post the value-reducing event itself).
+- `triggeringLedgerTransactionID` — the id of the value-reducing ledger
+  transaction `casino` has already built (and, depending on call order
+  below, already posted or is about to post) in this same database
+  transaction — carried through purely so `bonus-engine`'s own Progress
+  entry (doc10 §1.3) can cite exactly which ledger fact triggered this
+  recheck, mirroring `settlement_ledger_transaction_id`'s identical role
+  at §16.9/§16.14. `casino` does not need this field to serve any purpose
+  of its own.
+- `triggerKind` — a descriptive tag (e.g. `TriggerCasinoRollback`,
+  `TriggerCasinoSettlementTimeout`, `TriggerHeldDispositionResolved`),
+  used only for `bonus-engine`'s own audit trail/observability, never
+  branched on by the recheck logic itself, never by `casino`.
+
+**What it returns/does.** Inside the same transaction and the same
+`(tenant_id, grant_id)` advisory lock `casino`'s own call site already
+holds, `bonus-engine`'s implementation recomputes `AOE(G, ·)` live (N1.3
+— `casino` does not need to know its internals, only that this recompute
+is what decides the outcome): if `AOE(G, ·) = ∅`, it flips `G.status` from
+`pending_settlement` to the value already recorded in that Grant's
+`terminal_resolution` field (N1.4) and appends a Progress entry citing
+`triggeringLedgerTransactionID`, returning that new terminal status as
+`newStatus`; if `AOE(G, ·)` remains nonzero, `G.status` is left at
+`pending_settlement` and `newStatus` reports that unchanged value.
+`casino` does not branch on `newStatus` — like `heldDispositionID`
+(§16.9), it exists for logging/observability/testing, not for `casino`'s
+own control flow. **`casino` never computes or asserts, itself, whether a
+given closing event was "the last remaining `AOE` component" — that
+determination belongs entirely to `bonus-engine`'s own live recompute.**
+`casino`'s only obligation is the trigger condition below: call the seam
+whenever this event *might* have been the last component, and let
+`bonus-engine` decide whether it actually was.
+
+**Trigger condition — the one thing `casino` must get right, stated so it
+requires no knowledge of `AOE`'s internals.** Call this seam, in the same
+transaction, immediately after building (and, at the sweep, after
+posting) the value-reducing entry, **whenever the live Grant-status read
+that call site already performs finds `G.status = pending_settlement`.**
+That live read already exists at every site below for an unrelated
+reason (deciding whether the value-reducing posting interacts with a
+still-open Grant at all, per §16.10.2's INV-TG mechanism) — this section
+adds no new read, only the follow-up call once that read comes back
+`pending_settlement`. If the Grant is ordinarily non-terminal, or already
+fully terminal outside of `pending_settlement` (N1.6 Scenario 4), no call
+is made — there is nothing for `bonus-engine` to finalize.
+
+**Exactly where `casino` must call it — every site enumerated, none
+open-ended:**
+
+1. **`postRollback`, for the plain lock-rollback of a bet before any
+   win/loss is known** (§16.8's second bullet). After posting the
+   rollback's own entries (whatever shape §16.10.3's still-open tension
+   eventually settles on — this seam's call is unaffected by how that
+   tension resolves, since either shape is value-reducing under doc10
+   N1.4 step 5a), if the live Grant-status read finds `pending_settlement`,
+   call the seam with `TriggerCasinoRollback` before commit.
+2. **§16.5a(a)'s settlement-timeout sweep**, per Grant, per swept lock.
+   After posting that Grant's `casino_settlement_timeout` transaction, if
+   the live Grant-status read finds `pending_settlement`, call the seam
+   with `TriggerCasinoSettlementTimeout` before that Grant's write commits
+   (§16.5a(a) now states this as a required property, not merely
+   cross-referenced here).
+3. **`postRollback`, for the held-win rollback transition** (§16.15). This
+   is `voided_by_rollback` clearing a `HeldDisposition` `AOE` component
+   (doc10 N1.4 step 5c's own closing bullet), not step 5a — but the same
+   gap applies: after the guarded compare-and-swap (`UPDATE
+   bonus_held_dispositions SET status='voided_by_rollback' ... WHERE
+   status='held'`) affects exactly one row, if the live Grant-status read
+   finds `pending_settlement`, call the seam with
+   `TriggerHeldDispositionResolved` before commit — walked concretely in
+   §16.18 Part B step 3. A zero-row compare-and-swap (the record already
+   left `held`) calls nothing; there is no new closing event to recheck
+   against.
+
+**Not called from `postWin`'s hold-capture path (§16.9/§16.14).**
+Capture never reduces `AOE(G, ·)` — it *replaces* a `LockedExposure`/
+`InFlightExposure` member with a `HeldDisposition` member of equal value
+(N1.3, LF-20's "replaced, not cleared"), so it can never be the event that
+brings `AOE` to `∅`. Only a genuinely `AOE`-reducing event (a value
+disappearing from the set entirely, not moving within it) is ever a
+candidate trigger for this seam.
+
+**Concurrency — no new lock participant.** Every call site above already
+holds `(tenant_id, grant_id)` before this seam is ever reached (INV-TG's
+own live-read requirement, §16.10.2; HR-25's row lock, for site 3
+specifically, §16.15) — this seam acquires nothing beyond what its own
+call site already holds, mirroring §16.14's identical "no new lock
+participant" finding for hold-capture *creation*.
+
+**What this does not do.** It does not select G-2, does not decide
+§16.10.3's open tension about whether an ordinary lock-rollback is G-2-
+relevant at all (site 1's call fires either way, per that bullet's
+correction), and does not redesign any of `bonus-engine`'s own N1.3/N1.4
+mechanism — it names the boundary `casino`'s own transactions cross to
+reach it, exactly as §16.9 already does for the value-creating side.
+
 ## Cross-references
 
 - ADR: `docs/decisions/0025-casino-provider-abstraction-and-game-session-model.md`
@@ -2219,6 +2557,7 @@ resolved-win sub-case is all that remains of it).
 - Phase 2 findings this round closes/adopts: `docs/governance/wave-1.5-fixwave-phase2-report.md` (LF-18, held-win rollback gap), `docs/governance/task-registry.md`
 - Bonus accounting: `docs/decisions/0032-bonus-accounting.md` §3, §5
 - Terminal-Grant Technical Contract: `docs/architecture/10-bonus-engine-architecture.md` §T.1-T.13
+- Grant terminal-state invariant/`AOE`/hold-capture mechanism (load-bearing this round, §16.9/§16.14/§16.21): `docs/architecture/10-bonus-engine-architecture.md` §N1, especially N1.3 (`AOE`), N1.4 step 5a/5b/5c (the mechanism §16.9/§16.14/§16.21 reconcile against)
 - Human Decision Register: `docs/decisions/0039-human-decision-register-stage-4h-b0-r7.md`, Decision 2
 - Task registry: `docs/governance/task-registry.md`, Stage 4H-B1 Wave 1 reconciliation finding 1, Wave 1.5
 - Payment orchestration (the pattern this mirrors): `docs/architecture/payment-orchestration.md`
