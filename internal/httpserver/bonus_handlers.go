@@ -627,6 +627,10 @@ type resolveHeldDispositionRequest struct {
 	ReasonCode        string `json:"reason_code"`
 	RequestID         string `json:"request_id"`         // an already-approved bonus_change_requests id (four-eyes, doc 34 §3.1)
 	RequiredApprovals int32  `json:"required_approvals"` // resolved from bonus_approval_policies by the caller of this endpoint's own admin flow
+	// JurisdictionCode is consumed only by "route_to_cash"'s own T.1 gate
+	// (Stage 4H-B1 Wave 2 Phase 5 fix) - mirrors newIssueManualGrantHandler's
+	// identical optional field. Safe to omit for "reforfeit".
+	JurisdictionCode string `json:"jurisdiction_code,omitempty"`
 }
 
 func newResolveHeldDispositionHandler(deps Deps) http.HandlerFunc {
@@ -678,6 +682,7 @@ func newResolveHeldDispositionHandler(deps Deps) http.HandlerFunc {
 			resolved, err := bonus.ResolveHeldDispositionAction(ctx, tx, tc.TenantID, bonus.ResolveHeldDispositionActionParams{
 				HeldDispositionID: dispositionID, Action: bonus.HeldDispositionAction(req.Action), ActorID: staffID,
 				ReasonCode: req.ReasonCode, RequestID: changeRequestID, RequiredApprovals: requiredApprovals,
+				JurisdictionCode: req.JurisdictionCode,
 			})
 			if err != nil {
 				return err
@@ -691,6 +696,10 @@ func newResolveHeldDispositionHandler(deps Deps) http.HandlerFunc {
 		}
 		if errors.Is(err, bonus.ErrChangeRequestNotApproved) {
 			apierror.Write(w, requestID, apierror.CodeForbidden, "four-eyes approval required and not satisfied")
+			return
+		}
+		if errors.Is(err, bonus.ErrHeldDispositionActionDenied) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "route-to-cash denied: "+err.Error())
 			return
 		}
 		if err != nil {

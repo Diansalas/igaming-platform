@@ -23,6 +23,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/economicop"
+	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/risk"
 )
 
@@ -915,5 +916,219 @@ func TestConversion_BlockedByRiskDeny_NeverForfeits(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+// --- ACTION_ROUTE_TO_CASH's own T.1 gate (Stage 4H-B1 Wave 2 Phase 5 fix,
+// identity-compliance) - closing risk's Phase 4 review finding that
+// ACTION_ROUTE_TO_CASH released held bonus value into player_cash gated
+// ONLY by four-eyes/SEP-1, never by RG/Risk/AssetAuthorization. ---
+
+// seedHeldDispositionForResolution reproduces
+// TestHeldDisposition_ResolveReforfeit_WithFourEyesAndSEP1's own setup
+// (issue/activate a wagering bonus, terminate it forfeited with no open
+// exposure, then simulate a late win credit against the now-terminal
+// Grant via ResolveTerminalGrantCredit) - the ordinary way a 'held'
+// bonus_held_dispositions row comes to exist, shared by every test below
+// that needs one already sitting in 'held'.
+func seedHeldDispositionForResolution(t *testing.T, pool *db.Pool, f lifecycleFixture, co campaignOffer, triggerRef string) (grantID, dispositionID uuid.UUID) {
+	t.Helper()
+	settlementTxID := uuid.New()
+	correlationID := uuid.New()
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		g := newTestOfferGrant(f, co, triggerRef)
+		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode})
+		if err != nil || !outcome.Allowed {
+			return fmt.Errorf("issue/activate: %v / %+v", err, outcome)
+		}
+		grantID = result.ID
+
+		terminated, err := TerminateGrant(ctx, tx, f.tenantID, grantID, TerminateGrantParams{
+			Resolution: TerminalResolutionForfeited, ReasonCode: "wagering_rule_breach", ActorType: ActorSystem, TriggerType: TriggerAutomatedRuleEvaluation,
+		})
+		if err != nil {
+			return err
+		}
+		if terminated.Status != GrantForfeited {
+			return fmt.Errorf("expected forfeited (no exposure was open), got %s", terminated.Status)
+		}
+
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO ledger_transactions (id, tenant_id, transaction_type, idempotency_key, correlation_id) VALUES ($1, $2, 'casino_win', $3, $4)`,
+			settlementTxID, f.tenantID, "win-"+settlementTxID.String(), correlationID,
+		); err != nil {
+			return err
+		}
+		dispositionID, err = ResolveTerminalGrantCredit(ctx, tx, grantID, correlationID, CreditKindWin, big.NewInt(300), big.NewInt(0), settlementTxID)
+		if err != nil {
+			return fmt.Errorf("resolve terminal grant credit: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed held disposition: %v", err)
+	}
+	return grantID, dispositionID
+}
+
+// fileAndApproveHeldDispositionResolve files and two-staff-approves a
+// held_disposition_resolve change request naming `action` - the ordinary
+// four-eyes precondition ResolveHeldDispositionAction itself requires,
+// shared by every gate test below (this file's own established inline
+// pattern, factored out only because it is now needed three times).
+func fileAndApproveHeldDispositionResolve(t *testing.T, pool *db.Pool, f lifecycleFixture, dispositionID uuid.UUID, action HeldDispositionAction) uuid.UUID {
+	t.Helper()
+	var requestID uuid.UUID
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		payload := []byte(fmt.Sprintf(`{"action":%q}`, action))
+		req, err := FileChangeRequest(ctx, tx, ChangeRequest{
+			TenantID: f.tenantID, Operation: ChangeOpHeldDispositionResolve, TargetType: "bonus_held_dispositions", TargetID: dispositionID,
+			Payload: payload, ReasonCode: "g2-resolution-test", RequestedByPrincipalID: f.staffID,
+		})
+		if err != nil {
+			return err
+		}
+		requestID = req.ID
+		return RecordChangeApproval(ctx, tx, f.tenantID, req.ID, f.staff2ID, "approve", nil, nil, nil)
+	})
+	if err != nil {
+		t.Fatalf("file+approve held disposition resolve: %v", err)
+	}
+	return requestID
+}
+
+// TestHeldDisposition_ResolveRouteToCash_BlockedBySelfExclusion is this
+// fix's own proof: a self-excluded player's ACTION_ROUTE_TO_CASH attempt
+// is now blocked by the T.1 gate (specifically RG), never silently
+// allowed to credit player_cash. Before this fix, nothing in
+// ResolveHeldDispositionAction consulted internal/rg at all for this
+// action, so this same sequence would have posted real cash to a
+// self-excluded player.
+func TestHeldDisposition_ResolveRouteToCash_BlockedBySelfExclusion(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	co := seedCampaignOffer(t, pool, f.tenantID, f.brandID, f.staffID)
+	_, dispositionID := seedHeldDispositionForResolution(t, pool, f, co, "g2-route-to-cash-self-excluded")
+
+	if err := pool.WithPlayerScope(context.Background(), f.tenantID, f.playerID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := rg.CreateSelfExclusion(ctx, tx, rg.CreateSelfExclusionParams{TenantID: f.tenantID, PlayerAccountID: f.playerID})
+		return err
+	}); err != nil {
+		t.Fatalf("self-exclude: %v", err)
+	}
+
+	requestID := fileAndApproveHeldDispositionResolve(t, pool, f, dispositionID, ActionRouteToCash)
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ResolveHeldDispositionAction(ctx, tx, f.tenantID, ResolveHeldDispositionActionParams{
+			HeldDispositionID: dispositionID, Action: ActionRouteToCash, ActorID: f.staffID, ReasonCode: "g2-resolution-test",
+			RequestID: requestID, RequiredApprovals: 1, JurisdictionCode: f.jurisdictionCode,
+		})
+		return err
+	})
+	if !errors.Is(err, ErrHeldDispositionActionDenied) {
+		t.Fatalf("expected ErrHeldDispositionActionDenied for a self-excluded player's route-to-cash attempt, got: %v", err)
+	}
+
+	// The disposition must still be 'held' (nothing committed) and the
+	// four-eyes request must still be resolvable later (never permanently
+	// burned by a denied attempt) - both proven by the SAME action now
+	// succeeding once the self-exclusion no longer applies (this test
+	// does not lift it; instead it proves the disposition side directly,
+	// then re-uses the SAME already-approved request to prove it is
+	// still 'pending', not 'applied').
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		d, err := GetHeldDispositionByID(ctx, tx, dispositionID)
+		if err != nil {
+			return err
+		}
+		if d.Status != HeldDispositionHeld {
+			return fmt.Errorf("expected disposition to remain 'held' after a denied route-to-cash attempt, got %s", d.Status)
+		}
+		var state string
+		if err := tx.QueryRow(ctx, `SELECT state FROM bonus_change_requests WHERE id = $1`, requestID).Scan(&state); err != nil {
+			return err
+		}
+		if state != "pending" {
+			return fmt.Errorf("expected the four-eyes request to remain 'pending' (not burned) after a denied attempt, got %s", state)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestHeldDisposition_ResolveRouteToCash_AllowedPlayerSucceeds is the
+// regression proof for the same fix: an ordinary, non-excluded,
+// non-Risk-denied player's route-to-cash resolution still succeeds once
+// gated - the fix closes the gap without breaking the legitimate path.
+func TestHeldDisposition_ResolveRouteToCash_AllowedPlayerSucceeds(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	co := seedCampaignOffer(t, pool, f.tenantID, f.brandID, f.staffID)
+	_, dispositionID := seedHeldDispositionForResolution(t, pool, f, co, "g2-route-to-cash-allowed")
+
+	requestID := fileAndApproveHeldDispositionResolve(t, pool, f, dispositionID, ActionRouteToCash)
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		resolved, err := ResolveHeldDispositionAction(ctx, tx, f.tenantID, ResolveHeldDispositionActionParams{
+			HeldDispositionID: dispositionID, Action: ActionRouteToCash, ActorID: f.staffID, ReasonCode: "g2-resolution-test",
+			RequestID: requestID, RequiredApprovals: 1, JurisdictionCode: f.jurisdictionCode,
+		})
+		if err != nil {
+			return fmt.Errorf("resolve held disposition: %w", err)
+		}
+		if resolved.Status != HeldDispositionResolvedRouteToCash {
+			return fmt.Errorf("expected resolved_route_to_cash, got %s", resolved.Status)
+		}
+		if resolved.ResolutionLedgerTransactionID == nil {
+			return fmt.Errorf("expected a resolution ledger transaction id to be recorded")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestHeldDisposition_ResolveRouteToCash_BlockedByRiskDeny proves the
+// gate's Risk leg specifically (distinct from the RG leg proven above),
+// mirroring TestConversion_BlockedByRiskDeny_NeverForfeits's own
+// technique against the identical risk.OperationBonusConversion citation
+// this fix reuses.
+func TestHeldDisposition_ResolveRouteToCash_BlockedByRiskDeny(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	co := seedCampaignOffer(t, pool, f.tenantID, f.brandID, f.staffID)
+	_, dispositionID := seedHeldDispositionForResolution(t, pool, f, co, "g2-route-to-cash-risk-denied")
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// The disposition's total release amount is 300 (payout) + 0
+		// (released lock) = 300 minor units - a threshold of 100 is bound
+		// to be breached.
+		_, err := risk.CreateRule(ctx, tx, risk.CreateRuleParams{
+			TenantID: &f.tenantID, Operation: risk.OperationBonusConversion, AssetCode: f.assetCode,
+			LimitKind: risk.LimitMaxAmount, TimeWindow: risk.WindowTransaction, Threshold: 100,
+			RuleKind: risk.RuleHardLimit, Action: risk.ActionDeny,
+			CreatedByActorType: "staff", CreatedByActorID: f.staffID,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create risk rule: %v", err)
+	}
+
+	requestID := fileAndApproveHeldDispositionResolve(t, pool, f, dispositionID, ActionRouteToCash)
+
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ResolveHeldDispositionAction(ctx, tx, f.tenantID, ResolveHeldDispositionActionParams{
+			HeldDispositionID: dispositionID, Action: ActionRouteToCash, ActorID: f.staffID, ReasonCode: "g2-resolution-test",
+			RequestID: requestID, RequiredApprovals: 1, JurisdictionCode: f.jurisdictionCode,
+		})
+		return err
+	})
+	if !errors.Is(err, ErrHeldDispositionActionDenied) {
+		t.Fatalf("expected ErrHeldDispositionActionDenied for a Risk-denied route-to-cash attempt, got: %v", err)
 	}
 }

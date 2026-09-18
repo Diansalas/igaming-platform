@@ -4,9 +4,12 @@
 // RecheckGrantExposure - their frozen signatures, per doc 08 §16.9/§16.21
 // and doc 10 N1.4.2), and disposition-resolution
 // (ACTION_REFORFEIT/ACTION_ROUTE_TO_CASH), gated by SEP-1 (REQ-SEP-
-// BONUS-4) and four-eyes at the ratified tenant-configurable threshold
-// (doc 34 §3.1).
+// BONUS-4), four-eyes at the ratified tenant-configurable threshold
+// (doc 34 §3.1), and - for ACTION_ROUTE_TO_CASH only, Stage 4H-B1 Wave 2
+// Phase 5 fix, identity-compliance - doc 10 §T.1's own AssetAuthorization
+// -> RG -> Risk gate (see ErrHeldDispositionActionDenied's doc comment).
 //
+
 // bonus-engine does NOT select G-2 (CLAUDE.md's constraint, doc 10's own
 // "no default/timeout/fallback may choose which disposition action
 // applies"): ResolveHeldDispositionAction takes `action` as an explicit,
@@ -206,6 +209,29 @@ const (
 // not currently 'held' (already resolved, or voided by a rollback).
 var ErrHeldDispositionNotHeld = errors.New("bonus: held disposition is not in 'held' status")
 
+// ErrHeldDispositionActionDenied is returned when ACTION_ROUTE_TO_CASH's
+// own T.1 three-way gate (AssetAuthorization -> RG -> Risk) denies the
+// release (identity-compliance Phase 5 fix, closing risk's Phase 4
+// review finding: ACTION_ROUTE_TO_CASH released held bonus value into
+// player_cash - a real, spendable cash credit - gated only by four-eyes
+// and SEP-1, never by RG/Risk/AssetAuthorization, so a self-excluded
+// player, a Risk-denied player, or a player whose asset had been
+// deactivated could receive real cash through this path). Returning this
+// as a plain error rolls back the WHOLE transaction, INCLUDING this
+// call's own ConsumeApprovedChangeRequest - the four-eyes approval is
+// therefore left unconsumed (still 'pending', still approvable/
+// resolvable later), not permanently burned on a denial, mirroring how
+// every other precondition failure in this file (ErrHeldDispositionNotHeld,
+// ErrChangeRequestNotApproved) already behaves. This is a deliberate
+// departure from ConvertGrant's/IssueGrant's non-error GateOutcome
+// convention: this file's own established behavior for "this specific
+// resolution attempt cannot proceed" is a sentinel error with no partial
+// commit, not a committed block record, and this fix keeps that local
+// convention rather than introducing a second one for a single call
+// site. ActionReforfeit never runs this gate at all (see this function's
+// own doc comment) and is therefore never affected by this error.
+var ErrHeldDispositionActionDenied = errors.New("bonus: T.1 gate denied ACTION_ROUTE_TO_CASH's release of held bonus value to player_cash")
+
 // ResolveHeldDispositionActionParams is ResolveHeldDispositionAction's
 // input. RequestID must name an ALREADY-FILED, ALREADY-APPROVED
 // bonus_change_requests row (operation = held_disposition_resolve) whose
@@ -220,6 +246,11 @@ type ResolveHeldDispositionActionParams struct {
 	ReasonCode        string
 	RequestID         uuid.UUID
 	RequiredApprovals int32
+	// JurisdictionCode is consumed ONLY by ACTION_ROUTE_TO_CASH's own T.1
+	// gate (below) - resolved identically to every other T.1 call site in
+	// this package (resolveJurisdictionID/resolveLicensingMode). Unused,
+	// and safe to leave empty, for ACTION_REFORFEIT.
+	JurisdictionCode string
 }
 
 // ResolveHeldDispositionAction applies a G-2 disposition answer, gated by
@@ -297,8 +328,77 @@ func ResolveHeldDispositionAction(ctx context.Context, tx pgx.Tx, tenantID uuid.
 	case ActionRouteToCash:
 		newStatus = HeldDispositionResolvedRouteToCash
 		txType = ledger.TxBonusConversion
-		rc := "terminal_grant_cash_route:" + p.ReasonCode
-		reasonCode = &rc
+		// reasonCode is deliberately left nil here (PRE-EXISTING Phase 3
+		// DEFECT FOUND AND FIXED IN PASSING, identity-compliance Phase 5 -
+		// distinct from, and unrelated to, this same block's T.1 gate fix
+		// below): ledger_transactions_check1 (migration 0051) requires
+		// reason_code IS NOT NULL if-and-only-if transaction_type IN
+		// ('manual_adjustment', 'bonus_forfeiture') - TxBonusConversion is
+		// neither, so a non-nil reason_code here is UNCONDITIONALLY
+		// rejected by the database, exactly as internal/ledger.Post's own
+		// boundary-level comment documents (ledger.go: "reason_code is
+		// required on manual_adjustment... AND on bonus_forfeiture").
+		// conversion.go's own bonus_conversion posting already never sets
+		// ReasonCode, for the identical reason. The previous line here
+		// (`rc := "terminal_grant_cash_route:" + p.ReasonCode; reasonCode
+		// = &rc`) meant EVERY ACTION_ROUTE_TO_CASH RESOLUTION WOULD FAIL
+		// AT THE LEDGER POST, unconditionally - caught by this dispatch's
+		// own new allow-path test
+		// (TestHeldDisposition_ResolveRouteToCash_AllowedPlayerSucceeds),
+		// the first test ever to exercise this action's ledger posting
+		// against real Postgres. The human-readable reason is still
+		// recorded, on the disposition row itself (resolution_reason_code,
+		// via ResolveHeldDisposition below) and on the Progress entry
+		// (ReasonCode, via AppendGrantProgress below) - both of which DO
+		// carry p.ReasonCode - so nothing is silently dropped, only the
+		// ledger transaction's own reason_code column, which this
+		// transaction type structurally cannot carry.
+		reasonCode = nil
+
+		// T.1 GATE (identity-compliance Phase 5 fix, closing risk's
+		// Phase 4 review finding - see ErrHeldDispositionActionDenied's
+		// own doc comment for the full exposure this closes). Only
+		// ACTION_ROUTE_TO_CASH runs this: it is the ONE disposition
+		// action that credits player_cash - a real, spendable balance -
+		// so it is the one that needs the same AssetAuthorization -> RG
+		// -> Risk gate every other value-creating Bonus checkpoint
+		// already runs. ACTION_REFORFEIT credits promo_liability only,
+		// creates no new player-accessible value (risk's own Phase 4
+		// finding), and correctly runs no such gate.
+		//
+		// RiskOperation = OperationBonusConversion, not a new, distinct
+		// risk.Operation value: a disclosed, reasonable engineering call,
+		// not a Human Decision Register item. risk's own Phase 4 note
+		// already named this as "economically the same 'release held
+		// value to cash' act" as an ordinary bonus_conversion, and this
+		// package's own conversion.go call site cites the identical
+		// Operation for the identical economic act (held bonus value
+		// becoming spendable player_cash). Minting a fifth-ever
+		// risk.Operation value for this would repeat the exact six-step
+		// ADR-0031-§16 extension process Stage 4H-B1 Wave 2 Phase 4 just
+		// finished paying down for bonus_conversion itself - reusing the
+		// existing value keeps this fix inside RG mechanics rather than
+		// opening new Risk surface no specialist has reviewed.
+		jurisdictionID, err := resolveJurisdictionID(ctx, tx, p.JurisdictionCode)
+		if err != nil {
+			return HeldDisposition{}, err
+		}
+		licensingMode, err := resolveLicensingMode(ctx, tx, tenantID)
+		if err != nil {
+			return HeldDisposition{}, err
+		}
+		gateOutcome, err := GateCheckpoint(ctx, tx, GateParams{
+			TenantID: tenantID, BrandID: g.BrandID, PlayerAccountID: g.PlayerAccountID, WalletID: g.WalletID,
+			JurisdictionID: jurisdictionID, JurisdictionCode: p.JurisdictionCode, LicensingMode: licensingMode,
+			AssetCode: g.AssetCode, Amount: amountMinor, RiskOperation: OperationBonusConversion,
+		})
+		if err != nil {
+			return HeldDisposition{}, err
+		}
+		if !gateOutcome.Allowed {
+			return HeldDisposition{}, fmt.Errorf("%w: denied_by=%s code=%s", ErrHeldDispositionActionDenied, gateOutcome.DeniedBy, gateOutcome.Code)
+		}
+
 		playerCash, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &walletID, ledger.AccountPlayerCash, g.AssetCode)
 		if err != nil {
 			return HeldDisposition{}, err
