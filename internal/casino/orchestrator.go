@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/bonus"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/rg"
@@ -810,22 +811,27 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
 }
 
-// postWin implements Flow 6 (financial-transaction-flows.md §6): debit
-// house_gaming, credit player_cash. A win naming a round with no matching,
-// still-valid (never rolled back) prior bet is an integrity alert (a
-// provider protocol violation), not a routine failure - logged/audited at
-// elevated severity by the HTTP handler, which maps ErrBetNotFound
-// distinctly from an ordinary not-found.
+// postWin implements Flow 6 (financial-transaction-flows.md §6): resolves
+// the round's true funding origin (§16.4 in full, Stage 4H-B1 Wave 2
+// Phase 7 - bonus_settlement.go) and credits it accordingly. A win naming
+// a round with no matching, still-valid (never rolled back) prior bet is
+// an integrity alert (a provider protocol violation), not a routine
+// failure - logged/audited at elevated severity by the HTTP handler,
+// which maps ErrBetNotFound distinctly from an ordinary not-found.
 //
 // The wallet a win credits is resolved from the round's OWN bet
-// transaction's own ledger entries - the SAME player_cash account that
-// bet actually debited - never from event.PlayerAccountID (specialist
-// review finding, empirically reproduced during review: a win naming a
-// DIFFERENT player_account_id than the one who placed the round's bet was
-// previously credited to that different player in full). Deriving from
-// the bet's own ledger-truth entries is a stronger anchor than a session
-// lookup here: it is impossible for a win to be misdirected to any wallet
-// other than the one the round's own bet is already proven to have used.
+// transaction's own ledger entries - never from event.PlayerAccountID
+// (specialist review finding, empirically reproduced during review: a
+// win naming a DIFFERENT player_account_id than the one who placed the
+// round's bet was previously credited to that different player in full).
+// Deriving from the bet's own ledger-truth entries is a stronger anchor
+// than a session lookup here: it is impossible for a win to be
+// misdirected to any wallet other than the one the round's own bet is
+// already proven to have used. The account TYPE the win credits (cash vs.
+// bonus, locked vs. direct) is likewise derived exclusively from ledger
+// truth via resolveWinOrigin - never from event.Amount, event.AssetCode
+// (used only as a cross-check below, never a resolution input), or any
+// other payload field (§16.3/§16.18's standing invariant).
 //
 // Deliberately does NOT call evaluateAndAuditEligibility (Stage 4D-RG,
 // ADR 0026's own "Specialist review findings and fixes" - financial
@@ -840,27 +846,20 @@ func (o *Orchestrator) postWin(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		return ReceiveCallbackResult{}, err
 	}
 
-	var betWalletID uuid.UUID
-	err := tx.QueryRow(ctx,
-		`SELECT le.wallet_id
-		 FROM ledger_transactions lt
-		 JOIN ledger_entries le ON le.ledger_transaction_id = lt.id AND le.direction = 'debit'
-		 WHERE lt.tenant_id = $1 AND lt.correlation_id = $2 AND lt.transaction_type = $3
-		   AND NOT EXISTS (SELECT 1 FROM ledger_transactions r WHERE r.reverses_transaction_id = lt.id)
-		 LIMIT 1`,
-		tenantID, roundCorrelationID(tenantID, providerID, event.RoundID), ledger.TxCasinoBet,
-	).Scan(&betWalletID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// Covers both "no bet was ever posted for this round" and "the
-		// round's bet was already rolled back" (a win on a voided round is
-		// the same class of integrity violation as an orphan win).
-		return ReceiveCallbackResult{}, fmt.Errorf("%w: round=%s provider=%s", ErrBetNotFound, event.RoundID, providerID)
-	}
+	correlationID := roundCorrelationID(tenantID, providerID, event.RoundID)
+	origin, err := resolveWinOrigin(ctx, tx, tenantID, correlationID)
 	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: check prior bet: %w", err)
+		// Covers "no bet was ever posted for this round", "the round's bet
+		// was already rolled back" (ErrBetNotFound - the same class of
+		// integrity violation as an orphan win), and every other §16.4
+		// abort outcome (ErrCorrelationWalletCollision,
+		// ErrAmbiguousMultiOriginRound, ErrMixedFundingUnsupported,
+		// ErrLockAlreadyReleased, ErrBonusBetNotLocked) - each decorated
+		// identically with round/provider context for ops visibility.
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: round=%s provider=%s", err, event.RoundID, providerID)
 	}
 
-	wl, err := wallet.GetByID(ctx, tx, betWalletID)
+	wl, err := wallet.GetByID(ctx, tx, origin.WalletID)
 	if err != nil {
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve wallet: %w", err)
 	}
@@ -868,41 +867,20 @@ func (o *Orchestrator) postWin(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: asset_code does not match the round's own bet", ErrInvalidInput)
 	}
 
-	cashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &wl.ID, ledger.AccountPlayerCash, event.AssetCode)
-	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve player_cash account: %w", err)
+	switch origin.AccountType {
+	case ledger.AccountPlayerCash:
+		return o.postWinDirectCash(ctx, tx, tenantID, providerID, event, origin, correlationID)
+	case ledger.AccountPlayerLockedCash:
+		return o.postWinLockedCash(ctx, tx, tenantID, providerID, event, origin, correlationID)
+	case ledger.AccountPlayerLockedBonus:
+		return o.postWinLockedBonus(ctx, tx, tenantID, providerID, event, origin, correlationID)
+	default:
+		// Unreachable given resolveWinOrigin's own exhaustive
+		// classification (ledger-accounting-model.md §6.6.5's discipline:
+		// an allowlist-with-silent-fallback fails open) - kept as a hard
+		// stop rather than a silent guess if it is ever reached.
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: unhandled win origin account_type %q", origin.AccountType)
 	}
-	houseAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, nil, ledger.AccountHouseGaming, event.AssetCode)
-	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve house_gaming account: %w", err)
-	}
-
-	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
-		TenantID: tenantID, TransactionType: ledger.TxCasinoWin,
-		IdempotencyKey: providerID + ":" + event.ProviderTxID,
-		ProviderID:     &providerID, ProviderTxID: &event.ProviderTxID,
-		CorrelationID: roundCorrelationID(tenantID, providerID, event.RoundID),
-		Entries: []ledger.EntryInput{
-			{LedgerAccountID: houseAccountID, Direction: ledger.Debit, Amount: event.Amount},
-			{LedgerAccountID: cashAccountID, Direction: ledger.Credit, Amount: event.Amount},
-		},
-	})
-	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: post win: %w", err)
-	}
-
-	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_win.posted",
-		TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
-		Metadata: map[string]any{
-			"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
-			"amount": event.Amount, "asset_code": event.AssetCode, "already_posted": postResult.AlreadyPosted,
-		},
-	}); err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: audit win posted: %w", err)
-	}
-
-	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
 }
 
 // postRollback implements Flow 7 (financial-transaction-flows.md §7): a
@@ -995,6 +973,19 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		return ReceiveCallbackResult{}, ErrAlreadyRolledBack
 	}
 
+	// §16.15/§16.21 site 3 (Stage 4H-B1 Wave 2 Phase 7, bonus_settlement.go):
+	// a rollback naming a WIN that is still parked (or was ever parked) in
+	// bonus_held_dispositions is handled entirely by its own dedicated
+	// transition - never the generic entry-inversion below, which would
+	// (per §16.15's own reasoning) wrongly resurrect a lock that already,
+	// correctly, closed to zero. handled=false for every ordinary win (no
+	// disposition row at all) falls through unaffected.
+	if originalType == ledger.TxCasinoWin {
+		if handled, result, err := o.postRollbackHeldWin(ctx, tx, tenantID, providerID, event, originalID); handled {
+			return result, err
+		}
+	}
+
 	entries, err := loadEntries(ctx, tx, originalID)
 	if err != nil {
 		return ReceiveCallbackResult{}, err
@@ -1019,6 +1010,45 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		inverted = append(inverted, ledger.EntryInput{LedgerAccountID: e.LedgerAccountID, Direction: dir, Amount: e.Amount})
 	}
 
+	// §16.10.3/§16.21 site 1 (Stage 4H-B1 Wave 2 Phase 7): a plain
+	// lock-rollback of a bonus-funded BET (before any win/loss is known)
+	// touches BONUS_SET (player_bonus/player_locked_bonus), which
+	// bonus_mirror.go's Rule B2 generator REQUIRES a BonusCost for -
+	// resolved from the Grant this bet's own lock is attributed to
+	// (grant_ledger_attributions), never guessed. Scoped to originalType
+	// == casino_bet only: an ORDINARY win's rollback (a resolved,
+	// non-held player_bonus credit later swept by an unrelated
+	// forfeiture) deliberately gets NO BonusCost here, leaving today's
+	// existing nil behavior unchanged - LF-10's general case (§16.20,
+	// still open, ledger-finance's decision) is not silently re-enabled
+	// by this dispatch; it continues to fail at ledger.Post's own
+	// ErrBonusCostRequired validation exactly as it does today, rather
+	// than this package inventing a sufficiency-check/compensating-entry
+	// mechanism ledger-finance has not yet designed.
+	var bonusCost *ledger.BonusCostAttribution
+	var betGrantID uuid.UUID
+	var betGrantFound bool
+	if originalType == ledger.TxCasinoBet && entriesTouchBonusSet(entries) {
+		betGrantID, betGrantFound, err = lookupGrantForLedgerTransaction(ctx, tx, tenantID, originalID)
+		if err != nil {
+			return ReceiveCallbackResult{}, err
+		}
+		if !betGrantFound {
+			return ReceiveCallbackResult{}, fmt.Errorf("%w: original_transaction=%s", ErrLockedBonusGrantMissing, originalID)
+		}
+		if err := bonus.AdvisoryLockGrant(ctx, tx, tenantID, betGrantID); err != nil {
+			return ReceiveCallbackResult{}, err
+		}
+		grant, err := bonus.GetGrantByID(ctx, tx, betGrantID)
+		if err != nil {
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: load grant for bet rollback: %w", err)
+		}
+		bonusCost, err = grantBonusCost(grant.FundingSource)
+		if err != nil {
+			return ReceiveCallbackResult{}, err
+		}
+	}
+
 	rollbackTxType := ledger.TxCasinoRollback
 	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 		TenantID: tenantID, TransactionType: rollbackTxType,
@@ -1028,9 +1058,26 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		CorrelationID:         roundCorrelationID(tenantID, providerID, event.RoundID),
 		ReversesTransactionID: &originalID,
 		Entries:               inverted,
+		BonusCost:             bonusCost,
 	})
 	if err != nil {
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: post rollback: %w", err)
+	}
+
+	if betGrantFound && !postResult.AlreadyPosted {
+		// Attribute the reversal itself to the Grant BEFORE rechecking
+		// exposure - ComputeAOE's Component 1 (lockedExposure, aoe.go) is a
+		// LIVE read of player_locked_bonus summed ONLY over entries
+		// attributed via grant_ledger_attributions. The original bet's own
+		// lock credit was (or, once a bonus-funded postBet ships, will be)
+		// attributed at bet time; without attributing this reversal too,
+		// that component would never net back to zero.
+		if err := bonus.AttributeGrantLedgerTransactionIdempotent(ctx, tx, tenantID, betGrantID, postResult.TransactionID, string(rollbackTxType)); err != nil {
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: attribute bet rollback to grant: %w", err)
+		}
+		if err := recheckGrantAfterBonusTouchingRollback(ctx, tx, tenantID, betGrantID, postResult.TransactionID); err != nil {
+			return ReceiveCallbackResult{}, err
+		}
 	}
 
 	auditAction := "casino_bet.rolled_back"
@@ -1073,11 +1120,21 @@ type ledgerEntry struct {
 	LedgerAccountID uuid.UUID
 	Direction       ledger.Direction
 	Amount          int64
+	// AccountType is resolved alongside the entry (Stage 4H-B1 Wave 2
+	// Phase 7) so postRollback's generic entry-inversion path can detect
+	// whether the original transaction touched a BONUS_SET account
+	// (player_bonus/player_locked_bonus/player_bonus_held) without a
+	// second query - bonus_mirror.go's Rule B2 generator requires a
+	// BonusCost on any posting that does.
+	AccountType ledger.AccountType
 }
 
 func loadEntries(ctx context.Context, tx pgx.Tx, transactionID uuid.UUID) ([]ledgerEntry, error) {
 	rows, err := tx.Query(ctx,
-		`SELECT ledger_account_id, direction, amount FROM ledger_entries WHERE ledger_transaction_id = $1`,
+		`SELECT e.ledger_account_id, e.direction, e.amount, la.account_type
+		   FROM ledger_entries e
+		   JOIN ledger_accounts la ON la.id = e.ledger_account_id
+		  WHERE e.ledger_transaction_id = $1`,
 		transactionID,
 	)
 	if err != nil {
@@ -1088,10 +1145,26 @@ func loadEntries(ctx context.Context, tx pgx.Tx, transactionID uuid.UUID) ([]led
 	var out []ledgerEntry
 	for rows.Next() {
 		var e ledgerEntry
-		if err := rows.Scan(&e.LedgerAccountID, &e.Direction, &e.Amount); err != nil {
+		var acctType string
+		if err := rows.Scan(&e.LedgerAccountID, &e.Direction, &e.Amount, &acctType); err != nil {
 			return nil, fmt.Errorf("casino: scan entry: %w", err)
 		}
+		e.AccountType = ledger.AccountType(acctType)
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// entriesTouchBonusSet reports whether any of entries resolves to a
+// BONUS_SET account (ledger-accounting-model.md §7.7.2.3) - mirrors
+// internal/ledger's own bonusSetAccountTypes list (unexported; casino
+// only needs the membership test, not the generator itself).
+func entriesTouchBonusSet(entries []ledgerEntry) bool {
+	for _, e := range entries {
+		switch e.AccountType {
+		case ledger.AccountPlayerBonus, ledger.AccountPlayerLockedBonus, ledger.AccountPlayerBonusHeld:
+			return true
+		}
+	}
+	return false
 }

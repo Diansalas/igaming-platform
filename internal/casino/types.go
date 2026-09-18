@@ -210,6 +210,80 @@ var (
 	// ever occurred, and cannot distinguish a demo round from a real-
 	// money one).
 	ErrLaunchSessionRequired = errors.New("casino: bet callback requires a valid real-money launch session")
+
+	// --- Stage 4H-B1 Wave 2 Phase 7 (G-2 casino integration,
+	// docs/architecture/08-casino-integration-architecture.md §16.4's
+	// classification table). Each is a named, fail-closed abort - never a
+	// guess - raised as a loud integrity/ops alert exactly like
+	// ErrBetNotFound, per §16.4's own discipline. ---
+
+	// ErrCorrelationWalletCollision is §16.4's outcome 2 (LF-7): a single
+	// correlation_id resolved more than one distinct wallet_id at the
+	// SAME account_type - either a roundCorrelationID hash collision or a
+	// posting-layer defect, never guessed. Checked before outcome 3
+	// (ErrAmbiguousMultiOriginRound) since a cross-wallet collision is the
+	// more severe integrity condition.
+	ErrCorrelationWalletCollision = errors.New("casino: correlation_id resolved more than one player wallet")
+	// ErrAmbiguousMultiOriginRound is §16.4's outcome 3 / §16.4a (LF-8): a
+	// correlation_id resolved more than one distinct bet_transaction_id
+	// (a legitimate multi-bet round, re-bet, or side bet) that
+	// WinRequest/CallbackEvent cannot yet disambiguate per-bet
+	// (OriginatingProviderTxID does not exist on the win protocol today -
+	// confirmed against types.go). Routed to manual reconciliation, never
+	// guessed by amount-matching (CLAUDE.md's fail-closed financial-write
+	// rule) - NOT a permanent abort-forever condition.
+	ErrAmbiguousMultiOriginRound = errors.New("casino: correlation_id resolved more than one bet transaction; win cannot be attributed to a specific bet without OriginatingProviderTxID (routed to manual reconciliation)")
+	// ErrMixedFundingUnsupported is §16.4's outcome 4: a single
+	// bet_transaction_id's own credit/debit legs span more than one
+	// distinct account_type - the exact HR-2 single-posting-instruction
+	// mixed-origin shape HR-2 is meant to make unreachable. Kept distinct
+	// from ErrAmbiguousMultiOriginRound so an operator can tell "this
+	// looks like an HR-2 regression" apart from "this is an expected,
+	// unhandled multi-bet round."
+	ErrMixedFundingUnsupported = errors.New("casino: bet transaction's own entries span more than one funding origin (possible HR-2 regression)")
+	// ErrLockAlreadyReleased is §16.4's outcome 6 (LF-18's fix): a
+	// casino_bet credit leg genuinely exists for this correlation_id, but
+	// the net signed sum over EVERY later transaction sharing it
+	// (Step 1b, ledger-accounting-model.md §6.3.3.1 "variant 2") is
+	// already <= 0 - some earlier transaction (an ordinary prior win/
+	// rollback, or a settlement-timeout sweep) has already resolved this
+	// lock. Never released a second time.
+	ErrLockAlreadyReleased = errors.New("casino: this round's locked stake has already been released by an earlier transaction")
+	// ErrBonusBetNotLocked is §16.4's Step-2 "player_bonus, no Step-1
+	// lock found" row: under §16.10.1's mandated shape, a bonus-funded
+	// casino bet must ALWAYS lock (case B). A bare player_bonus debit leg
+	// with no matching Step-1 lock is a structural inconsistency (the
+	// disallowed immediate-absorb shape was posted somehow), never a
+	// second legitimate origin - never silently credited.
+	ErrBonusBetNotLocked = errors.New("casino: bet's own debit leg is player_bonus with no corresponding lock; the disallowed immediate-absorb shape may have been posted")
+	// ErrLockedBonusGrantMissing is a casino-side integrity finding (not
+	// itself named by doc 08 §16, which assumes a bonus-funded postBet
+	// that attributes the Grant already exists): a player_locked_bonus
+	// origin was resolved, but no grant_ledger_attributions row names
+	// which Grant it belongs to. Under the mandated case-B lock shape,
+	// every locked-bonus bet MUST be Grant-attributed at bet time - this
+	// is never guessed (which Grant's advisory lock/live status read
+	// would even be correct is unknowable), only raised as a loud
+	// integrity alert.
+	ErrLockedBonusGrantMissing = errors.New("casino: player_locked_bonus origin has no grant_ledger_attributions row naming its Grant")
+	// ErrHeldDispositionAlreadyVoided is returned by postRollback when a
+	// genuinely distinct new rollback reference names a
+	// bonus_held_dispositions record that a DIFFERENT, earlier rollback
+	// already transitioned to voided_by_rollback (08 §16.15's "two
+	// genuinely distinct rollback attempts" proof, the race loser's
+	// branch) - never a second disposition of the same held value.
+	ErrHeldDispositionAlreadyVoided = errors.New("casino: this held disposition was already voided by an earlier rollback")
+	// ErrHeldDispositionRollbackUnsupported is LF-10 (08 §16.20, still
+	// open, ledger-finance's decision, not casino's): a rollback names a
+	// bonus_held_dispositions record that has already moved to a terminal
+	// disposition (resolved_reforfeit/resolved_route_to_cash) - the held
+	// value has already left player_bonus_held entirely, potentially
+	// already spent or converted. This document/package does not
+	// pre-select "permit a negative balance as a clawback," "route the
+	// shortfall to a receivable," or "reject-and-alert" - it only fails
+	// closed, posting nothing, never guessing, never silently reusing
+	// §16.15's still-held mechanism for this structurally different case.
+	ErrHeldDispositionRollbackUnsupported = errors.New("casino: rollback of an already-resolved held disposition is LF-10 (ledger-finance's open decision); refusing to guess a resolution")
 )
 
 // Stage 4D-RG's LaunchGame/postBet eligibility denial (internal/
