@@ -294,7 +294,7 @@ members; where only one applies it is named.
 | `player_bonus` (`BLUEPRINT`) | Non-withdrawable bonus balance subject to wagering | Wallet | Any asset bonuses are offered in | Credit | bonus_grant, casino/sportsbook bet/win (bonus-funded stake), bonus_conversion (bonus→cash), bonus_forfeiture | No | Yes | Wallet projection vs. ledger (hourly); bonus-engine liability vs. `promo_liability` (see below) |
 | `player_locked_cash` (`BLUEPRINT`, as the cash half of the Blueprint's `player_locked` — migration `0048`) | Cash-funded funds locked against an open sportsbook stake (not yet settled) | Wallet | Any asset sportsbook accepts | Credit while locked (liability — stake still belonging to the player until the outcome is known) | sportsbook_bet (lock), sportsbook_settlement (release), sportsbook_partial_settlement (partial release), sportsbook_void (release) | No | Yes, on void/partial settlement | Open-liability report (see `09-sportsbook-architecture.md`) vs. the sum of **both** locked types' balances (`player_locked_cash` + `player_locked_bonus`); a query naming only one silently under-reports (§6.4.8 item 5) |
 | `player_locked_bonus` (`BLUEPRINT`, as the bonus half of the Blueprint's `player_locked` — migration `0048`) | Bonus-funded funds locked against an open sportsbook stake (not yet settled) | Wallet | Any asset sportsbook accepts | Credit while locked (liability — stake still belonging to the player until the outcome is known) | sportsbook_bet (lock), sportsbook_settlement (release), sportsbook_partial_settlement (partial release), sportsbook_void (release) | No | Yes, on void/partial settlement | Same open-liability reconciliation as `player_locked_cash`; **additionally** inside invariant B1's extended set `{player_bonus, player_locked_bonus}` (§6.1, §6.3.2), so it is also covered by the B1 reconciliation stream (`reconciliation-model.md` §2.9) |
-| `player_bonus_held` (`ARCHITECTURAL DECISION`, Stage 4H-B1 Wave 1.5 Fix Round 2, §7.7.2) | Bonus-origin settlement value (a win payout, and/or a released stake lock) whose disposition is undecided because `NewStakeEligibility` for the attributed Grant had already closed at settlement time — held pending a human-supplied G-2 answer (ADR 0039 Decision 2) | Wallet | Any asset bonus-funded wagering is offered in | Credit (liability — still potentially owed to the player, pending disposition) | Hold-capture leg of casino_win/sportsbook_settlement/sportsbook_partial_settlement (credit only); the resolution transaction that clears it (`ACTION_REFORFEIT`'s first half into `player_bonus`, or `ACTION_ROUTE_TO_CASH` directly into `player_cash` — both debit this account); the generic rollback-inversion of a still-held hold-capture posting (§7.7.2.7) | No | Yes | New stream **LF-12** (§7.7.2.8): every open `bonus_held_dispositions` row's amount must equal exactly its attributed balance here; **additionally** a third member of `BONUS_SET` (§6.1), covered by B1 (extended)'s hourly zero-tolerance sweep |
+| `player_bonus_held` (`ARCHITECTURAL DECISION`, Stage 4H-B1 Wave 1.5 Fix Round 2, §7.7.2) | Bonus-origin settlement value (a win payout, and/or a released stake lock) whose disposition is undecided because `NewStakeEligibility` for the attributed Grant had already closed at settlement time — held pending a human-supplied G-2 answer (ADR 0039 Decision 2) | Wallet | Any asset bonus-funded wagering is offered in | Credit (liability — still potentially owed to the player, pending disposition) | Hold-capture leg of casino_win/sportsbook_settlement/sportsbook_partial_settlement (credit only); the resolution transaction that clears it (`ACTION_REFORFEIT` debits this account directly into `promo_liability`, `ACTION_ROUTE_TO_CASH` debits it directly into `player_cash` — neither ever routes via `player_bonus`, §7.7.2.9/HR-25); the generic rollback-inversion of a still-held hold-capture posting (§7.7.2.7) | No | Yes | New stream **LF-12** (§7.7.2.8): every open `bonus_held_dispositions` row's amount must equal exactly its attributed balance here; **additionally** a third member of `BONUS_SET` (§6.1), covered by B1 (extended)'s hourly zero-tolerance sweep |
 | `player_withdrawal_hold` (`ARCHITECTURAL DECISION`) | Funds earmarked for a withdrawal request that has left `player_cash` but is not yet externally sent (pending approval/PSP submission) | Wallet | Any withdrawable asset | Credit while held | withdrawal_requested (in), withdrawal_completed (out, external send), withdrawal_reversed (back to `player_cash`) | No | Yes | Cross-checked against open rows in the withdrawal state machine (`withdrawal-state-machine.md`) — every held amount must equal exactly one non-terminal withdrawal request |
 | `house_gaming` (`BLUEPRINT`) | House's gaming P&L (stakes in, wins out) | Tenant (house-level, no wallet — see `financial-domain-model.md`) | Any asset the tenant accepts stakes in | Credit (revenue) net over time — may legitimately sit debit-side for a period if payouts exceed stakes | casino_bet, casino_win, casino_rollback, sportsbook_settlement, sportsbook_partial_settlement, sportsbook_void (post-settlement), provider_settlement (fee recognition — see Flow 17 `OPEN DECISION`). **Not** `sportsbook_bet`: a sportsbook stake moves `player_cash` → `player_locked_cash` and/or `player_bonus` → `player_locked_bonus` only, and does not touch `house_gaming` until settlement | No | Yes | Recomputed GGR (Blueprint §4.9) vs. this account's balance, per tenant per asset |
 | `provider_payable` (`BLUEPRINT`) | Amount owed to a casino/sportsbook game provider for GGR-share/fees | Tenant (house-level) | Any asset the provider bills in | Credit (liability) | provider_settlement | No | Yes | Daily reconciliation against provider settlement statements |
@@ -6979,7 +6979,16 @@ debit casino's `L(G) → 0` mandate already requires, §16.5a) and **credits
   exactly as on an ordinary win. LF-19 does not arise: there is no
   predicate exception to maintain, because the held value was never in
   the account the predicate reads. **A-1 (§7.7.1) is moot, not merely
-  satisfied** — there is nothing left for it to require.
+  satisfied** — there is nothing left for it to require. **A-3 (§7.7.1)
+  is moot for the identical reason, stated explicitly here so it is not
+  silently carried forward the way it was into an earlier draft of
+  §7.7.2.9's HR-25** (corrected there this pass): A-3 required extending
+  §7.11's `player_bonus` sufficiency lock to cover a later re-forfeiture
+  of held value, on the premise that held value would sit inside
+  `player_bonus`/`player_locked_bonus` — branch 1, rejected above. Once
+  held value sits in the disjoint `player_bonus_held` account instead,
+  there is no live, shared balance for such a lock to protect, and A-3's
+  concern does not arise here at all.
 - `LockedExposure(G, t)` (unchanged, a balance read of
   `player_locked_bonus`) correctly reads zero for this stake.
   `HeldDisposition(G, t)` is redefined (§7.7.2.10 item 2) as a balance read
@@ -7304,12 +7313,15 @@ not `player_bonus`), so HR-21's third element is simply absent from this
 path, the same way it is already absent from an ordinary Grant credit.
 **HR-21 is not violated and needs no new participant for creation.**
 
-**Resolution path: one genuine new participant — HR-25.** Resolving a
-`held` record (applying a human-supplied G-2 answer, or voiding it per
-§7.7.2.7) is **not** part of the original settlement transaction — it runs
-later, in its own transaction, keyed by the record's own `id`, not by
-`correlation_id` (no live settlement event is being processed). Its lock
-order:
+**Resolution path: one genuine new participant — HR-25 (corrected this
+pass — closing the relocated composition failure `architect`'s
+independent Phase 2 certification found: this item previously
+contradicted `10-bonus-engine-architecture.md` §N1.4 step 5c, which had
+the posting shape right).** Resolving a `held` record (applying a
+human-supplied G-2 answer, or voiding it per §7.7.2.7) is **not** part of
+the original settlement transaction — it runs later, in its own
+transaction, keyed by the record's own `id`, not by `correlation_id` (no
+live settlement event is being processed). Its lock order:
 
 > **HR-25.** Resolution acquires, in order: (1) `(tenant_id, grant_id)`
 > advisory lock (doc10 §9 — still required, since resolution mutates `G`'s
@@ -7317,15 +7329,99 @@ order:
 > concurrent settlement/expiry/cancellation touching the same `G`);
 > (2) `SELECT ... FOR UPDATE` on the specific `bonus_held_dispositions`
 > row (**the new, fourth participant** HR-21 requires be pinned in the
-> same change that introduces it — done here); (3) **only for
-> `ACTION_REFORFEIT`**, which releases into `player_bonus` before
-> immediately reforfeiting (`08 §16.9`'s own description of that action),
-> the `player_bonus` projection `FOR UPDATE` — identical to the existing
-> forfeiture row in §7.11's table, not a new lock shape.
-> `ACTION_ROUTE_TO_CASH` never acquires (3), since it debits
-> `player_bonus_held` directly to `player_cash` and never touches
-> `player_bonus`. The same row lock (step 2) also gates §7.7.2.7's
-> rollback-of-a-held-win transition.
+> same change that introduces it — done here). **There is no third
+> participant, for either disposition-bearing action.**
+> `ACTION_REFORFEIT` posts `Dr player_bonus_held (payout_amount +
+> released_lock_amount) / Cr promo_liability` **directly out of
+> `player_bonus_held` — never via `player_bonus`, not even transiently,
+> not even within the same transaction** — identical in shape to
+> `ACTION_ROUTE_TO_CASH`'s `Dr player_bonus_held (payout_amount +
+> released_lock_amount) / Cr player_cash`, differing only in the credit
+> leg's destination account. Neither action ever acquires a `player_bonus`
+> projection `FOR UPDATE`. The same row lock (step 2) also gates
+> §7.7.2.7's rollback-of-a-held-win transition.
+
+**Why no lock on `player_bonus_held` itself is needed either — this is
+not merely "the `player_bonus` lock, relabeled."** The amount being moved
+(`payout_amount + released_lock_amount`) is a fixed fact, denormalized at
+hold-creation time onto the `bonus_held_dispositions` row itself
+(§7.7.2.5) and never re-derived from a live balance read. Nothing other
+than this resolution transaction or the rollback transition (§7.7.2.7)
+can ever debit this specific occurrence's contribution to
+`player_bonus_held` — N1.4.1 item 3 (doc 10) excludes `player_bonus_held`
+from every wagering, authorization, spend and withdrawal path, for every
+Grant, permanently while `status = 'held'` — and both of that account's
+only two possible writers already contend for the identical row lock
+acquired at step 2. A live sufficiency check exists to guard against a
+*concurrent, independent* mutator of the balance being debited; here
+there is structurally none, so requiring one would not be conservative,
+it would be describing a lock against a hazard this design already
+eliminated by construction.
+
+**The error, named precisely, so it is not repeated.** This item
+previously required a third participant — a `player_bonus` projection
+`FOR UPDATE`, "identical to the existing forfeiture row in §7.11's
+table" — for `ACTION_REFORFEIT` specifically, on the premise that the
+action "releases into `player_bonus` before immediately reforfeiting."
+**That premise is false under this section's own decided design, and the
+lock requirement it implied is withdrawn outright, not merely relaxed.**
+It was inherited from §7.7.1's Round-1 finding **A-3** — a
+`player_bonus`/`player_locked_bonus` sufficiency-lock requirement written
+against **branch 1** (parking held value inside `player_locked_bonus`
+itself), which §7.7.2.1 rejected in favor of the disjoint
+`player_bonus_held` account (LF-19/LF-20) — without carrying forward the
+consequence for A-3 that §7.7.2.1 already drew for A-1. **Stated now,
+closing the gap**: §7.7.2.1's "A-1 is moot, not merely satisfied" applies
+identically to A-3, for the identical reason — once the held value sits
+in a disjoint, non-fungible, per-occurrence-attributed account that
+nothing outside resolution/rollback can touch, there is no live,
+shared balance for a sufficiency lock to protect. Requiring the
+`player_bonus` leg at all would reintroduce, inside a single
+transaction, the exact "credit a player-accessible balance, then
+immediately reverse it" shape `player_bonus_held` exists to eliminate —
+the transient credit is a distinct, player-balance-visible economic
+event (visible to audit logs and any balance-change consumer watching
+`player_bonus`) even when atomically reversed in the same commit, which
+is precisely `LF-2`'s original failure mode, reopened. `08 §16.9`
+independently repeated the identical wrong premise ("post normally, then
+a compensating `bonus_forfeiture`") and is corrected to match, in the
+same round (see below). `10-bonus-engine-architecture.md`'s N1.4 step 5c
+had this posting shape right from the start ("never via `player_bonus`,
+even transiently"); its own §N1.9 ("Additive edits this section makes")
+flagged a version of this inconsistency and routed a correction here, but
+pointed it at the frozen,
+superseded §T.7 text rather than at this item — **that routed correction
+is hereby ratified**: §T.7's literal `ACTION_REFORFEIT` posting-order
+text is superseded by this section and by doc 10's own N1.4 step 5c, not
+the other way around, and this item — not §T.7 — is the current, binding
+statement of the sequence.
+
+**§7.11's `bonus_forfeiture` row does not govern this posting — stated
+plainly, per this distinction actually mattering here.** §7.11 describes
+an *ordinary* forfeiture: a debit against the player's **live, shared,
+fungible** `player_bonus` balance for a Grant that is not (or not yet)
+resolved this way, where genuinely concurrent activity (wagering,
+conversion, a second partial forfeiture) can change that balance between
+read and write — which is exactly why that row needs a `FOR UPDATE`
+sufficiency check and a separately-minted `bonus_forfeiture:<forfeiture_
+occurrence_id>` idempotency key. A `bonus_held_dispositions` row is a
+**different kind of thing**, not merely a same-shape row with a
+different source account: its amount is fixed and denormalized at
+hold-creation, its source account is Grant-attributed and structurally
+unreachable by anything except resolution/rollback, and its own
+guarded `UPDATE ... WHERE status = 'held'` compare-and-swap — not a
+freshly-minted occurrence id — is what makes resolution idempotent
+(proved exhaustively below). The economic destination is the same
+(`promo_liability`), so this posting may still reasonably carry
+`transaction_type = 'bonus_forfeiture'` for statutory/reporting
+continuity with §7.2's existing category, but its **idempotency and
+concurrency mechanism is HR-25's own — never §7.11's row's** — and a
+future reader must not infer §7.11's `player_bonus` lock applies here
+merely because the destination account matches. If `bonus-engine`/
+`casino` would rather a distinct `transaction_type` value existed so
+tooling can never conflate the two mechanisms, that is a naming choice
+left to whichever of them owns the relevant migration, not a
+financial-invariant question this section needs to decide.
 
 This order is **consistent with, not a violation of, HR-21**: `grant_id`
 still precedes `player_bonus` wherever both are taken, and `correlation_id`

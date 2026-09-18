@@ -1116,9 +1116,15 @@ is required). The player later wins. Two exhaustive branches:
    exactly G-2's undecided question. Once a human selects and
    `bonus-engine` builds one of the three actions, the retried transaction
    posts the win **and** the lock release together, per whichever
-   disposition applies: `ACTION_REFORFEIT` releases into `player_bonus`
-   then immediately re-forfeits (INV-TG step 1's mechanism, re-applied,
-   `L(G) → 0`); `ACTION_ROUTE_TO_CASH` releases directly to `player_cash`
+   disposition applies: `ACTION_REFORFEIT` posts the payout and released
+   lock amount straight into `promo_liability` — **never via
+   `player_bonus`, not even transiently, not even within the same
+   transaction** (corrected this round: this sentence formerly read
+   "releases into `player_bonus` then immediately re-forfeits," which
+   `ledger-accounting-model.md` §7.7.2.9/HR-25 has now confirmed is wrong
+   and withdrawn — that document made and repeated the identical error,
+   independently corrected there this same round); `ACTION_ROUTE_TO_CASH`
+   releases directly to `player_cash`
    per the seam's override (`L(G) → 0`, and this is the **only** route by
    which a bonus-origin stake ever reaches `player_cash` directly — gated
    entirely behind a human decision, never `postWin`'s default);
@@ -1135,6 +1141,27 @@ is required). The player later wins. Two exhaustive branches:
    accounts). **No withdrawable cash is ever created by this branch until
    a human selects and `bonus-engine` implements one of these three
    actions. Holds.**
+
+   > **Flagged, not resolved here (`ledger-finance`, for `casino` and
+   > `architect`).** This sub-branch's "fails closed today, retries once
+   > a human decides" framing describes `ACTION_REFORFEIT`/
+   > `ACTION_ROUTE_TO_CASH` as posting for the first time only once a
+   > disposition is already known — but `10-bonus-engine-architecture.md`
+   > N1.4 step 5b (adopting `ledger-accounting-model.md` §7.7.2.2) requires
+   > the hold-capture posting into `player_bonus_held` to happen
+   > **unconditionally, for every** value-creating credit reaching a
+   > terminal Grant, before any disposition is known — and its own N1.4
+   > step 5c states resolution "never posts the win credit for the first
+   > time, it only moves an already-`player_bonus_held`-resident value
+   > onward," for **all three** actions, not only `ACTION_HOLD_FOR_REVIEW`.
+   > Whether this sub-branch's synchronous fail-closed/retry model (and
+   > §16.14's own framing of the hold-capture posting as built "at exactly
+   > the site §16.9's seam returns `ACTION_HOLD_FOR_REVIEW`") needs to be
+   > retired in favor of an unconditional hold-then-later-resolve model is
+   > a seam-invocation-timing question this section does not decide — it
+   > is `casino`'s and `architect`'s to reconcile against doc 10's already-
+   > decided mechanism, not a restatement of a posting shape this
+   > specialist can make unilaterally.
 
 In neither branch does `player_cash` receive value that traces back to a
 bonus-origin stake without first passing through either (a) the existing,
@@ -1245,9 +1272,14 @@ independent of which action is eventually selected.
 
 **Once G-2 is answered**, exactly one of the three bodies from doc10
 §T.7 is dropped into `ResolveTerminalGrantCredit`'s implementation:
-ACTION_REFORFEIT (post normally, then a compensating `bonus_forfeiture`,
-both owned by the settlement-posting layer, no new cross-domain call
-needed beyond the seam itself), ACTION_ROUTE_TO_CASH (the seam returns a
+ACTION_REFORFEIT (posts the held payout/released-lock amount straight
+into `promo_liability` — **never via `player_bonus`, not even
+transiently**; the §T.7 phrasing this bullet previously carried, "post
+normally, then a compensating `bonus_forfeiture`," described exactly the
+posted-then-reversed shape `ledger-accounting-model.md` §7.7.2.9/HR-25
+now confirms is wrong, and is withdrawn here to match — same document,
+same round, per the sub-branch-2 correction above), ACTION_ROUTE_TO_CASH
+(the seam returns a
 destination override, which `postWin` substitutes for `player_bonus`),
 or ACTION_HOLD_FOR_REVIEW (the seam returns a "hold" disposition,
 **now fully specified, not out of scope** — §16.14 adopts
