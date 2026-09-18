@@ -625,3 +625,369 @@ ledger; how the retail RBAC scope is carried on a request) rather than
 assumed to fit it. Item 1.6 (withdrawal exceeding float) is explicitly
 `OPEN DECISION`, referred to `architect`/`ledger-finance`, and its test
 cannot be written until that decision is made.
+
+## Stage 4H-B1 — Bonus Engine test strategy (Wave 1: design/contract only)
+
+Status: `RECOMMENDATION`, `NOT IMPLEMENTED`. Issued for Stage 4H-B1
+("Bonus Engine Implementation"), Wave 1 — a design/contract dispatch, per
+that stage's own gating rule: no `internal/bonus` code, no migration, and
+no test code is authorized by this section. This is the test matrix Waves
+2–7 are held to, and the floor Wave 7's dedicated abuse-testing dispatch
+builds its actual test suite against. It is written against
+`docs/architecture/10-bonus-engine-architecture.md` in full (§1–§10, the
+"Bonus Dependency Contract Freeze," and the "Terminal-Grant Technical
+Contract," §T.1–§T.13, cited below as "doc10") and
+`docs/architecture/ledger-accounting-model.md` §6.3–§6.6 (cited as
+"ledger-model"), using §6.5.8's ten-item migration-`0048` test set and
+§6.6.9's eleven-property Model-C test set as the rigor template the stage
+directive named. It supersedes nothing in this document's existing
+Stage 4H-B0 §5 ("Bonus/Gamification test strategy — proportionate to what
+actually ships") or ADR 0032's own testing floor — both remain the
+authoritative baseline this section extends with the concurrency,
+adversarial, property, RLS, and gating detail the B0 stage explicitly
+deferred to "whatever slice is actually authorized first."
+
+**Scope note, stated once rather than per test class below**: this section
+is written against Stage 4H-B0's authorized first slice — deposit bonus,
+reload bonus, cashback, generic wagering bonus, coupon; internal
+fulfillment only; no free spins/free bets, no external bonus engine, no
+cash reward, no mission/tournament/loyalty trigger (doc10, "Stage 4H-B0 —
+MVP Implementation Scope Plan," §1). Test rows for anything outside that
+slice are named where the architecture already specifies their shape (so a
+later scope expansion does not have to re-derive the test), but are marked
+`NOT APPLICABLE (out of first-slice scope)` rather than required for
+Waves 2–7's own sign-off.
+
+### 1. Concurrency/race test list
+
+Every row's **mechanism** column cites the locking discipline doc10
+already specifies (§9's `(tenant_id, grant_id)` advisory-lock family, or
+the specific idempotency key for the operation) — no new locking primitive
+is invented here. Every row's **invariant** column is the exact property a
+test must assert, not "the request succeeded."
+
+| # | Scenario | Mechanism under test | Invariant that must hold |
+|---|---|---|---|
+| C1 | Two redeliveries/near-simultaneous triggers of the same qualifying `deposit.settled` event, both attempting to issue a Grant for the same `(tenant_id, campaign_id, offer_version_id, player_account_id, trigger_reference)` | Grant-issuance idempotency key (doc10 §9, first bullet) | Exactly one `bonus_grants` row is created; the loser's attempt returns the original Grant, not an error and not a second row; no double `bonus_grant` ledger posting results even if both racers proceed to activation |
+| C2 | Two concurrent activation triggers for the *same* Grant (e.g. a redelivered no-opt-in `deposit.settled` racing a duplicate delivery, or racing an explicit staff manual-activation on the same Grant) | `(tenant_id, grant_id)` advisory lock (doc10 §9, extended by this document to activation — doc10's text names it explicitly only for "redemption/completion," so this row is this document's own extension, flagged in §6 below as needing `bonus-engine` confirmation before Wave 2 relies on it) | Exactly one `bonus_grant` posting (Dr `promo_liability`/Cr `player_bonus`) per Grant, ever; the loser observes the winner's already-`activated` state and performs no second RG/Risk/AssetAuthorization evaluation that could produce a second posting |
+| C3 | Two concurrent activations across **different** Grants issued under the **same Campaign**, both counting against that Campaign's budget cap | None designed — doc10 §1.1/Genuine-gap-7 confirms campaign-budget-cap enforcement has **no owner and no mechanism** as of this stage | **`BLOCKED`, not `NOT APPLICABLE`**: this is the literal "two simultaneous campaign activations" scenario the stage directive names, and it cannot be written until a budget-cap enforcement mechanism exists. Recorded here so a future implementer does not assume the cap is race-safe because no test failed — no test can exist yet. Once designed, the required invariant is standard TOCTOU-safe: concurrent activations against a shared counter must never jointly exceed the cap, proven under a real concurrent stress run, not a two-goroutine happy path |
+| C4 | Two concurrent triggers computing "this Grant's wagering multiplier is now satisfied," racing `completed→converted` for the same Grant | `(tenant_id, grant_id)` advisory lock (doc10 §9, second bullet, explicit) | Exactly one `bonus_conversion` posting per Grant; the loser's retry returns the original conversion result; Invariant B1 (ledger-model §6, `promo_liability` mirror) holds after either racer's view is read |
+| C5 | A conversion attempt races a staff/player cancellation of the same, still-`completed` Grant | Same advisory lock as C4; both paths must acquire it before reading `G.status` | Exactly one of `{converted, cancelled}` is the final state; never both a `bonus_conversion` and a `bonus_forfeiture` posting for the same Grant; whichever loses observes the winner's terminal state and performs no posting of its own — this is the identical "read current status `FOR UPDATE` inside the lock, never assume a prior read" rule doc10 §T.11's table states for exactly this reason |
+| C6 | A conversion attempt races the Grant's own automated time-limit expiry job for the same Grant | Same advisory lock as C4/C5 | Same invariant as C5, substituting `expired` for `cancelled` |
+| C7 | A `round.settled`/`bet.settled` progress-contribution event races a `casino_rollback`/`sportsbook_rollback` of a **different** round under the same Grant, both mutating what the completion job would read as current progress | The Model-C progress derivation is read-time, not stored (ledger-model §6.6) — there is nothing to lock in the classical sense, but the completion job's read of "is progress ≥ target" must be a single, consistent snapshot, not two independent queries that could see different committed states | The completion decision is made from one consistent read of the netted progress derivation; a completion transition never fires on a progress value that a concurrently-committing rollback has already nullified, and never fails to fire once the true, fully-netted progress (post-rollback) has genuinely crossed the target — race resolves to exactly one correct answer, not a a stale one from either side |
+| C8 | A `round.settled`/`bet.settled` progress-contribution event races the **void** of the very same bet it is trying to count | Same read-consistency requirement as C7, narrower: this is the "lock-then-void" cycle ledger-model §6.6.10 names as the anti-structuring case | The netted progress derivation must reflect the void (`q_eff = 0` per ledger-model §6.6.9 property 2) regardless of which of the two events' postings the completion job's read happens to observe first — i.e., the race must never let a voided bet's contribution count even transiently in a way that authorizes a conversion before the void's effect is visible |
+| C9 | Two identical, concurrently-delivered provider callbacks reporting the same external-Grant status change (external-fulfillment path) | `(grant_id, completion_trigger_reference)` idempotency key (doc10 §9, third bullet, adapted) | Exactly one Progress append and one lifecycle-event emission (if any — `inside_provider` Grants emit none per doc10 §3.2/Dependency Contract §10); the second racer is a no-op. **`NOT APPLICABLE` for Waves 2–7's own sign-off** per this section's scope note (external fulfillment is out of the first slice) — retained here because the mechanism is identical to C1/C9's in-house analogue and should not be re-derived when external fulfillment ships |
+| C10 | Two duplicate `deposit.settled` events (genuine provider retry, not a distinct deposit) delivered concurrently | Same key as C1 | No second Grant; no second `bonus_grant` posting if the deposit also triggers no-opt-in activation |
+| C11 | Duplicate sportsbook/casino activity events (redelivered `bet.settled`/`round.settled` for the same occurrence) delivered concurrently | ADR 0038 §14's composed idempotency key / `occurrence_ordinal` discipline (doc10 Dependency Contract §6's binding dedupe rule: dedupe on `idempotency_key`, never `event_id`) | Progress increments by exactly the genuine occurrence's contribution once, never twice, regardless of delivery order or concurrency; a non-adjacent or out-of-order `occurrence_ordinal` delivery (ADR 0038 §14.1, testing-strategy P1-3's named gap above) still nets correctly |
+| C12 | Two concurrent staff sessions attempt a manual grant-size override / manual conversion release on the same Grant, at least one exceeding the four-eyes threshold | doc10 §10's manual-adjustment audit row + CLAUDE.md's four-eyes-above-threshold rule (approval workflow itself is explicitly **not designed** by doc10 §10 — "flagged here as a requirement the backoffice/RBAC implementation stage must satisfy") | **`BLOCKED`** on the same undesigned mechanism as C3: the specific adversarial property that must eventually hold — a race can never let two different first-approvers each count as the other's second approver, and can never let two independent overrides both post — cannot be tested until the approval workflow exists. Recorded so it is required the moment that workflow lands, not discovered later |
+| C13 | An RG self-exclusion commits for player P concurrently with an in-flight Grant activation/conversion for the same P | `rg.EvaluateEligibility` inside the same transaction as the Grant's state-changing effect, `clock_timestamp()` semantics, queued behind the identical class of advisory lock `TestEvaluateEligibility_DetectsSelfExclusionCommittedAfterTransactionBegan` already proves for casino (doc10 §5, Dependency Contract §4) | Structured identically to that existing regression test, retargeted at Bonus Engine's own checkpoints: assert denial regardless of which of the two orderings (self-exclusion-commits-first vs. Grant-transition-starts-first) actually occurs — a `TestConcurrent_BonusActivationDuringConcurrentSelfExclusion`-shaped test, required at both the activation and conversion checkpoints, is the Bonus-domain instance of this platform's own highest-precedent concurrency regression and must not be treated as "covered by the generic RG test suite" without its own Bonus-specific reproduction, exactly as retail required its own version (this document's Stage 4H-B0 §4) rather than inheriting the online-path test |
+| C14 | A jurisdiction/tenant Risk rule change (a hard-limit tightening, e.g.) commits concurrently with an in-flight Grant activation/conversion for a player it would now deny | `risk.Evaluate` live, in-transaction, same composition point as C13 | Same shape as C13: the in-flight transition observes the rule as of `clock_timestamp()`-consistent read time, not a value frozen before the rule change committed; both orderings tested |
+| C15 | An asset is deactivated (`assets.active = false`) concurrently with an in-flight activation/reward-credit/conversion attempt against a Grant denominated in that asset | `AssetAuthorization.CheckEligibility`, live, T.1's composition order (doc10 §T.3/§T.8/§T.12) | The value-creating transition observes the live authorization state at the moment of its own check — either it commits before the deactivation is visible (a legitimate race the deactivating actor accepts, per §T.5.1's asymmetry — deactivation is fail-closed going forward, not retroactive) or it is denied cleanly per §T.12's already-specified per-checkpoint consequence; it must never partially post (a `bonus_grant`/`bonus_conversion` posting with no corresponding Progress entry, or vice versa) |
+| C16 | A settlement (WIN) or void/rollback credit against a lock-time debit under Grant `G` arrives concurrently with `G`'s **own** transition to a terminal state (expiry firing, staff cancellation, or a wagering-rule-breach forfeiture on a different bet) | The exact `(tenant_id, grant_id)` `FOR UPDATE` read doc10 §T.7 specifies, "read live... using the identical advisory lock doc10 §9 already specifies for Grant-completion races" | **`BLOCKED` on the G-2 human decision (doc10 §T.13)** — the mechanism to acquire a consistent read of `G.status` at the instant of the competing credit is fully specified, but which of `ACTION_REFORFEIT`/`ACTION_ROUTE_TO_CASH`/`ACTION_HOLD_FOR_REVIEW` fires is not selected, so the test's own assertion cannot be written. What **can** and must be tested before G-2 is resolved: that the race is detected and routed to *some* defined, non-silent outcome (i.e., the credit is never simply posted to `player_bonus` as if `G` were still non-terminal) — a placeholder assertion Wave 2's implementers should not skip merely because the final action is undecided |
+| C17 | Conversion is in flight for Grant `G` when an upstream event reverses the original transaction that justified `G` (a deposit chargeback, or a casino/sportsbook rollback of a round `G`'s Progress had already credited) | `(grant_id, reversing_event_reference)` idempotency key (doc10 §9, "Reversal" bullet); the reversal and the conversion race for the same `(tenant_id, grant_id)` lock | Exactly one of the two effects (the conversion's `bonus_conversion` posting, or the reversal's compensating entries) is the one that lands first and is authoritative; the loser must not silently proceed as if the other had not happened — a converted Grant later discovered to rest on a reversed deposit needs its own compensating entry (ADR 0032 §7, not a re-opened conversion), and a reversal racing a not-yet-committed conversion must block that conversion rather than let both post independently |
+
+**Stress-test requirement, not merely a two-goroutine happy path**: per this
+platform's own established precedent (`docs/progress.md`'s casino
+concurrency work — "8 goroutines, `-race`, proves exactly one of many
+simultaneous [attempts] wins"), every row above marked with a real
+mechanism (C1, C2, C4–C11, C13–C15, C17) requires, in addition to the exact
+two-actor race, an N-way stress variant (minimum 8 concurrent goroutines
+against a real Postgres instance, `-race` enabled) before it is credited as
+tested — a two-goroutine pass proves the lock exists; it does not prove the
+lock holds under real contention.
+
+### 2. Adversarial abuse test list
+
+Framed per the stage directive's own instruction: each row states what a
+real exploit attempt looks like and the specific thing the test must prove
+does **not** work — a passing happy-path test or "the code has coverage
+here" is explicitly not sufficient evidence for any row below.
+
+| # | Abuse vector | What a real attempt looks like | What the test must prove |
+|---|---|---|---|
+| A1 | Deposit/reversal farming | Player deposits just enough to trigger a deposit-match Grant, lets it activate (crediting `player_bonus`), then reverses the deposit (chargeback / payment-method dispute) after having already extracted wagering progress or converted value, repeating the cycle across payment methods/cards | The `reversed` transition (doc10 §1.3's "Any terminal state → `reversed`" row, ADR 0032 §7) always posts a compensating entry against whatever the Grant produced, even if the Grant has already converted — the test must show a player cannot net a real cash gain from a bonus whose triggering deposit was later reversed, across every terminal state the Grant could have reached before the reversal arrived (issued/activated/completed/converted), not only the simplest case |
+| A2 | Void farming | Player repeatedly places a bonus-funded bet and voids it (or exploits a market that is frequently voided) purely to cycle wagering progress up with no genuine stake at risk | Per ledger-model §6.6.9 property 2 / §6.6.10: a full lock-then-void round-trip changes net progress by exactly zero, with **no residue**, and this holds under **unbounded repetition** — the test must run a real repeated cycle (not one iteration) and assert the netted progress after N cycles equals the netted progress after 1 cycle (i.e., strictly zero marginal gain per cycle), not merely that a single void nets correctly |
+| A3 | Rollback farming | Same as A2 but via casino/sportsbook rollback of settled rounds rather than void, and — the platform-wide gap ledger-model §6.6.9 property 9 names — via a `casino_rollback` reversing a bonus-funded `casino_bet` specifically to test whether that channel (historically unbroken for cash, but not previously verified to net bonus progress) also nets to zero | Identical proof to A2, run through the rollback channel specifically, including the "improved" case ledger-model §6.6.9 item 9 flags as newly netting under Model C — this is a **regression test for a fix**, not merely a new-feature test, and must be labeled as such in the completion report |
+| A4 | Repeated cashback claim | Player attempts to trigger the cashback settlement job's credit more than once per window (double-submitting a claim, or racing the scheduled job with a manual trigger if one exists) | Exactly one cashback credit posts per Grant per window, identified by an idempotency key scoped to `(grant_id, window)` (or equivalent) — the settlement job itself must be idempotent on redelivery/re-invocation, not merely "runs once by convention," mirroring the "assert the job fires, not just that the query is right" lesson this document's own Stage 4H-B0 §1.7 already states for retail reconciliation, applied here to the cashback job |
+| A5 | Campaign/Offer version manipulation | Staff (or a compromised admin session) edits a live Campaign's Offer to a looser version (larger cap, lower wagering multiplier) attempting to retroactively improve the terms of an already-issued Grant, or a player attempts to reference a newer Offer version's id on an API call touching an older Grant | A Grant's every downstream computation (reward amount, wagering target, contribution %, payout ordering) reads only the immutable Offer version frozen at `issued` time (doc10 §1.1, §T.2, §T.11's table) — the test must edit the live Offer after Grant issuance and assert every subsequent computation for that Grant is provably unaffected, including an attempt to pass a different `offer_version_id` on a request touching that Grant, which must be rejected as a request/state mismatch, not silently substituted |
+| A6 | Asset deactivation abuse | An insider (or a race won deliberately) times an asset deactivation/reactivation to influence which of the not-yet-decided G-2 actions a terminal-Grant credit receives, or to selectively freeze one player's Grant while leaving others unaffected for improper reasons | **Cannot be fully proven until G-2 (doc10 §T.13) is resolved** — recorded as a required test the moment it is. What can and must be tested now: §T.5.1's asymmetry itself is not exploitable in the *other* direction — i.e., an asset deactivation must never be usable to **block** a value-reducing transition (expiry/cancellation/forfeiture write-down), since §T.5.1 explicitly requires those to proceed ungated; a test forcing a deactivation immediately before an expiry/cancellation fires must show the write-down still posts |
+| A7 | Grant duplication | Rapid-fire replay of the same qualifying deposit webhook (N requests, not 2) attempting to obtain N Grants from one qualifying event | Extension of C1/C10 to N ≥ 20 rapid, real (not simulated) concurrent deliveries against a real idempotency-keyed unique constraint — exactly one Grant results, proven by count, not by absence of an observed error |
+| A8 | Identity duplication | Player re-registers under a new account (or uses the retail-channel registration path once it exists) to claim a first-deposit-only Offer more than once | This is explicitly a **dependency, not a Bonus Engine test**: doc10 §1.4 states device/payment-fingerprint linking is a Bonus-Engine-owned *detector*, but the underlying identity-graph fact ("this device/payment instrument is linked to N other accounts that already claimed this Offer") is not designed by doc10 at all — flagged in §6 below as a gap `bonus-engine`/`identity-compliance` must close before this row can be tested rather than assumed covered |
+| A9 | Cross-brand abuse | A player active on two brands under the same tenant both claim a Campaign that was configured tenant-wide (intending one claim per player, not per brand-relationship) | Doc10 §8's "most-specific-row-wins, never a per-field merge" rule must be proven under attack: a brand-specific Campaign row replaces the tenant-wide one *entirely* for that brand; the test must show a tenant-wide Campaign's own eligibility axis (if configured "once per player" rather than "once per brand") is evaluated against the player's cross-brand history, not brand-scoped in isolation — this requires the eligibility axis to actually carry a "scope of uniqueness" concept, which is not confirmed to exist in doc10's five-axis model; flagged in §6 as needing confirmation before this row can be written as more than a negative/placeholder test |
+| A10 | Cross-tenant abuse | Under the hybrid licensing model, a person with accounts under two tenants (one under-platform-licence, one own-licence) attempts to claim a platform-wide Campaign (`tenant_id IS NULL`) once per tenant relationship | RLS-level cross-tenant isolation (§4 below) proves a tenant A staff/player connection cannot read/write tenant B's Grant rows. The **business-logic** question — whether a platform-wide Campaign should be deduplicated across a single Person's multiple tenant relationships — is **not answered anywhere in doc10**; flagged in §6 as an open product/architecture question, not decided by this document, and this row cannot be marked more than `NOT APPLICABLE (open question)` until it is |
+| A11 | Replay | An attacker captures and replays a previously-successful conversion (or activation) request verbatim, including any client-supplied identifiers | The full request replay must hit the same idempotency key as the original and return the original result with zero new ledger effect — this is C4/C9's mechanism restated as an explicit adversarial replay of a full request rather than a benign redelivery, and the test must include a **stale** replay (minutes/hours after the original, not immediately) to rule out a time-window-limited idempotency implementation |
+| A12 | Amount/asset/player/provider tampering | A client-supplied field (amount, `asset_code`, `player_account_id`, `provider_id`/`provider_tx_id`) on any Bonus Engine-facing request is altered to a value inconsistent with the authenticated session or the upstream event | Every one of these fields must be proven to originate from server-side authenticated context or the trusted event-bus payload, never a client-supplied value that is merely validated against — mirroring CLAUDE.md's `tenant_id` rule extended to this domain's own money/identity fields; the test supplies a tampered value on an otherwise-valid, authenticated request and asserts the tampered value has **zero effect** on which account is credited/debited or by how much, not merely that the request is rejected (a request that is "rejected" but nonetheless used the tampered value for a partial side effect before rejecting would still fail this test) |
+| A13 | Race-condition exploitation | An attacker deliberately automates a burst of concurrent requests (not 2 — a real burst, e.g. 50–100) at a known race window (activation, conversion, the reward-credit checkpoint) to try to win a double-credit through sheer volume rather than precise timing | This is §1's stress-test requirement (C1, C2, C4) run adversarially rather than as a correctness check — the test must show the *count* of resulting postings equals the count of genuinely distinct events regardless of burst size, and must be run at a burst size large enough to saturate the connection pool/lock queue, since a race that only manifests under real contention will not be caught by a burst too small to create contention |
+| A14 | Micro-operation exploitation (structuring) | Player splits what would be one qualifying deposit/stake into many small ones to (a) exploit WP-1's rounding-structuring vector (ledger-model §6.6.10) if progress were ever rounded, (b) fall under a `min_amount`/`max_amount` transaction-window Risk rule's threshold repeatedly since `cumulative_amount`/`count`-shaped rules are **not enforced in the first slice** (doc10 §"Package/domain ownership," condition 1), or (c) claim a per-transaction bonus cap N times instead of once | WP-1 itself: prove the progress computation is genuinely never rounded (ledger-model §6.6.10's "the vector dissolves if the progress quantity is never rounded") — a structuring test that splits a stake into many small ones and asserts the summed progress exactly equals the single-stake progress, no more. For (b)/(c): this is an **accepted, documented first-slice gap**, not a test failure — the test suite must include a test that *demonstrates* the gap (a player can currently bypass a would-be cumulative/velocity cap by structuring) and the completion report must carry it as a named residual risk per this document's "No fake completion" standard, not omit it because "the architecture already said so" |
+
+### 3. Property/invariant testing plan
+
+Per test-writing discipline, not per architecture section — classifying
+each of the seven named classes as property-based (generative, randomized
+inputs asserting an invariant holds across the input space) vs.
+example-based (fixed, hand-picked cases), and stating why:
+
+| Class | Property-based or example-based | Reasoning |
+|---|---|---|
+| **Rounding** | **Both.** Property-based for the algorithm itself (`result = sign(x) × floor(\|x\| + 0.5)`, ADR 0021 DS-1) across randomized minor-unit amounts/rates/caps, asserting determinism (same input always yields same output) and the "round once, at the final monetary boundary" property (DS-2 — intermediate values carried at full precision never affect the final result differently than a single-shot computation would). Example-based for the named boundary cases: exact tie (`x.5`), zero, the cap exactly equal to the computed amount, and the negative-direction case if ever reachable | A rounding algorithm's correctness is a property over the whole input space; specific boundary values are exactly where hand-written examples catch what random generation under-samples |
+| **Wagering progress** | **Property-based**, primarily, for the netting/idempotency guarantees ledger-model §6.6.9 states as eleven required properties — generate random orderings/interleavings of lock/settle/void/rollback events against a Grant and assert: `P_net ≤ P_firm` always; the derivation is order-independent for commuting operations; a full lock-then-void round trip nets to exactly zero regardless of position in the sequence (A2's property, generalized). **Example-based** for the twelve named worked cases (ledger-model §6.3.3.2's C-void/C-loss/C-win/C-partial, §6.6.7's cases 1–12) which exist precisely because they are the specific scenarios reviewers already reasoned through by hand and whose numeric answers are already known | The netting model is a genuinely generative space (arbitrary event orderings); the worked cases are the concrete, already-reviewed ground truth a generative test's output should never contradict — both are required, neither substitutes for the other |
+| **Grant state transitions** | **Both.** Example-based (state-machine conformance): every row in doc10 §1.3's transition table is individually reachable, and every transition **not** in that table is rejected — this is naturally an exhaustive enumeration, not a generative one, since the state machine is small and finite. **Property-based** as a random-walk companion: drive a Grant through random sequences of triggers and assert two invariants hold at every step regardless of path taken — (a) the Grant never occupies two states at once and never regresses from a terminal state except via the single `→ reversed` transition, and (b) every transition produces exactly one Progress entry in the same transaction (§10.1's completeness requirement), with a strictly monotonic sequence number | The transition table itself is a closed enumeration best proven exhaustively; a random walk additionally catches an accidentally-reachable illegal transition that a hand-written test suite, which only tries transitions someone thought to write, would miss |
+| **Idempotency** | **Both**, mirroring ADR 0020's own already-required list (cited by doc10's Dependency Contract §6 and by this document's existing financial-functionality baseline, item 2/4/10 above): example-based for exact retry, same-key-different-payload rejection, and the tombstone-then-late-original-rejected sequence; **property-based** for "N concurrent/redelivered/out-of-order copies of the same event, in any order and at any repetition count, always converge to exactly one effect" — randomizing delivery count, ordering, and timing | The specific named idempotency failure modes (ADR 0020's list) are known, finite scenarios; "any redelivery pattern converges to one effect" is precisely the kind of property that generative, randomized-ordering testing is suited to and example-based testing structurally under-samples |
+| **Ledger conservation** (Invariant B1, and platform-wide `SUM(DEBITS) == SUM(CREDITS)`) | **Both, and mandatory after every other test in this entire matrix**, not a standalone class. Example-based: assert B1/SUM after each of the twelve worked cases and after every scenario in §1/§2 above (mirroring "Invariant B1 asserted after every one of the above," ADR 0032's own testing floor). **Property-based**: a fuzzer that drives a Grant through random, architecture-legal lifecycle sequences and asserts B1 holds after every single posting, not only at the end of the sequence | B1 is a zero-tolerance invariant (CLAUDE.md: "any non-zero drift is a P1 incident") — it must be checked continuously through a random sequence, not only at a final assertion, since an intermediate violation that self-corrects by the end would otherwise go undetected |
+| **Cancellation/reversal** | **Both.** Example-based for the named required cases (reversal of a partly-consumed Grant fails loudly; double-reversal race is blocked; reversal of a never-seen Grant writes a tombstone and a late-arriving original is then rejected — mirroring the financial-functionality baseline's item 6 and doc10 §9's "Reversal" idempotency key). **Property-based** for "reversal delivered before vs. after the original is fully processed, in any interleaving, produces the same final ledger state" — randomizing the relative arrival order of an original event and its eventual reversal | The specific failure modes are known and must be individually proven; the order-independence property (a reversal genuinely arriving out of order relative to a slow-processing original) is exactly the class of bug advisory-lock/idempotency-key mechanisms are meant to prevent and benefits from randomized-ordering coverage |
+| **Asset exponent handling** | **Example-based**, deliberately not generative — every monetary computation path (grant-amount rounding, wagering-target computation, per-game contribution split, conversion payout, forfeiture write-off) must be **explicitly run at exponents 0, 2, 6, 8, and 18**, not sampled randomly from the registry's 0–18 range | See exponent-coverage confirmation below — this is a fixed, named checklist, not a space to explore generatively; a random exponent generator could easily never select 0 or 18 (the two extremes where bugs actually concentrate — see below) across a finite run |
+
+**Exponent coverage requirement, confirmed and extended, not merely
+repeated.** The stage directive asks this document to confirm 0/2/6/8/18
+decimal coverage "mirroring migration 0048's own test set." That mirror is
+**deliberately not a full repetition**: migration 0048's own
+implementation-status note (ledger-model §6.5, header) records that its
+item 9 ("repeated on an 18-exponent and a 0-exponent asset") was executed
+at exactly two exponents, 0 and 18, plus the pre-existing 2-exponent
+default the rest of the suite already ran at — **6 and 8 were never
+exercised**, despite being named in this document's own confirmation
+requirement and being the exponents a live BTC/ETH-class asset would
+actually use. Bonus Engine's own test set must not silently inherit that
+gap: **every** listed monetary computation path is required at all five
+named exponents (0, 2, 6, 8, 18), and a completion report that repeats
+migration 0048's shortfall (covering only 0/2/18 and calling the exponent
+requirement satisfied "by precedent") is itself a `FAIL` against this
+document's reporting standard, not a partial pass.
+
+### 4. RLS/tenancy test requirements
+
+Every row below is a **direct SQL test** (a raw connection with the
+relevant session-level scope set, issuing `SELECT`/`INSERT`/`UPDATE`/
+`DELETE` directly against the table) — never an application-path-only test
+— mirroring `internal/wallet/locked_origin_summary_integration_test.go`'s
+`TestRLS_LockedSplitAccountsScopedToOwnerAndTenant` and
+`internal/risk/risk_integration_test.go`'s
+`TestRiskRules_PlayerScopeConnectionCannotReadOrWrite`/
+`TestRiskRules_CrossTenantDisableDenied` naming and structural pattern.
+Per CLAUDE.md, "enforced by PostgreSQL row-level security... not by
+discipline in application code" — a suite that only ever exercises the
+API layer cannot distinguish "the database enforces this" from "the
+application always remembers to filter," which is precisely the gap this
+document's Stage 4H-B0 §2 already refused to accept as adequate for retail
+hierarchy isolation.
+
+Scoped to the four new tables migration sequencing item names (doc10,
+"Migration sequencing for the first slice ONLY"), in dependency order:
+
+| Table | Scope shape (doc10 §8) | Required direct-SQL tests (naming suggested, not binding) |
+|---|---|---|
+| `bonus_campaigns` | Dual, nullable `tenant_id`, optionally narrowed by `brand_id`; a genuinely platform-wide row (`tenant_id IS NULL`) is a deliberate, by-design exception to per-tenant isolation | `TestRLS_BonusCampaignsScopedToOwnerTenant` — a tenant-A-scoped connection cannot read/write a tenant-B-scoped Campaign row; `TestRLS_BonusCampaignsPlatformWideReadableByAllTenants` — a platform-wide (`tenant_id IS NULL`) row **is** readable across tenant-scoped connections, proven as an intentional assertion, not an accidental leak (mirroring `TestRiskRules_CrossTenantDisableDenied`'s pattern of proving both the isolation and its documented exception); `TestRLS_BonusCampaignsBrandRowReplacesTenantRowEntirely` — a brand-specific Campaign row is read in place of (never merged with) a tenant-wide one for that brand, direct-SQL, not inferred from application resolution logic |
+| `bonus_offers` | Inherits owning Campaign's scope, narrowing only | `TestRLS_BonusOffersInheritCampaignScope` — an Offer's effective scope under direct SQL matches its Campaign's, including the platform-wide/tenant-wide/brand-specific cases above; `TestRLS_BonusOffersCannotWidenCampaignScope` — an attempt to write an Offer row with a broader scope than its owning Campaign (e.g. brand-specific Campaign, tenant-wide Offer) is rejected by the database, not merely by application validation |
+| `bonus_grants` | Always tenant + brand + player scoped; dual `tenant_staff_scope` + `player_self_scope` (read-only), mirroring `casino_launch_sessions`/`withdrawal_requests` (migration 0026) | `TestRLS_BonusGrantsScopedToOwnerAndTenant` (direct structural mirror of `TestRLS_LockedSplitAccountsScopedToOwnerAndTenant`) — a tenant-staff connection cannot read/write another tenant's Grant; `TestRLS_BonusGrantsPlayerScopeCannotReadOtherPlayer` — a player-self-scoped connection (session set to player A) cannot read player B's Grant row even under the identical tenant/brand, via direct object reference (a known Grant id for B supplied under A's session), not merely absent from a list endpoint; `TestRLS_BonusGrantsPlayerScopeIsReadOnly` — the player-self-scope policy permits `SELECT` and rejects `INSERT`/`UPDATE`/`DELETE` outright at the database layer |
+| `bonus_progress` | Same scope as owning Grant; append-only (mirrors `audit_log`'s enforcement pattern) | `TestRLS_BonusProgressScopedToOwnerAndTenant` and `TestRLS_BonusProgressPlayerScopeCannotReadOtherPlayer` (identical shape to the Grant-level pair above); `TestRLS_BonusProgressAppendOnly` — a direct `UPDATE`/`DELETE` against an existing `bonus_progress` row fails at the database layer regardless of role, mirroring whatever mechanism `audit_log`'s own append-only enforcement uses (a `BEFORE UPDATE OR DELETE` trigger raising, or a `REVOKE` on those privileges from the application role) — the exact mechanism is `bonus-engine`'s implementation choice, but the test must prove the outcome at the SQL layer, not assume it from the table's intended design |
+
+**Cross-player isolation, called out because it is not the same test as
+cross-tenant isolation**: every Grant/Progress row test above must be run
+twice — once proving tenant A cannot see tenant B (cross-tenant), and once
+proving player X cannot see player Y **within the same tenant and brand**
+(cross-player) — a design that gets tenant isolation right can still leak
+between two players of the same tenant if the player-scope policy is
+missing or malformed, and the two failure modes have historically had
+different root causes on this platform (this document's own Stage 4H-B0
+§2 makes the identical point for retail hierarchy nodes).
+
+### 5. Testing gate checklist for Waves 2–7
+
+**At every wave (2 through 6), before that wave's work is reported as
+complete**, the following run cleanly, using this platform's own
+established command set (`docs/progress.md`'s existing convention, not
+invented here):
+
+1. `gofmt -l .` — zero files listed.
+2. `go build ./...` — clean.
+3. `go vet ./...` and `go vet -tags=integration ./...` — clean.
+4. `go test ./...` — unit suite, clean.
+5. `go test -tags=integration ./...` — integration suite (against a real
+   Postgres instance, per this platform's existing convention — never a
+   mocked database standing in for RLS/constraint behavior), clean.
+6. `go test -race ./...` and `go test -race -tags=integration ./...` —
+   clean, for **every** package touched that wave, not only new packages —
+   a race introduced in a shared helper (e.g. a change to
+   `internal/wallet.GetSummary` for the bonus-balance fields) must be
+   caught by the race detector run against the packages that already
+   depend on it, not only against `internal/bonus` itself.
+7. Every new test named in §1–§4 above that is in scope for that wave's
+   own deliverable is present and passing — a wave that ships a table
+   without its RLS direct-SQL tests, or a lifecycle transition without its
+   concurrency-race counterpart from §1, is not reportable as complete for
+   that deliverable, per this document's "What 'done' requires" section.
+
+**The final gate (Wave 7, the dedicated abuse-testing dispatch), in full,
+before Bonus Engine is eligible for a `qa` `IMPLEMENTED` sign-off on any
+in-scope bonus type:**
+
+1. The complete integration suite (`go test -tags=integration -count=1
+   ./...`), full repository, not scoped to `internal/bonus` alone — a
+   bonus-domain change that regresses casino/sportsbook/wallet/risk/rg
+   behavior must be caught here.
+2. The complete race suite (`go test -race -tags=integration ./...`),
+   full repository, at least once with `-count=1` and once repeated (this
+   platform's own precedent, `docs/progress.md`'s casino work, ran
+   repeated `-race` passes specifically because a race that only manifests
+   probabilistically can pass once and still be real).
+3. Every RLS test from §4, run directly, all four tables, both
+   cross-tenant and cross-player variants.
+4. Migration round-trip: every migration in doc10's "Migration sequencing"
+   list applies cleanly up, and — for the additive-widening migrations
+   specifically (the `bonus_expense` account-type and
+   `bonus_grant`/`bonus_conversion`/`bonus_forfeiture`/`bonus_reversal`
+   transaction-type CHECK widenings) — the down-migration is rehearsed
+   against a database already holding rows of the new types and is proven
+   to fail loudly (a named `SQLSTATE 23514`, not a silent no-op), mirroring
+   migration `0048`'s own rehearsed-down-migration requirement
+   (ledger-model §6.5.8 item 7).
+5. The complete adversarial abuse suite from §2, all fourteen rows, each
+   either passing with the stated proof, or explicitly labeled
+   `BLOCKED`/`NOT APPLICABLE (out of first-slice scope)`/`NOT APPLICABLE
+   (open question)` per this document's own labels — never silently
+   omitted.
+6. The complete concurrency suite from §1, all seventeen rows, under the
+   same labeling discipline, including the required N-way stress variants
+   (minimum 8 concurrent goroutines, real Postgres, `-race`) for every row
+   where a mechanism exists to stress.
+7. Every financial invariant from CLAUDE.md's financial-testing list
+   (normal transaction, duplicate, concurrent, retry, partial failure,
+   rollback, settlement, reconciliation, provider callback, idempotency
+   under concurrency, authorization, auditability) is proven for **every
+   in-scope bonus type**, not once generically — a deposit bonus and a
+   cashback bonus have different completion triggers (event-driven vs.
+   settlement-job-driven) and neither's test coverage substitutes for the
+   other's.
+8. Idempotency, proven under concurrency (not only sequentially) for every
+   named idempotency key in doc10 §9 (grant issuance, redemption/
+   completion, reversal).
+9. Multi-asset coverage: every test in §1/§2/§3 that involves a monetary
+   computation is run against at least two distinct assets of different
+   exponents, not only the platform's default asset, to catch an
+   exponent-specific bug the default asset's exponent happens to mask.
+10. The exponent-coverage matrix from §3 (0, 2, 6, 8, 18), confirmed
+    complete — all five, not the 0/2/18 subset migration `0048` actually
+    delivered — for every monetary computation path named in §3's table.
+
+**What "0 failures, any skip explicitly justified" means operationally for
+this stage**, per CLAUDE.md's "No fake completion" rule and this
+document's own reporting standard (see "Test reporting standard" above):
+
+- Every one of the ten final-gate items above, and every row of §1/§2/§4,
+  gets its own line in the completion report using exactly one of
+  `PASS`/`FAIL`/`FLAKE`/`NOT RUN`/`BLOCKED` — never a blanket "all tests
+  pass" summary covering rows that were actually skipped, deferred, or
+  never written.
+- A row marked `NOT APPLICABLE (out of first-slice scope)` is not a
+  "skip" requiring justification beyond citing the scope boundary that
+  already excludes it (doc10's MVP scope plan) — but it must still be
+  named, not omitted, so a future reader can distinguish "excluded by
+  documented scope" from "forgotten."
+- A row marked `BLOCKED` (C3, C12, C16, A6, and any row this document
+  flags as pending an unresolved architecture gap) is **not** eligible to
+  be silently treated as passing, skipped, or quarantined to ship the
+  wave — per CLAUDE.md's authority split, `qa` can refuse sign-off on the
+  affected bonus type's completion label but cannot itself decide to
+  proceed without the blocked test; if shipping the first slice without
+  resolving C3/C12/C16/A6 is genuinely necessary on a timeline basis, that
+  is a decision for the orchestrator to make and record explicitly (per
+  CLAUDE.md's "Cannot itself decide to skip... escalates to the
+  orchestrator"), never a quiet QA call and never something Wave 7's
+  report frames as "tested."
+- A `FLAKE` label on any row in this matrix requires the same evidence
+  standard this document already sets platform-wide (reproduction rate,
+  isolated re-run results, root-cause mechanism) — and, specific to this
+  domain, a flake on any concurrency-suite row (§1) or any test asserting
+  Invariant B1 must be treated with elevated suspicion before being
+  accepted as genuine non-determinism rather than a real race, given how
+  many of this platform's own past "flakes" in adjacent domains
+  (`docs/progress.md`'s `now()` vs. `clock_timestamp()` history) turned
+  out to be real defects.
+- The specific bonus type(s) actually shipped in Wave 7's report must be
+  named individually with their own `IMPLEMENTED`/`PARTIALLY
+  IMPLEMENTED`/etc. label (per this document's "What 'done' requires")
+  — a report that labels "Bonus Engine" `IMPLEMENTED` as a single unit
+  when, e.g., cashback's settlement-job-specific tests (A4, the cashback
+  row of C-worked-cases) are `BLOCKED` or `NOT RUN` is exactly the kind of
+  aggregation CLAUDE.md's "No fake completion" rule exists to prevent.
+
+### 6. Dependencies on unfinished domain/ledger work — flagged, not resolved here
+
+Per the dispatch's own instruction, named explicitly rather than silently
+assumed resolved:
+
+1. **G-2 (doc10 §T.13) is unresolved** and directly blocks C16, A6, and
+   any test asserting a specific outcome for a settlement/void credit
+   against an already-terminal Grant. The test *shape* is fully specified
+   (§T.7); only the selected action is missing. Waves 2–7 must not invent
+   an answer to unblock these tests — that is the orchestrator's decision
+   to make or escalate, per CLAUDE.md.
+2. **G-3 / Genuine gap 9's progress-netting fix (ledger-model §6.4.11,
+   §6.6)** is design-complete (Model C, §6.6.9's eleven properties) but its
+   own status line records it as gating **bonus-only** sportsbook
+   placement specifically, and its "new Progress-trail trigger point" (a
+   transition row for "previously-counted progress reversed") does not yet
+   exist in doc10 §1.3's table — C7/C8/A2/A3 are written against the
+   *design*, and cannot be executed until `bonus-engine`'s own transition
+   table is updated to carry that row.
+3. **`bonus_conversion`'s Risk `Operation` value is specified but not
+   started** (doc10 Dependency Contract §3, "zero of six required
+   extension-process steps are complete" as of the last verification) —
+   C4/C5/C6/C14 and every conversion-checkpoint Risk test cannot execute
+   against real code until this lands; this is a `risk`-owned dependency
+   `bonus-engine` must file, not a Bonus Engine defect.
+4. **`AssetAuthorization`/`internal/assetregistry` does not exist as Go
+   code** (doc10 Dependency Contract §2, Genuine gap 2) — every test in
+   this document referencing `AssetAuthorization.CheckEligibility` (C15,
+   A6, T.3/T.8/T.12's checkpoints) is written against ADR 0037's
+   architecture-only signature and must be re-verified against whatever
+   Workstream A actually ships before Wave 2 relies on it.
+5. **Which `AssetAuthorization.Operation` value a bonus checkpoint passes
+   is undecided** (Genuine gap 1) — a candidate (`wagering`) is named but
+   not committed; every AssetAuthorization-dependent test above is written
+   generically ("the live authorization check") rather than pinned to a
+   specific `Operation` constant, and must be updated once that decision
+   lands.
+6. **`player_locked_bonus` is schema-provisional, not human-approved**
+   (doc10 Dependency Contract §9; ledger-model §6.3.5.1) — C7/C8/C16's
+   locked-stake scenarios assume this account type exists and is postable;
+   as of this stage it is schema-present but HR-9-blocked (no posting path
+   exists at all), so these rows cannot be executed against real code until
+   both the human approval and the Rule B2 (extended) mirror generator
+   land (doc10 migration-sequencing item 3a).
+7. **Campaign-level budget-cap enforcement has no design or owner**
+   (doc10 §1.1, Genuine gap 7) — directly blocks C3, and any future test
+   of a jurisdiction-scoped promotional cap under concurrency.
+8. **The manual-adjustment four-eyes approval workflow is not designed**
+   (doc10 §10) — directly blocks C12.
+9. **Device/payment-fingerprint identity-linking (A8) and the
+   "scope of uniqueness" concept an Offer's eligibility axis would need for
+   A9's cross-brand test are not specified anywhere in doc10** — both are
+   named as open items requiring `bonus-engine`/`identity-compliance`
+   design work before their rows can be more than placeholders.
+10. **A10's cross-tenant-per-Person deduplication question for
+    platform-wide Campaigns is an open product/architecture question**, not
+    named or resolved by doc10, ADR 0006, or ADR 0032.
+11. **The event-taxonomy reconciliation gap (doc10 Genuine gap 3)** —
+    doc10's own five named event-bus inputs are not yet confirmed against
+    doc22's actual canonical `type` strings — means every test in §1/§2
+    that subscribes to `deposit.settled`/`round.settled`/`bet.settled` is
+    written against doc10's assumed names and must be re-verified against
+    whatever `type` strings Wave 2's actual event subscription code uses.
+
+Every item above is carried forward from already-approved architecture
+documents, not newly discovered by this dispatch — this section exists so
+Waves 2–7's implementers do not have to re-derive the dependency list from
+the underlying architecture documents themselves.
+
+### 7. Status and labels
+
+Every test named in this section is `RECOMMENDATION` (a test strategy
+binds nothing until executed) and `NOT IMPLEMENTED` (no test code exists
+yet — this is a Wave 1 design/contract dispatch; §T.13, §6 above, and this
+section's own header all restate that no schema, Go code, or test code is
+authorized here). None of it can move toward `IMPLEMENTED` before the
+corresponding Wave 2–6 implementation exists to test, and rows flagged
+`BLOCKED` in §6 above cannot move to `IMPLEMENTED` before their named
+architecture/product decision is made, regardless of implementation
+progress elsewhere in Bonus Engine.
