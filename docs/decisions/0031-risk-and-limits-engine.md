@@ -1039,6 +1039,36 @@ checkpoint cannot be deferred out of the first slice while still shipping
 those five types end to end. A first slice that stopped at `completed`
 would ship five bonus types that can never release value to a player.
 
+### 16b. `bonus_conversion` — LANDED (Stage 4H-B1 Wave 2 Phase 4)
+
+**STATUS: `DONE` — all six of §16's extension-process steps landed
+together in one authorized change, per §16a/§40's own binding
+discipline.** `risk` re-verified §16a's table against HEAD at Phase 4
+rather than assuming it stale; all six rows below reflect the actual
+repository state after this dispatch's own commit, not a claim carried
+forward from §16a's prose.
+
+| §16 step | Artifact | State after Phase 4 |
+|---|---|---|
+| 1. Migration CHECK | `migrations/0065_risk_bonus_conversion_operation.up.sql` | **DONE** — additively widens `risk_rules_operation_check` (the live constraint name migration 0041's inline CHECK produced) to accept `bonus_conversion` as a seventh value, none removed |
+| 2. Go constant | `internal/risk/types.go` | **DONE** — `OperationBonusConversion Operation = "bonus_conversion"` added to the const block and `knownOperations` |
+| 3. HTTP allowlist | `internal/httpserver/risk_handlers.go`, `newCreateRiskRuleHandler`'s `RequireOneOf("operation", ...)` | **DONE** |
+| 4. OpenAPI enum | `docs/api/openapi/platform-api.yaml` | **DONE** — all three occurrences (lines then-1136/1179/1902, §16a's own correction to §16 step 4 honored) |
+| 5. Cumulative spec | `operationCumulativeSpecs`, `internal/risk/cumulative.go` | **DONE** — landed, not deferred a second time, now that `ledger-finance`'s own posting shape is fully specified (`ledger-accounting-model.md` §7.6: `Dr player_bonus X · Cr player_cash X` plus wallet-less mirror legs). Measured on the `player_cash` credit (payout-shaped, matching this file's own "credit for a deposit or a payout" convention), `player_bonus` declared `Ignored`. `ReversalTypes` deliberately left empty: ADR 0032 §7's `bonus_reversal` is a single transaction_type shared across `bonus_grant`/`bonus_conversion`/`bonus_forfeiture`, not an exclusive per-operation reversal the way `casino_rollback` is for `casino_bet` — netting every `bonus_reversal` row in would risk folding in a reversal of an unrelated `bonus_grant`. The omission is conservative (a genuinely-reversed conversion still counts toward the cap, never the reverse), disclosed here rather than silently decided, and is `risk`'s own call to revisit only once a per-original-transaction-type reversal query shape is specified |
+| 6. Enforcement call site | `internal/bonus/conversion.go`'s `ConvertGrant` | **DONE** — this was already written, correctly, by `bonus-engine` in Phase 3 (calling `risk.Evaluate` with `Operation("bonus_conversion")` and failing closed on `ErrUnknownOperation`, exactly as this ADR's own §38(d)/§39 require); Phase 4 changed nothing about that call site's shape, only made the Operation it names real |
+
+**Practical consequence, confirmed by a real end-to-end integration test
+run against Postgres (`internal/bonus`'s
+`TestConversion_SucceedsOnceRiskOperationLands`):** a Grant now reaches
+`converted` through the full `AssetAuthorization → RG → Risk` gate with a
+real `bonus_conversion` ledger posting, with no `internal/bonus` code
+change beyond a stale doc-comment/local-alias cleanup. The fail-closed
+half of the contract was independently re-proven, not merely assumed
+still-true, by a companion test
+(`TestConversion_BlockedByRiskDeny_NeverForfeits`) configuring a real
+`HARD_LIMIT max_amount` rule for `bonus_conversion` and confirming the
+Grant stays `completed` (never forfeited) on the resulting `DENY`.
+
 ### 17. Open decisions introduced or confirmed by Stage 4H-A
 
 - **Cross-domain aggregate player exposure is NOT expressible today, and
@@ -3343,6 +3373,11 @@ carried forward on trust. All six rows are unchanged:
 Nothing partial exists: no half-landed constant, no dormant migration, no
 feature-flagged path. §16a's remaining-work description stands verbatim
 and is not restated here.
+
+**Superseded by §16b (Stage 4H-B1 Wave 2 Phase 4): all six rows above are
+now `DONE`.** This table is left unedited as the dated snapshot it always
+was (identical treatment to §16a); §16b is the current, authoritative
+status.
 
 **Three further values considered and REJECTED by this dispatch:**
 

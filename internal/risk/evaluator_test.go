@@ -133,16 +133,21 @@ func TestIsKnownOperation_ClosedSet(t *testing.T) {
 	for _, o := range []Operation{
 		OperationCasinoLaunch, OperationCasinoBet, OperationDeposit,
 		OperationWithdrawal, OperationSportsbookBet, OperationBonusGrant,
+		// OperationBonusConversion joined the known set in Stage 4H-B1
+		// Wave 2 Phase 4 (migration 0065 widened the CHECK constraint
+		// this test's own failure message names) - ADR 0031 §16/§16a/
+		// §40's long-documented, now-landed extension.
+		OperationBonusConversion,
 	} {
 		if !IsKnownOperation(o) {
-			t.Fatalf("%q is declared by this package and accepted by migration 0041, so it must be known", o)
+			t.Fatalf("%q is declared by this package and accepted by migration 0041 (as widened by migration 0065), so it must be known", o)
 		}
 	}
 	// A typo, an empty value, or a proposed-but-unstorable operation
 	// (ADR 0031 §26/§36) must never silently match zero rules and ALLOW.
 	for _, o := range []Operation{
 		Operation(""), Operation("casino_bett"), Operation("CASINO_BET"),
-		Operation("sportsbook_settlement"), Operation("sportsbook_cashout"), Operation("bonus_conversion"),
+		Operation("sportsbook_settlement"), Operation("sportsbook_cashout"), Operation("bonus_activate"),
 	} {
 		if IsKnownOperation(o) {
 			t.Fatalf("%q must NOT be a known operation", o)

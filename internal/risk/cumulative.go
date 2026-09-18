@@ -137,6 +137,52 @@ var operationCumulativeSpecs = map[Operation]cumulativeSpec{
 		IgnoredAccountTypes: nil,
 		ConsumingDirection:  directionDebit,
 	},
+	// OperationBonusConversion's posting shape, per ledger-finance's own
+	// authoritative specification (ledger-accounting-model.md §7.6, ADR
+	// 0032 §4): "Caller supplies Dr player_bonus X . Cr player_cash X;
+	// the generator supplies Cr promo_liability X . Dr bonus_expense X"
+	// (or Dr provider_payable X for a provider-funded Grant) - a single
+	// transaction_type=bonus_conversion posting with exactly two
+	// PLAYER-OWNED legs (player_bonus debited, player_cash credited) and
+	// two house-level, wallet-less mirror legs (promo_liability,
+	// bonus_expense/provider_payable) that carry no player_account_id at
+	// all and therefore - identically to casino_bet's house_gaming
+	// counterparty above - never appear in this query's result set; no
+	// IgnoredAccountTypes entry is needed for them.
+	//
+	// Measured on the CREDIT to player_cash, consistent with this file's
+	// own documented convention ("credit for a deposit or a payout") -
+	// bonus_conversion is a payout-shaped release of previously
+	// non-withdrawable value into cash, not a stake. player_bonus (the
+	// same posting's DEBIT leg, same amount, same asset) IS a
+	// player-owned leg this shape touches and MUST therefore be declared
+	// - as Ignored, not Measured - or every conversion would trip
+	// ErrUnrecognizedCumulativeLeg.
+	//
+	// ReversalTypes deliberately OMITTED, not overlooked: ADR 0032 §7's
+	// `bonus_reversal` is a single generic "this posting should never
+	// have existed" transaction_type shared across bonus_grant/
+	// bonus_conversion/bonus_forfeiture (ledger-accounting-model.md
+	// §6.6.15, §7.7's own table), not an exclusive per-operation reversal
+	// the way casino_rollback exclusively reverses casino_bet. Netting
+	// EVERY bonus_reversal transaction_type row into THIS operation's
+	// cumulative usage would silently fold in reversals of an unrelated
+	// bonus_grant or bonus_forfeiture (whose ledger legs do not even
+	// match this spec's MeasuredAccountTypes/IgnoredAccountTypes
+	// declaration), which is exactly the kind of undeclared-shape
+	// mis-measurement ADR 0031 §33 exists to prevent. Omitting it is the
+	// conservative, fail-closed direction: a genuinely-reversed
+	// conversion still counts toward the player's cumulative cap until a
+	// future change gives `bonus_reversal` a per-original-transaction-
+	// type-aware query shape (it never causes an UNDER-count, which is
+	// the direction that would actually be unsafe here).
+	OperationBonusConversion: {
+		TransactionTypes:     []string{"bonus_conversion"},
+		ReversalTypes:        nil,
+		MeasuredAccountTypes: []string{"player_cash"},
+		IgnoredAccountTypes:  []string{"player_bonus"},
+		ConsumingDirection:   directionCredit,
+	},
 }
 
 // validate fails closed on an incomplete spec. Called on every evaluation

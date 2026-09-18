@@ -173,7 +173,8 @@ func newCreateRiskRuleHandler(deps Deps) http.HandlerFunc {
 		v := validation.New()
 		v.RequireOneOf("operation", req.Operation,
 			string(risk.OperationCasinoLaunch), string(risk.OperationCasinoBet), string(risk.OperationDeposit),
-			string(risk.OperationWithdrawal), string(risk.OperationSportsbookBet), string(risk.OperationBonusGrant))
+			string(risk.OperationWithdrawal), string(risk.OperationSportsbookBet), string(risk.OperationBonusGrant),
+			string(risk.OperationBonusConversion))
 		v.RequireOneOf("limit_kind", req.LimitKind, string(risk.LimitMinAmount), string(risk.LimitMaxAmount), string(risk.LimitCumulativeAmount))
 		v.RequireOneOf("time_window", req.TimeWindow,
 			string(risk.WindowTransaction), string(risk.WindowRollingHour), string(risk.WindowRollingDay),

@@ -107,11 +107,12 @@ func GateCheckpoint(ctx context.Context, tx pgx.Tx, p GateParams) (GateOutcome, 
 		Product: "bonus", Operation: p.RiskOperation, AssetCode: p.AssetCode, Amount: p.Amount,
 	})
 	// A non-nil Risk error is ALWAYS a denial (doc 10 §4; ADR 0031 §1/§25)
-	// - this is also how a not-yet-existent Operation value (e.g.
-	// "bonus_conversion", not yet added to internal/risk.Operation's
-	// closed set - see conversion.go's own doc comment) fails closed
-	// automatically via risk.ErrUnknownOperation, with no special-casing
-	// needed here.
+	// - this is also how a not-yet-existent Operation value would fail
+	// closed automatically via risk.ErrUnknownOperation, with no
+	// special-casing needed here. ("bonus_conversion" was exactly such a
+	// value until Stage 4H-B1 Wave 2 Phase 4 added it to
+	// internal/risk.Operation's closed set - see conversion.go's own doc
+	// comment.)
 	if err != nil {
 		return GateOutcome{Allowed: false, DeniedBy: "risk", Code: "risk_evaluation_error", Message: err.Error()}, nil
 	}

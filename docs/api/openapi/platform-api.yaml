@@ -1133,7 +1133,7 @@ paths:
           required: true
           schema:
             type: string
-            enum: [casino_launch, casino_bet, deposit, withdrawal, sportsbook_bet, bonus_grant]
+            enum: [casino_launch, casino_bet, deposit, withdrawal, sportsbook_bet, bonus_grant, bonus_conversion]
       responses:
         "200":
           description: Risk rules for the named operation
@@ -1176,7 +1176,7 @@ paths:
                 product: { type: string, enum: [casino, sportsbook, payments, bonus] }
                 operation:
                   type: string
-                  enum: [casino_launch, casino_bet, deposit, withdrawal, sportsbook_bet, bonus_grant]
+                  enum: [casino_launch, casino_bet, deposit, withdrawal, sportsbook_bet, bonus_grant, bonus_conversion]
                 provider_id: { type: string }
                 game_id: { type: string, format: uuid }
                 asset_code: { type: string }
@@ -1899,7 +1899,7 @@ components:
         product: { type: string, enum: [casino, sportsbook, payments, bonus] }
         operation:
           type: string
-          enum: [casino_launch, casino_bet, deposit, withdrawal, sportsbook_bet, bonus_grant]
+          enum: [casino_launch, casino_bet, deposit, withdrawal, sportsbook_bet, bonus_grant, bonus_conversion]
         provider_id: { type: string }
         game_id: { type: string, format: uuid }
         asset_code: { type: string }

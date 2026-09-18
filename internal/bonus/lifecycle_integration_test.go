@@ -23,6 +23,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/economicop"
+	"github.com/Diansalas/igaming-platform/internal/risk"
 )
 
 // --- shared fixture helpers, extending bonus_integration_test.go's own ---
@@ -812,9 +813,23 @@ func TestAdversarial_ConcurrentActivation_ExactlyOneWins(t *testing.T) {
 	}
 }
 
-// --- Adversarial: conversion is blocked while risk.Operation("bonus_conversion") is unknown ---
+// --- risk.Operation("bonus_conversion") now exists (Stage 4H-B1 Wave 2
+// Phase 4: migration 0065 + internal/risk/types.go's OperationBonusConversion)
+// - conversion succeeds end-to-end with no matching risk_rules row, and
+// remains fail-closed (blocked, never forfeited) when a rule actually
+// denies it. TestConversion_BlockedByMissingRiskOperation_NeverForfeits
+// asserted the OLD, now-superseded blocked-by-dependency-gap state; it is
+// replaced by these two tests rather than left asserting behavior that is
+// no longer true. ---
 
-func TestConversion_BlockedByMissingRiskOperation_NeverForfeits(t *testing.T) {
+// TestConversion_SucceedsOnceRiskOperationLands proves the dependency
+// Phase 3 (bonus-engine) named and failed closed on is now closed:
+// ConvertGrant's risk.Evaluate(Operation: bonus_conversion) call resolves
+// normally (no risk_rules row matches this fresh tenant/asset, so
+// Evaluate's own "no matching rule" default is ALLOW) and the Grant
+// actually reaches `converted`, with a real bonus_conversion ledger
+// posting - not merely "no longer errors".
+func TestConversion_SucceedsOnceRiskOperationLands(t *testing.T) {
 	pool := testPool(t)
 	f := seedLifecycleFixture(t, pool)
 	co := seedCampaignOffer(t, pool, f.tenantID, f.brandID, f.staffID)
@@ -834,8 +849,61 @@ func TestConversion_BlockedByMissingRiskOperation_NeverForfeits(t *testing.T) {
 		if err != nil {
 			return fmt.Errorf("convert: %w", err)
 		}
+		if !convResult.Converted {
+			return fmt.Errorf("expected conversion to SUCCEED now that risk.OperationBonusConversion exists, got blocked: reason=%q code=%q", convResult.BlockedReason, convResult.BlockedCode)
+		}
+		if convResult.Grant.Status != GrantConverted {
+			return fmt.Errorf("expected the grant to reach 'converted', got %s", convResult.Grant.Status)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestConversion_BlockedByRiskDeny_NeverForfeits proves the OTHER half of
+// the fail-closed contract still holds now that the operation is real: a
+// live HARD_LIMIT max_amount risk_rules row scoped to
+// risk.OperationBonusConversion actually DENYs an over-threshold
+// conversion, and the Grant stays 'completed' (non-terminal, retryable) -
+// never forfeited, never cancelled - exactly per doc 10 §5/T.12 and ADR
+// 0031 §39's frozen rule.
+func TestConversion_BlockedByRiskDeny_NeverForfeits(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	co := seedCampaignOffer(t, pool, f.tenantID, f.brandID, f.staffID)
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// Grant amount is 1000 minor units (10.00 at this asset's
+		// DecimalExponent 2, seedLifecycleFixture/newTestOfferGrant) - a
+		// max_amount threshold of 500 (5.00) is bound to be breached by
+		// the full-amount conversion below.
+		if _, err := risk.CreateRule(ctx, tx, risk.CreateRuleParams{
+			TenantID: &f.tenantID, Operation: risk.OperationBonusConversion, AssetCode: f.assetCode,
+			LimitKind: risk.LimitMaxAmount, TimeWindow: risk.WindowTransaction, Threshold: 500,
+			RuleKind: risk.RuleHardLimit, Action: risk.ActionDeny,
+			CreatedByActorType: "staff", CreatedByActorID: f.staffID,
+		}); err != nil {
+			return fmt.Errorf("create risk rule: %w", err)
+		}
+
+		g := newTestOfferGrant(f, co, "conversion-denied-1")
+		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode})
+		if err != nil || !outcome.Allowed {
+			return fmt.Errorf("issue/activate: %v / %+v", err, outcome)
+		}
+		completed, ok, err := CheckAndCompleteGrant(ctx, tx, f.tenantID, result.ID, nil)
+		if err != nil || !ok {
+			return fmt.Errorf("complete: %v / %v", err, ok)
+		}
+
+		convResult, err := ConvertGrant(ctx, tx, f.tenantID, completed.ID, nil, ConvertGrantParams{ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode})
+		if err != nil {
+			return fmt.Errorf("convert: %w", err)
+		}
 		if convResult.Converted {
-			return fmt.Errorf("expected conversion to be BLOCKED (risk.Operation bonus_conversion does not exist yet) - it unexpectedly succeeded")
+			return fmt.Errorf("expected conversion to be BLOCKED by the HARD_LIMIT max_amount rule - it unexpectedly succeeded")
 		}
 		if convResult.BlockedReason != "risk" {
 			return fmt.Errorf("expected block reason 'risk', got %q (%s)", convResult.BlockedReason, convResult.BlockedCode)

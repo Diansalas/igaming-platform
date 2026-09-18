@@ -112,21 +112,34 @@ const (
 	OperationWithdrawal    Operation = "withdrawal"
 	OperationSportsbookBet Operation = "sportsbook_bet"
 	OperationBonusGrant    Operation = "bonus_grant"
+	// OperationBonusConversion is the Bonus Engine's `completed` ->
+	// `converted` release of bonus value as withdrawable cash (ADR 0031
+	// §15a-ii/§16/§16a/§38(d)/§40 - naming fixed, not re-openable:
+	// `bonus_conversion`, superseding doc 10 §4's placeholder
+	// `bonus_convert`; `bonus_activate` remains rejected, activation
+	// reuses OperationBonusGrant). Landed together with migration 0065's
+	// CHECK widening, the HTTP allowlist, the OpenAPI enum, the
+	// operationCumulativeSpecs entry, and internal/bonus/conversion.go's
+	// already-written call site, per §16's own six-steps-in-one-change
+	// discipline.
+	OperationBonusConversion Operation = "bonus_conversion"
 )
 
 // knownOperations is the closed set of Operation values migration 0041's
-// own CHECK constraint accepts. Evaluate validates req.Operation against
-// it (ErrUnknownOperation) rather than querying for rules and finding
-// none: an unknown or misspelled operation would otherwise match zero
-// rules and resolve to a silent ALLOW - a fail-OPEN triggered by a single
-// typo at a caller (Stage 4H-B0-R6 fail-closed audit, ADR 0031 §34).
+// (as widened by migration 0065) own CHECK constraint accepts. Evaluate
+// validates req.Operation against it (ErrUnknownOperation) rather than
+// querying for rules and finding none: an unknown or misspelled
+// operation would otherwise match zero rules and resolve to a silent
+// ALLOW - a fail-OPEN triggered by a single typo at a caller (Stage
+// 4H-B0-R6 fail-closed audit, ADR 0031 §34).
 var knownOperations = map[Operation]struct{}{
-	OperationCasinoLaunch:  {},
-	OperationCasinoBet:     {},
-	OperationDeposit:       {},
-	OperationWithdrawal:    {},
-	OperationSportsbookBet: {},
-	OperationBonusGrant:    {},
+	OperationCasinoLaunch:    {},
+	OperationCasinoBet:       {},
+	OperationDeposit:         {},
+	OperationWithdrawal:      {},
+	OperationSportsbookBet:   {},
+	OperationBonusGrant:      {},
+	OperationBonusConversion: {},
 }
 
 // IsKnownOperation reports whether o is one of the Operation values this

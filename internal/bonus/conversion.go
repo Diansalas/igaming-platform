@@ -3,27 +3,26 @@
 // (via ledger.Post, which auto-invokes Rule B2), Risk/RG/AssetAuthorization-
 // gated, actor/subject-protected, tenant/player-scoped, auditable.
 //
-// NAMED DEPENDENCY GAP, per the human directive's explicit instruction to
-// check internal/risk/types.go's Operation enum before wiring the
-// conversion checkpoint: risk.Operation currently has NO
-// "bonus_conversion" value (confirmed by direct read of
-// internal/risk/types.go - only OperationBonusGrant exists; ADR 0031
-// §15a-ii/§16 name bonus_conversion's exact shape but "zero of the six
-// required extension-process steps are complete", doc 10 Genuine Gap 4,
-// re-confirmed unchanged by this dispatch). This function calls
-// risk.Evaluate with Operation("bonus_conversion") anyway, exactly as the
-// human directive instructs ("fail closed and document the exact
-// dependency gap rather than skipping the check") - risk.Evaluate itself
-// already fails closed on an unrecognized Operation
-// (ErrUnknownOperation, internal/risk/types.go's knownOperations map),
-// and doc 10 §5/T.12's own frozen rule is that ANY Risk error at
-// conversion leaves the Grant in `completed` (non-terminal, retryable),
-// never forfeits. The practical consequence, stated plainly: NO Grant can
-// successfully convert on this platform until `risk` lands the
-// bonus_conversion Operation value - conversion is not bypassed, broken,
-// or silently disabled; it fails exactly as safely as an intentional
-// block would, and will start succeeding the moment that one dependency
-// closes, with no code change required here.
+// FORMERLY-NAMED DEPENDENCY GAP, NOW CLOSED (Stage 4H-B1 Wave 2 Phase 4,
+// `risk`-owned): this file originally documented that risk.Operation had
+// NO "bonus_conversion" value (ADR 0031 §15a-ii/§16/§16a/§40's "zero of
+// the six required extension-process steps are complete", doc 10 Genuine
+// Gap 4) and that this function's risk.Evaluate call would therefore
+// fail closed on every conversion via ErrUnknownOperation, per the human
+// directive's explicit instruction to wire the checkpoint anyway and
+// document the gap rather than skip it. Phase 4 landed all six of ADR
+// 0031 §16's steps together (migration 0065's CHECK widening;
+// internal/risk/types.go's OperationBonusConversion; the HTTP allowlist;
+// all three OpenAPI enum occurrences; internal/risk/cumulative.go's
+// operationCumulativeSpecs entry; this file's own call site, unchanged),
+// so this function's risk.Evaluate(Operation: OperationBonusConversion)
+// call now resolves normally instead of failing closed on
+// ErrUnknownOperation. doc 10 §5/T.12's own frozen rule - ANY Risk
+// error/DENY/REVIEW at conversion leaves the Grant in `completed`
+// (non-terminal, retryable), never forfeits - is unchanged and still
+// applies to a genuine DENY/REVIEW/error from a configured rule or an
+// unavailable Risk evaluation; it is no longer the UNCONDITIONAL outcome
+// this file's own call site was previously guaranteed to hit.
 package bonus
 
 import (
@@ -40,13 +39,14 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/risk"
 )
 
-// OperationBonusConversion is the Risk Operation value ADR 0031 §15a-ii/
-// §16 specify but has not yet landed in internal/risk/types.go - see this
-// file's own doc comment. Declared here, NOT in internal/risk (this
-// package must never invent or pre-empt another domain's enum), purely
-// so every call site in this file names the same string literal instead
-// of repeating a magic value.
-const OperationBonusConversion risk.Operation = "bonus_conversion"
+// OperationBonusConversion is a Bonus-package-local alias for
+// risk.OperationBonusConversion (ADR 0031 §15a-ii/§16/§40), which now
+// exists as a real constant in internal/risk/types.go (Stage 4H-B1 Wave 2
+// Phase 4 - see this file's own doc comment). Kept as a thin alias,
+// rather than switched to risk.OperationBonusConversion inline at every
+// call site, purely to minimize the diff on this now-working file; both
+// names refer to the identical risk.Operation value.
+const OperationBonusConversion = risk.OperationBonusConversion
 
 // ConvertGrantParams is completed->converted's own input (doc 10 T.12/
 // N1.4 Path A).
