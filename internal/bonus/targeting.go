@@ -278,6 +278,33 @@ func runBulkGrantJobItem(ctx context.Context, tx pgx.Tx, job BulkGrantJob, rootO
 	}
 
 	if err := economicop.ConsumeRootBudget(ctx, tx, job.TenantID, rootOperationID, economicop.OperationBonusBulkGrant, playerAccountID, amount); err != nil {
+		// NAMED FIX (Stage 4H-B1 Wave 2 Phase 6, security - found via
+		// genuinely concurrent multi-worker adversarial testing, not by
+		// inspection): ConsumeRootBudget's error return conflates an
+		// ORDINARY, expected business-level denial (ErrBudgetExhausted -
+		// the ceiling is genuinely reached, correctly recordable as
+		// ItemDenied on THIS same transaction) with any OTHER error,
+		// including a transient Postgres-level failure (a deadlock
+		// between concurrent workers contending for the SAME EOI root's
+		// FOR UPDATE lock, a dropped connection, a context
+		// cancellation). Treating the latter as if it were an ordinary
+		// denial and attempting a FURTHER write on the transaction was a
+		// real bug: once Postgres aborts a transaction for a genuine
+		// error, EVERY subsequent statement on it fails with "current
+		// transaction is aborted" (SQLSTATE 25P02) - which is exactly
+		// what happened, masking the true underlying error (SQLSTATE
+		// 40P01, deadlock_detected) behind a confusing, generic one and
+		// leaving the caller unable to distinguish "this item was
+		// legitimately denied" from "this whole attempt must be
+		// retried". Only ErrBudgetExhausted is recorded as ItemDenied
+		// here; every other error (transient or not) is returned
+		// immediately, exactly like every other non-budget error path in
+		// this function, so the caller's own transaction-retry handling
+		// (WithTenant returning the error, unattempted further writes)
+		// applies uniformly.
+		if !errors.Is(err, economicop.ErrBudgetExhausted) {
+			return err
+		}
 		reason := err.Error()
 		_, recErr := RecordBulkGrantJobItemOutcome(ctx, tx, job.TenantID, item.ID, ItemDenied, &reason, nil, nil, nil, time.Now().UTC())
 		if recErr != nil {
