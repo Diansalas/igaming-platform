@@ -8454,6 +8454,490 @@ wave build against):
 | Independent review by `bonus-engine`/`architect`/`security`/`qa` of this implementation | Not yet performed — this dispatch is `ledger-finance`'s own build-and-self-verify pass (`gofmt`/`go build`/`go vet`/`go test`/`go test -race`, all clean; full existing repo test suite re-run and unaffected) | **NOT YET REVIEWED** |
 | Cases B/E/G/I, bonus-funded casino/sportsbook stake postings, `internal/bonus`'s own domain tables, `bonus_held_dispositions`, Risk's `bonus_conversion` Operation | Explicitly **NOT** built by this dispatch (out of `ledger-finance`'s Phase-1 scope; routed to Phases 2-4 of this same wave per the dispatch's own instructions) | Unchanged — still `BLOCKED`/`NOT IMPLEMENTED` for the reasons already recorded elsewhere in this document |
 
+### 7.18 Event-consumption contracts — deposit-trigger, wagering-contribution-trigger, cashback-scheduling (Stage 4H-B1 Wave 3 Phase 1, `ledger-finance`, DESIGN/CONTRACT ONLY)
+
+**Status: `NOT IMPLEMENTED`.** This subsection authorizes no code, no
+migration, no route. It is Phase 1 of the Wave 3 dispatch that follows
+`docs/governance/wave-3-reconnaissance.md`'s finding (its §2 item 20,
+restated exactly): `internal/bonus` has zero live callers for deposit/
+reload issuance, cashback issuance and wagering-contribution tracking
+outside its own package and tests. This is the contract Phases 2
+(`backend`, schema if any) and 3 (`bonus-engine`, application logic) build
+against — the same role §7.7.2 played for `player_bonus_held` in Wave 1.5.
+
+**Binding scope constraint carried over from the Orchestrator's own
+dispatch, restated so this section is self-contained**: Wave 3 does
+**not** build `postBet`'s bonus-funded/locked-stake leg. The mechanic this
+section specifies instead is the one that needs no such leg: a player
+deposits cash, receives a Grant, and unlocks/converts it by wagering
+**their own cash** — ordinary `casino_bet` postings, funded entirely from
+`player_cash`, count toward the Grant's wagering-progress target. This is
+a materially different mechanic from the one §6.6/§7.10 were written
+against (see §7.18.3.1), and this section makes that difference explicit
+rather than silently reusing §6.6's machinery on an unstated assumption.
+
+#### 7.18.1 Re-confirmed: there is no event bus, and nothing has changed
+
+`FINDING`, re-verified against `HEAD`, not assumed from doc 29. `internal/
+eventbus` (`eventbus.go`) is unchanged since Wave 1: still labeled `STATUS:
+STUB`, still zero usages anywhere outside its own package and test
+(`grep -rn "eventbus" --include=*.go .` finds only the package itself).
+`internal/bonus` does not import it; `internal/payments`/`internal/
+wallet` do not either. Doc 29 §2.1's "honest transport finding" —
+*"'event' in this codebase today is a ledger `transaction_type` plus a
+`correlation_id` convention, plus an audit `Action` string"* — is still
+exactly the state of the platform. Doc 29 §2.2's already-made
+architectural decision (`ARCHITECTURAL DECISION`, `architect`, Wave 1) is
+therefore the controlling convention this section builds on, not a
+proposal this section re-litigates:
+
+1. No message broker is built or deployed for this.
+2. Bonus's inbound triggers are constructed from **already-durable
+   platform facts** — the ledger (`ledger_transactions`/`ledger_entries`)
+   for every monetary trigger, or an in-process post-commit call for a
+   non-monetary one.
+3. A **ledger-derived read is the durable, primary mechanism**; a
+   post-commit in-process call is, at most, a **latency optimization on
+   top of it, never the sole delivery mechanism** (doc 29 §2.2's own
+   words, quoted because Wave 3 depends on this exact division of
+   responsibility).
+4. Dedupe is always on a **business-fact idempotency key**, never on a
+   publish-scoped event id.
+
+Doc 29's OI-11 ("ratify §2.2's transport decision as an ADR") is still
+open and is **not** resolved here — that is the Orchestrator's
+reconciliation-round item, not a Wave 3 Phase 1 blocker. This section
+treats §2.2 as binding because `architect` already decided it and nothing
+in the intervening waves reopened it.
+
+**A hard invariant this section's design must not violate**: doc 29 §8
+**BI-2** — *"`internal/bonus` is never imported by `internal/ledger`,
+`internal/wallet`, `internal/risk`, `internal/rg`, `internal/payments`."*
+Confirmed still true by import inspection (`internal/payments` imports
+none of `internal/bonus`, and vice versa). **This directly rules out**
+the task framing's own "most likely" suggestion of a direct call from
+wherever `internal/payments` finalizes a deposit — that would require
+`internal/payments` to import `internal/bonus`, which BI-2 forbids
+outright, not merely discourages. §7.18.2 below designs around this
+correctly. `internal/casino` importing `internal/bonus` is, by contrast,
+**already exercised in production code** (the two Wave 2 G-2 settlement
+seams in `bonus_settlement.go`), so a casino → bonus call is
+architecturally unremarkable and requires no new exception.
+
+#### 7.18.2 Deposit / Reload-trigger contract
+
+**Where the fact becomes durable.** `internal/payments/orchestrator.go`'s
+`postDepositSuccess` is the single place a deposit becomes a platform
+fact: it calls `ledger.Post` with `TransactionType: ledger.TxDeposit`,
+`CorrelationID: intent.ID` (the `DepositIntent`'s own id), entries
+`Dr psp_clearing / Cr player_cash`, and returns `postResult.TransactionID`
+— the deposit's own, permanent `ledger_transactions.id`. The exact same
+shape is used by `receiveDepositCallback`'s asynchronous-provider path.
+There is no other deposit-completion point in this codebase.
+
+**Data available at that instant, all of it already resolved
+server-side, none of it re-derivable from anything a client supplies**
+(`intent` fields, all populated before `ReceiveCallback`/`InitiateDeposit`
+ever runs): `intent.TenantID`, `intent.BrandID`, `intent.PlayerAccountID`,
+`intent.WalletID`, `intent.AssetCode`, `intent.Amount` (`int64` minor
+units — payments' existing convention; converting to `*big.Int` for
+`bonus.DepositBonusParams.DepositAmount` is lossless and the caller's
+job), `intent.PaymentMethod`, `intent.ID` (the `DepositIntent`'s own id),
+and, once `ledger.Post` returns, `postResult.TransactionID` (the
+deposit's own ledger transaction id) plus `providerID`/`providerReference`.
+
+**The idempotency key, reusing an existing identifier as directed rather
+than inventing one: the deposit's own ledger transaction id**
+(`postResult.TransactionID`, equivalently `intent.LedgerTransactionID`
+once set), carried as `bonus_grants.trigger_reference` (cast to text).
+This slots directly into the **already-implemented** idempotency
+machinery (`grant.go`'s `UNIQUE (tenant_id, campaign_id, offer_version_id,
+player_account_id, trigger_reference)`, migration 0057; `types.go`'s
+`issueIdempotent`/`lookupExistingGrantByTrigger`) — a redelivered deposit
+success callback, or a sweep re-scanning an already-processed deposit,
+resolves to the existing Grant via `ErrAlreadyGranted`, never a second
+grant and never a raw constraint error. **No new schema, on either the
+ledger/wallet side or Bonus's own side, is required for this key** — it
+is a straightforward reuse of a column and a constraint that both already
+exist.
+
+**Transport — per §7.18.1's binding convention, not the task framing's
+own tentative suggestion:**
+
+1. **Primary, durable mechanism: a ledger-derived, per-tenant watermarked
+   sweep.** A scheduled job (owned by `bonus-engine`, mirroring
+   `internal/reconciliation/scheduler.go`'s exact shape —
+   `pg_try_advisory_xact_lock(hashtextextended('bonus_deposit_sweep:' ||
+   tenant_id, 0))`, one `pool.WithTenant` pass per active tenant, wired
+   from `cmd/platform-api/main.go` via a `RunSchedulerLoop`-style ticker
+   with its own interval config) scans `ledger_transactions WHERE
+   tenant_id = $1 AND transaction_type = 'deposit' AND id >
+   <this tenant's last-processed watermark>`, ordered by `id`/`posted_at`,
+   and for each row not yet reflected in `bonus_grants` (checked the
+   idempotent way — attempt issuance, treat `ErrAlreadyGranted` as
+   "already handled", never a pre-check-then-insert), resolves the
+   matching Deposit/Reload Offer(s) for that player/tenant/brand and calls
+   `IssueAndActivateDepositBonus`/the identical Reload path. The
+   consumer-watermark row itself is **Bonus's own schema** (doc 29 §7
+   already names this exact object, `BC-24`, "consumer watermark row —
+   OWED BY `bonus-engine`") — not a ledger/wallet table, so it is not
+   built here. This path alone is sufficient for correctness: it is
+   durable, survives a crash at any point, and requires no cooperation
+   from `internal/payments`.
+2. **Optional latency optimization: an in-process post-commit call from
+   `internal/httpserver`, never from `internal/payments`.**
+   `newPaymentWebhookHandler` (`deposit_handlers.go`) already calls
+   `deps.PaymentOrchestrator.ReceiveCallback` inside `deps.DB.WithTenant`
+   and receives back a `payments.ReceiveCallbackResult` **after that
+   transaction has committed**. When `result.Status ==
+   DepositIntentSucceeded`, the same handler may, in a **new**
+   transaction, call a new `internal/bonus` entry point with
+   `result.LedgerTransactionID`/`result.DepositIntentID` (looking up the
+   full `DepositIntent` via `payments.GetDepositIntentByID` for the
+   remaining fields). `internal/httpserver` already imports both
+   `internal/payments` (`deposit_handlers.go`) and `internal/bonus`
+   (`bonus_handlers.go`), so this adds no new cross-domain import and does
+   not touch BI-2 at all — the call happens one layer above both
+   packages, exactly where doc 29 §2.2 places an adapter. Because this
+   path uses the **identical** idempotency key as the sweep, running both
+   is safe by construction: whichever reaches `IssueAndActivateDepositBonus`
+   first wins, the other gets `ErrAlreadyGranted` and is a no-op. If this
+   optimization is dropped or fails (a crash between commit and the call,
+   a panic recovered by the handler's own middleware), the sweep is the
+   backstop and nothing is lost — only delayed until the next tick.
+3. **Rejected, per §7.18.1's binding convention**: any call from inside
+   `postDepositSuccess`/`receiveDepositCallback` itself (would require
+   `internal/payments` to import `internal/bonus`, forbidden by BI-2, and
+   would couple the deposit's own commit to Bonus's availability — exactly
+   what doc 29 §2.2 already rejected for this reason).
+
+**What Phase 3 (`bonus-engine`) still has to design, named so it is not
+silently assumed**: which Offer(s) a given deposit/reload event resolves
+against (the eligibility/campaign-matching step upstream of calling
+`IssueAndActivateDepositBonus`) is a Bonus-domain business rule, not a
+financial contract item, and is not specified here.
+
+#### 7.18.3 Wagering-contribution trigger contract
+
+##### 7.18.3.1 The load-bearing finding: the existing machinery was built for a bonus-funded stake, not a cash-funded one
+
+`FINDING`, verified directly against the live code and against this
+document's own Wave 1 text — stated precisely because silently reusing
+the existing mechanism without this correction would be wrong, not
+merely incomplete.
+
+- §6.6.4's contribution-record contract, verbatim: *"`staked_bonus_amount`
+  … **read from the posted ledger entry**, never from the caller"* — and
+  §7.10 R1 makes the source explicit: *"read the posted `player_bonus`/
+  `player_locked_bonus` **debit** amount from `ledger_entries` for the
+  lock transaction."*
+- `internal/bonus/lifecycle.go`'s `RecordWageringContribution` doc
+  comment, verbatim: *"the Bonus-side half of a **bonus-funded bet's own
+  posting transaction** (casino's `postBet`, Phase 7)."*
+- `internal/bonus/aoe.go`'s Component 2 (`InFlightExposureCount`) and
+  Component 1 (`LockedExposure`) are both defined in terms of
+  `player_locked_bonus`/a lock transaction whose closing event has not
+  yet arrived — a concept that presumes the stake was funded from Bonus's
+  own value.
+
+An **ordinary, cash-funded `casino_bet` posting has no `player_bonus`/
+`player_locked_bonus` leg at all** — it posts `Dr player_cash / Cr
+house_gaming` only (confirmed against `internal/casino/orchestrator.go`'s
+`postBet`). Calling `RecordWageringContribution` for such a bet with
+`StakedBonusAmount` read from a `player_bonus` debit is impossible (no
+such entry exists on that transaction); passing a caller-computed number
+instead would violate §6.6.4's own binding rule ("never from the
+caller") and reopen exactly the progress-fabrication risk WP-R exists to
+catch. **The Orchestrator's Wave 3 scope decision (deposit real cash,
+wager real cash, unlock the Grant) is therefore not a drop-in use of
+Model C as documented — it requires one precise, narrow generalization of
+§6.6.4/§7.10's read rule, made here rather than left for `bonus-engine` to
+guess.**
+
+##### 7.18.3.2 The generalization, stated as the binding rule
+
+**`RULE (extends §6.6.4/§7.10 R1)`.** For a Grant whose wagering
+requirement is satisfied by cash-funded play (the only mechanic Wave 3
+authorizes), `staked_bonus_amount` is populated from **the qualifying
+bet's own posted `player_cash` debit** on that `casino_bet` transaction,
+read from `ledger_entries` exactly the way R1 already reads a
+`player_bonus`/`player_locked_bonus` debit for the bonus-funded case —
+**never from a caller-supplied number**. The field's existing name and
+comment (`staked_bonus_amount` / "the debit that justified it") were
+written assuming the bonus-funded case; `bonus-engine` should update the
+Go field's doc comment (and may rename the column's Go-side accessor, not
+the column itself) to read "the qualifying stake amount, read from the
+funding account's own debit — `player_bonus`/`player_locked_bonus` for a
+bonus-funded lock, `player_cash` for a cash-funded wagering-contribution
+Grant" — a documentation clarification, **not a schema or behavioral
+change**:
+
+- `bonus_wagering_progress` (migration 0058) needs **no new column, no
+  new constraint, no new migration**. `lock_ledger_transaction_id` is
+  simply the cash-funded `casino_bet` transaction's own id instead of a
+  locked-stake transaction's id; every other field (`correlation_id`,
+  `asset_code`, `contribution_weight_bp`, `qualifying_scaled`,
+  `rounding_rule_id`) is unaffected.
+- `DeriveWageringProgress`'s nullification predicate (`wagering.go`) is
+  unaffected and is exactly what this mechanic needs: a cash bet later
+  rolled back via `casino_rollback` must not count toward unlocking the
+  Grant, which is precisely what `lockTransactionIsNullified` already
+  checks, unchanged.
+- **`RecordWageringContribution` itself needs no code change** — it
+  already stores whatever `StakedBonusAmount`/`QualifyingScaled` the
+  caller supplies (read, per this rule, from the `player_cash` leg) and
+  already performs the Grant-status transition
+  (`activated`→`in_progress`) and Progress append correctly regardless of
+  funding source.
+- **AOE Component 2 (`InFlightExposureCount`) is honestly reinterpreted,
+  not broken.** It will now also count a cash-funded wagering-contribution
+  bet whose correlated `casino_win`/`casino_rollback` has not yet arrived.
+  This is **safe and conservative** — the worst case is a Grant that would
+  otherwise terminate cleanly instead taking the `pending_settlement`
+  detour until that one bet resolves (ordinarily sub-second), then
+  finalizing via the existing `RecheckGrantExposure` path exactly as
+  designed. It is **no longer strictly "bonus value at risk"** once a
+  cash-funded Grant uses it, and `aoe.go`'s file/Component-2 doc comment
+  should be updated by `bonus-engine` to say so precisely, rather than
+  leaving a reader to assume every `bonus_wagering_progress` row implies
+  bonus money is outstanding. No functional change is required in
+  `aoe.go`.
+- **A future bonus-funded/locked-stake mechanic, if and when `postBet`'s
+  locking side is eventually built, is unaffected by this rule**: it
+  reads `player_bonus`/`player_locked_bonus` exactly as §7.10 R1 already
+  specifies. The two funding sources are mutually exclusive **per Grant**
+  (a Grant's own `Offer` fixes its mechanic at authoring time), never
+  mixed on one contribution row.
+
+##### 7.18.3.3 Where and how the trigger fires — same transaction, per already-established HR-10
+
+**Unlike the deposit case, this is not a new transport decision** — it
+restates a rule `bonus-engine`/`ledger-finance` already bound in Wave 2:
+§6.6.4's own text, *"Written **in the same database transaction as the
+lock posting**"*, and `RecordWageringContribution`'s own doc comment,
+*"called in the SAME database transaction as the lock posting itself
+(HR-10)."* This is the one deliberate exception to §7.18.1's "no
+same-transaction call" convention, and it is deliberate for a reason
+distinct from the deposit case: HR-10 exists so a rejected/rolled-back
+bet is **structurally incapable** of producing a phantom contribution —
+if the bet's own transaction rolls back for any reason, the contribution
+row rolls back with it, by construction, with no separate compensating
+action required. Decoupling this into a post-commit or ledger-derived
+call would reopen exactly the race HR-10 closes (a contribution recorded
+for a bet that the same request later fails to post). **Wave 3 does not
+reopen HR-10; it confirms the rule is unchanged and applies identically
+to the cash-funded mechanic.**
+
+Concretely: `internal/casino`'s `postBet`, immediately after posting the
+cash-funded `casino_bet` transaction (`Dr player_cash / Cr house_gaming`)
+and before that function returns, calls into `internal/bonus` — in the
+same `tx` — with that posting's own `ledger.Post` result
+(`TransactionID`), `roundCorrelationID(tenantID, providerID,
+event.RoundID)`, `event.AssetCode`, `event.Amount`, `session.PlayerAccountID`.
+This is architecturally unremarkable: `internal/casino` already imports
+`internal/bonus` for the two Wave 2 G-2 seams, so this adds no new
+cross-domain import, and BI-2 already carves out exactly this exception.
+
+**The cheap existence check — how the caller knows whether to do this
+work at all, without scanning every bet platform-wide.** `bonus-engine`
+should expose one indexed, read-only function:
+
+```
+HasActiveWageringGrant(ctx, tx, tenantID, playerAccountID uuid.UUID) (bool, error)
+```
+
+implemented as `SELECT EXISTS (SELECT 1 FROM bonus_grants WHERE
+tenant_id = $1 AND player_account_id = $2 AND status IN ('activated',
+'in_progress'))`. This is already covered by the existing
+`idx_bonus_grants_player (tenant_id, player_account_id)` index (migration
+0057) — a per-player scan over what is, for the overwhelming majority of
+bets, zero or one row — and needs **no new index and no migration** to be
+cheap; a dedicated composite `(tenant_id, player_account_id, status)`
+index is a trivial additive migration `bonus-engine` can add later purely
+as a performance tune, not a correctness requirement. `postBet` calls this
+first, on every bet, and only proceeds to the weighting/`RecordWageringContribution`
+path when it returns `true` — for the ordinary case (no active bonus),
+the added cost of this feature to every cash bet placed on the platform is
+one indexed existence check.
+
+**Named as `bonus-engine`'s own design work, not specified here (business
+logic, not a financial contract item):**
+
+- The per-game-category contribution-weight lookup
+  (`OfferVersion.ContributionWeightTable`, stored since migration 0055,
+  confirmed never read by any code path today) needs a resolver keyed on
+  the bet's `ProviderGameID` (via `internal/casino`'s own game catalogue —
+  `CallbackEvent` carries no game-category field today). This determines
+  `ContributionWeightBP`/`QualifyingScaled` for `RecordWageringContributionParams`.
+- **Multi-Grant attribution**, if a player can hold more than one
+  concurrent wagering-type Grant: §6.6.11 item 4 already sets the
+  governing precedent for the analogous bonus-funded case — *"a lock
+  drawing on more than one Grant is rejected at placement"* as the
+  fail-closed default until an attribution rule is specified. The
+  identical posture is recommended here: until `bonus-engine` specifies a
+  qualifying-wager attribution rule across concurrent Grants, at most one
+  Grant should be in a state that receives cash-funded wagering
+  contribution at a time (an eligibility/Offer-authoring constraint, not
+  a ledger one).
+
+##### 7.18.3.4 Confirmed: no new ledger posting
+
+Verified directly against `lifecycle.go`'s `RecordWageringContribution`:
+its body calls `AdvisoryLockGrant`, `LockGrantForUpdate`,
+`CreateWageringProgress`, `AttributeGrantLedgerTransactionIdempotent`,
+`UpdateGrantStatus` (a Bonus-domain status transition only) and
+`AppendGrantProgress`. **No call to `ledger.Post` appears anywhere in
+this path.** This matches §6.6.3's own framing exactly: wagering progress
+is a comparison measure, never money, and this Phase introduces no
+exception. Rule B2's mirror generator and `RoundToMinorUnits` are
+therefore **unaffected — confirmed, not merely assumed** — neither is
+invoked by, nor needs to be invoked by, anything in §7.18.2 or §7.18.3.
+
+##### 7.18.3.5 Idempotency
+
+**Deposit-trigger**: `bonus_grants (tenant_id, campaign_id,
+offer_version_id, player_account_id, trigger_reference)`, `trigger_reference`
+= the deposit's own `ledger_transactions.id` (§7.18.2). Already
+handled gracefully (`ErrAlreadyGranted`, never a raw constraint error).
+
+**Wagering-contribution trigger**: `bonus_wagering_progress (tenant_id,
+grant_id, lock_ledger_transaction_id)` (migration 0058, HR-10),
+`lock_ledger_transaction_id` = the qualifying bet's own `casino_bet`
+`ledger_transactions.id`. In the **reachable production path**, this is
+protected twice over: `postBet`'s own pre-existing idempotency
+short-circuit (`findPostedBetTransaction`, `pg_advisory_xact_lock` keyed
+on `(tenantID, providerID, event.ProviderTxID)`) already guarantees a
+redelivered bet callback never re-executes `postBet`'s posting body a
+second time — so the new call into `RecordWageringContribution` this
+Phase adds is, in practice, only ever reached once per real bet, before
+migration 0058's own unique constraint is ever tested. **One precise,
+narrow finding for `bonus-engine` to harden, not a blocker**:
+`CreateWageringProgress`'s `INSERT` (`wagering_progress.go`) carries no
+`ON CONFLICT` clause, so if this function were ever reached twice for the
+same `(grant_id, lock_ledger_transaction_id)` pair by some path other
+than `postBet`'s own guarded one (e.g., a future second caller that
+lacks an equivalent upstream guard), it would surface a raw unique-
+violation error rather than a graceful no-op — unlike
+`AttributeGrantLedgerTransactionIdempotent`, which already handles this
+exact situation with `ON CONFLICT ... DO NOTHING` plus an idempotent
+wrapper. `bonus-engine` should consider mirroring that same pattern for
+`CreateWageringProgress` as a defense-in-depth hardening, not because the
+Wave-3 call site needs it to be correct.
+
+#### 7.18.4 Cashback scheduling contract
+
+**What already works, confirmed unchanged.** `IssueAndActivateCashback`
+(`types.go`) is, by its own design, a complete issue→activate→complete
+chain in one call — a Cashback Offer's wagering axis is a no-op (doc 10
+§2), so no wagering-contribution trigger is needed for this bonus type at
+all. Its rounding discipline (cap-before-round, no residual carried
+between windows) is correct and unaffected by anything in this section.
+
+**What is missing is only the scheduling job**, per the reconnaissance's
+own finding (item 12): nothing calls it. This section specifies that
+job's contract; it is not new business logic beyond what `types.go`
+already implements.
+
+**Recommended shape — reuse `internal/reconciliation/scheduler.go`'s
+exact pattern**, since it is this project's own established, reviewed
+"cron-like scheduler," not a new mechanism:
+
+1. Per-tenant, per-active-Cashback-campaign tick, guarded by
+   `pg_try_advisory_xact_lock(hashtextextended('bonus_cashback:' ||
+   tenant_id || ':' || campaign_id, 0))` — the identical lock-key
+   discipline `TryRunLedgerVsProjectionForTenant` uses, for the identical
+   reason (two overlapping ticks for the same campaign must serialize,
+   never race to double-issue a window's cashback).
+2. A `pool.WithTenant` loop over every tenant with at least one active
+   Cashback campaign whose window has elapsed, wired into
+   `cmd/platform-api/main.go` via a `RunSchedulerLoop`-style ticker with
+   its own interval configuration (mirroring
+   `RECONCILIATION_INTERVAL_SECONDS`'s pattern) — owned and built by
+   `bonus-engine`, since it drives Bonus's own domain function, not a
+   ledger primitive.
+3. **The window-elapsed comparison, unchanged from doc 10 §2's own
+   already-binding rule**: `clock_timestamp()`, never `now()` — `now()`
+   is fixed for the duration of a transaction and would let a job that
+   re-enters the same transaction (retry, savepoint) evaluate "has the
+   window elapsed" against a stale instant.
+4. **`NetLossAmount` — a read query, not a new ledger primitive.** For a
+   given `(tenant_id, player_account_id, asset_code)` and window
+   `[start, end)`: the net of `casino_bet` debits to `player_cash` minus
+   `casino_win` credits to `player_cash` over that window, **excluding**
+   any bet nullified by a `casino_rollback` (the identical nullification
+   join `DeriveWageringProgress`/`lockTransactionIsNullified` already use
+   — this is a straightforward `ledger_entries`/`ledger_transactions`
+   aggregate over an existing, indexed shape (`idx_ledger_transactions_correlation`,
+   `idx_ledger_entries_transaction`), computed once per window per
+   player, and handed to `CashbackParams.NetLossAmount` **already
+   computed** — `IssueAndActivateCashback` never derives this itself, by
+   its own design ("already computed by the caller from ledger reads —
+   never invented here"). This query is `bonus-engine`'s own business
+   logic to write (which players/campaigns are due, over which exact
+   window boundaries, per the Offer's configured cadence); the *shape* of
+   the underlying ledger read is specified here so it is built against
+   `casino_bet`/`casino_win`/`casino_rollback`'s real, existing
+   `transaction_type`s rather than an invented one.
+5. **Idempotency — the window itself is the key, since a Cashback Grant
+   has no upstream settlement transaction to reuse.** `trigger_reference`
+   = a deterministic, re-derivable string such as
+   `cashback:<campaign_id>:<player_account_id>:<window_start RFC3339>:<window_end RFC3339>`,
+   set by the caller on `CashbackParams.Grant.TriggerReference` exactly as
+   `RedeemCoupon` already sets it to the redeemed code — reusing the
+   **same** `(tenant_id, campaign_id, offer_version_id, player_account_id,
+   trigger_reference)` constraint (migration 0057) the deposit trigger
+   uses, not a new one. A retried or re-run scheduler tick for the same
+   window recomputes the identical `trigger_reference` and resolves to
+   the existing Grant via `ErrAlreadyGranted`, never a duplicate cashback
+   payout.
+
+**Confirmed: no new ledger posting shape.** Cashback's Grant issuance and
+activation post the **same** `bonus_grant` transaction (§7.5) as every
+other Grant activation; its immediate self-completion (`CheckAndCompleteGrant`
+with a `nil` target) posts nothing at all. Nothing about "it runs on a
+timer" changes what gets posted.
+
+#### 7.18.5 Confirmations requested by the dispatch, stated plainly
+
+- **No new ledger posting shape is required anywhere in this Phase.**
+  Deposit/reload issuance already posts correctly (§7.5, Wave 2).
+  Wagering-contribution tracking posts nothing (§7.18.3.4). Cashback
+  posts the existing `bonus_grant` shape only (§7.18.4).
+- **The Rule B2 (extended) mirror generator (`internal/ledger/bonus_mirror.go`)
+  and `money.RoundToMinorUnits` require no changes.** Neither this
+  section's deposit-trigger design, its wagering-contribution design, nor
+  its cashback-scheduling design introduces a new posting shape, a new
+  `transaction_type`, or a new rounding boundary — confirmed, not merely
+  unaddressed.
+- **No schema addition on the ledger/wallet side is needed.** Every
+  identifier this section's contracts reuse (`ledger_transactions.id`,
+  `ledger_transactions.correlation_id`) already exists. The two schema
+  objects this section names as still-needed (a per-tenant deposit-sweep
+  consumer watermark; optionally, a composite `bonus_grants` index) are
+  both **Bonus's own schema**, not ledger/wallet's, and are named for
+  `backend`/`bonus-engine` to build, not built here.
+
+#### 7.18.6 What this Phase leaves for `backend`/`bonus-engine`
+
+| Item | Owner | Notes |
+|---|---|---|
+| Consumer-watermark table/row for the deposit sweep | `bonus-engine` (schema) | Doc 29's own `BC-24` |
+| The deposit-sweep job itself (scheduler wiring, Offer-matching logic) | `bonus-engine` | §7.18.2 item 1 |
+| The optional `internal/httpserver` post-commit call | `bonus-engine` (+ a small edit to `deposit_handlers.go`, which `backend` may need to review per its own file ownership) | §7.18.2 item 2 |
+| `HasActiveWageringGrant` | `bonus-engine` | §7.18.3.3; no migration needed |
+| Per-game-category contribution-weight resolver | `bonus-engine` (+ `casino` catalogue lookup) | §7.18.3.3 |
+| Multi-Grant qualifying-wager attribution rule (if needed) | `bonus-engine` | §7.18.3.3, fail-closed default recommended until specified |
+| `postBet`'s own call into `RecordWageringContribution` | `casino` (+ `bonus-engine` for the entry point's exact Go signature) | §7.18.3.3 |
+| Doc-comment clarification on `StakedBonusAmount`/`aoe.go`'s Component 2 | `bonus-engine` | §7.18.3.2; documentation only |
+| `CreateWageringProgress`'s `ON CONFLICT` hardening | `bonus-engine` | §7.18.3.5; recommended, not blocking |
+| The Cashback scheduler job, `NetLossAmount` query, campaign/player selection | `bonus-engine` | §7.18.4 |
+
+#### 7.18.7 Review status
+
+Not yet reviewed by `bonus-engine`, `architect`, `security` or `qa`. This
+subsection is `ledger-finance`'s own Phase 1 output for Stage 4H-B1 Wave
+3 and carries no implementation.
+
 ## 8. Cross-references
 
 - Object scoping, `Wallet` shape: `financial-domain-model.md`.
