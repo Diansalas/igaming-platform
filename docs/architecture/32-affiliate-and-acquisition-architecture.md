@@ -12,6 +12,17 @@ Authored by `architect` under the roster adaptation recorded in
 same precedent as Gamification doc 17, Retail doc 26 and ADR 0037), with
 `code-reviewer` as the independent architectural reviewer.
 
+**Revision (Wave 1.5 Fix Round 2, `code-reviewer`, one precise correction
+only — see §15's last row):** §6.5.2's `B(O)` resolver definition
+corrected from a strict ancestor chain to a reflexive ancestor closure,
+closing `code-reviewer`'s own NEW-6 (fail-open on a same-node declared
+interest; deadlock on a flat/root node). Made by `code-reviewer`, not
+`architect` (this document's owner, who did not touch this document this
+round), under this round's explicit task authorization, since the fix is
+small, mechanical and already fully specified by both NEW-6 and
+`security`'s independent §W15.2.7 restatement of the identical
+correction. Nothing else in this document was changed by this revision.
+
 Numbering: next free after `31`. This document takes **32**.
 
 ## 0. Scope anchor — stated honestly
@@ -495,7 +506,7 @@ cross-reference.
 
 | # | Requirement | Note |
 |---|---|---|
-| 1 | **All three of §6.5.1's conjuncts — A (distinct active person), B (`AFF-4E-1`: approver `principal_class = 'internal'`, unconditional), C (`SEP-1`: no requester or approver in the resolved beneficiary set)** | A re-attribution moves future commission from one affiliate to another, so **both** parties' beneficiary sets are in scope. `B(O)` is the union of the **ancestor chains** of the **new** `affiliate_node_id` and the **superseded** one, each expanded to its affiliate-account persons plus its declared beneficial-interest persons (§6.5.2). Running it against only the beneficiary would let the *losing* side's people drive a reversal, and running it down-tree would miss the override-earning parent entirely |
+| 1 | **All three of §6.5.1's conjuncts — A (distinct active person), B (`AFF-4E-1`: approver `principal_class = 'internal'`, unconditional), C (`SEP-1`: no requester or approver in the resolved beneficiary set)** | A re-attribution moves future commission from one affiliate to another, so **both** parties' beneficiary sets are in scope. `B(O)` is the union of the **reflexive ancestor closures** (each node itself plus its ancestor chain, per §6.5.2's Fix Round 2 correction) of the **new** `affiliate_node_id` and the **superseded** one, each expanded to its affiliate-account persons plus its declared beneficial-interest persons (§6.5.2). Running it against only the beneficiary would let the *losing* side's people drive a reversal, and running it down-tree would miss the override-earning parent entirely |
 | 2 | **A fail-closed default threshold: `0`, `required_approvals = 2`** | No configured policy ⇒ **every** re-attribution is four-eyes. Mirrors `internal/withdrawal/policy.go`'s `defaultApprovalPolicy` (`policy.go:136`). The Wave 1.5 wording would have resolved an absent config to "below threshold," i.e. no approval at all, for every re-attribution ever performed until someone noticed |
 | 3 | **`threshold_at_decision` and `amount_at_decision` captured on the decision row, by value** | Without them, a later policy change makes it impossible to say whether a historical re-attribution was correctly governed. The materiality measure is the **commission already accrued and not yet discharged against the superseded attribution**, plus the projected forward exposure under the agreement — computed from ledger-derived measures, never from an affiliate-owned counter (AFF-3) |
 | 4 | **The approval is CONSUMED, not referenced** | Same pattern as §7.1 rule 10 — the approval is spent in the same transaction as the superseding row is written, matched against a payload containing the superseded id, the new node id and the reason code. A re-attribution whose approval was already spent on a different re-attribution fails at the database |
@@ -702,11 +713,32 @@ Affiliate's:
 `CommissionApproval`, a `CommissionSettlementInstruction`, a
 re-attribution, or an agreement/rule-version activation is:
 
-> the commission owner node's **ancestor chain** under any sub-affiliate
+> the commission owner node's **reflexive ancestor closure** — the node
+> **itself**, together with its ancestor chain — under any sub-affiliate
 > override agreement (§6.4 — **a parent node benefits from a child's
-> accrual**, so the parent's people are beneficiaries too), expanded to
-> that chain's **affiliate-account persons** plus its **declared
+> accrual**, so the parent's people are beneficiaries too, **and the
+> node's own people are beneficiaries of its own accrual**, which a
+> strict-ancestors-only reading silently excluded), expanded to that
+> closure's **affiliate-account persons** plus its **declared
 > beneficial-interest persons** (§6.5.2.1).
+
+**Correction (Wave 1.5 Fix Round 2, `code-reviewer`'s NEW-6 — see §15):**
+the prior text on this line read "ancestor chain" (strict ancestors,
+excluding the node itself). That has two independently reachable defects,
+both closed by making the closure reflexive: (1) a **fail-open** — an
+internal staff member with a declared beneficial interest in the node
+*being approved for itself* (not a parent) was not in a strict-ancestor
+set and so was not blocked, directly against this control's own stated
+purpose; (2) a **deadlock** — a flat/root affiliate node (this platform's
+own recommended first slice, §14) has no ancestors at all, so a
+strict-ancestor `B(O)` resolves **empty**, and per §6.5.2's own
+fail-closed table an empty result is a refusal, not a pass — meaning no
+commission on a flat/root node could ever be approved. Reflexivity closes
+both: the node is trivially a member of its own closure, so `B(O)` is
+never empty and always includes the node's own beneficiaries. This
+mirrors `security-architecture.md` §W15.2.7's identical correction to its
+own restatement of this resolver, which explicitly left the edit to this
+document's owning revision.
 
 This corrects a real error in this document's own first Fix-Wave draft,
 which wrote the test as "the approver is not within the **subtree** the
@@ -730,7 +762,7 @@ refuses:
 | Condition | Result |
 |---|---|
 | Approver's `principal_class` is NULL, absent, or unrecognized | **Refuse** |
-| The ancestor chain cannot be fully resolved (hierarchy primitive unavailable, unknown node, unresolvable agreement version) | **Refuse** |
+| The reflexive ancestor closure cannot be fully resolved (hierarchy primitive unavailable, unknown node, unresolvable agreement version) | **Refuse** |
 | A beneficiary person cannot be resolved from an affiliate account | **Refuse** |
 | The node's beneficial-ownership attestation is **missing** (`undeclared`) | **Refuse** every approval on that node's objects |
 | The attestation exists but is **stale** past its re-attestation period | **Refuse** — explicitly not "stale ⇒ warn" |
@@ -766,8 +798,8 @@ current row:
 earns*, and it must survive an agreement being renegotiated, expiring, or
 being replaced — an agreement-homed attestation would lapse exactly when
 a new agreement version is cut, which is a moment of *heightened* rather
-than reduced conflict risk. The ancestor-chain resolver above also walks
-**nodes**, so a node-homed attestation is readable in the same traversal
+than reduced conflict risk. The reflexive ancestor-closure resolver above
+also walks **nodes**, so a node-homed attestation is readable in the same traversal
 rather than requiring a second join per ancestor. The cost is that an
 entity holding several nodes attests several times; that is the correct
 direction (over-declaration, not under-declaration) and is the same
@@ -835,7 +867,7 @@ the trigger needs:
 | Affiliate supplies | Depends on |
 |---|---|
 | `benefiting_node_id` on every approval and re-attribution | — |
-| The **ancestor-chain** beneficiary resolver (§6.5.2) — total, deterministic, evaluated in the same transaction as the authorizing write, empty-result-is-refusal | `agentnetwork` (DEP-AFF-5, AFF-C2, OI-AFF-2) |
+| The **reflexive ancestor-closure** beneficiary resolver (§6.5.2) — total, deterministic, evaluated in the same transaction as the authorizing write, empty-result-is-refusal | `agentnetwork` (DEP-AFF-5, AFF-C2, OI-AFF-2) |
 | `approver_principal_class` captured on the approval row, and the positive `= 'internal'` predicate conjunct (`AFF-4E-1`) | `security` — **decided**: `staff_users.principal_class`, `NOT NULL`, no permissive default (AFF-C1) |
 | The `affiliate_beneficial_interest_attestations` table, node-homed (§6.5.2.1), and the `undeclared`/stale refusals | `security` — **specified** (§W15.2.5); `identity-compliance` for who may attest and the cadence |
 | `threshold_at_decision`, `amount_at_decision`, `required_approvals_at_decision` | — |
@@ -1199,7 +1231,7 @@ reason code after their determination. Routed as **OI-AFF-4**.
 | **AI-3** | Clicks, attribution candidates, `PlayerAttribution` and accruals are append-only (no `UPDATE`/`DELETE`), enforced by trigger | Trigger/constraint inspection (ADR 0013's pattern) |
 | **AI-4** | **(corrected, SEC-W15-06)** Affiliate identity at the qualifying event is resolved by looking up the server-side `Click` row a **server-minted opaque lookup key** indexes; a forged, unknown, expired or wrongly-subject-bound token yields `unattributed`, never a fallback attribution | Adversarial test: forged token, replayed token, token presented by a second subject, expired token, token from a revoked key version |
 | **AI-5** | Attribution is deterministic: same evidence + same model version = same decision, including tie-breaks | Property test |
-| **AI-6** | **(strengthened, SEC-W15-01/07)** Re-attribution (§5.3.1) and `CommissionApproval` (§6.5) both supersede-never-edit and both require **all three conjuncts** — distinct active person **AND** `AFF-4E-1` (approver `principal_class = 'internal'`, unconditional) **AND** `SEP-1` (no requester or approver in the resolved beneficiary set: the node's **ancestor chain**, expanded to affiliate-account persons plus declared beneficial-interest persons) — with a fail-closed default threshold of `0`/`required_approvals = 2`, `threshold_at_decision`/`amount_at_decision` captured, and the approval **consumed** not referenced | Tests: literal self-approval attempt; **two colluding affiliate principals** (must fail on `AFF-4E-1`); an internal approver who is an **ancestor** node's affiliate-account person (must fail on `SEP-1` — the case a descendant-only test misses); an internal approver with a matching declared beneficial interest (must fail); an `undeclared` or stale attestation (must fail closed); an unresolvable ancestor chain (must fail closed); an **empty** beneficiary set (must fail closed, not pass); an absent policy row (must require 2 approvals, not 0); a replayed approval (must fail at the DB) |
+| **AI-6** | **(strengthened, SEC-W15-01/07; corrected Wave 1.5 Fix Round 2, `code-reviewer`'s NEW-6 — §15)** Re-attribution (§5.3.1) and `CommissionApproval` (§6.5) both supersede-never-edit and both require **all three conjuncts** — distinct active person **AND** `AFF-4E-1` (approver `principal_class = 'internal'`, unconditional) **AND** `SEP-1` (no requester or approver in the resolved beneficiary set: the node's **reflexive ancestor closure** — the node itself plus its ancestor chain, not ancestors alone — expanded to affiliate-account persons plus declared beneficial-interest persons) — with a fail-closed default threshold of `0`/`required_approvals = 2`, `threshold_at_decision`/`amount_at_decision` captured, and the approval **consumed** not referenced | Tests: literal self-approval attempt; **two colluding affiliate principals** (must fail on `AFF-4E-1`); an internal approver who is an **ancestor** node's affiliate-account person (must fail on `SEP-1` — the case a descendant-only test misses); an internal approver who is the **same node's own** affiliate-account person or declared interest holder, with **no** ancestors involved (must fail on `SEP-1` — the case a strict-ancestor-only reading misses, NEW-6's fail-open branch); a **flat/root node with no ancestors** (its reflexive closure must still resolve non-empty and approvals must remain possible — NEW-6's deadlock branch); an internal approver with a matching declared beneficial interest (must fail); an `undeclared` or stale attestation (must fail closed); an unresolvable reflexive ancestor closure (must fail closed); an **empty** beneficiary set (must fail closed, not pass); an absent policy row (must require 2 approvals, not 0); a replayed approval (must fail at the DB) |
 | **AI-7** | No commission figure is computed from an affiliate-owned counter; every revenue input traces to a ledger-derived measure | Code review + reconciliation test (accrual inputs vs. ledger) |
 | **AI-8** | No floating-point money anywhere; amounts are integer minor units against the registry exponent, rounded once via the shared `rounding_rules` function | Type inspection + multi-exponent test (0/2/6/8/18) |
 | **AI-9** | **(strengthened)** Every `affiliate_*` table has `tenant_id NOT NULL`, `FORCE ROW LEVEL SECURITY`, node-subtree scoping, and the `app.player_account_id IS NULL` conjunct on staff-scope policies. Subtree scope **fails closed on absence** of `app.hierarchy_node_id` (DEP-AFF-1 condition 3): unset ⇒ zero rows, never all rows | Schema inspection + cross-tenant/cross-subtree RLS tests + an explicit unset-`app.hierarchy_node_id` test asserting zero rows |
@@ -1322,6 +1354,7 @@ authorized to exist by this document.
 | `AttributionCandidate` determined **staff-only**: no affiliate-readable policy, no subtree carve-out, no aggregate/existence disclosure; dispute resolution is an internal process producing a decision, never raw competing evidence | `security` **SEC-W15-13** — its stated dispute purpose was incompatible with its own subtree access model | new §5.2.1, AI-22 |
 | `parent_operation_id` added to the settlement instruction and to re-attribution; AI-23 added | The general retry/decomposition mechanism (doc 34) | §5.3.1, §7, AI-23 |
 | §8 steps 4 and 8 corrected; DEP-AFF-6 through DEP-AFF-10 added | Consequences of the above | §8, §12 |
+| **(Wave 1.5 Fix Round 2)** `B(O)`'s definition corrected from a strict **ancestor chain** to a **reflexive ancestor closure** (the node itself, plus its ancestor chain) everywhere this document states it (§6.5.2, its fail-closed table, §6.5.2.1's cross-reference, AI-6, §5.3.1's re-attribution union). Strict ancestors had a fail-open branch (a same-node declared interest holder was never in `B(O)`) and a deadlock branch (a flat/root node's ancestor chain is empty, and an empty `B(O)` is a refusal, blocking all commission approval on this platform's own recommended first-slice topology). **This specific, narrow correction was made by `code-reviewer`, not `architect`**, under this round's explicit task authorization: `architect` (this document's owner) did not touch this document in Fix Round 2 (confirmed by `git log`), and `security`'s own Fix Round 2 restatement of the same resolver (`security-architecture.md` §W15.2.7, closing the identical finding as `NEW-6`) explicitly stated it was correcting only its own restatement and left the edit to this, the owning document, to `architect`'s "separate dispatch this round" — which did not occur. No other content in this document was touched by this correction | `code-reviewer` **NEW-6** (Phase 2, Wave 1.5 Fix Wave), mirroring `security-architecture.md` §W15.2.7/§W15.2.8's identical fix to its own text | §6.5.2, §6.5.2.1, AI-6, §5.3.1 |
 
 **Not changed, and deliberately so:** AFF-1 (read-and-record), AFF-2 (the
 two-chain decoupling), AFF-3 (ledger-derived revenue measure), §4's

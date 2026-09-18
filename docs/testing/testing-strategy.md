@@ -2172,3 +2172,706 @@ No item moves toward `IMPLEMENTED` before its named architecture/human
 dependency resolves, regardless of implementation progress elsewhere —
 this document's own standing rule, restated once more because this
 section's dependency list is longer than most.
+
+## Stage 4H-B1, Wave 1.5 Fix Round 2, Phase 2 — Independent re-verification test-plan update (`qa`)
+
+Status: `RECOMMENDATION`, `NOT IMPLEMENTED`. Per the human directive
+authorizing this round (§20 Testing): "Add targeted tests for every P0. No
+test may merely assert application behavior if direct SQL/RLS testing is
+required to prove the invariant." `qa` did not author any of this round's
+designs (`ledger-finance`'s §7.7.2 holding-representation decision,
+`casino`'s doc 08 §16.4/§16.14–§16.20 revision, `bonus-engine`'s doc 10
+N1/N2 revision, `security`'s §W15.1.9–§W15.1.12/§W15.2.7 fixes, `architect`'s
+doc 34 §3.4/§5.3 correction) — this section is independent design-only
+review-and-extend, per CLAUDE.md's "no specialist self-approves its own
+work." **No test code is written here.** No Human Decision Register item
+(G-2, `OpenBetSelfExclusionPolicy`, cashout policy, FD-1) is selected,
+referenced as resolved, or defaulted by any test below — every test that
+touches one is explicitly marked `BLOCKED` on it.
+
+This section extends, and does not silently rewrite, the Wave 1.5 Fix
+Wave Phase 2 section immediately above (`G2-HOLD-1`/`2`/`3`,
+`EOI-DECOMPOSITION-1`, the `SEP-1` conformance table, `CASINO-PW`/`STO`
+tests, `SEG-MEMBER-OF`/`InclusionSafety` tests, the `C28` finding this
+round closes). Where this round's redesigns make part of that section
+stale, §4 below names the drift explicitly rather than leaving it in
+place; the original text above is left untouched as the historical record
+of what Phase 2 actually specified, per this document's own established
+pattern of appending rather than overwriting.
+
+### 1. `G2-HOLD-1`/`2`/`3` updated to the final `player_bonus_held` design
+
+#### 1.0 What changed under this round and why the prior tightening no longer applies
+
+§1's own prior tightening of `G2-HOLD-1` ("should be run against **both**
+of N1.4.1 item 2's holding-representation branches — the sportsbook-shaped
+in-place `player_locked_bonus` branch, and the casino-shaped dedicated
+holding-account branch") is **superseded, not merely refined, by this
+round's decision** and must not be implemented as written. `ledger-
+accounting-model.md` §7.7.2.1 rejected branch 1 (reusing
+`player_locked_bonus` in place) **outright** — LF-19 and LF-20 are stated
+as the reasons for rejection, not merely findings against it — and doc 10
+§N1.4.1 confirms "the branching question this document posed no longer
+has two live branches; there is exactly one account, for every case."
+There is now exactly one account type, `player_bonus_held`, used
+identically whether or not the originating stake was locked; the only
+thing that varies per occurrence is whether the hold-capture posting has
+**one leg or two** (§7.7.2.2), never which account type receives the
+credit. A test suite built against the retired two-branch instruction
+would spend effort proving an account shape (`player_locked_bonus`
+retained in place as the holding account) that `ledger-finance` has
+explicitly disallowed, and would not exercise the actual schema
+(`bonus_held_dispositions`, HR-23/24/25) at all. §4 below records this
+formally as flagged drift; it is stated here first because `G2-HOLD-1`'s
+revision below depends on understanding exactly what is being replaced.
+
+#### 1.1 `G2-HOLD-1`, revised — the actual `player_bonus_held` two-leg posting shape
+
+**Setup.** Grant `G`, wallet `w`, asset `EUR`, stake `X = 400` locked via
+`Dr player_bonus 400 / Cr player_locked_bonus 400` (`casino_bet`,
+correlation_id `C`). `G`'s `NewStakeEligibility` has already closed
+(`pending_settlement` per Scenario 4, or fully terminal) at the moment a
+WIN settlement (`payout = W = 250`) for `C` is delivered.
+
+**Assertions, each independently sufficient to fail the test — this
+replaces the prior branch-ambiguity assertion with the concrete
+`ledger-accounting-model.md` §7.7.2.2/§7.7.2.4 shape:**
+
+1. **Exactly one balanced `LedgerTransaction` performs the capture**,
+   containing:
+   - `Dr house_gaming 250 / Cr player_bonus_held 250` (the payout leg —
+     **always present** for a held WIN, regardless of whether the
+     originating stake was locked).
+   - `Dr player_locked_bonus 400 / Cr player_bonus_held 400` (the
+     lock-release leg — **present if and only if** the originating stake
+     was locked; **absent entirely**, not zero-valued, when it was not).
+     Run the test twice — once with a locked origin (the two-leg case
+     above) and once with a hypothetical unlocked origin (the single-leg,
+     payout-only case §7.7.2.2 also names for completeness) — asserting
+     the **cardinality of legs**, not their presence/absence of a
+     branch-selecting account type, is the only thing that varies. This
+     is the corrected replacement for the retired "run against both
+     branches" instruction (§1.0): there are not two account-type
+     branches to exercise, there is one account and (at most) two legs.
+2. **No committed intermediate state exists in which one leg posted and
+   the other did not**, when both legs are required. Prove this, not
+   assume it from `ledger.Post`'s single-transaction contract: fault-inject
+   a connection kill between the two legs' `INSERT`s inside the same
+   `ledger.Post` call (the identical technique `G2-HOLD-3` assertion 4
+   already applies to the *resolution* transaction, applied here to the
+   *hold-capture* transaction instead — a distinct atomicity boundary
+   neither `G2-HOLD-3` nor the prior `G2-HOLD-1` text exercised). On
+   recovery, assert **neither** leg is present — no partial two-leg
+   posting, ever.
+3. **`player_locked_bonus` for `C` is exactly `0` after the posting** —
+   never negative (this is `L(G) → 0`, §16.5a's mandate, tested from the
+   ledger-finance side of the same seam casino's `CASINO-PW-4`/§16.18 Part
+   B already test from the casino side).
+4. **§6.6.6's nullifiable predicate reads "not nullifiable" for `C`
+   immediately after the posting** — this is the actual, empirical proof
+   of LF-19's closure (`Σ signed(player_locked_bonus)` over `C` is `0`,
+   the predicate's defined subject having genuinely gone to zero), not a
+   restatement of the design doc's own reasoning. A test that only checks
+   "the transaction balanced" does not distinguish this design from
+   branch 1, where the identical `Σ = 0` fact would *also* hold trivially
+   post-capture for the wrong reason (the money moved, but into an
+   account the predicate itself reads) — this assertion is what actually
+   distinguishes the two designs at the query level.
+5. **A `bonus_held_dispositions` row is created** with
+   `settlement_ledger_transaction_id` equal to the capture transaction's
+   own id, `payout_amount = 250`, `released_lock_amount = 400` (or `0`
+   with no row for that leg, in the unlocked-origin run), `status =
+   'held'`, and **`UNIQUE (tenant_id, settlement_ledger_transaction_id)`
+   enforced by the database** — attempt a second insert for the same
+   `settlement_ledger_transaction_id` via a raw `INSERT`, bypassing
+   application code, and assert the database itself rejects it (LF-22's
+   fix, §7.7.2.6, tested as a real constraint violation, not an
+   application-level "already exists" branch).
+6. **Never, at any point, a credit to the shared, fungible `player_bonus`
+   account for this settlement** — this is the specific regression this
+   test is written to **fail** against: a reimplementation of branch 1
+   (reusing `player_locked_bonus` in place, crediting `player_bonus`
+   transiently, or omitting `player_bonus_held` entirely) must make
+   assertion 1, 4, or 6 fail. This is the same "written to fail against
+   the retired mechanism" discipline this document already applies to
+   `CASINO-PW-1` against the pre-LF-1 debit-leg query.
+
+**`G2-HOLD-2` (doc10 §N1.11) is unaffected by this round's schema
+decision and remains adequate as written**, including last round's five
+independently-sufficient assertions — assertion (v) already names a live
+read of `player_bonus_held`'s balance, which is the final schema, not a
+placeholder. No revision required; re-confirmed rather than silently
+carried forward unexamined.
+
+#### 1.2 `G2-HOLD-3` reclassified — this is `C28`'s closure, and it needs a real concurrent-transaction test, not a mocked one
+
+Wave 1.5 Fix Wave Phase 2's own §5 raised **`C28`** ("rollback of a held,
+undisposed win") as an open gap: neither doc 10 §N1 nor doc 08 §16.11, as
+they stood then, named the state transition for a rollback arriving while
+a WIN's value sits in an open `bonus_held_dispositions` row. That gap is
+now closed at the design level — `ledger-accounting-model.md` §7.7.2.7
+(the guarded compare-and-swap), doc 08 §16.15/§16.18 Part B (casino's
+adoption and state-machine proof), and doc 10 §N1.11's own **`G2-HOLD-3`**
+(already specifying the exact concurrent-rollback-vs-resolution scenario
+this task asks for). `qa` did not need to invent a new test ID: `bonus-
+engine`'s own `G2-HOLD-3` **is** the C28 closure test. What this section
+adds is what `qa` owns and `bonus-engine`'s design text explicitly does
+not attempt — pinning `G2-HOLD-3` down as a **real PostgreSQL
+concurrency/SQL test**, per the directive's instruction that a
+`WHERE status = 'held'` compare-and-swap racing a concurrent reader is
+exactly the shape that needs one, and specifying it precisely enough to
+build directly.
+
+**Test `HELD-ROLLBACK-CAS-RACE-1` — the concrete SQL/concurrency
+specification for `G2-HOLD-3`'s scenario.**
+
+*Exact setup (real PostgreSQL 16, real tables, mirroring the fixture
+pattern `internal/risk/cumulative_race_integration_test.go` already
+establishes in this repo — `racePool`, pre-created accounts before the
+race, one connection per worker):*
+
+```sql
+-- Pre-race, sequential, one connection, real ledger.Post calls:
+-- T5: the hold-capture transaction (§7.7.2.2), already committed.
+--   Dr house_gaming 250 / Cr player_bonus_held 250
+--   Dr player_locked_bonus 400 / Cr player_bonus_held 400
+-- H1: the bonus_held_dispositions row it produced.
+--   id = $H1, settlement_ledger_transaction_id = T5.id,
+--   payout_amount = 250, released_lock_amount = 400, status = 'held'
+```
+
+*Two concurrent workers, each its own DB connection/transaction, released
+by a shared start barrier (the same `sync.WaitGroup`-gated barrier
+`cumulative_race_integration_test.go` uses to force genuine interleaving
+rather than accidental non-overlap):*
+
+- **Worker R (rollback).** Acquires `pg_advisory_xact_lock` on
+  `(tenant_id, grant_id=G)` (HR-25 step 1) — the **same** lock both
+  workers must acquire, so true concurrency is only observable in *which
+  worker's `BEGIN`/lock-acquire wins the race*, not in interleaved row
+  access after that point (this is a deliberate, correct property of the
+  design, not a test artifact — HR-25 pins this exact serialization).
+  Whichever worker acquires the advisory lock second **blocks** until the
+  first commits or rolls back. Having acquired the lock, Worker R runs
+  `postRollback`'s generic entry-inversion against `T5` (`Cr house_gaming
+  250 / Dr player_bonus_held 250` + `Cr house_gaming 400 / Dr
+  player_bonus_held 400`) and, in the **same** transaction, the guarded
+  update: `UPDATE bonus_held_dispositions SET status='voided_by_rollback',
+  resolution_ledger_transaction_id=$T6 WHERE id=$H1 AND status='held'`.
+  Commits.
+- **Worker S (staff resolution, `ACTION_REFORFEIT`).** Acquires the
+  identical `(tenant_id, grant_id=G)` advisory lock, then `H1`'s row `FOR
+  UPDATE` (HR-25 step 2), then attempts its own guarded update:
+  `UPDATE bonus_held_dispositions SET status='resolved_reforfeit',
+  resolution_ledger_transaction_id=$T7 WHERE id=$H1 AND status='held'`,
+  bundled with its own posting (release into `player_bonus` then an
+  immediate `bonus_forfeiture` debit, per HR-25 step 3). Commits.
+
+*Run the scenario with the barrier forcing each ordering explicitly (both
+"R acquires the advisory lock first" and "S acquires it first"), not
+relying on scheduling luck to exercise both — mirroring this document's
+own C24 "both orderings named explicitly" discipline.*
+
+**Assertions, both orderings:**
+
+1. **Exactly one of `voided_by_rollback` / `resolved_reforfeit` is the
+   final `status`** — never both (impossible by construction once the
+   `WHERE status = 'held'` guard is real, but asserted as the actual
+   observed outcome, not inferred from the mechanism's description).
+2. **The loser's guarded `UPDATE` affects exactly zero rows** — assert
+   this directly against the statement's own reported row count (Postgres
+   returns this; a test that only checks the final `status` cannot tell a
+   correctly-guarded zero-row loss from a check-then-update race that
+   happened not to lose this run), and assert the loser's transaction
+   posts **no** compensating or duplicate ledger entries as a result of
+   finding zero rows affected — the loser's enclosing transaction aborts
+   before positing any further money movement, per §7.7.2.7/HR-25's own
+   "guarded update, never check-then-act" instruction.
+3. **If Worker R wins**: `player_locked_bonus` for the original stake is
+   **not** credited (§7.7.2.7's explicit "never a lock resurrection")
+   and `player_bonus_held`'s balance for `H1` is exactly `0` afterward
+   (`650 → 0`).
+4. **If Worker S wins**: `player_bonus_held`'s balance for `H1` is exactly
+   `0` afterward via the reforfeit path instead, and a subsequent Worker
+   R attempt (run sequentially, after S's commit, as a third phase) finds
+   `status ≠ 'held'` and its own guarded update is a zero-row no-op —
+   proving the *later*-arriving side of either race, not only the
+   simultaneous case, is also rejected (this is `G2-HOLD-3` assertion
+   (iv), made concrete against a real sequential-after-race third phase).
+5. **A mandatory negative control, per this task's own instruction that
+   direct SQL testing is required to prove this invariant**: re-run the
+   identical two-worker race with the guarded `UPDATE`'s `WHERE status =
+   'held'` clause removed (replaced by an unconditional `UPDATE ... WHERE
+   id = $H1`, i.e. simulate a check-then-update reimplementation: `SELECT
+   status FROM bonus_held_dispositions WHERE id=$H1`, then, in application
+   code, `UPDATE ... SET status = ... WHERE id=$H1` with no status
+   predicate). Assert this control **deterministically** produces the
+   double-disposition the guarded version prevents (both workers' checks
+   observe `status = 'held'` before either writes, both proceed, the
+   later writer's `UPDATE` silently overwrites the earlier one's `status`
+   — `H1` ends in whichever status committed last, with **both** sets of
+   compensating postings having been made against the same held value) —
+   proving assertion 1–2 above are actually verifying the guard, not
+   scheduling luck, exactly as `internal/risk/cumulative_race_integration_
+   test.go`'s own negative control proves its advisory lock is load-bearing.
+
+**One design gap surfaced while specifying this test, not previously
+named in either document, flagged rather than silently worked around.**
+Doc 08 §16.18 Part B's own balance proof (the state-machine proof this
+round adds) explicitly **flags, and does not resolve**, whether `T6`'s
+reversal of the released-lock leg — which credits `house_gaming` rather
+than restoring `player_locked_bonus` — itself crosses `BONUS_SET`'s
+boundary outward and therefore requires a Rule B2 (extended) mirror pair
+that `T5`'s original leg never needed. Assertion 3 above ("`player_bonus_
+held` balance is exactly `0`") is the strongest claim this test can make
+today; a complete balance proof for the Worker-R-wins ordering additionally
+needs to assert the correct presence (or documented absence) of that
+mirror pair, which cannot be specified until `ledger-finance`'s own
+mirror-generator design states whether `T6` needs one. This is a genuine,
+named gap this test-writing exercise found, not a `qa`-invented
+requirement — recorded here so it is not silently dropped, and marked
+`BLOCKED` on that same open question in §5's status table below.
+
+**Status.** `BLOCKED` on `internal/bonus`'s `bonus_held_dispositions`
+migration (`0054`+), `ledger-finance`'s `0055` (`player_bonus_held`
+account-type widening), and HR-9's own removal precondition (migration
+`0050`/Rule B2 (extended) generator) — none of which exist at `HEAD`,
+confirmed against `migrations/` and `internal/ledger/ledger.go`. The
+compare-and-swap **primitive itself** (a single guarded `UPDATE ... WHERE
+status = X` under an advisory-lock-serialized contender) is not a new
+pattern this platform has to invent from scratch — it is the same shape
+`asset_change_consume_approved_request` (migrations `0044`/`0047`) already
+implements for a different table — so once `bonus_held_dispositions`
+exists, this test requires no new *mechanism* design, only wiring the
+existing pattern to the new table, which is a much smaller lift than
+`BLOCKED` might otherwise suggest.
+
+#### 1.3 New test — LF-18's exploit, as a real PostgreSQL concurrency test
+
+The directive requires LF-18 be proved with "real PostgreSQL concurrency
+testing," not an application-level assertion. Doc 08 §16.17 already walks
+the exploit **sequentially** (bet → silent sweep → late win); the test
+below operationalizes the identical arithmetic as a genuine concurrent
+race between two transactions, per that instruction, and separates what
+is buildable today from what needs casino's Round 2 code.
+
+**Layer 1 — `CASINO-LF18-QUERY-RACE-1`, buildable TODAY, no `internal/
+casino` Round 2 code required.** This isolates and proves the one property
+LF-18's fix actually depends on — that Step 1b's query is race-safe under
+real concurrent commits — using only mechanisms that exist at `HEAD`
+(`ledger.Post`, `casino_bet`/`casino_win` transaction types, confirmed
+against `internal/ledger/ledger.go`).
+
+*Setup*: post `T_bet` (`Dr player_bonus 500 / Cr player_locked_bonus 500`,
+`casino_bet`, correlation_id `C`) via real `ledger.Post`.
+
+*Two workers, barrier-synchronized (mirroring `racePool`'s pattern),
+each its own connection:*
+
+- **Worker A ("zeroing transaction," standing in for the not-yet-buildable
+  `casino_settlement_timeout` sweep — see Layer 2 for why this
+  substitution is legitimate).** Acquires `pg_advisory_xact_lock` on
+  `(tenant_id, correlation_id=C)` (HR-3, the same lock `postWin`/the sweep
+  both take), posts a second real `ledger.Post` transaction reducing
+  `player_locked_bonus` for `C` to `0` (`Dr player_locked_bonus 500 / Cr
+  player_bonus 500`, `casino_win` — the label is irrelevant to the test:
+  Step 1b's query, by design, has **no `transaction_type` filter**, so any
+  transaction type that credits/debits the right accounts under `C`
+  exercises the identical arithmetic `casino_settlement_timeout` will).
+  Commits.
+- **Worker B ("late settlement decision").** Acquires the same advisory
+  lock (blocks if Worker A holds it), then executes the **literal SQL**
+  from doc 08 §16.4 Step 1b (copied verbatim, no paraphrase) against the
+  real, committed `ledger_entries`/`ledger_accounts`/`ledger_transactions`
+  rows, reading `net_outstanding_locked`.
+
+*Run twice, forcing each lock-acquisition ordering explicitly (Worker A
+first; Worker B first, i.e. Worker B's advisory-lock acquisition observes
+no committed Worker A transaction yet, mirroring the "ordinary case"
+control §16.17 itself specifies).*
+
+**Assertions:**
+
+1. **Worker A commits first**: Worker B's Step 1b read, executed strictly
+   after acquiring the lock (i.e., strictly after Worker A's commit),
+   returns exactly `net_outstanding_locked = 0` — never the stale `+500`
+   a variant-1 (Step-1-only) read would return, proving the query reflects
+   Worker A's real, committed effect under genuine concurrent access, not
+   merely under sequential unit-test ordering.
+2. **Worker B's advisory-lock acquisition happens first** (Worker A has
+   not yet committed): Worker B's read, forced to wait for the SAME lock
+   Worker A also needs before it can post, cannot observe a state that
+   never existed in isolation — the two workers' `net_outstanding_locked`
+   reads and posts are strictly serialized by the single, shared advisory
+   lock, so no interleaving in which both read `+500` and both decide to
+   release is reachable. Assert directly that the two workers' Step 1b
+   reads are never both `> 0` for the same underlying real balance at the
+   same wall-clock instant (sample both connections' `net_outstanding_
+   locked` under `pg_stat_activity`-correlated timestamps, or, more simply,
+   assert the second worker's read strictly reflects the first worker's
+   already-committed write by checking Postgres's own transaction commit
+   ordering via `pg_current_xact_id()`/`txid_current_snapshot()` at each
+   read).
+3. **Negative control (recommended addition, beyond what the task
+   strictly names for LF-18, but the same discipline the task requires for
+   EOI-6 and this document's own `HELD-ROLLBACK-CAS-RACE-1` above)**:
+   re-run with the `pg_advisory_xact_lock` call removed from both workers.
+   Assert this **deterministically** allows Worker B's read to observe the
+   stale `+500` even after Worker A has (by wall-clock, not transaction
+   order) already committed its zeroing transaction, under a database
+   isolation level of `READ COMMITTED` with an artificially delayed read
+   (a `pg_sleep` inserted between Worker B's `BEGIN` and its Step 1b query,
+   long enough that Worker A has genuinely committed by then, without the
+   lock forcing Worker B to re-read) — proving the advisory lock, not the
+   query's own correctness alone, is what closes the race window, mirroring
+   `cumulative_race_integration_test.go`'s own "prove the lock is
+   load-bearing" negative-control pattern.
+
+**Layer 2 — `CASINO-LF18-FULL-1`, the complete exploit end-to-end, per
+doc 08 §16.17's own worked numbers.** Identical setup and worker shape as
+Layer 1, but through `postWin` and the real settlement-timeout sweep job
+(§16.5a(a)), asserting the actual sentinel error (`ErrLockAlreadyReleased`),
+the actual outcome-6 branch firing, and — critically, since Layer 1 only
+proves the *read* is race-safe — that **no write is ever attempted** when
+`net_outstanding_locked ≤ 0` (Layer 1 cannot prove this half: it never
+exercises the decision-to-post code path, because that code does not
+exist yet). Also required: the reverse-ordering scenario Layer 1's own
+Assertion 2 gestures at but doc 08 §16.17 does not itself walk — a genuine
+win settlement racing a sweep for the **same** correlation_id, where the
+win's advisory-lock acquisition happens to win the race (the sweep is not
+the only actor that can lose this race; nothing in §16.5a(a) states the
+sweep re-checks `net_outstanding_locked` for a lock a concurrent win just
+claimed before posting its own timeout transaction, and this test is
+where that symmetric case must be proved, not merely the one direction
+§16.17 walks).
+
+**Status.** Layer 1 is `SPECIFIED, READY TO IMPLEMENT` — every mechanism
+it needs (`ledger.Post`, the two existing transaction types, a raw SQL
+Step 1b query, `pg_advisory_xact_lock`) exists at `HEAD` today; nothing
+about it depends on `postWin`'s Round 2 rewrite existing. Layer 2 is
+`BLOCKED` on `internal/casino`'s Round 2 implementation (Step 1/1b/outcome
+classification, `ErrLockAlreadyReleased`, confirmed absent from
+`internal/casino/*.go` at `HEAD`) **and** on `casino_settlement_timeout`
+being ratified and migrated (§16.5a states the sweep is "**NOT SAFE to
+implement**" today) — the identical blocking status this document's own
+`CASINO-STO-*` rows already carry, extended here to name the LF-18-specific
+sub-case explicitly rather than leaving it implied.
+
+### 2. SEP-1 cardinality-assertion adversarial test — the round's single most important new test
+
+Per the task's own framing: `RK-W15P2-1` was a real fail-**open** defect
+in a shared security mechanism (§W15.1.9), so this test matters more than
+any other addition this round. §W15.1.9 sketches the shape in prose
+("a resolver whose join is made to cross a row outside the acting
+connection's RLS scope"); this section makes it a concrete, real-schema
+RLS test rather than leaving it as a description for whoever implements
+`SEP-1`'s triggers to interpret.
+
+**Grounding the scenario in schema that actually exists today, not an
+invented table.** This platform already has two tables whose RLS policies
+are **structurally different in exactly the way §W15.1.9 warns about**:
+`player_accounts` (migration `0010`) is tenant-scoped
+(`USING (tenant_id = current_setting('app.tenant_id'))`), while `persons`
+(migration `0015`) is **platform-scope-only for `SELECT`**
+(`USING (current_setting('app.tenant_id') IS NULL)`) — a `SELECT` against
+`persons` from any ordinary tenant-scoped connection returns **zero rows,
+unconditionally**, regardless of what the table holds. This exact
+contradiction has already caused one documented near-miss in this
+codebase: migration `0048`'s own guard comment records that an earlier
+draft's `SELECT count(*) FROM ledger_accounts` was "silently INERT" for
+the analogous reason (`FORCE ROW LEVEL SECURITY` blinding a migration
+connection with no `app.tenant_id` set). `persons`/`player_accounts` is
+the same defect class in the opposite direction — a **tenant-scoped**
+connection silently blinded against a **platform-scoped-only** table —
+and is real, present schema, not a hypothetical construction.
+
+**Test `SEP-1-CARDINALITY-RLS-1`.**
+
+*Scenario.* A `BulkGrantJob`'s beneficiary resolver (`REQ-SEP-BONUS-1`,
+set case) is required to additionally cross-check for **household/linked
+accounts** (`REQ-SEP-BONUS-3` — the detection path that must never be a
+block, but must still run as part of resolving the full beneficiary set
+correctly) by joining each candidate `player_accounts` row to `persons`
+to detect two `player_account_id`s sharing one `person_id`. Pin a
+50-member recipient set (`subject_set_count = 50`) at approval, where 2 of
+the 50 recipients are flagged by the household-detection pass as sharing
+a `person_id` with another account and therefore require this join; the
+other 48 resolve via `player_accounts` alone.
+
+*The defect, constructed exactly as it would occur in real code, not
+staged artificially.* The `SEP-1` trigger fires as part of the ordinary
+`BulkGrantJob` execution — a **tenant-scoped** transaction (`app.tenant_id`
+set, `app.player_account_id` unset — the correct scope for this
+operation, and the very thing step 0's tenant-scope self-proof, §W15.1.9
+part 1, is designed to confirm). Under that connection, the resolver's
+join to `persons` for those 2 flagged rows silently returns **zero** rows
+for each — not an error, not a NULL `person_id`, simply an empty join
+result, because `persons_platform_scope_read_write`'s policy filters every
+row under a tenant-scoped connection. The resolver's overall query
+returns **48** resolved beneficiaries, not 50: a **non-empty, non-NULL,
+genuinely truncated** result — exactly §W15.1.9's third failure shape, not
+the empty-set or NULL-person shapes §W15.1.3's original step 5 already
+covered.
+
+**Assertions:**
+
+1. **Under the OLD design (§W15.1.3's step 5 before this round's
+   amendment — run as the explicit negative/regression control, not
+   skipped):** `resolved_count = 48 > 0`, `null_count = 0` — both of step
+   5's original checks pass. **The operation is silently permitted to
+   proceed against an incomplete 48-person beneficiary set.** If either of
+   the 2 silently-dropped beneficiaries is the acting staff member or
+   approver, this is a genuine fail-**open**: self-dealing goes undetected
+   because the self-dealing party was never in the set step 6 compared the
+   actor against. Assert this explicitly reproduces the fail-open shape —
+   this sub-case must be run and shown to pass under the pre-Round-2 logic
+   before asserting the fix, per this document's own "written to fail
+   against the pre-revision mechanism" discipline applied to a security
+   control instead of a financial one.
+2. **Under the NEW design (§W15.1.9's amended step 5, the cardinality
+   assertion):** the trigger computes `expected_count = 50` (the pinned
+   `subject_set_count` from approval, per §W15.1.9's amendment to
+   §W15.1.2 item 1 — **read**, not re-resolved), compares against
+   `resolved_count = 48`, and the third branch fires: **refuse**, with
+   `SEP1_CARDINALITY_MISMATCH` as the recorded reason code (§W15.1.11),
+   **independent of whether either dropped beneficiary happens to be the
+   actor** — this is the property that makes the fix robust to *which* row
+   RLS happened to drop, per §W15.1.9's own stated design goal, and the
+   test must not construct the actor as one of the 2 dropped rows only,
+   precisely to prove the refusal does not depend on that coincidence.
+3. **Step 0's tenant-scope self-proof (§W15.1.9 part 1) is confirmed
+   orthogonal, not the mechanism doing the work here** — assert the
+   trigger's connection legitimately passes step 0 (it *is* correctly
+   scoped to the operation's own tenant; the defect is not a scope
+   mismatch on the authorizing row, it is a truncation two steps later, on
+   a *different* table the resolver's own join reaches into). A test that
+   only exercises step 0 would not catch this shape at all, which is the
+   entire reason §W15.1.9 needed a *second*, independent fix (the
+   cardinality assertion) rather than treating step 0 alone as sufficient.
+4. **Control case — no household match, no cross-table join, all 50
+   resolve from `player_accounts` alone**: `resolved_count = expected_count
+   = 50`, operation proceeds. Proves the fix does not spuriously refuse
+   the ordinary case where the resolver's join never needs to reach a
+   differently-scoped table at all.
+5. **Positive case (`SEP-1-H1`'s own discipline, restated)**: an
+   unrelated, non-colluding approver on the same 50-member set succeeds —
+   the mechanism is not merely "refuses everything," proven the same way
+   this document's existing §3 already requires for every `SEP-1`
+   enforcement point.
+
+**Honest scope, stated per §W15.1.9's own disclosure.** This test proves
+the *mechanism-level* fix — a resolver whose join truncates against a
+differently-scoped table is caught regardless of which row is dropped. It
+does not, and cannot, prove every domain's resolver is *authored*
+correctly for every relationship it should walk (a resolver that never
+attempts the household join at all, rather than attempting it and losing
+rows, is a resolver-authoring defect outside this test's reach, per
+§W15.1.9's own honest-scope paragraph) — that remains each adopting
+domain's own adversarial responsibility.
+
+**Status.** `SPECIFIED, READY TO IMPLEMENT` for the RLS mechanics
+(`player_accounts`/`persons`' RLS policies exist today, confirmed against
+migrations `0010`/`0015`) and for the trigger logic once written against
+§W15.1.9's amended step 5. `BLOCKED` on the `SEP-1` trigger family itself
+not existing yet (no `<table>_enforce_separation()` trigger is present in
+`migrations/` at `HEAD`), on `bonus-engine`'s own household/linked-account
+detection resolver (`REQ-SEP-BONUS-3`) not being implemented, and on
+`identity-compliance`'s Person-linkage primitive confirmation (`REQ-SEP-
+ID-1`) this document's §3 above already names as an open dependency.
+
+### 3. EOI root-subtree-budget test — the 100-page-vs-5,000-ceiling scenario
+
+Doc 34 §3.4/§5.5 already narrate this scenario at the design level and
+§6's `EOI-4`/`EOI-6` already name the required check in one sentence each.
+This section turns it into a build-directly specification for whoever
+implements `internal/economicop`, including the negative-control variant
+`risk` requested.
+
+**Test `EOI-BUDGET-RACE-1`.**
+
+*Setup, exactly doc 34 §5.5's worked numbers, scaled down for a runnable
+test:* a root `economic_operations` row `R`
+(`operation_type = 'crm_engagement_campaign_activation'`, `lineage_kind =
+'root'`, `root_operation_id = R.operation_id`, `recipient_ceiling = 5000`,
+`approval_state = 'approved'`, `status = 'open'`). One hundred child rows
+`P1..P100` (`lineage_kind = 'page'`, `parent_operation_id = R.operation_id`,
+`root_operation_id = R.operation_id`, each `recipient_ceiling = 1000` —
+**all 100 created successfully**, per §3.4's own "creating a child does not
+reserve budget" rule; this is not itself part of what the test proves,
+it is the precondition the test starts from).
+
+*Concurrent workers*: `N = 5001` simulated grant executions (a real
+integration test should run a representative subset under real
+concurrency — e.g. 200 concurrent workers drawn across all 100 pages, plus
+enough sequential fill to reach the 5,000 boundary deterministically for
+the assertion below — rather than literally 5,001 live goroutines, per
+this document's own stress-test-floor-not-literal-production-scale
+precedent, Wave 1 §1). Each worker:
+
+1. Picks one of `P1..P100` at random (or round-robin, to guarantee even
+   coverage across pages) as its `parent_operation_id`.
+2. Executes doc 34 §3.4's exact consumption query, `FOR UPDATE OF R` —
+   **on the root row `R`, never on the worker's own page row** — computing
+   `remaining_recipient_budget = R.recipient_ceiling − COUNT(DISTINCT
+   c.subject_ref)` over the **whole subtree** (`eoi.root_operation_id =
+   R.operation_id`), not the worker's own page's direct children.
+3. If `remaining_recipient_budget > 0`, writes one `BulkGrantJobItem` row
+   (`parent_operation_id` = the worker's chosen page, `player_account_id`
+   = a fresh, never-before-used subject for this test run) and commits, in
+   the **same** transaction as step 2's lock.
+4. If `remaining_recipient_budget ≤ 0`, the transaction raises and rolls
+   back — no `BulkGrantJobItem` row is written.
+
+**Assertions:**
+
+1. **Exactly 5,000 `BulkGrantJobItem` rows exist across the entire
+   subtree after all workers complete** — counted by `root_operation_id`,
+   summed across all 100 pages, never by any single page's own count.
+2. **The 5,001st successful write, whichever page it falls under**, is
+   the last one to succeed; every execution after it, regardless of which
+   of the 100 pages it targets, is rejected. This directly replaces the
+   Phase 2 test-plan's own stale "page 6 fails" framing (§4 below) — the
+   assertion must not assume, or test for, failure concentrated in any
+   particular page.
+3. **No `BulkGrantJobItem` row exists whose `parent_operation_id`'s page
+   was created *after* the 5,000th successful write** was still able to
+   write a 5,001st — i.e., the ceiling is enforced against the shared
+   root, not against per-page creation order or arrival order.
+4. **A recipient granted, clawed back, and re-targeted by a later page
+   still counts once, permanently** (`EOI-14`): as a follow-on phase after
+   the 5,000 boundary is reached, clawback one already-consumed recipient
+   (`lineage_kind = 'compensation'`, `subject_ref` matching an already-
+   consumed row) and re-target the same `subject_ref` from a different
+   page. Assert `remaining_recipient_budget` does **not** increase (the
+   `COUNT(DISTINCT subject_ref)` is unaffected by the compensation row,
+   per §3.4's asymmetric-netting rule), while a parallel assertion of
+   `remaining_value_budget` over the same clawback **does** net back
+   toward its pre-grant level — proving the two budgets' deliberately
+   different netting behavior is actually wired to two different
+   aggregate queries, not one shared "remaining" number that happens to
+   be reused.
+
+**Negative-control variant, mandatory per the directive and per doc 34's
+own `EOI-6`/`risk`'s request — `EOI-BUDGET-RACE-1-CONTROL`.** Identical
+setup and worker logic, with the root-row lock removed: replace step 2's
+`FOR UPDATE OF R` with a plain, non-locking `SELECT` (mirroring
+`cumulative_race_integration_test.go`'s own negative-control technique,
+named explicitly in doc 34 §9's own cross-reference). Assert this
+**deterministically overshoots** `recipient_ceiling` — i.e., the final
+`BulkGrantJobItem` count across the subtree is materially greater than
+5,000 (not "occasionally exactly 5,000 by scheduling luck"), proving
+positive test `EOI-BUDGET-RACE-1` is actually verifying the `FOR UPDATE OF
+R` lock's presence and effect, not an accident of low contention. Per
+`risk`'s own precedent for this exact pattern, the control should be run
+enough times (or with enough workers) that the overshoot is reproducible
+on every run, not merely likely — a control that only sometimes overshoots
+has not proven the positive test's pass is load-bearing.
+
+**A second negative control this test-writing exercise adds, beyond what
+doc 34 names, closing the identical gap `NEW-2` found one level down.**
+Re-run the positive scenario with step 2's query changed to aggregate
+**only** `eoi.parent_operation_id = <the worker's own page>` (i.e., the
+literal defect `code-reviewer`'s `NEW-2` finding describes, §3.4's own
+"a literal reading" paragraph) instead of `eoi.root_operation_id =
+R.operation_id`. Assert this **also** deterministically overshoots — each
+page's own locally-scoped count never reaches its declared `1000` ceiling
+meaningfully constraining anything against the shared `5000`, so all 100
+pages' workers succeed up to `100 × 1000 = 100,000` grants, wildly
+exceeding the root's ceiling. This is a distinct failure mode from the
+missing-lock control above (it fails even with a `FOR UPDATE`, just on the
+wrong row/aggregate scope) and is exactly the "recurs one level inside the
+fix that was supposed to close it" shape §3.4's own text warns about —
+worth testing as its own control precisely because a future refactor could
+reintroduce it while still technically "having a lock."
+
+**Status.** `SPECIFIED, READY TO IMPLEMENT` in full detail, directly
+buildable against this specification the moment `internal/economicop` and
+its schema exist. `BLOCKED` on: `internal/economicop` not existing at all
+(doc 34 §7's own "no implementation authorized... yet"); the consumption
+function (`DEP-EOI-2`, a generalization of or sibling to
+`asset_change_consume_approved_request`, `security` + `ledger-finance`'s
+call, not yet made); and each `operation_type`'s own consumption-record
+declaration (`DEP-EOI-6`, `RK-W15P2-4` — `bonus-engine`/`crm`/`affiliate`
+each own authoring their own type's declaration, none yet written). This
+is a **wider** `BLOCKED` scope than `EOI-DECOMPOSITION-1` above already
+carries for the same underlying reason (§7 of the Phase 2 section), stated
+here again because this test's own root-lock mechanics are the part of
+`EOI-DECOMPOSITION-1` that most needed the concrete SQL this section adds.
+
+### 4. Drift found while updating this section — flagged, not silently corrected in place
+
+Per the task's explicit instruction, and this document's own established
+"append, never silently rewrite" discipline: the following instructions
+from the Phase 2 section (§1/§2 above) are **incorrect under this round's
+redesigns** and must not be implemented as originally written. The
+original text is left in place as the historical record of what Phase 2
+specified at the time; this table is the authoritative correction.
+
+| Where | What the prior text said | Why it is now wrong | Corrected by |
+|---|---|---|---|
+| §1, `G2-HOLD-1` tightening | "should be run against **both** of N1.4.1 item 2's holding-representation branches" | `ledger-accounting-model.md` §7.7.2.1 rejected branch 1 outright (LF-19/LF-20); doc 10 §N1.4.1 confirms there is exactly one account type, `player_bonus_held`, for every case — there are no longer two branches to run the test against | §1.1/§1.0 above |
+| §2, `EOI-DECOMPOSITION-1` item 3 | "assert page 6 (the 5,001st–6,000th subjects) is rejected in full" | Doc 34 §5.5 itself states this framing is **wrong**: "Corrected from the prior version, which described 'page 6 fails' — that only holds under reservation-at-creation semantics, which §3.4 explicitly rejects." Under the corrected design, page **creation** never reserves budget; **all 100 pages may be created**, and the 5,001st **actual grant execution**, in whichever page it happens to fall under given real execution order, is what is rejected — not a specific, predictable page | §3 (`EOI-BUDGET-RACE-1`) above, which replaces the page-6-specific assertion with the subtree-wide, order-independent one |
+
+**Checked and confirmed NOT drifted, stated so this is not silently
+assumed rather than verified**: doc 08 §16.9's `ResolveTerminalGrantCredit`
+seam signature was widened this round from a single combined `amount`
+parameter to separate `payoutAmount`/`releasedLockAmount` parameters (the
+exact "old single-`amount`-parameter seam signature" shape the task warns
+against). Grepping this document confirms no existing test text anywhere
+references a single-amount seam call — `G2-HOLD-3` (doc 10 §N1.11) already
+names "amount `W`, lock-release amount `X` (distinct...)" as two separate
+quantities, and `CASINO-PW-4`/§16.18's own numbered walkthroughs already
+carry `W` and `X` as independent values throughout. No correction is
+required here; recorded as a checked-and-clean result, not an
+unaddressed risk.
+
+### 5. Status summary — `BLOCKED` vs `SPECIFIED, READY TO IMPLEMENT`, stated without inflation
+
+| Test | Status | Blocking dependency |
+|---|---|---|
+| `G2-HOLD-1` (revised, §1.1) | `BLOCKED` | `bonus_held_dispositions` migration (`0054`+), `player_bonus_held` widening (`0055`), HR-9's own removal precondition — none exist at `HEAD` |
+| `G2-HOLD-2` (re-confirmed) | `BLOCKED` | Same as above; unchanged from Phase 2's own status |
+| `HELD-ROLLBACK-CAS-RACE-1` / `G2-HOLD-3` (§1.2, closes `C28`) | `BLOCKED` (assertions 1–2 mechanism-buildable once the table exists; the `T6` mirror-completeness sub-question is additionally blocked on `ledger-finance`'s own open flag, doc 08 §16.18 Part B) | Same schema dependency, plus the named mirror-shape open question |
+| `CASINO-LF18-QUERY-RACE-1` (§1.3, Layer 1) | `SPECIFIED, READY TO IMPLEMENT` | None — buildable today against `internal/ledger`/existing transaction types |
+| `CASINO-LF18-FULL-1` (§1.3, Layer 2) | `BLOCKED` | `internal/casino`'s Round 2 rewrite (Step 1b, outcome classification, `ErrLockAlreadyReleased`) and `casino_settlement_timeout` ratification/migration, both absent at `HEAD` |
+| `SEP-1-CARDINALITY-RLS-1` (§2) | `SPECIFIED, READY TO IMPLEMENT` for the RLS mechanics; `BLOCKED` for the full trigger | `SEP-1` trigger family, `REQ-SEP-BONUS-3` resolver, `REQ-SEP-ID-1` Person-linkage confirmation |
+| `EOI-BUDGET-RACE-1` + both negative controls (§3) | `SPECIFIED, READY TO IMPLEMENT` in full detail | `internal/economicop` does not exist; consumption function (`DEP-EOI-2`) and per-type consumption declarations (`DEP-EOI-6`) not yet authored |
+
+No item in this section is claimed `IMPLEMENTED` or `PASSING`. Where a row
+above says `SPECIFIED, READY TO IMPLEMENT`, that means the mechanisms the
+test needs already exist in this repository today and the test can be
+written and run without waiting on any further design decision — not that
+it has been written.
+
+### 6. Gaps this test-writing exercise surfaced, beyond what it was asked to test
+
+- **The `bonus_held_disposition_resolution` four-eyes threshold
+  contradiction between `security` and `architect`, already flagged in doc
+  10 §N1.12 but not previously captured in this document.** `security`'s
+  §W15.1.12 states this operation's four-eyes is "threshold 0, always";
+  `architect`'s doc 34 §3.1 table states its root mint requires four-eyes
+  "above `CLAUDE.md`'s threshold" (i.e., thresholded, not unconditional).
+  Doc 10 itself declines to pick a side. This directly affects how
+  `HELD-ROLLBACK-CAS-RACE-1`'s (§1.2) staff-resolution worker must be
+  constructed once real: a below-threshold resolution attempt must be
+  tested as **refused** under `security`'s reading and as **permitted**
+  under `architect`'s literal table text, and this test cannot be
+  finalized as written until the two owners reconcile it. Recorded here
+  as a `qa`-surfaced consequence of the existing, already-disclosed
+  inconsistency, not a new finding.
+- **Doc 08 §16.18 Part B's own flagged mirror-completeness question for
+  `T6`** (§1.2 above) is not merely a documentation gap — it is a gap this
+  test cannot close without an answer, because "the reversal balances"
+  and "the reversal balances **and** posts the correct mirror pair" are
+  different assertions, and only `ledger-finance` can say which one this
+  test should make.
+- **`EOI-BUDGET-RACE-1`'s consumption-record join (§3) is only as good as
+  each `operation_type`'s own declaration (`DEP-EOI-6`), none of which are
+  written yet.** The test as specified assumes `BulkGrantJobItem` is the
+  sole consumption-row shape for `bonus_bulk_grant`; per §3.4/`EOI-15`'s
+  own "an undeclared second shape must raise, never under-count" rule,
+  this test should be re-run once any domain adds a second consumption-row
+  shape for the same `operation_type`, with an explicit assertion that the
+  consumption function raises rather than silently under-counting against
+  the new shape — named here so it is not rediscovered as a fresh gap once
+  `DEP-EOI-6` is authored.

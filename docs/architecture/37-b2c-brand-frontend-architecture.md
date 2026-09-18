@@ -25,8 +25,8 @@ found by a specialist. This document defines the target architecture and
 a concrete, honestly-scoped MVP stage for the B2C surface so that stage
 can be authorized and sequenced by the human, exactly as every other
 domain in this project has been. It does not select a Human Decision
-Register item and does not start Stage `[Stage: B2C Brand Frontend MVP —
-ID TBD]` itself.
+Register item and does not start `Stage 6C` (`35-product-surfaces-
+roadmap.md` §5, `OI-PSR-1`) itself.
 
 ## 1. Core architectural principle: brand differences are configuration, never code
 
@@ -149,13 +149,14 @@ block.
 
 ## 3. B2C Brand Frontend MVP implementation stage
 
-**`[Stage: B2C Brand Frontend MVP — ID TBD]`** — placeholder reference
-only; a concurrent `architect` dispatch is defining the numbered roadmap
-skeleton this stage ID belongs in (`35-product-surfaces-roadmap.md`).
-This section defines the stage's scope, dependencies, technology choice,
-and release criteria so it is ready to slot into that roadmap and be
-authorized by the human at the appropriate gate — it does not itself
-authorize starting the stage.
+**`Stage 6C`** (`35-product-surfaces-roadmap.md` §5, `OI-PSR-1`) — this
+document originally used a placeholder here pending `architect`'s
+numbered roadmap skeleton; that document has since been published and
+names this stage `Stage 6C`, mechanically substituted here per its own
+`OI-PSR-1` follow-up. This section defines the stage's scope, dependencies,
+technology choice, and release criteria so it is ready to slot into that
+roadmap and be authorized by the human at the appropriate gate — it does
+not itself authorize starting the stage.
 
 ### 3.1 Scope
 

@@ -1488,7 +1488,7 @@ points, resolvers and permissions** Bonus must wire it into.
 | **`REQ-SEP-BONUS-1`** | Grant issuance, Grant activation, direct bonus Adjustment, staff-forced conversion/manual release override, `BulkGrantJob` execution | Issuance/activation/adjustment/forced-conversion: the target Grant's/target wallet's `player_account_id → player_accounts.person_id` (scalar, `expected_count = 1`). `BulkGrantJob`: the **set** of persons behind the pinned, materialized recipient set (`expected_count` = the pinned row count, §W15.1.9) | `bonus_grant:issue`, `bonus_adjustment:write`, `bonus_bulk:execute` (existing, §B1.1) | Yes — §B1.2 items 1/2/3/4, unchanged. `SEP-1` is additional, per §W15.4.1 |
 | **`REQ-SEP-BONUS-2`** | `BonusSuggestion` review (approve/reject) and activation | The persons behind the resolved `proposed_player_population`, same pinned-set discipline as `BulkGrantJob` | `bonus_suggestion:review` (existing, §W15.4.3); activation consumes the underlying Grant/BulkJob permission, per §W15.4.3 item 3 | Activation's own existing four-eyes (unchanged); review itself is not separately four-eyes-gated (§W15.4.3) |
 | **`REQ-SEP-BONUS-3`** | The household/linked-account **detection** path of §W15.1.5 | n/a — this is a "never a block" requirement, not a resolver | n/a | n/a |
-| **`REQ-SEP-BONUS-4`** (**new, this round**) | `HeldDispositionRecord` resolution (doc 10 N1.4.1 item 5c/N1.9): `ACTION_REFORFEIT`, `ACTION_ROUTE_TO_CASH`, and the manual sub-choice under `ACTION_HOLD_FOR_REVIEW`. **Not** the `HeldDispositionRecord`'s *creation* (doc 10's own row 7/12 classify creation as `TECHNICAL` — "recording-and-parking a fact," never an authorizing write) | The Grant's `player_account_id → player_accounts.person_id` — identical shape to `REQ-SEP-BONUS-1`'s adjustment/forced-conversion resolver, because a `HeldDispositionRecord` resolution moves value onto or off of exactly that Grant's player | **New, dedicated**: `bonus_held_disposition:resolve` (see below — must not be folded into `bonus_adjustment:write` or `bonus_bulk:execute`) | **Yes, threshold 0 (always)** — doc 10 §3833–3835 already classifies every resolution action as `POLICY-DEPENDENT`, requiring a human G-2 answer; that is at least as material as an ordinary adjustment, which already defaults to threshold 0 |
+| **`REQ-SEP-BONUS-4`** (**new, this round**) | `HeldDispositionRecord` resolution (doc 10 N1.4.1 item 5c/N1.9): `ACTION_REFORFEIT`, `ACTION_ROUTE_TO_CASH`, and the manual sub-choice under `ACTION_HOLD_FOR_REVIEW`. **Not** the `HeldDispositionRecord`'s *creation* (doc 10's own row 7/12 classify creation as `TECHNICAL` — "recording-and-parking a fact," never an authorizing write) | The Grant's `player_account_id → player_accounts.person_id` — identical shape to `REQ-SEP-BONUS-1`'s adjustment/forced-conversion resolver, because a `HeldDispositionRecord` resolution moves value onto or off of exactly that Grant's player | **New, dedicated**: `bonus_held_disposition:resolve` (see below — must not be folded into `bonus_adjustment:write` or `bonus_bulk:execute`) | **Yes — the same shape as `bonus_adjustment:write` (§B1.2 item 3): a tenant-configurable threshold whose fail-closed default is 0.** Doc 10 §N1.8.1 rows 8–10 classify every resolution action as `POLICY-DEPENDENT`, requiring a human G-2 answer, which makes it at least as material as an ordinary adjustment — no more, no less. See the certification correction below: this cell previously read "threshold 0 (always)," which read as an unconditional, non-configurable floor (the `bonus_bulk:execute` shape); that was this document's own drafting ambiguity, not a considered departure from CLAUDE.md's general rule, and is corrected here |
 
 **Why `REQ-SEP-BONUS-4` needs a dedicated permission, stated as an
 argument, not an assertion.** The human directive's framing — "must
@@ -1508,6 +1508,45 @@ exists to close, recurring one layer over. A dedicated permission also
 lets `qa`/audit distinguish held-disposition-resolution volume from
 ordinary adjustment volume without inference, which the mixed-purpose
 alternative cannot do.
+
+**Phase 2 independent-certification correction (`security`, self-disclosed
+— not a re-review of the whole document, a fix to this one cell).**
+`bonus-engine`'s N1.12 correctly flagged, without resolving, an apparent
+conflict between this table's four-eyes cell and doc 34 §3.1's row for
+`bonus_held_disposition_resolution` ("four-eyes above `CLAUDE.md`'s
+threshold — same shape as `manual_balance_adjustment`"). Having reviewed
+both texts side by side: **doc 34 §3.1 was right; this document's own
+"(always)" wording was the defect**, and is corrected above rather than
+left standing for a second round. The reasoning: `bonus_held_disposition:
+resolve` gates a **scalar, single-Grant** action (`expected_count = 1`,
+identical shape to an ordinary adjustment or forced conversion) — it is
+not a blast-radius operation the way `BulkGrantJob` execution is. The
+argument this document makes above for a **dedicated permission**
+(distinct volume, distinct risk profile, distinct reporting need, closing
+the "configure it instead of adjusting it" bypass one layer over) is
+sound and unaffected by this correction — but it is an argument for
+*separating the authority*, not for making its *threshold* unconditional
+in a way ordinary adjustments are not. CLAUDE.md's own baseline is "four-
+eyes approval above a **configurable** threshold" for manual balance
+adjustments generally; §B1.2 item 3 already applies that verbatim to
+`bonus_adjustment:write` (default 0, tenant may raise it). Nothing about
+a `HeldDispositionRecord` resolution's economics distinguishes it from
+that baseline the way `bonus_bulk:execute`'s blast-radius reasoning
+(§B1.2 item 2 — "a per-player threshold applied to a bulk job is not a
+control") distinguishes bulk execution. **Binding, corrected statement**:
+`bonus_held_disposition:resolve`'s four-eyes threshold is
+tenant-configurable, defaulting (fail-closed, absent a policy row) to 0 —
+the `bonus_adjustment:write` shape — not a hardcoded, non-configurable
+zero. `bonus-engine`'s N1.12 deferred to this document's "stricter,
+unconditional reading" for its own text; that deference is now moot,
+since the stricter reading was the error being deferred to. **Routed**:
+`bonus-engine` should update N1.12's own four-eyes cell to match this
+correction (drop "threshold 0, always" / "unconditional regardless of
+amount," state "configurable, default 0, per §B1.2 item 3's shape")
+rather than carry the now-corrected inconsistency forward silently; this
+is a citation-alignment fix on Bonus's side, not a reopening of anything
+substantive `bonus-engine` designed. Doc 34 §3.1 needs no change — it was
+already correct.
 
 **Wiring, extending §B1.1's tables (routed for `architect`/
 `bonus-engine`'s sign-off, per the same flag §B1.1 already carries for

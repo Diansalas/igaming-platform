@@ -9,11 +9,17 @@ Surfaces roadmap skeleton and cross-domain dependency graph across all
 three surfaces — B2C Brand Frontend, Operator Back Office, Partner
 Console). That document was not available to this one at authoring time;
 its skeleton is expected to reference this document for the two surfaces
-covered here, not the reverse. Wherever this document would need a concrete
-stage number, it uses a placeholder — `[Stage: Back Office MVP — ID TBD]`
-and `[Stage: Partner Console MVP — ID TBD]` — rather than inventing one;
-`architect`'s roadmap document is authoritative for actual sequencing and
-numbering.
+covered here, not the reverse. Wherever this document previously needed a
+concrete stage number, it used a placeholder — `[Stage: Back Office MVP —
+ID TBD]` and `[Stage: Partner Console MVP — ID TBD]` — rather than
+inventing one; `architect`'s roadmap document (`35-product-surfaces-
+roadmap.md`) is now published and is authoritative for actual sequencing
+and numbering. Per that document's `OI-PSR-1`, the placeholders below are
+mechanically replaced with `Stage 6A` (Back Office MVP) and `Stage 6B`
+(Partner Console MVP) — a reference update only; this document's own scope
+and sequencing analysis is unchanged, and doc 35's own caveat stands:
+these IDs are `architect`'s recommendation, not yet ratified outside doc
+35 (doc 35 §8, `OI-PSR-5`).
 
 Numbering: next free after `34` (`35` is reserved for the concurrent
 roadmap-skeleton document). This document takes `36`.
@@ -231,7 +237,7 @@ things live. This is the concrete mechanism satisfying the task's
 requirement that "the information architecture must not require a full
 navigation redesign when a new domain eventually lands."
 
-## 6. Back Office MVP implementation stage — `[Stage: Back Office MVP — ID TBD]`
+## 6. Back Office MVP implementation stage — `Stage 6A` (`35-product-surfaces-roadmap.md` §5, `OI-PSR-1`)
 
 ### 6.1 Scope
 
@@ -513,7 +519,7 @@ Console was never previously scoped — but it means an honest MVP for this
 surface is materially smaller than Back Office's, and this document says
 so rather than padding the scope with placeholders dressed as features.
 
-## 8. Partner Console MVP implementation stage — `[Stage: Partner Console MVP — ID TBD]`
+## 8. Partner Console MVP implementation stage — `Stage 6B` (`35-product-surfaces-roadmap.md` §5, `OI-PSR-1`)
 
 ### 8.1 Scope
 
@@ -541,12 +547,14 @@ so rather than padding the scope with placeholders dressed as features.
 - Per-player compliance detail — never exposed to a partner, by design,
   regardless of role.
 
-Given this, `[Stage: Back Office MVP — ID TBD]` should very likely
-precede `[Stage: Partner Console MVP — ID TBD]` in `architect`'s roadmap
+Given this, `Stage 6A` (Back Office MVP) should very likely
+precede `Stage 6B` (Partner Console MVP) in `architect`'s roadmap
 skeleton — Back Office has six of nine ready-today sections and zero new
 RBAC primitives required, while Partner Console needs a new RBAC concept
-built and reviewed before its first screen can safely ship. This document
-states that dependency for `architect`'s sequencing call; it does not
+built and reviewed before its first screen can safely ship. `architect`'s
+`35-product-surfaces-roadmap.md` §5 has since confirmed exactly this
+ordering. This document states that dependency for `architect`'s sequencing
+call; it does not
 itself decide stage order.
 
 ### 8.2 Dependencies (blocking, in priority order)

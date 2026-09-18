@@ -699,3 +699,229 @@ explicitly** (concepts, not new tables beyond C.1/C.3 above):
   should be capped, disclosed, or restricted from certain commission
   structures is a commercial/Risk policy question, not an identity
   question, and is not resolved here.
+
+## Stage 4H-B1, Wave 1.5 Fix Round 2 — identity-compliance independent re-verification
+
+Four items, per the Round 2 dispatch (`docs/security/security-
+architecture.md` commit `7fe8143`, `REQ-SEP-STAFF-1`) and this
+specialist's own Phase 1 findings (`docs/governance/wave-1.5-fixwave-
+phase2-report.md` §"Identity-compliance", against commit `0c6ff60`,
+bonus-engine's rewritten G-2 mechanism, doc 10 §N1 / `ledger-accounting-
+model.md` §7.7.2).
+
+### E. `REQ-SEP-STAFF-1` — conditional sign-off, two changes required
+
+**Schema fit, confirmed against the real migration
+(`migrations/0011_create_staff_users.up.sql`, `person_id` added by
+`0029`, made append-only by `0034`).** `status TEXT NOT NULL DEFAULT
+'active' CHECK (status IN ('active','suspended'))` and `person_id UUID
+REFERENCES persons(id)` (nullable) are exactly the column shapes the
+proposed `CHECK (status <> 'active' OR person_id IS NOT NULL)` needs.
+There is no type mismatch, no existing constraint it collides with, and
+`ALTER TABLE ... ADD CONSTRAINT` validating every existing row is the
+correct fail-closed behavior security's text already claims for it. The
+mechanism itself is sound and I sign off on it **as a mechanism**.
+
+**But the constraint as literally written is table-wide, and two things
+about `staff_users`'s actual schema make that consequential, not merely
+academic:**
+
+1. **The remediation query's own `WHERE tenant_id = <t>` shape structurally
+   cannot see platform-scoped staff.** `staff_users.tenant_id` is
+   nullable by design — `migration 0011`'s own comment: "`NULL` means a
+   platform-wide staff member (role `platform_admin`)" — and the
+   constraint documented in that same migration (`role = 'platform_admin'
+   AND tenant_id IS NULL`) means every `platform_admin` row has
+   `tenant_id IS NULL`, always. A remediation query framed as "run per
+   tenant" (`WHERE tenant_id = <t> AND status = 'active' AND person_id IS
+   NULL`) never matches `tenant_id IS NULL` for any concrete `<t>` — SQL
+   equality against NULL is never true, not even accidentally. Running
+   that query once per tenant, however many times, leaves every active
+   `platform_admin` row with a NULL `person_id` completely unexamined.
+   The migration's `ALTER TABLE ADD CONSTRAINT` validates the *whole*
+   table regardless, so any surviving row like that fails the migration
+   outright at deploy time — the right fail-closed outcome, but only if
+   whoever runs remediation knows to look there, which the "per tenant"
+   framing as written does not tell them. **Required change:** state the
+   remediation as two passes, mirroring the dual-scope pattern
+   `staff_users`'s own RLS policy already uses (`migration 0011`'s
+   `dual_scope_isolation`) — one per-tenant pass exactly as drafted, plus
+   one platform-wide pass, `WHERE tenant_id IS NULL AND status = 'active'
+   AND person_id IS NULL`, before the constraint is added.
+
+2. **Whether `platform_admin` should be required to hold a `person_id` at
+   all is a real, separate question, not a remediation detail.** `SEP-1`
+   (`security-architecture.md` §W15.1.3 step 4) refuses whenever
+   `staff_users.tenant_id <> ` the authorizing row's `tenant_id` — and
+   every economically-consequential operation this contract enumerates
+   (Bonus/CRM/Affiliate, §W15.1.2's table) is tenant-owned. A
+   `platform_admin` row's `tenant_id` is always `NULL`, never equal to
+   any concrete tenant's id, so a `platform_admin` acting as `A` or `p ∈
+   P` on any of those operations is refused by step 4 regardless of
+   whether `person_id` is set — **requiring `platform_admin` to carry a
+   `person_id` buys `SEP-1` nothing**, since that role structurally
+   cannot pass the trigger's own tenant-scope check to reach the
+   comparison `person_id` exists to gate. (I am not re-deriving `SEP-1`'s
+   own logic here, only observing what the constraint's necessity reduces
+   to once `SEP-1`'s published step order is taken as given — `security`
+   should confirm this reading independently before relying on it, since
+   this touches the trigger's own semantics, which I don't own.) Absent
+   that requirement, this constraint's only effect on `platform_admin` is
+   to force fabricating a `Person` row for every platform-wide staff
+   account that will never need one for the stated purpose — pure
+   remediation cost with no `SEP-1` benefit, and in direct tension with
+   `migration 0033`'s own documented invariant that `person_id` is
+   "nullable and OPTIONAL: the overwhelming majority of staff accounts
+   have no corresponding player account and never will, so most rows
+   keep it NULL forever - that's expected, not an incomplete migration."
+   **Required change, or an explicit override from `architect`/`security`
+   stating the broader scope is intentional:** exempt `platform_admin`
+   explicitly — `CHECK (status <> 'active' OR person_id IS NOT NULL OR
+   role = 'platform_admin')` — consistent with the role-conditioned CHECK
+   pattern `migration 0011` already uses on this same table, rather than
+   requiring `person_id` for a role SEP-1 can never actually check it
+   against. If this change is made, `migration 0033`'s doc comment above
+   should also be updated (by whoever owns that migration file in
+   practice) to state the new, narrower invariant — "optional and
+   NULL-forever for `platform_admin`; mandatory for every other active
+   role" — so it doesn't read as contradicted by the new constraint.
+
+**Verdict: not signed off as drafted.** Sign off on the mechanism (a real
+DB `CHECK`, correct types, correct fail-closed validate-on-add behavior);
+require both changes above — the two-pass remediation and the
+`platform_admin` carve-out (or an explicit, named decision to skip the
+carve-out) — before this ships in the same migration alongside any
+`SEP-1`/`AFF-4E-1` trigger, per the dispatch's own sequencing requirement.
+`architect`'s cross-domain sign-off (also requested by the dispatch) should
+independently confirm item 2's reading of `SEP-1` step 4 before relying on
+it.
+
+### F. Prior finding re-check — the held-disposition/`person_id` surface: **CLOSED** at the design level
+
+Last round I found `REQ-PS-ID-1` (security-architecture.md, "the
+self-exclusion open-bet enumeration must see `pending_settlement`
+Grants") narrower than the actual gap: a `HeldDispositionRecord` can
+exist on an already-fully-terminal Grant with no open bet at all, so no
+generalization of *open-bet* enumeration would ever surface it, and a
+second, independent surface joining held dispositions to `person_id`
+was needed.
+
+`bonus_held_dispositions`'s finalized schema (`ledger-accounting-
+model.md` §7.7.2.5) gives exactly that surface, and gives it more
+directly than I had assumed last round:
+
+- `player_account_id UUID NOT NULL` is denormalized directly onto the
+  row — no join through `grant_id`/`wallet_id`/`ledger_entries` is
+  needed to reach it, and it is `NOT NULL`, not merely usually-present.
+- `player_accounts.person_id` is itself `NOT NULL` (`migrations/
+  0010_create_player_accounts.up.sql` line 15) — so the chain
+  `bonus_held_dispositions.player_account_id → player_accounts.id →
+  player_accounts.person_id` resolves to exactly one `person_id` for
+  every disposition row, with no NULL-hole of the kind migration
+  `0029`'s original defect had.
+- `status` (`held` / `resolved_reforfeit` / `resolved_route_to_cash` /
+  `voided_by_rollback`) is the row's **own** field, entirely independent
+  of the attributed Grant's lifecycle state — so the exact gap I flagged
+  (a terminal Grant hiding an open hold from any Grant-state-keyed
+  enumeration) cannot recur here by construction: the new surface never
+  needs to look at Grant state at all, only `WHERE status = 'held'`.
+- `tenant_id` is present and RLS-scoped (§7.7.2.5's own note, closing
+  `architect`'s Phase 2 finding that the record was originally missing
+  `tenant_id`/RLS/brand scope entirely) — so this surface can be built
+  as a per-tenant enumeration job following the same shape
+  `self_exclusion_enumeration_runs` (migration `0043`/`0049`) already
+  uses for the Grant-side enumeration, rather than a novel cross-tenant
+  query.
+
+The concrete shape (design-only — no code exists, none is claimed):
+join `bonus_held_dispositions` (`status = 'held'`) → `player_accounts`
+(on `player_account_id`) → `player_restrictions` (on `person_id`, per
+`migrations/0037_create_player_restrictions.up.sql`, itself
+platform-wide/person-keyed, `restriction_type = 'self_exclusion'`) —
+run per-tenant, recorded the same way `self_exclusion_enumeration_runs`
+already records a Grant-side run, so a dropped/incomplete run is
+detectable the same way S-9 already requires for the existing
+enumeration.
+
+**Verdict: CLOSED at the data-model level.** The schema supports building
+this surface with no missing field, no ambiguous join, and no
+Grant-state dependency — strictly easier to build than what I described
+last round, precisely because `player_account_id` now lives on the row
+directly. Naming it formally so it has a tracked identity: **`REQ-PS-
+ID-2`** (no other document has assigned this a number yet) — "a
+`bonus_held_dispositions` row with `status = 'held'` attributed to a
+self-excluded `person_id` must be visible to a self-exclusion
+enumeration surface, independent of and in addition to `REQ-PS-ID-1`'s
+Grant-side enumeration." Building the actual job/query is not required
+to close this Phase 2 finding, per this round's own framing (design-only);
+what closes it is that the data model no longer has a hole the design
+could fall into.
+
+One thing worth carrying forward when `REQ-PS-ID-2` is actually built:
+apply `security`'s `SEP-1-H1`/`W15.1.9` lesson (a resolver that reads
+zero rows under a partial-RLS-scope must be treated as a hazard, not a
+clean "nothing found") to this resolver too — the same class of failure
+(silently-inert enumeration passing every test because it never actually
+ran under the right scope) applies here as much as it does to `SEP-1`'s
+own resolvers.
+
+### G. `LF-12` aging check — still open, correctly named this time, not yet decided
+
+Last round's second finding: `LF-12`'s aging check did not prioritize
+self-excluded persons. `ledger-accounting-model.md` §7.7.2.8 item 3 (the
+finalized `LF-12` reconciliation stream) now says, verbatim: "prioritized
+per `identity-compliance`'s Phase 2 note that self-excluded players' open
+holds need priority review — **not decided here**, named so the
+reconciliation job's own design does not have to rediscover it."
+
+**Verdict: NOT CLOSED, but no longer silently dropped.** This is
+progress over last round (the note is now on record in the owning
+document, attributed, and won't be rediscovered from scratch), but the
+actual prioritization design — how the aging job orders or escalates a
+`held` row once it knows the attributed person is self-excluded — still
+does not exist. Re-flagging it as open: `ledger-finance` (owner of
+`LF-12`) still needs to specify how the aging sweep queries
+self-exclusion status (presumably the same `player_restrictions` join
+`REQ-PS-ID-2` above uses) and what "priority" means operationally
+(shorter aging threshold before escalation, a distinct queue, an
+immediate alert rather than waiting for the normal aging window) before
+this is buildable, not just nameable.
+
+### H. `voided_by_rollback` vs. self-exclusion enumeration — no new gap; one forward dependency noted
+
+`ledger-accounting-model.md` §7.7.2.7 adds `voided_by_rollback` for a
+provider rollback targeting a still-`held` win. Checked against
+`REQ-PS-ID-2`'s proposed surface (§F above):
+
+- A `voided_by_rollback` row is terminal (`status <> 'held'`) and
+  economically zero — the win is fully reversed to `house_gaming`, no
+  value remains attributed to the player. It falls out of a `WHERE
+  status = 'held'` enumeration exactly the way `resolved_reforfeit`/
+  `resolved_route_to_cash` already do, by the same mechanism, for the
+  same reason: no open exposure remains to surface. This is symmetric
+  with how the existing Grant-side enumeration already treats a fully
+  terminal, zero-exposure Grant — no special case is needed.
+- The row itself is never deleted (append-only, per this document's own
+  ledger rules), so a compliance investigator reviewing a self-excluded
+  person's full history still finds it on an unfiltered historical
+  query against `bonus_held_dispositions` — only the *active-exposure*
+  enumeration (which must exclude terminal rows to avoid false-positive
+  alerts) needs the `status = 'held'` filter. No audit-trail gap.
+- The one thing I am **not** closing here, because §7.7.2.7 itself
+  doesn't: a rollback naming an **already-resolved** record (value
+  already moved to `player_bonus`/`player_cash`, possibly already
+  withdrawn) is explicitly routed to `LF-10` and left undecided. If a
+  self-excluded person's held win was resolved (`resolved_route_to_cash`)
+  and *then* a late rollback arrives, whatever `LF-10` eventually
+  decides (clawback / receivable / reject-and-alert) needs to be checked
+  against self-exclusion enumeration at that time — a self-excluded
+  person with a disputed, already-cashed-out bonus win is exactly the
+  kind of case a self-exclusion review would want visibility into.
+  Flagging this as a dependency on `LF-10`'s resolution, not a defect of
+  this round's design.
+
+**Verdict: no new gap in the enumeration surface itself.** The new
+transition is consistent with the terminal-state handling every other
+disposition outcome already gets; the one open edge (late rollback of an
+already-resolved record) is `LF-10`'s to resolve, and I'll re-check its
+self-exclusion interaction once `LF-10` lands.
