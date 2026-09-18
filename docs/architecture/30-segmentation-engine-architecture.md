@@ -3,7 +3,9 @@
 Status: **DESIGN/ARCHITECTURE ONLY — `NOT IMPLEMENTED`.** No Go code, no
 schema, no migration, no route is authorized by this document. Produced
 in Stage 4H-B1, Wave 1.5 (Architecture Reconciliation Gate), directive
-§B. Owned by `architect` per `docs/governance/ownership.md`
+§B; **revised in the Wave 1.5 Fix Wave (task `4HB1FW-03`) to close
+`code-reviewer`'s findings P1-1 and P1-2 — see §13.1 for the changelog.**
+Owned by `architect` per `docs/governance/ownership.md`
 ("Cross-domain architecture | architect | `docs/architecture/*`") and by
 the ratified `internal/segment` ownership row ("`architect` — interface/
 contract/schema shape; `bonus-engine` — first consumer's call sites").
@@ -195,10 +197,26 @@ own audit trail must already carry.
 Not operator-editable. A compiled-in registry entry per supported leaf
 predicate: `predicate_key`, the owning domain, the read interface it
 calls, its parameter schema, its `as_of` semantics, its
-unknown-condition, and whether it is **inclusion-safe** (§8.4). New
-entries land through the documented extension process of §9, which
-mirrors ADR 0031 §12's five-step model — never an ad hoc addition and
-never a runtime-authored expression.
+unknown-condition, and its **protective-signal declaration** (§8.4 —
+replacing the original's static `inclusion_safe` boolean, per
+`code-reviewer`'s P1-2). New entries land through the documented
+extension process of §9, which mirrors ADR 0031 §12's five-step model —
+never an ad hoc addition and never a runtime-authored expression.
+
+The protective-signal declaration has three parts, all compiled-in and
+none operator-editable:
+
+| Field | Meaning |
+|---|---|
+| `protective_signal` (bool) | The predicate reads a harm-protective fact *directly* from its owning domain (RG restriction state, self-exclusion, cooling-off, a future harm indicator) |
+| `protective_signal_inputs[]` | The predicate's owning domain declares that **some** parameter values cause a protective signal to be read *indirectly* — e.g. doc 31's `PlayerLifecycleState`, whose state set includes the RG-derived `excluded`. Each entry names the parameter and the value subset that carries the taint |
+| `taint_free_domain` (optional) | The explicitly enumerated parameter subset for which the predicate carries **no** protective signal — the escape hatch that lets a lifecycle predicate remain usable for `dormant`/`churned` without laundering `excluded` |
+
+A predicate that declares neither `protective_signal` nor
+`protective_signal_inputs[]` is taint-free by *declaration*, not by
+omission. The §9 extension process (step 3) makes that declaration a
+mandatory, `security`-reviewed field, so a new predicate that silently
+forgets it fails review rather than defaulting to permissive.
 
 ### 3.6 `SegmentCriterionParameterSet` — the operator-defined half
 
@@ -221,7 +239,7 @@ is the anti-pattern — ADR 0037 §C.)
 |---|---|---|---|---|
 | C-01 | **VIP tier** | Gamification (levels/tiers, doc 17) | Gamification read API | **BLOCKED** — `internal/gamification` does not exist. Until it does, VIP tier is expressible **only** as static membership (§3.3). A segmentation-computed tier is forbidden (§4.1) |
 | C-02 | **Player value** (LTV, NGR contribution, deposit total) | `ledger-finance` (ledger truth) + `data-analytics` (aggregation, doc 12) | A ledger-derived read; for multi-period aggregates, the reporting read model | **PARTIAL** — single-asset ledger-derived aggregates are expressible; cross-asset value is **not** (§4.2) |
-| C-03 | **Lifecycle state** (new / active / inactive / dormant / churned / reactivated) | `crm` (derived classification, doc 31 §3) — *not* Identity, which owns account status only | CRM read projection, with its own `as_of` | **BLOCKED** on CRM; a lifecycle criterion must not be reimplemented here |
+| C-03 | **Lifecycle state** (new / active / inactive / dormant / churned / reactivated) | `crm` (derived classification, doc 31 §3) — *not* Identity, which owns account status only | CRM read projection, with its own `as_of` | **BLOCKED** on CRM; a lifecycle criterion must not be reimplemented here. **Use-restricted — §8.4.3**: doc 31's state set includes the RG-derived `excluded`, so C-03 carries a declared `protective_signal_inputs[]` and computes `exclusion_only` whenever its `states` parameter is not a subset of the enumerated taint-free domain |
 | C-04 | **New player** | Identity (`created_at` of `PlayerAccount`) + `payments` (first deposit) | Identity read; `payments.deposit.settled` history via ledger | Expressible |
 | C-05 | **Active / inactive / dormant** | Same as C-03 (a windowed derivation over activity) | CRM projection, or a direct ledger/activity read with an explicit window parameter | Expressible as a windowed activity predicate; the *named* lifecycle labels are C-03's |
 | C-06 | **Retention / reactivation** targeting | CRM (journey state) + activity windows | CRM read projection | **BLOCKED** on CRM for the labelled form |
@@ -240,7 +258,7 @@ is the anti-pattern — ADR 0037 §C.)
 | C-19 | **Risk classification** | `risk` — **and only `risk`** | `internal/risk` read | **BLOCKED — no such artifact exists.** §8.3 |
 | C-20 | **Operator-defined custom criteria** | operator, within the closed registry | §9 | Expressible within §9's bounds |
 | C-21 | **Acquisition source / affiliate attribution** (added — required by doc 32's chain) | `affiliate` (doc 32 §5) | Affiliate attribution projection (the immutable `PlayerAttribution` row) | **BLOCKED** on Affiliate |
-| C-22 | **RG status** | `internal/rg` | `rg` read | **Expressible but use-restricted — §8.4.** Never an inclusion criterion |
+| C-22 | **RG status** | `internal/rg` | `rg` read | **Expressible but use-restricted — §8.4.** Never an inclusion criterion; declares `protective_signal = true`, so any tree containing it computes `exclusion_only` unless the leaf sits under a `Not` (§8.4.1) |
 
 ### 4.1 The hard rule this table encodes
 
@@ -289,6 +307,74 @@ expressions over free text, and no reference to another segment's
 criteria body — a segment may reference another **segment** as a leaf
 (`member_of(segment_id, version_pin)`), and that reference graph is
 validated acyclic at authoring time.
+
+#### 5.1.1 The `member_of` leaf — resolution semantics (corrected, Wave 1.5 Fix Wave)
+
+**This subsection closes a real defect** `code-reviewer` found in the
+Wave 1.5 original of this document (finding **P1-1**), and it is
+load-bearing enough to state before the truth tables that depend on it.
+
+The original text mapped *both* the evaluator's internal `member_of`
+outcome and `Resolve`'s external terminal outcome through one rule —
+"an absent/disabled/draft segment definition is `member = false`." That
+rule is correct at the **boundary** and wrong **inside a tree**, because
+`Not(false) = true`. §6's own canonical hybrid shape,
+`And(criteria, Not(member_of(exclusion_list)))`, therefore had a
+reachable accidental-ALLOW: disable the referenced exclusion segment (an
+ordinary, low-privilege, non-financial operator action — and
+`disable-never-delete`, §3.1, makes it the *expected* way to retire one)
+and every previously-excluded player is swept back into the audience,
+silently, with a `true` that looks indistinguishable from a legitimate
+one. This is the identical accidental-ALLOW §5.3 exists to close, reached
+through the segment-reference door instead of the predicate door.
+
+**The binding rule, replacing the original in this respect:**
+
+| `member_of(segment_id, version_pin?)` resolves against | Leaf result |
+|---|---|
+| An `active` segment with a resolvable `active` version (or a resolvable pinned version) | `true` / `false` — the referenced tree's own evaluated outcome, three-valued, propagated **unmapped** |
+| A segment row that does not exist, or is not visible in the evaluating tenant/brand scope | **`unknown`** — reason `segment_reference_unresolvable` |
+| A segment whose `status` is `disabled` | **`unknown`** — reason `segment_reference_disabled` |
+| A segment whose only candidate version is `draft` (no `active`/`superseded` version at `as_of`) | **`unknown`** — reason `segment_reference_not_effective` |
+| A `version_pin` naming a version id that does not exist, belongs to another segment, or is not effective at `as_of` | **`unknown`** — reason `segment_reference_pin_unresolvable` |
+| A referenced tree that itself evaluates to `unknown` (any cause: a blocked predicate, a cost-budget exhaustion, a nested unresolvable `member_of`) | **`unknown`**, propagated, with the *innermost* reason code preserved in `leaf_outcomes[]` |
+| A reference whose resolution would exceed the evaluation's cost budget (§5.2 rule 7) | **`unknown`** — reason `segment_evaluation_budget_exceeded` |
+
+Three consequences, each binding:
+
+1. **A `member_of` leaf never yields `false` for a definitional reason** —
+   only for a substantive one (the referenced criteria genuinely evaluated
+   to `false` for this player at this `as_of`). "I could not tell you" and
+   "the answer is no" are different answers, and only the second one is
+   safe to negate.
+2. **Static (`§3.3`) membership is not exempt.** `member_of` over a
+   `static` segment that exists and is `active` returns `false` for a
+   player with no `add` event in the fold — that is a substantive `false`,
+   and negating it is correct. An *empty* static segment is still a
+   substantive `false` for every player; an *absent or disabled* one is
+   `unknown`. The distinction is the segment's existence and status, never
+   the list's length.
+3. **Terminal mapping is a boundary operation, not a node operation** —
+   see the corrected §5.3.
+
+**Authoring-time mitigation (necessary but NOT sufficient, and stated as
+such):** the acyclicity validator (§5.1) is extended to also reject
+authoring a version whose tree references a segment that is absent, or
+`disabled`, or has no effective version — so the common case fails at
+authoring rather than silently at evaluation. This does **not** replace
+the evaluation-time rule above, because a referenced segment can be
+disabled *after* the referencing version is frozen and in production
+use, which is precisely the exploit path. Authoring validation narrows
+the window; the `unknown` rule closes it.
+
+**A second-order obligation this creates, stated rather than hidden:**
+because disabling a segment now degrades every referencing segment's
+answer to `unknown` (and, at an inclusion boundary, to `not_member`), the
+`disabled` transition is operationally *more* consequential than it
+looks. The admin surface (§2, `admin.go`) must, before disabling,
+enumerate and display the referencing `SegmentVersion`s — the same
+"blast radius disclosed before the action" posture §8.4 and doc 31 §12.2
+require elsewhere. Recorded as **OI-SEG-8**.
 
 ### 5.2 Determinism — the eight rules
 
@@ -349,14 +435,50 @@ This is strong Kleene K3. It is order-independent (so short-circuit
 evaluation is safe and cannot change the answer), and it makes UNKNOWN
 non-erasable by negation.
 
-**Terminal mapping (fail-closed, no exception):** `true` → `member`;
-`false` → `not_member`; `unknown` → `not_member` **with reason code
-`segment_fact_unavailable`**, distinguishable from an ordinary
-`not_member`. A non-nil error from `Resolve` is `member = false`, and an
-absent/disabled/draft segment definition is `member = false` — never "no
-restriction configured, therefore everyone." Inherited verbatim from
-ADR 0037 §C.1 and `internal/risk`'s error contract, and unchanged from
-doc 29 §3.2.
+**Terminal mapping — a BOUNDARY operation, applied exactly once
+(corrected, Wave 1.5 Fix Wave, `code-reviewer` P1-1):**
+
+The three-valued result is carried, three-valued, through *every* node of
+the tree, including every `member_of` reference and every nested
+sub-tree. It is collapsed to two values **only** at the top-level
+`Resolve` return boundary, and never at an interior node:
+
+```
+   interior nodes  ──▶  {true, false, unknown}     (Kleene, §5.3's table,
+                                                    NO collapse anywhere)
+   Resolve() return ─▶  {member, not_member}       (collapse happens HERE,
+                                                    once, and only here)
+```
+
+| At the `Resolve` boundary | Terminal result | Reason code |
+|---|---|---|
+| `true` | `member` | the tree's own reason |
+| `false` | `not_member` | ordinary non-membership |
+| `unknown` | `not_member` | **`segment_fact_unavailable`** — distinguishable from an ordinary `not_member`, and carrying the innermost contributing reason from `leaf_outcomes[]` |
+| A non-nil `error` from `Resolve` | `member = false` for every caller | fail-closed, ADR 0037 §C.1 / `internal/risk`'s error contract |
+| The **top-level** `segment_id` itself is absent, `disabled`, draft-only, or its pin is unresolvable | `member = false` | never "no restriction configured, therefore everyone" |
+
+The last two rows are the original text's rule and are unchanged — they
+were always correct **at the boundary**. What is corrected is that they
+are no longer applied at an interior `member_of` node, where the
+subsequent `Not` could and did invert them (§5.1.1). Concretely, for
+§6's canonical hybrid shape:
+
+| Referenced exclusion segment's state | Old (defective) | Corrected |
+|---|---|---|
+| `active`, player is a member | `Not(true)=false` ⇒ excluded ✓ | `Not(true)=false` ⇒ excluded ✓ |
+| `active`, player is not a member | `Not(false)=true` ⇒ included ✓ | `Not(false)=true` ⇒ included ✓ |
+| **`disabled` / `draft` / deleted / bad pin** | `Not(false)=true` ⇒ **included ✗ (accidental ALLOW)** | `Not(unknown)=unknown` ⇒ `And(…, unknown)` ⇒ at worst `unknown` ⇒ **`not_member` ✓** |
+
+`Evaluation.result` retains its third value `unknown` in the returned
+struct (§5.4 already declares it) so a consumer with an *exclusion* use —
+whose fail-closed direction inverts, §5.3's asymmetry note and doc 31 §5
+— can discharge its own obligation without re-deriving what the evaluator
+already knew. **A consumer that ignores `unknown` and reads only
+`result == member` is fail-closed for an inclusion use and fail-OPEN for
+an exclusion use**; doc 31 §5's inverted mapping is what makes the
+exclusion case correct, and it depends on this value being carried
+rather than pre-collapsed.
 
 **The asymmetry that makes fail-closed correct here**: a segment is only
 ever an *inclusion* input (§8.1). Failing closed therefore withholds a
@@ -378,11 +500,27 @@ Resolve(ctx, tx, ResolveRequest) (Evaluation, error)
 
 ResolveRequest:  tenant_id, brand_id, player_account_id,
                  segment_id, segment_version_id (optional pin),
-                 as_of (optional; defaults to clock_timestamp())
+                 as_of (optional; defaults to clock_timestamp()),
+                 use (inclusion | exclusion — MANDATORY, §8.4.2;
+                      no default, an absent value is an error)
 Evaluation:      result (member|not_member|unknown), reason_code,
                  segment_version_id, criteria_hash, evaluated_as_of,
-                 evaluator_version, leaf_outcomes[]
+                 evaluator_version, inclusion_safety, leaf_outcomes[]
 ```
+
+Two fields added in the Wave 1.5 Fix Wave, both load-bearing rather than
+informational:
+
+- **`ResolveRequest.use` is mandatory and has no default.** It is what
+  makes §8.4.2's check possible at all, and it is what tells a consumer's
+  own fail-closed direction apart (inclusion collapses `unknown` →
+  `not_member`; exclusion must collapse `unknown` → *excluded*, doc 31
+  §5). A default would silently pick one, and the one it picked would be
+  wrong half the time. `IsMember`'s convenience wrapper therefore also
+  takes `use` — there is no zero-argument shortcut.
+- **`Evaluation.inclusion_safety`** carries the tree's computed
+  classification (§8.4.1) so a consumer recording evidence (§7) can
+  reconstruct *why* a resolution was permitted, not merely that it was.
 
 `IsMember` remains available as a convenience wrapper returning
 `Evaluation.result == member`, but **no consumer with an audit obligation
@@ -416,6 +554,15 @@ schema.
 `hybrid` is not a third mechanism — it is composition (§5.1) of the two,
 named here only because operators will ask for it and it must not be
 mistaken for a new engine feature.
+
+**The `And(criteria, Not(member_of(exclusion_list)))` shape above is
+exactly the shape `code-reviewer`'s P1-1 exploited**, and it is safe only
+under §5.1.1's corrected `member_of` semantics plus §5.3's
+boundary-only terminal mapping. An implementation that maps an
+unresolvable `member_of` to `false` at the node makes this canonical,
+operator-facing, documented shape an accidental-ALLOW generator. It is
+called out here, in the section that recommends the shape, and not only
+in §5, so that an implementer reading §6 in isolation cannot miss it.
 
 **Dynamic membership is never materialized.** Doc 10 W7 already commits
 to this ("never stored; evaluated live against the current SegmentVersion's
@@ -591,14 +738,169 @@ RG status (C-22) and any future harm-risk indicator are **asymmetric**:
 | Exclude an RG-restricted/self-excluded player from a marketing audience or a promotional Offer | **Yes — and doc 31 §8 makes it mandatory, enforced by our code** |
 | Include a player in an audience *because* they are RG-restricted, self-excluded, on a cooling-off, or carry a harm indicator — for any promotional, re-engagement, reactivation or bonus purpose | **No. Structurally forbidden.** |
 
-Mechanically: every entry in §3.5's predicate registry carries an
-`inclusion_safe` flag. A predicate with `inclusion_safe = false` may
-appear in a criteria tree **only** under a `Not(...)` in an exclusion
-position, or in a consumer whose declared use is suppression (doc 31 §8);
-an authoring-time validator rejects anything else. Note that §5.3's
-Kleene rule is what makes this enforceable rather than cosmetic: a
-`Not(unknown)` cannot silently flip an excluded player back into the
-audience.
+#### 8.4.1 `InclusionSafety` is a computed property of a TREE, not a flag on a key (corrected, Wave 1.5 Fix Wave)
+
+The Wave 1.5 original stated this as "every entry in §3.5's predicate
+registry carries an `inclusion_safe` flag; a predicate with
+`inclusion_safe = false` may appear only under a `Not(...)` in an
+exclusion position." `code-reviewer`'s finding **P1-2** is that this has
+no propagation rule through composition, and it demonstrated two concrete
+laundering paths that defeat it without ever tripping the validator:
+
+- **Path 1 — nested segment.** `member_of` is *necessarily* a
+  taint-free predicate key (legitimate inclusion uses of segment
+  references exist and are the norm — §6's hybrid shape, doc 10 W2.2's
+  Offer eligibility axis). So an operator defines Segment X containing an
+  RG-restriction criterion under an exclusion-use declaration, then
+  Segment Y whose tree is a plain inclusion `member_of(X)`. A validator
+  that inspects only leaf keys sees `member_of` and passes.
+- **Path 2 — via CRM lifecycle (C-03).** Doc 31 §3's
+  `PlayerLifecycleState` set includes `excluded`, which doc 31 itself
+  defines as "a projection of `internal/rg`'s authoritative status." The
+  state set is tenant-scoped, operator-extensible configuration. C-03
+  reads it through CRM's projection. `lifecycle_state_in([...])` cannot
+  sanely be marked wholesale unsafe (most of its state set —
+  `dormant`, `churned`, `reactivated` — is exactly what commercial
+  targeting is for), so RG status reaches an inclusion criterion with the
+  validator never seeing an RG predicate at all.
+
+Both are real. The fix is to stop treating safety as a property of a
+*key* and make it a property of an evaluated *tree*, computed bottom-up.
+
+**`InclusionSafety(node)`, binding, computed at authoring time over the
+normalized AST (§5.2 rule 4) and recorded on the `SegmentVersion` row:**
+
+```
+InclusionSafety : Node → { safe, exclusion_only }
+
+Leaf(key, params):
+    exclusion_only  if registry[key].protective_signal
+    exclusion_only  if any p ∈ registry[key].protective_signal_inputs
+                       is satisfiable by params
+                       (i.e. params could select a tainted value;
+                        a parameter that is not a closed, enumerated,
+                        authoring-time-fixed set is conservatively
+                        treated as satisfiable — fail closed)
+    safe            otherwise
+
+member_of(seg, pin):
+    InclusionSafety(resolved SegmentVersion's own criteria tree)
+    — computed transitively, NOT read from the leaf key.
+      Unresolvable at authoring time ⇒ exclusion_only (fail closed).
+
+And(c…), Or(c…):
+    exclusion_only  if ANY child is exclusion_only
+    safe            otherwise
+
+Not(c):
+    safe            (negation is the SANCTIONED position for a
+                     protective signal — this is the one node type
+                     that clears the taint, and only here)
+```
+
+Read plainly: **taint propagates upward through every composition except
+a `Not`**, and `Not` clears it because "exclude the RG-restricted" is
+precisely the permitted use. `Or` is deliberately as strict as `And`: an
+`Or` containing a tainted branch is an audience a restricted player can
+enter *because* they are restricted, which is the forbidden direction.
+
+**Two properties this gives that the flag-per-key version did not:**
+
+- It closes Path 1, because `member_of`'s safety is the *referenced
+  tree's* computed safety, not the `member_of` key's.
+- It is **stable against later edits** only if the referenced version is
+  immutable — which §3.2 already guarantees. A referenced segment that is
+  *disabled* after the fact degrades to `unknown` at evaluation (§5.1.1),
+  not to a safety downgrade, so the two corrections compose rather than
+  interfere.
+
+**The recomputation obligation, stated because it is the obvious way to
+get this wrong:** `InclusionSafety` is recorded on the `SegmentVersion`
+at authoring time, and a `SegmentVersion` is immutable — but the
+*registry* is compiled-in and can change with a deploy. Adding a
+`protective_signal_inputs[]` entry to an existing predicate key (e.g.
+`identity-compliance` later declares a second lifecycle state
+RG-derived) can retroactively make an already-frozen version
+`exclusion_only`. Therefore: the stored value is a **cache, not the
+authority**; it is recomputed at evaluator startup for every `active`
+`SegmentVersion`, a divergence is a startup-time hard failure (not a
+warning), and the recomputation result — never the stored one — is what
+SI-7 enforces against. This mirrors the "recompute and diff against the
+projection" discipline `CLAUDE.md` mandates for balances, applied to a
+safety classification.
+
+#### 8.4.2 Enforcement points
+
+An **inclusion position** is any consumer call whose declared use is
+inclusion. Consumers declare their use at the call site, not by
+convention:
+
+```
+ResolveRequest.use := inclusion | exclusion
+```
+
+- `use = inclusion` with `InclusionSafety(tree) = exclusion_only`
+  ⇒ `Resolve` **returns an error** (not `not_member`) —
+  `ErrSegmentNotInclusionSafe`. A misconfiguration must be loud, and the
+  fail-closed error contract (§5.3) already makes an error deny.
+- `use = exclusion` accepts either classification.
+- **The authoring-time validator rejects the same condition earlier**,
+  where the consumer's declared use is known at authoring time (doc 31's
+  `Audience` include/exclude terms are, doc 10's Offer eligibility axis
+  is). Authoring-time rejection is the primary control; the
+  `Resolve`-time check is the backstop for the case authoring cannot see.
+
+#### 8.4.3 C-03 and C-05 — the concrete resolution of Path 2
+
+Binding, and this is the resolution `code-reviewer`'s P1-2 required
+(**"doc 30 C-03 must either exclude RG-derived lifecycle states from its
+parameter domain or inherit doc 31's `excluded` as
+`inclusion_safe=false`"**) — this document adopts **both halves**, which
+is stricter than the either/or:
+
+1. **C-03's predicate (`lifecycle_state_in([...])`) declares
+   `protective_signal_inputs[] = { parameter: states, tainted values:
+   every state doc 31 marks RG-derived }`.** Today that is exactly
+   `excluded`. The set is **not** hardcoded here: doc 31 §3 owns the
+   lifecycle state set, and doc 31 is amended (this round, §7.2/§3 of
+   that document) to mark each state's derivation source so that
+   segmentation reads the taint set rather than guessing it. A state
+   whose derivation source is unknown or absent is treated as tainted
+   (fail closed).
+2. **`taint_free_domain` for C-03 is the explicitly enumerated set of
+   non-RG-derived states** (`prospect`, `registered`, `verified`,
+   `activated`, `active`, `at_risk`, `dormant`, `churned`,
+   `reactivated`). A C-03 leaf whose `states` parameter is a subset of
+   the taint-free domain computes `safe`; one that names `excluded`, or
+   that uses any non-enumerated/dynamic parameter form, computes
+   `exclusion_only`.
+3. **An operator-extended lifecycle state** (doc 31 permits the set to be
+   tenant-scoped configuration) is tainted unless its configuration row
+   carries an explicit, audited, `identity-compliance`-reviewed
+   non-RG-derivation declaration. Operator-extensible + permit-by-omission
+   is how Path 2 got created; this is permit-by-enumeration instead.
+4. **C-05 ("active/inactive/dormant" as a *windowed activity*
+   predicate)** is unaffected and remains `safe`: it derives from ledger/
+   activity recency, reads no RG fact, and is the sanctioned way to
+   express "inactive" without touching CRM's lifecycle label. This is
+   also the migration path for an operator whose real intent was
+   commercial rather than protective.
+
+#### 8.4.4 The residual gap, stated honestly
+
+`InclusionSafety` catches taint that flows through *declared* channels:
+a predicate's own protective signal, a declared protective input, and a
+`member_of` reference. It **cannot** catch taint that flows through an
+undeclared correlate — a criterion over, say, "deposit count dropped to
+zero in the last 30 days" is statistically correlated with
+self-exclusion, and no mechanical property will ever distinguish that
+from ordinary churn targeting. This is not a defect this design can
+close; it is why §8.4's rule is an engineering default routed to
+compliance (**OI-SEG-2**) rather than a claim of completeness, and why
+doc 31 §8.2's send gate calls `rg.EvaluateEligibility` **live, at send
+time, unconditionally** — a second, independent control that does not
+depend on the audience having been classified correctly. Stated so that
+no reader concludes the audience-level control is sufficient on its own.
 
 **This is a compliance-adjacent rule stated as an engineering default,
 and I am explicitly not making a legal determination** (`CLAUDE.md`:
@@ -647,8 +949,13 @@ extension model ADR 0031 §12 already established** for new Risk
 `Operation`/`LimitKind` values — documented steps, owning-domain
 sign-off, never ad hoc. Specifically: (1) name the fact and its
 authoritative owning domain; (2) obtain that domain's read interface and
-its `as_of` semantics; (3) declare the unknown-condition and the
-`inclusion_safe` flag; (4) `security` review for data-exposure and abuse;
+its `as_of` semantics; (3) declare the unknown-condition **and the full
+protective-signal declaration of §3.5 — `protective_signal`,
+`protective_signal_inputs[]` and `taint_free_domain` — as a mandatory,
+non-defaultable field**, with the owning domain confirming which of its
+own values are protective (this is the step Path 2 of P1-2 got past, and
+it is now the step that catches it); (4) `security` review for
+data-exposure and abuse;
 (5) record it, with the consumer that needs it. A predicate with no named
 first consumer is not added (`CLAUDE.md`'s scope test).
 
@@ -666,7 +973,9 @@ first consumer is not added (`CLAUDE.md`'s scope test).
 | **SI-4** | `Resolve` performs no write, no `SELECT … FOR UPDATE`, no publish, no external call | Code review + a test asserting zero rows change across an evaluation |
 | **SI-5** | Evaluation is deterministic: the same `(criteria_version, player, as_of)` yields the identical `Evaluation`, including `reason_code`, across repeated runs and across operand re-orderings | Property test over the Kleene table and the normalization in §5.2 rule 4 |
 | **SI-6** | `unknown` never becomes `member`, under any composition including negation | Property/fuzz test over the three-valued truth tables (§5.3) |
-| **SI-7** | No predicate marked `inclusion_safe = false` appears in an inclusion position | Authoring-time validator + a test per such predicate |
+| **SI-7** | **(rewritten, P1-2)** No `SegmentVersion` whose **computed** `InclusionSafety` (§8.4.1) is `exclusion_only` is ever resolved with `use = inclusion` — enforced at authoring time AND as a `Resolve`-time backstop returning `ErrSegmentNotInclusionSafe` | Authoring-time validator + a `Resolve`-time test per tainted predicate + the three adversarial trees in SI-12 |
+| **SI-11** | **(new, P1-1)** A `member_of` leaf over an absent / disabled / draft-only / unresolvable-pin / out-of-scope segment evaluates to `unknown`, never `false`; terminal `{true,false,unknown} → {member,not_member}` collapse occurs exactly once, at the `Resolve` return boundary, and at no interior node | Property test: for every interior node type, assert no collapse. Adversarial test: build `And(criteria, Not(member_of(X)))`, resolve it with X `active` (expect include/exclude correctly), then disable X and re-resolve — the player must **not** be swept in. The stored/returned `Evaluation.result` on the second run must be `not_member` with `segment_fact_unavailable` |
+| **SI-12** | **(new, P1-2)** `InclusionSafety` propagates: (a) `member_of(X)` inherits X's computed safety transitively, not `member_of`'s key safety; (b) `And`/`Or` are `exclusion_only` if any child is; (c) only `Not` clears taint; (d) a stored `SegmentVersion.inclusion_safety` that diverges from recomputation at evaluator startup is a hard startup failure | Three adversarial trees as tests: nested-segment laundering (Path 1), lifecycle-state laundering (Path 2, `lifecycle_state_in([excluded])` as a plain inclusion), and an `Or` with one tainted branch. Plus a registry-change test that mutates a predicate's `protective_signal_inputs[]` and asserts the startup diff fails |
 | **SI-8** | No dynamic membership is stored, cached across requests, or materialized | Schema inspection + grep |
 | **SI-9** | `SegmentVersion` is immutable once referenced; `segment_memberships` is append-only (no `UPDATE`/`DELETE`) | Trigger/constraint inspection, mirroring `audit_log`'s enforcement (ADR 0013) |
 | **SI-10** | A monetary predicate never compares across `asset_code`s and never performs a conversion | Code review + a test with two assets of different exponents |
@@ -771,6 +1080,31 @@ between doc 10 W7, doc 29 §3, and this document.
 | **OI-SEG-5** | Ranking/percentile audiences ("top 5% of depositors") are cross-player reads and are therefore not segmentation predicates (§5.2 rule 8). The sanctioned path is a `data-analytics` computation imported as static membership | data-analytics | No |
 | **OI-SEG-6** | C-01 (VIP tier) has no authoritative owner until Gamification exists. Static membership is the only sanctioned stand-in (§4.1) | Orchestrator | No |
 | **OI-SEG-7** | An ADR recording the three new domain boundaries created by this gate (Segmentation, CRM, Affiliate) is recommended. Number deliberately not claimed here — parallel-dispatch ADR-number collision has already happened once in this project (Stage 4H-B0-R6's `0049`) | Orchestrator | No |
+| **OI-SEG-8** | **(new, Fix Wave)** Disabling a `Segment` now degrades every referencing `SegmentVersion`'s answer to `unknown` (§5.1.1). The admin surface must enumerate and display referencing versions before permitting the disable — blast radius disclosed before the action, the same posture §8.4/doc 31 §12.2 require elsewhere | architect (interface) + whoever implements `admin.go` | No, but must land with the first `member_of` implementation |
+| **DEP-SEG-2** | **(new, Fix Wave)** §8.4.3 requires doc 31's `PlayerLifecycleState` set to carry a per-state **derivation-source** declaration (RG-derived vs. not), readable by segmentation, with an unknown/absent source treated as tainted. `architect` applies the doc 31 half this round; the *operator-extended-state* declaration requires `identity-compliance` review of what counts as RG-derived | identity-compliance (+ architect) | Yes, before C-03 is implementable |
+| **DEP-SEG-3** | **(new, Fix Wave)** `security` owns the final word on whether §8.4.1's `Not`-clears-taint rule is sufficient, and on whether `exclusion_only` trees need a distinct authoring permission (authoring a suppression audience is a different act from authoring a marketing one). `architect` specifies the mechanism; `security` decides the authority model | security | No, but recommended before implementation |
+
+### 13.1 Fix Wave changelog — what changed in this document and why
+
+Recorded explicitly so a reader diffing against the Wave 1.5 original
+knows which statements were defective rather than merely expanded.
+
+| Change | Driver | Section |
+|---|---|---|
+| `member_of` over an absent/disabled/draft/unresolvable-pin segment now returns `unknown`, not `false` | `code-reviewer` **P1-1** (real defect: reachable accidental-ALLOW through §6's own canonical hybrid shape) | new §5.1.1 |
+| Terminal `{true,false,unknown}` collapse is now explicitly a boundary-only operation, with the before/after exploit table | `code-reviewer` **P1-1** | §5.3 (rewritten) |
+| §6's hybrid shape carries an in-place warning that it is the exploited shape | `code-reviewer` **P1-1** | §6 |
+| `inclusion_safe` (static flag on a predicate key) replaced by `InclusionSafety` (computed property of a tree, propagating through `member_of` and through declared protective inputs) | `code-reviewer` **P1-2** (two demonstrated laundering paths) | §3.5, new §8.4.1–§8.4.4 |
+| C-03 gains a protective-signal declaration + an enumerated taint-free domain; C-22 gains an explicit `protective_signal = true` | `code-reviewer` **P1-2** | §4 table, §8.4.3 |
+| `ResolveRequest.use` added as a mandatory, non-defaultable field; `Evaluation.inclusion_safety` added | Required to make §8.4.2 enforceable at the call boundary | §5.4 |
+| §9's extension process step 3 now requires the full protective-signal declaration, not a boolean | `code-reviewer` **P1-2** | §9 |
+| SI-7 rewritten; SI-11 and SI-12 added with named adversarial tests | Both findings; `qa` needs a mechanically checkable form | §10.1 |
+| OI-SEG-8, DEP-SEG-2, DEP-SEG-3 added | Consequences the two fixes create | §13 |
+
+**Not changed, and deliberately so:** SEG-3/SEG-4 (§8.1/§8.2), the gate
+composition order, the "segmentation computes no fact" rule (§4.1), the
+non-materialization rule (§6), and §7's EDR content. None of the two
+findings touched them, and neither fix weakens any of them.
 
 ## 14. Cross-references
 

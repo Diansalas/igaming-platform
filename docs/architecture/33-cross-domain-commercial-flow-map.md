@@ -65,7 +65,8 @@ this platform has already explicitly rejected. The corrected topology:
         │       CRM         │ (5) ··event··▶ journey triggers
         │  internal/crm     │ (6) send-gate chain: consent→pref→suppress→RG→freq→juris
         └─────────┬─────────┘
-                  │ (7) ──call──▶ bonus.RequestOfferGrant(offer_id, offer_version_id, …)
+                  │ (7) ──call──▶ bonus BulkGrantJob-creation / single-Grant
+                  │        surface (doc 10 W5/§1.3, N2.4) + parent_operation_id
                   ▼
         ┌───────────────────┐
         │   Bonus Engine    │ (8) GATE: AssetAuthorization → RG → Risk  (fail-closed)
@@ -123,10 +124,10 @@ withdrawal, gated by its own policy, and is not part of this chain.
 | 1 | producer → Activity/Event | event | doc 22's envelope: type, source, tenant, brand, person/player **reference**, `occurred_at`/`recorded_at`, `is_real_money`, `funding_source`, `correlation_id`, `reverses_ref`, `operation_ref`, `asset_code`/`amount_minor_units`, `idempotency_key`, `schema_version`, versioned payload | **No provider payload, no raw DB row, no identity evidence, no PII, no KYC document, no credential.** An event never itself triggers a ledger posting (doc 22) |
 | 2 | Activity/Event → Segmentation | event | Nothing today. Segmentation is **pull, not push**: it evaluates on demand at `as_of`. Events matter to segmentation only as cache-invalidation signals for consumers, and no cache exists (doc 30 §6) | No membership materialization, no streaming membership |
 | 3 | Segmentation → owning domains | read | A bounded, side-effect-free read per leaf predicate, through the owning domain's interface, with one `as_of` for the whole evaluation | **No table reads**, no writes, no locks, no cross-player reads, no FX conversion (doc 30 §4.2, §5.2) |
-| 4 | Segmentation → CRM / Bonus / Gamification | call | `segment.Resolve` → `Evaluation{result, reason_code, segment_version_id, criteria_hash, evaluated_as_of, evaluator_version}` | **Not an authorization.** `member` is worth nothing at a gate (doc 30 §8.1/SEG-3). A DENY is never overridden by membership (SEG-4) |
+| 4 | Segmentation → CRM / Bonus / Gamification | call | `segment.Resolve(… use: inclusion\|exclusion)` → `Evaluation{result, reason_code, segment_version_id, criteria_hash, evaluated_as_of, evaluator_version, inclusion_safety}`. **`use` is mandatory and has no default** (doc 30 §5.4, Fix Wave): it selects the caller's fail-closed direction and gates the `InclusionSafety` check | **Not an authorization.** `member` is worth nothing at a gate (doc 30 §8.1/SEG-3). A DENY is never overridden by membership (SEG-4). An **inclusion** use of an `exclusion_only` tree is an **error**, not a `not_member` (doc 30 §8.4.2) |
 | 5 | Activity/Event → CRM | event | Journey triggers + conversion-goal anchors | No authoritative status. `rg.status.changed` triggers a re-check; it is never the RG answer (doc 22 consumer contract item 3) |
 | 6 | CRM internal send gate | call | consent → channel preference → suppression → `rg.EvaluateEligibility` → frequency → jurisdiction → channel adapter; every denial recorded with a reason code | No send on absent consent (fail-closed). No cached RG answer. No vendor-side enforcement |
-| 7 | CRM → Bonus | call | `OfferGrantRequest`: `offer_id` + `offer_version_id` **reference**, player, tenant/brand (server-resolved), idempotency key, trigger reference, audience evidence, optional experiment variant | **No amount, no %, no wagering multiplier, no max-cashout, no expiry, no forfeiture rule, no eligibility override, no retry-with-altered-parameters** (doc 31 §7.2) |
+| 7 | CRM → Bonus | call | **(corrected, Fix Wave)** `bonus-engine`'s **own** surfaces per doc 10 **N2.4** — the identical `BulkGrantJob`-creation surface (W5) or single-Grant staff-equivalent surface (§1.3), called as an `ActorService` (N2.3), plus the read-only `CheckOfferEligibility` preview. Carries: `offer_id` + `offer_version_id` **reference**, the target (player / list / segment / segment-set, N2.2), tenant/brand (server-resolved), idempotency key, trigger reference, audience evidence (incl. `inclusion_safety`), optional experiment variant, and the **`parent_operation_id`** of the approved `EngagementCampaign` activation (doc 34) | **No amount, no %, no wagering multiplier, no max-cashout, no expiry, no forfeiture rule, no eligibility override, no retry-with-altered-parameters, and no CRM-specific target shape** (doc 31 §7.2). A call with no resolvable, approved parent operation is **rejected by Bonus**. `bonus.RequestOfferGrant` — the Wave 1.5 original's invention — is **withdrawn** |
 | 8 | Bonus internal gate | call | `assetregistry.CheckEligibility(operation = wagering)` → `rg.EvaluateEligibility` → `risk.Evaluate`, in that fixed order, in the same `pgx.Tx` as the effect, all fail-closed (doc 10 §T.1; doc 29 §4.2, §8 BI-7) | No segment result in the chain. No CRM influence. No affiliate influence. No cached decision |
 | 9 / 9' | Bonus → Orchestrator; Gamification → Orchestrator | call | `RewardDecision` (doc 21): `decision_id`, scope, `source_domain`, `reward_type`, amount as a decimal string (never `int64`), asset, jurisdiction/licensing mode, fulfilment destination | The Orchestrator never decides **whether** a reward is earned. Bonus never calls Gamification and vice versa |
 | 10 | Orchestrator internal | call | **Unconditional** `rg.EvaluateEligibility` re-check inside the `(tenant_id, decision_id)` fulfilment lock, immediately before crediting (doc 21's corrected P1 rule — no "is the delay non-trivial" judgment) | No `risk.Evaluate` re-run (exposure was fixed at decision time). No new time-window comparison written for the purpose |
@@ -205,11 +206,11 @@ withdrawal, gated by its own policy, and is not part of this chain.
 | A3–A4 | Affiliate internal | call | Candidates + the frozen `PlayerAttribution` (model version by reference, result by value) | No player balance touched, no bonus granted, no eligibility effect. Attribution authorizes nothing (doc 32 AFF-1) |
 | A5 | Affiliate → Segmentation | read | Criterion C-21: "acquired via node subtree X", "acquired within N days" — through Affiliate's read interface | Segmentation never re-runs the attribution model, never copies attribution, never reads affiliate tables (doc 30 §4) |
 | A6 | Segmentation → CRM | call | `Evaluation` + evidence | Not an authorization (SEG-3) |
-| A7 | CRM → Bonus | call | `OfferGrantRequest` (§1.3 row 7) | **No affiliate identity, node id, code or commercial term reaches Bonus.** The gate never sees an affiliate |
+| A7 | CRM → Bonus | call | `bonus-engine`'s own N2.4 surfaces + `parent_operation_id` (§1.3 row 7) | **No affiliate identity, node id, code or commercial term reaches Bonus.** The gate never sees an affiliate |
 | A8 | Bonus/Gamification → Orchestrator → Ledger | call | As flow (a), unchanged | Affiliate has zero presence in the fulfilment path |
 | B1 | Ledger → Reporting | event/CDC | Ledger-derived revenue facts into `data-analytics`'s pipeline (doc 12) | Affiliate never reads `ledger_entries` directly and never maintains a revenue counter (doc 32 AFF-3) |
 | B2 | Reporting → Affiliate | read | A canonical NGR/GGR measure, per period, whose **definition is `ledger-finance`'s** (DEP-AFF-4) | Affiliate never defines or computes the revenue measure |
-| B3 | Affiliate → Ledger | call | `CommissionSettlementInstruction`: `instruction_id` (DB-unique), node, period, asset, integer-minor-unit amount, `rounding_rule_id`, accrual/adjustment/approval refs, reason code, requester | **Affiliate never calls `ledger.Post`, never imports `internal/ledger`/`internal/wallet`, never names a player ledger account, and never designs the posting shape** (doc 32 §7) |
+| B3 | Affiliate → Ledger | call | **(corrected, Fix Wave — P1-4)** `CommissionSettlementInstruction`: `instruction_id` (DB-unique), node, period, asset, the **declared** integer-minor-unit amount (re-derived and cross-checked by the ledger), `rounding_rule_id`, `accrual_set_hash`, accrual/adjustment/approval refs, `reverses_instruction_id` (nullable), reason code, requester, `parent_operation_id`. Affiliate calls `ledger.Post` with the split `ledger-finance` specifies, consuming the four-eyes approval and writing the `UNIQUE (tenant_id, accrual_id)` link rows in the **same transaction** | **Affiliate never DECIDES monetary treatment** — no account type, transaction type, split or posting shape is chosen in affiliate code; it never imports `internal/wallet`, never names a player ledger account, and never asserts the amount as an authority (doc 32 §7.1 rules 1/6/9/10). The absolute "never imports `internal/ledger`" claim in this row's Wave 1.5 original misstated the doc 26/ADR 0035 precedent and is withdrawn |
 | — | Affiliate → Gamification | (interface only) | Gamification events, if they ever exist, are engagement touches for multi-touch attribution | No `affiliate_*` table carries a point, level, badge, streak, mission or tournament column |
 | — | Affiliate → affiliate-facing reporting | read | Subtree-scoped aggregates; pseudonymous per-player references where commercially required | **No player PII** — no email, name, DOB, document data, IP, instrument, or exact balance (doc 32 §10) |
 
@@ -236,9 +237,9 @@ interface. `own` = is the authority.
 | **`internal/sportsbook`** (unbuilt) | ✗ | ✗ | read | read | ✗ | read | ✗ |
 | **`internal/bonus`** (unbuilt) | ✗ — no bonus table stores a balance; every bonus balance is derived from `ledger_entries` (doc 29 BI-3) | ✗ — calls `ledger.Post`; posting map is ADR 0032's | read | read | read | read | **own** (lifecycle/terms); accounting treatment is `ledger-finance`'s |
 | **`internal/gamification`** (unbuilt) | ✗ | ✗ — never imports ledger/wallet | ✗ — no limit/threshold/cap/counter/velocity | ✗ — no self-exclusion concept | ✗ | read | ✗ — never grants a bonus |
-| **`internal/segment`** (unbuilt) | ✗ | ✗ | ✗ — **no risk score/tier/classification; reads `internal/risk`, never computes** (doc 30 §8.3) | ✗ — may suppress, never constitute (doc 30 §8.4) | ✗ — reads status only | ✗ — reads references only | ✗ |
+| **`internal/segment`** (unbuilt) | ✗ | ✗ | ✗ — **no risk score/tier/classification; reads `internal/risk`, never computes** (doc 30 §8.3) | ✗ — may suppress, never constitute; enforced by the **computed** `InclusionSafety` property of a criteria *tree*, propagating through `member_of` and declared protective inputs (doc 30 §8.4.1, Fix Wave) | ✗ — reads status only | ✗ — reads references only | ✗ |
 | **`internal/crm`** (unbuilt) | ✗ — profile balance is a decorative projection with `as_of` (doc 31 §4) | ✗ — never imports ledger/wallet; no `crm_*` monetary counter | ✗ — caps messages, never value (doc 31 §8.4) | ✗ — enforces by calling `EvaluateEligibility`, never caches | ✗ — reads status with `as_of` | ✗ — read projection only, never written back | ✗ — references `offer_id`+`offer_version_id`; supplies no terms |
-| **`internal/affiliate`** (unbuilt) | ✗ — never touches a player balance | ✗ — never posts; hands an instruction to `ledger-finance` | ✗ — no limit/counter/player-risk concept; self-referral fraud is `risk`+`bonus-engine`+`identity-compliance`'s | ✗ | ✗ | ✗ — affiliates are `StaffUser`s with affiliate roles (pending `security`, DEP-AFF-1); players are ordinary `Person`+`PlayerAccount` | ✗ — a promo code is an attribution token; bonus value is granted only by Bonus |
+| **`internal/affiliate`** (unbuilt) | ✗ — never touches a player balance; never imports `internal/wallet` | ✗ — **never decides monetary treatment**; supplies the instruction and calls `Post` with `ledger-finance`'s split (doc 32 §7.1 rule 1, corrected) | ✗ — no limit/counter/player-risk concept; self-referral fraud is `risk`+`bonus-engine`+`identity-compliance`'s | ✗ | ✗ | ✗ — affiliates are `StaffUser`s with affiliate roles (pending `security`, DEP-AFF-1); players are ordinary `Person`+`PlayerAccount` | ✗ — a promo code is an attribution token; bonus value is granted only by Bonus |
 | **`internal/agentnetwork`** (unbuilt) | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ — pure hierarchy primitive |
 | **Reward Orchestrator** (unbuilt) | ✗ | ✗ — supplies the split instruction it received; never invents treatment | ✗ — does not re-run Risk | **re-checks, unconditionally** (doc 21) — but never owns | ✗ | ✗ | ✗ |
 | **`data-analytics` / Reporting** | ✗ | read-only (CDC), never authoritative; never run against the transactional ledger for reports | ✗ | ✗ | ✗ | ✗ | ✗ |
@@ -316,6 +317,19 @@ discovered one.
 
    CONSENT MODEL (identity-compliance, DEP-CRM-1) ──▶ blocks every CRM send
    COMMISSION POSTING (ledger-finance, DEP-AFF-4) ──▶ blocks affiliate settlement
+
+   ECONOMIC OPERATION IDENTITY (architect, doc 34) ──▶ blocks every
+     grant-causing CRM path, affiliate settlement and re-attribution.
+     Not a domain; a small shared package + a mint/inherit rule, built
+     out of correlation_id + idempotency keys + version pins + the
+     existing asset_change_consume_approved_request pattern.
+   FOUR-EYES CONSUMPTION FUNCTION (security + ledger-finance,
+     DEP-EOI-2 / DEP-AFF-6 / DEP-CRM-5) ──▶ shared by all three; until it
+     exists, every four-eyes reference in docs 31/32/34 is data, not a
+     control.
+   AFFILIATE PRINCIPAL CLASS (security, DEP-AFF-1) ──▶ blocks affiliate
+     four-eyes (the approver's INTERNAL-class test is a conjunct of the
+     governance trigger, doc 32 §6.5.1 B).
 ```
 
 ### 4.2 The honest answers
@@ -332,6 +346,10 @@ discovered one.
 | Can Bonus be built before CRM/Affiliate/Segmentation-at-full-capability? | **Yes** — and Stage 4H-B1's slice is already scoped that way | Doc 29 §3.2's minimal segmentation, plus doc 10's five in-slice types, none of which requires CRM or Affiliate |
 | Is the Reward Orchestrator worth building for Bonus alone? | **No.** | Doc 10 B0 §4/doc 29 §6.3: one fulfilment mechanism, one producer. B1 leaves the `RewardFulfiller` **interface** (not a stub) so a second producer does not force a rewrite |
 | Can Gamification be built independently of all three new domains? | **Yes** — it has no dependency on CRM, Affiliate or (beyond `segment_ref`) Segmentation | Docs 17/18/19/20 |
+| Can a CRM `EngagementCampaign` cause grants before `EconomicOperationIdentity` exists? | **No.** | Doc 31 §7.2.3's always-four-eyes rule and its ceilings are enforced **in Bonus** against an approved parent operation (doc 34 §5.1). Without the identity, 100,000 individual grant calls again escape the bulk control — the exact SEC-W15-02 defect. The non-`offer_request` half of CRM (messaging) does not need it |
+| Can Affiliate settle commission before the four-eyes **consumption** function exists? | **No.** | Doc 32 §7.1 rule 10 / DEP-AFF-6. Until an approval is *spent* rather than *referenced*, the control is a data field. This is a smaller dependency than DEP-AFF-4 (the posting shape) and is additional to it |
+| Can Affiliate mint a tracking token before a KMS/Vault key story exists? | **No.** | Doc 32 §5.1.2 / DEP-AFF-8. Per-tenant key derivation, `key_version` and rotation are part of the token design, not an operational afterthought |
+| Is `EconomicOperationIdentity` a new domain that needs its own build slot? | **No — deliberately.** | Doc 34 §4: one flat, capability-minimal package (`internal/economicop`) built out of mechanisms that already exist (`correlation_id`, idempotency keys, version pins, the `asset_change_consume_approved_request` pattern). It is upstream of the *controls*, not of the domains |
 | Does any of this unblock the open human decisions? | **No.** | G-2, `OpenBetSelfExclusionPolicy`, cashout policy and FD-1 are untouched by this gate (ADR 0039) |
 
 ### 4.3 Critical-path observation for the human
@@ -365,6 +383,7 @@ recorded where a choice was made:
 | `internal/crm` | `architect` (doc 31) | **OPEN DECISION** — `backend` while architecture-only; a dedicated `crm` specialist if implementation is authorized | Same shape as the Retail/Gamification precedent. Flat package; no Retail-style split (doc 31 §12.3) |
 | `internal/affiliate` | `architect` (doc 32) | **OPEN DECISION** — same two options | Operational surface only |
 | `internal/agentnetwork` | `architect` | **OPEN DECISION** (pre-existing row) | **Now has a second named consumer** (Affiliate), which is the outcome doc 26 §7.1 predicted; the row's rationale is confirmed rather than revised |
+| `internal/economicop` | `architect` (doc 34) | **OPEN DECISION** — `backend`, or the first consuming domain's specialist | **New in the Fix Wave.** One flat, capability-minimal package; explicitly no scheduler/workflow engine/HTTP surface. Enforced by Bonus, Affiliate and `ledger-finance` at their own surfaces; minted by CRM/Bonus/Affiliate at their own authorization points |
 | Commission accounting | `ledger-finance` | `ledger-finance` | Mirrors ADR 0035's retail-accounting split (DEP-AFF-4) |
 | Consent model | `identity-compliance` | `identity-compliance` | DEP-CRM-1 — does not exist today |
 | CRM/affiliate reporting dimensions | `data-analytics` | `data-analytics` | DEP-CRM-2; mirrors doc 26's retail reporting extension |
@@ -374,6 +393,7 @@ recorded where a choice was made:
 - Segmentation: `30-segmentation-engine-architecture.md`
 - CRM: `31-crm-engine-architecture.md`
 - Affiliate/Acquisition: `32-affiliate-and-acquisition-architecture.md`
+- Economic operation identity: `34-economic-operation-identity.md`
 - Bonus implementation contract (master map, transport finding, invariants): `29-bonus-implementation-contract.md`
 - Bonus lifecycle and terminal-grant contract: `10-bonus-engine-architecture.md`
 - Domain boundary registry: `02-domain-and-service-boundaries.md`
@@ -383,3 +403,27 @@ recorded where a choice was made:
 - Reporting/BI: `12-audit-reporting-architecture.md`
 - Unmade human decisions: `docs/decisions/0039-human-decision-register-stage-4h-b0-r7.md`
 - Dependency/risk register: `13-dependency-map-and-risk-register.md`
+
+---
+
+## 7. Fix Wave changelog — what changed in this document and why
+
+Stage 4H-B1, Wave 1.5 **Fix Wave** (task `4HB1FW-03`). This document is a
+map; every change here reflects a corrected fact in a document it maps.
+
+| Change | Driver | Section |
+|---|---|---|
+| Arrow (7) / §1.3 row 7 / §2.2 A7: CRM→Bonus is `bonus-engine`'s **own** N2.4 surfaces (`BulkGrantJob`/single-Grant + `CheckOfferEligibility`) plus a `parent_operation_id`, not the withdrawn `bonus.RequestOfferGrant` | `code-reviewer` **P1-3**, `security` **SEC-W15-02** (doc 31 §7.2) | §1.1, §1.3, §2.2 |
+| §1.3 row 4: `segment.Resolve` now carries the mandatory `use` discriminator and returns `inclusion_safety`; an inclusion use of an `exclusion_only` tree is an error | `code-reviewer` **P1-1/P1-2** (doc 30 §5.4, §8.4.2) | §1.3 |
+| §2.2 row B3 and §3's `internal/affiliate` row: the absolute "never imports `internal/ledger`" claim withdrawn; the rule is **never decides monetary treatment**; amount re-derived by the ledger; approval consumed; accrual-link uniqueness | `code-reviewer` **P1-4**, `ledger-finance` **LF-6/LF-9**, `security` **SEC-W15-12** (doc 32 §7.1) | §2.2, §3 |
+| §3's `internal/segment` RG cell: suppression-not-constitution is now enforced by a **computed** tree property, not a static predicate flag | `code-reviewer` **P1-2** (doc 30 §8.4.1) | §3 |
+| §4.1 graph and §4.2: `EconomicOperationIdentity`, the shared four-eyes consumption function, and the affiliate principal class added as upstream blockers; four new honest answers | New doc 34; `security` DEP-AFF-1/SEC-W15-12 | §4 |
+| §5 ownership map: `internal/economicop` row added | New doc 34 | §5 |
+
+**Not changed:** §1.2's two topology corrections (Gamification is a
+sibling; Payments is a producer), §3.1's three cross-cutting statements,
+and §4.3's critical-path observation. None of the findings touched them,
+and the one gate-chain statement (§3.1 item 2) is explicitly re-affirmed
+by doc 34 §4.4 — the `EconomicOperationIdentity` check sits **before and
+outside** `AssetAuthorization → RG → Risk`, can only deny, and adds no
+fourth gate.
