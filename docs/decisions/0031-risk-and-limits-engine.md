@@ -2984,3 +2984,667 @@ confirms that scoping, §36 is Risk's own position and the cross-domain
 item stays open on ADR 0038's side. Flagged to the Orchestrator per
 `docs/governance/integration-protocol.md`; §32(g) is closed on Risk's
 side only.
+
+## Stage 4H-B1 Wave 1: Bonus Engine Risk integration contract
+
+Status of this section: **design/contract only — everything below is
+`NOT IMPLEMENTED`.** Stage 4H-B1 Wave 1's directive is explicit: no code
+yet. §37-§42 add no `Operation` value, no `LimitKind`, no scope
+dimension, no column, no migration, no HTTP validation, no OpenAPI enum
+entry, and no enforcement wiring. `Evaluate`'s signature, `RiskRequest`/
+`RiskDecision`'s shape, `risk_rules`' shape, the precedence algorithm and
+the fail-closed contract are all unchanged. Every prior section stands
+unmodified; where this section restates an earlier one it cites it rather
+than re-deriving it.
+
+**Sources read for this section**, at this stage's own commit, verified
+directly rather than recalled from a prior stage's claims:
+`internal/risk/{types,evaluator,cumulative,denomination,policy_service}.go`,
+`migrations/0041_risk_limits_engine.up.sql`,
+`internal/httpserver/risk_handlers.go`,
+`docs/api/openapi/platform-api.yaml`,
+`docs/architecture/10-bonus-engine-architecture.md` (whole document,
+including the Stage 4H-B0 MVP scope plan, the Stage 4H-B0-R6 Dependency
+Contract Freeze and the Stage 4H-B0-R7 Terminal-Grant Technical
+Contract), `docs/decisions/0032-bonus-accounting.md`'s posting tables,
+`docs/architecture/ledger-accounting-model.md` §6.3-§6.6 and HR-7, and
+`CLAUDE.md`. `internal/bonus` **does not exist**; the Bonus Engine's own
+Grant/Offer/Campaign shapes are being frozen in parallel, so this section
+describes them abstractly ("however the Bonus Engine represents a
+Grant"), exactly as §14 and §19 did for the same reason.
+
+### 37. Verified inventory of what `internal/risk` can evaluate TODAY — `IMPLEMENTED` vs. extension point
+
+Each row was checked against the named artifact at this commit. Nothing
+below is inferred from §13's table or from any other document.
+
+**(a) Scope dimensions on `RiskRequest`/`Rule` — the complete set, there
+are no others.**
+
+| Dimension | Field | Status | Bonus-relevant note |
+|---|---|---|---|
+| Player | `PlayerAccountID uuid.UUID` | `IMPLEMENTED`, and **mandatory** — `Evaluate` returns `ErrMissingPlayer` for `uuid.Nil` | Every Bonus checkpoint is player-scoped, so this is always resolvable |
+| Tenant | `TenantID uuid.UUID` | `IMPLEMENTED`, mandatory, **and cross-checked against the transaction's own `app.tenant_id`** (`verifyConnectionScope` → `ErrTenantScopeMismatch`) | Bonus must call `Evaluate` on a `db.WithTenant` transaction, never `db.WithoutTenant` and never `db.WithPlayerScope` (`ErrPlayerScopedConnection`) |
+| Brand | `BrandID uuid.UUID` | `IMPLEMENTED`, mandatory (`uuid.Nil` → `ErrInvalidInput`) | A Grant is always brand-scoped (doc 10 §8), so always resolvable |
+| Jurisdiction | `JurisdictionCode string` | `IMPLEMENTED` as a scope-matching value — but see §42(a): **nothing in this repository resolves a per-player jurisdiction**, and an empty value now fails closed once any jurisdiction-scoped rule is effective (§34) | The single largest Wave-1 rule-authoring trap |
+| Licensing mode | `LicensingMode string` | `IMPLEMENTED` (§10); resolved by the caller from `tenants.licensing_model`, never looked up by Risk | Always resolvable (`NOT NULL` column); Bonus must resolve it exactly as `internal/casino.resolveLicensingMode` does |
+| Product | `Product string` | `IMPLEMENTED`; `risk_rules.product` CHECK already accepts `'bonus'` — **no widening needed for Bonus** | Bonus should set `Product: "bonus"` on every request (always resolvable, so it can never trigger the missing-scope gate) |
+| Operation | `Operation Operation` | `IMPLEMENTED`, closed set of exactly six; `OperationBonusGrant` is real | `bonus_conversion` is NOT one of them — §40 |
+| Provider | `ProviderID string` | **`IMPLEMENTED`** — unconstrained `TEXT` on the rule side, plain `string` on the request side, no HTTP allowlist, already used to scope casino rules to a vendor. The directive's §22 "provider as a Risk dimension" therefore needs **no extension at all** | But see §42(b): a provider-scoped `bonus_grant` rule fails closed every internally-fulfilled grant |
+| Game | `GameID uuid.UUID` | `IMPLEMENTED`, but the rule column is `game_id UUID REFERENCES casino_games (id)` | Meaningful only for a free-spin Grant scoped to a casino game — out of the first slice (doc 10 §1) |
+| Asset | `AssetCode string` | `IMPLEMENTED`, `REFERENCES assets (code)`, resolved to a decimal exponent through `internal/assetregistry.GetAsset` at evaluation time; **required for every amount-shaped rule** (`ErrMissingAsset`), and an unregistered asset fails closed (`ErrUnknownAsset`) | A Grant's `asset_code` is fixed at `issued` (doc 10 §T.2), so always resolvable |
+| Payment method | `PaymentMethod string` | `IMPLEMENTED`, unconstrained `TEXT`, no HTTP allowlist | Expressible for a deposit-bonus rule, but subject to §42(b)'s operation-wide gate — do not author in Wave 1 |
+| Amount | `Amount int64` | `IMPLEMENTED`, minor units of `AssetCode` | See §42(c): `Amount == 0` + any matching amount-shaped rule = `ErrMissingAmount`, fail-closed |
+| Correlation | `CorrelationID uuid.UUID` | `IMPLEMENTED`, reporting/audit only, never used for matching | Bonus sets it to whatever identifies the Grant/attempt |
+| **Campaign** | — | **NOT IMPLEMENTED — named extension point, §42(f)** | No column, no `Rule`/`RiskRequest` field, no `specificity()` bit, no HTTP input. Zero of the required steps are done |
+
+**(b) Limit kinds.** `min_amount`, `max_amount`, `cumulative_amount` and
+nothing else — `internal/risk/types.go`'s const block, migration 0041's
+CHECK, and `newCreateRiskRuleHandler`'s `RequireOneOf` allowlist all
+agree. `count`, `velocity`, `exposure`, `loss` are **`NOT IMPLEMENTED`
+and not configurable** (§4/§12/§18, unchanged). **There is no velocity
+capability in this engine today, in any form.**
+
+**(c) Time windows.** `transaction` plus four UTC-anchored rolling
+windows (`rolling_hour`/`day`/`week`/`month`). Calendar-aligned windows
+are `NOT IMPLEMENTED` (§4), so "at most X in bonus value per calendar
+month" is not expressible even once cumulative works for Bonus.
+
+**(d) Cumulative usage.** `IMPLEMENTED` as a mechanism, but
+`operationCumulativeSpecs` (`internal/risk/cumulative.go`) contains
+**exactly one entry, `OperationCasinoBet`**. For every other operation —
+including `bonus_grant` — a `cumulative_amount` rule is *storable*
+(`CreateRule` still does not cross-validate `limit_kind`/`operation`
+compatibility, a standing P2) and **fails closed with
+`ErrUnsupportedCumulativeOperation` on every matching request**. Treated
+as unavailable, not as working. §33's leg-specification precondition
+applies: the ledger transaction type alone is no longer sufficient to
+wire it — a spec must also declare measured leg(s), known-ignored leg(s)
+and consuming direction, all three `ledger-finance`'s to supply.
+
+**(e) Threshold denomination.** `IMPLEMENTED` (§35, migration 0046): an
+amount-shaped rule is either asset-scoped (exponent read from the `assets`
+registry, `threshold_exponent` must be NULL) or asset-agnostic
+(`threshold_exponent` REQUIRED, and the rule fails closed for a request
+in an asset of any other exponent). `Threshold` is `int64` minor units.
+
+**(f) Decision surface.** `Outcome` ∈ {`allow`,`deny`,`review`}, plus a
+stable `Code`, `Message`, `[]MatchedRule` and the caller's
+`CorrelationID`. `error` is a fourth, distinct outcome (§34). No
+provider-specific type is ever exposed.
+
+**(g) RBAC.** `risk_config:manage` is held only by `RoleRiskManager`,
+always tenant-scoped, deliberately separate from Compliance, Finance,
+Tenant Admin and Platform Admin (`docs/governance/ownership.md`, §24).
+**No Bonus-domain role — campaign manager, promotions manager, VIP desk
+— may be given risk-configuration write access as part of Stage 4H-B1.**
+A promotions actor authoring the limits that constrain promotions is the
+limit engine defeating itself, the identical argument §24 already made
+for retail hierarchy actors. Unchanged and not negotiable by this stage.
+
+**(h) What Risk does NOT do, restated so Bonus does not assume it.** Risk
+holds no state (§32(c)): `risk_rules` is configuration only and
+cumulative usage is a derived read inside the guarded transaction. Risk
+has no asynchronous signal channel, no queue, no notification path, and
+no ability to revoke a decision it already returned. Risk never reads
+`player_restrictions` and never decides self-exclusion (§1).
+
+### 38. The Bonus evaluation points — exact `RiskRequest` shapes — `ARCHITECTURAL DECISION`
+
+**38.0 Preconditions binding on every checkpoint below.**
+
+1. **Idempotency short-circuit runs BEFORE `Evaluate`**, not after. This
+   is not a style preference: §32(b) records the empirically-reproduced
+   casino defect where a redelivered, already-posted operation reaching
+   `Evaluate` a second time was compared against its own already-posted
+   ledger entries plus `req.Amount` and flipped to a cumulative DENY — a
+   false decline for value the platform had already moved. Bonus's own
+   `issued`/`activated` triggers are at-least-once event-bus deliveries
+   (doc 10 §1.3/§9), so this is the *expected* path, not an edge case. The
+   Grant's idempotency key / `trigger_reference` (doc 10 §T.2) must
+   resolve a duplicate to "already granted" **before** any of the three
+   gates runs.
+2. **Composition order** is `AssetAuthorization.CheckEligibility` → `rg.
+   EvaluateEligibility` → `risk.Evaluate` (doc 10 §T.1), with RG
+   short-circuiting before Risk (§1, unchanged and not re-openable here).
+   Risk confirms doc 10 §T.1's placement of `AssetAuthorization` first is
+   consistent with §1's own ordering rationale and asserts no authority
+   over it; the platform-wide resolution of §32(f) remains `architect`'s.
+3. **Same transaction, before commit** (§13/§14). A Grant evaluated in one
+   transaction and written in another is not gated, it is merely advised.
+   No cache, no Redis, no Bonus-maintained counter may stand in for the
+   read — CLAUDE.md's rule, restated because a promotions system is
+   exactly where a "we already checked this" counter is most tempting.
+4. **`Product: "bonus"`, `LicensingMode` and `CorrelationID` are set on
+   every request below** and are not repeated per row.
+
+**(a) Campaign eligibility check — `RECOMMENDATION`: this is NOT a Risk
+checkpoint, and Risk recommends it does not call `Evaluate` at all.**
+
+A campaign/offer eligibility check that creates no Grant and moves no
+value is a *decision, not a movement* — doc 10 §T.2's own principle
+("gate value-moving events, not decisions"), and it fails §13's test:
+there is no state-changing effect for the call to sit in the same
+transaction as. Three concrete reasons this is the right answer rather
+than a merely defensible one:
+
+- **A display/preview evaluation is structurally non-authoritative.** Its
+  result cannot be carried forward to the later grant (§38.0 item 3), so
+  the grant-time call must happen anyway. The preview adds a second
+  evaluation whose only possible effect is to disagree with the
+  authoritative one.
+- **It would take a real lock for a read.** Once a `cumulative_amount`
+  rule is ever wired for `bonus_grant`, `Rule.breach()` takes
+  `pg_advisory_xact_lock(hashtext('risk_cumulative'), hashtext(tenant:
+  player:operation:limit_kind:asset))`, held until the caller's
+  transaction ends. A player-facing "which offers am I eligible for"
+  listing would then serialize itself against that player's real,
+  money-moving grant path. That is an availability defect designed in.
+- **`MatchedRule`/`Code` are staff-explainability data.** Surfacing "you
+  are over your bonus limit" to a player from a preview leaks the
+  existence and shape of risk configuration to the one party with an
+  incentive to probe it.
+
+**If the product genuinely requires an accurate eligibility preview**,
+these constraints bind and are not negotiable by the Bonus Engine alone:
+(i) the preview is labelled advisory in the API contract and in the UI;
+(ii) it is re-evaluated in full at grant time regardless of what the
+preview said; (iii) an `error` renders as "temporarily unavailable",
+**never** as "eligible" — the fail-closed direction for an advisory read
+is "unknown", not "yes"; (iv) no `MatchedRule` id, rule id or threshold
+is exposed to a player-facing response; (v) it runs on the same
+tenant-scoped transaction discipline as any other `Evaluate` call. If it
+is built, its `RiskRequest` is identical to (b) below. **Recorded as an
+open product decision (§42(g)), not resolved here.**
+
+**(b) Grant creation, `(none) → issued` — YES, `OperationBonusGrant`,
+no change to `internal/risk` required.**
+
+```
+Operation:        risk.OperationBonusGrant          // exists today
+Product:          "bonus"                            // accepted by migration 0041
+TenantID:         the Grant's own tenant             // server-side, never client-supplied
+BrandID:          the Grant's own brand
+PlayerAccountID:  the Grant's own player
+AssetCode:        the Grant's frozen asset_code      // doc 10 §T.2, required for any amount rule
+Amount:           the Grant's face value in that asset's minor units  // see §42(c)
+JurisdictionCode: the bonus domain's own trusted context  // see §42(a)
+LicensingMode:    tenants.licensing_model
+ProviderID:       "" for an internally-fulfilled Grant   // see §42(b)
+GameID:           uuid.Nil
+PaymentMethod:    ""
+CorrelationID:    the Grant id (or the issuance attempt id)
+```
+
+Called in the same transaction that inserts the Grant row, before that
+insert commits. `DENY`/`REVIEW`/error → no Grant row (§39).
+
+**(c) Grant activation, `issued → activated` — YES, re-evaluated fresh,
+`OperationBonusGrant` again.** Not in the dispatch's list; added here
+because omitting it would contradict §15a-ii and doc 10 §4/§T.3, both
+already binding. Identical `RiskRequest` to (b), with `Amount` set to the
+value actually entering the wallet at this instant (the `Dr
+promo_liability · Cr player_bonus` posting's amount, ADR 0032 §3.1) — for
+an Offer where issuance and activation collapse into one operation (ADR
+0032 §3.1's "one posting, not two"), this is ONE evaluation, not two.
+`bonus_activate` remains explicitly rejected (§15a-ii).
+
+**(d) Bonus conversion, `completed → converted` — YES, and it is BLOCKED
+on `bonus_conversion`, which is still `NOT STARTED` (§40).** When the
+`Operation` value exists, the request is (b)'s shape with two changes:
+
+```
+Operation: risk.OperationBonusConversion   // DOES NOT EXIST TODAY
+Amount:    the ACTUAL amount to be released, payout rules applied FIRST
+           (max-cashout cap, partial wagering, cash/bonus ordering) —
+           never the original grant value
+```
+
+Payout rules are applied *before* the gate, and the gated number is the
+released number; this is the whole reason conversion cannot reuse
+`bonus_grant` (§15a-ii). A `DENY`/`REVIEW`/error leaves the Grant in
+`completed` — non-terminal and retryable, never `forfeited`, never
+`cancelled` (§39).
+
+**(e) Coded-bonus (coupon) redemption — YES it is gated, and it needs NO
+new `Operation`. `bonus_redemption` is explicitly REJECTED.**
+
+Applying the decision rule §15a-ii/§15e/§21 already established — *does
+the money movement, and the amount it is computed against, differ in KIND
+from an existing operation?* — the answer is no. A coupon is doc 10 §1
+item 5's own framing: "the only lifecycle novelty is the
+`issued`→`activated` trigger being a player-supplied code validated
+against an Offer, otherwise identical to a deposit/cash bonus." The value
+created is a Grant of the same shape, in the same asset, against the same
+Offer axes. Adding `bonus_redemption` would force every operator to
+author each bonus cap twice — once for coupon-triggered Grants and once
+for everything else — and one forgotten copy is a silent gap, the exact
+trap §15a-ii names for `bonus_activate`. This is the mirror of §21's
+retail reasoning: reuse is RIGHT when it is the same value created
+through a different trigger.
+
+Therefore: coupon redemption is gated as (b) and (c) above, at the
+`issued` and `activated` transitions it produces, with
+`OperationBonusGrant`. The code-validation step itself (does this code
+exist, is it live, has this player already used it) is ordinary Bonus
+Engine input validation and is not a Risk concern.
+
+**One thing coupon redemption genuinely needs and CANNOT have in Wave 1**:
+a per-player redemption-frequency cap ("at most N coupon redemptions per
+player per day"). That is a `count` over a window, `NOT IMPLEMENTED`
+(§15c/§18), and it **must not be approximated** with a
+`cumulative_amount` rule — which in any case fails closed for
+`bonus_grant` today. See §42(d) for the cross-document conflict this
+exposes.
+
+**(f) Bulk assignment — N independent evaluations, one per player. No new
+`Operation`, and no batch semantics of any kind.**
+
+A staff/bulk assignment of a campaign to N players is N `bonus_grant`
+issuances that happen to share a trigger. Risk's contract, which is
+binding under §14's authority:
+
+1. **One `Evaluate` call per player.** A single evaluation must never be
+   applied to more than one player. Player-scoped rules are the most
+   specific rule shape in the engine (§5) and cumulative usage is keyed by
+   `le.player_account_id`; a batch-level decision is not a decision about
+   any of the players in it.
+2. **One transaction per player**, each containing that player's own
+   `Evaluate` call and that player's own Grant insert. Not one transaction
+   for the batch. Two independent reasons, either alone sufficient:
+   *(i)* an error on player 500 would roll back 499 already-authorized
+   grants, and the retry then re-evaluates all 500 against a rule set and
+   a clock that may have changed; *(ii)* once a `cumulative_amount` rule
+   exists for `bonus_grant`, a single transaction would accumulate N
+   advisory locks in whatever order the batch iterates, held to commit —
+   a lock-contention and cross-batch deadlock hazard against the live
+   single-grant path, for no benefit.
+3. **Per-player outcomes are recorded per player.** A `DENY` or `REVIEW`
+   for one player is that player's own outcome with its own reason code in
+   that Grant's Progress trail; it neither aborts the batch nor is
+   silently dropped from a success count. A bulk assignment that reports
+   "500 granted" when 40 were denied is a reporting defect with compliance
+   consequences.
+4. **No throttling, batching or sampling of the Risk call.** "Evaluate
+   every 10th player" or "evaluate once per brand" is a limit engine
+   under another name (§14) and is forbidden.
+5. **Idempotency per player** (§38.0 item 1): a retried bulk job must
+   resolve each already-granted player as a duplicate before evaluating.
+
+### 39. Fail-closed contract for Bonus — confirmed, with the one distinction most likely to be got wrong — `ARCHITECTURAL DECISION`
+
+**Confirmed without qualification: a Risk error or unavailability during
+any Bonus operation must NEVER produce a Grant, an activation, or a
+conversion.** §6/§34's contract applies with no bonus-specific softening.
+There is no "grant it anyway and reconcile later", no cached last-known
+decision, no degraded mode, and no campaign-deadline or
+marketing-schedule exception.
+
+| Condition at a Bonus checkpoint | Result | Grant/ledger effect |
+|---|---|---|
+| `Outcome == allow` | proceed | the transition commits |
+| `Outcome == deny` | a business decision — decline, no Go error | no transition |
+| `Outcome == review` | **blocks, exactly like deny**, until a compliance-review queue exists (§8/§11/§17 — still an open product decision, deliberately unresolved) | no transition |
+| `Outcome` outside the three | **not a decision at all** — must be handled as an error, never as a decline (`Outcome.IsKnown()`, §34) | transaction aborts |
+| any non-nil `error` (database, timeout, cancelled context, `ErrConflictingRules`, `ErrMissingAmount`, `ErrMissingAsset`, `ErrUnknownAsset`, `ErrMissingJurisdiction`, `ErrMissingLicensingMode`, `ErrMissingScopeContext`, `ErrUnknownOperation`, `ErrMissingPlayer`, `ErrTenantScopeMismatch`, `ErrPlayerScopedConnection`, `ErrMissingThresholdDenomination`, `ErrThresholdDenominationMismatch`, `ErrUnsupportedCumulativeOperation`, `ErrInvalidCumulativeSpec`, `ErrUnrecognizedCumulativeLeg`) | **fail closed** — propagate as a Go error, abort the whole transaction | no Grant row, no posting, no partial state |
+
+**The distinction Bonus must implement correctly, and the one a naive
+implementation gets wrong.** Doc 10 §T.3 requires a denial to be recorded
+as a Progress entry carrying the denying check's reason code, "never
+silently skipped". That is achievable for `DENY`/`REVIEW` and *not*
+achievable in the same transaction for an `error`:
+
+- **`DENY`/`REVIEW`**: `Evaluate` returned normally, the transaction is
+  still valid. Bonus writes its Progress/audit entry **in that same
+  transaction** and commits it — exactly the shape
+  `internal/casino.evaluateAndAuditRisk` already uses (audit the
+  non-ALLOW decision inside the transaction, let the caller decline
+  without a Go error). This is the model to copy verbatim.
+- **`error`**: the transaction must abort, so **nothing written in it
+  survives**, including a Progress entry. An attempt record, if the
+  product wants one, must be written on a **separate** transaction and
+  must be unmistakably distinguishable from a policy decline — an error
+  means "the platform could not decide", not "the player's limits
+  rejected this" (§34). Bonus must not, in order to preserve a Progress
+  entry, downgrade an error into a decline: that converts an
+  unavailability into a business fact and is a fail-open in reporting
+  even though the money stayed put.
+
+**Conversion-time asymmetry, restated because it is load-bearing.** At
+grant and activation, a `DENY`/`REVIEW`/error blocks the transition
+outright. At conversion it leaves the Grant in `completed` — non-terminal
+and retryable after review. Fail-closed here means "do not release value
+yet", never "destroy an already-earned entitlement" (§15a-ii, doc 10
+§3's Risk freeze). Forfeiting a fully-wagered-through balance on a
+conversion-time Risk denial is forbidden.
+
+**No bonus-specific carve-out exists for any of the following**, named
+explicitly because each is a realistic request: a campaign launch window,
+a time-limited promotion expiring, a bulk assignment "already half done",
+an external bonus provider's callback deadline, or a player-facing
+coupon-redemption UX that would rather show success. Each of them
+resolves the same way: the operation is not authorized.
+
+### 40. New `Operation` values — exactly one is needed, and its status is unchanged — `RECOMMENDATION`
+
+**`bonus_conversion` — still `NOT STARTED`, re-verified at this commit.**
+§16a's verification was re-run against HEAD for this dispatch, not
+carried forward on trust. All six rows are unchanged:
+
+| §16 step | Artifact | Verified at this commit |
+|---|---|---|
+| 1. Migration CHECK | `migrations/0041_risk_limits_engine.up.sql` line 49-51 | **NOT DONE** — `operation IN ('casino_launch','casino_bet','deposit','withdrawal','sportsbook_bet','bonus_grant')` |
+| 2. Go constant | `internal/risk/types.go` | **NOT DONE** — the const block and `knownOperations` both hold exactly those six; `OperationBonusGrant` exists, `OperationBonusConversion` does not |
+| 3. HTTP allowlist | `internal/httpserver/risk_handlers.go` `newCreateRiskRuleHandler` | **NOT DONE** — same six |
+| 4. OpenAPI enum | `docs/api/openapi/platform-api.yaml` lines 1136, 1179, 1902 | **NOT DONE** — same six, in all **three** occurrences (§16a's own correction to §16 step 4 confirmed: it is three, not two) |
+| 5. Cumulative spec | `operationCumulativeSpecs`, `internal/risk/cumulative.go` | **NOT DONE**, and conditional — the map holds exactly one entry (`OperationCasinoBet`) |
+| 6. Enforcement call site | `internal/bonus` | **NOT DONE, and cannot be done** — the package does not exist (`internal/` contains no `bonus` directory at this commit) |
+
+Nothing partial exists: no half-landed constant, no dormant migration, no
+feature-flagged path. §16a's remaining-work description stands verbatim
+and is not restated here.
+
+**Three further values considered and REJECTED by this dispatch:**
+
+| Considered | Verdict | Reason |
+|---|---|---|
+| `bonus_redemption` (coded-bonus/coupon) | **REJECTED** | Same value, same asset, same Offer, different trigger — §38(e). Adding it would force every bonus cap to be authored twice |
+| `bonus_activate` | **REJECTED**, unchanged | §15a-ii's existing resolution; activation re-evaluates under `bonus_grant` |
+| a bulk-assignment operation | **REJECTED** | A bulk assignment is N ordinary grants (§38(f)); a batch-level `Operation` would be a rule that gates a job rather than a money movement, which has no `RiskRequest` to evaluate |
+
+**`bonus_grant` itself needs nothing.** It is a real constant, accepted by
+migration 0041, present in the HTTP allowlist and all three OpenAPI
+enums, and `risk_rules.product` already accepts `'bonus'`. Grant
+issuance, activation, coupon-triggered issuance and bulk assignment are
+therefore **all** gateable today with **zero** Risk-side code, schema or
+API change — the most important positive result of this dispatch.
+
+**Ownership and sequencing for `bonus_conversion` (unchanged from §16a).**
+Steps 1-5 are `risk`-owned; step 6 is `bonus-engine`-owned and cannot
+precede `internal/bonus` existing. Steps 1-4 have no structural
+dependency on ADR 0032's ledger CHECK widenings; step 5 does. Risk does
+**not** land steps 1-5 speculatively — an `Operation` value with no call
+site is precisely the inversion §16 step 6 warns about. The trigger is a
+dependency request from `bonus-engine` through
+`docs/governance/integration-protocol.md`, at the point its conversion
+write path is actually being built.
+
+### 41. HR-7 interaction — answered — `ARCHITECTURAL DECISION`
+
+`docs/architecture/ledger-accounting-model.md` HR-7(b) requires that when
+`OperationSportsbookBet` is added to `operationCumulativeSpecs`, its spec
+declare **both** `player_locked_cash` and `player_locked_bonus` in
+`IgnoredAccountTypes`, because naming only one makes the other an
+unrecognized leg (`ErrUnrecognizedCumulativeLeg`) and denies every bet a
+cumulative rule matches. The question put to Risk: does any
+Bonus-triggered Risk rule type need the same declaration?
+
+**Answer, in three parts.**
+
+**(a) For Wave 1's permitted rule set: NO, and the question is
+structurally inapplicable.** The only rule kinds Bonus may author in Wave
+1 are `min_amount`/`max_amount` with `TimeWindow: transaction` (§42(e)).
+`Rule.breach()`'s min/max cases compare `req.Amount` directly and **read
+no ledger rows and no `ledger_accounts.account_type` at all**. HR-7 is an
+`account_type`-enumeration obligation; those rule kinds enumerate
+nothing. There is no declaration to make and no failure mode to guard.
+
+**(b) For `cumulative_amount` on `bonus_grant`/`bonus_conversion`: the
+obligation applies in full the moment a spec is written, and the
+conversion shape is a §33 two-player-leg shape — the exact hazard
+class.** Neither spec exists (§37(d)), so nothing is owed today. When
+`ledger-finance` supplies them, from ADR 0032's own posting tables:
+
+- **`bonus_grant`** posts `Dr promo_liability X · Cr player_bonus X` (ADR
+  0032 §3). `promo_liability` is tenant/house-level with no wallet, so
+  `ledger_entries.player_account_id` is NULL on that leg and it never
+  appears in the query at all. One player-owned leg →
+  `{measured=[player_bonus], ignored=[], direction=credit}`, with
+  `ReversalTypes` covering `bonus_forfeiture` and `bonus_reversal` so a
+  forfeited or clawed-back bonus does not permanently consume the
+  player's capacity (the same correctness property
+  `casino_bet`/`casino_rollback` already establishes).
+- **`bonus_conversion`** posts `Dr player_bonus X · Cr player_cash X · Dr
+  bonus_expense X · Cr promo_liability X` (ADR 0032 §4). The two house
+  legs are wallet-less and never observed; the **two player-owned legs
+  are exactly §32(a)/§33's cancelling pair** — an account-type-blind sum
+  would compute `X - X = 0` usage no matter how much was converted, the
+  fail-OPEN §33 exists to prevent. Risk's recommended spec is
+  `{measured=[player_cash], ignored=[player_bonus],
+  direction=credit}` — measuring the *released withdrawable value*, which
+  is what a conversion cap means, and which stays correct if a future
+  max-cashout-capped conversion debits more `player_bonus` than it
+  credits `player_cash` within one transaction. `ledger-finance` owns
+  confirming that shape; Risk does not invent it.
+- **The locked family is NOT in either shape today**, so on today's
+  frozen postings neither spec needs `player_locked_cash`/
+  `player_locked_bonus` in `IgnoredAccountTypes`.
+
+**(c) One named condition under which it DOES become required — and it is
+a live open item, not hypothetical.** `ledger-accounting-model.md`
+§6.3.5.1 focus question 4 (answered affirmatively at §6.4's item 4) and
+doc 10's Genuine gaps item 6 / gate **G-2** record that a bonus-funded
+stake can be, and routinely will be, sitting in `player_locked_bonus` at
+the moment a forfeiture/expiry/cancellation trigger fires, and that the
+locked-stake forfeiture variant is **undesigned**. If its eventual design
+posts against `player_locked_bonus` (or, in a mixed-funded case,
+`player_locked_cash`) under a `bonus_forfeiture`/`bonus_reversal`
+transaction type, and that type is in a `bonus_grant` spec's
+`ReversalTypes`, then that leg becomes an **undeclared** player-side leg
+and `ErrUnrecognizedCumulativeLeg` **denies every bonus grant matched by
+that cumulative rule**. That is correct fail-closed behavior and exactly
+the self-defending mechanism §33 was built for — but it is an outage,
+surfacing at a posting-shape change rather than at rule-authoring time.
+
+**Risk's binding instruction, adopting HR-7(b)'s own rule rather than
+re-deriving it: whichever change first adds a `bonus_grant` or
+`bonus_conversion` entry to `operationCumulativeSpecs` must declare the
+WHOLE locked family — both `player_locked_cash` and `player_locked_bonus`
+— in `IgnoredAccountTypes`, even though neither is expected in today's
+frozen postings, and must extend that declaration to any future
+locked-family member per L1's extensibility clause.** The cost is two
+strings; the cost of omission is a silent-until-triggered denial of every
+bonus grant under a cumulative rule. This is Risk's answer to the
+dispatch's HR-7 question and it is additive to, not a variation of,
+HR-7(b).
+
+**(d) The reciprocal obligation, flagged for `ledger-finance`/`casino`.**
+`operationCumulativeSpecs[OperationCasinoBet]` today declares
+`MeasuredAccountTypes: ["player_cash"]` and `IgnoredAccountTypes: nil`,
+with an in-code comment that a future bonus-funded stake leg
+(`player_bonus`) "must be added here DELIBERATELY". Once the Bonus Engine
+can fund a casino stake from `player_bonus`, that leg appears under
+`transaction_type = 'casino_bet'` and — by the same mechanism — makes
+`ErrUnrecognizedCumulativeLeg` fire, **denying every casino bet covered by
+a cumulative stake rule**. That is a Bonus-caused Risk regression on an
+already-wired, already-enforced operation, and it is the one place where
+Bonus Engine work can break a live Risk path. It costs nothing today
+(bonus-funded casino stakes do not exist) and is not a Wave-1 blocker,
+but it must be on the checklist for whichever change first enables
+bonus-funded wagering, alongside the decision `ledger-finance` owns:
+whether a bonus-funded stake *consumes* a cumulative cash-stake cap
+(measured) or not (ignored) — a policy question, not a mechanical one.
+
+### 42. Wave-1 rule-authoring constraints, traps, extension points, and cross-document findings
+
+**(a) `TRAP`, P1 — a jurisdiction-scoped `bonus_grant` rule denies 100% of
+bonus grants today.** §34 changed §9: once **any** currently-effective
+rule for an operation scopes `jurisdiction_code`, every request for that
+operation that leaves `JurisdictionCode` empty fails closed with
+`ErrMissingJurisdiction`. Verified at this commit: **nothing in this
+repository resolves a per-player jurisdiction** (`TODO(jurisdiction)` in
+`internal/casino` and `internal/payments`; no resolver anywhere), and
+`internal/bonus` will have no casino launch session to read one from
+(§9/§15a). Doc 10 §4.1's **example rule 1 is precisely this shape** — a
+jurisdiction-scoped `HARD_LIMIT` on `bonus_grant`. Authoring it in Wave 1
+would deny every bonus grant for that tenant, including grants entirely
+unrelated to that jurisdiction. **Constraint: no jurisdiction-scoped
+`bonus_grant` rule may be authored until the Bonus Engine can supply a
+real `JurisdictionCode` on every one of its `bonus_grant` call sites.**
+Doc 10 §4's claim that Bonus resolves it "from the same authoritative
+source a deposit/casino session would use" describes a source that does
+not exist; that is an honest gap in doc 10, owned by `bonus-engine`/
+`architect`, not a Risk defect.
+
+**(b) `TRAP`, P1 — the same operation-wide gate applies to `provider_id`,
+`payment_method`, `product` and `game_id`.** `missingScopeContext` is
+deliberately operation-wide (§34). So a single `bonus_grant` rule scoped
+by `provider_id` (e.g. intended for `external:<provider_id>` campaigns,
+doc 10 §3.1) fails closed **every internally-fulfilled grant** for that
+tenant, which in Wave 1 is all of them (doc 10's scope plan §4: every
+first-slice campaign is `fulfillment_owner: internal`). The same holds for
+a `payment_method`-scoped deposit-bonus rule against a cashback or coupon
+grant that has no payment method. **Constraint for Wave 1: author
+`bonus_grant` rules scoped only by dimensions every bonus call site can
+always populate — `tenant_id`, `brand_id`, `player_account_id`,
+`asset_code`, `product`, `licensing_mode`.** This is a rule-authoring
+scope choice, not a code change, and it is the same class of mitigation
+§16a already confirmed sufficient for `cumulative_amount`.
+
+**(c) `TRAP`, P1 — `Amount == 0` plus any matching amount-shaped rule is
+`ErrMissingAmount`, and cashback is in the first slice.** `Rule.breach()`
+returns `ErrMissingAmount` for a zero-amount request against any
+amount-shaped kind — deliberately, so a forgotten `Amount` can never
+silently skip a cap. But **cashback's reward value is not known at
+`issued`**: it is computed when the settlement job closes the window (doc
+10 §2). A cashback Grant issued with `Amount: 0` while any `max_amount`
+`bonus_grant` rule matches will fail closed on **every** issuance. Two
+acceptable resolutions, both `bonus-engine`'s to choose (Risk does not
+pick a product behavior):
+  1. **Recommended** — supply the Offer's own maximum possible reward
+     value as `Amount` at `issued`. It is a conservative ceiling, correct
+     for `max_amount` (if the ceiling passes, the actual value passes)
+     and safe for `min_amount` only if the Offer also declares a floor.
+  2. Treat `issued` as an amount-less checkpoint for such Offers and make
+     **activation** the authoritative amount gate, where the real value
+     exists. This is defensible on §15a-ii's own reasoning (activation is
+     where funds enter the wallet) but means no amount-shaped rule may be
+     authored that is expected to bind at issuance.
+  **What is NOT acceptable**: passing a placeholder, a `1`, or the
+  campaign average. Risk compares whatever it is given.
+  Non-monetary rewards (free spins with no declared carrying value) have
+  the identical problem and are out of the first slice, which is why this
+  surfaces for cashback and not for them.
+
+**(d) `FINDING`, P1 — two cross-document statements conflict with §4/§14/
+§15c on velocity, and Risk's position is that §14 governs.** Escalated to
+the Orchestrator per `docs/governance/integration-protocol.md`; not
+edited into `bonus-engine`'s own document by this specialist.
+  - `10-bonus-engine-architecture.md` §1.4 names "velocity caps" as a
+    Bonus-Engine-owned **detector**. §14 forbids "a velocity check" inside
+    the Bonus domain, and §23's guard states it in its most general form:
+    *the moment a proposed constraint is a threshold compared against
+    accumulated activity over a window, it is a limit engine under another
+    name and must be a `risk_rules` row instead.* A per-player
+    grant-frequency counter that routes to a review queue is still a
+    threshold-over-a-window comparison. **Risk's position: it is a
+    `RISK_SIGNAL` rule of the reserved `count` `LimitKind` — which does
+    not exist — so bonus velocity is NOT available in Wave 1 in any form,
+    and must not be built inside `internal/bonus` as a detector.** Doc 10
+    §1.4's genuinely Bonus-owned detectors are the *identity-graph-shaped*
+    ones it also names (device/payment fingerprint linking across
+    accounts), which Risk's `Rule` shape cannot express and does not
+    claim — that half of §1.4 is correct and unaffected.
+  - `10-bonus-engine-architecture.md` §4.1 example 3 proposes a
+    `RISK_SIGNAL` with `LimitKind = cumulative_amount` "used as a proxy
+    for `count` via a rolling window over grant events". **§15c rejects
+    exactly this by name**: "Faking it (e.g. a `cumulative_amount` rule
+    with a threshold chosen to approximate a count) would be exactly the
+    ad hoc logic §12 exists to prevent." It is also inoperative — it
+    would `ErrUnsupportedCumulativeOperation` on every grant (§37(d)).
+    Example 3 must not be authored.
+
+**(e) Wave-1 permitted rule set, stated positively.** For `bonus_grant`:
+`RuleKind` ∈ {`hard_limit`, `configurable_limit`}; `LimitKind` ∈
+{`min_amount`, `max_amount`}; `TimeWindow` = `transaction`; scoped only by
+the dimensions in (b). Full HARD_LIMIT/CONFIGURABLE_LIMIT precedence,
+specificity resolution, `ErrConflictingRules` conflict detection and
+player-override behavior (§5) apply unchanged — a player-scoped max bonus
+beats a brand default, stricter or looser, by specificity. Denomination
+per §35: an asset-scoped rule leaves `threshold_exponent` NULL; an
+asset-agnostic rule **must** declare it and will fail closed for a
+request in an asset of any other exponent (so a tenant offering both a
+2-exponent fiat and an 8/18-exponent crypto asset needs one rule per
+exponent, or per asset).
+
+**(f) Named extension points — `NOT IMPLEMENTED`, and no stub pretends
+otherwise.**
+  - **`campaign` as a Risk scope dimension.** Zero of the required steps
+    exist: no `risk_rules.campaign_id` column, no `Rule`/`RiskRequest`
+    field, no `specificity()` bit, no HTTP/OpenAPI input. Adding it would
+    follow §20(a)'s shape exactly — a `*uuid.UUID` on `Rule`, a
+    `uuid.UUID` on `RiskRequest`, NULL-means-wildcard, a new bitmask bit
+    (renumbering is free per §20(b)(1)), plus, because a campaign is
+    **tenant-authored**, the `CHECK (campaign_id IS NULL OR tenant_id IS
+    NOT NULL)` guard §20(a) required for `hierarchy_node_type` — and a
+    composite FK into `bonus_campaigns`, a table Risk does not own and
+    which does not yet exist. It is **not** proposed by this dispatch: no
+    Wave-1 requirement needs a campaign-scoped *per-player* cap, and the
+    cross-player campaign budget cap it is most often confused with is
+    **not a Risk concern at all** (§15d, restated below).
+  - **`count`/`velocity` `LimitKind`** — §15c/§18, unchanged.
+  - **`cumulative_amount` for `bonus_grant`/`bonus_conversion`** — blocked
+    on `ledger-finance` supplying a §33 cumulative spec (§41(b)).
+  - **Calendar-aligned windows** — §4, unchanged.
+  - **Cross-domain aggregate player exposure** (bonus + casino +
+    sportsbook) — §17, still an open decision, still not approximated.
+
+**(g) Open decisions this dispatch records rather than resolves.**
+  - Does a campaign eligibility *preview* call `Evaluate` at all
+    (§38(a))? Risk recommends no; it is a product decision.
+  - Does a `REVIEW` outcome block or hold a bonus grant (§8/§17)? Still
+    unresolved, still blocking by default. A held Grant is arguably a
+    better fit for a review queue than a blocked bet — but there is still
+    no queue.
+  - Which `AssetAuthorization.CheckEligibility` operation value a bonus
+    checkpoint passes (doc 10 Genuine gaps item 1, and §32(f)'s
+    two-vocabulary mapping). Not Risk's to decide; named because all
+    three gates are called in the same transaction.
+  - The locked-stake forfeiture variant (G-2) — §41(c).
+
+**(h) The §15d guard, restated for Wave 1 so it is not re-litigated.** A
+**per-player** promotional cap is a `risk_rules` row. A **campaign-level,
+cross-player budget cap** is not expressible by `internal/risk` and should
+not be: every scope dimension narrows toward a single subject and the
+cumulative aggregation is keyed by `le.player_account_id`. It belongs to
+the Bonus Engine's Campaign object, under the non-negotiable guard that
+**a campaign budget counter must never be keyed by player** — the moment
+it is, it is a limit engine under another name and must be a `risk_rules`
+row instead. Doc 10 §1.1 correctly records that the campaign-budget
+enforcement mechanism itself is `NOT IMPLEMENTED` with no assigned owner
+(its Genuine gaps item 7); that gap is not Risk's and is not closed here.
+
+**(i) Dependencies on the parallel Wave-1 dispatches.**
+  - On **`bonus-engine`**: the `Amount`-at-issuance decision for cashback
+    (c); confirmation that every `bonus_grant` call site can populate
+    `Product`/`AssetCode`/`LicensingMode` and, if a jurisdiction-scoped
+    rule is ever wanted, `JurisdictionCode` (a); the idempotency-before-
+    Evaluate ordering (§38.0 item 1); per-player transactions for bulk
+    assignment (§38(f)); and the dependency request that triggers
+    `bonus_conversion`'s steps 1-5 (§40).
+  - On **`ledger-finance`**: the §33 cumulative specs for `bonus_grant`
+    and `bonus_conversion` — transaction types, reversal types, measured
+    leg(s), ignored leg(s) and consuming direction — none of which Risk
+    may invent (§41(b)); confirmation that `promo_liability` and
+    `bonus_expense` are wallet-less (this section assumes so from
+    `ledger-accounting-model.md`'s account table and would be wrong if
+    not); the capped-conversion posting shape (§41(b)); and the G-2
+    locked-stake forfeiture variant (§41(c)).
+  - On **`identity-compliance`**: nothing blocking — RG stays the sole
+    self-exclusion authority (§1/§14), Bonus composes both at its
+    enforcement point, and Risk claims none of it.
+  - On **`security`**: no `risk_rules` RLS/RBAC change is proposed by this
+    dispatch, and §37(g)'s "no Bonus role gets `risk_config:manage`"
+    position is offered for confirmation.
+
+**What remains impossible to configure after this section** — the
+load-bearing negative claim, stated the way §18/§24/§31 state it, and
+**unchanged by it**: `bonus_conversion` as an `operation` value;
+`count`/`velocity`/`exposure`/`loss` limit kinds (so bonus frequency is
+not configurable at all); `cumulative_amount` on any bonus operation;
+campaign as a scope dimension; campaign-level cross-player budget caps;
+cross-operation aggregate exposure; calendar-aligned windows;
+points-denominated thresholds. §37-§42 are a contract specification and a
+set of extension points; the extension points stay closed until an
+authorizing stage opens them with all the steps in §12 or §16 executed
+together in one change.

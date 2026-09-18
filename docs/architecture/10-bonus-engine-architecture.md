@@ -2135,3 +2135,771 @@ remains open.
 
 Owner of this section: `bonus-engine`. Nothing in this section authorizes
 writing `internal/bonus`, a migration, or a test.
+
+## Stage 4H-B1, Wave 1 — Core Domain Model, Canonical Mechanics Catalogue, and Governance Contract
+
+Status: **DESIGN/CONTRACT ONLY, `NOT IMPLEMENTED`.** Issued per the Stage
+4H-B1 directive §36, Wave 1 of an 8-wave gated implementation. No Go code,
+no migration, no test is authorized by this section. This section does
+**not** redesign anything already frozen above — §1–§10, the Bonus
+Dependency Contract Freeze, and the Terminal-Grant Technical Contract
+(§T.1–§T.13) all stand unchanged and are cited, not re-derived. Where this
+section formalizes an object the directive names but the frozen sections
+above only described informally (e.g. `GrantActivation`, `BonusReward`),
+that formalization is stated explicitly as such, and is additive: it
+introduces no new persistent store, no new ledger transaction type, and no
+new bypass of RG/Risk/AssetAuthorization anywhere.
+
+Terminology check performed before writing anything below, per the
+directive's explicit instruction: this document already names Campaign,
+Offer, Grant, and Progress (§1.1) — none is renamed. `GrantActivation`,
+`BonusBalance`/`BonusAccount`, `WageringRequirement`, `WageringProgress`,
+`BonusConversion`, `BonusAdjustment`, `BonusCancellation`, `BonusExpiry`,
+and `BonusReward` are new names for objects the directive requires but
+that were previously only described inline (e.g. inside §1.3's transition
+table, §2's five configuration axes, or ledger-accounting-model.md §6.6's
+contribution record) — each is defined below with an explicit statement of
+whether it is a new persistent object or a named, typed view over an
+already-designed one, because inventing a persistent duplicate of an
+already-append-only record is exactly the "side table" CLAUDE.md and this
+document's own §6 forbid.
+
+### W0. Scope map — directive item to section
+
+| Directive item | Section(s) |
+|---|---|
+| 1. Domain model (identity/audit/lifecycle template + all named objects) | W1, W2 |
+| 2. Campaign versioning | W2.1 |
+| 3. Offer, separate from Campaign | W2.2 |
+| 4. Grant | W2.3 (cites §1.1/T.2, does not re-derive) |
+| 5. Five approved bonus types, full detail | Already frozen at §2/Stage 4H-B0-R6's scope plan §1; W3 maps them onto canonical mechanics, adds nothing new to their rule content |
+| 6. Full operational bonus catalogue, canonical mechanics | W3 |
+| 7. Coded bonuses | W4 |
+| 8. Manual and bulk assignment | W5 |
+| 9. Bonus Suggestions (separate, non-financial) | W6 |
+| 10. Player segmentation (reusable abstraction) | W7 |
+| 11. Bonus-funded wagering / mixed-funding rejection | W8 |
+| 12. Human-decision safety (G-2, `OpenBetSelfExclusionPolicy`, cashout+FD-1) | W9 |
+| Forward interfaces for future reward-producing domains | W10 |
+| Deferrals to parallel Wave-1 dispatches | W11 |
+
+### W1. Common object contract
+
+Every object named in W2 below, with no exception, carries:
+
+- **Immutable identity**: a server-generated UUID primary key, never
+  client-supplied, never reused.
+- **Tenant/brand ownership**: `tenant_id` (nullable only where §8 already
+  permits platform/tenant-wide scope — Campaign only; every other object
+  below is always tenant+brand+player scoped, mirroring Grant's own rule,
+  §8), resolved from authenticated server-side context only (CLAUDE.md).
+- **Lifecycle/status**: an explicit enum, never inferred from the presence
+  or absence of other fields.
+- **`created_at`**: `clock_timestamp()`-sourced (never `now()` — the same
+  discipline §2's cashback note and ADR 0034 §14.12 already require
+  platform-wide for any time-sensitive bonus/RG computation), immutable.
+- **Actor/source**: `actor_type` (system | player | staff | provider) and
+  `actor_id`, never omitted even for an automated transition (`actor_type
+  = system` is itself a recorded fact).
+- **Audit correlation**: a `correlation_id` linking the object to the
+  Grant (or Campaign/Offer/job) it belongs to, and — for any object
+  produced by a mutating action — a same-transaction `audit.Record` per
+  §10's existing pattern.
+- **Idempotency**, where the object represents the effect of an
+  externally-triggerable operation (Grant, GrantActivation,
+  BonusConversion, BulkGrantJobItem, WageringProgress's contribution row):
+  a DB-enforced unique constraint per §9's existing pattern, never
+  check-then-insert.
+- **No mutable financial history**: every object below that carries a
+  monetary or lifecycle-defining fact is append-only. A correction is
+  always a new row (a new Progress entry, a new BonusAdjustment, a
+  compensating ledger transaction) — never an `UPDATE` of a historical
+  fact. This restates CLAUDE.md's ledger rule one layer up, for the
+  bonus-domain records that sit beside the ledger, not inside it.
+
+### W2. Domain model catalogue
+
+#### W2.1 Campaign — versioned configuration
+
+§1.1 already establishes Campaign's shape informally. This formalizes the
+versioning the directive requires without changing any of it: a
+**Campaign** row is identity + scope (§8) + top-level status
+(`draft`/`active`/`paused`/`ended`/`archived`, staff-actioned, audited) +
+`fulfillment_owner` (§3.1). Its actual configuration content — the part
+that can change over the Campaign's life — lives in append-only
+**CampaignVersion** rows, one active at a time, monotonically numbered:
+name/display copy, start/end window, target Segment reference +
+SegmentVersion pin (W7, never an inlined criteria blob), jurisdiction/
+asset/product restriction, budget cap (`NOT IMPLEMENTED` enforcement —
+§1.1's already-flagged P2 gap stands unchanged, this formalization does
+not close it), Risk-constraint references (rule ids/tags — Risk owns the
+rule *content*, §4, Campaign only records which rules apply), the bonus
+type / canonical mechanic this Campaign issues (W3), and the
+terms-and-conditions text/version.
+
+**Once any Offer version (W2.2) references a CampaignVersion, that
+CampaignVersion's content is immutable forever** — a change is always a
+new CampaignVersion row, never an edit, mirroring the Offer-version
+immutability rule (§1.1, T.2) one level up. A Campaign's own top-level
+status transition does not retroactively alter any Grant already issued
+under a frozen CampaignVersion+OfferVersion pair (T.11's "why getting this
+wrong breaks the platform" reasoning applies identically here).
+
+#### W2.2 Offer — separate from Campaign, no duplicated logic
+
+An **Offer** row: id, `campaign_id`, `campaign_version_id` (immutable
+pin), status (`draft`/`active`/`retired`), and its own start/end, which
+must fall within the pinned CampaignVersion's window (narrowing only,
+§8). The actual rule content is the **OfferVersion**, immutable once any
+Grant references it (§1.1), carrying the five axes already named in §2,
+now with their field surface made explicit for Wave 1:
+
+- **Eligibility axis**: segment reference + SegmentVersion pin (W7),
+  country/jurisdiction list, deposit-method list, first-deposit-only flag,
+  min/max qualifying amount, VIP-tier reference (itself a segment
+  reference, W7 — never a Bonus-local enum), opt-in-required flag,
+  KYC/RG level required (a reference into `identity-compliance`'s own
+  levels, never a Bonus-local re-definition).
+- **Reward axis** → a `BonusReward` object (W2.6).
+- **Wagering axis** → a `WageringRequirement` object (W2.7).
+- **Payout axis**: max-cashout amount/%, cash-first/bonus-first ordering,
+  partial-release thresholds, time limit.
+- **Abuse-control axis**: velocity-cap references into Risk (§4.1),
+  device/payment-fingerprint-linking detector configuration (§1.4 — a
+  Bonus-Engine-owned detector, not a Risk rule), manual-review routing.
+
+Offer never computes eligibility itself; it configures the parameters T.1's
+three-way gate and T.4's eligibility-axis snapshot consume. A `grant_policy`
+field (`auto_issue` | `manual_approval_required` | `code_redeemed` |
+`external_signal` | `manually_assigned`) selects which canonical trigger
+mechanic (W3) applies — this is the one field that distinguishes, e.g., a
+Coupon Offer from a Deposit-bonus Offer; nothing else about the Offer's
+shape differs, which is precisely §2's already-established "the only
+lifecycle novelty is the trigger" rule for Coupon, generalized.
+
+#### W2.3 Grant
+
+Unchanged from §1.1/T.2 — this subsection is an index, not a re-design.
+The full immutable field set a Grant freezes at creation (`asset_code`,
+`decimal_exponent`, the Offer-version reference denormalizing its
+Campaign-version reference, `funding_source`/provider id,
+`fulfillment_destination`, the idempotency/`trigger_reference`, and the
+eligibility-axis snapshot) is specified in full at T.2 and governed by
+T.11's immutable-vs-live table. Nothing here adds a field T.2 does not
+already name.
+
+#### W2.4 GrantActivation
+
+**Design decision, stated explicitly: not a new persistent table.**
+`GrantActivation` is the directive-required, typed, queryable name for
+the Grant's `issued → activated` Progress-trail entry (§1.3, T.3) — a
+projection joining that specific `bonus_progress` row (transition type
+`activated`) with the resulting `bonus_grant` ledger transaction group id
+(§10.1's "cross-referenceable without being the same record"). Inventing
+a second, parallel table to hold activation facts that duplicate an
+already-append-only Progress row is exactly the "side table" CLAUDE.md and
+this document's own §6 forbid, and would create two places a disputing
+player's "why was my bonus activated on this date" question could get two
+different answers from.
+
+Its field surface, as exposed to API/reporting consumers: `grant_id`,
+`activated_at` (`clock_timestamp()`, immutable), `trigger` (player opt-in
+/ automated event / staff action / code redemption, per §1.3), its
+concrete `trigger_reference`, the three-way gate outcome consulted at
+activation (`AssetAuthorization`/RG/Risk decision codes, T.3), and the
+resulting `ledger_transaction_group_id`. This satisfies "immutable
+identity, tenant ownership, lifecycle, timestamps, actor, audit
+correlation" in full without a second source of truth.
+
+#### W2.5 BonusAccount / BonusBalance
+
+**Design decision: Bonus Engine owns no authoritative balance of any
+kind.** `BonusBalance` is a read-model term, not a table: a query-time
+projection over `wallet`/`ledger`'s own `Summary.BonusBalance` (and, once
+Dependency Freeze §9's `player_locked_bonus` split is unblocked,
+`LockedBonusBalance`) for a given wallet+asset. `BonusAccount`, as used in
+this document, means exactly the ledger's own `player_bonus` (and,
+eventually, `player_locked_bonus`) account — Bonus Engine has no
+independent BonusAccount table. This is the direct, literal answer to the
+directive's "must reconcile with `player_locked_bonus`/`player_bonus`, not
+invent a parallel balance" requirement.
+
+Multiple concurrent Grants can share one wallet+asset's single
+`player_bonus` account (ADR 0032 §5 confirms per-grant attribution — FIFO,
+last-in, or per-grant-lot — is a **Bonus Engine business rule**, not a
+ledger concern). To make "this Grant's remaining bonus balance" answerable
+without a maintained counter, Bonus Engine owns an append-only
+**GrantLedgerAttribution** record: one row per (Grant, ledger transaction),
+written in the same database transaction as the posting it attributes,
+DB-unique on `(tenant_id, grant_id, ledger_transaction_id)`, carrying no
+field the ledger does not already have except the Grant it belongs to
+(the one fact the ledger deliberately does not carry, mirroring
+`ledger-accounting-model.md` §6.6.4's justification for the WageringProgress
+contribution record, applied one level up). A Grant's remaining bonus
+balance is always a derived read (`Σ` over this table's attributed
+entries), never a stored figure — the identical "derived, per-event,
+reconciled" pattern §6.6.4 already establishes, not a new one invented
+here.
+
+#### W2.6 BonusReward
+
+The canonical descriptor of *what is granted*, frozen inside the
+OfferVersion's Reward axis: `reward_kind` (one of W3's canonical reward
+mechanics), `asset_code`, `calculation` (the exact formula/cap/rate
+shape), `rounding_rule_id` (Dependency Freeze §7), `fulfillment_destination`
+(`into_platform_wallet` | `inside_provider`, immutable, ADR 0032 §6(c)),
+and `funding_source` (`operator` | `provider:<id>`, immutable at grant
+time, ADR 0032 §6). `BonusReward` never itself posts anything — Grant
+issuance reads it to compute the grant amount and the §6/§3.1 lifecycle
+events; it is configuration, not a movement.
+
+#### W2.7 WageringRequirement
+
+The Wagering axis, frozen inside the OfferVersion: multiplier (or
+"already satisfied" for a no-wagering cash reward, §2), the per-game/
+category/provider `contribution_weight_bp` table (integer basis points,
+never float, ADR 0032 §9), max-bet-while-wagering, the excluded-games
+list, and the time limit. A Cashback Offer's Wagering axis is a no-op by
+design (§2) — its completion trigger is the Payout axis's window/%
+instead.
+
+#### W2.8 WageringProgress
+
+**This is exactly `ledger-accounting-model.md` §6.6.4's contribution
+record — cited, not redesigned.** One append-only row per (Grant, lock
+ledger transaction): `tenant_id`, `grant_id`, `offer_version_id`,
+`lock_ledger_transaction_id`, `correlation_id`, `asset_code`,
+`staked_bonus_amount` (read from the posted ledger entry, never the
+caller), `contribution_weight_bp` (copied immutably from the OfferVersion
+at contribution time), `qualifying_scaled`, `rounding_rule_id`,
+`created_at`. DB-unique on `(tenant_id, grant_id,
+lock_ledger_transaction_id)`, written in the same database transaction as
+the lock posting (HR-10), append-only, RLS per player-self-scope. The
+table's name, package, and migration belong to `bonus-engine`'s own stage,
+exactly as §6.6.4 already states.
+
+Bonus Engine additionally owns the **`P_net`/`P_firm` derivation** —
+read-only computations over this table plus `ledger_transactions`/
+`ledger_entries` (§6.6.3/§6.6.5/§6.6.6), never a write and never a
+maintained counter. Bonus Engine calls this derivation at every
+completion/conversion checkpoint; **only `P_firm` may authorize
+`completed → converted`** (invariant W1, §6.6.6), re-checked inside the
+conversion's own database transaction (HR-12). Bonus Engine implements
+§6.6.5's exhaustive, fail-closed transaction-type classification exactly
+as specified — an unclassified transaction type excludes the contribution
+from `P_firm` and raises an integrity alert; it is never treated as
+nullifying or as risk-preserving by a permissive default. Bonus Engine
+owns its half of reconciliation stream WP-R (§6.6.4) jointly with
+`ledger-finance`.
+
+**Progress-trail obligation, formalizing gap 9 (§6.6.1/§6.6.9 property 3)
+as a Wave-1 requirement**: every ledger fact in §6.6.7's case table that
+moves `q_eff` (accepted bet, void, partial void, rollback, settlement,
+correction, reversal) triggers a `bonus_progress` append explaining the
+movement — contribution id, the confirming/nullifying ledger transaction
+id, before/after `q_eff`, and a reason code — in the same transaction as
+the read/write that observes it. This closes the Progress-trail-
+completeness half of gap 9; §6.6 itself already closes the ledger-
+derivation half.
+
+#### W2.9 BonusConversion
+
+Bonus Engine's own record of a conversion decision, distinct from but
+referencing the ledger's `bonus_conversion` transaction: `grant_id`,
+`decided_amount` (≤ the Grant's attributed outstanding balance, W2.5,
+capped by the Offer's max-cashout rule), the cash-first/bonus-first
+ordering and partial-release threshold applied, the `P_firm` value read at
+decision time (HR-12), the three-way gate outcome (T.12), the resulting
+`ledger_transaction_id`, `decided_at`, `decided_by` (system | staff —
+staff requires a reason code and §10's audit record). Exactly one
+`BonusConversion` row per successful `completed → converted` transition,
+keyed by §9's `(grant_id, completion_trigger_reference)`. A rejected
+conversion attempt (HR-12's re-check fails, or a T.12 denial) produces
+**no** `BonusConversion` row — only a Progress entry recording the
+rejection reason, with the Grant left in `completed` per §5/T.12's
+already-frozen rule.
+
+#### W2.10 BonusAdjustment
+
+A new, formalized object for the staff-driven, non-terminal modification
+of an active Grant's terms that §10's audit table already names ("Manual
+adjustment / administrative override") but doc 10 had not previously given
+its own object shape. **Scope, stated narrowly and fail-closed**: a
+`BonusAdjustment` may only ever *widen* a player's position (extend the
+time limit, waive or reduce the remaining wagering-requirement target,
+raise the max-cashout cap) or correct a computation error by recomputing
+from the frozen OfferVersion's own stored inputs (ADR 0032 §9) — it may
+never edit the OfferVersion's frozen content (T.2/T.11 stand unchanged)
+and, if it has a monetary effect, it may only use one of §3.1's
+already-defined lifecycle-event → posting shapes (never a new
+`transaction_type` invented ad hoc; a correction touching value the player
+has already consumed follows ADR 0032 §7's exact `manual_adjustment
+against player_cash, never player_bonus` shape).
+
+Every `BonusAdjustment`: mandatory reason code, staff actor id,
+before/after value pair, four-eyes approval above CLAUDE.md's configured
+threshold (§10's existing row, restated as an object rather than a table
+footnote), a Progress entry, and — if monetary — a ledger instruction
+under an existing transaction type. A change that *reduces* a player's
+position (shrinks the wagering target, lowers the cap, shortens the time
+limit) is out of scope for `BonusAdjustment` — that is a
+`BonusCancellation`/`BonusExpiry`/forfeiture concern with its own
+already-designed, reason-coded shape, never a disguised downward
+adjustment.
+
+#### W2.11 BonusCancellation
+
+Formalizes the `cancelled`-transition Progress entry (§1.2/§1.3, §3.1) as
+a named, typed view, mirroring `GrantActivation`'s pattern: `grant_id`,
+`cancelled_at`, `actor` (player | staff), `reason_code` (mandatory, §10),
+and whether an outstanding balance existed (which determines whether a
+`bonus_forfeiture` posting accompanies it per §3.1's table — `cancelled`
+from `issued` posts nothing; from `activated`/`in_progress` posts the
+forfeiture shape). No new mechanism.
+
+#### W2.12 BonusExpiry
+
+Formalizes the `expired`-transition Progress entry: `grant_id`,
+`expired_at` (`clock_timestamp()`-driven), the outstanding-balance
+write-off amount, and the resulting `bonus_forfeiture` ledger transaction
+id. Distinguishes T.9's two cases explicitly — "ordinary expiry" (fully
+specified, no new design needed) versus "expiry while a stake is locked"
+(one of G-2's trigger paths, not a fourth case) — a `BonusExpiry` record
+is produced either way; the locked-stake case's later resolution is a
+separate G-2 event on the now-terminal Grant (§T.7), never a second
+`BonusExpiry`.
+
+### W3. Canonical mechanics catalogue
+
+The directive requires the full operational bonus catalogue to be modeled
+as a small set of canonical, reusable mechanics — not twenty bespoke
+implementations. Every catalogue item decomposes into exactly three
+independent choices, each drawn from a small, closed set:
+
+**Trigger mechanic** (what causes `(none) → issued`):
+
+| Code | Mechanic | Already-frozen basis |
+|---|---|---|
+| T1 | Event-triggered | Automated rule evaluation against `deposit.settled`/`player.registered`/`session.started` (§1.3) |
+| T2 | Code-redeemed | §2's Coupon row, generalized (W4) |
+| T3 | Manually-assigned | §1.3's "Staff action" trigger; single/list/segment/bulk (W5) |
+| T4 | External-signal-triggered | §2's general rule: mission/tournament/loyalty/referral signals Bonus Engine consumes but never computes |
+| T5 | Provider-native | §3: Bonus Engine does not issue a Grant at all; `fulfillment_owner: external`, memo/audit trail only |
+
+**Reward mechanic** (`BonusReward.reward_kind`, W2.6):
+
+| Code | Mechanic | Already-frozen basis |
+|---|---|---|
+| R1 | Percentage-of-qualifying-amount-with-cap | Deposit/reload/welcome/multi-deposit match; cashback computed against net loss instead of deposit amount |
+| R2 | Fixed-value grant | No-deposit, birthday/anniversary, flat goodwill/compensation, flat referral, flat mission/challenge reward |
+| R3 | Free-round/free-bet grant, distinct redemption unit | §2's Free spins/Free bets rows — Grant decision internal, fulfillment via the Reward Orchestrator/casino's normalised interface, never built by Bonus Engine directly |
+| R5 | Manually-assigned value | A staff-entered amount/count within Risk-enforced bounds (composes with T3) |
+| R6 | External-signal value | The amount/count is supplied by the external producer's own signal; Bonus Engine records, never computes (composes with T4) |
+
+(R4 is deliberately absent as a distinct code: "code-redeemed value" is
+not a reward shape, it is trigger mechanic T2 composed with any of
+R1/R2/R3 — listed here only to head off the mistake of treating "coded
+bonus" as a sixth reward mechanic.)
+
+**Completion mechanic**:
+
+| Code | Mechanic | Already-frozen basis |
+|---|---|---|
+| C1 | Wagering-multiplier | §2's Wagering-bonus row; the default for anything carrying a `WageringRequirement` |
+| C2 | Time-window settlement job | §2's Cashback row — completion is the window closing, not a multiplier |
+| C3 | Already-satisfied / no-op | §2's Cash-reward row; ADR 0032 §3's two-entry shape, never modeled as a zero-wagering Grant plus immediate conversion |
+| C4 | Externally-tracked | §3.1/§3.2 — Bonus Engine records the external engine's own reported state, never recomputes it |
+
+**Catalogue mapping** (every item the directive names, decomposed; "in
+first slice" restates, never expands, Stage 4H-B0's already-authorized
+scope plan §1):
+
+| Catalogue item | Trigger | Reward | Completion | Composes from §2 row | In first slice? |
+|---|---|---|---|---|---|
+| Welcome / first-deposit | T1 | R1 | C1 | Deposit bonus | Yes |
+| Multi-deposit | T1 (repeated matches) | R1 | C1 | Deposit bonus (a multi-step eligibility-axis configuration, a Bonus Engine business rule — no new lifecycle concept) | Yes |
+| Reload | T1 | R1 | C1 | Reload bonus | Yes |
+| Cashback / loss-back | T1 (eligibility) | R1 (against net loss) | C2 | Cashback | Yes |
+| No-deposit | T1 or T3 | R2 | C1 (if wagering attached) or C3 (if not) | Generic-wagering-bonus row (C1 shape, in slice) or Cash-reward row (C3 shape, **out** of slice per §2's explicit scope note) | Only the C1-shaped variant |
+| Free spins / free rounds | T1 / T3 / T4 | R3 | C1 | Free spins row | **No** — fulfillment not built (§2, scope plan item 4) |
+| Free bets | T1 / T3 / T4 | R3 | C1 | Free bets row | **No** — same, plus `internal/sportsbook` does not exist |
+| Sportsbook bonuses | Depends on shape | R1/R2/R3 | C1 | Composes from Wagering-bonus (R1/R2) or Free-bet (R3) rows — no new mechanic | **No** — blocked on `internal/sportsbook` existing at all, a much larger gate than any Bonus Engine gap |
+| Casino bonuses | Any | Any | Any | Composes from Deposit/Reload/Cashback/Wagering/Free-spin — no new mechanic | Per each composed row |
+| Wagering / turnover bonuses | T1/T2/T3/T4 | R1/R2/R5/R6 | C1 | Generic wagering bonus | Yes |
+| Promo codes / voucher / bonus codes | T2 | Any | Any | Coupon row (W4) | Yes |
+| Manual bonuses | T3 | R2/R5 | C1 or C3 | Generic-wagering-bonus (C1, in slice) or Cash-reward (C3, **out** of slice) | Only the C1-shaped variant |
+| Compensation / goodwill | T3 | R2 | C1 or C3 | Same flag as manual bonuses | Only the C1-shaped variant |
+| VIP / loyalty | T4 (points/loyalty redemption signal) or T3 (manual VIP-desk grant) | R2/R5/R6 | C1/C3 | Loyalty-reward row (T4-shaped, **out** — blocked on Points/Gamification) or an ordinary manual bonus (T3-shaped, in-slice-composable) | Only the T3-shaped variant |
+| Retention / reactivation | T1 (a dormancy signal — **not** one of Bonus Engine's five subscribed events) or T3 (manual) | R1/R2 | C1 | Composes from Deposit/Reload/Generic-wagering | Only the T3-shaped (manual) variant; the automated dormancy-trigger variant needs a new event producer this document does not build |
+| Birthday / anniversary | T1 (a calendar/scheduled signal — likewise not one of the five subscribed events) or T3 (manual) | R2 | C1/C3 | Same flag as retention | Only the T3-shaped variant |
+| Referral / affiliate | T4 (a referral-confirmation signal — does not exist yet) or T3 (manual) | R2 | C1/C3 | Symmetrical to the tournament/mission boundary already established (§2's general rule) | Only the T3-shaped variant |
+| Tournament / competition rewards | T4 | R2/R6 | C1/C3 | Tournament-reward row | **No** — §2, blocked on Gamification |
+| Mission / challenge rewards | T4 | R2/R6 | C1/C3 | Mission-reward row | **No** — same |
+| Points / XP-triggered rewards | T4 | R2/R6 | C1/C3 | Loyalty-reward row | **No** — blocked on Points accounting, doc 24 |
+| Provider-native bonuses | T5 | — (never enters our wallet) | C4 | §3/§3.2's `external`/`inside_provider` shape | **No** — requires an actual external provider relationship (scope plan item 4) |
+
+**This mapping adds zero bonus types beyond the five already authorized
+for the first slice** (Deposit, Reload, Cashback, Generic Wagering,
+Coupon, per Stage 4H-B0's scope plan §1) — every catalogue row composes
+from those five plus the already-named, already-deferred rows (Free
+spins/bets, Cash reward, Tournament/Mission/Loyalty). Where a catalogue
+item needs an event producer Bonus Engine's own five subscribed events do
+not supply (dormancy signals, calendar/scheduled signals, referral
+confirmation), that is named above as a genuine new dependency on a
+producer this document does not build — not silently assumed available.
+
+### W4. Coded bonuses
+
+A "coded bonus" is trigger mechanic **T2** composed with any reward/
+completion mechanic — not a parallel object. When `OfferVersion.grant_
+policy = code_redeemed`, the eligibility axis carries: a code (or code-pool
+reference), a validation rule (format/checksum), a per-code and/or
+per-Offer `redemption_limit`, and any stacking/conflict predicate (e.g.
+"excludes Campaign X" / "requires no other active Offer of type Y" for
+this player) — evaluated at the same `issued`-time eligibility snapshot
+(T.4), not a new mechanism.
+
+**Enforcement of `redemption_limit`, stated honestly rather than
+invented**: a *per-player* limit is enforced as an ordinary DB uniqueness
+constraint on the redemption attempt (the same discipline as the already-
+noted "redeemed-code uniqueness constraint... left to the implementation
+stage" from Stage 4H-B0's migration-sequencing note, item 7) — not a Risk
+rule, since no `count`-shaped `LimitKind` exists yet (Dependency Freeze §3).
+A *global* redemption cap generalizes the already-named, already-open
+"campaign-level budget cap has no enforcement mechanism or owner" gap
+(Genuine Gaps item 7) from an amount ceiling to a count ceiling; this
+document does not invent an enforcement mechanism for it, consistent with
+that gap's own standing status.
+
+**No bypass path, by construction, not by promise**: the code-redemption
+endpoint (already named in Stage 4H-B0's scope plan §1 item 5) does
+exactly three things — validate the code's format, resolve it to an Offer,
+and check the redemption-limit constraint — before handing off to the
+*identical* `(none) → issued` pipeline every other trigger uses:
+`AssetAuthorization → RG → Risk` (T.1), the Offer eligibility-axis
+snapshot (T.4), and §9's idempotency key. A code is only a different
+`trigger_reference` value feeding that one existing transition row in
+§1.3; it does not skip, reorder, or soften any step of it. Jurisdiction/
+brand/tenant/segment restriction on a code is identical to any other
+Offer-level restriction (§7/§8) — a code is not a parallel scoping
+mechanism.
+
+### W5. Manual and bulk assignment
+
+**`BulkGrantJob`**: `id`, tenant/brand scope (always scoped, never
+platform-wide, mirroring Grant, §8), `campaign_id`/`offer_version_id`,
+`target` (a single `player_account_id`, an explicit list, or a Segment +
+SegmentVersion reference resolved **live at run time**, W7), `requested_by`,
+`requested_at`, `approval_state` (`pending_four_eyes` | `approved` |
+`rejected`), `status` (`queued`/`running`/`completed`/
+`partially_completed`/`failed`), and a job-level `idempotency_key` (a
+resubmission of the identical job spec is a no-op against the same key,
+never a second job).
+
+**Resumability and per-player isolation**: an append-only
+**`BulkGrantJobItem`** row per targeted player, each keyed
+`(tenant_id, bulk_grant_job_id, player_account_id)` (DB-unique), each
+independently running the **full** T.1 three-way gate for that one player
+— bulk assignment is `N` individual `issued` transitions sharing one job
+correlation id, never a batch-level bypass — and each recording its own
+outcome (`issued` | `denied:<reason_code>` | `already_granted:<grant_id>` |
+`error`) and timestamp. A crashed/resumed job re-walks its target list and
+skips every player who already has a `BulkGrantJobItem` row of any
+outcome: resumable and idempotent by construction, with duplicate-grant
+prevention supplied by the ordinary `issued`-time idempotency key (§9),
+not a bulk-specific mechanism.
+
+**Live segment resolution, not a stale snapshot**: a segment-targeted
+job's member list is resolved against the current SegmentVersion at
+**job-run time**, not frozen at job-creation time — mirroring T.4's
+"RG/Risk/AssetAuthorization repeated live" rule one level up, applied to
+segment membership itself, so a player who has since become
+RG-excluded, Risk-denied, or left the segment is never silently included
+from a stale list.
+
+**Four-eyes threshold — flagged, not invented here.** CLAUDE.md requires
+four-eyes approval above a configurable threshold for manual balance
+adjustments; a `BulkGrantJob` is exactly such an action at batch scale.
+Per the directive's explicit instruction, the specific threshold (whether
+evaluated per-item amount, aggregate job amount, or player count) is
+coordinated with `security`'s parallel Wave 1 dispatch, not set
+unilaterally here. **Fail-closed default until that threshold is set**:
+any `BulkGrantJob` targeting more than one player, or any single-player
+manual grant whose `BonusReward` amount exceeds the Campaign/tier's
+existing per-transaction Risk `max_amount` ceiling (§4.1 item 2), requires
+four-eyes approval before leaving `pending_four_eyes` — a conservative
+placeholder, not a final policy.
+
+**Tenant/brand isolation and auditability**: every `BulkGrantJob` and
+`BulkGrantJobItem` inherits the ordinary Grant RLS pattern (§8) and writes
+an `audit.Record` at creation, approval/rejection, start, completion, and
+per-item outcome (§10's pattern), correlated by the job's own id, so a
+single audit query answers "who authorized this batch, under what rules,
+and what happened to every targeted player" without joining a mutable
+status table.
+
+### W6. Bonus Suggestions — a separate, non-financial domain
+
+**`BonusSuggestion`** never creates a Grant, never moves money, and never
+calls RG/Risk/AssetAuthorization's value-moving checkpoints — it is a
+proposal artifact consumed by a human reviewer, structurally incapable of
+becoming a financial fact on its own.
+
+Lifecycle: `Generated → UnderReview → {Approved | Rejected | Edited} →
+{Activated | Discarded}`.
+
+- **Generated**: carries a mandatory `originating_rule`/`originating_signal`
+  reference (a rule id, a model version, or a staff actor id for an ad hoc
+  suggestion) and a `proposed_config` (an inert structured blob — not an
+  Offer version until Activated).
+- **UnderReview**: a reviewer is assigned or the queue entry is claimed; no
+  financial commitment exists at this state.
+- **Approved / Rejected / Edited**: `reviewer_id`, `decided_at`, and — for
+  Edited — the specific modified fields, diffed against `proposed_config`,
+  so a suggestion silently approved-with-private-edits never happens.
+- **Activated**: only reachable from Approved (or Edited-then-Approved).
+  Activation means exactly one thing: the reviewer's decision is submitted
+  through the **ordinary, unmodified** Campaign/Offer/Grant (or
+  `BulkGrantJob`, or single manual Grant) pipeline — Activation grants no
+  shortcut through eligibility/RG/Risk/AssetAuthorization. The resulting
+  Campaign/Offer/Grant carries an `originating_suggestion_id` back-reference
+  for traceability.
+- **Discarded**: terminal, no financial artifact, reason optional but
+  recorded if given.
+
+Every field the directive names is stored append-only with full audit
+trail, own tenant/brand scope (never platform-wide, mirroring Grant).
+**Why this is genuinely separate, not a Bonus Engine sub-object**: no
+`BonusSuggestion` table carries any `player_bonus`-denominated field or
+ledger reference until Activation produces one indirectly through the
+ordinary Grant path — it trivially satisfies CLAUDE.md's "never track
+liability only in a side table" rule because a suggestion is not liability
+at all. This document does not decide whether `BonusSuggestion` lives in
+`internal/bonus` or a separate package — an ordinary package-boundary call
+for the implementation stage, not an architectural one, since either
+choice preserves the one load-bearing property above (Activation never
+bypasses the ordinary Grant pipeline).
+
+**Explicitly out of Wave 1**: any recommendation engine that *populates*
+`BonusSuggestion.Generated` rows (a scoring model, an LTV heuristic) — this
+section designs the object and lifecycle a future recommendation engine
+would populate, never the recommendation logic itself. Building a
+generator ahead of a concrete first consumer (a staff member manually
+creating a suggestion) is exactly the "generality for a hypothetical
+future need" CLAUDE.md's scope test would flag.
+
+### W7. Player segmentation — a reusable abstraction, not Bonus-owned
+
+**Confirmed gap, checked directly**: no existing architecture document
+(`02-domain-and-service-boundaries.md`, checked) currently owns a
+reusable segmentation service. Every "segment" mention in this platform's
+frozen documents today (this doc's §2 eligibility axis, ADR 0031's Risk
+rule scoping) is a free-text field or a Risk-rule scope dimension, never a
+first-class, queryable membership object.
+
+**`ARCHITECTURAL DECISION` (scope only) / `RECOMMENDATION`, flagged for
+`architect`'s cross-domain map**: Bonus Engine's Wave 1 does **not**
+implement a segmentation service. It designs the minimal shape here, and
+writes its own Offer eligibility axis to consume it **by reference**
+(`segment_id` + `segment_version_id`, never an inlined criteria blob), so
+that when a shared segmentation service is authorized elsewhere, Bonus
+Engine needs a data migration to populate the reference, not a redesign.
+
+Shape (design-only):
+
+- **Segment**: id, tenant/brand scope, name, kind (`static` | `dynamic`),
+  `created_by`/`created_at`.
+- **SegmentVersion**: id, `segment_id`, `criteria` (a versioned, immutable
+  AND/OR/NOT-composable predicate expression over player facts), effective
+  timestamp, **immutable once referenced by any consumer** — the identical
+  "frozen version, never a live reference" discipline this entire document
+  already applies to Offer versions, extended to segmentation.
+- **Static membership**: an explicit, staff-assigned, append-only
+  addition/removal list, each entry audited — used for named lists, not
+  derived criteria.
+- **Dynamic membership**: never stored; evaluated live against the current
+  SegmentVersion's criteria at the instant of use — mirroring T.4's split
+  between a snapshotted eligibility-axis fact and a live-repeated
+  compliance gate, applied one level up to segment membership itself.
+
+**Hard boundary, restated because it is the one that matters most**:
+segment criteria may reference only facts that are authoritative
+elsewhere (deposit history via wallet/ledger read APIs, VIP tier via a
+loyalty/CRM read API, jurisdiction via §7's canonical resolver) —
+segmentation **never** becomes a second source of truth for RG/Risk/
+KYC/licensing status, and segment membership **never** overrides or
+bypasses a hard DENY from RG/Risk/AssetAuthorization/KYC. Concretely: a
+Grant's `issued` transition still runs T.1's full three-way gate
+regardless of which segment(s) qualified the Offer — segment membership
+decides eligibility for an Offer's *terms*, never authorization to
+*receive value*, and those remain the same two structurally distinct
+steps T.4 already separates.
+
+**Auditability**: a Grant's Progress trail records the `segment_id` +
+`segment_version_id` (or static-list id) that qualified the player at
+`issued` time, as part of the existing eligibility-axis snapshot (T.2) —
+so a disputing player's or auditor's reconstruction shows exactly which
+segment definition, at which version, produced the decision, with no
+Bonus-owned copy of segmentation logic to drift from the authoritative
+one.
+
+Bonus Engine does **not** hard-code VIP/Risk/AML/KYC categories anywhere
+in its own Campaign/Offer schema — every eligibility-axis dimension that
+looks like "VIP tier" or "risk tier" is a segment reference, resolved
+against whichever domain actually owns that classification, never a
+Bonus-local enum.
+
+### W8. Bonus-funded wagering and mixed-funding rejection
+
+Bonus Engine never re-implements `player_cash`/`player_bonus`/
+`player_locked_cash`/`player_locked_bonus` accounting — it calls the
+authoritative wallet/ledger contract (`ledger-finance`'s parallel Wave 1
+dispatch; §6/Dependency Freeze §5 above). Bonus Engine's own boundary here
+is exactly the split-instruction computation (§6 item 1), never the
+posting.
+
+**Mixed cash+bonus funding for a single stake is rejected deterministically,
+not invented around**, per the directive's own framing that this is
+already HR-2-rejected, fail-closed. Concretely: Bonus Engine's
+split-instruction computation for a wagering event always produces a
+**single-origin** funding decision (cash-only or bonus-only), per the
+Offer's Wagering-axis contribution rules and the wallet's own
+already-authoritative balance-selection logic (a `wallet`-owned decision,
+never reimplemented here) — never a fractional per-stake blend across the
+two origins. Where a stake would need both origins to be fully funded,
+Bonus Engine's instruction is a deterministic rejection (ordinary
+insufficient-funds handling), never an automatic blend. The named,
+not-yet-generalized configuration boundary this fixes:
+
+> **`MixedFundingPolicy`** (config key, fails closed until set). Bonus
+> Engine's own default and only currently-authorized value is
+> **`REJECT_SINGLE_ORIGIN_ONLY`**: a stake exceeding the player's
+> single-origin balance is rejected, never blended. No other value is
+> designed, authorized, or implemented here — introducing one (e.g. any
+> form of proportional cash+bonus stake splitting) is a new architecture
+> decision requiring its own ADR and human sign-off, mirroring T.2's
+> identical treatment of cross-asset bonus grants (ADR 0032 §8). Wave 1
+> does not permit it by silence.
+
+### W9. Human-decision safety analysis
+
+For each of the three decisions in ADR 0039 (Human Decision Register),
+per the directive's (A)/(B)/(C) framework:
+
+**Decision 1 — `OpenBetSelfExclusionPolicy` default.**
+(A) B1 does not depend on it. The first slice's five bonus types have no
+sportsbook dependency (`internal/sportsbook` does not exist). (B)
+Everything in Wave 1 can be built without it — no first-slice Offer/
+Campaign/Grant path references sportsbook or this policy at all. Bonus
+Engine's own RG-denial handling at activation/conversion (§5, Dependency
+Freeze §4's "prospective, not retroactive" rule) is identical regardless
+of which default is chosen. (C) Any future sportsbook-funded bonus type
+needing to reason about a bonus-funded stake on self-exclusion stays
+gated — but that already depends on `internal/sportsbook` existing at
+all, an independently larger gate. Wave 1 invents no default here.
+
+**Decision 2 — Terminal-Grant settlement-credit resolution (G-2).**
+(A) B1 does not depend on it, independently confirmed by ADR 0039
+("cash-only sportsbook wagering is unaffected... G-2... blocks
+bonus-funded sportsbook wagering directly") and by Stage 4H-B0's scope
+plan (sportsbook/free-bet fulfillment explicitly deferred out of the
+first slice). No first-slice bet ever posts to `player_locked_bonus`. (B)
+The full W2.8 WageringProgress/Model C design can be built without it —
+Model C is exercised casino-only in the first slice (`P_firm == P_net`
+identically, §6.6.3), a regime G-2 never reaches. (C) The Terminal-Grant
+Technical Contract's §T.7 mechanism (ACTION_REFORFEIT /
+ACTION_ROUTE_TO_CASH / ACTION_HOLD_FOR_REVIEW) stays fully specified and
+unselected; Wave 1 builds none of the three actions and does not enable
+bonus-funded locked-stake wagering of any kind until it is answered. Any
+future locked-stake product must re-check Dependency Freeze §9's status
+before assuming bonus-funded locking is available.
+
+**Decision 3 — Mixed/bonus-funded sportsbook cashout policy + FD-1.**
+(A) B1 does not depend on it — W8 above already rejects mixed cash+bonus
+funding deterministically, and no sportsbook cashout code exists anywhere
+in the platform (confirmed by ADR 0039's own "nothing is blocked, on any
+timeline" finding for this decision). (B) Everything in Wave 1 can be
+built without it — no first-slice object involves a cashout concept
+(cashout is sportsbook-only, and sportsbook does not exist). (C) Any
+future combination of bonus-funded sportsbook wagering **and** a
+sportsbook cashout feature stays gated on both sub-questions (3a
+proceeds-split, 3b FD-1 wagering-progress treatment) being answered
+*together*, per ADR 0039's own framing — and even if cashout code were
+built prematurely, W2.8's own §6.6.5 classification already fails closed
+on `sportsbook_cashout` today (unclassified, excluded from `P_firm`,
+integrity alert), so Wave 1's design would not silently authorize a
+conversion from it regardless.
+
+**Summary: none of the three human decisions blocks any part of this
+Wave 1 domain-model design or Stage 4H-B0's already-authorized first
+slice.** All three are carried forward as explicit, named boundaries that
+fail closed (§T.7's three actions unselected; `MixedFundingPolicy` fixed
+at `REJECT_SINGLE_ORIGIN_ONLY`; `sportsbook_cashout` unclassified) — none
+is defaulted, guessed, or silently built around by this section.
+
+### W10. Forward interfaces for future reward-producing domains (interfaces only, no implementation)
+
+Per the directive's explicit request — Gamification, Points/XP, Missions,
+Achievements, Tournaments, Leaderboards, the Reward Marketplace, and a
+complete Reward Orchestrator remain fully out of scope; the two interface
+points below are named contracts a future producer would implement, not
+new Bonus Engine mechanism, and neither is implemented, stubbed, or given
+a Go signature here:
+
+- **`RewardTriggerSignal`** (consumed, never produced, by Bonus Engine):
+  the shape a future external-signal producer (tournament ranking, mission
+  completion, points redemption, referral confirmation) emits for Trigger
+  mechanic T4 (W3) to react to, exactly as Bonus Engine reacts to
+  `deposit.settled` today (§2's general rule). Minimal fields, drawn from
+  doc 22's canonical envelope (Dependency Freeze §6): `event_id`/
+  `idempotency_key`, `tenant_id`/`brand_id`/`player_account_id`,
+  `producing_domain` (mission | tournament | loyalty | referral | other),
+  either an `offer_reference` or a `reward_amount`/`reward_kind` (whichever
+  the producing domain has already decided — Bonus Engine never
+  re-derives it), and `correlation_id`. This is a naming convention over
+  the subset of doc 22's taxonomy T4 consumes, not a new event-bus
+  concept.
+- **`ExternalRewardProvider`** (§3): unchanged by Wave 1, still an explicit
+  ASSUMPTION section, still deferred to the Master Orchestrator's Reward
+  Orchestrator synthesis and to an actual sportsbook provider relationship
+  existing (scope plan item 4).
+
+### W11. Deferrals to parallel Wave-1 dispatches, and open items carried forward
+
+Recorded in one place for the orchestrator's cross-domain review — none of
+these is resolved by this section:
+
+- **`ledger-finance`**: the posting mechanics for every lifecycle event
+  (§6/§3.1) and for `GrantLedgerAttribution` (W2.5) and the WageringProgress
+  contribution record (W2.8) remain ledger-finance's exact SQL/Go design to
+  produce, per §6.6.4's own ownership split; HR-9/HR-15 guard status
+  (Dependency Freeze §9); the §T.7/G-2 posting mechanics once selected.
+- **`risk`**: the `bonus_conversion` `Operation` value (still not started,
+  Dependency Freeze item 4); a `count`/velocity `LimitKind` for coded-bonus
+  redemption limits and campaign-level budget/redemption caps (W4, Genuine
+  Gaps item 7); the specific four-eyes threshold for `BulkGrantJob` (W5).
+- **`identity-compliance`**: RG/KYC nuance beyond the calling contract
+  already frozen (§5/Dependency Freeze §4); jurisdiction-specific
+  bonus-type bans (§7); any RG-level definition a `WageringRequirement`'s
+  eligibility axis references.
+- **`security`**: RBAC for the coded-bonus redemption endpoint (W4); the
+  `BulkGrantJob` approval workflow and its four-eyes threshold (W5,
+  coordinated, not set here); audit-trail sufficiency for
+  `BonusSuggestion`/`BonusAdjustment` (W6/W2.10).
+- **`architect`**: segmentation-service placement (W7) as a cross-domain
+  map item; the platform-wide `AssetAuthorization.Operation`-composition-
+  order question (T.1) if it resolves differently from Bonus Engine's own
+  placeholder; whether `BonusSuggestion` lives in `internal/bonus` or a
+  separate package (W6).
+- **`sportsbook`**: the correlation point for free-bet fulfillment (§2/§3)
+  and G-2/FD-1's sportsbook-specific triggers — not designed here.
+
+**Genuinely unresolved without a human decision** (restated, not new):
+G-2's three-action selection (§T.13); `OpenBetSelfExclusionPolicy`'s
+platform-wide fallback default; the bonus-funded sportsbook cashout
+proceeds-split (3a) and its required FD-1 companion (3b) — all three
+carried forward unchanged from ADR 0039, none selected, guessed, or
+defaulted by this section (W9).
+
+Owner of this section: `bonus-engine`. Nothing in this section authorizes
+writing `internal/bonus`, a migration, or a test.
