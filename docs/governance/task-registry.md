@@ -368,6 +368,48 @@ to `claude/focused-wright-jw88w9` at `17f1057`, pushed, full integration
 suite green. No other workstream produced code this stage, so no other
 integration action applies.
 
+## Stage 4H-B1 — Bonus Engine Implementation
+
+**AUTHORIZED**, started at HEAD `7e1656f` on `claude/focused-wright-jw88w9`.
+Wave structure per the stage directive §36: 8 gated waves, each requiring
+a clean prior-wave review before the next starts. No specialist may
+review its own work at any wave.
+
+**Migration-number reservation**: block `0050`+ (the `0050`/`0051`/`0052`
+numbers Stage 4H-B0-R7 reserved for its own Workstreams B/C/D were never
+consumed — R7 closed as design-only for those workstreams — so this block
+is released back to the pool and reused here, not duplicated). Exact
+count to be determined by Wave 1's schema design; specialists claim
+numbers sequentially and self-resolve collisions per the established
+protocol (check `git log`/`ls migrations/` before writing, document any
+collision found).
+
+**Roster note**: the directive names `bonus-finance` as a specialist.
+No such agent type exists in this environment's configured roster. Its
+concerns (bonus-specific financial correctness) are covered jointly by
+`ledger-finance` (ledger invariants, ownership platform-wide per
+CLAUDE.md) and `bonus-engine` (bonus-specific calculation rules) — the
+same adaptation pattern used for other roster gaps in prior stages.
+`architect`'s Wave 1 cross-domain map is instructed to confirm this
+coverage is sufficient before Wave 1 closes.
+
+| ID | Owner | Status | Dependencies | Files owned | Workstream | Blockers |
+|---|---|---|---|---|---|---|
+| 4HB1-01 | Orchestrator | Done | none | `docs/governance/*` | Governance setup | none |
+| 4HB1-02 | bonus-engine | In progress | none | `docs/architecture/10-bonus-engine-architecture.md` | Wave 1: domain model + full bonus catalogue + campaign/offer/grant/segmentation/coded-bonus/bulk/suggestion design | none |
+| 4HB1-03 | ledger-finance | In progress | none | `docs/architecture/ledger-accounting-model.md` | Wave 1: financial/ledger integration contract (bonus_expense, Rule B2 generator, conversion flow) | none |
+| 4HB1-04 | risk | In progress | none | ADR 0031 addendum | Wave 1: Risk integration contract | none |
+| 4HB1-05 | identity-compliance | In progress | none | ADR 0034 addendum | Wave 1: RG + identity/multi-account contract | none |
+| 4HB1-06 | sportsbook | In progress | none | doc 09 addendum (review only) | Wave 1: provider-native bonus coexistence contract | none |
+| 4HB1-07 | casino | In progress | none | doc 08 addendum (review only) | Wave 1: casino event-consumption contract | none |
+| 4HB1-08 | security | In progress | none | `docs/security/security-architecture.md` addendum | Wave 1: RBAC/audit/tenancy/RLS contract | none |
+| 4HB1-09 | architect | In progress | none | new cross-domain implementation-contract doc | Wave 1: master architecture→ADR→object→service→API→event→ledger→audit→test mapping | none |
+| 4HB1-10 | qa | In progress | none | `docs/testing/testing-strategy.md` addendum | Wave 1: full test-matrix design | none |
+
+Wave 1 independent review round and reconciliation to be added once these
+report back. No coding dispatch is authorized until reconciliation is
+complete, per the directive's explicit gate.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and
