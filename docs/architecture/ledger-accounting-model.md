@@ -7627,6 +7627,88 @@ once, for both to build against.
   authorization, but it is not, by itself, the independent cross-domain
   re-verification a future Wave 2 readiness call still requires.
 
+##### 7.7.2.12 Final ruling — the `ACTION_ROUTE_TO_CASH`/`ACTION_REFORFEIT` posting shape is 4-leg/2-leg, not 2-leg/2-leg, and this is correct (Stage 4H-B1 Wave 2 Phase 11, `ledger-finance`, closing the question `architect`'s Phase 10 composition certification deferred back to this domain)
+
+§7.7.2.9's own text above, and `10-bonus-engine-architecture.md`'s N1.4
+step 5c, both describe `ACTION_ROUTE_TO_CASH` as `Dr player_bonus_held
+payout+released_lock_amount / Cr player_cash` — two legs — and
+`ACTION_REFORFEIT` as `Dr player_bonus_held payout+released_lock_amount /
+Cr promo_liability` — also two legs. **Both descriptions are correct as
+far as they go, and incomplete in a way that matters if read as the
+FULL posted transaction rather than as the CALLER-supplied legs.**
+`player_bonus_held` is a `BONUS_SET` member (§6.1's extension note,
+§7.7.2.3), so §7.4's Rule B2 (extended) mirror generator — frozen,
+"admits no exception by transaction type," invoked unconditionally
+inside `Post` — fires on both postings exactly as it fires on every
+other `BONUS_SET`-touching posting in the codebase. Traced against the
+real implementation (`internal/bonus/held_disposition_ops.go`'s
+`ResolveHeldDispositionAction`, Stage 4H-B1 Wave 2 Phase 3, unchanged by
+any later fix dispatch):
+
+- **`ACTION_ROUTE_TO_CASH`** supplies exactly the two caller legs above.
+  `player_bonus_held`'s net movement is a debit (value leaving the
+  `BONUS_SET`), so step 2 mirrors a **credit to `promo_liability`**; the
+  overall residual after that mirror is non-zero (the value is leaving
+  the combined `{BONUS_SET, promo_liability}` system into `player_cash`,
+  a genuine boundary crossing), so step 3 adds a **debit recognition leg
+  to `bonus_expense`/`provider_payable`**, per `BonusCost.Funding`. Final
+  shape: **four legs** — `Dr player_bonus_held / Cr player_cash / Cr
+  promo_liability / Dr bonus_expense` — structurally IDENTICAL to
+  §7.6's `bonus_conversion` shape, with `player_bonus_held` standing in
+  for `player_bonus`. This is not a coincidence: routing held value to
+  cash is, economically, the same act as converting a Grant's balance to
+  cash (a real, spendable credit leaving the bonus program), and Rule B2
+  — by design, per its own uniform net/residual algorithm with no
+  transaction-type branch — produces the same shape for the same
+  economic act regardless of which `BONUS_SET` member the value happened
+  to be sitting in when the act occurred.
+- **`ACTION_REFORFEIT`** supplies exactly one caller leg (`Dr
+  player_bonus_held`). Its net movement mirrors to a **credit to
+  `promo_liability`** of the identical magnitude, and the residual after
+  that mirror is exactly zero (the value never leaves the `{BONUS_SET,
+  promo_liability}` system — it returns to the liability pool, not to a
+  spendable account) — so step 3 adds nothing. Final shape: **two legs**
+  — `Dr player_bonus_held / Cr promo_liability` — matching §7.7.2.9's own
+  description exactly, with no discrepancy, because forfeiture's residual
+  genuinely is zero. (`terminalWriteDown`'s ordinary `player_bonus`
+  forfeiture, §7.7, is the identical two-leg shape one level up in the
+  Grant lifecycle, for the same reason.)
+
+**Ruling: both shapes are financially sound as implemented, and no
+design change is needed.** `SUM(DEBITS) == SUM(CREDITS)` holds for each
+(verified directly against the posted entries, not re-derived from this
+document's prose); no leg is hand-assembled by the caller (HR-17 —
+`held_disposition_ops.go` supplies only the caller-owned legs and lets
+`Post` generate the rest, exactly as every other `BONUS_SET`-touching
+call site in this codebase does); the `ACTION_ROUTE_TO_CASH` shape
+carries the same cost-recognition semantics as an ordinary conversion,
+which is the correct economic treatment (irrevocably releasing bonus
+value to a spendable balance is a genuine cost, whether the value was
+sitting in `player_bonus` or `player_bonus_held` at the moment it
+happened), and the `ACTION_REFORFEIT` shape correctly recognizes no cost
+at all (forfeited value was never given away). Traced end to end across
+a full terminal-Grant lifecycle (hold-capture's own §7.4 mirror/
+recognition legs for the win-payout portion, composed with each
+resolution's own legs), the net effect over the complete
+capture-then-resolve sequence reconciles correctly in both directions —
+route-to-cash recognizes `bonus_expense` for exactly the original locked
+stake (the win-payout portion's cost was already recognized once, via
+`house_gaming`, at hold-capture, and is not double-recognized here);
+reforfeit recognizes no net `bonus_expense` at all, consistent with
+nothing having actually been given away.
+
+**This closes the question in full — for `ledger-finance`'s domain.**
+§7.7.2.9's and doc 10 N1.4 step 5c's two-leg prose is not wrong, only
+silent about the automatic legs §7.4 already documents apply
+universally; no correction to either document's caller-leg description
+is required, and no "flagged, not resolved" status remains attached to
+this posting shape in this document. `10-bonus-engine-architecture.md`
+is `bonus-engine`'s own file, not amended here, but the Orchestrator
+should route this section to `bonus-engine` so its own N1.4 step 5c
+prose can, at its discretion, cross-reference this ruling for a reader
+who has not also read §7.4 — a documentation clarity nice-to-have, not a
+financial-correctness gap.
+
 ### 7.8 Rounding integration
 
 **Bonus MUST use the one shared function. Never a second implementation,

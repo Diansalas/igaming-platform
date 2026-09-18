@@ -324,6 +324,26 @@ func ActivateGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, 
 	if err != nil {
 		return Grant{}, GateOutcome{}, err
 	}
+	// LF-Phase-11 (migration 0067): record the Grant's granted_amount -
+	// an immutable computation input (doc 29 BI-3), never a balance, never
+	// re-derived - exactly once, in this same transaction, immediately
+	// after the sole bonus_grant posting above. This is the ONLY point in
+	// the Grant lifecycle that ever writes this column (migration 0067's
+	// trigger extension rejects any later change), which is why the
+	// `granted_amount IS NULL` guard below is a belt-and-suspenders
+	// no-op-on-replay rather than a real branch: UpdateGrantStatus's own
+	// CAS above already guarantees this statement runs at most once per
+	// Grant (a redelivered activation attempt fails the CAS first). Closes
+	// DR-4HB1W2-02's disclosed gap: internal/economicop.ConsumeRootBudget's
+	// value-budget query sums exactly this column for
+	// OperationBonusManualGrant/OperationAPIInitiatedGrant, which had no
+	// column to read before this migration.
+	if _, err := tx.Exec(ctx,
+		`UPDATE bonus_grants SET granted_amount = $3 WHERE tenant_id = $1 AND id = $2 AND granted_amount IS NULL`,
+		tenantID, grantID, amountMinor,
+	); err != nil {
+		return Grant{}, GateOutcome{}, fmt.Errorf("bonus: record granted_amount: %w", err)
+	}
 	before, after := string(GrantIssued), string(GrantActivated)
 	ledgerTxID := postResult.TransactionID
 	if _, err := AppendGrantProgress(ctx, tx, GrantProgressEntry{
