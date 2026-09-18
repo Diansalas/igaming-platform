@@ -102,14 +102,39 @@ var consumptionShapes = map[OperationType]string{
 // rows of consumptionShapes' table count as an ACTUALLY REALIZED
 // consumption (doc 34 §3.4's "recipient reached" test) versus a row that
 // merely exists for resumability/audit purposes but never issued
-// anything. bonus_grants has no such intermediate state - a row existing
-// IS the issuance, so no extra predicate applies. bulk_grant_job_items
-// DOES have one: a 'pending' or 'denied' item was never actually granted
-// and must not permanently occupy a recipient-ceiling slot (RK-W15P2-2's
-// "a clawed-back recipient has still been reached" rule is about a REAL
-// grant later reversed, never about an attempt denied before issuing).
+// anything.
+//
+// bonus_grants DOES need a realized predicate (fixed here, DR-4HB1W2-02):
+// a bonus_grants row is inserted by issueIdempotent/IssueGrant at status
+// 'issued' BEFORE ConsumeRootBudget ever runs for it - the consume now
+// happens inside ActivateGrant's PostGateHook (DR-4HB1W2-01), strictly
+// AFTER the T.1 gate chain but strictly BEFORE the 'issued'->'activated'
+// UpdateGrantStatus call (lifecycle.go's ActivateGrant, PostGateHook call
+// site precedes the status-transition call site). So at the instant THIS
+// execution's own count query runs, its own just-inserted row is still
+// 'issued', never yet 'activated' - excluding 'issued' rows here is
+// exactly what makes ConsumeRootBudget's "!alreadyCounted && currentCount+
+// 1 > ceiling" check see the subject player as NOT yet counted, the same
+// property bulk_grant_job_items' own 'pending' exclusion already gives
+// the bulk surface. Without this, the subject was ALWAYS already counted
+// (alreadyCounted=true, since the row already existed pre-fix) and
+// recipient_ceiling was a structural no-op on this surface - the finding
+// this fix closes. 'cancelled' is excluded for the same reason
+// bulk_grant_job_items excludes 'denied': a Grant the T.1 gate chain
+// denied (ActivateGrant's own pre-PostGateHook GateCheckpoint call, which
+// transitions issued->cancelled and returns BEFORE PostGateHook ever
+// runs) was never actually granted and must not occupy a recipient-
+// ceiling slot. Every OTHER status (activated and anything reachable only
+// from it - in_progress, pending_settlement, completed, converted,
+// expired, forfeited, reversed) is a REAL, ledger-posted grant and stays
+// counted forever, even if later reversed/forfeited (RK-W15P2-2: "a
+// clawed-back recipient has still been reached" - that rule is about a
+// REAL grant later reversed, never about an attempt denied before
+// issuing). Scoped to exactly this table/column per this dispatch's own
+// constraint - no other operation_type's shape is touched.
 var consumptionRealizedFilter = map[string]string{
 	"bulk_grant_job_items": "AND c.outcome IN ('issued', 'already_granted')",
+	"bonus_grants":         "AND c.status NOT IN ('issued', 'cancelled')",
 }
 
 // ErrUndeclaredConsumptionShape is RK-W15P2-4's binding fail-closed

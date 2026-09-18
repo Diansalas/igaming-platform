@@ -714,6 +714,293 @@ func TestEOI_SingleManualGrant_RejectsUnresolvableParent(t *testing.T) {
 	}
 }
 
+// seedExtraBonusPlayer inserts one more player_account (+ wallet, for
+// f.assetCode) beyond the lifecycleFixture's own single f.playerID/
+// f.walletID - mirroring TestEOI_BulkGrantRecipientCeiling_RejectsBeyond
+// Budget's own inline extra-player seeding, factored out because both
+// regression tests below need MULTIPLE DISTINCT players relaying the SAME
+// parent_operation_id (the exact SEC-W15-02 decomposition shape).
+func seedExtraBonusPlayer(t *testing.T, pool *db.Pool, f lifecycleFixture) (playerID, walletID uuid.UUID) {
+	t.Helper()
+	playerID = uuid.New()
+	walletID = uuid.New()
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		personID := uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status) VALUES ($1,$2,$3,$4,$5,'x','active')`,
+			playerID, f.tenantID, f.brandID, personID, playerID.String()+"@example.com"); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO wallets (id, tenant_id, brand_id, player_account_id, asset_code) VALUES ($1,$2,$3,$4,$5)`,
+			walletID, f.tenantID, f.brandID, playerID, f.assetCode)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed extra player: %v", err)
+	}
+	return playerID, walletID
+}
+
+// TestEOI_SingleManualGrant_RecipientCeiling_RejectsSecondDistinctPlayer is
+// DR-4HB1W2-02's own regression proof (Stage 4H-B1 Wave 2, closing the gap
+// the DR-4HB1W2-01 dispatch found and correctly declined to fix on the
+// spot, as out of that dispatch's own narrow scope): before this fix,
+// economicop.ConsumeRootBudget's recipient-ceiling check was a
+// STRUCTURAL NO-OP on this surface. IssueSingleManualGrant's own
+// issueIdempotent call always inserts the bonus_grants row (this
+// operation's own consumption record) BEFORE ConsumeRootBudget ever runs
+// (which now happens inside ActivateGrant's PostGateHook, per
+// DR-4HB1W2-01) - and, before this fix, consumptionRealizedFilter had no
+// entry for "bonus_grants", so that just-inserted, still-'issued' row was
+// ALREADY counted (alreadyCounted=true) the instant the check ran,
+// meaning "!alreadyCounted && currentCount+1 > ceiling" could never fire.
+//
+// This is exactly the "single-Grant staff-action-equivalent surface" door
+// SEC-W15-02's original finding named as the harder-to-close half: a
+// caller relaying ONE shared, approved parent_operation_id across MANY
+// individual IssueSingleManualGrant calls, each targeting a DIFFERENT
+// player, must be capped by that operation's recipient_ceiling - exactly
+// as the bulk surface (bulk_grant_job_items, which already carries its
+// own correct 'pending'-excluding realized filter) already is.
+//
+// Fix chosen (see enforce.go's consumptionRealizedFilter doc comment for
+// the full reasoning): give "bonus_grants" a genuine realized predicate,
+// "AND c.status NOT IN ('issued', 'cancelled')" - symmetric with
+// bulk_grant_job_items' own discipline, and correct because
+// ActivateGrant's PostGateHook call site (lifecycle.go) runs strictly
+// BEFORE the 'issued'->'activated' UpdateGrantStatus call, so THIS
+// execution's own row is always still 'issued' (never yet 'activated')
+// at the instant its own count query runs - excluding 'issued' rows is
+// exactly what stops an execution from permanently counting itself. The
+// alternative (excluding the current row by its own id) was rejected: it
+// requires widening ConsumeRootBudget's signature for every caller
+// (including the bulk surface, out of this dispatch's own scope) for no
+// benefit over the realized-filter approach, which needs no signature
+// change and is symmetric with the table bulk_grant_job_items already
+// uses correctly.
+//
+// IntendedAggregateValue is deliberately left nil on this root: bonus_
+// grants has no "granted_amount" (or any amount) column at all (migration
+// 0057), so ConsumeRootBudget's value-budget branch (which hardcodes
+// "granted_amount" as its value column, ready-built only for
+// bulk_grant_job_items' own schema) would fail with an undefined-column
+// error the instant it ran against this shape. That is a SEPARATE, real,
+// pre-existing gap this dispatch's own scope does not cover (fixing it
+// requires an architecture decision on where a Grant's own monetary value
+// for budget-accounting purposes should be sourced from - bonus_grants
+// has no amount column, only bonus_grant_progress and the ledger posting
+// do - which is exactly the kind of cross-cutting call CLAUDE.md routes
+// through the architect/ledger-finance specialists, not decided
+// unilaterally here) - reported, not silently patched, and deliberately
+// not exercised by this test so this recipient_ceiling regression proof
+// stays isolated from it.
+func TestEOI_SingleManualGrant_RecipientCeiling_RejectsSecondDistinctPlayer(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	co := seedCampaignOffer(t, pool, f.tenantID, f.brandID, f.staffID)
+	player2ID, wallet2ID := seedExtraBonusPlayer(t, pool, f)
+
+	var rootID uuid.UUID
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		ceiling := int32(1)
+		asset := f.assetCode
+		op, err := MintRootOperation(ctx, tx, MintRootOperationParams{
+			TenantID: f.tenantID, OperationType: economicop.OperationBonusManualGrant,
+			InitiatingActorType: "staff", InitiatingActorID: f.staffID,
+			SubjectScope:     economicop.SubjectScopeEnumeratedSet,
+			AssetCode:        &asset,
+			RecipientCeiling: &ceiling,
+			IdempotencyKey:   "single-manual-ceiling-test", CorrelationID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+			ApprovalState: economicop.ApprovalApproved,
+		})
+		if err != nil {
+			return err
+		}
+		rootID = op.OperationID
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("mint EOI root: %v", err)
+	}
+
+	// First IssueSingleManualGrant call, first player, relaying rootID -
+	// must succeed and fully activate (the ceiling of 1 has one slot,
+	// this is the only consumer so far).
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		g := newTestOfferGrant(f, co, "manual-player-1")
+		activated, outcome, err := IssueSingleManualGrant(ctx, tx, g, rootID, f.jurisdictionCode, f.staffID, big.NewInt(500))
+		if err != nil {
+			return fmt.Errorf("first player: unexpected error: %w", err)
+		}
+		if !outcome.Allowed || activated.Status != GrantActivated {
+			return fmt.Errorf("first player: expected activated grant, got status=%s allowed=%v", activated.Status, outcome.Allowed)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Second IssueSingleManualGrant call, a DIFFERENT player, relaying the
+	// SAME rootID (SEC-W15-02's decomposition shape) - must be denied for
+	// exceeding recipient_ceiling=1. Under the PRE-FIX code, this call
+	// incorrectly succeeded (the structural no-op this test exists to
+	// close).
+	//
+	// The closure returns the raw error UNCONDITIONALLY (never swallowing
+	// it into a nil return, even once it is confirmed to be the EXPECTED
+	// denial) - exactly like every real caller must - so WithTenant's own
+	// deferred Rollback actually fires, matching production's own "an
+	// over-budget attempt never leaves a committed Grant behind" guarantee
+	// (this function's own doc comment). Asserting on the sentinel happens
+	// OUTSIDE the transaction, against the error WithTenant itself returns.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		g := newTestOfferGrant(f, co, "manual-player-2")
+		g.PlayerAccountID = player2ID
+		g.WalletID = wallet2ID
+		_, _, err := IssueSingleManualGrant(ctx, tx, g, rootID, f.jurisdictionCode, f.staffID, big.NewInt(500))
+		return err
+	})
+	if !errors.Is(err, economicop.ErrBudgetExhausted) {
+		t.Fatalf("second player: expected ErrBudgetExhausted (recipient_ceiling=1 already reached by a different player under the same root), got %v", err)
+	}
+
+	// The second player must have NO activated (or even issued) grant
+	// left behind - the whole denied attempt's transaction rolled back in
+	// full, including the bonus_grants row issueIdempotent inserted before
+	// the denial was discovered.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var count int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM bonus_grants WHERE tenant_id = $1 AND player_account_id = $2`, f.tenantID, player2ID).Scan(&count); err != nil {
+			return err
+		}
+		if count != 0 {
+			return fmt.Errorf("expected zero bonus_grants rows left behind for the denied second player, got %d", count)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAdversarial_ConcurrentSingleManualGrant_NeverExceedRecipientCeiling
+// is DR-4HB1W2-02's concurrent counterpart, matching TestAdversarial_
+// ConcurrentBulkGrantWorkers_NeverExceedRecipientCeiling's own discipline
+// (including its n=2 rationale - see that test's own NAMED FINDING
+// comment - to stay clear of Postgres's documented 3+-waiter tuple-lock
+// deadlock-detector pathology on ONE contended row, which is an
+// availability/robustness matter, not the security property either test
+// proves): two goroutines, each running an ENTIRE, independent
+// IssueSingleManualGrant call (its own transaction) against the SAME EOI
+// root (recipient_ceiling=1), targeting two DIFFERENT players. Exactly
+// one must win.
+func TestAdversarial_ConcurrentSingleManualGrant_NeverExceedRecipientCeiling(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	co := seedCampaignOffer(t, pool, f.tenantID, f.brandID, f.staffID)
+
+	const n = 2
+	ceiling := int32(1) // strictly fewer than n concurrent workers
+
+	type playerFixture struct {
+		playerID uuid.UUID
+		walletID uuid.UUID
+	}
+	players := make([]playerFixture, n)
+	players[0] = playerFixture{playerID: f.playerID, walletID: f.walletID}
+	for i := 1; i < n; i++ {
+		pid, wid := seedExtraBonusPlayer(t, pool, f)
+		players[i] = playerFixture{playerID: pid, walletID: wid}
+	}
+
+	var rootID uuid.UUID
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		asset := f.assetCode
+		op, err := MintRootOperation(ctx, tx, MintRootOperationParams{
+			TenantID: f.tenantID, OperationType: economicop.OperationBonusManualGrant,
+			InitiatingActorType: "staff", InitiatingActorID: f.staffID,
+			SubjectScope:     economicop.SubjectScopeEnumeratedSet,
+			AssetCode:        &asset,
+			RecipientCeiling: &ceiling,
+			IdempotencyKey:   "concurrent-single-manual-ceiling-test", CorrelationID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+			ApprovalState: economicop.ApprovalApproved,
+		})
+		if err != nil {
+			return err
+		}
+		rootID = op.OperationID
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("mint EOI root: %v", err)
+	}
+
+	// Same retryable-transient-error discipline as TestAdversarial_
+	// ConcurrentBulkGrantWorkers_NeverExceedRecipientCeiling's own NAMED
+	// FINDING comment: N backends issuing `SELECT ... FOR UPDATE` against
+	// the SAME economic_operations root row can hit real Postgres
+	// deadlock/serialization errors under genuine concurrency - a
+	// transaction that hits one never commits (no over-issuance, no
+	// bypassed check is possible via this path), so retrying it from
+	// scratch is the correct, ordinary mitigation, not a workaround for a
+	// security defect.
+	isRetryableTxError := func(err error) bool {
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) {
+			return false
+		}
+		return pgErr.Code == "40P01" /* deadlock_detected */ || pgErr.Code == "40001" /* serialization_failure */
+	}
+
+	var wg sync.WaitGroup
+	results := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			const maxAttempts = 40
+			for attempt := 0; attempt < maxAttempts; attempt++ {
+				err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+					g := newTestOfferGrant(f, co, fmt.Sprintf("concurrent-manual-%d", idx))
+					g.PlayerAccountID = players[idx].playerID
+					g.WalletID = players[idx].walletID
+					_, _, err := IssueSingleManualGrant(ctx, tx, g, rootID, f.jurisdictionCode, f.staffID, big.NewInt(500))
+					return err
+				})
+				if err == nil || errors.Is(err, economicop.ErrBudgetExhausted) || !isRetryableTxError(err) {
+					results[idx] = err
+					return
+				}
+				time.Sleep(time.Duration(5+idx*3) * time.Millisecond)
+			}
+			results[idx] = fmt.Errorf("worker %d: exhausted %d retries on transient errors", idx, maxAttempts)
+		}(i)
+	}
+	wg.Wait()
+
+	issued, denied := 0, 0
+	for i, err := range results {
+		switch {
+		case err == nil:
+			issued++
+		case errors.Is(err, economicop.ErrBudgetExhausted):
+			denied++
+		default:
+			t.Fatalf("worker %d: unexpected error: %v", i, err)
+		}
+	}
+	if issued != int(ceiling) {
+		t.Fatalf("recipient_ceiling=%d was NOT correctly enforced under real concurrency on the single-Grant surface: expected exactly %d issued, got %d (decomposition/race bypass)", ceiling, ceiling, issued)
+	}
+	if denied != n-int(ceiling) {
+		t.Fatalf("expected exactly %d denied, got %d", n-int(ceiling), denied)
+	}
+}
+
 // TestEOI_BulkGrantItem_ActivateDenialNeverConsumesEOIBudget is
 // DR-4HB1W2-01's own regression proof (Stage 4H-B1 Wave 2 Phase 10,
 // architect composition finding, closed by this dispatch): the locking
