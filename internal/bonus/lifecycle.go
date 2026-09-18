@@ -182,6 +182,48 @@ type ActivateGrantParams struct {
 	// specific business logic, types_*.go) - this function posts exactly
 	// this amount, never recomputes it.
 	Amount *big.Int
+	// PostGateHook, if non-nil, runs EXACTLY ONCE, strictly AFTER the T.1
+	// gate chain below has allowed this activation and strictly BEFORE
+	// the effecting ledger write that follows it - never earlier, never
+	// later - all still inside this SAME transaction/advisory lock (doc
+	// 34 §5.3 rule 3 / doc 10 N2.4a: "the locking EOI consume happens
+	// exactly once, strictly AFTER the gate chain completes, immediately
+	// before the effecting write"). This is the seam
+	// internal/economicop.ConsumeRootBudget's locking `FOR UPDATE` on the
+	// EOI root row is threaded through for the two EOI-gated callers
+	// (targeting.go's IssueSingleManualGrant / runBulkGrantJobItem) -
+	// DR-4HB1W2-01 (Stage 4H-B1 Wave 2 Phase 10, architect composition
+	// finding): the prior code called ConsumeRootBudget BEFORE
+	// ActivateGrant even ran, so its locking EOI-root row lock could be
+	// acquired before Risk's own pg_advisory_xact_lock (taken inside this
+	// function's own GateCheckpoint call below, if a cumulative rule is
+	// ever scoped to bonus_grant) - the reverse of doc 34 §5.3 rule 4's
+	// canonical "Risk's lock always before the EOI lock" ordering, and a
+	// live AB-BA deadlock risk the moment such a rule exists. Threading
+	// the consume through THIS hook, instead of leaving it at the call
+	// site wrapping the whole function, is what makes "after the gate
+	// chain, before the write" achievable at all without duplicating T.1
+	// gate logic outside this function.
+	//
+	// ActivateGrant itself stays completely EOI-agnostic: every non-EOI-
+	// gated bonus type (deposit/reload, cashback, generic wagering,
+	// coupon redemption) leaves this nil, which is a pure no-op -
+	// byte-for-byte the same activation behavior as before this hook
+	// existed. Only the two EOI-gated call sites ever set it, each
+	// supplying its own economicop.ConsumeRootBudget closure bound to its
+	// own root_operation_id/OperationType/subject/amount - the actual
+	// EOI-specific decision-making stays in targeting.go, never leaks
+	// into this shared function.
+	//
+	// If the hook returns an error (including economicop.ErrBudgetExhausted),
+	// ActivateGrant returns that error immediately, WITHOUT transitioning
+	// the Grant to activated (or cancelled) and WITHOUT posting anything
+	// - the Grant is left exactly as LockGrantForUpdate found it (status
+	// issued), identical in effect to the prior ordering where a budget-
+	// exhausted ConsumeRootBudget was discovered before ActivateGrant
+	// even started: either way, an over-budget attempt's transaction
+	// never commits a completed activation.
+	PostGateHook func(ctx context.Context, tx pgx.Tx) error
 }
 
 // ActivateGrant performs doc 10's "issued -> activated" transition: the
@@ -243,6 +285,16 @@ func ActivateGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, 
 			return Grant{}, GateOutcome{}, err
 		}
 		return cancelled, outcome, nil
+	}
+
+	// doc 34 §5.3 rule 3/4, doc 10 N2.4a: strictly after the gate chain
+	// above (including Risk's advisory lock, if taken), strictly before
+	// the effecting ledger write below. See PostGateHook's own doc
+	// comment (DR-4HB1W2-01).
+	if p.PostGateHook != nil {
+		if err := p.PostGateHook(ctx, tx); err != nil {
+			return Grant{}, GateOutcome{}, err
+		}
 	}
 
 	fundingKind, providerID, err := parseFundingSource(g.FundingSource)

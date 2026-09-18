@@ -714,6 +714,190 @@ func TestEOI_SingleManualGrant_RejectsUnresolvableParent(t *testing.T) {
 	}
 }
 
+// TestEOI_BulkGrantItem_ActivateDenialNeverConsumesEOIBudget is
+// DR-4HB1W2-01's own regression proof (Stage 4H-B1 Wave 2 Phase 10,
+// architect composition finding, closed by this dispatch): the locking
+// economicop.ConsumeRootBudget consume must run strictly AFTER
+// ActivateGrant's own T.1 gate chain has ALLOWED the activation - never
+// before it, and never at all on a denial (doc 34 §5.3 rules 3/4, doc 10
+// N2.4a). The prior code called ConsumeRootBudget (which takes a
+// locking `FOR UPDATE` on the EOI root row) BEFORE ever calling
+// ActivateGrant, so that lock could be acquired before ActivateGrant's
+// own GateCheckpoint call ever had a chance to take Risk's
+// pg_advisory_xact_lock (were a cumulative rule ever scoped to
+// bonus_grant) - the reverse of the canonical "Risk's lock always
+// before the EOI lock" ordering.
+//
+// This uses the BULK surface (runBulkGrantJobItem), not the single-Grant
+// one, because bulk_grant_job_items is the ONE consumption-record shape
+// whose ConsumeRootBudget realized-filter ("AND c.outcome IN ('issued',
+// 'already_granted')", enforce.go's consumptionRealizedFilter) excludes
+// the CURRENT item from its own recipient count while that item is still
+// 'pending' - i.e. at every point before RecordBulkGrantJobItemOutcome
+// finalizes it. This is what makes the ceiling genuinely bite on a
+// SECOND, distinct recipient once a first one has consumed it (exactly
+// as TestEOI_BulkGrantRecipientCeiling_RejectsBeyondBudget already
+// proves sequentially, and TestAdversarial_ConcurrentBulkGrantWorkers_
+// NeverExceedRecipientCeiling under real concurrency) - the property
+// this test's own distinguishing scenario depends on.
+//
+// The distinguishing scenario uses AssetAuthorization, not Risk, because
+// it is the one live T.1 axis doc 10 T.2 deliberately evaluates ONLY at
+// activation: IssueGrant's own gate call passes SkipAssetAuthorization:
+// true ("issued is a decision, not a movement"), while ActivateGrant's
+// gate call never skips it. A jurisdiction for which this test's own
+// asset was never platform/tenant/jurisdiction-authorized therefore
+// passes issuance untouched but is refused at activation, on
+// AssetAuthorization's own merits alone - isolating ActivateGrant's gate
+// as the ONLY gate that can deny this attempt (no risk_rules row is
+// created at all, so Risk cannot be the cause either way).
+//
+// The EOI root's recipient_ceiling is set to exactly 1 and already
+// fully consumed by a first, successful item (in the properly authorized
+// jurisdiction) to a DIFFERENT player before the denied item runs. Under
+// the PRE-FIX ordering, this second item would call
+// economicop.ConsumeRootBudget BEFORE ActivateGrant's gate chain ever
+// ran, immediately finding the ceiling already exhausted and recording
+// ItemDenied with economicop.ErrBudgetExhausted's own reason - the T.1
+// gate chain would never even execute, and the denial reason would name
+// the EOI budget, never AssetAuthorization. Under the CORRECTED
+// ordering, ActivateGrant's own gate chain runs first and denies on its
+// own merits (an "asset_authorization_denied:..." reason code), proving
+// the EOI consume was never attempted on this denied item.
+func TestEOI_BulkGrantItem_ActivateDenialNeverConsumesEOIBudget(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	co := seedCampaignOffer(t, pool, f.tenantID, f.brandID, f.staffID)
+
+	// A second player/wallet - the recipient this test's own denied item
+	// targets, kept distinct from f.playerID (who consumes the EOI
+	// root's only recipient slot below), mirroring
+	// TestEOI_BulkGrantRecipientCeiling_RejectsBeyondBudget's own extra-
+	// player seeding pattern.
+	var player2ID uuid.UUID
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		player2ID = uuid.New()
+		personID := uuid.New()
+		if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status) VALUES ($1,$2,$3,$4,$5,'x','active')`,
+			player2ID, f.tenantID, f.brandID, personID, player2ID.String()+"@example.com"); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO wallets (id, tenant_id, brand_id, player_account_id, asset_code) VALUES ($1,$2,$3,$4,$5)`,
+			uuid.New(), f.tenantID, f.brandID, player2ID, f.assetCode)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed second player: %v", err)
+	}
+
+	// A second jurisdiction - deliberately NEVER given a jurisdiction-
+	// authorization row for f.assetCode (unlike f.jurisdictionID, walked
+	// through authorizeFreshAssetForBonusWagering above), so
+	// AssetAuthorization.CheckEligibility denies for it while every other
+	// T.1 axis (RG, Risk) is completely unaffected by which jurisdiction
+	// is named.
+	var unauthorizedJurisdictionCode string
+	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		id := uuid.New()
+		unauthorizedJurisdictionCode = "TJ-UNAUTH-" + id.String()[:8]
+		_, err := tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, 'Unauthorized Test Jurisdiction')`, id, unauthorizedJurisdictionCode)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed unauthorized jurisdiction: %v", err)
+	}
+
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		asset := f.assetCode
+		ceiling := int32(1)
+		op, err := MintRootOperation(ctx, tx, MintRootOperationParams{
+			TenantID: f.tenantID, OperationType: economicop.OperationBonusBulkGrant,
+			InitiatingActorType: "staff", InitiatingActorID: f.staffID,
+			SubjectScope: economicop.SubjectScopeEnumeratedSet, AssetCode: &asset,
+			RecipientCeiling: &ceiling,
+			IdempotencyKey:   "eoi-lockorder-bulk-root", CorrelationID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+			ApprovalState: economicop.ApprovalApproved,
+		})
+		if err != nil {
+			return fmt.Errorf("mint root: %w", err)
+		}
+
+		job, err := CreateBulkGrantJob(ctx, tx, BulkGrantJob{
+			TenantID: f.tenantID, BrandID: f.brandID, CampaignID: co.campaignID, OfferVersionID: co.offerVersionID,
+			TargetKind: TargetPlayerList, TargetPlayerList: []uuid.UUID{f.playerID, player2ID},
+			RequestedByPrincipalID: f.staffID, ApprovalState: BulkApprovalApproved, Status: BulkJobRunning,
+			IdempotencyKey: "eoi-lockorder-bulk-job", ParentOperationID: &op.OperationID,
+		})
+		if err != nil {
+			return fmt.Errorf("create bulk job: %w", err)
+		}
+
+		template := newTestOfferGrant(f, co, "")
+		requesterPerson := uuid.New() // unrelated to both targeted players - SEP-1 is not this test's concern
+
+		// First item, f.playerID, in the PROPERLY authorized jurisdiction:
+		// allowed end to end, consumes the EOI root's only recipient
+		// slot.
+		if err := runBulkGrantJobItem(ctx, tx, job, op.RootOperationID, f.playerID, template, f.jurisdictionCode, uuid.Nil, big.NewInt(50), requesterPerson, nil); err != nil {
+			return fmt.Errorf("first item: %w", err)
+		}
+		item1, err := GetBulkGrantJobItem(ctx, tx, f.tenantID, job.ID, f.playerID)
+		if err != nil {
+			return fmt.Errorf("get item1: %w", err)
+		}
+		if item1.Outcome != ItemIssued {
+			reason := ""
+			if item1.ReasonCode != nil {
+				reason = *item1.ReasonCode
+			}
+			return fmt.Errorf("expected first item ISSUED, got %s (reason=%q)", item1.Outcome, reason)
+		}
+
+		// Second item, player2ID, in the UNAUTHORIZED jurisdiction:
+		// ActivateGrant's own T.1 gate (AssetAuthorization) must deny it
+		// on its OWN merits - it must never even reach the EOI consume,
+		// and the EOI root's already-exhausted recipient_ceiling (1,
+		// already spent by item 1 above) must never be the reported
+		// reason. runBulkGrantJobItem itself must return nil either way
+		// (a denial is recorded on the item, never propagated as a Go
+		// error) - see the NAMED FIX comment on its own ErrBudgetExhausted
+		// handling in targeting.go.
+		if err := runBulkGrantJobItem(ctx, tx, job, op.RootOperationID, player2ID, template, unauthorizedJurisdictionCode, uuid.Nil, big.NewInt(1000), requesterPerson, nil); err != nil {
+			return fmt.Errorf("second item returned an unexpected error %v (expected nil - a recorded ItemDenied)", err)
+		}
+		item2, err := GetBulkGrantJobItem(ctx, tx, f.tenantID, job.ID, player2ID)
+		if err != nil {
+			return fmt.Errorf("get item2: %w", err)
+		}
+		if item2.Outcome != ItemDenied {
+			return fmt.Errorf("expected second item DENIED (unauthorized jurisdiction), got %s", item2.Outcome)
+		}
+		if item2.ReasonCode == nil {
+			return fmt.Errorf("expected a recorded reason code on the denied second item, got none")
+		}
+		reason := *item2.ReasonCode
+		if !strings.Contains(reason, "asset_authorization") {
+			return fmt.Errorf("expected the recorded denial reason to be ActivateGrant's own T.1 gate denial "+
+				"(containing \"asset_authorization\"), proving the gate chain ran and decided this - not the EOI "+
+				"budget - got reason=%q. This means economicop.ConsumeRootBudget ran BEFORE ActivateGrant's own "+
+				"gate chain (DR-4HB1W2-01's exact regression: the EOI's already-exhausted recipient_ceiling was "+
+				"consulted before the T.1 gate ever ran)", reason)
+		}
+		if strings.Contains(reason, "budget") || strings.Contains(reason, "recipient_ceiling") {
+			return fmt.Errorf("the recorded denial reason names the EOI budget (%q) instead of ActivateGrant's "+
+				"own T.1 gate - DR-4HB1W2-01's exact regression", reason)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // --- Adversarial: cross-tenant mutation attempt (direct SQL) ---
 
 func TestAdversarial_CrossTenantGrantUpdate_BlockedByRLS(t *testing.T) {

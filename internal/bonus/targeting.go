@@ -104,15 +104,43 @@ func MintRootOperation(ctx context.Context, tx pgx.Tx, p MintRootOperationParams
 // IssueSingleManualGrant is doc 10 N2.4a's single-Grant staff-action-
 // equivalent surface, EOI-gated per §5.1/§5.3: the non-locking entry
 // check runs first (before AssetAuthorization even starts), the ordinary
-// T.1 gate chain runs unchanged, and the locking EOI consume happens
-// immediately before/around the effecting write, atomically inside the
-// SAME transaction - so an over-budget attempt never leaves a committed
-// Grant behind, even though (for implementation-simplicity reasons
-// documented on ConsumeRootBudget's own call below) this function
-// performs the consume check immediately AFTER inserting the Grant row
-// rather than in a separate pre-check; both orderings are equivalent
-// under this transaction's atomicity (an over-budget attempt's
-// transaction is never committed either way).
+// T.1 gate chain runs unchanged (across BOTH of issueIdempotent's own
+// RG/Risk-only issuance gate and ActivateGrant's own full
+// AssetAuthorization->RG->Risk activation gate), and the locking EOI
+// consume happens exactly once, strictly AFTER ActivateGrant's gate
+// chain has allowed the activation and strictly BEFORE its effecting
+// ledger write - via ActivateGrantParams.PostGateHook, never before
+// ActivateGrant is even called.
+//
+// DR-4HB1W2-01 (Stage 4H-B1 Wave 2 Phase 10, architect composition
+// finding): an earlier version of this function called
+// economicop.ConsumeRootBudget (which takes a locking `FOR UPDATE` on
+// the EOI root row) BEFORE calling ActivateGrant at all - meaning that
+// lock could be acquired before ActivateGrant's own GateCheckpoint call
+// ever had a chance to take Risk's pg_advisory_xact_lock (if a
+// cumulative rule is ever scoped to bonus_grant), the reverse of doc 34
+// §5.3 rule 4's canonical "Risk's lock always before the EOI lock"
+// ordering and a live AB-BA deadlock risk the moment such a rule
+// exists. Routing the consume through ActivateGrant's PostGateHook seam
+// instead fixes this: the EOI lock is now only ever taken after
+// ActivateGrant's own gate chain has already run (and released, if
+// Risk's lock was even taken at all - a pg_advisory_xact_lock is
+// released at COMMIT/ROLLBACK either way, so "acquired before" is what
+// the ordering rule actually requires, and this ordering guarantees
+// it), immediately before the actual money-moving ledger write -
+// atomically, in the same transaction, exactly as before.
+//
+// This still leaves the ENTIRE sequence (non-locking entry check, gate
+// chain, locking EOI consume, effecting write) atomic within the one
+// transaction the caller supplies - nothing here opens a second
+// transaction or a race window between the gate check and the actual
+// grant/consumption. An over-budget attempt never leaves a committed
+// Grant behind: the Grant row itself may already exist (this surface's
+// own doc-10-N2.4a consumption record, inserted by issueIdempotent
+// above), but it is left at status `issued`, never `activated`, and no
+// ledger entry is ever posted for it, so the caller's own transaction
+// rollback / retry handling is unaffected by exactly where in this
+// timeline the rejection is discovered.
 //
 // parentOperationID MUST already be a resolvable, approved, open,
 // unexpired EOI (either freshly minted via MintRootOperation for THIS
@@ -134,18 +162,30 @@ func IssueSingleManualGrant(ctx context.Context, tx pgx.Tx, g Grant, parentOpera
 	if !issueOutcome.Allowed {
 		return created, issueOutcome, err
 	}
+
+	// A fresh issuance consumes this surface's own EOI budget slice,
+	// exactly once, via ActivateGrant's PostGateHook seam (see this
+	// function's own doc comment above). An idempotent replay
+	// (ErrAlreadyGranted) already consumed it on the original attempt -
+	// this Grant row is already the consumption record ConsumeRootBudget
+	// counts, so re-consuming here is skipped, matching this function's
+	// pre-existing replay semantics.
+	var postGateHook func(context.Context, pgx.Tx) error
 	if !errors.Is(err, ErrAlreadyGranted) {
-		op, getErr := economicop.GetByID(ctx, tx, parentOperationID)
-		if getErr != nil {
-			return Grant{}, GateOutcome{}, getErr
-		}
-		if consumeErr := economicop.ConsumeRootBudget(ctx, tx, g.TenantID, op.RootOperationID, economicop.OperationBonusManualGrant, created.PlayerAccountID, amount); consumeErr != nil {
-			return Grant{}, GateOutcome{}, consumeErr
+		playerAccountID := created.PlayerAccountID
+		tenantID := g.TenantID
+		postGateHook = func(hookCtx context.Context, hookTx pgx.Tx) error {
+			op, getErr := economicop.GetByID(hookCtx, hookTx, parentOperationID)
+			if getErr != nil {
+				return getErr
+			}
+			return economicop.ConsumeRootBudget(hookCtx, hookTx, tenantID, op.RootOperationID, economicop.OperationBonusManualGrant, playerAccountID, amount)
 		}
 	}
 
 	activated, activateOutcome, err := ActivateGrant(ctx, tx, created.TenantID, created.ID, ActivateGrantParams{
 		JurisdictionCode: jurisdictionCode, ActorType: ActorStaff, ActorID: actorID, Amount: amount,
+		PostGateHook: postGateHook,
 	})
 	if err != nil {
 		return Grant{}, GateOutcome{}, err
@@ -277,17 +317,40 @@ func runBulkGrantJobItem(ctx context.Context, tx pgx.Tx, job BulkGrantJob, rootO
 		return err
 	}
 
-	if err := economicop.ConsumeRootBudget(ctx, tx, job.TenantID, rootOperationID, economicop.OperationBonusBulkGrant, playerAccountID, amount); err != nil {
+	// DR-4HB1W2-01 (Stage 4H-B1 Wave 2 Phase 10, architect): the locking
+	// economicop.ConsumeRootBudget consume is threaded through
+	// ActivateGrant's PostGateHook seam (see lifecycle.go's own doc
+	// comment) rather than called here, before ActivateGrant runs - so
+	// the EOI root row's `FOR UPDATE` lock is only ever taken strictly
+	// AFTER ActivateGrant's own full T.1 gate chain (AssetAuthorization
+	// -> RG -> Risk, including Risk's own pg_advisory_xact_lock if a
+	// cumulative rule is ever scoped to bonus_grant) has already allowed
+	// the activation, and strictly BEFORE its effecting ledger write -
+	// never held across, and never acquired ahead of, that gate chain.
+	// This is doc 34 §5.3 rule 4's canonical ordering (Risk's lock always
+	// before the EOI lock), made structural rather than incidental.
+	activated, activateOutcome, err := ActivateGrant(ctx, tx, created.TenantID, created.ID, ActivateGrantParams{
+		JurisdictionCode: jurisdictionCode, ActorType: ActorSystem, ActorID: systemActorID, Amount: amount,
+		PostGateHook: func(hookCtx context.Context, hookTx pgx.Tx) error {
+			return economicop.ConsumeRootBudget(hookCtx, hookTx, job.TenantID, rootOperationID, economicop.OperationBonusBulkGrant, playerAccountID, amount)
+		},
+	})
+	if err != nil {
 		// NAMED FIX (Stage 4H-B1 Wave 2 Phase 6, security - found via
 		// genuinely concurrent multi-worker adversarial testing, not by
-		// inspection): ConsumeRootBudget's error return conflates an
-		// ORDINARY, expected business-level denial (ErrBudgetExhausted -
-		// the ceiling is genuinely reached, correctly recordable as
+		// inspection; relocated by DR-4HB1W2-01 to wrap ActivateGrant
+		// instead of the bare ConsumeRootBudget call, since the consume
+		// itself now runs inside ActivateGrant's PostGateHook - the same
+		// reasoning applies unchanged to whatever error surfaces here):
+		// ConsumeRootBudget's error return conflates an ORDINARY,
+		// expected business-level denial (ErrBudgetExhausted - the
+		// ceiling is genuinely reached, correctly recordable as
 		// ItemDenied on THIS same transaction) with any OTHER error,
 		// including a transient Postgres-level failure (a deadlock
 		// between concurrent workers contending for the SAME EOI root's
 		// FOR UPDATE lock, a dropped connection, a context
-		// cancellation). Treating the latter as if it were an ordinary
+		// cancellation), or an ordinary T.1 gate-chain error unrelated to
+		// EOI at all. Treating the former as if it were an ordinary
 		// denial and attempting a FURTHER write on the transaction was a
 		// real bug: once Postgres aborts a transaction for a genuine
 		// error, EVERY subsequent statement on it fails with "current
@@ -301,7 +364,11 @@ func runBulkGrantJobItem(ctx context.Context, tx pgx.Tx, job BulkGrantJob, rootO
 		// immediately, exactly like every other non-budget error path in
 		// this function, so the caller's own transaction-retry handling
 		// (WithTenant returning the error, unattempted further writes)
-		// applies uniformly.
+		// applies uniformly. Note ActivateGrant returns a hook error
+		// WITHOUT touching the Grant's own status (still `issued`, never
+		// `activated`/`cancelled`) and WITHOUT posting anything, exactly
+		// as the pre-reorder ordering left it when ConsumeRootBudget
+		// failed before ActivateGrant was even called.
 		if !errors.Is(err, economicop.ErrBudgetExhausted) {
 			return err
 		}
@@ -311,13 +378,6 @@ func runBulkGrantJobItem(ctx context.Context, tx pgx.Tx, job BulkGrantJob, rootO
 			return recErr
 		}
 		return nil // budget exhaustion stops THIS item, not the whole job (doc 34 §5.5: later items may still be under budget if this one is skipped for another reason - though in practice once exhausted, every remaining item also denies)
-	}
-
-	activated, activateOutcome, err := ActivateGrant(ctx, tx, created.TenantID, created.ID, ActivateGrantParams{
-		JurisdictionCode: jurisdictionCode, ActorType: ActorSystem, ActorID: systemActorID, Amount: amount,
-	})
-	if err != nil {
-		return err
 	}
 	if !activateOutcome.Allowed {
 		reason := denialReasonCode(activateOutcome)
