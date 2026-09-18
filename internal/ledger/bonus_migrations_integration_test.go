@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -89,6 +90,64 @@ func stagedMigrationsHolding(t *testing.T, holdPrefixes []string) (dir string, a
 			copyMigrationFile(t, src, dir, name)
 		}
 	}
+}
+
+// holdPrefixesAfterVersion scans the REAL migrations directory (never
+// the staged temp copy) and returns the "NNNN_" prefix for every
+// migration whose version is strictly greater than maxVersion.
+//
+// Why this exists (a genuine defect this dispatch found and is fixing,
+// not merely working around, per CLAUDE.md's "no specialist redesigns
+// shared architecture unilaterally" / "name it precisely" instruction):
+// TestMigration0050_DownMigrationCleanThenFailsOnDirtyDatabase originally
+// hard-coded its "isolate 0050 as the sole most-recent migration" trick
+// as holdPrefixes = {"0051_", "0052_"} - correct only as long as 0050/52
+// happened to be the last migrations in the repository. Stage 4H-B1 Wave
+// 2 Phase 2 landed eight new migrations (0053-0060) immediately
+// afterwards, exactly as migration 0052's own comment anticipated
+// ("0053-0054 are deliberately left unclaimed... for bonus-engine's own
+// domain-table range") - and because stagedMigrationsHolding only holds
+// back the prefixes it is TOLD to, those eight files were silently
+// included in the staged directory, applied in the SAME MigrateUp call
+// as 0050, and became the new most-recently-applied migrations. A
+// single-step MigrateDown(1) then popped 0060, not 0050 - the down-
+// migration equivalent of the exact "no automated way to confirm no
+// intervening migration was added" hazard doc 27 §1.1 already warns
+// about, now caught for real by this file's own regression run rather
+// than left to recur every time a future stage adds another migration
+// after this one. This helper generalizes the fix so it doesn't need to
+// be hand-updated the NEXT time a migration lands after 0052 either.
+func holdPrefixesAfterVersion(t *testing.T, maxVersion int) []string {
+	t.Helper()
+	src := migrationsDir(t)
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("read migrations dir: %v", err)
+	}
+	seen := map[string]bool{}
+	var prefixes []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		underscore := strings.IndexByte(e.Name(), '_')
+		if underscore < 0 {
+			continue
+		}
+		version, err := strconv.Atoi(e.Name()[:underscore])
+		if err != nil {
+			continue
+		}
+		if version <= maxVersion {
+			continue
+		}
+		prefix := e.Name()[:underscore+1]
+		if !seen[prefix] {
+			seen[prefix] = true
+			prefixes = append(prefixes, prefix)
+		}
+	}
+	return prefixes
 }
 
 // TestMigration0050_BonusExpenseInsertGatedByMigration is §7.15 item 1.
@@ -168,12 +227,18 @@ func TestMigration0050_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 	// unrelated to what this test is isolating. Holding it back keeps
 	// 0050 as the sole most-recent migration for a clean single-step
 	// MigrateDown(1).
-	// 0051/0052 are excluded from dir for this test's ENTIRE lifetime
-	// (their addHeld callback is deliberately never invoked): this test
-	// isolates 0050 alone, and re-introducing either file later would
-	// make a subsequent MigrateUp/MigrateDown(1) target one of them
-	// instead of 0050, defeating that isolation.
-	dir, _ := stagedMigrationsHolding(t, []string{"0051_", "0052_"})
+	// EVERY migration numbered above 0050 is excluded from dir for this
+	// test's ENTIRE lifetime (their addHeld callback is deliberately
+	// never invoked): this test isolates 0050 alone, and re-introducing
+	// any of them later would make a subsequent MigrateUp/MigrateDown(1)
+	// target one of them instead of 0050, defeating that isolation.
+	// holdPrefixesAfterVersion (this file's own generalized fix for the
+	// regression Stage 4H-B1 Wave 2 Phase 2's migrations 0053-0060
+	// exposed - see that function's own doc comment) computes this
+	// dynamically rather than the original hard-coded {"0051_", "0052_"},
+	// so it stays correct the next time a migration lands after 0052
+	// too.
+	dir, _ := stagedMigrationsHolding(t, holdPrefixesAfterVersion(t, int(migration0050VersionForBonusMigTest)))
 
 	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
 		t.Fatalf("migrate up through 0050 (0051/0052 excluded): %v", err)

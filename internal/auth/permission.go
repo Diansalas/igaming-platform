@@ -189,6 +189,55 @@ const (
 	// principal has no tenant scope to write these rows in, and
 	// migration 0045's RLS would reject the write anyway.
 	PermAssetAuthorizationWrite Permission = "asset_authorization:write"
+
+	// Stage 4H-B1 Wave 2 (Bonus Engine) permissions, matching
+	// security-architecture.md §B1.1's table and §W15.4.3/§W15.1.12's
+	// amendments EXACTLY (permission names are security's own, already-
+	// published names - not invented here). Role-to-permission wiring is
+	// in rolePermissions below, restricted to the wiring the security doc
+	// explicitly names; no role gets a bonus permission the doc does not
+	// list for it.
+	PermBonusRead                Permission = "bonus:read"
+	PermBonusConfigRead          Permission = "bonus_config:read"
+	PermBonusCampaignCreate      Permission = "bonus_campaign:create"
+	PermBonusCampaignUpdate      Permission = "bonus_campaign:update"
+	PermBonusCampaignActivate    Permission = "bonus_campaign:activate"
+	PermBonusCampaignSuspend     Permission = "bonus_campaign:suspend"
+	PermBonusOfferManage         Permission = "bonus_offer:manage"
+	PermBonusSegmentManage       Permission = "bonus_segment:manage"
+	PermBonusGrantIssue          Permission = "bonus_grant:issue"
+	PermBonusGrantReview         Permission = "bonus_grant:review"
+	PermBonusGrantCancel         Permission = "bonus_grant:cancel"
+	PermBonusAdjustmentWrite     Permission = "bonus_adjustment:write"
+	PermBonusBulkExecute         Permission = "bonus_bulk:execute"
+	PermBonusReportRead          Permission = "bonus_report:read"
+	PermBonusApprovalPolicyWrite Permission = "bonus_approval_policy:write"
+
+	// PermBonusSuggestionCreate (§W15.4.3, closing SEC-W15-20): "Service
+	// identity only - held by no human role." Deliberately absent from
+	// EVERY entry of rolePermissions below, per that section's own binding
+	// wiring constraint 1 ("bonus_suggestion:create is granted to no
+	// role") - a future edit must not add it to any role's set.
+	PermBonusSuggestionCreate Permission = "bonus_suggestion:create"
+	// PermBonusSuggestionReview: claim/annotate/edit/approve/reject, or
+	// create a manual-origin suggestion (§W15.4.3) - confers no power to
+	// activate anything.
+	PermBonusSuggestionReview Permission = "bonus_suggestion:review"
+
+	// PermBonusHeldDispositionResolve gates REQ-SEP-BONUS-4 (doc 10
+	// §N1.9/§N1.12; security-architecture.md §W15.1.12): resolving a
+	// bonus_held_dispositions row (ACTION_REFORFEIT/ACTION_ROUTE_TO_CASH/
+	// the manual sub-choice under ACTION_HOLD_FOR_REVIEW). Deliberately
+	// its OWN authority, never folded into PermBonusAdjustmentWrite or
+	// PermBonusBulkExecute (§W15.1.12's own argument: "a distinct economic
+	// act... with its own volume, its own risk profile, and its own
+	// reporting need" - folding it in would let existing adjustment-
+	// authorized staff resolve deferred G-2 dispositions without any
+	// role-wiring decision ever having been made about it). Does NOT gate
+	// a HeldDispositionRecord's CREATION (doc 10 N1.8.1: TECHNICAL,
+	// "recording-and-parking a fact," never an authorizing write) - only
+	// its resolution.
+	PermBonusHeldDispositionResolve Permission = "bonus_held_disposition:resolve"
 )
 
 // rolePermissions is a static, in-code role -> permission-set mapping.
@@ -260,9 +309,23 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// offers, per brand/jurisdiction/product). Never
 		// PermAssetRegistryManage - that is platform-only.
 		PermAssetAuthorizationWrite,
+		// Stage 4H-B1 Wave 2 (security-architecture.md §B1.1): read-only
+		// bonus visibility "exactly as it does for risk_config/
+		// verification/rg_restriction today" - a tenant admin may see
+		// every campaign and every player's grant history, and may not
+		// author, activate, issue, adjust, bulk-assign, or cancel
+		// anything. PermBonusApprovalPolicyWrite sits HERE (never on
+		// either new bonus role) because "the role that approves must not
+		// also be the role that can loosen the policy gating its own
+		// approvals" (§B1.1 hard constraint 4) - RoleTenantAdmin holds no
+		// four-eyes-gated bonus permission, so it satisfies that
+		// constraint by construction.
+		PermBonusConfigRead, PermBonusRead, PermBonusReportRead, PermBonusApprovalPolicyWrite,
 	),
 	RoleSupport: permSet(
 		PermPlayerRead,
+		// Stage 4H-B1 Wave 2 (security-architecture.md §B1.1 table).
+		PermBonusRead,
 	),
 	RoleCompliance: permSet(
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead,
@@ -276,6 +339,11 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// permission's own doc comment for why it mirrors
 		// PermRGRestrictionWrite's separation-of-duties treatment exactly.
 		PermIdentityReviewManage,
+		// Stage 4H-B1 Wave 2 (security-architecture.md §B1.1 table):
+		// read-only bonus visibility plus the fail-closed kill-switch
+		// (bonus_campaign:suspend is deliberately granted widely - "an
+		// emergency kill-switch must not need a second approver").
+		PermBonusRead, PermBonusConfigRead, PermBonusCampaignSuspend,
 		// Stage 4F: the sole grantee of PermVerificationReview, plus
 		// read visibility - see both permissions' own doc comments.
 		PermVerificationRead, PermVerificationReview,
@@ -293,8 +361,52 @@ var rolePermissions = map[Role]map[Permission]bool{
 	// mirroring RoleFinance's own "one role, one narrow authority" shape.
 	RoleRiskManager: permSet(
 		PermRiskConfigRead, PermRiskConfigManage,
+		// Stage 4H-B1 Wave 2 (security-architecture.md §B1.1 table):
+		// read-only bonus config visibility plus the fail-closed
+		// kill-switch, same reasoning as RoleCompliance above.
+		PermBonusConfigRead, PermBonusCampaignSuspend,
 	),
 	RolePlayer: permSet(),
+
+	// RolePromotionsManager (Stage 4H-B1 Wave 2, security-architecture.md
+	// §B1.1 "Role wiring"): authors and activates Campaigns/Offers/
+	// Segments/BonusCodes, and reviews BonusSuggestions - but holds NO
+	// grant-issuing/adjustment/bulk-execution/held-disposition-resolution
+	// authority. This is what makes hard constraint 1 ("no principal may
+	// hold both RolePromotionsManager and RoleBonusOperations - the
+	// author of a Campaign must not also be able to hand out its value
+	// directly") a real separation rather than a documentation-only one.
+	RolePromotionsManager: permSet(
+		PermBonusConfigRead, PermBonusRead, PermBonusReportRead,
+		PermBonusCampaignCreate, PermBonusCampaignUpdate, PermBonusCampaignActivate, PermBonusCampaignSuspend,
+		PermBonusOfferManage, PermBonusSegmentManage,
+		// §W15.4.3 binding wiring constraint 2: bonus_suggestion:review ->
+		// RolePromotionsManager, never bundled with bonus_bulk:execute or
+		// bonus_grant:issue (which stay on RoleBonusOperations, below) -
+		// otherwise "one principal can approve a suggestion and then
+		// activate it," which the section calls "worse than no control."
+		PermBonusSuggestionReview,
+	),
+	// RoleBonusOperations (Stage 4H-B1 Wave 2): holds the financially
+	// material bonus-issuance/adjustment/bulk/held-disposition-resolution
+	// set. Deliberately does NOT hold PermBonusOfferManage/
+	// PermBonusCampaignActivate (hard constraint 3: "no role may hold
+	// both bonus_offer:manage and bonus_adjustment:write - the 'configure
+	// it instead of adjusting it' bypass is only closed if authoring and
+	// adjusting are separate authorities"; §W15.1.12 extends this
+	// verbatim to bonus_held_disposition:resolve) and does NOT hold
+	// PermStaffManage (Stage 3D's business decision #4/#5 precedent,
+	// applied to both new bonus roles per §B1.1 hard constraint 2).
+	RoleBonusOperations: permSet(
+		PermBonusConfigRead, PermBonusRead,
+		PermBonusGrantIssue, PermBonusGrantReview, PermBonusGrantCancel,
+		PermBonusAdjustmentWrite, PermBonusBulkExecute,
+		// §W15.1.12's own binding wiring: "granted to RoleBonusOperations
+		// only - the same role that holds bonus_adjustment:write and
+		// bonus_grant:cancel - never to RolePromotionsManager,
+		// RoleTenantAdmin, RoleFinance, or RolePlatformAdmin."
+		PermBonusHeldDispositionResolve,
+	),
 }
 
 func permSet(perms ...Permission) map[Permission]bool {

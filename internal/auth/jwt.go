@@ -41,6 +41,15 @@ const (
 	RolePlayer        Role = "player"
 	// RoleRiskManager is Stage 4G's own role - see identity.StaffRoleRiskManager.
 	RoleRiskManager Role = "risk_manager"
+
+	// RolePromotionsManager/RoleBonusOperations are Stage 4H-B1 Wave 2's
+	// two new Bonus Engine roles (security-architecture.md §B1.1 "Role
+	// wiring"). Deliberately two separate roles, never one: "the author of
+	// a Campaign must not also be able to hand out its value directly"
+	// (§B1.1 hard constraint 1 - no principal may hold both). See
+	// permission.go's rolePermissions map for exactly what each holds.
+	RolePromotionsManager Role = "promotions_manager"
+	RoleBonusOperations   Role = "bonus_operations"
 )
 
 // PrincipalType distinguishes what kind of subject a token identifies -
