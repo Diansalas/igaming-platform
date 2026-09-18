@@ -37,6 +37,30 @@ import (
 
 const migration0048Version = int64(48)
 
+// migrationsDependentOn0048Prefixes are the migration files whose up.sql
+// performs a DROP CONSTRAINT/ADD CONSTRAINT on ledger_accounts_
+// account_type_check assuming migration 0048's exact prior state (its
+// twelve-value list) as the baseline to widen from - migrations 0050
+// (bonus_expense) and 0052 (player_bonus_held), added in this same Stage
+// 4H-B1 Wave 2 dispatch. Migration 0051 (the bonus_* transaction types)
+// touches ledger_transactions, not ledger_accounts, and has no such
+// dependency, so it is deliberately NOT included here and stays applied
+// normally even when 0048 is held back.
+//
+// Holding ONLY 0048 back while still running 0050/0052 would leave the
+// chain in an incoherent state no real deployment could reach: 0050/0052
+// would each successfully DROP+ADD the constraint using their own
+// hard-coded value lists, silently producing a schema that excludes bare
+// 'player_locked' even though 0048 - the migration that is SUPPOSED to be
+// the one removing it - never ran. Holding all three back together and
+// re-applying them together (MigrateUp sorts by version and applies
+// unapplied versions in ascending order, so 0048 lands before 0050 lands
+// before 0052 regardless of what else is already applied in between) is
+// what actually reproduces "0048 is a not-yet-applied reserved gap" -
+// the real scenario doc 27's migration-order notes describe, and the one
+// these tests are about.
+var migrationsDependentOn0048Prefixes = []string{"0048_", "0050_", "0052_"}
+
 // migrationsDir is the real migrations directory, relative to this
 // package. Read (never written) by these tests.
 func migrationsDir(t *testing.T) string {
@@ -52,12 +76,15 @@ func migrationsDir(t *testing.T) string {
 }
 
 // stagedMigrations copies the real migrations into a temp directory,
-// optionally holding migration 0048 back, and returns the directory plus
-// a function that drops 0048 in later. Copying (rather than pointing the
-// migrator at the repo) is what lets a test run the chain WITHOUT 0048
-// and then add it, which is the only way to observe 0048's pre-flight
-// guard against a pre-0048 database.
-func stagedMigrations(t *testing.T, includeMigration0048 bool) (dir string, add0048 func()) {
+// optionally holding migration 0048 (and the later migrations that
+// structurally depend on its prior state,
+// migrationsDependentOn0048Prefixes) back, and returns the directory plus
+// a function that adds them all back in later, in one MigrateUp call.
+// Copying (rather than pointing the migrator at the repo) is what lets a
+// test run the chain WITHOUT 0048 and then add it, which is the only way
+// to observe 0048's pre-flight guard against a genuinely pre-0048
+// database.
+func stagedMigrations(t *testing.T, includeMigration0048 bool) (dir string, addHeld func()) {
 	t.Helper()
 	src := migrationsDir(t)
 	dir = t.TempDir()
@@ -71,14 +98,24 @@ func stagedMigrations(t *testing.T, includeMigration0048 bool) (dir string, add0
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
 			continue
 		}
-		if strings.HasPrefix(e.Name(), "0048_") && !includeMigration0048 {
+		heldBack := false
+		if !includeMigration0048 {
+			for _, prefix := range migrationsDependentOn0048Prefixes {
+				if strings.HasPrefix(e.Name(), prefix) {
+					heldBack = true
+					break
+				}
+			}
+		}
+		if heldBack {
 			held = append(held, e.Name())
 			continue
 		}
 		copyMigrationFile(t, src, dir, e.Name())
 	}
-	if len(held) != 2 && !includeMigration0048 {
-		t.Fatalf("expected to hold back exactly 2 files for migration 0048 (up+down), held %v", held)
+	wantHeld := 2 * len(migrationsDependentOn0048Prefixes)
+	if len(held) != wantHeld && !includeMigration0048 {
+		t.Fatalf("expected to hold back exactly %d files (up+down for each of %v), held %v", wantHeld, migrationsDependentOn0048Prefixes, held)
 	}
 	return dir, func() {
 		for _, name := range held {
@@ -284,11 +321,11 @@ func appliedVersions(t *testing.T, pool *db.Pool) map[int64]bool {
 func TestMigration0048_PreflightGuardFiresOnBarePlayerLocked(t *testing.T) {
 	scratchURL := scratchDatabase(t)
 	pool := scratchPool(t, scratchURL)
-	dir, add0048 := stagedMigrations(t, false)
+	dir, addHeld := stagedMigrations(t, false)
 
 	applied, err := pool.MigrateUp(context.Background(), dir)
 	if err != nil {
-		t.Fatalf("migrate up without 0048: %v", err)
+		t.Fatalf("migrate up without 0048/0050/0052: %v", err)
 	}
 	if len(applied) == 0 {
 		t.Fatal("expected the pre-0048 chain to apply")
@@ -301,7 +338,10 @@ func TestMigration0048_PreflightGuardFiresOnBarePlayerLocked(t *testing.T) {
 	seedLockedAccountRow(t, pool, "player_locked")
 	before := accountTypeCheckDef(t, pool)
 
-	add0048()
+	addHeld()
+	// MigrateUp stops at the first failing migration (internal/db/
+	// migrate.go), so 0048 failing here means 0050/0052 are never even
+	// attempted - the assertions below need nothing extra for that.
 	_, err = pool.MigrateUp(context.Background(), dir)
 	if err == nil {
 		t.Fatal("migration 0048 must refuse to run while a bare player_locked account exists")
@@ -358,6 +398,14 @@ func TestMigration0048_PreflightGuardFiresOnBarePlayerLocked(t *testing.T) {
 	}
 }
 
+// migration0050Version and migration0052Version are this dispatch's own
+// account-type-check widenings, chained onto migration 0048's exact prior
+// state (see migrationsDependentOn0048Prefixes).
+const (
+	migration0050Version = int64(50)
+	migration0052Version = int64(52)
+)
+
 // TestMigration0048_DownMigrationCleanThenFailsOnDirtyDatabase is §6.5.8
 // item 7 plus the up/down/up round trip: 0048 fills its reserved gap in
 // the existing chain, rolls back cleanly while no locked account exists,
@@ -365,45 +413,65 @@ func TestMigration0048_PreflightGuardFiresOnBarePlayerLocked(t *testing.T) {
 // SQLSTATE 23514, leaving the schema intact. That refusal is the correct,
 // deliberate behavior for an append-only financial ledger (CLAUDE.md),
 // identical to migration 0035's documented position, not a defect.
+//
+// EXTENDED, Stage 4H-B1 Wave 2: migrations 0050 (bonus_expense) and 0052
+// (player_bonus_held) both DROP+ADD the same ledger_accounts_
+// account_type_check constraint, chained onto 0048's result
+// (migrationsDependentOn0048Prefixes), so they apply and roll back
+// TOGETHER with 0048 in this test now, in the version order MigrateUp/
+// MigrateDown actually use - up ascending (48, then 50, then 52), down in
+// applied-order-descending (52, then 50, then 48). That is the same
+// structural relationship migration 0022 has with 0021 (each widening
+// assumes its predecessor's exact prior value list), just discovered here
+// because 0048/0050/0052 are the reserved-gap migrations this dispatch's
+// tests exercise directly rather than through the ordinary "just run the
+// whole chain" path every other test in this package uses.
 func TestMigration0048_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) {
 	scratchURL := scratchDatabase(t)
 	pool := scratchPool(t, scratchURL)
 
-	// Apply the chain WITHOUT 0048 first, then add it, so 0048 is the
-	// most recently applied migration and MigrateDown(1) targets exactly
-	// it (MigrateDown orders by applied_at). This also reproduces how
-	// 0048 lands on an environment already at 0049, which is the real
-	// deployment shape - 0048's number is a reserved gap, not the tip.
-	dir, add0048 := stagedMigrations(t, false)
+	// Apply the chain WITHOUT 0048/0050/0052 first, then add all three
+	// back, so they are the three most recently applied migrations and
+	// MigrateDown(3) targets exactly them (MigrateDown orders by
+	// applied_at). This also reproduces how 0048 lands on an environment
+	// already at 0049+, which is the real deployment shape - 0048's
+	// number is a reserved gap, not the tip.
+	dir, addHeld := stagedMigrations(t, false)
 	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
-		t.Fatalf("migrate up without 0048: %v", err)
+		t.Fatalf("migrate up without 0048/0050/0052: %v", err)
 	}
-	add0048()
+	addHeld()
 	rolledUp, err := pool.MigrateUp(context.Background(), dir)
 	if err != nil {
-		t.Fatalf("migrate up 0048 into the existing chain: %v", err)
+		t.Fatalf("migrate up 0048/0050/0052 into the existing chain: %v", err)
 	}
-	if len(rolledUp) != 1 || rolledUp[0] != migration0048Version {
-		t.Fatalf("expected exactly migration 48 to be applied, got %v", rolledUp)
+	wantUp := []int64{migration0048Version, migration0050Version, migration0052Version}
+	if !equalVersions(rolledUp, wantUp) {
+		t.Fatalf("expected exactly migrations %v to be applied in that order, got %v", wantUp, rolledUp)
 	}
-	if !strings.Contains(accountTypeCheckDef(t, pool), "player_locked_cash") {
-		t.Fatal("migration 0048 did not widen the constraint")
+	afterUp := accountTypeCheckDef(t, pool)
+	for _, want := range []string{"player_locked_cash", "player_locked_bonus", "bonus_expense", "player_bonus_held"} {
+		if !strings.Contains(afterUp, want) {
+			t.Fatalf("expected the widened constraint to admit %s, got: %s", want, afterUp)
+		}
 	}
 	// The success path must leave FORCE ROW LEVEL SECURITY exactly as it
-	// found it - 0048 declares "no RLS change" and, since security finding
-	// S-1, executes no statement touching it.
+	// found it - none of the three declares an RLS change, and, since
+	// security finding S-1, none executes a statement touching it.
 	if !ledgerAccountsForcesRLS(t, pool) {
-		t.Fatal("migration 0048 left ledger_accounts without FORCE ROW LEVEL SECURITY - tenant isolation weakened")
+		t.Fatal("migrations 0048/0050/0052 left ledger_accounts without FORCE ROW LEVEL SECURITY - tenant isolation weakened")
 	}
 
-	// (a) Clean database: the down migration succeeds and restores
-	// migration 0020's exact eleven values.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 1)
+	// (a) Clean database: rolling all three back succeeds and restores
+	// migration 0020's exact eleven values - the state before any of
+	// 0048/0050/0052 ever ran.
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 3)
 	if err != nil {
-		t.Fatalf("down migration must succeed on a database with no locked account: %v", err)
+		t.Fatalf("down migration must succeed on a database with no locked/bonus account: %v", err)
 	}
-	if len(rolledBack) != 1 || rolledBack[0] != migration0048Version {
-		t.Fatalf("expected exactly migration 48 to be rolled back, got %v", rolledBack)
+	wantDown := []int64{migration0052Version, migration0050Version, migration0048Version}
+	if !equalVersions(rolledBack, wantDown) {
+		t.Fatalf("expected exactly migrations %v to be rolled back in that order, got %v", wantDown, rolledBack)
 	}
 	restored := accountTypeCheckDef(t, pool)
 	for _, want := range []string{"'player_locked'::text", "'player_cash'::text", "'manual_adjustment'::text"} {
@@ -411,28 +479,56 @@ func TestMigration0048_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 			t.Fatalf("restored constraint must contain %s, got: %s", want, restored)
 		}
 	}
-	for _, unwanted := range []string{"player_locked_cash", "player_locked_bonus"} {
+	for _, unwanted := range []string{"player_locked_cash", "player_locked_bonus", "bonus_expense", "player_bonus_held"} {
 		if strings.Contains(restored, unwanted) {
 			t.Fatalf("restored constraint must not contain %s, got: %s", unwanted, restored)
 		}
 	}
 
 	// Round trip: up again.
-	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
-		t.Fatalf("re-applying migration 0048 after a rollback: %v", err)
+	rolledUpAgain, err := pool.MigrateUp(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("re-applying migrations 0048/0050/0052 after a rollback: %v", err)
 	}
-	if !strings.Contains(accountTypeCheckDef(t, pool), "player_locked_bonus") {
-		t.Fatal("re-applied migration 0048 did not widen the constraint again")
+	if !equalVersions(rolledUpAgain, wantUp) {
+		t.Fatalf("expected exactly migrations %v to be re-applied in that order, got %v", wantUp, rolledUpAgain)
+	}
+	if !strings.Contains(accountTypeCheckDef(t, pool), "player_bonus_held") {
+		t.Fatal("re-applied migrations did not widen the constraint again")
 	}
 
 	// (b) Dirty database: a real player_locked_cash account now exists.
+	// 0052 and 0050's down migrations succeed on their own (neither
+	// widening's value is the one this row holds); only 0048's - the one
+	// that actually admits player_locked_cash - must refuse, loudly, and
+	// leave the schema exactly as it found it. Rolling back one step at a
+	// time (rather than 3 in one call) makes that boundary explicit
+	// rather than relying on MigrateDown's internal stop-on-first-error
+	// behavior to prove it.
 	dirtyTenantID := seedLockedAccountRow(t, pool, "player_locked_cash")
-	widened := accountTypeCheckDef(t, pool)
+	widenedWithDirtyRow := accountTypeCheckDef(t, pool)
+
+	for _, step := range []struct {
+		version int64
+		name    string
+	}{
+		{migration0052Version, "player_bonus_held"},
+		{migration0050Version, "bonus_expense"},
+	} {
+		rolledBack, err := pool.MigrateDown(context.Background(), dir, 1)
+		if err != nil {
+			t.Fatalf("rolling back migration %d (%s) must succeed - it does not touch player_locked_cash: %v",
+				step.version, step.name, err)
+		}
+		if len(rolledBack) != 1 || rolledBack[0] != step.version {
+			t.Fatalf("expected exactly migration %d to be rolled back, got %v", step.version, rolledBack)
+		}
+	}
 
 	_, err = pool.MigrateDown(context.Background(), dir, 1)
 	if err == nil {
-		t.Fatal("the down migration must FAIL once a player_locked_cash account exists - silently narrowing the " +
-			"constraint while violating rows remain is exactly what NOT VALID would have allowed")
+		t.Fatal("migration 0048's down migration must FAIL once a player_locked_cash account exists - silently " +
+			"narrowing the constraint while violating rows remain is exactly what NOT VALID would have allowed")
 	}
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
@@ -442,15 +538,24 @@ func TestMigration0048_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 		t.Fatalf("expected SQLSTATE %s, got %s: %v", pgCheckViolation, pgErr.Code, err)
 	}
 
-	// The failed rollback left everything intact: still applied, still
-	// widened, and the row is still there (ledger data is append-only and
-	// was never at risk).
+	// The failed rollback left everything intact: migration 0048 (and
+	// only it - 0050/0052 were already rolled back above) still applied,
+	// the constraint still at 0048's exact widened state, and the row
+	// still there (ledger data is append-only and was never at risk).
 	if !appliedVersions(t, pool)[migration0048Version] {
 		t.Fatal("a failed rollback must leave migration 0048 recorded as applied")
 	}
-	if after := accountTypeCheckDef(t, pool); after != widened {
-		t.Fatalf("a failed rollback must leave the constraint untouched:\nbefore: %s\nafter:  %s", widened, after)
+	if appliedVersions(t, pool)[migration0050Version] || appliedVersions(t, pool)[migration0052Version] {
+		t.Fatal("migrations 0050/0052 must remain rolled back - only 0048's own down migration failed")
 	}
+	after := accountTypeCheckDef(t, pool)
+	if strings.Contains(after, "bonus_expense") || strings.Contains(after, "player_bonus_held") {
+		t.Fatalf("the constraint must reflect ONLY migration 0048's widening after 0050/0052 were rolled back, got: %s", after)
+	}
+	if !strings.Contains(after, "player_locked_cash") {
+		t.Fatalf("a failed 0048 rollback must leave its own widening (player_locked_cash) in place, got: %s", after)
+	}
+	_ = widenedWithDirtyRow // documents the pre-rollback-attempt state; not compared field-by-field since 0050/0052's rollback intentionally changes it first.
 	var lockedCount int
 	err = pool.WithTenant(context.Background(), dirtyTenantID, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
@@ -462,4 +567,20 @@ func TestMigration0048_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 	if lockedCount != 1 {
 		t.Fatalf("expected the player_locked_cash account to survive the failed rollback, found %d", lockedCount)
 	}
+}
+
+// equalVersions reports whether got and want name the same migration
+// versions in the same order - used instead of reflect.DeepEqual so a
+// mismatch's failure message can show both slices directly at the call
+// site.
+func equalVersions(got, want []int64) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }

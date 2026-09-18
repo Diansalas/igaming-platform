@@ -551,17 +551,36 @@ L1 is `IMPLEMENTED` as of migration 0048 and its accompanying Go changes
 (§6.5's implementation-status note). It is a *determinacy* statement, not
 a sufficiency one: bonus-origin locking remains unusable until
 `bonus_expense` and the Rule B2 (extended) generator exist, which HR-9
-enforces at the posting boundary.
+enforces at the posting boundary. **That precondition is now met — see
+the status update immediately below.**
 
-B1 is `NOT IMPLEMENTED`: it becomes enforceable only once the
-`bonus_expense` account type and the `bonus_*` transaction types exist.
-Its full derivation, the worked grant/bet/win/convert check, and the
-provider-funded and externally-fulfilled variants are in ADR 0032 and are
-not restated here. **Stage 4H-B1: §7.4 specifies the Rule B2 (extended)
+> **STATUS UPDATE — Stage 4H-B1 Wave 2, `ledger-finance`: B1 is now
+> `IMPLEMENTED`, and HR-9 is SATISFIED and its guard REMOVED.** Both
+> `bonus_expense` (migration `0050`) and the Rule B2 (extended) mirror
+> generator (`internal/ledger/bonus_mirror.go`) landed in this dispatch,
+> together with `bonus_*` transaction types (migration `0051`) and
+> `player_bonus_held` (migration `0052` — renumbered from §7.7.2.4's
+> speculative `0055` claim, see that section's own updated note). HR-9's
+> removal condition (§6.5.7) is a conjunctive precondition evaluated at
+> removal time: **both** halves now exist in the tree, exercised by
+> `bonus_mirror_integration_test.go`'s and
+> `bonus_migrations_integration_test.go`'s test suites (§7.15), so the
+> removal is unconditional, not partial. The full detail — what was
+> removed, what survives and changes role, and why — is §7.4.4, itself
+> now updated with this same status. B1 (extended)'s formula, invariants,
+> and worked table below are otherwise UNCHANGED by this update; only the
+> implementation-status labels change.
+
+B1 was `NOT IMPLEMENTED` prior to this dispatch: it became enforceable
+only once the `bonus_expense` account type and the `bonus_*` transaction
+types existed. Its full derivation, the worked grant/bet/win/convert
+check, and the provider-funded and externally-fulfilled variants are in
+ADR 0032 and are not restated here. §7.4 specifies the Rule B2 (extended)
 mirror generator that makes B1 hold by construction — its location,
 algorithm, API and failure modes — and §7.2/§7.3 specify the two
-migrations B1 waits on. All three remain `NOT IMPLEMENTED` (design
-only).**
+migrations B1 waited on. **All three are now `IMPLEMENTED`** (the status
+update above; this paragraph is left in its original, historical wording
+otherwise, per this document's own no-silent-rewrite convention).
 
 ### 6.2 Open item — `player_locked` loses stake origin (blocking precondition, future stage)
 
@@ -3734,7 +3753,7 @@ The honest deliverable labels for phase 2 are therefore:
 |---|---|
 | Migration `0048`, invariant L1's five enforcement layers, the `GetSummary` fix, HR-9's guard, the phase-2 test set | `IMPLEMENTED` |
 | Cases A/D/F/H/J/K as *postings* | `NOT IMPLEMENTED` — they have no owning code; they are an implementation-ready contract (§6.4.5) awaiting an authorized sportsbook stage |
-| Cases B/E/G/I (bonus-funded) | `BLOCKED` — G-2, G-3, plus HR-9 at the ledger boundary |
+| Cases B/E/G/I (bonus-funded) | `BLOCKED` — G-2, G-3, **and, historically, HR-9 at the ledger boundary. HR-9 is now SATISFIED (Stage 4H-B1 Wave 2 — §7.4.4); G-2/G-3 and the absence of `internal/sportsbook` remain the live blockers** |
 | Case C (mixed), case L (cashout) | `NOT IMPLEMENTED` by decision (§6.4.1, §6.4.3) |
 
 **Consequence for sequencing, and it is a genuine improvement over doing
@@ -3758,7 +3777,15 @@ is a gate on the *next* domain to post to a locked account, not on phase 2
 (which posts to none), and is `NOT IMPLEMENTED` by design.
 
 - **HR-9 — a posting against a `BONUS_SET` account fails closed until the
-  mirror generator and `bonus_expense` both exist.** `internal/ledger`'s
+  mirror generator and `bonus_expense` both exist.** *(STATUS UPDATE,
+  Stage 4H-B1 Wave 2: both now exist — `bonus_expense` (migration 0050)
+  and the Rule B2 (extended) generator (`internal/ledger/bonus_mirror.go`)
+  — so this guard is **SATISFIED and REMOVED**, per this item's own
+  removal condition below and §7.4.4's record of exactly what was
+  removed. The description that follows is left in its original,
+  historical wording, since it correctly describes why the guard existed
+  and what its removal condition was — not a claim about current
+  behavior.)* `internal/ledger`'s
   posting path rejects, with a distinct non-retryable error, any entry
   whose resolved `account_type` is `player_locked_bonus` (**required**, the
   account this migration creates) or `player_bonus` (**required** as of
@@ -6521,6 +6548,31 @@ and future-entry-ordinal requirement, not an aesthetic one.
 
 #### 7.4.4 HR-9's removal, exactly
 
+> **DONE — Stage 4H-B1 Wave 2, `ledger-finance`.** Both conditions below
+> are now satisfied in the tree: migration `0050` is applied
+> (`bonus_expense` is in `ledger_accounts_account_type_check`) and
+> `internal/ledger/bonus_mirror.go` exists, exercised by
+> `bonus_mirror_integration_test.go`'s and
+> `bonus_migrations_integration_test.go`'s test suites (§7.15's coverage
+> map). The removal described below was carried out exactly as specified
+> — `assertNoBonusSetEntries`, `ErrBonusPostingBlocked` and
+> `bonusPostingPreconditions` no longer exist in `internal/ledger` at all
+> (not commented out, not feature-flagged); `bonusSetAccountTypes()`
+> survives, unexported, still returning a fresh slice each call, now
+> exclusively in its post-removal role (§7.4.2 step 1's netting set) and
+> widened to its three-member form (`player_bonus`, `player_locked_bonus`,
+> `player_bonus_held` — §6.1's extension note, HR-23). **HR-9 (and, by
+> the identical mechanism, HR-23) is SATISFIED.** `player_bonus`,
+> `player_locked_bonus` and `player_bonus_held` are all postable, subject
+> only to `BonusCostAttribution`'s own fail-closed validation (§7.4.3) —
+> never unconditionally, and never without the mirror the generator
+> supplies automatically. This does **not** select G-2, does **not**
+> implement Bonus's own domain tables (Campaign/Offer/Grant/Progress —
+> `internal/bonus`, a later phase), and does **not** implement
+> `bonus_held_dispositions` (§7.7.2.5 — `bonus-engine`-owned, a later
+> phase's migration). It removes exactly the ledger-side precondition
+> those phases were waiting on.
+
 The generator's arrival is the change that removes the guard, and the
 removal is **total**: `assertNoBonusSetEntries`, `bonusSetAccountTypes`'s
 use as a *blocklist*, `ErrBonusPostingBlocked` and
@@ -7072,21 +7124,36 @@ is new, but the hazard (a `player_bonus_held` credit posted before the
 generator exists breaks B1 on its first row, exactly as an early
 `player_bonus` grant would) is not.
 
-**HR-9's blocking status, stated plainly per this round's directive:**
-`bonus_expense` is unmigrated and the Rule B2 (extended) generator does
-not exist in `internal/ledger` at `HEAD`. HR-9 therefore blocks **every**
-posting to any `BONUS_SET` account today, including the new one — this
-section does not remove, weaken, or work around that guard, and nothing
-described here is postable until HR-9's own removal condition (§6.5.7:
-both preconditions in the tree, generator tested) is independently
-satisfied. This is the same, already-recorded blocking status, now
-confirmed to apply identically to `player_bonus_held` — not a separate
-open item, and not silently resolved.
+**HR-9's blocking status, historical as of when this section was
+written, SUPERSEDED below:** `bonus_expense` was unmigrated and the Rule
+B2 (extended) generator did not exist in `internal/ledger` at that
+commit. HR-9 therefore blocked **every** posting to any `BONUS_SET`
+account then, including this new one — this section did not remove,
+weaken, or work around that guard at the time, and nothing described here
+was postable until HR-9's own removal condition (§6.5.7: both
+preconditions in the tree, generator tested) was independently satisfied.
+This was the same, already-recorded blocking status, confirmed to apply
+identically to `player_bonus_held`.
 
-**Also confirmed still open, named so it is not mistaken for resolved
-here: HR-9's own removal is itself gated on HR-9's coordination gap
-recorded at §6.6.16/§6.5.7 — that gap is unrelated to this section's
-decision and is not touched by it.**
+> **STATUS UPDATE — Stage 4H-B1 Wave 2, `ledger-finance`: HR-9 (and
+> HR-23) are now SATISFIED.** `bonus_expense` (migration `0050`) and the
+> Rule B2 (extended) generator (`internal/ledger/bonus_mirror.go`) both
+> exist and are exercised by tests (§7.4.4, §7.15). `player_bonus_held`
+> is postable, on the identical terms as `player_bonus`/
+> `player_locked_bonus`: subject to `BonusCostAttribution`'s fail-closed
+> validation (§7.4.3), never unconditionally. The paragraph above is left
+> in its original wording as the historical record of this section's own
+> "not resolved here" scope statement — it was correct when written; this
+> update states what has since changed, in the same place, rather than
+> silently rewriting it.
+
+**Also, separately: the coordination gap this section flagged as "still
+open" (HR-9's own removal being gated on the §6.6.16/§6.5.7 coordination
+gap between this document and doc 10 §3) was unrelated to *this*
+section's holding-representation decision and remains a fact about how
+HR-9's removal was sequenced, not something this status update needs to
+re-litigate — the removal itself is done, by the mechanism §7.4.4
+records.**
 
 ##### 7.7.2.4 Schema — `player_bonus_held` (ledger account type)
 
@@ -7103,17 +7170,29 @@ section — see §2). Summary:
 | Compensating entries required? | Yes |
 | Reconciliation | New stream **LF-12** (§7.7.2.8) plus B1 (extended)'s existing sweep, as a third `BONUS_SET` member |
 
-**Migration.** Claimed as **`0055`** — the next open slot (`0050`–`0054`
-are already claimed per the task registry's migration ledger: `0050`–
-`0053` are `ledger-finance`'s own, `0054`+ is reserved for
-`bonus-engine`'s domain tables; this is a
-`ledger_accounts_account_type_check` widening, `ledger-finance`-owned like
-`0050`, so it does not compete with `0054`+). Same shape as §6.3.2's
-illustrative widening: drop and re-add `ledger_accounts_account_type_check`
-with `player_bonus_held` appended. No new column, no new index, no new
-owner family, no RLS change — `UNIQUE (wallet_id, account_type,
-asset_code)` already covers it. **`NOT IMPLEMENTED`, design only**, gated
-on HR-9 exactly as `player_bonus`/`player_locked_bonus` already are.
+**Migration.** *(RENUMBERED, Stage 4H-B1 Wave 2, `ledger-finance` —
+recorded here rather than silently corrected.)* This section originally
+claimed **`0055`** as "the next open slot", on the assumption that
+`0050`–`0054` would already be consumed by other specialists' work before
+this widening landed. That assumption did not hold: `ledger-finance`
+built `0050` (`bonus_expense`), `0051` (`bonus_*` transaction types) and
+this widening together, in one Stage 4H-B1 Wave 2 dispatch, with nothing
+else having claimed `0052`–`0054` in the meantime. **The migration that
+actually shipped is `0052`** —
+`migrations/0052_player_bonus_held_account_type.up/down.sql`, verified
+against the live `migrations/` directory rather than trusted from this
+document's own earlier speculative number (per this dispatch's own
+instruction to trust the filesystem over a design document's placeholder
+numbering). `0053`–`0054`+ remain open for `bonus-engine`'s domain-table
+range (`bonus_held_dispositions`, §7.7.2.5, among others), unclaimed by
+this migration. Same shape as §6.3.2's illustrative widening: drop and
+re-add `ledger_accounts_account_type_check` with `player_bonus_held`
+appended. No new column, no new index, no new owner family, no RLS
+change — `UNIQUE (wallet_id, account_type, asset_code)` already covers
+it. **`IMPLEMENTED`** (Stage 4H-B1 Wave 2) — HR-9/HR-23's gate, which this
+migration was written against, is itself now satisfied (§7.4.4), so
+`player_bonus_held` is postable on the same terms as
+`player_bonus`/`player_locked_bonus`.
 
 **Explicit, permanent exclusion — the guardrail LF-19's mistake would
 otherwise repeat under a new name.** `player_bonus_held` is **never**
@@ -8193,21 +8272,46 @@ LF-16) — added Stage 4H-B1, Wave 1.5:**
 
 | Number | Content | Status |
 |---|---|---|
-| **`0050`** | `bonus_expense` account type (§7.2) | **CLAIMED** by `ledger-finance` this dispatch |
-| **`0051`** | `bonus_grant`/`bonus_conversion`/`bonus_forfeiture`/`bonus_reversal` transaction types **+** the `reason_code` constraint widening (§7.3) | **CLAIMED** by `ledger-finance` this dispatch |
-| *(unassigned)* | `rounding_rules` table + `ledger_transactions.rounding_rule_id` (§7.8) | **REQUESTED** — `ledger-finance`-owned, not on `bonus_expense`'s critical path; number to be assigned by the Orchestrator after Wave-1 reconciliation |
-| *(unassigned)* | HR-15/HR-16's `ledger_accounts` identity-immutability trigger, reconciled with ADR 0035 §1.3.1's `ledger_accounts_owner_family` CHECK (§7.14) | **REQUESTED** — `ledger-finance`-owned, **hard gate** on the first `bonus_*` posting |
-| **`0055`** | `player_bonus_held` account type — `ledger_accounts_account_type_check` widening (§7.7.2.4) | **CLAIMED** by `ledger-finance`, Stage 4H-B1 Wave 1.5 Fix Round 2. Gated on HR-9/HR-23 exactly as `0050`/`0051` are — `NOT IMPLEMENTED` |
+| **`0050`** | `bonus_expense` account type (§7.2) | **IMPLEMENTED** — Stage 4H-B1 Wave 2 |
+| **`0051`** | `bonus_grant`/`bonus_conversion`/`bonus_forfeiture`/`bonus_reversal` transaction types **+** the `reason_code` constraint widening (§7.3) | **IMPLEMENTED** — Stage 4H-B1 Wave 2 |
+| *(unassigned)* | `rounding_rules` table + `ledger_transactions.rounding_rule_id` (§7.8) | **REQUESTED** — `ledger-finance`-owned, not on `bonus_expense`'s critical path; number to be assigned by the Orchestrator after Wave-1 reconciliation. Still not built as of Stage 4H-B1 Wave 2: `money.RoundToMinorUnits` (§7.8) is implemented in `internal/money`, but it takes `ruleID` as an opaque, caller-validated parameter — it does not itself look up a `rounding_rules` table, because that table does not exist yet (see `internal/money`'s own package doc comment) |
+| *(unassigned)* | HR-15/HR-16's `ledger_accounts` identity-immutability trigger, reconciled with ADR 0035 §1.3.1's `ledger_accounts_owner_family` CHECK (§7.14) | **REQUESTED** — `ledger-finance`-owned, **hard gate** on the first `bonus_*` posting. **Still not built as of Stage 4H-B1 Wave 2** — HR-16's gate is on the first `bonus_*` POSTING, and this dispatch's own postings are exercised only by its own test suite, not by a live `bonus_grant` call site (`internal/bonus` does not exist yet), so the gate is not yet reachable in production traffic. This is flagged, not resolved, as a required item before `internal/bonus`'s Phase 2/3 call sites go live |
+| **`0052`** *(renumbered from this section's own earlier speculative `0055` claim — see §7.7.2.4's own updated note)* | `player_bonus_held` account type — `ledger_accounts_account_type_check` widening (§7.7.2.4) | **IMPLEMENTED** — Stage 4H-B1 Wave 2. HR-9/HR-23 (its own gate) are themselves now satisfied (§7.4.4) |
 
-Verified at `HEAD` `7e1656f`: `migrations/` runs `0001`…`0049`
-contiguously with no gaps and nothing at `0050`+. The task registry
-releases the `0050`+ block to Stage 4H-B1. Two numbers are claimed rather
-than four so that `risk`'s and `bonus-engine`'s parallel Wave-1 claims are
-not crowded out by reservations this specialist may not need in Wave 2.
+Verified at `HEAD` `7e1656f`: `migrations/` ran `0001`…`0049`
+contiguously with no gaps and nothing at `0050`+, at the time this
+section was written. **Stage 4H-B1 Wave 2 update:** `ledger-finance`
+re-verified this against the live `migrations/` directory before writing
+any new migration, per this dispatch's own instruction not to trust a
+speculative number cited in this or any other document. `0050` and
+`0051` landed exactly as claimed; `0052` (not `0055`) is what actually
+shipped for `player_bonus_held`, because `ledger-finance` built all three
+migrations together in one dispatch rather than across the separately-
+staged waves this section originally assumed. `0053`+ remains open for
+`bonus-engine`'s domain-table range (including `bonus_held_dispositions`,
+§7.7.2.5), unclaimed by any of this dispatch's migrations.
 
 ### 7.17 Review status
 
-`NOT IMPLEMENTED`, design only. Requires, before any code is written:
+**STATUS UPDATE — Stage 4H-B1 Wave 2, `ledger-finance`: §§7.2–7.7.2, §7.9
+and §7.14's HR-9/HR-17/HR-22/HR-23 are now `IMPLEMENTED`** (migrations
+`0050`/`0051`/`0052`; `internal/ledger/bonus_mirror.go`; `internal/money`;
+the test suites named in §7.15's coverage map, restated in
+`bonus_mirror_integration_test.go`'s and
+`bonus_migrations_integration_test.go`'s own header comments). The
+paragraph immediately below is left in its original wording as the
+historical DESIGN-ONLY review-status statement this section opened
+with — accurate for the dispatch that wrote it, superseded by this
+update for what actually exists in the tree now. **Independent review by
+`bonus-engine`, `architect`, `security` and `qa` of THIS implementation
+(not the design that preceded it) has not yet occurred as of this
+dispatch** and remains the gating step before the next phase's
+`internal/bonus`/`internal/casino` call sites are authorized to build
+against it — see this dispatch's own completion report for exactly what
+is left open.
+
+`NOT IMPLEMENTED`, design only, AS OF THE DISPATCH THAT WROTE THIS
+PARAGRAPH. Requires, before any code is written:
 independent `bonus-engine` validation (§7.12's D-1…D-9, finding BF-1, and
 **§7.7.1's A-1…A-3**), `architect` validation (HR-16's widening of HR-15;
 `internal/money` placement; **finding LF-16b**; §7.7.1's A-2 if a new
@@ -8240,6 +8344,23 @@ Phase 2 independent re-verification report,
 | **LF-23** (casino §16.7 still describing post-then-reforfeit) | Reviewed against the current `08 §16.7` text during this dispatch; the live text already reflects the capture-not-post design (§16.7 branch 2, "**Nothing posts. No money moves.**") — appears already fixed on `casino`'s side, not re-verified independently here | **NOT INDEPENDENTLY RE-VERIFIED** — `casino`'s to confirm |
 | **LF-24** (five unguarded `*big.Int`/`int64` boundary crossings) | Not touched by this dispatch — out of this section's scope (holding representation only) | **NOT ADDRESSED HERE** |
 | Held-win rollback gap (casino/`qa` C28) | Closed for the still-held case via the existing generic rollback-inversion plus a guarded status transition (§7.7.2.7); the already-resolved case remains routed to LF-10 | **PARTIALLY CLOSED** |
+
+**Stage 4H-B1 Wave 2 amendments** (`ledger-finance`'s first REAL CODE
+dispatch for this section — the financial substrate Phases 2-3 of this
+wave build against):
+
+| Item | What changed | Status |
+|---|---|---|
+| Migration `0050` (`bonus_expense`) | Implemented exactly as §7.2 specifies; superset-property and irreversibility (down-migration) proved by `bonus_migrations_integration_test.go` | **IMPLEMENTED** |
+| Migration `0051` (`bonus_grant`/`bonus_conversion`/`bonus_forfeiture`/`bonus_reversal` + widened `reason_code` constraint) | Implemented exactly as §7.3 specifies, including the Go-side copy of the `reason_code` requirement in `Post` | **IMPLEMENTED** |
+| Migration `0052` (`player_bonus_held`) | Implemented per §7.7.2.4, **renumbered from that section's speculative `0055` claim** (see that section's own updated note and §7.16) | **IMPLEMENTED** |
+| Rule B2 (extended) mirror generator (`internal/ledger/bonus_mirror.go`) | Implemented exactly per §7.4: the four-step net-over-the-set algorithm, `BonusFunding`/`BonusCostAttribution`, fail-closed validation, HR-17's hand-assembled-leg rejection (no reversal exemption), the reversal funding-match check, fixed leg ordering. `BONUS_SET` widened to its three-member form from the start (`player_bonus`, `player_locked_bonus`, `player_bonus_held`), so HR-23 is satisfied by the same generator as HR-9, not separately | **IMPLEMENTED** |
+| HR-9 / HR-23 (fail-closed guard) | **REMOVED**, exactly as §7.4.4 specifies — total removal, not a feature flag. See §7.4.4's own status update | **SATISFIED, REMOVED** |
+| HR-17 (no hand-assembled mirror leg, no reversal exemption) | Enforced in `applyBonusMirror`; tested including under `ReversesTransactionID` | **IMPLEMENTED** |
+| `money.RoundToMinorUnits` / HR-22's narrowing helper (§7.8) | Implemented in the new `internal/money` package exactly per this section's signature and DS-1 (round-half-up, ties away from zero)/DS-2 (round once) rules; `ToInt64`/`FromInt64` are HR-22's named, range-checked `*big.Int`⇄`int64` boundary crossing, never a bare `.Int64()`. The `rounding_rules` reference table itself (§7.8's separate, unclaimed migration) is **still not built** — `RoundToMinorUnits` takes `ruleID` as a caller-validated parameter and cannot itself check "known or active" without that table; disclosed in `internal/money`'s own package doc comment, not silently narrowed | **IMPLEMENTED** (the function); reference-table-backed rule validation **NOT IMPLEMENTED** (unclaimed migration, per §7.16) |
+| §7.15's test set | Implemented as `bonus_mirror_integration_test.go` (the generator's own exhaustive coverage) and `bonus_migrations_integration_test.go` (migration mechanics), plus `internal/money`'s unit tests for the rounding function/HR-22 boundary. Coverage map and the small number of items NOT independently tested (and why) are in `bonus_mirror_integration_test.go`'s own header comment | **IMPLEMENTED**, per that file's own disclosed coverage map |
+| Independent review by `bonus-engine`/`architect`/`security`/`qa` of this implementation | Not yet performed — this dispatch is `ledger-finance`'s own build-and-self-verify pass (`gofmt`/`go build`/`go vet`/`go test`/`go test -race`, all clean; full existing repo test suite re-run and unaffected) | **NOT YET REVIEWED** |
+| Cases B/E/G/I, bonus-funded casino/sportsbook stake postings, `internal/bonus`'s own domain tables, `bonus_held_dispositions`, Risk's `bonus_conversion` Operation | Explicitly **NOT** built by this dispatch (out of `ledger-finance`'s Phase-1 scope; routed to Phases 2-4 of this same wave per the dispatch's own instructions) | Unchanged — still `BLOCKED`/`NOT IMPLEMENTED` for the reasons already recorded elsewhere in this document |
 
 ## 8. Cross-references
 

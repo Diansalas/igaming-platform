@@ -14,15 +14,26 @@
 // for BTC at 8 decimals alone that is about 9.2*10^10 whole bitcoin,
 // several orders of magnitude beyond any value this platform will ever
 // hold), and Go has no built-in fixed-point type that would be simpler
-// than int64 without pulling in math/big for no realistic benefit.
+// than int64 without pulling in math/big for no realistic benefit. See
+// bonus_mirror.go's own doc comment (finding LF-16b) for the one place
+// this representation is known to fall short - an 18-exponent asset - and
+// why that is disclosed rather than fixed here.
+//
+// Invariant B1 (bonus mirror, ledger-accounting-model.md §6.1/§7.4) is
+// enforced by this package, not by callers: Post invokes bonus_mirror.go's
+// Rule B2 (extended) generator unconditionally on every call, so any
+// posting touching a BONUS_SET account (player_bonus, player_locked_bonus,
+// player_bonus_held) is mirrored automatically. HR-9's fail-closed guard,
+// which used to block every such posting until bonus_expense (migration
+// 0050) and this generator both existed, is REMOVED as of this same
+// dispatch - both preconditions are now met - per §7.4.4's instruction
+// that the removal be total, not a feature flag.
 package ledger
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -34,10 +45,12 @@ import (
 // to. The Blueprint names ten; player_withdrawal_hold is a Stage 3A
 // architectural addition; player_locked_cash/player_locked_bonus replace
 // the Blueprint's origin-indeterminate player_locked (migration 0048,
-// ledger-accounting-model.md §6.3/§6.4/§6.5, invariant L1);
-// bonus_expense (ADR 0032 §2) is approved architecture and not yet
-// migrated. No count is stated here: the previous comment's count was
-// already stale and would go stale again.
+// ledger-accounting-model.md §6.3/§6.4/§6.5, invariant L1); bonus_expense
+// (ADR 0032 §2, migration 0050) and player_bonus_held (§7.7.2.4,
+// migration 0052) are Stage 4H-B1 Wave 2 additions - the twelfth and
+// fourteenth account types, both now migrated. No count is stated here:
+// the previous comment's count was already stale and would go stale
+// again.
 type AccountType string
 
 const (
@@ -61,14 +74,34 @@ const (
 	AccountJackpotContribution  AccountType = "jackpot_contribution"
 	AccountPromoLiability       AccountType = "promo_liability"
 	AccountManualAdjustment     AccountType = "manual_adjustment"
+	// AccountBonusExpense is ADR 0032 §2's recognized promotional-cost
+	// account (migration 0050, ledger-accounting-model.md §7.2):
+	// house-level, debit-normal, debited by the Rule B2 (extended) mirror
+	// generator's step 3 (bonus_mirror.go) whenever bonus-origin value
+	// leaves BONUS_SET for any reason other than forfeiture and the
+	// recognition is operator-funded. Never posted to directly by a
+	// caller - HR-17 forbids it.
+	AccountBonusExpense AccountType = "bonus_expense"
+	// AccountPlayerBonusHeld is the third BONUS_SET member
+	// (ledger-accounting-model.md §7.7.2, migration 0052): a dedicated,
+	// disjoint, player-owned holding account for bonus-origin settlement
+	// value (a win payout, and/or a released stake lock) whose
+	// disposition is undecided pending gate G-2. Deliberately NOT part of
+	// the locked-funds family above - "held" and "locked" are kept
+	// disjoint at every read site that enumerates one or the other
+	// (§7.7.2.4's explicit, permanent exclusion) - and NOT reachable from
+	// any posting this dispatch builds: only casino's future hold-capture
+	// posting (§7.7.2.2, not this dispatch's scope) credits it.
+	AccountPlayerBonusHeld AccountType = "player_bonus_held"
 )
 
 // TransactionType is limited to the flows implemented so far
-// (deposit/withdrawal/manual_adjustment/tombstone, plus Stage 4A's
-// casino bet/win/rollback) - see migration 0021's own comment.
-// Sportsbook/bonus/crypto types remain added by an additive migration +
-// a new const here when their owning stage implements them; they are
-// explicitly BLOCKED until then (CLAUDE.md's stage scope gate).
+// (deposit/withdrawal/manual_adjustment/tombstone, Stage 4A's casino
+// bet/win/rollback, and Stage 4H-B1's four bonus types) - see migration
+// 0021's own comment. Sportsbook/crypto types remain added by an
+// additive migration + a new const here when their owning stage
+// implements them; they are explicitly BLOCKED until then (CLAUDE.md's
+// stage scope gate).
 type TransactionType string
 
 const (
@@ -88,6 +121,21 @@ const (
 	TxCasinoBet      TransactionType = "casino_bet"
 	TxCasinoWin      TransactionType = "casino_win"
 	TxCasinoRollback TransactionType = "casino_rollback"
+	// TxBonusGrant/Conversion/Forfeiture/Reversal implement ADR 0032's
+	// bonus posting shapes (migration 0051, ledger-accounting-model.md
+	// §7.3). TxBonusForfeiture covers expiry AND cancellation-after-
+	// activation too - ADR 0032 §3.1 is binding that these are
+	// distinguished from each other and from an ordinary forfeiture only
+	// by reason_code (required on this type, migration 0051's widened
+	// ledger_transactions_check1), never by a separate type. Every
+	// posting of any of these four touching a BONUS_SET account is
+	// mirrored automatically by bonus_mirror.go's Rule B2 (extended)
+	// generator; none of the four is itself special-cased there (ADR
+	// 0032 §2: "Rule B2 admits no exception by transaction type").
+	TxBonusGrant      TransactionType = "bonus_grant"
+	TxBonusConversion TransactionType = "bonus_conversion"
+	TxBonusForfeiture TransactionType = "bonus_forfeiture"
+	TxBonusReversal   TransactionType = "bonus_reversal"
 )
 
 // Direction is a ledger entry's debit/credit side. Never a signed amount
@@ -109,130 +157,6 @@ var ErrIdempotencyKeyReused = errors.New("ledger: idempotency key reused with a 
 // ErrInvalidEntry is returned for a structurally invalid entry (e.g. a
 // non-positive amount) caught before ever reaching the database.
 var ErrInvalidEntry = errors.New("ledger: invalid entry")
-
-// ErrBonusPostingBlocked is HR-9's distinct, non-retryable rejection
-// (ledger-accounting-model.md §6.5.7): a posting against a BONUS_SET
-// account fails closed until BOTH the bonus_expense account type and the
-// Rule B2 (extended) mirror generator exist. Non-retryable by
-// construction - retrying cannot make either precondition appear, so a
-// caller must treat this as a permanent rejection, never as a transient
-// failure to re-attempt.
-//
-// Why a rejection is the safe outcome, per HR-9's own reasoning:
-//   - a player_bonus posting without the mirror generator breaks
-//     invariant B1 (bonus mirror) outright, on the first row;
-//   - a player_locked_bonus lock is B1-safe on its own (it is an internal
-//     BONUS_SET transfer) but could not be SETTLED, because settlement
-//     requires a bonus_expense leg that no CHECK constraint currently
-//     admits - producing a stuck lock, i.e. real player value trapped in
-//     a locked account with no postable resolution. That is strictly
-//     worse than refusing the lock.
-var ErrBonusPostingBlocked = errors.New("ledger: bonus-origin posting blocked until the bonus mirror preconditions exist (HR-9)")
-
-// bonusSetAccountTypes is HR-9's BONUS_SET: the account types no entry
-// may be posted against yet. Both members are REQUIRED as of Stage
-// 4H-B0-R7 (§6.5.7; player_bonus was promoted from recommended to
-// required, and has zero posting call sites at HEAD, so the promotion
-// costs nothing today and converts doc 10 §3 item 2's stated safety
-// ordering into a build-time hard stop).
-//
-// REMOVAL CONDITION - a conjunctive precondition evaluated at removal
-// time, not a co-location rule (§6.5.7, reworded at Stage 4H-B0-R7):
-// this guard may be removed only once BOTH already exist in the tree:
-// (i) bonus_expense is migrated into ledger_accounts_account_type_check,
-// AND (ii) the Rule B2 (extended) mirror generator exists in this package
-// and is exercised by tests. Removal lands WITH the generator (the later
-// of the two), never with the bonus_expense migration. At HEAD neither
-// exists, so the guard is unconditional: there is no partial state to
-// check for.
-// It is a function, not a package-level var, deliberately: a var of slice
-// type can be reassigned or truncated by any code in this package -
-// including a test - which would silently disable HR-9 with no compile
-// error (security finding S-3, Stage 4H-B0-R7). Returning a fresh slice
-// per call makes the set immutable by construction; callers may mutate
-// only their own copy.
-func bonusSetAccountTypes() []string {
-	return []string{
-		string(AccountPlayerBonus),
-		string(AccountPlayerLockedBonus),
-	}
-}
-
-// bonusPostingPreconditions is the message fragment HR-9's error must
-// carry: the error names its own precondition, so a Bonus developer who
-// hits it is told what to build rather than reading a bare rejection
-// (§6.5.7).
-//
-// It is phrased as a REQUIREMENT LIST, not as an assertion that both
-// items are currently missing. §6.5.7 reworked HR-9 into a conjunctive
-// condition evaluated at removal time precisely because the two
-// preconditions can land separately: bonus_expense may be migrated first
-// while the guard stays up awaiting the generator. A "missing precondition
-// (i)" phrasing would be false during exactly that window - the window
-// HR-9 exists to cover.
-const bonusPostingPreconditions = "requires (i) account type 'bonus_expense' in ledger_accounts_account_type_check (ADR 0032 §2) and " +
-	"(ii) the Rule B2 (extended) bonus mirror generator in internal/ledger; " +
-	"at the time this guard was written neither existed (Stage 4H-B0-R7). " +
-	"Both must exist before this guard is removed, and its removal lands with the generator (ledger-accounting-model.md §6.5.7 HR-9)"
-
-// assertNoBonusSetEntries implements HR-9. It resolves each entry's
-// account_type from ledger_accounts and rejects the whole posting if any
-// of them is in BONUS_SET, before Post writes anything at all - so a
-// rejected call leaves no ledger_transactions row, no ledger_entries row,
-// and no half-built transaction for a caller to mistake for a partial
-// success. Accounts already minted by an earlier GetOrCreateAccount call
-// are unaffected: a minted-but-never-posted-to account holds no value and
-// carries no entries.
-//
-// On RLS and fail-open, asked because migration 0048's own pre-flight
-// guard was found to be silently inert under ledger_accounts' FORCE ROW
-// LEVEL SECURITY: this lookup runs in the caller's scope, so in principle
-// a scope that cannot see the account would see no BONUS_SET row and let
-// the posting through. It cannot fail open in practice, for two
-// independent reasons. Postings run under tenant/system scope
-// (db.Pool.WithTenant), where tenant_staff_scope makes every account of
-// the tenant visible - a player-scoped connection cannot insert into
-// ledger_transactions at all (migration 0028). And if an account were
-// somehow invisible here, Post's own entry INSERT resolves asset_code by
-// sub-selecting the SAME row, so it would fail on a NOT NULL violation
-// rather than post. The guard is therefore never the only thing standing
-// between an invisible account and an entry.
-func assertNoBonusSetEntries(ctx context.Context, tx pgx.Tx, entries []EntryInput) error {
-	if len(entries) == 0 {
-		return nil
-	}
-	ids := make([]uuid.UUID, 0, len(entries))
-	for _, e := range entries {
-		ids = append(ids, e.LedgerAccountID)
-	}
-	rows, err := tx.Query(ctx,
-		`SELECT DISTINCT account_type FROM ledger_accounts
-		 WHERE id = ANY($1) AND account_type = ANY($2)`,
-		ids, bonusSetAccountTypes(),
-	)
-	if err != nil {
-		return fmt.Errorf("ledger: resolve entry account types: %w", err)
-	}
-	defer rows.Close()
-
-	var blocked []string
-	for rows.Next() {
-		var accountType string
-		if err := rows.Scan(&accountType); err != nil {
-			return fmt.Errorf("ledger: scan entry account type: %w", err)
-		}
-		blocked = append(blocked, accountType)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("ledger: read entry account types: %w", err)
-	}
-	if len(blocked) > 0 {
-		sort.Strings(blocked)
-		return fmt.Errorf("%w: entries resolve to account type(s) %s; %s",
-			ErrBonusPostingBlocked, strings.Join(blocked, ", "), bonusPostingPreconditions)
-	}
-	return nil
-}
 
 // EntryInput is one leg of a transaction to post.
 type EntryInput struct {
@@ -259,6 +183,13 @@ type TransactionInput struct {
 	// never seen posts no money movement - CLAUDE.md's rollback rule,
 	// ledger-accounting-model.md §1.4).
 	Entries []EntryInput
+	// BonusCost is required if, and only if, Entries touches a BONUS_SET
+	// account (player_bonus, player_locked_bonus, player_bonus_held) -
+	// bonus_mirror.go's Rule B2 (extended) generator validates this
+	// fail-closed, with NO default (ledger-accounting-model.md §7.4.3).
+	// Nil for every non-bonus posting (deposit, withdrawal, casino,
+	// cash-only manual_adjustment, ...).
+	BonusCost *BonusCostAttribution
 }
 
 // PostResult is what Post returns.
@@ -284,13 +215,17 @@ type PostResult struct {
 // the original's returns ErrIdempotencyKeyReused rather than silently
 // preferring either payload.
 //
-// HR-9 (ledger-accounting-model.md §6.5.7): a posting any of whose
-// entries resolves to a BONUS_SET account (player_bonus,
-// player_locked_bonus) is rejected with ErrBonusPostingBlocked before
-// anything is written, until the bonus_expense account type and the Rule
-// B2 (extended) mirror generator both exist. See bonusSetAccountTypes for
-// the exact removal condition.
+// Rule B2 (extended) mirror generator (ledger-accounting-model.md §7.4,
+// bonus_mirror.go): a posting any of whose entries resolves to a
+// BONUS_SET account (player_bonus, player_locked_bonus, player_bonus_held)
+// is mirrored automatically here, before anything is written - the
+// caller supplies only the economically real legs plus BonusCost, and
+// Post appends the promo_liability/bonus_expense/provider_payable legs
+// invariant B1 requires. A caller may never hand-assemble one of those
+// legs itself (HR-17); doing so is rejected before any write, same as
+// every other validation failure below.
 //
+
 // Balance (invariant #1): entries are validated to balance per asset by
 // a deferred database constraint trigger (migration 0022), which Post
 // forces to run immediately (rather than at the caller's eventual
@@ -309,8 +244,15 @@ func Post(ctx context.Context, tx pgx.Tx, in TransactionInput) (PostResult, erro
 	if (in.ProviderID == nil) != (in.ProviderTxID == nil) {
 		return PostResult{}, fmt.Errorf("%w: provider_id and provider_tx_id must both be set or both be nil", ErrInvalidEntry)
 	}
-	if in.TransactionType == TxManualAdjustment && (in.ReasonCode == nil || *in.ReasonCode == "") {
-		return PostResult{}, fmt.Errorf("%w: manual_adjustment requires a reason code", ErrInvalidEntry)
+	// reason_code is required on manual_adjustment (CLAUDE.md's four-eyes
+	// rule) AND on bonus_forfeiture (ADR 0032 §3.1: expiry vs. staff
+	// cancellation is distinguished ONLY by reason_code) - migration
+	// 0051's widened ledger_transactions_check1 enforces the same
+	// equality at the database; this is the boundary-level copy with a
+	// legible error (ledger-accounting-model.md §7.3).
+	if (in.TransactionType == TxManualAdjustment || in.TransactionType == TxBonusForfeiture) &&
+		(in.ReasonCode == nil || *in.ReasonCode == "") {
+		return PostResult{}, fmt.Errorf("%w: %s requires a reason code", ErrInvalidEntry, in.TransactionType)
 	}
 	for _, e := range in.Entries {
 		if e.Amount <= 0 {
@@ -321,12 +263,32 @@ func Post(ctx context.Context, tx pgx.Tx, in TransactionInput) (PostResult, erro
 		}
 	}
 
-	// HR-9 (ledger-accounting-model.md §6.5.7): a posting against a
-	// BONUS_SET account fails closed here, before any write, until the
-	// bonus_expense account type and the Rule B2 (extended) mirror
-	// generator both exist.
-	if err := assertNoBonusSetEntries(ctx, tx, in.Entries); err != nil {
+	// Rule B2 (extended) mirror generator (ledger-accounting-model.md
+	// §7.4, bonus_mirror.go): resolves every entry's account_type/
+	// asset_code from ledger_accounts (never trusting the caller),
+	// validates BonusCost's fail-closed rules, enforces HR-17, and - for
+	// every asset touched by a BONUS_SET account - returns the mirror and
+	// recognition legs invariant B1 requires. Returns no entries and an
+	// error for a non-bonus posting (the overwhelming majority of calls),
+	// after one lightweight account-type lookup. Runs BEFORE the
+	// idempotent insert below, so a validation failure leaves no
+	// ledger_transactions row and no ledger_entries row - "before Post
+	// writes anything at all", HR-9's own original standard, preserved
+	// under the generator that replaces it.
+	generatedEntries, err := applyBonusMirror(ctx, tx, in.TenantID, in)
+	if err != nil {
 		return PostResult{}, err
+	}
+	entriesToPost := in.Entries
+	if len(generatedEntries) > 0 {
+		// Fixed order (§7.4.2): the caller's own entries first, then the
+		// generated legs in the order applyBonusMirror produced them (all
+		// step-2 legs, then all step-3 legs, assets in sorted order) - so
+		// a given logical posting always produces byte-identical entry
+		// rows, never mutating in.Entries itself.
+		entriesToPost = make([]EntryInput, 0, len(in.Entries)+len(generatedEntries))
+		entriesToPost = append(entriesToPost, in.Entries...)
+		entriesToPost = append(entriesToPost, generatedEntries...)
 	}
 
 	transactionID := uuid.New()
@@ -357,7 +319,7 @@ func Post(ctx context.Context, tx pgx.Tx, in TransactionInput) (PostResult, erro
 		return PostResult{TransactionID: existingID, AlreadyPosted: true}, nil
 	}
 
-	for _, e := range in.Entries {
+	for _, e := range entriesToPost {
 		if _, err := tx.Exec(ctx,
 			`INSERT INTO ledger_entries (ledger_transaction_id, ledger_account_id, tenant_id, asset_code, direction, amount)
 			 VALUES ($1, $2, $3, (SELECT asset_code FROM ledger_accounts WHERE id = $2), $4, $5)`,

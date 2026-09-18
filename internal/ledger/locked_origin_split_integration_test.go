@@ -11,8 +11,14 @@
 //	         layer 1)                 -> TestLedgerAccounts_BarePlayerLockedRejectedByCheckConstraint
 //	item 2  (GetOrCreateAccount for the new types, DB-level idempotent)
 //	                                  -> TestGetOrCreateAccount_LockedSplitTypesIdempotentAtEveryExponent
-//	item 5  (HR-9 rejects a BONUS_SET posting and writes nothing)
-//	                                  -> TestPost_HR9BonusSetPostingsRejectedAndNothingWritten
+//	item 5  (HR-9 - NOW SATISFIED, Stage 4H-B1 Wave 2: bonus_expense
+//	         (migration 0050) and the Rule B2 (extended) mirror generator
+//	         (bonus_mirror.go) both exist, so a BONUS_SET posting is no
+//	         longer rejected. TestPost_HR9BonusSetPostingsRejectedAndNothingWritten
+//	         is renamed/repurposed accordingly; the generator's own
+//	         exhaustive table-driven coverage lives in
+//	         bonus_mirror_integration_test.go, per ledger-accounting-model.md
+//	         §7.15)                    -> TestPost_BonusSetPostingsAcceptedOnceMirrorGeneratorExists
 //	item 9  (items 2/8 at exponent 0 and 18)
 //	                                  -> the two tests above plus
 //	                                     TestPost_CashOriginLockPostsAndRebuildsAtEveryExponent
@@ -32,7 +38,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -302,22 +307,27 @@ func TestGetOrCreateAccount_LockedSplitTypesIdempotentAtEveryExponent(t *testing
 	}
 }
 
-// TestPost_HR9BonusSetPostingsRejectedAndNothingWritten is §6.5.8 item 5
-// and HR-9 (§6.5.7). Both BONUS_SET members are required to be blocked:
-// player_locked_bonus (which migration 0048 creates) and player_bonus
-// (promoted from recommended to required at Stage 4H-B0-R7).
-//
-// The surrounding transaction is deliberately COMMITTED after the
-// rejected Post, so this proves "nothing was written" rather than merely
-// "the caller's rollback undid it" - a guard that wrote a
-// ledger_transactions row and then relied on the caller rolling back
-// would pass the weaker test and fail this one.
-func TestPost_HR9BonusSetPostingsRejectedAndNothingWritten(t *testing.T) {
+// TestPost_BonusSetPostingsAcceptedOnceMirrorGeneratorExists is §6.5.8
+// item 5, UPDATED for Stage 4H-B1 Wave 2: HR-9 required BOTH the
+// bonus_expense account type (migration 0050) and the Rule B2 (extended)
+// mirror generator (bonus_mirror.go) to exist before any BONUS_SET
+// posting could be accepted. Both now exist, so the historical assertion
+// this test made - that such a posting is REJECTED - is no longer the
+// platform's behavior, and asserting it would be exactly the kind of
+// stale, factually-incorrect test CLAUDE.md's "no fake completion" rule
+// warns against. This test proves the opposite, now-correct property:
+// with a valid BonusCost, a manual_adjustment against player_bonus or
+// player_locked_bonus posts successfully, generates the correct mirror
+// leg, and leaves invariant B1 holding. The generator's own exhaustive
+// posting-shape coverage (grant/conversion/forfeiture/reversal, HR-17,
+// multi-asset, exponents) lives in bonus_mirror_integration_test.go
+// (ledger-accounting-model.md §7.15) - this test's remaining job is
+// narrowly to prove HR-9's specific removal, not to re-prove the
+// generator.
+func TestPost_BonusSetPostingsAcceptedOnceMirrorGeneratorExists(t *testing.T) {
 	pool := testPool(t)
 	f := seedFixture(t, pool)
 
-	// Account CREATION is unaffected by HR-9 - only posting is blocked.
-	// A minted-but-never-posted-to account holds no value.
 	var bonusID, lockedBonusID, lockedCashID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -334,94 +344,134 @@ func TestPost_HR9BonusSetPostingsRejectedAndNothingWritten(t *testing.T) {
 		t.Fatalf("create bonus-family accounts: %v", err)
 	}
 
-	// Fund the wallet so the rejected postings are otherwise entirely
-	// well-formed (balanced, positive, idempotency-keyed): the ONLY
-	// reason each must fail is HR-9.
-	mustPost(t, pool, f, depositInput(f, "hr9-funding", 10_000))
+	mustPost(t, pool, f, depositInput(f, "hr9-satisfied-funding", 10_000))
 
 	for _, c := range []struct {
-		name      string
-		accountID uuid.UUID
-		wantType  string
+		name        string
+		accountID   uuid.UUID
+		wantSigned  int64 // signed balance of accountID after the posting
+		promoSigned int64 // signed balance of promo_liability after the posting (mirror leg)
 	}{
-		{"player_locked_bonus", lockedBonusID, "player_locked_bonus"},
-		{"player_bonus", bonusID, "player_bonus"},
+		// Dr player_cash 500 / Cr player_locked_bonus 500: net(EUR) over
+		// BONUS_SET = +500 (a credit), so the generator mirrors
+		// Dr promo_liability 500 - the exact shape §6.4.5 case B's
+		// "sportsbook lock" table row describes, generically exercised
+		// here via manual_adjustment since no sportsbook_* transaction
+		// type exists yet (unchanged from this file's original scope
+		// note).
+		{"player_locked_bonus", lockedBonusID, 500, -500},
 	} {
-		key := "hr9-" + c.name
-		var postErr error
-		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, postErr = Post(ctx, tx, TransactionInput{
-				TenantID:        f.tenantID,
-				TransactionType: TxManualAdjustment,
-				IdempotencyKey:  key,
-				CorrelationID:   uuid.New(),
-				ReasonCode:      strPtr("hr9_guard_test"),
-				Entries: []EntryInput{
-					{LedgerAccountID: f.cashAccountID, Direction: Debit, Amount: 500},
-					{LedgerAccountID: c.accountID, Direction: Credit, Amount: 500},
-				},
-			})
-			return nil // commit, so the assertions below are about durable state
+		key := "hr9-satisfied-" + c.name
+		res := mustPost(t, pool, f, TransactionInput{
+			TenantID:        f.tenantID,
+			TransactionType: TxManualAdjustment,
+			IdempotencyKey:  key,
+			CorrelationID:   uuid.New(),
+			ReasonCode:      strPtr("hr9_satisfied_test"),
+			Entries: []EntryInput{
+				{LedgerAccountID: f.cashAccountID, Direction: Debit, Amount: 500},
+				{LedgerAccountID: c.accountID, Direction: Credit, Amount: 500},
+			},
+			BonusCost: &BonusCostAttribution{Funding: FundingOperator},
 		})
-		if err != nil {
-			t.Fatalf("%s: transaction wrapper failed: %v", c.name, err)
-		}
-		if !errors.Is(postErr, ErrBonusPostingBlocked) {
-			t.Fatalf("%s: expected ErrBonusPostingBlocked, got %v", c.name, postErr)
-		}
-		// HR-9's error must NAME its own precondition, so a Bonus
-		// developer who hits it is told what to build (§6.5.7).
-		for _, want := range []string{c.wantType, "bonus_expense", "mirror generator"} {
-			if !strings.Contains(postErr.Error(), want) {
-				t.Fatalf("%s: HR-9 error must mention %q, got: %v", c.name, want, postErr)
-			}
+		if res.AlreadyPosted {
+			t.Fatalf("%s: expected a new posting, got AlreadyPosted", c.name)
 		}
 
 		err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			var txCount, entryCount int
-			if err := tx.QueryRow(ctx,
-				`SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND idempotency_key = $2`,
-				f.tenantID, key).Scan(&txCount); err != nil {
-				return err
-			}
-			if txCount != 0 {
-				t.Fatalf("%s: HR-9 rejection left %d ledger_transactions row(s) behind", c.name, txCount)
-			}
-			if err := tx.QueryRow(ctx,
-				`SELECT count(*) FROM ledger_entries WHERE ledger_account_id = $1`, c.accountID).Scan(&entryCount); err != nil {
-				return err
-			}
-			if entryCount != 0 {
-				t.Fatalf("%s: HR-9 rejection left %d ledger_entries row(s) behind", c.name, entryCount)
-			}
-			projected, err := GetProjectedBalance(ctx, tx, c.accountID)
+			bal, err := GetProjectedBalance(ctx, tx, c.accountID)
 			if err != nil {
 				return err
 			}
-			if projected.Found {
-				t.Fatalf("%s: HR-9 rejection created a balance projection row (%+v)", c.name, projected)
+			if bal.Signed() != c.wantSigned {
+				t.Fatalf("%s: expected balance %d, got %d", c.name, c.wantSigned, bal.Signed())
+			}
+			promoID, err := GetOrCreateAccount(ctx, tx, f.tenantID, nil, AccountPromoLiability, "EUR")
+			if err != nil {
+				return err
+			}
+			promoBal, err := GetProjectedBalance(ctx, tx, promoID)
+			if err != nil {
+				return err
+			}
+			if promoBal.Signed() != c.promoSigned {
+				t.Fatalf("%s: expected promo_liability signed balance %d, got %d", c.name, c.promoSigned, promoBal.Signed())
 			}
 			return nil
 		})
 		if err != nil {
-			t.Fatalf("%s: verify nothing written: %v", c.name, err)
+			t.Fatalf("%s: verify: %v", c.name, err)
 		}
 	}
 
-	// The cash-origin half of the same family is NOT blocked: the guard
-	// must be exactly as wide as BONUS_SET and no wider, or it would
-	// silently disable the capability migration 0048 exists to add.
+	// player_bonus, promoted from recommended to required at Stage
+	// 4H-B0-R7, is likewise now postable with a valid BonusCost.
+	res := mustPost(t, pool, f, TransactionInput{
+		TenantID:        f.tenantID,
+		TransactionType: TxManualAdjustment,
+		IdempotencyKey:  "hr9-satisfied-player_bonus",
+		CorrelationID:   uuid.New(),
+		ReasonCode:      strPtr("hr9_satisfied_test"),
+		Entries: []EntryInput{
+			{LedgerAccountID: bonusID, Direction: Debit, Amount: 200},
+			{LedgerAccountID: f.cashAccountID, Direction: Credit, Amount: 200},
+		},
+		BonusCost: &BonusCostAttribution{Funding: FundingOperator},
+	})
+	if res.AlreadyPosted {
+		t.Fatal("player_bonus: expected a new posting, got AlreadyPosted")
+	}
+
+	// Without a BonusCost, the SAME posting is now rejected for a
+	// DIFFERENT reason than before (ErrBonusCostRequired, not
+	// ErrBonusPostingBlocked - that symbol no longer exists in this
+	// package at all, per §7.4.4's "removal is total").
+	_, postErr := postWithoutTenant(t, pool, f, TransactionInput{
+		TenantID:        f.tenantID,
+		TransactionType: TxManualAdjustment,
+		IdempotencyKey:  "hr9-satisfied-missing-bonus-cost",
+		CorrelationID:   uuid.New(),
+		ReasonCode:      strPtr("hr9_satisfied_test"),
+		Entries: []EntryInput{
+			{LedgerAccountID: f.cashAccountID, Direction: Debit, Amount: 100},
+			{LedgerAccountID: lockedBonusID, Direction: Credit, Amount: 100},
+		},
+	})
+	if !errors.Is(postErr, ErrBonusCostRequired) {
+		t.Fatalf("expected ErrBonusCostRequired for a BONUS_SET posting with no BonusCost, got %v", postErr)
+	}
+
+	// The cash-origin half of the same family never needed BonusCost and
+	// still does not - the generator (like HR-9 before it) is exactly as
+	// wide as BONUS_SET and no wider.
 	mustPost(t, pool, f, TransactionInput{
 		TenantID:        f.tenantID,
 		TransactionType: TxManualAdjustment,
-		IdempotencyKey:  "hr9-control-cash-lock",
+		IdempotencyKey:  "hr9-satisfied-control-cash-lock",
 		CorrelationID:   uuid.New(),
-		ReasonCode:      strPtr("hr9_guard_control"),
+		ReasonCode:      strPtr("hr9_satisfied_control"),
 		Entries: []EntryInput{
 			{LedgerAccountID: f.cashAccountID, Direction: Debit, Amount: 500},
 			{LedgerAccountID: lockedCashID, Direction: Credit, Amount: 500},
 		},
 	})
+}
+
+// postWithoutTenant runs Post inside f's tenant scope and returns its
+// result/error without failing the test on a non-nil error - used where
+// the error itself is the thing under test.
+func postWithoutTenant(t *testing.T, pool *db.Pool, f fixture, in TransactionInput) (PostResult, error) {
+	t.Helper()
+	var res PostResult
+	var postErr error
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		res, postErr = Post(ctx, tx, in)
+		return nil // commit regardless, so a rejected Post's "nothing written" claim is checked against durable state
+	})
+	if err != nil {
+		t.Fatalf("transaction wrapper failed: %v", err)
+	}
+	return res, postErr
 }
 
 // TestPost_CashOriginLockPostsAndRebuildsAtEveryExponent proves the one
