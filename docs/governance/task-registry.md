@@ -489,7 +489,45 @@ No human decision (G-2, `OpenBetSelfExclusionPolicy`, cashout policy, FD-1, or a
 
 **P2/P3**: see each specialist's full report (11 P2s + 10 P3s not restated here in full — recorded in the source reports, routed per-owner as each report specifies).
 
-**Wave 2 readiness decision: NOT READY.** Three P0s block implementation authorization outright (per `security`'s explicit blocking position, which stands under schedule pressure); a fourth P0 (LF-2) means the central G-2-avoidance claim this entire gate exists to validate does not currently hold as designed. This is not a documentation-polish backlog — it is unresolved design defects in the mechanisms meant to prevent silent human-decision selection, self-dealing, and mass-grant abuse. A fix wave is required, routed to the owning specialists per each finding's source report, followed by a second independent re-verification pass, before Wave 2 (or any narrower re-scoped implementation) can be authorized.
+## Stage 4H-B1, Wave 1.5 Fix Wave — Close and Re-Verify the 4 P0s + ~20 P1s
+
+**AUTHORIZED** (human directive), started at HEAD `9ae397f`. **Fix + independent re-verification only — no Wave 2, no bonus-funded-wagering/CRM/Affiliate/Gamification implementation code, unless strictly required to close an already-identified defect.**
+
+**Orchestrator's unifying technical contract**, given to every Phase 1 dispatch below to prevent the kind of unreconciled divergence that produced LF-2/LF-1 last round:
+
+- **Eligibility state vs. financial disposition, formally separated.** A Grant's *wagering eligibility* (may new stakes be authorized against it) is a purely technical property that may change immediately and uncontestedly the moment any termination trigger fires (expiry/cancellation/forfeiture-condition/conversion) — this is never G-2. A Grant's *financial disposition* (what happens to value already at risk when the trigger fires) is where G-2 lives, and only for the specific sub-case of a **value-creating credit (a win) arriving against exposure that was already open at the moment eligibility closed**. Loss-side resolution of the same exposure is value-reducing, creates nothing to dispute, and proceeds immediately and technically, exactly as `casino`'s original B(G)/L(G) split intended.
+- **The G-2 seam must genuinely fail closed, not post-then-reverse.** `ledger-finance`'s LF-2 finding is that posting a win credit to `player_bonus` and then immediately reforfeiting it is economically `ACTION_REFORFEIT`, regardless of the state-machine label attached. The corrected behavior: a win credit reaching the G-2 seam is **never posted to any player-accessible balance**. It is held in an economically-explicit, policy-neutral representation (extending, not duplicating, the already-named `ACTION_HOLD_FOR_REVIEW` holding mechanism as the necessary interim parking state for any of the three eventual answers, not a selection of that specific answer) until a human supplies G-2.
+- **`EconomicOperationIdentity`**: extend existing operation/transaction-identity mechanisms (correlation_id, idempotency keys, campaign/offer/grant versioning) to carry parent-operation/batch-lineage/intended-aggregate-value, rather than inventing a new domain. Owned by `architect`, since it is the entity that must be consistently referenced by Bonus, CRM, and Affiliate alike.
+- **Actor≠subject/beneficiary is one reusable platform invariant**, not three domain-local ones. Owned by `security` (design) with `identity-compliance` confirming the underlying Person-linkage mechanism is the right primitive to build it on (the same `staff_users.person_id` ↔ `PlayerAccount`→`Person` link already used for four-eyes). Each domain (Bonus, CRM, Affiliate) then adopts the same invariant at its own enforcement point — no domain reinvents it.
+- **Affiliate four-eyes**: the simplest fail-closed answer that needs no new "affiliate entity" identity resolution is that the approver on any affiliate-financial decision must be an **internal** (non-affiliate) principal, full stop — `security`'s own Phase 2 report already specified this as DEP-AFF-1 condition 4 / SEC-W15-01's required fix.
+
+**Phase 1 — Authorship (parallel, distinct ownership):**
+
+| ID | Owner | Deliverable |
+|---|---|---|
+| 4HB1FW-01 | bonus-engine | P0#1 (LF-2) fix: redesign TI-1 per the eligibility/disposition split; fix LF-11 (FOR UPDATE claim) |
+| 4HB1FW-02 | casino | Casino postWin fix: LF-1 (query must actually deliver what's claimed), LF-4 (lock release / loss-settlement mechanism), LF-7/LF-8 (missing 4th outcome, wrong HR-2 unreachability claim), LF-10 (stop pre-committing to a ledger-finance decision) |
+| 4HB1FW-03 | architect | Segmentation fix (P1-1 Kleene/`member_of` gap, P1-2 `inclusion_safe` propagation); CRM fix (P1-3 reconcile with bonus-engine's real N2.4 interface, SEC-W15-02's volume-control-on-activation requirement); Affiliate fix (P1-4 ledger-import misstatement, structural support for SEC-W15-01); `EconomicOperationIdentity` design; ownership map + dependency graph update; P2/P3 doc-level corrections from `code-reviewer`'s and `security`'s Phase 2 reports |
+| 4HB1FW-04 | security | P0#4 actor≠subject canonical invariant design; P0#2 affiliate four-eyes redesign detail; its own promised Wave 1.5 security-architecture.md section (DEP-AFF-1/DEP-CRM-4 formalization, EDR constraint set, `bonus_suggestion:*` permissions, `pending_settlement` four-eyes extension) |
+| 4HB1FW-05 | identity-compliance | Confirms/extends the Person-linkage mechanism underlying the actor≠subject invariant; defines the affiliate identity/authority boundary security's design needs (entity vs. account vs. beneficial owner) |
+| 4HB1FW-06 | ledger-finance | Fixes its own previously-disclosed, not-yet-fixed design errors in its own file: LF-16 (`RoundToMinorUnits` int64 overflow risk vs. NUMERIC(38,0)), LF-17 (stale unextended-B1 documentation row) |
+
+**Phase 2 — Independent re-verification (parallel, after Phase 1, none reviewing own work)** — to be dispatched once Phase 1 reports back:
+- `ledger-finance` — independently verifies LF-2's fix (bonus-engine) and the Casino postWin fix (casino) — explicitly required by the directive
+- `security` — independently verifies all four original P0s are actually closed — explicitly required
+- `architect` — independently reviews bonus-engine's and casino's fixes (cross-domain consistency) — did not author either this round
+- `code-reviewer` — substitutes as the independent architectural reviewer for Segmentation/CRM/Affiliate/EconomicOperationIdentity, since `architect` authored those fixes and cannot review its own work (same disclosed roster adaptation as Wave 1.5's own Phase 2)
+- `bonus-engine` — independently reviews architect's Segmentation fix only (first-consumer angle, as before)
+- `identity-compliance` — independently reviews bonus-engine's P0#1 fix from the RG/self-exclusion interaction angle (a fresh angle; did not author the fix itself)
+- `casino` — independently reviews bonus-engine's P0#1 fix from the concrete async-callback-model stress-testing angle (did not author it)
+- `risk` — independently reviews the actor≠subject invariant and `EconomicOperationIdentity` design against Risk's own operation/eligibility model (new reviewer this round)
+- `sportsbook` — independently reviews whether the new cross-cutting designs generalize correctly to sportsbook's own future domain (new reviewer this round, authored nothing)
+- `qa` — produces the required adversarial test-plan updates (12 items per the directive's Testing section)
+- `product-owner-proxy` — scope-discipline check: confirms no implementation crept in beyond what's strictly required to close an already-identified defect
+
+No human decision (G-2, `OpenBetSelfExclusionPolicy`, cashout policy, FD-1) will be selected in this fix wave.
+
+**Wave 2 readiness decision (prior gate, superseded by this fix wave's own eventual verdict): NOT READY.** Three P0s block implementation authorization outright (per `security`'s explicit blocking position, which stands under schedule pressure); a fourth P0 (LF-2) means the central G-2-avoidance claim this entire gate exists to validate does not currently hold as designed. This is not a documentation-polish backlog — it is unresolved design defects in the mechanisms meant to prevent silent human-decision selection, self-dealing, and mass-grant abuse. A fix wave is required, routed to the owning specialists per each finding's source report, followed by a second independent re-verification pass, before Wave 2 (or any narrower re-scoped implementation) can be authorized.
 
 ## How to use this registry (for future stages)
 
