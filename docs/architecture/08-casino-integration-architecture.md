@@ -346,6 +346,50 @@ section closes the design gap **without selecting G-2's answer** and
 is changed by this section; §16.1 proves the defect against already-
 committed code rather than by writing a reproduction.
 
+**Fix-wave revision note (Stage 4H-B1, Wave 1.5 Fix Wave, task
+4HB1FW-02).** `ledger-finance`'s Phase 2 review (findings LF-1, LF-4,
+LF-7, LF-8, LF-10) found this section's *own* first draft self-
+contradictory or incomplete in five places, independent of G-2 itself.
+All five are fixed below, in §16.3, §16.4, new §16.4a, new §16.5a, §16.7,
+§16.8, §16.11, §16.12, and §16.13. Summary, each attributed:
+
+- **LF-1** (fixed in §16.4): the original query read the bet's *debit*
+  leg with no `account_type`-conditioned amount, then the destination map
+  treated `player_bonus` (which is what a lock-shaped bonus bet's debit
+  leg actually is) as the *unconditional, no-G-2* row — meaning the
+  G-2-gated row, keyed on `player_locked_bonus`, could never be reached by
+  the debit leg at all. §16.7's exploit-closure proof accordingly did not
+  hold as originally written. Re-walked in full below; it holds now.
+- **LF-4** (fixed in new §16.5a): the original design changed the win
+  credit destination but never released the lock, and had no mechanism at
+  all for a *losing* bonus-funded round (casino has no loss callback).
+  §16.5a designs both the win-side release (falls out of the LF-1 fix)
+  and a new loss-resolution mechanism (a bounded, per-jurisdiction
+  settlement-timeout sweep, recommended over a provider-protocol
+  extension, with a fail-closed default and a late-win alerting
+  contract).
+- **LF-7** (fixed in §16.3, §16.4, §16.11): a fourth query outcome — one
+  distinct `account_type`, more than one distinct `wallet_id` — was
+  unhandled, and §16.3's claim that this was "already caught" by the
+  existing asset check was false (that check compares only `AssetCode`,
+  never `wallet_id` or player identity, confirmed against
+  `orchestrator.go:867`). Now a named, aborting fourth outcome.
+- **LF-8** (fixed in new §16.4a): the ">1 distinct `account_type` is
+  structurally unreachable by HR-2" claim was wrong — HR-2 only blocks a
+  *single* posting instruction with two funding origins, not two separate
+  `casino_bet` transactions sharing one round-level `correlation_id`
+  (legitimate multi-bet rounds/re-bets/side bets). §16.4a designs a real
+  handling path and names the actual missing capability (a bet-level
+  identifier on win events, which `internal/casino/types.go` confirms
+  does not exist today).
+- **LF-10** (fixed in §16.5, §16.11, §16.12, §16.13): this section's own
+  "fail closed on insufficient balance" pre-commitment for a rollback of
+  an already-forfeited win is withdrawn — that is `ledger-finance`'s
+  decision, not casino's, and this document no longer pre-selects an
+  answer.
+
+No G-2 selection is made anywhere below. No code or migration is written.
+
 ### 16.1 The defect, confirmed against live code (not asserted from memory)
 
 `postWin` (`orchestrator.go:838-906`) resolves the round's wallet from the
@@ -390,6 +434,7 @@ needed.
 | Replay (redelivery) | `findPostedBetTransaction` (bet, lines 520-541, 641-645); win/rollback rely on `ledger.Post`'s own `(tenant_id, idempotency_key)` uniqueness | Idempotent no-op — see §16.2.1 for the gap this section does not create but does confirm still exists | Same `provider_id:provider_tx_id` idempotency key for every event type |
 | Late callback | No distinguished handling — a win/rollback arriving after an arbitrary delay is processed identically to one arriving immediately | Whatever tx is open when the callback is finally delivered | Same correlation/idempotency mechanisms — timing is invisible to the posting logic by design (financial-transaction-flows.md's flows carry no timeout) |
 | Concurrent callback | `pg_advisory_xact_lock` on `casino_bet_delivery:<tenant>:<provider>:<provider_tx_id>` serializes concurrent **bet** redeliveries only (lines 616-621); win/rollback have no equivalent named lock beyond `postRollback`'s row-level `FOR UPDATE` on the original (line 939) | — | — |
+| Settlement timeout (system-initiated, new, LF-4) | **No inbound webhook at all** — no third-party event exists for a loss. §16.5a's scheduled sweep, not `ReceiveCallback`, is the only mechanism that can ever resolve a bonus-funded locked stake with no win/rollback callback | Its own, separate DB transaction per swept lock, distinct from any webhook delivery | `correlation_id` (to find the lock) plus a new `casino_settlement_timeout` transaction type (§16.5a) — **`NOT IMPLEMENTED`, requires ratification**, unlike every other row in this table |
 
 **16.2.1 — the false premise this section corrects.** `ledger-accounting-
 model.md` §6.3.3.1 states: *"casino resolves a bet atomically inside one
@@ -419,12 +464,23 @@ nullifiability, applied here for the first time to casino:
    value: it is a SHA1-namespaced UUID over `(tenant_id, provider_id,
    round_id)`, computed identically by whichever posting call sees the
    round first). A malicious or buggy `round_id` value can at most cause a
-   *lookup miss* (→ `ErrBetNotFound`, already fail-closed) or, in the
-   pathological case of a genuine collision, a mismatch caught by the
-   wallet/asset checks already in `postWin` (lines 863-869) — it can never
-   *select* an arbitrary account, because the query in §16.4 is scoped to
-   `tenant_id` (server-derived) and `transaction_type = 'casino_bet'`
-   (fixed), not to any payload field.
+   *lookup miss* (→ `ErrBetNotFound`, already fail-closed), because the
+   query in §16.4 is scoped to `tenant_id` (server-derived) and
+   `transaction_type = 'casino_bet'` (fixed), not to any payload field.
+   **Corrected claim (LF-7):** a prior draft of this section asserted that
+   a genuine `correlation_id` collision (two different players' rounds
+   hashing to the same value) would be "caught by the wallet/asset checks
+   already in `postWin`." That is false against the actual code:
+   `orchestrator.go:867`'s only cross-check is `wl.AssetCode !=
+   event.AssetCode` — an asset-code equality check, nothing else. It does
+   not compare `wallet_id`, `player_account_id`, or any other player-
+   identity dimension, so it cannot detect a collision between two
+   players' rounds that happen to share a currency. §16.4 now adds an
+   explicit fourth query outcome — one distinct `account_type` but more
+   than one distinct `wallet_id` — that aborts by name (LF-7); the asset
+   check remains a separate, narrower defense that only ever catches a
+   currency mismatch on the wallet the query *did* resolve, never a
+   wallet-identity divergence within the query result itself.
 2. **`ledger_transactions.transaction_type`** — fixes which flow posted
    the row (`casino_bet`), never inferred from payload.
 3. **`ledger_accounts.account_type`** — the actual server-side ledger
@@ -442,67 +498,207 @@ ever used to choose an account. This is not a new design decision — it is
 the existing, reviewed rule (`postWin`'s own doc comment, lines 820-829)
 extended one field further (`account_type`, not just `wallet_id`).
 
-### 16.4 `postWin`'s exact destination-resolution design
+### 16.4 `postWin`'s exact destination-resolution design (revised — LF-1, LF-7)
 
-**Replaces** the two-line hardcode at `orchestrator.go:843-874` (lines
-844-861's wallet-resolution query, and 871's `AccountPlayerCash` lookup)
-with a single query that resolves **both** the wallet and the origin
-`account_type` together — this is `ledger-accounting-model.md` §6.3.3.1's
-"variant 1" query (there proposed for sportsbook), reused verbatim with
-`casino_bet` substituted for `sportsbook_bet`, per this gate's explicit
-instruction not to invent a parallel mechanism:
+**Defect in the original draft, confirmed by `ledger-finance` (LF-1) and
+accepted in full.** The original design replaced `orchestrator.go:843-874`
+with a query that read the bet's **debit** leg across all four
+`player_*` account types, with no amount and no wallet-collision check,
+and then built a destination map as if that query could return a *locked*
+account. It cannot: under migration 0048's case-B lock shape — the shape
+§16.10.1 requires for any future bonus-funded casino bet — the posting is
+`Dr player_bonus X / Cr player_locked_bonus X`. The **debit** leg of that
+transaction is `player_bonus`, never `player_locked_bonus`. The original
+destination map's `player_bonus` row read "`player_bonus` → `player_bonus`,
+unconditionally, no G-2 check" — so a lock-shaped bonus bet's win would
+have been routed through the *ungated* row, and the G-2-gated row (keyed
+on `player_locked_bonus`) could never be reached by a debit-leg query at
+all. §16.7's exploit-closure proof did not hold as originally written;
+it is re-walked in full below and does hold under the fix that follows.
+
+**Fix chosen: read the credit leg for the locked case (option (a) from
+the fix-wave directive), not just correct the map.** This is deliberately
+**not** the minimal fix (b) — patching the map so `player_bonus` (debit)
+routes to the gated row — because that minimal fix leaves a structural
+ambiguity: `player_bonus` as a debit leg is legitimately produced by
+*both* an ordinary immediate-absorb bonus shape (ADR 0032 §3's original,
+now-disallowed-for-casino shape, §16.10.1) *and*, incidentally, by the
+first half of the mandated lock shape — the debit leg alone cannot tell
+these apart, and more importantly it carries no **amount** for the
+quantity §16.5a's lock-release mechanism needs (the locked stake `X`,
+which is a different number from the win's own payout amount). Reading
+the **credit** leg of the lock instead — genuinely reusing
+`ledger-accounting-model.md` §6.3.3.1's own "variant 1" query verbatim,
+restricted to the locked account types, with a wallet/asset-scoped
+aggregate amount — answers "is this bet currently locked, in which
+account, for how much" directly, which is the actual question `postWin`
+needs answered, and gives §16.5a's release step the exact `X` it needs
+without a second query or a second design.
+
+**Step 1 — locked-origin resolution** (only outcome that ever requires a
+G-2 read; only outcome a bonus-funded bet under the mandated shape can
+produce):
 
 ```sql
--- DESIGN ONLY. Resolves a round's bet's wallet AND funding origin from
--- ledger truth alone -- never from event.PlayerAccountID or any other
--- payload field. tenantID/providerID/roundID -> correlation_id exactly
--- as today; no new input.
-SELECT DISTINCT la.account_type, la.wallet_id
+-- DESIGN ONLY. ledger-accounting-model.md §6.3.3.1 "variant 1", reused
+-- verbatim (transaction_type substituted). Reads the CREDIT leg -- the
+-- account the stake is actually SITTING IN today -- restricted to the
+-- locked account types only, grouped so multi-row outcomes (LF-7/LF-8)
+-- are visible to the caller rather than collapsed by a bare LIMIT 1.
+-- Never reads event.PlayerAccountID or any other payload field.
+SELECT t.id AS bet_transaction_id, la.account_type, la.wallet_id,
+       la.asset_code, SUM(e.amount) AS locked_amount
   FROM ledger_entries      e
   JOIN ledger_accounts     la ON la.id = e.ledger_account_id
   JOIN ledger_transactions t  ON t.id  = e.ledger_transaction_id
  WHERE t.tenant_id = $1
    AND t.correlation_id = $2   -- roundCorrelationID(tenantID, providerID, roundID)
    AND t.transaction_type = 'casino_bet'
-   AND e.direction = 'debit'
-   AND la.account_type IN ('player_cash','player_bonus',
-                            'player_locked_cash','player_locked_bonus')
+   AND e.direction = 'credit'
+   AND la.account_type IN ('player_locked_cash','player_locked_bonus')
    AND NOT EXISTS (SELECT 1 FROM ledger_transactions r
-                    WHERE r.reverses_transaction_id = t.id);
+                    WHERE r.reverses_transaction_id = t.id)
+ GROUP BY t.id, la.account_type, la.wallet_id, la.asset_code;
 ```
 
-Three outcomes, all fail-closed, none a guess:
+**Step 2 — direct-absorb (cash) resolution**, run only if Step 1 returns
+zero rows (no lock exists for this round):
 
-- **Zero rows** → `ErrBetNotFound`, unchanged from today (no bet, or the
-  bet was rolled back).
-- **Exactly one distinct `account_type`** → this is the bet's origin.
-  Proceed to the destination map below.
-- **More than one distinct `account_type`** → a mixed-funded bet somehow
-  reached settlement. This must be **structurally unreachable** today
-  (HR-2 rejects mixed funding at placement, fail-closed, before any
-  posting occurs) — but §16.4 does not assume its own precondition holds
-  forever. A new sentinel error (e.g. `ErrMixedFundingUnsupported`)
-  aborts the whole win posting rather than silently choosing one account,
-  satisfying this gate's explicit "confirm mixed funding is rejected/
-  errors rather than guessed" requirement (§A.4).
+```sql
+-- DESIGN ONLY. No lock found -- resolve the DEBIT leg, restricted to
+-- player_cash only. player_bonus is deliberately EXCLUDED here: per
+-- §16.10.1, a bonus-funded casino bet must ALWAYS lock. A bare
+-- player_bonus debit leg with no matching Step-1 lock is therefore not a
+-- second legitimate origin -- it is a structural inconsistency (the
+-- disallowed immediate-absorb shape was posted somehow) and is detected,
+-- not silently routed (see outcome table below).
+SELECT t.id AS bet_transaction_id, la.account_type, la.wallet_id,
+       la.asset_code
+  FROM ledger_entries      e
+  JOIN ledger_accounts     la ON la.id = e.ledger_account_id
+  JOIN ledger_transactions t  ON t.id  = e.ledger_transaction_id
+ WHERE t.tenant_id = $1
+   AND t.correlation_id = $2
+   AND t.transaction_type = 'casino_bet'
+   AND e.direction = 'debit'
+   AND la.account_type IN ('player_cash','player_bonus')
+   AND NOT EXISTS (SELECT 1 FROM ledger_transactions r
+                    WHERE r.reverses_transaction_id = t.id)
+ GROUP BY t.id, la.account_type, la.wallet_id, la.asset_code;
+```
+
+**Shared outcome classification, applied identically to whichever step's
+result set is non-empty** — evaluated in this fixed order, each a named,
+fail-closed branch, none a guess:
+
+1. **Zero rows from both steps** → `ErrBetNotFound`, unchanged from today
+   (no bet, or the bet was rolled back).
+2. **More than one distinct `wallet_id` across the result set** →
+   **new fourth outcome (LF-7).** One `account_type` naming two different
+   players' wallets under the same `correlation_id` cannot be a legitimate
+   multi-bet round (a wallet is scoped to one player+asset; nothing
+   legitimate ever splits one round's stake across two players' wallets).
+   This is either a `correlation_id` hash collision or a posting-layer
+   defect — never guessed. Abort the whole win with a new, distinct
+   sentinel error, `ErrCorrelationWalletCollision`, raised as a loud
+   integrity/ops alert exactly like `ErrBetNotFound`. Checked **before**
+   outcome 3, since a cross-wallet collision is a more severe integrity
+   condition than an ordinary same-wallet multi-bet round.
+3. **More than one distinct `bet_transaction_id`** (all sharing one
+   wallet) → the **multi-bet-round case**, handled by §16.4a below (LF-8)
+   — **not** an automatic abort-forever condition.
+4. **Exactly one `bet_transaction_id`, but that single transaction's own
+   result rows span more than one distinct `account_type`** → a genuine
+   same-instruction mixed-origin posting. This is the case HR-2 is
+   actually meant to make unreachable (a single posting instruction with
+   two funding origins) — kept as a named, defense-in-depth sentinel,
+   `ErrMixedFundingUnsupported`, distinct from outcome 3 precisely so an
+   operator can tell "this looks like an HR-2 regression" apart from
+   "this is an expected, unhandled multi-bet round."
+5. **Exactly one `bet_transaction_id`, one `account_type`, one
+   `wallet_id`** → the clean, single-bet case. Proceed to the destination
+   map below, using this row's `locked_amount` (Step 1) as the exact
+   quantity §16.5a's lock-release step debits.
 
 **Destination map** (the only part of `postWin` that changes what account
 receives the credit; the posting mechanics — `ledger.Post`, idempotency
 key, audit record — are unchanged):
 
-| Origin `account_type` (bet's debit leg) | Win credit destination | Status today |
-|---|---|---|
-| `player_cash` | `player_cash` | **Unchanged.** This is the only case `postBet` can produce today; behavior is identical to current code |
-| `player_locked_cash` | `player_cash` | Not producible by today's `postBet` (which debits `player_cash` directly, no lock phase for cash — §16.10). Included for completeness/future-proofing only |
-| `player_bonus` | `player_bonus`, **unconditionally, no G-2 check** | Blocked at the ledger level by HR-9 today (`ledger-accounting-model.md` §6.5.7) regardless of this design. **Not recommended** — see §16.10's finding that this shape gives G-2 no ledger-visible signal to act on |
-| `player_locked_bonus` | `player_bonus`, **gated by the G-2 check** (§16.9) | Blocked at the ledger level by HR-9 today, independent of this design. This is the recommended shape once bonus-funded casino wagering is built (§16.10) |
+| Resolution | Win credit destination | Lock release (§16.5a)? | G-2 involved? |
+|---|---|---|---|
+| Step 1: `player_locked_cash` | `player_cash` | Yes — `Dr player_locked_cash locked_amount / Cr player_cash locked_amount`, bundled in the same transaction | No — G-2 is defined only over `player_bonus`/`player_locked_bonus` (doc10 §T.7). Not producible by today's `postBet` (§16.10); included for completeness only |
+| Step 1: `player_locked_bonus`, Grant non-terminal | `player_bonus` | Yes — `Dr player_locked_bonus locked_amount / Cr player_bonus locked_amount`, bundled in the same transaction | No — ordinary case. This is the shape LF-1 restores as actually reachable |
+| Step 1: `player_locked_bonus`, Grant terminal | §16.9's seam decides | Yes, but bundled into whatever §16.9's disposition specifies (§16.5a) | **Yes — this is G-2 itself** |
+| Step 2: `player_cash` | `player_cash` | No — never locked | No. **Unchanged** from today's actual behavior for every bet `postBet` can currently produce |
+| Step 2: `player_bonus`, no Step-1 lock found | **Abort** — new sentinel `ErrBonusBetNotLocked`, integrity alert | N/A | N/A — under the mandated shape (§16.10.1) this is unreachable in correctly-functioning code; never silently credited, since guessing its destination is exactly the exploit this section closes |
 
-The `player_locked_cash`/`player_bonus` rows exist so the design is
-**closed over every reachable `account_type`**, not merely the two cases
-casino currently needs — a `default`/unmatched case in the eventual Go
-`switch` **must** return an error, mirroring the exhaustive-classification
-discipline `ledger-accounting-model.md` §6.6.5 already established for
-the identical reason (an allowlist-with-silent-fallback fails open).
+A `default`/unmatched case in the eventual Go `switch` **must** return an
+error, mirroring the exhaustive-classification discipline
+`ledger-accounting-model.md` §6.6.5 already established for the identical
+reason (an allowlist-with-silent-fallback fails open).
+
+### 16.4a Multi-bet rounds: the legitimate case HR-2 does not cover (LF-8)
+
+**Corrected claim.** The original draft asserted ">1 distinct
+`account_type` [is] structurally unreachable by HR-2." This is wrong.
+HR-2 (`ledger-accounting-model.md` §6.5's fail-closed rejection at
+placement) blocks a **single posting instruction** that would fund one
+bet from two origins at once. It does not, and structurally cannot, block
+**two separate `casino_bet` transactions**, each internally single-origin,
+that share one round-level `correlation_id` — nothing in `postBet`
+prevents a provider from sending two bet callbacks naming the same
+`RoundID` (a multi-bet round, a re-bet, or a side bet), and nothing
+requires the two bets to share a funding origin. This is a legitimate,
+reachable shape today, independent of any bonus-funded work: outcome 3 in
+§16.4's classification (`>1` distinct `bet_transaction_id`) generalizes
+LF-8's own literal ">1 distinct `account_type`" trigger to the actual
+underlying condition — even two *same-origin* separate bets under one
+round are equally ambiguous for the purpose that matters here, which is
+resolving a **specific bet's own stake** for lock-release/credit purposes,
+not merely picking a destination account type.
+
+**The real gap, confirmed against actual code, not assumed.**
+`internal/casino/types.go`'s `WinRequest`/`CallbackEvent` carries only
+`RoundID` — no bet-level identifier equivalent to
+`RollbackRequest.OriginalProviderTxID`, which exists for exactly this
+purpose on the rollback side. A win event today cannot say which specific
+bet within a multi-bet round it is paying out. This is a genuine
+provider-protocol/schema gap, not something `postWin`'s query logic alone
+can resolve by being cleverer.
+
+**Design, concrete enough to build once the schema gap is closed.** Add
+an `OriginatingProviderTxID` field to `WinRequest`/`CallbackEvent`,
+mirroring `RollbackRequest.OriginalProviderTxID`'s existing naming and
+precedent exactly, populated whenever the provider's own win event names
+the specific bet it settles (the norm for real aggregator protocols that
+support multi-bet rounds, not the exception). When present, both of
+§16.4's queries add `AND t.provider_tx_id = $3` (`ledger_transactions`
+already stores `provider_tx_id`; no new column) — this scopes resolution
+to the exact bet's own ledger rows and the multi-bet-round case stops
+being ambiguous at all, resolved per-bet rather than per-round.
+
+**Until that field exists** (true of every mock/sandbox this platform
+runs today, all of which only exercise 1:1 bet:win rounds): a win event
+that resolves to outcome 3 (`>1` distinct `bet_transaction_id`) is
+**neither silently guessed nor a permanent black hole**. It aborts that
+one win with a new, distinct sentinel error, `ErrAmbiguousMultiOriginRound`,
+routed to a named manual-reconciliation queue (not a generic failure log)
+— an ops reviewer inspects the round's actual bet legs against the
+provider's own round detail and posts the correct settlement through the
+existing four-eyes, reason-coded manual-adjustment path (CLAUDE.md's
+compensating-entry rule), rather than the platform inferring one.
+Amount-matching heuristics (e.g., "the win amount equals one specific
+bet's stake") are explicitly rejected as unsafe guessing, per CLAUDE.md's
+fail-closed financial-write rule — never implemented as a shortcut around
+the manual queue.
+
+**Named as a required future dependency, not decided here:** until
+`OriginatingProviderTxID` (or equivalent) is added to the win protocol and
+adopted by whichever provider adapter is built, no multi-bet-capable game
+title should be marked launch-eligible in the catalogue for a tenant with
+bonus-funded wagering enabled — a catalogue/launch-eligibility
+consideration flagged for `product-owner-proxy`/`architect` scoping, not
+a code change and not decided by this section.
 
 ### 16.5 Resolution mechanism per funding case
 
@@ -513,10 +709,152 @@ the identical reason (an allowlist-with-silent-fallback fails open).
 | Bonus-funded wager, Grant already terminal | §16.9's seam is invoked | **Yes — this is G-2 itself** |
 | Locked cash | Same row as cash-funded above; a lock has no Grant, so no G-2 dimension exists | No |
 | Locked bonus | Same row as "Grant non-terminal"/"Grant terminal" above — "locked bonus" *is* the `player_locked_bonus` origin case, not a fifth case | See above |
-| Mixed funding | §16.4's "more than one distinct `account_type`" branch → `ErrMixedFundingUnsupported`, whole transaction aborts, nothing posted | N/A — rejected before any credit is considered |
-| Rollback | `postRollback`'s existing generic entry-inversion (§16.1) — reverses whatever the original actually posted, origin-safe by construction. **A rollback of a WIN that already credited `player_bonus`, where the Grant has since gone terminal and swept that balance into `promo_liability` (§16.10), can find insufficient `player_bonus` balance to debit** — this must fail closed (an ordinary insufficient-balance rejection, not a partial/negative posting); flagged in §16.11 as an adversarial scenario needing `ledger-finance`'s existing balance-sufficiency mechanism to cover `player_bonus`, not a new casino-specific check |
-| Late settlement | Timing is invisible to §16.4's query — a win arriving an hour or a month after its bet resolves identically. Only the *outcome* of the live Grant-status read at settlement time can differ, which is exactly G-2's own subject matter, not a separate "lateness" mechanism |
-| Idempotent replay | Unaffected by this section — `ledger.Post`'s existing `(tenant_id, idempotency_key)` uniqueness already no-ops a redelivered win before any destination decision is re-evaluated. §16.5's own concern (destination) is decided once, at first delivery, and never re-decided on replay |
+| Mixed funding (single-instruction, HR-2 regression) | §16.4's outcome 4 (`ErrMixedFundingUnsupported`) — whole transaction aborts, nothing posted | N/A — rejected before any credit is considered |
+| Multi-bet round (legitimate, LF-8) | §16.4's outcome 3 → §16.4a's manual-reconciliation path, **not** an automatic permanent abort | Deferred to manual review; may involve G-2 once disambiguated |
+| Correlation-ID wallet collision (LF-7) | §16.4's outcome 2 (`ErrCorrelationWalletCollision`) — whole transaction aborts, integrity alert | N/A — rejected before any credit is considered |
+| Rollback | `postRollback`'s existing generic entry-inversion (§16.1) — reverses whatever the original actually posted, origin-safe by construction. **A rollback of a WIN that already credited `player_bonus`, where the Grant has since gone terminal and swept that balance into `promo_liability` (§16.10), can find insufficient `player_bonus` balance to debit.** What happens then — permit the negative balance as a recorded clawback, route the shortfall to a receivable, or reject-and-alert — is **`ledger-finance`'s decision, not casino's** (LF-10); this document does not pre-select an answer (§16.11, §16.12) | Not casino's call — see note |
+| Loss (no callback exists) | No inbound event signals a loss at all (§16.2). §16.5a designs the resolution mechanism a locked bonus-funded stake requires | No — value-reducing, never gated by G-2 (§16.8) |
+| Late settlement | Timing is invisible to §16.4's query — a win arriving an hour or a month after its bet resolves identically. Only the *outcome* of the live Grant-status read at settlement time can differ, which is exactly G-2's own subject matter, not a separate "lateness" mechanism | See above |
+| Idempotent replay | Unaffected by this section — `ledger.Post`'s existing `(tenant_id, idempotency_key)` uniqueness already no-ops a redelivered win before any destination decision is re-evaluated. §16.5's own concern (destination) is decided once, at first delivery, and never re-decided on replay | No |
+
+### 16.5a Lock release and loss-settlement resolution (LF-4)
+
+**The gap, confirmed.** The original design changed the win's credit
+*destination* but never specified debiting the lock itself — `L(G)` (the
+locked-bonus component of open exposure, §16.10.2) could never reach zero
+on a win, and casino has **no loss callback at all** (§16.2's lifecycle
+table: only bet/win/rollback exist), so a losing bonus-funded round left
+`player_locked_bonus` permanently nonzero with no event to post the
+loss-absorption case against. Both halves are fixed here.
+
+**Win case — falls out of §16.4's fix, with one addition.** Once §16.4
+correctly resolves a `player_locked_bonus` origin and its `locked_amount`
+`X` (Step 1), the settlement transaction bundles **two** entry pairs in
+one `ledger.Post` call (a single balanced transaction, `ledger.Post`'s
+existing multi-entry-pair support — no new capability):
+
+1. The ordinary win payout: `Dr house_gaming W / Cr player_bonus W`
+   (Grant non-terminal) or whatever §16.9's disposition specifies (Grant
+   terminal).
+2. The lock release: `Dr player_locked_bonus X / Cr player_bonus X` (or,
+   under a terminal-Grant disposition, credited to wherever that
+   disposition routes it instead — see below).
+
+This closes `L(G)` to zero on every win, including the terminal-Grant
+branch — **explicitly required by this fix, not left to `bonus-engine`**:
+per the fix-wave directive, `internal/casino` does not need to design
+`bonus-engine`'s own holding mechanism for a *held* win payout (if G-2 is
+answered `ACTION_HOLD_FOR_REVIEW`), but it **does** need the lock itself
+to resolve rather than dangle. **New cross-dependency found during this
+fix, not previously named**: `ACTION_HOLD_FOR_REVIEW`'s seam disposition
+must name a destination for the *released lock amount* `X` (distinct from
+wherever it holds the *payout* `W`) — a suspense/hold account this
+document does not name, since it belongs to `bonus-engine`'s own parallel
+hold-mechanism design. Flagged in §16.13 as an open cross-dependency for
+that design to specify, not invented here.
+
+**Loss case — the harder, previously entirely unaddressed gap.** No
+inbound event signals a loss. Two designs, per this fix-wave's own (a)/(b)
+menu:
+
+- **(a) Bounded, per-provider/per-jurisdiction-configurable settlement
+  window — RECOMMENDED.** A scheduled sweep (operationally the same
+  pattern as the existing hourly reconciliation sweep, not a new
+  architectural primitive) finds `player_locked_bonus` locks — identified
+  by a `casino_bet` transaction with a Step-1-shaped credit leg — that are
+  **both** (i) older than a configured window `W` and (ii) genuinely
+  unresolved: no `casino_win` or `casino_rollback` transaction exists
+  under the same `correlation_id`, **and** no `ErrTerminalGrantCreditUnresolved`
+  rejection (§16.9) was ever recorded for it (see the exclusion below —
+  found during the §16.7 re-walk, not assumed at the outset). For each
+  genuinely unresolved, expired lock, the sweep posts a new,
+  system-initiated transaction type, `casino_settlement_timeout`,
+  resolving the stake as a loss with the identical case-I accounting
+  shape a real loss would use: `Dr player_locked_bonus locked_amount /
+  Cr house_gaming locked_amount`, mirrored per the existing `BONUS_SET`
+  rule (B1 extended) exactly as an ordinary loss would be — no new
+  posting shape, reused verbatim.
+
+  Required properties, per the fix-wave directive:
+  - **Per-tenant and per-jurisdiction configurable**, jurisdiction-primary
+    and tenant/brand tighten-only — the same pattern already established
+    for `OpenBetSelfExclusionPolicy` (ADR 0034 §14) — since "how long can
+    a bonus-funded stake legitimately go unresolved" is a regulatory
+    question, not a product-taste one.
+  - **Fail-closed default: sweeping is disabled absent an explicit
+    configured window.** No default duration is invented here. Absent
+    config, locks accumulate, visible via `LockedBonusBalance`
+    (migration 0048) and the hourly reconciliation sweep, rather than a
+    guessed number wrongly writing off a stake that may still be
+    genuinely in flight — mirroring CLAUDE.md's "absent config = deny"
+    convention, already cited in this document's own Asset Authorization
+    discussion (§16.6).
+  - **Alerting integrity event on a late win.** If a genuine `casino_win`
+    callback for an already-swept round arrives after `W` has elapsed, it
+    is **not** silently re-posted or used to reverse the timeout posting
+    automatically — that could double-count or resurrect a Grant
+    sub-state that has already finalized. It raises a new, distinct,
+    loud integrity alert (mirroring `ErrBetNotFound`'s framing) and is
+    held for manual reconciliation. This is an accepted, real trade-off
+    of the window design (a genuine late win becomes an ops incident, not
+    a silent loss of player funds) and is why the window duration is a
+    per-jurisdiction operational-tuning decision, not a ledger-correctness
+    one.
+  - **Exclusion, found while re-walking §16.7 (not previously stated):**
+    the sweep must **never** treat a round whose win callback already
+    arrived and was rejected via `ErrTerminalGrantCreditUnresolved`
+    (§16.9) as a silent, no-signal loss — that round had a genuine win,
+    only blocked pending a human G-2 decision. Such rounds are excluded
+    from the sweep's candidate set entirely (matched by the recorded
+    rejection audit event, not by timing) and remain in
+    `pending_settlement` until a human resolves G-2, never auto-resolved
+    as a loss.
+  - Every timeout posting is audit-recorded identically to a normal
+    settlement (actor = system, action = `casino_settlement_timeout.posted`,
+    full metadata) — CLAUDE.md's audit-on-every-mutating-financial-action
+    rule applies unchanged.
+  - Requires no change to the provider-facing wallet-callback contract —
+    entirely internal, which is why it is recommended over (b).
+
+- **(b) Provider-protocol extension: an explicit round-close/loss-
+  confirmation callback** (a fourth inbound event type, e.g.
+  `CallbackEventRoundClose`). More precise — a provider-attested
+  resolution moment rather than an inferred timeout — but not a universal
+  casino wallet-callback primitive: many real aggregators do not send one
+  (a loss is implicit-by-silence in most wallet-callback specs, which is
+  the entire reason this gap exists). Named here as a **future
+  dependency**, not designed further — this document cannot confirm any
+  specific aggregator offers this callback without a confirmed commercial
+  relationship (CLAUDE.md's mocks-only boundary), and building against an
+  assumed protocol feature no contracted provider has confirmed would be
+  exactly the kind of invented-ahead-of-the-real-docs work this project
+  avoids.
+
+**Recommendation: (a).** It needs no provider cooperation (safe against
+every aggregator regardless of what protocol primitives it exposes,
+including every mock/sandbox this platform runs today, none of which
+expose either primitive), it reuses existing case-I loss accounting and
+the existing reconciliation-sweep operational pattern rather than
+inventing a new posting shape, and its one real cost — a bounded window
+during which a genuinely late win becomes an alerted incident rather than
+a silent auto-loss — is bounded and tunable per jurisdiction. (b) remains
+a valid future enhancement (a faster-resolving path that could race the
+timeout sweep) if a specific contracted aggregator is later confirmed to
+offer an explicit round-close signal; nothing here precludes adding it
+later.
+
+**Explicit statement this fix-wave directive requires:** without either
+(a) or (b) actually built, the lock-shaped bonus-funded casino wagering
+design described in §16.10.1 is **NOT SAFE to implement** —
+`ledger-finance`'s own characterization of the lock shape as
+"conditionally ratifiable only as the package described" includes this
+resolution mechanism as a required component, not an optional
+enhancement. This section recommends (a) but does not authorize building
+it: it remains `NOT IMPLEMENTED`, requires the same `ledger-finance`/
+`architect` ratification as §16.10.1's posting-shape finding (the two are
+two halves of one required package, §16.13), and additionally requires a
+new human/jurisdiction decision — the actual per-jurisdiction window
+durations — that this section does not select.
 
 ### 16.6 Cross-domain reconciliation
 
@@ -531,9 +869,18 @@ the identical reason (an allowlist-with-silent-fallback fails open).
 | **Sportsbook** | No casino-specific assumption breaks sportsbook's own future design — §16.4 reuses sportsbook's own §6.3.3.1 query verbatim rather than diverging from it, and §16.9's seam is written product-agnostically (keyed on `correlation_id`/Grant, not on casino specifically) so `internal/sportsbook` can call the identical seam later without a second design pass | Confirmed no divergence introduced |
 | **Risk** | No change. `risk.Evaluate` is not consulted by `postWin` today (doc comment, lines 830-837) and this section does not add a call — a terminal-Grant credit decision is not a Risk-shaped exposure/limit question | — |
 | **RG** | No change. `postWin` deliberately does not call `evaluateAndAuditEligibility` (unchanged rationale, lines 830-837) — settling an already-legitimately-placed bet is not gated by the player's current RG status. G-2's own resolution (whichever action a human selects) may itself have RG/AML implications (a routed-to-cash credit becoming withdrawable) but that is Decision 2's own province, not a new RG call site this design adds | — |
-| **Reconciliation** | No change to the hourly ledger-vs-projection sweep mechanism. A held/failed-closed G-2 credit (§16.9) must not create an unreconciled ledger residue — see §16.13's open item on the holding mechanism, explicitly deferred by doc10 §T.7 itself to `ledger-finance` | Open item, not a defect introduced here |
+| **Reconciliation** | No change to the hourly ledger-vs-projection sweep mechanism. A held/failed-closed G-2 credit (§16.9) must not create an unreconciled ledger residue — see §16.13's open item on the holding mechanism, explicitly deferred by doc10 §T.7 itself to `ledger-finance`. **New (LF-4):** §16.5a's settlement-timeout sweep is a second, distinct scheduled job operating on the same locked-balance projections — it must run and be reconciled independently of the hourly ledger-vs-projection sweep, and its own postings (`casino_settlement_timeout`) are ordinary, audited ledger transactions the existing sweep already covers without modification | Open item (holding mechanism) plus one new, not-yet-authorized mechanism (settlement-timeout sweep, §16.5a) |
 
-### 16.7 Exploit closure proof — a bonus-funded win can never become unrestricted cash before wagering/conversion rules permit it
+### 16.7 Exploit closure proof — a bonus-funded win can never become unrestricted cash before wagering/conversion rules permit it (re-walked, LF-1)
+
+**This proof did not hold as originally written.** LF-1 found that the
+original query/destination-map mismatch meant branch 2 below was
+structurally unreachable — a bonus-funded win posted through the
+*ungated* `player_bonus` row regardless of Grant status, so §16.8's "G-2
+is reached exactly once" was false as designed; it was reached zero
+times. The walkthrough below is re-derived line by line against §16.4's
+fixed resolution mechanism and §16.5a's lock-release addition, not
+re-asserted from the original text.
 
 **Walkthrough.** Suppose a future `postBet` variant posts a bonus-funded
 bet: `Dr player_bonus X / Cr player_locked_bonus X` (case B, no mirror —
@@ -541,53 +888,101 @@ bet: `Dr player_bonus X / Cr player_locked_bonus X` (case B, no mirror —
 is required). The player later wins. Two exhaustive branches:
 
 1. **Grant `G` is non-terminal at settlement time** (the overwhelmingly
-   common case). §16.4 resolves origin = `player_locked_bonus`. §16.5's
-   "Grant non-terminal" row applies: the win credits `player_bonus`, the
-   ordinary case-G mirror pair posts (`bonus_expense`/`promo_liability`),
-   and the resulting `player_bonus` balance remains **restricted,
-   non-withdrawable value subject to `G`'s wagering requirement** —
-   invariant W1 (`ledger-accounting-model.md` §6.6.6) already forbids any
-   conversion until `P_firm ≥ T`, and `P_firm` cannot count a
-   still-nullifiable contribution. No path from this branch reaches
-   `player_cash` except through the existing, already-reviewed
-   `bonus_conversion` posting (ADR 0032 §4), which is itself gated by W1.
-   **Never `player_cash` directly, at any point.**
-2. **Grant `G` is already terminal at settlement time.** §16.4 still
-   resolves origin = `player_locked_bonus` (unchanged from branch 1 — the
-   *origin* resolution never depends on Grant status, only the
-   *destination* decision does). §16.5's "Grant terminal" row applies:
+   common case). §16.4 Step 1 finds the credit leg `player_locked_bonus`,
+   wallet `w`, `locked_amount = X` — this is now actually reached, because
+   Step 1 reads the credit leg, not the debit leg the original design
+   read. §16.5's "Grant non-terminal" row applies: the live `FOR UPDATE`
+   Grant-status read finds `G` non-terminal, so the win posts **both**
+   entry pairs from §16.5a — (i) the payout `Dr house_gaming W / Cr
+   player_bonus W`, and (ii) the lock release `Dr player_locked_bonus X /
+   Cr player_bonus X` — in one balanced transaction. The ordinary case-G
+   mirror pair (`bonus_expense`/`promo_liability`) posts against (i) only;
+   (ii) is `BONUS_SET`-neutral bookkeeping (§16.10.3) and mirrors nothing.
+   `L(G)` is now `0` for this stake (LF-4 closed), and the resulting
+   `player_bonus` balance remains **restricted, non-withdrawable value
+   subject to `G`'s wagering requirement** — invariant W1
+   (`ledger-accounting-model.md` §6.6.6) already forbids any conversion
+   until `P_firm ≥ T`, and `P_firm` cannot count a still-nullifiable
+   contribution. No path from this branch reaches `player_cash` except
+   through the existing, already-reviewed `bonus_conversion` posting
+   (ADR 0032 §4), which is itself gated by W1. **Never `player_cash`
+   directly, at any point. Holds.**
+2. **Grant `G` is already terminal at settlement time.** §16.4 Step 1
+   still resolves the same credit leg = `player_locked_bonus`, wallet `w`,
+   `locked_amount = X` (unchanged from branch 1 — the *origin* resolution
+   never depends on Grant status, only the *destination* decision does —
+   and, unlike the original design, this resolution path is actually
+   reachable now that it keys off the credit leg rather than a debit leg
+   the destination map mis-mapped). §16.5's "Grant terminal" row applies:
    the credit is **not** posted to either `player_bonus` or `player_cash`
    by `postWin` itself — it is handed to §16.9's seam, which today (no
-   G-2 answer exists) **fails closed**: the whole win-posting transaction
-   is rejected with a distinct, loud, alerting error (mirroring
-   `ErrBetNotFound`'s "integrity alert, not a routine failure" framing,
-   §7). **Nothing posts. No money moves. No withdrawable cash is ever
-   created by this branch until a human selects and `bonus-engine`
-   implements one of ACTION_REFORFEIT/ROUTE_TO_CASH/HOLD_FOR_REVIEW.**
+   G-2 answer exists, `bonusengine.ResolveTerminalGrantCredit` does not
+   exist) **fails closed**: the whole win-posting transaction is rejected
+   with `ErrTerminalGrantCreditUnresolved`, a distinct, loud, alerting
+   error (mirroring `ErrBetNotFound`'s "integrity alert, not a routine
+   failure" framing, §7), and — per §16.5a's exclusion, found during this
+   re-walk — that rejection is itself recorded so the settlement-timeout
+   sweep (§16.5a(a)) can never later misclassify this genuine win as a
+   silent loss. **Nothing posts. No money moves.** `G` remains in
+   `pending_settlement` (§16.10.2) with `L(G) = X > 0` — a real, disclosed
+   residual: the lock does **not** release in this sub-branch, by design,
+   because releasing it would require choosing a destination, which is
+   exactly G-2's undecided question. Once a human selects and
+   `bonus-engine` builds one of the three actions, the retried transaction
+   posts the win **and** the lock release together, per whichever
+   disposition applies: `ACTION_REFORFEIT` releases into `player_bonus`
+   then immediately re-forfeits (INV-TG step 1's mechanism, re-applied,
+   `L(G) → 0`); `ACTION_ROUTE_TO_CASH` releases directly to `player_cash`
+   per the seam's override (`L(G) → 0`, and this is the **only** route by
+   which a bonus-origin stake ever reaches `player_cash` directly — gated
+   entirely behind a human decision, never `postWin`'s default);
+   `ACTION_HOLD_FOR_REVIEW` releases the lock into a suspense/hold
+   destination `bonus-engine`'s own hold mechanism must name (§16.5a's
+   newly-found cross-dependency) — `L(G) → 0` there too, the lock is never
+   left dangling once a disposition exists. **No withdrawable cash is
+   ever created by this branch until a human selects and `bonus-engine`
+   implements one of these three actions. Holds.**
 
 In neither branch does `player_cash` receive value that traces back to a
 bonus-origin stake without first passing through either (a) the existing,
 wagering-gated `bonus_conversion` posting, or (b) a not-yet-selected,
 not-yet-built G-2 action the human has not authorized. The specific
 exploit `architect` flagged — `postWin`'s hardcode routing a bonus-funded
-win straight to `player_cash` — is closed by §16.4 alone, **unconditionally,
-independent of G-2's eventual answer**: even if G-2 is one day answered
-`ACTION_ROUTE_TO_CASH`, that routing only ever fires through §16.9's named
-seam, deliberately, for the narrow terminal-Grant case — never as
-`postWin`'s default behavior for an ordinary, non-terminal settlement.
+win straight to `player_cash` — is closed by §16.4's fixed resolution
+alone, **unconditionally, independent of G-2's eventual answer**: even if
+G-2 is one day answered `ACTION_ROUTE_TO_CASH`, that routing only ever
+fires through §16.9's named seam, deliberately, for the narrow
+terminal-Grant case — never as `postWin`'s default behavior for an
+ordinary, non-terminal settlement.
 
-### 16.8 Every place G-2 is reached, enumerated
+**What this re-walk changed versus the original proof:** branch 2 is now
+actually reachable (LF-1); both branches now explicitly close `L(G)` to
+zero, or explain precisely why it stays open and how it will close
+(LF-4); and one new, previously-unnamed cross-dependency surfaced
+(`ACTION_HOLD_FOR_REVIEW`'s lock-release destination, §16.5a) rather than
+being silently assumed away.
+
+### 16.8 Every place G-2 is reached, enumerated (re-confirmed, LF-1)
 
 Given §16.10's recommended posting shape (bonus-funded casino bets always
-lock, never immediately absorb), G-2 is reached **exactly once**,
-structurally, in this domain:
+lock, never immediately absorb) **and** §16.4's fixed resolution
+mechanism (LF-1) — the original debit-leg query made this claim false in
+practice (reached zero times, not once, per LF-1); it is re-confirmed
+true here against the corrected mechanism — G-2 is reached **exactly
+once per successfully-resolved win event**, structurally, in this domain:
 
-1. **`postWin`, at the destination-resolution step (§16.4), when the
-   resolved origin is `player_locked_bonus` and the live, `FOR UPDATE`
-   Grant-status read finds `G.status ∈ {expired, cancelled, forfeited}`
-   (or, under §16.10's refined invariant, `G.status = pending_settlement`
-   and the inbound event is the specific value-creating credit that
-   triggered it).** This is the sole call site.
+1. **`postWin`, at the destination-resolution step (§16.4), when Step 1
+   resolves a single, unambiguous `player_locked_bonus` origin and the
+   live, `FOR UPDATE` Grant-status read finds `G.status ∈ {expired,
+   cancelled, forfeited}` (or, under §16.10's refined invariant,
+   `G.status = pending_settlement` and the inbound event is the specific
+   value-creating credit that triggered it).** This is the sole call
+   site. It presupposes §16.4 did not first abort via
+   `ErrCorrelationWalletCollision` (LF-7) or route to §16.4a's
+   manual-reconciliation path (LF-8) — those cases defer resolution
+   entirely, including any G-2 read, until a human has disambiguated
+   which specific bet the win event names; the eventual re-attempt, once
+   disambiguated, reaches this same call site exactly once, as above.
 
 Two adjacent, deliberately-**not**-G-2 cases, named so they are never
 confused with it (mirroring doc10 §T.12's own distinction):
@@ -595,7 +990,12 @@ confused with it (mirroring doc10 §T.12's own distinction):
 - A **loss** settling a locked bonus-funded stake (`player_locked_bonus`
   absorbed into `house_gaming`, case I) is value-**reducing** and is
   never gated by G-2 at all, terminal Grant or not (§16.10's B0/L0 split,
-  §T.5.1's asymmetry) — it always posts immediately.
+  §T.5.1's asymmetry). **Correction (LF-4):** it does not "always post
+  immediately" as the original text claimed — casino has no loss
+  callback, so it posts only once §16.5a's settlement-timeout sweep (or,
+  if built later, a provider round-close signal) resolves it; the
+  correction is to *when* it posts, not to whether G-2 applies (it never
+  does).
 - A **rollback of the lock itself** (the bet is voided/rolled back before
   any win/loss is known) returning `X` to `player_bonus` is, per §16.10's
   analysis, a candidate for the **same** immediate/uncontested treatment
@@ -650,6 +1050,18 @@ actual holding mechanism is explicitly out of scope here, per doc10
 §T.7's own disclaimer that it is "a `ledger-finance` design question this
 contract does not resolve"). **No code in this section selects among
 these three or implements any of them.**
+
+**One requirement on all three, found while designing §16.5a's lock-
+release step, not previously stated:** whichever disposition
+`ResolveTerminalGrantCredit` returns must also specify where the
+*released lock amount* (`X`, distinct from the win payout `W`) lands —
+`ACTION_REFORFEIT`/`ACTION_ROUTE_TO_CASH` already imply an answer
+(`promo_liability` via re-forfeiture, or `player_cash` via the override,
+respectively), but `ACTION_HOLD_FOR_REVIEW`'s disposition must additionally
+name a suspense/hold account for `X` — this document does not name one,
+since it is part of `bonus-engine`'s own hold-mechanism design (§16.13),
+but the lock must not be left dangling regardless of which action is
+eventually selected.
 
 ### 16.10 The Grant terminal-state invariant — formalized, stress-tested, and found insufficient as originally proposed
 
@@ -719,9 +1131,13 @@ advisory lock:
 > 3. While `pending_settlement`, `L(G)`'s eventual resolution is
 >    classified exactly as §6.6.5's exhaustive switch already classifies
 >    it: **value-reducing** (a loss, or — per §16.10.3's flagged, unresolved
->    question — possibly a rollback-of-the-lock) posts immediately,
->    ordinarily, no G-2; **value-creating** (a win) is the **sole** trigger
->    for §16.9's seam.
+>    question — possibly a rollback-of-the-lock) posts ordinarily, no G-2
+>    — for casino specifically, "posts" means via whichever mechanism
+>    §16.5a specifies (the settlement-timeout sweep, since no loss
+>    callback exists), not necessarily immediately upon the outcome being
+>    known provider-side (LF-4: the original text's "posts immediately"
+>    assumed a signal casino does not have); **value-creating** (a win) is
+>    the **sole** trigger for §16.9's seam.
 > 4. Once `L(G)` reaches zero **and** any pending G-2 disposition has
 >    resolved, `G` finalizes into the terminal state its original trigger
 >    named, with a Progress-trail entry recording both the original
@@ -802,7 +1218,7 @@ model?** Stress-tested against §16.2's full lifecycle:
 |---|---|---|
 | Win after Grant state change (non-terminal → terminal, no lock outstanding) | Ordinary termination already completed (INV-TG step 2's `L(G)=0` branch) before the win arrives; the win then finds no matching, non-reversed bet under this Grant's lock — but the bet's own ledger row still exists, so §16.4 still resolves an origin. If `G` is already fully terminal with `L(G)` having been zero at trigger time, no `pending_settlement` interval ever existed for this stake, meaning the win could only be a genuinely late artifact of a *different*, still-locked amount — in which case `pending_settlement` (still active) is found and §16.9 fires | INV-TG's `L(G)` check is re-evaluated live, not cached from trigger time |
 | Win after wagering completion (`completed`/`converted`) | Not a terminal status (§1.2) — G-2 does not apply; ordinary settlement path, credit posts to `player_bonus` normally, subject to whatever `bonus_conversion` has already released | `completed`/`converted` are excluded from G-2's trigger set by definition (doc10 §T.13) |
-| Rollback after win | `postRollback`'s generic inversion (§16.1) debits `player_bonus` for the win amount; if the Grant went terminal and swept that balance into `promo_liability` in the interim, the debit finds insufficient balance and **must fail closed** (§16.5's rollback row) — a real, open dependency on `ledger-finance`'s balance-sufficiency check covering `player_bonus`, flagged in §16.13, not silently built here | Never posts a negative/impossible balance; ledger's own `SELECT ... FOR UPDATE` sufficiency pattern (already used for `player_cash`, `orchestrator.go` line 762) generalizes without a casino-specific mechanism |
+| Rollback after win | `postRollback`'s generic inversion (§16.1) debits `player_bonus` for the win amount; if the Grant went terminal and swept that balance into `promo_liability` in the interim, the debit finds insufficient balance. **What happens then is `ledger-finance`'s decision, not casino's (LF-10) — this document does not pre-select "fail closed," "permit negative as a clawback," or "route to a receivable."** Whichever `ledger-finance` decides, it must generalize `ledger.Post`'s existing sufficiency mechanism to `player_bonus` (not yet built, HR-9 currently blocks all `player_bonus` posting regardless), flagged in §16.13 | Never posts a negative/impossible balance *without an explicit, ledger-finance-owned decision permitting one*; the mechanism generalizes the existing `SELECT ... FOR UPDATE` pattern (already used for `player_cash`, `orchestrator.go` line 762) — the treatment of a failed check is the open item, not the check's existence |
 | Win after rollback | `postWin`'s existing `NOT EXISTS (... reverses_transaction_id ...)` clause (line 849, reused unchanged in §16.4's query) finds no valid origin → `ErrBetNotFound`, an integrity alert | Unchanged, already correct |
 | Duplicate win | `ledger.Post`'s `(tenant_id, idempotency_key)` uniqueness no-ops the second delivery before §16.4/§16.9 re-run | Idempotency key is provider-namespaced and DB-enforced, not "check then insert" |
 | Duplicate rollback | Existing `postRollback` logic (distinguishes a same-reference redelivery, idempotent no-op, from a distinct new reference against an already-reversed original, `ErrAlreadyRolledBack`) — unaffected by this section | Unchanged, already correct and tested (Stage 4A completion report §17) |
@@ -810,6 +1226,11 @@ model?** Stress-tested against §16.2's full lifecycle:
 | Late callback | Handled uniformly regardless of elapsed time (§16.10.4) | Timing is not part of any correctness condition in this design |
 | Callback after Grant expiry | INV-TG's `pending_settlement`/G-2 path (§16.8) | Live status read, not a cached grant-time snapshot (doc10 §T.11) |
 | Callback after Grant cancellation | Identical mechanism to expiry — §T.10 confirms cancellation is symmetric to expiry for this purpose | Same as above |
+| Two players' rounds collide on `correlation_id` (LF-7) | §16.4's outcome 2 fires: one distinct `account_type`, more than one distinct `wallet_id` → `ErrCorrelationWalletCollision`, whole win aborted, integrity alert raised | Never guessed which of the two wallets is correct; a SHA1-namespaced UUID collision or a posting-layer defect is treated as an incident, not resolved silently |
+| Multi-bet round: win event cannot say which bet it settles (LF-8) | §16.4's outcome 3 fires: more than one distinct `bet_transaction_id` under one `correlation_id` → §16.4a's manual-reconciliation queue, not a silent guess and not a permanent abort | `WinRequest`/`CallbackEvent` has no bet-level identifier today (confirmed against `internal/casino/types.go`); resolved by a human today, automatable once `OriginatingProviderTxID` is added (§16.4a) |
+| Losing bonus-funded round (no callback ever arrives) | §16.5a(a)'s settlement-timeout sweep resolves it as a loss once the configured per-jurisdiction window elapses; absent config, nothing sweeps and the lock is visible, not silently written off | Fail-closed default (no sweep without explicit config); every timeout posting is audited identically to a normal settlement |
+| Genuine win arrives after the settlement-timeout window already swept the round as a loss | Not silently re-posted or auto-reversed — raises a new, distinct integrity alert and is held for manual reconciliation (§16.5a(a)) | Prevents a double-count or a resurrected Grant sub-state; the accepted cost of a bounded window is an alerted incident, not a silent loss of funds |
+| Win arrives for a round already rejected via `ErrTerminalGrantCreditUnresolved`, before its settlement-timeout window would otherwise elapse | Excluded from the timeout sweep's candidate set by the recorded rejection audit event (§16.5a(a)'s exclusion, found during the §16.7 re-walk) — stays in `pending_settlement` for a human to resolve via G-2, never auto-resolved as a loss | A genuine win must never be silently reclassified as a loss merely because it is also G-2-blocked |
 
 ### 16.12 Corrections routed to `ledger-finance`, not edited here
 
@@ -839,6 +1260,19 @@ file directly"):
    should be treated as G-2-relevant or as an uncontested, immediately-
    resolvable value-reducing event) is left open for `bonus-engine`'s
    parallel Grant-terminal-invariant proof to reconcile.
+5. **New (LF-4 fix wave).** §16.5a proposes a new named transaction type,
+   `casino_settlement_timeout`, and a new scheduled sweep mechanism,
+   neither of which exist in `ledger-accounting-model.md` today. This is
+   a proposal for `ledger-finance`/`architect` to ratify or reject — the
+   same posture as item 3 above — not adopted as binding by this section.
+   It also proposes reusing the existing case-I loss-accounting shape
+   verbatim for the sweep's posting, which `ledger-finance` should confirm
+   is a correct reuse, not a divergence.
+6. **New (LF-10 fix wave).** §16.5's and §16.11's rollback-insufficient-
+   balance rows no longer assert "fail closed" as this document's answer.
+   The actual treatment (permit negative balance as a recorded clawback /
+   route to a receivable / reject-and-alert) is explicitly routed to
+   `ledger-finance` as an open decision, not pre-selected here.
 
 ### 16.13 What remains open
 
@@ -866,11 +1300,37 @@ file directly"):
 - **§16.9's `ACTION_HOLD_FOR_REVIEW` holding mechanism** remains, as
   doc10 §T.7 itself already discloses, an unresolved `ledger-finance`
   design question — a held G-2 credit's interaction with the hourly
-  reconciliation sweep (§16.6's Reconciliation row) is unspecified.
+  reconciliation sweep (§16.6's Reconciliation row) is unspecified. **New
+  (LF-4 fix wave):** that mechanism must additionally name a destination
+  for the *released lock amount* `X` (distinct from the held payout `W`)
+  — found while designing §16.5a, flagged in both §16.5a and §16.9,
+  not resolved here.
 - **The rollback-of-a-credited-win-against-a-later-forfeited-balance
   insufficient-balance case** (§16.11) depends on `ledger-finance`'s
   balance-sufficiency check generalizing to `player_bonus`, not yet built
-  (HR-9 currently blocks all `player_bonus` posting regardless).
+  (HR-9 currently blocks all `player_bonus` posting regardless). **Revised
+  (LF-10 fix wave):** this document no longer asserts "fail closed" as
+  its own answer for what a failed check should do — that treatment
+  (permit negative balance as a recorded clawback / route to a
+  receivable / reject-and-alert) is `ledger-finance`'s decision. Only the
+  need for the check to exist and to cover `player_bonus` is asserted
+  here.
+- **§16.5a's settlement-timeout sweep (LF-4)** is a new mechanism and a
+  new transaction type (`casino_settlement_timeout`), proposed but not
+  authorized — requires `ledger-finance`/`architect` ratification
+  (§16.12 item 5) **and** a new human/jurisdiction decision (the actual
+  per-jurisdiction window durations) neither selected nor defaulted by
+  this section. Until both exist, §16.10.1's lock-shaped bonus-funded
+  casino wagering design is **NOT SAFE to implement** (§16.5a's explicit
+  statement).
+- **§16.4a's `OriginatingProviderTxID` capability (LF-8)** does not exist
+  on `WinRequest`/`CallbackEvent` today (confirmed against
+  `internal/casino/types.go`) and is not added by this section — a
+  required future provider-protocol/schema capability before multi-bet
+  rounds can be resolved automatically rather than via manual
+  reconciliation. Until it exists, multi-bet-capable titles should not be
+  marked launch-eligible for bonus-funded wagering (flagged for
+  `product-owner-proxy`/`architect` scoping, not decided here).
 - **Free-round/bonus-stake normalization** (§1's own long-standing
   `OPEN DECISION`) is untouched by this section — it concerns how a
   provider-side free-round is normalized into the platform's bet/win
