@@ -16,6 +16,16 @@ this concept and constrains its shape:
 Numbering: `docs/architecture/` was populated through `33`. This document
 takes the next free number, **34**.
 
+**Revision (Wave 1.5 Fix Round 2, `architect`)**: two independent Phase 2
+reviews (`code-reviewer` finding NEW-2; `risk` findings RK-W15P2-2 through
+RK-W15P2-5 and RK-W15P2-8 part B) proved the version below this line was
+insufficient — as written, its own worked example (§5.5, formerly §5.4)
+did not follow from its own enforcement rule (§3.4), and the design as a
+whole did **not** close SEC-W15-02. This revision replaces §3.4, extends
+§2.2/§3.1/§3.2/§5, and adds invariants EOI-14 through EOI-17. Every
+change is mapped to the finding that required it inline. Still
+**DESIGN/ARCHITECTURE ONLY** — nothing below authorizes implementation.
+
 ## 0. What this is, in one paragraph — and what it is not
 
 An `EconomicOperationIdentity` (**EOI**) is a row that names **the real
@@ -117,12 +127,12 @@ context the authorization needs to be reconstructable.
 | | `beneficiary_class` | `player` \| `affiliate` \| `staff` \| `platform`. The EOI carries the *class*; the **resolved beneficiary set** `B(O)` that `security`'s `SEP-1` (`security-architecture.md` §W15.1) tests against is supplied by each adopting domain's own resolver, in the same transaction as the authorizing write, and is deliberately **not** stored here — §2.3 |
 | **Economic owner** | **`economic_owner`** | *Who bears the cost.* `tenant` (operator-funded), `provider:<provider_id>` (provider-funded), `affiliate:<node_id>`, `platform`. This is not decoration: doc 10 §3's `fulfillment_owner` split and `ledger-finance`'s BF-1 lot-attribution finding both turn on it, and a ceiling is meaningless without knowing whose money it bounds |
 | **Value** | `asset_code` | Asset Registry code (ADR 0037). **Null is legal and meaningful**: a non-monetary operation (a pure send campaign) has no asset |
-| | **`intended_aggregate_value`** | Integer minor units, decimal-string wire form, `NUMERIC(38,0)`-compatible — **never** `int64`, never floating point (`CLAUDE.md`; ADR 0021; doc 21's exponent-18 correction). The *authorized* aggregate, by value, at approval time |
-| | **`recipient_ceiling`** | An integer **count**. The maximum number of subjects this authorization may ever reach. Mandatory for `criteria_defined` scope (doc 31 §7.2.3 item 3) |
+| | **`intended_aggregate_value`** | Integer minor units, decimal-string wire form, `NUMERIC(38,0)`-compatible — **never** `int64`, never floating point (`CLAUDE.md`; ADR 0021; doc 21's exponent-18 correction). The *authorized* aggregate, by value, at approval time. **A null `asset_code` EOI has no enforceable value budget** — an `intended_aggregate_value` on a non-monetary operation, if present at all, is informational only, and §5.4's consumption function must never be asked to enforce a value ceiling against a null asset (RK-W15P2-5, stated explicitly rather than left implicit in the asset_code row above) |
+| | **`recipient_ceiling`** | An integer **count of distinct subjects reached**, not a row count. Mandatory for `criteria_defined` scope (doc 31 §7.2.3 item 3). **Monotone non-decreasing, never released by a compensating entry** (RK-W15P2-2, §3.2, §3.4): a recipient granted and later clawed back has still been *reached* — clawing back the value does not un-reach them. Consumption is `COUNT(DISTINCT subject)` over the append-only consumption rows in the whole lineage subtree, computed the same way as the value budget (§3.4) but netted differently: only the value budget nets under compensation, `recipient_ceiling` never does |
 | | **`per_window_ceiling`** + `window` | For a continuously-running authorization (a live journey): the maximum executions per declared window |
 | | `value_measure_basis` | How `intended_aggregate_value` was computed and its `as_of` — EDR-R1's "copy the mutable with its as-of" (doc 30 §7.1) applied to a control input |
 | **Lineage** | **`parent_operation_id`** | Nullable **only** for a root operation. Non-null for every derived execution |
-| | `root_operation_id` | Denormalized for query sanity; equals `operation_id` for a root. A closure/recursive query is correct but makes the enforcement path a recursive CTE, which is the wrong thing to put on a write path |
+| | `root_operation_id` | Denormalized for query sanity; equals `operation_id` for a root. A closure/recursive query is correct but makes the enforcement path a recursive CTE, which is the wrong thing to put on a write path. **This is the field the whole enforcement mechanism turns on (§3.4): every budget is a subtree-wide aggregate keyed on `root_operation_id`, never on `parent_operation_id` alone** — code-reviewer's NEW-2 finding, closed below |
 | | **`lineage_kind`** | `root` \| `retry` \| `resume` \| `page` \| `item` \| `compensation`. §3.2 |
 | | `batch_ordinal` / `batch_total` | For `page`/`item`: position and declared total. Reuses ADR 0038 §14's `occurrence_ordinal` discipline for repeated same-type operations |
 | **Approval** | **`approval_state`** | `not_required` \| `pending` \| `approved` \| `rejected` \| `expired` \| `consumed` \| `revoked`. **`not_required` is never a default** — it is a recorded determination with the policy row and threshold that produced it |
@@ -166,6 +176,7 @@ EOI and (per §5.1) is rejected.
 | `affiliate_reattribution` | A `PlayerAttribution` supersede (doc 32 §5.3.1) | Same three conjuncts |
 | `manual_balance_adjustment` | A staff adjustment (`CLAUDE.md`) | Reason code + four-eyes above threshold |
 | `api_initiated_grant` | An authenticated `ActorService` call to a grant surface (doc 10 N2.3 mode 7) | The service credential's own authorization grant — which is exactly the case that has no human approval today, and therefore the case §5.1's rejection rule is most important for |
+| `bonus_held_disposition_resolution` | A staff action clearing a `HeldDispositionRecord` (doc 10 §N1.4.1/5c: `ACTION_REFORFEIT` or `ACTION_ROUTE_TO_CASH`, introduced by this round's LF-2 fix) | The staff action's reason code, plus four-eyes above `CLAUDE.md`'s threshold — same shape as `manual_balance_adjustment`, but scoped to a specific Grant's holding representation rather than an arbitrary ledger posting. **Resolves RK-W15P2-8 part B**: doc 10's LF-2 fix introduces a new staff-authorized, value-creating operation with no `operation_type` in the version of this table Phase 2 reviewed. Added here via this document's own §2.2 extension discipline rather than left as a gap. Value is known exactly at this point (the `HeldDispositionRecord`'s captured amount) — this is not an instance of §3.4's value-unknown-at-execution case, which applies to the *issuing* Grant's own EOI (e.g. cashback at `issued`), not to this later, amount-known disposition step |
 
 **Deliberately absent from this list**: an ordinary player-initiated bet,
 deposit or withdrawal. Those are single-subject, self-authorized, already
@@ -175,6 +186,30 @@ the platform for no gain. **The EOI governs operations one party
 authorizes *on behalf of, or affecting, many others* — that is the
 decomposition surface.** Stated explicitly so nobody generalizes this
 into a universal transaction wrapper.
+
+**`operation_type` is a fully separate, non-derived vocabulary from
+`internal/risk`'s `Operation` enum (DEP-EOI-4, `risk`-confirmed) —
+binding, not a suggestion.** An EOI answers "is this execution inside an
+approved operation?"; a Risk `Operation` answers "which posting shape and
+limit-evaluation path does this request take?" They classify different
+things and will diverge over time for reasons specific to each (a new
+Risk `Operation` needs a `cumulativeSpec`, doc 34's `operation_type` needs
+a minting authority and a consumption-record declaration — §3.4). Binding
+requirements for whoever implements either enum:
+
+- **No derivation, ever.** No `operation_type` value may be computed from,
+  aliased to, defaulted from, or kept in lockstep with a Risk `Operation`
+  value by convention, naming pattern, or shared constant. Each domain
+  owns and extends its own enum independently, through its own additive
+  discipline (this document's, ADR 0031 §12 for Risk's).
+- **Vocabulary-disjointness test, mandatory before either implementation
+  merges.** A test asserting `operation_type`'s value set and
+  `internal/risk.Operation`'s value set share no member and that no
+  function in the codebase maps one to the other. This is the same
+  discipline `internal/risk`'s own import-inspection technique (doc 34
+  EOI-9, mirroring doc 02's risk/RG separation check) applies one level
+  up: two vocabularies that happen to look similar today are exactly the
+  ones a future refactor quietly merges unless a test forbids it.
 
 ### 3.2 `lineage_kind` — the four ways a child comes to exist, and why each is a child
 
@@ -187,7 +222,7 @@ there is a real execution pattern that would otherwise mint a root.
 | **`resume`** | A crashed/restarted job continues (doc 10 W5's resumability; a period-close settlement run) | A resume re-attaches to the existing EOI. Budget already consumed stays consumed: `BulkGrantJobItem`'s existing `UNIQUE (tenant_id, bulk_grant_job_id, player_account_id)` row is the per-item record of what was already spent, and the EOI is the aggregate ceiling those items count against |
 | **`page`** | A large operation is executed in chunks | **Every page inherits.** `batch_ordinal`/`batch_total` are declared, and the sum of pages is checked against `recipient_ceiling` at the EOI, not per page. This is what makes "100 × 1k pages under a 5k ceiling" fail instead of succeed |
 | **`item`** | One subject inside a batch | The per-item execution carries the parent EOI. Doc 10 W5's guarantee is unchanged — "N individual `issued` transitions sharing one job correlation id, never a batch-level bypass" — and the EOI is the object that makes the *converse* also true: never an item-level bypass of a batch-level control |
-| **`compensation`** | A reversal, clawback, or correcting entry (doc 32 §7.1 rule 8's `reverses_instruction_id`) | Inherits, so a reversal is attributable to the operation it reverses, and **releases** rather than consumes budget |
+| **`compensation`** | A reversal, clawback, or correcting entry (doc 32 §7.1 rule 8's `reverses_instruction_id`) | Inherits, so a reversal is attributable to the operation it reverses, and **releases budget — but only the VALUE budget** (`remaining_value_budget`, §3.4). **`recipient_ceiling` is never released by a compensation** (RK-W15P2-2): a clawed-back recipient has still been reached, so `remaining_recipient_budget` does not grow back. This is a deliberate asymmetry between the two budgets, not an oversight — netting recipient count under compensation would let the exact SEC-W15-02 shape recur one level up (grant, clawback, re-grant, clawback, re-grant... each cycle "freeing" a recipient slot while the true audience reached keeps growing) |
 
 **A child never has a wider scope than its parent.** Concretely,
 enforced at creation:
@@ -205,6 +240,21 @@ enforced at creation:
 A violation of any of these is a **rejected write**, not a warning. A
 child that needs a wider scope is a new authorization, and must go
 through §3.1's minting path with its own approval.
+
+**Creating a child does NOT reserve its declared ceiling up front**
+(NEW-2, answering the question the prior version of this document left
+ambiguous). The check above (`child.recipient_ceiling ≤
+parent.remaining_recipient_budget`) is evaluated **at child-creation
+time, non-locking, against the subtree's aggregate consumption as it
+stands at that instant** — it is an early, advisory rejection of an
+obviously-oversized child, not a hold. It is therefore possible, by
+design, for many children's *declared* ceilings to sum to more than the
+root's ceiling at the moment they are created (100 pages of
+`recipient_ceiling=1000` each may all be created under a root ceiling of
+5,000, since none of them has consumed anything yet). This is safe
+**only because it is not the enforcement point** — §3.4 is. See §3.4 for
+why this is correct rather than a loophole, and §5.5 for the corrected
+worked example.
 
 ### 3.3 Mint-once — how a retry fails to create a fresh authorization
 
@@ -240,30 +290,148 @@ link table (`UNIQUE (tenant_id, accrual_id)`): **a unique key on the
 thing consumed, not only on the operation consuming it.** That is the
 same correction, one level up.
 
-### 3.4 Budget accounting — a projection, never a counter
+### 3.4 Budget accounting — a projection over the WHOLE lineage subtree, never a counter and never scoped to the direct parent
 
-`remaining_recipient_budget` and `remaining_value_budget` are
-**derived at read time, inside the enforcing transaction**, from the
-append-only record of what each child consumed — not maintained as a
-mutable column.
+**This section replaces the version `code-reviewer` proved defeats the
+whole mechanism (NEW-2).** The defect, restated precisely: the prior text
+said the projection was "`SUM`/`COUNT` over [child rows], `FOR
+UPDATE`-serialized on the EOI row" without saying *which* EOI row each
+page's own check ran against. A literal reading has each page compute its
+**own** remaining budget from rows where `parent_operation_id = <that
+page>` — which is always zero before that page has executed anything,
+since real consumption rows are written under the page, not under the
+root. Meanwhile the root's own remaining budget, computed the same way,
+never moves, because no consumption row ever carries `parent_operation_id
+= root` directly. Result: a root ceiling of 5,000 constrains nothing,
+because nothing is ever measured against it. This is the exact SEC-W15-02
+shape recurring one level inside the fix that was supposed to close it.
 
-This is `CLAUDE.md`'s balance rule applied to a control quantity, and for
-the same reason: *"Never `UPDATE` a balance. Balances are projections
-recomputed from ledger entries."* A mutable `remaining` column is a
-counter that drifts, and a drifted authorization ceiling fails **open**.
+**The fix: there is exactly one budget per authorization, and it is
+always computed over the entire subtree rooted at `root_operation_id`,
+never over a single generation of parentage.**
 
-Concretely: the consumption record is the domain's own already-existing
-per-item row (`BulkGrantJobItem`, the settled-accrual link row, the
-`Communication` row), carrying `parent_operation_id`. The projection is a
-`SUM`/`COUNT` over those rows, `FOR UPDATE`-serialized on the EOI row
-itself so two concurrent executions cannot both read the same remaining
-budget. **The EOI row is the serialization point; the child rows are the
-truth.**
+```sql
+-- remaining_recipient_budget for root R (COUNT, never released by compensation):
+SELECT R.recipient_ceiling - COUNT(DISTINCT c.subject_ref)
+FROM   economic_operations R
+JOIN   economic_operations eoi ON eoi.root_operation_id = R.operation_id
+JOIN   <declared consumption row(s) for eoi.operation_type> c
+       ON c.parent_operation_id = eoi.operation_id
+WHERE  R.operation_id = $root_id
+  AND  R.lineage_kind = 'root'
+FOR UPDATE OF R;
 
-A periodic recompute-and-diff of any materialized view of this is
-required for the same reason the ledger's is (hourly projection diff,
-`CLAUDE.md`), and any non-zero drift is treated as a control failure, not
-a reporting nuisance.
+-- remaining_value_budget for root R (SUM, nets under compensation):
+SELECT R.intended_aggregate_value
+       - COALESCE(SUM(c.value) FILTER (WHERE eoi.lineage_kind <> 'compensation'), 0)
+       + COALESCE(SUM(c.value) FILTER (WHERE eoi.lineage_kind =  'compensation'), 0)
+FROM   economic_operations R
+JOIN   economic_operations eoi ON eoi.root_operation_id = R.operation_id
+JOIN   <declared consumption row(s) for eoi.operation_type> c
+       ON c.parent_operation_id = eoi.operation_id
+WHERE  R.operation_id = $root_id
+  AND  R.lineage_kind = 'root'
+FOR UPDATE OF R;
+```
+
+`root_operation_id` (§2.2) exists **precisely** so this is a join against
+an indexed column, not a recursive CTE walking the lineage tree on every
+write — the prior version's own stated reason for denormalizing it, now
+actually used for it.
+
+**No reservation at child creation (answering NEW-2's explicit question,
+stated once here as the canonical answer — §3.2 cross-refers to it):**
+creating a `page`/`item`/child EOI does **not** consume or reserve any
+budget. The only two places budget is ever measured are:
+
+1. **§3.2's non-locking containment check**, at child creation, against
+   the subtree aggregate **as it stands at that instant** — early,
+   advisory, rejects an obviously-oversized child, but does not prevent
+   many siblings' declared ceilings from summing to more than the root's
+   ceiling (§3.2).
+2. **§5.4's locking consume**, exactly once per actual effecting write,
+   which is the real enforcement point.
+
+This means 100 pages of `recipient_ceiling=1000` under a root ceiling of
+5,000 **may all be created** — and that is correct, not a hole, because
+none of them has executed anything yet. What cannot happen is more than
+5,000 *actual* grants executing: the 5,001st execution, in whichever page
+it falls, computes `remaining_recipient_budget` as the subtree-wide
+`COUNT(DISTINCT subject_ref)` above, finds it exhausted, and is rejected
+at §5.4's atomic consume — **regardless of which page or item lineage_kind
+it carries**. See §5.5 for the corrected worked example (the previous
+text's "page 6 fails" was wrong under these — the design's own — rules;
+it only holds under reservation-at-creation semantics, which this section
+explicitly rejects).
+
+**`FOR UPDATE` is always taken on the ROOT row, never on an intermediate
+page's row** (closing the ambiguity `risk`'s RK-W15P2-3 identified between
+this section and §5.3 as originally written — see §5.3 for the full
+canonical-ordering rule this requires). A page or item never has its own
+independently-enforced budget; it has a *declared* ceiling checked
+non-locking against the root's aggregate at creation (§3.2), and its
+actual executions consume against the root's lock at effecting time.
+
+**The two budgets net differently under compensation (RK-W15P2-2):**
+`remaining_value_budget` nets — a clawback's `value` is added back with
+the opposite sign, consistent with `CLAUDE.md`'s ledger netting.
+`remaining_recipient_budget` does **not** net — it is monotone
+non-decreasing over the append-only consumption rows regardless of
+`lineage_kind = compensation`, because a clawed-back recipient has still
+been *reached* (§2.2, §3.2).
+
+**Consumption-record shape must be declared per `operation_type`, and an
+undeclared shape is refused, not silently ignored (RK-W15P2-4).** The
+`<declared consumption row(s)>` join target above is not implicit. This
+platform has already had, and fixed, exactly this defect once:
+`internal/risk/cumulative.go`'s `cumulativeSpec` requires every
+`Operation` to declare its `MeasuredAccountTypes` and
+`IgnoredAccountTypes` explicitly, and returns
+`ErrUnrecognizedCumulativeLeg` — not a silent zero — the moment a query
+observes a player-side ledger leg the spec didn't declare either way.
+The EOI mechanism requires the identical discipline, one level up: each
+`operation_type` in §3.1's table must declare **exactly which child-row
+table(s) and column(s) constitute its consumption record** (for example:
+`bonus_bulk_grant` → `BulkGrantJobItem` rows keyed by
+`parent_operation_id`, counted by `player_account_id`, valued by
+`granted_amount`). If a domain later writes a **second** kind of
+consumption row for the same `operation_type` — concretely, the moment
+this round's `HeldDispositionRecord` exists, a `bonus_held_disposition_resolution`
+EOI (§3.1) could in principle be consumed against by more than one row
+shape — the consumption function must **raise**, not under-count, the
+moment it finds a `parent_operation_id` on a row shape the declaration
+for that `operation_type` does not name. Whoever implements
+`internal/economicop` names the equivalent of
+`ErrUnrecognizedCumulativeLeg` for this domain; this document does not
+pick the Go error name, but does bind the *behavior*: fail closed on an
+undeclared shape, always.
+
+**Value-unknown-at-execution-time operations consume the conservative
+maximum, never zero or a placeholder (RK-W15P2-5).** Some grants —
+cashback is the concrete first-slice case (doc 10 §2) — have a value not
+known until a settlement job closes a window well after `issued`. Per
+ADR 0031 §42(c)'s already-established rule for the identical shape inside
+Risk (`ErrMissingAmount` on a zero-amount request; the two acceptable
+resolutions are the Offer's declared ceiling as a conservative maximum,
+or making the amount-known checkpoint the authoritative gate — never a
+placeholder), the EOI mechanism adopts the same rule at the same layer:
+**an `operation_type` whose value is not known at execution time consumes
+the Offer's declared maximum possible value against `remaining_value_budget`
+at that execution**, not zero, not a sentinel, not the campaign average.
+This is conservative by construction — if the ceiling passes, the actual
+(smaller-or-equal) realized value also passes — and it means a batch of
+cashback issuances can exhaust `remaining_value_budget` before any of
+them actually settles, which is correct: the authorization bounded the
+*maximum exposure it created*, and that exposure exists from `issued`,
+not from settlement. (Recall from §2.2: a **null** `asset_code` EOI has
+no enforceable value budget at all — this rule applies only when
+`asset_code` is non-null and a value is simply not yet *known*, a
+different case from *not applicable*.)
+
+**A periodic recompute-and-diff** of any materialized view of either
+budget is required for the same reason the ledger's is (hourly projection
+diff, `CLAUDE.md`), and any non-zero drift is treated as a control
+failure, not a reporting nuisance.
 
 ---
 
@@ -398,7 +566,52 @@ The rule stated plainly: **the domain whose tables change is the domain
 that checks.** A requester-enforced control is removable by a refactor,
 a bug, or a bought product's own engine.
 
-### 5.3 Budget and approval are CONSUMED, atomically, in the effecting transaction
+### 5.3 Canonical lock ordering — one rule, resolving the §5.1/§5.4 ambiguity `risk` found (RK-W15P2-3)
+
+The prior version of this document left the lock-acquisition point
+ambiguous between "entry check, non-locking" (§5.1) and "effecting-
+transaction consume" (what is now §5.4), and never stated its order
+relative to Risk's own advisory lock (`internal/risk/evaluator.go`'s
+`pg_advisory_xact_lock`, taken inside `Rule.breach()`,
+`evaluator.go:338`). Left that way, a naive implementation could hold an
+EOI row lock across the **entire** gate chain
+(`AssetAuthorization → RG → Risk` + the ledger posting) for every one of
+100,000 items in a job — turning an EOI throughput concern into Risk
+fail-closed denials under load (Risk's own advisory lock contends with
+whatever else is holding it), and risking an AB-BA deadlock if different
+call paths ever acquired the two locks in different orders.
+
+**The canonical rule, stated once, binding everywhere `internal/economicop`
+is called from:**
+
+1. **§5.1's entry check is non-locking.** It may only reject early
+   (no resolvable/approved/open/unexpired parent, or an obviously
+   oversized child per §3.2). It never takes `FOR UPDATE` and is not the
+   enforcement point.
+2. **The gate chain runs next, unchanged and unreordered** — exactly
+   §4.4's `AssetAuthorization → RG → Risk`, including Risk's own
+   `pg_advisory_xact_lock`. The EOI is not part of this chain and is
+   never interleaved with it.
+3. **The locking consume (§5.4) happens exactly once, strictly AFTER the
+   gate chain completes and immediately before the effecting write**, in
+   the same transaction as that write. It is always taken on the **ROOT**
+   row identified by `root_operation_id` (§3.4) — never on an
+   intermediate page's or item's own row, which has no independent lock
+   to take.
+4. **Ordering relative to Risk: Risk's advisory lock is always acquired
+   BEFORE the EOI row lock, never after.** Because step 2 always precedes
+   step 3, this is automatic as long as no call site is restructured to
+   take the EOI lock earlier "for efficiency" — which step 1 makes
+   unnecessary, since the cheap non-locking rejection already happened.
+   This fixed ordering is what makes an AB-BA deadlock between the two
+   locks structurally unreachable: every path takes Risk's lock, then the
+   EOI lock, never the reverse.
+
+This makes the EOI row lock's hold time exactly one effecting write, not
+a whole gate chain — the throughput property the prior ambiguity put at
+risk.
+
+### 5.4 Budget and approval are CONSUMED, atomically, in the effecting transaction
 
 Both use the pattern this platform already implements and has already
 reviewed — `asset_change_consume_approved_request` (migrations
@@ -407,7 +620,7 @@ reviewed — `asset_change_consume_approved_request` (migrations
 
 | Property | Why it is needed here |
 |---|---|
-| `SELECT … FOR UPDATE` on the EOI row | Two concurrent executions cannot both read the same remaining budget |
+| `SELECT … FOR UPDATE` on the **root** EOI row (§5.3 rule 3, §3.4) | Two concurrent executions — anywhere in the subtree, whichever page or item they belong to — cannot both read the same remaining budget |
 | The four-eyes predicate (`approver_principal_id <> requested_by_principal_id`) **inside the selection predicate**, not as a separate check | A caller that forgets to check cannot succeed — an unapproved operation is simply not selectable |
 | Payload containment (`payload @> match`) | The execution must match the **pinned** payload (§2.2), not merely reference an approval that exists |
 | State transition in the same transaction | The approval is **spent**; a replay finds nothing and raises |
@@ -420,22 +633,28 @@ the EOI version is a generalization of it or a sibling is `security`'s and
 `ledger-finance`'s call (doc 32 DEP-AFF-6, doc 31 DEP-CRM-5); the
 properties are binding either way.
 
-### 5.4 Worked example — the SEC-W15-02 attack, before and after
+### 5.5 Worked example — the SEC-W15-02 attack, before and after
 
 A 100,000-member audience, an `EngagementCampaign` with one
-`offer_request` step, a €10 offer.
+`offer_request` step, a €10 offer, `recipient_ceiling = 5,000` at
+activation approval. **Corrected from the prior version, which described
+"page 6 fails" — that only holds under reservation-at-creation semantics,
+which §3.4 explicitly rejects. Under the rules this document actually
+specifies, page creation is not the enforcement point; the 5,001st actual
+grant execution is, wherever it falls.**
 
 | Step | Before (Wave 1.5 as designed) | After |
 |---|---|---|
 | Operator authors the campaign | `crm_config:manage` | `crm_offer_request:configure` — a **distinct** authority (doc 31 §12.2) |
-| Activation | An ordinary status change | Mints `crm_engagement_campaign_activation`. Contains an `offer_request` step ⇒ **four-eyes ALWAYS**, no threshold. Approval pins the campaign/journey/offer versions and the audience-definition hash; `recipient_ceiling` and `intended_aggregate_value` recorded |
+| Activation | An ordinary status change | Mints `crm_engagement_campaign_activation`. Contains an `offer_request` step ⇒ **four-eyes ALWAYS**, no threshold. Approval pins the campaign/journey/offer versions and the audience-definition hash; `recipient_ceiling = 5,000` and `intended_aggregate_value` recorded on the **root** |
 | Journey runs | 100,000 individual grant calls | 100,000 executions, **each carrying `parent_operation_id`**, each `lineage_kind = item` |
 | Bulk control | **Never triggered** — no `BulkGrantJob` exists | Irrelevant which surface is used: Bonus checks the parent EOI on **every** grant-causing call |
 | Exceeding the ceiling | Nothing to exceed | Execution 100,001 finds zero remaining budget ⇒ **rejected**, loudly, with the operation id in the audit record |
-| Splitting into 100 × 1k pages | 100 sub-threshold batches, all pass | Each page is a `page` child; `child.recipient_ceiling ≤ parent.remaining` ⇒ the sum cannot exceed the parent's ceiling. Page 6 fails |
+| Splitting into 100 × 1k pages | 100 sub-threshold batches, all pass | All 100 pages **may be created** — page creation does not reserve budget (§3.2, §3.4). But actual item executions are consumed against the **root's** subtree-wide aggregate (§3.4), regardless of which page they run under: the **5,001st actual grant execution across the whole subtree** — which could be item 1 of page 6, or item 800 of page 5, depending on execution order — finds `remaining_recipient_budget = 0` at §5.4's locking consume and is **rejected**. The other 94,999 create-only pages never get to execute past that point either, for the same reason. The sum can never exceed 5,000 **executed** grants, which is the actual property that matters |
 | Retrying after a crash | A fresh, unapproved context | `resume` re-attaches to the same EOI; already-spent budget stays spent (the existing `BulkGrantJobItem` rows are the record) |
 | Retrying the *activation* | A second activation | Hits `UNIQUE (tenant_id, operation_type, idempotency_key)` ⇒ resolves to the existing EOI with its already-**consumed** approval |
 | A journey step calling the single-Grant surface instead | Same bypass, different door | Same rejection — the check is on the **surface**, not on the shape of the call |
+| A recipient granted, then clawed back, then targeted again by a later page | Not modeled | `recipient_ceiling` consumption is `COUNT(DISTINCT subject_ref)` and never releases on the clawback (RK-W15P2-2) — the recipient still counts once against the 5,000, permanently |
 
 ---
 
@@ -446,9 +665,9 @@ A 100,000-member audience, an `EngagementCampaign` with one
 | **EOI-1** | Every §3.1 surface rejects a call with no resolvable, `approved`, `open`, unexpired `parent_operation_id`. Every failure mode of resolution denies | Fail-closed integration test per surface, mirroring `internal/risk/fail_closed_integration_test.go` |
 | **EOI-2** | An EOI is created exactly once per authorization: `UNIQUE (tenant_id, operation_type, idempotency_key)`, DB-enforced, never check-then-insert | Concurrency test: N simultaneous mint attempts ⇒ exactly one row |
 | **EOI-3** | A retry, a resume, a page and an item **all** resolve to the same `root_operation_id` as their first attempt; none mints a root | Interrupt/resume test on a bulk job and on a period settlement; assert one root, one approval consumption |
-| **EOI-4** | A child's scope never exceeds its parent's: all five §3.2 containment checks are enforced as rejected writes | Property test over the five, plus the explicit "100 × 1k pages under a 5k ceiling" case |
-| **EOI-5** | Remaining budget is **derived** from append-only child records inside the enforcing transaction; no mutable `remaining` column is the authority | Schema inspection + a recompute-and-diff test |
-| **EOI-6** | Budget and approval are consumed atomically with the effect, via a `FOR UPDATE` + payload-containment + state-transition function; a replay raises | Replay test; concurrent-consume test |
+| **EOI-4** | A child's scope never exceeds its parent's at creation (all five §3.2 containment checks, non-locking, are enforced as rejected writes); **and, separately, no more than `recipient_ceiling` actual executions ever complete across the ENTIRE lineage subtree**, aggregated by `root_operation_id`, never by direct `parent_operation_id` alone (§3.4, NEW-2) | Property test over the five containment checks; **the explicit "100 pages of `recipient_ceiling=1000` created under a 5,000 root ceiling, then all attempt to execute" case, asserting exactly 5,000 executions succeed and the 5,001st — in whichever page it falls — is rejected** (replacing the "page 6 fails" framing the prior version of this invariant's check implied) |
+| **EOI-5** | Remaining budget is **derived** from append-only child records inside the enforcing transaction, aggregated over the whole subtree via `root_operation_id`; no mutable `remaining` column is the authority, and no per-page or per-item local aggregate is ever treated as authoritative | Schema inspection + a recompute-and-diff test + a test asserting a page's own `parent_operation_id`-scoped count is never queried as a budget source |
+| **EOI-6** | Budget and approval are consumed atomically with the effect, via a `FOR UPDATE` (on the ROOT row, §5.3/§5.4) + payload-containment + state-transition function; a replay raises | Replay test; concurrent-consume test; **and a mandatory negative control** (`risk`'s requested pattern, copied from `internal/risk/cumulative_race_integration_test.go`): the identical concurrency test re-run with the `FOR UPDATE` statement replaced by a no-op, which must deterministically **overshoot** `recipient_ceiling` — proving the lock, not incidental scheduling luck, is what the positive test is actually verifying |
 | **EOI-7** | `approval_state = not_required` is never a default: every such row names the policy row and threshold that produced it. Absent policy ⇒ threshold `0`, `required_approvals` `2` | Schema constraint + a zero-config test asserting approval is required |
 | **EOI-8** | `correlation_id` is inherited from the root and never re-minted along a lineage | Test comparing root and leaf |
 | **EOI-9** | The EOI check is never inside the `AssetAuthorization → RG → Risk` chain and never alters its order or outcome; `internal/rg`, `internal/risk`, `internal/kyc`, `internal/assetregistry` never import `internal/economicop` | Import inspection (the technique doc 02 uses for the risk/rg separation) + code review of the call ordering |
@@ -456,6 +675,10 @@ A 100,000-member audience, an `EngagementCampaign` with one
 | **EOI-11** | No floating-point money: `intended_aggregate_value` is integer minor units in `NUMERIC(38,0)`-compatible form against the registry exponent, never `int64` | Type inspection + a multi-exponent test (0/2/6/8/18) |
 | **EOI-12** | `internal/economicop` contains no scheduler, no retry policy, no workflow/saga state machine, no HTTP surface, and no eligibility/RG/Risk/KYC concept | Repo inspection + grep |
 | **EOI-13** | Every EOI mint, approval, consumption, rejection and status change writes an `audit.Record` in the same transaction (actor, tenant, entity, before/after, reason code) | Count-matching test (`CLAUDE.md`; ADR 0013) |
+| **EOI-14** *(new, RK-W15P2-2)* | `recipient_ceiling` consumption is `COUNT(DISTINCT subject_ref)` over the subtree's append-only rows and is monotone non-decreasing; a `lineage_kind = compensation` row never decreases it, even though the same row DOES net against `remaining_value_budget` | Test: grant, clawback, re-grant same subject ⇒ `recipient_ceiling` consumption reads 1 throughout (not 0 after clawback, not 2 after re-grant), while `remaining_value_budget` correctly returns to its pre-grant level after the clawback |
+| **EOI-15** *(new, RK-W15P2-4)* | Every `operation_type` declares, exhaustively, the child-row table(s)/column(s) that constitute its consumption record; a child row bearing a `parent_operation_id` whose shape is not named in that declaration causes the consumption function to **raise**, never to under-count silently | Test mirroring `internal/risk/cumulative.go`'s `ErrUnrecognizedCumulativeLeg` pattern: introduce an undeclared second consumption-row shape for one `operation_type` and assert the enforcing query fails closed rather than returning a smaller-than-true sum |
+| **EOI-16** *(new, RK-W15P2-5)* | An `operation_type` whose value is not known at execution time consumes the Offer's declared maximum against `remaining_value_budget` at that execution, never zero or a placeholder; a null `asset_code` EOI has no enforceable value budget at all | Test: a cashback-shaped `issued` execution with value unknown consumes the declared ceiling, not 0; a separate test asserts an attempt to enforce a value budget against a null-`asset_code` EOI is rejected as a configuration error, not silently treated as unlimited or zero |
+| **EOI-17** *(new, DEP-EOI-4)* | `operation_type` is never derived from, aliased to, or mapped to `internal/risk.Operation`; the two enums' value sets are disjoint and no function converts one into the other | The vocabulary-disjointness test (§3.1) |
 
 ---
 
@@ -484,8 +707,10 @@ A 100,000-member audience, an `EngagementCampaign` with one
 | **DEP-EOI-1** | **Bonus must enforce §5.1 at every grant-causing surface** — its own staff surfaces, `ActorService` callers, and CRM alike. `bonus-engine` owns doc 10 and is independently revising §N1–N2 this same Fix Wave; it has not seen this document | bonus-engine | **Yes** — doc 31 §7.2.3 items 1/3/4 are unenforceable without it |
 | **DEP-EOI-2** | The consumption function (§5.3) — a generalization of, or sibling to, `asset_change_consume_approved_request`. Same dependency as doc 32 DEP-AFF-6 and doc 31 DEP-CRM-5; **one function should serve all three**, and deciding that is `security` + `ledger-finance`'s | security + ledger-finance | Yes, before implementation |
 | **DEP-EOI-3** | **`security` has since PUBLISHED the invariant as `SEP-1`** (`security-architecture.md` §W15.1): unconditional, threshold-independent, refusing on any unresolvable or empty beneficiary set, with each adopting domain supplying a resolver and an enforcement point and **nothing else**. The EOI composes with it and does not duplicate it: `SEP-1` asks *"is the actor a beneficiary?"*; the EOI asks *"is this execution inside an approved operation?"* — both must hold, neither implies the other. Remaining dependency: the Person-linkage primitive underneath (`identity-compliance`, `4HB1FW-05`, not seen here) | identity-compliance (+ security) | Yes, before implementation |
-| **DEP-EOI-4** | `risk` is independently reviewing this concept against Risk's own operation/eligibility model this round. If `risk` finds that `operation_type` should align with, or stay deliberately distinct from, ADR 0031's `Operation` enum, that is `risk`'s call — this document deliberately does **not** reuse Risk's enum (an EOI is not a risk-evaluated operation), and the reasoning should be confirmed or corrected by the owner | risk | No |
+| **DEP-EOI-4** | **RESOLVED this revision.** `risk` independently confirmed `operation_type` must stay a fully separate, non-derived vocabulary from ADR 0031's `Operation` enum — never reused, never aliased. §3.1 now states this as a binding requirement (no derivation, ever; a vocabulary-disjointness test), closing this item. No further owner action required unless a future reviewer disagrees | risk (confirmed) | No — closed |
 | **DEP-EOI-5** | **(new)** `security`'s `CRM-BR-1`/§W15.1.2 (pin the **materialized** subject set; never re-resolve at execution) and `bonus-engine`'s doc 10 **W5** (resolve **live** at run time) point in opposite directions. §2.2's `subject_set_hash` adopts the ceiling reconciliation — the pin bounds from above, live resolution may only shrink — but **neither owner has confirmed it**. Same item as doc 31 **DEP-CRM-7** | security + bonus-engine | Yes, before the first pinned-audience execution |
+| **DEP-EOI-6** *(new, RK-W15P2-4)* | The consumption-record-shape declaration (§3.4) must be authored per `operation_type` by the domain that owns that type's tables — `bonus-engine` for `bonus_bulk_grant`/`bonus_manual_grant`/`bonus_campaign_activation`/`bonus_held_disposition_resolution`, `crm` for `crm_engagement_campaign_activation` (which enforces nothing itself but should still declare its own shape for symmetry), `affiliate` for its two types. Not yet authored by any of them — this document specifies the *requirement and failure behavior*, not the per-type declarations themselves | bonus-engine, affiliate, crm | Yes, before implementation of any given `operation_type`'s enforcement |
+| **DEP-EOI-7** *(new, RK-W15P2-3)* | §5.3's canonical lock ordering (Risk's advisory lock always before the EOI row lock) is a call-site discipline, not something the EOI schema alone enforces. Whoever implements the Bonus/Affiliate call sites that invoke both Risk and `internal/economicop` in the same transaction must follow §5.3's ordering; a code-review checklist item, not a database constraint, since no database mechanism can order two applications' independently-acquired advisory/row locks | bonus-engine, affiliate (implementers) + code-reviewer (gate) | Yes, before implementation |
 | **OI-EOI-1** | An ADR ratifying this concept is recommended. **Number deliberately not claimed** — parallel-dispatch ADR-number collision has already occurred once in this project (Stage 4H-B0-R6's `0049`) and twice now in this gate's numbering discussions | Orchestrator | No |
 | **OI-EOI-2** | `economic_owner` (§2.2) intersects `ledger-finance`'s **BF-1** finding (concurrent operator-funded and provider-funded Grants share one fungible `player_bonus` balance with no lot-attribution mechanism), which is deferred to `architect` + a human decision. This document introduces the *field*, not a resolution, and Wave 2's operator-funded-only restriction is unaffected | architect + human | No |
 | **OI-EOI-3** | Retention of `economic_operations` rows: an authorization record is audit-adjacent and inherits doc 16's unresolved retention-period question (a legal decision, not an engineering one) | identity-compliance → human | No |
@@ -498,6 +723,10 @@ A 100,000-member audience, an `EngagementCampaign` with one
 - Bonus's surfaces it governs: `10-bonus-engine-architecture.md` W5, §1.3, N2.2–N2.6
 - Existing identity mechanisms it extends: `22-canonical-activity-event-taxonomy.md` (envelope: `correlation_id`, `operation_ref`, `idempotency_key`, `reverses_ref`)
 - The consumption pattern it adopts: `migrations/0044_asset_registry_failclosed_and_dual_control.up.sql`, `migrations/0047_asset_registry_dual_control_hardening.up.sql`
+- The self-defending undeclared-consumption-shape pattern it copies (RK-W15P2-4): `internal/risk/cumulative.go` (`ErrUnrecognizedCumulativeLeg`, `cumulativeSpec`)
+- The value-unknown-at-execution-time rule it copies (RK-W15P2-5): ADR 0031 §42(c) (`ErrMissingAmount`, the conservative-maximum resolution)
+- The canonical lock ordering it fixes relative to (RK-W15P2-3): `internal/risk/evaluator.go` (`Rule.breach()`'s `pg_advisory_xact_lock`, `evaluator.go:338`)
+- The negative-control test pattern EOI-6 now requires: `internal/risk/cumulative_race_integration_test.go`
 - The fail-closed default it mirrors: `internal/withdrawal/policy.go` (`defaultApprovalPolicy`)
 - Gate order it must not join: `10-bonus-engine-architecture.md` §T.1; `29-bonus-implementation-contract.md` §8 (BI-7); `33-cross-domain-commercial-flow-map.md` §3.1 item 2
 - Evidence/reconstruction rules it follows: `30-segmentation-engine-architecture.md` §7.1 (EDR-R1/EDR-R2)

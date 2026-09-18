@@ -2,6 +2,13 @@
 
 Status: Stage 0 draft. Source: Blueprint §9, §10.
 
+Stage 6 (B2C frontend + back office + partner console + reporting/BI,
+below) is elaborated into named sub-stages, a dependency graph, and an
+honest per-domain readiness check in `35-product-surfaces-roadmap.md`
+(Stage 4H-B1, Wave 1.5 Fix Round 2). This document's Stage 6 references
+below are unchanged; see that document for the concrete stage IDs
+(`6A`–`6D`) and sequencing analysis.
+
 ## B2C MVP scope (own brand, real money, Stage 0–4 target)
 
 In scope: identity + tenancy foundation, wallet/ledger, one game
