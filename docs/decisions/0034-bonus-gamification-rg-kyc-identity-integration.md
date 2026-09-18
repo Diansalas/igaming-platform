@@ -1618,3 +1618,443 @@ implementer for everything it cannot (4).
   `docs/architecture/withdrawal-state-machine.md` — confirmed to carry no
   RG/self-exclusion gate today, cited in §14.6 as a pre-existing,
   out-of-scope gap this section does not close.
+
+## Stage 4H-B1 Wave 1 — Bonus Engine RG and Identity/Multi-Account Integration Contracts (task 4HB1-05)
+
+Status: Accepted (design/contract-only — Wave 1 of an 8-wave gated
+implementation per `docs/governance/task-registry.md`'s Stage 4H-B1; no
+code, no migration). Owner: `identity-compliance`. Written in parallel
+with `bonus-engine`'s Wave 1 domain-model authorship
+(`docs/architecture/10-bonus-engine-architecture.md`, task `4HB1-02`) and
+`security`'s Wave 1 RBAC/audit/tenancy contract (task `4HB1-08`) —
+reconciliation across all Wave 1 outputs happens before any Wave 2 coding
+dispatch, per the stage's own gate. This section does not redesign
+anything doc 10 §1.2/§1.3 (Grant state machine) or §5/"4. RG" (RG
+composition, already frozen and citing this ADR verbatim) — those are
+read as binding, confirmed consistent with §1-§14 above, and extended
+here with the checkpoint-by-checkpoint specification and the identity/
+multi-account contract the stage directive additionally asks for.
+
+### 15. RG integration contract — exact Bonus Engine lifecycle checkpoints
+
+**15.1 Confirmed unchanged.** Composition order (RG first, short-
+circuiting Risk — ADR 0031 §1), the frozen `EvaluateEligibility`/
+`EligibilityParams`/`Decision` signature (§1 above, restated verbatim in
+doc 10's "4. RG"), and doc 10 §5's own corrected rule that a denial at
+GRANT/ACTIVATION time is a `cancelled` Progress transition while a denial
+at CONVERSION time leaves the Grant `completed` (non-terminal, retryable)
+— never forfeited, per §2 above's "no clawback" principle. Nothing below
+revises any of that; this subsection only makes doc 10's general rule
+exhaustive against doc 10's own actual state machine.
+
+**15.2 Checkpoint table.** Every row is a point where Bonus Engine (or the
+Gamification/Reward Orchestrator components sharing doc 10's lifecycle)
+MUST call `rg.EvaluateEligibility` fresh, in the same transaction as the
+state-changing effect, before that effect commits — no checkpoint may be
+satisfied by a cached result from an earlier checkpoint, mirroring
+§14.3's "resolved fresh, every time" discipline restated for doc 10's
+actual state machine (§1 above already stated this in general/
+illustrative terms; this table is the exhaustive version against doc 10's
+frozen states):
+
+| Checkpoint | Bonus Engine event (doc 10 §1.2/§1.3) | `WalletID` | RG capability actually exercised (per `internal/rg` as it exists today) |
+|---|---|---|---|
+| **Campaign/Offer eligibility (opt-in)** | `issued`→`activated` triggered by *player action* (explicit opt-in click, doc 10 §1.3) | `uuid.Nil` — no wallet operation yet, mirroring §1's mission/tournament-entry precedent | Account-status + self-exclusion (`CodePlayerAccountNotActive`/`CodeSelfExcluded`) only; no wallet check is possible or needed at this step |
+| **Grant creation** | *(none)*→`issued`, whether by automated rule evaluation on a canonical event, provider callback, or staff/bulk action | `uuid.Nil` if no bonus wallet is resolved yet at `issued` time (doc 10's own state table: `issued` may precede any wallet effect); the bonus wallet once resolved, otherwise | Account-status + self-exclusion, plus wallet-status (`CodeWalletNotActive`) once a wallet is resolved |
+| **Activation** | `issued`→`activated` (deposit-triggered, staff, or opt-in paths in doc 10 §1.3) | The bonus wallet being credited | Full three-part decision, evaluated **independently** of the grant-time check even when grant and activation happen in the same request — never inferred from the earlier, already-passed check (§14.3's "never cached" discipline) |
+| **Coded-bonus redemption** | A player-supplied code validated against an Offer — doc 10 §2's "Coupon" row: "the only lifecycle novelty is the *trigger* for `issued`→`activated`... otherwise identical to a deposit/cash bonus" | Same as Grant creation/Activation above — redemption is not a fifth checkpoint, it is the SAME `issued`/`activated` checkpoints reached through a different trigger, and gets no lighter-weight treatment | Same as Grant creation/Activation |
+| **Conversion / release** | `completed`→`converted` (wagering multiplier satisfied, cashback window closed, marketplace/points redemption crediting a wallet) | The destination wallet (spendable/cash balance, or a different bonus-class wallet for a bonus-to-bonus conversion) | Full three-part decision; per doc 10 §5's corrected rule, `Allowed == false` here does **not** forfeit — it leaves the Grant `completed`, retryable |
+| **Bulk assignment, per player** | Any of the above, triggered by a staff bulk-assignment action targeting N players at once | Per the individual player's own resolved wallet, exactly as a single-player grant | Identical to Grant creation — see §15.4 for why this is its own row despite being "the same checkpoint N times" |
+
+**15.3 What is explicitly NOT a checkpoint.** Showing/listing an Offer to
+a player (a campaign-eligibility *query* used for marketing display —
+"which offers can this player see") is not itself a value-granting,
+value-activating, or value-consuming action, and is therefore not
+required to call `EvaluateEligibility` by this contract — consistent
+with §1's own scoping ("every player-facing bonus/gamification action
+that grants, activates, or lets a player consume value"). Recommended,
+not required by this ADR: a self-excluded player should not be shown
+promotional Offers, as a UX/reputational matter — but that is a product/
+marketing-list filter, not an RG enforcement point, and building it does
+not substitute for or weaken the checkpoints in §15.2 in any way.
+
+**15.4 Bulk assignment — the checkpoint most likely to be silently
+weakened, stated explicitly.** A bulk-assignment action (a staff operator
+targeting a segment/campaign at many players at once) MUST evaluate
+`EvaluateEligibility` once **per targeted player**, inside that player's
+own grant-creation transaction, exactly as a single-player grant would —
+never as a single pre-check pass whose result is reused for every
+subsequent player in the batch (a real TOCTOU risk for a batch that can
+run for minutes across thousands of players, the same class of race
+`lockPerson`'s own doc comment exists to close for a single player,
+restated here for N players run sequentially or concurrently). A player
+who fails the check is **skipped**: their grant is never created, and a
+`bonus.grant_denied_by_rg_policy` audit entry is written for that player
+alone (§3 above), while the rest of the batch proceeds. The batch as a
+whole is never all-or-nothing on one player's RG denial, and a
+campaign-level pass never substitutes for each player's own account/
+self-exclusion/wallet-status check.
+
+### 16. Fail-closed contract — RG unavailable or erroring must never resolve to an implicit allow
+
+Restating and making explicit, for the Bonus Engine implementation, the
+discipline already binding on every other caller of `EvaluateEligibility`
+in this codebase (`postBet`'s own error propagation; `identityresolution`'s
+explicit "treat resolver-unavailable identically to Uncertain, never
+silently create an unrestricted new Person" precedent, ADR 0027 §7):
+
+- `EvaluateEligibility` returns `(Decision, error)`. A non-nil `error` —
+  a database error, a failed wallet resolution, any failure that prevents
+  the function from reaching a real `Decision` at all — is **not** a
+  `Decision{Allowed: false}` and must never be treated as one by
+  inference; it means the question was never actually answered. Every
+  Bonus Engine call site MUST treat a non-nil error exactly like a hard
+  failure of the entire enclosing operation: the transaction is aborted
+  (rolled back), no Grant row is inserted or transitioned, no wallet is
+  credited, and no Progress entry claiming a decision was reached is
+  written. This is not a new rule invented here — it is what already
+  happens by construction today at every existing `EvaluateEligibility`
+  call site (an error return aborts the enclosing Go function before any
+  write commits); this section exists only to make explicit that Bonus
+  Engine's own implementation must preserve that property rather than,
+  for example, wrapping the call in a "best-effort" pattern that logs the
+  error and proceeds.
+- A `Decision{Allowed: false}` (the ordinary denial path) is handled per
+  §15's checkpoint table and doc 10 §5's `cancelled`/`completed`-
+  non-terminal split — never re-interpreted as `Allowed: true` under any
+  retry, timeout, or "the check was probably fine" fallback.
+- **No override, bypass, or "skip RG" parameter exists on
+  `EligibilityParams`, and this contract does not ask for one.** This
+  restates §10 above's sportsbook rule verbatim for Bonus Engine's own
+  implementation: a genuine operational need (e.g. a support agent
+  manually completing a stuck bulk-assignment batch) is never satisfied
+  by a runtime flag that skips this check — it is its own separately-
+  audited, four-eyes-gated administrative action if it is ever needed,
+  never a parameter on the eligibility call itself.
+- This applies identically inside a bulk-assignment batch (§15.4): a
+  partial-batch failure (RG returning an error for player K of N, e.g. a
+  transient DB issue) skips and logs player K's own grant, and does not
+  abort or roll back players 1..K-1's already-committed grants (each is
+  its own transaction) — but it also never treats player K's error as an
+  implicit allow for player K specifically.
+
+### 17. The `OpenBetSelfExclusionPolicy` human decision — what Bonus Engine genuinely depends on, and the explicit configuration boundary for the gated portion
+
+Per this stage's own instruction, §14's `OpenBetSelfExclusionPolicy`
+default (ADR 0039 Decision 1) is **not selected here**. This section
+instead determines, precisely, what slice of Bonus Engine functionality
+that unmade decision actually blocks, versus what proceeds regardless —
+the same fail-closed-by-scope discipline §14.9/ADR 0039 already apply to
+sportsbook itself, extended to its one Bonus-relevant consequence.
+
+**17.1 Ungated — proceeds now, depends on nothing this section flags.**
+Every checkpoint in §15.2 — campaign/offer opt-in, grant creation,
+activation, coded-bonus redemption, conversion/release, and bulk
+assignment — resolves RG eligibility **as of the instant of that
+specific action**, using `EvaluateEligibility`'s existing, already-
+implemented self-exclusion/account-status/wallet-status check. None of
+this depends on `OpenBetSelfExclusionPolicy` in any way: that policy
+governs what happens to an *already-placed, still-open sportsbook bet*
+when self-exclusion fires mid-bet (§14.1) — a question about a
+**sportsbook** wager's own disposition, not about whether a Bonus Grant/
+opt-in/conversion action is itself allowed right now. A Bonus Grant
+funded entirely by cash, or wagered exclusively through casino play
+(whose rounds resolve near-instantly — §2's own reasoning for why casino
+needed no equivalent open-position policy), is completely unaffected by
+Decision 1 remaining unmade. This includes ordinary wagering-progress
+tracking for a bonus-funded **casino** bet — the open-position/self-
+exclusion-timing ambiguity §11/§14 reasoned through is specific to a
+sportsbook bet's long-lived, days-to-months-open liability window, which
+casino rounds do not have.
+
+**17.2 The one genuinely gated slice — already blocked by G-2; Decision 1
+only widens, does not create, the block.** The concrete case the
+directive asks about — "how an in-flight bonus-funded bet is treated if
+self-exclusion fires mid-bet" — only exists at all once (a) a sportsbook
+bet can be funded, wholly or partly, from a `player_bonus`-origin lock,
+and (b) that bet's Grant can go terminal (`expired`/`cancelled`/
+`forfeited`) while the bet is still open, and (c) a later settlement or
+void credit arrives back against that now-terminal Grant. This is exactly
+doc 10 §5's own "Terminal-Grant settlement-credit resolution" gap, which
+ADR 0039 Decision 2 (options (a) re-forfeit / (b) route to cash / (c)
+hold for review) already tracks as gate **G-2**, and which ADR 0039's own
+record states, independently confirmed by `bonus-engine` and
+`sportsbook`, **blocks bonus-funded sportsbook wagering directly** —
+`player_locked` phase 2 code for the bonus-funded case is "not being
+built or enabled until this is resolved" (ADR 0039 Decision 2, "Where
+implementation actually stands"). In other words: **bonus-funded
+sportsbook wagering as a feature does not exist yet to be affected by
+Decision 1 in the first place** — it is already gated shut by Decision 2,
+a separate, already-recorded human decision, independently of whether
+Decision 1 is ever answered.
+
+Self-exclusion firing mid-bet on a bonus-funded sportsbook stake is one
+of the two named trigger paths into that SAME already-gated Terminal-
+Grant question (doc 10 §5's "Cross-reference" paragraph: "(i) completing
+an already-fully-satisfied wagering requirement after self-exclusion, and
+(ii) a locked stake settling or voiding against a Grant that has already
+gone terminal for any reason... resolve to the same single choice"). Once
+G-2 (Decision 2) is answered, the specific self-exclusion-triggered
+instance of it additionally requires `OpenBetSelfExclusionPolicy`
+(Decision 1) to be configured for the relevant bet's jurisdiction,
+because `ResolveOpenBetSelfExclusionPolicy` fails closed (`Configured:
+false`) with no jurisdiction floor set (§14.9) — so a bonus-funded bet's
+self-exclusion-triggered disposition (does it void, returning the lock to
+`player_bonus` for G-2 to then dispose of; or settle normally) cannot
+even be computed for a jurisdiction with no configured value, regardless
+of Bonus Engine's own state.
+
+**17.3 The explicit configuration boundary.** Bonus Engine's own
+template/feature configuration (doc 10 §7/§8's jurisdiction/tenant/
+brand-scoped configuration surface — the same shape as every other
+jurisdiction-varying rule on this platform) MUST carry a distinct,
+off-by-default gate — e.g. `bonus_funded_sportsbook_wagering_enabled` —
+that is **never** implied by, or silently defaulted from, the existence
+of an Offer or Campaign that would otherwise permit it. This gate may
+only be set to enabled, per jurisdiction, once **both**:
+
+1. ADR 0039 Decision 2 (Terminal-Grant settlement-credit resolution, gate
+   G-2) has a recorded human answer and its corresponding state-machine
+   transition exists in doc 10 §1.2, **and**
+2. For that specific jurisdiction, `OpenBetSelfExclusionPolicy` resolves
+   `Configured: true` (a jurisdiction floor is set, per ADR 0039 Decision
+   1 and §14.2/§14.9 above) — either because the platform-wide default
+   has been decided and applies, or because that jurisdiction has its own
+   explicit override.
+
+Neither Bonus Engine, nor any other domain, may substitute a code-level
+assumption (e.g. "default to `SETTLE_NORMALLY` if unset") for condition
+2 — that would exactly reproduce the tampering/fail-open risk
+§14.9/ADR 0039 already reasoned through for sportsbook itself, now
+reachable through a Bonus Engine feature flag instead of a direct
+sportsbook code path. This is the one place this stage's Bonus Engine
+design has a hard, named dependency on an unmade human decision; every
+other checkpoint in §15 is unaffected, per §17.1.
+
+## Identity / multi-account abuse contract (directive's Part B, task 4HB1-05)
+
+### 18. Person-level history read — the capability that exists, and the one that does not
+
+**18.1 Confirmed: `internal/identityresolution` is not, and must not
+become, a per-action read surface for Bonus Engine.** This restates §4
+above, re-verified against the current code
+(`internal/identityresolution/register.go`): `PersonResolver.Resolve` is
+called from exactly one production entry point,
+`RegisterPlayerWithResolution`, itself called only from the HTTP
+registration handler. There is no exported function in this package a
+Bonus Engine eligibility check could call at grant/conversion time, and
+this contract does not ask for one to be added — `identityresolution`
+answers "does this NEW REGISTRATION correspond to an existing Person," a
+question asked once, at account creation, not "does this Person already
+hold N grants."
+
+**18.2 Confirmed: `internal/identity` has no cross-brand/cross-tenant
+PlayerAccount read today, and this contract does not build one.** Checked
+directly against `internal/identity/player_account.go`: every read
+function (`GetPlayerAccountByID`, `GetPlayerAccountByEmail`,
+`ListPlayerAccounts`) operates under the caller's own tenant-scoped RLS
+(`player_accounts`' sole policy is `tenant_isolation`, migration 0010 —
+no platform-wide read policy exists, the identical gap
+`internal/rg.CreateStaffRestriction`'s own doc comment already discloses
+for `ScopePlatform`). There is therefore no existing function of the
+shape "list every PlayerAccount linked to Person P, across every tenant/
+brand" for Bonus Engine to call, and building one is **not** part of this
+contract — it would be new, unreviewed cross-tenant read surface, exactly
+the kind of unilateral shared-architecture change CLAUDE.md's specialist
+rules reserve for `architect`+`security`, not something this ADR
+authorizes by itself.
+
+**18.3 What Bonus Engine should actually do instead — and why it needs no
+new `internal/identity` capability at all.** The correct, minimum-surface
+design is to make the Person-level query one Bonus Engine answers from
+**its own data**, never a live cross-tenant join at query time — the
+identical pattern `player_restrictions` already established (`person_id`
+stored directly on the row, §1 above; `rg.ListRestrictionsForAccount`
+resolves a Person once and then queries `player_restrictions WHERE
+person_id = $1`, which works across tenants only because that table's own
+RLS was deliberately built to allow it, migration 0037's `player_self_
+read` policy). Concretely:
+
+- Every Bonus Engine Grant row already carries `person_id`, resolved once
+  at grant-creation time from **the same `rg.EvaluateEligibility` call
+  §15.2 already requires** — `Decision.PersonID` is returned by that
+  exact call, so no *additional* read into `internal/identity` is needed
+  to obtain it (confirmed against `rg.go`: `Decision.PersonID` is
+  populated from `identity.GetPlayerAccountByID(...).PersonID`, already
+  resolved as a side effect of the mandatory RG check). This is also
+  independently confirmed as already-frozen doc 10 architecture: doc 10
+  §6 ("Activity/Event taxonomy") states every canonical event envelope
+  Bonus consumes already carries `person_id` alongside
+  `player_account_id` — so a Grant created from an event-driven trigger
+  has `person_id` available from the event itself, and a Grant created
+  from a direct API call (opt-in, staff action, bulk assignment) has it
+  from the RG call. Either way, zero new plumbing into
+  `internal/identity`/`internal/identityresolution` is required.
+- Bonus Engine's own duplicate-grant/anti-abuse query (§19) is then an
+  ordinary query **against Bonus Engine's own Grant table**, filtered
+  `WHERE person_id = $1`, never a query that needs to resolve or
+  enumerate a Person's PlayerAccounts at all. This sidesteps the missing
+  cross-tenant `player_accounts` read entirely — Bonus Engine never needs
+  to ask "which accounts does this Person have," only "how many grants of
+  class C has this Person already received," which its own data answers
+  directly.
+- **RLS consequence, stated precisely so it is not assumed away**: for
+  this query to see every relevant Grant across BRANDS under the SAME
+  tenant, Bonus Engine's `bonus_grants` (or equivalent) table's RLS needs
+  only the ordinary `tenant_isolation` policy — a same-tenant, cross-brand
+  anti-abuse rule (the recommended default scope, §7 above) requires **no
+  new capability at all**, since a tenant-scoped connection already sees
+  every brand's Grant rows under `tenant_isolation` (brands never span
+  tenants). If the anti-abuse rule's configured scope (§19.1) is ever set
+  wider than one tenant (a true cross-tenant, platform-wide anti-abuse
+  rule — §7/§8 above's own flagged, human-confirmed-only case), a
+  platform-scoped read path analogous to `persons`' own `persons_
+  platform_scope_read_write` policy (migration 0015) would be needed.
+  **That platform-scoped path does not exist today for any Bonus table,
+  is not built by this contract, and must not be silently assumed** —
+  exactly the same disclosed gap §18.2 names for `player_accounts`.
+
+### 19. Duplicate grant prevention — a configurable Bonus Engine policy, never an RG/KYC concept
+
+**19.1 Precise definition.** "Duplicate grant prevention" is a Bonus-
+Engine-owned, configurable rule of the shape: *no more than N grants of
+Offer-class C may be issued to Person P within scope S*, where:
+
+- **N** is a configured integer (commonly 1, e.g. "one welcome bonus
+  ever"), never hardcoded.
+- **C** is a Bonus-Engine-defined classification tag on a Campaign/Offer
+  (e.g. `welcome`, `first_deposit`, `reload`) — an ordinary
+  Offer-configuration field, not a new taxonomy this ADR invents.
+- **P** is the Person resolved per §18.3 (never the PlayerAccount — this
+  is the entire point of using Person rather than PlayerAccount: it is
+  what makes the rule see through a player registering under a second
+  PlayerAccount at a sibling brand).
+- **S** is the configured scope this rule is evaluated over — brand /
+  tenant-wide (default recommendation, §7 above) / platform-wide
+  (requires the not-yet-built platform-scoped read, §18.3) — using the
+  exact same nullable `tenant_id`/`brand_id` scope pattern doc 10 §8
+  already establishes for Campaign scoping itself, never a new scope
+  concept.
+- An optional **look-back window** (e.g. "within the last 12 months") may
+  further narrow N — also configuration, not a hardcoded rule.
+
+**19.2 Where and how it is evaluated.** At **grant creation** (§15.2),
+after `EvaluateEligibility` allows and before the Grant row is inserted,
+inside the SAME transaction: Bonus Engine queries its own Grant table
+(`WHERE person_id = $1 AND offer_class = $2 AND <scope predicate>` per
+§19.1, optionally windowed) and counts existing non-`reversed` grants of
+that class; if the count already meets or exceeds N, the grant is **not
+created** — recorded as its own, Bonus-Engine-owned denial (a
+`bonus.grant_denied_by_duplicate_policy` audit entry, distinct from
+`bonus.grant_denied_by_rg_policy` §3, since this is not an RG decision and
+must never be coded or reported as one) rather than a `cancelled`
+Progress transition with an RG `Code` — no Grant row exists yet at this
+point for a Progress trail to attach to.
+
+**19.3 Composition — independent of, never a substitute for, RG.** This
+check is entirely separate from, and composes with, §15's RG gate exactly
+as doc 10 §5/ADR 0031 §1 already establish the RG→Risk ordering:
+`EvaluateEligibility` still runs first and still short-circuits on
+denial; the duplicate-grant policy is evaluated only once RG has already
+allowed, as one more Bonus-Engine-owned rule alongside its own Risk-based
+checks (§4 above's standing boundary: "a bonus-specific... eligibility
+rule belongs in Risk's configurable engine or the Bonus Engine's own
+template rules, never in `internal/rg`"). `internal/rg`/`internal/kyc`
+are unchanged and gain no new concept from this section — Person-scoped
+duplicate-grant prevention is, and remains, entirely Bonus Engine's own
+configuration and query, never a restriction row, never a KYC state.
+
+### 20. No automatic historical identity merging — confirmed, not attempted
+
+Per this stage's explicit instruction and ADR 0027's own already-
+established scope boundary (§4 above), this contract does **not**
+trigger, request, or depend on any new historical Person-merge/
+re-resolution logic. Confirmed against the actual code:
+`identityresolution.RegisterPlayerWithResolution` is the only call site of
+`PersonResolver.Resolve` in this codebase, and it runs exactly once, at
+registration. Bonus Engine's duplicate-grant check (§19) works only with
+whatever Person clustering already resulted from each PlayerAccount's own
+original registration-time resolution outcome:
+
+- If two of a Person's real-world accounts were correctly linked at
+  registration (a `Match` outcome, e.g. because verified KYC evidence was
+  available and matched) — §19's check sees both, correctly, with zero
+  additional work.
+- If two accounts were never linked because the resolver returned
+  `NoMatch` or `Uncertain` (the honest, expected state of every
+  registration today per `VerifiedAttributes.IsEmpty`'s own doc comment —
+  no real KYC vendor is integrated yet, ADR 0027 §3) — §19's check will
+  **not** catch that latent cross-brand duplication, because there is
+  genuinely no shared `person_id` between the two PlayerAccounts to query
+  against. **This is a disclosed, accepted limitation, not a defect this
+  contract is asked to close.** Building a retroactive matching/merge
+  capability to close it would be exactly the kind of new, unreviewed
+  identity-matching logic ADR 0027 §3/§10 already declined to invent
+  ("matching on a single weak, unverified attribute... would be worse
+  than no matching at all") and this stage's own directive explicitly
+  forbids adding.
+- Consequence stated plainly so it is not mistaken for a stronger
+  guarantee than it is: §19's duplicate-grant policy is only as strong as
+  the platform's existing Person-resolution coverage. As real KYC
+  verification (ADR 0028) becomes available and registration-time
+  resolution improves (more `Match` outcomes, fewer `Uncertain`/
+  `NoMatch`), §19's effectiveness improves automatically, with no Bonus
+  Engine code change — but this contract makes no claim that it closes
+  every cross-brand duplicate-grant vector today.
+
+### Consequences (§15-§20 addendum)
+
+- `internal/rg`, `internal/kyc`, `internal/identity`, and
+  `internal/identityresolution` are all unchanged by this section — it is
+  a consumption contract for Bonus Engine's own, doc-10-defined lifecycle,
+  plus a precise statement of what identity capability Bonus Engine's
+  duplicate-grant policy needs (none beyond what
+  `EvaluateEligibility`/the canonical event envelope already provide, per
+  §18.3) and does not need (no cross-tenant `player_accounts` read, no
+  identity re-merge).
+- One dependency on an unmade human decision is named precisely and
+  narrowly: bonus-funded sportsbook wagering as a whole remains gated
+  behind ADR 0039 Decision 2 (already recorded, independent of this
+  stage), and the self-exclusion-specific instance of that same gap
+  additionally requires ADR 0039 Decision 1 (`OpenBetSelfExclusionPolicy`
+  default) to be configured per jurisdiction before Bonus Engine may
+  enable its own `bonus_funded_sportsbook_wagering_enabled` gate for that
+  jurisdiction (§17.3). No other Bonus Engine functionality in §15's
+  checkpoint table depends on either decision.
+- A genuine, disclosed architecture gap, found rather than assumed:
+  neither `player_accounts` nor (by extension) any future Bonus Grant
+  table has a platform-scoped (cross-tenant) read path today; a
+  same-tenant, cross-brand anti-abuse rule needs no new capability, but a
+  true cross-tenant, platform-wide one would (§18.3). Not built here, not
+  silently assumed away.
+- This section imposes no change on doc 10's own frozen state machine
+  (§1.2/§1.3), RG ordering (§5/"4. RG"), or accounting boundary (§6) —
+  `bonus-engine`'s Wave 1 authorship and this section are read as jointly
+  binding, to be reconciled (not re-litigated) in the stage's Wave 1
+  reconciliation pass.
+
+### Cross-references (§15-§20 addendum)
+
+- `docs/architecture/10-bonus-engine-architecture.md` §1.2/§1.3 (Grant
+  state machine, cited verbatim in §15), §5/"4. RG" (RG composition and
+  ordering, confirmed unrevised in §15.1), §6 (event envelope's
+  `person_id` field, the basis for §18.3's "zero new plumbing" finding),
+  §8 (Campaign/Offer nullable-scope pattern, reused by §19.1's scope
+  dimension).
+- `docs/decisions/0039-human-decision-register-stage-4h-b0-r7.md`
+  Decision 1 (`OpenBetSelfExclusionPolicy` default) and Decision 2
+  (Terminal-Grant settlement-credit resolution, gate G-2) — both cited in
+  §17 as the precise, narrow dependency this section names.
+- `internal/rg/rg.go` (`EvaluateEligibility`, `Decision.PersonID`) and
+  `internal/rg/self_exclusion_policy.go`
+  (`ResolveOpenBetSelfExclusionPolicy`'s fail-closed `Configured` field)
+  — the exact functions §15/§17 build on, unmodified.
+- `internal/identity/player_account.go` and migration
+  `0010_create_player_accounts.up.sql` — the tenant-only RLS confirmed in
+  §18.2.
+- `internal/identityresolution/register.go` and `types.go` — the single
+  registration-time call site confirmed in §18.1/§20.
+- `docs/governance/task-registry.md`, Stage 4H-B1, task `4HB1-05` — this
+  section's own origin and its stated Wave 1 sibling tasks (`4HB1-02`
+  bonus-engine, `4HB1-08` security, `4HB1-09` architect) it is written to
+  be reconciled against.
