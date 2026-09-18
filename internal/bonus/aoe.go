@@ -133,6 +133,19 @@ func lockedExposure(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID)
 // observed. Casino-shaped only, per doc 10 N1.3's own "why casino needs a
 // second component at all" reasoning; there is no sportsbook-shaped
 // analogue to add here today.
+//
+// Reinterpreted, not broken, by Stage 4H-B1 Wave 3's cash-funded
+// wagering-contribution mechanic (ledger-accounting-model.md §7.18.3.2):
+// this count now also includes a cash-funded contribution bet whose
+// correlated casino_win/casino_rollback has not yet arrived. This is
+// safe and conservative - the worst case is a Grant that would otherwise
+// terminate cleanly instead taking the pending_settlement detour until
+// that one bet resolves (ordinarily sub-second), then finalizing via the
+// existing RecheckGrantExposure path exactly as designed. A non-zero
+// value here is therefore no longer strictly "bonus value at risk" once
+// a cash-funded Grant uses this mechanic - a reader must not assume every
+// bonus_wagering_progress row implies bonus money is outstanding. No
+// functional change was required in this file for the generalization.
 func inFlightExposureCount(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID) (int, error) {
 	var count int
 	err := tx.QueryRow(ctx, `

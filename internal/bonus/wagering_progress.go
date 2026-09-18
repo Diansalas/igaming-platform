@@ -67,13 +67,37 @@ func scanWageringProgress(row rowScanner) (WageringProgress, error) {
 	return p, nil
 }
 
+// ErrWageringProgressAlreadyRecorded is returned by CreateWageringProgress
+// when a row already exists for this (tenant_id, grant_id,
+// lock_ledger_transaction_id) tuple (migration 0058's own UNIQUE
+// constraint, HR-10) - the expected, graceful outcome for a redelivered/
+// re-entrant caller, never a program error. In the one reachable
+// production call path today (postBet's own pre-existing idempotency
+// short-circuit, §7.18.3.5) this is never actually hit - it exists as
+// defense-in-depth hardening for any future second caller that lacks an
+// equivalent upstream guard (ledger-accounting-model.md §7.18.3.5,
+// "bonus-engine should consider mirroring [AttributeGrantLedgerTransaction's]
+// same pattern... as defense-in-depth hardening, not because the Wave-3
+// call site needs it to be correct").
+var ErrWageringProgressAlreadyRecorded = errors.New("bonus: a wagering progress row already exists for this (grant, lock transaction) pair")
+
 // CreateWageringProgress inserts a new, append-only contribution row.
 // Callers MUST write this in the same database transaction as the lock
 // posting itself (ledger-accounting-model.md §6.6.4, HR-10) - this
 // function does not enforce that, it is a caller discipline this
 // package's own doc comment states rather than silently assumes.
 // StakedBonusAmount must be read from the posted ledger entry, never
-// supplied by an untrusted caller (§6.6.4's own stated rationale).
+// supplied by an untrusted caller (§6.6.4's own stated rationale; §7.18.3.2's
+// generalization - the funding account for a cash-funded wagering-
+// contribution Grant is player_cash, not player_bonus/player_locked_bonus,
+// but the "read from the ledger, never the caller" invariant is identical).
+//
+// ON CONFLICT (tenant_id, grant_id, lock_ledger_transaction_id) DO NOTHING
+// (§7.18.3.5's named hardening item): a second insert attempt for the
+// same tuple returns ErrWageringProgressAlreadyRecorded rather than a raw
+// unique-violation error that would otherwise poison the caller's
+// transaction - mirroring AttributeGrantLedgerTransaction's identical
+// ON CONFLICT ... DO NOTHING / sentinel-error shape (attribution.go).
 func CreateWageringProgress(ctx context.Context, tx pgx.Tx, p WageringProgress) (WageringProgress, error) {
 	if p.ID == uuid.Nil {
 		p.ID = uuid.New()
@@ -83,11 +107,42 @@ func CreateWageringProgress(ctx context.Context, tx pgx.Tx, p WageringProgress) 
 			id, tenant_id, grant_id, player_account_id, offer_version_id, lock_ledger_transaction_id, correlation_id,
 			asset_code, staked_bonus_amount, contribution_weight_bp, qualifying_scaled, rounding_rule_id
 		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		ON CONFLICT (tenant_id, grant_id, lock_ledger_transaction_id) DO NOTHING
 		RETURNING `+wageringProgressColumns,
 		p.ID, p.TenantID, p.GrantID, p.PlayerAccountID, p.OfferVersionID, p.LockLedgerTransactionID, p.CorrelationID,
 		p.AssetCode, bigIntToNumeric(p.StakedBonusAmount), p.ContributionWeightBP, bigIntToNumeric(p.QualifyingScaled), p.RoundingRuleID,
 	)
-	return scanWageringProgress(row)
+	wp, err := scanWageringProgress(row)
+	if errors.Is(err, ErrNotFound) {
+		// ErrNotFound means pgx.ErrNoRows here (scanWageringProgress's own
+		// mapping) - i.e. the ON CONFLICT DO NOTHING fired, not that the
+		// row genuinely does not exist (this was an INSERT, not a lookup).
+		return WageringProgress{}, ErrWageringProgressAlreadyRecorded
+	}
+	return wp, err
+}
+
+// CreateWageringProgressIdempotent is CreateWageringProgress but treats
+// ErrWageringProgressAlreadyRecorded as success, returning the
+// already-recorded row instead - the shape a caller with no upstream
+// idempotency guard of its own actually wants (mirroring
+// AttributeGrantLedgerTransactionIdempotent's identical role).
+func CreateWageringProgressIdempotent(ctx context.Context, tx pgx.Tx, p WageringProgress) (WageringProgress, bool, error) {
+	wp, err := CreateWageringProgress(ctx, tx, p)
+	if err == nil {
+		return wp, true, nil
+	}
+	if !errors.Is(err, ErrWageringProgressAlreadyRecorded) {
+		return WageringProgress{}, false, err
+	}
+	row := tx.QueryRow(ctx, `SELECT `+wageringProgressColumns+` FROM bonus_wagering_progress WHERE tenant_id = $1 AND grant_id = $2 AND lock_ledger_transaction_id = $3`,
+		p.TenantID, p.GrantID, p.LockLedgerTransactionID,
+	)
+	existing, err := scanWageringProgress(row)
+	if err != nil {
+		return WageringProgress{}, false, err
+	}
+	return existing, false, nil
 }
 
 // ListWageringProgressByGrant returns every contribution row for a

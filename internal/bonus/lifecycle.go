@@ -182,6 +182,29 @@ type ActivateGrantParams struct {
 	// specific business logic, types_*.go) - this function posts exactly
 	// this amount, never recomputes it.
 	Amount *big.Int
+	// WageringTimeLimit, if non-nil and positive, is the issuing Offer
+	// version's own configured wagering-completion window
+	// (bonus_offer_versions.wagering_time_limit) - Stage 4H-B1 Wave 3's
+	// binding decision (docs/governance/wave-3-reconnaissance.md gap-list
+	// item 7; migration 0070) for WHEN bonus_grants.expires_at gets
+	// populated: at activation, as g.CreatedAt + *WageringTimeLimit,
+	// written exactly once via SetGrantExpiryOnce, immediately after
+	// granted_amount below. Computed from g.CreatedAt (not time.Now()) so
+	// the DB's own `expires_at > created_at` CHECK can never fail under
+	// Go/Postgres clock skew. nil (the default for every existing caller -
+	// no behavior change) means "this Offer configures no wagering time
+	// limit, this Grant never expires", matching migration 0070's own
+	// nullable-by-design column.
+	//
+	// NAMED, DELIBERATE SCOPE BOUNDARY: an OfferVersion's separate
+	// PayoutTimeLimit (time to convert/withdraw AFTER completion) is a
+	// materially different mechanic - it would need to gate a Grant that
+	// is already `completed`, not one still open for new stakes, and
+	// bonus_grants.expires_at (migration 0070) is a single write-once
+	// column that cannot hold both deadlines. PayoutTimeLimit enforcement
+	// is intentionally NOT built by this Phase - named here as a
+	// follow-up item, not silently conflated with WageringTimeLimit.
+	WageringTimeLimit *time.Duration
 	// PostGateHook, if non-nil, runs EXACTLY ONCE, strictly AFTER the T.1
 	// gate chain below has allowed this activation and strictly BEFORE
 	// the effecting ledger write that follows it - never earlier, never
@@ -344,6 +367,11 @@ func ActivateGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, 
 	); err != nil {
 		return Grant{}, GateOutcome{}, fmt.Errorf("bonus: record granted_amount: %w", err)
 	}
+	if p.WageringTimeLimit != nil && *p.WageringTimeLimit > 0 {
+		if _, err := SetGrantExpiryOnce(ctx, tx, tenantID, grantID, g.CreatedAt.Add(*p.WageringTimeLimit)); err != nil {
+			return Grant{}, GateOutcome{}, err
+		}
+	}
 	before, after := string(GrantIssued), string(GrantActivated)
 	ledgerTxID := postResult.TransactionID
 	if _, err := AppendGrantProgress(ctx, tx, GrantProgressEntry{
@@ -409,25 +437,53 @@ func amountToInt64(v *big.Int) (int64, error) {
 }
 
 // RecordWageringContributionParams is one lock-transaction's contribution
-// (doc 10 §W2.8/ledger-accounting-model.md §6.6.4).
+// (doc 10 §W2.8/ledger-accounting-model.md §6.6.4, generalized by §7.18.3.2).
 type RecordWageringContributionParams struct {
 	OfferVersionID          uuid.UUID
 	LockLedgerTransactionID uuid.UUID
 	CorrelationID           uuid.UUID
 	AssetCode               string
-	StakedBonusAmount       *big.Int
-	ContributionWeightBP    int32
-	QualifyingScaled        *big.Int
-	RoundingRuleID          *uuid.UUID
+	// StakedBonusAmount is the qualifying stake amount, read from the
+	// funding account's OWN posted debit on LockLedgerTransactionID -
+	// player_bonus/player_locked_bonus for a bonus-funded lock, player_cash
+	// for a cash-funded wagering-contribution Grant (§7.18.3.2's
+	// generalization) - NEVER a caller-supplied/computed number. The field
+	// name predates the cash-funded generalization and is left unchanged
+	// (a documentation clarification only, not a schema/behavioral change).
+	StakedBonusAmount    *big.Int
+	ContributionWeightBP int32
+	QualifyingScaled     *big.Int
+	RoundingRuleID       *uuid.UUID
 }
 
-// RecordWageringContribution is the Bonus-side half of a bonus-funded
-// bet's own posting transaction (casino's postBet, Phase 7) - called in
-// the SAME database transaction as the lock posting itself (HR-10). It
-// writes the append-only WageringProgress row, attributes the lock
+// RecordWageringContribution is the Bonus-side half of a qualifying
+// bet's own posting transaction - called in the SAME database
+// transaction as the posting itself (HR-10). For a Grant whose wagering
+// mechanic is bonus-funded/locked-stake (the shape this function was
+// originally written for), that posting is casino's own lock transaction
+// (a player_bonus/player_locked_bonus debit). For a Grant whose wagering
+// mechanic is the cash-funded mechanic Stage 4H-B1 Wave 3 authorizes
+// (ledger-accounting-model.md §7.18.3.2's generalization), that posting
+// is instead an ordinary, 100% player_cash-funded casino_bet transaction
+// - StakedBonusAmount (the field name predates this generalization and is
+// NOT renamed at the column/struct level, doc 29 BI-3-style stability) is
+// then read from that transaction's own posted player_cash debit, never
+// from the caller's own claim, exactly mirroring how the bonus-funded
+// case reads a player_bonus/player_locked_bonus debit - "the qualifying
+// stake amount, read from the funding account's own debit", never a
+// caller-supplied number, regardless of which account funded the stake.
+// The two funding sources are mutually exclusive per Grant (a Grant's own
+// Offer fixes its mechanic at authoring time) and are never mixed on one
+// contribution row.
+//
+// It writes the append-only WageringProgress row (idempotently - a
+// redelivered/re-entrant call for the SAME (grant, lock transaction) pair
+// is a no-op, per §7.18.3.5's hardening item), attributes the lock/bet
 // transaction to the Grant, appends a Progress entry, and - if the Grant
 // is still Activated (its very first contribution) - transitions it to
-// InProgress.
+// InProgress. A redelivered contribution is skipped entirely (no second
+// Progress entry, no redundant status transition) once the underlying
+// WageringProgress row already exists.
 func RecordWageringContribution(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, p RecordWageringContributionParams) error {
 	if err := AdvisoryLockGrant(ctx, tx, tenantID, grantID); err != nil {
 		return err
@@ -440,13 +496,21 @@ func RecordWageringContribution(ctx context.Context, tx pgx.Tx, tenantID, grantI
 		return fmt.Errorf("%w: grant %s is not open for new stakes (status %s)", ErrIllegalTransition, grantID, g.Status)
 	}
 
-	if _, err := CreateWageringProgress(ctx, tx, WageringProgress{
+	_, created, err := CreateWageringProgressIdempotent(ctx, tx, WageringProgress{
 		TenantID: tenantID, GrantID: grantID, PlayerAccountID: g.PlayerAccountID, OfferVersionID: p.OfferVersionID,
 		LockLedgerTransactionID: p.LockLedgerTransactionID, CorrelationID: p.CorrelationID, AssetCode: p.AssetCode,
 		StakedBonusAmount: p.StakedBonusAmount, ContributionWeightBP: p.ContributionWeightBP,
 		QualifyingScaled: p.QualifyingScaled, RoundingRuleID: p.RoundingRuleID,
-	}); err != nil {
+	})
+	if err != nil {
 		return err
+	}
+	if !created {
+		// Already recorded (a redelivery/re-entrant call for the SAME
+		// lock/bet transaction) - the Grant's status/Progress trail was
+		// already updated the first time this was reached; doing so again
+		// would double-append a Progress entry for the exact same stake.
+		return nil
 	}
 	if err := AttributeGrantLedgerTransactionIdempotent(ctx, tx, tenantID, grantID, p.LockLedgerTransactionID, "casino_bet"); err != nil {
 		return err

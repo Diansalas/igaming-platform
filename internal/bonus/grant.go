@@ -99,6 +99,12 @@ type Grant struct {
 
 	ReversedAt         *time.Time
 	ReversalReasonCode *string
+
+	// ExpiresAt (migration 0070, Stage 4H-B1 Wave 3) is nullable
+	// (an Offer that configures no wagering_time_limit legitimately never
+	// expires) and write-once at the DB layer once set - see
+	// SetGrantExpiryOnce.
+	ExpiresAt *time.Time
 }
 
 const grantColumns = `
@@ -111,7 +117,7 @@ const grantColumns = `
 	created_by_actor_type, created_by_actor_id, created_at,
 	activated_at, completed_at, converted_at, terminal_at,
 	terminal_resolution, terminal_trigger_reason_code, terminal_triggered_at, terminal_trigger_correlation_id,
-	reversed_at, reversal_reason_code`
+	reversed_at, reversal_reason_code, expires_at`
 
 func scanGrant(row rowScanner) (Grant, error) {
 	var (
@@ -131,7 +137,7 @@ func scanGrant(row rowScanner) (Grant, error) {
 		&createdByActorType, &g.CreatedByActorID, &g.CreatedAt,
 		&g.ActivatedAt, &g.CompletedAt, &g.ConvertedAt, &g.TerminalAt,
 		&terminalResolution, &g.TerminalTriggerReasonCode, &g.TerminalTriggeredAt, &g.TerminalTriggerCorrelationID,
-		&g.ReversedAt, &g.ReversalReasonCode,
+		&g.ReversedAt, &g.ReversalReasonCode, &g.ExpiresAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Grant{}, ErrNotFound
@@ -326,6 +332,30 @@ func FinalizePendingSettlement(ctx context.Context, tx pgx.Tx, tenantID, id uuid
 		return Grant{}, ErrGrantStateConflict
 	}
 	return g, err
+}
+
+// SetGrantExpiryOnce writes bonus_grants.expires_at exactly once
+// (migration 0070's own trigger additionally enforces this at the DB
+// layer - "expires_at is immutable once set" - this WHERE clause is the
+// same belt-and-suspenders no-op-on-replay shape ActivateGrant's own
+// granted_amount write uses, not the sole enforcement mechanism). A
+// caller that computes expiresAt from g.CreatedAt plus a configured
+// duration (rather than time.Now()) avoids any risk of the DB's own
+// `expires_at > created_at` CHECK failing under Go/Postgres clock skew -
+// see lifecycle.go ActivateGrant's own caller of this function. Returns
+// (false, nil) - not an error - if expires_at was already set (either by
+// a concurrent/earlier call, or because this Grant's Offer configures no
+// expiry and the caller never intended to call this at all is the
+// caller's own no-op branch, not this function's).
+func SetGrantExpiryOnce(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, expiresAt time.Time) (bool, error) {
+	tag, err := tx.Exec(ctx,
+		`UPDATE bonus_grants SET expires_at = $3 WHERE tenant_id = $1 AND id = $2 AND expires_at IS NULL`,
+		tenantID, grantID, expiresAt,
+	)
+	if err != nil {
+		return false, fmt.Errorf("bonus: set grant expiry: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // MarkGrantReversed applies the 'reversed' transition (doc 10 §1.3's

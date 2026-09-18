@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -123,6 +124,11 @@ type DepositBonusParams struct {
 	JurisdictionCode string
 	ActorType        ActorType
 	ActorID          uuid.UUID
+	// WageringTimeLimit, if set, is threaded through to
+	// ActivateGrantParams (see its own doc comment) - the issuing Offer
+	// version's configured wagering-completion window, nil meaning "never
+	// expires". Stage 4H-B1 Wave 3.
+	WageringTimeLimit *time.Duration
 }
 
 // IssueAndActivateDepositBonus implements the Deposit/Reload Bonus type:
@@ -161,6 +167,7 @@ func IssueAndActivateDepositBonus(ctx context.Context, tx pgx.Tx, p DepositBonus
 
 	activated, activateOutcome, err := ActivateGrant(ctx, tx, g.TenantID, g.ID, ActivateGrantParams{
 		JurisdictionCode: p.JurisdictionCode, ActorType: TriggerActorForAutomated(p.ActorType), ActorID: p.ActorID, Amount: amount,
+		WageringTimeLimit: p.WageringTimeLimit,
 	})
 	if err != nil {
 		return Grant{}, GateOutcome{}, err
@@ -253,11 +260,12 @@ func IssueAndActivateCashback(ctx context.Context, tx pgx.Tx, p CashbackParams) 
 // Amount either way, since this type's own defining property is its
 // COMPLETION mechanic (C1, wagering-multiplier), not its reward formula.
 type GenericWageringBonusParams struct {
-	Grant            Grant
-	Amount           *big.Int
-	JurisdictionCode string
-	ActorType        ActorType
-	ActorID          uuid.UUID
+	Grant             Grant
+	Amount            *big.Int
+	JurisdictionCode  string
+	ActorType         ActorType
+	ActorID           uuid.UUID
+	WageringTimeLimit *time.Duration // see DepositBonusParams' identical field
 }
 
 // IssueAndActivateGenericWageringBonus issues and activates a Grant whose
@@ -278,6 +286,7 @@ func IssueAndActivateGenericWageringBonus(ctx context.Context, tx pgx.Tx, p Gene
 	}
 	return ActivateGrant(ctx, tx, g.TenantID, g.ID, ActivateGrantParams{
 		JurisdictionCode: p.JurisdictionCode, ActorType: p.ActorType, ActorID: p.ActorID, Amount: p.Amount,
+		WageringTimeLimit: p.WageringTimeLimit,
 	})
 }
 
@@ -287,10 +296,11 @@ func IssueAndActivateGenericWageringBonus(ctx context.Context, tx pgx.Tx, p Gene
 // a deposit/cash bonus" - trigger mechanic T2 composed with any reward/
 // completion mechanic, never a parallel object or a sixth reward shape).
 type CouponRedemptionParams struct {
-	Grant            Grant // TriggerReference MUST be set to the redeemed code (or a per-attempt id) by the caller - the per-player redemption-limit uniqueness IS the (campaign, offer_version, player, trigger_reference) constraint already enforced at grant.go's own DB level (doc 10 §W4: "a per-player limit is enforced as an ordinary DB uniqueness constraint on the redemption attempt")
-	Amount           *big.Int
-	JurisdictionCode string
-	ActorID          uuid.UUID // the redeeming player's own principal
+	Grant             Grant // TriggerReference MUST be set to the redeemed code (or a per-attempt id) by the caller - the per-player redemption-limit uniqueness IS the (campaign, offer_version, player, trigger_reference) constraint already enforced at grant.go's own DB level (doc 10 §W4: "a per-player limit is enforced as an ordinary DB uniqueness constraint on the redemption attempt")
+	Amount            *big.Int
+	JurisdictionCode  string
+	ActorID           uuid.UUID      // the redeeming player's own principal
+	WageringTimeLimit *time.Duration // see DepositBonusParams' identical field
 }
 
 // RedeemCoupon validates NOTHING about the code's format/pool/stacking-
@@ -319,5 +329,6 @@ func RedeemCoupon(ctx context.Context, tx pgx.Tx, p CouponRedemptionParams) (Gra
 	}
 	return ActivateGrant(ctx, tx, g.TenantID, g.ID, ActivateGrantParams{
 		JurisdictionCode: p.JurisdictionCode, ActorType: ActorPlayer, ActorID: p.ActorID, Amount: p.Amount,
+		WageringTimeLimit: p.WageringTimeLimit,
 	})
 }
