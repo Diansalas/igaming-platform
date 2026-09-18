@@ -438,7 +438,32 @@ Wave 1 was design-only):
 
 7. **No contradictions found** between the nine reports beyond the two closed above (OI-2, OI-4) — `architect`'s independent cross-domain read of all nine (via doc 29's master map) and this Orchestrator's own review agree.
 
-**Wave 2 authorization**: Wave 2 (core Bonus domain + database) may proceed for the domain model, schema, and the cash-settled/operator-funded/non-locked-stake bonus lifecycle (deposit/reload/cashback/coupon issuance and conversion). Bonus-funded stake wagering (the locked-account wagering path) is **staged**, not authorized to code yet, pending the casino `postWin` fix and the deferred-terminal design being implemented together — flagged to the human before dispatch.
+**Wave 2 authorization (superseded by Wave 1.5 below, human directive)**: the human interposed a Wave 1.5 architecture-reconciliation gate before ordinary Wave 2 begins, in response to the G-2/casino-postWin escalation above. Wave 2 does not start until Wave 1.5 explicitly clears it.
+
+## Stage 4H-B1, Wave 1.5 — Commercial Ecosystem + Casino Win + Segmentation Architecture Reconciliation Gate
+
+**AUTHORIZED** (human directive), started at HEAD `b8b2d1d`. **Architecture/design only — no bonus-funded wagering implementation, no Gamification/CRM/Affiliate implementation. STOP after the gate report; no automatic continuation to Wave 2.**
+
+Roster adaptation, disclosed per this project's standing practice (mirrors the "bonus-finance" gap in Wave 1): the directive treats CRM and Affiliate as new first-class platform domains, but no dedicated `crm`/`affiliate` specialist exists in this environment's roster. Following this project's own precedent (every prior brand-new cross-cutting domain — Retail's doc 26, Asset Registry's ADR 0037 — was authored by `architect`), `architect` authors the CRM and Affiliate architecture documents. Since `architect` cannot then independently review its own output, `code-reviewer` stands in as the independent architectural-consistency reviewer for CRM/Affiliate/Segmentation specifically (its own mandate explicitly includes "consistency with docs/architecture/"), while `ledger-finance`/`security`/`bonus-engine`/`product-owner-proxy` cover their own named review angles per the directive's §J.
+
+**Phase 1 — Authorship (parallel, distinct ownership):**
+
+| ID | Owner | Status | Deliverable |
+|---|---|---|---|
+| 4HB1W15-01 | casino | In progress | Casino postWin financial source/destination resolution design, G-2 boundary specification (not selecting G-2), adversarial scenarios (§A) |
+| 4HB1W15-02 | bonus-engine | In progress | Grant terminal-state invariant + proof (§A.9), bonus targeting/bulk-assignment validation (§C), Bonus Suggestion full spec (§D), bonus catalogue validation (§H) |
+| 4HB1W15-03 | architect | In progress | Segmentation Engine architecture doc (§B), CRM Engine architecture doc (§E), Affiliate Engine architecture doc (§F), canonical cross-domain relationship diagrams (§G), updated ownership map + dependency graph |
+| 4HB1W15-04 | sportsbook | In progress | Provider-native bonus coexistence re-confirmation against the new CRM/Affiliate/Segmentation additions (§I) |
+| 4HB1W15-05 | qa | In progress | Cross-domain test matrix covering all new domains + §A.10's adversarial scenarios |
+
+**Phase 2 — Independent review (parallel, after Phase 1, none reviewing own work)** — to be dispatched once Phase 1 reports back:
+- `ledger-finance` — casino's postWin design, bonus-engine's terminal-invariant, G-2 boundary spec (financial-correctness angle, §J)
+- `security` — tenant/player isolation, privilege escalation, bulk-assignment/promo-code/segment/CRM-triggered-grant/affiliate-attribution abuse, self-awarding, replay, concurrency, across all Phase 1 docs (§J)
+- `code-reviewer` — independent architectural-consistency review of CRM/Affiliate/Segmentation (substituting for "independent architect," since architect authored these) plus the casino/bonus-engine docs
+- `bonus-engine` — independent review of architect's Segmentation Engine doc only (first-consumer integration-correctness angle; does not review CRM/Affiliate, outside its domain)
+- `product-owner-proxy` — scope-discipline review: confirms architecture-only framing held, no implementation crept in, no scope beyond the directive's own ask
+
+No human decision (G-2, `OpenBetSelfExclusionPolicy`, cashout policy, FD-1, or any other Human Decision Register item) will be selected in this gate.
 
 ## How to use this registry (for future stages)
 
