@@ -2903,3 +2903,997 @@ defaulted by this section (W9).
 
 Owner of this section: `bonus-engine`. Nothing in this section authorizes
 writing `internal/bonus`, a migration, or a test.
+
+## Stage 4H-B1, Wave 1.5 — Architecture Reconciliation Gate (dispatch 4HB1W15-02)
+
+Status: **DESIGN/CONTRACT ONLY, `NOT IMPLEMENTED`.** Issued per the human-
+interposed Wave 1.5 gate (`docs/governance/task-registry.md`, Stage
+4H-B1 Wave 1.5), dispatch `4HB1W15-02`. No Go code, no migration, no test
+is authorized by this section. It does not redesign §1–§10, the Bonus
+Dependency Contract Freeze, the Terminal-Grant Technical Contract
+(§T.1–§T.13), or Wave 1 (W0–W11) above — it extends them additively,
+naming every addition and every correction explicitly as such, per the
+same discipline Wave 1 itself used for `GrantActivation`/`BonusReward`.
+**No Human Decision Register item (G-2, `OpenBetSelfExclusionPolicy`,
+the cashout proceeds-split, or FD-1) is selected here** — ADR 0039 stands
+untouched; §N1 below is an engineering mechanism that narrows *when* G-2
+is reachable, not an answer to it.
+
+This section runs in parallel with, and does not see, `casino`'s own
+Wave 1.5 dispatch (`4HB1W15-01`, the casino-side `postWin` destination-
+resolution design and its own G-2 boundary specification) or `architect`'s
+Segmentation/CRM/Affiliate architecture (`4HB1W15-03`). Every place this
+section depends on one of those without having seen it is named as such,
+per the dispatch's own instruction, not silently assumed.
+
+### N1. Grant terminal-state invariant — formal definition and proof (gate §A.9)
+
+#### N1.1 What this closes
+
+This closes the engineering resolution the Orchestrator's Wave 1
+reconciliation already sketched (`docs/governance/task-registry.md`,
+finding 1): "*A Grant may only reach a genuinely terminal status
+(expired/cancelled/forfeited-final) once its attributable locked balance
+(`player_locked_bonus` tied to that Grant) reaches zero. A terminal
+trigger firing while locked funds remain outstanding defers the Grant
+into a pending-settlement sub-state that finalizes automatically once the
+locked stake resolves (win or loss) — never crediting against an
+already-terminal Grant, by construction.*" This section makes that
+sketch precise enough to build from, proves it, and — because the
+sketch's own wording ("locked funds," "locked stake") is sportsbook-
+shaped and this document's own §T.7 already flags a `converted`-side
+instance of the identical failure mode, and because `architect`'s doc 29
+§4.3 independently proved the casino-only slice reaches the same failure
+mode **without** any locked account at all — generalizes the sketch to
+cover both shapes honestly, including the one place it does **not**
+fully close.
+
+#### N1.2 The invariant, stated formally
+
+> **Invariant TI-1.** For every Grant `G` and every instant `t`: if
+> `G.status(t) ∈ TERMINAL`, then `AOE(G, t) = ∅`.
+
+Where:
+
+- **`TERMINAL`** = `{expired, cancelled, forfeited, converted}`.
+  **Correction to the gate directive's own framing, stated explicitly**:
+  the directive names "expired/cancelled/forfeited-final." This section
+  adds **`converted`** to the set, because §T.7 already documents "a rare
+  fourth entry path... a race where `G` reaches `converted` with this
+  stake still in flight... covered by the identical mechanism," and that
+  claim was previously asserted, not built. A Grant's wagering-progress
+  threshold is computed from **stake debits** (§6.6/§7.10's `P_net`/
+  `P_firm`), not from settlement outcomes — so `completed → converted`
+  can legitimately fire while a bonus-funded bet placed under `G` is
+  still open, and that bet's later WIN/VOID/ROLLBACK credit lands against
+  a Grant that has already converted, structurally the same failure
+  shape as landing against an already-`expired` Grant. `reversed` is
+  deliberately **excluded** from `TERMINAL` for this invariant's purpose:
+  it is itself the append-only compensating mechanism §1.2 already uses
+  for a fact discovered *after* terminality (an upstream reversal), not a
+  forward-settlement-credit case, and nothing about TI-1 constrains it.
+- **`AOE(G, t)`** ("Attributable Open Exposure") — defined in N1.3.
+
+Equivalently, by contraposition: **a settlement or void credit can never
+arrive against an already-terminal Grant, because a Grant is not
+permitted to become terminal while that credit remains possible.** This
+is the precise, checkable form of "never crediting against an
+already-terminal Grant, by construction."
+
+#### N1.3 Attributable Open Exposure (AOE) — the concrete definition the gate directive asks for
+
+`AOE(G, t)` is the union of two components, because this platform's two
+provider-integration shapes (sportsbook's locked-account model and
+casino's direct-post model) make "relevant money movement... capable of
+affecting" concrete in two structurally different ways. Conflating them
+would be exactly the mistake the gate directive's own phrasing (both
+examples named side by side: "an outstanding `player_locked_bonus`
+balance... an in-flight bet whose win/loss hasn't settled") warns
+against.
+
+**Component 1 — `LockedExposure(G, t)`** (sportsbook-shaped, once
+Dependency Contract Freeze §9's `player_locked_bonus` split is
+unblocked): the signed sum, read live and `FOR UPDATE`, of every
+`player_locked_bonus` ledger entry attributable to `G` via
+`GrantLedgerAttribution` (W2.5) that has not yet been nullified per
+`ledger-accounting-model.md` §6.6.5/§6.6.7's own classification.
+`LockedExposure(G, t) ≠ 0` means a stake funded by `G` is currently
+locked, and by construction of the lock/settle/void protocol itself,
+*something* (a WIN settlement, a LOSS-grading settlement, a VOID, or a
+ROLLBACK) is still guaranteed to arrive and move that balance — sportsbook
+settlement is exhaustive over win/loss/push per bet (`docs/decisions/
+0038` confirms "settlement win/loss happy paths" as an explicit,
+first-class case, not merely the win side). This component is **exact**:
+it is a real, currently-posted ledger balance, cleared only by a genuine
+event, never by a timeout guess.
+
+**Component 2 — `InFlightExposure(G, t)`** (casino-shaped, no locked
+account): the set of `WageringProgress` contribution rows (§W2.8)
+attributable to `G` whose underlying stake-lock ledger transaction
+(`casino_bet`, correlated via `roundCorrelationID`) has posted, for which
+**no qualifying closing event** — a `casino_win` credit, a
+`casino_rollback`, or (see N1.7) an elapsed settlement-window — has yet
+been observed. `InFlightExposure(G, t) ≠ ∅` means a bonus-funded casino
+stake placed under `G` could still, at some future point, cause a
+`casino_win` credit to `player_bonus` under `G`.
+
+`AOE(G, t) = LockedExposure(G, t) ∪ InFlightExposure(G, t)`, and
+`AOE(G, t) = ∅` (both components empty) is the precondition N1.4's
+mechanism enforces before `G` may become `TERMINAL`.
+
+**Why casino needs a second component at all, verified against code, not
+assumed**: `internal/casino`'s `postBet` debits `player_bonus` (once
+wagering split instructions post there) straight into `house_gaming` —
+there is no intermediate locked account the way sportsbook's
+`player_locked_bonus` provides. The moment a bonus-funded bet posts, its
+stake has **already left** any account `LockedExposure` could observe.
+If `AOE` were defined as `LockedExposure` alone, every bonus-funded
+casino bet would show zero exposure the instant it is placed — which is
+precisely the exposure this gate exists to close, per `architect`'s doc
+29 §4.3 finding that G-2 is reachable in the casino-only slice with no
+locked account and no sportsbook at all.
+
+#### N1.4 The mechanism
+
+Two distinct handling paths, deliberately not one, because the two
+transition families already have structurally different holding
+patterns available and reusing an existing one is cheaper and safer than
+inventing a single mechanism to cover both:
+
+**Path A — Conversion (`completed → converted`).** No new Grant status.
+`AOE(G, t) ≠ ∅` at a conversion attempt is treated by the **identical,
+already-frozen rule** §5/T.12 already specify for an RG/Risk/
+`AssetAuthorization` denial at conversion: the transition does not occur,
+`G` remains `completed` (non-terminal, retryable), and a Progress entry
+records the block with its own reason code (`open_exposure_outstanding`,
+new, alongside the existing RG/Risk/`AssetAuthorization` codes T.12
+already uses at this same checkpoint). This is not a new mechanism — it
+is one more entry in the set of things that can block `completed →
+converted` without forfeiting or cancelling the Grant, exactly the set
+T.12 already establishes. The natural re-trigger is the same event that
+clears the exposure (see N1.6): every ledger event that reduces
+`AOE(G, ·)` to `∅` for a Grant sitting in `completed` re-attempts the
+conversion it previously blocked, in the same transaction as the event
+that cleared the last unit of exposure.
+
+**Path B — Expiry / cancellation / forfeiture.** These are transitions
+**out of** `activated`/`in_progress`, where no existing "stay here,
+retryable" state also communicates "this Grant's fate is decided, only
+its finalization is pending." Leaving `G.status` at `activated`/
+`in_progress` while its fate is already fixed would itself violate
+§1.2's own standing objection to a state that "does not honestly
+describe why" — a support agent or report reading `activated` would
+believe the bonus is still a live, ongoing offer. This needs one new,
+named status:
+
+> **`pending_settlement`** — additive to §1.2's Grant-state table, not a
+> replacement of any existing row. A Grant in `pending_settlement` has
+> already had a terminal trigger fire against it; its financial and
+> lifecycle fate is decided; only the timing of the status flip is
+> deferred, pending `AOE(G, ·)` reaching `∅`.
+
+Fields carried on `pending_settlement` (additive to the Grant row, no
+new persistent object — mirroring `GrantActivation`'s "typed projection,
+not a side table" discipline): `terminal_resolution` (one of `expired` /
+`cancelled` / `forfeited` — never `converted`, which is Path A's
+concern and cannot race with Path B: a Grant is never simultaneously
+`completed` and `activated`/`in_progress`), `terminal_trigger_reason_code`
+(the reason the original trigger fired — RG denial, staff cancellation,
+wagering-rule breach, time-limit elapsed, asset-deactivation-driven
+expiry per §T.5, etc.), `terminal_triggered_at` (`clock_timestamp()` of
+the *original* trigger, immutable — this is the timestamp a disputing
+player's Progress trail cites for "why," even though the status flip
+happens later), and `terminal_trigger_correlation_id`.
+
+**Mechanism, step by step, run inside `G`'s existing `(tenant_id,
+grant_id)` advisory lock (doc10 §9), same transaction as the trigger's
+own effect:**
+
+1. The trigger fires exactly as §1.3/T.9/T.10 already specify (time
+   limit elapsed, staff cancellation, wagering-rule breach, manual-review
+   forfeiture outcome).
+2. `AOE(G, ·)` is computed live, `FOR UPDATE` on the `LockedExposure`
+   component's ledger rows, per N1.3.
+3. **If `AOE(G, ·) = ∅`**: proceed exactly as already specified — write
+   the terminal status directly, no behavior change from §1.2/§T.9/§T.10.
+   This is the ordinary case today and remains fully unmodified.
+4. **If `AOE(G, ·) ≠ ∅`**: write `G.status = pending_settlement` instead,
+   with the fields above populated. **Whatever portion of the write-down
+   is already free right now still posts now** — per §7.7's own
+   "forfeiture is explicitly frequently partial" design, the ordinary
+   `bonus_forfeiture` shape posts immediately for the currently-
+   unlocked, not-in-flight balance (this is not new — partial forfeiture
+   already exists in the frozen design; this section only adds that the
+   *status* does not flip to `forfeited`/`expired`/`cancelled` until the
+   remaining exposure also clears). A Progress entry records the
+   deferral, enumerating every outstanding exposure record (each open
+   `WageringProgress` contribution id / each nonzero locked-balance
+   attribution) so the trail is inspectable, not merely asserted.
+5. **Resolution**: every ledger event that is itself one of `AOE`'s
+   closing events (a WIN settlement credit, a VOID, a ROLLBACK, or —
+   casino only, N1.7 — an elapsed settlement window) re-checks, in the
+   same transaction, under the same advisory lock, whether `G` is
+   `pending_settlement` and whether this event brings `AOE(G, ·)` to
+   `∅`. If so: the credit (if any) posts first, using the **ordinary**
+   settlement/void posting shape — because `G` is not yet terminal at
+   the instant this posts, this is **not** G-2, it is an ordinary
+   in-progress credit to a non-terminal Grant, needing no special
+   handling — and then, in the same transaction, the deferred terminal
+   disposition applies to whatever balance is now free (the ordinary
+   §7.7 shape, for whatever newly became free) and `G.status` flips
+   from `pending_settlement` to `terminal_resolution`. If the closing
+   event does not bring `AOE` to `∅` (another stake is still open),
+   `G` stays `pending_settlement`, unchanged, and the newly-closed
+   component is simply removed from the enumerated set on the next
+   Progress entry.
+6. **Re-entry while already `pending_settlement`**: a second terminal
+   trigger firing on a Grant already `pending_settlement` (e.g. a
+   wagering-rule breach on a *different* bet fires while the Grant is
+   already deferred from an earlier time-limit expiry) is never silently
+   discarded — it appends its own Progress entry. If it represents a
+   more severe disposition (forfeiture for an abuse finding outranks a
+   neutral expiry or a player-opt-out cancellation, since the reason
+   code is what a disputing player's case and any compliance reporting
+   turn on), `terminal_resolution` is updated to the more severe value;
+   a less severe trigger arriving after a more severe one is recorded
+   but never downgrades `terminal_resolution`. Concurrent triggers
+   serialize under the same `(tenant_id, grant_id)` lock this document
+   already relies on throughout — no new race is introduced.
+
+**Why conversion does not get its own new status (parsimony, not an
+oversight)**: `completed` already is a "decided outcome, pending a
+live-gate re-check" holding state (T.12), so reusing it for "decided
+outcome, pending exposure clearing" adds one reason code, not one new
+persistent status. Introducing `pending_settlement` for conversion too
+would double the number of new states for no additional expressive
+power — exactly the kind of avoidable state-machine growth CLAUDE.md's
+scope discipline flags.
+
+**No partial/staged conversion is introduced.** While `G` sits blocked
+in `completed` under Path A, the currently-free bonus balance is *not*
+partially converted — ADR 0032/§7.6/W2.9 already fix conversion as one
+atomic, all-or-nothing posting per Grant, and this section does not
+reopen that. The full amount available at the moment `AOE` finally
+clears converts in one posting, exactly as §7.6 already specifies.
+
+#### N1.5 Locking and concurrency
+
+No new lock primitive. Step 2/5 above read `LockedExposure` `FOR UPDATE`
+and the `InFlightExposure` set under the **existing** `(tenant_id,
+grant_id)` advisory lock (doc10 §9), acquired in `ledger-accounting-
+model.md` §7.11's already-pinned order (HR-21: `correlation_id →
+grant_id → player_bonus projection`) — a settlement/void posting takes
+its own `(tenant_id, correlation_id)` lock first (HR-3), then `G`'s
+`(tenant_id, grant_id)` lock, then the `player_bonus` projection row —
+identical order whether the settlement event is closing out ordinary
+progress or resolving a `pending_settlement` deferral. No new
+lock-acquisition order is introduced; this section is a new **caller**
+of an order the ledger contract already fixed.
+
+#### N1.6 Scenario-by-scenario proof
+
+**Scenario 1 — bet placed → grant expires before win arrives → win
+arrives late.**
+
+*Sportsbook-shaped (locked account exists).* `t0`: bet locks stake under
+`G`, `LockedExposure(G, t0) ≠ 0`. `t1 > t0`: `G`'s time limit elapses.
+Step 2 computes `AOE(G, t1) ⊇ LockedExposure(G, t1) ≠ ∅` (the lock has
+not been released — no settlement/void has occurred). Step 4 fires:
+`G.status = pending_settlement`, `terminal_resolution = expired`. `t2 >
+t1`: the WIN settlement arrives, correlated to the original lock. It is
+read under the same lock; because `G.status = pending_settlement`, not
+`expired`, this is an **ordinary** settlement credit to a
+non-terminal-in-the-TI-1-sense Grant (case F's shape: `Cr player_bonus
+(S+W)`) — posts normally. `LockedExposure(G, t2)` now reaches `0`.
+`AOE(G, t2) = ∅` (no other bet open). The deferred disposition applies:
+the just-credited balance (now entirely free) is forfeited via the
+ordinary §7.7 shape (the Offer's time limit already elapsed — the player
+does not keep a wagering-multiplier bonus past its own expiry merely
+because a bet was in flight; TI-1 only defers the **status flip**, it
+does not extend the Offer's own terms), and `G.status` flips
+`pending_settlement → expired`. **Invariant holds**: at no instant did
+`G.status = expired` while `AOE(G, ·) ≠ ∅`; the WIN credit never landed
+against an already-terminal Grant.
+
+*Casino-shaped (no locked account).* `t0`: `postBet` posts a bonus-funded
+stake straight to `house_gaming`; a `WageringProgress` row records the
+contribution, `InFlightExposure(G, t0) = {that row}`. `t1 > t0`: `G`'s
+time limit elapses. Step 2 computes `AOE(G, t1) ⊇ InFlightExposure(G,
+t1) ≠ ∅`. Step 4 fires identically: `pending_settlement`,
+`terminal_resolution = expired`. `t2 > t1`: `postWin` delivers the round's
+win, correlated via `roundCorrelationID`. Handled identically to the
+sportsbook case above (this is exactly `architect`'s doc 29 §4.3
+scenario, now closed): the credit posts as an ordinary event against a
+`pending_settlement` (not yet terminal) Grant, `InFlightExposure` clears
+for that row, `AOE(G, t2) = ∅`, the newly-credited balance is forfeited,
+`G` flips to `expired`. **Invariant holds**, subject to N1.7's disclosed
+bound.
+
+**Scenario 2 — Grant cancelled by staff while a bet is in flight.**
+Identical mechanism, different trigger: staff cancellation is one more
+row in §1.3's transition table feeding the same Path B mechanism. At the
+instant of the cancellation request, `AOE(G, ·) ≠ ∅` (a bet is open) →
+`pending_settlement`, `terminal_resolution = cancelled`,
+`terminal_trigger_reason_code` = the staff-supplied reason (§10's
+mandatory-reason-code rule for cancellation is satisfied at the
+*original* trigger, carried through to the eventual `cancelled` Progress
+entry — never lost by the deferral). The open bet resolves exactly as in
+Scenario 1 (win, loss/timeout, or void — N1.7 covers the loss/timeout
+case) and the Grant finalizes to `cancelled` only once `AOE = ∅`.
+**Invariant holds identically** — cancellation is not a structurally
+different trigger from expiry for this mechanism's purposes, exactly as
+§T.10 already states expiry and cancellation share one posting shape.
+
+**Scenario 3 — concurrent expiry-timer-fire and win-settlement.** Both
+the expiry-timer job and the inbound WIN settlement attempt to act on
+`G` at nearly the same instant. Both take `G`'s `(tenant_id, grant_id)`
+advisory lock (N1.5's pinned order) before reading or writing anything
+about `G`. Whichever acquires the lock first commits its full effect
+(read `AOE`, decide, write) before the second's `SELECT ... FOR UPDATE`
+of the relevant balance/status even begins evaluating. Two orderings,
+both safe:
+- **Expiry wins the race**: it observes `AOE(G, ·) ≠ ∅` (the win has not
+  posted yet from this transaction's point of view) and defers to
+  `pending_settlement`. The win-settlement transaction, now second,
+  observes `G.status = pending_settlement`, posts its ordinary credit,
+  clears `AOE`, and finalizes to `expired` in the same transaction —
+  exactly Scenario 1's sequence, just compressed to near-simultaneous
+  timestamps.
+- **Win-settlement wins the race**: it posts its ordinary credit first
+  (`G` is still `activated`/`in_progress` at this instant — the expiry
+  trigger has not yet run), which clears that bet's contribution to
+  `InFlightExposure`/`LockedExposure`. The expiry-timer transaction, now
+  second, computes `AOE(G, ·)` **after** the win has posted; if no other
+  bet is open, `AOE = ∅` and expiry writes the terminal status directly
+  (N1.4 step 3's ordinary path — the mechanism this section adds never
+  even engages, because by the time expiry's own transaction reads
+  `AOE`, there is nothing left to defer for).
+
+Both orderings are serialized by the same lock and produce the identical
+final state (`G.status = expired`, the bet's stake fully accounted for)
+regardless of which transaction the database happened to schedule
+first — this is exactly the property `pg_advisory_xact_lock` already
+provides for every other Grant-completion race this document specifies
+(doc10 §9). **Invariant holds under both interleavings; no third
+interleaving is reachable**, because both participants take the same
+lock before observing or mutating `G`.
+
+#### N1.7 The honest gap — this does not eliminate G-2 for casino, only bounds it
+
+**Stated plainly, not papered over**: `internal/casino`'s provider
+protocol has exactly three callback kinds — `bet`, `win`, `rollback`
+(verified at `internal/casino/types.go:396-398`) — **there is no fourth
+"round closed, no win" or "loss confirmed" callback.** A casino loss is
+represented by the *absence* of a future `win` callback, never by a
+positive signal. This means `InFlightExposure(G, t)` cannot, from events
+alone, ever be proven to have reached `∅` for a losing bet — the
+platform cannot distinguish "this bet lost, nothing more will ever
+arrive" from "this bet's win has simply not been delivered yet" without
+an additional, engineering-asserted rule.
+
+**The additional mechanism this requires, named rather than assumed**: a
+per-provider (or platform-default) **settlement window** — a bounded,
+configured maximum interval after which a bonus-funded bet with no `win`
+callback is treated, **for `AOE`-clearing purposes only**, as resolved.
+This is explicitly **not** a ledger-truth claim (nothing is posted for a
+"timed-out" loss — a genuine loss already has its complete financial
+fact recorded at `postBet` time, per §7.7/ADR 0032; the timeout only
+releases the *Grant* from `pending_settlement`) and it is **not** a
+guarantee that no `win` callback can ever arrive after the window — a
+provider could still violate its own delivery SLA and deliver a `win`
+callback after the window has already let `G` finalize to `expired`/
+`cancelled`/`forfeited`.
+
+**Consequence, stated as the proof requires**: TI-1, for the casino
+shape, holds **exactly and unconditionally within the settlement
+window**, and holds only **probabilistically/by-SLA** outside it. A
+`win` callback delivered after the window has elapsed and `G` has
+already finalized reproduces **exactly** G-2's original failure mode —
+narrowed from "the normal path for every bonus-funded bet's timing gap"
+(the framing this gate exists to fix) to "a rare, monitored, provider-
+SLA-violation exception," but **not eliminated in principle**. This
+section does not select which of §T.7's three actions (`ACTION_
+REFORFEIT`/`ACTION_ROUTE_TO_CASH`/`ACTION_HOLD_FOR_REVIEW`) handles that
+residual case — G-2 remains genuinely open for it, exactly as ADR 0039
+leaves it, just reached far less often and only under conditions that are
+themselves alarm-worthy (a provider violating its own settlement-window
+SLA is independently something `casino`'s monitoring should flag).
+
+**Two ways this residual could later be closed, named, neither designed
+here**: (a) `casino` defines and contractually/technically enforces a
+maximum settlement window per provider (a `casino`-owned dependency,
+cross-referenced to `4HB1W15-01`'s parallel work — this section does not
+set that number); or (b) casino's bonus-funded stakes are routed through
+a locked-account model symmetric to sportsbook's `player_locked_bonus`
+(eliminating `InFlightExposure`'s timeout dependency entirely by giving
+casino the same exhaustive win/loss/void settlement guarantee sportsbook
+already has) — a genuinely new architecture change, `casino`-owned,
+requiring its own ADR and human sign-off, not something this document
+authorizes by naming it.
+
+**Sportsbook shape has no such gap.** Because sportsbook settlement is
+exhaustive over win/loss/push (every locked bet receives an explicit
+grading event, `docs/decisions/0038`), `LockedExposure` clears only by a
+real event, never a timeout — TI-1 holds **exactly and unconditionally**
+for the sportsbook shape, with no residual.
+
+#### N1.8 Confirmation: this resolves G-2's original failure mode, without selecting G-2's answer
+
+ADR 0039 Decision 2's question is: "when a settlement or void credit
+arrives against a bonus Grant that has **already gone terminal**... what
+should the platform do with that credit?" Under N1.4's mechanism, **the
+premise of that question — a credit arriving against a Grant already
+recorded as terminal — does not occur** for any credit that arrives
+within N1.7's bound: the Grant is `pending_settlement`, not `expired`/
+`cancelled`/`forfeited`/`converted`, for exactly as long as that credit
+remains possible, by TI-1's construction. §T.7's three candidate actions
+therefore have **no case to act on** in the normal (in-window) path —
+not because one of them was chosen, but because the scenario they were
+built to resolve is prevented from arising. This is precisely what
+`docs/governance/task-registry.md`'s finding 1 anticipated ("never
+crediting against an already-terminal Grant, by construction") and what
+this section proves rather than asserts.
+
+**This selects nothing from the Human Decision Register.** It does not
+choose `ACTION_REFORFEIT`/`ACTION_ROUTE_TO_CASH`/`ACTION_HOLD_FOR_REVIEW`
+(§T.7's mechanism, and the fully-specified data/posting shapes it
+describes, remain exactly as built — they now apply only to N1.7's
+narrow residual, not to the general case). It does not touch
+`OpenBetSelfExclusionPolicy` (Decision 1): a self-exclusion-driven void
+or forfeiture is just one more Path B trigger, handled by the identical
+mechanism, and this section takes no position on `SETTLE_NORMALLY` vs.
+`VOID_ON_SELF_EXCLUSION`. It does not touch the cashout proceeds-split or
+FD-1 (Decision 3): no cashout code exists, and nothing here creates or
+assumes one. Wave 1's W9 human-decision safety analysis stands
+unchanged — none of the three decisions is defaulted, guessed, or
+selected by this mechanism.
+
+#### N1.9 Additive edits this section makes (named, not silently applied)
+
+- §1.2's Grant-state table gains one row: `pending_settlement` (N1.4),
+  inserted as an additional non-`TERMINAL` status, no existing row
+  edited.
+- §1.3's transition table gains: `activated`/`in_progress →
+  pending_settlement` (trigger: any Path B trigger firing while `AOE ≠
+  ∅`) and `pending_settlement → {expired|cancelled|forfeited}` (trigger:
+  the `AOE`-clearing event that brings exposure to `∅`) — both additive
+  rows, no existing row's trigger conditions changed except that they are
+  now understood to gate on `AOE(G, ·) = ∅` as a precondition (N1.4 step
+  2/3), which was previously unstated because `AOE` did not exist as a
+  concept until this section.
+- §T.7's "rare fourth entry path... covered by the identical mechanism"
+  claim is now backed by N1.4/N1.6 instead of asserted.
+- §T.9's "expiry while a stake is locked... reached the moment that
+  locked stake's settlement or void/rollback later arrives" is
+  unchanged in substance; N1.4 is the mechanism that makes "reached the
+  moment" precise (previously it meant "G-2 fires then"; now it means
+  "the deferred finalization runs then").
+- A new Progress reason code, `open_exposure_outstanding` (N1.4 Path A),
+  alongside the existing RG/Risk/`AssetAuthorization` reason codes at the
+  conversion checkpoint (T.12).
+- No change to §6/§7 (ledger interaction) beyond what `ledger-finance`'s
+  own §7.7 "Gated on G-2" paragraph already anticipates as
+  answer-independent — the ordinary settlement/void/forfeiture posting
+  shapes are reused verbatim; only the **Grant-side status-flip timing**
+  changes.
+
+#### N1.10 Cross-domain dependencies
+
+- **`casino`** (parallel `4HB1W15-01` dispatch, not yet seen): the exact
+  settlement-window value/mechanism (N1.7) and any `postWin`/
+  `postRollback` destination-resolution design are `casino`'s to
+  propose; this section states only the Bonus-Engine-side precondition
+  (`AOE`-clearing must be observable to Bonus Engine) that any such
+  design must satisfy. If `casino`'s independent analysis reaches a
+  different mechanism for the same problem, this section's own claim is
+  the one that should yield, per this dispatch's own instruction.
+- **`ledger-finance`**: confirmation that the `AOE`-clearing read path
+  (N1.3's `LockedExposure`/`InFlightExposure` queries) is exactly
+  §7.10's already-specified R1–R4 reads, no new query shape; and that
+  the "post now, flip status later" split in N1.4 step 4 does not
+  conflict with §7.7's existing partial-forfeiture idempotency
+  (`bonus_forfeiture:<forfeiture_occurrence_id>`, per-occurrence, not
+  per-Grant — already compatible, re-confirmed here, not re-designed).
+- **`security`**: no new actor/privilege surface — the `pending_
+  settlement` transition is system-triggered exactly like the terminal
+  transitions it replaces; no new RBAC role is needed.
+- **`qa`**: N1.6's three scenarios (plus their sportsbook/casino
+  sub-cases and N1.7's settlement-window-exceeded case) are the minimum
+  adversarial test set for this mechanism — named for the parallel
+  `4HB1W15-05` test-matrix dispatch, not designed here.
+
+### N2. Bonus targeting / bulk-assignment validation (gate §C)
+
+Re-validated against Wave 1's domain model (W4 coded bonuses, W5 bulk
+assignment, W7 segmentation) mode by mode, per the gate directive's ten
+named modes. Two genuine corrections found (N2.2, N2.3); everything else
+confirmed as already covered.
+
+| # | Mode | Wave 1 coverage | Verdict |
+|---|---|---|---|
+| 1 | Player enters a code | W4 (T2 trigger mechanic) | Confirmed, no change |
+| 2 | Staff assigns to one player | W5's `BulkGrantJob.target` already accepts a single `player_account_id`; ordinary §1.3 staff-action `issued` also applies directly for a one-off grant with no job overhead | Confirmed, both paths valid and equivalent in outcome |
+| 3 | Staff assigns to a list | W5's `target` = explicit list | Confirmed, no change |
+| 4 | Staff assigns to a segment | W5's `target` = one Segment + SegmentVersion reference (W7) | Confirmed, no change |
+| 5 | Staff assigns to multiple segments | **Not covered** — W5's `target` shape names only "a single... Segment + SegmentVersion reference" | **Corrected, N2.2** |
+| 6 | Bulk assignment (general) | W5 | Confirmed, no change |
+| 7 | API-driven assignment | Actor-type mismatch found | **Corrected, N2.3** |
+| 8 | CRM-driven campaign assignment (NEW) | Not previously addressed | **Specified, N2.4** |
+| 9 | Automated eligibility-triggered grants | §1.3 (T1 trigger mechanic) | Confirmed, no change |
+| 10 | Provider-native bonus coexistence | §3/§3.1/§3.2 | Confirmed, no new gap (N2.6) |
+
+#### N2.1 Confirmed modes (1, 2, 3, 4, 6, 9, 10) — no further detail needed
+
+Each already composes from an existing, named Wave 1 mechanism with no
+new object, no new bypass, and no new state. Mode 10 specifically: doc10
+§3's `external`/`inside_provider` split, ADR 0032 §6(c)'s posting rule,
+and T5/C4's catalogue placement are unchanged by anything in this
+section — CRM/Affiliate/segmentation additions (N2.4, N4.2) never touch
+a Campaign whose `fulfillment_owner = external:<provider_id>`, because
+that Campaign-level field is resolved once at configuration time (§3.1),
+upstream of any targeting-mode question.
+
+#### N2.2 Correction — segment-set targeting (mode 5)
+
+`BulkGrantJob.target` (W5) is widened, additively, from a discriminated
+union of `{single_player_account_id | player_list | segment_reference}`
+to `{single_player_account_id | player_list | segment_reference |
+segment_set}`, where `segment_set` is a bounded, explicit list of
+`(segment_id, segment_version_id)` pairs. Resolution semantics: **union**
+— a player who is a live member of **any** listed SegmentVersion at
+job-run time (W5's own "live segment resolution, not a stale snapshot"
+rule applies identically, per-segment) is included exactly once. Per-
+player deduplication requires no new mechanism: `BulkGrantJobItem`'s
+existing `UNIQUE (tenant_id, bulk_grant_job_id, player_account_id)`
+constraint (W5) already guarantees one job-item row per player regardless
+of how many listed segments matched them.
+
+**Intersection ("in segment A AND segment B") is deliberately not built
+here** — it is expressible today by asking whichever service owns
+segmentation (W7's open placement question, `architect`'s parallel
+Segmentation Engine doc) to define one compound SegmentVersion whose own
+criteria composes both underlying predicates, which W7's AND/OR/NOT-
+composable criteria shape (§W7) already supports without any Bonus
+Engine change. Building AND-semantics into `BulkGrantJob.target` itself
+would duplicate a capability the segmentation criteria language already
+owns — an unnecessary second place the same logic could drift.
+
+#### N2.3 Correction — actor type, verified against `internal/audit`
+
+**W1's common object contract states `actor_type (system | player |
+staff | provider)`. This is wrong, checked against the actual, already-
+implemented canonical enum every domain's audit trail uses**:
+`internal/audit.ActorType` (`internal/audit/audit.go:21-24`) is exactly
+`{player, staff, service, system}` — **there is no `provider` value.**
+
+**Corrected here**: every Bonus Engine object's `actor_type` field is
+`internal/audit.ActorType`, verbatim, never a Bonus-local redefinition
+(the same "never invent a parallel enum" discipline this document
+already applies to jurisdiction codes, §7, and asset codes, §T.2).
+Every place §1–§10/W1–W11/T.1–T.13 refers to a "provider" actor (an
+external bonus engine's inbound status callback, §3.2; a provider-
+originated free-round fulfillment confirmation) is `ActorService` — the
+calling identity is the Reward Orchestrator's own service credential
+that verified and relayed the callback, never a distinct "provider"
+principal type. `causation_id`/metadata (which service credential,
+which upstream system) — not a proliferation of `actor_type` values —
+is what distinguishes one `ActorService` caller from another.
+
+**This directly answers mode 7 (API-driven assignment) and mode 8
+(CRM-driven, N2.4): both are `ActorService` callers of the ordinary
+Grant-issuance/`BulkGrantJob`-creation surface**, distinguished from a
+staff member's own session-backed call only by `actor_id` (which service
+credential authenticated the request) and a `source_system` metadata
+field on the resulting audit record — no new `actor_type` value, no new
+targeting mechanism, no new bypass surface. `security`'s RBAC contract
+(`4HB1-08`) governs which `ActorService` credentials may call which
+Bonus Engine endpoints — this section states the object-model fact
+(one existing enum, reused), not the authorization policy.
+
+#### N2.4 CRM interface boundary (mode 8), specified without assuming CRM's internal design
+
+Per the gate directive's explicit instruction, this specifies the exact
+boundary CRM calls **into**, not CRM's own architecture (`architect`'s
+parallel `4HB1W15-03` dispatch owns that). Two surfaces, both already
+existing in this document's own design, neither modified in mechanism:
+
+1. **Command surface — request a Grant or a bulk campaign.** CRM,
+   having decided (by whatever internal logic it owns) that a player, an
+   explicit list, or a segment should receive an Offer, calls the
+   **identical** `BulkGrantJob`-creation surface (W5) or single-Grant
+   staff-action-equivalent surface (§1.3) that a staff member's back-
+   office UI already calls — as an `ActorService` caller (N2.3), with a
+   caller-supplied `campaign_id`/`offer_version_id` and a `target` in
+   any of N2.2's shapes (a single player, an explicit list, a segment,
+   or a segment set). If CRM resolves its own audiences via the same
+   shared `internal/segment` package `architect`'s Segmentation Engine
+   doc is expected to define (task registry OI-3), CRM passes a
+   `segment_id`+`segment_version_id` reference exactly as staff does —
+   no CRM-specific target shape is invented. **T.1's full three-way
+   gate, T.4's eligibility-axis snapshot, and W5's full per-item
+   isolation/idempotency/resumability run identically regardless of
+   caller identity** — a CRM-originated `BulkGrantJob` cannot bypass
+   anything an identical staff-originated one could not also bypass
+   (i.e., nothing).
+2. **Query surface — `CheckOfferEligibility` (new, read-only, no
+   financial or Grant-creating effect).** `CheckOfferEligibility(
+   offer_version_id, player_account_id) → (eligible bool, reason)`
+   composes the **same** live checks (`AssetAuthorization` →
+   `rg.EvaluateEligibility` → `risk.Evaluate`, T.1's order) a real grant
+   attempt would run, but writes no Grant row, no Progress entry, no
+   ledger effect, and is not idempotency-keyed — a point-in-time preview
+   whose answer is **explicitly non-binding**: T.4's "repeated live"
+   rule still governs the real attempt regardless of what this preview
+   returned. This exists so CRM can size/validate a campaign's audience
+   *before* committing a `BulkGrantJob`, without Bonus Engine building a
+   second eligibility engine — it is the identical T.1 gate, called
+   read-only, once per candidate player, not a new decision surface.
+   This is also the natural surface for a reviewer evaluating a
+   `BonusSuggestion` (§N3) to preview likely eligibility before
+   Approving.
+
+**No shortcut exists through either surface.** Both terminate in the
+same `(none) → issued` pipeline every other trigger uses (W4's own
+"a code is only a different `trigger_reference` value feeding that one
+existing transition row" reasoning, generalized to every targeting
+mode): `AssetAuthorization → RG → Risk`, the eligibility-axis snapshot,
+and §9's idempotency key. CRM is a caller, not a parallel authority.
+
+#### N2.5 Bulk-operation requirements — re-confirmed
+
+- **Idempotent** — job-level `idempotency_key` (W5); a resubmission of
+  the identical job spec is a no-op. ✓ unchanged.
+- **Resumable** — a crashed/resumed job re-walks its target list,
+  skipping every player with an existing `BulkGrantJobItem` row of any
+  outcome (W5). ✓ unchanged, and N2.2's `segment_set` widening does not
+  change this: the resolved member list (now a union across segments) is
+  walked identically.
+- **Per-player eligibility-checked** — every `BulkGrantJobItem`
+  independently runs the full T.1 gate (W5). ✓ unchanged.
+- **Tenant/brand-scoped** — `BulkGrantJob`/`BulkGrantJobItem` inherit the
+  ordinary Grant RLS pattern (W5, §8); never platform-wide, mirroring
+  Grant. ✓ unchanged.
+- **Permission-controlled** — W5 does not itself define an RBAC role
+  taxonomy; this is confirmed as `security`'s named dependency (`4HB1-08`,
+  already listed in W11), not a Bonus Engine design gap: the object model
+  (an ordinary, API-authenticated, audited action) does not preclude
+  whatever role gate `security` attaches to `BulkGrantJob` creation/
+  approval, for either a staff or an `ActorService` caller.
+- **Auditable** — `audit.Record` at creation, approval/rejection, start,
+  completion, and per-item outcome (W5). ✓ unchanged.
+- **Duplicate-safe** — job-level idempotency key plus per-item DB
+  uniqueness (W5). ✓ unchanged, and N2.2's union-of-segments resolution
+  is itself duplicate-safe by the same per-item constraint (a player
+  matched by two segments still gets exactly one item row).
+- **Independently reportable** — `BulkGrantJob`/`BulkGrantJobItem`'s
+  stable ids and per-item outcome make "who was targeted, under what
+  authority, and what happened to each" answerable by an ordinary,
+  RLS-scoped query with no join to a mutable status table. ✓ confirmed,
+  not previously stated explicitly in W5 — recorded here as a
+  confirmation, not a new mechanism.
+
+#### N2.6 No-bypass guarantee, re-confirmed across every mode including the two new ones
+
+W5's core guarantee — "bulk assignment is `N` individual `issued`
+transitions sharing one job correlation id, never a batch-level bypass"
+— is unchanged by N2.2 (segment-set is a resolution-time widening of
+which players end up as job items, not a change to how each item is
+processed), N2.3 (a new caller identity, not a new code path), or N2.4
+(CRM is a caller of the same command surface). **KYC/jurisdiction/
+licensing/player-status are not a fourth live gate distinct from
+RG/Risk/`AssetAuthorization`** — KYC/RG-level and jurisdiction-Offer-
+availability are part of the Offer's eligibility-axis snapshot (T.4,
+checked once at `issued`, for every mode including bulk/CRM/API-driven);
+jurisdiction-asset-authorization and jurisdiction-scoped Risk hard-limits
+are folded into the live `AssetAuthorization`/`risk.Evaluate` calls
+(§4/§7, T.1) that every `BulkGrantJobItem` runs individually. No mode
+named in this section reaches `issued` by any path other than the one
+T.1/T.4/§9 already fully specify.
+
+### N3. Bonus Suggestion full specification (gate §D)
+
+Elevates W6's sketch into a full object/lifecycle specification. Nothing
+here changes W6's central, load-bearing property: **`BonusSuggestion`
+never creates a Grant, never moves money, and never calls RG/Risk/
+`AssetAuthorization`'s value-moving checkpoints.**
+
+#### N3.1 Object shape — every field the directive names, with a concrete home
+
+| Field | Meaning | Immutable once written? |
+|---|---|---|
+| `id` | server-generated UUID | yes |
+| `tenant_id`/`brand_id` | scope, never platform-wide (mirrors Grant, §8) | yes |
+| `status` | `Generated`/`UnderReview`/`Approved`/`Rejected`/`Edited`/`Activated`/`Discarded` — explicit enum, W1's common contract | no (the one mutable read-model field, N3.2) |
+| `originating_kind` | `rule` \| `model` \| `manual` — structurally distinguishes the source, never inferred | yes |
+| `originating_rule_id` / `originating_model_version` / `originating_staff_actor_id` | the one populated per `originating_kind` | yes |
+| `generated_at` | `clock_timestamp()` | yes |
+| `proposed_config` | the inert, structured proposal (below) | yes — a review's *changes* are captured as a diff (N3.2), never an in-place edit of the original proposal |
+| `reason` | free text and/or a structured signal summary — why this suggestion exists | yes |
+| `reviewer_id` | who claimed/decided | set once claimed |
+| `review_claimed_at` | `clock_timestamp()` | set once |
+| `decision` | `Approved`/`Rejected`/`Edited` | set once per review round |
+| `decided_at`/`decided_by` | when/who | set once per review round |
+| `modifications` | for `Edited`: field-by-field diff, `{field: (proposed_value, reviewer_value)}` | append-only per edit round |
+| `rejection_reason` | mandatory if `Rejected` (mirrors §10's reason-code discipline) | yes |
+| `activated_at` | `clock_timestamp()` | set once |
+| `resulting_reference` | the `campaign_id`/`offer_version_id`/`grant_id` or `bulk_grant_job_id` Activation produced | set once, bidirectional with that object's own `originating_suggestion_id` (W6) |
+| `discarded_at`/`discard_reason` | terminal, no financial artifact | set once |
+
+`proposed_config` carries exactly what the gate directive names, each
+field a direct reference into an already-specified Wave 1 shape — a
+suggestion invents no new configuration vocabulary:
+
+- `proposed_bonus_type` — one of W3's canonical-mechanic codes (trigger/
+  reward/completion), or a named catalogue item (§N4).
+- `proposed_offer_reference` — nullable: an existing Offer to reuse, or
+  null meaning "propose a new Campaign/Offer."
+- `proposed_reward` — amount/percentage/cap/`reward_kind` (W2.6's shape).
+- `proposed_wagering_requirement` — multiplier/contribution weights
+  (W2.7's shape).
+- `proposed_target_segment` — a `segment_id`+`segment_version_id`
+  reference (W7's "by reference, never inlined" rule, unchanged).
+- `proposed_campaign_reference` — nullable, existing Campaign to attach
+  to vs. propose a new one.
+- `proposed_timing` — proposed start/end window, or a trigger-condition
+  description for a signal-driven proposal.
+- `proposed_player_population` — reuses N2.2's exact `target` shape
+  (single player / list / segment / segment set) — a suggestion's
+  population is not a fifth targeting concept.
+- `proposed_activation_strategy` — one of `grant_policy`'s existing
+  values (W2.2: `auto_issue`/`manual_approval_required`/`code_redeemed`/
+  `external_signal`/`manually_assigned`) — a suggestion never invents a
+  sixth.
+
+#### N3.2 Lifecycle, formalized as an append-only review trail
+
+Mirroring `GrantActivation`'s own pattern one level down in stakes: the
+`BonusSuggestion.status` column is a **read-model pointer**, not the
+authoritative history. The authoritative record is an append-only
+`SuggestionReviewEvent` per transition (`Generated` is the creation event
+itself; each of `UnderReview`/`Approved`/`Rejected`/`Edited`/`Activated`/
+`Discarded` is its own row, actor/timestamp/reason carried per §10's
+audit discipline). This is not a new mechanism — it is the identical
+"typed projection over an append-only trail" pattern W2.4 already
+establishes, applied to a non-financial object, so a reviewer's full
+edit/re-review history is never lost to an in-place status-column
+overwrite.
+
+- **Generated**: `proposed_config` frozen at this instant; never mutated
+  in place thereafter.
+- **UnderReview**: `reviewer_id` claims the queue entry; no RG/Risk/
+  `AssetAuthorization` call happens here — there is nothing to gate, no
+  money moves. A reviewer **may** use N2.4's `CheckOfferEligibility`
+  query surface as an informational preview of the proposed population's
+  likely eligibility; this is a UX aid, never a gate — the real gate
+  runs, unconditionally, at Activation's ordinary Grant-issuance path,
+  exactly as for every other targeting mode (T.4's "repeated live" rule
+  applies here with no carve-out).
+- **Approved**: `reviewer_id`/`decided_at` set; the suggestion may
+  proceed to Activation with `proposed_config` unchanged.
+- **Rejected**: terminal for this round; `rejection_reason` mandatory.
+- **Edited**: the specific modified fields are diffed against
+  `proposed_config` (never a silent overwrite — W6's own "a suggestion
+  silently approved-with-private-edits never happens" rule, restated as
+  a concrete diff structure) and the suggestion returns to an
+  `UnderReview`-equivalent state carrying the modified proposal,
+  requiring its **own** subsequent `Approved`/`Rejected` decision — an
+  edit is never itself a terminal approval. This can iterate (edited
+  again), each round its own `SuggestionReviewEvent`.
+- **Activated**: reachable only from `Approved` (directly, or via one or
+  more `Edited` rounds each themselves `Approved`). Activation means
+  **exactly one thing**: the approved `proposed_config` is submitted
+  through N2.4's **ordinary, unmodified** command surface (single Grant,
+  or `BulkGrantJob`, per `proposed_player_population`'s shape) —
+  architecturally, `BonusSuggestion.Activate()` **is**
+  `BulkGrantJob.Create()`/`Grant.Issue()` called with an extra
+  `originating_suggestion_id` parameter, not a second, parallel code
+  path. The resulting object carries `originating_suggestion_id` back to
+  this suggestion (W6); this suggestion's own `resulting_reference`
+  points forward — bidirectional, so either record answers "why does
+  this Grant/campaign exist" or "what did this suggestion produce."
+- **Discarded**: terminal, no financial artifact, reason optional but
+  recorded if given.
+
+#### N3.3 The structural (not promised) non-financial guarantee
+
+Three independent facts make "Suggestion != Grant" true by construction,
+not by discipline, restated and strengthened from W6:
+
+1. **No write path to ledger/wallet tables.** No code reachable from any
+   `BonusSuggestion` state transition calls `internal/ledger`/
+   `internal/wallet`. Only Activation, via N2.4's command surface, can
+   ever reach the ledger — and that surface is the identical one every
+   other targeting mode already reaches it through.
+2. **No write path to `Grant`/`Progress` other than through Activation's
+   call into the ordinary issuance pipeline.** There is no
+   `BonusSuggestion`-specific Grant-creation function; Activation's
+   *only* mechanism is "call the surface a human/API/CRM caller would
+   otherwise call directly."
+3. **RBAC-enforceable at the credential level, named as a `security`
+   dependency, not designed here**: a suggestion-generator service
+   identity (a rules engine today; a future scoring/ML model, explicitly
+   out of scope per W6/N3.4) is scoped to `bonus_suggestion:create` only
+   — it holds no credential capable of calling `bonus_grant:create` or
+   `BulkGrantJob:create` directly. This is what makes the guarantee hold
+   for a **future** AI/CRM/recommendation system too: such a system can
+   only ever populate `Generated` rows; it structurally cannot move
+   money, no matter how it is built, because it is never issued the
+   credential that could.
+
+#### N3.4 Still out of Wave 1/1.5 scope, restated
+
+The generator that *populates* `Generated` rows (a scoring model, an LTV
+heuristic, a CRM-triggered rule) remains explicitly out of scope, per
+W6's own "building a generator ahead of a concrete first consumer" scope
+test. This section specifies the object and lifecycle a future generator
+would populate — never the recommendation logic itself.
+
+### N4. Full bonus catalogue validation (gate §H)
+
+Re-verified against W3's canonical-mechanics catalogue, category by
+category, per the gate directive's full list. Every category composes
+from W3's existing three-choice decomposition (Trigger × Reward ×
+Completion) with **zero new financial mechanisms** — confirmed, not
+merely asserted, in the table below. Two items needed correction (the
+Affiliate split, N4.2) or a cross-reference addition (Retail, N4.3); the
+rest are direct restatements of W3's own already-frozen mapping.
+
+| Category | W3 row | Verdict |
+|---|---|---|
+| Welcome / First Deposit | "Welcome / first-deposit" | Confirmed |
+| Multi-deposit | "Multi-deposit" | Confirmed |
+| Reload | "Reload" | Confirmed |
+| Cashback | "Cashback / loss-back" | Confirmed — see below |
+| Loss-back | Same row as Cashback | Confirmed — "loss-back" and "cashback" are the identical R1-against-net-loss/C2 mechanic under two commercial names; no functional distinction exists in this platform's rule shape, and none needs to |
+| No-deposit | "No-deposit" | Confirmed (C1-shaped variant only, in slice; C3-shaped variant deferred per Stage 4H-B0's own scope note, unchanged) |
+| Free Spins / Free Rounds | "Free spins / free rounds" | Confirmed, deferred (fulfillment not built) |
+| Free Bets | "Free bets" | Confirmed, deferred (blocked on `internal/sportsbook`) |
+| Sportsbook bonus | "Sportsbook bonuses" | Confirmed, deferred (blocked on `internal/sportsbook` existing at all) |
+| Casino bonus | "Casino bonuses" | Confirmed — composes from Deposit/Reload/Cashback/Wagering/Free-spin, no new mechanic |
+| Wagering / Turnover bonus | "Wagering / turnover bonuses" | Confirmed |
+| Coupon | "Promo codes / voucher / bonus codes" | Confirmed |
+| Promo Code | Same row | Confirmed — naming variance only |
+| Voucher | Same row | Confirmed, with one cross-reference: `docs/architecture/26-retail-operations-architecture.md`'s own vocabulary explicitly excludes "voucher" from its retail-instrument taxonomy (line 25) — a retail voucher and a Bonus Engine "voucher-named" coded bonus are **not the same object**; this section's "Voucher" row is the coded-bonus sense only, never the retail cash-instrument sense, and this document does not (and should not) resolve that naming collision — it is flagged so a future reader does not conflate them |
+| Bonus Code | Same row as Coupon | Confirmed — naming variance only |
+| Manual Bonus | "Manual bonuses" | Confirmed, C1-shaped variant only in slice; see N4.3 for one open item |
+| Compensation / Goodwill | "Compensation / goodwill" | Confirmed — "same flag as manual bonuses" |
+| VIP / Loyalty | "VIP / loyalty" | Confirmed — T3-shaped (manual VIP-desk grant) in-slice-composable; T4-shaped (points/loyalty redemption signal) deferred, blocked on Points/Gamification (doc 24) |
+| Retention | "Retention / reactivation" | Confirmed — T3-shaped (manual) variant only; automated dormancy-trigger variant needs a new event producer, unbuilt, unchanged from W3 |
+| Reactivation | Same row | Confirmed |
+| Birthday / Anniversary | "Birthday / anniversary" | Confirmed — T3-shaped variant only |
+| Referral | "Referral / affiliate" — **split, N4.2** | Corrected |
+| Affiliate acquisition (NEW) | Same row, split — **N4.2** | Specified |
+| Tournament / competition reward | "Tournament / competition rewards" | Confirmed, deferred (blocked on Gamification) |
+| Mission / challenge reward | "Mission / challenge rewards" | Confirmed, deferred |
+| Points / XP-triggered reward | "Points / XP-triggered rewards" | Confirmed, deferred (blocked on Points accounting, doc 24) |
+| Provider-native bonuses | "Provider-native bonuses" | Confirmed — T5/C4, §3/§3.2 |
+
+#### N4.2 Splitting Referral from Affiliate acquisition, and the Affiliate pipeline's interface boundary into Bonus Engine
+
+W3's single "Referral / affiliate" row conflated two distinct producers
+that happen to compose identically once a trigger reaches Bonus Engine.
+**Split, additively, into two rows sharing one mechanic**:
+
+- **Referral** (in-house "refer a friend"): `T4` (an internal
+  referral-confirmation signal — doc 22's `RewardTriggerSignal`, W10 —
+  or `T3` for a manual staff grant), `R2` reward, `C1`/`C3` completion,
+  composing from the Wagering-bonus or Cash-reward rows exactly as W3
+  already states. Unchanged.
+- **Affiliate acquisition** (NEW — per the gate directive's own
+  requirement to cross-reference `architect`'s parallel Affiliate
+  architecture's expected pipeline: **Affiliate → Attribution →
+  Segmentation → CRM → Bonus Offer → Bonus Grant**). Bonus Engine's
+  position in that pipeline is the **last link only** — it never talks
+  to Affiliate or Attribution directly. Concretely:
+
+  > **Interface boundary (specified here, without assuming Affiliate's
+  > internal design)**: Affiliate/Attribution's acquisition decision
+  > reaches Bonus Engine exclusively through **CRM**, via the identical
+  > two surfaces N2.4 already specifies for any CRM-driven assignment —
+  > `CheckOfferEligibility` (a preview) and the command surface
+  > (single-Grant or `BulkGrantJob`, `ActorService`-authenticated). If
+  > CRM chooses to express "acquired via affiliate X" as Segmentation
+  > membership (the pipeline's own stated order places Segmentation
+  > before CRM), CRM passes a `segment_id`+`segment_version_id`
+  > reference exactly as any segment-targeted assignment already does
+  > (N2.2). If CRM instead resolves an explicit player list itself, it
+  > passes that list. **Bonus Engine's own model requires no new field,
+  > no new trigger mechanic, and no new object to receive this**: from
+  > Bonus Engine's side, "CRM relaying an Affiliate-attributed
+  > acquisition decision" and "CRM relaying any other campaign
+  > decision" (N2.4) are the identical call, distinguished only by
+  > `source_system`/metadata on the resulting audit record, never by
+  > code path. This composes as `T3`/`T4` + `R2`/`R1` + `C1`/`C3` from
+  > the already-existing Wagering-bonus/Manual-bonus/Cash-reward rows —
+  > **zero new financial mechanism**, exactly as the gate directive asks
+  > to be confirmed.
+
+  Attribution-specific commercial terms (e.g., a different reward size
+  per affiliate, a cost-attribution to the affiliate's own commission
+  ledger rather than `bonus_expense`) are an Affiliate/CRM-domain
+  question about **which** Offer/Campaign CRM selects and **how the
+  affiliate's own commission accounting works** — not a Bonus Engine
+  concern; Bonus Engine treats an affiliate-driven Grant exactly as
+  operator-funded unless a `funding_source = provider:<id>` value (W2.6,
+  ADR 0032 §6) is explicitly configured on the Offer, identical to any
+  other provider-funded Grant question already named in Wave 1 (finding
+  BF-1, task registry).
+
+#### N4.3 Cross-reference — cashier-issued manual bonus (Retail)
+
+`docs/architecture/26-retail-operations-architecture.md` line 827
+already names an `OPEN DECISION` for `bonus-engine`: "whether a bonus
+may ever be *issued by a cashier* (an obvious collusion vector)." This
+is a genuine, standing open item under the "Manual Bonus" row above —
+not resolved by this section, and not silently assumed either way. If
+ever authorized, a cashier-issued Grant would be `actor_type = staff`
+(N2.3), subject to whatever additional retail-hierarchy control
+`docs/decisions/0036-retail-hierarchy-rbac-and-audit.md` and `security`
+require on top of the ordinary staff-manual-grant path (W5's four-eyes
+placeholder, §10) — named here as the item's current status, carried
+forward, not newly invented.
+
+#### N4.4 Confirmation
+
+Every category the gate directive lists composes from W3's existing
+Trigger × Reward × Completion decomposition, the segmentation/targeting
+shapes in §N2, and (where relevant) the Suggestion object in §N3 as an
+optional upstream proposal mechanism that itself produces nothing until
+Activation. **No category requires a bespoke financial implementation,
+a new ledger transaction type beyond `bonus_grant`/`bonus_conversion`/
+`bonus_forfeiture`/`bonus_reversal` (§7.3), or a new bypass of RG/Risk/
+`AssetAuthorization`/eligibility.** The two corrections in this section
+(N4.2's split, N4.3's cross-reference) are naming/provenance
+clarifications and a carried-forward open item, not new mechanism.
+
+### N5. Summary of corrections to Wave 1, and cross-domain dependencies for the Orchestrator's reconciliation
+
+**Corrections made to this specialist's own Wave 1 work, stated
+plainly**:
+
+1. W1's `actor_type` enum was wrong — checked against
+   `internal/audit.ActorType` and corrected (N2.3). This also resolved
+   two of the gate directive's ten targeting modes (API-driven, CRM-
+   driven) using an existing primitive instead of a new one.
+2. W5's `BulkGrantJob.target` shape did not support multi-segment
+   targeting — corrected additively (N2.2).
+3. §T.7's "rare fourth entry path" (`converted` racing an in-flight
+   settlement) was asserted, not built — now covered by the same
+   mechanism as expiry/cancellation/forfeiture (N1.4 Path A).
+4. W3's "Referral / affiliate" row conflated two distinct producers —
+   split, with the new Affiliate pipeline's interface boundary specified
+   (N4.2).
+5. Wave 1 did not check `docs/decisions/0038`'s "settlement win/loss
+   happy paths" language against casino's actual three-callback-type
+   protocol (`bet`/`win`/`rollback`, no loss-confirmation event) — doing
+   so surfaced N1.7's genuine, disclosed residual gap rather than
+   assuming symmetry between the two provider shapes.
+
+**Cross-domain dependencies, named for the Orchestrator's reconciliation
+(none blocking this section's own conclusions)**:
+
+- **`casino`** (`4HB1W15-01`) — the settlement-window mechanism (N1.7)
+  and any `postWin`/`postRollback` destination-resolution design; this
+  section's own AOE/`pending_settlement` design should be checked against
+  whatever concrete timing model `casino`'s independent dispatch finds,
+  per the task's own instruction not to block on it.
+- **`architect`** (`4HB1W15-03`) — Segmentation Engine placement (N2.2's
+  `segment_set` reuse, N2.4's CRM-via-`internal/segment` path), the CRM
+  Engine's own architecture (N2.4/N4.2 specify only the boundary Bonus
+  Engine exposes, not CRM's internals), and the Affiliate Engine's
+  pipeline (N4.2).
+- **`ledger-finance`** — re-confirmation that N1.4's "post now, flip
+  status later" split and N1.3's AOE reads do not require a new query
+  shape beyond §7.10's R1–R4 (N1.10).
+- **`security`** — RBAC for the two new command-surface callers
+  (`ActorService`, N2.3/N2.4), the `BulkGrantJob` permission gate (N2.5),
+  and the suggestion-generator credential scoping (N3.3).
+- **`qa`** — N1.6/N1.7's scenario set as the minimum adversarial test
+  list for the terminal-state invariant; N2's ten targeting modes as a
+  test-matrix input; N3's full suggestion lifecycle (including multi-
+  round Edit) as a completeness-trail test target, mirroring Progress-
+  trail-completeness testing one level down in stakes.
+
+Owner of this section: `bonus-engine`. Nothing in this section
+authorizes writing `internal/bonus`, a migration, or a test. No Human
+Decision Register item is selected.
