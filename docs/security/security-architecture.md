@@ -848,8 +848,8 @@ specialist redesigns shared architecture unilaterally").
 | **SEC-W15-04** (EDR has no RLS / read-gating story) | **Closed at the design level** by §W15.5 (`EDR-S1`–`EDR-S5`). |
 | **SEC-W15-02** (P0 — CRM per-player grant calls escape the bulk control) | **NOT closed by this section alone.** §W15.3's `CRM-BR-2` states the binding requirement; it is implementable only by `architect` (doc 31) and `bonus-engine` (doc 10 N2.4) in their own dispatches. It remains open until both adopt it. |
 | SEC-W15-05 … SEC-W15-13 (the remaining P1s) | **Open.** Not addressed here; they are separate findings against `architect`'s and `bonus-engine`'s files. |
-| **RK-W15P2-1** (P0, `risk` Phase 2 — `SEP-1` fails **open**, not closed, on a partial-RLS-truncation resolver read) | **Closed at the design level** by §W15.1.9 (cardinality assertion + step-0 tenant-scope self-proof). This is a Fix Round 2 correction to §W15.1.3/§W15.1.4, which addressed only the *empty*-result failure mode. |
-| **RK-W15P2-6 / RK-W15P2-7** (`risk` Phase 2 — the non-NULL-actor precondition is enforced by a pre-deploy query, not a DB constraint; the required denial-audit record is unimplementable inside a `BEFORE` trigger that aborts its own transaction) | **Closed at the design level** by §W15.1.10 (DB-level `CHECK` constraint, routed as `REQ-SEP-STAFF-1`) and §W15.1.11 (separate-transaction denial-audit record, per the ADR 0031 §39 precedent). A residual limitation on the audit side is stated honestly in §W15.1.11 and is not claimed closed. |
+| **RK-W15P2-1** (P0, `risk` Phase 2 — `SEP-1` fails **open**, not closed, on a partial-RLS-truncation resolver read) | **Closed at the design level** by §W15.1.9 (cardinality assertion + step-0 tenant-scope self-proof), as corrected by §W15.1.9's second pass (fail-closed `IF/ELSIF/ELSE` replacing the original unmatched-`CASE`, plus the `ancestor_closure` shape's Step 0b totality proof) after `risk`'s partial re-open proved the first pass's `CASE` was silently inert on exactly the resolver shape (Affiliate's reflexive ancestor closure) the fix was written to catch. One dependency remains routed, not closed: `architect`'s confirmation that `agentnetwork` has no cross-tenant parent/child edge (§W15.1.9). This is a Fix Round 2 correction to §W15.1.3/§W15.1.4, which addressed only the *empty*-result failure mode. |
+| **RK-W15P2-6 / RK-W15P2-7** (`risk` Phase 2 — the non-NULL-actor precondition is enforced by a pre-deploy query, not a DB constraint; the required denial-audit record is unimplementable inside a `BEFORE` trigger that aborts its own transaction) | **Closed at the design level** by §W15.1.10 (DB-level `CHECK` constraint, routed as `REQ-SEP-STAFF-1`) and §W15.1.11 (separate-transaction denial-audit record, per the ADR 0031 §39 precedent). §W15.1.10's constraint was **not** signed off as first drafted this round — `identity-compliance` found it invisible to platform-scoped (`tenant_id IS NULL`) staff on both the remediation side and the constraint's own applicability; closed by §W15.1.10's second pass (two-pass remediation, a confirmed-and-corrected `platform_admin` exemption, and the step-4 `IS DISTINCT FROM` fix that the exemption's correctness actually depends on). A residual limitation on the audit side is stated honestly in §W15.1.11 and is not claimed closed. |
 | **NEW-6** (`code-reviewer`, doc 32 §6.5.2 — the affiliate ancestor-chain resolver is non-reflexive: fail-open on a same-node declared interest, deadlock on a flat/root node) | **Closed at the design level** by §W15.2.7 (reflexive ancestor closure). The corresponding edit to doc 32 §6.5.2 itself is `architect`'s, in a separate dispatch this round; this document's own restatement is corrected here so it does not perpetuate the non-reflexive wording in the meantime. |
 
 Nothing in this section makes any subsystem "secure". It specifies what
@@ -919,14 +919,14 @@ things and reuses the shared mechanism for everything else:
 Resolvers, per adopting domain (these are the *requirements*; the owning
 specialist writes them in their own file):
 
-| Domain | Operation | `B(O)` resolves to |
-|---|---|---|
-| Bonus | Grant issuance, Grant activation | the Grant's `player_account_id → player_accounts.person_id` |
-| Bonus | Bonus adjustment, staff-forced conversion, manual release override | the target Grant's / target wallet's player account → `person_id` |
-| Bonus | `BulkGrantJob` execution | the **set** of persons behind the pinned recipient set (a set-membership test, not a scalar comparison) |
-| Bonus | `BonusSuggestion` review and activation | the persons behind the resolved `proposed_player_population` |
-| CRM | Journey/campaign activation containing an `offer_request` step | the persons behind the pinned, resolved audience. A size-1 audience is precisely the self-deal case and is covered by construction |
-| Affiliate | `CommissionApproval`, `CommissionSettlementInstruction`, re-attribution, agreement/rule-version activation | the affiliate node's **reflexive ancestor closure** — the node **itself**, together with its ancestor chain — under any sub-affiliate override agreement (doc 32 §6.4 — a parent node benefits from a child's accrual, so the parent's people are beneficiaries too, **and** the node's own people are beneficiaries of its own accrual, which a strict ancestors-only reading silently excluded; corrected by Fix Round 2, §W15.2.7, closing `NEW-6`), expanded to that closure's affiliate-account persons **plus** its declared beneficial-interest persons (§W15.2.5) |
+| Domain | Operation | `B(O)` resolves to | `resolver_shape` (§W15.1.9) |
+|---|---|---|---|
+| Bonus | Grant issuance, Grant activation | the Grant's `player_account_id → player_accounts.person_id` | `single_subject` |
+| Bonus | Bonus adjustment, staff-forced conversion, manual release override | the target Grant's / target wallet's player account → `person_id` | `single_subject` |
+| Bonus | `BulkGrantJob` execution | the **set** of persons behind the pinned recipient set (a set-membership test, not a scalar comparison) | `pinned_set` |
+| Bonus | `BonusSuggestion` review and activation | the persons behind the resolved `proposed_player_population` | `pinned_set` |
+| CRM | Journey/campaign activation containing an `offer_request` step | the persons behind the pinned, resolved audience. A size-1 audience is precisely the self-deal case and is covered by construction | `pinned_set` (audience size 1 is a `pinned_set` of one, not `single_subject` — its count still comes from the pinned audience, not from structure) |
+| Affiliate | `CommissionApproval`, `CommissionSettlementInstruction`, re-attribution, agreement/rule-version activation | the affiliate node's **reflexive ancestor closure** — the node **itself**, together with its ancestor chain — under any sub-affiliate override agreement (doc 32 §6.4 — a parent node benefits from a child's accrual, so the parent's people are beneficiaries too, **and** the node's own people are beneficiaries of its own accrual, which a strict ancestors-only reading silently excluded; corrected by Fix Round 2, §W15.2.7, closing `NEW-6`), expanded to that closure's affiliate-account persons **plus** its declared beneficial-interest persons (§W15.2.5) | `ancestor_closure` — no pinned count exists for this shape; see §W15.1.9's second pass (Step 0b + `SECURITY DEFINER` construction), routed dependency on `architect` re cross-tenant `agentnetwork` edges |
 
 The set cases (bulk, audience) must test membership against the
 **already-pinned, materialized** recipient/audience set that §B1.2 item 2
@@ -964,9 +964,30 @@ as a sibling of that function, not as a new pattern:
      economically consequential operation.
   2. `person_id IS NULL` → **refuse**.
   3. `status <> 'active'` → **refuse**.
-  4. `staff_users.tenant_id <> ` the authorizing row's `tenant_id` →
-     **refuse** (the tenant-scoped analogue of `0044`'s platform-scope
-     check).
+  4. `staff_users.tenant_id IS DISTINCT FROM` the authorizing row's
+     `tenant_id` → **refuse** (the tenant-scoped analogue of `0044`'s
+     platform-scope check). **`IS DISTINCT FROM`, not bare `<>` — Fix
+     Round 2, second pass (`identity-compliance`'s `REQ-SEP-STAFF-1`
+     sign-off, §W15.1.10).** Every authorizing table in this contract is
+     tenant-owned (`CLAUDE.md`: "every tenant-owned table carries
+     `tenant_id`"), so the authorizing row's `tenant_id` is always a real
+     UUID, never NULL — but the *actor's* side can be NULL, for exactly
+     one legitimate reason: a `platform_admin` `staff_users` row, which
+     migration `0011`'s own `CHECK` makes `tenant_id IS NULL` if and only
+     if `role = 'platform_admin'`. Plain SQL `<>` against a NULL operand
+     evaluates to NULL, and PL/pgSQL's `IF` treats a NULL condition as
+     false — so a bare `<>` here would silently **not** refuse a
+     `platform_admin` actor regardless of which tenant the operation
+     belongs to, which is the identical "unresolvable side skipped instead
+     of the statement aborting" defect step 5's own `IS NOT NULL AND`
+     discussion (above) already forbids, recurring one step earlier in the
+     same function. `IS DISTINCT FROM` is NULL-aware — `NULL IS DISTINCT
+     FROM <any real UUID>` is `TRUE` — so a `platform_admin` actor is
+     refused at this step on **every** tenant-owned authorizing row,
+     unconditionally, consistent with §W15.1.1's "unresolvable is a
+     refusal, never a pass." This is not a new restriction invented here;
+     it is what step 4 already claimed to do and did not, as literally
+     specified, actually do.
   5. Resolve `B(O)` via the domain's resolver. **Empty set → refuse. Any
      element whose `person_id` is NULL → refuse.**
   6. Compare **unconditionally**: `person(actor) = ANY(persons(B(O)))` →
@@ -1136,7 +1157,7 @@ probabilistic match, `SEP-1` must consume only its deterministic arm, per
   per §W15.1.11, which corrects this bullet's original, unimplementable
   "writes an audit record with `Outcome: denied`" claim (`RK-W15P2-7`).
 
-#### W15.1.9 Fix Round 2 (`RK-W15P2-1`) — the cardinality assertion and step-0 tenant-scope self-proof
+#### W15.1.9 Fix Round 2 (`RK-W15P2-1`) — the cardinality assertion and step-0 tenant-scope self-proof (second pass: fail-closed default + the `ancestor_closure` shape)
 
 **The finding, restated precisely.** §W15.1.3's step 5 ("Resolve `B(O)`
 … Empty set → refuse. Any element whose `person_id` is NULL → refuse.")
@@ -1208,25 +1229,70 @@ bare emptiness/NULL check.** The resolver must return, per subject it
 was asked to resolve, at most one non-NULL `person_id` row, and the
 trigger must verify the **count** of rows returned equals the **count of
 subjects the authorizing row claims to have**, not merely that the count
-is nonzero:
+is nonzero.
+
+**Fix Round 2, second pass (`RK-W15P2-1` partial re-open, `risk`).** As
+first drafted this round, `expected_count` was computed by a SQL `CASE`
+**expression** with exactly two `WHEN` branches and no `ELSE`. An
+unmatched SQL `CASE` expression evaluates to `NULL`, and PL/pgSQL's `IF`
+treats a `NULL` condition as false — so `IF resolved_count <>
+expected_count THEN` silently never fires for any resolver shape not one
+of the two enumerated, which is exactly the "unresolvable side skipped
+instead of the statement aborting" defect this whole document keeps
+finding and re-finding in different guises (migration `0029`'s inert
+guard, step 4's bare `<>` just corrected above, and now this). `risk`
+identified a live instance, not a hypothetical one: Affiliate's
+**reflexive ancestor-closure** resolver (`REQ-SEP-AFF-1`, §W15.1.2, doc 32
+§6.5.2) is a recursive graph walk with no pre-materialized pinned count —
+it matches neither `WHEN` branch, so `expected_count` was `NULL` and the
+one failure mode this section exists to catch (a truncated recursive
+walk) was the one case it did not catch. Fixed as follows, replacing the
+SQL expression with an explicit, fail-closed PL/pgSQL statement and
+naming three resolver shapes instead of two:
 
 ```
--- Step 5 (AMENDED, Fix Round 2).
-expected_count :=
-  CASE
-    WHEN <authorizing row is single-subject>  THEN 1
-    WHEN <authorizing row is a pinned set>     THEN
-      -- the row count already pinned into the approval payload at
-      -- §B1.2 item 2 / CRM-BR-1 — the same content-hash-plus-row-count
-      -- the set-swap control already requires; where an
-      -- EconomicOperationIdentity exists for the operation (doc 34
-      -- §2.2), this is its subject_set_count field, not a second
-      -- number invented here
-  END;
+-- Step 5 (AMENDED, Fix Round 2, second pass).
+-- resolver_shape is a value the adopting domain's resolver declares as
+-- part of the three-part contract (§W15.1.2 item 1, amended below) —
+-- 'single_subject' | 'pinned_set' | 'ancestor_closure' — never inferred
+-- from the authorizing row's shape by the trigger itself.
+
+IF resolver_shape = 'single_subject' THEN
+  expected_count := 1;
+
+ELSIF resolver_shape = 'pinned_set' THEN
+  -- the row count already pinned into the approval payload at §B1.2
+  -- item 2 / CRM-BR-1 — the same content-hash-plus-row-count the
+  -- set-swap control already requires; where an
+  -- EconomicOperationIdentity exists for the operation (doc 34 §2.2),
+  -- this is its subject_set_count field, not a second number invented
+  -- here
+  expected_count := <pinned subject_set_count>;
+
+ELSIF resolver_shape = 'ancestor_closure' THEN
+  -- No independent pinned or structural count exists for this shape —
+  -- see "The ancestor-closure shape" below. Cardinality is not the
+  -- control for this branch; totality proven *before* the resolver
+  -- runs (Step 0b) is. expected_count is defined as resolved_count so
+  -- that the comparison below is a no-op by construction for this
+  -- shape, not a silently-vacuous NULL by omission.
+  expected_count := resolved_count; -- assigned after the resolver call below
+
+ELSE
+  RAISE EXCEPTION USING ERRCODE = 'SP001',
+    MESSAGE = format('SEP-1: refuse — unrecognized resolver_shape %L;
+               a new resolver shape must add an explicit branch here
+               (with either a pinned count or a Step-0b-style totality
+               proof) before it may be deployed', resolver_shape);
+END IF;
 
 SELECT count(*), count(*) FILTER (WHERE person_id IS NULL)
   INTO resolved_count, null_count
   FROM <domain_resolver_function>(NEW. ...);
+
+IF resolver_shape = 'ancestor_closure' THEN
+  expected_count := resolved_count; -- see ELSIF above
+END IF;
 
 IF resolved_count = 0 THEN
   RAISE EXCEPTION USING ERRCODE = 'SP001',
@@ -1247,45 +1313,171 @@ IF resolved_count <> expected_count THEN
 END IF;
 ```
 
-The third branch is the one this fix adds. A resolver whose join lost
-rows to a mismatched RLS scope now returns `resolved_count <
-expected_count` and is refused **on that basis alone**, independent of
-whether the missing row happened to be the actor's own. This is what
-makes the control robust to *which* row RLS happened to drop, rather
-than correct only for the specific self-dealing case a test author
-thought to construct.
+This is now a PL/pgSQL `IF/ELSIF/.../ELSE` statement, not a SQL `CASE`
+expression, precisely so that "a resolver shape nobody enumerated" is a
+loud, distinct `RAISE EXCEPTION` — refused for being unrecognized, with
+its own message, not a silent `NULL` that happens to make the next `IF`
+false. The `single_subject`/`pinned_set` branches behave exactly as
+before: a resolver whose join lost rows to a mismatched RLS scope
+returns `resolved_count < expected_count` and is refused **on that basis
+alone**, independent of whether the missing row happened to be the
+actor's own.
+
+**The ancestor-closure shape needs a different control, not a bigger
+`CASE`.** The finding's own options were: (a) make the resolver
+structurally total by construction, so there is nothing left to check by
+count; or (b) compute an independent expected count for this shape too,
+e.g. a separate non-recursive query that counts the ancestor chain's
+length before the recursive walk runs it. **(b) is unsound here and is
+rejected, not merely deprioritized.** Counting "the ancestor chain's
+length" is not actually independent of the recursive walk it is meant to
+check — an ancestor chain has no length known in advance except by
+walking parent pointers up the tree, which is the same recursive
+traversal, over the same rows, under the same connection scope, as the
+resolver itself. If the connection's RLS scope truncates the walk at
+node K, a "count the chain first" query hits the identical wall at the
+identical node and returns the identical, equally-wrong number — the two
+numbers agree with each other while both are wrong, and the cardinality
+check passes on a truncated result. This is the exact shape of unsound
+double-check the finding warned against checking for before picking (b),
+and it fails that check.
+
+**(a) is the fix: prove the resolver's connection is structurally unable
+to truncate, before it runs, rather than counting after.** Two parts,
+both required together:
+
+1. **Step 0b (NEW) — subtree-scope self-proof, required specifically
+   before any `ancestor_closure`-shaped resolver runs, in addition to
+   (never instead of) Step 0's tenant-scope self-proof above:**
+
+   ```
+   -- Step 0b — only for resolver_shape = 'ancestor_closure'.
+   scoped_node := NULLIF(current_setting('app.hierarchy_node_id', true), '')
+
+   IF scoped_node IS NOT NULL THEN
+     RAISE EXCEPTION USING ERRCODE = 'SP001',
+       MESSAGE = 'SEP-1: refuse — app.hierarchy_node_id is set on this
+                  transaction; the ancestor-closure resolver requires an
+                  unnarrowed, whole-tenant connection to prove its walk
+                  is total (WithNodeScope analogue, doc 32 §3/AFF-C2) —
+                  a subtree-scoped connection cannot see the ancestors
+                  above its own node and would silently truncate the
+                  walk';
+   END IF;
+   ```
+
+   `app.hierarchy_node_id` (doc 32 §3, `AFF-C2`, `DEP-AFF-5`) is the RLS
+   dimension that scopes a connection to one node's own subtree —
+   *descendants*, not ancestors. A connection narrowed by it is exactly
+   the shape that would truncate an upward ancestor walk, the same way a
+   narrower tenant scope would. Refusing outright when it is set (rather
+   than trying to clear it and proceed) keeps this proof the same shape
+   as Step 0: a precondition checked and refused on, never a value
+   silently overridden and trusted.
+
+2. **The `ancestor_closure` resolver function itself is `SECURITY
+   DEFINER`, with the authorizing row's own already-tenant-proven
+   `tenant_id` (from Step 0 — not a session GUC) compiled into an
+   explicit predicate on every level of the recursive CTE, base case and
+   recursive term alike** — the same discipline §W15.1.4 already requires
+   of any `SECURITY DEFINER` resolver ("never relying on the definer's
+   RLS bypass to be scoped by something else"). This is what makes the
+   walk *cross-tenant-safe* rather than merely subtree-safe: `SECURITY
+   DEFINER` bypasses RLS entirely (including any future RLS dimension
+   that is not `app.hierarchy_node_id`), so the walk's only tenant
+   boundary is the one written into the query text, not one enforced by
+   whatever policy happens to be attached to the table. Combined with
+   Step 0b, the resolver runs with a **proven**, whole-tenant,
+   single-tenant view of exactly the authorizing row's own tenant, and
+   `agentnetwork`'s node instances being `tenant_id NOT NULL` (doc 32 §3:
+   "every node instance is `tenant_id NOT NULL`") means there is no row
+   for the walk to lose within that tenant — the resolver is total by
+   construction, not by having survived a count.
+
+   Given that, `expected_count := resolved_count` for this shape (shown
+   above) is not a gap being papered over: it is the correct expression
+   of "this shape's totality is Step 0b's job, and Step 0b already
+   refused if it could not be proven" — the cardinality comparison is
+   structurally a no-op here because the thing it would have caught
+   cannot occur once Step 0b holds.
+
+   **Dependency stated, not assumed — routed to `architect` (doc 32/
+   `agentnetwork` owner).** This construction depends on `agentnetwork`
+   parent/child edges never crossing a tenant boundary — i.e., a node's
+   ancestor chain, walked via parent pointers, never leaves the node's
+   own tenant. Doc 32 §3 states every node *instance* is single-tenant,
+   which this reasoning was checked against, but does not state as a
+   standalone invariant that no *edge* connects nodes of two different
+   tenants (relevant to the hybrid B2B licensing model, `docs/decisions/
+   0006-…`, where a partner tenant's own sub-affiliates could in
+   principle be modeled as rolling up cross-tenant). **`architect` must
+   confirm this invariant holds for `agentnetwork` as built, or, if a
+   cross-tenant edge is ever legitimate, the single-`tenant_id` predicate
+   above is insufficient and the resolver needs a tenant-closure
+   predicate instead of a tenant-equality one.** Until confirmed,
+   Affiliate's adoption of `SEP-1` (`REQ-SEP-AFF-1`) must not ship against
+   a hierarchy where this is unverified.
 
 **Amendment to the three-part contract (§W15.1.2 item 1).** A beneficiary
 resolver is no longer sufficient as "a SQL function that … returns the
-set of `persons.id` values" alone; it must additionally be
-**countable against the authorizing row's own declared subject count**
-— for `single_subject` scope this is structural (there is exactly one
-target), and for a pinned set it is the row count **already** pinned at
-approval time (§B1.2 item 2, `CRM-BR-1`). This is not a new obligation on
-adopting domains beyond what they already must pin; it is a requirement
-that the trigger **read and check** a number the domain was already
-recording, rather than trusting the join's row count implicitly.
+set of `persons.id` values" alone; it must additionally declare its
+**`resolver_shape`** (`single_subject` | `pinned_set` | `ancestor_closure`
+— an adopting domain introducing a genuinely new shape adds a new named
+branch to Step 5 above, per its fail-closed `ELSE`, before deploying it)
+and be **verifiably total** for that shape — for `single_subject` this is
+structural (there is exactly one target), for `pinned_set` it is the row
+count **already** pinned at approval time (§B1.2 item 2, `CRM-BR-1`), and
+for `ancestor_closure` it is Step 0b plus the `SECURITY DEFINER`
+explicit-tenant-predicate construction above. This is not a new
+obligation on adopting domains beyond what they already must pin or
+prove; it is a requirement that the trigger **read and check** (or, for
+`ancestor_closure`, **structurally foreclose**) a gap, rather than
+trusting the join's row count implicitly.
 
 **Honest scope of what this closes.** This closes the *partial-RLS-read*
-shape of fail-open. It does **not** by itself prove every possible
-resolver query is written correctly — a resolver that never crosses a
-differently-scoped table has nothing to truncate, and a resolver whose
-own logic (not RLS) omits a genuine beneficiary is a resolver-authoring
-defect this cardinality check cannot detect, because the resolver
-itself decided what "expected" means for anything other than the
+shape of fail-open for all three named shapes, including the one
+(`ancestor_closure`) that the first pass of this fix missed. It does
+**not** by itself prove every possible resolver query is written
+correctly — a resolver that never crosses a differently-scoped table has
+nothing to truncate, and a resolver whose own logic (not RLS) omits a
+genuine beneficiary is a resolver-authoring defect this mechanism cannot
+detect, because the resolver itself decided what "expected" means (or,
+for `ancestor_closure`, what "total" means) for anything beyond the
 pinned-count set case. `qa`'s per-domain adversarial test set (§W15.1.8,
 amended below) is what catches that class, one adopting domain at a
 time; this section closes the *mechanism-level* gap, not every possible
-resolver bug.
+resolver bug. Nor does it prove `agentnetwork` never grows a cross-tenant
+edge — that is the routed dependency to `architect` stated above, and
+this fix is not claimed complete for `REQ-SEP-AFF-1` until it is
+confirmed.
 
-**New test, added to §W15.1.8's list:** a resolver whose join is made to
-cross a row outside the acting connection's RLS scope (simulated by
-scoping the trigger's own connection one tenant narrower than a
-beneficiary's actual row) returns fewer rows than `expected_count` and
-is refused with the cardinality-mismatch reason — asserted as its own
-distinct case from the pre-existing empty-set and NULL-person tests,
-because a fix that only re-tests those two would not catch a regression
-of this one.
+**New tests, added to §W15.1.8's list:**
+
+- A resolver whose join is made to cross a row outside the acting
+  connection's RLS scope (simulated by scoping the trigger's own
+  connection one tenant narrower than a beneficiary's actual row) returns
+  fewer rows than `expected_count` and is refused with the
+  cardinality-mismatch reason — asserted as its own distinct case from
+  the pre-existing empty-set and NULL-person tests, for the
+  `single_subject` and `pinned_set` shapes.
+- **(New, second pass)** A trigger invoked with a `resolver_shape` value
+  that matches none of the enumerated branches is refused with the
+  distinct "unrecognized resolver_shape" error, not silently passed —
+  the direct regression test for the defect this second pass fixes, and
+  the only test that would have caught the original unmatched-`CASE`
+  shape.
+- **(New, second pass)** An `ancestor_closure` resolver invoked on a
+  connection with `app.hierarchy_node_id` set is refused at Step 0b, with
+  the subtree-scope-self-proof error, **before** the resolver runs at
+  all — asserted by observing the resolver function is never invoked
+  (e.g. via a call-count instrumentation on the test double), not merely
+  by observing the overall refusal, so a future change that clears the
+  GUC instead of refusing on it cannot pass this test by accident.
+- **(New, second pass, blocked on the routed `architect` confirmation
+  above)** If `agentnetwork` ever permits a cross-tenant parent/child
+  edge, a beneficiary on the far side of that edge must still be resolved
+  or the operation refused — this test cannot be written until
+  `architect` confirms whether the case exists.
 
 #### W15.1.10 Fix Round 2 (`RK-W15P2-6`, part a) — the non-NULL-actor precondition as a DB constraint
 
@@ -1303,33 +1495,114 @@ later, by any path that does not go through whatever created the
 original account.
 
 **Fix — a real, permanent, database-enforced constraint on
-`staff_users`, replacing the query as the enforcement mechanism:**
+`staff_users`, replacing the query as the enforcement mechanism.**
+
+**Fix Round 2, second pass — `identity-compliance`'s sign-off findings on
+`REQ-SEP-STAFF-1`, checked against the real migrations
+(`0011_create_staff_users.up.sql`, `person_id` added by `0029`, made
+append-only by `0034`).** The constraint as first drafted this round was
+**not** signed off, on two grounds, both addressed below:
+
+**(1) Confirming `identity-compliance`'s reading of `SEP-1`'s own step 4
+against `platform_admin` rows — this is `SEP-1`'s semantics, so the call
+is `security`'s to make, and it is confirmed correct, with one
+correction to how step 4 was itself specified.** Migration `0011`'s own
+`CHECK` makes `role = 'platform_admin' ⟺ tenant_id IS NULL`, and every
+`SEP-1`-authorizing table is tenant-owned (`tenant_id NOT NULL`,
+`CLAUDE.md`). `identity-compliance` read step 4 (§W15.1.3) as refusing
+every `platform_admin` actor unconditionally, on every such table, because
+its `tenant_id` is never equal to any real tenant's id — and therefore a
+`platform_admin`'s `person_id` buys `SEP-1` nothing, since it never
+reaches step 5 regardless. **That reading is correct only for a
+NULL-aware comparison, and step 4 was specified with a bare `<>`, which
+is not one** — see the correction just made to step 4 above (`IS
+DISTINCT FROM`, not `<>`), found while confirming this exact reading:
+as originally written, a bare `<>` against `staff_users.tenant_id IS
+NULL` evaluates `NULL`, `IF` treats that as false, and a `platform_admin`
+actor would have silently **passed** step 4 on every tenant, not been
+refused by it — the opposite of what `identity-compliance`'s reasoning,
+and the sign-off decision below, depend on. With step 4 corrected to
+`IS DISTINCT FROM`, `identity-compliance`'s reading now holds as stated:
+a `platform_admin` actor is refused at step 4 on every tenant-owned
+authorizing row, unconditionally, so requiring `person_id` of a
+`platform_admin` row buys `SEP-1` nothing, and directly undercuts
+migration `0033`'s documented "`person_id` is optional and NULL-forever
+for the overwhelming majority of staff" invariant for no compensating
+gain. The exemption is adopted.
 
 ```sql
 ALTER TABLE staff_users
   ADD CONSTRAINT staff_users_active_requires_person
-  CHECK (status <> 'active' OR person_id IS NOT NULL);
+  CHECK (
+    status <> 'active'
+    OR person_id IS NOT NULL
+    OR role = 'platform_admin'
+  );
 ```
+
+The `OR role = 'platform_admin'` clause follows migration `0011`'s own
+role-conditioned `CHECK` pattern (`role = 'platform_admin' AND tenant_id
+IS NULL) OR (role != 'platform_admin' AND tenant_id IS NOT NULL)`) rather
+than inventing a new style for this table.
+
+**(2) The remediation query's per-tenant framing structurally cannot see
+`platform_admin` rows, and needed a second pass regardless of (1).**
+`WHERE tenant_id = <t>` is never true against a NULL `tenant_id`, so no
+number of per-tenant remediation runs examines a `platform_admin` row —
+`identity-compliance`'s finding on this point stands on its own, whether
+or not the exemption above is adopted, because remediation for a
+*table-wide* constraint must actually cover the whole table.
+**Remediation is therefore two passes, not one:**
+
+```sql
+-- Pass 1 — per tenant (unchanged from Fix Round 2's first pass):
+SELECT id, email FROM staff_users
+  WHERE tenant_id = <t> AND status = 'active' AND person_id IS NULL;
+
+-- Pass 2 — NEW, second pass (identity-compliance, REQ-SEP-STAFF-1) —
+-- platform-scoped staff, tenant_id IS NULL, invisible to pass 1:
+SELECT id, email FROM staff_users
+  WHERE tenant_id IS NULL AND status = 'active' AND person_id IS NULL;
+```
+
+**Pass 2 is kept even though the exemption in (1) means a surviving
+`platform_admin` row it finds would not, in fact, fail the migration.**
+This is stated plainly so it is not misread as belt-and-braces
+busywork: `role = 'platform_admin'` and `tenant_id IS NULL` are the same
+condition (migration `0011`'s own `CHECK` makes them equivalent), so
+every row pass 2 would find is, by construction, a row the exemption
+already covers — the exemption alone is sufficient for this migration to
+succeed. Pass 2 is kept anyway for the reason stated as a "side effect"
+below: several **other** triggers in the `0034`/`0044`/`0047` family
+resolve the same `staff_users.person_id` column **without** this
+exemption (they have no reason to carry a `SEP-1`-specific carve-out for
+`platform_admin`), so knowing the true, whole-table state before this
+migration ships — not just the state of the rows this one constraint
+happens to gate — is cheap, honest, and consistent with `CLAUDE.md`'s
+"verify actual implementation state" rule. It is not required for
+*this* constraint's own correctness once (1) is adopted, and that
+distinction is the whole reason it is spelled out rather than left
+implicit.
 
 This is a standard table `CHECK` constraint, evaluated by PostgreSQL on
 every `INSERT` and `UPDATE` to `staff_users`, not a one-time read. It
 cannot be silently bypassed by a code path the pre-deploy query's author
 did not anticipate, and it turns "a tenant's promotions staff account
 went active with no person link" from a possible-but-unverified state
-into a rejected write, structurally, forever.
+into a rejected write, structurally, forever — while leaving
+platform-wide staff exactly as unaffected by it as `SEP-1` already
+renders them, per (1).
 
 **The pre-deploy query does not disappear — its role changes.** Adding
-this constraint to a table that already contains a violating row fails
-the migration outright (the correct, fail-closed behavior — it is
-cheaper to discover a violation at migration time than to discover it
-was silently tolerated). The `SELECT id, email FROM staff_users WHERE
-tenant_id = <t> AND status = 'active' AND person_id IS NULL` query
+this constraint to a table that already contains a violating,
+non-exempt row fails the migration outright (the correct, fail-closed
+behavior — it is cheaper to discover a violation at migration time than
+to discover it was silently tolerated). The two-pass query above
 therefore becomes the **remediation** step run immediately before the
-migration that adds this constraint, per tenant — clean the data, then
-make the invariant permanent — rather than the control itself. This
-mirrors the same distinction `SEP-1` draws everywhere else in this
-contract between a check that fires once and one the database enforces
-continuously.
+migration that adds this constraint — clean the data, then make the
+invariant permanent — rather than the control itself. This mirrors the
+same distinction `SEP-1` draws everywhere else in this contract between
+a check that fires once and one the database enforces continuously.
 
 **Side effect, stated rather than claimed as a deliverable**: this
 constraint hardens every existing `<table>_enforce_governance()` trigger
@@ -1337,7 +1610,12 @@ in the migration `0034`/`0044`/`0047` family that already depends on the
 same precondition, not only `SEP-1`'s own triggers — because they all
 resolve the same `staff_users.person_id` column. That is a welcome
 side effect of closing `SEP-1`'s dependency correctly, not a new,
-separately-scoped deliverable of this dispatch.
+separately-scoped deliverable of this dispatch, and it is also exactly
+why pass 2 of the remediation query is worth running even where the
+`platform_admin` exemption makes it non-blocking for this constraint
+specifically — those other triggers may not carry the same exemption,
+and pass 2 is how their owners would find out before, not after,
+deploy.
 
 **Routed requirement — `REQ-SEP-STAFF-1`.** `security` does not own
 `staff_users` or its migrations (CLAUDE.md, "no specialist redesigns
@@ -1345,16 +1623,37 @@ shared architecture unilaterally"). Routed to `identity-compliance`
 (co-owner of the `staff_users.person_id` ↔ `Person` primitive per
 `REQ-SEP-ID-1`, §W15.1.6) and whoever owns the `staff_users` migration
 file in practice (`backend-platform`), flagged for `architect`'s
-cross-domain sign-off: add
-`staff_users_active_requires_person` in the same migration that performs
-the per-tenant remediation query above, before any `SEP-1` or `AFF-4E-1`
-trigger goes live in a non-development environment.
+cross-domain sign-off: add `staff_users_active_requires_person` (with the
+`platform_admin` exemption above) in the same migration that performs
+**both passes** of the remediation query above, before any `SEP-1` or
+`AFF-4E-1` trigger goes live in a non-development environment.
+`security`'s own step-4 reading (1) is stated here as confirmed, but the
+constraint's wording and the migration itself remain
+`identity-compliance`/`architect`'s to land, per the same routing as Fix
+Round 2's first pass.
 
-**Test, added to §B1.5/§W15.1.8's obligations:** an `UPDATE staff_users
-SET status = 'active' WHERE person_id IS NULL` (attempted directly,
-bypassing every application code path) is rejected by the database with
-a constraint violation, not merely refused by application logic that
-could be routed around.
+**Tests, added to §B1.5/§W15.1.8's obligations:**
+
+- An `UPDATE staff_users SET status = 'active' WHERE person_id IS NULL
+  AND role <> 'platform_admin'` (attempted directly, bypassing every
+  application code path) is rejected by the database with a constraint
+  violation, not merely refused by application logic that could be
+  routed around.
+- **(New, second pass)** An `UPDATE staff_users SET status = 'active'
+  WHERE person_id IS NULL AND role = 'platform_admin'` **succeeds** at
+  the constraint level (the exemption does not over-block) — paired,
+  positive-case test, so the exemption's correctness is asserted
+  directly rather than inferred from the first test's absence of a
+  false positive.
+- **(New, second pass)** A `platform_admin` actor, `person_id` NULL,
+  attempting a `SEP-1`-guarded operation on a real tenant's authorizing
+  row is refused at **step 4** with reason code
+  `SEP1_ACTOR_TENANT_MISMATCH` (§W15.1.11, second pass), distinct from
+  `SEP1_ACTOR_UNRESOLVED`/`SEP1_ACTOR_IS_BENEFICIARY` — asserted
+  specifically so a future relaxation of step 4 back to
+  a bare `<>` (silently passing a `platform_admin` actor instead of
+  refusing it) is caught here, not discovered as a live self-deal path
+  later.
 
 #### W15.1.11 Fix Round 2 (`RK-W15P2-6` part b / `RK-W15P2-7`) — the denial-audit record, redesigned per ADR 0031 §39
 
@@ -1423,13 +1722,20 @@ a reserved custom SQLSTATE, not by parsing a message string:**
      keeps its own existing action name, e.g. `bonus_change_request
      .rejected`) or with an RBAC/RLS denial
    - `Metadata.reason_code` one of a small fixed set naming *which* step
-     of §W15.1.3 (as amended by §W15.1.9) refused —
+     of §W15.1.3 (as amended by §W15.1.9, second pass) refused —
      `SEP1_ACTOR_UNRESOLVED`, `SEP1_ACTOR_IS_BENEFICIARY`,
      `SEP1_APPROVER_IS_BENEFICIARY`, `SEP1_EMPTY_BENEFICIARY_SET`,
      `SEP1_NULL_BENEFICIARY_PERSON`, `SEP1_CARDINALITY_MISMATCH`,
-     `SEP1_TENANT_SCOPE_SELF_PROOF_FAILED` — never the resolved
-     `person_id`s or beneficiary attributes themselves (§B1.4's PII
-     rule applies to this record exactly as to every other)
+     `SEP1_TENANT_SCOPE_SELF_PROOF_FAILED`,
+     `SEP1_ACTOR_TENANT_MISMATCH` (step 4, second pass — includes every
+     `platform_admin` actor on a tenant-owned row, by the `IS DISTINCT
+     FROM` correction above),
+     `SEP1_SUBTREE_SCOPE_SELF_PROOF_FAILED` (Step 0b, second pass —
+     `ancestor_closure` resolvers only), and
+     `SEP1_RESOLVER_SHAPE_UNRECOGNIZED` (step 5's fail-closed `ELSE`,
+     second pass) — never the resolved `person_id`s or beneficiary
+     attributes themselves (§B1.4's PII rule applies to this record
+     exactly as to every other)
    - the attempted operation's identity (tenant, target type/id,
      operation type) but **not** the payload the attempt tried to write,
      for the same reason a denied withdrawal's audit record does not
@@ -2373,3 +2679,30 @@ arriving through a legitimate read path.
   subject to independent re-review by `risk` and `code-reviewer` before
   either finding is marked closed in fact rather than at the design
   level.
+- **Fix Round 2, closing pass (Wave 1.5, Fix Round 2 Round 2) corrects
+  two defects in that same dispatch, found by `risk` and
+  `identity-compliance` re-reviewing it, not by a new external finding**:
+  (1) `risk`'s partial re-open of `RK-W15P2-1` — §W15.1.9's cardinality
+  `CASE` had no fail-closed default and was proven silently inert on
+  exactly the resolver shape (Affiliate's reflexive ancestor closure) it
+  was written to catch; fixed by §W15.1.9's second pass (a fail-closed
+  `IF/ELSIF/ELSE`, a named `ancestor_closure` shape, a new Step 0b
+  subtree-scope self-proof, and a `SECURITY DEFINER` explicit-tenant-
+  predicate construction for that resolver, in place of an independent
+  count that would have shared the same RLS blind spot it was meant to
+  check). (2) `identity-compliance`'s non-sign-off of `REQ-SEP-STAFF-1` —
+  the proposed `staff_users` constraint and its per-tenant remediation
+  framing could not see platform-scoped (`tenant_id IS NULL`) staff at
+  all; fixed by a two-pass remediation query and a confirmed, corrected
+  `platform_admin` exemption on the constraint, which in turn required
+  correcting step 4's own tenant-match comparison (bare `<>` to `IS
+  DISTINCT FROM`) because the exemption's soundness depends on step 4
+  actually refusing every `platform_admin` actor rather than silently
+  passing one. **One dependency remains open, routed rather than
+  resolved**: `architect`'s confirmation that `agentnetwork` parent/child
+  edges never cross a tenant boundary (§W15.1.9, second pass) — until
+  confirmed, `REQ-SEP-AFF-1`'s `ancestor_closure` construction is not
+  claimed complete. This closing pass is, again, `security`'s own
+  correction to its own immediately-prior design and remains subject to
+  the same independent re-review by `risk` and `code-reviewer` before
+  either finding is marked closed in fact.
