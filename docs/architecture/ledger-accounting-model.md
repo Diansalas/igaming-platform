@@ -294,6 +294,7 @@ members; where only one applies it is named.
 | `player_bonus` (`BLUEPRINT`) | Non-withdrawable bonus balance subject to wagering | Wallet | Any asset bonuses are offered in | Credit | bonus_grant, casino/sportsbook bet/win (bonus-funded stake), bonus_conversion (bonus→cash), bonus_forfeiture | No | Yes | Wallet projection vs. ledger (hourly); bonus-engine liability vs. `promo_liability` (see below) |
 | `player_locked_cash` (`BLUEPRINT`, as the cash half of the Blueprint's `player_locked` — migration `0048`) | Cash-funded funds locked against an open sportsbook stake (not yet settled) | Wallet | Any asset sportsbook accepts | Credit while locked (liability — stake still belonging to the player until the outcome is known) | sportsbook_bet (lock), sportsbook_settlement (release), sportsbook_partial_settlement (partial release), sportsbook_void (release) | No | Yes, on void/partial settlement | Open-liability report (see `09-sportsbook-architecture.md`) vs. the sum of **both** locked types' balances (`player_locked_cash` + `player_locked_bonus`); a query naming only one silently under-reports (§6.4.8 item 5) |
 | `player_locked_bonus` (`BLUEPRINT`, as the bonus half of the Blueprint's `player_locked` — migration `0048`) | Bonus-funded funds locked against an open sportsbook stake (not yet settled) | Wallet | Any asset sportsbook accepts | Credit while locked (liability — stake still belonging to the player until the outcome is known) | sportsbook_bet (lock), sportsbook_settlement (release), sportsbook_partial_settlement (partial release), sportsbook_void (release) | No | Yes, on void/partial settlement | Same open-liability reconciliation as `player_locked_cash`; **additionally** inside invariant B1's extended set `{player_bonus, player_locked_bonus}` (§6.1, §6.3.2), so it is also covered by the B1 reconciliation stream (`reconciliation-model.md` §2.9) |
+| `player_bonus_held` (`ARCHITECTURAL DECISION`, Stage 4H-B1 Wave 1.5 Fix Round 2, §7.7.2) | Bonus-origin settlement value (a win payout, and/or a released stake lock) whose disposition is undecided because `NewStakeEligibility` for the attributed Grant had already closed at settlement time — held pending a human-supplied G-2 answer (ADR 0039 Decision 2) | Wallet | Any asset bonus-funded wagering is offered in | Credit (liability — still potentially owed to the player, pending disposition) | Hold-capture leg of casino_win/sportsbook_settlement/sportsbook_partial_settlement (credit only); the resolution transaction that clears it (`ACTION_REFORFEIT`'s first half into `player_bonus`, or `ACTION_ROUTE_TO_CASH` directly into `player_cash` — both debit this account); the generic rollback-inversion of a still-held hold-capture posting (§7.7.2.7) | No | Yes | New stream **LF-12** (§7.7.2.8): every open `bonus_held_dispositions` row's amount must equal exactly its attributed balance here; **additionally** a third member of `BONUS_SET` (§6.1), covered by B1 (extended)'s hourly zero-tolerance sweep |
 | `player_withdrawal_hold` (`ARCHITECTURAL DECISION`) | Funds earmarked for a withdrawal request that has left `player_cash` but is not yet externally sent (pending approval/PSP submission) | Wallet | Any withdrawable asset | Credit while held | withdrawal_requested (in), withdrawal_completed (out, external send), withdrawal_reversed (back to `player_cash`) | No | Yes | Cross-checked against open rows in the withdrawal state machine (`withdrawal-state-machine.md`) — every held amount must equal exactly one non-terminal withdrawal request |
 | `house_gaming` (`BLUEPRINT`) | House's gaming P&L (stakes in, wins out) | Tenant (house-level, no wallet — see `financial-domain-model.md`) | Any asset the tenant accepts stakes in | Credit (revenue) net over time — may legitimately sit debit-side for a period if payouts exceed stakes | casino_bet, casino_win, casino_rollback, sportsbook_settlement, sportsbook_partial_settlement, sportsbook_void (post-settlement), provider_settlement (fee recognition — see Flow 17 `OPEN DECISION`). **Not** `sportsbook_bet`: a sportsbook stake moves `player_cash` → `player_locked_cash` and/or `player_bonus` → `player_locked_bonus` only, and does not touch `house_gaming` until settlement | No | Yes | Recomputed GGR (Blueprint §4.9) vs. this account's balance, per tenant per asset |
 | `provider_payable` (`BLUEPRINT`) | Amount owed to a casino/sportsbook game provider for GGR-share/fees | Tenant (house-level) | Any asset the provider bills in | Credit (liability) | provider_settlement | No | Yes | Daily reconciliation against provider settlement statements |
@@ -534,6 +535,17 @@ rather than numbered so the Stage 3B list above keeps its numbering:
 |---|---|---|
 | B1 | **B1 (extended)** — `signed(promo_liability) + Σ signed(player_bonus) + Σ signed(player_locked_bonus) == 0` for every `(tenant_id, asset_code)`, at every instant, **no tolerance band**. The aggregated account set is named `BONUS_SET = {player_bonus, player_locked_bonus}` (§7.4.2) | **Rule B2 (extended)**: every `LedgerTransaction` is mirrored on its **net** movement across `BONUS_SET` per asset — an equal, opposite `promo_liability` leg generated/validated in `internal/ledger` rather than assembled by callers (§7.4.2's four-step generator; HR-17 forbids a caller-supplied mirror leg). A movement *within* `BONUS_SET` (a lock, `Dr player_bonus · Cr player_locked_bonus`, or its release) nets to zero and is correctly **unmirrored**. Verified continuously by a new hourly, zero-tolerance reconciliation stream, P1 on any drift (`reconciliation-model.md` §2.9) |
 | L1 | Locked-origin determinacy: every `LedgerEntry` against a locked-funds account is attributable to the origin of the value it holds from the account's own `account_type` alone. Family membership is explicit and named; no origin-indeterminate locked account exists or can be created. Full statement, including the extensibility clause, in §6.5.4 | Five layers (§6.5.4): (1) `ledger_accounts_account_type_check` admits `player_locked_cash`/`player_locked_bonus` and **not** `player_locked` (migration 0048); (2) no `AccountPlayerLocked` Go const exists, so a stale use is a compile error; (3) migration 0048's pre-flight guard proves the pre-state; (4) every read-side `account_type` enumeration is exhaustive with a fail-closed `default` (`internal/wallet.GetSummary`); (5) tests in `internal/ledger` and `internal/wallet` (§6.5.8) |
+
+> **`BONUS_SET` is extended to a THIRD member.** *(Added Stage 4H-B1, Wave
+> 1.5 Fix Round 2, §7.7.2 — the holding-representation decision.)*
+> `BONUS_SET = {player_bonus, player_locked_bonus, player_bonus_held}`.
+> The new member holds bonus-origin settlement value whose disposition is
+> undecided pending a human-supplied G-2 answer (ADR 0039 Decision 2).
+> B1 (extended)'s formula above gains a third summand,
+> `Σ signed(player_bonus_held)`, and Rule B2 (extended)'s boundary-crossing
+> rule (§6.3.2, §7.4.2) applies to it identically to the other two members.
+> Full derivation, schema, and the reasoning against **LF-19**/**LF-20**:
+> §7.7.2.
 
 L1 is `IMPLEMENTED` as of migration 0048 and its accompanying Go changes
 (§6.5's implementation-status note). It is a *determinacy* statement, not
@@ -6888,6 +6900,548 @@ cross-document finding for the Phase-2 reconciliation round**, not
 something to be waved through on the strength of B1 holding — B1 holding
 is necessary and, as §4 above shows, nowhere near sufficient.
 
+#### 7.7.2 The holding-representation decision — Stage 4H-B1, Wave 1.5 Fix Wave, Round 2 (DECIDED, binding)
+
+Per the human directive authorizing this round: *"Define the exact
+representation... It must be: ledger-balanced; auditable; reconstructable;
+tenant-scoped; asset-scoped; idempotent; safe under concurrency; resistant
+to replay... Do not invent a third economic outcome. Do not choose G-2."*
+This section makes the account-type/schema decision §7.7.1 (A-2) and doc
+10 §N1.4.1 (item 2's two-branch split) both explicitly declined to make,
+closes **LF-19**, **LF-20** and **LF-22**, and states the binding contract
+`bonus-engine` and `casino` build against for the rest of this round. It
+does not restate §7.7.1's B1/L1 analysis (still correct, §7.7.2.1 explains
+why A-1 becomes moot rather than satisfied) and it does not select G-2's
+answer.
+
+##### 7.7.2.1 The decision
+
+**A single, new, dedicated, Grant-attributed bonus-origin holding account
+type, `player_bonus_held`, used identically whether or not the
+originating stake was locked.** This is the shape `casino` and `architect`
+both independently proposed in Phase 2 and that §7.7.1 (A-2) and doc 10
+§N1.4.1 (item 2) both explicitly routed here rather than choosing. It is
+decided now, under this round's explicit human authorization, for the
+following reasons — argued directly against LF-19 and LF-20, not in the
+abstract.
+
+**Why not branch 1 (reuse `player_locked_bonus`) — LF-19 and LF-20 as the
+reasons for rejection, not merely findings against it:**
+
+- **LF-19.** §6.6.6's nullifiable predicate is defined exactly as
+  `Σ signed(player_locked_bonus) over (tenant_id, correlation_id) > 0` —
+  it cannot distinguish "this correlation_id still has an open bet" from
+  "this correlation_id's bet settled and its win is parked here pending
+  G-2," because under branch 1 both are the identical fact: a nonzero
+  `player_locked_bonus` balance under that `correlation_id`. Every entry
+  sharing that `correlation_id` — not only the held win — reads as
+  permanently nullifiable for as long as the hold is open; `P_firm` never
+  reaches `T`; by invariant W1 (HR-12), `bonus_conversion` can never be
+  authorized under that Grant. This is not a bug in the predicate — the
+  predicate does exactly what it is defined to do. It is a defect in
+  asking one account, one balance, to mean two mutually exclusive things
+  ("outcome unknown" and "outcome known, administratively unresolved").
+  Closing it without a new account requires an exclusion clause keyed on
+  something other than `account_type` — reopening exactly the "future
+  defect made the holding account readable" risk N1.4.1 item 3 already
+  warns about, now applied to the gate on real money's conversion. This
+  section avoids that clause by not putting the held value in that
+  account at all.
+- **LF-20.** N1.3 defines `AOE(G, t) = LockedExposure(G, t) ∪
+  InFlightExposure(G, t) ∪ HeldDisposition(G, t)`, stating the
+  `LockedExposure`/`InFlightExposure` member is "**replaced, not
+  cleared**" by `HeldDisposition` at capture. Under branch 1,
+  `LockedExposure(G, t)` is itself a live balance read of
+  `player_locked_bonus` attributed to `G` — the *same account*
+  `HeldDisposition` would also read. A physical balance cannot be
+  "replaced" by relabeling; the money never left the account, so any read
+  of `LockedExposure` after the hold posts reports the identical nonzero
+  figure it reported before, and an independent read computing
+  `HeldDisposition` from the same balance reports the same money again.
+  Harmless for a mere `AOE ≠ ∅` check (an OR of two truths about one fact
+  is still true) — fatal the moment anything needs the components
+  separately (an aging/reconciliation report distinguishing "still an
+  open bet" from "unresolved disposition" cannot be built against branch
+  1 at all, because on the ledger the two figures are one and the same
+  number).
+
+**Why this design closes both, by construction.** `player_bonus_held` is
+a **third, disjoint** ledger account (per wallet, per asset — the same
+per-`(wallet_id, account_type, asset_code)` shape every other `player_*`
+type already has). The hold-capture posting (§7.7.2.2) **debits
+`player_locked_bonus` to exactly zero** for the resolved stake (the same
+debit casino's `L(G) → 0` mandate already requires, §16.5a) and **credits
+`player_bonus_held`** with the net held value. After that posting:
+
+- `Σ signed(player_locked_bonus)` for that `correlation_id` is zero —
+  §6.6.6's predicate, **unmodified**, correctly reports "not nullifiable"
+  for that bet, because its defined subject has genuinely gone to zero,
+  exactly as on an ordinary win. LF-19 does not arise: there is no
+  predicate exception to maintain, because the held value was never in
+  the account the predicate reads. **A-1 (§7.7.1) is moot, not merely
+  satisfied** — there is nothing left for it to require.
+- `LockedExposure(G, t)` (unchanged, a balance read of
+  `player_locked_bonus`) correctly reads zero for this stake.
+  `HeldDisposition(G, t)` is redefined (§7.7.2.10 item 2) as a balance read
+  of the **different** account, `player_bonus_held`, attributed to `G`.
+  Two disjoint account balances cannot report the same money twice —
+  LF-20's double-count is structurally unreachable, since a single ledger
+  entry posts to exactly one account.
+
+##### 7.7.2.2 Composing with casino's `L(G) → 0` mandate and the released-lock-amount destination
+
+`08 §16.5a` requires every WIN settlement — held or not — to close `L(G)`
+to zero in the same transaction as the settlement, and separately flags
+(then unnamed) that `ACTION_HOLD_FOR_REVIEW`'s disposition "must
+additionally name a suspense/hold account for [the released lock amount],
+distinct from wherever it holds the payout." Both are answered by the same
+account, in the same posting:
+
+> **The hold-capture posting — one balanced `LedgerTransaction`:**
+> - `Dr house_gaming payout_amount (W) · Cr player_bonus_held payout_amount (W)`
+>   — the win's own value-creating credit, captured rather than posted to
+>   `player_bonus`.
+> - `Dr player_locked_bonus released_lock_amount (X) · Cr player_bonus_held
+>   released_lock_amount (X)` — present **only if** the originating stake
+>   was locked (sportsbook always; casino, if and when `08 §16.10.1`'s
+>   lock-shape recommendation is adopted for bonus-funded casino bets —
+>   not decided or required by this section). **Absent entirely** if the
+>   stake was never locked.
+>
+> Both legs, when both are present, post in the **same** `ledger.Post`
+> call — never as two transactions — so there is no intermediate state in
+> which `L(G)` has closed but the payout has not yet been captured, or
+> vice versa.
+
+This closes architect's "the released-lock amount has no destination"
+finding directly: `player_bonus_held` is that destination, for both legs,
+in every case, uniformly. There is exactly one account; the two branches
+differ only in whether the occurrence's posting has one leg or two — a
+fact about the bet, not a design choice. This is why this section retires
+doc 10 §N1.4.1's own two-branch account-type split (§7.7.2.10 item 3): that
+split described the same underlying uncertainty this section closes, one
+document early.
+
+##### 7.7.2.3 `BONUS_SET` extension and mirror-generator interaction
+
+`player_bonus_held` is a member of `BONUS_SET` (§6.1's extension note).
+This is necessary, not incidental: the value is still bonus-origin and
+still potentially payable to the player pending G-2, so excluding it from
+`BONUS_SET` would let real, disputed bonus value sit permanently outside
+invariant B1's aggregate — strictly worse than the defect this section
+closes.
+
+**Mirror-generator trace, exactly as §7.7.1 traced it for branch 1 (the
+trace is unchanged by which `BONUS_SET` member receives the credit):**
+
+- The `X` leg (`Dr player_locked_bonus X · Cr player_bonus_held X`) is a
+  transfer **within** `BONUS_SET` — both accounts are members — so it nets
+  to zero over the set and Rule B2 (extended) generates **no mirror**,
+  identically to an ordinary lock or lock-release.
+- The `W` leg (`Dr house_gaming W · Cr player_bonus_held W`) crosses
+  `BONUS_SET`'s boundary exactly as `Dr house_gaming Y · Cr
+  player_locked_bonus Y` did in §7.7.1's own trace. **The trace is
+  identical, only the receiving account's name changes**: net over
+  `BONUS_SET` = `+W`; mirror `Dr promo_liability W`; residual
+  `r = W − (W + W) = −W` → `Cr bonus_expense W`; four entries total,
+  balances.
+
+**Item 3's answer, stated plainly so this section is not misread as
+having removed a precondition by choosing a new account type: it has
+not.** Migration `0050` (`bonus_expense`) and the Rule B2 (extended)
+generator remain **hard preconditions**, unchanged, for exactly the reason
+§7.7.1 found them necessary — the boundary crossing is a property of *a
+win payout entering bonus-attributable value from `house_gaming`*, not a
+property of *which* `BONUS_SET` member receives it. Choosing a new account
+type changes where the money lands; it cannot change that money still
+crosses the boundary.
+
+**HR-9's guard is correspondingly widened (HR-23, §7.14).** A posting
+against `player_bonus_held` fails closed under the identical rule and for
+the identical reason as `player_bonus`/`player_locked_bonus` — the account
+is new, but the hazard (a `player_bonus_held` credit posted before the
+generator exists breaks B1 on its first row, exactly as an early
+`player_bonus` grant would) is not.
+
+**HR-9's blocking status, stated plainly per this round's directive:**
+`bonus_expense` is unmigrated and the Rule B2 (extended) generator does
+not exist in `internal/ledger` at `HEAD`. HR-9 therefore blocks **every**
+posting to any `BONUS_SET` account today, including the new one — this
+section does not remove, weaken, or work around that guard, and nothing
+described here is postable until HR-9's own removal condition (§6.5.7:
+both preconditions in the tree, generator tested) is independently
+satisfied. This is the same, already-recorded blocking status, now
+confirmed to apply identically to `player_bonus_held` — not a separate
+open item, and not silently resolved.
+
+**Also confirmed still open, named so it is not mistaken for resolved
+here: HR-9's own removal is itself gated on HR-9's coordination gap
+recorded at §6.6.16/§6.5.7 — that gap is unrelated to this section's
+decision and is not touched by it.**
+
+##### 7.7.2.4 Schema — `player_bonus_held` (ledger account type)
+
+Added to §2's account-type table (own row, `ARCHITECTURAL DECISION`, this
+section — see §2). Summary:
+
+| Field | Value |
+|---|---|
+| `account_type` | `player_bonus_held` |
+| Purpose | Bonus-origin settlement value (win payout, and/or a released stake lock) held pending a human-supplied G-2 answer |
+| Owner/scope | Wallet, one row per `(wallet_id, account_type, asset_code)` — identical shape to every other player-owned type |
+| Normal balance | Credit (liability, pending disposition) |
+| Directly manipulable? | No — only via a `LedgerTransaction` |
+| Compensating entries required? | Yes |
+| Reconciliation | New stream **LF-12** (§7.7.2.8) plus B1 (extended)'s existing sweep, as a third `BONUS_SET` member |
+
+**Migration.** Claimed as **`0055`** — the next open slot (`0050`–`0054`
+are already claimed per the task registry's migration ledger: `0050`–
+`0053` are `ledger-finance`'s own, `0054`+ is reserved for
+`bonus-engine`'s domain tables; this is a
+`ledger_accounts_account_type_check` widening, `ledger-finance`-owned like
+`0050`, so it does not compete with `0054`+). Same shape as §6.3.2's
+illustrative widening: drop and re-add `ledger_accounts_account_type_check`
+with `player_bonus_held` appended. No new column, no new index, no new
+owner family, no RLS change — `UNIQUE (wallet_id, account_type,
+asset_code)` already covers it. **`NOT IMPLEMENTED`, design only**, gated
+on HR-9 exactly as `player_bonus`/`player_locked_bonus` already are.
+
+**Explicit, permanent exclusion — the guardrail LF-19's mistake would
+otherwise repeat under a new name.** `player_bonus_held` is **never**
+added to §6.6.6's nullifiable-predicate account list (`player_locked_cash`,
+`player_locked_bonus` only) and **never** added to `08 §16.4`'s
+locked-origin-resolution query's `account_type IN (...)` list. It is a
+**held**, not a **locked**, account — the two families are deliberately
+kept disjoint at every read site that currently enumerates one or the
+other; a future change merging them into one enumeration is a regression
+of this finding, not a simplification.
+
+##### 7.7.2.5 Schema — `bonus_held_dispositions` (the `HeldDispositionRecord`)
+
+**Ownership.** `bonus-engine`-owned table (the same split as
+`WageringProgress`/§6.6.4: `ledger-finance` specifies the contract,
+`bonus-engine` builds and owns the migration, in its own `0054`+ range).
+This section specifies the contract exactly, so it does not shift again
+under implementation, closing architect's Phase 2 finding that
+`HeldDispositionRecord` was missing `tenant_id`/RLS/brand scope entirely.
+
+```
+-- CONTRACT, not a migration to run. bonus-engine's migration (0054+)
+-- implements this shape; ledger-finance's is the CHECK-widening (0055)
+-- creating player_bonus_held itself (§7.7.2.4). Neither posts anything
+-- until HR-9's guard is independently satisfied.
+
+bonus_held_dispositions
+  id                                UUID          NOT NULL PRIMARY KEY
+  tenant_id                         UUID          NOT NULL   -- RLS
+  brand_id                          UUID          NOT NULL   -- denormalized from Wallet
+  wallet_id                         UUID          NOT NULL   -- FK wallets.id
+  player_account_id                UUID          NOT NULL   -- denormalized from Wallet; RLS-key parity with LedgerAccount (§1.1)
+  asset_code                       TEXT          NOT NULL   -- FK assets.code
+  grant_id                          UUID          NOT NULL   -- FK Grant; the G this occurrence is attributed to
+                                                            -- (GrantLedgerAttribution, W2.5, covers the ledger side;
+                                                            -- this is the bonus-engine-side denormalization
+                                                            -- WageringProgress already carries for the same reason)
+  correlation_id                    UUID          NOT NULL   -- underlying round's correlation_id -- AUDIT TRAIL ONLY.
+                                                            -- Never the idempotency key -- this is LF-22's fix (§7.7.2.6)
+  settlement_ledger_transaction_id  UUID          NOT NULL   -- FK ledger_transactions.id; the ONE balanced transaction
+                                                            -- that posted this occurrence's hold-capture (§7.7.2.2)
+  payout_amount                     NUMERIC(38,0) NOT NULL CHECK (payout_amount >= 0)             -- W
+  released_lock_amount              NUMERIC(38,0) NOT NULL DEFAULT 0 CHECK (released_lock_amount >= 0)  -- X; 0 if never locked
+  status                            TEXT          NOT NULL DEFAULT 'held'
+                                                  CHECK (status IN ('held','resolved_reforfeit',
+                                                                     'resolved_route_to_cash','voided_by_rollback'))
+  created_at                        TIMESTAMPTZ   NOT NULL
+  resolved_at                       TIMESTAMPTZ   NULL
+  resolved_by_actor_id              UUID          NULL   -- staff actor applying the G-2 answer;
+                                                        -- feeds security's REQ-SEP-BONUS-4 check, does not itself enforce it
+  resolution_reason_code            TEXT          NULL   -- CLAUDE.md reason-code requirement for the manual/administrative act
+  resolution_ledger_transaction_id  UUID          NULL   -- FK ledger_transactions.id; the transaction that moved the
+                                                        -- held value out, once resolved. NULL while 'held'; for
+                                                        -- 'voided_by_rollback' this is the *reversal's* transaction id
+
+  CHECK (payout_amount + released_lock_amount > 0)               -- no vacuous hold
+  UNIQUE (tenant_id, settlement_ledger_transaction_id)           -- THE per-occurrence idempotency key (§7.7.2.6)
+                                                                  -- NOT correlation_id, NOT grant_id
+  CHECK ((status = 'held') = (resolved_at IS NULL))
+  CHECK (status <> 'held' OR resolution_ledger_transaction_id IS NULL)
+  -- FKs: tenant_id, wallet_id, player_account_id, asset_code, grant_id,
+  -- settlement_ledger_transaction_id, resolution_ledger_transaction_id
+  -- RLS: tenant_id, mirroring every other tenant-owned table (CLAUDE.md)
+```
+
+Every field a human resolving G-2 needs is present without a join back to
+`ledger_entries`: `payout_amount`/`released_lock_amount` are denormalized
+at hold-creation time from the posting that created them (never
+re-derived, never re-read from a mutable source — the posting is
+append-only, the same safe-denormalization pattern `rounding_rule_id`'s
+storage on `ledger_transactions` already uses, §7.8). `status` plus the
+two nullable resolution columns are the complete resolution state; nothing
+about the eventual disposition needs recomputing from the ledger.
+
+**No third economic outcome.** `status`'s admitted values are exactly
+`held` (the open state) and the three ways it leaves that state:
+`resolved_reforfeit` and `resolved_route_to_cash` (G-2's two
+disposition-bearing answers — `ACTION_HOLD_FOR_REVIEW`'s own eventual
+manual sub-choice resolves to one of these two, per doc 10 §N1.8.1 row 10;
+`held` persisting **is** `ACTION_HOLD_FOR_REVIEW`'s state, not a fourth
+value) and `voided_by_rollback` (not a G-2 answer at all — a technical
+undo of an event that never should have existed, §7.7.2.7). This section
+does not choose between `resolved_reforfeit` and `resolved_route_to_cash`
+for any given record; it only names the two slots G-2's answer fills.
+
+##### 7.7.2.6 Idempotency — LF-22, fixed
+
+**The defect, restated precisely.** Doc 10 §N1.4.1 item 4 proposed
+`bonus_g2_hold:<correlation_id>` as the hold's idempotency key. `08
+§16.4a` independently establishes that one round-level `correlation_id`
+can legitimately contain multiple, separately-settled bets (a multi-bet
+round), each producing its own win event and its own
+`bet_transaction_id`/`provider_tx_id`. A key scoped to `correlation_id`
+alone would silently collapse a second, genuinely distinct hold-worthy win
+under the same round into "already held," dropping real money's hold on
+the floor — never posted, never recorded, never even visibly rejected.
+
+**The fix.** The per-occurrence key is the settlement's own
+`ledger_transaction_id` — not `correlation_id`, not `grant_id`, and not a
+newly-minted UUID either (a per-delivery-attempt key would defeat
+idempotency entirely, per HR-5/ADR 0032 §8's standing rule). `ledger.Post`'s
+own `(tenant_id, idempotency_key)` uniqueness has already collapsed a
+redelivered win into a single settlement transaction **before**
+hold-creation logic ever runs (doc 10 §N1.6 Scenario 5's own reasoning,
+unchanged) — so `settlement_ledger_transaction_id` is already guaranteed
+to name exactly one real occurrence, by construction, whether the round is
+single-bet or multi-bet. `bonus_held_dispositions.UNIQUE (tenant_id,
+settlement_ledger_transaction_id)` is the second, independent line of
+defense N1.6 Scenario 5 already argued for, now scoped correctly: a
+concurrent or retried attempt to create a second row for the same
+settlement transaction hits the unique constraint and is treated exactly
+like a duplicate `bonus_grant` (§7.11's row) — the existing row's id is
+returned, zero new rows written, never a second, silent hold.
+
+**HR-24 (§7.14) names this.** A round's `correlation_id` remains on the
+record purely as an audit-trail/lookup convenience (finding every hold
+that arose from a given round, exactly as `08 §16.4a`'s own bet-level
+disambiguation already requires) — present, never load-bearing for
+uniqueness.
+
+##### 7.7.2.7 Rollback of a still-held win — closing the flagged gap
+
+**The gap**, as `casino` and `qa` (test `C28`) independently flagged it: a
+provider rollback targeting a WIN whose settlement is currently parked in
+an open `bonus_held_dispositions` row had no defined state transition
+anywhere. Closed here using only mechanisms this design already has — no
+new posting shape, no new economic outcome:
+
+- A rollback naming `settlement_ledger_transaction_id` as its target,
+  while that record's `status = 'held'`, is handled by `postRollback`'s
+  **existing, unmodified generic entry-inversion** (`08 §16.1`) — the
+  exact inverse of every entry the hold-capture posting made (`Cr
+  house_gaming payout_amount`, and `Cr player_locked_bonus
+  released_lock_amount` if present — restoring the locked balance is
+  deliberately **not** attempted, since `L(G)` already closed to zero and
+  reversing a win that never should have happened is a straight reversal
+  to `house_gaming`, not a resurrection of a lock; if the underlying bet
+  itself also needs unwinding, that is `postRollback`'s existing, separate
+  "two independent reversals" rule, `08 §16.11`, unaffected here), posted
+  in the **same transaction** as a guarded status update:
+  `UPDATE bonus_held_dispositions SET status = 'voided_by_rollback',
+  resolution_ledger_transaction_id = <the reversal's own id> WHERE id = ?
+  AND status = 'held'` — the `WHERE status = 'held'` clause is the
+  DB-enforced compare-and-swap (one atomic statement; zero rows affected
+  is the loud, checkable failure signal, never check-then-update), gated
+  under the same `SELECT ... FOR UPDATE` on the `bonus_held_dispositions`
+  row this section introduces for resolution (HR-25, §7.7.2.9).
+- A rollback naming an **already-resolved** record is a harder case — the
+  held value has already moved to a different account entirely,
+  potentially already spent or converted. This is the **general**
+  late-rollback-of-an-already-settled-financial-event problem `08
+  §16.11`/§16.12 item 6 (**LF-10**) already routes to `ledger-finance`,
+  and this section does **not** re-decide it: whatever LF-10's eventual
+  answer is (permit a recorded clawback / route to a receivable /
+  reject-and-alert) applies identically here, once decided. Flagged, not
+  resolved, exactly as LF-10 itself is.
+
+This is not a fourth economic outcome: voiding a still-held hold is
+symmetric with voiding any other not-yet-disposed ledger fact, exactly as
+`postRollback` already treats an ordinary bet or win — it says "this event
+is undone," never "this is G-2's answer."
+
+##### 7.7.2.8 Reconciliation — the `LF-12` stream, named precisely
+
+Doc 10 §N1.10 names the need for a new reconciliation stream rather than
+folding held value into an existing sweep it would corrupt. This section
+gives it its exact shape, `ledger-finance`-owned, hourly, zero-tolerance:
+
+1. **Balance-attribution check.** For every `bonus_held_dispositions` row
+   with `status = 'held'`, `payout_amount + released_lock_amount` must
+   equal exactly the sum of `player_bonus_held` entries attributed to that
+   row's `grant_id` under `settlement_ledger_transaction_id` (a direct
+   join, no aggregation ambiguity — one row, one transaction). A mismatch
+   is **P1**: either a held amount was posted without its record, or a
+   record exists without its posting.
+2. **B1 (extended) coverage.** `player_bonus_held`'s balance participates
+   in the existing hourly B1 sweep as a third `BONUS_SET` member
+   (§7.7.2.3) — no separate zero-tolerance check is needed for the
+   boundary-crossing/mirror correctness itself.
+3. **Aging.** Every `held` row older than a configured (jurisdiction-
+   tunable, fail-closed-absent-config, mirroring `08 §16.5a`'s
+   settlement-timeout-window pattern) threshold is surfaced to the manual
+   G-2 resolution queue, prioritized per `identity-compliance`'s Phase 2
+   note that self-excluded players' open holds need priority review —
+   **not decided here**, named so the reconciliation job's own design does
+   not have to rediscover it.
+
+##### 7.7.2.9 Concurrency and lock order — HR-21 extended, replay proof
+
+**Hold-creation path: no new participant.** The hold-capture posting
+(§7.7.2.2) runs inside the **same** transaction, under the **same** two
+locks, as the settlement it is part of — `(tenant_id, correlation_id)`
+(HR-3) acquired first, then `(tenant_id, grant_id)` (doc10 §9) — exactly
+HR-21's existing pinned order. It never acquires a `player_bonus`
+projection `FOR UPDATE` at all (the destination is `player_bonus_held`,
+not `player_bonus`), so HR-21's third element is simply absent from this
+path, the same way it is already absent from an ordinary Grant credit.
+**HR-21 is not violated and needs no new participant for creation.**
+
+**Resolution path: one genuine new participant — HR-25.** Resolving a
+`held` record (applying a human-supplied G-2 answer, or voiding it per
+§7.7.2.7) is **not** part of the original settlement transaction — it runs
+later, in its own transaction, keyed by the record's own `id`, not by
+`correlation_id` (no live settlement event is being processed). Its lock
+order:
+
+> **HR-25.** Resolution acquires, in order: (1) `(tenant_id, grant_id)`
+> advisory lock (doc10 §9 — still required, since resolution mutates `G`'s
+> `HeldDisposition` component of `AOE` and must serialize against any
+> concurrent settlement/expiry/cancellation touching the same `G`);
+> (2) `SELECT ... FOR UPDATE` on the specific `bonus_held_dispositions`
+> row (**the new, fourth participant** HR-21 requires be pinned in the
+> same change that introduces it — done here); (3) **only for
+> `ACTION_REFORFEIT`**, which releases into `player_bonus` before
+> immediately reforfeiting (`08 §16.9`'s own description of that action),
+> the `player_bonus` projection `FOR UPDATE` — identical to the existing
+> forfeiture row in §7.11's table, not a new lock shape.
+> `ACTION_ROUTE_TO_CASH` never acquires (3), since it debits
+> `player_bonus_held` directly to `player_cash` and never touches
+> `player_bonus`. The same row lock (step 2) also gates §7.7.2.7's
+> rollback-of-a-held-win transition.
+
+This order is **consistent with, not a violation of, HR-21**: `grant_id`
+still precedes `player_bonus` wherever both are taken, and `correlation_id`
+is simply not a participant in this path (resolution has no live
+settlement event to hold a lock against) — a subsequence of an
+already-pinned total order introduces no cycle.
+
+**Replay/duplication, restated exhaustively against both paths:**
+
+- **Duplicate win delivery, still held**: `ledger.Post`'s own key rejects
+  the redelivered settlement before hold-creation logic re-runs;
+  `bonus_held_dispositions`'s `UNIQUE (tenant_id,
+  settlement_ledger_transaction_id)` is the independent second line of
+  defense (§7.7.2.6). No second hold.
+- **Duplicate/concurrent resolution attempt**: both contend for the same
+  row's `FOR UPDATE` (HR-25 step 2); the loser blocks, then finds
+  `status ≠ 'held'` and is rejected — never re-posted, since the guarded
+  `UPDATE ... WHERE status = 'held'` pattern from §7.7.2.7 makes a second
+  application a zero-row update regardless.
+- **Resolution racing a rollback of the same record**: both acquire the
+  row's `FOR UPDATE` (HR-25 step 2) — they serialize identically to any
+  other contended row, and whichever commits first leaves `status` in a
+  terminal state the second finds and is rejected against, by the same
+  `WHERE status = 'held'` guard both use.
+- **Late win, no hold record exists yet, arriving concurrently with a
+  Grant-state change**: unaffected by this section — governed entirely by
+  doc 10 §N1.5's existing `(grant_id)`-then-live-read serialization, which
+  hold-creation inherits unchanged.
+
+No interleaving of creation, resolution, and rollback produces a
+double-credit, a lost hold, or a resolution applied twice.
+
+##### 7.7.2.10 The binding contract — what `bonus-engine` and `casino` must each do
+
+Stated so this decision needs no further back-and-forth, per the
+directive's own instruction that Round 1's parallel-dispatch-without-a-
+shared-decision caused the composition failures `architect` found.
+
+**`bonus-engine` must:**
+1. Build `bonus_held_dispositions` to exactly §7.7.2.5's contract, in its
+   own migration (`0054`+), including the `UNIQUE (tenant_id,
+   settlement_ledger_transaction_id)` constraint verbatim — not
+   `correlation_id`, not `grant_id`.
+2. Redefine `HeldDisposition(G, t)` (N1.3, Component 3) as a **balance
+   read of `player_bonus_held` attributed to `G`** (the same
+   `GrantLedgerAttribution`/§6.3.3.1-pattern read `LockedExposure` already
+   uses), not merely "does an open `bonus_held_dispositions` row exist" —
+   the ledger balance is the source of truth; the row is a reconciled,
+   richer projection over it (§7.7.2.8 item 1 is exactly the check that
+   keeps the two in agreement).
+3. Retire doc 10 §N1.4.1's two-branch account-type split (item 2) — both
+   branches now use the single account this section names; N1.4.1's
+   items 1, 3, 4, 5 (ledger-visibility, progress/authorization exclusion,
+   idempotency intent, independent reconciliation) all stand, with item 4's
+   key corrected per §7.7.2.6.
+4. Adopt `resolved_reforfeit`/`resolved_route_to_cash`/`voided_by_rollback`
+   as the record's exact terminal-status vocabulary (already the naming
+   N1.6/N1.8.1 used informally; this section makes it the schema).
+5. Implement HR-25's resolution lock order exactly (§7.7.2.9) and route
+   `resolved_by_actor_id`/`resolution_reason_code` through to `security`'s
+   REQ-SEP-BONUS-4 enforcement point once designed — this section supplies
+   the fields, not the enforcement.
+
+**`casino` must:**
+1. Post the hold-capture transaction exactly as §7.7.2.2 specifies — both
+   legs (or the single `W` leg if no lock existed) into
+   `player_bonus_held`, in the same `ledger.Post` call as the rest of the
+   settlement, never as a second transaction.
+2. Widen `08 §16.9`'s seam (`ResolveTerminalGrantCredit`) to carry
+   `payout_amount` and `released_lock_amount` separately — the seam's
+   current single-`amount` signature must widen since `postWin` needs both
+   to build the two-leg posting; a mechanical signature change to a
+   not-yet-built function, not a new design.
+3. `08 §16.10.1`'s lock-shape recommendation for future bonus-funded
+   casino bets remains **routed to `ledger-finance`/`architect` for
+   ratification**, unchanged by this section — this section's design works
+   identically whether or not it is ever adopted (§7.7.2.2's "present
+   only if... absent entirely if" framing), so this decision does not
+   force that one, and that one does not need to resolve first for this
+   section to be buildable.
+4. Implement §7.7.2.7's rollback-of-a-held-win transition (still-held case
+   only) inside `postRollback`.
+
+**Neither** needs to design a new account, a new reconciliation stream, or
+a new idempotency scheme independently — all three are specified here,
+once, for both to build against.
+
+##### 7.7.2.11 What this section does not resolve — routed, named as such
+
+- **G-2 itself** — not selected. Nothing here chooses
+  `ACTION_REFORFEIT`/`ACTION_ROUTE_TO_CASH`/which manual sub-choice
+  `ACTION_HOLD_FOR_REVIEW` eventually makes.
+- **HR-9's removal** — not accelerated, not weakened. Still blocks every
+  `BONUS_SET` posting, including to `player_bonus_held`, until both its
+  preconditions are independently met (§7.7.2.3).
+- **`08 §16.10.1`** (bonus-funded casino must lock) — still
+  `casino`/`architect`/`ledger-finance`'s joint ratification to make, not
+  pre-empted by this section (§7.7.2.10 item 3).
+- **LF-10** (rollback of an already-resolved financial event,
+  insufficient-balance treatment) — still open, still routed to
+  `ledger-finance` generally; §7.7.2.7 only closes the narrower
+  *still-held* sub-case, which needed no answer to LF-10 to close.
+- **REQ-SEP-BONUS-4** (actor≠subject enforcement on the resolution act
+  itself) — `security`'s to design; this section supplies the audit
+  fields (`resolved_by_actor_id`, `resolution_reason_code`) the
+  enforcement will read, not the enforcement.
+- **The identity-compliance aging-priority policy** (self-excluded
+  players' held records reviewed first) — named in §7.7.2.8 item 3, not
+  designed here.
+- **`architect`'s cross-domain ratification** of this decision against the
+  rest of Round 2's dispatches (bonus-engine's/casino's own fixes, built
+  against this contract) — this section is a decision within
+  `ledger-finance`'s own authority per this round's explicit human
+  authorization, but it is not, by itself, the independent cross-domain
+  re-verification a future Wave 2 readiness call still requires.
+
 ### 7.8 Rounding integration
 
 **Bonus MUST use the one shared function. Never a second implementation,
@@ -7342,7 +7896,39 @@ place.
   participant is added to this ordering in the same change that
   introduces it, never afterwards. Closes §6.6.17's joint gap for the
   conversion path specifically; the sportsbook settlement path inherits
-  it when it is built.
+  it when it is built. **Fourth participant, added Stage 4H-B1 Wave 1.5
+  Fix Round 2 (§7.7.2.9):** a `SELECT ... FOR UPDATE` on the specific
+  `bonus_held_dispositions` row, taken during held-disposition resolution
+  or rollback, acquired after the `(tenant_id, grant_id)` advisory lock
+  and, only for `ACTION_REFORFEIT`, before the `player_bonus` projection
+  lock — see HR-25. This path never acquires `(tenant_id, correlation_id)`
+  at all, which is order-safe (a subsequence of an already-pinned total
+  order), not a new order.
+- **HR-23 — HR-9's fail-closed guard extends to `player_bonus_held`.**
+  *(Added Stage 4H-B1, Wave 1.5, Fix Round 2, §7.7.2.3.)* A posting
+  against `player_bonus_held` is rejected under the identical rule and
+  for the identical reason HR-9 already rejects `player_bonus`/
+  `player_locked_bonus` postings — the account is new, but the B1 hazard
+  an early posting would create is not. Removed only when HR-9's own
+  removal condition (§6.5.7) is satisfied; not sooner, and not implicitly
+  by virtue of `player_bonus_held` being a different account name.
+- **HR-24 — a held disposition's idempotency key is per settlement
+  occurrence, never per round or per Grant.** *(Added Stage 4H-B1, Wave
+  1.5, Fix Round 2, closing **LF-22**, §7.7.2.6.)* `bonus_held_dispositions.
+  UNIQUE (tenant_id, settlement_ledger_transaction_id)` — not
+  `correlation_id` (a round can legitimately contain multiple,
+  separately-held wins) and not `grant_id` (a Grant can legitimately
+  accumulate more than one held disposition over its lifetime).
+  `correlation_id` remains on the record as an audit-trail/lookup field
+  only, never load-bearing for uniqueness.
+- **HR-25 — resolving or rolling back an open `bonus_held_dispositions`
+  row is the fourth HR-21 participant, in a fixed sub-order.** *(Added
+  Stage 4H-B1, Wave 1.5, Fix Round 2, §7.7.2.9.)* `(tenant_id, grant_id)`
+  advisory lock, then `SELECT ... FOR UPDATE` on the specific
+  `bonus_held_dispositions` row, then — only for `ACTION_REFORFEIT` — the
+  `player_bonus` projection `FOR UPDATE`. The status transition itself is
+  a guarded, single-statement compare-and-swap (`UPDATE ... WHERE
+  status = 'held'`), never check-then-update.
 - **HR-22 — a monetary value crosses from `*big.Int` to `int64` through
   exactly one range-checked helper that returns an error, never through
   `(*big.Int).Int64()`.** *(Added Stage 4H-B1, Wave 1.5, finding
@@ -7506,6 +8092,7 @@ LF-16) — added Stage 4H-B1, Wave 1.5:**
 | **`0051`** | `bonus_grant`/`bonus_conversion`/`bonus_forfeiture`/`bonus_reversal` transaction types **+** the `reason_code` constraint widening (§7.3) | **CLAIMED** by `ledger-finance` this dispatch |
 | *(unassigned)* | `rounding_rules` table + `ledger_transactions.rounding_rule_id` (§7.8) | **REQUESTED** — `ledger-finance`-owned, not on `bonus_expense`'s critical path; number to be assigned by the Orchestrator after Wave-1 reconciliation |
 | *(unassigned)* | HR-15/HR-16's `ledger_accounts` identity-immutability trigger, reconciled with ADR 0035 §1.3.1's `ledger_accounts_owner_family` CHECK (§7.14) | **REQUESTED** — `ledger-finance`-owned, **hard gate** on the first `bonus_*` posting |
+| **`0055`** | `player_bonus_held` account type — `ledger_accounts_account_type_check` widening (§7.7.2.4) | **CLAIMED** by `ledger-finance`, Stage 4H-B1 Wave 1.5 Fix Round 2. Gated on HR-9/HR-23 exactly as `0050`/`0051` are — `NOT IMPLEMENTED` |
 
 Verified at `HEAD` `7e1656f`: `migrations/` runs `0001`…`0049`
 contiguously with no gaps and nothing at `0050`+. The task registry
@@ -7532,7 +8119,22 @@ previously-disclosed defects, closed this round):
 | **LF-16** | `money.RoundToMinorUnits` returns **`*big.Int`**, not `int64` (§7.8). New **HR-22** (range-checked narrowing, never `.Int64()`); new tests 29–31 (§7.15); §7.9 restated | **FIXED** |
 | **LF-16b** | Newly disclosed while fixing LF-16: `internal/ledger`'s `int64` amount representation cannot hold an ordinary exponent-18 amount (§7.9) | **DISCLOSED, NOT FIXED** — code change outside this DESIGN-ONLY section; `architect`-owned; gates registering a real exponent-18 asset |
 | **LF-17** | §6.1's B1 row now states **B1 (extended)**, matching §6.3.2/§6.4.4/§7.4.2. §2's and §6.3.1's stale mentions corrected | **FIXED** |
-| **§7.7.1** | Advance consistency note for `bonus-engine`'s parallel Grant terminal-state redesign | **ADVISORY** — A-1 is a blocking Phase-2 reconciliation dependency if their design lands without it |
+| **§7.7.1** | Advance consistency note for `bonus-engine`'s parallel Grant terminal-state redesign | **ADVISORY** — superseded by §7.7.2's decision; A-1 is moot under it (§7.7.2.1), not merely satisfied |
+
+**Stage 4H-B1, Wave 1.5 Fix Wave, Round 2 amendments** (the
+holding-representation decision, §7.7.2, closing three findings from the
+Phase 2 independent re-verification report,
+`docs/governance/wave-1.5-fixwave-phase2-report.md`):
+
+| Finding | What changed | Status |
+|---|---|---|
+| **LF-19** | Branch 1 (reuse `player_locked_bonus`) rejected outright; a new dedicated account, `player_bonus_held`, adopted instead (§7.7.2.1) | **FIXED** — the predicate exception A-1 required is now moot, not merely satisfied |
+| **LF-20** | `LockedExposure`/`HeldDisposition` are now disjoint-account balance reads (§7.7.2.1, §7.7.2.10 item 2); double-count structurally unreachable | **FIXED** |
+| **LF-22** | Idempotency key corrected to `UNIQUE (tenant_id, settlement_ledger_transaction_id)` (HR-24), never `correlation_id`/`grant_id` (§7.7.2.6) | **FIXED** |
+| **LF-21** (three-way incompatible `ACTION_HOLD_FOR_REVIEW` descriptions) | Not this section's finding to close — `bonus-engine`/`architect`/`casino` own the three conflicting texts named in the Phase 2 report | **NOT ADDRESSED HERE** — routed to those owners |
+| **LF-23** (casino §16.7 still describing post-then-reforfeit) | Reviewed against the current `08 §16.7` text during this dispatch; the live text already reflects the capture-not-post design (§16.7 branch 2, "**Nothing posts. No money moves.**") — appears already fixed on `casino`'s side, not re-verified independently here | **NOT INDEPENDENTLY RE-VERIFIED** — `casino`'s to confirm |
+| **LF-24** (five unguarded `*big.Int`/`int64` boundary crossings) | Not touched by this dispatch — out of this section's scope (holding representation only) | **NOT ADDRESSED HERE** |
+| Held-win rollback gap (casino/`qa` C28) | Closed for the still-held case via the existing generic rollback-inversion plus a guarded status transition (§7.7.2.7); the already-resolved case remains routed to LF-10 | **PARTIALLY CLOSED** |
 
 ## 8. Cross-references
 
