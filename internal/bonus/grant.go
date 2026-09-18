@@ -229,6 +229,62 @@ func ListGrantsByStatus(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, stat
 	return queryGrants(ctx, tx, `SELECT `+grantColumns+` FROM bonus_grants WHERE tenant_id = $1 AND status = $2 ORDER BY created_at ASC`, tenantID, string(status))
 }
 
+// ListExpirableGrants returns every open (issued/activated/in_progress)
+// Grant whose expires_at has already passed asOf, oldest expiry first -
+// the expiry sweep job's own read pattern (migration 0070's partial
+// index on (tenant_id, expires_at) WHERE expires_at IS NOT NULL exists
+// for exactly this query). asOf is supplied by the caller (the sweep
+// job's own clock_timestamp() read, per doc 10 §2's "clock_timestamp(),
+// never now()" rule already binding on every other window-elapsed
+// comparison in this package) rather than read here, so this function
+// stays a pure, deterministic query.
+func ListExpirableGrants(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, asOf time.Time) ([]Grant, error) {
+	return queryGrants(ctx, tx,
+		`SELECT `+grantColumns+` FROM bonus_grants
+		  WHERE tenant_id = $1 AND status IN ('issued','activated','in_progress')
+		    AND expires_at IS NOT NULL AND expires_at <= $2
+		  ORDER BY expires_at ASC`,
+		tenantID, asOf,
+	)
+}
+
+// HasActiveWageringGrant is ledger-accounting-model.md §7.18.3.3's own
+// named seam: a cheap, indexed existence check (idx_bonus_grants_player,
+// migration 0057 - no new index/migration needed) casino's postBet calls
+// on EVERY cash bet, BEFORE any wagering-contribution weighting/
+// attribution work, so the added cost to the overwhelming majority of
+// bets (no active bonus at all) is exactly one indexed EXISTS.
+func HasActiveWageringGrant(ctx context.Context, tx pgx.Tx, tenantID, playerAccountID uuid.UUID) (bool, error) {
+	var exists bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM bonus_grants
+			 WHERE tenant_id = $1 AND player_account_id = $2 AND status IN ('activated','in_progress')
+		)`,
+		tenantID, playerAccountID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("bonus: has active wagering grant: %w", err)
+	}
+	return exists, nil
+}
+
+// listActiveWageringGrants returns every Grant currently open for new
+// stakes (status activated/in_progress) for playerAccountID - the raw
+// input to this Wave's own fail-closed multi-Grant attribution posture
+// (ledger-accounting-model.md §7.18.3.3: "until bonus-engine specifies a
+// qualifying-wager attribution rule across concurrent Grants, at most one
+// Grant should be in a state that receives cash-funded wagering
+// contribution at a time").
+func listActiveWageringGrants(ctx context.Context, tx pgx.Tx, tenantID, playerAccountID uuid.UUID) ([]Grant, error) {
+	return queryGrants(ctx, tx,
+		`SELECT `+grantColumns+` FROM bonus_grants
+		  WHERE tenant_id = $1 AND player_account_id = $2 AND status IN ('activated','in_progress')
+		  ORDER BY created_at ASC`,
+		tenantID, playerAccountID,
+	)
+}
+
 func queryGrants(ctx context.Context, tx pgx.Tx, sql string, args ...any) ([]Grant, error) {
 	rows, err := tx.Query(ctx, sql, args...)
 	if err != nil {

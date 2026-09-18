@@ -808,6 +808,37 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: audit bet posted: %w", err)
 	}
 
+	// Stage 4H-B1 Wave 3 Phase 3 (ledger-accounting-model.md §7.18.3.3):
+	// the cash-funded wagering-contribution trigger, in the SAME
+	// transaction as the bet posting above (HR-10) - so a rejected/rolled-
+	// back bet is structurally incapable of producing a phantom
+	// contribution. HasActiveWageringGrant is the cheap, indexed
+	// pre-check every bet pays regardless of whether the player holds an
+	// active Grant; the weighting/attribution/completion work below only
+	// runs for the (rare) case it returns true. Never gates the bet
+	// itself - a failure here is a genuine internal error (returned,
+	// which rolls back this bet's own posting too, exactly like every
+	// other post-posting step in this function), never a silent
+	// swallow that would leave a contribution permanently unrecorded.
+	active, err := bonus.HasActiveWageringGrant(ctx, tx, tenantID, session.PlayerAccountID)
+	if err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: check active wagering grant: %w", err)
+	}
+	if active {
+		game, err := GetGameByID(ctx, tx, session.GameID)
+		if err != nil {
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve game for wagering contribution: %w", err)
+		}
+		if err := bonus.RecordCashFundedWageringContribution(ctx, tx, bonus.CashFundedBetContributionParams{
+			TenantID: tenantID, PlayerAccountID: session.PlayerAccountID,
+			BetLedgerTransactionID: postResult.TransactionID, CorrelationID: roundCorrelationID(tenantID, providerID, event.RoundID),
+			AssetCode: event.AssetCode, StakeAmount: event.Amount,
+			GameType: game.GameType, ProviderGameID: event.ProviderGameID,
+		}); err != nil {
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: record cash-funded wagering contribution: %w", err)
+		}
+	}
+
 	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
 }
 
