@@ -848,6 +848,9 @@ specialist redesigns shared architecture unilaterally").
 | **SEC-W15-04** (EDR has no RLS / read-gating story) | **Closed at the design level** by §W15.5 (`EDR-S1`–`EDR-S5`). |
 | **SEC-W15-02** (P0 — CRM per-player grant calls escape the bulk control) | **NOT closed by this section alone.** §W15.3's `CRM-BR-2` states the binding requirement; it is implementable only by `architect` (doc 31) and `bonus-engine` (doc 10 N2.4) in their own dispatches. It remains open until both adopt it. |
 | SEC-W15-05 … SEC-W15-13 (the remaining P1s) | **Open.** Not addressed here; they are separate findings against `architect`'s and `bonus-engine`'s files. |
+| **RK-W15P2-1** (P0, `risk` Phase 2 — `SEP-1` fails **open**, not closed, on a partial-RLS-truncation resolver read) | **Closed at the design level** by §W15.1.9 (cardinality assertion + step-0 tenant-scope self-proof). This is a Fix Round 2 correction to §W15.1.3/§W15.1.4, which addressed only the *empty*-result failure mode. |
+| **RK-W15P2-6 / RK-W15P2-7** (`risk` Phase 2 — the non-NULL-actor precondition is enforced by a pre-deploy query, not a DB constraint; the required denial-audit record is unimplementable inside a `BEFORE` trigger that aborts its own transaction) | **Closed at the design level** by §W15.1.10 (DB-level `CHECK` constraint, routed as `REQ-SEP-STAFF-1`) and §W15.1.11 (separate-transaction denial-audit record, per the ADR 0031 §39 precedent). A residual limitation on the audit side is stated honestly in §W15.1.11 and is not claimed closed. |
+| **NEW-6** (`code-reviewer`, doc 32 §6.5.2 — the affiliate ancestor-chain resolver is non-reflexive: fail-open on a same-node declared interest, deadlock on a flat/root node) | **Closed at the design level** by §W15.2.7 (reflexive ancestor closure). The corresponding edit to doc 32 §6.5.2 itself is `architect`'s, in a separate dispatch this round; this document's own restatement is corrected here so it does not perpetuate the non-reflexive wording in the meantime. |
 
 Nothing in this section makes any subsystem "secure". It specifies what
 three named controls must be, so that the implementations that come later
@@ -923,7 +926,7 @@ specialist writes them in their own file):
 | Bonus | `BulkGrantJob` execution | the **set** of persons behind the pinned recipient set (a set-membership test, not a scalar comparison) |
 | Bonus | `BonusSuggestion` review and activation | the persons behind the resolved `proposed_player_population` |
 | CRM | Journey/campaign activation containing an `offer_request` step | the persons behind the pinned, resolved audience. A size-1 audience is precisely the self-deal case and is covered by construction |
-| Affiliate | `CommissionApproval`, `CommissionSettlementInstruction`, re-attribution, agreement/rule-version activation | the affiliate node's **ancestor chain** under any sub-affiliate override agreement (doc 32 §6.4 — a parent node benefits from a child's accrual, so the parent's people are beneficiaries too), expanded to that chain's affiliate-account persons **plus** its declared beneficial-interest persons (§W15.2.5) |
+| Affiliate | `CommissionApproval`, `CommissionSettlementInstruction`, re-attribution, agreement/rule-version activation | the affiliate node's **reflexive ancestor closure** — the node **itself**, together with its ancestor chain — under any sub-affiliate override agreement (doc 32 §6.4 — a parent node benefits from a child's accrual, so the parent's people are beneficiaries too, **and** the node's own people are beneficiaries of its own accrual, which a strict ancestors-only reading silently excluded; corrected by Fix Round 2, §W15.2.7, closing `NEW-6`), expanded to that closure's affiliate-account persons **plus** its declared beneficial-interest persons (§W15.2.5) |
 
 The set cases (bulk, audience) must test membership against the
 **already-pinned, materialized** recipient/audience set that §B1.2 item 2
@@ -1099,7 +1102,7 @@ probabilistic match, `SEP-1` must consume only its deterministic arm, per
 | **REQ-SEP-BONUS-2** | `bonus-engine` | Adopt `SEP-1` at `BonusSuggestion` review and activation (§W15.4.3). |
 | **REQ-SEP-BONUS-3** | `bonus-engine` | Own the household/linked-account **detection** path of §W15.1.5; refuse any request to make it a block. |
 | **REQ-SEP-CRM-1** | `architect` (doc 31) | Adopt `SEP-1` at journey/campaign activation containing an `offer_request` step, against the pinned audience. |
-| **REQ-SEP-AFF-1** | `architect` (doc 32) | Adopt `SEP-1` at `CommissionApproval`, settlement instruction, re-attribution and agreement/rule activation, with the ancestor-chain beneficiary set of §W15.1.2. |
+| **REQ-SEP-AFF-1** | `architect` (doc 32) | Adopt `SEP-1` at `CommissionApproval`, settlement instruction, re-attribution and agreement/rule activation, with the **reflexive** ancestor-closure beneficiary set of §W15.1.2 (node itself plus ancestors — not ancestors alone; §W15.2.7). |
 | **REQ-SEP-ID-1** | `identity-compliance` | Confirm the `staff_users.person_id` ↔ `PlayerAccount → Person` primitive; if a canonical resolver is introduced, expose a deterministic-only arm for `SEP-1`. |
 
 #### W15.1.8 Tests `SEP-1` requires, in every adopting domain
@@ -1125,8 +1128,440 @@ probabilistic match, `SEP-1` must consume only its deterministic arm, per
   trigger is not refusing everything.
 - Concurrency: two approvals racing on the same request, one of them
   self-dealing, never both commit.
-- A `SEP-1` refusal writes an audit record with `Outcome: denied`
-  (§B1.4 — a control that fires silently leaves no evidence it fired).
+- A `SEP-1` refusal aborts the authorizing transaction (no partial row
+  survives in the change-request/approval table), **and** a
+  separate-transaction denial-audit record with `Outcome: denied` and a
+  `SEP-1`-specific reason code is written and is mechanically
+  distinguishable, by `Code`, from an ordinary four-eyes policy decline —
+  per §W15.1.11, which corrects this bullet's original, unimplementable
+  "writes an audit record with `Outcome: denied`" claim (`RK-W15P2-7`).
+
+#### W15.1.9 Fix Round 2 (`RK-W15P2-1`) — the cardinality assertion and step-0 tenant-scope self-proof
+
+**The finding, restated precisely.** §W15.1.3's step 5 ("Resolve `B(O)`
+… Empty set → refuse. Any element whose `person_id` is NULL → refuse.")
+and §W15.1.4's `SEP-1-H1` analysis together cover exactly two failure
+shapes of the resolver's `SELECT`: **zero rows**, and **a NULL
+`person_id` on a returned row**. Neither covers a third, more dangerous
+shape: the resolver's join path crosses a table whose RLS policy is
+scoped differently from the authorizing row — a beneficiary's
+`player_accounts` row hidden by a stricter scope than the trigger's own,
+or a recursive affiliate-ancestor walk (§W15.2.7) whose recursive term
+crosses a node the connection's scope cannot see — and the query
+returns a **non-empty, non-NULL, but truncated** `B(O)`: some genuine
+beneficiaries are silently absent, not represented by an empty set or a
+NULL row. Step 5 as originally specified does not fire on this shape at
+all, because it is neither the empty case nor the NULL case, and step 6
+then compares the actor only against the *rows that survived* — so a
+self-dealing actor whose own beneficiary row was the one RLS silently
+dropped is compared against an incomplete set and passes. This is a
+genuine fail-**open**, not merely an availability problem, and it is
+`risk`'s correctly-identified gap in `SEP-1-H1`'s own reasoning: `SEP-1-H1`
+proved the *empty*-result case is fail-closed and stopped there.
+
+**Fix part 1 — step 0, a tenant-scope self-proof, ported directly from
+`internal/risk/evaluator.go`'s `verifyConnectionScope` /
+`ErrTenantScopeMismatch` / `ErrPlayerScopedConnection`.** Every
+`<table>_enforce_separation()` trigger runs this **before** step 1 of
+§W15.1.3, not as a replacement for the "run under the operation's own
+tenant context" mitigation but as its enforcement — a mitigation that is
+only ever "the caller opened the right kind of transaction" is exactly
+the discipline-not-database pattern `evaluator.go`'s own doc comment
+(`ErrTenantScopeMismatch`) was written to eliminate for Risk, and `SEP-1`
+must not reintroduce it one layer up:
+
+```
+-- Step 0 (NEW, Fix Round 2) — tenant-scope self-proof.
+-- Direct port of internal/risk/evaluator.go:verifyConnectionScope.
+scoped_tenant := NULLIF(current_setting('app.tenant_id', true), '')
+scoped_player := NULLIF(current_setting('app.player_account_id', true), '')
+
+IF scoped_player IS NOT NULL THEN
+  RAISE EXCEPTION USING ERRCODE = 'SP001',
+    MESSAGE = 'SEP-1: refuse — app.player_account_id is set on this
+               transaction (ErrPlayerScopedConnection analogue)';
+END IF;
+
+IF scoped_tenant IS NULL THEN
+  RAISE EXCEPTION USING ERRCODE = 'SP001',
+    MESSAGE = 'SEP-1: refuse — app.tenant_id is not set on this
+               transaction (ErrTenantScopeMismatch analogue)';
+END IF;
+
+-- parse as uuid; a non-uuid value refuses, same ERRCODE, same message
+-- shape as evaluator.go's own "is not a uuid" branch.
+
+IF scoped_tenant::uuid <> NEW.tenant_id THEN
+  RAISE EXCEPTION USING ERRCODE = 'SP001',
+    MESSAGE = format('SEP-1: refuse — transaction scoped to %s, row is
+               for %s', scoped_tenant, NEW.tenant_id);
+END IF;
+```
+
+This step proves the connection the resolver is about to run its
+`SELECT` on is scoped to exactly the authorizing row's own tenant and
+carries no player scope — closing the RLS-mismatch precondition rather
+than only reacting to its symptom.
+
+**Fix part 2 — step 5 is amended to a cardinality assertion, not a
+bare emptiness/NULL check.** The resolver must return, per subject it
+was asked to resolve, at most one non-NULL `person_id` row, and the
+trigger must verify the **count** of rows returned equals the **count of
+subjects the authorizing row claims to have**, not merely that the count
+is nonzero:
+
+```
+-- Step 5 (AMENDED, Fix Round 2).
+expected_count :=
+  CASE
+    WHEN <authorizing row is single-subject>  THEN 1
+    WHEN <authorizing row is a pinned set>     THEN
+      -- the row count already pinned into the approval payload at
+      -- §B1.2 item 2 / CRM-BR-1 — the same content-hash-plus-row-count
+      -- the set-swap control already requires; where an
+      -- EconomicOperationIdentity exists for the operation (doc 34
+      -- §2.2), this is its subject_set_count field, not a second
+      -- number invented here
+  END;
+
+SELECT count(*), count(*) FILTER (WHERE person_id IS NULL)
+  INTO resolved_count, null_count
+  FROM <domain_resolver_function>(NEW. ...);
+
+IF resolved_count = 0 THEN
+  RAISE EXCEPTION USING ERRCODE = 'SP001',
+    MESSAGE = 'SEP-1: refuse — beneficiary set resolved empty';
+END IF;
+
+IF null_count > 0 THEN
+  RAISE EXCEPTION USING ERRCODE = 'SP001',
+    MESSAGE = 'SEP-1: refuse — a beneficiary resolved to a NULL
+               person_id';
+END IF;
+
+IF resolved_count <> expected_count THEN
+  RAISE EXCEPTION USING ERRCODE = 'SP001',
+    MESSAGE = format('SEP-1: refuse — resolver returned %s persons for
+               %s expected subjects (partial resolution)',
+               resolved_count, expected_count);
+END IF;
+```
+
+The third branch is the one this fix adds. A resolver whose join lost
+rows to a mismatched RLS scope now returns `resolved_count <
+expected_count` and is refused **on that basis alone**, independent of
+whether the missing row happened to be the actor's own. This is what
+makes the control robust to *which* row RLS happened to drop, rather
+than correct only for the specific self-dealing case a test author
+thought to construct.
+
+**Amendment to the three-part contract (§W15.1.2 item 1).** A beneficiary
+resolver is no longer sufficient as "a SQL function that … returns the
+set of `persons.id` values" alone; it must additionally be
+**countable against the authorizing row's own declared subject count**
+— for `single_subject` scope this is structural (there is exactly one
+target), and for a pinned set it is the row count **already** pinned at
+approval time (§B1.2 item 2, `CRM-BR-1`). This is not a new obligation on
+adopting domains beyond what they already must pin; it is a requirement
+that the trigger **read and check** a number the domain was already
+recording, rather than trusting the join's row count implicitly.
+
+**Honest scope of what this closes.** This closes the *partial-RLS-read*
+shape of fail-open. It does **not** by itself prove every possible
+resolver query is written correctly — a resolver that never crosses a
+differently-scoped table has nothing to truncate, and a resolver whose
+own logic (not RLS) omits a genuine beneficiary is a resolver-authoring
+defect this cardinality check cannot detect, because the resolver
+itself decided what "expected" means for anything other than the
+pinned-count set case. `qa`'s per-domain adversarial test set (§W15.1.8,
+amended below) is what catches that class, one adopting domain at a
+time; this section closes the *mechanism-level* gap, not every possible
+resolver bug.
+
+**New test, added to §W15.1.8's list:** a resolver whose join is made to
+cross a row outside the acting connection's RLS scope (simulated by
+scoping the trigger's own connection one tenant narrower than a
+beneficiary's actual row) returns fewer rows than `expected_count` and
+is refused with the cardinality-mismatch reason — asserted as its own
+distinct case from the pre-existing empty-set and NULL-person tests,
+because a fix that only re-tests those two would not catch a regression
+of this one.
+
+#### W15.1.10 Fix Round 2 (`RK-W15P2-6`, part a) — the non-NULL-actor precondition as a DB constraint
+
+**The finding.** §W15.1.3's dependency list states the non-NULL-actor
+precondition is upheld by "the pre-deploy verification §B1.2 item 3
+already specifies" — a `SELECT` run once, by an operator, before a
+tenant's promotions staff can file or approve anything. That is
+"discipline in application/operational process," precisely the pattern
+`CLAUDE.md` rules out ("enforced by PostgreSQL row-level security bound
+to a connection-level setting — not by discipline in application code");
+a pre-deploy query proves the precondition held **at the moment someone
+remembered to run it**, and says nothing about a `staff_users` row that
+is updated to `status = 'active'` with a NULL `person_id` five minutes
+later, by any path that does not go through whatever created the
+original account.
+
+**Fix — a real, permanent, database-enforced constraint on
+`staff_users`, replacing the query as the enforcement mechanism:**
+
+```sql
+ALTER TABLE staff_users
+  ADD CONSTRAINT staff_users_active_requires_person
+  CHECK (status <> 'active' OR person_id IS NOT NULL);
+```
+
+This is a standard table `CHECK` constraint, evaluated by PostgreSQL on
+every `INSERT` and `UPDATE` to `staff_users`, not a one-time read. It
+cannot be silently bypassed by a code path the pre-deploy query's author
+did not anticipate, and it turns "a tenant's promotions staff account
+went active with no person link" from a possible-but-unverified state
+into a rejected write, structurally, forever.
+
+**The pre-deploy query does not disappear — its role changes.** Adding
+this constraint to a table that already contains a violating row fails
+the migration outright (the correct, fail-closed behavior — it is
+cheaper to discover a violation at migration time than to discover it
+was silently tolerated). The `SELECT id, email FROM staff_users WHERE
+tenant_id = <t> AND status = 'active' AND person_id IS NULL` query
+therefore becomes the **remediation** step run immediately before the
+migration that adds this constraint, per tenant — clean the data, then
+make the invariant permanent — rather than the control itself. This
+mirrors the same distinction `SEP-1` draws everywhere else in this
+contract between a check that fires once and one the database enforces
+continuously.
+
+**Side effect, stated rather than claimed as a deliverable**: this
+constraint hardens every existing `<table>_enforce_governance()` trigger
+in the migration `0034`/`0044`/`0047` family that already depends on the
+same precondition, not only `SEP-1`'s own triggers — because they all
+resolve the same `staff_users.person_id` column. That is a welcome
+side effect of closing `SEP-1`'s dependency correctly, not a new,
+separately-scoped deliverable of this dispatch.
+
+**Routed requirement — `REQ-SEP-STAFF-1`.** `security` does not own
+`staff_users` or its migrations (CLAUDE.md, "no specialist redesigns
+shared architecture unilaterally"). Routed to `identity-compliance`
+(co-owner of the `staff_users.person_id` ↔ `Person` primitive per
+`REQ-SEP-ID-1`, §W15.1.6) and whoever owns the `staff_users` migration
+file in practice (`backend-platform`), flagged for `architect`'s
+cross-domain sign-off: add
+`staff_users_active_requires_person` in the same migration that performs
+the per-tenant remediation query above, before any `SEP-1` or `AFF-4E-1`
+trigger goes live in a non-development environment.
+
+**Test, added to §B1.5/§W15.1.8's obligations:** an `UPDATE staff_users
+SET status = 'active' WHERE person_id IS NULL` (attempted directly,
+bypassing every application code path) is rejected by the database with
+a constraint violation, not merely refused by application logic that
+could be routed around.
+
+#### W15.1.11 Fix Round 2 (`RK-W15P2-6` part b / `RK-W15P2-7`) — the denial-audit record, redesigned per ADR 0031 §39
+
+**The finding, and why it is correct.** §W15.1.8's original bullet
+required "a `SEP-1` refusal writes an audit record with `Outcome:
+denied`." `SEP-1` is specified as a `BEFORE INSERT/UPDATE` trigger that
+`RAISE EXCEPTION`s (§W15.1.3). A `RAISE EXCEPTION` inside a `BEFORE`
+trigger aborts the **entire enclosing transaction** — every write that
+transaction attempted, including any audit-record insert the same
+transaction tried to make, is rolled back with it. There is no
+statement ordering, no savepoint discipline internal to that one
+transaction, and no "write the audit row first" reordering that survives
+this, because the abort is unconditional and total. The original
+requirement was, as specified, impossible.
+
+**The precedent that already solved this exact problem — ADR 0031 §39.**
+Risk's `Evaluate` faces the identical shape: a `DENY`/`REVIEW` decision
+returns *normally* (the transaction is still valid, so Bonus can write
+its Progress/audit entry in that same transaction and commit); but a Go
+`error` return means the transaction must abort, so **nothing written in
+it survives**, and ADR 0031 §39 resolves this by requiring: *"An attempt
+record, if the product wants one, must be written on a **separate**
+transaction and must be unmistakably distinguishable from a policy
+decline — an error means 'the platform could not decide,' not 'the
+player's limits rejected this.'"*
+
+**`SEP-1` maps onto the harder branch of that precedent, always — not
+conditionally.** Unlike `Evaluate`, which has a real "return `DENY` and
+let the caller commit a decline record in the same transaction" path,
+`SEP-1` has no such path: it is a trigger, and a trigger's only way to
+refuse an `INSERT`/`UPDATE` is to raise, which always aborts. Every
+`SEP-1` refusal is therefore, structurally, the "error" row of ADR 0031
+§39's table, never the "DENY, write in the same transaction" row. This
+is stated because it would be a mistake to read `SEP-1` as sometimes
+needing the separate-transaction pattern and sometimes not — it always
+does.
+
+**The fix — a separate-transaction denial-audit record, distinguished by
+a reserved custom SQLSTATE, not by parsing a message string:**
+
+1. Every `<table>_enforce_separation()` trigger raises using a single,
+   shared, reserved custom SQLSTATE across the whole `SEP-1` trigger
+   family — `'SP001'` throughout this document's pseudocode — never a
+   generic PL/pgSQL default (`P0001`) and never a code shared with an
+   ordinary `CHECK` constraint violation or with the four-eyes consume
+   trigger's own raises (§B1.2 item 4, which should use its own distinct
+   code, e.g. `'AC001'`, for the identical reason). A caller distinguishes
+   "the database refused this because it is structurally a self-deal"
+   from "the database refused this for an unrelated reason" by
+   `pgconn.PgError.Code`, never by matching the `RAISE` message text,
+   which §W15.1.3's own examples already show varies per refusal branch
+   and is not a stable API.
+2. The domain's Go call site — the code performing the `INSERT`/`UPDATE`
+   that `SEP-1` may reject — catches the error, confirms `Code ==
+   "SP001"`, and, **on a new transaction** (the original is already
+   rolled back by Postgres; this is a fresh `Begin`, not a `Savepoint`
+   inside the dead one), writes an `audit.Record` with:
+   - `Outcome: denied`
+   - `Action`: `<domain>_<object>.sep1_refused` (e.g.
+     `bonus_grant.sep1_refused`, `bonus_bulk_job.sep1_refused`,
+     `affiliate_commission_approval.sep1_refused`,
+     `crm_engagement_campaign_activation.sep1_refused`) — a naming
+     convention distinct from every existing `<domain>.<event>` action in
+     §B1.4's catalogue, so a `SEP-1` refusal is never confusable, by
+     `Action` alone, with an ordinary four-eyes policy decline (which
+     keeps its own existing action name, e.g. `bonus_change_request
+     .rejected`) or with an RBAC/RLS denial
+   - `Metadata.reason_code` one of a small fixed set naming *which* step
+     of §W15.1.3 (as amended by §W15.1.9) refused —
+     `SEP1_ACTOR_UNRESOLVED`, `SEP1_ACTOR_IS_BENEFICIARY`,
+     `SEP1_APPROVER_IS_BENEFICIARY`, `SEP1_EMPTY_BENEFICIARY_SET`,
+     `SEP1_NULL_BENEFICIARY_PERSON`, `SEP1_CARDINALITY_MISMATCH`,
+     `SEP1_TENANT_SCOPE_SELF_PROOF_FAILED` — never the resolved
+     `person_id`s or beneficiary attributes themselves (§B1.4's PII
+     rule applies to this record exactly as to every other)
+   - the attempted operation's identity (tenant, target type/id,
+     operation type) but **not** the payload the attempt tried to write,
+     for the same reason a denied withdrawal's audit record does not
+     replay the withdrawal amount's provenance beyond what is already
+     safe to store
+3. This is a **mandatory** obligation on every call site that performs a
+   `SEP-1`-guarded write, not an optional enhancement — a refusal that
+   writes nothing anywhere is exactly the "a control that fires silently
+   leaves no evidence it fired" failure §B1.4 already names, now
+   correctly engineered to actually be achievable.
+
+**Honest residual limitation, stated rather than hidden.** The
+separate-transaction write happens *after* the aborting transaction has
+already unwound, in the same application process, on the same request.
+A process crash or connection loss in the narrow window between the
+abort and the separate audit write is a real, if narrow, gap: the
+`SEP-1` refusal itself is not lost (the `INSERT`/`UPDATE` did not
+happen — the ledger/state invariant holds), but the **evidence that it
+was attempted** could be. This is the same residual risk ADR 0031 §39's
+own pattern accepts implicitly for Risk's `error` branch, and this
+document does not claim to close it — it is recorded as a known,
+accepted gap, not a solved one. A future outbox-pattern or
+write-ahead-log-based delivery would close it; building one is out of
+this dispatch's scope and is not required to close `RK-W15P2-7`, which
+concerns the record's *specification*, not its delivery guarantee.
+
+**Test, replacing and extending §W15.1.8's original bullet (already
+restated above in place):**
+
+- A `SEP-1` refusal produces **zero** rows in the authorizing table (the
+  transaction fully rolled back) and **exactly one** separate-transaction
+  audit record with `Outcome: denied`, an `Action` ending in
+  `.sep1_refused`, and a `Metadata.reason_code` matching the specific
+  branch that fired.
+- The `SEP-1`-refusal audit record's `Action` is asserted to differ from
+  the ordinary four-eyes decline `Action` for the same table, so a test
+  that only checks "an audit record with `Outcome: denied` exists" —
+  which would pass even if the two were conflated — is insufficient and
+  must not be the only assertion `qa` accepts.
+- The custom SQLSTATE (`'SP001'`) is asserted directly on the caught
+  Postgres error, not inferred from message text, as the mechanism the
+  application-layer catch relies on.
+
+#### W15.1.12 Fix Round 2 — the Bonus adoption contract (`REQ-SEP-BONUS-1` … `4`), consolidated and made unambiguous
+
+This subsection is the single, self-contained checklist `bonus-engine`
+implements against in its own dispatch this round. It restates
+`REQ-SEP-BONUS-1`–`3` (§W15.1.7) in full rather than by cross-reference,
+and formalizes the newly-discovered `REQ-SEP-BONUS-4`. Nothing here
+weakens or reopens the general `SEP-1` mechanism (§W15.1.3, as amended by
+§W15.1.9–§W15.1.11); this subsection only fixes the **enforcement
+points, resolvers and permissions** Bonus must wire it into.
+
+| Req | Enforcement point(s) | Beneficiary resolver `B(O)` | Permission gated | Four-eyes independent of `SEP-1`? |
+|---|---|---|---|---|
+| **`REQ-SEP-BONUS-1`** | Grant issuance, Grant activation, direct bonus Adjustment, staff-forced conversion/manual release override, `BulkGrantJob` execution | Issuance/activation/adjustment/forced-conversion: the target Grant's/target wallet's `player_account_id → player_accounts.person_id` (scalar, `expected_count = 1`). `BulkGrantJob`: the **set** of persons behind the pinned, materialized recipient set (`expected_count` = the pinned row count, §W15.1.9) | `bonus_grant:issue`, `bonus_adjustment:write`, `bonus_bulk:execute` (existing, §B1.1) | Yes — §B1.2 items 1/2/3/4, unchanged. `SEP-1` is additional, per §W15.4.1 |
+| **`REQ-SEP-BONUS-2`** | `BonusSuggestion` review (approve/reject) and activation | The persons behind the resolved `proposed_player_population`, same pinned-set discipline as `BulkGrantJob` | `bonus_suggestion:review` (existing, §W15.4.3); activation consumes the underlying Grant/BulkJob permission, per §W15.4.3 item 3 | Activation's own existing four-eyes (unchanged); review itself is not separately four-eyes-gated (§W15.4.3) |
+| **`REQ-SEP-BONUS-3`** | The household/linked-account **detection** path of §W15.1.5 | n/a — this is a "never a block" requirement, not a resolver | n/a | n/a |
+| **`REQ-SEP-BONUS-4`** (**new, this round**) | `HeldDispositionRecord` resolution (doc 10 N1.4.1 item 5c/N1.9): `ACTION_REFORFEIT`, `ACTION_ROUTE_TO_CASH`, and the manual sub-choice under `ACTION_HOLD_FOR_REVIEW`. **Not** the `HeldDispositionRecord`'s *creation* (doc 10's own row 7/12 classify creation as `TECHNICAL` — "recording-and-parking a fact," never an authorizing write) | The Grant's `player_account_id → player_accounts.person_id` — identical shape to `REQ-SEP-BONUS-1`'s adjustment/forced-conversion resolver, because a `HeldDispositionRecord` resolution moves value onto or off of exactly that Grant's player | **New, dedicated**: `bonus_held_disposition:resolve` (see below — must not be folded into `bonus_adjustment:write` or `bonus_bulk:execute`) | **Yes, threshold 0 (always)** — doc 10 §3833–3835 already classifies every resolution action as `POLICY-DEPENDENT`, requiring a human G-2 answer; that is at least as material as an ordinary adjustment, which already defaults to threshold 0 |
+
+**Why `REQ-SEP-BONUS-4` needs a dedicated permission, stated as an
+argument, not an assertion.** The human directive's framing — "must
+become a `SEP-1` enforcement point with its own named permission (not
+folded into `bonus_grant:adjust` or `bonus_bulk:execute`)" — is correct
+for the same reason §B1.1 already split `bonus_config:manage` into six
+narrower authorities rather than leaving it bundled: a
+`HeldDispositionRecord` resolution is a distinct economic act (it
+resolves a G-2-policy-dependent, already-deferred value disposition,
+not an ordinary balance correction and not a bulk operation) with its
+own volume, its own risk profile, and its own reporting need. Folding it
+into `bonus_adjustment:write` would let a tenant's existing
+adjustment-authorized staff resolve deferred dispositions **without any
+role-wiring decision ever being made about it** — the exact "configure
+it instead of adjusting it" bypass shape §B1.1 hard constraint 3 already
+exists to close, recurring one layer over. A dedicated permission also
+lets `qa`/audit distinguish held-disposition-resolution volume from
+ordinary adjustment volume without inference, which the mixed-purpose
+alternative cannot do.
+
+**Wiring, extending §B1.1's tables (routed for `architect`/
+`bonus-engine`'s sign-off, per the same flag §B1.1 already carries for
+its own permission proposals):**
+
+- `bonus_held_disposition:resolve` is granted to `RoleBonusOperations`
+  only — the same role that holds `bonus_adjustment:write` and
+  `bonus_grant:cancel` — never to `RolePromotionsManager`,
+  `RoleTenantAdmin`, `RoleFinance`, or `RolePlatformAdmin`, for the
+  identical reasons §B1.1 already gives for those roles holding no other
+  bonus write authority.
+- §B1.1 hard constraint 3 ("No role may hold both `bonus_offer:manage`
+  and `bonus_adjustment:write`") is extended verbatim to
+  `bonus_held_disposition:resolve`: no role may hold both
+  `bonus_offer:manage` and `bonus_held_disposition:resolve`.
+- Audit (extending §B1.4's catalogue): `bonus_held_disposition.resolved`
+  — actor staff; `TargetType` a placeholder pending `bonus-engine`'s
+  Wave-1 domain model per §B1.7 dependency 1 (the `HeldDispositionRecord`
+  table/type name itself); reason code **always**; before/after the
+  `status` transition (`held → resolved_reforfeit` /
+  `resolved_route_to_cash`), the amount, `change_request_id`, approver
+  ids, `threshold_at_decision` — the same shape as
+  `bonus_adjustment.applied` (§B1.4).
+- `SEP-1` applies at the resolution row exactly as specified in
+  §W15.1.3 (as amended by §W15.1.9–§W15.1.11): step 0 tenant-scope
+  self-proof, actor resolution, cardinality-asserted resolver, the
+  unconditional comparison, and a separate-transaction denial-audit
+  record on refusal.
+
+**Fail-closed statement (per the human directive's instruction not to
+invent identity data that doesn't exist).** Where the `HeldDispositionRecord`'s
+target Grant's `player_accounts.person_id` cannot be resolved — an
+unlinked or malformed player account, a cross-tenant reference, any
+resolution failure — the resolution is **refused**, not defaulted to
+"resolve without a `SEP-1` check" and not defaulted to "resolve as if no
+conflict exists." This is the same fail-closed posture §W15.2.4 already
+states for the affiliate side, restated here so Bonus's adoption does
+not silently diverge from it.
+
+**Test additions to §B1.5/§W15.1.8:**
+
+- A staff actor whose `person_id` equals the target Grant's player's
+  `person_id` attempting `ACTION_REFORFEIT` or `ACTION_ROUTE_TO_CASH` is
+  refused by `SEP-1`, at a single Grant (amount 1, audience size 1).
+- No role in `permission.go`'s map holds `bonus_held_disposition:resolve`
+  together with `bonus_offer:manage`.
+- A `HeldDispositionRecord` **creation** event (doc 10 row 7/12) requires
+  no permission beyond the existing settlement/capture path and is
+  **not** `SEP-1`-gated — asserted explicitly, so the TECHNICAL/
+  POLICY-DEPENDENT boundary doc 10 already draws is not blurred by an
+  over-broad implementation that gates the wrong event.
+- `bonus_held_disposition.resolved` is audited with the full
+  before/after shape above; a resolution attempted with an unresolvable
+  target player is refused, not defaulted.
 
 ### W15.2 Affiliate approval independence (closes SEC-W15-01; decides DEP-AFF-1)
 
@@ -1149,7 +1584,7 @@ control.
 | **Affiliate account** | A `staff_users` row with an affiliate role, subtree-scoped. | Two distinct accounts are **not** two distinct interests, and two distinct `person_id`s are **not** two distinct interests either. |
 | **Approver** | The principal recording an `approve` decision on an affiliate-financial object. | Holding the approval permission does not make a principal independent of the beneficiary. |
 | **Subject** | The object acted upon: the accrual, the attribution, the settlement instruction, the agreement version. | Not the same as the beneficiary — a re-attribution's subject is an attribution row; its beneficiaries are two nodes' entities. |
-| **Beneficiary** | Every party to whom value accrues if the operation succeeds. For a commission decision this is the **ancestor chain** of the commission owner under any override agreement (doc 32 §6.4), not just the named node. | Not limited to the node on the accrual. A parent's override interest makes the parent a beneficiary. |
+| **Beneficiary** | Every party to whom value accrues if the operation succeeds. For a commission decision this is the **reflexive ancestor closure** of the commission owner — the node **itself**, together with its ancestor chain — under any override agreement (doc 32 §6.4). **Ancestors alone is wrong** (§W15.2.7, `NEW-6`): it excludes the node's own beneficiaries and, for a flat/root node with no ancestors, resolves empty — which `SEP-1` treats as a refusal, deadlocking the platform's own first-slice affiliate topology. | Not limited to the node on the accrual, **and** not limited to its ancestors either. A parent's override interest makes the parent a beneficiary; the node's own people are beneficiaries of the node's own accrual. |
 | **Commission owner** | The node the accrual names — the direct claimant. | Not the only beneficiary. |
 
 **The binding consequence of this vocabulary**: two accounts controlled by
@@ -1278,9 +1713,10 @@ money, then:
 **Two supporting requirements that travel with `AFF-4E-1`:**
 
 - **`SEP-1` applies at the same point**, with the beneficiary set of
-  §W15.1.2 (the ancestor chain's affiliate-account persons **plus** its
-  declared beneficial-interest persons). `AFF-4E-1` handles "which class
-  may approve"; `SEP-1` handles "which person may not".
+  §W15.1.2 (the node's **reflexive ancestor closure**'s affiliate-account
+  persons **plus** its declared beneficial-interest persons — §W15.2.7;
+  not ancestors alone). `AFF-4E-1` handles "which class may approve";
+  `SEP-1` handles "which person may not".
 - **Approvals must be *consumed*, not referenced.** This is SEC-W15-12:
   `CommissionSettlementInstruction.approval_refs[]` as specified is *data
   carried alongside* the instruction, which means the instruction is
@@ -1299,7 +1735,7 @@ them warns-and-continues:
 | Condition | Result |
 |---|---|
 | Approver's `principal_class` is NULL, absent, or an unrecognized value | **Refuse the approval.** |
-| The beneficiary set cannot be fully resolved (missing attestation record, incomplete ancestor chain, unresolvable agreement version, unresolvable node) | **Refuse the approval.** |
+| The beneficiary set cannot be fully resolved (missing attestation record, incomplete reflexive ancestor closure, unresolvable agreement version, unresolvable node) | **Refuse the approval.** |
 | The node's beneficial-ownership attestation is **missing** (`undeclared`) | **Refuse** every approval on that node's objects. |
 | The attestation exists but is **stale** past its re-attestation period | **Refuse.** Stated explicitly so that nobody implements "stale ⇒ warn". |
 | An affiliate-class principal attempts an approval | **Refuse** (`AFF-4E-1`). |
@@ -1377,7 +1813,7 @@ independence.
    literal SEC-W15-01 scenario: refused by `AFF-4E-1`.
 5. **Parent approving a sub-affiliate's accrual** where an override
    agreement makes the parent a beneficiary: refused by `SEP-1`'s
-   ancestor-chain resolver.
+   reflexive-ancestor-closure resolver.
 6. **Sub-affiliate approving its parent's accrual**: refused by
    `AFF-4E-1`.
 7. **Same beneficial authority where represented** — an internal staff
@@ -1388,8 +1824,9 @@ independence.
 9. **Stale attestation** past `next_attestation_due_at`: refused, not
    warned.
 10. **Two unrelated internal authorized approvers**, neither a declared
-    interest holder, neither in the ancestor chain: **succeeds.** (The
-    positive case that proves the control set is not inert — `SEP-1-H1`.)
+    interest holder, neither in the reflexive ancestor closure: **succeeds.**
+    (The positive case that proves the control set is not inert —
+    `SEP-1-H1`.)
 11. **Replay** — the same approved settlement instruction submitted twice:
     posts once, by database constraint, not by application check.
 12. **Concurrent approvals** — two approvers racing to be the second
@@ -1408,6 +1845,132 @@ independence.
 17. **Cross-subtree read** — an affiliate principal reading another
     subtree's accrual/attribution returns zero rows under RLS, not a
     filtered application response.
+18. **Same node, not an ancestor** — an internal staff member with a
+    declared beneficial interest in the **subject node itself** (the
+    commission owner, not a parent) approving that node's own commission:
+    refused by `SEP-1`. (New, Fix Round 2 — `code-reviewer`'s `NEW-6`; a
+    strict ancestors-only resolver does **not** catch this, because the
+    subject node is not its own ancestor.)
+19. **Flat/root node, no ancestors** — the platform's own first-slice
+    affiliate topology (no sub-affiliates): an unrelated, unconflicted
+    internal approver approving that node's commission **succeeds**. (New,
+    Fix Round 2 — proves the reflexive fix also closes the deadlock branch
+    of `NEW-6`: an ancestors-only resolver would return an empty `B(O)`
+    for a node with no ancestors, and `SEP-1` treats empty as a refusal,
+    so *every* commission in the recommended first slice would have been
+    permanently unapprovable.)
+
+#### W15.2.7 Fix Round 2 (`NEW-6`) — the reflexive ancestor closure correction
+
+**The finding.** `code-reviewer` found that doc 32 §6.5.2's corrected
+resolver — itself a fix for the original SEC-W15-01 collusion finding —
+defines `B(O)` as the commission owner node's "ancestor chain," which on
+its plain reading **excludes the node itself**. This document's own
+§W15.1.2 table and §W15.2.1 vocabulary entry (both `security`'s text, not
+doc 32's) used the identical non-reflexive phrasing and are corrected in
+place, above, rather than left standing while this subsection alone
+states the fix — CLAUDE.md's "no specialist redesigns shared architecture
+unilaterally" means `security` does not edit doc 32 itself, but it does
+not excuse `security`'s own document from repeating doc 32's bug.
+
+**The two failure branches, both real, both closed by the same one-word
+fix.**
+
+1. **Fail-open.** §W15.2.5 specifies that
+   `declared_interest_person_ids` "join the node's `SEP-1` beneficiary
+   set" — but if `B(O)` is computed as ancestors-only, an internal staff
+   member who declared a beneficial interest in the paying node **itself**
+   is never in `B(O)` at all, because the node is not its own ancestor.
+   That staff member could approve their own node's commission, with a
+   properly-filed, properly-witnessed attestation on record, and `SEP-1`
+   would not fire. This directly defeats §W15.2.5's stated purpose — "a
+   declared internal owner is therefore structurally unable to act on, or
+   approve, that node's money" — which is only true if `B(O)` includes the
+   node itself.
+2. **Deadlock.** `SEP-1` treats an empty `B(O)` as a refusal (§W15.1.3
+   step 5, unchanged by this fix) — correctly, per §W15.1.1's "an
+   operation whose beneficiary set resolves empty is refused" and its own
+   stated reasoning ("this operation benefits nobody identifiable" is as
+   ineligible as benefiting the actor). A flat/root affiliate node with no
+   sub-affiliates — which doc 32 and the platform's own commercial plan
+   name as the **first slice**, deliberately the simplest topology — has
+   an empty ancestor set by construction. Under an ancestors-only reading,
+   `B(O)` for every commission on that node is empty, so **every**
+   commission approval on the platform's own recommended launch topology
+   would be refused, forever, by a control whose entire purpose is to
+   distinguish a legitimate approver from an illegitimate one — not to
+   forbid approval altogether.
+
+**The fix.** `B(O)` for `CommissionApproval`, `CommissionSettlementInstruction`,
+re-attribution, and agreement/rule-version activation is the **reflexive**
+ancestor closure:
+
+> `B(O) = {commission owner node} ∪ ancestors(commission owner node)`,
+> expanded to that closure's affiliate-account persons **plus** its
+> declared beneficial-interest persons — never ancestors alone.
+
+This is a one-word correction ("ancestor chain" → "reflexive ancestor
+closure") with two consequences that were previously both wrong in
+opposite directions: `B(O)` is now **never empty** for any node (a node
+is trivially a member of its own reflexive closure), which closes the
+deadlock; and the node's own affiliate-account persons and declared
+interest-holders are now always tested, which closes the fail-open.
+Nothing else about `SEP-1`'s mechanism (§W15.1.3, as amended by
+§W15.1.9–§W15.1.11) changes — this is a correction to one domain's
+supplied *resolver definition* (§W15.1.2 item 1), not to the shared
+template.
+
+**What this does not change.** `AFF-4E-1` (§W15.2.3) is untouched — it
+already refuses any affiliate-class approver regardless of beneficiary
+set, so it was never affected by the ancestors-only bug. The reflexive
+fix is purely a `SEP-1`-side correction to the beneficiary-set
+*definition*, addressing the residual "internal staff member as
+beneficiary" gap `AFF-4E-1` explicitly does not claim to close (§W15.2.3,
+"What `AFF-4E-1` does not close, stated plainly," item 1).
+
+**Routed.** The actual edit to doc 32 §6.5.2's own prose (and to AI-6's
+test list there) is `architect`'s, in a separate dispatch this round —
+`security` states the corrected rule here as the authoritative contract
+text so that `architect`'s doc 32 edit has an unambiguous target to match,
+per the human directive's instruction that this document's own
+restatement must not perpetuate the non-reflexive wording while doc 32
+is fixed separately.
+
+#### W15.2.8 SEC-W15-01 adversarial test matrix, closure honesty (human directive, Fix Round 2)
+
+The human directive requires an explicit adversarial test matrix for
+SEC-W15-01 specifically, naming eight categories, and requires this
+document to state plainly which of them the fixed design (`AFF-4E-1` +
+`SEP-1` with the §W15.2.7 reflexive correction) actually closes versus
+what remains residual. §W15.2.6 already contains 19 numbered cases (17
+original, 2 added by §W15.2.7); this table maps the directive's eight
+named categories onto them rather than re-deriving a second list, and is
+the honesty statement the directive requires.
+
+| Directive category | Mapped test(s) in §W15.2.6 | Closed by this design? | Residual, if any |
+|---|---|---|---|
+| **Same person** | 1, 2 | **Yes.** `UNIQUE (request_id, approver_principal_id)` plus the person-comparison trigger, unconditionally (the migration-`0034`-line-117 inversion is required to be absent, §W15.1.3). | None known. |
+| **Same affiliate** | 3, 4 | **Yes**, by `AFF-4E-1` alone — no affiliate-class principal may ever record an approval, so two affiliate accounts on the same or different nodes cannot contribute an approval regardless of collusion. | None for the P0 scenario itself. `AFF-4E-1` does not, and does not claim to, detect that two affiliate *entities* are the same commercial party where distinct nodes and accounts are used to route around it (§W15.2.1's stated platform-wide identity-capability gap) — but that gap is moot here because neither can approve at all. |
+| **Same parent affiliate** | 5, 6 (and 18/19 for the reflexive fix) | **Yes**, by `SEP-1`'s reflexive ancestor closure — a parent benefiting from a child's override is now always in `B(O)`, and the node's own case (18) and the empty-ancestor case (19) are both covered. | The *deadlock* branch of `NEW-6` was itself introduced by a previous fix and closed only in this round; no further residual is claimed here beyond the honest limits of §W15.2.5 below. |
+| **Same economic owner where represented** | 7 | **Yes, where an attestation exists.** An internal staff member with a `declared_interest_person_ids` entry for the node is in `B(O)` and is refused. | **Residual, stated plainly (§W15.2.5's own limitation, restated here because the directive asks for honesty specifically):** an *undisclosed* beneficial interest is not detected — an internal staff member who is a true economic owner but never attested to it is not in `B(O)` and is not refused by `SEP-1`. §W15.2.4's `undeclared` default at least forces the node into a refused state until *someone* attests, but a dishonest or negligent attester (`none_internal` when the truth is otherwise) defeats the control. This is not solved by this fix and is not claimed to be — detecting an undisclosed interest requires payout-instrument/identity correlation routed to `identity-compliance`/`risk` (§W15.2.5), not an affiliate-local or security-local heuristic. |
+| **Unrelated authorized approvers** | 10 (renumbered from the original list; also 19) | **Yes** — the positive case proving the control set is not universally inert (`SEP-1-H1`). | None known, subject to the resolver actually running (§W15.1.9's cardinality assertion is what makes "unrelated" provably unrelated rather than accidentally-truncated-to-look-unrelated). |
+| **Replay** | 11 | **Yes** — by database constraint (the consume function's state transition, §B1.2 item 4 shape, `REQ-AFF-CONSUME-1`), not by an application check that could be skipped. | None known. |
+| **Concurrency** | 12 | **Yes** — `SELECT … FOR UPDATE` serializes the consume; two racing approvals cannot both reach `applied`. | None known beyond the general residual audit-record-loss-on-crash limitation stated in §W15.1.11, which is about evidence of a denial, not about the operation's own correctness. |
+| **Missing authority** | 15 (unclassified `principal_class`), plus every row of §W15.2.4's fail-closed table | **Yes** — every listed missing-authority condition (unclassified principal, unresolvable ancestor closure, undeclared attestation, stale attestation) refuses; none defaults to approve. | None known for the *listed* conditions. A condition this document has not enumerated could in principle default open if a future implementation adds a new authority-bearing field without adding its own fail-closed row — this is a general hazard of any enumerated fail-closed table, not specific to this control, and is why §W15.2.4's table is phrased as exhaustive-as-of-today rather than exhaustive-forever. |
+| **Partial identity resolution** | new test under §W15.1.9 ("a resolver whose join is made to cross a row outside the acting connection's RLS scope") | **Yes, at the mechanism level** — the cardinality assertion (§W15.1.9) refuses whenever the resolved count differs from the expected count, which is exactly the shape a partial/truncated resolution takes. | **Residual, stated honestly:** the cardinality assertion catches *undercounting* (rows silently dropped). It does not, by itself, prove a resolver is *authored* correctly for every domain-specific edge case (e.g., a resolver that never attempts to walk a particular relationship at all, rather than walking it and losing rows to RLS) — that class of defect is caught only by each adopting domain's own adversarial test suite for its own resolver, not by the shared mechanism. §W15.1.9 states this same limitation in its own terms. |
+
+**Summary, stated as the directive requires — plainly, not as a
+blanket claim:** every one of the eight directive categories has at
+least one closing test in this design. Two categories carry a named,
+accepted residual: **undisclosed** beneficial interest (no detection
+mechanism exists or is claimed), and **resolver-authoring correctness
+beyond undercounting** (caught by per-domain test suites, not by the
+shared mechanism). Both residuals are pre-existing limitations already
+stated in §W15.2.5 and §W15.1.9 respectively, not new gaps this
+subsection discovers — this subsection's contribution is making the
+mapping from the directive's own categories to those limitations
+explicit, per its instruction to "be honest; do not claim closure you
+can't support."
 
 ### W15.3 DEP-CRM-4 — formal decision
 
@@ -1759,3 +2322,15 @@ arriving through a legitimate read path.
   these controls once is not a standing clearance — per
   `.claude/agents/security.md`, each implementing wave is reviewed on its
   own.
+- **Fix Round 2 (§W15.1.9–§W15.1.12, §W15.2.7–§W15.2.8) closes four named
+  defects at the design level and no further**: `RK-W15P2-1`,
+  `RK-W15P2-6`, `RK-W15P2-7`, and `NEW-6`. It carries forward, honestly,
+  two residuals stated in place rather than repeated here: the
+  separate-transaction denial-audit record can still lose evidence of an
+  attempt (not the attempt's effect) to a crash in a narrow window
+  (§W15.1.11), and undisclosed beneficial ownership remains undetected
+  (§W15.2.5, restated in §W15.2.8). This dispatch is `security`'s own
+  fix to its own prior round's design and is, per its own tasking,
+  subject to independent re-review by `risk` and `code-reviewer` before
+  either finding is marked closed in fact rather than at the design
+  level.
