@@ -356,3 +356,346 @@ reach every **network and brand within one tenant/licence**, not "across
 tenants" — not about the identity model — see the companion KYC/AML/RG
 document's §4 for the full treatment; this document does not duplicate it
 here to avoid two sources of truth for the same open question.
+
+## Stage 4H-B1, Wave 1.5 Fix Wave — actor≠subject Person-linkage confirmation, and the affiliate identity/authority model (task 4HB1FW-05)
+
+Status: **DESIGN ONLY, `NOT IMPLEMENTED`.** No code, migration, or Human
+Decision Register item is selected here. This section feeds two parallel
+dispatches this same round - `security`'s cross-cutting actor≠subject
+invariant (4HB1FW-04, closing P0 SEC-W15-03) and `architect`'s Affiliate
+architecture fix (4HB1FW-03, closing P0 SEC-W15-01/P1-4 on doc 32) - per
+the orchestrator's own unifying contract that actor≠subject is "one
+reusable platform invariant... with `identity-compliance` confirming the
+underlying Person-linkage mechanism is the right primitive to build it
+on." Since neither parallel dispatch's output is visible this round,
+reconciliation happens at Phase 2 review; this section states the
+foundation honestly, including what it cannot yet guarantee, rather than
+asserting an outcome those dispatches haven't confirmed.
+
+### A. Is `staff_users.person_id` <-> `player_accounts` -> `Person` sufficient for actor≠subject?
+
+**Split answer: the subject side is sound; the actor side has a real,
+named gap.**
+
+**Subject/beneficiary side - sound.** Every `player_accounts` row has an
+immutable `person_id`, set once at registration (the "Implementation
+status (Stage 4E)" section above) and never re-pointed after creation -
+there is no mutation path that changes which `Person` a given
+`PlayerAccount` row resolves to. So "which `Person` does this specific
+player subject/beneficiary resolve to" is a single, unambiguous,
+always-populated join (`player_accounts.person_id`) for any concrete
+`player_account_id` a Grant, a CRM `RequestOfferGrant` target, or a
+`PlayerAttribution` names. This holds regardless of ADR 0027 Decision 8's
+honest limitation that cross-brand *matching* of two different
+`PlayerAccount`s to the *same* `Person` is not yet live for a real
+player - that limitation is about whether two accounts get correctly
+merged into one `Person`, not about whether a single, already-existing
+account's `person_id` is a reliable, resolvable fact. It is. Any
+comparison keyed on a named subject/beneficiary account stands on solid
+ground.
+
+**Actor side - a genuine, precisely-named gap, not an edge case.**
+`staff_users.person_id` is nullable by design (migration 0029's own
+comment: "the overwhelming majority of staff accounts have no
+corresponding player account... that's expected, not an incomplete
+migration") and is set **only** by a deliberate admin action
+(`CreateStaffUser` with a non-nil `personID`, or the remediation path
+`LinkStaffPersonID`) - there is no automatic process that ever populates
+it. Concretely: **a staff member who is secretly also a player, and
+whom no admin has ever linked, is invisible to any `person_id`
+comparison.** `staff.PersonID` is `NULL`; the comparison has nothing to
+compare against; the self-dealing case the invariant exists to catch
+passes silently. This is not a hypothetical corner case - it is the
+*expected* state of the overwhelming majority of `staff_users` rows, and
+"linked" vs. "not linked" today reflects only "did an admin happen to
+know and bother to link them," never a verified fact.
+
+It is worse than "no automated check exists" - **there is currently no
+data model at all to check against.** `StaffUser` (`internal/identity/
+staff_user.go`) carries email, password hash, role, status, and an
+optional `person_id`. It has no legal name, no date of birth, no
+document reference - nothing `internal/identityresolution.
+PersonResolver` (or any hypothetical future staff-side equivalent) could
+match against even if one were built today. This is stated plainly
+because CLAUDE.md's "no fake completion" rule forbids implying the
+comparison is airtight when it structurally cannot be: **the actor≠subject
+invariant, however well `security` implements the comparison logic, is
+only as strong as which staff accounts happen to carry a `person_id` -
+and today that is a matter of admin knowledge, not verified fact.**
+
+**Is this closeable now, or does it need a new capability?**
+
+- **Closeable now (a policy/process control, not a new technical
+  capability), `RECOMMENDATION`:** require a mandatory, audited
+  attestation at staff onboarding - and periodically re-attested, e.g.
+  annually or on role change to any permission that can approve a
+  Grant/CRM send/affiliate commission - asking each staff member to
+  declare whether they are also a registered player at any brand on the
+  platform, or a declared beneficial owner of any affiliate node (§C
+  below). A "yes" answer routes to the existing, sanctioned
+  `LinkStaffPersonID` remediation path (or the new beneficial-owner
+  attestation field, §C.3); a "no" answer is itself recorded as a dated,
+  auditable claim - so a later discovery that the attestation was false
+  is a documented compliance/HR violation with a specific false
+  statement on record, not silence. This is honesty-based, not
+  detection-based, and must be described as exactly that: it closes "we
+  never asked," not "they lied." It requires no new resolver, no new
+  matching logic, and no new PII collection beyond a yes/no declaration
+  plus (on "yes") the existing linkage flow - squarely within what this
+  specialist can specify without inventing an automated-matching
+  mechanism the directive forbids.
+- **Not closeable now - a genuine future capability requiring a human/
+  privacy decision, not invented here:** a *detective* control (an
+  automated cross-check comparing staff identity data against player
+  identity data, the way KYC-based `PersonResolver` evidence eventually
+  will for cross-brand player matching) would require collecting
+  staff-side identity evidence (legal name, DOB, government ID
+  reference) equivalent to KYC evidence - a materially new, privacy-
+  sensitive employee-data-collection decision (mirroring ADR 0027's own
+  open question about collecting verified attributes at all), and
+  explicitly the kind of "invent a way to be certain" mechanism this
+  task's directive forbids building here. **This is recorded as a
+  genuine platform gap, not resolved**: absent that future capability
+  (or absent one being authorized), the honest fail-closed answer is
+  that an *unattested, unlinked* staff actor cannot be affirmatively
+  cleared as "not the subject" - the invariant should therefore not
+  silently pass an unlinked actor as "no collision found" (see the
+  fail-closed shape in §B below), and any residual exposure from a false
+  "no" attestation is a policy/detection gap for compliance monitoring
+  to own, not something identity-resolution's technical mechanism can
+  close today.
+
+### B. The primitive-level query/join shape - and the lesson from migrations 0029 -> 0034
+
+`security` should build the unconditional comparison on the **same shape
+migration 0034 already proved**, not migration 0029's earlier, weaker
+shape - the difference between the two is the single most important fact
+this confirmation can hand over, because it is a fail-open/fail-closed
+distinction the codebase has already lived through once:
+
+- **Migration 0029 (Stage 3C)** compared `approver_person_id` against
+  `requester_person_id` but treated a `NULL` `approver_person_id` as "no
+  data to compare, allow" - i.e., an *unlinked* staff member's
+  self-approval passed silently, because the comparison itself, not
+  eligibility to act, was the only gate.
+- **Migration 0034 (Stage 3D)** fixed this by making linkage a
+  **precondition of eligibility to act at all**: `approver_person_id IS
+  NULL` now raises an exception outright ("approver has no confirmed
+  Person linkage and is not eligible to record withdrawal decisions"),
+  *before* the equality comparison is even reached. `internal/
+  withdrawal.ApproverEligibility`'s Go-level mirror of this same rule
+  documents the reasoning directly: "Stage 3C's optional, unenforced
+  Person linkage was found insufficient."
+
+**Confirmation:** any new unconditional actor≠subject trigger must
+replicate 0034's shape, not 0029's. Concretely, for any table recording a
+staff decision that grants, approves, or targets value/access
+(`Grant`/adjustment issuance, a CRM `RequestOfferGrant`/send, a
+`CommissionApproval`):
+
+```
+actor:    SELECT person_id, status FROM staff_users WHERE id = :actor_principal_id
+          -- NOT FOUND + is_automated/service-identity  -> exempt (ADR 0014 pattern, migration 0034's own precedent)
+          -- NOT FOUND + a human decision                -> REFUSE (identity cannot be resolved)
+          -- FOUND, status != 'active'                   -> REFUSE
+          -- FOUND, person_id IS NULL                     -> REFUSE  (0034's fix - NOT "skip comparison")
+
+subject/beneficiary: resolved per domain, e.g.
+          Grant beneficiary   -> SELECT person_id FROM player_accounts WHERE id = :player_account_id
+          CRM target          -> SELECT person_id FROM player_accounts WHERE id = :target_player_account_id
+          Affiliate commission-> SELECT declared beneficial_owner_person_id (§C.3) for the paying node,
+                                  UNION the node's own StaffUser.person_id if that account is itself linked
+
+compare:  IF actor.person_id = subject.person_id THEN REFUSE (self-dealing)
+          IF subject-side ownership is UNKNOWN (no attestation on file) THEN REFUSE
+              -- cannot exclude collision, per this task's own fail-closed instruction -
+              -- "unknown beneficial ownership" is not evidence of independence.
+```
+
+This is exactly `internal/withdrawal`'s existing two-layer pattern
+(`BeneficiaryCheck` + `ApproverEligibility` in Go, `withdrawal_approvals_
+enforce_governance` in SQL as the backstop that holds "even if [the
+Go-level check] is bypassed, disabled, or has a bug") generalized to
+Grant/CRM/Affiliate - not a new mechanism. The one substantive addition
+this confirmation flags for `security`'s design, beyond what 0034 already
+proves: **a nil/absent eligibility check on a human decision must be a
+hard error (`ErrInvalidInput`-shaped), never an implicit skip** -
+`ApproverEligibility`'s own doc comment already states this discipline
+("a nil ApproverEligibility on a non-automated call is itself a
+fail-closed ERROR here... never a silent skip"); every new call site
+`security` designs (Grant issuance, CRM send, commission approval) must
+carry the identical contract, or a future caller that simply forgets to
+wire the check reopens exactly the P0 this invariant exists to close.
+
+### C. The affiliate identity/authority model
+
+`docs/architecture/32-affiliate-and-acquisition-architecture.md` §3.2
+already decided an affiliate user authenticates as an `identity.
+StaffUser` with an affiliate-scoped role (no new principal type) and
+flagged the harder question - internal staff vs. external commercial
+counterparty isolation - to `security` as DEP-AFF-1. That decision is
+sound and this section does not revisit it. What it does not yet
+address, and what this task asks this specialist to name, is that
+"affiliate" conflates several genuinely distinct concepts the identity
+model has no way to express today. Naming them precisely is a
+precondition for `architect`'s and `security`'s parallel fixes to close
+SEC-W15-01 (two colluding affiliate accounts satisfying four-eyes) and
+the separate, currently-unowned conflict-of-interest vector (an
+employee who is personally the undisclosed beneficial owner of an
+affiliate node).
+
+**C.1 - Affiliate entity.** The actual external commercial counterparty
+(a company, a person, a partnership) that may control **multiple**
+affiliate accounts/nodes. **No existing mechanism expresses this.**
+`Person` is the wrong fit - `Person` is this platform's model of a
+*human*, built for KYC/self-exclusion/AML, and an affiliate entity may be
+a company, not a human; forcing a corporate affiliate into `Person`
+would corrupt a compliance-critical table with commercial-relationship
+data it was never designed to hold, and is explicitly out of scope
+(`Person` stays exactly what ADR 0027/this doc's "Model" section define
+it as). **Minimal addition needed:** a lightweight `AffiliateEntity`
+reference concept - commercial-relationship data (legal/trading name, a
+business or tax reference, a primary contact), owned by whichever
+package ends up owning `internal/affiliate`'s operational surface (doc
+32 §3), not by `internal/identity`. This specialist's contribution is
+naming the concept and its one identity-relevant property: an
+`AffiliateEntity` is the thing a `beneficial_owner_*` reference (C.3)
+ultimately resolves to when the owner is itself a company rather than an
+individual - the schema shape is `architect`'s/`internal/affiliate`'s to
+design, not designed here.
+
+**C.2 - Affiliate account/node.** One login/access credential within
+`internal/agentnetwork`'s hierarchy - per doc 32 §3.2's existing
+decision, one `identity.StaffUser` row scoped to one node. No new
+addition needed for the account/node concept itself; it is already
+specified. **One extension this specialist does recommend, following
+directly from the "Cashier as an actor" precedent above:** any
+`StaffUser` used for affiliate-node access should be brought under the
+**same** mandatory Person-linkage discipline this doc already extends to
+cashiers, and that migration 0034 already enforces for withdrawal
+approvers - not because every affiliate account is expected to resolve
+to a `Person` (most, like most staff, will not), but because "is this
+affiliate account secretly the same real person as an internal
+approver, or as the player it attributes" is precisely a `person_id`
+comparison, and it can only ever fire if the affiliate account's own
+`person_id` is populated when it genuinely applies. This is the same
+"closeable now via attestation, not automated matching" answer as §A.
+
+**C.3 - Beneficial ownership.** The relationship between an affiliate
+entity and the node(s) it controls, **including the case where an
+internal staff member is personally the beneficial owner of an
+affiliate node** - the conflict-of-interest vector `security`'s Phase 2
+report flagged as real and currently unowned. **No existing mechanism
+expresses this at all**: `agentnetwork` nodes (as specified in doc 26/32)
+carry no ownership reference, `StaffUser` carries no "declared external
+commercial interest" field, and `Person` (again, deliberately) carries
+none either. This is the sharpest gap of the three, because it is
+exactly what the orchestrator's own interim mitigation for SEC-W15-01
+("the approver on any affiliate-financial decision must be an internal,
+non-affiliate principal") does **not** close: an internal approver is
+still fully capable of being the *undisclosed* beneficial owner of the
+very affiliate node whose commission they are approving. "Internal, not
+affiliate" answers *who the approver's login belongs to*; it does not
+answer *whose money the approver personally benefits from*. Those are
+different questions, and only the second is what a beneficial-ownership
+fact can close.
+
+**Minimal addition specified (per this task's explicit boundary - a
+declared attestation, never automated/biometric matching):**
+
+- A `beneficial_owner_person_id` (for an individual owner) or
+  `beneficial_owner_entity_id` (for a corporate owner, resolving to
+  C.1's `AffiliateEntity`) reference on the affiliate node record -
+  schema ownership is `architect`'s/`internal/affiliate`'s, not
+  designed here.
+- Populated **only** through a declared, audited attestation process:
+  the node's controlling party (or, where the node is created/managed by
+  internal staff on an affiliate's behalf, the onboarding staff member)
+  affirmatively declares beneficial ownership at node creation, and
+  re-attests periodically (mirroring the staff attestation cadence in
+  §A) or on any ownership change. Every attestation and re-attestation
+  writes an audit record (actor, previous value, new value, reason) -
+  the same append-only, reason-coded discipline `CLAUDE.md` already
+  requires for every compliance-relevant action.
+- **Fail-closed default, stated exactly as this task's directive
+  requires:** a node with **no attestation on file has UNKNOWN
+  beneficial ownership** - this must never be silently treated as "no
+  known conflict, therefore independent." Any operation where the
+  approver's ownership of the node cannot be affirmatively excluded (no
+  attestation, or an attestation that is stale past its re-attestation
+  window) must be **refused**, exactly like the actor-side `person_id IS
+  NULL` case in §B is refused rather than skipped. This is the same
+  fail-closed posture this specialist's own Authority requires
+  elsewhere ("cannot weaken an RG or KYC enforcement rule... enforcement
+  is not optional") applied to a new fact this platform has never
+  needed to track before.
+- **What this does and does not close, stated honestly:** an attestation
+  is a declared fact, not a verified one - this closes "we never asked
+  and therefore assumed independence," exactly like §A's staff
+  attestation; it does not, and cannot without the forbidden automated-
+  matching mechanism, catch a deliberately false attestation. A false
+  attestation is a fraud/detection problem for compliance monitoring
+  (e.g., a periodic reconciliation report flagging affiliate nodes that
+  share bank/payout details, IP ranges, or other correlatable signals
+  despite declaring independent ownership) - worth naming as a future
+  compliance-analytics control, not built here, and explicitly not a
+  substitute for the attestation-based fail-closed default above.
+- **A related, currently out-of-scope question flagged for `architect`/
+  product policy, not resolved here:** SEC-W15-01's interim fix (approver
+  must be internal) closes affiliate-affiliate collusion for the
+  four-eyes check specifically. It does not address one external entity
+  legitimately holding **multiple** affiliate nodes and using the
+  beneficial-ownership fact this section proposes to detect it - should
+  shared beneficial ownership across two nodes be capped, disclosed, or
+  blocked from certain commission structures (e.g. sub-affiliate
+  override, doc 32 §6.4)? That is a commercial/Risk policy question this
+  specialist is not positioned to answer and does not attempt to here;
+  recording it so the beneficial-ownership field's existence doesn't
+  quietly imply the policy question is already settled.
+
+**C.4 - The five roles this task asks to be distinguished, mapped
+explicitly** (concepts, not new tables beyond C.1/C.3 above):
+
+| Concept | Definition | Existing mechanism |
+|---|---|---|
+| Actor identity | The authenticated principal performing an action | `identity.StaffUser` (unchanged, doc 32 §3.2) |
+| Legal/organizational authority | Whose interest the actor is acting under when performing the action | Platform, for internal staff (implicit); the affiliate entity (C.1), for an affiliate account - **not currently a distinguishable fact for affiliate accounts**, since `StaffUser` has no entity reference (this is what C.1 closes) |
+| Affiliate entity | The external commercial counterparty, may control N nodes | **Does not exist** - C.1 |
+| Affiliate account/node | One credentialed access point, 1:1 with a `StaffUser` row, per node | Exists as specified (doc 32 §3.2) |
+| Approver | The `StaffUser` recording a `CommissionApproval` (or Grant/CRM-equivalent) decision | Exists as a role; the *eligibility* rule (must be internal, must resolve to an active, linked Person) is what §B specifies |
+| Subject | The player/account the underlying activity is about | `player_accounts.person_id` - sound (§A) |
+| Beneficiary | Whoever receives the value from the decision being approved | Player, for a Grant; the affiliate node/entity, for a commission - **ownership of "the affiliate node" is exactly C.3's unresolved fact** |
+| Commission owner | The affiliate entity with the contractual claim to a specific accrual | **Does not exist as a distinguishable fact from "beneficiary"** - relevant precisely when a payout is contractually owed to a different entity than the node that generated it (e.g. a sub-affiliate override paid to a parent, doc 32 §6.4) - resolved by the SAME `AffiliateEntity`/beneficial-ownership references above, not a sixth concept |
+
+### D. Summary - what is closeable now vs. a genuine platform gap
+
+**Achievable now, no new capability, feeds directly into `security`'s and
+`architect`'s designs this round:**
+- The subject-side join (`player_accounts.person_id`) is sound and
+  needs no change.
+- The fail-closed shape (missing linkage = refuse eligibility to act,
+  not skip the comparison) is already proven at migration 0034 and
+  should be replicated verbatim for every new actor≠subject enforcement
+  point.
+- A mandatory, audited staff attestation process (identity linkage +,
+  separately, declared external commercial interests) is specifiable
+  now and requires no automated matching.
+- The affiliate identity/authority concepts (C.1-C.4) can be named and
+  specified now; `AffiliateEntity` and `beneficial_owner_*` as
+  attestation-backed reference fields, fail-closed on absence.
+
+**Genuine platform gaps, not resolved here:**
+- An unlinked, unattested (or falsely-attested) staff member who is also
+  a player, or is personally the undisclosed beneficial owner of an
+  affiliate node, is invisible to any `person_id`-based comparison - this
+  is a detection/compliance-monitoring gap, not something identity-
+  resolution's technical mechanism can close without the automated-
+  matching capability this task's directive explicitly forbids building.
+- Whether to invest in a future staff-side identity-evidence collection
+  capability (to eventually feed the same kind of resolver player
+  identity does) is a privacy-sensitive human/product/legal decision, not
+  made here.
+- Whether shared beneficial ownership across multiple affiliate nodes
+  should be capped, disclosed, or restricted from certain commission
+  structures is a commercial/Risk policy question, not an identity
+  question, and is not resolved here.
