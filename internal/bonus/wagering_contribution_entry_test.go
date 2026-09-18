@@ -1,0 +1,82 @@
+package bonus
+
+import (
+	"math/big"
+	"testing"
+)
+
+func TestResolveContributionWeightBP(t *testing.T) {
+	cases := []struct {
+		name           string
+		table          []byte
+		gameType       string
+		providerGameID string
+		want           int32
+	}{
+		{name: "nil table defaults to full contribution", table: nil, gameType: "slot", want: 10000},
+		{name: "empty table defaults to full contribution", table: []byte(``), gameType: "slot", want: 10000},
+		{name: "malformed json fails open to full contribution", table: []byte(`{not json`), gameType: "slot", want: 10000},
+		{name: "explicit default used when no more specific match", table: []byte(`{"default":5000}`), gameType: "table", want: 5000},
+		{name: "by_game_type match wins over default", table: []byte(`{"default":5000,"by_game_type":{"slot":10000}}`), gameType: "slot", want: 10000},
+		{name: "by_provider_game_id wins over by_game_type", table: []byte(`{"by_game_type":{"slot":10000},"by_provider_game_id":{"g1":2500}}`), gameType: "slot", providerGameID: "g1", want: 2500},
+		{name: "excluded_game_types wins over everything", table: []byte(`{"default":10000,"excluded_game_types":["slot"]}`), gameType: "slot", want: 0},
+		{name: "excluded_provider_game_ids wins over everything else including by_provider_game_id", table: []byte(`{"by_provider_game_id":{"g1":10000},"excluded_provider_game_ids":["g1"]}`), providerGameID: "g1", want: 0},
+		{name: "no match anywhere falls back to full contribution", table: []byte(`{"by_game_type":{"table":5000}}`), gameType: "slot", want: 10000},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ResolveContributionWeightBP(c.table, c.gameType, c.providerGameID)
+			if got != c.want {
+				t.Errorf("got %d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
+func TestComputeQualifyingScaled(t *testing.T) {
+	cases := []struct {
+		name   string
+		staked *big.Int
+		weight int32
+		want   *big.Int
+	}{
+		{name: "full weight passes through unchanged", staked: big.NewInt(1000), weight: 10000, want: big.NewInt(1000)},
+		{name: "half weight halves the contribution", staked: big.NewInt(1000), weight: 5000, want: big.NewInt(500)},
+		{name: "zero weight contributes nothing", staked: big.NewInt(1000), weight: 0, want: big.NewInt(0)},
+		{name: "nil staked amount contributes nothing", staked: nil, weight: 10000, want: big.NewInt(0)},
+		{name: "negative staked amount contributes nothing (defensive)", staked: big.NewInt(-5), weight: 10000, want: big.NewInt(0)},
+		{name: "floors rather than rounds up (conservative direction)", staked: big.NewInt(3), weight: 3333, want: big.NewInt(0)}, // 3*3333/10000 = 0.9999 -> floor 0
+		{name: "multiplier above 100% is honored (a 'boost' weight, not just a discount)", staked: big.NewInt(1000), weight: 20000, want: big.NewInt(2000)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := ComputeQualifyingScaled(c.staked, c.weight)
+			if got.Cmp(c.want) != 0 {
+				t.Errorf("got %s, want %s", got, c.want)
+			}
+		})
+	}
+}
+
+func TestWageringTargetScaled(t *testing.T) {
+	mult35x := int32(350000)
+	t.Run("nil multiplier means no wagering axis - nil target", func(t *testing.T) {
+		got := WageringTargetScaled(OfferVersion{}, big.NewInt(1000))
+		if got != nil {
+			t.Errorf("expected nil target for a nil WageringMultiplierBP, got %s", got)
+		}
+	})
+	t.Run("nil granted amount refuses to fabricate a target", func(t *testing.T) {
+		got := WageringTargetScaled(OfferVersion{WageringMultiplierBP: &mult35x}, nil)
+		if got != nil {
+			t.Errorf("expected nil target for a nil granted amount, got %s", got)
+		}
+	})
+	t.Run("computes multiplier * granted amount / 10000", func(t *testing.T) {
+		got := WageringTargetScaled(OfferVersion{WageringMultiplierBP: &mult35x}, big.NewInt(1000))
+		want := big.NewInt(35000) // 1000 * 35x
+		if got.Cmp(want) != 0 {
+			t.Errorf("got %s, want %s", got, want)
+		}
+	})
+}
