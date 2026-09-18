@@ -355,7 +355,9 @@ provider-funded vs. externally-fulfilled cost treatments, and the
 recognition position; it is not duplicated here. Status: **architecture
 only, `NOT IMPLEMENTED`** — no migration adds `bonus_expense` or any
 `bonus_*` `transaction_type` yet, so bonus postings remain `BLOCKED` by the
-existing `CHECK` constraint until their own stage.
+existing `CHECK` constraint until their own stage. **Stage 4H-B1 update:
+§7.2/§7.3 design those two migrations (`0050`/`0051`) exactly; they are
+still unwritten and this status line is still accurate at `HEAD`.**
 
 `OPEN DECISION` (cross-asset conversion counter-account): `ADR 0021`'s
 `ConversionOperation` cannot balance per asset using only player wallet
@@ -525,7 +527,11 @@ B1 is `NOT IMPLEMENTED`: it becomes enforceable only once the
 `bonus_expense` account type and the `bonus_*` transaction types exist.
 Its full derivation, the worked grant/bet/win/convert check, and the
 provider-funded and externally-fulfilled variants are in ADR 0032 and are
-not restated here.
+not restated here. **Stage 4H-B1: §7.4 specifies the Rule B2 (extended)
+mirror generator that makes B1 hold by construction — its location,
+algorithm, API and failure modes — and §7.2/§7.3 specify the two
+migrations B1 waits on. All three remain `NOT IMPLEMENTED` (design
+only).**
 
 ### 6.2 Open item — `player_locked` loses stake origin (blocking precondition, future stage)
 
@@ -1584,9 +1590,11 @@ architecture decisions, so they carried no separate `architect` sign-off:*
   makes its account list load-bearing twice over.
 - `docs/architecture/financial-domain-model.md:146` (the player-owned-type
   list) and `:196` (the brand-scoping statement — both new types are
-  brand-scoped for exactly the reason `player_locked` was). §7 of this
-  document cites `financial-domain-model.md` as canonical for object
-  scoping, so the two must not disagree.
+  brand-scoped for exactly the reason `player_locked` was). §8 of this
+  document (the cross-reference list, renumbered from §7 when §7's Bonus
+  Engine Ledger Integration Contract was added) cites
+  `financial-domain-model.md` as canonical for object scoping, so the two
+  must not disagree.
 - `docs/architecture/financial-transaction-flows.md` — Flows 8–11 (as
   originally listed) **and** the **Summary table's rows 8/9/11**
   (lines ~668-671), whose account-path column carries bare
@@ -5929,7 +5937,1222 @@ order jointly, and "no cycle today" is not a property that survives a
 fourth participant. `ledger-finance` will pin it as an HR when the first
 of those paths is authorized for implementation, which is not this stage.
 
-## 7. Cross-references
+## 7. Bonus Engine ledger integration contract (Stage 4H-B1 Wave 1, DESIGN ONLY)
+
+**Status: `NOT IMPLEMENTED`. DESIGN/CONTRACT ONLY — the dispatch that
+produced this section wrote no Go code, no migration and no test, per the
+Stage 4H-B1 directive §36 Wave-1 gate.** This section is the
+financial/ledger side of the contract the Bonus Engine builds against. It
+does not re-derive ADR 0032 (which holds the accounting decisions), ADR
+0021 (rounding), ADR 0020 (idempotency/concurrency) or §6.6 (wagering
+progress); it cites them, and specifies exactly what `internal/ledger`
+will expose, what it will enforce, and what Bonus must supply.
+
+Ownership: `ledger-finance`. The `bonus-engine` specialist owns the
+domain model (Campaign/Offer/Grant/Progress, lifecycle, eligibility,
+bonus catalogue) in a parallel Wave-1 dispatch and is not bound by this
+section on any of that. Where this section names a bonus-domain artifact
+(a Grant id, a conversion occurrence row) it states a **requirement on
+that artifact's uniqueness and durability**, never its name, columns or
+package — those are `bonus-engine`'s. §7.12 lists every such dependency
+explicitly.
+
+The directive names a `bonus-finance` specialist that does not exist in
+this environment's roster. Its financial-correctness concerns are covered
+here (ledger, postings, invariants, idempotency, concurrency) and by
+`bonus-engine` (bonus-specific calculation rules); §7.13 lists what
+neither of us may decide.
+
+### 7.1 What this contract closes, and what it deliberately does not
+
+| Closed by this section | Left open, and where |
+|---|---|
+| The `bonus_expense` account type's migration (§7.2) | — |
+| The `bonus_*` `transaction_type` migration (§7.3) | — |
+| The Rule B2 (extended) mirror generator: location, algorithm, API, failure modes (§7.4) | — |
+| Grant-issuance posting shape and its idempotency key (§7.5) | Which lifecycle transition triggers it is ADR 0032 §3.1's binding map, re-confirmed here; the transition's *name* is `bonus-engine`'s (§7.12 D-1) |
+| Conversion posting shape, atomicity, idempotency, authorization gate (§7.6) | The convertible amount `X` itself (a Bonus business rule, ADR 0032 §4 item 4) |
+| Cancellation/expiry/forfeiture posting shape, generically (§7.7) | Which lifecycle states produce one, and the amount — `bonus-engine` (§7.12 D-2). The **terminal-Grant late-credit** shape is gated on **G-2** (§7.13) |
+| Rounding integration: the one shared function, and where `rounding_rule_id` is stored (§7.8) | Nothing — DS-1/DS-2/DS-3 are decided (ADR 0021) |
+| Exponent-agnosticism of every shape above (§7.9) | Nothing |
+| Which ledger reads Bonus needs for `P_net`/`P_firm` (§7.10) | Nothing — §6.6 is confirmed, not redesigned |
+| Concurrency/idempotency requirements per posting type (§7.11) | Nothing |
+| HR-16 … HR-21 (§7.14) | — |
+| Bonus-funded **casino** stake postings | Reachable with this contract, but **not authorized by this section**: `internal/casino` posts cash-only today (ADR 0025 §6) and any change there is `casino`'s, with `ledger-finance` sign-off |
+| Bonus-funded **sportsbook** stake postings | Still `BLOCKED` on G-2/G-3 and on `internal/sportsbook` not existing (§6.4.2, §6.5.6) — unchanged by this section |
+| Mixed cash+bonus funding of a single stake (case C) | Still **DEFERRED** (§6.4.1, §6.5.9) — unchanged |
+| Cashout (case L) | Still `NOT IMPLEMENTED` and human-gated (§6.5.10, §7.13) |
+
+### 7.2 Migration `0050` — the `bonus_expense` account type
+
+Claims migration number **`0050`** (verified free: `migrations/` runs
+`0001`…`0049` contiguously at `HEAD` `7e1656f`; the `0050`/`0051`/`0052`
+numbers Stage 4H-B0-R7 reserved for its Workstreams B/C/D were never
+consumed and the task registry explicitly releases the `0050`+ block back
+to Stage 4H-B1). `ledger-finance`-owned, per `ownership.md`'s
+Financial/Ledger row and doc 27 §1.1's migration-order item 1;
+`bonus-engine` files a dependency request rather than authoring it.
+
+This is ADR 0032 §2's approved-but-unmigrated twelfth account type, and
+it is **precondition (i)** of HR-9's removal condition (§6.5.7).
+
+```sql
+-- 0050_bonus_expense_account_type.up.sql
+-- Adds ADR 0032 §2's bonus_expense account type: house-level, per
+-- (tenant_id, asset_code), wallet_id IS NULL, debit-normal - the
+-- operator's RECOGNIZED promotional cost, debited at the instant bonus
+-- value leaves the BONUS_SET for any reason other than forfeiture
+-- (ADR 0032 §3's recognition position). Approved architecture since
+-- Stage 4H-A; unmigrated until now because an account type with no
+-- posting path would have been speculative (§6.5.2).
+--
+-- Postgres has no ALTER CHECK, so the constraint is dropped and
+-- recreated - the mechanic migrations 0035 and 0048 both used. Unlike
+-- 0048 this is PURELY ADDITIVE: twelve accepted values become thirteen,
+-- none is removed, so the re-added constraint is a strict superset of
+-- the one it replaces and cannot be violated by any row that satisfied
+-- the previous one. That is a proof, not an expectation.
+--
+-- Deliberately NOT in this migration, each absence being a decision:
+--   * no transaction_type change - the bonus_* types are migration 0051
+--     (§7.3), sequenced immediately after this one so the account type a
+--     bonus_conversion's mirror leg debits exists first. Postgres does
+--     not structurally enforce that ordering between two independent
+--     CHECK constraints; it is a practical safety ordering (doc 27
+--     §1.1 item 2);
+--   * no removal of HR-9's fail-closed guard in internal/ledger. HR-9's
+--     removal condition (§6.5.7) is CONJUNCTIVE and evaluated at removal
+--     time: this migration satisfies precondition (i) only. The guard
+--     comes down with the Rule B2 (extended) mirror generator (§7.4),
+--     never with this file. An implementer who removes it here reopens,
+--     on the first bonus_grant posting, exactly the invariant-B1 hazard
+--     HR-9 exists to prevent;
+--   * no index. bonus_expense is house-level, so it is covered unchanged
+--     by idx_ledger_accounts_tenant_type_asset (migration 0020:45), the
+--     partial unique index on (tenant_id, account_type, asset_code)
+--     WHERE wallet_id IS NULL - the same index promo_liability,
+--     house_gaming and psp_clearing already use;
+--   * no RLS change, no trigger change. ledger_accounts' RLS keys on
+--     tenant_id/player_account_id and the
+--     ledger_accounts_populate_from_wallet trigger is account_type-blind
+--     (migration 0020:101-117);
+--   * no seed row. Accounts are minted on first use by
+--     GetOrCreateAccount's race-free INSERT ... ON CONFLICT DO NOTHING
+--     (§1.1); seeding one per tenant per asset would create rows that
+--     may never be posted to and would have to be kept in step with the
+--     asset registry forever.
+ALTER TABLE ledger_accounts DROP CONSTRAINT ledger_accounts_account_type_check;
+DO $$
+BEGIN
+    ALTER TABLE ledger_accounts ADD CONSTRAINT ledger_accounts_account_type_check CHECK (account_type IN (
+        'player_cash', 'player_bonus',
+        'player_locked_cash', 'player_locked_bonus',
+        'player_withdrawal_hold',
+        'house_gaming', 'provider_payable', 'psp_clearing', 'psp_reserve',
+        'jackpot_contribution', 'promo_liability', 'manual_adjustment',
+        'bonus_expense'
+    ));
+EXCEPTION WHEN check_violation THEN
+    -- Defense in depth, and honestly labelled as such: this branch is
+    -- believed UNREACHABLE, because the widened list is a strict
+    -- superset of migration 0048's. It is present for two reasons, not
+    -- as a ritual copy of 0048's guard. (1) If it ever does fire, the
+    -- database holds an account_type outside all thirteen values -
+    -- i.e. migration 0048 did not in fact apply, or a row was written
+    -- while the constraint was absent - and a bare SQLSTATE 23514 would
+    -- not say so. (2) It is RLS-immune by construction and the obvious
+    -- alternative is not: ledger_accounts carries FORCE ROW LEVEL
+    -- SECURITY (migration 0020:98), which applies to the table owner
+    -- too, so a `SELECT ... WHERE account_type NOT IN (...)` pre-flight
+    -- check run by a migration connection with no app.tenant_id set
+    -- sees ZERO rows regardless of what the table holds and is silently
+    -- inert. That is exactly the defect found in migration 0048's first
+    -- draft (§6.5's implementation-status note). Constraint validation
+    -- evaluates every row and cannot be filtered by RLS. No RLS setting
+    -- is toggled here, and none ever should be: the restore would be
+    -- transaction-local and an operator running this file standalone
+    -- under `psql -v ON_ERROR_STOP=1 -f` would leave FORCE permanently
+    -- off (security finding S-1, Stage 4H-B0-R7).
+    RAISE EXCEPTION 'migration 0050: ledger_accounts holds an account_type outside the thirteen admitted values (detected at constraint validation, which row-level security cannot filter). This widening is additive, so this should be unreachable: verify migration 0048 applied and that no row was written while the constraint was absent (ledger-accounting-model.md §7.2)';
+END $$;
+```
+
+```sql
+-- 0050_bonus_expense_account_type.down.sql
+-- Restores migration 0048's exact twelve-value list. Reversible ONLY on
+-- a database where no bonus_expense account has ever been created. Once
+-- one exists the ADD CONSTRAINT below re-validates every row and fails
+-- with SQLSTATE 23514, and the offending account cannot be deleted first
+-- once it holds entries: ledger_entries is append-only (migration 0022's
+-- ledger_deny_mutation) and carries an FK to ledger_accounts. This is
+-- correct, deliberate behavior for an append-only financial ledger
+-- (CLAUDE.md), identical to the position migrations 0035 and 0048 both
+-- record in their own down scripts, not a defect in this script.
+-- NOT VALID is deliberately NOT used: it would let the narrower
+-- constraint be re-added while violating rows remain, which is silent
+-- constraint/data divergence rather than a loud failure.
+--
+-- THIS is the direction where the wrapper below actually earns its
+-- place - narrowing can genuinely fail, and it is the direction an
+-- operator reaches for under time pressure.
+ALTER TABLE ledger_accounts DROP CONSTRAINT ledger_accounts_account_type_check;
+DO $$
+BEGIN
+    ALTER TABLE ledger_accounts ADD CONSTRAINT ledger_accounts_account_type_check CHECK (account_type IN (
+        'player_cash', 'player_bonus',
+        'player_locked_cash', 'player_locked_bonus',
+        'player_withdrawal_hold',
+        'house_gaming', 'provider_payable', 'psp_clearing', 'psp_reserve',
+        'jackpot_contribution', 'promo_liability', 'manual_adjustment'
+    ));
+EXCEPTION WHEN check_violation THEN
+    -- The only value this down migration removes is 'bonus_expense', so
+    -- a violating row is necessarily one. Rolling back is not possible
+    -- without deleting financial history.
+    RAISE EXCEPTION 'migration 0050 (down): at least one bonus_expense ledger account exists (detected at constraint validation, which row-level security cannot filter). This migration is irreversible once bonus value has been recognized: ledger_entries is append-only and the account cannot be removed. Roll forward with a compensating change instead (ledger-accounting-model.md §7.2)';
+END $$;
+```
+
+**Follow-up edits this migration forces, in the same change** (so no
+document claims `bonus_expense` is unmigrated once it is):
+
+1. §2's account table gains a `bonus_expense` row (house-level, per
+   `(tenant_id, asset_code)`, `wallet_id IS NULL`, **debit-normal**,
+   allowed transaction types `bonus_conversion` / `casino_bet` /
+   `casino_win` / future `sportsbook_*` mirror legs / `manual_adjustment`
+   mirror legs, reconciliation: covered by invariant B1's stream
+   indirectly and by NGR reporting directly).
+2. §2's `RESOLVED (Stage 4H-A)` note drops "no migration adds
+   `bonus_expense` … yet".
+3. §5's normal-balance sign list gains `bonus_expense ≥ 0` measured
+   **debit-positive**, i.e. `signed_balance ≤ 0` under §5's uniform
+   credit-positive convention — the same relationship `psp_clearing`,
+   `psp_reserve` and `promo_liability` already carry. `bonus_expense` is
+   **not** part of invariant B1's aggregate: B1 sums `promo_liability`
+   against the `BONUS_SET`, and adding the expense account to it would
+   make B1 non-zero the first time anything is recognized.
+4. `internal/ledger` gains `AccountBonusExpense AccountType =
+   "bonus_expense"`.
+5. `internal/wallet.GetSummary`'s exhaustive switch: **no new arm.**
+   `bonus_expense` is house-level and `GetSummary` enumerates only
+   player-owned accounts. Its fail-closed `default` is therefore not
+   reached by this migration — verified, not assumed, and re-proved by
+   §7.15 test 3.
+
+### 7.3 Migration `0051` — the `bonus_*` transaction types
+
+Claims migration number **`0051`**. `ledger-finance`-owned (doc 27 §1.1
+item 2). Additive widening of
+`ledger_transactions_transaction_type_check`, in exactly migration
+`0035`'s shape, adding **four** values:
+
+| `transaction_type` | Posted at | ADR 0032 |
+|---|---|---|
+| `bonus_grant` | Grant activation (value enters `player_bonus`), and the direct cash reward of §3's second table | §3, §3.1 |
+| `bonus_conversion` | Conversion of wagered-through bonus to cash | §4 |
+| `bonus_forfeiture` | Expiry, cancellation-after-activation, forfeiture | §5, §3.1 |
+| `bonus_reversal` | "This posting should never have existed" | §7 |
+
+Plus the matching Go consts in `internal/ledger`. The `.down.sql` carries
+the same narrowing wrapper and the same irreversibility note as §7.2's.
+
+**No fifth type for cancellation.** ADR 0032 §3.1 is binding: a
+cancellation after activation posts `bonus_forfeiture` and is
+distinguished from expiry by `reason_code`, **not** by a separate
+account or a separate transaction type. A `bonus_cancellation` type
+would split one economic fact across two types and force every
+reconciliation query and every NGR report to enumerate both forever.
+
+**`reason_code` becomes required on `bonus_forfeiture`.** Migration
+0021's existing constraint is
+`CHECK ((transaction_type = 'manual_adjustment') = (reason_code IS NOT
+NULL))` — an **equality**, so it currently forbids a reason code on any
+non-`manual_adjustment` type. Since ADR 0032 §3.1 distinguishes expiry
+from cancellation *by reason code*, that constraint must be widened in
+the same migration to:
+
+```sql
+CHECK (
+    (transaction_type IN ('manual_adjustment', 'bonus_forfeiture')) = (reason_code IS NOT NULL)
+)
+```
+
+and `internal/ledger.Post`'s matching Go validation (`ledger.go:312`)
+extended identically, so the requirement is enforced twice — at the
+boundary with a legible error, and at the database as the actual
+guarantee. **This is a real, easily-missed blocker**: without it every
+`bonus_forfeiture` posting fails on a check violation the moment Bonus
+supplies the reason code ADR 0032 §3.1 requires it to supply, and the
+tempting workaround (omit the reason code) silently destroys the only
+signal that distinguishes "the player's bonus expired" from "staff
+cancelled it" — a distinction a disputing player is entitled to.
+
+### 7.4 The Rule B2 (extended) mirror generator
+
+**Precondition (ii) of HR-9's removal condition.** This is the piece that
+makes invariant B1 hold *by construction* rather than by every caller
+remembering to add two legs.
+
+#### 7.4.1 Where it lives, and why there
+
+**`internal/ledger`, in a new file `bonus_mirror.go`, invoked
+unconditionally from inside `Post` — not exported, not optional, not a
+helper a caller may choose to call.** HR-9's own doc comment names
+`internal/ledger`; this section confirms that placement rather than
+relitigating it, and states the reasoning so a future reader does not
+reopen it:
+
+1. **The invariant is owned here.** ADR 0032 §2's `RECOMMENDATION` is
+   explicit: the mirror legs are generated by the ledger posting layer,
+   "not hand-assembled by `internal/casino`, `internal/sportsbook` or the
+   bonus engine… Enforcement belongs where the invariant is owned, not in
+   each caller's discipline — the same reasoning CLAUDE.md applies to
+   RLS." A generator in `internal/bonus` would be exactly the
+   per-caller-discipline variant that ADR explicitly rejects.
+2. **`Post` is already the single choke point.** Every bonus-touching
+   posting — grant, conversion, forfeiture, reversal, a bonus-funded
+   casino bet, a `manual_adjustment` against `player_bonus`, a future
+   sportsbook lock — goes through `Post` (package doc comment: "No other
+   package writes to ledger_accounts, ledger_transactions, or
+   ledger_entries directly"). Generating in `Post` covers callers that do
+   not exist yet, including ones written by specialists who have never
+   read ADR 0032. A generator anywhere else covers only the callers that
+   remember it.
+3. **It needs the resolved `account_type` of every entry**, which is a
+   `ledger_accounts` read `Post` already performs (`assertNoBonusSetEntries`,
+   `ledger.go:200`). Putting the generator elsewhere either duplicates
+   that read or trusts a caller's claim about which account type an id
+   refers to — and "trust the caller's claim about an account type" is
+   the shape of the bug HR-15 exists to prevent.
+4. **It replaces HR-9's guard in the same file, at the same point in
+   `Post`.** The guard's removal and the generator's arrival are one
+   edit to one function, which is what makes the conjunctive removal
+   condition auditable in review rather than a checklist item.
+
+`internal/wallet` was considered and rejected: it is a read/summary
+package over the ledger, does not post, and routing postings through it
+would invert the existing dependency direction.
+
+#### 7.4.2 The algorithm — net over the set, never per entry
+
+The generator runs **per `asset_code`** (the balance constraint is
+per-`(ledger_transaction_id, asset_code)`, migration 0022), over the
+caller's entries with their `account_type` resolved from
+`ledger_accounts`:
+
+> **Step 1 — net bonus movement.** For each asset `a`:
+> `net(a) = Σ credits to BONUS_SET in a − Σ debits to BONUS_SET in a`,
+> where `BONUS_SET = {player_bonus, player_locked_bonus}` (invariant B1
+> in its extended form, §6.1, `reconciliation-model.md` §2.9).
+>
+> **Step 2 — the mirror leg.** If `net(a) = 0`, generate nothing for `a`.
+> If `net(a) > 0`, append `Debit promo_liability(tenant, a) net(a)`.
+> If `net(a) < 0`, append `Credit promo_liability(tenant, a) |net(a)|`.
+>
+> **Step 3 — the recognition leg.** Recompute the transaction's per-asset
+> residual over the caller's entries **plus** step 2's leg:
+> `r(a) = Σ credits − Σ debits`. If `r(a) = 0`, generate nothing further.
+> Otherwise append a leg against the **cost account** `C` — `bonus_expense`
+> for operator-funded, `provider_payable` for provider-funded (ADR 0032
+> §6(b)'s one substitution): `Debit C r(a)` if `r(a) > 0`, `Credit C |r(a)|`
+> if `r(a) < 0`.
+>
+> **Step 4 — assert.** The transaction now balances per asset, and at most
+> two legs were generated per asset. If either is false, return an error
+> and post **nothing**.
+
+**Step 1's netting over the set — rather than a mirror leg per entry — is
+the whole design, and it is not an optimization.** A bonus-funded
+sportsbook lock posts `Dr player_bonus X · Cr player_locked_bonus X`
+(§6.4.5 case B): a per-entry mirror would emit `Cr promo_liability X` and
+`Dr promo_liability X`, two legs that cancel, plus force a spurious
+recognition leg. Netting emits nothing, which is correct — the lock is an
+internal transfer *within* the set B1 aggregates over, so the set's sum
+is unchanged and there is nothing to mirror. The same holds for a void's
+release (`Dr player_locked_bonus X · Cr player_bonus X`).
+
+**The generator has no `transaction_type` switch, and must never acquire
+one.** ADR 0032 §2: "Rule B2 admits no exception by transaction type."
+That every ADR 0032 shape falls out of the four steps above without a
+single per-type branch is the evidence that the rule was stated correctly,
+and it is what makes a future transaction type correct on the day it is
+added rather than on the day someone remembers to extend a switch.
+Worked, exhaustively, against every shape any current document defines:
+
+| Caller supplies | `net` | Step 2 | `r` | Step 3 | Result | Authority |
+|---|---|---|---|---|---|---|
+| Grant: `Cr player_bonus X` | `+X` | `Dr promo_liability X` | `0` | — | **2 entries**, `Dr promo_liability X · Cr player_bonus X` | ADR 0032 §3 |
+| Forfeiture/expiry/cancel: `Dr player_bonus X` | `−X` | `Cr promo_liability X` | `0` | — | **2 entries**, no `bonus_expense` | ADR 0032 §5 |
+| Conversion: `Dr player_bonus X · Cr player_cash X` | `−X` | `Cr promo_liability X` | `+X` | `Dr bonus_expense X` | **4 entries** | ADR 0032 §4 |
+| Bonus-funded casino bet: `Dr player_bonus X · Cr house_gaming X` | `−X` | `Cr promo_liability X` | `+X` | `Dr bonus_expense X` | **4 entries** | Flows §5 |
+| Casino win to bonus: `Dr house_gaming Y · Cr player_bonus Y` | `+Y` | `Dr promo_liability Y` | `−Y` | `Cr bonus_expense Y` | **4 entries** | Flows §6 |
+| Sportsbook lock (case B): `Dr player_bonus X · Cr player_locked_bonus X` | `0` | — | `0` | — | **2 entries**, unmirrored | §6.4.5 case B |
+| Void/release (case E): `Dr player_locked_bonus X · Cr player_bonus X` | `0` | — | `0` | — | **2 entries**, unmirrored | §6.4.5 case E |
+| Stake absorbed (case I): `Dr player_locked_bonus X · Cr house_gaming X` | `−X` | `Cr promo_liability X` | `+X` | `Dr bonus_expense X` | **4 entries** | §6.4.5 case I |
+| `manual_adjustment` against bonus: `Dr player_bonus X · Cr manual_adjustment X` | `−X` | `Cr promo_liability X` | `+X` | `Dr bonus_expense X` | **4 entries** | ADR 0032 §2's P1-4 correction |
+| Direct cash reward: `Dr bonus_expense X · Cr player_cash X` | `0` | — | `0` | — | **2 entries**, untouched | ADR 0032 §3 |
+| Any reversal of any row above (caller supplies the inverse of the **caller-supplied** legs only) | inverse | inverse | inverse | inverse | exact inverse of the original's full entry set, **no special case, no exemption** | ADR 0032 §7 |
+
+**The reversal row needs its mechanism stated precisely, because the
+obvious implementation is wrong.** A reversal caller supplies the inverse
+of the original's **caller-supplied legs only** — never the inverse of
+its generated mirror legs — and the generator regenerates the mirrors
+from that inverse. Reversing a conversion: the caller supplies
+`Cr player_bonus X · Dr player_cash X`; `net = +X`; step 2 emits
+`Dr promo_liability X`; `r = −X`; step 3 emits `Cr bonus_expense X` — the
+exact inverse of the original's four entries, with no special case and
+no `reverses_transaction_id` branch in the generator.
+
+The tempting alternative — "repost every entry of the original inverted,
+and skip the generator for reversals" — is **rejected**, and the reason
+is worth recording because it is not obvious. Keying an exemption on
+`ReversesTransactionID != nil` would make the generator's correctness
+depend on the reversal caller having supplied the mirror legs too. A
+caller that supplied only the two economically real inverse legs would
+produce a transaction that **balances** (so invariant #1 passes, and
+`Post` reports success) but is **unmirrored** — B1 drift of `X`,
+undetected until the next hourly sweep. Uniformity is what removes that
+class of bug: the generator runs on **every** posting, with no exemption
+of any kind, and HR-17 forbids any caller — reversal included — from
+hand-assembling a mirror leg. This is ADR 0032 §7's "falls out of
+reversing the same transaction" property, now with a mechanism behind it
+that does not depend on caller discipline.
+
+#### 7.4.3 API surface
+
+```go
+// BonusFunding names who bears the cost of bonus value that leaves the
+// BONUS_SET (ADR 0032 §6). Fixed on the Grant at grant time and
+// immutable thereafter; the ledger is told, never asked to infer.
+type BonusFunding string
+
+const (
+    FundingOperator BonusFunding = "operator" // recognition -> bonus_expense
+    FundingProvider BonusFunding = "provider" // recognition -> provider_payable
+)
+
+// BonusCostAttribution is required on, and only on, a posting that
+// touches a BONUS_SET account.
+type BonusCostAttribution struct {
+    Funding    BonusFunding
+    ProviderID *string // required iff Funding == FundingProvider
+}
+
+// ... added to TransactionInput:
+//   BonusCost *BonusCostAttribution
+```
+
+**Fail-closed validation in `Post`, before anything is written:**
+
+- touches no `BONUS_SET` account **and** `BonusCost != nil` → reject. A
+  caller that set it meant something by it; silently ignoring the field
+  is how a provider-funded attribution gets lost.
+- touches a `BONUS_SET` account **and** `BonusCost == nil` → reject. There
+  is **no default**. `FundingOperator` as a zero-value default would mean
+  a forgotten field silently books a provider's marketing spend into the
+  tenant's own P&L, and nothing downstream would ever flag it.
+- `Funding == FundingProvider` **and** `ProviderID` nil/empty → reject.
+  ADR 0032 §6(b): "A provider-funded attribution that the platform cannot
+  tie to a specific provider agreement is rejected, not defaulted to
+  operator-funded and not defaulted to provider-funded."
+- `Funding` is neither constant → reject (no `default:` fall-through to
+  operator).
+- **A reversal must carry the same `BonusCost` as the transaction it
+  reverses.** Since the generator runs on reversals too (no exemption,
+  §7.4.2), a reversal of a provider-funded recognition that passed
+  `FundingOperator` would credit `bonus_expense` while the original
+  debited `provider_payable` — leaving both accounts permanently wrong
+  with `promo_liability` and B1 both perfectly balanced, so no
+  reconciliation stream would ever report it. `Post` therefore reads the
+  original's cost attribution (from its posted entries' account types,
+  not from a caller claim) and rejects a mismatch. Tested by §7.15 item
+  17.
+
+`BonusFunding` is a string type with an exhaustive, fail-closed switch
+for the same reason §6.5.4 layer 2 gives for the account-type consts: an
+unrecognized value must be a loud error, never a silent selection of the
+cheaper-looking account.
+
+**`promo_liability`, `bonus_expense` and `provider_payable` accounts are
+obtained via the existing `GetOrCreateAccount(ctx, tx, tenantID, nil,
+…, assetCode)`** — house-level, `wallet_id` nil, minted on first use,
+race-free through the partial unique index's `ON CONFLICT DO NOTHING`
+(§1.1). No new minting mechanism, no seeding, no registry.
+
+**Generated legs are appended in a fixed order** (all step-2 legs, then
+all step-3 legs, assets in sorted `asset_code` order) so a given logical
+posting always produces byte-identical entry rows. This is a testability
+and future-entry-ordinal requirement, not an aesthetic one.
+
+#### 7.4.4 HR-9's removal, exactly
+
+The generator's arrival is the change that removes the guard, and the
+removal is **total**: `assertNoBonusSetEntries`, `bonusSetAccountTypes`'s
+use as a *blocklist*, `ErrBonusPostingBlocked` and
+`bonusPostingPreconditions` are all deleted, not left behind as dead
+code or as a feature flag. `bonusSetAccountTypes()` itself **survives and
+changes role**, from "the set no entry may touch" to "the set step 1 nets
+over" — it remains a function returning a fresh slice, for security
+finding S-3's reason (a package-level slice var could be truncated by any
+code in the package, including a test, silently disabling the netting
+with no compile error). Its doc comment is rewritten; the immutability
+property is not.
+
+The removal may land only when, verified in the tree at that moment
+(§6.5.7's conjunctive condition):
+
+1. migration `0050` exists and `bonus_expense` is in
+   `ledger_accounts_account_type_check`; **and**
+2. `bonus_mirror.go` exists and §7.15's tests exercise it.
+
+### 7.5 Grant issuance posting
+
+**`player_bonus`, not `player_locked_bonus`.** Naming the distinction
+because the dispatch brief asks which: `player_locked_bonus` (migration
+`0048`) means *bonus-origin value locked against the resolution of a
+specific open wagering event* — a sportsbook stake whose outcome is not
+yet known (§6.4.5 case B, invariant L1 §6.5.4). It does **not** mean
+"restricted", "not yet wagerable" or "pending activation". A granted
+bonus subject to a wagering requirement is already non-withdrawable by
+virtue of sitting in `player_bonus` at all, which is that account's
+entire purpose (§2: "Non-withdrawable bonus balance subject to
+wagering"). Crediting `player_locked_bonus` at grant would be a category
+error with a concrete cost: §6.6.6's nullifiable predicate keys on
+`Σ signed(player_locked_bonus) > 0` for the bet's `correlation_id`, so a
+grant parked there would make every contribution under that Grant look
+permanently nullifiable and `P_firm` could never reach `T` — no player
+could ever convert.
+
+> **Grant posting (ADR 0032 §3, §3.1).** At the lifecycle transition where
+> value enters the wallet (`activated`, never `issued`):
+> **caller supplies `Cr player_bonus X`; the generator supplies
+> `Dr promo_liability X`.** `transaction_type = bonus_grant`.
+> No `bonus_expense` — a granted bonus is a contingent liability, not a
+> recognized expense (ADR 0032 §3's recognition position).
+
+- **`X` is strictly positive integer minor units.** ADR 0021's
+  implementation-time item 1 — a computation rounding to exactly 0 minor
+  units cannot be posted (`ledger_entries.amount > 0`) — is a **Bonus
+  eligibility/configuration** question, and the ledger's behavior is
+  fixed and deliberate: `ErrInvalidEntry`, not a zero-amount row and not
+  a silent no-op. §7.12 D-5.
+- **Idempotency key: `bonus_grant:<grant_id>`**, under `UNIQUE (tenant_id,
+  idempotency_key)`. Namespaced so a Grant id and some other bonus
+  entity id can never collide in the shared key space. This makes
+  ADR 0032 §3.1's "a Grant produces **exactly one** `bonus_grant`
+  posting" a **database property** rather than a state-machine
+  discipline: a duplicated `activated` event returns
+  `PostResult{AlreadyPosted: true}` and posts nothing. **Consequence
+  stated so it is not discovered later:** a future multi-tranche grant
+  (two credits against one Grant) must mint a per-tranche durable id and
+  key on it; keying a second real tranche on the Grant id would have it
+  silently absorbed as a retry — the exact failure mode ADR 0038 §14 was
+  built to close. Recorded as HR-20.
+- **Direct cash reward (no wagering requirement)**: `Dr bonus_expense X ·
+  Cr player_cash X`, also `transaction_type = bonus_grant`, both legs
+  caller-supplied, generator a no-op (it touches no `BONUS_SET` account,
+  so `BonusCost` must be **nil** — the cost account is the caller's
+  explicit leg, not an attribution the generator resolves). ADR 0032 §3
+  is binding that this is **never** modeled as a zero-wagering
+  `player_bonus` grant plus an immediate conversion.
+- **Provider-funded grant**: identical player-facing entries
+  (`Dr promo_liability X · Cr player_bonus X`) — ADR 0032 §6's rule that
+  a player must not be able to tell from their balance who funded the
+  promotion. Only the later recognition differs, and only through
+  `BonusCost`.
+- **No balance lock.** A grant is a credit to `player_bonus`; there is no
+  sufficiency condition to check, so invariant #15 imposes no read.
+  Concurrency is handled entirely by the idempotency constraint (§7.11).
+
+### 7.6 Conversion — the atomic, idempotent financial boundary
+
+> **Conversion posting (ADR 0032 §4, directive §17).** **Caller supplies
+> `Dr player_bonus X · Cr player_cash X`; the generator supplies
+> `Cr promo_liability X · Dr bonus_expense X`** (operator-funded) or
+> `Cr promo_liability X · Dr provider_payable X` (provider-funded).
+> `transaction_type = bonus_conversion`. **Four entries, one
+> `LedgerTransaction`, one database transaction**, balanced per asset.
+
+Double-entry: debits `X + X`, credits `X + X`, one asset, so invariant #1
+holds by the same deferred constraint trigger every other posting uses —
+`Post` already forces it `IMMEDIATE` so an unbalanced call fails
+synchronously (`ledger.go:373`). B1 holds across the posting because
+`Σ signed(BONUS_SET)` falls by `X` and `signed(promo_liability)` rises by
+`X`.
+
+**Never two transactions, never a `ConversionOperation`.** ADR 0032 §4's
+reasoning is binding and is not re-derived: a retire-then-credit design
+has a window in which the player holds neither side; `player_bonus` and
+`player_cash` are two account types of the *same wallet* in the *same
+asset*, so ADR 0021's genuinely cross-asset `ConversionOperation` (which
+needs an FX clearing account that does not exist) is the wrong
+instrument and invoking it here would wrongly imply a cross-asset
+movement.
+
+**"No successful conversion without the corresponding ledger result"** is
+structural, not procedural: the Bonus-side state write (`completed →
+converted`) and `Post` happen in **one database transaction** opened by
+the Bonus service via `db.Pool.WithTenant`, exactly as
+`internal/casino`/`internal/withdrawal` already do. `Post` never opens or
+commits its own transaction (`ledger.go:276`). If the posting fails, the
+state write rolls back with it; if the state write fails, the posting
+rolls back with it. There is no ordering to get right and no outbox to
+lose, because there is no second transaction.
+
+**"No duplicate conversion creates value"** is enforced at three
+independent levels, none of which is check-then-insert:
+
+1. **`UNIQUE (tenant_id, idempotency_key)`** with key
+   `bonus_conversion:<conversion_occurrence_id>`, where the occurrence id
+   is minted **once** by Bonus when the conversion is first accepted and
+   reused verbatim on every retry (ADR 0032 §8's single most-likely
+   failure mode: a caller that mints a fresh key per delivery attempt has
+   defeated the mechanism). A replay returns the original
+   `TransactionID` with `AlreadyPosted: true`; a same-key-different-type
+   replay returns `ErrIdempotencyKeyReused`.
+2. **A Bonus-side partial unique index enforcing at most one conversion
+   occurrence per Grant** — `UNIQUE (tenant_id, grant_id)` on the
+   conversion-occurrence table (or equivalent). This is deliberately a
+   *separate* mechanism from (1) and not a substitute for it: (1)
+   guarantees "this occurrence posts at most once", (2) guarantees "a
+   Grant has at most one occurrence". Collapsing them by keying (1) on
+   `grant_id` would make a genuine second conversion — if Bonus ever
+   supports staged/partial conversion — silently absorbed as a retry,
+   with no error and a permanently lost posting. §7.12 D-3, HR-18.
+3. **`SELECT … FOR UPDATE` on the wallet's `player_bonus`
+   `wallet_balance_projection` row**, inside the same transaction, before
+   the amount is computed or posted — the pattern
+   `internal/casino.lockCashBalance` and
+   `internal/withdrawal.lockCashBalanceForUpdate` already implement.
+   Two concurrent conversions on one wallet serialize on that row.
+
+**Authorization reads that must happen inside that same transaction,
+after the lock:**
+
+- **Sufficiency (ADR 0032 §4, invariant #15):** the `player_bonus` debit
+  may not exceed the wallet's `player_bonus` balance. **An
+  over-conversion is rejected, not clamped** — clamping is a business
+  decision and belongs to the Bonus Engine. If the projection row is
+  absent (`pgx.ErrNoRows`), treat the balance as zero and reject: no
+  lock is taken in that case, which is safe here because every
+  concurrent caller then also reads zero and also rejects.
+- **`P_firm ≥ T` (HR-12, invariant W1, §6.6.6):** re-evaluated here, not
+  inherited from the `completed` transition. If a late fact moved
+  `P_firm` below `T` in between, the conversion is **rejected, not
+  posted**. `P_net` may authorize nothing.
+- **Risk `Operation = bonus_conversion`** — doc 27 §1.1's migration-order
+  item 3, `risk`-owned, must exist before this path is wired. Not
+  `ledger-finance`'s to build.
+
+**Max cashout.** ADR 0032 §4 item 4 is binding: Bonus decides the
+convertible amount `X` (possibly less than the outstanding balance)
+**before** posting, and the remainder is extinguished by a **separate
+§7.7 forfeiture posting** with its own idempotency key. The ledger never
+silently converts less than it was asked to. Both postings belong in the
+same database transaction and share a `correlation_id`.
+
+### 7.7 Cancellation, expiry and forfeiture
+
+All three are **one posting shape**, distinguished by `reason_code`
+(ADR 0032 §3.1; §7.3's constraint widening is what makes that possible):
+
+> **Forfeiture posting.** Caller supplies `Dr player_bonus X`; the
+> generator supplies `Cr promo_liability X`. `transaction_type =
+> bonus_forfeiture`, `reason_code` **required**. Two entries. **No
+> `bonus_expense` is recognized or reversed** — and note this falls out
+> of §7.4.2 step 3 (`r = 0`) rather than being a special case, so it
+> cannot be got wrong by a future caller.
+
+Stated generically, as the brief requires, so it survives whichever
+lifecycle `bonus-engine` lands: **a compensating entry of
+`transaction_type = bonus_forfeiture` extinguishing the outstanding
+bonus balance attributable to the Grant, sourced from the account the
+value currently sits in.**
+
+Binding constraints on `X`, from ADR 0032 §5:
+
+- `X` is the **currently outstanding** bonus attributable to the Grant,
+  never the original grant amount. Value already consumed keeps its
+  recognized expense; it cannot be un-spent.
+- The ledger enforces exactly one thing: the sum forfeited may never
+  exceed the wallet's `player_bonus` balance, checked `FOR UPDATE` in the
+  posting transaction. **Grant attribution across concurrent grants**
+  (FIFO, LIFO, per-grant lot tracking) is a Bonus business rule the
+  ledger does not model; it is carried on `correlation_id`/`causation_id`
+  so the Progress trail and the ledger tell the same story. §7.12 D-2.
+- Forfeiture is **not** a `reverses_transaction_id` reversal of the
+  grant. It is a new economic fact, frequently partial, frequently long
+  after the grant. `reverses_transaction_id` is reserved for "this
+  transaction should never have been posted".
+- Expiry is a **posted transaction on the expiry date, not a filtered
+  read.** A balance that silently stops counting at read time is not
+  auditable, not reproducible as-of a past date, and unanswerable when a
+  player disputes it.
+
+**Cancellation from `issued` (never activated) posts nothing** — no value
+ever entered a wallet (ADR 0032 §3.1). A posting here would be value
+creation followed by value destruction, and would put two rows in the
+player's statement for an event they never saw.
+
+**Idempotency key: `bonus_forfeiture:<forfeiture_occurrence_id>`**, per
+occurrence, **not** per Grant — forfeiture is explicitly "frequently
+partial", so a Grant may legitimately produce several. Bonus must mint a
+durable occurrence row before posting; a per-attempt UUID is a blocking
+review finding (HR-5). §7.12 D-4, HR-19.
+
+**Reversal (`bonus_reversal`)**, for completeness, since it shares this
+family:
+
+- New `LedgerTransaction` with `reverses_transaction_id` pointing at the
+  specific original and resulting in the exact inverse entry set
+  (ADR 0032 §7). The caller supplies the inverse of the original's
+  **caller-supplied** legs only; the generator rebuilds the mirror legs
+  inverted, with no exemption (§7.4.2's reversal property, HR-17).
+- **Double-reversal protection:** select the original `FOR UPDATE` and
+  reject if a transaction already reverses it — the pattern
+  `internal/casino`'s rollback path adopted after a specialist review
+  empirically reproduced two concurrent rollbacks both posting a
+  reversal. A row lock on an append-only table is not a mutation.
+- **Reversal of a never-seen grant writes a tombstone** occupying the
+  slot the original would have used (`bonus_grant:<grant_id>`, zero
+  entries), so a late-arriving original hits the unique constraint, finds
+  `transaction_type = 'tombstone'`, and is rejected with
+  `ErrIdempotencyKeyReused` rather than posted after its own
+  cancellation. Mechanism unchanged from `postRollbackTombstone`.
+- **A reversal must fail loudly if the granted value has already been
+  partly consumed** (ADR 0032 §7). The correct instrument is then:
+  forfeit the remainder (§7.7), and recoup the consumed portion as a
+  `manual_adjustment` **against `player_cash`**, with a reason code and
+  four-eyes approval above threshold. Never against `player_bonus` —
+  recreating value there reopens a wagering obligation for value the
+  player has already spent.
+
+**Gated on G-2 (§7.13), and specified generically so either answer
+fits:** a settlement or void credit arriving against an
+already-terminal Grant. The ledger side is answer-independent —
+`ACTION_REFORFEIT` is the §7.7 shape posted a second time in the same
+database transaction as the inbound credit; `ACTION_ROUTE_TO_CASH` is
+the inbound credit landing on `player_cash` instead of `player_bonus`,
+which **HR-14 already binds**: a non-`player_bonus` return destination
+must carry an explicit marker §6.6.5's predicate can key on, and whoever
+introduces it amends §6.6.5 in the same change. `ACTION_HOLD_FOR_REVIEW`
+is the one answer with no ledger shape yet, because "held" is not a
+ledger state (§4: the ledger has no pending) — it would need either a
+dedicated holding account type or a non-ledger staff queue, and that is
+a `ledger-finance` design question this section does not pre-empt.
+
+### 7.8 Rounding integration
+
+**Bonus MUST use the one shared function. Never a second implementation,
+never a bare `ROUND()`, never an implicit `NUMERIC`→integer cast.**
+
+ADR 0021's DECISION RECORDED block is binding and is not reopened here:
+**DS-1** round-half-up (ties away from zero), **DS-2** round **once**, at
+the final monetary boundary, every intermediate value carried at full
+`NUMERIC` precision, **DS-3** one platform-wide rule by default with
+per-asset/per-jurisdiction override possible later without redesign.
+
+**The function does not exist in the tree yet** — verified at `HEAD`
+`7e1656f`: no `rounding`/`RoundHalfUp`/`rounding_rules` symbol exists in
+any `.go` or `.sql` file. ADR 0021 specifies its *contract* but never
+names it, so this section names it, since "use the shared function" is
+unenforceable while the function is anonymous:
+
+> **`money.RoundToMinorUnits`**, in a new package **`internal/money`**,
+> `ledger-finance`-owned. Signature shape (final form is
+> implementation-time, the constraints are not):
+>
+> ```go
+> // RoundToMinorUnits applies ADR 0021's DS-1/DS-2 rule to an exact
+> // pre-rounding value, at the target asset's own precision. The
+> // interface is expressed in minor units / base units, never "cents",
+> // and carries no hardcoded scale (ADR 0021, qa's constraint).
+> func RoundToMinorUnits(exact *big.Rat, decimalExponent int32, ruleID uuid.UUID) (int64, error)
+> ```
+>
+> - `exact` is the full-precision value: `*big.Rat` (stdlib; the module
+>   has no decimal dependency and does not need one). **Never `float64`,
+>   at any point in the call chain** — invariant #7, ADR 0032 §9.
+> - `decimalExponent` comes from the `Asset` registry
+>   (`internal/assetregistry`, `assets.decimal_exponent`), never a
+>   constant and never inferred from the asset code (invariant #8).
+> - `ruleID` selects the composite rule version. An unknown or inactive
+>   id is an **error**, never a fall-through to the current default —
+>   otherwise a recomputation check against a historical transaction
+>   silently re-rounds under today's rule.
+> - Exactly one rounding happens per computation, at the call site that
+>   is the final monetary boundary (DS-2). Intermediate `*big.Rat`
+>   values are passed through unrounded.
+
+Every bonus amount computation routes through it: deposit-match, reload
+and cashback percentages, the per-game contribution weighting that
+produces a cash/bonus split instruction, and any percentage-derived cap.
+**Per ADR 0021's per-bonus-type clarification**, the final boundary for
+deposit-match/reload/cashback is *after both the percentage multiply and
+the cap comparison* — round `min(base × rate, cap)` once, not the raw
+percentage result before the cap decision. A second rounding anywhere in
+that chain is a blocking review finding, not a style note.
+
+**Two quantities that are deliberately NOT rounded**, so nobody "fixes"
+them into the function:
+
+- The **wagering-requirement target** `T` — a comparison threshold
+  gating a lifecycle transition, never posted (ADR 0032 §3.1:
+  "conversion-eligibility is a decision, not a movement").
+- **`qualifying_scaled`** in §6.6.4, and the `Σ qualifying_scaled ≥
+  T × 10000` comparison — an exact scaled-integer inequality with no
+  division. §6.6.10's **finding WP-1** (accepted by `bonus-engine` at
+  §6.6.15) is binding: rounding the progress quantity at `weight < 100%`
+  with DS-1 creates a real structuring vector — at 50% weight, a
+  1-minor-unit stake would yield `round_half_up(0.5) = 1`, a 100%
+  contribution, so a hundred 1-unit stakes buy a 2× discount on the
+  wagering requirement. Progress is not money and is not rounded.
+
+**Where `rounding_rule_id` is stored — two places, both required, for
+two different reasons** (ADR 0021's "Where the applied rule/version must
+be stored", `security`-confirmed):
+
+1. **On the upstream computation row**, alongside the other
+   recomputation inputs — i.e. on the **Grant** (base amount, stored
+   rate, stored cap, `rounding_rule_id`) and on the **conversion
+   occurrence** row (pre-cap amount, applied max-cashout cap,
+   `rounding_rule_id`). This is where the reconciliation recomputation
+   reads its inputs from. `bonus-engine`-owned columns; this section
+   states only that they must exist and be immutable. §7.12 D-6.
+2. **Denormalized onto `ledger_transactions.rounding_rule_id`** at post
+   time, immutable thereafter under the no-mutation enforcement that
+   column's table already carries — so the audit trail is
+   self-sufficient even if the upstream row is later archived or
+   restructured. Same rationale as `tenant_id`/`asset_code` on
+   `LedgerEntry`.
+
+Both require a **`rounding_rules` reference table**: immutable,
+append-only, one row per composite version encoding the Q1 direction and
+the Q2 rounding-point/residue treatment **together** (never two
+independently versioned axes, which would create an ambiguous
+cross-product), new rule = new row, existing rows never edited. That
+table plus the `ledger_transactions.rounding_rule_id` column is a
+`ledger-finance`-owned migration this section **requests a number for but
+does not claim** (§7.16) — it is not on `bonus_expense`'s critical path
+and the Orchestrator should assign it after Wave-1 reconciliation, so it
+does not collide with `risk`'s or `bonus-engine`'s parallel claims.
+
+`rounding_rule_id` is **nullable** on `ledger_transactions`: a deposit, a
+withdrawal or a casino bet involves no rounding and must not be forced to
+name a rule it did not apply. Non-null is required exactly where an
+amount was derived by rounding, which for the first slice means
+`bonus_grant` postings whose amount came from a percentage. Making it
+non-null everywhere would attach a meaningless rule id to every
+historical-style posting and destroy the signal.
+
+### 7.9 Multi-asset and exponent handling
+
+**Exponent-agnostic by construction, not by testing.** Every mechanism in
+§§7.2–7.8 operates on integer minor units with the asset's exponent read
+from the registry, and no step divides, scales or compares across assets:
+
+- `ledger_entries.amount` is `NUMERIC(38,0)`; `internal/ledger` carries
+  it as `int64` minor units, a representation choice already recorded
+  (`ledger.go:10-17`) and unchanged here.
+- The generator's steps 1–3 are **addition and subtraction of same-asset
+  integers only**. No multiplication, no division, no rate, no exponent
+  appears anywhere in `bonus_mirror.go`. An amount of `1` means one
+  minor unit whether the asset has exponent 0, 2, 6, 8 or 18, and the
+  net/residual arithmetic is identical.
+- Netting and balance are computed **per `asset_code`**, matching
+  migration 0022's `(ledger_transaction_id, asset_code)` grouping, so a
+  multi-asset transaction (none exists today) would still balance per
+  asset rather than in aggregate.
+- Conversion is single-asset by definition (`player_bonus` →
+  `player_cash` in the same wallet, same asset). A cross-asset bonus
+  movement is **not** a conversion and is not in scope: it would be ADR
+  0021's `ConversionOperation`, which needs an FX clearing account that
+  does not exist (§2's third `OPEN DECISION`).
+- The only exponent-sensitive step is `money.RoundToMinorUnits`, and it
+  takes the exponent as a parameter from the registry (invariant #8).
+- Grant/conversion/forfeiture amounts are all `> 0` integers, so no
+  fractional or negative path exists. ADR 0021's negative-input contract
+  (`-2.5 → -3`) is specified but unreachable from any bonus call site.
+
+Proved by execution, not asserted, following migration `0048`'s own test
+precedent (§6.5.8 item 9): §7.15's set repeats the core cases at
+exponents **0, 2, 8 and 18**.
+
+### 7.10 Wagering-progress ledger interaction — confirmed, not redesigned
+
+§6.6's Model C stands unchanged. Restating the one property that matters
+to this contract: **`P_net` and `P_firm` are derived comparison measures.
+Neither is ever posted, ever stored, or ever credited to an account.**
+Progress is not money — it never appears in a balance and creates no
+obligation. Nothing in §7 changes that, and a future proposal to
+"materialize progress for performance" is a change to §6.6, not an
+optimization.
+
+The reads Bonus needs, exactly — all four are already index-covered
+(§6.5.1), and **none is a new query shape**:
+
+| # | Purpose | Query | Index |
+|---|---|---|---|
+| R1 | Contribution inputs (`b`) | read the posted `player_bonus`/`player_locked_bonus` **debit** amount from `ledger_entries` for the lock transaction, **never from the caller's claim** (§6.6.4) | `idx_ledger_entries_transaction` |
+| R2 | Effective nullifiers of a lock `L` | `ledger_transactions` where `tenant_id = L.tenant_id AND correlation_id = L.correlation_id AND id <> L.id`, filtered to `transaction_type = 'sportsbook_void'` **or** (`transaction_type IN ('sportsbook_rollback','casino_rollback')` **and** `reverses_transaction_id = L.id`) | `idx_ledger_transactions_correlation` (**the `tenant_id` predicate is a correctness requirement, not an optimization** — the index is on `correlation_id` alone and that column carries no cross-tenant uniqueness guarantee) |
+| R3 | Nullifier not itself reversed | `NOT EXISTS (SELECT 1 FROM ledger_transactions r WHERE r.tenant_id = V.tenant_id AND r.reverses_transaction_id = V.id)` | `idx_ledger_transactions_reverses` (partial) |
+| R4 | `returned(c)` and the nullifiable predicate | `Σ` **credit** amounts to `player_bonus` in `c`'s wallet and asset across R2's set; and `Σ signed(player_locked_bonus) > 0` over entries of transactions sharing `(tenant_id, correlation_id)`, restricted to `c`'s wallet and asset | `idx_ledger_entries_transaction` + `idx_ledger_accounts_wallet_type_asset` |
+
+Three properties of these reads that Bonus may rely on:
+
+- **`returned(c)` measures the `player_bonus` credit, not the locked
+  account's movement.** The obvious alternative is wrong: case E posts
+  `Dr player_locked_bonus 20 · Cr player_bonus 20`, so a signed sum over
+  `BONUS_SET` is zero and a naive sum over both legs double-counts to 40
+  (§6.6.5). **HR-14 qualifies this and is part of the definition**: a
+  future return destination other than `player_bonus` must carry an
+  explicit marker the predicate keys on.
+- **Provider neutrality.** No `provider_id`/`provider_tx_id` field
+  appears in any of R1–R4, so in-house and external occurrences are
+  identical by construction (§6.6.7 cases 11/12). Idempotency routing
+  differs upstream and is invisible to progress.
+- **For casino, `P_firm == P_net` identically**, because no casino
+  posting touches a locked account, so no casino contribution is ever
+  nullifiable. Model C is a strict no-op for casino except that a
+  `casino_rollback` of a bonus-funded bet now nets.
+
+The contribution record itself (§6.6.4) — its table, package and
+migration — is **`bonus-engine`'s**, built to §6.6.4's constrained shape:
+`UNIQUE (tenant_id, grant_id, lock_ledger_transaction_id)` (HR-10's
+DB-enforced idempotency), written in the same database transaction as the
+lock posting, append-only, RLS on `tenant_id`, FK to
+`ledger_transactions (id)`, `qualifying_scaled NUMERIC(38,0)` compared in
+`NUMERIC`/`math/big` and **never `int64`** (§6.6.10). Reconciliation
+stream **WP-R** (hourly, `ledger-finance`-owned) diffs
+`Σ staked_bonus_amount` against the ledger's bonus-origin stake debits
+per `(tenant_id, grant_id, asset_code)`: over-count is **P1** (progress
+fabrication can authorize an unearned conversion, i.e. real money),
+under-count is **P2**.
+
+**None of R1–R4 is reachable in the first slice**, because they all key
+on sportsbook/casino bonus-funded stake postings that do not exist yet
+(`internal/sportsbook` does not exist; `internal/casino` is cash-only).
+They are specified now so Bonus builds the Progress derivation against
+the right shapes rather than inventing them later — and so that a first
+slice whose Offers all carry a wagering requirement of zero, or whose
+wagering is tracked but never satisfiable, is recognized as such rather
+than presented as a working wagering engine. **§7.12 D-7.**
+
+### 7.11 Concurrency and idempotency requirements, per posting type
+
+Directive §18. Every row below is a **database-level** guarantee. Nothing
+here is check-then-insert, and no row relies on a caller being careful.
+
+| Posting | Idempotency key | Uniqueness that makes duplication impossible | Lock/isolation required | What a concurrent duplicate does |
+|---|---|---|---|---|
+| **Grant** (`bonus_grant`) | `bonus_grant:<grant_id>` | `UNIQUE (tenant_id, idempotency_key)` (migration 0021) | **none** — a credit has no sufficiency condition | Loser gets `AlreadyPosted: true` and the original's `TransactionID`; zero entries written. Arbitrated by the constraint via `db.IdempotentInsert`'s `SAVEPOINT`, never by a prior `SELECT` |
+| **Grant, direct cash reward** | `bonus_grant:<reward_issuance_id>` | same | none | same |
+| **Conversion** (`bonus_conversion`) | `bonus_conversion:<conversion_occurrence_id>` | `UNIQUE (tenant_id, idempotency_key)` **plus** Bonus's `UNIQUE (tenant_id, grant_id)` on the occurrence table (two distinct properties, §7.6) | `SELECT … FOR UPDATE` on the wallet's `player_bonus` projection row, held for the rest of the transaction; **sufficiency and `P_firm ≥ T` both re-read under it** (invariant #15, HR-12) | Second caller blocks on the row lock, then either hits the unique constraint (same occurrence → replay) or re-reads a now-insufficient balance and is **rejected, not clamped** |
+| **Forfeiture / expiry / cancellation** (`bonus_forfeiture`) | `bonus_forfeiture:<forfeiture_occurrence_id>` | `UNIQUE (tenant_id, idempotency_key)` | same `FOR UPDATE` on the `player_bonus` projection row — the sum forfeited may never exceed the balance (ADR 0032 §5) | Same as conversion. Two concurrent partial forfeitures serialize; the second sees the first's effect |
+| **Reversal** (`bonus_reversal`) | `bonus_reversal:<original_transaction_id>` | `UNIQUE (tenant_id, idempotency_key)` makes at-most-one-reversal-per-original a DB property | `SELECT … FOR UPDATE` on the **original** `ledger_transactions` row, plus the already-reversed check under that lock | Second concurrent reversal blocks, then finds the original already reversed and is rejected — the empirically-reproduced casino double-rollback, closed the same way |
+| **Reversal of a never-seen grant** | `bonus_grant:<grant_id>` (the slot the original *would* have used) | same constraint, occupied by a `tombstone` row with zero entries | none | A late-arriving real grant hits the constraint, finds `transaction_type = 'tombstone'` ≠ `'bonus_grant'`, and gets `ErrIdempotencyKeyReused` — rejected, not posted after its own cancellation |
+| **Provider-originated bonus posting** (free rounds, external reward callbacks) | `(provider_id, provider_tx_id)` with `provider_id` resolved from **the credential that verified the callback signature**, never the payload | `UNIQUE (tenant_id, provider_id, provider_tx_id) WHERE provider_id IS NOT NULL` | per the underlying posting type | ADR 0032 §8's forward-flagged gap applies: a provider reusing one reference across two genuinely distinct occurrences is silently absorbed. Whichever stage builds free-round fulfilment **must** adopt ADR 0038 §14.1's `occurrence_ordinal` (or an equivalent per-occurrence discriminator scoped to `(tenant_id, correlation_id, transaction_type)`) from the start |
+
+Cross-cutting requirements:
+
+- **Keys are tenant-scoped**, both of them (§3). A platform-global key on
+  an RLS-protected, tenant-partitioned table is a cross-tenant collision
+  and an existence oracle.
+- **Keys are minted once per business fact and reused verbatim on every
+  retry.** A per-delivery-attempt UUID defeats the entire mechanism —
+  ADR 0032 §8 names this as the single most likely way for this design to
+  fail in practice, and it is a blocking review finding, not a style
+  note (HR-5).
+- **Lock-acquisition order.** §6.6.17's open joint gap is inherited here
+  and now has a first concrete claimant. Conversion takes
+  (a) Bonus's `(tenant_id, grant_id)` advisory lock, then (b) the
+  `player_bonus` projection `FOR UPDATE`. A bonus-funded settlement takes
+  HR-3's `(tenant_id, correlation_id)` advisory lock, then (a). **The
+  order `correlation_id → grant_id → player_bonus projection` is
+  hereby pinned** (HR-21) — no cycle exists among the orders as written,
+  but "no cycle today" is not a property that survives a fourth
+  participant, and the first path to take two of these locks is the
+  conversion path this section authorizes.
+- **Authorization** (ADR 0019's actor matrix): `bonus_grant`,
+  `bonus_conversion`, `bonus_forfeiture` and the new `bonus_reversal` are
+  **internal service identity** only (ADR 0014). A player session may
+  never originate one, and may never cause a direct credit to
+  `player_bonus`. The matrix needs the `bonus_reversal` row added under
+  the same service-identity entry — `security`'s to confirm, named here
+  rather than edited.
+- **Audit.** Every one of these postings is a financial action and writes
+  an `audit.Record` (actor, tenant, entity, before/after, reason code) in
+  the same database transaction, per CLAUDE.md. The forfeiture path's
+  reason code is *also* a ledger column (§7.3), which is deliberate
+  redundancy: the ledger row must be self-explanatory without a join to
+  an audit store that may have a different retention policy.
+
+### 7.12 Dependencies on `bonus-engine`'s parallel Wave-1 dispatch
+
+Named, not blocked on. Each is a property this contract requires of an
+artifact `bonus-engine` owns; none dictates its name, shape or package.
+
+| # | What this contract needs | Why | If it lands differently |
+|---|---|---|---|
+| D-1 | The lifecycle transition at which value enters the wallet, and confirmation that it is emitted **exactly once** per Grant | §7.5's `bonus_grant:<grant_id>` key makes one-posting-per-Grant a DB property; if Bonus intends multi-tranche grants, the key must change **before** the first posting, not after | Amend §7.5's key to a per-tranche occurrence id; HR-20 already binds this |
+| D-2 | The forfeiture amount, and grant-attribution rule across concurrent Grants (FIFO/LIFO/lot) | The ledger enforces only "not more than the balance"; attribution is carried on `correlation_id`/`causation_id` so Progress and ledger agree | No ledger change — attribution is a Bonus rule by construction (ADR 0032 §5) |
+| D-3 | A durable **conversion occurrence** row with a stable id and `UNIQUE (tenant_id, grant_id)` | §7.6's two-level duplicate protection; keying the ledger on `grant_id` instead would silently absorb a genuine second conversion | If staged/partial conversion is in scope, (2) relaxes and the ledger key stays per-occurrence — the design already supports it |
+| D-4 | A durable **forfeiture occurrence** row with a stable id | Forfeiture is frequently partial, so per-Grant keying is wrong | — |
+| D-5 | The minimum-bonus / zero-amount eligibility guard | ADR 0021 implementation-item 1: an amount rounding to 0 minor units **cannot be posted**; the ledger returns `ErrInvalidEntry`, deliberately | Ledger behavior is fixed either way; only the player-facing outcome differs |
+| D-6 | `rounding_rule_id` + the recomputation inputs (base, rate, cap) stored immutably on Grant and conversion rows | ADR 0021: a posted amount must be exactly recomputable from stored inputs | — |
+| D-7 | Whether the first slice's Offers carry a **real** wagering requirement | §7.10's R1–R4 are unreachable while no bonus-funded stake posting exists. A slice with wagering requirements that no posting path can satisfy must be labelled `PARTIALLY IMPLEMENTED`, never "wagering supported" | If wagering is genuinely exercised, the bonus-funded casino stake path must be authorized separately (`casino`-owned, `ledger-finance` sign-off) |
+| D-8 | The Grant's immutable `funding_source` (+ funding `provider_id` when provider-funded) | Feeds `BonusCostAttribution`; the ledger never infers it | — |
+| D-9 | Confirmation that the first slice is **operator-funded only** | See finding **BF-1** below | Provider-funded first requires BF-1's resolution |
+
+> **Finding BF-1 (`ledger-finance`, new, for `bonus-engine` and the
+> Orchestrator).** `player_bonus` is a **fungible per-wallet balance**,
+> but ADR 0032 §6 fixes the funding attribution **per Grant**. With two
+> concurrent Grants of different `funding_source` in one wallet, a later
+> recognition event (conversion, or a bonus-funded stake absorbed by the
+> house) cannot determine from the balance alone whether to debit
+> `bonus_expense` or `provider_payable` — the money is a single pooled
+> balance and the ledger holds no lot structure. This is the same
+> attribution problem ADR 0032 §5 assigns to the Bonus Engine for
+> forfeiture, but with a **financial-statement** consequence rather than
+> a bookkeeping one: guessing wrong books a provider's marketing spend
+> into the tenant's P&L or vice versa.
+>
+> **Position, within this specialist's authority:** the first slice
+> admits **operator-funded Grants only**, in which case the question does
+> not arise. Enabling provider-funded Grants requires either (a) a
+> documented Bonus-side lot-attribution rule that the recognition path
+> reads (the same instrument D-2 already needs), or (b) a decision to
+> partition bonus balance by funding source — which would be a **new
+> account type or a new account dimension**, i.e. shared-architecture
+> work requiring the `architect` and human approval, not a
+> `ledger-finance` unilateral call. Recorded rather than resolved.
+
+Additional cross-domain dependencies, not `bonus-engine`'s:
+
+- **`risk`** — `RiskRequest.Operation = bonus_conversion` (migration
+  0041's CHECK + `internal/risk/types.go`), doc 27 item 3. The conversion
+  path cannot be gated by an `Operation` value that does not exist.
+- **`security`** — ADR 0019's actor matrix gains `bonus_reversal`.
+- **`architect`** — placement of `internal/money` (§7.8) and confirmation
+  that the missing `bonus-finance` role is adequately covered by the
+  `ledger-finance`/`bonus-engine` split, per the task registry's Wave-1
+  instruction.
+
+### 7.13 Gated on a human decision — `ledger-finance` does not choose
+
+Per CLAUDE.md's "when to stop and ask" and ADR 0039. **This specialist
+does not select any of these, and this section is written so that
+whichever answer is chosen needs no redesign of §§7.2–7.11.**
+
+| Gate | What it blocks in §7 | Why §7 survives either answer |
+|---|---|---|
+| **G-2 — Terminal-Grant settlement-credit resolution** (ADR 0039 Decision 2: re-forfeit / route-to-cash / hold-for-review) | The posting shape for a credit arriving against an already-terminal Grant (§7.7's final paragraph) | (a) is §7.7's existing shape posted twice; (b) is a destination change already bound by **HR-14**; (c) alone has no ledger shape and would need its own design. Nothing in §§7.2–7.6 depends on the answer |
+| **Self-exclusion open-bet default** (ADR 0039 Decision 1) | Which lifecycle event fires, and when, for a self-exclusion-triggered void | The void posts `sportsbook_void`, which §6.6.5's predicate already treats as a nullifier with **no extra rule** (§6.6.7). The ledger shape is answer-independent |
+| **Bonus-funded sportsbook cashout policy + FD-1** (ADR 0039 Decision 3) | Case L; the proceeds split between `player_cash` and `player_bonus` on a cashed-out bonus-funded bet | §7.4.2's generator handles **any** split: whatever the caller posts, steps 1–3 complete it correctly. Only HR-14's marker requirement binds in advance |
+| **`bonus_expense` statutory presentation** (P&L expense vs. contra-revenue) — ADR 0032 §2's `OPEN DECISION` | **Nothing.** A reporting/finance decision | It does not change any posting; §7.2's migration is correct either way |
+| **Provider-funded settlement terms** — ADR 0032 §6(b)'s commercial `OPEN DECISION` | Whether provider-funded promotions settle by invoice offset (making `provider_payable` correct) or otherwise | `PROVIDER DEPENDENT`. Compounded by **BF-1**; the first slice avoids it by being operator-funded only |
+| **Mixed cash+bonus funding of one stake** (case C) | Deferred, unchanged (§6.4.1, §6.5.9) | Not reopened here |
+
+### 7.14 HR-16 … HR-21 — hard requirements added by this section
+
+Continuing §6.4.7's and §6.5.7's series, so the HR list stays in one
+place.
+
+- **HR-16 — `ledger_accounts` identity-column immutability must land
+  before the first `player_bonus` posting, not only before the first
+  locked-account posting.** HR-15 phrases its gate against
+  `player_locked_cash`/`player_locked_bonus`. That was correct when those
+  were the only accounts whose `account_type` was load-bearing. Once
+  HR-9's guard is removed, `account_type` becomes the **sole** determinant
+  of `BONUS_SET` membership in §7.4.2 step 1, so an
+  `UPDATE ledger_accounts SET account_type = 'player_cash' WHERE
+  account_type = 'player_bonus'` would retroactively un-mirror already
+  posted history and break invariant B1 silently, with `ledger_entries`
+  append-only and still pointing at an account whose meaning changed
+  underneath it. HR-16 widens HR-15's trigger gate to cover the first
+  `bonus_*` posting; it is the **same** `BEFORE UPDATE` row trigger
+  rejecting changes to `account_type`/`wallet_id`/`asset_code`/
+  `tenant_id`, in the same migration, and must reconcile with ADR 0035
+  §1.3.1's proposed `ledger_accounts_owner_family` CHECK (§6.5.11) rather
+  than adding a third overlapping constraint. **Hard gate, not backlog.**
+- **HR-17 — a caller may never hand-assemble a mirror leg.** `Post`
+  rejects a transaction that touches a `BONUS_SET` account **and** also
+  contains a caller-supplied `promo_liability`, `bonus_expense` or
+  `provider_payable` entry. Without this, a caller that "helpfully" adds
+  the legs gets them doubled: §7.4.2 step 1 nets over `BONUS_SET` only,
+  so a pre-supplied `promo_liability` leg is invisible to step 1 and
+  survives into step 3's residual, producing a balanced-but-wrong
+  transaction that no constraint would catch and that B1's hourly sweep
+  would report as drift hours later. **There is no exemption, including
+  for reversals** — a reversal supplies the inverse of the original's
+  caller-supplied legs only and lets the generator rebuild the mirrors
+  (§7.4.2). An exemption keyed on `ReversesTransactionID != nil` was
+  considered and rejected: it would make correctness depend on the
+  reversal caller remembering to include mirror legs, and a caller that
+  forgot would post a balanced-but-unmirrored transaction that `Post`
+  accepts and only the hourly B1 sweep catches.
+- **HR-18 — "one conversion per Grant" and "this conversion posts once"
+  are two properties with two mechanisms.** The ledger idempotency key is
+  per **occurrence**; the per-Grant constraint lives on Bonus's own
+  occurrence table. Collapsing them into a `grant_id`-keyed ledger key is
+  forbidden (§7.6).
+- **HR-19 — forfeiture is keyed per occurrence, never per Grant.**
+  Forfeiture is explicitly partial-capable (ADR 0032 §5); a per-Grant key
+  would silently absorb the second real partial forfeiture.
+- **HR-20 — a multi-tranche grant requires a per-tranche durable id
+  before its first posting.** §7.5's `bonus_grant:<grant_id>` key makes
+  one-posting-per-Grant a database property; that property is desirable
+  today and wrong the day tranches exist, and the change must precede the
+  first tranche posting, never follow it.
+- **HR-21 — lock-acquisition order is pinned:
+  `(tenant_id, correlation_id)` advisory → `(tenant_id, grant_id)`
+  advisory → `player_bonus` projection row `FOR UPDATE`.** Any path
+  taking two or more of these acquires them in that order; a fourth
+  participant is added to this ordering in the same change that
+  introduces it, never afterwards. Closes §6.6.17's joint gap for the
+  conversion path specifically; the sportsbook settlement path inherits
+  it when it is built.
+
+### 7.15 Test set — `ledger-finance`-owned, non-negotiable
+
+Per CLAUDE.md ("financial functionality is not done without tests
+for…"). A happy-path grant test satisfies none of this. Integration
+tests against a real PostgreSQL instance, following
+`internal/ledger`'s existing `*_integration_test.go` pattern.
+
+**Migration `0050`/`0051`:**
+
+1. `INSERT` of `account_type = 'bonus_expense'` succeeds after `0050` and
+   fails with a check violation before it.
+2. `0050`'s down migration succeeds on a clean database and **fails with
+   SQLSTATE 23514** on one holding a `bonus_expense` account — the same
+   rehearsal `0035`/`0048` require, proving irreversibility is loud.
+3. Every pre-existing account type still inserts after `0050`
+   (superset property proved by execution), and
+   `internal/wallet.GetSummary` is unaffected by the new house-level type
+   — its fail-closed `default` is **not** reached.
+4. A `bonus_forfeiture` posting **with** a reason code succeeds and
+   **without** one fails, at the database (§7.3's widened constraint) —
+   and a `deposit` with a reason code still fails, proving the equality
+   constraint was widened rather than loosened to an implication.
+
+**The generator (Rule B2 extended):**
+
+5. Every row of §7.4.2's worked table, asserted on the **exact** entry
+   set produced (accounts, directions, amounts, count), not merely on
+   the transaction balancing.
+6. **Invariant B1 holds after every one of them**:
+   `signed(promo_liability) + Σ signed(BONUS_SET) == 0` per
+   `(tenant_id, asset_code)`, recomputed from `ledger_entries`, never
+   from the projection.
+7. A lock (`Dr player_bonus · Cr player_locked_bonus`) generates
+   **zero** legs — the property a per-entry generator would fail.
+8. `BonusCost` nil on a `BONUS_SET`-touching posting → rejected, nothing
+   written. Non-nil on a non-touching posting → rejected. `provider`
+   without a `ProviderID` → rejected. An unknown `BonusFunding` value →
+   rejected, never defaulted.
+9. HR-17: a caller-supplied `promo_liability` leg alongside a
+   `player_bonus` leg → **rejected**, nothing written — **including when
+   `ReversesTransactionID` is set** (the exemption that was considered
+   and rejected, tested so it cannot be reintroduced). A reversal
+   supplying only the inverse real legs → accepted, and its full entry
+   set is exactly inverse to the original's.
+10. A posting the generator cannot balance (step 4's assertion) writes
+    **nothing** — no `ledger_transactions` row, no partial entries.
+11. Multi-asset: a transaction with `BONUS_SET` entries in two assets
+    generates the correct legs **per asset**, and balances per asset.
+
+**Postings:**
+
+12. Grant: exactly two entries, `promo_liability` debit-side,
+    **no `bonus_expense` account is even created**.
+13. Conversion: exactly four entries; `player_cash` rises by `X`,
+    `player_bonus` falls by `X`, `bonus_expense` debit `X`,
+    `promo_liability` credit `X`; B1 holds; the recomputed balance equals
+    the projection.
+14. Conversion exceeding the `player_bonus` balance is **rejected, not
+    clamped**, and posts nothing.
+15. Conversion with `P_firm < T` is rejected under HR-12 even when a
+    `completed` state exists — proving the gate is re-read in the
+    posting transaction, not inherited.
+16. Forfeiture: exactly two entries, no `bonus_expense`; forfeiting more
+    than the balance is rejected; a partial forfeiture followed by
+    another partial forfeiture both post and sum correctly.
+17. Reversal of a grant reproduces the exact inverse including mirror
+    legs; a second concurrent reversal of the same original is rejected
+    under the `FOR UPDATE`; a reversal where value was already consumed
+    fails loudly.
+18. Tombstone: reversal of a never-seen grant writes a zero-entry
+    tombstone, and the late-arriving real grant is then rejected with
+    `ErrIdempotencyKeyReused`.
+
+**Duplicates, concurrency, retries, partial failure:**
+
+19. Exact retry of each of grant/conversion/forfeiture/reversal returns
+    `AlreadyPosted: true` with the original `TransactionID` and writes
+    zero new entries — asserted by entry count, not by absence of error.
+20. Same key, different `transaction_type` → `ErrIdempotencyKeyReused`.
+21. **Two genuinely concurrent conversions** on one wallet from two
+    connections: exactly one posts, the other is rejected or replayed;
+    the final balance is correct and B1 holds. Empirical, with real
+    concurrent transactions — not a sequential simulation.
+22. Two concurrent grants **with the same key**: exactly one posting.
+    Two concurrent grants with **different** keys to the same wallet:
+    both post, balance is the sum, B1 holds.
+23. Caller transaction rolled back after a successful `Post`: nothing is
+    visible afterwards, including the generated legs and the
+    house-level accounts minted by `GetOrCreateAccount`.
+24. Partial failure: a `Post` that fails at the entry stage leaves no
+    `ledger_transactions` row (the SAVEPOINT/abort property, re-proved
+    for the four-entry shape).
+
+**Reconciliation and rebuild:**
+
+25. The ledger-vs-projection sweep passes over a wallet holding
+    `player_bonus` and a tenant holding `promo_liability`/`bonus_expense`
+    accounts; `RebuildBalance` and `RebuildProjectionRow` reproduce all
+    four accounts exactly.
+26. B1's reconciliation stream (`reconciliation-model.md` §2.9) reports
+    **zero** drift over a full grant → bet → win → convert sequence, and
+    reports the **exact** drift when a mirror leg is removed by direct
+    SQL — proving the stream detects what it claims to.
+
+**Exponents and RLS:**
+
+27. Tests 5, 6, 12, 13, 16 repeated at exponents **0, 2, 8 and 18**
+    (§6.5.8 item 9's precedent — claimed exponent-independence is proved
+    by execution, not asserted).
+28. RLS: a player-scoped connection can read its own `player_bonus`
+    account and cannot read another player's; a tenant-staff connection
+    cannot read another tenant's `promo_liability`/`bonus_expense`; a
+    player-scoped connection cannot post at all.
+
+### 7.16 Migration numbers — claimed, requested, and why
+
+| Number | Content | Status |
+|---|---|---|
+| **`0050`** | `bonus_expense` account type (§7.2) | **CLAIMED** by `ledger-finance` this dispatch |
+| **`0051`** | `bonus_grant`/`bonus_conversion`/`bonus_forfeiture`/`bonus_reversal` transaction types **+** the `reason_code` constraint widening (§7.3) | **CLAIMED** by `ledger-finance` this dispatch |
+| *(unassigned)* | `rounding_rules` table + `ledger_transactions.rounding_rule_id` (§7.8) | **REQUESTED** — `ledger-finance`-owned, not on `bonus_expense`'s critical path; number to be assigned by the Orchestrator after Wave-1 reconciliation |
+| *(unassigned)* | HR-15/HR-16's `ledger_accounts` identity-immutability trigger, reconciled with ADR 0035 §1.3.1's `ledger_accounts_owner_family` CHECK (§7.14) | **REQUESTED** — `ledger-finance`-owned, **hard gate** on the first `bonus_*` posting |
+
+Verified at `HEAD` `7e1656f`: `migrations/` runs `0001`…`0049`
+contiguously with no gaps and nothing at `0050`+. The task registry
+releases the `0050`+ block to Stage 4H-B1. Two numbers are claimed rather
+than four so that `risk`'s and `bonus-engine`'s parallel Wave-1 claims are
+not crowded out by reservations this specialist may not need in Wave 2.
+
+### 7.17 Review status
+
+`NOT IMPLEMENTED`, design only. Requires, before any code is written:
+independent `bonus-engine` validation (§7.12's D-1…D-9 and finding
+BF-1), `architect` validation (HR-16's widening of HR-15; `internal/money`
+placement; the §7.12 cross-domain list), `security` review (the actor
+matrix row, HR-16, the migration's RLS-immune guard), and `qa` review of
+§7.15. The human-gated items in §7.13 are **not** resolved by this
+section and none of them blocks §§7.2–7.6.
+
+## 8. Cross-references
 
 - Object scoping, `Wallet` shape: `financial-domain-model.md`.
 - Canonical transaction flows (one row per flow type in §2's "allowed
