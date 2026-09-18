@@ -2972,6 +2972,31 @@ per the dispatch's own instruction, not silently assumed.
 > the technical mechanism that holds, represents, and authorizes access
 > to disputed value, never to which of G-2's three answers applies.
 
+> **Addendum — Stage 4H-B1 Wave 1.5 Fix Round 2, final closing pass.**
+> `casino` closed a gap its own Phase 2 review found in this document: N1.4
+> step 5a's ordinary value-reducing finalization and step 5c's
+> `voided_by_rollback` transition both asserted that `G.status` "flips in
+> the same transaction, no window" without ever naming the concrete call
+> by which `casino`'s own transaction reaches `bonus-engine`'s
+> Grant-status write. `08 §16.21` names that seam,
+> `bonusengine.RecheckGrantExposure`, symmetric to the value-creating
+> side's already-named `ResolveTerminalGrantCredit` (`08 §16.9`). This
+> document adopts it at new §N1.4.2 and updates N1.4 step 5a, step 5c's
+> `voided_by_rollback` bullet, and Scenario 6 (N1.6) to name it in place
+> of the previously-asserted-but-unmechanized claim — the outcome each
+> previously described is unchanged, only the mechanism that was missing
+> is now named. This pass also confirms N1.4 step 5b/§N1.9 already match
+> `casino`'s now-canonical, further-widened `ResolveTerminalGrantCredit`
+> signature (unconditional hold-capture, `settlementLedgerTransactionID`
+> in, `heldDispositionID` out) and corrects the two places (N1.4 step
+> 5b(i), N1.10) that still cited the earlier, narrower signature. Finally,
+> it updates N1.12's four-eyes-threshold citation to the now-ratified
+> position (`architect`'s doc 34 §3.1, `security`'s self-correction,
+> commit `6745e10`) in place of the superseded "unconditional" reading,
+> and states LF-10's residual explicitly at N1.10 so a reader of this
+> document alone is not misled into thinking that mechanism is fully
+> closed. **G-2 itself remains unselected by any of this.**
+
 #### N1.1 What this closes
 
 This closes the engineering resolution the Orchestrator's Wave 1
@@ -3300,10 +3325,16 @@ own effect:**
    `AOE(G, ·)`. If this brings the full three-component `AOE(G, ·)` to
    `∅`, the deferred disposition applies to whatever balance is now free
    (the ordinary §7.7 write-down, unchanged from the pre-revision text)
-   and `G.status` flips `pending_settlement → terminal_resolution` in the
-   same transaction. If `AOE` is still nonzero (another open bet, or an
-   outstanding `HeldDisposition` record, remains), `G` stays
-   `pending_settlement`.
+   and `G.status` flips `pending_settlement → terminal_resolution` **via
+   `bonusengine.RecheckGrantExposure` (N1.4.2), called by `casino` in the
+   same transaction as the closing posting above** — at the plain
+   lock-rollback site in `postRollback` (`TriggerCasinoRollback`) and at
+   `08 §16.5a(a)`'s settlement-timeout sweep
+   (`TriggerCasinoSettlementTimeout`), `08 §16.21` sites 1 and 2 —
+   immediately after the live Grant-status read that call site already
+   performs finds `pending_settlement`. If `AOE` is still nonzero (another
+   open bet, or an outstanding `HeldDisposition` record, remains), the
+   recheck leaves `G` at `pending_settlement`.
 
    **5b. Value-creating closing event** (a WIN settlement credit
    correlated to exposure that was part of `AOE(G, ·)` at the instant
@@ -3326,12 +3357,30 @@ own effect:**
          required here). Both are threaded, as **separate parameters,
          never combined into one `amount`**, through casino's widened
          seam `bonusengine.ResolveTerminalGrantCredit(ctx, tx, grantID,
-         correlationID, creditKind, payoutAmount, releasedLockAmount)`
-         (`08 §16.9`, adopted here verbatim — this document's own prior
-         text describing a single combined `X` is retired). Neither
-         quantity is in dispute at this step; both are preserved so the
-         eventual disposition and the Progress trail have something
-         correct to act on and explain.
+         correlationID, creditKind, payoutAmount, releasedLockAmount,
+         settlementLedgerTransactionID) (heldDispositionID, err)` (`08
+         §16.9`, adopted here verbatim, including its call order — this
+         document's own prior text, which omitted
+         `settlementLedgerTransactionID`/`heldDispositionID` and did not
+         state which side posts first, is corrected to match: `casino`
+         posts the two-leg hold-capture posting (5b.ii) **itself**, via
+         its own `ledger.Post` call, *before* calling this seam, which
+         yields `settlementLedgerTransactionID`; this seam runs second,
+         inside the same transaction, and does no posting of its own — it
+         only writes the `bonus_held_dispositions` row (5b.iii) carrying
+         that id, returning the row's own `id` as `heldDispositionID` for
+         `casino`'s logging/observability only, never branched on).
+         Neither quantity is in dispute at this step; both are preserved
+         so the eventual disposition and the Progress trail have
+         something correct to act on and explain. **Capture is
+         unconditional**: this seam is called, and posts, for **every**
+         terminal-Grant win credit, before any of G-2's three eventual
+         answers is known or decided — never conditioned on
+         `ACTION_HOLD_FOR_REVIEW` or any other outcome (`08 §16.9`'s Round
+         2, final-closing-pass correction, adopted here; this was this
+         document's own original requirement, N1.8 below, which `casino`
+         was reconciling itself to, not a new constraint this document is
+         adopting from `casino`).
       ii. **The hold-capture posting** — one balanced `LedgerTransaction`,
           posted in the same `ledger.Post` call as the rest of the
           settlement, never as a second transaction, exactly per
@@ -3481,13 +3530,29 @@ own effect:**
         `resolved_route_to_cash`, or `voided_by_rollback` — `held`
         persisting under `ACTION_HOLD_FOR_REVIEW` does **not** clear it):
         if this was the **last** outstanding `AOE` component for `G`,
-        `G.status` flips `pending_settlement → terminal_resolution` in
-        the same transaction. For N1.7's residual case (the record was
-        created atop a Grant already fully terminal), no status flip
-        occurs — only the `bonus_held_dispositions` row and a new
-        Progress entry are appended, exactly as §T.7 already specifies
-        ("every one of the three actions appends a Progress entry to `G`
-        even though `G` is already terminal").
+        `G.status` flips `pending_settlement → terminal_resolution`. For
+        `resolved_reforfeit`/`resolved_route_to_cash`, that write is
+        Bonus Engine's own, made directly in the same transaction as the
+        resolution posting above — this is Bonus Engine's own resolution
+        flow, not a cross-service call, so no seam is needed here; Bonus
+        Engine already owns both the disposition write and the
+        Grant-status write in that one transaction. For
+        `voided_by_rollback`, by contrast, the disposition write and the
+        closing reversal are **`casino`'s** transaction (`postRollback`),
+        not Bonus Engine's — that flip happens **via
+        `bonusengine.RecheckGrantExposure` (N1.4.2)**, which `casino`
+        calls, in the same transaction, immediately after the guarded
+        compare-and-swap above, whenever its own live Grant-status read
+        finds `pending_settlement` (`08 §16.21` site 3,
+        `TriggerHeldDispositionResolved`) — replacing this document's
+        prior unmechanized "flips in the same transaction, no window"
+        claim for this sub-case with that named seam. For N1.7's residual
+        case (the record was created atop a Grant already fully
+        terminal), no status flip occurs — only the `bonus_held_
+        dispositions` row and a new Progress entry are appended, exactly
+        as §T.7 already specifies ("every one of the three actions
+        appends a Progress entry to `G` even though `G` is already
+        terminal").
       - **No double-resolution under concurrency, adopted from `08
         §16.15`'s exhaustive proof**: a resolution racing a rollback of
         the same record, a duplicate rollback, or two distinct rollback
@@ -3660,6 +3725,97 @@ split (item 2)"), that split is retired here, verbatim, below.**
    an aging check surfacing every `held` row older than a configured
    threshold to the manual G-2 resolution queue. This section adopts that
    stream's existence; it does not design it (`ledger-finance`-owned).
+
+#### N1.4.2 `RecheckGrantExposure` — the Grant-side implementation of `casino`'s named seam (new, Stage 4H-B1 Wave 1.5 Fix Round 2, final closing pass, closing `casino`'s own Phase 2 finding)
+
+**The gap this closes.** N1.4 step 5a and step 5c's `voided_by_rollback`
+bullet both asserted, correctly as a requirement but with no named
+mechanism, that a value-reducing closing event flips `G.status` from
+`pending_settlement` to its recorded `terminal_resolution` "in the same
+transaction... no window." Nothing in this document, before this round,
+named the concrete call by which `casino`'s own transaction
+(`postRollback`, or `08 §16.5a(a)`'s settlement-timeout sweep) reaches
+Bonus Engine's Grant-status write to make that true. `08 §16.21` names
+that seam, symmetric to the value-creating side's already-named
+`ResolveTerminalGrantCredit` (`08 §16.9`/N1.4 step 5b). This section is
+Bonus Engine's own implementation of it, adopted verbatim from `08
+§16.21`, not re-derived:
+
+```
+bonusengine.RecheckGrantExposure(
+    ctx context.Context,
+    tx <db tx>,
+    grantID uuid.UUID,
+    triggeringLedgerTransactionID uuid.UUID,
+    triggerKind GrantExposureTriggerKind,
+) (newStatus bonusengine.GrantStatus, err error)
+```
+
+**What "recompute `AOE(G, ·)` live" means concretely, against this
+document's own model.** Nothing new is computed — this seam re-enters the
+identical three-component sum N1.3 already defines and N1.4 steps 2–4
+already evaluate at every other trigger point, just from `casino`'s call
+site instead of Bonus Engine's own:
+
+- **Component 1 (`LockedExposure`) and Component 2 (`InFlightExposure`)**
+  — read live via §7.10's R1–R4 query family, exactly as N1.3/N1.5
+  confirm no fifth query shape is needed for this seam either; the
+  recheck is not a new read path, only a new caller of the existing one.
+- **Component 3 (`HeldDisposition`)** — read live as a `player_bonus_held`
+  balance via `GrantLedgerAttribution` (N1.3's redefinition, N1.10's
+  confirmation), scoped to `grantID`.
+
+The seam sums all three, inside the same transaction `tx` the caller
+passed in, at the instant it is called — the identical live recompute
+N1.4's own mechanism performs, never a cached or point-in-time-stale
+value. **If `AOE(G, ·) = ∅`**, the implementation flips `G.status` from
+`pending_settlement` to the value already recorded in `terminal_
+resolution` (N1.4 step 1/N1.9) and appends a Progress entry citing
+`triggeringLedgerTransactionID` and `triggerKind`, returning that new
+terminal status as `newStatus`. **If `AOE(G, ·)` remains nonzero**,
+`G.status` is left at `pending_settlement`, and `newStatus` reports that
+unchanged value. Exactly as `08 §16.21` specifies, this implementation
+never branches on which component closed or which call site invoked it
+— `triggerKind` is carried into the Progress entry for audit/
+observability only, never read by the recompute itself.
+
+**Advisory-lock reuse — confirmed explicitly, no new lock.** This seam
+acquires **no lock participant beyond the `(tenant_id, grant_id)`
+advisory lock N1.5 already names**, which every call site below already
+holds before reaching this seam, for its own unrelated reason (N1.5's
+"every transaction that reads or writes anything about `G`" rule; HR-25's
+row lock, additionally, at site 3 specifically, per N1.4 step 5c/`08
+§16.15`). There is no fifth lock participant, no new lock primitive, and
+nothing about this seam's own internals needs one: it is a live read
+(the three-component sum) plus, conditionally, the same kind of `G.status`
+write N1.4's own mechanism already performs elsewhere under the identical
+lock. This mirrors N1.5's own "no new lock primitive" finding for
+hold-capture *creation* (5b) — this section makes the identical finding
+for exposure-clearing *rechecks*.
+
+**Exactly where this is called — `08 §16.21`'s enumerated sites, adopted
+verbatim:**
+
+1. **`postRollback`, plain lock-rollback of a bet before any win/loss is
+   known** (N1.4 step 5a) — `TriggerCasinoRollback`.
+2. **`08 §16.5a(a)`'s settlement-timeout sweep**, per Grant, per swept
+   lock (N1.4 step 5a, N1.7's residual mechanism) — `TriggerCasino
+   SettlementTimeout`.
+3. **`postRollback`, held-win rollback transition** (N1.4 step 5c's
+   `voided_by_rollback` bullet, Scenario 6) — `TriggerHeldDisposition
+   Resolved`.
+
+**Not called from `postWin`'s hold-capture path (5b).** Capture never
+reduces `AOE(G, ·)` — it replaces a `LockedExposure`/`InFlightExposure`
+member with a `HeldDisposition` member of equal value (N1.3, `LF-20`'s
+"replaced, not cleared") — so it can never be the event that brings `AOE`
+to `∅`, and `08 §16.21` correctly never lists it as a trigger site.
+
+**What this does not do.** It does not select G-2, does not decide `08
+§16.10.3`'s open tension about whether an ordinary lock-rollback is
+G-2-relevant at all, and redesigns nothing about N1.3/N1.4's own
+mechanism — it names the boundary `casino`'s transactions cross to reach
+it, exactly as N1.4 step 5b already does for the value-creating side.
 
 #### N1.5 Locking and concurrency — corrected (`LF-11`)
 
@@ -3926,12 +4082,17 @@ gone back to zero for this occurrence), and is **not** replaced by a
 restored `LockedExposure`/`InFlightExposure` member — the underlying bet
 is now a fully reversed, closed fact, exactly like an ordinary VOID
 (step 5a), never reopened as still-in-flight. If `H` was `AOE(G, ·)`'s
-only remaining component, `G.status` flips `pending_settlement → expired`
-in the **same** transaction as the reversal and the compare-and-swap —
-`postRollback` and Bonus Engine's own `G`-status write occur under the
-one `(tenant_id, grant_id)` lock both already hold, so there is no window
-in which `H` is `voided_by_rollback` while `G` still incorrectly reads
-`AOE ≠ ∅` for a component that no longer exists. `t3 > t2.5`: a queued
+only remaining component, `postRollback` calls **`bonusengine.
+RecheckGrantExposure(ctx, tx, G, <reversal id>,
+TriggerHeldDispositionResolved)`** (N1.4.2, `08 §16.21` site 3) in the
+**same** transaction as the reversal and the compare-and-swap, under the
+one `(tenant_id, grant_id)` lock both `postRollback` and this recheck
+already hold. Bonus Engine's own live `AOE` recompute inside that call
+finds `AOE(G, ·) = ∅` and flips `G.status` from `pending_settlement` to
+its recorded `terminal_resolution` (`expired`) before the transaction
+commits — this named seam, not a bare assertion, is what makes there no
+window in which `H` is `voided_by_rollback` while `G` still incorrectly
+reads `AOE ≠ ∅` for a component that no longer exists. `t3 > t2.5`: a queued
 staff action attempts to apply a G-2 answer to `H`, unaware of the
 rollback (a realistic race — the resolution UI's queue entry was
 populated before `t2.5`). Its own attempt at the identical guarded
@@ -4232,6 +4393,15 @@ safety analysis stands unchanged.
   `HeldDisposition` component (N1.3).
 - A new reconciliation stream is named, not designed (N1.10), closing
   `LF-12`.
+- **New this round, final closing pass**: `bonusengine.
+  RecheckGrantExposure` (N1.4.2) is named as the Grant-side mechanism by
+  which `casino`'s `postRollback` and settlement-timeout sweep flip
+  `G.status` at the trigger points N1.4 step 5a/5c already describe — no
+  new field, no new lock, and no new Progress reason code (it appends the
+  same ordinary terminal-transition Progress entry N1.4 already writes
+  whenever `G.status` flips, now additionally citing
+  `triggeringLedgerTransactionID`/`triggerKind`); only a previously-
+  unnamed call is now named.
 
 #### N1.10 Cross-domain dependencies — revised, Stage 4H-B1 Wave 1.5 Fix Round 2 (most items below CLOSED this round, stated as such rather than left as Round 1's open questions)
 
@@ -4239,22 +4409,36 @@ safety analysis stands unchanged.
   "not yet seen." `casino`'s own Round 2 dispatch (`08` §16.9/§16.14–
   §16.18) is now adopted verbatim throughout N1.4/N1.4.1/N1.6/N1.9 above:
   the widened `ResolveTerminalGrantCredit(ctx, tx, grantID, correlationID,
-  creditKind, payoutAmount, releasedLockAmount)` signature (N1.4 step
-  5b(i)), the two-leg hold-capture posting (5b(ii)), the single
-  `player_bonus_held` account (N1.4.1 item 2, retiring the two-branch
-  split this dependency previously turned on), and the still-held
-  rollback compare-and-swap (5c/Scenario 6). **Still open, confirmed by
-  both documents**: `08 §16.10.1`'s recommendation that a *future*
-  bonus-funded casino bet adopt the locked-account shape (case B/G/I)
-  rather than the immediate-absorb shape remains routed to
-  `ledger-finance`/`architect` for ratification — this document's own
-  design (N1.4.1 item 2, the single-account shape) works identically
-  whether or not that recommendation is ever adopted, since the hold-
-  capture posting's `X` leg is simply present or absent depending on
-  whether a lock existed, never a second account-type choice. `08
-  §16.10.3`'s flagged tension (whether a rollback-of-the-lock should be
-  G-2-relevant) also remains open, unresolved by this section per that
-  section's own routing.
+  creditKind, payoutAmount, releasedLockAmount,
+  settlementLedgerTransactionID) (heldDispositionID, err)` signature
+  (N1.4 step 5b(i)), its unconditional-capture call order (5b(i)), the
+  two-leg hold-capture posting (5b(ii)), the single `player_bonus_held`
+  account (N1.4.1 item 2, retiring the two-branch split this dependency
+  previously turned on), and the still-held rollback compare-and-swap
+  (5c/Scenario 6). **New this round, final closing pass**: `08 §16.21`'s
+  `bonusengine.RecheckGrantExposure` seam, closing `casino`'s own Phase 2
+  finding that N1.4 step 5a/5c's "flips in the same transaction, no
+  window" claim never named a concrete mechanism — adopted at new N1.4.2
+  and cited at N1.4 step 5a, step 5c's `voided_by_rollback` bullet, and
+  Scenario 6. **Still open, confirmed by both documents**: `08
+  §16.10.1`'s recommendation that a *future* bonus-funded casino bet
+  adopt the locked-account shape (case B/G/I) rather than the
+  immediate-absorb shape remains routed to `ledger-finance`/`architect`
+  for ratification — this document's own design (N1.4.1 item 2, the
+  single-account shape) works identically whether or not that
+  recommendation is ever adopted, since the hold-capture posting's `X`
+  leg is simply present or absent depending on whether a lock existed,
+  never a second account-type choice. `08 §16.10.3`'s flagged tension
+  (whether a rollback-of-the-lock should be G-2-relevant) also remains
+  open, unresolved by this section per that section's own routing.
+  **Also still open, confirmed by both `casino` and `ledger-finance`'s
+  own documents (`08 §16.20`, `ledger-accounting-model.md` §7.7.2.11),
+  and stated here so a reader of this document alone is not misled into
+  thinking the mechanism is fully closed**: a rollback of an
+  already-`resolved_reforfeit`/`resolved_route_to_cash` `bonus_held_
+  dispositions` row — as distinct from Scenario 6's still-`held` case,
+  which N1.4 step 5c and Scenario 6 close in full — is **LF-10**, routed
+  to `ledger-finance`, not pre-selected or decided by this document.
 - **`ledger-finance` — CLOSED this round for everything Round 1 asked.**
   `ledger-accounting-model.md` §7.7.2 ratifies and finalizes the account/
   schema shape (N1.4.1 item 2), the idempotency key (item 4, `LF-22`),
@@ -4379,7 +4563,7 @@ adopted here, never re-derived).
 | `REQ-SEP-BONUS-1` | Grant issuance/activation (§1.3), direct bonus Adjustment, staff-forced conversion/manual release override, `BulkGrantJob` execution (W5) | Scalar (`expected_count = 1`): target Grant's/wallet's `player_account_id → player_accounts.person_id`, for issuance/activation/adjustment/forced-conversion. **Set**, for `BulkGrantJob`: the persons behind the pinned, materialized recipient set (`expected_count` = the pinned row count) | `bonus_grant:issue`, `bonus_adjustment:write`, `bonus_bulk:execute` (existing, unchanged, `security`-owned §B1.1) | Existing §B1.2 four-eyes, unchanged; `SEP-1` is additional |
 | `REQ-SEP-BONUS-2` | `BonusSuggestion` (N3) review (Approve/Reject/Edit) and Activation | The persons behind the resolved `proposed_player_population` (N3.1), same pinned-set discipline as `BulkGrantJob` | `bonus_suggestion:review` (existing, N3's own permission dependency); Activation consumes the underlying Grant/`BulkGrantJob` permission (N3.2's "Activation **is** `BulkGrantJob.Create()`/`Grant.Issue()`" — the identical command surface, so `REQ-SEP-BONUS-1`'s own `SEP-1` check fires there too, not a second, parallel one) | Activation's own existing four-eyes (unchanged); review itself is not separately four-eyes-gated |
 | `REQ-SEP-BONUS-3` | The household/linked-account **detection** path (`security`'s §W15.1.5, outside this document's own object model) | n/a — signal-only, never a block | n/a | n/a |
-| `REQ-SEP-BONUS-4` (**new this round**) | `bonus_held_dispositions` **resolution** (N1.4 step 5c): `ACTION_REFORFEIT`, `ACTION_ROUTE_TO_CASH`, and the manual sub-choice under `ACTION_HOLD_FOR_REVIEW`. **Not** the row's **creation** (N1.4 step 5b — N1.8.1 row 7 classifies this TECHNICAL, "recording-and-parking a fact," never an authorizing write) | Scalar (`expected_count = 1`): the row's Grant's `player_account_id → player_accounts.person_id` — identical shape to `REQ-SEP-BONUS-1`'s adjustment/forced-conversion resolver, because a resolution moves value onto or off of exactly that Grant's player | **New, dedicated**: `bonus_held_disposition:resolve` — `security` mints and owns this permission (§B1.1 extension); this document states only where it is checked (the resolution write in N1.4 step 5c) and that it must **never** be folded into `bonus_adjustment:write` or `bonus_bulk:execute` (security's own argument, §W15.1.12: a `bonus_held_dispositions` resolution is a distinct economic act with its own volume/risk/reporting need, and folding it in would let existing adjustment-authorized staff resolve deferred dispositions without any role-wiring decision ever made about it) | **Yes, threshold 0, always** — every resolution is `POLICY-DEPENDENT` (N1.8.1 rows 8/9/10), requiring a human G-2 answer, at least as material as an ordinary adjustment |
+| `REQ-SEP-BONUS-4` (**new this round**) | `bonus_held_dispositions` **resolution** (N1.4 step 5c): `ACTION_REFORFEIT`, `ACTION_ROUTE_TO_CASH`, and the manual sub-choice under `ACTION_HOLD_FOR_REVIEW`. **Not** the row's **creation** (N1.4 step 5b — N1.8.1 row 7 classifies this TECHNICAL, "recording-and-parking a fact," never an authorizing write) | Scalar (`expected_count = 1`): the row's Grant's `player_account_id → player_accounts.person_id` — identical shape to `REQ-SEP-BONUS-1`'s adjustment/forced-conversion resolver, because a resolution moves value onto or off of exactly that Grant's player | **New, dedicated**: `bonus_held_disposition:resolve` — `security` mints and owns this permission (§B1.1 extension); this document states only where it is checked (the resolution write in N1.4 step 5c) and that it must **never** be folded into `bonus_adjustment:write` or `bonus_bulk:execute` (security's own argument, §W15.1.12: a `bonus_held_dispositions` resolution is a distinct economic act with its own volume/risk/reporting need, and folding it in would let existing adjustment-authorized staff resolve deferred dispositions without any role-wiring decision ever made about it) | **Yes, tenant-configurable, above `CLAUDE.md`'s threshold (default 0)** — ratified by `architect`'s doc 34 §3.1, with `risk`'s dissent recorded there rather than adopted; `security` has self-corrected its own earlier "threshold 0, always" text to match (commit `6745e10`; see paragraph below). Every resolution is `POLICY-DEPENDENT` (N1.8.1 rows 8/9/10), requiring a human G-2 answer, at least as material as an ordinary adjustment |
 
 **Wiring — `security`-owned, this document only confirms it does not
 conflict with anything Bonus Engine specifies.** `bonus_held_disposition:
@@ -4413,18 +4597,23 @@ dedicated `bonus_held_disposition_resolution` `operation_type` for the
 identical resolution act `REQ-SEP-BONUS-4` gates — **both** the EOI check
 (N2.4's entry rule, applied to this operation type) and the `SEP-1` check
 above run at a `bonus_held_dispositions` resolution; neither is optional
-because the other exists. **One inconsistency between the two source
-documents is flagged here, not resolved**: `security`'s §W15.1.12 states
-`bonus_held_disposition_resolution`'s four-eyes is "threshold 0, always,"
-while `architect`'s doc 34 §3.1 table row for the same operation type
-says its root mint requires four-eyes "above `CLAUDE.md`'s threshold"
-(i.e., thresholded, not unconditional). This document defers to
-`security`'s stricter, unconditional reading for the actual resolution
-write (N1.4 step 5c already requires an approver above CLAUDE.md's
-threshold **and** — per this section — `SEP-1` fires unconditionally
-regardless of amount) — but does not silently resolve doc 34's own table
-text, which is `architect`'s and `security`'s to reconcile with each
-other, not Bonus Engine's to pick a side on unilaterally.
+because the other exists. **This document previously flagged, rather than
+resolved, an inconsistency here between `security`'s and `architect`'s
+source documents; that inconsistency is now ratified, not merely flagged,
+and this document cites the ratified position rather than reconciling it
+itself.** Earlier Round 2 text (`security`'s §W15.1.12, "threshold 0,
+always") is superseded: `security` has since self-corrected that text
+(commit `6745e10`) to match `architect`'s doc 34 §3.1, which formally
+ratifies — with `risk`'s dissent recorded there, not adopted — that
+`bonus_held_disposition_resolution`'s four-eyes control is
+**tenant-configurable, above `CLAUDE.md`'s threshold (default 0)**, not
+unconditional. This requires no change to N1.4 step 5c's own resolution
+write, which already requires an approver above `CLAUDE.md`'s threshold;
+`SEP-1` (this section) remains separately, and still unconditionally,
+required regardless of amount — doc 34 §3.1's own reasoning is that
+`SEP-1` alone already closes the self-dealing scenario the four-eyes
+threshold would otherwise need to be unconditional to defend against, not
+re-derived here.
 
 ### N2. Bonus targeting / bulk-assignment validation (gate §C)
 
@@ -5114,10 +5303,14 @@ plainly**:
 (none blocking this section's own conclusions)**:
 
 - **`casino`** (`4HB1W15-01`/Round 2) — **CLOSED this round** for the
-  hold-capture posting, the widened seam, and the still-held rollback
-  transition (N1.10). Still open: `08 §16.10.1`'s locked-shape
-  recommendation for a future bonus-funded casino bet, and `08 §16.10.3`'s
-  flagged tension — both routed, neither this document's to decide.
+  hold-capture posting (now confirmed unconditional), the widened
+  `ResolveTerminalGrantCredit` seam, the still-held rollback transition,
+  and — new this final closing pass — the `RecheckGrantExposure`
+  Grant-status-finalization seam (N1.4.2, N1.10). Still open: `08
+  §16.10.1`'s locked-shape recommendation for a future bonus-funded
+  casino bet, `08 §16.10.3`'s flagged tension, and **LF-10** (rollback of
+  an already-resolved disposition, N1.10) — all routed, none this
+  document's to decide.
 - **`ledger-finance`** — **CLOSED this round** for the account/schema
   decision, the idempotency key, the reconciliation stream, and the
   `ACTION_REFORFEIT`/`ACTION_HOLD_FOR_REVIEW` framing corrections (N1.10).
@@ -5129,10 +5322,13 @@ plainly**:
   specify only the boundary Bonus Engine exposes, not CRM's internals),
   and the Affiliate Engine's pipeline (N4.2) — all still open, unaffected
   by this round. **New this round, closed on Bonus Engine's side**: doc
-  34's `EconomicOperationIdentity` is adopted at N2.4a; one table-text
-  inconsistency between doc 34 §3.1 and `security` §W15.1.12 over
-  `bonus_held_disposition_resolution`'s four-eyes threshold is flagged,
-  not resolved, at N1.12.
+  34's `EconomicOperationIdentity` is adopted at N2.4a; the table-text
+  inconsistency this document previously flagged between doc 34 §3.1 and
+  `security` §W15.1.12 over `bonus_held_disposition_resolution`'s
+  four-eyes threshold is, as of this final closing pass, **ratified, not
+  merely flagged** — doc 34 §3.1's "tenant-configurable, above
+  `CLAUDE.md`'s threshold, default 0" reading is the cited position at
+  N1.12, `security` having self-corrected to match.
 - **`security`** — **REQ-SEP-BONUS-1–4 specified this round** (N1.12);
   RBAC for the two command-surface callers (`ActorService`, N2.3/N2.4),
   the `BulkGrantJob` permission gate (N2.5), and the suggestion-generator
