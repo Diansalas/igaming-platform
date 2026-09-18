@@ -1479,3 +1479,35 @@ none authorized for implementation yet.
 4. The four Human Decision Register items (G-2, `OpenBetSelfExclusionPolicy`
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
+
+## Current stage: Stage 4H-B1 Wave 2 — Bonus Engine Implementation — CONCLUDED, awaiting human authorization for the next stage
+
+**Status: READY**, subject to explicitly-open, non-blocking items. Full
+detail: `docs/governance/wave-2-report.md`. `docs/progress.md`'s "Stage
+4H-B1 Wave 2" entry has the running narrative.
+
+The human authorized real-code implementation (not design) of the Bonus
+Engine's core scope: `internal/bonus`, `internal/economicop`, real
+casino integration, a landed `bonus_conversion` Risk Operation, and
+player/staff HTTP surfaces. 11 specialist phases plus 2 dependency-request
+fix dispatches, migrations `0050`-`0067`. Seven real defects found
+during implementation/review, all closed with proven regression tests
+(none were pre-existing — each was introduced or exposed by this Wave's
+own new code, and each was caught before this report was written).
+Segmentation (dynamic), CRM, Affiliate, Gamification, real sportsbook,
+and real external providers were correctly not implemented.
+
+### Decisions/input needed from the human before any further work
+
+1. **Authorize (or not) the next stage** — options include: closing the
+   remaining open items in `wave-2-report.md` §21 (LF-10's general case,
+   the KYC-tier taxonomy gap, the multi-account abuse detector, the
+   missing HTTP admin surfaces) before anything else; Stage 6A (Back
+   Office MVP); or a further Bonus Engine wave (bonus-funded sportsbook
+   wagering, once its own explicit dependency gate clears).
+2. Wave 3, CRM, Affiliate, Gamification, sportsbook, Retail/POS, and
+   Back Office/Partner Console/B2C frontend implementation remain **NOT
+   authorized**.
+3. The four Human Decision Register items (G-2, `OpenBetSelfExclusionPolicy`
+   default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
+   none of this Wave's work required or selected one.

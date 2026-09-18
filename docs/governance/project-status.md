@@ -1213,6 +1213,29 @@ Wave 2, CRM, Affiliate, Gamification, bonus-funded-wagering, and Back
 Office/Partner Console/B2C frontend implementation remain unauthorized
 pending a new human directive.
 
+**Update — Stage 4H-B1 Wave 2 (Bonus Engine, real-code implementation)
+concluded: READY**, subject to explicitly-open, non-blocking items. The
+platform now has a real, tested `internal/bonus` package (Campaign/
+Offer/Grant lifecycle, the G-2/AOE mechanism, 5 bonus types, Bonus
+Conversion functional end to end, static/pinned targeting, bulk grant
+jobs, four-eyes governance), `internal/economicop`
+(`EconomicOperationIdentity`), real casino integration (`postWin`/
+`postRollback` call the G-2 seams), a landed `bonus_conversion` Risk
+Operation, and player/staff HTTP surfaces. Migrations `0050`-`0067`.
+Seven real defects (gate bypasses, posting-shape bugs, lock-ordering
+and decomposition-vector reopenings) were found and closed during
+implementation/review, each with a proven regression test. Open,
+non-blocking: LF-10's general case, a KYC-tier taxonomy gap, a
+multi-account abuse detector gap (schema-only), missing HTTP admin
+surfaces for four-eyes/EOI-root-minting/campaign-activation. Segmentation
+(dynamic), CRM, Affiliate, Gamification, real sportsbook, and real
+external providers were correctly not implemented. No Human Decision
+Register item was selected. Full report:
+`docs/governance/wave-2-report.md`. Wave 3, CRM, Affiliate,
+Gamification, sportsbook, Retail/POS, and Back Office/Partner
+Console/B2C frontend implementation remain unauthorized pending a new
+human directive.
+
 ## Production blockers (summary)
 
 Every item in "Blocked stages" and "External dependencies" above is a

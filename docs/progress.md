@@ -5496,3 +5496,43 @@ package exists, no migration beyond `0049` was written, no route exists.
   here — Wave 2, CRM, Affiliate, Gamification, and Back Office/Partner
   Console/B2C frontend implementation remain unauthorized pending a new
   human directive.
+
+## Stage 4H-B1 Wave 2: Bonus Engine implementation — REAL CODE, human-authorized
+
+The first real-code implementation stage for the Bonus Engine. 11
+specialist phases plus 2 dependency-request fix dispatches, commits
+`d145ba1`..`3526d87`. Full report: `docs/governance/wave-2-report.md`.
+
+Built and tested: `internal/bonus` (Campaign/Offer/Grant lifecycle, the
+G-2/AOE mechanism, 5 bonus types — Deposit/Reload/Cashback/Generic-Wagering/Coupon,
+Bonus Conversion now functional end to end, static/pinned targeting,
+bulk grant jobs, Bonus Suggestion lifecycle, four-eyes governance),
+`internal/economicop` (`EconomicOperationIdentity`), real casino
+integration (`postWin`/`postRollback` now call the G-2 seams), a landed
+`bonus_conversion` Risk Operation, and player/staff HTTP surfaces.
+Migrations `0050`-`0067`.
+
+Seven real defects found and fixed during implementation/review (each
+with a regression test proven to fail pre-fix and pass post-fix): an
+RG/Risk/AssetAuthorization gate bypass on `ACTION_ROUTE_TO_CASH`; its
+accompanying posting-shape bug; a missing `SEP-1` Step-0 self-proof; a
+bulk-worker error-masking bug; an AOE-attribution gap and a
+redelivery-idempotency bug in casino's integration; an EOI/Risk
+lock-ordering reversal; and a structural no-op in the single-grant EOI
+recipient-ceiling check that had reopened the SEC-W15-02 decomposition
+vector through a different door.
+
+**Verdict: READY**, subject to explicitly-open, non-blocking items:
+LF-10's general case (still ledger-finance's, fails closed safely); no
+KYC-tier taxonomy exists for Bonus to reference; no multi-account abuse
+detector exists (schema-only); no HTTP admin surface exists yet for
+four-eyes filing/EOI-root-minting/campaign-activation (the underlying
+mechanisms are built and tested). Segmentation (dynamic), CRM,
+Affiliate, Gamification, real sportsbook, and all real external
+providers were correctly not implemented, per the directive's scope.
+
+No Human Decision Register item was selected. Per the authorizing
+directive, the Orchestrator **stops** here — Wave 3, CRM, Affiliate,
+Gamification, sportsbook, Retail/POS, and Back Office/Partner
+Console/B2C frontend implementation remain unauthorized pending a new
+human directive.
