@@ -997,10 +997,39 @@ need one input that **was never stated anywhere in this proposal, in ADR
 origin) and `B` (bonus-origin) amounts? `sportsbook`'s review correctly
 identified this as a real gap rather than an implementation detail,
 because **sportsbook's lock and its settlement are separated in time**
-(minutes to months) and possibly by process restarts, whereas casino
-resolves a bet atomically inside one transaction and therefore still holds
-the split in memory. Casino never needed a recovery mechanism; sportsbook
-cannot work without one.
+(minutes to months) and possibly by process restarts.
+
+> **CORRECTION (Stage 4H-B1, Wave 1.5, `ledger-finance`).** This
+> paragraph originally continued: *"whereas casino resolves a bet
+> atomically inside one transaction and therefore still holds the split
+> in memory. Casino never needed a recovery mechanism; sportsbook cannot
+> work without one."* **That claim is factually wrong and is withdrawn.**
+> Raised by `casino` (doc 08 §16.2.1/§16.12 item 1) and verified here
+> against `internal/casino/orchestrator.go` at `HEAD`: `postBet`
+> (`orchestrator.go:577-811`) and `postWin` (`orchestrator.go:838-906`)
+> are reached from **two separate `ReceiveCallback` invocations**, each
+> opening its **own** database transaction, separated by an arbitrary,
+> unbounded interval — a webhook delivery gap, not a continuation. That
+> is the *identical* separation sportsbook has. `postWin` already proves
+> the point: it recovers the round's wallet by querying the bet's own
+> posted `ledger_entries` through `correlation_id` (lines 844-861)
+> precisely because it holds **nothing** in memory from `postBet`.
+>
+> **Consequence for this subsection:** casino needs the same
+> `correlation_id` recovery mechanism sportsbook does, and reuses the
+> queries below rather than requiring a parallel invention. The
+> *mechanism* in this subsection is unaffected and unchanged — only the
+> false premise about who needs it. Casino's own application of it is
+> doc 08 §16.4, and **that application is not a verbatim reuse of
+> variant 1 below** — see the `ledger-finance` finding recorded there
+> (Wave 1.5 review, finding LF-1): variant 1 reads the **credit** leg
+> into the locked account (`account_type IN ('player_locked_cash',
+> 'player_locked_bonus')`, credit-positive signed sum, wallet and asset
+> supplied as inputs), whereas doc 08 §16.4 reads the **debit** leg
+> (`e.direction = 'debit'`, wallet resolved as an output). Both are
+> legitimate queries answering different questions; they are not the same
+> query, and the difference is load-bearing for the destination map
+> doc 08 §16.4 builds on top of it.
 
 **The mechanism (proposed).** The split is recovered from the ledger
 itself — the append-only record that already contains it — never from a
@@ -4406,9 +4435,78 @@ impossible progress" is excluded arithmetically, not by clamping.
 This is §6.3.3.1 **variant 2** (the remaining-per-origin query) reused
 verbatim — not a new query shape, not a new index. Once the exposure
 reaches zero the bet's fate is decided: the stake was absorbed (case I),
-paid out (case G), or returned (case E / void). For **casino** the
-quantity is always zero, so no casino contribution is ever nullifiable and
-`P_firm == P_net` — the compatibility property §6.6.3 point 1 claims.
+paid out (case G), or returned (case E / void).
+
+> **CORRECTION (Stage 4H-B1, Wave 1.5, `ledger-finance`).** This
+> paragraph originally continued: *"For **casino** the quantity is always
+> zero, so no casino contribution is ever nullifiable and `P_firm ==
+> P_net` — the compatibility property §6.6.3 point 1 claims."* **That
+> claim is wrong and is withdrawn.** `casino` raised it (doc 08
+> §16.6/§16.12 item 2) as conditional on casino adopting a locked-account
+> posting shape; it is in fact wrong **unconditionally, under the
+> lock-free shape too**, and for a reason neither document stated:
+>
+> The predicate above is expressed in terms of `player_locked_bonus`
+> exposure, which is a **sportsbook-shaped proxy** for the real
+> condition — *"this bet's fate is not yet decided, so its contribution
+> can still be nullified."* For a lock-free posting shape (today's
+> casino, and ADR 0032 §3's immediate-absorb shape) the proxy is
+> **vacuously zero while the real condition is still true**: between
+> `postBet` and `postWin`/`postRollback` — two separate transactions with
+> an unbounded gap (§6.3.3.1's correction) — a `casino_rollback`
+> reversing the lock can still arrive, and §6.6.5's own classification
+> table lists exactly that transaction as **nullifying**, with §6.6.5's
+> `returned(c)` text explicitly noting it "works uniformly ... for casino
+> (a `casino_rollback` of a bonus-funded bet credits `player_bonus` with
+> no locked account in sight)". The predicate here and the classification
+> in §6.6.5 therefore **contradict each other for casino**, and the
+> predicate is the one that is wrong.
+>
+> **The defect this opens, stated so it is not mistaken for a
+> documentation nit.** Under the withdrawn claim, a bonus-funded casino
+> stake counts toward `P_firm` the instant it posts. `P_firm ≥ T` is the
+> **sole** authorization for the `bonus_conversion` posting (invariant
+> W1, HR-12) — real money into `player_cash`. So: stake → `P_firm`
+> reaches `T` → conversion posts → `casino_rollback` arrives → the stake
+> is returned to `player_bonus` and the contribution is retroactively
+> nullified. The conversion was authorized by progress that no longer
+> exists, §6.6.1 property 1's "exactly zero residue" fails, and the
+> residue is **withdrawable cash**. This is the exact farming vector
+> §6.6.6's own second bullet claims is closed.
+>
+> **The corrected predicate.** `nullifiable(c)` is *"a not-yet-reversed
+> effective nullifier of `c`'s lock transaction `L` (§6.6.5 conditions
+> 1–4) can still arrive."* Two instantiations, one condition:
+>
+> - **Locked shape** (sportsbook; casino *if* it adopts the case-B/G/I
+>   lock shape doc 08 §16.10.1 recommends): `Σ signed(player_locked_bonus)
+>   > 0` over `(tenant_id, correlation_id)`, restricted to `c`'s wallet
+>   and asset — the predicate as originally written, which for this shape
+>   is exact, because settlement is exhaustive over win/loss/void and the
+>   locked balance is cleared only by a real event.
+> - **Lock-free shape** (casino today): exposure is **not** observable as
+>   a balance. It is bounded only by a **maximum settlement/rollback
+>   window** after which no further `casino_win`/`casino_rollback` for
+>   that `correlation_id` is accepted. Until such a window exists and is
+>   enforced, `nullifiable(c)` for a casino contribution is **true
+>   indefinitely**, and by W1 that contribution may authorize **nothing**
+>   — it is excluded from `P_firm`, exactly as §6.6.5's fail-closed
+>   `default` branch already does for an unclassified type. Silently
+>   counting it is the defect above; silently excluding it forever makes
+>   bonus-funded casino wagering non-convertible. Neither is acceptable
+>   as a permanent state.
+>
+> **Routed, not decided here.** The settlement/rollback window is a
+> `casino`-owned provider-protocol parameter (doc 08 §16.13; doc 10 §N1.7
+> independently arrives at the *same* missing mechanism from the Grant
+> side). `ledger-finance`'s position: **a bounded, per-provider,
+> configured and enforced settlement window is a hard precondition for
+> bonus-funded casino wagering** — not an optimisation and not an interim
+> convenience — because without it no casino contribution can ever be
+> firm, and `P_firm` is the only thing standing between wagering progress
+> and real cash. Recorded as an open item; it selects no Human Decision
+> Register entry (it is an engineering parameter, not one of G-2's three
+> actions).
 
 > **Invariant W1 — progress authorization.** No value-transferring
 > operation may be authorized by progress that is still nullifiable. The
@@ -6811,10 +6909,18 @@ Three properties of these reads that Bonus may rely on:
   appears in any of R1–R4, so in-house and external occurrences are
   identical by construction (§6.6.7 cases 11/12). Idempotency routing
   differs upstream and is invisible to progress.
-- **For casino, `P_firm == P_net` identically**, because no casino
-  posting touches a locked account, so no casino contribution is ever
-  nullifiable. Model C is a strict no-op for casino except that a
-  `casino_rollback` of a bonus-funded bet now nets.
+- **~~For casino, `P_firm == P_net` identically~~ — CORRECTED (Stage
+  4H-B1, Wave 1.5).** This bullet originally read: *"For casino, `P_firm
+  == P_net` identically, because no casino posting touches a locked
+  account, so no casino contribution is ever nullifiable. Model C is a
+  strict no-op for casino except that a `casino_rollback` of a
+  bonus-funded bet now nets."* It is **withdrawn**, for the reason
+  §6.6.6's own correction block gives at length — and note that the
+  bullet contradicted itself in its own two sentences: a contribution
+  that a `casino_rollback` "nets" *is* a nullifiable contribution.
+  `P_firm == P_net` does **not** hold for casino. Read §6.6.6's
+  correction as the governing text; R1–R4 above are unchanged and remain
+  the correct read shapes.
 
 The contribution record itself (§6.6.4) — its table, package and
 migration — is **`bonus-engine`'s**, built to §6.6.4's constrained shape:
