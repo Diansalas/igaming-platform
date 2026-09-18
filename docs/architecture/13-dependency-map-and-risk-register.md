@@ -42,3 +42,13 @@ money go-live** and the B2B sale, not the build.
 R3, R6, R10 all argue for starting vendor/legal/hosting conversations in
 parallel with Stage 0–1 engineering, not after — this is a human/business
 track that runs alongside the engineering stage gates, not inside them.
+
+## Internal (domain-to-domain) dependency graph — Stage 4H-B1 Wave 1.5
+
+This document's external-vendor map above is unchanged. The **internal**
+build-order graph — which domain can be built before which, and the two
+cross-cutting items (an event transport decision; a consent model) that
+sit upstream of the new commercial domains — is maintained in
+`33-cross-domain-commercial-flow-map.md` §4 rather than duplicated here.
+It authorizes no sequencing; it exists so the human's stage-sequencing
+decisions are made with the dependencies visible.

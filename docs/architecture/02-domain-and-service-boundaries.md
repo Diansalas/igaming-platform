@@ -29,6 +29,9 @@ components rather than duplicated per service.
 | `bonus-engine` | Campaign/Offer/Grant/Progress, rule evaluation | bonus-engine |
 | `gamification` | Points/XP/level rules, achievements, missions, tournaments, leaderboards, streaks — **`NOT IMPLEMENTED`**, architecture frozen Stage 4H-A | gamification (architecture by architect) |
 | `retail` / `agent-network` | Configurable hierarchy/agent network, retail terminals & cashier sessions, counter operations — **`NOT IMPLEMENTED`**, architecture frozen Stage 4H-B0 (`26-retail-operations-architecture.md`) | no existing specialist — architecture by architect; implementation owner is an OPEN DECISION for the Orchestrator (see doc 26 §7) |
+| `segment` | Segment definitions/versions, static membership, membership resolution — **`NOT IMPLEMENTED`**, architecture frozen Stage 4H-B1 Wave 1.5 (`30-segmentation-engine-architecture.md`) | architect (interface/contract/schema), bonus-engine (first consumer) |
+| `crm` | Player lifecycle, customer read-projection, engagement campaigns, audiences, journeys, triggers, communications, preferences, suppression, frequency, experimentation, campaign performance — **`NOT IMPLEMENTED`**, architecture frozen Stage 4H-B1 Wave 1.5 (`31-crm-engine-architecture.md`) | no existing specialist — architecture by architect; implementation owner is an OPEN DECISION for the Orchestrator |
+| `affiliate` | Affiliate/partner records, tracking, clicks, attribution evidence and decisions, promo codes as attribution tokens, commission rules/accrual/approval, affiliate reporting definitions — **`NOT IMPLEMENTED`**, architecture frozen Stage 4H-B1 Wave 1.5 (`32-affiliate-and-acquisition-architecture.md`) | no existing specialist — architecture by architect; implementation owner is an OPEN DECISION for the Orchestrator |
 | `payment-orchestrator` | PSP/crypto routing, reserve accounting, withdrawal workflow | payments |
 | `compliance` | KYC/AML orchestration, RG controls, case queue | identity-compliance |
 | `backoffice-api` / `partner-console-api` | Admin operations, RBAC-gated | backend / backoffice |
@@ -66,6 +69,18 @@ existing service until a real need forces a split: affiliate tracking
 in-house rebuild (Blueprint §1 table — third-party first, in-house is a
 year-two consideration), CRM/campaign journey builder (buy first), and any
 per-jurisdiction reporting engine beyond a pluggable export interface.
+
+**Stage 4H-B1 Wave 1.5 clarification — not a reversal.** A human
+directive elevated CRM and Affiliate to first-class *architectural*
+domains (`31-crm-engine-architecture.md`, `32-affiliate-and-acquisition-
+architecture.md`). That does not overturn the buy-first posture above,
+and neither document claims it does: what those documents freeze is the
+**boundary, data ownership, enforcement points and financial contract** —
+i.e. exactly what a bought product must plug into rather than replace,
+per `CLAUDE.md`'s provider-abstraction rule. Buy-vs-build for the CRM
+journey execution engine (doc 31 OI-CRM-2) and for the affiliate platform
+(doc 32 OI-AFF-1) both remain OPEN DECISIONS for the human. Neither is a
+separate deployable — ADR 0010 is untouched; both are packages.
 
 ## Open question
 
@@ -305,3 +320,80 @@ tenant-level `TenantJurisdictionConfig`. That second one is a **positive
 finding**: a registered shop address would be the first authoritative,
 non-geolocated source of jurisdiction this platform has ever had, against
 the `TODO(jurisdiction)` gap doc 15 and ADR 0031 §9 both still record.
+
+## Segmentation / CRM / Affiliate boundaries (Stage 4H-B1 Wave 1.5 — architecture freeze)
+
+Status: **`NOT IMPLEMENTED`.** No `internal/segment`, `internal/crm` or
+`internal/affiliate` package, schema, migration, API or test exists.
+Stage 4H-B1 Wave 1.5 froze the architecture only —
+`30-segmentation-engine-architecture.md`,
+`31-crm-engine-architecture.md`,
+`32-affiliate-and-acquisition-architecture.md`, with the cross-domain
+flow diagrams, the per-domain non-duplication register and the
+build-order dependency graph in
+`33-cross-domain-commercial-flow-map.md`. Those documents are
+authoritative; this section records the *contract* in the same Owns /
+Never does style as the verified table above, and does not restate them.
+
+| Domain | Package (future) | Sole authority for | Never does |
+|---|---|---|---|
+| Segmentation | `internal/segment` | Segment definitions, immutable criteria versions, static membership (append-only events), and the deterministic membership *resolution* that answers "is this player in this audience, as of this instant" | Own, compute, cache or override any authoritative fact — no risk score/tier, no RG concept, no KYC model, no jurisdiction resolver, no LTV ledger, no FX conversion, no cross-player ranking, no materialized dynamic membership, no player-facing surface, no gate |
+| CRM | `internal/crm` | WHO/WHEN/WHAT CAMPAIGN: player lifecycle classification, the customer read-projection, engagement campaigns/journeys/triggers, communication orchestration and channel abstraction, channel preferences, suppression, message-frequency caps, experimentation, campaign performance definitions | Own a wallet balance, the ledger, bonus accounting, a Risk decision, an RG decision, a KYC decision, identity truth, a consent store, a segmentation engine, a reward fulfilment path, or a BI pipeline. Never supplies a bonus amount or term — it references an `offer_id` + `offer_version_id` and Bonus decides |
+| Affiliate / Acquisition | `internal/affiliate` (operational surface) + node instances in `internal/agentnetwork` (hierarchy) | WHO INTRODUCED WHOM and WHAT COMMISSION IS OWED under which versioned rule: tracking links/codes, immutable click and candidate evidence, the frozen attribution decision, commission rules/accrual/adjustment/approval, affiliate reporting definitions | Post to the ledger, touch any player balance, grant a bonus, gate play, define the revenue (NGR/GGR) measure, design the commission posting shape, build a second hierarchy/closure table, create a second identity model, hold a player-risk heuristic, or expose player PII to an external affiliate |
+
+The boundaries that matter most, each mirroring a separation this
+codebase has already established rather than inventing a new one:
+
+- **None of the three is a Risk replacement.** This is now the third,
+  fourth and fifth occurrence of the same rule (Gamification and Retail
+  above were the first two). Segmentation reads `internal/risk` and never
+  computes a classification — and doc 30 §8.3 records the honest finding
+  that **no persistent player risk classification exists today**, so that
+  criterion is `BLOCKED` rather than approximated. CRM caps how often we
+  *talk* to a player; only Risk caps how much *value* moves. Affiliate
+  has no limit, counter or velocity concept, and self-referral fraud is
+  `risk` + `bonus-engine` + `identity-compliance`'s, not an
+  affiliate-local heuristic.
+- **None of the three is an RG replacement.** Enforcement is always a
+  literal `rg.EvaluateEligibility` call by the acting domain, inside the
+  acting transaction (ADR 0034 §2.1; doc 21's corrected *unconditional*
+  re-check rule). `rg.status.changed` triggers a re-evaluation; it is
+  never the answer. A segment may **suppress** an audience on an RG
+  signal but may never **constitute** one (doc 30 §8.4 — an engineering
+  default with a compliance dimension, routed to the human, tightenable
+  but not loosenable).
+- **A segment result is evidence, never authorization.** Membership may
+  make a player eligible for an Offer's *terms*; it can never make a
+  player authorized to *receive value*. The gate chain
+  `AssetAuthorization → RG → Risk` is unchanged, unreordered, uncached
+  and unbypassable, and no segment/CRM/affiliate symbol may appear
+  between a gate call and its enforcement branch.
+- **CRM creates no player value and Affiliate moves no money.** CRM is
+  not a reward-deciding domain in doc 21's sense and has no interface to
+  the Reward Orchestrator at all (a deliberate omission, doc 31 §7.3).
+  Affiliate hands `ledger-finance` a `CommissionSettlementInstruction`
+  and stops — the identical split ADR 0035 made for retail, where
+  `ledger-finance` owned `agent_float` accounting while the operational
+  architecture was `architect`'s, and where ADR 0035 wins any monetary
+  disagreement.
+- **No second identity, hierarchy or consent model.** Affiliate users are
+  `identity.StaffUser`s with affiliate roles scoped to a node subtree
+  (pending `security`'s judgment on an *external* counterparty in the
+  staff principal space, doc 32 DEP-AFF-1); the affiliate tree is
+  `internal/agentnetwork`'s — the second consumer doc 26 §7.1 explicitly
+  predicted when it refused to name that package `retail`. Marketing
+  consent is `identity-compliance`'s and **does not exist yet** (doc 31
+  §8.1, DEP-CRM-1); CRM fails closed until it does.
+
+### Open cross-domain items these boundaries depend on
+
+| Item | Owner(s) | Severity |
+|---|---|---|
+| A marketing/communication consent model — none exists anywhere in the platform today | **identity-compliance** (DEP-CRM-1) | **P0 for any CRM send** |
+| Commission settlement posting shape, the canonical NGR/GGR definition, liability recognition, clawback treatment | **ledger-finance** (DEP-AFF-4) + human on commercial policy | **P0 for any settlement** |
+| Event transport (transactional outbox vs. broker) — CRM's journey/trigger engine is the first domain that genuinely requires one | Orchestrator → human (doc 22 open decision 1) | P1 |
+| Node-subtree RLS dimension (`app.hierarchy_node_id` + `WithNodeScope`) — already flagged P1 by doc 26 §8; Affiliate is its second consumer | architect + security | P1 |
+| Affiliate users as subtree-scoped `StaffUser`s vs. a distinct principal type | security (DEP-AFF-1) | P1 |
+| The Eligibility Decision Record's versioned-provenance content (doc 30 §7) extends doc 10 W2.4's activation projection | bonus-engine + ledger-finance (DEP-SEG-1) | P1 |
+| CRM/affiliate reporting dimensions in the doc 12 pipeline | data-analytics (DEP-CRM-2) | P2 |
+| Promo-code vs. bonus-coupon namespace collision check | bonus-engine (DEP-AFF-3) | P2 |
