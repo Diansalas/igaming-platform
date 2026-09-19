@@ -141,6 +141,28 @@ type DepositBonusParams struct {
 // no-opt-in, deposit-triggered Offer, issuance and activation collapse
 // into one caller-visible operation.
 func IssueAndActivateDepositBonus(ctx context.Context, tx pgx.Tx, p DepositBonusParams) (Grant, GateOutcome, error) {
+	return issueAndActivateDepositBonus(ctx, tx, p, activateGrantProd)
+}
+
+// issueAndActivateDepositBonus is IssueAndActivateDepositBonus's shared
+// implementation, parameterized on the activateGrantFunc seam (see that
+// type's own doc comment, targeting.go).
+//
+// DR-4I-BONUS-01 CLOSURE (`architect`, Stage 4I final cross-domain
+// certification): this is the third and last instance of the hand-copy
+// drift class SEC-4I-F6 (`security`) and SEC-4I-F7 (`qa`) each closed
+// elsewhere in this package. `qa` disclosed it as a residual rather than
+// fixing it; it is closed here because of WHAT the copy was hiding, which
+// is materially more than test hygiene: this function's clamp-then-cap-
+// then-round ordering IS the financial invariant ADR 0021's DS-2 records
+// (round once, at the final monetary boundary, after the cap comparison),
+// and the platform's own ledger-finance certification suite
+// (wave3_ledger_finance_certification_integration_test.go) reaches it ONLY
+// through the former hand-copy. A regression in the production ordering
+// would therefore not have been caught by the very tests that certify that
+// ordering. Nothing about the invariant is changed here - only which code
+// the certification actually exercises.
+func issueAndActivateDepositBonus(ctx context.Context, tx pgx.Tx, p DepositBonusParams, activate activateGrantFunc) (Grant, GateOutcome, error) {
 	if p.MinQualifying != nil && p.DepositAmount.Cmp(p.MinQualifying) < 0 {
 		return Grant{}, GateOutcome{Allowed: false, DeniedBy: "eligibility_axis", Code: "below_min_qualifying_amount"}, nil
 	}
@@ -164,7 +186,7 @@ func IssueAndActivateDepositBonus(ctx context.Context, tx pgx.Tx, p DepositBonus
 		return g, issueOutcome, nil
 	}
 
-	activated, activateOutcome, err := ActivateGrant(ctx, tx, g.TenantID, g.ID, ActivateGrantParams{
+	activated, activateOutcome, err := activate(ctx, tx, g.TenantID, g.ID, ActivateGrantParams{
 		ActorType: TriggerActorForAutomated(p.ActorType), ActorID: p.ActorID, Amount: amount,
 		WageringTimeLimit: p.WageringTimeLimit,
 	})
@@ -213,6 +235,18 @@ type CashbackParams struct {
 // Grant per window, immediately completed since a cashback Offer's
 // Wagering axis is a no-op by design (doc 10 §2).
 func IssueAndActivateCashback(ctx context.Context, tx pgx.Tx, p CashbackParams) (Grant, GateOutcome, error) {
+	return issueAndActivateCashback(ctx, tx, p, activateGrantProd)
+}
+
+// issueAndActivateCashback is IssueAndActivateCashback's shared
+// implementation, parameterized on the activateGrantFunc seam - see
+// issueAndActivateDepositBonus's own doc comment (above) for the full
+// DR-4I-BONUS-01 reasoning. Cashback's case is the sharper one: the
+// per-window, no-accumulation rounding rule this function implements is
+// itself a recorded decision (ADR 0021's cashback-residual rule, restated
+// in this function's own doc comment), and it was likewise certified only
+// through a hand-copy.
+func issueAndActivateCashback(ctx context.Context, tx pgx.Tx, p CashbackParams, activate activateGrantFunc) (Grant, GateOutcome, error) {
 	amount, err := computeCappedPercentageReward(p.NetLossAmount, p.RateBP, p.CapAmount, p.Grant.DecimalExponent)
 	if err != nil {
 		return Grant{}, GateOutcome{}, err
@@ -229,7 +263,7 @@ func IssueAndActivateCashback(ctx context.Context, tx pgx.Tx, p CashbackParams) 
 		return g, issueOutcome, nil
 	}
 
-	activated, activateOutcome, err := ActivateGrant(ctx, tx, g.TenantID, g.ID, ActivateGrantParams{
+	activated, activateOutcome, err := activate(ctx, tx, g.TenantID, g.ID, ActivateGrantParams{
 		ActorType: ActorSystem, ActorID: p.ActorID, Amount: amount,
 	})
 	if err != nil || !activateOutcome.Allowed {

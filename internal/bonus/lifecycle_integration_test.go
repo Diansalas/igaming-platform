@@ -642,72 +642,38 @@ func forceConvertGrantSkippingAssetAuthorizationForTest(t *testing.T, ctx contex
 	return result
 }
 
-// forceIssueAndActivateDepositBonusForTest mirrors
-// IssueAndActivateDepositBonus's OWN reward-computation and issue/activate
-// composition EXACTLY (types.go - qualifying-amount clamping, then
-// computeCappedPercentageReward, then issueIdempotent), substituting
-// forceActivateGrantForTest for the real ActivateGrant call. See
-// forceActivateGrantForTest's own doc comment (above) for why this
-// substitution is necessary and safe.
+// forceIssueAndActivateDepositBonusForTest calls
+// issueAndActivateDepositBonus - IssueAndActivateDepositBonus's OWN shared
+// implementation (types.go) - substituting activateGrantForceAdapter for
+// the real, T.1-gate-enforcing ActivateGrant, so these tests exercise the
+// PRODUCTION reward-computation/issue/activate composition rather than a
+// copy of it. See forceActivateGrantForTest's own doc comment (above) for
+// why the substitution is necessary and safe, and
+// issueAndActivateDepositBonus's for why the former hand-copy was worth
+// closing (DR-4I-BONUS-01, `architect`, Stage 4I final certification: the
+// copy stood between this package's ledger-finance certification suite and
+// the ADR 0021 DS-2 rounding ordering it certifies).
 func forceIssueAndActivateDepositBonusForTest(t *testing.T, ctx context.Context, tx pgx.Tx, p DepositBonusParams) (Grant, GateOutcome) {
 	t.Helper()
-	if p.MinQualifying != nil && p.DepositAmount.Cmp(p.MinQualifying) < 0 {
-		return Grant{}, GateOutcome{Allowed: false, DeniedBy: "eligibility_axis", Code: "below_min_qualifying_amount"}
-	}
-	qualifying := p.DepositAmount
-	if p.MaxQualifying != nil && qualifying.Cmp(p.MaxQualifying) > 0 {
-		qualifying = p.MaxQualifying
-	}
-	amount, err := computeCappedPercentageReward(qualifying, p.RateBP, p.CapAmount, p.Grant.DecimalExponent)
+	g, outcome, err := issueAndActivateDepositBonus(ctx, tx, p, activateGrantForceAdapter)
 	if err != nil {
-		t.Fatalf("forceIssueAndActivateDepositBonusForTest: compute reward: %v", err)
+		t.Fatalf("forceIssueAndActivateDepositBonusForTest: %v", err)
 	}
-	g, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: p.Grant})
-	if err != nil && !errors.Is(err, ErrAlreadyGranted) {
-		t.Fatalf("forceIssueAndActivateDepositBonusForTest: issue: %v", err)
-	}
-	if errors.Is(err, ErrAlreadyGranted) {
-		return g, issueOutcome
-	}
-	if !issueOutcome.Allowed {
-		return g, issueOutcome
-	}
-	activated := forceActivateGrantForTest(t, ctx, tx, g.TenantID, g.ID, ActivateGrantParams{
-		ActorType: TriggerActorForAutomated(p.ActorType), ActorID: p.ActorID, Amount: amount,
-		WageringTimeLimit: p.WageringTimeLimit,
-	})
-	return activated, GateOutcome{Allowed: true}
+	return g, outcome
 }
 
-// forceIssueAndActivateCashbackForTest mirrors IssueAndActivateCashback's
-// OWN reward-computation, issue/activate, and immediate-completion
-// composition EXACTLY (types.go), substituting forceActivateGrantForTest
-// for the real ActivateGrant call. See forceActivateGrantForTest's own
-// doc comment (above) for why.
+// forceIssueAndActivateCashbackForTest calls issueAndActivateCashback -
+// IssueAndActivateCashback's OWN shared implementation (types.go) - the
+// same way, and for the same reason (DR-4I-BONUS-01). Cashback's
+// per-window, no-accumulation rounding rule is itself a recorded ADR 0021
+// decision, and it too was previously certified only through a copy.
 func forceIssueAndActivateCashbackForTest(t *testing.T, ctx context.Context, tx pgx.Tx, p CashbackParams) (Grant, GateOutcome) {
 	t.Helper()
-	amount, err := computeCappedPercentageReward(p.NetLossAmount, p.RateBP, p.CapAmount, p.Grant.DecimalExponent)
+	g, outcome, err := issueAndActivateCashback(ctx, tx, p, activateGrantForceAdapter)
 	if err != nil {
-		t.Fatalf("forceIssueAndActivateCashbackForTest: compute reward: %v", err)
+		t.Fatalf("forceIssueAndActivateCashbackForTest: %v", err)
 	}
-	g, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: p.Grant})
-	if err != nil && !errors.Is(err, ErrAlreadyGranted) {
-		t.Fatalf("forceIssueAndActivateCashbackForTest: issue: %v", err)
-	}
-	if errors.Is(err, ErrAlreadyGranted) {
-		return g, issueOutcome
-	}
-	if !issueOutcome.Allowed {
-		return g, issueOutcome
-	}
-	forceActivateGrantForTest(t, ctx, tx, g.TenantID, g.ID, ActivateGrantParams{
-		ActorType: ActorSystem, ActorID: p.ActorID, Amount: amount,
-	})
-	completed, _, err := CheckAndCompleteGrant(ctx, tx, g.TenantID, g.ID, nil)
-	if err != nil {
-		t.Fatalf("forceIssueAndActivateCashbackForTest: complete: %v", err)
-	}
-	return completed, GateOutcome{Allowed: true}
+	return g, outcome
 }
 
 func newTestOfferGrant(f lifecycleFixture, co campaignOffer, triggerRef string) Grant {
