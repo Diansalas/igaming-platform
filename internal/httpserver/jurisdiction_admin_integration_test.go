@@ -63,7 +63,7 @@ func TestJurisdictionRegistryAPI_PlatformAdminDeniedResolutionActiveWrite(t *tes
 	admin := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "pa-jur-pw-1")
 	token := mustLoginStaff(t, srv, "", admin.Email, "pa-jur-pw-1").AccessToken
 
-	resp := sendAssetJSON(t, srv.URL+"/v1/admin/jurisdiction-resolution-active/play", http.MethodPut, token, map[string]any{"active": true})
+	resp := sendAssetJSON(t, srv.URL+"/v1/admin/jurisdiction-resolution-active/play", http.MethodPut, token, map[string]any{"active": true, "reason_code": "stage-4i-test"})
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("expected 403 for a platform_admin writing a tenant-scoped resolution-active fact, got %d", resp.StatusCode)
 	}
@@ -131,7 +131,7 @@ func TestJurisdictionResolutionActiveAPI_TenantAdminRoundTrip(t *testing.T) {
 	ta := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleTenantAdmin, "ta-jur-active-1")
 	token := mustLoginStaff(t, srv, tenant.Slug, ta.Email, "ta-jur-active-1").AccessToken
 
-	resp := sendAssetJSON(t, srv.URL+"/v1/admin/jurisdiction-resolution-active/play", http.MethodPut, token, map[string]any{"active": true})
+	resp := sendAssetJSON(t, srv.URL+"/v1/admin/jurisdiction-resolution-active/play", http.MethodPut, token, map[string]any{"active": true, "reason_code": "stage-4i-test"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 setting resolution-active, got %d", resp.StatusCode)
 	}
@@ -170,9 +170,17 @@ func TestJurisdictionResolutionActiveAPI_CrossTenantIsolation(t *testing.T) {
 	tokenA := mustLoginStaff(t, srv, tenantA.Slug, taA.Email, "ta-jur-a-1").AccessToken
 	tokenB := mustLoginStaff(t, srv, tenantB.Slug, taB.Email, "ta-jur-b-1").AccessToken
 
-	resp := sendAssetJSON(t, srv.URL+"/v1/admin/jurisdiction-resolution-active/play", http.MethodPut, tokenA, map[string]any{"active": true})
+	resp := sendAssetJSON(t, srv.URL+"/v1/admin/jurisdiction-resolution-active/play", http.MethodPut, tokenA, map[string]any{"active": true, "reason_code": "stage-4i-test"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 setting tenant A's fact, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// A write with no reason_code is a 400 - CLAUDE.md's audit rule, and
+	// the same requirement every other mutating admin surface here has.
+	resp = sendAssetJSON(t, srv.URL+"/v1/admin/jurisdiction-resolution-active/play", http.MethodPut, tokenA, map[string]any{"active": false})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for a resolution-active write with no reason_code, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 

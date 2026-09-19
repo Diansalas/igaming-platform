@@ -280,6 +280,10 @@ var validJurisdictionOperationClasses = []string{
 
 type setResolutionActiveRequest struct {
 	Active bool `json:"active"`
+	// ReasonCode is required, exactly as it is on every other mutating
+	// admin surface in this package's file header convention 2 and on
+	// PermAssetAuthorizationWrite's own tenant-scoped writes.
+	ReasonCode string `json:"reason_code"`
 }
 
 // newSetResolutionActiveHandler is PUT
@@ -316,13 +320,19 @@ func newSetResolutionActiveHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
 			return
 		}
+		v = validation.New()
+		v.RequireNonEmpty("reason_code", body.ReasonCode)
+		if v.HasErrors() {
+			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+			return
+		}
 
 		var rec jurisdiction.ActiveRecord
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			rec, err = jurisdiction.SetResolutionActive(ctx, tx, jurisdiction.SetResolutionActiveParams{
 				TenantID: tc.TenantID, OperationClass: jurisdiction.OperationClass(operationClass), Active: body.Active,
-				ActorType: jurisdiction.ActorStaff, ActorID: staffID,
+				ActorType: jurisdiction.ActorStaff, ActorID: staffID, ReasonCode: body.ReasonCode,
 				IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
 			})
 			return err

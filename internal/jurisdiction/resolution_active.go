@@ -3,6 +3,7 @@ package jurisdiction
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -38,9 +39,19 @@ type SetResolutionActiveParams struct {
 	// toggle is a configuration change, never a player action.
 	ActorType ActorType
 	ActorID   uuid.UUID
-	IPAddress string
-	UserAgent string
-	RequestID string
+	// ReasonCode is REQUIRED on every write, and is recorded in the audit
+	// entry alongside before/after. CLAUDE.md's audit rule names it
+	// explicitly ("actor, tenant, entity, before/after state, IP, reason
+	// code"), and the precedent this operation follows -
+	// PermAssetAuthorizationWrite's SetAssetAuthorization/
+	// SetOperationEligibility (internal/assetregistry/authorization_admin.go)
+	// - requires and persists one on every write. Without it the record
+	// says what changed but never why, which is precisely the question
+	// asked of a control's state months later.
+	ReasonCode string
+	IPAddress  string
+	UserAgent  string
+	RequestID  string
 }
 
 // SetResolutionActive creates or updates the (tenant, operation_class)
@@ -62,6 +73,9 @@ func SetResolutionActive(ctx context.Context, tx pgx.Tx, p SetResolutionActivePa
 	}
 	if p.ActorID == uuid.Nil {
 		return ActiveRecord{}, fmt.Errorf("%w: actor_id is required", ErrInvalidInput)
+	}
+	if strings.TrimSpace(p.ReasonCode) == "" {
+		return ActiveRecord{}, fmt.Errorf("%w: reason_code is required on every resolution-active change", ErrInvalidInput)
 	}
 
 	var before *bool
@@ -94,6 +108,7 @@ func SetResolutionActive(ctx context.Context, tx pgx.Tx, p SetResolutionActivePa
 			"operation_class": string(p.OperationClass),
 			"before_active":   before,
 			"after_active":    p.Active,
+			"reason_code":     p.ReasonCode,
 		},
 	}); err != nil {
 		return ActiveRecord{}, fmt.Errorf("jurisdiction: audit resolution-active change: %w", err)

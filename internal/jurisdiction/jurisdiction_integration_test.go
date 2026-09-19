@@ -460,7 +460,7 @@ func TestSetResolutionActive_RoundTripAndIsActiveAccessor(t *testing.T) {
 	staffID := uuid.New()
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := SetResolutionActive(ctx, tx, SetResolutionActiveParams{
-			TenantID: f.tenantID, OperationClass: OperationPlay, Active: true, ActorType: ActorStaff, ActorID: staffID,
+			TenantID: f.tenantID, OperationClass: OperationPlay, Active: true, ActorType: ActorStaff, ActorID: staffID, ReasonCode: "stage-4i-test",
 		})
 		return err
 	})
@@ -500,10 +500,40 @@ func TestSetResolutionActive_RoundTripAndIsActiveAccessor(t *testing.T) {
 		if count != 1 {
 			t.Fatalf("expected exactly 1 audit_log row, got %d", count)
 		}
+		// CLAUDE.md's audit rule names reason code explicitly, and
+		// PermAssetAuthorizationWrite's own tenant-scoped writes (the
+		// precedent canonical-model §4.2 tells B-6 to follow) require and
+		// record one on every write.
+		var reasonCode string
+		if err := tx.QueryRow(ctx,
+			`SELECT metadata ->> 'reason_code' FROM audit_log WHERE tenant_id = $1 AND action = 'jurisdiction_resolution_active.changed'`,
+			f.tenantID).Scan(&reasonCode); err != nil {
+			return err
+		}
+		if reasonCode != "stage-4i-test" {
+			t.Fatalf("expected the audit record to carry the caller's reason_code, got %q", reasonCode)
+		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("audit check: %v", err)
+	}
+
+	// A write with no reason code is rejected outright - a record that
+	// says what changed but never why is the gap CLAUDE.md's audit rule
+	// names.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := SetResolutionActive(ctx, tx, SetResolutionActiveParams{
+			TenantID: f.tenantID, OperationClass: OperationBonusIssuance, Active: true,
+			ActorType: ActorStaff, ActorID: staffID,
+		})
+		if !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("expected ErrInvalidInput for a missing reason_code, got %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("missing-reason-code check: %v", err)
 	}
 }
 
@@ -514,7 +544,7 @@ func TestJurisdictionResolutionActive_CrossTenantIsolation(t *testing.T) {
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := SetResolutionActive(ctx, tx, SetResolutionActiveParams{
-			TenantID: f.tenantID, OperationClass: OperationPlay, Active: true, ActorType: ActorStaff, ActorID: staffID,
+			TenantID: f.tenantID, OperationClass: OperationPlay, Active: true, ActorType: ActorStaff, ActorID: staffID, ReasonCode: "stage-4i-test",
 		})
 		return err
 	})
@@ -567,7 +597,7 @@ func TestJurisdictionResolutionActive_DeleteIsDeniedByRLS(t *testing.T) {
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := SetResolutionActive(ctx, tx, SetResolutionActiveParams{
-			TenantID: f.tenantID, OperationClass: OperationPlay, Active: true, ActorType: ActorStaff, ActorID: staffID,
+			TenantID: f.tenantID, OperationClass: OperationPlay, Active: true, ActorType: ActorStaff, ActorID: staffID, ReasonCode: "stage-4i-test",
 		})
 		return err
 	})
