@@ -260,6 +260,30 @@ self-correction or this ratification. `bonus-engine` owns doc 10 and must
 update that citation to match; per this round's constraints, `architect`
 does not edit doc 10.
 
+**`bonus_campaign_activation` is declared in this table and has no mint
+point — and Stage 4H-B1 Wave 3 made the effecting writes it was declared
+to bound live for the first time (`architect`, Phase 10).** Stated here
+rather than left for a reader to notice: `internal/bonus`'s
+`ActivateCampaign` consumes a four-eyes `ChangeOperation` and performs
+the status write, minting **no EOI**; `economicop.consumptionShapes` has
+no entry for this type, so a minted one would be refused fail-closed at
+§5.4; and Wave 3's new deposit sweep and cashback scheduler issue Grants
+automatically, to any qualifying player, for as long as the Campaign
+stays active — exactly the "many subsequent grant-issuing effecting
+writes over its life, under the one activation approval" this row
+describes. One four-eyes-approved activation therefore authorizes an
+unbounded count and value of automatic issuance today, bounded only by
+Offer configuration and per-player idempotency. It is inert for an
+unrelated reason (every sweep-driven issuance currently denies at the
+`AssetAuthorization` gate — no per-player jurisdiction resolver exists
+anywhere on the platform), which is why this is a gate rather than an
+emergency: **before campaign-driven automatic issuance can actually
+succeed, either this type gets a real mint point with declared bounds
+(plus its §5.7 and §3.4 declarations, and the sweeps relaying it as
+`parent_operation_id`), or an explicit determination co-signed by
+`security` records why it needs no budget ceiling and what bounds it
+instead.** ADR 0040 D4.
+
 **Deliberately absent from this list**: an ordinary player-initiated bet,
 deposit or withdrawal. Those are single-subject, self-authorized, already
 fully controlled by RG/Risk/AssetAuthorization on the live path, and
@@ -771,6 +795,102 @@ grant execution is, wherever it falls.**
 | A recipient granted, then clawed back, then targeted again by a later page | Not modeled | `recipient_ceiling` consumption is `COUNT(DISTINCT subject_ref)` and never releases on the clawback (RK-W15P2-2) — the recipient still counts once against the 5,000, permanently |
 | `approval_state` across all 100,000 executions | Not modeled — and if modeled naively, execution #2 would already be rejected (NEW-7) | `crm_engagement_campaign_activation` is a **standing authorization** (§3.1's Consumption shape column). `approval_state` stays `approved` from execution 1 through execution 5,000 — it is never set to `consumed`. The authorization retires to `status = exhausted` only when the 5,001st execution is rejected for lack of budget (or to `completed` if the campaign's window ends first), never as a side effect of any single item's write (§5.4) |
 
+### 5.6 Lock ordering BEYOND the EOI — HR-21 extended to every projection row (Stage 4H-B1 Wave 3 Phase 10, `architect`)
+
+§5.3 pins the order between Risk's advisory lock and the EOI root row
+lock. It says nothing about the two locks that sit *outside* both on the
+Bonus/casino paths, and `ledger-accounting-model.md` §6.6.16 already
+named that as a known, unstated joint gap, in its own words: *"the
+lock-acquisition order across HR-3's `(tenant_id, correlation_id)`
+advisory lock, doc 10 §9/§T.7's `(tenant_id, grant_id)` advisory lock,
+and HR-12's `FOR UPDATE` on the `player_bonus` projection row… No cycle
+exists among the orders as currently written, but no document states the
+order jointly, and 'no cycle today' is not a property that survives a
+fourth participant."*
+
+**Stage 4H-B1 Wave 3 added the fourth participant.** `internal/casino`'s
+`postBet` takes `FOR UPDATE` on the **`player_cash`**
+`wallet_balance_projection` row (`lockCashBalance`, invariant #15), then
+posts (migration 0023's `AFTER INSERT` trigger write-locks every
+projection row the posting touches), and only then reaches the new
+cash-funded wagering-contribution call and, through it,
+`AdvisoryLockGrant` — **projection row, then grant**. Every Bonus-domain
+value-moving path (`ActivateGrant`, `TerminateGrant`,
+`CheckAndCompleteGrant`, `ConvertGrant`, `ResolveHeldDispositionAction`)
+does the exact reverse by design — **grant, then projection row**.
+
+**The rule, binding on every domain:**
+
+> `(tenant_id, correlation_id)` advisory lock → `(tenant_id, grant_id)`
+> advisory lock → **any** `wallet_balance_projection` row lock, whether
+> taken explicitly with `FOR UPDATE` or implicitly by migration 0023's
+> trigger on an `INSERT INTO ledger_entries`.
+
+HR-21's third element is no longer "the `player_bonus` projection row"
+specifically. Any transaction taking both a Grant advisory lock and any
+projection row lock takes them in that order.
+
+**Do not cite `risk`'s F1 closure as covering this.** F1 concerned two
+*scheduler* namespaces using `pg_try_advisory_xact_lock` — the
+**non-blocking** family, which by construction never waits and therefore
+can never participate in a wait-for cycle (`qa` Phase 9 closed it
+empirically and the reasoning is sound). The pair above **blocks**
+(`pg_advisory_xact_lock`; `SELECT … FOR UPDATE`), so a genuine wait-for
+cycle is possible wherever the two orders meet on a shared projection
+row. The two findings are unrelated.
+
+**Current status: latent, not live, and gated.** The only Bonus paths
+posting to `player_cash` are `ConvertGrant` and `ACTION_ROUTE_TO_CASH`;
+the only ones posting to `house_gaming` are `postWinLockedBonus` and
+`postRollbackHeldWin`. None is reachable today (`ConvertGrant` has zero
+non-test callers and no route; the three G-2 paths need bonus-funded
+stake locking, which does not exist). The live Grant-locking paths Wave 3
+wired — the deposit sweep, the cashback scheduler, the expiry sweep —
+post only to `player_bonus`/`promo_liability`/`bonus_expense`, which
+`postBet` never locks. `DR-4HB1W3-ARCH-01` tracks the `postBet` fix
+(resolve the Grant and lock it **before** `lockCashBalance`), which must
+land **before** any conversion trigger, `postBet`'s bonus-funded leg, or
+any other change that makes those paths concurrently reachable with a
+bet. Full reasoning and the gate: ADR 0040 D2.
+
+### 5.7 A root authorization for a value-creating operation type may never be unbounded (Stage 4H-B1 Wave 3 Phase 10, `architect`)
+
+`ConsumeRootBudget` (§5.4) treats a nil `recipient_ceiling` as "no
+recipient check" and a nil `intended_aggregate_value` on a non-null
+`asset_code` root as "no value check". A bound that is optional to
+declare is not a bound: an actor able to mint an already-approved root
+with no ceiling has reopened SEC-W15-02 **at the mint point**, one layer
+below the control §5.4 implements. `security` found this in Stage 4H-B1
+Wave 3 Phase 6 (`security-architecture.md` §W3P6.5 item 1), where the
+bound existed only in one HTTP handler's request validation.
+
+**The rule:** for the `operation_type`s declared in
+`economicop.boundedRootOperationTypes`, a `lineage_kind = root` row must
+carry a non-empty `asset_code`, a positive `intended_aggregate_value`, a
+positive `recipient_ceiling` and a non-zero `expires_at`;
+`single_subject` scope additionally requires `subject_ref` and a
+`recipient_ceiling` of exactly **1** (a `single_subject` root authorizing
+more than one recipient is the shape used to launder a set-shaped
+authorization through the narrower scope's weaker declaration
+requirements); `subject_scope = none` is refused outright. Enforced by
+`economicop.ValidateRootAuthorizationBounds`, called by every mint point
+before the row is inserted and before any idempotency lookup, returning
+`ErrUnboundedRootAuthorization`.
+
+**Permit-by-enumeration, deliberately.** §2.2 states that a null
+`asset_code` is legal and meaningful and RK-W15P2-5 states such a root
+has no enforceable value budget at all, so a blanket rule would
+contradict this document. The declared set is exactly the types that
+create player-redeemable value and already carry a consumption shape.
+
+**Binding consequence for the next consumer:** a new value-creating
+`operation_type` needs **two** declarations in the same change — a
+`consumptionShapes` entry (so §5.4 can count it) and a
+`boundedRootOperationTypes` entry (so its roots cannot be unbounded).
+One without the other is a half-built control. See also ADR 0040 D1 and
+D4 (`bonus_campaign_activation` is currently declared in §3.1 with
+neither).
+
 ---
 
 ## 6. Invariants (for `qa` and `code-reviewer`; each mechanically checkable)
@@ -795,10 +915,23 @@ grant execution is, wherever it falls.**
 | **EOI-16** *(new, RK-W15P2-5)* | An `operation_type` whose value is not known at execution time consumes the Offer's declared maximum against `remaining_value_budget` at that execution, never zero or a placeholder; a null `asset_code` EOI has no enforceable value budget at all | Test: a cashback-shaped `issued` execution with value unknown consumes the declared ceiling, not 0; a separate test asserts an attempt to enforce a value budget against a null-`asset_code` EOI is rejected as a configuration error, not silently treated as unlimited or zero |
 | **EOI-17** *(new, DEP-EOI-4)* | `operation_type` is never derived from, aliased to, or mapped to `internal/risk.Operation`; the two enums' value sets are disjoint and no function converts one into the other | The vocabulary-disjointness test (§3.1) |
 | **EOI-18** *(new, NEW-7)* | An `operation_type`'s declared Consumption shape (§3.1) governs its `approval_state` lifecycle exclusively: a **single-consumption** type transitions `approved → consumed` on its one effecting write; a **standing-authorization** type never writes `consumed` to `approval_state` regardless of how many effecting writes occur under it (§5.4), and retires only via `status` (`exhausted` \| `completed`) or an explicit staff-initiated `revoked` transition | Test: run N>1 effecting writes under one standing-authorization EOI (e.g. a `crm_engagement_campaign_activation` with `recipient_ceiling ≥ 3`) and assert `approval_state` reads `approved` after every write and is never `consumed`; a second test asserts the consuming function raises rather than silently succeeding if ever invoked in a code path attempting to write `consumed` for a declared-standing `operation_type` |
+| **EOI-19** *(new, Stage 4H-B1 Wave 3 Phase 10, §5.7)* | A `lineage_kind = root` row of a declared value-creating `operation_type` never exists without a non-empty `asset_code`, a positive `intended_aggregate_value`, a positive `recipient_ceiling` and a non-zero `expires_at`; a `single_subject` root additionally always carries a `subject_ref` and a `recipient_ceiling` of exactly 1 | `internal/economicop`'s `TestValidateRootAuthorizationBounds` (pure) plus `internal/bonus`'s `TestMintRootOperation_RefusesUnboundedRoot`, which asserts both the sentinel AND that no `economic_operations` row came into existence. Additionally: every `operation_type` present in `consumptionShapes` and capable of increasing value is present in `boundedRootOperationTypes` — a declaration-parity check |
+| **EOI-20** *(new, Stage 4H-B1 Wave 3 Phase 10, §5.6)* | No transaction acquires a `wallet_balance_projection` row lock (explicit `FOR UPDATE`, or implicitly via migration 0023's trigger on an `INSERT INTO ledger_entries`) **before** the `(tenant_id, grant_id)` advisory lock, on any path that takes both | Call-site review, same discipline as DEP-EOI-7 — no database mechanism can order two applications' independently-acquired locks. `DR-4HB1W3-ARCH-01` is the one known open violation (`internal/casino`'s `postBet`), latent today and gated per §5.6 |
 
 ---
 
 ## 7. What is NOT authorized by this document
+
+**Status correction (Stage 4H-B1 Wave 3 Phase 10, `architect`).** The
+first two bullets below were written when this document was a design
+with no code behind it. They are retained verbatim because they record
+what *this document* authorized, which has not changed — but they are no
+longer a description of the repository: `internal/economicop`,
+migration `0053` and the Wave 3 minting/governance routes were
+authorized by their own later Stage 4H-B1 dispatches (Wave 2 Phases 2/3,
+Wave 3 Phase 3) and are `IMPLEMENTED`. Read the bullets as "this
+document authorizes none of this by itself," not as "none of this
+exists."
 
 - No implementation. `internal/economicop` does not exist and is not
   authorized to exist by this document.
@@ -827,6 +960,8 @@ grant execution is, wherever it falls.**
 | **DEP-EOI-5** | **(new)** `security`'s `CRM-BR-1`/§W15.1.2 (pin the **materialized** subject set; never re-resolve at execution) and `bonus-engine`'s doc 10 **W5** (resolve **live** at run time) point in opposite directions. §2.2's `subject_set_hash` adopts the ceiling reconciliation — the pin bounds from above, live resolution may only shrink — but **neither owner has confirmed it**. Same item as doc 31 **DEP-CRM-7** | security + bonus-engine | Yes, before the first pinned-audience execution |
 | **DEP-EOI-6** *(new, RK-W15P2-4)* | The consumption-record-shape declaration (§3.4) must be authored per `operation_type` by the domain that owns that type's tables — `bonus-engine` for `bonus_bulk_grant`/`bonus_manual_grant`/`bonus_campaign_activation`/`bonus_held_disposition_resolution`, `crm` for `crm_engagement_campaign_activation` (which enforces nothing itself but should still declare its own shape for symmetry), `affiliate` for its two types. Not yet authored by any of them — this document specifies the *requirement and failure behavior*, not the per-type declarations themselves | bonus-engine, affiliate, crm | Yes, before implementation of any given `operation_type`'s enforcement |
 | **DEP-EOI-7** *(new, RK-W15P2-3)* | §5.3's canonical lock ordering (Risk's advisory lock always before the EOI row lock) is a call-site discipline, not something the EOI schema alone enforces. Whoever implements the Bonus/Affiliate call sites that invoke both Risk and `internal/economicop` in the same transaction must follow §5.3's ordering; a code-review checklist item, not a database constraint, since no database mechanism can order two applications' independently-acquired advisory/row locks | bonus-engine, affiliate (implementers) + code-reviewer (gate) | Yes, before implementation |
+| **DR-4HB1W3-ARCH-01** *(new, Stage 4H-B1 Wave 3 Phase 10)* | §5.6's extended lock order is violated by `internal/casino`'s `postBet`, which locks the `player_cash` projection row before taking the Grant advisory lock. Latent only (no Bonus path that posts to `player_cash`/`house_gaming` is reachable today). Fix: resolve the qualifying Grant and take `AdvisoryLockGrant` **before** `lockCashBalance`, threading the resolved Grant (and the fail-closed multi-Grant branch) down from there | casino + bonus-engine | **Yes, gated** — must land before any conversion trigger, before `postBet`'s bonus-funded leg, and before anything else that makes `ConvertGrant`/`ACTION_ROUTE_TO_CASH`/`postWinLockedBonus` concurrently reachable with a bet (ADR 0040 D2) |
+| **DEP-EOI-8** *(new, Stage 4H-B1 Wave 3 Phase 10)* | `bonus_campaign_activation` is declared in §3.1 with no mint point, no `consumptionShapes` entry and no `boundedRootOperationTypes` entry, while Wave 3's deposit sweep and cashback scheduler made its effecting writes live. Either mint it with declared bounds, or record a `security`-co-signed determination of what bounds campaign-driven automatic issuance instead | bonus-engine + security | **Yes, gated** — before campaign-driven automatic issuance can actually succeed, i.e. as part of whatever closes the sweeps' jurisdiction-resolution gap (ADR 0040 D4) |
 | **OI-EOI-1** | An ADR ratifying this concept is recommended. **Number deliberately not claimed** — parallel-dispatch ADR-number collision has already occurred once in this project (Stage 4H-B0-R6's `0049`) and twice now in this gate's numbering discussions | Orchestrator | No |
 | **OI-EOI-2** | `economic_owner` (§2.2) intersects `ledger-finance`'s **BF-1** finding (concurrent operator-funded and provider-funded Grants share one fungible `player_bonus` balance with no lot-attribution mechanism), which is deferred to `architect` + a human decision. This document introduces the *field*, not a resolution, and Wave 2's operator-funded-only restriction is unaffected | architect + human | No |
 | **OI-EOI-3** | Retention of `economic_operations` rows: an authorization record is audit-adjacent and inherits doc 16's unresolved retention-period question (a legal decision, not an engineering one) | identity-compliance → human | No |
