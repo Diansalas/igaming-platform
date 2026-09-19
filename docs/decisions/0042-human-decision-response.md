@@ -1,27 +1,28 @@
 # 0042 — Human Decision Response Pack
 
-**This is a questionnaire, not a decision document.** It contains no
-selected answer, no default, and no recommendation anywhere in it. Every
-item below reproduces the exact wording already on record in this
-platform's architecture/governance documents — nothing here paraphrases a
-question into a different question, and nothing here invents an option
-that is not already named in the source material. Where a source document
-did not name discrete options (this is true for several items), this
-document says so explicitly rather than inventing labels.
+**Status: HUMAN DECISIONS RECORDED.** This document was originally
+published as a blank questionnaire; every `HUMAN ANSWER:` field below has
+now been completed with the decision the human owner provided. Every item
+still reproduces the exact original question wording already on record in
+this platform's architecture/governance documents — nothing here
+paraphrases a question into a different question, and nothing here
+invents an option that is not already named in the source material.
+Where a source document did not name discrete options (this is true for
+several items), the document still says so explicitly rather than
+inventing labels; the human's answer for those items is recorded as free
+text rather than as a selection among invented options.
 
-**How to complete this document.** For each item, fill in the blank
-`HUMAN ANSWER:` field with your decision, in your own words or by naming
-one of the documented options. Use `NOTES / CONDITIONS:` for any
-qualification, scope limitation, or condition attached to your answer
-(e.g., "yes, but only for jurisdiction X" or "yes, pending outside legal
-review"). **A blank `HUMAN ANSWER:` field is not a decision and must never
-be read as approval, as a default, or as selecting any option** — it
-means the item remains open exactly as it is today. `LEGAL / COMPLIANCE
-REVIEW REQUIRED:` is pre-marked based on the documented context of each
-decision (whether the architecture record itself flags a legal/compliance
-dimension); it does not require your input, but you may add to
-`NOTES / CONDITIONS` if you want to record that such a review has already
-happened, is scheduled, or is being waived.
+**How this document is structured.** Each item preserves its original
+question, plain-English explanation, documented options, and documented
+technical consequences exactly as first published. Immediately below
+that, `HUMAN ANSWER:` records the decision as given, `NOTES / CONDITIONS:`
+records any qualification or scope limitation attached to that answer,
+and `LEGAL / COMPLIANCE REVIEW REQUIRED:` records whether the
+architecture record itself flags a legal/compliance dimension for that
+item (this flag was pre-marked before the human's answer was received and
+is unchanged by it, except where an answer's own conditions state that a
+review is still pending). **Recording an answer here is not, by itself,
+an implementation instruction** — see the closing note.
 
 **Sources read in full to build this document:**
 `docs/decisions/0041-jurisdiction-human-decision-brief.md`,
@@ -93,12 +94,15 @@ player until their own jurisdiction is actually known?
 
 **HUMAN ANSWER:**
 ```
-[blank]
+No fallback, ever.
 ```
 
 **NOTES / CONDITIONS:**
 ```
-[blank]
+An unresolved player jurisdiction must remain unresolved and
+jurisdiction-dependent operations must fail closed. The tenant/brand
+licensing jurisdiction must never be substituted for the player's
+jurisdiction merely because the player's jurisdiction is unknown.
 ```
 
 **LEGAL / COMPLIANCE REVIEW REQUIRED:** Yes — this determines whether a
@@ -147,12 +151,28 @@ earlier rule remains reconstructable later.
 
 **HUMAN ANSWER:**
 ```
-[blank]
+Jurisdiction signal precedence must be operation-specific.
+
+For identity/KYC and residence-based regulatory determinations, verified
+residence is authoritative once established. Declared residence is a
+lower-trust signal and must not override verified residence.
+
+For real-time market-access/geolocation controls, the current
+physical-location signal may impose an additional restriction and must
+not be treated as a substitute for verified residence.
+
+Where multiple applicable signals impose different restrictions, the
+more restrictive applicable result should prevail for the operation.
+
+Historical/regulatory reporting must preserve the jurisdiction
+determination and evidence applicable at the time of the event.
 ```
 
 **NOTES / CONDITIONS:**
 ```
-[blank]
+The precedence configuration must be versioned, auditable,
+tenant/jurisdiction aware, and subject to legal/compliance validation for
+each operating jurisdiction.
 ```
 
 **LEGAL / COMPLIANCE REVIEW REQUIRED:** Yes — this is a judgment about
@@ -209,7 +229,17 @@ document flags but does not resolve.
 
 **HUMAN ANSWER:**
 ```
-[blank]
+Yes, the platform may use a real-time physical-location signal for
+jurisdiction-sensitive market-access and access-control decisions. It
+must not be treated as a permanent residence attribute or as proof of
+residence.
+```
+
+**NOTES / CONDITIONS:**
+```
+The signal is point-in-time and must not be persisted as a player
+residence. The location provider and availability/failure behavior
+require separate security, privacy and compliance review.
 ```
 
 ### 3b. Declared residence
@@ -228,7 +258,15 @@ of decision.
 
 **HUMAN ANSWER:**
 ```
-[blank]
+Yes. The platform may collect and store the player's self-declared
+residence on the brand-specific player account.
+```
+
+**NOTES / CONDITIONS:**
+```
+Declared residence is unverified and must not by itself be treated as
+sufficient for enforcement-grade jurisdiction decisions unless an
+explicitly approved operation-specific policy permits it.
 ```
 
 ### 3c. Verified residence
@@ -247,7 +285,15 @@ every case.
 
 **HUMAN ANSWER:**
 ```
-[blank]
+Yes. The platform may record a KYC-reviewer-verified residence.
+```
+
+**NOTES / CONDITIONS:**
+```
+Verified residence must be explicitly established through the approved
+KYC process and must not be automatically inferred from a document's
+issuing country. Its authority for individual operation types remains
+governed by HDR-J-2.
 ```
 
 ### 3d. Nationality
@@ -262,7 +308,14 @@ be collected merely because residence collection was authorized.
 
 **HUMAN ANSWER:**
 ```
-[blank]
+No, nationality should not be collected as a general platform attribute.
+```
+
+**NOTES / CONDITIONS:**
+```
+Nationality may only be introduced later where a specific, documented
+regulatory or operational requirement demonstrates a legitimate need for
+it, with separate legal/compliance approval defining the permitted use.
 ```
 
 ### 3e. Lawful basis / permitted use
@@ -279,7 +332,17 @@ classification, and the lawful basis relied upon.
 
 **HUMAN ANSWER:**
 ```
-[blank]
+Collection and use of jurisdiction-relevant player data must be
+supported by a documented lawful basis applicable to the relevant
+jurisdiction and purpose. The final lawful basis, privacy notice,
+purpose limitation and permitted uses must be validated by qualified
+legal/privacy counsel before production use.
+```
+
+**NOTES / CONDITIONS:**
+```
+No jurisdiction-relevant player attribute may be collected or used
+merely because it is technically available.
 ```
 
 ### 3f. Persistence
@@ -299,7 +362,17 @@ player-record access.
 
 **HUMAN ANSWER:**
 ```
-[blank]
+Retention must be defined by data type, purpose and applicable
+jurisdiction rather than by one universal retention period. The platform
+must retain each jurisdiction-relevant fact only for as long as required
+for its documented purpose and applicable legal/regulatory obligations,
+with deletion/retention controls enforced accordingly.
+```
+
+**NOTES / CONDITIONS:**
+```
+Final retention periods require legal/privacy/compliance validation for
+each relevant jurisdiction and data category.
 ```
 
 ### 3g. Audit requirements
@@ -319,7 +392,18 @@ audit record), not whether auditing happens at all.
 
 **HUMAN ANSWER:**
 ```
-[blank]
+The existing audit model is sufficient as the baseline: record when a
+jurisdiction-relevant fact was collected, changed, consulted, or used
+for a jurisdiction decision, including the source/type and resulting
+decision, but never place the underlying raw residence, nationality,
+location or coordinate value into the general audit trail.
+```
+
+**NOTES / CONDITIONS:**
+```
+Staff corrections and administrative changes must have actor, subject,
+reason and timestamp auditability. Legal/compliance may impose
+additional requirements by jurisdiction.
 ```
 
 ### 3h. KYC source requirements
@@ -340,12 +424,24 @@ document types should be allowed to serve as corroborating evidence.
 
 **HUMAN ANSWER:**
 ```
-[blank]
+KYC document issuing country may be used only as corroborating evidence
+for an independently established residence or nationality fact. It must
+never automatically populate or override residence, nationality or
+jurisdiction.
+```
+
+**NOTES / CONDITIONS:**
+```
+The permitted document types and evidentiary weight must be defined
+through the KYC/compliance policy and validated for the applicable
+jurisdictions.
 ```
 
 **NOTES / CONDITIONS (applies to all of HDR-J-3):**
 ```
-[blank]
+See each sub-item's own NOTES / CONDITIONS above for item-specific
+qualifications. No jurisdiction-relevant player attribute is authorized
+for collection or use beyond what 3a-3h explicitly state above.
 ```
 
 **LEGAL / COMPLIANCE REVIEW REQUIRED:** Yes, for every sub-item except
@@ -407,12 +503,19 @@ Answering one does not answer the other.
 
 **HUMAN ANSWER:**
 ```
-[blank]
+For regulator-facing historical record-keeping, the authoritative
+jurisdiction should be the jurisdiction determination applicable at the
+time the relevant obligation or reportable event arose. Where the
+jurisdiction subsequently changes, the later jurisdiction must also
+remain recorded as contextual evidence. The system must not rewrite
+historical jurisdiction determinations.
 ```
 
 **NOTES / CONDITIONS:**
 ```
-[blank]
+Where applicable law requires reporting to another jurisdiction as well,
+both records must remain available. Legal/compliance review is required
+for jurisdiction-specific SAR and data-residency obligations.
 ```
 
 **LEGAL / COMPLIANCE REVIEW REQUIRED:** Yes — this determines which
@@ -459,12 +562,22 @@ one.
 
 **HUMAN ANSWER:**
 ```
-[blank]
+For player-level jurisdiction determination, the platform's own
+jurisdiction resolution is authoritative.
+
+The tenant's licensed jurisdiction is authoritative only for the
+tenant's own licensing context, subject to platform validation and the
+platform's own licensing/security ceilings. It must not automatically
+become the player's jurisdiction.
 ```
 
 **NOTES / CONDITIONS:**
 ```
-[blank]
+A tenant assertion must remain explicitly identified as tenant-provided
+/licence-context data and must never be merged with or represented as
+an independently platform-resolved player jurisdiction. Final BYOL
+policy requires legal/compliance validation before the first BYOL tenant
+is onboarded.
 ```
 
 **LEGAL / COMPLIANCE REVIEW REQUIRED:** Not urgent today (no BYOL tenant
@@ -509,17 +622,23 @@ unrelated denial reason.
 **HUMAN ANSWER (list the permitted markets/jurisdictions, or state the
 policy for determining them):**
 ```
-[blank]
+Not yet determined. The first B2C permitted-market list must be
+established through a jurisdiction-by-jurisdiction legal/compliance
+review before launch. No country is permitted by default merely because
+it is in Europe or LATAM.
 ```
 
 **NOTES / CONDITIONS:**
 ```
-[blank]
+Once approved, the permitted-market list must be explicit and
+enumerable. Any jurisdiction not on the approved list must fail closed.
 ```
 
 **LEGAL / COMPLIANCE REVIEW REQUIRED:** Yes — this is the platform's core
 licensing-scope question and is already flagged by this platform's own
-rules as requiring explicit human authorization.
+rules as requiring explicit human authorization. **Status: not yet
+determined — this remains a launch-governance dependency until the
+jurisdiction-by-jurisdiction review is complete.**
 
 ---
 
@@ -570,12 +689,41 @@ money, given the bonus it was tied to no longer technically exists?
 
 **HUMAN ANSWER:**
 ```
-[blank]
+All three documented late-settlement treatments must be supported as
+configurable policy options:
+
+(a) Re-forfeit immediately.
+
+(b) Route to player_cash as mechanical settlement of an already-earned
+    entitlement.
+
+(c) Hold for manual review.
+
+The selected treatment must be configurable at brand level before the
+brand is activated, so different brands may use different approved
+policies.
+
+The initial/default policy should be (b) route to player_cash unless
+explicitly configured otherwise.
 ```
 
 **NOTES / CONDITIONS:**
 ```
-[blank]
+The policy must be explicit, auditable and versioned. Changes to the
+selected policy must be subject to the applicable staff
+authorization/four-eyes controls and must not retroactively change the
+treatment of already-created settlement events.
+
+The three options must remain distinct and must not be silently
+substituted for one another.
+
+IMPORTANT: this is a decision/configuration requirement only at this
+stage. It is not implemented now — per (b)'s own documented technical
+consequence above, routing to cash requires new cross-system plumbing
+that does not exist today, and (c)'s manual-review workflow does not yet
+exist either. Building brand-level configurability across all three
+options, including (c)'s workflow, is deferred to a future
+implementation dispatch.
 ```
 
 **LEGAL / COMPLIANCE REVIEW REQUIRED:** Recommended — this has a
@@ -628,12 +776,14 @@ a bet that has multiple legs mid-settlement).
 
 **HUMAN ANSWER:**
 ```
-[blank]
+VOID_ON_SELF_EXCLUSION.
 ```
 
 **NOTES / CONDITIONS:**
 ```
-[blank]
+This is the platform-wide fallback only. Jurisdiction-specific policy
+may override it where required, and tenant/brand configuration may
+tighten but not loosen the applicable jurisdictional floor.
 ```
 
 **LEGAL / COMPLIANCE REVIEW REQUIRED:** Yes — this is a
@@ -691,12 +841,15 @@ alone does not determine FD-1's answer, and an incomplete cashout policy
 
 **HUMAN ANSWER:**
 ```
-[blank]
+Not cashout-eligible.
 ```
 
 **NOTES / CONDITIONS:**
 ```
-[blank]
+Bonus-funded sportsbook bets, including bets funded entirely or
+partially with bonus value, are excluded from cashout unless a future
+explicitly approved policy changes this. This avoids converting
+bonus-origin value into cash through the cashout mechanism.
 ```
 
 **LEGAL / COMPLIANCE REVIEW REQUIRED:** Recommended — potential
@@ -759,12 +912,18 @@ separately.**
 
 **HUMAN ANSWER:**
 ```
-[blank]
+Nullifying.
+
+This policy is currently inactive because bonus-funded sportsbook bets
+are not cashout-eligible.
 ```
 
 **NOTES / CONDITIONS:**
 ```
-[blank]
+If bonus-funded sportsbook cashout is enabled in the future, cashout
+must nullify the wagering progress attributable to the cashed-out
+bonus-funded stake unless a new, explicitly approved decision replaces
+this policy before implementation.
 ```
 
 **LEGAL / COMPLIANCE REVIEW REQUIRED:** Recommended — same
@@ -817,12 +976,21 @@ already specified and unaffected by this question.
 
 **HUMAN ANSWER:**
 ```
-[blank]
+Do not permit automatic cancellation or clawback of a converted Grant in
+the initial platform. A converted Grant must not automatically create a
+customer receivable.
 ```
 
 **NOTES / CONDITIONS:**
 ```
-[blank]
+If a converted Grant must ever be reversed because of fraud, material
+error, regulatory requirement, or another exceptional circumstance, this
+must be handled through a separately approved finance/legal process with
+explicit rules for insufficient player balances, customer recourse,
+approvals, accounting treatment and applicable jurisdiction.
+
+No automatic negative player balance or receivable should be created
+until that policy is separately approved.
 ```
 
 **LEGAL / COMPLIANCE REVIEW REQUIRED:** Yes — the source record
@@ -859,10 +1027,18 @@ omitted, and no additional, undocumented decision was introduced.
 
 ## Closing note
 
-Every `HUMAN ANSWER:` field above is blank. This document selects no
-answer, recommends no answer, and defaults no answer, anywhere. No code,
-migration, API, schema, configuration, or policy has been created or
-modified as part of producing this document. This document does not
-authorize any implementation; a follow-on implementation dispatch, scoped
-to whichever answers you provide, would still be required after you
-complete and return this questionnaire.
+Every `HUMAN ANSWER:` field above now records the decision the human
+owner provided, verbatim. This document itself did not select, recommend,
+or default any answer — every answer above was supplied by the human, not
+inferred, completed, or resolved by this document. No code, migration,
+API, schema, configuration, or policy has been created or modified as
+part of recording these answers; this remains a governance/decision-record
+update only. Recording an answer here does not, by itself, authorize
+implementation — a follow-on implementation dispatch, scoped precisely to
+these recorded answers and to nothing beyond them, would still be
+required before any of this is built, and several answers above (HDR-J-2's
+precedence content, HDR-J-3's several sub-items, HDR-J-6's permitted-market
+list, G-2's brand-level configurability, and the remaining
+legal/compliance validations noted throughout) explicitly still require
+further legal/compliance review or further specification before that
+implementation dispatch could be scoped.
