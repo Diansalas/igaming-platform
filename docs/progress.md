@@ -5611,3 +5611,71 @@ the authorizing directive, the Orchestrator **stops** here — Wave 4,
 CRM, Affiliate, Gamification, sportsbook, Retail/POS, and Back
 Office/Partner Console/B2C frontend implementation remain unauthorized
 pending a new human directive.
+
+## Stage 4I: Platform-wide jurisdiction resolution foundation
+
+Human-authorized closure of the platform-wide jurisdiction-resolver gap
+Wave 3 carried forward. Mandatory first action: `architect` produced
+`docs/governance/stage-4i-reconnaissance.md`, a from-code reconstruction
+finding the gap was not "a missing resolver" but a fully-built
+configuration/consumption layer with a completely absent production
+layer, split across four mutually incompatible absent-value contracts.
+Thirteen specialist phases, commits `2bab29f`..`f1f8d13`. Full report:
+`docs/governance/stage-4i-report.md`.
+
+Built and tested: a canonical, provider-neutral `internal/jurisdiction`
+package (a non-forgeable `Resolution` type, a 3-valued `Outcome` plus a
+separate diagnostic `Reason` enum, a `ReadOnlyQuerier` interface making
+the mandatory read-only-on-the-evaluation-path constraint a compile-time
+property, not a convention); a registry admin surface (`jurisdictions`/
+`licences`, previously writable only by direct DB access); an append-only
+`jurisdiction_resolutions` table plus a `jurisdiction_resolution_active`
+precondition table; migrations `0071`-`0073`. Four real consumers wired
+correctly for the first time: AssetAuthorization (unchanged, confirmed
+correct); Risk (reviewed and confirmed its existing conditional
+fail-closed contract was already correct, not a defect); casino's
+per-game jurisdiction blocklist (a genuine fail-open defect — the check
+silently never executed since its one caller never set the field —
+fully remediated, armed only per-game, with a byte-identical
+player-facing response collapsing "unresolved" and "blocked" to prevent
+an oracle); five Bonus admin surfaces (client-suppliable
+`jurisdiction_code` removed entirely, replaced with server-side
+resolution, closing a latent fail-open in the shared jurisdiction-lookup
+helper along the way).
+
+Twelve real defects found and fixed across the review chain, each with a
+regression test proven to fail pre-fix and pass post-fix: an unclamped
+four-eyes threshold letting staff lower a dual-control requirement to 1
+on a money-moving disposition; a missing audit gap on a casino admin
+write that was about to become a live denial control; two RLS policy
+gaps on new tables (a `FOR ALL` policy silently granting DELETE, and a
+missing TRUNCATE-deny trigger that let any tenant-scoped connection erase
+every tenant's precondition rows unaudited); a missing required reason
+code; a test-refactor defect that had silently orphaned a production
+four-eyes wrapper from any test coverage; two further test-coverage gaps
+(a hand-copied test helper duplicating enough production logic to mask a
+real regression; missing forged-payload and unavailable-resolver
+adversarial tests); and a missing tenant-scope assertion in the resolver
+itself, found in the final architectural certification pass, where the
+underlying tables carry no RLS at all and isolation had been resting on
+caller discipline alone.
+
+**Verdict: PARTIALLY IMPLEMENTED** (per CLAUDE.md's no-fake-completion
+rule, deliberately — not a shortfall). The foundation is real, tested,
+and independently certified (CERTIFIED WITH NAMED EXCEPTIONS, none
+blocking), but does not yet resolve any player's actual jurisdiction: the
+one producible basis has no application write path, so every
+player-scoped resolution correctly returns "unresolved" today, leaving
+Bonus deposit/cashback issuance blocked and no jurisdiction-based
+regulatory claim possible. Six new Human Decision Register items were
+opened (HDR-J-1 through HDR-J-6, `docs/decisions/0041-...md`), none
+decided; HDR-J-3 (whether to collect a player residence/location/
+nationality attribute at all) is the single highest-leverage item, since
+nothing else can unblock the resolver's actual capability without it. No
+pre-existing Human Decision Register item was selected, narrowed, or
+defaulted — confirmed independently by a dedicated sportsbook boundary
+review. CRM, Affiliate, Gamification, real sportsbook, Retail, Back
+Office/Partner Console/B2C frontend UI, and every real external vendor
+were correctly not implemented. Per the authorizing directive, the
+Orchestrator **stops** here — the next stage, and every out-of-scope
+domain named above, remain unauthorized pending a new human directive.

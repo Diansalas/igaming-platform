@@ -1480,7 +1480,61 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 4H-B1 Wave 3 — Bonus Engine Completion, Integration Hardening & Final Financial Gate — CONCLUDED, awaiting human authorization for the next stage
+## Current stage: Stage 4I — Platform-Wide Jurisdiction Resolution Foundation — CONCLUDED, awaiting human authorization for the next stage
+
+**Status: PARTIALLY IMPLEMENTED** (per CLAUDE.md's no-fake-completion
+discipline — deliberately, not as a shortfall). Full detail:
+`docs/governance/stage-4i-report.md`. `docs/progress.md`'s "Stage 4I" entry
+has the running narrative.
+
+The human authorized closing the platform-wide jurisdiction-resolver gap
+Wave 3 identified as a carried dependency. Thirteen specialist phases built
+a canonical, provider-neutral, fail-closed jurisdiction resolution
+foundation (`internal/jurisdiction`, migrations `0071`-`0073`, a registry
+admin surface, an append-only resolution-record table) consumed correctly
+by AssetAuthorization (unchanged), Risk (reviewed and confirmed correct,
+unchanged), casino's per-game blocklist (fail-open defect fully
+remediated), and five Bonus admin surfaces (client-suppliable jurisdiction
+removed, server-resolved instead). Twelve real defects were found and
+fixed across the review chain, every one proven with a regression test.
+Final independent security/compliance verdict: CERTIFIED WITH NAMED
+EXCEPTIONS (none blocking).
+
+**The foundation does not yet resolve any player's actual jurisdiction** —
+the one producible basis (`tenant_licence`) has no application write path,
+so every player-scoped resolution returns `unresolved(no_signal)` by
+design. This means Bonus deposit/cashback sweep issuance remains blocked,
+and no jurisdiction-based regulatory enforcement capability can be claimed,
+until the human decisions below are made.
+
+### Decisions/input needed from the human before any further work
+
+1. **Six new candidate Human Decision Register items were opened this
+   stage** (`docs/decisions/0041-human-decision-register-stage-4i-jurisdiction.md`,
+   HDR-J-1 through HDR-J-6). **HDR-J-3 is the single highest-leverage
+   item** — whether the platform may collect a player residence/location/
+   nationality attribute at all, and under what lawful basis/retention
+   rule. Until it (and HDR-J-1) is answered, the resolver structurally
+   cannot resolve any player's jurisdiction, and Bonus issuance stays
+   blocked. HDR-J-5 (BYOL) is registered but explicitly not urgent — no
+   BYOL tenant exists yet.
+2. **Authorize (or not) the next stage** — options include: answering one
+   or more of the six new HDR items to unblock the resolver's actual
+   capability; closing the named, non-blocking carried-debt items (see
+   report §22/§24); resuming Bonus Engine work now that its remaining
+   `ChangeOperation` posting shapes are specified; or Stage 6A (Back
+   Office MVP).
+3. Wave 4, CRM, Affiliate, Gamification, sportsbook, Retail/POS, and Back
+   Office/Partner Console/B2C frontend implementation remain **NOT
+   authorized**.
+4. All four pre-existing Human Decision Register items (G-2,
+   `OpenBetSelfExclusionPolicy` default, mixed/bonus-funded cashout policy,
+   FD-1) plus Wave 3's Grant-cancellation-after-conversion item remain
+   unmade — none of this stage's work required, selected, or narrowed one.
+
+---
+
+## Prior stage: Stage 4H-B1 Wave 3 — Bonus Engine Completion, Integration Hardening & Final Financial Gate — CONCLUDED
 
 **Status: READY**, subject to explicitly-open, non-blocking items and one
 newly-raised Human Decision Register-adjacent question. Full detail:

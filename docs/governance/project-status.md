@@ -1272,6 +1272,43 @@ Gamification, sportsbook, Retail/POS, and Back Office/Partner
 Console/B2C frontend implementation remain unauthorized pending a new
 human directive.
 
+**Update — Stage 4I (Platform-wide jurisdiction resolution foundation)
+concluded: PARTIALLY IMPLEMENTED**, per CLAUDE.md's no-fake-completion
+rule, deliberately. Mandatory first action: `architect`'s from-code
+reconnaissance found the gap was a fully-built configuration/consumption
+layer with a completely absent production layer, split across four
+mutually incompatible absent-value contracts (AssetAuthorization deny,
+Risk conditional-deny, casino's blocklist fail-open, payments'
+permissive-empty). Thirteen specialist phases built a canonical,
+provider-neutral `internal/jurisdiction` resolver (non-forgeable
+`Resolution` type, compile-time-enforced read-only-on-evaluation-path
+constraint), a registry admin surface, an append-only resolution-record
+table, and wired four real consumers correctly for the first time —
+AssetAuthorization and Risk confirmed already correct and unchanged,
+casino's genuine fail-open blocklist defect fully remediated, five Bonus
+admin surfaces converted from client-suppliable to server-resolved
+jurisdiction (closing a latent Risk-rule fail-open along the way).
+Migrations `0071`-`0073`. Twelve real defects found and fixed across the
+review chain (a four-eyes threshold bypass, an audit gap on a
+soon-to-be-live casino control, two new-table RLS policy gaps including
+an unaudited platform-wide TRUNCATE vector, a missing reason code, a
+test-orphaning defect, two coverage gaps, and a missing tenant-scope
+assertion in the resolver itself), each with a proven regression test.
+Final independent security/compliance verdict: CERTIFIED WITH NAMED
+EXCEPTIONS (none blocking). The foundation does not yet resolve any
+player's actual jurisdiction — the one producible basis has no
+application write path, so Bonus issuance stays blocked and no
+jurisdiction-based regulatory claim can be made — six new Human Decision
+Register items were opened (HDR-J-1 through HDR-J-6,
+`docs/decisions/0041-...md`), none decided; HDR-J-3 (player residence/
+location/nationality collection and its lawful basis) is the single
+highest-leverage item. No pre-existing Human Decision Register item was
+touched, confirmed by a dedicated sportsbook boundary review. CRM,
+Affiliate, Gamification, real sportsbook, Retail, Back Office/Partner
+Console/B2C frontend UI, and every real external vendor were correctly
+not implemented. Full report: `docs/governance/stage-4i-report.md`. The
+next stage remains unauthorized pending a new human directive.
+
 ## Production blockers (summary)
 
 Every item in "Blocked stages" and "External dependencies" above is a
