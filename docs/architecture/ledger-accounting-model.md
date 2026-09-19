@@ -8220,6 +8220,30 @@ place.
   applies in reverse to any `int64` → `*big.Int` widening (always safe,
   but must be explicit rather than an implicit conversion buried in an
   expression).
+- **HR-26 — HR-21's third participant is ANY `wallet_balance_projection`
+  row lock, not the `player_bonus` row specifically.** *(Added Stage
+  4H-B1 Wave 3 Phase 11, `ledger-finance`, mirroring ADR 0040 D2 into
+  this document's own catalogue — ADR 0040 D2 explicitly routes that
+  mirroring decision here rather than making it, and this is
+  `ledger-finance` accepting it.)* The pinned order, binding on every
+  domain, is `(tenant_id, correlation_id)` advisory → `(tenant_id,
+  grant_id)` advisory → **any** `wallet_balance_projection` row lock,
+  whether taken explicitly with `SELECT … FOR UPDATE` or implicitly by
+  migration 0023's `AFTER INSERT` trigger on `ledger_entries`. HR-21's
+  original wording named `player_bonus` because that was the only
+  projection row any then-existing path locked; Wave 3 added a path that
+  locks `player_cash` and `house_gaming` (casino's `postBet`, via
+  `lockCashBalance` and then the posting trigger) before reaching a
+  Grant advisory lock, which is the reverse of the order every
+  Bonus-domain path uses. Both lock families **block** (`pg_advisory_
+  xact_lock`, `FOR UPDATE`), so this is a genuine wait-for cycle
+  wherever the two orders meet on a shared projection row — and it is
+  **not** covered by `qa`'s Phase 9 closure of `risk`'s F1, which
+  concerned two schedulers using the non-blocking
+  `pg_try_advisory_xact_lock` family and therefore cannot transfer.
+  `DR-4HB1W3-ARCH-01` (open, gated, ADR 0040 D2 consequence 1) is the
+  outstanding violation; §7.18.9 records `ledger-finance`'s independent
+  re-verification that the gate is safe as drawn.
 
 ### 7.15 Test set — `ledger-finance`-owned, non-negotiable
 
@@ -8456,14 +8480,36 @@ wave build against):
 
 ### 7.18 Event-consumption contracts — deposit-trigger, wagering-contribution-trigger, cashback-scheduling (Stage 4H-B1 Wave 3 Phase 1, `ledger-finance`, DESIGN/CONTRACT ONLY)
 
-**Status: `NOT IMPLEMENTED`.** This subsection authorizes no code, no
-migration, no route. It is Phase 1 of the Wave 3 dispatch that follows
-`docs/governance/wave-3-reconnaissance.md`'s finding (its §2 item 20,
-restated exactly): `internal/bonus` has zero live callers for deposit/
-reload issuance, cashback issuance and wagering-contribution tracking
-outside its own package and tests. This is the contract Phases 2
-(`backend`, schema if any) and 3 (`bonus-engine`, application logic) build
-against — the same role §7.7.2 played for `player_bonus_held` in Wave 1.5.
+**Status: `IMPLEMENTED` (as a contract; see the per-item table in
+§7.18.8 for what was actually built against it).** Updated Stage 4H-B1
+Wave 3 Phase 11 by `ledger-finance`, the owner of this document, at
+`architect`'s Phase 10 routing (ADR 0040's own note that this header and
+§7.18.7 had both gone stale and that correcting them was this
+document's owner's job, not `architect`'s).
+
+**What this header said until Phase 11, and why it is no longer true.**
+It read *"Status: `NOT IMPLEMENTED`. This subsection authorizes no code,
+no migration, no route."* That was correct on the day it was written
+(Phase 1, commit `b617f75`) and is now false: Phase 2 (`backend`,
+`9d857dc`) built migrations `0068`-`0070` against it, Phase 3
+(`bonus-engine`, `94257ec`..`f92eb39`) built the deposit sweep, the
+cashback scheduler, the expiry sweep, the cash-funded
+wagering-contribution trigger and the HTTP surfaces, and Phases 4-10
+(`risk`, `identity-compliance`, `security`, `casino`, `qa`, `architect`)
+reviewed and amended that work. A design contract that has been built
+against is no longer a proposal, and leaving a `NOT IMPLEMENTED` banner
+on top of a section whose rules are now load-bearing in shipped code is
+the kind of document-contradicts-code drift `architect`'s Phase 10 read
+exists to catch.
+
+This subsection originated as Phase 1 of the Wave 3 dispatch that
+follows `docs/governance/wave-3-reconnaissance.md`'s finding (its §2 item
+20, restated exactly): `internal/bonus` had zero live callers for
+deposit/reload issuance, cashback issuance and wagering-contribution
+tracking outside its own package and tests. It is the contract Phases 2
+(`backend`, schema) and 3 (`bonus-engine`, application logic) built
+against — the same role §7.7.2 played for `player_bonus_held` in Wave
+1.5 — and it remains binding on every future change to those paths.
 
 **Binding scope constraint carried over from the Orchestrator's own
 dispatch, restated so this section is self-contained**: Wave 3 does
@@ -8934,9 +8980,339 @@ timer" changes what gets posted.
 
 #### 7.18.7 Review status
 
-Not yet reviewed by `bonus-engine`, `architect`, `security` or `qa`. This
-subsection is `ledger-finance`'s own Phase 1 output for Stage 4H-B1 Wave
-3 and carries no implementation.
+**Reviewed and built against.** Updated Stage 4H-B1 Wave 3 Phase 11
+(`ledger-finance`). The previous text — *"Not yet reviewed by
+`bonus-engine`, `architect`, `security` or `qa`. This subsection is
+`ledger-finance`'s own Phase 1 output... and carries no
+implementation"* — was true at Phase 1 and is false now.
+
+| Reviewer | Phase | Outcome |
+|---|---|---|
+| `backend` | 2 (`9d857dc`) | Built migrations `0068` (deposit-sweep watermark, §7.18.2 item 1 / doc 29 `BC-24`), `0069` (cashback schedule watermark, §7.18.4 item 5), `0070` (`bonus_grants.expires_at`). Confirmed §7.18.3.5's `ON CONFLICT` item needs **no** schema change. |
+| `bonus-engine` | 3 (`94257ec`..`f92eb39`) | Built every item in §7.18.6's table except the optional `internal/httpserver` post-commit call (§7.18.2 item 2), which remains deliberately unbuilt — the durable sweep is sufficient for correctness, exactly as §7.18.2 item 1 states. |
+| `risk` | 4 (`6166e1d`) | Two fail-open fixes in the cash-funded path (`DR-4HB1W3-RISK-01` asset-mismatch, `DR-4HB1W3-RISK-02` unmeasurable target). Both **tighten** §7.18.3's rules; neither contradicts them. |
+| `identity-compliance` | 5 (`1428da7`) | Added REQ-SEP-BONUS-3's multi-account first-deposit **signal** inside the deposit sweep. Signal only — no effect on any posting. |
+| `security` | 6 (`ab8ee70`..`65d83d1`) | Reviewed the governance/EOI surface; found and fixed the `amount_at_request` numeric-scan defect and server-resolved the approval snapshot. No finding against this section's own contracts. |
+| `casino` | 7 (`fb829e1`) | Independently confirmed §7.18.3.3's call-site placement (same transaction as the bet posting, HR-10) and added a concurrency regression for the trigger's idempotency. |
+| `sportsbook` | 8 | No change required — this section's mechanic is casino-only by construction. |
+| `qa` | 9 (`da33c5e`..`8c6ab7a`) | Full validation floor; found and fixed the Cashback-Offer/deposit-match collision in `listDepositMatchableOfferVersions`. **Disclosed that no test reached a successful posting via either sweep** (jurisdiction-resolver gap) — closed in Phase 11, below. |
+| `architect` | 10 (`5af05d2`..`c48a6ab`) | ADR 0040: D1 (bounded EOI roots), D2 (HR-21 extended lock order), D3 (contribution-weight clamp), D4 (`bonus_campaign_activation` EOI, gated), D6(b) (BI-16, the declared `deposit_intents` read). Routed this header's correction here. |
+| `ledger-finance` | 11 | Final financial certification (§7.18.8). Closed `qa`'s B1 gap with real successful postings; fixed `DR-4HB1W3-LF-01`; recorded `LF-W3-01`/`LF-W3-03`. |
+
+#### 7.18.8 Financial certification outcome (Stage 4H-B1 Wave 3 Phase 11, `ledger-finance`)
+
+What this contract's own claims turned out to be worth, checked against
+the shipped code rather than against the phases' self-reports:
+
+| §7.18 claim | Verdict |
+|---|---|
+| §7.18.3.4 "no new ledger posting" | **HOLDS.** No production `ledger.Post` call site and no raw `ledger_entries`/`ledger_transactions` write was added anywhere in Wave 3 — verified by diffing the whole Wave; every such occurrence is in a test fixture. The only postings any new path produces are the pre-existing `bonus_grant` (activation) and `bonus_forfeiture` (terminal write-down) shapes. |
+| §7.18.5 "Rule B2 and `RoundToMinorUnits` need no changes" | **HOLDS.** Neither file was touched. `computeCappedPercentageReward` still caps in `big.Rat` **before** the single `RoundToMinorUnits` boundary (DS-2, round once) and still rounds ties away from zero (DS-1) — now proven end-to-end at the ledger, not only at the unit level. |
+| §7.18.5 "no ledger/wallet-side schema addition" | **HOLDS.** Migrations `0068`-`0070` are all Bonus-owned. |
+| §7.18.2 idempotency = the deposit's own `ledger_transactions.id` as `trigger_reference` | **HOLDS, with `LF-W3-01` recorded below** — the DB constraint it reuses is scoped per `offer_version_id`, which this section did not state. |
+| §7.18.3.2's generalization (`staked_bonus_amount` from the funding account's own debit) | **HOLDS by call-site construction only**, as ADR 0040 RC-4 records. `postBet` posts `event.Amount` and passes that same value in the same transaction; the structural hardening RC-4 recommends is still the right durable fix and is **endorsed here by `ledger-finance`**, not merely noted. |
+| §7.18.4 item 3 "`clock_timestamp()`, never `now()`" | **DID NOT HOLD — fixed in Phase 11** (`DR-4HB1W3-LF-01`). The schedulers compared against Go's `time.Now()`, read once per sweep in the API process, while three doc comments claimed otherwise. See `internal/bonus/schedulers.go`'s `dbClockTimestamp`. |
+
+**`LF-W3-01` (recorded, not fixed — routed to `bonus-engine`, no live
+exposure today).** Migration 0057's idempotency constraint is
+`UNIQUE (tenant_id, campaign_id, offer_version_id, player_account_id,
+trigger_reference)` — it includes **`offer_version_id`**. Both new
+triggers therefore guarantee "never twice for the same trigger event"
+only *per Offer version*. If an Offer's `current_version_id` changes
+between the original issuance and a re-scan of the same trigger event,
+the DB constraint does not fire and a second Grant is issued for the
+same deposit/window. This does **not** make cashback_scheduler.go's
+top-of-file claim ("a lost/reset/stale watermark can, at worst, cause
+redundant recomputation… never a double payout") true unconditionally:
+it is true only while the Offer version is unchanged, and the watermark
+— explicitly documented there as non-load-bearing — is the **sole**
+guard in the version-changed case. Not fixed here: narrowing the
+constraint is a `bonus_grants` migration owned by `bonus-engine`, too
+wide a blast radius for a certification phase, and nothing can re-scan a
+processed event today without an operator deleting a watermark row.
+Recorded so the claim is not relied on as written.
+
+**`LF-W3-03` (recorded, not fixed — no live exposure).**
+`cashbackCandidatesAndNetLoss`'s nullification join excludes only
+`transaction_type = 'casino_rollback'`, whereas §6.6.5's binding
+discipline (implemented by `lockTransactionIsNullified`) fails **closed**
+on any *unclassified* reversal. An unclassified reversal of a
+`casino_bet` would therefore still count toward `NetLossAmount` —
+fail-open, over-crediting. Unreachable today (`casino_rollback` and
+`bonus_reversal` are the only reversal types, and `bonus_reversal` never
+reverses a `casino_bet`), and the conservative direction is not uniform
+across the two legs of the net (excluding a reversed *win* would
+over-credit), so a blanket widening would be wrong. Whoever adds a third
+reversal `transaction_type` must revisit this query in the same change.
+
+**`LF-W3-04` (observation, no action).** A `casino_rollback` that arrives
+*after* a cashback window has been settled cannot retroactively reduce
+that window's `NetLossAmount` — the window is never revisited. This is
+inherent to window settlement without a settlement-lag grace period, is
+bounded, and over-credits the player rather than the platform. Named so
+a future operator-facing cashback policy decision is made deliberately
+rather than inherited.
+
+#### 7.18.9 `ledger-finance`'s independent confirmations of the items ADR 0040 routed here
+
+Each checked against the code at Wave 3's HEAD, not inferred from the
+phase that routed it.
+
+**`DR-4HB1W3-ARCH-01` — the gated `postBet` lock-order inversion.
+CONFIRMED; the gate is safe as drawn, and `ledger-finance` agrees it
+should not be fixed inside Wave 3.** The factual claim is
+re-verified independently: `postBet` takes `lockCashBalance`
+(`player_cash` `FOR UPDATE`) and posts — which takes migration 0023's
+trigger lock on every projection row the posting touches — **before**
+`HasActiveWageringGrant` → `RecordCashFundedWageringContribution` →
+`AdvisoryLockGrant`, i.e. projection-then-Grant, the reverse of HR-26.
+The gate rests on `ConvertGrant` being unreachable, and that is
+independently confirmed rather than accepted: `grep` for `ConvertGrant`
+across the repository returns its own definition file and two doc
+comments, and **zero non-test call sites**; `bonus_routes.go` contains no
+conversion route of any kind. The other two `player_cash`/`house_gaming`-
+posting Bonus paths are `ResolveHeldDispositionAction`'s
+`ACTION_ROUTE_TO_CASH` and `postWinLockedBonus`. `ResolveHeldDisposition
+Action` **is** HTTP-reachable (`bonus_handlers.go`), which is worth
+stating plainly because it is the one place a casual reading of ADR 0040
+D2 could under-state the risk — but it is reachable only for a
+`bonus_held_dispositions` row, which only `ResolveTerminalGrantCredit`
+creates, which only `postWinLockedBonus` calls, which
+`resolveWinOrigin` only routes to when a round's bet debited
+`player_locked_bonus`. **No production code path anywhere posts a debit
+to `player_locked_bonus`** (verified by grepping every non-test
+reference to `AccountPlayerLockedBonus`: the only occurrences are the
+account-type constant, the BONUS_SET membership list, the origin switch
+itself, and the account-creation call **inside** `postWinLockedBonus`).
+The three G-2 paths are therefore genuinely unreachable, and the live
+Wave-3 paths (deposit sweep, cashback scheduler, expiry sweep) post only
+to `player_bonus`/`promo_liability`/`bonus_expense`/`provider_payable` —
+a set disjoint from the `player_cash`/`house_gaming` rows `postBet`
+locks. **No cycle is reachable today.** ADR 0040 D2's gate clause (c)
+("any other path that makes `ConvertGrant`/`ACTION_ROUTE_TO_CASH`/
+`postWinLockedBonus` concurrently reachable with a bet") already covers
+the held-disposition route, so no widening of the gate is needed — only
+this explicit note that clause (c), not clause (a), is the one that
+catches it.
+
+**LF-10 — CONFIRMED untouched, orthogonal, and doubly inert.**
+Independently re-checked against this Wave's diff rather than carried
+forward from the reconnaissance: `internal/casino/bonus_settlement.go` is
+unmodified across `9d857dc..c48a6ab` except for a test file, and no Wave
+3 file writes `bonus_held_dispositions`. `postRollbackHeldWin`'s
+disposition-status switch is unchanged: `resolved_reforfeit` and
+`resolved_route_to_cash` both return
+`ErrHeldDispositionRollbackUnsupported` — fails closed, posts nothing.
+As the owning specialist, `ledger-finance` confirms the general case
+remains **open** and correctly routed to a future dedicated dispatch; it
+is not resolved, not partially resolved, and not implicitly settled by
+anything in Wave 3. Its inertness is now doubled rather than weakened by
+this Wave: it was already unreachable until `postBet`'s bonus-funded
+locking side exists, and the paragraph above re-verifies that side still
+does not exist.
+
+**ADR 0040 RC-4 (`StakedBonusAmount` true by call-site construction) —
+CONFIRMED, and the recommended durable fix is ENDORSED.** Verified
+directly: `postBet` posts `event.Amount` as the `player_cash` debit and
+then passes that same `event.Amount` as `StakeAmount` in the same
+transaction, so §6.6.4's "read from the posted ledger entry, never from
+the caller" rule is satisfied *because of what the caller happens to
+do*, not because anything checks it. `ledger-finance` agrees this should
+not have been changed inside a certification phase (it breaks fixtures
+that pass synthetic transaction ids) and agrees the right durable fix is
+RC-4's: have `RecordWageringContribution` verify `StakedBonusAmount`
+against the actual posted funding-account debit on
+`LockLedgerTransactionID`, making the rule structurally true. Recorded
+here as this document's own position so a future implementer does not
+have to infer it from a `CONSTRAINT` in someone else's ADR.
+
+### 7.19 Posting shapes for `bonus_adjustment_write` and `grant_cancel_completed` (Stage 4H-B1 Wave 3 Phase 11, `ledger-finance`, DESIGN/CONTRACT ONLY)
+
+**Status: `NOT IMPLEMENTED`. This subsection authorizes no code, no
+migration, no route, and no HTTP surface.** It exists because ADR 0040's
+`CONSTRAINT` RC-1 and RC-3 both state that the posting shape for these
+two operations is *"`ledger-finance`'s to specify first"* and that
+*"nothing may be implemented against a guessed shape"*. Specifying the
+shape here removes `ledger-finance` from the critical path of whoever
+eventually builds them; it does not schedule, authorize or start that
+work, which remains outside Wave 3's scope. Every constraint ADR 0040
+RC-1/RC-2/RC-3 places on these operations is adopted unchanged and is
+**not** restated or weakened below.
+
+The headline finding of this specification, stated first because it is
+the useful part: **neither operation needs a new `transaction_type`, a
+new account type, a new mirror rule, a new rounding boundary or a
+migration.** Both decompose into posting shapes this platform already
+posts and already reconciles.
+
+#### 7.19.1 Why no new mechanism is needed — the two load-bearing facts
+
+1. **Rule B2 (extended) is keyed on BONUS_SET membership, never on
+   `transaction_type`.** Verified directly against
+   `internal/ledger/bonus_mirror.go`: the generator fires for any posting
+   touching `player_bonus`/`player_locked_bonus`/`player_bonus_held`, and
+   ADR 0032 §2 is explicit that *"Rule B2 admits no exception by
+   transaction type"*. A caller therefore supplies **exactly one leg**
+   for either operation below and the generator supplies the balancing
+   `promo_liability` leg plus the `bonus_expense`/`provider_payable`
+   recognition leg from `BonusCost`. HR-17 forbids hand-assembling any of
+   them, and that prohibition applies to these two operations with no
+   exemption.
+2. **`manual_adjustment` and `bonus_forfeiture` both already require a
+   `reason_code`** at the boundary and at migration 0051's widened
+   `ledger_transactions_check1`. ADR 0032 §3.1 already establishes that
+   expiry, staff cancellation and ordinary forfeiture are distinguished
+   from one another **only by `reason_code`, never by a separate
+   transaction type** — the precedent `grant_cancel_completed` reuses
+   directly.
+
+#### 7.19.2 `bonus_adjustment_write` — the posting shape
+
+`transaction_type = manual_adjustment` (`ledger.TxManualAdjustment`,
+already defined, already reason-code-mandated). **Not** `bonus_grant`,
+**not** `bonus_forfeiture`. The reasoning is the same one ADR 0040 RC-1
+item 2 applies to the Risk `Operation`: a staff-discretionary adjustment
+is a categorically different fact from a lifecycle transition, and
+folding it into the lifecycle types would make it un-separable in
+reporting, in reconciliation triage and in any future cumulative
+evaluation — while the distinction costs nothing, because Rule B2 fires
+regardless (fact 1 above).
+
+**Value-INCREASING adjustment** (crediting bonus value to a player):
+
+| Leg | Supplied by | Direction / account |
+|---|---|---|
+| 1 | the caller, and this is the **only** leg a caller may supply | `Cr player_bonus`, amount = the approved adjustment amount |
+| 2 | Rule B2 generator | `Dr promo_liability` |
+| 3 | Rule B2 generator | `Dr bonus_expense` or `Dr provider_payable`, per `BonusCost.Funding` |
+
+Structurally identical to `bonus_grant` (§7.5), which is the point: an
+adjustment that credits bonus value creates the same liability and the
+same expense recognition as a grant of the same size, and must not be
+allowed to create a *different* one.
+
+**Value-REDUCING adjustment** (clawing bonus value back):
+
+| Leg | Supplied by | Direction / account |
+|---|---|---|
+| 1 | the caller, and this is the **only** leg a caller may supply | `Dr player_bonus`, amount = the approved adjustment amount |
+| 2-3 | Rule B2 generator | the exact mirror/recognition reversal of the above |
+
+Structurally identical to `terminalWriteDown` (§7.7), again deliberately.
+
+**Binding rules on the amount, which are `ledger-finance`'s to set and
+are not negotiable by the implementer:**
+
+- **`A1` — a value-reducing adjustment may never exceed the Grant's
+  currently-free attributed `player_bonus` balance.** `terminalWriteDown`
+  already computes exactly this figure and already posts nothing when it
+  is zero; the adjustment path must reuse that computation rather than
+  re-derive it. Driving `player_bonus` past zero would produce an account
+  whose rebuilt balance contradicts its own normal balance and would
+  surface as a reconciliation mismatch rather than as the refusal it
+  should have been.
+- **`A2` — the amount is an operator-supplied integer minor-unit figure
+  in the Grant's own asset, never a percentage, never a rate, never a
+  float.** There is **no rounding boundary in this operation at all**:
+  nothing is computed from a rate, so `money.RoundToMinorUnits` is not
+  invoked and must not be. An implementation that introduces a rate here
+  has changed the operation's definition and needs a fresh spec.
+- **`A3` — never `player_cash`, never `player_locked_bonus`, never
+  `player_bonus_held`.** An adjustment that needs to move cash is a
+  different operation with different legal consequences (§7.19.4).
+  Adjusting `player_locked_bonus`/`player_bonus_held` would mutate value
+  that is mid-settlement and is refused outright.
+- **`A4` — idempotency key.** `manual_adjustment:<grant_id>:<approved
+  change_request_id>` (or the consumed EOI's own `operation_id`). It must
+  be derived from the **authorization**, never from the attempt, so a
+  retried submission of one approved adjustment can never post twice —
+  the same discipline `MintRootOperation`'s own key already follows. Two
+  *separately approved* adjustments of the same size against the same
+  Grant are two different facts and must both post.
+- **`A5` — `reason_code` is mandatory** (already enforced by
+  `ledger.Post` and by migration 0051's CHECK) and, per `CLAUDE.md`, the
+  four-eyes approval above the configured threshold and the audit record
+  carrying before/after state are conditions of the operation, not
+  optional extras.
+
+Gate composition is ADR 0040 RC-1 item 3's, adopted verbatim and not
+re-derived: value-increasing runs the full T.1 chain unchanged and
+unreordered plus four-eyes plus an EOI; value-reducing follows
+`terminalWriteDown`'s T.5.1 asymmetry (no `AssetAuthorization`/RG/Risk)
+but still requires the reason code, the four-eyes threshold and the audit
+record.
+
+#### 7.19.3 `grant_cancel_completed` — the posting shape
+
+**It is `terminalWriteDown`'s shape, unchanged.** A `completed` Grant has
+not converted: its value is still sitting in `player_bonus`. So:
+
+- `transaction_type = bonus_forfeiture`, one caller leg `Dr player_bonus`
+  for the Grant's currently-free attributed balance, Rule B2 supplying
+  the rest — byte-for-byte the posting `terminalWriteDown` already makes.
+- `reason_code` is a **distinct, stable string** (e.g.
+  `staff_cancel_completed`), which is the entire mechanism ADR 0032 §3.1
+  prescribes for distinguishing this from expiry and from ordinary
+  forfeiture. Because `terminalWriteDown`'s idempotency key is already
+  `bonus_forfeiture:<grant_id>:<reason_code>`, a distinct reason code
+  yields a distinct key automatically and cannot collide with a prior
+  expiry/forfeiture write-down of the same Grant.
+- Zero free balance → **post nothing**, status-only transition. Already
+  `terminalWriteDown`'s behaviour; no special case.
+
+**The genuinely new part is not the posting, it is the guard — and it
+must be widened, never removed.** `TerminateGrant` today refuses
+anything where `ComputeNewStakeEligibility(status) != open`, which
+excludes `completed`. The new operation accepts `{issued, activated,
+in_progress, completed}` and must continue to refuse **every** terminal
+status and, emphatically, `converted` (§7.19.4).
+
+**`AOE(G,t)` is re-checked exactly as `TerminateGrant` re-checks it, with
+no relaxation.** A `completed` Grant can legitimately carry non-empty
+exposure (an in-flight contribution bet whose win/rollback has not
+arrived). Non-empty AOE therefore takes the **same** `pending_settlement`
+detour carrying `terminal_resolution = cancelled`, finalized later by the
+existing `RecheckGrantExposure`. This is the same arithmetic ADR 0040
+RC-2 item 4 protects on the conversion side: paying out or writing down
+against value still at risk in an unsettled round double-counts it, and
+no approval count makes that arithmetic work.
+
+#### 7.19.4 Cancelling a **`converted`** Grant — deliberately NOT specified, and escalated
+
+The reconnaissance's dependency map framed this operation as needing a
+posting shape *"for clawing back an already-converted-or-completed
+Grant's value (may already be spent/converted — a straightforward
+write-down doesn't apply the same way)"*. §7.19.3 answers the
+`completed` half. The `converted` half is **refused, not deferred by
+oversight**, and the reason is not a technical one:
+
+once a Grant has converted, its value is in `player_cash`. It is
+fungible with the player's own money, it may already have been staked,
+and it may already have been withdrawn. "Clawing it back" is a debit of a
+real player cash balance, which can drive that balance negative — i.e.
+it creates a **receivable from a customer**. Whether this platform ever
+creates player receivables, under what jurisdictional consumer-protection
+rules, and what the operator's recourse is when the balance is
+insufficient, are commercial and legal questions with insurance and
+licensing weight. Per this specialist's own stated limitations, that is
+not a call `ledger-finance` makes alone, and inventing a posting shape
+for it here would be making it by implication.
+
+**Escalated to the Orchestrator as an open business decision.** Until it
+is answered, `grant_cancel_completed` is specified for `completed` only,
+and reversal of a `converted` Grant stays exactly where ADR 0040 RC-2
+item 5 left it: `MarkGrantReversed`'s wiring remains an open scope
+question, unchanged by this Wave.
+
+#### 7.19.5 What is deliberately left to `bonus-engine`
+
+The four-eyes `ChangeOperation` wiring, the `consumptionShapes` and
+`boundedRootOperationTypes` entries ADR 0040 D1/RC-1 item 4 require, the
+new Risk `Operation` and its `cumulativeSpec` entry (RC-1 item 2), the
+permission checks, the HTTP surfaces, and the Grant-status transition
+machinery are all `bonus-engine`'s, unchanged by this subsection. This
+specifies the ledger shape and the amount rules only — the two things ADR
+0040 says must exist before implementation starts.
 
 ## 8. Cross-references
 
