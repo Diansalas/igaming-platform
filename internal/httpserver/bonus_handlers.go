@@ -623,10 +623,24 @@ func newDecideSuggestionHandler(deps Deps) http.HandlerFunc {
 // --- staff-facing: held-disposition resolution (REQ-SEP-BONUS-4) ---
 
 type resolveHeldDispositionRequest struct {
-	Action            string `json:"action"` // "reforfeit" | "route_to_cash"
-	ReasonCode        string `json:"reason_code"`
-	RequestID         string `json:"request_id"`         // an already-approved bonus_change_requests id (four-eyes, doc 34 §3.1)
-	RequiredApprovals int32  `json:"required_approvals"` // resolved from bonus_approval_policies by the caller of this endpoint's own admin flow
+	Action     string `json:"action"` // "reforfeit" | "route_to_cash"
+	ReasonCode string `json:"reason_code"`
+	RequestID  string `json:"request_id"` // an already-approved bonus_change_requests id (four-eyes, doc 34 §3.1)
+	// RequiredApprovals is DELIBERATELY NOT a field here (SEC-4I-F1 fix,
+	// security's Stage 4I Phase 4 design review finding): a client-supplied
+	// approvals count, unclamped, previously flowed straight into
+	// bonus_change_consume_approved_request, letting a caller lower a
+	// tenant's configured N-approver four-eyes threshold to as little as 1
+	// for ACTION_ROUTE_TO_CASH (real money leaving player_bonus_held).
+	// Every other four-eyes-consuming wrapper in this codebase resolves its
+	// required-approvals count SERVER-SIDE, from bonus_approval_policies,
+	// via resolveRequiredApprovals (internal/bonus/four_eyes_ops.go) - this
+	// endpoint now does the same, inside bonus.ResolveHeldDispositionAction
+	// itself, never from request input. Because httpserver's JSON decoding
+	// already calls dec.DisallowUnknownFields() (json.go), a client that
+	// still sends "required_approvals" in the body now gets a clean 400,
+	// not a silently-ignored field.
+	//
 	// JurisdictionCode is consumed only by "route_to_cash"'s own T.1 gate
 	// (Stage 4H-B1 Wave 2 Phase 5 fix) - mirrors newIssueManualGrantHandler's
 	// identical optional field. Safe to omit for "reforfeit".
@@ -669,11 +683,6 @@ func newResolveHeldDispositionHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeValidation, "request_id must be a valid UUID")
 			return
 		}
-		requiredApprovals := req.RequiredApprovals
-		if requiredApprovals == 0 {
-			requiredApprovals = 2
-		}
-
 		var resp struct {
 			ID     string `json:"id"`
 			Status string `json:"status"`
@@ -681,7 +690,7 @@ func newResolveHeldDispositionHandler(deps Deps) http.HandlerFunc {
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			resolved, err := bonus.ResolveHeldDispositionAction(ctx, tx, tc.TenantID, bonus.ResolveHeldDispositionActionParams{
 				HeldDispositionID: dispositionID, Action: bonus.HeldDispositionAction(req.Action), ActorID: staffID,
-				ReasonCode: req.ReasonCode, RequestID: changeRequestID, RequiredApprovals: requiredApprovals,
+				ReasonCode: req.ReasonCode, RequestID: changeRequestID,
 				JurisdictionCode: req.JurisdictionCode,
 			})
 			if err != nil {

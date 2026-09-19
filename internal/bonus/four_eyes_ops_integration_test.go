@@ -519,3 +519,175 @@ func listBulkJobItemsForTest(t *testing.T, pool *db.Pool, tenantID, jobID uuid.U
 	})
 	return items, err
 }
+
+// --- held_disposition_resolve (SEC-4I-F1) ---
+
+// TestHeldDispositionResolve_CallerCannotLowerRequiredApprovalsBelowPolicy
+// is the regression test for SEC-4I-F1 (security, Stage 4I Phase 4 design
+// review): held_disposition_ops.go's own ResolveHeldDispositionAction used
+// to trust a caller-supplied RequiredApprovals count UNCLAMPED (it flowed,
+// via bonus_handlers.go's now-removed "required_approvals" request field,
+// straight into bonus_change_consume_approved_request), letting a staff
+// member lower a tenant's configured N-approver four-eyes threshold to as
+// little as 1 for a real disposition resolution (ACTION_ROUTE_TO_CASH
+// moves value out of player_bonus_held; ACTION_REFORFEIT is used here
+// since it needs no T.1/AssetAuthorization setup, and the defect is in the
+// SHARED four-eyes consume both actions go through, not in either action's
+// own effecting logic).
+//
+// This test configures a real policy of 3 required approvals, records
+// only ONE genuine approval, and calls ResolveHeldDispositionAction with a
+// caller-supplied RequiredApprovals: 1 - the exact pre-fix bypass shape -
+// proving the resolved-server-side value can only ever be RAISED above the
+// policy (GREATEST(caller, policy)), never lowered by a caller. It then
+// proves the ordinary, correctly-thresholded path (three real distinct
+// approvals, RequiredApprovals left at its zero value exactly as
+// bonus_handlers.go now always calls it) still succeeds - no regression to
+// the legitimate flow.
+func TestHeldDispositionResolve_CallerCannotLowerRequiredApprovalsBelowPolicy(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	staff3 := seedExtraStaff(t, pool, f.tenantID)
+	staff4 := seedExtraStaff(t, pool, f.tenantID)
+	co := seedCampaignOffer(t, pool, f.tenantID, f.brandID, f.staffID)
+
+	// Override seedLifecycleFixture's own default (required_approvals=1,
+	// added so the OTHER held-disposition tests in this package - which
+	// only ever seed two staff members - keep working) with a
+	// higher-than-default threshold: a NEW, later-effective_from row (the
+	// table is insert-only, migration 0063) resolves ahead of the
+	// fixture's own row at identical specificity (tenant-wide, no
+	// brand/asset), per ResolveApprovalPolicy's own "... effective_from
+	// DESC" ordering.
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO bonus_approval_policies (tenant_id, operation, approval_threshold_minor_units, required_approvals, created_by_principal_id)
+			VALUES ($1, 'held_disposition_resolve', 0, 3, $2)`, f.tenantID, f.staffID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed 3-approval policy override: %v", err)
+	}
+
+	var grantID, dispositionID uuid.UUID
+	settlementTxID := uuid.New()
+	correlationID := uuid.New()
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		g := newTestOfferGrant(f, co, "sec-4i-f1-required-approvals")
+		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode})
+		if err != nil || !outcome.Allowed {
+			return fmt.Errorf("issue/activate: %v / %+v", err, outcome)
+		}
+		grantID = result.ID
+
+		terminated, err := TerminateGrant(ctx, tx, f.tenantID, grantID, TerminateGrantParams{
+			Resolution: TerminalResolutionForfeited, ReasonCode: "wagering_rule_breach", ActorType: ActorSystem, TriggerType: TriggerAutomatedRuleEvaluation,
+		})
+		if err != nil {
+			return err
+		}
+		if terminated.Status != GrantForfeited {
+			return fmt.Errorf("expected forfeited, got %s", terminated.Status)
+		}
+
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO ledger_transactions (id, tenant_id, transaction_type, idempotency_key, correlation_id) VALUES ($1, $2, 'casino_win', $3, $4)`,
+			settlementTxID, f.tenantID, "win-"+settlementTxID.String(), correlationID,
+		); err != nil {
+			return err
+		}
+
+		dispID, err := ResolveTerminalGrantCredit(ctx, tx, grantID, correlationID, CreditKindWin, big.NewInt(300), big.NewInt(0), settlementTxID)
+		if err != nil {
+			return fmt.Errorf("resolve terminal grant credit: %w", err)
+		}
+		dispositionID = dispID
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// File the request, record exactly ONE approval - insufficient against
+	// the 3-approval policy just configured.
+	var requestID uuid.UUID
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		payload := []byte(fmt.Sprintf(`{"action":%q}`, ActionReforfeit))
+		req, err := FileChangeRequest(ctx, tx, ChangeRequest{
+			TenantID: f.tenantID, Operation: ChangeOpHeldDispositionResolve, TargetType: "bonus_held_dispositions", TargetID: dispositionID,
+			Payload: payload, ReasonCode: "sec-4i-f1-test", RequestedByPrincipalID: f.staffID,
+		})
+		if err != nil {
+			return err
+		}
+		requestID = req.ID
+		return RecordChangeApproval(ctx, tx, f.tenantID, req.ID, f.staff2ID, "approve", nil, nil, nil)
+	})
+	if err != nil {
+		t.Fatalf("file+single-approve: %v", err)
+	}
+
+	// THE BYPASS ATTEMPT: a caller supplies RequiredApprovals: 1 (the
+	// pre-fix HTTP request body's exact shape) against a real policy of 3,
+	// with only ONE real approval recorded. Pre-fix, this SUCCEEDED
+	// (p.RequiredApprovals flowed unclamped into
+	// bonus_change_consume_approved_request). Post-fix, the
+	// server-side-resolved policy value (3) can only be RAISED by a
+	// caller-supplied value, never lowered, so this must be refused.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ResolveHeldDispositionAction(ctx, tx, f.tenantID, ResolveHeldDispositionActionParams{
+			HeldDispositionID: dispositionID, Action: ActionReforfeit, ActorID: f.staffID, ReasonCode: "sec-4i-f1-test",
+			RequestID: requestID, RequiredApprovals: 1,
+		})
+		return err
+	})
+	if !errors.Is(err, ErrChangeRequestNotApproved) {
+		t.Fatalf("SEC-4I-F1 REGRESSION: expected a caller-supplied RequiredApprovals:1 to be refused against a 3-approval policy with only 1 real approval (ErrChangeRequestNotApproved), got %v", err)
+	}
+
+	// The disposition must remain 'held' - a refused four-eyes consume must
+	// have no side effect.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		d, err := GetHeldDispositionByID(ctx, tx, dispositionID)
+		if err != nil {
+			return err
+		}
+		if d.Status != HeldDispositionHeld {
+			return fmt.Errorf("expected disposition to remain held after a refused resolution attempt, got %s", d.Status)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Record the TWO remaining distinct approvals the real policy requires.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := RecordChangeApproval(ctx, tx, f.tenantID, requestID, staff3, "approve", nil, nil, nil); err != nil {
+			return err
+		}
+		return RecordChangeApproval(ctx, tx, f.tenantID, requestID, staff4, "approve", nil, nil, nil)
+	})
+	if err != nil {
+		t.Fatalf("record remaining approvals: %v", err)
+	}
+
+	// Now the ORDINARY, correctly-thresholded path: no regression to the
+	// legitimate flow (three real distinct approvals against a 3-approval
+	// policy, resolved entirely server-side - RequiredApprovals left at its
+	// zero value here, exactly as bonus_handlers.go now always calls it).
+	var resolved HeldDisposition
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var resErr error
+		resolved, resErr = ResolveHeldDispositionAction(ctx, tx, f.tenantID, ResolveHeldDispositionActionParams{
+			HeldDispositionID: dispositionID, Action: ActionReforfeit, ActorID: f.staffID, ReasonCode: "sec-4i-f1-test",
+			RequestID: requestID,
+		})
+		return resErr
+	})
+	if err != nil {
+		t.Fatalf("expected the legitimate 3-approval path to succeed, got %v", err)
+	}
+	if resolved.Status != HeldDispositionResolvedReforfeit {
+		t.Fatalf("expected resolved_reforfeit, got %s", resolved.Status)
+	}
+}

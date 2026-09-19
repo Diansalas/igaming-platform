@@ -245,6 +245,14 @@ type ResolveHeldDispositionActionParams struct {
 	ActorID           uuid.UUID
 	ReasonCode        string
 	RequestID         uuid.UUID
+	// RequiredApprovals is NOT a trusted source of the effective threshold
+	// (SEC-4I-F1 fix) - ResolveHeldDispositionAction always resolves the
+	// real threshold itself, server-side, from the tenant's configured
+	// bonus_approval_policies row via resolveRequiredApprovals, and this
+	// field can only ever RAISE that resolved value (GREATEST), never
+	// lower it. The HTTP layer (bonus_handlers.go) no longer accepts this
+	// as client input at all; leave it zero unless a caller has a genuine
+	// reason to require MORE approvals than the tenant's own policy.
 	RequiredApprovals int32
 	// JurisdictionCode is consumed ONLY by ACTION_ROUTE_TO_CASH's own T.1
 	// gate (below) - resolved identically to every other T.1 call site in
@@ -282,15 +290,43 @@ func ResolveHeldDispositionAction(ctx context.Context, tx pgx.Tx, tenantID uuid.
 		return HeldDisposition{}, ErrHeldDispositionNotHeld
 	}
 
-	payloadMatch := []byte(fmt.Sprintf(`{"action":%q}`, p.Action))
-	if _, err := ConsumeApprovedChangeRequest(ctx, tx, tenantID, ChangeOpHeldDispositionResolve, p.HeldDispositionID, payloadMatch, p.RequiredApprovals, p.ActorID); err != nil {
-		return HeldDisposition{}, err
-	}
-
 	g, err := GetGrantByID(ctx, tx, disposition.GrantID)
 	if err != nil {
 		return HeldDisposition{}, err
 	}
+
+	// SEC-4I-F1 FIX (security, Stage 4I Phase 4 design review): the
+	// required-approvals count for this operation is resolved from the
+	// tenant's own configured bonus_approval_policies row, via
+	// resolveRequiredApprovals (four_eyes_ops.go) - the SAME function every
+	// other four-eyes wrapper in this package already uses - never trusted
+	// from a caller. Previously p.RequiredApprovals flowed, UNCLAMPED,
+	// straight from the HTTP request body (bonus_handlers.go) into
+	// ConsumeApprovedChangeRequest below, letting a staff member lower a
+	// tenant's configured N-approver threshold to 1 for
+	// ACTION_ROUTE_TO_CASH (real money leaving player_bonus_held). Client
+	// input for this value has been removed at the HTTP layer entirely
+	// (resolveHeldDispositionRequest no longer has a RequiredApprovals
+	// field); p.RequiredApprovals is retained here ONLY as a
+	// belt-and-suspenders floor - GREATEST(p.RequiredApprovals,
+	// policyRequired) can only ever RAISE the effective threshold above the
+	// configured policy, never lower it, so even a future internal caller
+	// that mistakenly supplies a smaller number cannot reintroduce this
+	// class of bug.
+	policyRequired, err := resolveRequiredApprovals(ctx, tx, tenantID, ChangeOpHeldDispositionResolve, &g.BrandID, &g.AssetCode)
+	if err != nil {
+		return HeldDisposition{}, err
+	}
+	requiredApprovals := policyRequired
+	if p.RequiredApprovals > requiredApprovals {
+		requiredApprovals = p.RequiredApprovals
+	}
+
+	payloadMatch := []byte(fmt.Sprintf(`{"action":%q}`, p.Action))
+	if _, err := ConsumeApprovedChangeRequest(ctx, tx, tenantID, ChangeOpHeldDispositionResolve, p.HeldDispositionID, payloadMatch, requiredApprovals, p.ActorID); err != nil {
+		return HeldDisposition{}, err
+	}
+
 	fundingKind, providerID, err := parseFundingSource(g.FundingSource)
 	if err != nil {
 		return HeldDisposition{}, err

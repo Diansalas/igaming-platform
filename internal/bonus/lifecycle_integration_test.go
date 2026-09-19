@@ -86,8 +86,24 @@ func seedLifecycleFixture(t *testing.T, pool *db.Pool) lifecycleFixture {
 		if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, p2); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status)
-			VALUES ($1, $2, $3, 'x', 'bonus_operations', $4, 'active')`, f.staff2ID, f.tenantID, f.staff2ID.String()+"@staff.example.com", p2)
+		if _, err := tx.Exec(ctx, `INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status)
+			VALUES ($1, $2, $3, 'x', 'bonus_operations', $4, 'active')`, f.staff2ID, f.tenantID, f.staff2ID.String()+"@staff.example.com", p2); err != nil {
+			return err
+		}
+		// held_disposition_resolve's own bonus_approval_policies row: this
+		// fixture only ever seeds TWO staff members (f.staffID, f.staff2ID),
+		// so every held-disposition test below files as one and records
+		// exactly one distinct approval from the other. Without an explicit
+		// policy row, ResolveApprovalPolicy falls back to
+		// fallbackApprovalPolicy's required_approvals=2 (fail-closed
+		// default), which these two-staff tests cannot satisfy. This row
+		// makes the ACTUAL tenant-configured policy (required_approvals=1)
+		// match what these tests already set up - SEC-4I-F1's fix means the
+		// resolved-server-side value now comes from this row, never from a
+		// caller-supplied count, so the policy itself (not a test-supplied
+		// override) is what must say "1" here.
+		_, err := tx.Exec(ctx, `INSERT INTO bonus_approval_policies (tenant_id, operation, approval_threshold_minor_units, required_approvals, created_by_principal_id)
+			VALUES ($1, 'held_disposition_resolve', 0, 1, $2)`, f.tenantID, f.staffID)
 		return err
 	})
 	if err != nil {
