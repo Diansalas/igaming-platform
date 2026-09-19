@@ -255,6 +255,54 @@ advertised benefit from a player who did nothing wrong. This is a
 confirmation of a default within a fixed frame, not an open design
 question.
 
+**`product-owner-proxy` ruling (2026-09-19): CONFIRMED — 100%-plus-audit-signal,
+as recommended.** Against the five-question scope test in `CLAUDE.md`:
+this default is not itself required by name in the Blueprint, but it is
+required by the current stage's B2C MVP path (a live wagering path must
+have *a* defined bet-time behavior for this case — "undefined" is not an
+option, so the choice is between the two architect already framed) and,
+independently, by the "avoid material technical debt / silent failure"
+prong — the fail-closed alternative (skip/hold) creates an
+operator-invisible, player-visible defect (a Grant that silently stalls
+or never completes) whose root cause is a staff typo, not a player
+action. That is worse customer experience for a first-party B2C brand at
+launch than the bounded, audited, self-correcting alternative, for a
+gain (slightly tighter value-protection on a rare data-entry error that
+D3 item 1 now also prevents at the source) that is speculative and not
+required by any named MVP feature.
+
+Deciding factors specific to this call:
+- **Blast radius is genuinely bounded**, per the architect's own analysis:
+  no new value is created (liability already posted at activation), the
+  payout is capped at `granted_amount`/`MaxCashoutAmount`, and
+  `ConvertGrant` still runs the full T.1 chain (AssetAuthorization → RG →
+  Risk) regardless of how wagering progress was accrued. This is
+  precisely the kind of already-mitigated residual risk that does not
+  meet the "material technical debt" or "security/compliance"
+  bar for overriding an MVP-speed-friendly default.
+- **The alternative (skip/hold/flag-for-review) is the more complex build**
+  for a case that D3 item 1 (authoring-time rejection) should make rare
+  once implemented — building an additional in-flight "Grant held pending
+  staff review" sub-state for a residual case is exactly the kind of
+  premature complexity `CLAUDE.md`'s scope-expansion test exists to defer,
+  not a control this platform's MVP or future B2B architecture needs.
+  Nothing about the future B2B platform requires a different answer here:
+  per-tenant Offer configuration and validation is orthogonal to this
+  bet-time default, and a stricter operator preference (hold instead of
+  continue) can be layered in later, per-tenant, without a rewrite, if a
+  B2B partner ever asks for it.
+- **This does not touch a money/security/tenant-isolation/audit/
+  compliance/idempotency/reconciliation invariant** — the audit-signal
+  half of architect's proposal *is* the compliance-relevant part (it must
+  and does fire), and this ruling changes nothing about that; it only
+  confirms which side of a bounded, already-audited default to take.
+
+**Not escalated to a human decision.** This is a reversible, bounded,
+already-safety-reviewed default inside an existing mechanism, not a
+licensing/legal/commercial-pricing/production-authorization question —
+none of the `CLAUDE.md` "stop and ask" triggers apply. `architect`'s
+recommendation stands as adopted, not merely as a suggestion.
+
 ---
 
 ## D4 — `DECISION`: `bonus_campaign_activation` is a declared EOI type with no mint point, and Wave 3 made its effecting writes live
@@ -534,6 +582,10 @@ structurally true rather than conventionally true.
   (design) → `architect` (contract sign-off) → `bonus-engine`
   (enforcement call site). Recorded as a scheduled item in doc 13 so it
   survives the end of this Wave.
+- **`CONFIRMED` — D3's commercial default is settled.**
+  `product-owner-proxy` confirmed 100%-plus-audit-signal for the
+  present-but-unparseable `contribution_weight_table` case at bet time
+  (see D3). No human escalation required.
 
 ---
 
@@ -553,8 +605,10 @@ structurally true rather than conventionally true.
   refusal, the EOI-mint audit metadata, the `StakedBonusAmount`
   ledger-read hardening, and the `bonus_campaign_activation` EOI
   determination (gated).
-- One question routed to `product-owner-proxy` (D3's commercial default),
-  framed for confirmation inside a fixed structure.
+- **`product-owner-proxy`'s D3 commercial default is confirmed** —
+  100%-plus-audit-signal, adopted as `architect` recommended. `bonus-
+  engine` implements D3 items 1–3 as specified; no further product input
+  is needed for this question.
 - Nothing in this document authorizes a stage transition, and nothing in
   it overrides `ledger-finance` on a financial invariant or `security` on
   a security requirement — D1 and D5 implement what `security` asked for
