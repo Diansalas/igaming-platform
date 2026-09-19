@@ -52,6 +52,64 @@ hardcoding either region's rules into business logic.
 
 ## Enforcement points
 
+> **IMPLEMENTATION STATUS (corrected by `architect`, Stage 4I — this
+> corrects RECON finding C-7 and discharges
+> `docs/governance/stage-4i-canonical-model.md` §12.3 item 3).**
+>
+> **The five enforcement points listed below are the intended design.
+> `NOT IMPLEMENTED` — zero of the five are wired at this commit.** They
+> are retained as the design statement, not as a description of platform
+> behaviour. Specifically, as of Stage 4I:
+>
+> - **Registration / geo-gating** — there is no producer of a "player's
+>   detected jurisdiction" anywhere in the platform. Collecting any
+>   player residence/location/nationality attribute is an unanswered
+>   human decision (**HDR-J-3**,
+>   `docs/decisions/0041-human-decision-register-stage-4i-jurisdiction.md`),
+>   so every player-scoped jurisdiction resolution returns
+>   `unresolved(no_signal)` (canonical-model §11.3). No registration or
+>   play path consults `TenantJurisdictionConfig`.
+> - **KYC/AML/RG** — `internal/kyc` and `internal/rg` do not resolve
+>   ruleset ids from `TenantJurisdictionConfig`. RG's own
+>   jurisdiction dimension (self-exclusion policy, migration `0043`) is
+>   keyed on `jurisdictions` directly, not through this table.
+> - **Payments** — `internal/payments`' routing dimension 2 is an
+>   explicit `TODO(jurisdiction)`. `AdapterCapability.SupportedCountries`
+>   is an ISO-3166 **payment-rail capability** fact and is **not** a
+>   jurisdiction gate, is not in `jurisdictions.code` space, and must
+>   never be substituted for one without an explicit, stored, audited,
+>   `security`-reviewed mapping — see
+>   `docs/governance/stage-4i-payments-model.md`.
+> - **Reporting** — no export path reads `reporting_ruleset_id`.
+> - **Provider availability** — `casino_games.jurisdiction_blocklist`
+>   **is** now genuinely enforced (Stage 4I item K-3,
+>   `internal/casino`'s `LaunchGame`), but it resolves against the game's
+>   own blocklist array and a server-resolved `jurisdiction.Resolution`,
+>   **not** against `TenantJurisdictionConfig`. The control is armed per
+>   game with a non-empty blocklist and fails closed within it
+>   (canonical-model §9.2).
+>
+> **`allowed_currencies` is superseded for the asset-availability
+> question** by `asset_authorizations` (migration `0045`, whose own header
+> says so) and must not be read for that purpose. It is not dropped —
+> dropping a column on an RLS'd, effective-dated table is its own change
+> with its own review — and nothing reads it today either way
+> (canonical-model §1.3, RULING BI-4I-3).
+>
+> **A brand has no independent operating jurisdiction** (canonical-model
+> §1.1, RULING BI-4I-1): brand is a *narrowing* dimension over the
+> tenant's jurisdiction set, never an independent source of one. This is
+> why `TenantJurisdictionConfig` correctly carries no brand dimension
+> while `asset_authorizations` / `risk_rules` /
+> `open_bet_self_exclusion_policies` carry brand alongside jurisdiction.
+>
+> **What jurisdiction resolution actually is, as of Stage 4I**:
+> `internal/jurisdiction` (the resolver) plus `jurisdiction_resolutions`
+> (the append-only record) plus the `jurisdictions`/`licences` registry
+> write surface. `docs/governance/stage-4i-canonical-model.md` is the
+> canonical and binding contract; this document remains the schema/model
+> statement it is implemented against.
+
 - **Registration / geo-gating**: player's detected jurisdiction is
   resolved, checked against the tenant's `TenantJurisdictionConfig` for a
   matching, active row; no row or an inactive row blocks registration/play
@@ -152,3 +210,11 @@ ruleset content it points to; `payments` and `data-analytics` consume it
 for their own filtering; `risk` consumes `jurisdiction_code`/
 `licensing_model` as read-only `RiskRequest` scope dimensions (Stage
 4G-FINAL) without owning or modifying this schema.
+
+**Jurisdiction *resolution*** — as distinct from this schema — is owned
+separately, per `docs/governance/stage-4i-canonical-model.md` §2.1 and
+the corresponding row in `docs/governance/ownership.md`: the interface
+contract is `architect`'s, the implementation (`internal/jurisdiction`)
+is `backend`'s, and the source-precedence ruleset **content** (once
+HDR-J-2 is answered) is `identity-compliance`'s — mirroring the
+schema/content split this document already uses for KYC/AML/RG rulesets.

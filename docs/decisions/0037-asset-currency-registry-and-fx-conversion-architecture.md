@@ -1488,7 +1488,23 @@ gating, which §C.6 implements but does not self-certify.
    decides which administrative operations require dual control and
    states its reasoning; it is explicitly flagged for `security`'s
    independent sign-off, not self-certified.
-7. **No product/vertical dimension in `CheckEligibility`'s `operation`
+7. **RESOLVED — Stage 4H-B0-R6 Workstream A; staleness marker added by
+   `architect`, Stage 4I.** *(See the status paragraph at the head of this
+   section. This item's body below is retained as the historical record of
+   the question as originally asked, and must not be read as an open flag.
+   The answer to the question it hands `architect` — "does layer 6/7 need a
+   product/vertical parameter, added the same narrow-only-never-widen way
+   brand narrows tenant" — is **yes, and it shipped**: migration `0045`
+   added a `product` column with most-specific-match semantics on layers
+   4–7, and `CheckEligibility` passes `scope.Product` through. The Stage 4I
+   canonical model re-verified this against the live schema and recorded
+   the marker as owed — `docs/governance/stage-4i-canonical-model.md` §1
+   concept 7, §12.3 item 4. No residual question remains for `architect`
+   here; `tenant_jurisdiction_configs.allowed_currencies`' separate
+   supersession by `asset_authorizations` is recorded at canonical-model
+   §1.3, not here.)*
+
+   **No product/vertical dimension in `CheckEligibility`'s `operation`
    value or in the reused `tenant_jurisdiction_configs.allowed_currencies`
    (layer 6)** (`sportsbook`-review finding, Stage 4H-B0-R5, Wave 3).
    `AssetAuthorization.CheckEligibility`'s `operation` enum
