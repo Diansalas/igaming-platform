@@ -544,6 +544,106 @@ func TestJurisdictionResolutionActive_CrossTenantIsolation(t *testing.T) {
 	}
 }
 
+// SEC-4I-F4 regression guard (migration 0072). The canonical model §6.1 /
+// security model §S-3.1 are binding on jurisdiction_resolution_active as
+// well as jurisdiction_resolutions: "Per-command policies. No `FOR ALL`
+// policy. No DELETE policy." Migration 0071 shipped a single FOR ALL
+// policy, which silently granted DELETE to every tenant-scoped
+// transaction in the platform.
+//
+// This is not a style point. There is no application DELETE path for this
+// table; the absence of a DELETE policy is the backstop for that fact.
+// A DELETE is not equivalent to SetResolutionActive(active=false): the
+// latter writes an audited before/after `audit_log` row in the same
+// transaction, the former writes nothing - so a DELETE is an UNAUDITED
+// change to a control's state, and leaves audit_log permanently
+// disagreeing with the table.
+//
+// Pre-0072 this test fails with "affected 1".
+func TestJurisdictionResolutionActive_DeleteIsDeniedByRLS(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	staffID := uuid.New()
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := SetResolutionActive(ctx, tx, SetResolutionActiveParams{
+			TenantID: f.tenantID, OperationClass: OperationPlay, Active: true, ActorType: ActorStaff, ActorID: staffID,
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// The tenant's OWN connection - the strongest scope any application
+	// code in this platform ever holds for this table - must still not be
+	// able to delete the row.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM jurisdiction_resolution_active WHERE tenant_id = $1 AND operation_class = $2`,
+			f.tenantID, string(OperationPlay))
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 0 {
+			t.Fatalf("expected the DELETE to affect 0 rows (no DELETE policy must exist on jurisdiction_resolution_active), affected %d", tag.RowsAffected())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("DELETE attempt: %v", err)
+	}
+
+	// The fact is still there and still true.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		active, err := IsActive(ctx, tx, f.tenantID, OperationPlay)
+		if err != nil {
+			return err
+		}
+		if !active {
+			t.Fatal("expected the resolution-active fact to survive the DELETE attempt")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("post-delete IsActive: %v", err)
+	}
+
+	// And the policy set itself is per-command with no DELETE entry -
+	// asserted directly so a future FOR ALL policy is caught even if some
+	// other mechanism happened to make the DELETE above a no-op.
+	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT cmd FROM pg_policies WHERE tablename = 'jurisdiction_resolution_active' ORDER BY cmd`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		var cmds []string
+		for rows.Next() {
+			var cmd string
+			if err := rows.Scan(&cmd); err != nil {
+				return err
+			}
+			cmds = append(cmds, cmd)
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		want := map[string]bool{"SELECT": true, "INSERT": true, "UPDATE": true}
+		if len(cmds) != len(want) {
+			t.Fatalf("expected exactly SELECT/INSERT/UPDATE policies on jurisdiction_resolution_active, got %v", cmds)
+		}
+		for _, cmd := range cmds {
+			if !want[cmd] {
+				t.Fatalf("unexpected policy command %q on jurisdiction_resolution_active (ALL and DELETE are both forbidden), full set %v", cmd, cmds)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("policy shape check: %v", err)
+	}
+}
+
 // --- B-1: jurisdictions/licences registry write surface ---
 
 func TestCreateJurisdictionAndListJurisdictions(t *testing.T) {
