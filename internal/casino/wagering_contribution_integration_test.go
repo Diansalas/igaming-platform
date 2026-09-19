@@ -13,6 +13,7 @@ package casino
 import (
 	"context"
 	"math/big"
+	"sync"
 	"testing"
 	"time"
 
@@ -474,5 +475,116 @@ func TestPostBet_CashFundedWageringContribution_RedeliveredBetIsIdempotent(t *te
 	}
 	if status := readGrantStatus(t, pool, f.tenantID, grantID); status != bonus.GrantInProgress {
 		t.Fatalf("expected the grant to be in_progress (1000 of 10000 target) after a redelivered bet, got %s", status)
+	}
+}
+
+// TestConcurrentStress_DuplicateBetDeliveryWithActiveWageringGrantIsIdempotent
+// is Stage 4H-B1 Wave 3 Phase 7's (casino) own regression, widening
+// TestPostBet_CashFundedWageringContribution_RedeliveredBetIsIdempotent
+// (sequential, N=2) to genuinely CONCURRENT redelivery
+// (adversarial_lock_stress_test.go's own N=10 fan-out pattern), with an
+// active wagering Grant present so the new wagering-contribution
+// call-through this Wave adds is actually exercised under the race, not
+// bypassed because HasActiveWageringGrant returns false.
+//
+// This proves, against real Postgres under -race, that the structural
+// guarantee this review's item 2 relies on actually holds: postBet's own
+// pg_advisory_xact_lock + findPostedBetTransaction idempotency
+// short-circuit (both strictly BEFORE the wagering-contribution
+// call-through in the function body) serialize N truly-concurrent
+// deliveries of the identical provider_tx_id such that only the FIRST to
+// acquire the lock ever reaches RecordCashFundedWageringContribution -
+// every other delivery observes "already posted" and returns before
+// touching the Grant at all. A defect in this composition would surface
+// here as more than one bonus_wagering_progress row, a Grant status
+// that raced past in_progress, or divergent per-delivery outcomes -
+// none of which this test tolerates.
+func TestConcurrentStress_DuplicateBetDeliveryWithActiveWageringGrantIsIdempotent(t *testing.T) {
+	pool := testPool(t)
+	const n = 10
+
+	f := seedCasinoFixture(t, pool)
+	fundWallet(t, pool, f, 100000)
+	provider := NewMockCasinoProvider("mock-casino", "EUR")
+	registerCasinoCapability(t, pool, f, provider, 100)
+	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+
+	// 10x multiplier, target 10000 - a single 1000-unit bet (even
+	// double-counted) must not complete the grant outright, so a defect
+	// that let concurrency double-record the contribution would still be
+	// visible via the progress-row count/status assertions below even if
+	// it happened not to flip completion.
+	co := seedWageringOfferVersion(t, pool, f.tenantID, f.brandID, 100000, nil)
+	grantID := seedActivatedWageringGrant(t, pool, f, co, "wagering-concurrent-redeliver", 1000)
+
+	providerTxID := "bet-concurrent-redeliver"
+	payload := provider.CallbackPayload(CallbackEventBet, providerTxID, "", "round-concurrent-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+
+	results := make([]ReceiveCallbackResult, n)
+	errs := make([]error, n)
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+				var err error
+				results[i], err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+				return err
+			})
+		}()
+	}
+	wg.Wait()
+
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			t.Fatalf("delivery %d: %v", i, errs[i])
+		}
+		if results[i].Outcome != OutcomeSucceeded {
+			t.Fatalf("delivery %d: expected the bet to succeed, got %+v", i, results[i])
+		}
+	}
+	first := results[0].LedgerTransactionID
+	if first == nil {
+		t.Fatalf("delivery 0: expected a non-nil ledger transaction id, got %+v", results[0])
+	}
+	for i := 1; i < n; i++ {
+		if results[i].LedgerTransactionID == nil || *results[i].LedgerTransactionID != *first {
+			t.Fatalf("delivery %d reports a different (or nil) ledger transaction id than delivery 0: %+v vs %+v", i, results[i], results[0])
+		}
+	}
+
+	var betCount int
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND provider_id = 'mock-casino' AND provider_tx_id = $2`,
+			f.tenantID, providerTxID,
+		).Scan(&betCount)
+	})
+	if err != nil {
+		t.Fatalf("count ledger transactions: %v", err)
+	}
+	if betCount != 1 {
+		t.Fatalf("expected exactly one ledger_transactions row for provider_tx_id=%s under %d-way concurrency, got %d", providerTxID, n, betCount)
+	}
+
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		progress, err := bonus.ListWageringProgressByGrant(ctx, tx, f.tenantID, grantID)
+		if err != nil {
+			return err
+		}
+		if len(progress) != 1 {
+			t.Fatalf("expected exactly one wagering progress row after %d-way concurrent identical bet deliveries, got %d", n, len(progress))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := readGrantStatus(t, pool, f.tenantID, grantID); status != bonus.GrantInProgress {
+		t.Fatalf("expected the grant to be in_progress (1000 of 10000 target) after %d-way concurrent redelivery, got %s", n, status)
 	}
 }
