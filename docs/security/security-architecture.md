@@ -2843,3 +2843,533 @@ Grant or ledger entry survives. Asserted by
 **Nothing in this section is claimed to make the reviewed surfaces
 "secure" in general.** It records what was examined, what was found, and
 what deliberately was not examined.
+
+---
+
+## Stage 4I — jurisdiction resolution: audit/provenance, tenant isolation, and the adversarial test contract
+
+**Author:** `security`. **Origin:** this section folds
+`docs/governance/stage-4i-security-model.md` §S-2 (audit and provenance
+content), §S-3 (the RLS / tenant-isolation contract) and §S-6 (the
+adversarial test specification) into this permanent document, per
+`DR-4I-SEC-01`. That routing was `architect`'s explicit decision in
+`docs/governance/stage-4i-canonical-model.md` §13.6: the stage-4I
+governance document is a *stage* artefact, these rulings are *permanent*
+platform rules, and the Stage 4I final independent security/compliance
+review owns this document.
+
+**This is not a transcription.** The stage document was written in Phase 4,
+*before* the code existed. This section states the rules as they stand
+after the whole stage shipped, with every place the original reasoning was
+wrong or unachievable corrected in place and marked. Where a rule is
+specification rather than behaviour, it says so — per CLAUDE.md's
+no-fake-completion rule, a binding requirement and an implemented control
+are different things.
+
+Section numbering is `J4I.*`. Cross-references to `§S-n` mean the stage
+document; `§n` means the canonical model.
+
+### J4I.1 Two artefacts, deliberately separate (`AR-1`, `AR-2`)
+
+**`AR-1` (binding).** The per-operation resolution record lives in its own
+append-only, tenant-scoped table (`jurisdiction_resolutions`), **not** in
+`audit_log`. Three reasons, all still valid:
+
+1. **Volume.** Resolution happens on every launch, every bet, every
+   deposit, every gate checkpoint — strictly more often than
+   `bonus_grant.progressed`, which §B1.4 already flags as a per-bet-class
+   event that would dominate `audit_log`.
+2. **Access control.** `audit_log` is readable by any `audit:read` holder
+   in the tenant (migration 0014's `dual_scope_isolation`). A resolution
+   record carries the basis selected and the bases rejected, which is
+   KYC/identity-adjacent. §B1.3's rule — "`bonus:read` must never become a
+   side channel around `verification:read`" — applies here directly.
+3. **Referential integrity.** An operation row must be able to carry a
+   **foreign key** to the resolution that governed it.
+   `audit_log.target_id` is `TEXT` with no FK and is not a usable anchor.
+
+**`AR-2` (binding, NOT YET IMPLEMENTED).** Every operation that consumes a
+jurisdiction persists a reference to the resolution that governed it,
+inside the same transaction as the effecting write. The two existing
+snapshot columns (`casino_launch_sessions.jurisdiction_code`,
+`bonus_grants.jurisdiction_code`) stay and gain a
+`jurisdiction_resolution_id` FK alongside — storing only the code preserves
+the original defect in a new form: you know *which* jurisdiction, never *on
+what basis*.
+
+> **Status, stated plainly.** `AR-2` is **NOT IMPLEMENTED**
+> (`DR-4I-BE-02`), and `jurisdiction.Persist` has **zero production call
+> sites** (`DR-4I-BE-01`), so `jurisdiction_resolutions` is never written
+> outside tests. §5.1's "one row per resolution attempt, including
+> failures" is therefore **specification, not behaviour**, as of Stage 4I's
+> close. A future phase must not read this section and assume the table is
+> populated. The deferral is deliberate and reasoned: in Stage 4I every
+> player-scoped resolution is `unresolved(no_signal)`, so a per-launch row
+> would be an unbounded, player-triggerable stream of identical rows into
+> an append-only table with no delete path — the amplification hazard
+> J4I.3 forbids, for less evidentiary value.
+
+### J4I.2 What MUST be recorded
+
+Per resolution, in `jurisdiction_resolutions`: `id`, `tenant_id` (RLS key),
+`brand_id` (nullable, composite FK), `player_account_id` (nullable,
+composite FK), `operation_class` (a closed enum, never a wire string),
+`requested_by_actor_type` / `requested_by_actor_id` (matching `audit_log`'s
+existing `CHECK` vocabulary, migration 0014), `outcome`,
+`jurisdiction_code` (NULL iff outcome ≠ `resolved`, FK to
+`jurisdictions (code)`), `selected_basis`, `considered_bases`,
+`confidence_class`, `resolver_policy_version`, `registry_version`,
+`config_effective_from`, `as_of`, `created_at`.
+
+`outcome` is **three-valued, never two**. `unresolved` means "the inputs do
+not determine a jurisdiction"; `refused` means "the resolver declined to
+answer" (scope mismatch, unavailable dependency, precondition failure).
+They have different remediations and must not be collapsed. `unresolved`
+is a first-class recorded outcome, not an absent row.
+
+### J4I.3 What must NEVER be recorded — and the principle that makes the boundary non-arbitrary
+
+> **A resolution record persists the DECISION and REFERENCES to its
+> evidence. It never persists the evidence VALUES.** Reconstruction is
+> performed by re-reading the referenced evidence under *that evidence's
+> own* access control and retention rule — never by reading a copy of it
+> made into a store with different access control and a longer retention.
+
+The obvious objection, answered so nobody has to re-derive it: the resolved
+`jurisdiction_code` *is* itself recorded, and when residence is the
+selected basis it approximately discloses residence. That is unavoidable
+and correct — the jurisdiction **is** the decision, and a decision that
+cannot be reconstructed cannot be defended to a regulator. What is not
+unavoidable, and is therefore forbidden, is additionally recording the raw
+inputs and the values of bases that were considered and *not* selected.
+"A `kyc_corroboration` basis was consulted and disagreed" is a decision
+fact. "It said `UA`" is a copy of a KYC-derived personal attribute, in an
+append-only store, about a determination that did not even use it.
+
+**The prohibited list. An implementation that records any of these is a
+blocking finding.** This extends §B1.4's never-log list, which continues to
+apply in full.
+
+1. **`kyc_documents.issuing_country`'s value — never, under any
+   circumstance, including when it was a corroborating input.** Record
+   instead: the basis enum, `kyc_documents.id` as an `evidence_ref`, the
+   `document_type`, and the agreement flag.
+2. **A player's declared or verified residence country value.** Record the
+   basis, the `player_accounts.id` (already the row's own key) and the
+   capture/verify timestamp. The current value is always readable from the
+   row under that row's own RLS; a copy in an append-only multi-year store
+   is a PII duplicate that outlives every erasure request made against the
+   original (the identical argument §B1.4 makes for segment membership).
+3. **Nationality, in any form.**
+4. **Any raw IP address, geo-coordinate, city, ISP, or geolocation-vendor
+   payload as a jurisdiction-evidence field.** `audit_log.ip_address`,
+   `sessions.ip_address` and `login_attempts.ip_address` already capture
+   the request's IP under their own retention and access rules. A second
+   copy — and worse, a *derived* precise location — is a new, more
+   sensitive category of personal data created as a side effect of an audit
+   requirement.
+5. **`persons.person_key_hash`, or any cross-brand identity correlator.**
+   `jurisdiction_resolutions` is tenant-scoped and readable by tenant
+   staff; `persons` is deliberately platform-scoped (ADR 0015). Putting the
+   cross-brand correlator into a tenant-readable table hands every tenant a
+   join key for correlating the same human across other operators' brands —
+   a **cross-tenant privacy leak with no attacker required**, and the single
+   most likely accidental version of this mistake, because a future
+   implementer will want it for reporting.
+6. **Full name, date of birth, address, phone, email, document number,
+   document image, or document URL** — restated from §B1.4 because
+   "provenance" is precisely the word under which someone will propose
+   attaching them.
+7. **Vendor raw responses, verbatim.** Store the mapped enum plus the
+   vendor's opaque reference id, never the response body (ADR 0028's rule
+   for KYC vendor responses).
+8. **Provider or vendor API credentials, HMAC secrets, or per-tenant
+   geolocation-vendor keys.** A resolution record names the provider id,
+   never the credential used to reach it.
+
+> **Verified against the FINAL shipped schema** (Stage 4I closing review,
+> `information_schema.columns`, not the migration text): the table has
+> exactly 18 columns and **none** is on this list. The one free-form field,
+> `considered_bases JSONB`, is structurally constrained in Go rather than by
+> a `CHECK`: it is marshalled from `[]ConsideredBasis`, whose only two
+> fields are the basis enum and a status enum, and whose value is set only
+> inside the resolver. There is no exported path by which a caller can put
+> an evidence value into it. `registry_version` carries a licence UUID, not
+> a personal attribute. **No new KYC or PII field appears anywhere in the
+> audit trail Stage 4I produced**, and no code path in the stage reads
+> `kyc_documents.issuing_country` at all.
+
+### J4I.4 The four `audit_log` event classes, and the amplification guard
+
+`audit_log` — not `jurisdiction_resolutions` — receives an entry for, and
+only for:
+
+1. **`jurisdiction_registry.*`** — a write to `jurisdictions`, `licences`,
+   or `tenant_jurisdiction_configs`. Staff actor, before/after in metadata,
+   **reason code required**. *(IMPLEMENTED:
+   `jurisdiction_registry.jurisdiction_created` /
+   `jurisdiction_registry.licence_created`.)*
+2. **`jurisdiction_fact.corrected`** — a staff correction to a player's
+   jurisdiction-determining identity fact. Reason code required;
+   before/after recorded **as a reference and a change flag, not as the two
+   country values** (J4I.3 item 2 applies to `audit_log` at least as
+   strongly as to the resolution table). *(NOT IMPLEMENTED — no such fact
+   exists yet; blocked on HDR-J-3.)*
+3. **`jurisdiction_resolution_active.changed`** — enabling or disabling
+   resolution for a `(tenant, operation_class)` pair. Reason code required.
+   Disabling it is a control-weakening act and must be as visible as using
+   it. *(IMPLEMENTED, with before/after and a mandatory reason code —
+   SEC-4I-F5.)*
+4. **`jurisdiction.resolver_unavailable`** — resolver/dependency
+   unavailability, **aggregated**. *(NOT IMPLEMENTED.)*
+
+Per-request denials caused by an unresolved jurisdiction are **not**
+individually written to `audit_log`. They are recorded by the existing
+per-domain denial mechanisms plus the `jurisdiction_resolutions` row.
+
+**Audit amplification is an attack, not just a cost.** If every resolver
+failure wrote an `audit_log` row, an attacker — or one degraded dependency —
+who can make the resolver fail can make the platform write one immutable,
+never-deletable row per attempt. `audit_log` is append-only by trigger;
+rows cannot be pruned by the application even deliberately. A sustained
+failure therefore converts a transient outage into **permanent,
+unreclaimable growth on the platform's most retention-sensitive table**,
+and drowns genuine security events in noise during exactly the window
+someone is reading them.
+
+> **Requirement (binding).** `jurisdiction.resolver_unavailable` is emitted
+> **at most once per `(tenant, operation_class, time_bucket)`**, carrying a
+> count — never once per failed request. `qa` must include a test that N
+> failed resolutions in one bucket produce exactly one `audit_log` entry.
+> **Status: the event is NOT IMPLEMENTED, so the guard is unexercised.**
+> This is currently harmless *because* nothing emits the event; it becomes
+> load-bearing the moment anything does, and the aggregation must land in
+> the same change that first emits it, never after.
+
+### J4I.5 Universal RLS rules for every tenant-owned jurisdiction table
+
+`backend` implements against this list; `qa` asserts it.
+
+- **`tenant_id UUID NOT NULL`**, plus **`ENABLE ROW LEVEL SECURITY` and
+  `FORCE ROW LEVEL SECURITY`**. FORCE is the load-bearing half: the
+  application role owns these tables and bypasses non-FORCE policies
+  entirely.
+- **No `BYPASSRLS` assumption anywhere.** The application role is
+  `NOBYPASSRLS` by construction (`deploy/init-app-role.sql`) and every
+  read/write goes through `db.Pool.WithTenant` / `WithPlayerScope` /
+  `WithPrincipalScope` / `WithoutTenant` / `WithPlatformAdmin`.
+- **Composite foreign keys, never plain ones** —
+  `(brand_id, tenant_id) → brands (id, tenant_id)` and
+  `(player_account_id, tenant_id) → player_accounts (id, tenant_id)`
+  (migration 0043's precedent). A plain `brand_id REFERENCES brands(id)`
+  does not prevent tenant A's row from naming tenant B's brand; the
+  composite FK makes cross-tenant attachment structurally impossible rather
+  than policy-dependent.
+- **Per-command policies. No `FOR ALL` policy. No DELETE policy. No UPDATE
+  policy on `jurisdiction_resolutions`.** A resolution row is the *record of
+  a decision*: an UPDATE is a rewrite of history and a DELETE removes the
+  only evidence a control ran.
+- **Append-only is enforced by a `BEFORE UPDATE OR DELETE` trigger, not
+  only by the absence of a policy** — a trigger is not bypassed by table
+  ownership, which is precisely why `audit_log_immutable` exists.
+- **Plus a `BEFORE TRUNCATE … FOR EACH STATEMENT` deny trigger, on every
+  such table without exception.** *(Corrected in the closing review —
+  SEC-4I-F8. This bullet had been read as applying only to the append-only
+  table. It does not, and the reason is mechanical: **PostgreSQL RLS does
+  not apply to TRUNCATE at all.** TRUNCATE is governed solely by the
+  TRUNCATE privilege, which the application role holds implicitly by owning
+  the tables. Every per-command policy, every tenant predicate and every
+  deliberately-absent DELETE policy on a table is therefore bypassed by one
+  statement from an ordinary tenant-scoped — or even player-scoped —
+  connection. Verified live, not inferred. A trigger is the only mechanism
+  that reaches it. Migration 0073 closed this for
+  `jurisdiction_resolution_active`.)*
+- **No player-read policy on `jurisdiction_resolutions`.** This is a
+  constraint on API design, not an oversight: the row records which basis
+  was selected and which were rejected, so a player who can read it learns
+  exactly which signal the platform trusted and which it ignored — directly
+  attack-useful for steering a future resolution. Anything player-facing is
+  a **curated server-side projection** ("your account is registered under
+  jurisdiction X" at most), never a passthrough. Note the leading
+  `app.player_account_id IS NULL` conjunct in each staff predicate is what
+  makes this real: without it a player-scoped connection, which sets *both*
+  GUCs, would satisfy a plain tenant match.
+- **Staff read is its own permission**, not implied by `audit:read`,
+  `bonus:read` or `player:read`; `considered_bases` is **projected out** for
+  a caller lacking `verification:read`, because "a KYC basis was consulted /
+  disagreed / was unavailable" are KYC-derived facts. *(Status: no staff
+  read surface for `jurisdiction_resolutions` exists yet, so this is a
+  binding constraint on whoever builds the first one — not a control in
+  force.)*
+
+### J4I.6 The platform registry, and a correction to the original ruling
+
+`jurisdictions` and `licences` are platform-scoped reference data with **no
+`tenant_id` and no RLS** — the same shape as `casino_games` (migration
+0035), and deliberately so: they are platform facts and FK targets every
+tenant-scoped transaction must be able to read. Adding RLS would break
+FK-validating reads from a tenant scope. **They stay that way.** What
+changes is only the **write** side: one platform-only permission
+(`PermJurisdictionRegistryManage`, `RolePlatformAdmin` only, following
+`PermCasinoCatalogueManage`'s precedent), enforced at the HTTP layer, with
+every write audited in the same transaction.
+
+> **Correction (closing review).** §S-3.2 additionally required `qa` to
+> assert that "a tenant-scoped transaction can `SELECT` from
+> `jurisdictions` and **cannot** `INSERT`/`UPDATE`/`DELETE`", citing
+> `assets` as precedent. **That assertion is unachievable as written, and
+> the precedent was the wrong one.** `assets` genuinely carries
+> `ENABLE`+`FORCE` RLS; `jurisdictions`, `licences` and `casino_games` carry
+> none. Verified directly: a tenant-scoped transaction **can** `INSERT` into
+> `jurisdictions` today. The two halves of §S-3.2 contradicted each other —
+> a table cannot simultaneously have no RLS and have RLS-enforced write
+> denial.
+>
+> The honest statement of the control, which `internal/jurisdiction/
+> registry_admin.go`'s own header already makes: **the permission check is
+> the entire control on the write side; there is no database backstop
+> behind it.** That is an accepted, pre-existing platform posture for
+> reference tables, not a Stage 4I regression — but it is a materially
+> weaker posture than every tenant-owned table in this platform has, and it
+> should be stated rather than assumed away. The assertions that *are*
+> achievable, and are required: a tenant-scoped transaction can `SELECT`
+> from `jurisdictions`; and no role other than `RolePlatformAdmin` holds
+> `PermJurisdictionRegistryManage` (pinned by
+> `internal/auth/jurisdiction_permission_test.go`). Tightening the database
+> posture of platform reference tables is a cross-cutting change belonging
+> to `architect`, recorded as `SEC-4I-F11`.
+
+### J4I.7 The three-layer non-forgeability mechanism
+
+A jurisdiction value is exactly one of: **(a)** a scope declaration on a
+configuration row — staff-authored by design, legitimately in a request
+body, controlled by RBAC + FK + audit; or **(b)** a resolved fact about an
+operation — **server-resolved only**. **No request body, header, query
+parameter or path segment, staff- or player-supplied, may ever carry a
+class (b) value.**
+
+- **Layer 1 — no parse path.** The field does not exist on any
+  enforcement-facing request struct, so `decodeJSON`'s
+  `DisallowUnknownFields` turns a submitted value into a **400**, not a
+  silent ignore. Removal, never keep-and-cross-validate: cross-validation
+  manufactures a third state (resolver-unavailable-but-field-present) whose
+  "just trust what the operator typed" resolution is a one-line change
+  under incident pressure with no tripwire.
+- **Layer 2 — two independent scope assertions, and a consumer implementing
+  only one has implemented neither half usefully.** The **resolver** asserts
+  the transaction's own `app.tenant_id` GUC against the tenant it is
+  resolving for; the **consumer** asserts the resolution's binding against
+  its own authenticated context before calling `Code()`/`ID()`. *(Corrected
+  in the closing review: the resolver-side half was originally absent, and
+  it is load-bearing rather than decorative, because `tenants`, `licences`
+  and `jurisdictions` carry no RLS — so a caller-supplied tenant argument
+  was the only thing standing between a transaction scoped to tenant B and
+  a fully `Resolved` answer belonging to tenant A. Where a consumer derives
+  both sides from the same values its half is defence-in-depth against
+  future refactors — valuable, but not isolation.)*
+- **Layer 3 — a non-forgeable value type.** `Resolution`'s fields are
+  unexported, there is no exported constructor and no setter, and
+  `Code()`/`ID()` return an error for any outcome other than `resolved`. No
+  caller can obtain `""` or `uuid.Nil` from a resolution and proceed as
+  though it had a real value.
+
+**Where staff legitimately need to influence jurisdiction**, the channel is
+correcting the underlying identity **fact**, through its own audited,
+reason-coded surface — never a per-call override on an enforcement path.
+Conflating the two is the actual design mistake to avoid.
+
+### J4I.8 The nine-scenario isolation contract
+
+Binding on `qa` for any jurisdiction-consuming surface. "Never data"
+throughout means: never another tenant's/brand's/player's row content,
+never a partial field, never an error message that discloses existence.
+
+| # | Scenario | Required behaviour | Must NOT happen |
+|---|---|---|---|
+| 1 | **Cross-tenant** — tenant B's *valid* staff token requests tenant A's resolution | RLS returns zero rows; the handler surfaces **404**. A tenant-A resolution is also **unusable** as an input to any tenant-B operation even if an id were guessed | 200 with data; an error whose text distinguishes "exists but forbidden" from "does not exist"; a resolution crossing a tenant boundary in-process |
+| 2 | **Cross-brand**, same tenant | Composite FK makes cross-tenant brand attachment impossible; within a tenant a brand-mismatched resolution is **refused, not silently widened**. A resolution with no brand is a tenant-level fact usable by any brand in that tenant | A brand-A resolution accepted for a brand-B operation because the tenant matched |
+| 3 | **Player-scope read** | **Zero rows.** No player-read policy exists | A "my account" endpoint passing the row through instead of projecting it |
+| 4 | **Forged jurisdiction payload** | **400** from `DisallowUnknownFields`; the server-resolved value is used regardless | The supplied value reaching any gate parameter, risk request, eligibility argument or persisted snapshot |
+| 5 | **Forged tenant payload** | Tenant from authenticated context only; the resolver performs the same `app.tenant_id` assertion `internal/assetregistry` does | A resolution produced for a tenant the caller never proved it was |
+| 6 | **Forged brand payload** | Brand derived server-side from the player account row; a body brand on an enforcement path is refused | A body brand narrowing or widening an authorization answer or a brand-scoped rule match |
+| 7 | **Stale context** | Every resolution carries `as_of` and `resolver_policy_version`; an enforcement point that *reuses* a resolution rejects one older than its operation class's configured maximum age and **fails closed**. A *frozen* per-round snapshot and a *stale* resolution are different things and must be distinguishable in the record | An unbounded-age resolution reused indefinitely. *(Which jurisdiction **governs** across a change is a Human Decision Register item and is not asserted here.)* |
+| 8 | **Conflicting sources** | Deterministic precedence from configuration; the disagreement is recorded as a per-basis **status**, values omitted; where precedence does not determine an answer the outcome is **`unresolved`**, never an arbitrary pick | A gate re-resolving or overriding; a silent "prefer the more permissive"; a silent "prefer the most recently written" |
+| 9 | **Unavailable resolver** | `refused`; the operation **fails closed** with a distinguishable *internal* reason code; `audit_log` receives an **aggregated** entry; the **player-facing** response does not distinguish it from "blocked" | Falling back to a previously-known-good answer, a cached value, a tenant default or a brand default; one `audit_log` row per failed request |
+
+> **Status of scenario 7 as of Stage 4I's close.** No staleness bound is
+> implemented anywhere, and `Resolution.AsOf()` has no consumer. That is
+> **correct today and only today**, for a precise reason: no resolution is
+> ever cached or reused. Casino resolves inside the same transaction as the
+> gate chain it feeds; Bonus resolves inside the gate transaction. Every
+> resolution is milliseconds old and used exactly once. The obligation in
+> row 7 becomes live the moment *anything* reuses a resolution across
+> transactions — a cache, `AR-2`'s FK being read back, or a session-scoped
+> reuse — and it must land in that same change, not after it.
+
+### J4I.9 The adversarial test contract
+
+Mandatory for any phase that touches jurisdiction resolution. Each case
+names what it targets so `qa` is not starting from "test forgery." A `✔`
+marks a case with executing coverage in the repository as of Stage 4I's
+close; a `—` marks a case that is **specified and not yet covered**, which
+is a disclosure, not a claim.
+
+**A. Payload forgery — the value arrives from the wire**
+
+- **A-1 ✔** Every routed enforcement surface, with a `jurisdiction_code` in
+  the body, returns **400**. *One case per routed surface, not per struct*
+  — routing, not the struct, is what a regression breaks.
+- **A-2 —** The same surfaces with the field absent: the operation proceeds
+  using the **server-resolved** jurisdiction, and the persisted snapshot
+  matches the resolver's output, not any value the test could have
+  supplied. (A-1 without A-2 would pass against a handler that ignores
+  jurisdiction entirely.) *Not currently assertable end-to-end, because
+  every player-scoped resolution is unresolved and every consuming gate
+  therefore denies; it becomes assertable with HDR-J-3.*
+- **A-3 —** A jurisdiction value supplied as an HTTP **header**
+  (`X-Jurisdiction`, `X-Forwarded-Country`, `CF-IPCountry`), a **query
+  parameter**, and a **path segment**: all ignored, resolved value
+  unchanged. Headers are the case `DisallowUnknownFields` does **not**
+  cover, and `CF-IPCountry`-shaped headers are exactly what a future geo
+  implementation would be tempted to trust.
+- **A-4 —** A jurisdiction value nested inside an otherwise-legitimate JSON
+  field (a `reason_code` or `metadata` blob) never reaches any gate.
+- **A-5 ✔ (structurally)** No path exists from a request body to the
+  casino launch path's jurisdiction: the caller-supplied field was
+  **deleted from the params struct**, so the property holds by compilation
+  rather than by assertion.
+
+**B. Context forgery — the value arrives from a manipulated identity**
+
+- **B-1 ✔** A *valid* staff token for tenant B cannot cause a resolution
+  for tenant A: refused, never data.
+- **B-2 ✔** A resolver invoked on a transaction with **no** `app.tenant_id`
+  **errors** — it does not return `unresolved`. These are different
+  outcomes with different remediations, and reporting a connection-setup
+  mistake as "no signal on file" is a silent-wrong-answer bug that becomes
+  a fail-closed denial with a misleading cause.
+- **B-3 ✔** A resolver invoked with a tenant argument disagreeing with
+  `app.tenant_id` refuses **before** reading the other tenant's registry
+  relationship, not merely eventually.
+- **B-4 —** A player token for player X cannot produce, read or consume a
+  resolution for player Y, same tenant **and** cross-tenant.
+- **B-5 ✔** A platform-scoped principal (nil tenant, ADR 0011) cannot
+  resolve at all — the attempt fails loudly rather than resolving against
+  an empty read.
+
+**C. Temporal — racing a change**
+
+All of **C-1 … C-5 —** (configuration-boundary reuse, racing a
+configuration write, a session predating a fact change, a frozen per-round
+snapshot not being confused with a stale resolution, and the stuck-round
+hazard) are **specified and uncovered**, for the same reason as scenario 7:
+nothing reuses a resolution yet, and no player-side fact exists to change.
+They are the first tests owed by whichever phase introduces reuse.
+
+**D. Provenance forgery — the value is fabricated in-process**
+
+- **D-1 ✔ (structurally)** A resolution cannot be constructed outside the
+  resolver package: unexported fields, no exported constructor, no function
+  anywhere that accepts a jurisdiction code from a caller and returns a
+  resolution carrying it.
+- **D-2 ✔** A resolution produced for one (tenant, player, brand) is
+  refused when presented to a gate running for a different one.
+- **D-3 ✔** No fallback exists: a sweep with no resolvable player
+  jurisdiction **denies**. A fallback to a tenant or platform default is a
+  Human Decision Register item, not an engineering decision, and is
+  additionally forbidden by a database `CHECK`.
+- **D-4 ✔** An empty code and an *unknown* code must never collapse to the
+  same value, because a gate that treats the collapsed value as "no rule is
+  scoped here" turns an invalid code into an ALLOW. Closed structurally —
+  the translating helper was **deleted, not wrapped**, and no caller-supplied
+  code exists to translate.
+
+**E. Oracle / feedback channels**
+
+- **E-1 ✔** The player-facing response for "jurisdiction unresolved" is
+  **byte-identical** to the one for "jurisdiction blocked" — same status,
+  same message, same body. Asserted on the serialised response, not on the
+  sentinel. Internal distinctness is preserved in full; the collapse happens
+  at the HTTP boundary only.
+- **E-2 —** The two are not distinguishable by **timing** either, to within
+  a coarse threshold. A resolver that short-circuits on one and scans on the
+  other leaks the distinction through latency even with identical bodies.
+  This is a coarse assertion, not a constant-time-crypto requirement.
+- **E-3 / E-4 —** No player-facing or staff-facing read surface for
+  `jurisdiction_resolutions` exists yet, so these are binding constraints on
+  whoever builds the first one rather than presently-testable properties.
+
+**F. Availability and fail-closed behaviour**
+
+- **F-1 ✔** Resolver unavailable ⇒ the operation denies. It does not fall
+  back to a previously-known-good answer, a cached value, a tenant default
+  or a brand default.
+- **F-2 —** N failed resolutions in one bucket produce **exactly one**
+  `audit_log` entry (J4I.4's amplification guard). Uncovered because the
+  event is unimplemented.
+- **F-3 ✔** Two concurrent operations on the **same player**, with the
+  resolver in the picture, complete without a deadlock.
+- **F-4 —** The resolver holds no advisory lock and no row lock, and
+  succeeds inside a `BEGIN … READ ONLY` transaction. **Partially covered:**
+  the strongest of the three read-only enforcement mechanisms — the
+  compile-time one, where the resolver accepts a `Query`/`QueryRow`-only
+  interface so a write inside its body would not compile — genuinely holds.
+  The other two do not exist (`DR-4I-QA-01`), and the `pg_locks` one exists
+  specifically to catch a `SELECT … FOR SHARE` that the other two both
+  permit.
+
+**G. Isolation and RLS**
+
+- **G-1 ✔** Every row of J4I.8 has at least one test, within the limits
+  disclosed above for rows 7–9.
+- **G-2 ✔** `DELETE` removes zero rows; `UPDATE` raises; `TRUNCATE` raises —
+  on **both** tables (the second table's TRUNCATE case is SEC-4I-F8).
+- **G-3 ✔** A resolver query on a bare pool connection is reported as an
+  **error**, not as `unresolved`.
+- **G-4 ✔ (restated)** A tenant-scoped transaction can `SELECT` from
+  `jurisdictions`. The original "and cannot write it" half is withdrawn as
+  unachievable — see J4I.6.
+- **G-5 ✔** A tenant-scoped role cannot manage the platform game catalogue —
+  a regression guard that matters more once a per-game jurisdiction
+  blocklist is a live denial control.
+- **G-6 —** The authoring-time precondition that would make a
+  jurisdiction-scoped rule un-authorable for a `(tenant, operation)` pair
+  not recorded as resolution-active is unimplemented (`DR-4I-RISK-01`), so
+  its assertion is owed with it.
+
+### J4I.10 Findings register — Stage 4I `security`
+
+| Id | Finding | Severity | Status |
+|---|---|---|---|
+| `SEC-4I-F1` | A client-supplied approvals count flowed unclamped into four-eyes consumption, letting a caller lower a tenant's configured N-approver threshold to 1 on a path that releases real money | HIGH | **CLOSED** — field removed; resolved server-side from policy |
+| `SEC-4I-F2` | Interim `staff_supplied` provenance label on staff-typed jurisdiction values | — (interim control) | **CLOSED** — superseded, not merely retired: the field it labelled no longer exists on any surface, and no site emits the label. The enum value is retained only so records written before removal remain distinguishable |
+| `SEC-4I-F3` | The catalogue upsert's audit record carried no before/after, so a change to a jurisdiction blocklist left no trace of what it had been — a hard prerequisite for making that blocklist a live denial control | HIGH | **CLOSED** |
+| `SEC-4I-F4` | `FOR ALL` policy on `jurisdiction_resolution_active` silently granted DELETE to every tenant-scoped transaction — an unaudited way to change a control's state | MEDIUM | **CLOSED** — per-command policies, no DELETE policy (migration 0072) |
+| `SEC-4I-F5` | Resolution-active changes recorded *what* changed but never *why* | LOW | **CLOSED** — reason code required and persisted |
+| `SEC-4I-F6` | A hand-copy of the manual-grant four-eyes logic in a test meant the production control was not what the test exercised | MEDIUM | **CLOSED** — single shared post-gate hook; test de-tautologised |
+| `SEC-4I-F7` | Same shape on the grant-activation path | MEDIUM | **CLOSED** — unexported function-typed seam, production always binds the real implementation |
+| `SEC-4I-F8` | No `BEFORE TRUNCATE` trigger on `jurisdiction_resolution_active`. RLS does not cover TRUNCATE, so every control on the table — including F4's own fix — was bypassable by one statement from any tenant- or player-scoped connection, erasing every tenant's control state unaudited | MEDIUM | **CLOSED** — migration 0073 |
+| `SEC-4I-F9` | A per-game jurisdiction blocklist entry is compared to a resolved code by **exact, case-sensitive string match**, with no validation that the entry is a real `jurisdictions.code`. A blocklist of `["mt"]` against a registry code of `MT` leaves the game *armed* but the specific block silently inert. Registry codes are also not case-normalised, so `MT` and `mt` can both exist as distinct jurisdictions | MEDIUM when reachable; **inert today** (an armed game denies every launch while all player-scoped resolutions are unresolved, so the mismatch cannot manifest) | **OPEN** — routed to `casino` + `architect`. Trigger: HDR-J-3 |
+| `SEC-4I-F10` | The resolver's licence lookup does **not** filter on `licences.status`. A suspended or expired licence would still yield `resolved` with `authoritative` confidence — a compliance fail-open. Currently unreachable: no status-transition operation is exposed and the column can only hold its default | LOW today; MEDIUM once reachable | **OPEN** — routed to `backend` + `architect`. **Hard trigger: any change introducing a licence status transition must land with a resolver-query change and a security review, in the same change** |
+| `SEC-4I-F11` | Platform reference tables (`jurisdictions`, `licences`, `casino_games`) have no database-level write control at all; the HTTP permission check is the entire control. Pre-existing platform posture, not a Stage 4I regression, but materially weaker than every tenant-owned table | LOW | **OPEN** — routed to `architect` as a cross-cutting posture question |
+
+### J4I.11 Scope of this review
+
+**In scope:** `internal/jurisdiction` in full; migrations 0071–0073; the
+jurisdiction admin HTTP surface and its route wiring; the two new
+permissions and the complete role-permission map; the consuming gates in
+`internal/casino` and `internal/bonus` **as jurisdiction consumers**; the
+RLS posture of both new tables, re-tested adversarially against a live
+database in their final state; and the audit/PII content of everything
+Stage 4I writes.
+
+**Explicitly NOT in scope:** `internal/risk`, `internal/rg`, `internal/kyc`
+and `internal/payments` beyond their jurisdiction touchpoints; the Bonus,
+casino, ledger and EOI surfaces as domains; sportsbook; retail; any UI; any
+real external provider. **No claim is made that any surface is "secure" in
+general**, and passing this review once does not make a feature secure
+later. This is a code-level and design-level review appropriate to a
+development-stage platform — **not** a penetration test and **not** a
+certification-grade audit, both of which require external, human-run
+engagements. No Human Decision Register item is decided here, and nothing
+in this section authorizes a production launch.
