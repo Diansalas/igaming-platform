@@ -12,6 +12,7 @@ package httpserver
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -307,5 +308,105 @@ func TestCasinoWebhook_UnsignedPayloadRejected(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected zero ledger_transactions rows for an unsigned callback, got %d", count)
+	}
+}
+
+// --- 7. SEC-4I-F3: casino_game.upserted audit gap fix ---
+
+// mustGetLatestAuditMetadata reads the most recent audit_log row for
+// (action, targetID) and decodes its metadata JSONB - platform-level rows
+// only (tenant_id IS NULL), matching newUpsertCasinoGameHandler's own
+// db.Pool.WithoutTenant scope.
+func mustGetLatestAuditMetadata(t *testing.T, pool *db.Pool, action, targetID string) map[string]any {
+	t.Helper()
+	var raw []byte
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT metadata FROM audit_log WHERE tenant_id IS NULL AND action = $1 AND target_id = $2
+			 ORDER BY created_at DESC LIMIT 1`,
+			action, targetID,
+		).Scan(&raw)
+	})
+	if err != nil {
+		t.Fatalf("query audit_log metadata for %s/%s: %v", action, targetID, err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatalf("unmarshal audit metadata: %v", err)
+	}
+	return metadata
+}
+
+// TestUpsertCasinoGame_AuditRecordsBeforeAfterJurisdictionBlocklist proves
+// SEC-4I-F3's fix (docs/governance/stage-4i-canonical-model.md §9.5,
+// confirmed a HARD PREREQUISITE of K-3's own remediation): the
+// casino_game.upserted audit entry now captures before/after state for
+// jurisdiction_blocklist (and the other enforcement-relevant fields),
+// where the pre-fix entry recorded only provider_id/provider_game_id/
+// status and omitted jurisdiction_blocklist entirely even though the same
+// call writes it. A brand-new game records before=nil (no prior row to
+// diff against); an update to an EXISTING game's blocklist - the exact
+// act that arms K-3's fail-closed control platform-wide - must leave a
+// reconstructable before/after diff.
+func TestUpsertCasinoGame_AuditRecordsBeforeAfterJurisdictionBlocklist(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, _ := newMockCasinoOrchestrator()
+	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
+
+	admin := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "admin-casino-audit-pw-1")
+	adminTokens := mustLoginStaff(t, srv, "", admin.Email, "admin-casino-audit-pw-1")
+
+	providerGameID := "game-" + uuid.NewString()[:8]
+	createBody := map[string]any{
+		"provider_id": "mock-casino", "provider_game_id": providerGameID,
+		"name": "Audit Test Game", "game_type": "slot",
+	}
+	resp := putJSON(t, srv, "/v1/admin/casino/games", adminTokens.AccessToken, createBody)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create game: expected 200, got %d", resp.StatusCode)
+	}
+	var created casinoGameResponse
+	decodeBody(t, resp, &created)
+
+	metadata := mustGetLatestAuditMetadata(t, pool, "casino_game.upserted", created.ID)
+	if before, ok := metadata["before"]; !ok || before != nil {
+		t.Fatalf("expected an explicit before=nil for a brand-new game, got %+v (present=%v)", before, ok)
+	}
+	after, ok := metadata["after"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected an 'after' object, got %+v", metadata["after"])
+	}
+	if bl, _ := after["jurisdiction_blocklist"].([]any); len(bl) != 0 {
+		t.Fatalf("expected an empty after jurisdiction_blocklist, got %+v", after["jurisdiction_blocklist"])
+	}
+
+	// Update: add a jurisdiction to the blocklist - the exact act that
+	// arms K-3's fail-closed control for this game platform-wide.
+	updateBody := map[string]any{
+		"provider_id": "mock-casino", "provider_game_id": providerGameID,
+		"name": "Audit Test Game", "game_type": "slot",
+		"jurisdiction_blocklist": []string{"KM-ANJ"},
+	}
+	resp2 := putJSON(t, srv, "/v1/admin/casino/games", adminTokens.AccessToken, updateBody)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("update game: expected 200, got %d", resp2.StatusCode)
+	}
+	resp2.Body.Close()
+
+	metadata2 := mustGetLatestAuditMetadata(t, pool, "casino_game.upserted", created.ID)
+	before2, ok := metadata2["before"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected a 'before' object on the update, got %+v", metadata2["before"])
+	}
+	if bl, _ := before2["jurisdiction_blocklist"].([]any); len(bl) != 0 {
+		t.Fatalf("expected the pre-update jurisdiction_blocklist to be empty, got %+v", before2["jurisdiction_blocklist"])
+	}
+	after2, ok := metadata2["after"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected an 'after' object on the update, got %+v", metadata2["after"])
+	}
+	afterBlocklist, _ := after2["jurisdiction_blocklist"].([]any)
+	if len(afterBlocklist) != 1 || afterBlocklist[0] != "KM-ANJ" {
+		t.Fatalf("expected the post-update jurisdiction_blocklist to be [KM-ANJ], got %+v", after2["jurisdiction_blocklist"])
 	}
 }

@@ -44,6 +44,27 @@ type upsertCasinoGameRequest struct {
 // RolePlatformAdmin: a tenant administering its OWN routing/availability
 // must never be able to register a brand-new title into the shared
 // catalogue, only opt into one the platform has already vetted.
+//
+// SEC-4I-F3 fix (docs/governance/stage-4i-canonical-model.md §9.5,
+// confirmed a HARD PREREQUISITE of casino's own K-3 remediation): the
+// audit record now captures before/after state for every enforcement-
+// relevant field - status, supported_assets, demo_supported, and
+// specifically jurisdiction_blocklist, which K-3 turns into a live,
+// platform-wide, single-actor, non-four-eyes denial control the moment
+// this handler adds a code to it (every launch of that game then denies
+// for every tenant, canonical-model §9.5). A control with that blast
+// radius that leaves no diff in its own audit trail is not operable -
+// before this fix the audit entry recorded only provider_id/
+// provider_game_id/status, with no way to reconstruct what changed or
+// who last touched jurisdiction_blocklist. Follows the before/after
+// pattern already established at
+// internal/httpserver/withdrawal_policy_handlers.go's
+// newDeleteWithdrawalPolicyHandler (a DELETE...RETURNING before-image);
+// here the read happens via GetGameByProviderRef immediately before the
+// upsert, in the SAME transaction, so the before-image can never observe
+// a different row than the one the upsert is about to replace. A brand-
+// new game (no prior row) records before=nil, distinguishable from an
+// update in the metadata shape itself.
 func newUpsertCasinoGameHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -79,7 +100,18 @@ func newUpsertCasinoGameHandler(deps Deps) http.HandlerFunc {
 		subjectID, _ := uuid.Parse(tc.Subject)
 		var game casino.Game
 		err = deps.DB.WithoutTenant(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
-			var err error
+			// Before-image, read in the SAME transaction immediately ahead
+			// of the write it precedes (SEC-4I-F3) - nil (not an empty
+			// struct) for a brand-new title, so the metadata shape itself
+			// distinguishes "created" from "updated".
+			var before *casino.Game
+			existing, err := casino.GetGameByProviderRef(ctx, tx, req.ProviderID, req.ProviderGameID)
+			if err == nil {
+				before = &existing
+			} else if !errors.Is(err, casino.ErrGameNotFound) {
+				return err
+			}
+
 			game, err = casino.UpsertGame(ctx, tx, casino.UpsertGameInput{
 				ProviderID: req.ProviderID, ProviderGameID: req.ProviderGameID, Name: req.Name, GameType: req.GameType,
 				RTPVariant: req.RTPVariant, Volatility: req.Volatility, FeatureFlags: req.FeatureFlags,
@@ -89,11 +121,26 @@ func newUpsertCasinoGameHandler(deps Deps) http.HandlerFunc {
 			if err != nil {
 				return err
 			}
+			metadata := map[string]any{
+				"provider_id": req.ProviderID, "provider_game_id": req.ProviderGameID,
+				"after": map[string]any{
+					"status": string(game.Status), "supported_assets": game.SupportedAssets,
+					"demo_supported": game.DemoSupported, "jurisdiction_blocklist": game.JurisdictionBlocklist,
+				},
+			}
+			if before != nil {
+				metadata["before"] = map[string]any{
+					"status": string(before.Status), "supported_assets": before.SupportedAssets,
+					"demo_supported": before.DemoSupported, "jurisdiction_blocklist": before.JurisdictionBlocklist,
+				}
+			} else {
+				metadata["before"] = nil
+			}
 			return audit.Record(ctx, tx, audit.Entry{
 				ActorType: audit.ActorStaff, ActorID: subjectID,
 				Action: "casino_game.upserted", TargetType: "casino_game", TargetID: game.ID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
-				Metadata: map[string]any{"provider_id": req.ProviderID, "provider_game_id": req.ProviderGameID, "status": string(status)},
+				Metadata: metadata,
 			})
 		})
 		if err != nil {
