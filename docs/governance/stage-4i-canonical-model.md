@@ -8,9 +8,16 @@ where they agree, this document states the answer once and cross-references
 the prior document for the reasoning rather than restating it.
 
 Implementation status label, per CLAUDE.md's no-fake-completion rule:
-**`NOT IMPLEMENTED`.** No resolver, no `jurisdiction_resolutions` table, no
-registry write surface, and no player-side jurisdiction signal exists at
-this commit. This document is a specification, not a claim of capability.
+**`PARTIALLY IMPLEMENTED`** — updated by `architect` at Stage 4I's closing
+certification phase. **§13 is the current status record**; read it before
+relying on any implementation claim in this document. As originally
+written (Phase 5) this document was a specification with nothing
+implementing it; the resolver, the `jurisdiction_resolutions` record and
+the registry write surface now exist, but **no player-side jurisdiction
+signal does** (HDR-J-3), so every player-scoped resolution returns
+`unresolved(no_signal)` and §11.3's honest-outcome statement stands
+unchanged. This document remains a specification; §13 records how much of
+it is real.
 
 **Chain position.** `architect` reconnaissance (Phase 1, `2bab29f`) →
 `identity-compliance` (Phase 2, `c91fe40`) → `risk` (Phase 3, `61c020e`) →
@@ -1539,15 +1546,300 @@ from-code inventory. Where this document **is** explicit, it governs.
 
 ---
 
-**Labelled status, per CLAUDE.md's no-fake-completion rule:**
+**Labelled status AS THIS DOCUMENT WAS WRITTEN (Phase 5, `22ac91a`), per
+CLAUDE.md's no-fake-completion rule:**
 **`NOT IMPLEMENTED`.** No resolver, no `jurisdiction_resolutions` table, no
 registry write surface, no player-side jurisdiction signal, and no
 jurisdiction value populating any of the platform's seventeen
-jurisdiction-bearing schema elements exists at this commit. The
+jurisdiction-bearing schema elements existed at that commit. The
 `jurisdiction_code` fields at `internal/httpserver/bonus_handlers.go:399`
-/ `:633` and `bonus_domain_ops_handlers.go:497` / `:719` are unchanged and
+/ `:633` and `bonus_domain_ops_handlers.go:497` / `:719` were unchanged and
 still client-supplied; `internal/casino/orchestrator.go:138`'s blocklist
-check is unchanged and still fail-open; `bonus.resolveJurisdictionID` still
-collapses empty and unknown codes; and SEC-4I-F1, SEC-4I-F2 and SEC-4I-F3
-are all still open. This document is the specification those changes are
+check was unchanged and still fail-open; `bonus.resolveJurisdictionID` still
+collapsed empty and unknown codes; and SEC-4I-F1, SEC-4I-F2 and SEC-4I-F3
+were all still open. This document was the specification those changes are
 implemented against, and nothing more.
+
+**For the status after implementation, see §13 below — that section, not
+this paragraph, is the current record.**
+
+---
+
+## 13. Final cross-domain certification (`architect`, Stage 4I closing phase)
+
+**Status of this section: `architect`'s architectural sign-off on Stage 4I
+as a whole, written after reading the entire stage's diff and every phase
+document as one integrated artefact.** It is the counterpart to
+`docs/governance/wave-3-report.md` §9's closing role for Stage 4H-B1 Wave 3.
+It does **not** close the stage — the final independent security/compliance
+review and the orchestrator's Stage 4I Final Gate Report follow it — and it
+decides no Human Decision Register item.
+
+### 13.1 Labelled status after implementation
+
+**`PARTIALLY IMPLEMENTED`**, and deliberately so. Specifically:
+
+| Artefact | Status |
+|---|---|
+| `internal/jurisdiction` resolver, non-forgeable `Resolution`, 3-outcome + reason contract, closed `basis` enum | **IMPLEMENTED** |
+| `jurisdiction_resolutions` table, RLS + append-only + TRUNCATE-deny + both CHECK constraints (migration `0071`) | **IMPLEMENTED** |
+| `jurisdiction_resolution_active`, per-command policies, no DELETE (`0071` + `0072`) | **IMPLEMENTED** |
+| `jurisdiction_precedence_configs` **shape** (`0071`) | **IMPLEMENTED** (shape); **rows BLOCKED on HDR-J-2** |
+| `jurisdictions` / `licences` registry write surface + platform-only permission | **IMPLEMENTED** |
+| `tenant_licence` basis, bounded to tenant-subject operations by DB `CHECK` **and** by a resolver-side `app.tenant_id` assertion (§13.3) | **IMPLEMENTED** |
+| K-3 casino blocklist remediation (K3-1…K3-6 + the `evaluateAndAuditRisk` metadata item) | **IMPLEMENTED** |
+| JV-2 field removal (4 structs / 5 surfaces) + B-11 (`resolveJurisdictionID` deleted, not wrapped) | **IMPLEMENTED** |
+| SEC-4I-F1 / F2 / F3 / F4 / F5 / F6 / F7 | **CLOSED** |
+| Any player-side jurisdiction signal | **NOT IMPLEMENTED — BLOCKED on HDR-J-3** |
+| `Persist` wired into any production path; AR-2's `jurisdiction_resolution_id` FK | **NOT IMPLEMENTED** — §13.6, `DR-4I-BE-01` / `DR-4I-BE-02` |
+| B-7 (R-2b's `risk.CreateRule` precondition) | **NOT IMPLEMENTED** — §13.6, `DR-4I-RISK-01` |
+| §6.4 enforcement mechanisms 2 and 3 (`READ ONLY` test, `pg_locks` test) | **NOT IMPLEMENTED** — §13.6, `DR-4I-QA-01` |
+| MROC composition machinery | **NOT BUILT, deliberately** (§7.4) — non-foreclosure requirements verified satisfied |
+
+§11.3's honest outcome statement holds **unchanged and unqualified**: every
+player-scoped resolution returns `unresolved(no_signal)`; Bonus is not
+unblocked; Risk's behaviour is unchanged; casino's behaviour is unchanged
+for every game with an empty blocklist. Stage 4I delivered the *foundation*
+for a determination, not the determination.
+
+### 13.2 Implementation fidelity — verified, not assumed
+
+Each of the six Phase 5 adjudications was checked against the code that
+followed, for architectural faithfulness rather than merely for a passing
+build. **Five landed faithfully; one needed a correction (§13.3).**
+
+1. **J-4 mechanism (MROC).** Correctly *not* built. The only Stage 4I
+   obligation — no operation-keyed `UNIQUE` constraint, no speculative
+   composition column — is satisfied by `0071`, and `0071`'s own comment
+   states the reason, so a future tidier cannot add one innocently.
+2. **Doc 34 §5.3 placement.** Landed in Phase 5 as a precondition. Casino's
+   K-3 preserved the property: `Resolve` holds no lock, and the total order
+   jurisdiction (no lock) → Risk advisory lock → EOI row lock is intact.
+3. **Resolved-value shape.** Faithful. `Resolution` has unexported fields,
+   no exported constructor, and `Code()`/`ID()` are genuinely unreachable
+   for a non-`resolved` outcome. §2.5's three-place structural closure of
+   the unresolved/unknown collapse is all three places: `refused(
+   registry_unknown_code)` is reachable in the type, the FK to
+   `jurisdictions (code)` plus `CHECK ((jurisdiction_code IS NOT NULL) =
+   (outcome = 'resolved'))` closes persistence, and
+   `bonus.resolveJurisdictionID` is **deleted**, not wrapped, exactly as
+   instructed.
+4. **K-3 spec.** Faithful to §9.2's *corrected* contract, including the
+   part prior phases got wrong: armed per game with a non-empty blocklist,
+   fail-closed within it. K3-2's distinguishable internal code, K3-3's one-
+   resolution-three-consumers, K3-4's explicit demo ruling, K3-5's return
+   shape and K3-6's byte-identical player-facing collapse are each present
+   and each separately tested. §9.5's hard prerequisite (SEC-4I-F3) landed
+   **before** K-3, in the required order.
+5. **C-4 removal.** Faithful, including §8.3's sequencing rule (removal and
+   resolver call site in the same change, per handler) and §8.2's "four
+   structs, five surfaces" precision.
+6. **Caching (CA-1).** Confirmed: no cache was built, and §9.4's
+   availability property holds — the resolver's inputs are Postgres rows
+   only, with no external network dependency.
+
+### 13.3 The one finding this phase had to correct — `DR-4I-ARCH-01`, FIXED
+
+**§4.4 Layer 2's resolver-side half was never implemented**, and it was
+load-bearing rather than decorative. Every table `resolveTenantLicence`
+reads — `tenants`, `licences`, `jurisdictions` — carries **no row-level
+security at all**. So `Resolve` returned a fully `Resolved` Resolution
+carrying tenant A's jurisdiction to a transaction that had only ever proven
+tenant B, on the strength of a caller-supplied `Params.TenantID`. Confirmed
+live by mutation test, not by inspection.
+
+`Resolution.AssertScope` — which casino and bonus both correctly call —
+cannot substitute for it: it compares the resolution's binding against the
+caller's own arguments, which are the same arguments `Resolve` was given.
+Both consuming domains' comments honestly say so. Only a comparison against
+the **connection's proven scope** is non-tautological.
+
+**No single earlier phase would have caught this**, which is precisely why
+the stage has this closing pass: `security`'s control model predates the
+code; `backend` implemented B-3 without it; `casino` and `bonus-engine`
+each added the other half; and `qa`'s concurrency test observed the
+underlying no-RLS fact but only as a lock-ordering safety property.
+
+**Fixed this phase** (`assertTenantScope` in `internal/jurisdiction`, five
+new tests including a real-database cross-tenant case with an
+anti-inertness control). **Two corrections to this document follow from
+it and are binding:**
+
+- **§6.1's stated safety net — "a resolver query on a bare pool connection
+  reads zero rows under FORCE RLS" — is FALSE for the `tenant_licence`
+  path**, because those three tables have no RLS. The required behaviour
+  ("it must error, not return `unresolved`") is now real, but it is real
+  because of an explicit assertion, not because of RLS. Any future basis
+  that reads a non-RLS table inherits this obligation explicitly.
+- **§4.4 Layer 2 is two independent checks, and a consumer implementing
+  only `AssertScope` has implemented neither half usefully.** The resolver
+  asserts against the connection; the consumer asserts against its own
+  authenticated context. Where a consumer derives both from the same
+  values, its half is defence-in-depth against future refactors — valuable,
+  but not isolation.
+
+### 13.4 The Bonus blast radius — CONFIRMED CORRECT AND INTENDED, with a precision
+
+`bonus-engine` disclosed that deleting `resolveJurisdictionID`'s fail-open
+(per §2.5's explicit "deleted, not wrapped" instruction) had a larger effect
+than the dispatch anticipated, because `AssetAuthorization.CheckEligibility`
+denies **unconditionally** on an unresolved jurisdiction — unlike casino's
+blocklist, which is armed only per game — so essentially all Bonus grant
+activation, conversion and route-to-cash now deny at the gate.
+
+**`architect`'s ruling: this is the CORRECT, INTENDED and pre-stated
+consequence of this document's own model. It is not an over-broad side
+effect and it must NOT be narrowed.** Three independent grounds:
+
+1. **§4.1 rules it explicitly and by design.** AssetAuthorization layer 6
+   keeps unconditional fail-closed, with the reason given: layer 6 is
+   *structurally* jurisdiction-keyed, so with no jurisdiction there is no
+   lookup to perform — the question is unanswerable, not answerable-as-yes.
+   §4.1 then states the consequence verbatim: *"Bonus stays blocked in
+   Stage 4I."*
+2. **§11.3 states it again, pre-emptively, as the headline consequence**:
+   "Stage 4I does not unblock the Bonus deposit sweep, the cashback
+   scheduler, or manual grant issuance. Anyone reading 'jurisdiction
+   resolution foundation' as 'Bonus unblocked' is reading it wrong."
+3. **Narrowing it would be indefensible.** The only mechanism that could
+   narrow it is falling back to the tenant's jurisdiction for a player —
+   which **is** HDR-J-1, an unanswered human decision, explicitly
+   forbidden to the resolver (§3.1, §3.2) and enforced by a database
+   `CHECK`. An engineering narrowing would silently answer a human
+   decision in the affirmative.
+
+**One precision worth recording, because "blast radius" overstates the
+behavioural delta.** The set of code paths that now deny is indeed broad,
+but the set whose *production behaviour changed* is exactly what §8.3
+predicted:
+
+- The **five admin surfaces** genuinely changed: a staff member could
+  previously type a `jurisdiction_code` into a request body and pass the
+  gate; now they cannot. That is JV-2's entire point and §8.3 required it
+  to be sequenced deliberately and visibly, which it was.
+- The **deposit sweep and cashback scheduler did not change**: both already
+  passed `""`, which the deleted helper already collapsed to `uuid.Nil`,
+  which layer 6 already denied. `bonus-engine`'s own commit message says
+  so.
+- **`ConvertGrant` has no production caller at all** outside the package —
+  no HTTP handler, no scheduler — so its denial is presently moot.
+
+So: the *state* is "essentially all Bonus checkpoints deny," the *change*
+is "the staff-supplied side channel is gone," and both were specified in
+advance. §11.3 needs no amendment.
+
+### 13.5 The two test seams — CERTIFIED, with a convention and an expiry
+
+SEC-4I-F6 (`security`) and SEC-4I-F7 (`qa`) each closed a hand-copy of
+production logic that existed because Stage 4I made a fail-closed gate deny
+unconditionally, putting the post-gate logic out of reach of the tests that
+must exercise it. `architect` reviewed both as production-code patterns,
+not merely as test fixes.
+
+**Both are certified sound, minimal, and non-load-bearing in production:**
+
+- **SEC-4I-F6 (`manualGrantApprovalPostGateHook`) is not a seam at all** —
+  it is an ordinary extraction of a closure into a named function that both
+  the production caller and the test call. No production signature changed,
+  no injection point exists, nothing is parameterized. This needs no
+  special sanction; it is just DRY.
+- **SEC-4I-F7 (`activateGrantFunc`) is a genuine seam, and is correctly
+  built.** The type is **unexported**; the exported entry points keep their
+  exact signatures and **always** bind `activateGrantProd`; the only
+  substituting implementation lives in a `_test.go` file and is therefore
+  never compiled into the production binary. A production bypass would
+  require someone writing a new bypass in production code, which this
+  pattern makes no easier than it was before.
+
+**Ruling — this is a sanctioned platform convention, with a named shape and
+a named expiry.** It is recorded here rather than left as three ad-hoc
+precedents, because Stage 4I created a repo-wide condition that will keep
+producing the need until HDR-J-3 is answered.
+
+> **Convention (`architect`, binding):** where a fail-closed gate denies
+> unconditionally for reasons outside the code under test, the test reaches
+> the post-gate logic by **injecting an unexported function-typed seam into
+> a shared, unexported implementation that the production entry point also
+> calls** — never by hand-copying the production body. The seam type is
+> unexported; the exported entry point's signature is unchanged; production
+> always binds the real implementation; the substituting implementation
+> lives only in `_test.go`. A hand-copy is a defect, not an alternative:
+> all three instances this stage found were hiding a real control or a
+> recorded financial invariant behind a copy nothing bound to the original.
+
+> **Expiry (binding, so this does not calcify):** these seams exist because
+> a *temporary* condition makes the real gate chain unreachable. **When
+> HDR-J-1/HDR-J-3 are answered and player-scoped activation can resolve,
+> every use of `activateGrantForceAdapter` must be re-examined and
+> re-pointed at the real gate chain wherever the test's own subject does
+> not require the bypass.** They are not a permanent licence to test around
+> T.1. Tracked as `DR-4I-BONUS-02`.
+
+`security`'s deliberate HTTP-test tripwire (asserting *which* 403 is
+returned, so the test fails once the four-eyes branch becomes reachable) is
+the right mechanism for that expiry and should be imitated, not removed.
+
+### 13.6 Carried debt — named, owned, and triggered
+
+None of the following blocks Stage 4I's architectural certification. Each is
+named so it cannot be lost, following this session's `DR-*` convention.
+
+| Id | Item | Owner | Trigger / note |
+|---|---|---|---|
+| **`DR-4I-ARCH-01`** | Resolver-side §4.4 Layer 2 assertion | `architect` | **CLOSED this phase** (§13.3) |
+| **`DR-4I-BONUS-01`** | Last hand-copied force helpers (deposit bonus / cashback) | `architect` | **CLOSED this phase** (§13.5 convention applied) |
+| **`DR-4I-BE-01`** | **`jurisdiction.Persist` has ZERO production call sites.** `jurisdiction_resolutions` — §11.1's "single highest-value artefact of Stage 4I" — is never written outside tests. §5.1's "one row per resolution attempt, including failures" is therefore specification, not behaviour | `backend` + each consuming domain | **Deliberately carried, with reasons.** In Stage 4I every player-scoped resolution is `unresolved(no_signal)`, so a per-launch row would be an unbounded, player-triggerable stream of identical rows into an append-only table with no application delete path and no pruning — the same amplification hazard §5.2 forbids for `audit_log`, for less evidentiary value. **Wire it when a resolution can carry a real basis** (HDR-J-3), or earlier if a consumer needs AR-2's reference. **A future phase must not read §5.1 and assume the table is populated.** |
+| **`DR-4I-BE-02`** | **AR-2's `jurisdiction_resolution_id` FK** on `casino_launch_sessions` / `bonus_grants` is not built (§1 concept 6) | `casino`, `bonus-engine` | Lands with `DR-4I-BE-01`; meaningless before it. Note the §6.4 condition it discharges is presently moot: casino resolves *inside* the guarded transaction, so the TOCTOU window the FK was to make visible does not currently exist |
+| **`DR-4I-RISK-01`** | **B-7 / R-2b not implemented.** `jurisdiction.IsActive` exists, is tested and has **zero production callers**; `risk.CreateRule` still accepts a jurisdiction-scoped rule for a `(tenant, operation)` pair not recorded as resolution-active | `risk`, after `security` review | `risk` had no implementation phase in this stage's sequence. Until B-7 lands, RISK §2.4a's fixed activation order plus §2.2's enumeration remain the fallback — weaker but, per §4.2, acceptable and not a resolver blocker |
+| **`DR-4I-QA-01`** | **§6.4's enforcement mechanisms 2 and 3 are absent**: no test resolves inside `BEGIN … READ ONLY`, and no test queries `pg_locks` after a resolution. Mechanism 1 (compile-time, via `ReadOnlyQuerier`) is the only one in force | `qa` | Mechanism 1 is the strongest of the three and genuinely holds, so H-2 is not unguarded. But mechanism 3 exists specifically to catch a `SELECT … FOR SHARE` that mechanisms 1 and 2 both permit, and nothing catches that today |
+| **`DR-4I-QA-02`** | `DepositBonusParams.MaxQualifying`'s clamp branch is **untested** — removing the clamp fails no test in the repository. A monetary-boundary branch with no coverage | `qa`, with `ledger-finance` input | Pre-existing, found while mutation-testing `DR-4I-BONUS-01`; not introduced by Stage 4I |
+| **`DR-4I-SEC-01`** | **§12.3 item 5 re-deferred**: folding SEC §S-2 / §S-3 / §S-6 into `docs/security/security-architecture.md` as a numbered section | `security` | **Explicitly re-deferred, not dropped.** Routed to the Stage 4I final independent security/compliance review, which owns that document and is reading this whole stage anyway. `architect` deliberately does not pre-empt it |
+| **`DR-4I-BONUS-02`** | Test-seam expiry (§13.5) | `bonus-engine`, `qa` | Triggered by HDR-J-1/HDR-J-3 being answered |
+
+§12.3's other three owed corrections are **DONE**: item 1 (doc 34 §5.3) in
+Phase 5; item 2 (`ownership.md`'s jurisdiction row) by `backend`; items 3
+(doc 15 / C-7) and 4 (ADR 0037 open question 7) by `architect` in this
+phase.
+
+### 13.7 Cross-document tensions — all closed
+
+The six Phase 5 tensions remain closed and were re-verified against the
+code (§13.2). **One new cross-document tension arose after Phase 5 and is
+adjudicated here:**
+
+**`payments`' C-3(d) determination — ACCEPTED.** §4.5 forwarded RISK §1.4's
+characterization that C-3(d) is "two defects, not one." `payments`'
+determination is that only one survives. **`architect` accepts it**, and
+amends §4.5 accordingly: `AdapterCapability.SupportedCountries`' empty-means-
+permissive default is **not** a jurisdiction-gating defect but a correctly-
+designed, ADR-0022-original, currently-inert payment-rail *capability*
+default; the **code-space confusion** (ISO-3166 country vs.
+`jurisdictions.code`) is the real and surviving hazard, and remains binding
+per §2.4 on anyone building routing dimension 2.
+
+The reasoning is sound and was checked independently: `SupportedCountries`
+has exactly one consumer — a narrowing invariant in `WriteCapability` — and
+`RouteProvider` never reads it, so there is no gate whose absent-value
+behaviour could fail open. §4.0's invariant does not even reach it, because
+it is not a jurisdiction-dependent policy. §4.5's own remaining
+requirements are untouched and confirmed honoured: routing dimension 2 is
+still `TODO(jurisdiction)`, and `withdrawal_policies`' `CHECK
+(jurisdiction_code IS NULL)` was not lifted.
+
+### 13.8 Verdict
+
+**Stage 4I is ARCHITECTURALLY SOUND and CERTIFIED by `architect`**, subject
+to the final independent security/compliance review that follows this
+phase. The stage delivered what §11.3 said it would and claimed nothing it
+did not: the platform has stopped having four mutually incompatible,
+mostly-silent answers to "jurisdiction is absent" and now has one explicit,
+recorded, non-forgeable, auditable, fail-closed answer — with the registry
+writable, the interface fixed, the RLS contract enforced, the staff-supplied
+side channel removed, the K-3 fail-open closed, and one genuine
+cross-tenant defect found and fixed in this closing pass.
+
+It is **not** a jurisdiction capability. Per CLAUDE.md: infrastructure for a
+determination and the determination itself are different things, and so are
+software capability and regulatory approval. Real jurisdiction resolution
+remains blocked on **HDR-J-3** above all, and no engineering work in any
+later stage may route around it.
