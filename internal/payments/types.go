@@ -185,10 +185,35 @@ type AdapterCapability struct {
 	// 'local_method:<name>', 'crypto_rail', ...) - never a fixed enum the
 	// orchestrator hardcodes (docs/decisions/0022 §2).
 	SupportedPaymentMethods []string
-	// SupportedCountries is ISO country codes. Empty means "not
+	// SupportedCountries is ISO country codes - an adapter-declared
+	// PAYMENT-RAIL capability fact (e.g. "this local method only settles
+	// in Brazil"), never a jurisdiction/regulatory value. Empty means "not
 	// country-restricted" - never "all countries" by silent default; that
 	// distinction is preserved verbatim through routing and capability
 	// writes (docs/decisions/0022 §2).
+	//
+	// Stage 4I (docs/governance/stage-4i-payments-model.md) examined this
+	// field against AssetAuthorization/Risk/Casino's jurisdiction-gating
+	// absent-value contracts (reconnaissance C-3(d)) and concluded it is
+	// NOT a specialization of them: it lives in ISO-3166 country-code
+	// space, never `jurisdictions.code` space, and today - RouteProvider's
+	// dimension 2 remains TODO(jurisdiction) below - it is consumed ONLY
+	// by WriteCapability's narrow-only invariant, never by a live
+	// routing or regulatory decision. Two rules bind whoever eventually
+	// builds routing dimension 2 or any country->jurisdiction mapping:
+	//  1. A SupportedCountries value is NEVER substituted for a
+	//     jurisdictions.code value, or vice versa, without an explicit,
+	//     stored, audited mapping reviewed by `security` (canonical model
+	//     §4.5) - conflating the two code spaces is exactly the
+	//     concept-conflation the platform's jurisdiction model forbids.
+	//  2. This field's "empty = unrestricted" CAPABILITY default must
+	//     NEVER be reused as the absent-value CONTRACT for a future
+	//     jurisdiction/regulatory gate. That gate resolves the operation's
+	//     jurisdiction via internal/jurisdiction.Resolve and independently
+	//     satisfies the platform-wide invariant - "an absent jurisdiction
+	//     must never let a jurisdiction-dependent policy be evaluated as
+	//     if it did not exist" - rather than inheriting permissiveness
+	//     from a provider's own capability declaration.
 	SupportedCountries     []string
 	SupportsDeposit        bool
 	SupportsWithdrawal     bool

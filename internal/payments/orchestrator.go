@@ -100,6 +100,15 @@ type RoutingRequest struct {
 	// licensed/permitted to serve that country") requires
 	// tenant_jurisdiction_configs integration (Stage 1) and is out of
 	// scope for Stage 3B, per the task's own explicit scope note.
+	//
+	// Stage 4I note (docs/governance/stage-4i-payments-model.md): when
+	// this dimension is finally built, it is a regulatory gate resolved
+	// via internal/jurisdiction.Resolve against the platform's own
+	// jurisdiction/licence model - it is a SEPARATE mechanism from
+	// AdapterCapability.SupportedCountries (a provider's own declared
+	// market/rail coverage, ISO-3166 code space) and must not reuse that
+	// field's "empty = unrestricted" default as its own absent-value
+	// contract; see the longer note on SupportedCountries in types.go.
 	ExcludeProviderIDs []string
 }
 
