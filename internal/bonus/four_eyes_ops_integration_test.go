@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,6 +79,44 @@ func fileAndDoublyApprove(t *testing.T, pool *db.Pool, tenantID uuid.UUID, opera
 		t.Fatalf("file+doubly-approve %s: %v", operation, err)
 	}
 	return requestID
+}
+
+// forceActivateManualGrantWithApprovalForTest mirrors
+// ActivateManualGrantWithApproval's own four-eyes-consume-then-EOI-consume
+// PostGateHook EXACTLY (same resolveRequiredApprovals/
+// manualGrantIssuePayloadMatch/ConsumeApprovedChangeRequest/
+// economicop.ConsumeRootBudget calls), but reaches the effecting write via
+// forceActivateGrantForTestErr instead of the full ActivateGrant/T.1 gate
+// chain (see that helper's own doc comment, lifecycle_integration_test.go,
+// for why: Stage 4I's jurisdiction resolver now unconditionally denies
+// T.1's AssetAuthorization layer for every player-scoped operation, which
+// would otherwise mask - never actually exercise - the four-eyes consume
+// this file's own tests were written to prove). This is the ONLY
+// difference from calling ActivateManualGrantWithApproval directly.
+func forceActivateManualGrantWithApprovalForTest(ctx context.Context, tx pgx.Tx, tenantID, grantID, parentOperationID, actorID uuid.UUID, amount *big.Int) (Grant, error) {
+	g, err := GetGrantByID(ctx, tx, grantID)
+	if err != nil {
+		return Grant{}, err
+	}
+	requiredApprovals, err := resolveRequiredApprovals(ctx, tx, tenantID, ChangeOpManualGrantIssue, &g.BrandID, &g.AssetCode)
+	if err != nil {
+		return Grant{}, err
+	}
+	payloadMatch := manualGrantIssuePayloadMatch(g.PlayerAccountID, g.OfferVersionID, g.AssetCode, amount)
+	playerAccountID := g.PlayerAccountID
+	postGateHook := func(hookCtx context.Context, hookTx pgx.Tx) error {
+		if _, err := ConsumeApprovedChangeRequest(hookCtx, hookTx, tenantID, ChangeOpManualGrantIssue, grantID, payloadMatch, requiredApprovals, actorID); err != nil {
+			return err
+		}
+		op, getErr := economicop.GetByID(hookCtx, hookTx, parentOperationID)
+		if getErr != nil {
+			return getErr
+		}
+		return economicop.ConsumeRootBudget(hookCtx, hookTx, tenantID, op.RootOperationID, economicop.OperationBonusManualGrant, playerAccountID, amount)
+	}
+	return forceActivateGrantForTestErr(ctx, tx, tenantID, grantID, ActivateGrantParams{
+		ActorType: ActorStaff, ActorID: actorID, Amount: amount, PostGateHook: postGateHook,
+	})
 }
 
 // --- campaign_activate ---
@@ -256,7 +295,7 @@ func TestManualGrantWithApproval_RefusedWithoutApproval(t *testing.T) {
 		g := newTestOfferGrant(f, co, "manual-grant-refused")
 		g.CreatedByActorType = ActorStaff
 		var issueErr error
-		grant, _, issueErr = IssueManualGrantRequest(ctx, tx, g, parentOpID, f.jurisdictionCode, f.staffID)
+		grant, _, issueErr = IssueManualGrantRequest(ctx, tx, g, parentOpID, f.staffID)
 		return issueErr
 	})
 	if err != nil {
@@ -267,9 +306,15 @@ func TestManualGrantWithApproval_RefusedWithoutApproval(t *testing.T) {
 	}
 
 	// No bonus_change_requests row filed/approved at all - activation
-	// must be refused.
+	// must be refused. Uses forceActivateManualGrantWithApprovalForTest
+	// (see its own doc comment above) rather than
+	// ActivateManualGrantWithApproval directly: Stage 4I's jurisdiction
+	// resolver now unconditionally denies T.1's AssetAuthorization layer
+	// for every player-scoped operation (this file's own tests are not
+	// about that gate), which would otherwise mask the four-eyes refusal
+	// this test exists to prove.
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := ActivateManualGrantWithApproval(ctx, tx, f.tenantID, grant.ID, parentOpID, f.jurisdictionCode, f.staffID, amount)
+		_, err := forceActivateManualGrantWithApprovalForTest(ctx, tx, f.tenantID, grant.ID, parentOpID, f.staffID, amount)
 		return err
 	})
 	if !errors.Is(err, ErrChangeRequestNotApproved) {
@@ -294,7 +339,7 @@ func TestManualGrantWithApproval_SucceedsWithApproval(t *testing.T) {
 		g := newTestOfferGrant(f, co, "manual-grant-approved")
 		g.CreatedByActorType = ActorStaff
 		var issueErr error
-		grant, _, issueErr = IssueManualGrantRequest(ctx, tx, g, parentOpID, f.jurisdictionCode, f.staffID)
+		grant, _, issueErr = IssueManualGrantRequest(ctx, tx, g, parentOpID, f.staffID)
 		return issueErr
 	})
 	if err != nil {
@@ -308,18 +353,19 @@ func TestManualGrantWithApproval_SucceedsWithApproval(t *testing.T) {
 	payloadMatch := manualGrantIssuePayloadMatch(grant.PlayerAccountID, grant.OfferVersionID, grant.AssetCode, amount)
 	fileAndDoublyApprove(t, pool, f.tenantID, ChangeOpManualGrantIssue, "bonus_grants", grant.ID, payloadMatch, f.staffID, f.staff2ID, staff3)
 
+	// Uses forceActivateManualGrantWithApprovalForTest (see its own doc
+	// comment above): this test's subject is the four-eyes consume, which
+	// Stage 4I's now-unconditional jurisdiction denial at T.1 would
+	// otherwise mask entirely (activation would deny at
+	// AssetAuthorization before the four-eyes PostGateHook ever ran).
 	var activated Grant
-	var outcome GateOutcome
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var actErr error
-		activated, outcome, actErr = ActivateManualGrantWithApproval(ctx, tx, f.tenantID, grant.ID, parentOpID, f.jurisdictionCode, f.staffID, amount)
+		activated, actErr = forceActivateManualGrantWithApprovalForTest(ctx, tx, f.tenantID, grant.ID, parentOpID, f.staffID, amount)
 		return actErr
 	})
 	if err != nil {
 		t.Fatalf("ActivateManualGrantWithApproval: %v", err)
-	}
-	if !outcome.Allowed {
-		t.Fatalf("expected the gate chain to allow, got %+v", outcome)
 	}
 	if activated.Status != GrantActivated {
 		t.Fatalf("expected activated, got %s", activated.Status)
@@ -329,7 +375,7 @@ func TestManualGrantWithApproval_SucceedsWithApproval(t *testing.T) {
 	// Grant is illegal (ActivateGrant's own CAS guard) - proving the
 	// four-eyes consume is not the only thing preventing replay.
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := ActivateManualGrantWithApproval(ctx, tx, f.tenantID, grant.ID, parentOpID, f.jurisdictionCode, f.staffID, amount)
+		_, err := forceActivateManualGrantWithApprovalForTest(ctx, tx, f.tenantID, grant.ID, parentOpID, f.staffID, amount)
 		return err
 	})
 	// A bare non-nil check here would also pass if the SECOND attempt
@@ -365,7 +411,7 @@ func TestManualGrantWithApproval_PayloadMismatchRefused(t *testing.T) {
 		g := newTestOfferGrant(f, co, "manual-grant-mismatch")
 		g.CreatedByActorType = ActorStaff
 		var issueErr error
-		grant, _, issueErr = IssueManualGrantRequest(ctx, tx, g, parentOpID, f.jurisdictionCode, f.staffID)
+		grant, _, issueErr = IssueManualGrantRequest(ctx, tx, g, parentOpID, f.staffID)
 		return issueErr
 	})
 	if err != nil {
@@ -378,7 +424,7 @@ func TestManualGrantWithApproval_PayloadMismatchRefused(t *testing.T) {
 	// Attempt to activate the SAME grant for a DIFFERENT amount than what
 	// was approved.
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := ActivateManualGrantWithApproval(ctx, tx, f.tenantID, grant.ID, parentOpID, f.jurisdictionCode, f.staffID, big.NewInt(999999))
+		_, err := forceActivateManualGrantWithApprovalForTest(ctx, tx, f.tenantID, grant.ID, parentOpID, f.staffID, big.NewInt(999999))
 		return err
 	})
 	if !errors.Is(err, ErrChangeRequestNotApproved) {
@@ -426,7 +472,7 @@ func TestExecuteBulkGrantJobWithApproval_RefusedWithoutApproval(t *testing.T) {
 
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		template := newTestOfferGrant(f, co, "")
-		_, err := ExecuteBulkGrantJobWithApproval(ctx, tx, f.tenantID, jobID, f.staffID, StaticPlayerListTarget{PlayerAccountIDs: []uuid.UUID{f.playerID}}, template, f.jurisdictionCode, uuid.Nil, big.NewInt(1000))
+		_, err := ExecuteBulkGrantJobWithApproval(ctx, tx, f.tenantID, jobID, f.staffID, StaticPlayerListTarget{PlayerAccountIDs: []uuid.UUID{f.playerID}}, template, uuid.Nil, big.NewInt(1000))
 		return err
 	})
 	if !errors.Is(err, ErrChangeRequestNotApproved) {
@@ -486,26 +532,42 @@ func TestExecuteBulkGrantJobWithApproval_SucceedsWithApproval(t *testing.T) {
 	payloadMatch := BulkJobExecutePayloadMatch(co.offerVersionID, f.assetCode, big.NewInt(1000), []uuid.UUID{f.playerID})
 	fileAndDoublyApprove(t, pool, f.tenantID, ChangeOpBulkJobExecute, "bulk_grant_jobs", jobID, payloadMatch, f.staffID, f.staff2ID, staff3)
 
+	// This test's own subject is the bulk_job_execute four-eyes consume
+	// (proving it does NOT refuse once genuinely approved) - it is filed
+	// and consumed at the JOB level, entirely BEFORE RunStaticBulkGrantJob
+	// ever runs a single item's own ActivateGrant/T.1 gate (four_eyes_ops.go's
+	// own ExecuteBulkGrantJobWithApproval), so it is UNAFFECTED by Stage
+	// 4I. What IS affected is the per-recipient item's own activation,
+	// which now honestly, correctly denies at T.1's AssetAuthorization
+	// layer (every player-scoped jurisdiction resolution is
+	// unresolved(no_signal) today - see resolveGrantJurisdiction's own doc
+	// comment, eligibility.go) - so the job completes with exactly one
+	// DENIED item, not an issued one, and the job's own final status
+	// reflects that (BulkJobPartiallyCompleted, four_eyes_ops.go's own
+	// finalStatus logic).
 	var result ExecuteBulkGrantJobResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		template := newTestOfferGrant(f, co, "")
 		var execErr error
-		result, execErr = ExecuteBulkGrantJobWithApproval(ctx, tx, f.tenantID, jobID, f.staffID, StaticPlayerListTarget{PlayerAccountIDs: []uuid.UUID{f.playerID}}, template, f.jurisdictionCode, uuid.Nil, big.NewInt(1000))
+		result, execErr = ExecuteBulkGrantJobWithApproval(ctx, tx, f.tenantID, jobID, f.staffID, StaticPlayerListTarget{PlayerAccountIDs: []uuid.UUID{f.playerID}}, template, uuid.Nil, big.NewInt(1000))
 		return execErr
 	})
 	if err != nil {
 		t.Fatalf("ExecuteBulkGrantJobWithApproval: %v", err)
 	}
-	if result.Status != BulkJobCompleted {
-		t.Fatalf("expected completed, got %s", result.Status)
+	if result.Status != BulkJobPartiallyCompleted {
+		t.Fatalf("expected partially_completed (the item denied at T.1's jurisdiction-dependent AssetAuthorization layer, Stage 4I), got %s", result.Status)
 	}
 
 	items, err := listBulkJobItemsForTest(t, pool, f.tenantID, jobID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || items[0].Outcome != ItemIssued {
-		t.Fatalf("expected exactly one issued item, got %+v", items)
+	if len(items) != 1 || items[0].Outcome != ItemDenied {
+		t.Fatalf("expected exactly one denied item (Stage 4I's disclosed jurisdiction-resolution gap, not a four-eyes refusal), got %+v", items)
+	}
+	if items[0].ReasonCode == nil || !strings.Contains(*items[0].ReasonCode, "asset_authorization") {
+		t.Fatalf("expected the denial reason to name asset_authorization (proving the four-eyes consume itself succeeded and this is the DIFFERENT, jurisdiction-dependent gate), got %+v", items[0].ReasonCode)
 	}
 }
 
@@ -573,10 +635,7 @@ func TestHeldDispositionResolve_CallerCannotLowerRequiredApprovalsBelowPolicy(t 
 	correlationID := uuid.New()
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "sec-4i-f1-required-approvals")
-		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode})
-		if err != nil || !outcome.Allowed {
-			return fmt.Errorf("issue/activate: %v / %+v", err, outcome)
-		}
+		result := forceIssueAndActivateGrantForTest(t, ctx, tx, g, ActivateGrantParams{Amount: big.NewInt(1000), ActorType: ActorSystem})
 		grantID = result.ID
 
 		terminated, err := TerminateGrant(ctx, tx, f.tenantID, grantID, TerminateGrantParams{

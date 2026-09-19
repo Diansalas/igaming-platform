@@ -19,6 +19,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/risk"
 )
@@ -71,9 +72,16 @@ func denialReasonCode(o GateOutcome) string {
 }
 
 // IssueGrantParams is everything (none)->issued needs (doc 10 §1.3/T.2).
+//
+// JurisdictionCode is DELETED as a field (Stage 4I JV-2, canonical-model
+// §8): a caller-suppliable jurisdiction code is a resolved FACT about an
+// operation, never a value a caller (staff, test, or any other) may
+// supply directly (JV-1). IssueGrant resolves it itself, server-side,
+// via internal/jurisdiction.Resolve, from g's own
+// TenantID/BrandID/PlayerAccountID - see resolveGrantJurisdiction's own
+// doc comment (eligibility.go) for the disclosed Stage 4I consequence.
 type IssueGrantParams struct {
-	Grant            Grant
-	JurisdictionCode string
+	Grant Grant
 }
 
 // IssueGrant performs doc 10's "(none) -> issued" transition: RG then
@@ -87,7 +95,8 @@ type IssueGrantParams struct {
 // only the RG/Risk gate and the row insert.
 func IssueGrant(ctx context.Context, tx pgx.Tx, p IssueGrantParams) (Grant, GateOutcome, error) {
 	g := p.Grant
-	jurisdictionID, err := resolveJurisdictionID(ctx, tx, p.JurisdictionCode)
+	jurisdictionID, jurisdictionCode, err := resolveGrantJurisdiction(ctx, tx, g.TenantID, g.BrandID, g.PlayerAccountID,
+		jurisdiction.OperationBonusIssuance, g.CreatedByActorType, g.CreatedByActorID)
 	if err != nil {
 		return Grant{}, GateOutcome{}, err
 	}
@@ -98,7 +107,7 @@ func IssueGrant(ctx context.Context, tx pgx.Tx, p IssueGrantParams) (Grant, Gate
 
 	outcome, err := GateCheckpoint(ctx, tx, GateParams{
 		TenantID: g.TenantID, BrandID: g.BrandID, PlayerAccountID: g.PlayerAccountID, WalletID: g.WalletID,
-		JurisdictionID: jurisdictionID, JurisdictionCode: p.JurisdictionCode, LicensingMode: licensingMode,
+		JurisdictionID: jurisdictionID, JurisdictionCode: jurisdictionCode, LicensingMode: licensingMode,
 		AssetCode: g.AssetCode, RiskOperation: risk.OperationBonusGrant, SkipAssetAuthorization: true,
 	})
 	if err != nil {
@@ -179,10 +188,14 @@ func nonNilActorID(actorType ActorType, id uuid.UUID) *uuid.UUID {
 }
 
 // ActivateGrantParams is issued->activated's own input (doc 10 T.3).
+//
+// JurisdictionCode is DELETED as a field (Stage 4I JV-2 - see
+// IssueGrantParams' own identical doc comment): ActivateGrant resolves it
+// itself, server-side, from the locked Grant's own
+// TenantID/BrandID/PlayerAccountID.
 type ActivateGrantParams struct {
-	JurisdictionCode string
-	ActorType        ActorType
-	ActorID          uuid.UUID
+	ActorType ActorType
+	ActorID   uuid.UUID
 	// Amount is the reward's face value in the Grant's own asset minor
 	// units, already computed (and, for a cashback/other computed reward,
 	// rounded per money.RoundToMinorUnits) by the caller (the bonus-type-
@@ -275,7 +288,8 @@ func ActivateGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, 
 		return Grant{}, GateOutcome{}, fmt.Errorf("%w: activate requires status issued, got %s", ErrIllegalTransition, g.Status)
 	}
 
-	jurisdictionID, err := resolveJurisdictionID(ctx, tx, p.JurisdictionCode)
+	jurisdictionID, jurisdictionCode, err := resolveGrantJurisdiction(ctx, tx, g.TenantID, g.BrandID, g.PlayerAccountID,
+		jurisdiction.OperationBonusIssuance, p.ActorType, p.ActorID)
 	if err != nil {
 		return Grant{}, GateOutcome{}, err
 	}
@@ -291,7 +305,7 @@ func ActivateGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, 
 
 	outcome, err := GateCheckpoint(ctx, tx, GateParams{
 		TenantID: g.TenantID, BrandID: g.BrandID, PlayerAccountID: g.PlayerAccountID, WalletID: g.WalletID,
-		JurisdictionID: jurisdictionID, JurisdictionCode: p.JurisdictionCode, LicensingMode: licensingMode,
+		JurisdictionID: jurisdictionID, JurisdictionCode: jurisdictionCode, LicensingMode: licensingMode,
 		AssetCode: g.AssetCode, Amount: amountMinor, RiskOperation: risk.OperationBonusGrant,
 	})
 	if err != nil {
@@ -317,24 +331,53 @@ func ActivateGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, 
 		return cancelled, outcome, nil
 	}
 
+	activated, err := applyGrantActivation(ctx, tx, tenantID, grantID, g, amountMinor, now, p)
+	if err != nil {
+		return Grant{}, GateOutcome{}, err
+	}
+	return activated, GateOutcome{Allowed: true}, nil
+}
+
+// applyGrantActivation is ActivateGrant's own post-gate effecting logic
+// (ADR 0032 §3.1's sole bonus_grant posting, granted_amount recording,
+// optional expiry, Progress/audit entries), extracted into its own
+// function so that internal/bonus's test suite has exactly ONE place
+// that performs this posting - never a second, hand-copied version that
+// could drift from it. ActivateGrant is this function's only PRODUCTION
+// caller, invoked only strictly after GateCheckpoint has genuinely
+// ALLOWED (doc 34 §5.3 rule 3/4, doc 10 N2.4a - see PostGateHook's own
+// doc comment, DR-4HB1W2-01). The package's own _test.go files' fixture
+// helper (forceActivateGrantForTest, lifecycle_integration_test.go) is
+// this function's ONLY other caller - a TEST-ONLY seam (never compiled
+// into the production binary, never reachable from any HTTP/production
+// code path) that exists solely because Stage 4I's jurisdiction resolver
+// honestly and correctly denies EVERY player-scoped operation at T.1's
+// AssetAuthorization layer today (HDR-J-1/HDR-J-3 unanswered - see
+// resolveGrantJurisdiction's own doc comment, eligibility.go), which
+// would otherwise make it impossible for a test whose actual subject is
+// downstream of activation (wagering math, expiry, forfeiture,
+// conversion) to ever reach that state via the public API. See that
+// helper's own doc comment for the full, disclosed reasoning - this is
+// never a production gate weakening.
+func applyGrantActivation(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, g Grant, amountMinor int64, now time.Time, p ActivateGrantParams) (Grant, error) {
 	// doc 34 §5.3 rule 3/4, doc 10 N2.4a: strictly after the gate chain
 	// above (including Risk's advisory lock, if taken), strictly before
 	// the effecting ledger write below. See PostGateHook's own doc
 	// comment (DR-4HB1W2-01).
 	if p.PostGateHook != nil {
 		if err := p.PostGateHook(ctx, tx); err != nil {
-			return Grant{}, GateOutcome{}, err
+			return Grant{}, err
 		}
 	}
 
 	fundingKind, providerID, err := parseFundingSource(g.FundingSource)
 	if err != nil {
-		return Grant{}, GateOutcome{}, err
+		return Grant{}, err
 	}
 	walletID := g.WalletID
 	playerBonusAccount, err := ledger.GetOrCreateAccount(ctx, tx, g.TenantID, &walletID, ledger.AccountPlayerBonus, g.AssetCode)
 	if err != nil {
-		return Grant{}, GateOutcome{}, err
+		return Grant{}, err
 	}
 	idempotencyKey := fmt.Sprintf("bonus_grant:%s", g.ID)
 	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
@@ -344,15 +387,15 @@ func ActivateGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, 
 		BonusCost:     &ledger.BonusCostAttribution{Funding: fundingKind, ProviderID: providerID},
 	})
 	if err != nil {
-		return Grant{}, GateOutcome{}, err
+		return Grant{}, err
 	}
 	if err := AttributeGrantLedgerTransactionIdempotent(ctx, tx, g.TenantID, g.ID, postResult.TransactionID, string(ledger.TxBonusGrant)); err != nil {
-		return Grant{}, GateOutcome{}, err
+		return Grant{}, err
 	}
 
 	activated, err := UpdateGrantStatus(ctx, tx, tenantID, grantID, GrantIssued, GrantActivated, now)
 	if err != nil {
-		return Grant{}, GateOutcome{}, err
+		return Grant{}, err
 	}
 	// LF-Phase-11 (migration 0067): record the Grant's granted_amount -
 	// an immutable computation input (doc 29 BI-3), never a balance, never
@@ -372,11 +415,11 @@ func ActivateGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, 
 		`UPDATE bonus_grants SET granted_amount = $3 WHERE tenant_id = $1 AND id = $2 AND granted_amount IS NULL`,
 		tenantID, grantID, amountMinor,
 	); err != nil {
-		return Grant{}, GateOutcome{}, fmt.Errorf("bonus: record granted_amount: %w", err)
+		return Grant{}, fmt.Errorf("bonus: record granted_amount: %w", err)
 	}
 	if p.WageringTimeLimit != nil && *p.WageringTimeLimit > 0 {
 		if _, err := SetGrantExpiryOnce(ctx, tx, tenantID, grantID, g.CreatedAt.Add(*p.WageringTimeLimit)); err != nil {
-			return Grant{}, GateOutcome{}, err
+			return Grant{}, err
 		}
 	}
 	before, after := string(GrantIssued), string(GrantActivated)
@@ -387,15 +430,15 @@ func ActivateGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, 
 		BeforeStatus: &before, AfterStatus: &after, ActorType: p.ActorType, ActorID: nonNilActorID(p.ActorType, p.ActorID),
 		Amount: p.Amount, AssetCode: &g.AssetCode, LedgerTransactionID: &ledgerTxID,
 	}); err != nil {
-		return Grant{}, GateOutcome{}, err
+		return Grant{}, err
 	}
 	if err := audit.Record(ctx, tx, audit.Entry{
 		TenantID: g.TenantID, ActorType: audit.ActorType(p.ActorType), ActorID: p.ActorID,
 		Action: "bonus_grant.activated", TargetType: "bonus_grant", TargetID: g.ID.String(), Outcome: audit.OutcomeSuccess,
 	}); err != nil {
-		return Grant{}, GateOutcome{}, err
+		return Grant{}, err
 	}
-	return activated, GateOutcome{Allowed: true}, nil
+	return activated, nil
 }
 
 func activationTriggerType(actor ActorType) TriggerType {

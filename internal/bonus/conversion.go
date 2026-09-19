@@ -35,6 +35,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/risk"
 )
@@ -50,10 +51,14 @@ const OperationBonusConversion = risk.OperationBonusConversion
 
 // ConvertGrantParams is completed->converted's own input (doc 10 T.12/
 // N1.4 Path A).
+//
+// JurisdictionCode is DELETED as a field (Stage 4I JV-2 - see
+// IssueGrantParams' own identical doc comment, lifecycle.go): ConvertGrant
+// resolves it itself, server-side, from the locked Grant's own
+// TenantID/BrandID/PlayerAccountID.
 type ConvertGrantParams struct {
-	JurisdictionCode string
-	ActorType        ActorType
-	ActorID          uuid.UUID
+	ActorType ActorType
+	ActorID   uuid.UUID
 	// MaxCashoutAmount is the Offer's own payout-axis ceiling (nil = no
 	// cap). The decided amount is min(remaining bonus balance,
 	// MaxCashoutAmount).
@@ -123,7 +128,8 @@ func ConvertGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, w
 		return ConvertGrantResult{Grant: g, Converted: false, BlockedReason: "wagering_requirement_not_met", BlockedCode: "wagering_requirement_not_met"}, nil
 	}
 
-	jurisdictionID, err := resolveJurisdictionID(ctx, tx, p.JurisdictionCode)
+	jurisdictionID, jurisdictionCode, err := resolveGrantJurisdiction(ctx, tx, g.TenantID, g.BrandID, g.PlayerAccountID,
+		jurisdiction.OperationBonusConversion, p.ActorType, p.ActorID)
 	if err != nil {
 		return ConvertGrantResult{}, err
 	}
@@ -146,7 +152,7 @@ func ConvertGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, w
 
 	outcome, err := GateCheckpoint(ctx, tx, GateParams{
 		TenantID: g.TenantID, BrandID: g.BrandID, PlayerAccountID: g.PlayerAccountID, WalletID: g.WalletID,
-		JurisdictionID: jurisdictionID, JurisdictionCode: p.JurisdictionCode, LicensingMode: licensingMode,
+		JurisdictionID: jurisdictionID, JurisdictionCode: jurisdictionCode, LicensingMode: licensingMode,
 		AssetCode: g.AssetCode, Amount: amountMinor, RiskOperation: OperationBonusConversion,
 	})
 	if err != nil {
@@ -160,6 +166,21 @@ func ConvertGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, w
 		return ConvertGrantResult{Grant: g, Converted: false, BlockedReason: outcome.DeniedBy, BlockedCode: outcome.Code}, nil
 	}
 
+	return applyGrantConversion(ctx, tx, tenantID, grantID, g, amountMinor, decided, p)
+}
+
+// applyGrantConversion is ConvertGrant's own post-gate effecting logic
+// (ADR 0032 §3.1's sole bonus_conversion posting, Progress/audit entries),
+// extracted into its own function for the identical reason
+// applyGrantActivation is (lifecycle.go): exactly ONE place performs this
+// posting. ConvertGrant is this function's only PRODUCTION caller,
+// invoked only strictly after GateCheckpoint has genuinely ALLOWED. The
+// package's own _test.go files' fixture helper
+// (forceConvertGrantForTest, lifecycle_integration_test.go) is this
+// function's ONLY other caller - see that helper's own doc comment, and
+// forceActivateGrantForTest's, for the full disclosed reasoning (never a
+// production bypass).
+func applyGrantConversion(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, g Grant, amountMinor int64, decided *big.Int, p ConvertGrantParams) (ConvertGrantResult, error) {
 	if amountMinor == 0 {
 		// Nothing left to convert (e.g. already fully written down by an
 		// interleaved adjustment) - still a legitimate terminal

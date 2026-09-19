@@ -26,18 +26,15 @@ func TestRunExpirySweepForTenant_TerminatesExpiredGrant(t *testing.T) {
 	var grantID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "expiry-1")
-		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{
-			Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode,
+		result := forceIssueAndActivateGrantForTest(t, ctx, tx, g, ActivateGrantParams{
+			Amount: big.NewInt(1000), ActorType: ActorSystem,
 		})
-		if err != nil || !outcome.Allowed {
-			t.Fatalf("issue/activate: %v / %+v", err, outcome)
-		}
 		grantID = result.ID
 		// expires_at is set by ActivateGrant only when WageringTimeLimit
 		// is supplied (nil here) - write it directly for this test, since
 		// SetGrantExpiryOnce is exactly the function ActivateGrant itself
 		// would have called had a wagering_time_limit been configured.
-		_, err = SetGrantExpiryOnce(ctx, tx, f.tenantID, grantID, time.Now().UTC().Add(10*time.Millisecond))
+		_, err := SetGrantExpiryOnce(ctx, tx, f.tenantID, grantID, time.Now().UTC().Add(10*time.Millisecond))
 		return err
 	})
 	if err != nil {
@@ -86,14 +83,11 @@ func TestRunExpirySweepForTenant_DoesNotTouchNotYetExpiredGrants(t *testing.T) {
 	var grantID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "expiry-not-yet")
-		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{
-			Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode,
+		result := forceIssueAndActivateGrantForTest(t, ctx, tx, g, ActivateGrantParams{
+			Amount: big.NewInt(1000), ActorType: ActorSystem,
 		})
-		if err != nil || !outcome.Allowed {
-			t.Fatalf("issue/activate: %v / %+v", err, outcome)
-		}
 		grantID = result.ID
-		_, err = SetGrantExpiryOnce(ctx, tx, f.tenantID, grantID, time.Now().UTC().Add(24*time.Hour))
+		_, err := SetGrantExpiryOnce(ctx, tx, f.tenantID, grantID, time.Now().UTC().Add(24*time.Hour))
 		return err
 	})
 	if err != nil {
@@ -130,12 +124,9 @@ func TestRunExpirySweepForTenant_OpenExposureDefersToPendingSettlement(t *testin
 	correlationID := uuid.New()
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "expiry-open-exposure")
-		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{
-			Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode,
+		result := forceIssueAndActivateGrantForTest(t, ctx, tx, g, ActivateGrantParams{
+			Amount: big.NewInt(1000), ActorType: ActorSystem,
 		})
-		if err != nil || !outcome.Allowed {
-			t.Fatalf("issue/activate: %v / %+v", err, outcome)
-		}
 		grantID = result.ID
 
 		lockTxID := uuid.New()
@@ -151,7 +142,7 @@ func TestRunExpirySweepForTenant_OpenExposureDefersToPendingSettlement(t *testin
 		}); err != nil {
 			return err
 		}
-		_, err = SetGrantExpiryOnce(ctx, tx, f.tenantID, grantID, time.Now().UTC().Add(10*time.Millisecond))
+		_, err := SetGrantExpiryOnce(ctx, tx, f.tenantID, grantID, time.Now().UTC().Add(10*time.Millisecond))
 		return err
 	})
 	if err != nil {

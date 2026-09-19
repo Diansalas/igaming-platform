@@ -432,20 +432,22 @@ type DepositSweepOutcome struct {
 // actor (ActivateGrantParams.ActorType is normalized to ActorSystem by
 // TriggerActorForAutomated regardless).
 //
-// NAMED, DISCLOSED LIMITATION (not silently narrowed): JurisdictionCode
-// is passed as "" - this platform has no per-player jurisdiction
-// resolver anywhere yet (the same pre-existing "TODO(jurisdiction)" gap
-// internal/casino's own postBet/LaunchGame already carry, confirmed by
-// grep: no jurisdiction_code column exists on player_accounts or
-// deposit_intents). An empty JurisdictionCode resolves to uuid.Nil via
-// resolveJurisdictionID, which AssetAuthorization.CheckEligibility
-// treats as an immediate, correct denial (ADR 0037 §C.2) - so today,
-// every deposit-bonus Grant this sweep attempts will be denied at the
-// AssetAuthorization gate until the platform-wide jurisdiction-resolution
-// gap is closed by whatever specialist eventually owns it. This is NOT a
-// new gap this dispatch introduces; it is the same one already disclosed
-// against casino's real-money bet path, now inherited honestly rather
-// than worked around with an invented per-deposit jurisdiction value.
+// NAMED, DISCLOSED LIMITATION (not silently narrowed): IssueAndActivateDepositBonus
+// resolves jurisdiction server-side via internal/jurisdiction.Resolve
+// (Stage 4I, see resolveGrantJurisdiction's own doc comment,
+// eligibility.go), which honestly returns unresolved(no_signal) for every
+// player-scoped operation today (HDR-J-3 is unanswered - no player-side
+// jurisdiction signal exists anywhere in this codebase, the same
+// pre-existing gap internal/casino's own LaunchGame carries). An
+// unresolved jurisdiction resolves to a zero jurisdiction id, which
+// AssetAuthorization.CheckEligibility treats as an immediate, correct
+// denial (ADR 0037 §C.2) - so today, every deposit-bonus Grant this sweep
+// attempts is denied at the AssetAuthorization gate until HDR-J-3/HDR-J-1
+// are answered. This is NOT a new gap this dispatch introduces; it is the
+// same one already disclosed against casino's real-money bet path, now
+// resolved honestly through the platform's own jurisdiction resolver
+// rather than worked around with an invented per-deposit jurisdiction
+// value.
 func RunDepositSweepForTenant(ctx context.Context, tx pgx.Tx, tenantID, actorID uuid.UUID) (DepositSweepOutcome, error) {
 	var outcome DepositSweepOutcome
 	w, err := getDepositSweepWatermark(ctx, tx, tenantID, DepositSweepConsumerName)
@@ -505,7 +507,7 @@ func RunDepositSweepForTenant(ctx context.Context, tx pgx.Tx, tenantID, actorID 
 			_, activateOutcome, err := IssueAndActivateDepositBonus(ctx, tx, DepositBonusParams{
 				Grant: g, DepositAmount: event.Amount, RateBP: rateBP, CapAmount: cap,
 				MinQualifying: c.OfferVersion.MinQualifyingAmount, MaxQualifying: c.OfferVersion.MaxQualifyingAmount,
-				JurisdictionCode: "", ActorType: ActorSystem, ActorID: actorID,
+				ActorType: ActorSystem, ActorID: actorID,
 				WageringTimeLimit: c.OfferVersion.WageringTimeLimit,
 			})
 			if err != nil {

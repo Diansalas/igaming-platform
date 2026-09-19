@@ -328,7 +328,7 @@ func RunCashbackSchedulerForTenant(ctx context.Context, tx pgx.Tx, tenantID, act
 				}
 				_, activateOutcome, err := IssueAndActivateCashback(ctx, tx, CashbackParams{
 					Grant: g, NetLossAmount: netLoss, RateBP: rateBP, CapAmount: cap,
-					JurisdictionCode: "", ActorType: ActorSystem, ActorID: actorID,
+					ActorType: ActorSystem, ActorID: actorID,
 				})
 				if err != nil {
 					return outcome, fmt.Errorf("bonus: cashback scheduler issue/activate (campaign=%s, player=%s, window=%s..%s): %w",

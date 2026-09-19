@@ -269,14 +269,9 @@ func TestExpirySweep_TrueConcurrentTicksSameTenant_NoDoubleTerminationOrLoss(t *
 		var grantID uuid.UUID
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			g := newTestOfferGrant(f, co, "expiry-concurrent-"+suffix)
-			result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{
-				Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode,
-			})
-			if err != nil || !outcome.Allowed {
-				t.Fatalf("issue/activate %s: %v / %+v", suffix, err, outcome)
-			}
+			result := forceIssueAndActivateGrantForTest(t, ctx, tx, g, ActivateGrantParams{Amount: big.NewInt(1000), ActorType: ActorSystem})
 			grantID = result.ID
-			_, err = SetGrantExpiryOnce(ctx, tx, f.tenantID, grantID, time.Now().UTC().Add(10*time.Millisecond))
+			_, err := SetGrantExpiryOnce(ctx, tx, f.tenantID, grantID, time.Now().UTC().Add(10*time.Millisecond))
 			return err
 		})
 		if err != nil {

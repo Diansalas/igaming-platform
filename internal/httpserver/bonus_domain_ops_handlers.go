@@ -22,7 +22,6 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/bonus"
 	"github.com/Diansalas/igaming-platform/internal/economicop"
-	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
@@ -460,7 +459,7 @@ func newIssueManualGrantRequestHandler(deps Deps) http.HandlerFunc {
 				FundingSource: req.FundingSource, FulfillmentDestination: bonus.FulfillmentIntoPlatformWallet, FulfillmentOwner: "internal",
 				TriggerReference: "manual_grant:" + uuid.NewString(),
 			}
-			grant, outcome, err := bonus.IssueManualGrantRequest(ctx, tx, g, parentOperationID, req.JurisdictionCode, staffID)
+			grant, outcome, err := bonus.IssueManualGrantRequest(ctx, tx, g, parentOperationID, staffID)
 			if err != nil {
 				return err
 			}
@@ -469,28 +468,26 @@ func newIssueManualGrantRequestHandler(deps Deps) http.HandlerFunc {
 				return nil
 			}
 			result = toGrantResponse(grant, nil)
-			// SEC-4I-F2 interim control (canonical-model §8.4, confirmed
-			// by architect §8.4 with the tightening below): until JV-2
-			// removes this handler's client-supplied jurisdiction_code
-			// field, the audit record explicitly labels it as
-			// staff-supplied, using the SAME basis enum
-			// internal/jurisdiction's resolver defines
-			// (jurisdiction.BasisStaffSupplied) - a value the resolver
-			// is structurally incapable of ever producing itself (see
-			// that constant's own doc comment). This lets a later reader
-			// distinguish a pre-JV-2 record (staff-typed, unverified)
-			// from a post-resolver record without a second, ad hoc
-			// vocabulary - it is NOT a licence to keep this field; it
-			// ends the moment JV-2 lands for this handler.
-			jurisdictionMetadata := map[string]any{"basis": string(jurisdiction.BasisStaffSupplied)}
-			if req.JurisdictionCode != "" {
-				jurisdictionMetadata["code"] = req.JurisdictionCode
-			}
+			// SEC-4I-F2's interim `staff_supplied` audit label
+			// (canonical-model §8.4) is SUPERSEDED for this handler, not
+			// merely retired: JV-2 (above) removed this handler's
+			// client-supplied jurisdiction_code field entirely, so there is
+			// no longer a staff-typed jurisdiction value to label as such -
+			// bonus.IssueManualGrantRequest resolves the operation's
+			// jurisdiction itself, server-side, via
+			// internal/jurisdiction.Resolve (resolveGrantJurisdiction,
+			// internal/bonus/eligibility.go). Re-adding a "jurisdiction"
+			// metadata block here would either fabricate a value this
+			// handler no longer has, or silently re-derive one out of band
+			// from the resolver - both defeat the label's own purpose.
+			// jurisdiction.BasisStaffSupplied remains defined for the OTHER
+			// interim-fixed audit sites named in canonical-model §8.4 that
+			// have not yet been converted by a Stage 4I phase.
 			return audit.Record(ctx, tx, audit.Entry{
 				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: staffID,
 				Action: "bonus_grant.manual_issue_requested", TargetType: "bonus_grant", TargetID: grant.ID.String(), Outcome: audit.OutcomeSuccess,
 				IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
-				Metadata: map[string]any{"parent_operation_id": req.ParentOperationID, "jurisdiction": jurisdictionMetadata},
+				Metadata: map[string]any{"parent_operation_id": req.ParentOperationID},
 			})
 		})
 		if errors.Is(err, economicop.ErrParentOperationNotFound) || errors.Is(err, economicop.ErrParentNotApproved) || errors.Is(err, economicop.ErrParentNotOpenOrExpired) || errors.Is(err, economicop.ErrChildScopeExceedsParent) {
@@ -512,8 +509,11 @@ func newIssueManualGrantRequestHandler(deps Deps) http.HandlerFunc {
 
 type activateManualGrantRequest struct {
 	ParentOperationID string `json:"parent_operation_id"`
-	JurisdictionCode  string `json:"jurisdiction_code,omitempty"`
 	Amount            string `json:"amount"`
+	// JurisdictionCode is DELETED (Stage 4I JV-2 - see
+	// issueManualGrantRequest's own identical doc comment,
+	// bonus_handlers.go): bonus.ActivateManualGrantWithApproval resolves
+	// the operation's jurisdiction itself, server-side.
 }
 
 func newActivateManualGrantHandler(deps Deps) http.HandlerFunc {
@@ -561,7 +561,7 @@ func newActivateManualGrantHandler(deps Deps) http.HandlerFunc {
 		var denied bool
 		var denialReason string
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			grant, outcome, err := bonus.ActivateManualGrantWithApproval(ctx, tx, tc.TenantID, grantID, parentOperationID, req.JurisdictionCode, staffID, amount)
+			grant, outcome, err := bonus.ActivateManualGrantWithApproval(ctx, tx, tc.TenantID, grantID, parentOperationID, staffID, amount)
 			if err != nil {
 				return err
 			}
@@ -734,8 +734,14 @@ func newCreateBulkGrantJobHandler(deps Deps) http.HandlerFunc {
 }
 
 type executeBulkGrantJobRequest struct {
-	JurisdictionCode string `json:"jurisdiction_code,omitempty"`
-	Amount           string `json:"amount"`
+	Amount string `json:"amount"`
+	// JurisdictionCode is DELETED (Stage 4I JV-2 - see
+	// issueManualGrantRequest's own identical doc comment,
+	// bonus_handlers.go): bonus.ExecuteBulkGrantJobWithApproval resolves
+	// each item's own jurisdiction itself, server-side, per recipient
+	// (recipients differ per bulk-grant item, so this is necessarily
+	// resolved per player, inside bonus.runBulkGrantJobItem, never once
+	// for the whole job).
 }
 
 // newExecuteBulkGrantJobHandler consumes the bulk_job_execute approval
@@ -821,7 +827,7 @@ func newExecuteBulkGrantJobHandler(deps Deps) http.HandlerFunc {
 			}
 			template.DecimalExponent = exp
 
-			result, err := bonus.ExecuteBulkGrantJobWithApproval(ctx, tx, tc.TenantID, jobID, staffID, target, template, req.JurisdictionCode, staffID, amount)
+			result, err := bonus.ExecuteBulkGrantJobWithApproval(ctx, tx, tc.TenantID, jobID, staffID, target, template, staffID, amount)
 			if err != nil {
 				return err
 			}

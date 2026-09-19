@@ -41,12 +41,7 @@ func TestRecordWageringContribution_CrossAssetContributionIsRefused(t *testing.T
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "cross-asset-1")
-		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{
-			Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode,
-		})
-		if err != nil || !outcome.Allowed {
-			t.Fatalf("issue/activate: %v / %+v", err, outcome)
-		}
+		result := forceIssueAndActivateGrantForTest(t, ctx, tx, g, ActivateGrantParams{Amount: big.NewInt(1000), ActorType: ActorSystem})
 
 		lockTxID := uuid.New()
 		correlationID := uuid.New()
@@ -58,7 +53,7 @@ func TestRecordWageringContribution_CrossAssetContributionIsRefused(t *testing.T
 		}
 
 		// The contribution names a DIFFERENT asset than the Grant's own.
-		err = RecordWageringContribution(ctx, tx, f.tenantID, result.ID, RecordWageringContributionParams{
+		err := RecordWageringContribution(ctx, tx, f.tenantID, result.ID, RecordWageringContributionParams{
 			OfferVersionID: g.OfferVersionID, LockLedgerTransactionID: lockTxID, CorrelationID: correlationID,
 			AssetCode: otherAsset, StakedBonusAmount: big.NewInt(500), ContributionWeightBP: 10000, QualifyingScaled: big.NewInt(500),
 		})

@@ -396,8 +396,21 @@ type issueManualGrantRequest struct {
 	Amount            string `json:"amount"` // decimal-string minor units, never float (CLAUDE.md)
 	FundingSource     string `json:"funding_source"`
 	ParentOperationID string `json:"parent_operation_id"` // doc 10 N2.4a: MUST already be a resolvable, approved EOI
-	JurisdictionCode  string `json:"jurisdiction_code,omitempty"`
 	ReasonCode        string `json:"reason_code"`
+	// JurisdictionCode is DELETED (Stage 4I JV-2, docs/governance/stage-4i-
+	// canonical-model.md §8): a jurisdiction is a RESOLVED FACT about an
+	// operation, never a value a staff member may type into a request body
+	// (JV-1). httpserver's decodeJSON already calls
+	// dec.DisallowUnknownFields() (json.go), so a client that still sends
+	// "jurisdiction_code" now gets a clean 400, not a silently-ignored
+	// field. bonus.IssueSingleManualGrant resolves the operation's
+	// jurisdiction itself, server-side, via internal/jurisdiction.Resolve,
+	// from the Grant's own tenant/brand/player - see
+	// resolveGrantJurisdiction's own doc comment
+	// (internal/bonus/eligibility.go) for the disclosed Stage 4I
+	// consequence (every player-scoped resolution is unresolved(no_signal)
+	// today, so this denies at the AssetAuthorization gate - the correct,
+	// fail-closed, auditable outcome, never worked around here).
 }
 
 // newIssueManualGrantHandler is doc 10 N2.4a's single-Grant staff-action
@@ -476,7 +489,7 @@ func newIssueManualGrantHandler(deps Deps) http.HandlerFunc {
 				FundingSource: req.FundingSource, FulfillmentDestination: bonus.FulfillmentIntoPlatformWallet, FulfillmentOwner: "internal",
 				TriggerReference: "manual_grant:" + uuid.NewString(),
 			}
-			grant, outcome, err := bonus.IssueSingleManualGrant(ctx, tx, g, parentOperationID, req.JurisdictionCode, staffID, amount)
+			grant, outcome, err := bonus.IssueSingleManualGrant(ctx, tx, g, parentOperationID, staffID, amount)
 			if err != nil {
 				return err
 			}
@@ -641,10 +654,13 @@ type resolveHeldDispositionRequest struct {
 	// still sends "required_approvals" in the body now gets a clean 400,
 	// not a silently-ignored field.
 	//
-	// JurisdictionCode is consumed only by "route_to_cash"'s own T.1 gate
-	// (Stage 4H-B1 Wave 2 Phase 5 fix) - mirrors newIssueManualGrantHandler's
-	// identical optional field. Safe to omit for "reforfeit".
-	JurisdictionCode string `json:"jurisdiction_code,omitempty"`
+	// JurisdictionCode is DELETED (Stage 4I JV-2 - see
+	// issueManualGrantRequest's own identical doc comment above): a
+	// jurisdiction is a resolved fact about an operation, never a staff-
+	// typed request field. "route_to_cash"'s own T.1 gate now resolves it
+	// server-side via bonus.ResolveHeldDispositionAction (see
+	// resolveGrantJurisdiction's doc comment, internal/bonus/
+	// eligibility.go). "reforfeit" never ran this gate and is unaffected.
 }
 
 func newResolveHeldDispositionHandler(deps Deps) http.HandlerFunc {
@@ -691,7 +707,6 @@ func newResolveHeldDispositionHandler(deps Deps) http.HandlerFunc {
 			resolved, err := bonus.ResolveHeldDispositionAction(ctx, tx, tc.TenantID, bonus.ResolveHeldDispositionActionParams{
 				HeldDispositionID: dispositionID, Action: bonus.HeldDispositionAction(req.Action), ActorID: staffID,
 				ReasonCode: req.ReasonCode, RequestID: changeRequestID,
-				JurisdictionCode: req.JurisdictionCode,
 			})
 			if err != nil {
 				return err

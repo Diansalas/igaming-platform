@@ -115,15 +115,14 @@ func issueIdempotent(ctx context.Context, tx pgx.Tx, p IssueGrantParams) (Grant,
 // §2: "Reload bonus - identical Offer shape to deposit bonus, eligibility
 // axis only distinguishes it" - no new lifecycle concept, one function).
 type DepositBonusParams struct {
-	Grant            Grant // caller has already populated every T.2-frozen field except computed amount
-	DepositAmount    *big.Int
-	RateBP           int32
-	CapAmount        *big.Int // nil = uncapped
-	MinQualifying    *big.Int // nil = no minimum
-	MaxQualifying    *big.Int // nil = no maximum
-	JurisdictionCode string
-	ActorType        ActorType
-	ActorID          uuid.UUID
+	Grant         Grant // caller has already populated every T.2-frozen field except computed amount
+	DepositAmount *big.Int
+	RateBP        int32
+	CapAmount     *big.Int // nil = uncapped
+	MinQualifying *big.Int // nil = no minimum
+	MaxQualifying *big.Int // nil = no maximum
+	ActorType     ActorType
+	ActorID       uuid.UUID
 	// WageringTimeLimit, if set, is threaded through to
 	// ActivateGrantParams (see its own doc comment) - the issuing Offer
 	// version's configured wagering-completion window, nil meaning "never
@@ -154,7 +153,7 @@ func IssueAndActivateDepositBonus(ctx context.Context, tx pgx.Tx, p DepositBonus
 		return Grant{}, GateOutcome{}, err
 	}
 
-	g, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: p.Grant, JurisdictionCode: p.JurisdictionCode})
+	g, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: p.Grant})
 	if err != nil && !errors.Is(err, ErrAlreadyGranted) {
 		return Grant{}, GateOutcome{}, err
 	}
@@ -166,7 +165,7 @@ func IssueAndActivateDepositBonus(ctx context.Context, tx pgx.Tx, p DepositBonus
 	}
 
 	activated, activateOutcome, err := ActivateGrant(ctx, tx, g.TenantID, g.ID, ActivateGrantParams{
-		JurisdictionCode: p.JurisdictionCode, ActorType: TriggerActorForAutomated(p.ActorType), ActorID: p.ActorID, Amount: amount,
+		ActorType: TriggerActorForAutomated(p.ActorType), ActorID: p.ActorID, Amount: amount,
 		WageringTimeLimit: p.WageringTimeLimit,
 	})
 	if err != nil {
@@ -192,13 +191,12 @@ func TriggerActorForAutomated(actor ActorType) ActorType {
 // settlement job's own comparison against 'now' to decide the window has
 // elapsed MUST read clock_timestamp(), never now()").
 type CashbackParams struct {
-	Grant            Grant
-	NetLossAmount    *big.Int // this window's net loss, already computed by the caller from ledger reads - never invented here
-	RateBP           int32
-	CapAmount        *big.Int // the Offer's declared maximum (also the EOI value-budget conservative-maximum, doc 34 §3.4 RK-W15P2-5)
-	JurisdictionCode string
-	ActorType        ActorType
-	ActorID          uuid.UUID
+	Grant         Grant
+	NetLossAmount *big.Int // this window's net loss, already computed by the caller from ledger reads - never invented here
+	RateBP        int32
+	CapAmount     *big.Int // the Offer's declared maximum (also the EOI value-budget conservative-maximum, doc 34 §3.4 RK-W15P2-5)
+	ActorType     ActorType
+	ActorID       uuid.UUID
 }
 
 // IssueAndActivateCashback implements the Cashback bonus type:
@@ -220,7 +218,7 @@ func IssueAndActivateCashback(ctx context.Context, tx pgx.Tx, p CashbackParams) 
 		return Grant{}, GateOutcome{}, err
 	}
 
-	g, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: p.Grant, JurisdictionCode: p.JurisdictionCode})
+	g, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: p.Grant})
 	if err != nil && !errors.Is(err, ErrAlreadyGranted) {
 		return Grant{}, GateOutcome{}, err
 	}
@@ -232,7 +230,7 @@ func IssueAndActivateCashback(ctx context.Context, tx pgx.Tx, p CashbackParams) 
 	}
 
 	activated, activateOutcome, err := ActivateGrant(ctx, tx, g.TenantID, g.ID, ActivateGrantParams{
-		JurisdictionCode: p.JurisdictionCode, ActorType: ActorSystem, ActorID: p.ActorID, Amount: amount,
+		ActorType: ActorSystem, ActorID: p.ActorID, Amount: amount,
 	})
 	if err != nil || !activateOutcome.Allowed {
 		return activated, activateOutcome, err
@@ -262,7 +260,6 @@ func IssueAndActivateCashback(ctx context.Context, tx pgx.Tx, p CashbackParams) 
 type GenericWageringBonusParams struct {
 	Grant             Grant
 	Amount            *big.Int
-	JurisdictionCode  string
 	ActorType         ActorType
 	ActorID           uuid.UUID
 	WageringTimeLimit *time.Duration // see DepositBonusParams' identical field
@@ -274,7 +271,7 @@ type GenericWageringBonusParams struct {
 // RecordWageringContribution + CheckAndCompleteGrant as bets settle, not
 // by this function.
 func IssueAndActivateGenericWageringBonus(ctx context.Context, tx pgx.Tx, p GenericWageringBonusParams) (Grant, GateOutcome, error) {
-	g, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: p.Grant, JurisdictionCode: p.JurisdictionCode})
+	g, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: p.Grant})
 	if err != nil && !errors.Is(err, ErrAlreadyGranted) {
 		return Grant{}, GateOutcome{}, err
 	}
@@ -285,7 +282,7 @@ func IssueAndActivateGenericWageringBonus(ctx context.Context, tx pgx.Tx, p Gene
 		return g, issueOutcome, nil
 	}
 	return ActivateGrant(ctx, tx, g.TenantID, g.ID, ActivateGrantParams{
-		JurisdictionCode: p.JurisdictionCode, ActorType: p.ActorType, ActorID: p.ActorID, Amount: p.Amount,
+		ActorType: p.ActorType, ActorID: p.ActorID, Amount: p.Amount,
 		WageringTimeLimit: p.WageringTimeLimit,
 	})
 }
@@ -298,7 +295,6 @@ func IssueAndActivateGenericWageringBonus(ctx context.Context, tx pgx.Tx, p Gene
 type CouponRedemptionParams struct {
 	Grant             Grant // TriggerReference MUST be set to the redeemed code (or a per-attempt id) by the caller - the per-player redemption-limit uniqueness IS the (campaign, offer_version, player, trigger_reference) constraint already enforced at grant.go's own DB level (doc 10 §W4: "a per-player limit is enforced as an ordinary DB uniqueness constraint on the redemption attempt")
 	Amount            *big.Int
-	JurisdictionCode  string
 	ActorID           uuid.UUID      // the redeeming player's own principal
 	WageringTimeLimit *time.Duration // see DepositBonusParams' identical field
 }
@@ -317,7 +313,7 @@ type CouponRedemptionParams struct {
 func RedeemCoupon(ctx context.Context, tx pgx.Tx, p CouponRedemptionParams) (Grant, GateOutcome, error) {
 	p.Grant.CreatedByActorType = ActorPlayer
 	p.Grant.CreatedByActorID = p.ActorID
-	g, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: p.Grant, JurisdictionCode: p.JurisdictionCode})
+	g, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: p.Grant})
 	if err != nil && !errors.Is(err, ErrAlreadyGranted) {
 		return Grant{}, GateOutcome{}, err
 	}
@@ -328,7 +324,7 @@ func RedeemCoupon(ctx context.Context, tx pgx.Tx, p CouponRedemptionParams) (Gra
 		return g, issueOutcome, nil
 	}
 	return ActivateGrant(ctx, tx, g.TenantID, g.ID, ActivateGrantParams{
-		JurisdictionCode: p.JurisdictionCode, ActorType: ActorPlayer, ActorID: p.ActorID, Amount: p.Amount,
+		ActorType: ActorPlayer, ActorID: p.ActorID, Amount: p.Amount,
 		WageringTimeLimit: p.WageringTimeLimit,
 	})
 }

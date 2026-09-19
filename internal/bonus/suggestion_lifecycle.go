@@ -106,7 +106,7 @@ func DecideSuggestion(ctx context.Context, tx pgx.Tx, tenantID, suggestionID uui
 // surface - SEP-1, T.1's gate, and doc 34's EOI enforcement all apply
 // exactly as they would for a staff member acting with no suggestion
 // involved at all.
-func ActivateSuggestionAsSingleGrant(ctx context.Context, tx pgx.Tx, tenantID, suggestionID uuid.UUID, g Grant, parentOperationID uuid.UUID, jurisdictionCode string, actorID uuid.UUID, amount *big.Int) (Grant, GateOutcome, error) {
+func ActivateSuggestionAsSingleGrant(ctx context.Context, tx pgx.Tx, tenantID, suggestionID uuid.UUID, g Grant, parentOperationID uuid.UUID, actorID uuid.UUID, amount *big.Int) (Grant, GateOutcome, error) {
 	s, err := GetSuggestionByID(ctx, tx, suggestionID)
 	if err != nil {
 		return Grant{}, GateOutcome{}, err
@@ -116,7 +116,7 @@ func ActivateSuggestionAsSingleGrant(ctx context.Context, tx pgx.Tx, tenantID, s
 	}
 
 	g.OriginatingSuggestionID = &suggestionID
-	activated, outcome, err := IssueSingleManualGrant(ctx, tx, g, parentOperationID, jurisdictionCode, actorID, amount)
+	activated, outcome, err := IssueSingleManualGrant(ctx, tx, g, parentOperationID, actorID, amount)
 	if err != nil {
 		return Grant{}, GateOutcome{}, err
 	}

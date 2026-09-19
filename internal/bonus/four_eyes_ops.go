@@ -188,14 +188,14 @@ func manualGrantIssuePayloadMatch(playerAccountID, offerVersionID uuid.UUID, ass
 // Grant.ID, payload built via manualGrantIssuePayloadMatch) and have it
 // approved AFTER calling this function and BEFORE calling
 // ActivateManualGrantWithApproval below.
-func IssueManualGrantRequest(ctx context.Context, tx pgx.Tx, g Grant, parentOperationID uuid.UUID, jurisdictionCode string, actorID uuid.UUID) (Grant, GateOutcome, error) {
+func IssueManualGrantRequest(ctx context.Context, tx pgx.Tx, g Grant, parentOperationID uuid.UUID, actorID uuid.UUID) (Grant, GateOutcome, error) {
 	if _, err := economicop.CheckEntry(ctx, tx, g.TenantID, parentOperationID, g.AssetCode); err != nil {
 		return Grant{}, GateOutcome{}, err
 	}
 	g.ParentOperationID = &parentOperationID
 	g.CreatedByActorType = ActorStaff
 	g.CreatedByActorID = actorID
-	return issueIdempotent(ctx, tx, IssueGrantParams{Grant: g, JurisdictionCode: jurisdictionCode})
+	return issueIdempotent(ctx, tx, IssueGrantParams{Grant: g})
 }
 
 // ActivateManualGrantWithApproval performs doc 10's "issued -> activated"
@@ -217,7 +217,7 @@ func IssueManualGrantRequest(ctx context.Context, tx pgx.Tx, g Grant, parentOper
 // §5.3 rule 3/doc 10 N2.4a, DR-4HB1W2-01's own fix, unchanged and
 // respected here exactly as targeting.go's IssueSingleManualGrant already
 // does for the EOI half alone).
-func ActivateManualGrantWithApproval(ctx context.Context, tx pgx.Tx, tenantID, grantID, parentOperationID uuid.UUID, jurisdictionCode string, actorID uuid.UUID, amount *big.Int) (Grant, GateOutcome, error) {
+func ActivateManualGrantWithApproval(ctx context.Context, tx pgx.Tx, tenantID, grantID, parentOperationID uuid.UUID, actorID uuid.UUID, amount *big.Int) (Grant, GateOutcome, error) {
 	g, err := GetGrantByID(ctx, tx, grantID)
 	if err != nil {
 		return Grant{}, GateOutcome{}, err
@@ -241,7 +241,7 @@ func ActivateManualGrantWithApproval(ctx context.Context, tx pgx.Tx, tenantID, g
 	}
 
 	return ActivateGrant(ctx, tx, tenantID, grantID, ActivateGrantParams{
-		JurisdictionCode: jurisdictionCode, ActorType: ActorStaff, ActorID: actorID, Amount: amount,
+		ActorType: ActorStaff, ActorID: actorID, Amount: amount,
 		PostGateHook: postGateHook,
 	})
 }
@@ -336,7 +336,7 @@ func BulkJobExecutePayloadMatch(offerVersionID uuid.UUID, assetCode string, amou
 // unchanged, this function's own four-eyes-consume-then-execute
 // sequencing needs no rework when that lands. Named here, not silently
 // presented as the final production shape for an arbitrarily large job.
-func ExecuteBulkGrantJobWithApproval(ctx context.Context, tx pgx.Tx, tenantID, jobID, actorID uuid.UUID, target StaticPlayerListTarget, grantTemplate Grant, jurisdictionCode string, systemActorID uuid.UUID, amount *big.Int) (ExecuteBulkGrantJobResult, error) {
+func ExecuteBulkGrantJobWithApproval(ctx context.Context, tx pgx.Tx, tenantID, jobID, actorID uuid.UUID, target StaticPlayerListTarget, grantTemplate Grant, systemActorID uuid.UUID, amount *big.Int) (ExecuteBulkGrantJobResult, error) {
 	job, err := GetBulkGrantJobByID(ctx, tx, jobID)
 	if err != nil {
 		return ExecuteBulkGrantJobResult{}, err
@@ -356,7 +356,7 @@ func ExecuteBulkGrantJobWithApproval(ctx context.Context, tx pgx.Tx, tenantID, j
 		return ExecuteBulkGrantJobResult{}, err
 	}
 
-	if err := RunStaticBulkGrantJob(ctx, tx, running, target, grantTemplate, jurisdictionCode, systemActorID, amount); err != nil {
+	if err := RunStaticBulkGrantJob(ctx, tx, running, target, grantTemplate, systemActorID, amount); err != nil {
 		if _, failErr := UpdateBulkGrantJobStatus(ctx, tx, tenantID, jobID, BulkJobFailed); failErr != nil {
 			return ExecuteBulkGrantJobResult{}, fmt.Errorf("bonus: record bulk job failure (job=%s): %w (original error: %v)", jobID, failErr, err)
 		}

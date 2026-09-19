@@ -22,23 +22,30 @@
 // IssueAndActivateCashback entry point the sweeps call, with exactly the
 // parameter struct the sweeps build.
 //
-// THE ONE SUBSTITUTION, STATED PLAINLY RATHER THAN HIDDEN: the sweeps
-// pass JurisdictionCode: "" (RunDepositSweepForTenant's own disclosed
-// limitation — this platform has no per-player jurisdiction resolver
-// anywhere, the same pre-existing gap already disclosed against casino's
-// real-money bet path), which AssetAuthorization correctly treats as an
-// immediate denial (ADR 0037 §C.2). These tests pass the fixture's OWN
-// real, fully dual-control-authorized jurisdiction code instead
-// (seedLifecycleFixture → authorizeFreshAssetForBonusWagering: a real
-// `jurisdictions` row plus a real ScopeTenant/ScopeJurisdiction
-// `assetregistry.AuthorizeScope` chain). NOTHING about the gate itself
-// is stubbed, skipped, short-circuited or weakened: the full T.1 chain
-// (AssetAuthorization → RG → Risk) runs unmodified and must genuinely
-// ALLOW for these tests to reach a posting at all. What is not proven
-// here — and is not provable until the platform-wide jurisdiction-
-// resolution gap closes — is the single link "a sweep supplies a real
-// jurisdiction code". Everything downstream of that link, which is where
-// all of the arithmetic and all of the double-entry lives, IS proven.
+// THE ONE SUBSTITUTION, STATED PLAINLY RATHER THAN HIDDEN, UPDATED FOR
+// STAGE 4I: this file originally substituted the fixture's own real,
+// fully dual-control-authorized jurisdiction code for the sweeps' own
+// JurisdictionCode: "" (RunDepositSweepForTenant's disclosed limitation),
+// so AssetAuthorization would genuinely ALLOW and this file's own B1
+// proof could reach a real posting. Stage 4I's jurisdiction resolver
+// (internal/jurisdiction, docs/governance/stage-4i-canonical-model.md)
+// makes that substitution structurally impossible now: bonus_grants and
+// bonus_grant activation are ALWAYS player-scoped operations, and the
+// resolver is, by design, incapable of resolving ANY jurisdiction for a
+// player-scoped operation today (HDR-J-1/HDR-J-3 unanswered - see
+// resolveGrantJurisdiction's own doc comment, eligibility.go) - there is
+// no longer any code path, test or production, that can make
+// AssetAuthorization ALLOW a Bonus activation. This file now uses
+// forceIssueAndActivateDepositBonusForTest/forceIssueAndActivateCashbackForTest
+// (lifecycle_integration_test.go) to reach the SAME real posting this
+// file's own B1 proof needs, skipping ONLY T.1's gate call - every other
+// line (candidate resolution, amount derivation, the ledger posting
+// itself) is the real, unmodified production code this file's own header
+// above already documents driving directly. What was already true before
+// Stage 4I remains true after it: what is not proven here is "a sweep
+// supplies a real jurisdiction" (now provably impossible, not merely
+// unproven) - everything downstream of activation, where the arithmetic
+// and the double-entry live, IS proven.
 package bonus
 
 import (
@@ -181,7 +188,7 @@ func assertReconciliationClean(t *testing.T, pool *db.Pool, tenantID uuid.UUID, 
 // rather than the cursor that would ordinarily stop the sweep earlier.
 // (The cursor's own idempotency is separately covered by Phase 3's
 // TestRunDepositSweepForTenant_MatchesAndAdvancesWatermark.)
-func runDepositSweepChainWithJurisdiction(t *testing.T, pool *db.Pool, f lifecycleFixture, jurisdictionCode string, ignoreCursor bool) (Grant, GateOutcome) {
+func runDepositSweepChain(t *testing.T, pool *db.Pool, f lifecycleFixture, ignoreCursor bool) (Grant, GateOutcome) {
 	t.Helper()
 	var grant Grant
 	var outcome GateOutcome
@@ -230,15 +237,12 @@ func runDepositSweepChainWithJurisdiction(t *testing.T, pool *db.Pool, f lifecyc
 					CreatedByActorType:  ActorSystem,
 				}
 				matches++
-				grant, outcome, err = IssueAndActivateDepositBonus(ctx, tx, DepositBonusParams{
+				grant, outcome = forceIssueAndActivateDepositBonusForTest(t, ctx, tx, DepositBonusParams{
 					Grant: g, DepositAmount: event.Amount, RateBP: rateBP, CapAmount: capAmount,
 					MinQualifying: c.OfferVersion.MinQualifyingAmount, MaxQualifying: c.OfferVersion.MaxQualifyingAmount,
-					JurisdictionCode: jurisdictionCode, ActorType: ActorSystem, ActorID: uuid.Nil,
+					ActorType: ActorSystem, ActorID: uuid.Nil,
 					WageringTimeLimit: c.OfferVersion.WageringTimeLimit,
 				})
-				if err != nil {
-					return err
-				}
 			}
 			if err := advanceDepositSweepWatermark(ctx, tx, f.tenantID, DepositSweepConsumerName, event.LedgerTransactionID, event.PostedAt); err != nil {
 				return err
@@ -269,7 +273,7 @@ func TestLFCert_DepositSweepPosting_B1AndRoundingAndReconciliation(t *testing.T)
 	seedDepositMatchableOffer(t, pool, f, false, nil) // rate_bp 5000, cap_amount 100000
 	depositTxID := seedRawDeposit(t, pool, f, 333, "card")
 
-	grant, outcome := runDepositSweepChainWithJurisdiction(t, pool, f, f.jurisdictionCode, false)
+	grant, outcome := runDepositSweepChain(t, pool, f, false)
 	if !outcome.Allowed {
 		t.Fatalf("the full T.1 gate chain denied the deposit-bonus activation (denied_by=%s code=%s) — "+
 			"this test cannot certify B1 without a real posting", outcome.DeniedBy, outcome.Code)
@@ -325,7 +329,7 @@ func TestLFCert_DepositSweepPosting_B1AndRoundingAndReconciliation(t *testing.T)
 	// UNIQUE (tenant_id, campaign_id, offer_version_id, player_account_id,
 	// trigger_reference) constraint and handled inside
 	// IssueAndActivateDepositBonus) and must post NOTHING new.
-	replayGrant, _ := runDepositSweepChainWithJurisdiction(t, pool, f, f.jurisdictionCode, true)
+	replayGrant, _ := runDepositSweepChain(t, pool, f, true)
 	if replayGrant.ID != grant.ID {
 		t.Fatalf("replay produced a DIFFERENT grant %s (original %s) — idempotency violated", replayGrant.ID, grant.ID)
 	}
@@ -342,7 +346,7 @@ func TestLFCert_DepositSweepPosting_B1AndRoundingAndReconciliation(t *testing.T)
 // elapsed window against the real production helpers, substituting only
 // the jurisdiction code (see this file's header). Returns the Grant, the
 // gate outcome and the NetLossAmount the real ledger read produced.
-func runCashbackChainWithJurisdiction(t *testing.T, pool *db.Pool, f lifecycleFixture, jurisdictionCode string, asOf time.Time) (Grant, GateOutcome, *big.Int) {
+func runCashbackChain(t *testing.T, pool *db.Pool, f lifecycleFixture, asOf time.Time) (Grant, GateOutcome, *big.Int) {
 	t.Helper()
 	var grant Grant
 	var outcome GateOutcome
@@ -399,11 +403,11 @@ func runCashbackChainWithJurisdiction(t *testing.T, pool *db.Pool, f lifecycleFi
 			CreatedByActorType: ActorSystem,
 		}
 		issued++
-		grant, outcome, err = IssueAndActivateCashback(ctx, tx, CashbackParams{
+		grant, outcome = forceIssueAndActivateCashbackForTest(t, ctx, tx, CashbackParams{
 			Grant: g, NetLossAmount: netLoss, RateBP: rateBP, CapAmount: capAmount,
-			JurisdictionCode: jurisdictionCode, ActorType: ActorSystem, ActorID: uuid.Nil,
+			ActorType: ActorSystem, ActorID: uuid.Nil,
 		})
-		return err
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("cashback scheduler chain: %v", err)
@@ -425,7 +429,7 @@ func TestLFCert_CashbackSchedulerPosting_B1AndNetLossArithmetic(t *testing.T) {
 	seedCasinoBetForCashback(t, pool, f, 1000) // 1000 staked, no win -> net loss 1000
 
 	asOf := time.Now().UTC().Add(48 * time.Hour)
-	grant, outcome, observedNetLoss := runCashbackChainWithJurisdiction(t, pool, f, f.jurisdictionCode, asOf)
+	grant, outcome, observedNetLoss := runCashbackChain(t, pool, f, asOf)
 
 	if !outcome.Allowed {
 		t.Fatalf("the full T.1 gate chain denied the cashback activation (denied_by=%s code=%s)", outcome.DeniedBy, outcome.Code)
@@ -461,7 +465,7 @@ func TestLFCert_CashbackSchedulerPosting_B1AndNetLossArithmetic(t *testing.T) {
 	// offer_version_id, player_account_id, trigger_reference) constraint
 	// must resolve to the existing Grant — never a second cashback payout
 	// for the same window.
-	replayGrant, _, replayNetLoss := runCashbackChainWithJurisdiction(t, pool, f, f.jurisdictionCode, asOf)
+	replayGrant, _, replayNetLoss := runCashbackChain(t, pool, f, asOf)
 	if replayGrant.ID != grant.ID {
 		t.Fatalf("replaying the same cashback window produced a DIFFERENT grant %s (original %s) — a double payout", replayGrant.ID, grant.ID)
 	}
@@ -625,16 +629,10 @@ func TestLFCert_ExpirySweepWithDatabaseClock_TerminatesExpiredGrant(t *testing.T
 	var grantID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "lfcert-expiry-dbclock")
-		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{
-			Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode,
+		result := forceIssueAndActivateGrantForTest(t, ctx, tx, g, ActivateGrantParams{
+			Amount: big.NewInt(1000), ActorType: ActorSystem,
 			WageringTimeLimit: durationPtr(10 * time.Millisecond),
 		})
-		if err != nil {
-			return err
-		}
-		if !outcome.Allowed {
-			return fmt.Errorf("activation denied: %+v", outcome)
-		}
 		grantID = result.ID
 		return nil
 	})

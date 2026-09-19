@@ -30,6 +30,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 )
 
@@ -254,11 +255,14 @@ type ResolveHeldDispositionActionParams struct {
 	// as client input at all; leave it zero unless a caller has a genuine
 	// reason to require MORE approvals than the tenant's own policy.
 	RequiredApprovals int32
-	// JurisdictionCode is consumed ONLY by ACTION_ROUTE_TO_CASH's own T.1
-	// gate (below) - resolved identically to every other T.1 call site in
-	// this package (resolveJurisdictionID/resolveLicensingMode). Unused,
-	// and safe to leave empty, for ACTION_REFORFEIT.
-	JurisdictionCode string
+	// JurisdictionCode is DELETED as a field (Stage 4I JV-2, canonical-model
+	// §8 - see lifecycle.go's IssueGrantParams for the full doc comment this
+	// mirrors): a caller-suppliable jurisdiction code is a resolved FACT
+	// about an operation, never a value a caller may supply directly (JV-1).
+	// ACTION_ROUTE_TO_CASH's own T.1 gate (below) now resolves it itself,
+	// server-side, via resolveGrantJurisdiction (eligibility.go), from the
+	// disposition's own Grant's TenantID/BrandID/PlayerAccountID.
+	// ACTION_REFORFEIT never ran this gate at all and is unaffected.
 }
 
 // ResolveHeldDispositionAction applies a G-2 disposition answer, gated by
@@ -275,6 +279,22 @@ type ResolveHeldDispositionActionParams struct {
 // player_bonus projection FOR UPDATE (HR-25's own correction: both debit
 // player_bonus_held directly, never via player_bonus).
 func ResolveHeldDispositionAction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p ResolveHeldDispositionActionParams) (HeldDisposition, error) {
+	return resolveHeldDispositionAction(ctx, tx, tenantID, p, false)
+}
+
+// resolveHeldDispositionAction is ResolveHeldDispositionAction's real
+// implementation. skipAssetAuthorization is NEVER exposed on
+// ResolveHeldDispositionActionParams (a public, HTTP-reachable struct) -
+// it exists ONLY so this package's own _test.go files (same package,
+// same visibility rules that already let them call every other
+// unexported function here directly) can isolate RG's/Risk's own T.1
+// behavior from AssetAuthorization's now-unconditional Stage 4I
+// jurisdiction denial, mirroring GateCheckpoint's own pre-existing,
+// legitimate SkipAssetAuthorization parameter (eligibility.go). No
+// exported function anywhere in this package ever passes true for it;
+// internal/httpserver (a different package) cannot reach this function
+// at all, only the always-false exported wrapper above.
+func resolveHeldDispositionAction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p ResolveHeldDispositionActionParams, skipAssetAuthorization bool) (HeldDisposition, error) {
 	disposition, err := GetHeldDispositionByID(ctx, tx, p.HeldDispositionID)
 	if err != nil {
 		return HeldDisposition{}, err
@@ -415,7 +435,8 @@ func ResolveHeldDispositionAction(ctx context.Context, tx pgx.Tx, tenantID uuid.
 		// finished paying down for bonus_conversion itself - reusing the
 		// existing value keeps this fix inside RG mechanics rather than
 		// opening new Risk surface no specialist has reviewed.
-		jurisdictionID, err := resolveJurisdictionID(ctx, tx, p.JurisdictionCode)
+		jurisdictionID, jurisdictionCode, err := resolveGrantJurisdiction(ctx, tx, tenantID, g.BrandID, g.PlayerAccountID,
+			jurisdiction.OperationBonusConversion, ActorStaff, p.ActorID)
 		if err != nil {
 			return HeldDisposition{}, err
 		}
@@ -425,8 +446,9 @@ func ResolveHeldDispositionAction(ctx context.Context, tx pgx.Tx, tenantID uuid.
 		}
 		gateOutcome, err := GateCheckpoint(ctx, tx, GateParams{
 			TenantID: tenantID, BrandID: g.BrandID, PlayerAccountID: g.PlayerAccountID, WalletID: g.WalletID,
-			JurisdictionID: jurisdictionID, JurisdictionCode: p.JurisdictionCode, LicensingMode: licensingMode,
+			JurisdictionID: jurisdictionID, JurisdictionCode: jurisdictionCode, LicensingMode: licensingMode,
 			AssetCode: g.AssetCode, Amount: amountMinor, RiskOperation: OperationBonusConversion,
+			SkipAssetAuthorization: skipAssetAuthorization,
 		})
 		if err != nil {
 			return HeldDisposition{}, err

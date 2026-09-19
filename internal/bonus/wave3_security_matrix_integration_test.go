@@ -89,7 +89,7 @@ func issueApproveActivateManualGrant(t *testing.T, pool *db.Pool, f lifecycleFix
 		g.PlayerAccountID = playerID
 		g.WalletID = walletID
 		g.CreatedByActorType = ActorStaff
-		grant, _, err := IssueManualGrantRequest(ctx, tx, g, parentOpID, f.jurisdictionCode, f.staffID)
+		grant, _, err := IssueManualGrantRequest(ctx, tx, g, parentOpID, f.staffID)
 		grantID = grant.ID
 		return err
 	}); err != nil {
@@ -99,8 +99,13 @@ func issueApproveActivateManualGrant(t *testing.T, pool *db.Pool, f lifecycleFix
 	payloadMatch := manualGrantIssuePayloadMatch(playerID, co.offerVersionID, f.assetCode, amount)
 	fileAndDoublyApprove(t, pool, f.tenantID, ChangeOpManualGrantIssue, "bonus_grants", grantID, payloadMatch, f.staffID, f.staff2ID, approver2)
 
+	// forceActivateManualGrantWithApprovalForTest (four_eyes_ops_integration_
+	// test.go, same package): this helper's own callers test EOI's value-
+	// budget enforcement (threaded through the identical PostGateHook),
+	// which Stage 4I's now-unconditional jurisdiction denial at T.1 would
+	// otherwise mask entirely.
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, actErr := ActivateManualGrantWithApproval(ctx, tx, f.tenantID, grantID, parentOpID, f.jurisdictionCode, f.staffID, amount)
+		_, actErr := forceActivateManualGrantWithApprovalForTest(ctx, tx, f.tenantID, grantID, parentOpID, f.staffID, amount)
 		return actErr
 	})
 	return grantID, err
@@ -246,14 +251,14 @@ func TestSEC_ApprovalAuthorizesExactlyOneExecution(t *testing.T) {
 
 		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			template := newTestOfferGrant(f, co, "")
-			_, execErr := ExecuteBulkGrantJobWithApproval(ctx, tx, f.tenantID, jobID, f.staffID, target, template, f.jurisdictionCode, uuid.Nil, amount)
+			_, execErr := ExecuteBulkGrantJobWithApproval(ctx, tx, f.tenantID, jobID, f.staffID, target, template, uuid.Nil, amount)
 			return execErr
 		}); err != nil {
 			t.Fatalf("the first, approved execution must succeed: %v", err)
 		}
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			template := newTestOfferGrant(f, co, "")
-			_, execErr := ExecuteBulkGrantJobWithApproval(ctx, tx, f.tenantID, jobID, f.staffID, target, template, f.jurisdictionCode, uuid.Nil, amount)
+			_, execErr := ExecuteBulkGrantJobWithApproval(ctx, tx, f.tenantID, jobID, f.staffID, target, template, uuid.Nil, amount)
 			return execErr
 		})
 		if !errors.Is(err, ErrChangeRequestNotApproved) {
@@ -321,7 +326,7 @@ func TestSEC_EOIMintedForOwnPerson_RefusedByComposedSEP1(t *testing.T) {
 		g.PlayerAccountID = selfPlayerID
 		g.WalletID = selfWalletID
 		g.CreatedByActorType = ActorStaff
-		_, _, issueErr := IssueManualGrantRequest(ctx, tx, g, parentOpID, f.jurisdictionCode, f.staffID)
+		_, _, issueErr := IssueManualGrantRequest(ctx, tx, g, parentOpID, f.staffID)
 		return issueErr
 	})
 	// Per CLAUDE.md's "no fake completion"/qa-owned "check WHICH error"
@@ -367,8 +372,12 @@ func TestSEC_EOIMintedForOwnPerson_RefusedByComposedSEP1(t *testing.T) {
 	}
 
 	// And with no recordable approval, the activation is refused outright.
+	// forceActivateManualGrantWithApprovalForTest (four_eyes_ops_integration_
+	// test.go, same package): this test's subject is the four-eyes consume
+	// itself, which Stage 4I's now-unconditional jurisdiction denial at T.1
+	// would otherwise mask.
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, actErr := ActivateManualGrantWithApproval(ctx, tx, f.tenantID, grantID, parentOpID, f.jurisdictionCode, f.staffID, amount)
+		_, actErr := forceActivateManualGrantWithApprovalForTest(ctx, tx, f.tenantID, grantID, parentOpID, f.staffID, amount)
 		return actErr
 	})
 	if !errors.Is(err, ErrChangeRequestNotApproved) {

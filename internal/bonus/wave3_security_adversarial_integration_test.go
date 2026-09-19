@@ -116,7 +116,7 @@ func TestSEC_SelfApprovalRefused_AllFourNewlyWiredOperations(t *testing.T) {
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "sec-self-approval")
 		g.CreatedByActorType = ActorStaff
-		grant, _, err := IssueManualGrantRequest(ctx, tx, g, parentOpID, f.jurisdictionCode, f.staffID)
+		grant, _, err := IssueManualGrantRequest(ctx, tx, g, parentOpID, f.staffID)
 		if err != nil {
 			return err
 		}
@@ -245,7 +245,7 @@ func TestSEC_BulkJobExecute_AmountSubstitutionRefused(t *testing.T) {
 	// Execute for a DIFFERENT per-recipient amount than the one approved.
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		template := newTestOfferGrant(f, co, "")
-		_, execErr := ExecuteBulkGrantJobWithApproval(ctx, tx, f.tenantID, jobID, f.staffID, target, template, f.jurisdictionCode, uuid.Nil, substitutedAmount)
+		_, execErr := ExecuteBulkGrantJobWithApproval(ctx, tx, f.tenantID, jobID, f.staffID, target, template, uuid.Nil, substitutedAmount)
 		return execErr
 	})
 	if !errors.Is(err, ErrChangeRequestNotApproved) {
@@ -271,7 +271,7 @@ func TestSEC_BulkJobExecute_AmountSubstitutionRefused(t *testing.T) {
 	// legitimate execution.
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		template := newTestOfferGrant(f, co, "")
-		_, execErr := ExecuteBulkGrantJobWithApproval(ctx, tx, f.tenantID, jobID, f.staffID, target, template, f.jurisdictionCode, uuid.Nil, approvedAmount)
+		_, execErr := ExecuteBulkGrantJobWithApproval(ctx, tx, f.tenantID, jobID, f.staffID, target, template, uuid.Nil, approvedAmount)
 		return execErr
 	})
 	if err != nil {
@@ -330,7 +330,7 @@ func TestSEC_BulkJobExecute_RecipientSetSubstitutionRefused(t *testing.T) {
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		template := newTestOfferGrant(f, co, "")
 		_, execErr := ExecuteBulkGrantJobWithApproval(ctx, tx, f.tenantID, jobID, f.staffID,
-			StaticPlayerListTarget{PlayerAccountIDs: substitutedSet}, template, f.jurisdictionCode, uuid.Nil, amount)
+			StaticPlayerListTarget{PlayerAccountIDs: substitutedSet}, template, uuid.Nil, amount)
 		return execErr
 	})
 	if !errors.Is(err, ErrChangeRequestNotApproved) {
@@ -440,7 +440,7 @@ func TestSEC_ManualGrantEOI_SubjectSubstitutionRefused(t *testing.T) {
 		g.PlayerAccountID = otherPlayerID
 		g.WalletID = otherWalletID
 		g.CreatedByActorType = ActorStaff
-		grant, _, err := IssueManualGrantRequest(ctx, tx, g, parentOpID, f.jurisdictionCode, f.staffID)
+		grant, _, err := IssueManualGrantRequest(ctx, tx, g, parentOpID, f.staffID)
 		grantID = grant.ID
 		return err
 	})
@@ -455,8 +455,13 @@ func TestSEC_ManualGrantEOI_SubjectSubstitutionRefused(t *testing.T) {
 	payloadMatch := manualGrantIssuePayloadMatch(otherPlayerID, co.offerVersionID, f.assetCode, amount)
 	fileAndDoublyApprove(t, pool, f.tenantID, ChangeOpManualGrantIssue, "bonus_grants", grantID, payloadMatch, f.staffID, f.staff2ID, staff3)
 
+	// forceActivateManualGrantWithApprovalForTest (four_eyes_ops_integration_
+	// test.go, same package): this test's subject is EOI's OWN subject-
+	// containment check (threaded through the identical PostGateHook),
+	// which Stage 4I's now-unconditional jurisdiction denial at T.1 would
+	// otherwise mask entirely.
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := ActivateManualGrantWithApproval(ctx, tx, f.tenantID, grantID, parentOpID, f.jurisdictionCode, f.staffID, amount)
+		_, err := forceActivateManualGrantWithApprovalForTest(ctx, tx, f.tenantID, grantID, parentOpID, f.staffID, amount)
 		return err
 	})
 	if !errors.Is(err, economicop.ErrChildScopeExceedsParent) {
@@ -483,7 +488,7 @@ func TestSEC_ManualGrantEOI_AuthorizedSubjectStillAllowed(t *testing.T) {
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "sec-subject-authorized")
 		g.CreatedByActorType = ActorStaff
-		grant, _, err := IssueManualGrantRequest(ctx, tx, g, parentOpID, f.jurisdictionCode, f.staffID)
+		grant, _, err := IssueManualGrantRequest(ctx, tx, g, parentOpID, f.staffID)
 		grantID = grant.ID
 		return err
 	})
@@ -493,14 +498,12 @@ func TestSEC_ManualGrantEOI_AuthorizedSubjectStillAllowed(t *testing.T) {
 	payloadMatch := manualGrantIssuePayloadMatch(f.playerID, co.offerVersionID, f.assetCode, amount)
 	fileAndDoublyApprove(t, pool, f.tenantID, ChangeOpManualGrantIssue, "bonus_grants", grantID, payloadMatch, f.staffID, f.staff2ID, staff3)
 
-	var outcome GateOutcome
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var actErr error
-		_, outcome, actErr = ActivateManualGrantWithApproval(ctx, tx, f.tenantID, grantID, parentOpID, f.jurisdictionCode, f.staffID, amount)
+		_, actErr := forceActivateManualGrantWithApprovalForTest(ctx, tx, f.tenantID, grantID, parentOpID, f.staffID, amount)
 		return actErr
 	})
-	if err != nil || !outcome.Allowed {
-		t.Fatalf("the EOI's own authorized subject must still be grantable: err=%v outcome=%+v", err, outcome)
+	if err != nil {
+		t.Fatalf("the EOI's own authorized subject must still be grantable: err=%v", err)
 	}
 }
 
@@ -574,7 +577,7 @@ func TestSEC_ForeignTenantEOIRootRefused(t *testing.T) {
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "sec-foreign-eoi")
 		g.CreatedByActorType = ActorStaff
-		_, _, err := IssueManualGrantRequest(ctx, tx, g, foreignOpID, f.jurisdictionCode, f.staffID)
+		_, _, err := IssueManualGrantRequest(ctx, tx, g, foreignOpID, f.staffID)
 		return err
 	})
 	if !errors.Is(err, economicop.ErrParentOperationNotFound) {

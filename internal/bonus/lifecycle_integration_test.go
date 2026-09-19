@@ -305,6 +305,462 @@ func seedCampaignOffer(t *testing.T, pool *db.Pool, tenantID, brandID, staffActo
 	return co
 }
 
+// forceActivateGrantForTest performs EXACTLY the same post-gate effecting
+// logic ActivateGrant performs on a genuine ALLOW (applyGrantActivation,
+// lifecycle.go - the ONE place this posting is implemented; this helper
+// calls it directly rather than re-implementing it, so there is no
+// second, hand-copied version that could drift), WITHOUT running T.1's
+// gate first.
+//
+// WHY THIS EXISTS, STATED PLAINLY (never a production bypass - see this
+// dispatch's own stage completion report for the full reasoning): Stage
+// 4I's jurisdiction resolver (internal/jurisdiction,
+// docs/governance/stage-4i-canonical-model.md) is, by design, structurally
+// incapable of resolving a jurisdiction for ANY player-scoped operation
+// today (HDR-J-1/HDR-J-3 are unanswered - see resolveGrantJurisdiction's
+// own doc comment, eligibility.go). T.1's AssetAuthorization layer
+// therefore honestly, correctly denies every real ActivateGrant call in
+// this package's test suite now, exactly as it denies in production. That
+// is the CORRECT, disclosed behaviour for the gate itself, and is
+// asserted directly by the tests whose actual subject IS that gate (the
+// manual-grant/bulk-grant/held-disposition admin surfaces, and the
+// dedicated jurisdiction-gate tests). It is NOT a defect this helper works
+// around.
+//
+// For every OTHER test in this package - whose actual subject is
+// downstream of a successful activation (wagering-contribution math,
+// expiry-sweep mechanics, forfeiture, conversion payout rules, EOI/
+// four-eyes concurrency) - reaching `activated` is a SETUP precondition,
+// not the thing under test, and Stage 4I's honest denial would otherwise
+// silently delete dozens of tests' ability to exercise code that has
+// nothing to do with jurisdiction at all, which is its own compliance
+// problem (CLAUDE.md's financial-testing mandate). This helper is that
+// precondition, built the same way any test seeds a precondition it does
+// not itself want to exercise (e.g. seeding rows directly via SQL rather
+// than through a full user journey) - it is defined in a _test.go file,
+// is NEVER compiled into the production binary, and is NEVER reachable
+// from any HTTP handler or other production code path. It never appears
+// in, and never influences, internal/jurisdiction's or
+// internal/assetregistry's own production decision.
+func forceActivateGrantForTest(t *testing.T, ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, p ActivateGrantParams) Grant {
+	t.Helper()
+	activated, err := forceActivateGrantForTestErr(ctx, tx, tenantID, grantID, p)
+	if err != nil {
+		t.Fatalf("forceActivateGrantForTest: %v", err)
+	}
+	return activated
+}
+
+// forceActivateGrantForTestErr is forceActivateGrantForTest's error-
+// returning core, for the handful of tests that need to assert a SPECIFIC
+// error out of the post-gate effecting logic (e.g. four_eyes_ops_
+// integration_test.go's own four-eyes-consume assertions, threaded
+// through p.PostGateHook) rather than treating any error as an
+// unconditional test failure.
+func forceActivateGrantForTestErr(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, p ActivateGrantParams) (Grant, error) {
+	if err := AdvisoryLockGrant(ctx, tx, tenantID, grantID); err != nil {
+		return Grant{}, err
+	}
+	g, err := LockGrantForUpdate(ctx, tx, grantID)
+	if err != nil {
+		return Grant{}, err
+	}
+	if g.Status != GrantIssued {
+		return Grant{}, fmt.Errorf("%w: activate requires status issued, got %s", ErrIllegalTransition, g.Status)
+	}
+	amountMinor, err := amountToInt64(p.Amount)
+	if err != nil {
+		return Grant{}, err
+	}
+	return applyGrantActivation(ctx, tx, tenantID, grantID, g, amountMinor, time.Now().UTC(), p)
+}
+
+// forceIssueAndActivateGrantForTest composes IssueGrant (unmodified,
+// real production code - issuance's own T.2 gate does not require
+// AssetAuthorization/a resolved jurisdiction at all, doc 10 §T.2, and is
+// therefore UNAFFECTED by Stage 4I: see IssueGrant's own doc comment)
+// with forceActivateGrantForTest above, for the common case where a test
+// merely wants an activated Grant to build on and has no interest in
+// exercising T.1's gate itself.
+func forceIssueAndActivateGrantForTest(t *testing.T, ctx context.Context, tx pgx.Tx, g Grant, p ActivateGrantParams) Grant {
+	t.Helper()
+	activated, err := forceIssueAndActivateGrantForTestErr(ctx, tx, g, p)
+	if err != nil {
+		t.Fatalf("forceIssueAndActivateGrantForTest: %v", err)
+	}
+	return activated
+}
+
+// forceIssueAndActivateGrantForTestErr is forceIssueAndActivateGrantForTest's
+// error-returning core - safe to call from a spawned test goroutine (see
+// forceRunBulkGrantJobItemForTest's own doc comment for why t.Fatalf
+// cannot be).
+func forceIssueAndActivateGrantForTestErr(ctx context.Context, tx pgx.Tx, g Grant, p ActivateGrantParams) (Grant, error) {
+	created, issueOutcome, err := IssueGrant(ctx, tx, IssueGrantParams{Grant: g})
+	if err != nil {
+		return Grant{}, fmt.Errorf("issue: %w", err)
+	}
+	if !issueOutcome.Allowed {
+		return Grant{}, fmt.Errorf("issue denied: %+v", issueOutcome)
+	}
+	return forceActivateGrantForTestErr(ctx, tx, created.TenantID, created.ID, p)
+}
+
+// forceConvertGrantForTest mirrors ConvertGrant's own AOE/wagering-target
+// pre-checks EXACTLY, then reaches the effecting posting via
+// applyGrantConversion (conversion.go) directly, WITHOUT running T.1's
+// gate - see forceActivateGrantForTest's own doc comment (above) for the
+// full, disclosed reasoning (ConvertGrant's own T.1 gate now
+// unconditionally denies at AssetAuthorization for every player-scoped
+// operation, Stage 4I, which would otherwise make it impossible for a
+// test whose actual subject is downstream of a successful conversion -
+// or the conversion mechanics themselves, independent of jurisdiction -
+// to ever reach `converted` via the public API).
+func forceConvertGrantForTest(t *testing.T, ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, wageringTargetScaled *big.Int, p ConvertGrantParams) ConvertGrantResult {
+	t.Helper()
+	if err := AdvisoryLockGrant(ctx, tx, tenantID, grantID); err != nil {
+		t.Fatalf("forceConvertGrantForTest: advisory lock: %v", err)
+	}
+	g, err := LockGrantForUpdate(ctx, tx, grantID)
+	if err != nil {
+		t.Fatalf("forceConvertGrantForTest: lock grant: %v", err)
+	}
+	if g.Status != GrantCompleted {
+		t.Fatalf("forceConvertGrantForTest: grant %s is not completed (status %s)", grantID, g.Status)
+	}
+	aoe, err := ComputeAOE(ctx, tx, tenantID, grantID)
+	if err != nil {
+		t.Fatalf("forceConvertGrantForTest: compute AOE: %v", err)
+	}
+	if !aoe.IsEmpty() {
+		t.Fatalf("forceConvertGrantForTest: grant %s has open exposure - this helper is for the T.1-gate bypass only, not for exercising AOE blocking", grantID)
+	}
+	progress, err := DeriveWageringProgress(ctx, tx, tenantID, grantID)
+	if err != nil {
+		t.Fatalf("forceConvertGrantForTest: derive wagering progress: %v", err)
+	}
+	if wageringTargetScaled != nil && progress.PFirm.Cmp(wageringTargetScaled) < 0 {
+		t.Fatalf("forceConvertGrantForTest: wagering requirement not met - this helper is for the T.1-gate bypass only")
+	}
+	remaining, err := RemainingBonusBalance(ctx, tx, tenantID, grantID)
+	if err != nil {
+		t.Fatalf("forceConvertGrantForTest: remaining balance: %v", err)
+	}
+	decided := new(big.Int).Set(remaining)
+	if p.MaxCashoutAmount != nil && decided.Cmp(p.MaxCashoutAmount) > 0 {
+		decided = new(big.Int).Set(p.MaxCashoutAmount)
+	}
+	amountMinor, err := amountToInt64(decided)
+	if err != nil {
+		t.Fatalf("forceConvertGrantForTest: amount: %v", err)
+	}
+	result, err := applyGrantConversion(ctx, tx, tenantID, grantID, g, amountMinor, decided, p)
+	if err != nil {
+		t.Fatalf("forceConvertGrantForTest: applyGrantConversion: %v", err)
+	}
+	return result
+}
+
+// forceIssueSingleManualGrantForTest mirrors IssueSingleManualGrant
+// EXACTLY (targeting.go - economicop.CheckEntry, issueIdempotent, and the
+// IDENTICAL EOI-budget PostGateHook), substituting
+// forceActivateGrantForTestErr for the real ActivateGrant call. See
+// forceRunBulkGrantJobItemForTest's own doc comment (below) for why: this
+// file's EOI/adversarial tests are about economicop's own budget/ceiling
+// enforcement, not jurisdiction.
+func forceIssueSingleManualGrantForTest(ctx context.Context, tx pgx.Tx, g Grant, parentOperationID uuid.UUID, actorID uuid.UUID, amount *big.Int) (Grant, error) {
+	if _, err := economicop.CheckEntry(ctx, tx, g.TenantID, parentOperationID, g.AssetCode); err != nil {
+		return Grant{}, err
+	}
+	g.ParentOperationID = &parentOperationID
+	g.CreatedByActorType = ActorStaff
+	g.CreatedByActorID = actorID
+
+	created, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: g})
+	if err != nil && !errors.Is(err, ErrAlreadyGranted) {
+		return Grant{}, err
+	}
+	if !issueOutcome.Allowed {
+		return created, nil
+	}
+
+	var postGateHook func(context.Context, pgx.Tx) error
+	if !errors.Is(err, ErrAlreadyGranted) {
+		playerAccountID := created.PlayerAccountID
+		tenantID := g.TenantID
+		postGateHook = func(hookCtx context.Context, hookTx pgx.Tx) error {
+			op, getErr := economicop.GetByID(hookCtx, hookTx, parentOperationID)
+			if getErr != nil {
+				return getErr
+			}
+			return economicop.ConsumeRootBudget(hookCtx, hookTx, tenantID, op.RootOperationID, economicop.OperationBonusManualGrant, playerAccountID, amount)
+		}
+	}
+
+	return forceActivateGrantForTestErr(ctx, tx, created.TenantID, created.ID, ActivateGrantParams{
+		ActorType: ActorStaff, ActorID: actorID, Amount: amount,
+		PostGateHook: postGateHook,
+	})
+}
+
+// forceRunStaticBulkGrantJobForTest / forceRunBulkGrantJobItemForTest
+// mirror RunStaticBulkGrantJob / runBulkGrantJobItem EXACTLY (targeting.go
+// - resumability check, item creation, SEP-1 check, wallet resolution,
+// issueIdempotent, and the IDENTICAL economicop.ConsumeRootBudget
+// PostGateHook), substituting forceActivateGrantForTestErr for the real
+// ActivateGrant call. See forceActivateGrantForTest's own doc comment
+// (above) for why: this file's own EOI/four-eyes/adversarial tests are
+// about economicop's OWN budget/ceiling enforcement (threaded through
+// ActivateGrant's PostGateHook, which never runs at all once T.1's
+// AssetAuthorization layer unconditionally denies first, Stage 4I) - not
+// about jurisdiction, which none of them were written to exercise.
+func forceRunStaticBulkGrantJobForTest(ctx context.Context, tx pgx.Tx, job BulkGrantJob, target StaticPlayerListTarget, grantTemplate Grant, systemActorID uuid.UUID, amount *big.Int) error {
+	if job.ParentOperationID == nil {
+		return fmt.Errorf("forceRunStaticBulkGrantJobForTest: bulk grant job %s has no parent_operation_id", job.ID)
+	}
+	if _, err := economicop.CheckEntry(ctx, tx, job.TenantID, *job.ParentOperationID, grantTemplate.AssetCode); err != nil {
+		return err
+	}
+	op, err := economicop.GetByID(ctx, tx, *job.ParentOperationID)
+	if err != nil {
+		return err
+	}
+	requesterPerson, approverPersons, err := requesterAndApproverPersons(ctx, tx, job)
+	if err != nil {
+		return err
+	}
+	for _, playerAccountID := range target.PlayerAccountIDs {
+		if err := forceRunBulkGrantJobItemForTest(ctx, tx, job, op.RootOperationID, playerAccountID, grantTemplate, systemActorID, amount, requesterPerson, approverPersons); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// forceRunBulkGrantJobItemForTest is safe to call from a spawned test
+// goroutine (unlike this file's t.Fatalf-based helpers): it returns every
+// failure as a plain error rather than calling t.Fatalf, since the
+// testing package requires Fatal/FailNow to be called only from the
+// goroutine running the test function itself, and this file's own
+// concurrent adversarial tests call this helper from worker goroutines.
+func forceRunBulkGrantJobItemForTest(ctx context.Context, tx pgx.Tx, job BulkGrantJob, rootOperationID, playerAccountID uuid.UUID, grantTemplate Grant, systemActorID uuid.UUID, amount *big.Int, requesterPerson uuid.UUID, approverPersons []uuid.UUID) error {
+	if _, err := GetBulkGrantJobItem(ctx, tx, job.TenantID, job.ID, playerAccountID); err == nil {
+		return nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	item, err := CreateBulkGrantJobItem(ctx, tx, BulkGrantJobItem{TenantID: job.TenantID, BulkGrantJobID: job.ID, PlayerAccountID: playerAccountID, ParentOperationID: &rootOperationID})
+	if err != nil {
+		if errors.Is(err, ErrDuplicateItem) {
+			return nil
+		}
+		return err
+	}
+	subjectPerson, err := playerPersonID(ctx, tx, playerAccountID)
+	if err != nil {
+		return err
+	}
+	if subjectPerson == requesterPerson || containsUUID(approverPersons, subjectPerson) {
+		reason := "SEP-1: requester or an approver of this bulk job resolves to the same person as this targeted player"
+		_, err := RecordBulkGrantJobItemOutcome(ctx, tx, job.TenantID, item.ID, ItemDenied, &reason, nil, nil, nil, time.Now().UTC())
+		return err
+	}
+	walletID, err := resolvePlayerWallet(ctx, tx, job.TenantID, playerAccountID, grantTemplate.AssetCode)
+	if err != nil {
+		return err
+	}
+	grant := grantTemplate
+	grant.PlayerAccountID = playerAccountID
+	grant.WalletID = walletID
+	grant.TriggerReference = fmt.Sprintf("bulk_grant_job:%s:%s", job.ID, playerAccountID)
+	grant.ParentOperationID = &rootOperationID
+	grant.CreatedByActorType = ActorSystem
+	grant.CreatedByActorID = uuid.Nil
+
+	created, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: grant})
+	if err != nil && !errors.Is(err, ErrAlreadyGranted) {
+		return err
+	}
+	if !issueOutcome.Allowed {
+		reason := denialReasonCode(issueOutcome)
+		_, err := RecordBulkGrantJobItemOutcome(ctx, tx, job.TenantID, item.ID, ItemDenied, &reason, nil, nil, nil, time.Now().UTC())
+		return err
+	}
+	if errors.Is(err, ErrAlreadyGranted) {
+		_, err := RecordBulkGrantJobItemOutcome(ctx, tx, job.TenantID, item.ID, ItemAlreadyGranted, nil, &created.ID, nil, nil, time.Now().UTC())
+		return err
+	}
+
+	activated, err := forceActivateGrantForTestErr(ctx, tx, created.TenantID, created.ID, ActivateGrantParams{
+		ActorType: ActorSystem, ActorID: systemActorID, Amount: amount,
+		PostGateHook: func(hookCtx context.Context, hookTx pgx.Tx) error {
+			return economicop.ConsumeRootBudget(hookCtx, hookTx, job.TenantID, rootOperationID, economicop.OperationBonusBulkGrant, playerAccountID, amount)
+		},
+	})
+	if err != nil {
+		if !errors.Is(err, economicop.ErrBudgetExhausted) {
+			return err
+		}
+		reason := err.Error()
+		_, recErr := RecordBulkGrantJobItemOutcome(ctx, tx, job.TenantID, item.ID, ItemDenied, &reason, nil, nil, nil, time.Now().UTC())
+		if recErr != nil {
+			return recErr
+		}
+		return nil
+	}
+	amountCopy := new(big.Int).Set(amount)
+	_, err = RecordBulkGrantJobItemOutcome(ctx, tx, job.TenantID, item.ID, ItemIssued, nil, &activated.ID, amountCopy, nil, time.Now().UTC())
+	return err
+}
+
+// forceConvertGrantSkippingAssetAuthorizationForTest mirrors ConvertGrant
+// EXACTLY (conversion.go's pre-checks: lock, AOE, wagering-target
+// re-check, remaining-balance/MaxCashoutAmount decision), except its own
+// GateCheckpoint call sets SkipAssetAuthorization: true -
+// GateCheckpoint's OWN existing, real, documented parameter
+// (eligibility.go: "SkipAssetAuthorization is true ONLY at Grant
+// creation... every other checkpoint... leaves this false"), not a test
+// invention. This still runs the REAL RG and REAL Risk checks, unmodified
+// - only the Stage-4I-affected, jurisdiction-dependent AssetAuthorization
+// portion is skipped. Used ONLY by this file's tests whose actual
+// subject is RG's or Risk's OWN denial/allow behavior at this
+// checkpoint (never jurisdiction) - a full bypass
+// (forceConvertGrantForTest, below) would make every such test trivially
+// "succeed" regardless of the risk_rules row it configured, which would
+// prove nothing. See forceActivateGrantForTest's own doc comment (above)
+// for the general Stage 4I reasoning.
+func forceConvertGrantSkippingAssetAuthorizationForTest(t *testing.T, ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, wageringTargetScaled *big.Int, p ConvertGrantParams) ConvertGrantResult {
+	t.Helper()
+	if err := AdvisoryLockGrant(ctx, tx, tenantID, grantID); err != nil {
+		t.Fatalf("forceConvertGrantSkippingAssetAuthorizationForTest: advisory lock: %v", err)
+	}
+	g, err := LockGrantForUpdate(ctx, tx, grantID)
+	if err != nil {
+		t.Fatalf("forceConvertGrantSkippingAssetAuthorizationForTest: lock grant: %v", err)
+	}
+	if g.Status != GrantCompleted {
+		t.Fatalf("forceConvertGrantSkippingAssetAuthorizationForTest: grant %s is not completed (status %s)", grantID, g.Status)
+	}
+	aoe, err := ComputeAOE(ctx, tx, tenantID, grantID)
+	if err != nil {
+		t.Fatalf("forceConvertGrantSkippingAssetAuthorizationForTest: compute AOE: %v", err)
+	}
+	if !aoe.IsEmpty() {
+		t.Fatalf("forceConvertGrantSkippingAssetAuthorizationForTest: grant %s has open exposure", grantID)
+	}
+	progress, err := DeriveWageringProgress(ctx, tx, tenantID, grantID)
+	if err != nil {
+		t.Fatalf("forceConvertGrantSkippingAssetAuthorizationForTest: derive wagering progress: %v", err)
+	}
+	if wageringTargetScaled != nil && progress.PFirm.Cmp(wageringTargetScaled) < 0 {
+		t.Fatalf("forceConvertGrantSkippingAssetAuthorizationForTest: wagering requirement not met")
+	}
+	licensingMode, err := resolveLicensingMode(ctx, tx, g.TenantID)
+	if err != nil {
+		t.Fatalf("forceConvertGrantSkippingAssetAuthorizationForTest: licensing mode: %v", err)
+	}
+	remaining, err := RemainingBonusBalance(ctx, tx, tenantID, grantID)
+	if err != nil {
+		t.Fatalf("forceConvertGrantSkippingAssetAuthorizationForTest: remaining balance: %v", err)
+	}
+	decided := new(big.Int).Set(remaining)
+	if p.MaxCashoutAmount != nil && decided.Cmp(p.MaxCashoutAmount) > 0 {
+		decided = new(big.Int).Set(p.MaxCashoutAmount)
+	}
+	amountMinor, err := amountToInt64(decided)
+	if err != nil {
+		t.Fatalf("forceConvertGrantSkippingAssetAuthorizationForTest: amount: %v", err)
+	}
+	outcome, err := GateCheckpoint(ctx, tx, GateParams{
+		TenantID: g.TenantID, BrandID: g.BrandID, PlayerAccountID: g.PlayerAccountID, WalletID: g.WalletID,
+		LicensingMode: licensingMode, AssetCode: g.AssetCode, Amount: amountMinor,
+		RiskOperation: OperationBonusConversion, SkipAssetAuthorization: true,
+	})
+	if err != nil {
+		t.Fatalf("forceConvertGrantSkippingAssetAuthorizationForTest: gate checkpoint: %v", err)
+	}
+	if !outcome.Allowed {
+		reason := denialReasonCode(outcome)
+		if err := recordConversionBlock(ctx, tx, g, outcome.DeniedBy, reason); err != nil {
+			t.Fatalf("forceConvertGrantSkippingAssetAuthorizationForTest: record block: %v", err)
+		}
+		return ConvertGrantResult{Grant: g, Converted: false, BlockedReason: outcome.DeniedBy, BlockedCode: outcome.Code}
+	}
+	result, err := applyGrantConversion(ctx, tx, tenantID, grantID, g, amountMinor, decided, p)
+	if err != nil {
+		t.Fatalf("forceConvertGrantSkippingAssetAuthorizationForTest: applyGrantConversion: %v", err)
+	}
+	return result
+}
+
+// forceIssueAndActivateDepositBonusForTest mirrors
+// IssueAndActivateDepositBonus's OWN reward-computation and issue/activate
+// composition EXACTLY (types.go - qualifying-amount clamping, then
+// computeCappedPercentageReward, then issueIdempotent), substituting
+// forceActivateGrantForTest for the real ActivateGrant call. See
+// forceActivateGrantForTest's own doc comment (above) for why this
+// substitution is necessary and safe.
+func forceIssueAndActivateDepositBonusForTest(t *testing.T, ctx context.Context, tx pgx.Tx, p DepositBonusParams) (Grant, GateOutcome) {
+	t.Helper()
+	if p.MinQualifying != nil && p.DepositAmount.Cmp(p.MinQualifying) < 0 {
+		return Grant{}, GateOutcome{Allowed: false, DeniedBy: "eligibility_axis", Code: "below_min_qualifying_amount"}
+	}
+	qualifying := p.DepositAmount
+	if p.MaxQualifying != nil && qualifying.Cmp(p.MaxQualifying) > 0 {
+		qualifying = p.MaxQualifying
+	}
+	amount, err := computeCappedPercentageReward(qualifying, p.RateBP, p.CapAmount, p.Grant.DecimalExponent)
+	if err != nil {
+		t.Fatalf("forceIssueAndActivateDepositBonusForTest: compute reward: %v", err)
+	}
+	g, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: p.Grant})
+	if err != nil && !errors.Is(err, ErrAlreadyGranted) {
+		t.Fatalf("forceIssueAndActivateDepositBonusForTest: issue: %v", err)
+	}
+	if errors.Is(err, ErrAlreadyGranted) {
+		return g, issueOutcome
+	}
+	if !issueOutcome.Allowed {
+		return g, issueOutcome
+	}
+	activated := forceActivateGrantForTest(t, ctx, tx, g.TenantID, g.ID, ActivateGrantParams{
+		ActorType: TriggerActorForAutomated(p.ActorType), ActorID: p.ActorID, Amount: amount,
+		WageringTimeLimit: p.WageringTimeLimit,
+	})
+	return activated, GateOutcome{Allowed: true}
+}
+
+// forceIssueAndActivateCashbackForTest mirrors IssueAndActivateCashback's
+// OWN reward-computation, issue/activate, and immediate-completion
+// composition EXACTLY (types.go), substituting forceActivateGrantForTest
+// for the real ActivateGrant call. See forceActivateGrantForTest's own
+// doc comment (above) for why.
+func forceIssueAndActivateCashbackForTest(t *testing.T, ctx context.Context, tx pgx.Tx, p CashbackParams) (Grant, GateOutcome) {
+	t.Helper()
+	amount, err := computeCappedPercentageReward(p.NetLossAmount, p.RateBP, p.CapAmount, p.Grant.DecimalExponent)
+	if err != nil {
+		t.Fatalf("forceIssueAndActivateCashbackForTest: compute reward: %v", err)
+	}
+	g, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: p.Grant})
+	if err != nil && !errors.Is(err, ErrAlreadyGranted) {
+		t.Fatalf("forceIssueAndActivateCashbackForTest: issue: %v", err)
+	}
+	if errors.Is(err, ErrAlreadyGranted) {
+		return g, issueOutcome
+	}
+	if !issueOutcome.Allowed {
+		return g, issueOutcome
+	}
+	forceActivateGrantForTest(t, ctx, tx, g.TenantID, g.ID, ActivateGrantParams{
+		ActorType: ActorSystem, ActorID: p.ActorID, Amount: amount,
+	})
+	completed, _, err := CheckAndCompleteGrant(ctx, tx, g.TenantID, g.ID, nil)
+	if err != nil {
+		t.Fatalf("forceIssueAndActivateCashbackForTest: complete: %v", err)
+	}
+	return completed, GateOutcome{Allowed: true}
+}
+
 func newTestOfferGrant(f lifecycleFixture, co campaignOffer, triggerRef string) Grant {
 	return Grant{
 		TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, WalletID: f.walletID,
@@ -325,13 +781,10 @@ func TestLifecycle_IssueActivateWagerComplete(t *testing.T) {
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "deposit-1")
-		result, outcome, err := IssueAndActivateDepositBonus(ctx, tx, DepositBonusParams{
+		result, outcome := forceIssueAndActivateDepositBonusForTest(t, ctx, tx, DepositBonusParams{
 			Grant: g, DepositAmount: big.NewInt(10000), RateBP: 5000, CapAmount: big.NewInt(5000),
-			JurisdictionCode: f.jurisdictionCode, ActorType: ActorSystem, ActorID: uuid.Nil,
+			ActorType: ActorSystem, ActorID: uuid.Nil,
 		})
-		if err != nil {
-			return fmt.Errorf("issue deposit bonus: %w", err)
-		}
 		if !outcome.Allowed {
 			return fmt.Errorf("expected allow, got denial %s: %s", outcome.DeniedBy, outcome.Code)
 		}
@@ -349,13 +802,10 @@ func TestLifecycle_IssueActivateWagerComplete(t *testing.T) {
 
 		// A second delivery of the SAME deposit event must never grant
 		// twice (doc 10 §9's idempotency guarantee).
-		result2, outcome2, err := IssueAndActivateDepositBonus(ctx, tx, DepositBonusParams{
+		result2, outcome2 := forceIssueAndActivateDepositBonusForTest(t, ctx, tx, DepositBonusParams{
 			Grant: newTestOfferGrant(f, co, "deposit-1"), DepositAmount: big.NewInt(10000), RateBP: 5000, CapAmount: big.NewInt(5000),
-			ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode,
+			ActorType: ActorSystem,
 		})
-		if err != nil {
-			return fmt.Errorf("re-issue: %w", err)
-		}
 		if result2.ID != result.ID {
 			return fmt.Errorf("expected the SAME grant id on redelivery, got a different one (%s vs %s)", result2.ID, result.ID)
 		}
@@ -382,12 +832,7 @@ func TestLifecycle_TerminateWithOpenExposure_DefersToPendingSettlement(t *testin
 	correlationID := uuid.New()
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "wagering-1")
-		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{
-			Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode,
-		})
-		if err != nil || !outcome.Allowed {
-			return fmt.Errorf("issue/activate: %v / %+v", err, outcome)
-		}
+		result := forceIssueAndActivateGrantForTest(t, ctx, tx, g, ActivateGrantParams{Amount: big.NewInt(1000), ActorType: ActorSystem})
 		grantID = result.ID
 
 		lockTxID = uuid.New()
@@ -470,10 +915,7 @@ func TestHeldDisposition_ResolveReforfeit_WithFourEyesAndSEP1(t *testing.T) {
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "wagering-g2-1")
-		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode})
-		if err != nil || !outcome.Allowed {
-			return fmt.Errorf("issue/activate: %v / %+v", err, outcome)
-		}
+		result := forceIssueAndActivateGrantForTest(t, ctx, tx, g, ActivateGrantParams{Amount: big.NewInt(1000), ActorType: ActorSystem})
 		grantID = result.ID
 
 		// Terminate the Grant (forfeited, e.g. wagering-rule breach) with
@@ -673,7 +1115,7 @@ func TestEOI_BulkGrantRecipientCeiling_RejectsBeyondBudget(t *testing.T) {
 		}
 
 		template := newTestOfferGrant(f, co, "")
-		err = RunStaticBulkGrantJob(ctx, tx, job, StaticPlayerListTarget{PlayerAccountIDs: players}, template, f.jurisdictionCode, uuid.Nil, big.NewInt(1000))
+		err = forceRunStaticBulkGrantJobForTest(ctx, tx, job, StaticPlayerListTarget{PlayerAccountIDs: players}, template, uuid.Nil, big.NewInt(1000))
 		if err != nil {
 			return fmt.Errorf("run bulk job: %w", err)
 		}
@@ -719,7 +1161,7 @@ func TestEOI_SingleManualGrant_RejectsUnresolvableParent(t *testing.T) {
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "manual-1")
-		_, _, err := IssueSingleManualGrant(ctx, tx, g, uuid.New() /* does not exist */, f.jurisdictionCode, f.staffID, big.NewInt(500))
+		_, _, err := IssueSingleManualGrant(ctx, tx, g, uuid.New() /* does not exist */, f.staffID, big.NewInt(500))
 		if !errors.Is(err, economicop.ErrParentOperationNotFound) {
 			return fmt.Errorf("expected ErrParentOperationNotFound, got %v", err)
 		}
@@ -852,12 +1294,12 @@ func TestEOI_SingleManualGrant_RecipientCeiling_RejectsSecondDistinctPlayer(t *t
 	// this is the only consumer so far).
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "manual-player-1")
-		activated, outcome, err := IssueSingleManualGrant(ctx, tx, g, rootID, f.jurisdictionCode, f.staffID, big.NewInt(500))
+		activated, err := forceIssueSingleManualGrantForTest(ctx, tx, g, rootID, f.staffID, big.NewInt(500))
 		if err != nil {
 			return fmt.Errorf("first player: unexpected error: %w", err)
 		}
-		if !outcome.Allowed || activated.Status != GrantActivated {
-			return fmt.Errorf("first player: expected activated grant, got status=%s allowed=%v", activated.Status, outcome.Allowed)
+		if activated.Status != GrantActivated {
+			return fmt.Errorf("first player: expected activated grant, got status=%s", activated.Status)
 		}
 		return nil
 	})
@@ -882,7 +1324,7 @@ func TestEOI_SingleManualGrant_RecipientCeiling_RejectsSecondDistinctPlayer(t *t
 		g := newTestOfferGrant(f, co, "manual-player-2")
 		g.PlayerAccountID = player2ID
 		g.WalletID = wallet2ID
-		_, _, err := IssueSingleManualGrant(ctx, tx, g, rootID, f.jurisdictionCode, f.staffID, big.NewInt(500))
+		_, err := forceIssueSingleManualGrantForTest(ctx, tx, g, rootID, f.staffID, big.NewInt(500))
 		return err
 	})
 	if !errors.Is(err, economicop.ErrBudgetExhausted) {
@@ -993,7 +1435,7 @@ func TestAdversarial_ConcurrentSingleManualGrant_NeverExceedRecipientCeiling(t *
 					g := newTestOfferGrant(f, co, fmt.Sprintf("concurrent-manual-%d", idx))
 					g.PlayerAccountID = players[idx].playerID
 					g.WalletID = players[idx].walletID
-					_, _, err := IssueSingleManualGrant(ctx, tx, g, rootID, f.jurisdictionCode, f.staffID, big.NewInt(500))
+					_, err := forceIssueSingleManualGrantForTest(ctx, tx, g, rootID, f.staffID, big.NewInt(500))
 					return err
 				})
 				if err == nil || errors.Is(err, economicop.ErrBudgetExhausted) || !isRetryableTxError(err) {
@@ -1106,23 +1548,15 @@ func TestEOI_BulkGrantItem_ActivateDenialNeverConsumesEOIBudget(t *testing.T) {
 		t.Fatalf("seed second player: %v", err)
 	}
 
-	// A second jurisdiction - deliberately NEVER given a jurisdiction-
-	// authorization row for f.assetCode (unlike f.jurisdictionID, walked
-	// through authorizeFreshAssetForBonusWagering above), so
-	// AssetAuthorization.CheckEligibility denies for it while every other
-	// T.1 axis (RG, Risk) is completely unaffected by which jurisdiction
-	// is named.
-	var unauthorizedJurisdictionCode string
-	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		id := uuid.New()
-		unauthorizedJurisdictionCode = "TJ-UNAUTH-" + id.String()[:8]
-		_, err := tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, 'Unauthorized Test Jurisdiction')`, id, unauthorizedJurisdictionCode)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("seed unauthorized jurisdiction: %v", err)
-	}
-
+	// Stage 4I NOTE (superseding this test's own original "second
+	// jurisdiction, deliberately never authorized" fixture): the resolver
+	// (internal/jurisdiction) now makes EVERY player-scoped resolution
+	// unresolved(no_signal) unconditionally (HDR-J-1/HDR-J-3 unanswered -
+	// see resolveGrantJurisdiction's own doc comment, eligibility.go), so
+	// AssetAuthorization denies the second item on ITS OWN merits with no
+	// jurisdiction-fixture distinction needed at all - the property this
+	// test exists to prove (the T.1 gate runs, and denies, BEFORE EOI
+	// consumption) holds even more directly than before.
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		asset := f.assetCode
 		ceiling := int32(1)
@@ -1156,10 +1590,14 @@ func TestEOI_BulkGrantItem_ActivateDenialNeverConsumesEOIBudget(t *testing.T) {
 		template := newTestOfferGrant(f, co, "")
 		requesterPerson := uuid.New() // unrelated to both targeted players - SEP-1 is not this test's concern
 
-		// First item, f.playerID, in the PROPERLY authorized jurisdiction:
-		// allowed end to end, consumes the EOI root's only recipient
-		// slot.
-		if err := runBulkGrantJobItem(ctx, tx, job, op.RootOperationID, f.playerID, template, f.jurisdictionCode, uuid.Nil, big.NewInt(50), requesterPerson, nil); err != nil {
+		// First item, f.playerID: forced past T.1 (forceRunBulkGrantJobItemForTest
+		// - see its own doc comment above; Stage 4I's jurisdiction resolver
+		// makes a genuine AssetAuthorization ALLOW impossible for ANY
+		// player-scoped item today) so it consumes the EOI root's only
+		// recipient slot - this test's own subject is the SECOND item's
+		// gate-vs-EOI ordering, not whether the first item's own
+		// jurisdiction resolves.
+		if err := forceRunBulkGrantJobItemForTest(ctx, tx, job, op.RootOperationID, f.playerID, template, uuid.Nil, big.NewInt(50), requesterPerson, nil); err != nil {
 			return fmt.Errorf("first item: %w", err)
 		}
 		item1, err := GetBulkGrantJobItem(ctx, tx, f.tenantID, job.ID, f.playerID)
@@ -1174,16 +1612,17 @@ func TestEOI_BulkGrantItem_ActivateDenialNeverConsumesEOIBudget(t *testing.T) {
 			return fmt.Errorf("expected first item ISSUED, got %s (reason=%q)", item1.Outcome, reason)
 		}
 
-		// Second item, player2ID, in the UNAUTHORIZED jurisdiction:
-		// ActivateGrant's own T.1 gate (AssetAuthorization) must deny it
-		// on its OWN merits - it must never even reach the EOI consume,
-		// and the EOI root's already-exhausted recipient_ceiling (1,
-		// already spent by item 1 above) must never be the reported
-		// reason. runBulkGrantJobItem itself must return nil either way
-		// (a denial is recorded on the item, never propagated as a Go
-		// error) - see the NAMED FIX comment on its own ErrBudgetExhausted
-		// handling in targeting.go.
-		if err := runBulkGrantJobItem(ctx, tx, job, op.RootOperationID, player2ID, template, unauthorizedJurisdictionCode, uuid.Nil, big.NewInt(1000), requesterPerson, nil); err != nil {
+		// Second item, player2ID: the REAL, unmodified runBulkGrantJobItem
+		// (never forced) - ActivateGrant's own T.1 gate (AssetAuthorization,
+		// Stage 4I's unconditional jurisdiction denial) must deny it on its
+		// OWN merits - it must never even reach the EOI consume, and the
+		// EOI root's already-exhausted recipient_ceiling (1, already spent
+		// by item 1 above) must never be the reported reason.
+		// runBulkGrantJobItem itself must return nil either way (a denial
+		// is recorded on the item, never propagated as a Go error) - see
+		// the NAMED FIX comment on its own ErrBudgetExhausted handling in
+		// targeting.go.
+		if err := runBulkGrantJobItem(ctx, tx, job, op.RootOperationID, player2ID, template, uuid.Nil, big.NewInt(1000), requesterPerson, nil); err != nil {
 			return fmt.Errorf("second item returned an unexpected error %v (expected nil - a recorded ItemDenied)", err)
 		}
 		item2, err := GetBulkGrantJobItem(ctx, tx, f.tenantID, job.ID, player2ID)
@@ -1269,19 +1708,32 @@ func TestAdversarial_ConcurrentActivation_ExactlyOneWins(t *testing.T) {
 		t.Fatalf("seed grant: %v", err)
 	}
 
+	// Stage 4I NOTE: this test's own subject is the CAS guard on the
+	// issued->activated/cancelled TRANSITION itself (exactly one of N
+	// concurrent callers may transition a Grant OUT of `issued` at all) -
+	// not which terminal status that transition lands on. The REAL,
+	// unmodified ActivateGrant is used deliberately (not a forced
+	// bypass): Stage 4I's jurisdiction resolver now unconditionally denies
+	// T.1's AssetAuthorization layer for every player-scoped operation
+	// (resolveGrantJurisdiction's own doc comment, eligibility.go), so the
+	// ONE winner's transition is issued->cancelled (ActivateGrant's own
+	// documented denial path, doc 10 §5/T.3: "the Grant is recorded as
+	// cancelled... never silently left issued"), not issued->activated -
+	// every LOSER still correctly fails the identical CAS guard with
+	// ErrIllegalTransition, exactly as before this Stage.
 	const n = 5
 	var wg sync.WaitGroup
-	successes := make([]bool, n)
+	attempted := make([]bool, n)
 	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
 			err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				_, outcome, err := ActivateGrant(ctx, tx, f.tenantID, grantID, ActivateGrantParams{ActorType: ActorSystem, Amount: big.NewInt(100), JurisdictionCode: f.jurisdictionCode})
+				_, _, err := ActivateGrant(ctx, tx, f.tenantID, grantID, ActivateGrantParams{ActorType: ActorSystem, Amount: big.NewInt(100)})
 				if err != nil {
 					return err
 				}
-				successes[idx] = outcome.Allowed
+				attempted[idx] = true
 				return nil
 			})
 			if err != nil && !errors.Is(err, ErrGrantStateConflict) && !errors.Is(err, ErrIllegalTransition) {
@@ -1292,13 +1744,13 @@ func TestAdversarial_ConcurrentActivation_ExactlyOneWins(t *testing.T) {
 	wg.Wait()
 
 	won := 0
-	for _, s := range successes {
+	for _, s := range attempted {
 		if s {
 			won++
 		}
 	}
 	if won != 1 {
-		t.Fatalf("expected exactly 1 successful activation out of %d concurrent attempts, got %d", n, won)
+		t.Fatalf("expected exactly 1 goroutine to successfully TRANSITION the grant out of issued (win the CAS), got %d", won)
 	}
 
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -1306,8 +1758,8 @@ func TestAdversarial_ConcurrentActivation_ExactlyOneWins(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if g.Status != GrantActivated {
-			return fmt.Errorf("expected final status activated, got %s", g.Status)
+		if g.Status != GrantCancelled {
+			return fmt.Errorf("expected final status cancelled (Stage 4I's disclosed jurisdiction-resolution gap denies at AssetAuthorization), got %s", g.Status)
 		}
 		return nil
 	})
@@ -1339,19 +1791,19 @@ func TestConversion_SucceedsOnceRiskOperationLands(t *testing.T) {
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "conversion-1")
-		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode})
-		if err != nil || !outcome.Allowed {
-			return fmt.Errorf("issue/activate: %v / %+v", err, outcome)
-		}
+		result := forceIssueAndActivateGrantForTest(t, ctx, tx, g, ActivateGrantParams{Amount: big.NewInt(1000), ActorType: ActorSystem})
 		completed, ok, err := CheckAndCompleteGrant(ctx, tx, f.tenantID, result.ID, nil)
 		if err != nil || !ok {
 			return fmt.Errorf("complete: %v / %v", err, ok)
 		}
 
-		convResult, err := ConvertGrant(ctx, tx, f.tenantID, completed.ID, nil, ConvertGrantParams{ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode})
-		if err != nil {
-			return fmt.Errorf("convert: %w", err)
-		}
+		// forceConvertGrantForTest (see its own doc comment above): this
+		// test's subject is that risk.OperationBonusConversion resolves and
+		// ALLOWS with no matching rule - Stage 4I's now-unconditional
+		// jurisdiction denial at T.1's AssetAuthorization layer would
+		// otherwise make EVERY conversion deny regardless of Risk, proving
+		// nothing about Risk specifically.
+		convResult := forceConvertGrantForTest(t, ctx, tx, f.tenantID, completed.ID, nil, ConvertGrantParams{ActorType: ActorSystem})
 		if !convResult.Converted {
 			return fmt.Errorf("expected conversion to SUCCEED now that risk.OperationBonusConversion exists, got blocked: reason=%q code=%q", convResult.BlockedReason, convResult.BlockedCode)
 		}
@@ -1392,19 +1844,21 @@ func TestConversion_BlockedByRiskDeny_NeverForfeits(t *testing.T) {
 		}
 
 		g := newTestOfferGrant(f, co, "conversion-denied-1")
-		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode})
-		if err != nil || !outcome.Allowed {
-			return fmt.Errorf("issue/activate: %v / %+v", err, outcome)
-		}
+		result := forceIssueAndActivateGrantForTest(t, ctx, tx, g, ActivateGrantParams{Amount: big.NewInt(1000), ActorType: ActorSystem})
 		completed, ok, err := CheckAndCompleteGrant(ctx, tx, f.tenantID, result.ID, nil)
 		if err != nil || !ok {
 			return fmt.Errorf("complete: %v / %v", err, ok)
 		}
 
-		convResult, err := ConvertGrant(ctx, tx, f.tenantID, completed.ID, nil, ConvertGrantParams{ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode})
-		if err != nil {
-			return fmt.Errorf("convert: %w", err)
-		}
+		// forceConvertGrantSkippingAssetAuthorizationForTest (see its own
+		// doc comment above): this test's subject is that RISK specifically
+		// denies (BlockedReason == "risk") - a full T.1 bypass would make
+		// this trivially succeed regardless of the risk_rules row just
+		// created, proving nothing; a full, un-skipped T.1 gate would
+		// instead deny at AssetAuthorization (Stage 4I's jurisdiction gap),
+		// masking Risk's own denial. Only AssetAuthorization is skipped;
+		// RG and Risk run for real, unmodified.
+		convResult := forceConvertGrantSkippingAssetAuthorizationForTest(t, ctx, tx, f.tenantID, completed.ID, nil, ConvertGrantParams{ActorType: ActorSystem})
 		if convResult.Converted {
 			return fmt.Errorf("expected conversion to be BLOCKED by the HARD_LIMIT max_amount rule - it unexpectedly succeeded")
 		}
@@ -1439,10 +1893,7 @@ func seedHeldDispositionForResolution(t *testing.T, pool *db.Pool, f lifecycleFi
 	correlationID := uuid.New()
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, triggerRef)
-		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode})
-		if err != nil || !outcome.Allowed {
-			return fmt.Errorf("issue/activate: %v / %+v", err, outcome)
-		}
+		result := forceIssueAndActivateGrantForTest(t, ctx, tx, g, ActivateGrantParams{Amount: big.NewInt(1000), ActorType: ActorSystem})
 		grantID = result.ID
 
 		terminated, err := TerminateGrant(ctx, tx, f.tenantID, grantID, TerminateGrantParams{
@@ -1521,11 +1972,18 @@ func TestHeldDisposition_ResolveRouteToCash_BlockedBySelfExclusion(t *testing.T)
 
 	requestID := fileAndApproveHeldDispositionResolve(t, pool, f, dispositionID, ActionRouteToCash)
 
+	// resolveHeldDispositionAction's own skipAssetAuthorization param
+	// (held_disposition_ops.go, test-only, never exposed on
+	// ResolveHeldDispositionActionParams - see its own doc comment): this
+	// test's subject is RG's OWN self-exclusion denial, which
+	// AssetAuthorization's now-unconditional Stage 4I jurisdiction denial
+	// would otherwise mask (AssetAuthorization runs before RG in T.1's
+	// fixed order).
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := ResolveHeldDispositionAction(ctx, tx, f.tenantID, ResolveHeldDispositionActionParams{
+		_, err := resolveHeldDispositionAction(ctx, tx, f.tenantID, ResolveHeldDispositionActionParams{
 			HeldDispositionID: dispositionID, Action: ActionRouteToCash, ActorID: f.staffID, ReasonCode: "g2-resolution-test",
-			RequestID: requestID, RequiredApprovals: 1, JurisdictionCode: f.jurisdictionCode,
-		})
+			RequestID: requestID, RequiredApprovals: 1,
+		}, true)
 		return err
 	})
 	if !errors.Is(err, ErrHeldDispositionActionDenied) {
@@ -1573,11 +2031,17 @@ func TestHeldDisposition_ResolveRouteToCash_AllowedPlayerSucceeds(t *testing.T) 
 
 	requestID := fileAndApproveHeldDispositionResolve(t, pool, f, dispositionID, ActionRouteToCash)
 
+	// resolveHeldDispositionAction's skipAssetAuthorization=true (see
+	// TestHeldDisposition_ResolveRouteToCash_BlockedBySelfExclusion's own
+	// identical comment above): this test's subject is that RG/Risk
+	// ALLOW for an ordinary player - Stage 4I's now-unconditional
+	// jurisdiction denial at AssetAuthorization would otherwise make this
+	// deny regardless.
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		resolved, err := ResolveHeldDispositionAction(ctx, tx, f.tenantID, ResolveHeldDispositionActionParams{
+		resolved, err := resolveHeldDispositionAction(ctx, tx, f.tenantID, ResolveHeldDispositionActionParams{
 			HeldDispositionID: dispositionID, Action: ActionRouteToCash, ActorID: f.staffID, ReasonCode: "g2-resolution-test",
-			RequestID: requestID, RequiredApprovals: 1, JurisdictionCode: f.jurisdictionCode,
-		})
+			RequestID: requestID, RequiredApprovals: 1,
+		}, true)
 		if err != nil {
 			return fmt.Errorf("resolve held disposition: %w", err)
 		}
@@ -1623,11 +2087,16 @@ func TestHeldDisposition_ResolveRouteToCash_BlockedByRiskDeny(t *testing.T) {
 
 	requestID := fileAndApproveHeldDispositionResolve(t, pool, f, dispositionID, ActionRouteToCash)
 
+	// resolveHeldDispositionAction's skipAssetAuthorization=true (see
+	// TestHeldDisposition_ResolveRouteToCash_BlockedBySelfExclusion's own
+	// identical comment above): this test's subject is RISK's OWN denial,
+	// which AssetAuthorization's now-unconditional Stage 4I jurisdiction
+	// denial would otherwise mask.
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := ResolveHeldDispositionAction(ctx, tx, f.tenantID, ResolveHeldDispositionActionParams{
+		_, err := resolveHeldDispositionAction(ctx, tx, f.tenantID, ResolveHeldDispositionActionParams{
 			HeldDispositionID: dispositionID, Action: ActionRouteToCash, ActorID: f.staffID, ReasonCode: "g2-resolution-test",
-			RequestID: requestID, RequiredApprovals: 1, JurisdictionCode: f.jurisdictionCode,
-		})
+			RequestID: requestID, RequiredApprovals: 1,
+		}, true)
 		return err
 	})
 	if !errors.Is(err, ErrHeldDispositionActionDenied) {
@@ -1990,7 +2459,7 @@ func TestAdversarial_ConcurrentBulkGrantWorkers_NeverExceedRecipientCeiling(t *t
 					if err != nil {
 						return err
 					}
-					return runBulkGrantJobItem(ctx, tx, job, rootID, players[idx], template, f.jurisdictionCode, uuid.Nil, big.NewInt(1000), requesterPerson, nil)
+					return forceRunBulkGrantJobItemForTest(ctx, tx, job, rootID, players[idx], template, uuid.Nil, big.NewInt(1000), requesterPerson, nil)
 				})
 				if err == nil || !isRetryableTxError(err) {
 					errs[idx] = err
@@ -2078,12 +2547,7 @@ func TestAdversarial_ConcurrentTerminate_ExpireVsCancel_ExactlyOneWins(t *testin
 	var grantID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		g := newTestOfferGrant(f, co, "concurrent-terminate-1")
-		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{
-			Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode,
-		})
-		if err != nil || !outcome.Allowed {
-			return fmt.Errorf("issue/activate: %v / %+v", err, outcome)
-		}
+		result := forceIssueAndActivateGrantForTest(t, ctx, tx, g, ActivateGrantParams{Amount: big.NewInt(1000), ActorType: ActorSystem})
 		grantID = result.ID
 		return nil
 	})
@@ -2315,12 +2779,7 @@ func TestAdversarial_SamePlayerAcrossMultipleBrands_ConcurrentGrantsIsolated(t *
 			defer wg.Done()
 			_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 				g := newTestOfferGrant(a.fx, a.co, a.trigger)
-				result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{
-					Grant: g, Amount: big.NewInt(500), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode,
-				})
-				if err == nil && !outcome.Allowed {
-					err = fmt.Errorf("denied: %s / %s", outcome.DeniedBy, outcome.Code)
-				}
+				result, err := forceIssueAndActivateGrantForTestErr(ctx, tx, g, ActivateGrantParams{Amount: big.NewInt(500), ActorType: ActorSystem})
 				a.result, a.err = result, err
 				return err
 			})

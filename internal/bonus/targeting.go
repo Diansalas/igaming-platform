@@ -169,7 +169,7 @@ func MintRootOperation(ctx context.Context, tx pgx.Tx, p MintRootOperationParams
 // staff action, or relayed from an upstream authorization, doc 10
 // N2.4a's exactly-two paths) - there is no third path, and no fallback
 // to "no parent required" for this surface.
-func IssueSingleManualGrant(ctx context.Context, tx pgx.Tx, g Grant, parentOperationID uuid.UUID, jurisdictionCode string, actorID uuid.UUID, amount *big.Int) (Grant, GateOutcome, error) {
+func IssueSingleManualGrant(ctx context.Context, tx pgx.Tx, g Grant, parentOperationID uuid.UUID, actorID uuid.UUID, amount *big.Int) (Grant, GateOutcome, error) {
 	if _, err := economicop.CheckEntry(ctx, tx, g.TenantID, parentOperationID, g.AssetCode); err != nil {
 		return Grant{}, GateOutcome{}, err
 	}
@@ -177,7 +177,7 @@ func IssueSingleManualGrant(ctx context.Context, tx pgx.Tx, g Grant, parentOpera
 	g.CreatedByActorType = ActorStaff
 	g.CreatedByActorID = actorID
 
-	created, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: g, JurisdictionCode: jurisdictionCode})
+	created, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: g})
 	if err != nil && !errors.Is(err, ErrAlreadyGranted) {
 		return Grant{}, GateOutcome{}, err
 	}
@@ -206,7 +206,7 @@ func IssueSingleManualGrant(ctx context.Context, tx pgx.Tx, g Grant, parentOpera
 	}
 
 	activated, activateOutcome, err := ActivateGrant(ctx, tx, created.TenantID, created.ID, ActivateGrantParams{
-		JurisdictionCode: jurisdictionCode, ActorType: ActorStaff, ActorID: actorID, Amount: amount,
+		ActorType: ActorStaff, ActorID: actorID, Amount: amount,
 		PostGateHook: postGateHook,
 	})
 	if err != nil {
@@ -257,7 +257,7 @@ type StaticPlayerListTarget struct {
 // This is a live, per-item, un-bypassable gate, even though it is
 // Go-level rather than the DB-trigger shape migration 0063 uses for the
 // two materializable target kinds.
-func RunStaticBulkGrantJob(ctx context.Context, tx pgx.Tx, job BulkGrantJob, target StaticPlayerListTarget, grantTemplate Grant, jurisdictionCode string, systemActorID uuid.UUID, amount *big.Int) error {
+func RunStaticBulkGrantJob(ctx context.Context, tx pgx.Tx, job BulkGrantJob, target StaticPlayerListTarget, grantTemplate Grant, systemActorID uuid.UUID, amount *big.Int) error {
 	if job.ParentOperationID == nil {
 		return fmt.Errorf("bonus: bulk grant job %s has no parent_operation_id", job.ID)
 	}
@@ -275,14 +275,14 @@ func RunStaticBulkGrantJob(ctx context.Context, tx pgx.Tx, job BulkGrantJob, tar
 	}
 
 	for _, playerAccountID := range target.PlayerAccountIDs {
-		if err := runBulkGrantJobItem(ctx, tx, job, op.RootOperationID, playerAccountID, grantTemplate, jurisdictionCode, systemActorID, amount, requesterPerson, approverPersons); err != nil {
+		if err := runBulkGrantJobItem(ctx, tx, job, op.RootOperationID, playerAccountID, grantTemplate, systemActorID, amount, requesterPerson, approverPersons); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func runBulkGrantJobItem(ctx context.Context, tx pgx.Tx, job BulkGrantJob, rootOperationID, playerAccountID uuid.UUID, grantTemplate Grant, jurisdictionCode string, systemActorID uuid.UUID, amount *big.Int, requesterPerson uuid.UUID, approverPersons []uuid.UUID) error {
+func runBulkGrantJobItem(ctx context.Context, tx pgx.Tx, job BulkGrantJob, rootOperationID, playerAccountID uuid.UUID, grantTemplate Grant, systemActorID uuid.UUID, amount *big.Int, requesterPerson uuid.UUID, approverPersons []uuid.UUID) error {
 	if _, err := GetBulkGrantJobItem(ctx, tx, job.TenantID, job.ID, playerAccountID); err == nil {
 		return nil // already processed (any outcome) - resumability (§W5)
 	} else if !errors.Is(err, ErrNotFound) {
@@ -325,7 +325,7 @@ func runBulkGrantJobItem(ctx context.Context, tx pgx.Tx, job BulkGrantJob, rootO
 	grant.CreatedByActorType = ActorSystem
 	grant.CreatedByActorID = uuid.Nil
 
-	created, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: grant, JurisdictionCode: jurisdictionCode})
+	created, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: grant})
 	if err != nil && !errors.Is(err, ErrAlreadyGranted) {
 		return err
 	}
@@ -352,7 +352,7 @@ func runBulkGrantJobItem(ctx context.Context, tx pgx.Tx, job BulkGrantJob, rootO
 	// This is doc 34 §5.3 rule 4's canonical ordering (Risk's lock always
 	// before the EOI lock), made structural rather than incidental.
 	activated, activateOutcome, err := ActivateGrant(ctx, tx, created.TenantID, created.ID, ActivateGrantParams{
-		JurisdictionCode: jurisdictionCode, ActorType: ActorSystem, ActorID: systemActorID, Amount: amount,
+		ActorType: ActorSystem, ActorID: systemActorID, Amount: amount,
 		PostGateHook: func(hookCtx context.Context, hookTx pgx.Tx) error {
 			return economicop.ConsumeRootBudget(hookCtx, hookTx, job.TenantID, rootOperationID, economicop.OperationBonusBulkGrant, playerAccountID, amount)
 		},
