@@ -110,7 +110,7 @@ func CreateJurisdiction(ctx context.Context, tx pgx.Tx, p CreateJurisdictionPara
 		return Jurisdiction{}, fmt.Errorf("jurisdiction: insert jurisdictions row: %w", err)
 	}
 
-	if err := recordRegistryAudit(ctx, tx, p.Actor, "jurisdiction_registry.jurisdiction_created", "jurisdiction", j.ID.String(), map[string]any{
+	if err := recordRegistryAudit(ctx, tx, uuid.Nil, p.Actor, "jurisdiction_registry.jurisdiction_created", "jurisdiction", j.ID.String(), map[string]any{
 		"before": nil, "after": jurisdictionState(j),
 	}); err != nil {
 		return Jurisdiction{}, err
@@ -220,7 +220,7 @@ func CreateLicence(ctx context.Context, tx pgx.Tx, p CreateLicenceParams) (Licen
 	l.PermittedProducts = products
 	l.PermittedMarkets = markets
 
-	if err := recordRegistryAudit(ctx, tx, p.Actor, "jurisdiction_registry.licence_created", "licence", l.ID.String(), map[string]any{
+	if err := recordRegistryAudit(ctx, tx, uuid.Nil, p.Actor, "jurisdiction_registry.licence_created", "licence", l.ID.String(), map[string]any{
 		"before": nil, "after": licenceState(l),
 	}); err != nil {
 		return Licence{}, err
@@ -265,16 +265,23 @@ func licenceState(l Licence) map[string]any {
 	}
 }
 
-// recordRegistryAudit writes the mandatory audit record for a
-// PLATFORM-scoped mutation (tenant_id NULL - audit_log's dual-scope RLS,
-// ADR 0013), in the SAME transaction as the mutation itself.
-func recordRegistryAudit(ctx context.Context, tx pgx.Tx, actor ActorContext, action, targetType, targetID string, metadata map[string]any) error {
+// recordRegistryAudit writes the mandatory audit record for a mutating
+// registry operation, in the SAME transaction as the mutation itself.
+// tenantID selects the audit row's scope (audit_log's dual-scope RLS,
+// ADR 0013): uuid.Nil for a genuinely PLATFORM-scoped mutation (e.g.
+// CreateJurisdiction/CreateLicence, which create platform-wide reference
+// rows with no single-tenant subject), or a specific tenant id when the
+// mutation's subject IS a specific tenant (e.g. AssignTenantLicence) - in
+// that case tx must already be scoped to that same tenant (db.Pool.
+// WithTenant), since audit_log's WITH CHECK policy requires a non-NULL
+// tenant_id to equal the connection's app.tenant_id setting exactly.
+func recordRegistryAudit(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, actor ActorContext, action, targetType, targetID string, metadata map[string]any) error {
 	if metadata == nil {
 		metadata = map[string]any{}
 	}
 	metadata["reason_code"] = actor.ReasonCode
 	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: uuid.Nil, ActorType: audit.ActorStaff, ActorID: actor.ActorID,
+		TenantID: tenantID, ActorType: audit.ActorStaff, ActorID: actor.ActorID,
 		Action: action, TargetType: targetType, TargetID: targetID,
 		Outcome: audit.OutcomeSuccess, IPAddress: actor.IPAddress, UserAgent: actor.UserAgent,
 		RequestID: actor.RequestID, Metadata: metadata,

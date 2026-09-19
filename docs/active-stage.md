@@ -1480,7 +1480,80 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 4I — Platform-Wide Jurisdiction Resolution Foundation — CONCLUDED, awaiting human authorization for the next stage
+## Current stage: Stage 4I Phase A — Tenant Licence Jurisdiction Basis — COMPLETE, awaiting human review
+
+**Status: IMPLEMENTED, independently reviewed, fixed, and re-verified.**
+Closes the single highest-leverage gap the Stage 4I Implementation Plan's
+current-state assessment identified: `tenants.licence_id` — the one
+column the jurisdiction resolver's `tenant_licence` basis reads — had
+zero application write path anywhere in the repository. Full detail:
+this session's Phase A completion report (delivered to the human
+directly; see `docs/governance/task-registry.md`'s new "Stage 4I Phase
+A" section and the `docs/plans/stage-4i-jurisdiction-implementation-plan.md`
+Phase A entry for the technical trace).
+
+Between this stage and Stage 4I's own closure (below), two governance-only
+gates ran first, per their own directives: (1) `docs/decisions/0042-
+human-decision-response.md` was completed with the human's verbatim
+decisions for all 11 previously-open items (HDR-J-1 through HDR-J-6 incl.
+HDR-J-3's 8 sub-items, G-2, `OpenBetSelfExclusionPolicy`, the mixed/
+bonus-funded sportsbook cashout policy plus FD-1, and the converted-
+Grant-cancellation/receivable question) — no code changed; and (2)
+`docs/plans/stage-4i-jurisdiction-implementation-plan.md` traced every
+decision into concrete technical consequences across a 9-phase
+implementation sequence (Phases A-I) — planning only, no code changed,
+approved by the human for Phase A specifically.
+
+**What Phase A built:** `internal/jurisdiction.AssignTenantLicence`
+(new file `tenant_licence_admin.go`), the platform-admin-only endpoint
+`PUT /v1/admin/tenants/{tenantID}/licence`, and a new, narrowly-scoped
+permission `PermTenantLicenceAssign` (distinct from both `PermTenantWrite`
+and `PermJurisdictionRegistryManage`). The licensee/`licensing_model`
+match invariant is enforced entirely by migration 0007's pre-existing
+composite FK, never re-implemented in application code. Generic across
+both the platform-licensed and BYOL (`own_licence`) shapes of the hybrid
+licensing model from day one, with a dedicated passing test for each.
+
+**Review chain (all independent, none self-certified):** `architect`
+design ruling → `backend` implementation → parallel independent
+`security`/`architect`/`qa` review → `backend` fix round addressing every
+finding → orchestrator integration. Verdicts: `security` — CERTIFIED WITH
+NAMED EXCEPTIONS (no P0/P1); `architect` — ARCHITECTURALLY CERTIFIED,
+with named exceptions (no blocking issues); `qa` — READY WITH NAMED GAPS,
+both P1s closed in the fix round. Full findings ledger, with disposition
+for every item: `docs/governance/task-registry.md`'s "Stage 4I Phase A"
+section.
+
+**Honest scope statement, unchanged from Stage 4I's own steady state:**
+Phase A adds a write path; it does not add a consumer. Both production
+`Resolve` call sites (`internal/casino`, `internal/bonus`) structurally
+always pass a non-nil `PlayerAccountID`, so every player-scoped
+resolution still returns `unresolved(no_signal)`, exactly as before Phase
+A. Bonus issuance remains blocked; casino's per-game blocklist behaviour
+is unchanged. The `tenant_licence` basis is now technically producible
+for the first time in the platform's history, but remains unobserved in
+production until a tenant/brand-subject consumer exists (a later phase)
+**and** an operational data-entry step assigns the platform's real
+licence to the real production tenant (explicitly not performed by this
+phase — a human confirmation, not an engineering task).
+
+**Explicitly deferred, not performed this phase** (see the plan's own
+Phase B-I and the task-registry findings ledger for the full list):
+player physical-location collection, declared/verified residence
+collection, KYC verified-residence workflow, nationality, jurisdiction
+precedence configuration content, permitted-market population, G-2
+bonus brand policy implementation, sportsbook cashout, converted-Grant
+clawback, BYOL onboarding, and any resolver-side (evaluation-time)
+licence-status/expiry check (SEC-4I-F10 remains open, unchanged by this
+phase's bind-time-only check). No new Human Decision was required or
+invented.
+
+**No automatic progression.** Per the authorizing directive, the next
+phase (B through I) requires its own separate human authorization.
+
+---
+
+## Prior stage: Stage 4I — Platform-Wide Jurisdiction Resolution Foundation — CONCLUDED, awaiting human authorization for the next stage
 
 **Status: PARTIALLY IMPLEMENTED** (per CLAUDE.md's no-fake-completion
 discipline — deliberately, not as a shortfall). Full detail:

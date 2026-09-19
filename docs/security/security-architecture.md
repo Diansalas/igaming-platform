@@ -3005,10 +3005,19 @@ apply in full.
 only for:
 
 1. **`jurisdiction_registry.*`** — a write to `jurisdictions`, `licences`,
-   or `tenant_jurisdiction_configs`. Staff actor, before/after in metadata,
-   **reason code required**. *(IMPLEMENTED:
-   `jurisdiction_registry.jurisdiction_created` /
-   `jurisdiction_registry.licence_created`.)*
+   `tenant_jurisdiction_configs`, or (added Stage 4I Phase A)
+   `tenants.licence_id` — the tenant-licence binding, a distinct target from
+   the registry rows themselves but audited under the same family since it
+   is the same class of platform-admin registry-adjacent mutation. Staff
+   actor, before/after in metadata, **reason code required**.
+   *(IMPLEMENTED: `jurisdiction_registry.jurisdiction_created` /
+   `jurisdiction_registry.licence_created` /
+   `jurisdiction_registry.tenant_licence_assigned` — the last one, unlike
+   the first two, is written TENANT-scoped (`audit_log.tenant_id` = the
+   affected tenant, not `NULL`), because its subject is a specific tenant
+   that must be able to read its own audit trail via `PermAuditRead`; see
+   `docs/plans/stage-4i-jurisdiction-implementation-plan.md` Phase A and
+   `docs/governance/task-registry.md`'s `PHASE-A-SEC-1` finding.)*
 2. **`jurisdiction_fact.corrected`** — a staff correction to a player's
    jurisdiction-determining identity fact. Reason code required;
    before/after recorded **as a reference and a change flag, not as the two

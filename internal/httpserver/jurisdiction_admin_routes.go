@@ -47,4 +47,16 @@ func registerJurisdictionRoutes(mux *http.ServeMux, deps Deps) {
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermJurisdictionResolutionActiveWrite)(newListResolutionActiveHandler(deps)))))
 	mux.Handle("PUT /v1/admin/jurisdiction-resolution-active/{operationClass}",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermJurisdictionResolutionActiveWrite)(newSetResolutionActiveHandler(deps)))))
+
+	// --- Tenant-licence binding (Stage 4I Phase A) ---
+	//
+	// PLATFORM-ONLY, PermTenantLicenceAssign. Deliberately NOT wrapped in
+	// RequireTenantScope, same reasoning as the jurisdictions/licences
+	// registry block above: a platform_admin token carries a nil
+	// tenant_id, which RequireTenantScope would reject before the handler
+	// ran, and a platform_admin is explicitly the only role permitted to
+	// target ANY tenant here (tenants has no RLS; the tenant id comes
+	// from the path, never the body).
+	mux.Handle("PUT /v1/admin/tenants/{tenantID}/licence",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermTenantLicenceAssign)(newAssignTenantLicenceHandler(deps))))
 }

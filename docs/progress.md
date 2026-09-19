@@ -5679,3 +5679,122 @@ Office/Partner Console/B2C frontend UI, and every real external vendor
 were correctly not implemented. Per the authorizing directive, the
 Orchestrator **stops** here — the next stage, and every out-of-scope
 domain named above, remain unauthorized pending a new human directive.
+
+## Stage 4I Phase A: tenant-licence write path — IMPLEMENTED
+
+Preceded by two governance-only gates, both delivered directly (no code):
+`docs/decisions/0042-human-decision-response.md` recorded the human's
+verbatim decisions for all 11 previously-open items from Stage 4I's own
+register plus the pre-existing register (HDR-J-1 through HDR-J-6 incl.
+HDR-J-3's 8 sub-items; G-2; `OpenBetSelfExclusionPolicy`; the mixed/
+bonus-funded sportsbook cashout policy plus FD-1; the converted-Grant-
+cancellation/receivable question); `docs/plans/stage-4i-jurisdiction-
+implementation-plan.md` then traced every decision into concrete
+technical consequences (a 24-domain impact matrix, a fail-closed
+analysis, a Human Decision Traceability Matrix, and a 9-phase
+implementation sequence, Phases A-I) — planning only, approved by the
+human for Phase A specifically.
+
+**What Phase A closes.** The plan's own current-state assessment found
+the sharpest remaining gap in Stage 4I's foundation: the resolver's one
+producible basis, `tenant_licence`, reads `tenants.licence_id`, but
+nothing in the application had ever written that column — verified by
+grep, zero write call sites existed anywhere in the repository. Phase A
+adds exactly that write path and nothing else.
+
+**Built:** `internal/jurisdiction.AssignTenantLicence` (new file
+`tenant_licence_admin.go`), the platform-admin-only endpoint
+`PUT /v1/admin/tenants/{tenantID}/licence`, and a new permission
+`PermTenantLicenceAssign` (deliberately separate from both
+`PermTenantWrite` and `PermJurisdictionRegistryManage` — an `architect`
+ruling: binding a live tenant to a licence determines which
+jurisdiction's rules govern that tenant, a materially different
+authorizing act from either). No migration was needed — the schema
+(`tenants.licence_id`, the composite FK `tenants_licence_matches_model`
+from migration 0007) already existed and had simply never been writable.
+The licensee/`licensing_model` invariant is enforced entirely by that
+pre-existing FK, never re-implemented in Go, per an explicit
+non-duplication ruling. The operation is generic across both the
+platform-licensed and BYOL (`own_licence`) shapes of the hybrid licensing
+model, with a dedicated, passing test proving each.
+
+**Review chain, all independent, none self-certified:** `architect`
+design ruling (8 numbered decisions: placement, permission model,
+transaction-helper choice, API shape, the BYOL-genericity boundary, audit
+shape, fail-closed requirements, in/out-of-scope items) → `backend`
+implementation → three parallel independent reviews (`security`,
+`architect`, `qa`) → `backend` fix round closing every review finding →
+orchestrator integration and independent re-verification of every claim
+(build/vet/fmt/unit/integration-against-real-Postgres/race, run directly
+by the orchestrator, not merely trusted from agent reports).
+
+**Findings and disposition** (full ledger:
+`docs/governance/task-registry.md`'s new "Stage 4I Phase A" section):
+one P2 finding fixed in the same session (the audit record for this
+tenant-targeted mutation was initially written platform-scoped, via the
+shared registry-audit helper's hardcoded convention, so the affected
+tenant could never see it via its own `PermAuditRead` — fixed by
+threading a `tenantID` parameter through the shared helper and switching
+the handler's transaction wrapper to match the codebase's existing
+"platform_admin acts on a target tenant" precedent, e.g. brand/staff
+creation); two P1 test-coverage gaps closed (the BYOL success path had
+zero coverage at either layer; none of the 10 original HTTP-layer tests
+ever drove the endpoint's own domain-error branches, including the
+codebase's only `ErrNotFound` producer); one convergent test-strength
+finding (independently raised by both `architect` and `qa`) closed by
+strengthening the concurrency test to assert an actual before/after audit
+chain rather than merely "no deadlock." Three P2 findings were
+deliberately NOT fixed and instead routed as open, named, non-blocking
+decisions: `licences.status`/`expires_at` are checked at bind time only,
+never at resolve time (amends SEC-4I-F10, whose existing hard trigger
+already covers closing this — unchanged, still open); `licences` has no
+tenant-ownership binding, so two distinct BYOL tenants could in principle
+be pointed at the same licence row with no constraint violation (routed
+to `architect`/compliance, relevant only once a BYOL tenant is actually
+onboarded); and no dual control exists on this single-permission,
+no-RLS-backed write (routed to `architect`/`product-owner-proxy`, an
+open decision, not a Phase A blocker). Several P3 observational findings
+(pre-existing, platform-wide `decodeJSON` characteristics; unaudited
+denied attempts; unbounded reason-code text; controlled-but-verbatim
+error messages) were recorded as not introduced by, and not blocking,
+this phase.
+
+**Verdicts:** `security` — CERTIFIED WITH NAMED EXCEPTIONS (no P0/P1
+found). `architect` — ARCHITECTURALLY CERTIFIED, with named exceptions
+(no blocking issues; several implementation choices — the single-
+statement atomic CTE update, the absent-key-vs-null presence
+distinction, auditing a no-op reassignment — independently judged to
+exceed the ruling's own specification). `qa` — READY WITH NAMED GAPS,
+both P1s closed in the fix round it flagged them in.
+
+**Honest scope statement.** Phase A adds a write path, not a consumer.
+Both of the platform's production `Resolve` call sites
+(`internal/casino/orchestrator.go`, `internal/bonus/eligibility.go`)
+structurally always pass a non-nil `PlayerAccountID` — a Go value type,
+never nilable at that call site — so every player-scoped resolution
+still returns `unresolved(no_signal)`, byte-for-byte identical to before
+this phase. No tenant/brand-subject consumer exists anywhere in the
+repository outside test code. Casino's per-game blocklist behaviour is
+unchanged for every game. Bonus issuance remains blocked. The
+`tenant_licence` basis is now technically producible for the first time
+in the platform's history, but stays unobserved in production until (a)
+a tenant/brand-subject consumer exists (a later phase) and (b) a human
+operational data-entry step assigns the platform's real licence to the
+real production tenant — explicitly not performed by this phase.
+Confirmed strictly non-regressive for every tenant and every operation,
+independently, by all three review passes.
+
+**Explicitly deferred, not performed this phase, per the authorizing
+directive's own named prohibitions:** player physical-location
+collection, declared/verified residence collection, KYC verified-
+residence workflow, nationality, jurisdiction precedence configuration
+content, permitted-market population, G-2 bonus-brand policy
+implementation, sportsbook cashout, converted-Grant clawback, BYOL
+onboarding, and any resolver-side (evaluation-time) licence-status/
+expiry check. No new Human Decision Register item was required or
+invented — every open question found during review routes to an
+existing specialist's ordinary authority.
+
+Per the authorizing directive: the Orchestrator **stops** here. Phases
+B through I, and every domain named above, remain unauthorized pending a
+separate human directive reviewing this Phase A completion report.

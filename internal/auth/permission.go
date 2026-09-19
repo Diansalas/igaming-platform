@@ -275,6 +275,19 @@ const (
 	// write this fact in, and migration 0071's RLS would reject the
 	// write anyway.
 	PermJurisdictionResolutionActiveWrite Permission = "jurisdiction_resolution_active:write"
+
+	// PermTenantLicenceAssign gates binding a tenant to the licence it
+	// actually operates under (tenants.licence_id) - the write path Stage 4I
+	// Phase A adds. Deliberately separate from PermTenantWrite (which only
+	// covers name/slug/licensing_model provisioning) and from
+	// PermJurisdictionRegistryManage (which only creates jurisdictions/
+	// licences REFERENCE rows, never binds a live tenant to one) - binding a
+	// live tenant to a licence determines which jurisdiction's rules govern
+	// that tenant's operations, a materially different authorizing act.
+	// PLATFORM-ONLY, granted only to RolePlatformAdmin, following
+	// PermJurisdictionRegistryManage's exact precedent - see
+	// docs/plans/stage-4i-jurisdiction-implementation-plan.md Phase A.
+	PermTenantLicenceAssign Permission = "tenant_licence:assign"
 )
 
 // rolePermissions is a static, in-code role -> permission-set mapping.
@@ -294,6 +307,11 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// `licences` registries). See that permission's own doc comment -
 		// same shape as PermAssetRegistryManage/PermCasinoCatalogueManage.
 		PermJurisdictionRegistryManage,
+		// Stage 4I Phase A: the sole grantee of PermTenantLicenceAssign
+		// (binding a live tenant to the licence it operates under). See
+		// that permission's own doc comment for why it is separate from
+		// both PermTenantWrite and PermJurisdictionRegistryManage.
+		PermTenantLicenceAssign,
 		// Deliberately NOT PermRGRestrictionWrite/Read (Stage 4D-RG, ADR
 		// 0026 §12): platform_admin cannot resolve a specific tenant's
 		// player_account at all today (PermPlayerRead is itself
