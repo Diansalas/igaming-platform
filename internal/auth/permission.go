@@ -238,6 +238,43 @@ const (
 	// "recording-and-parking a fact," never an authorizing write) - only
 	// its resolution.
 	PermBonusHeldDispositionResolve Permission = "bonus_held_disposition:resolve"
+
+	// PermJurisdictionRegistryManage gates the Stage 4I admin write
+	// surface for the PLATFORM-WIDE `jurisdictions` and `licences`
+	// registries (docs/governance/stage-4i-canonical-model.md §6.1/§11.1
+	// item B-1). Before this permission existed, neither table had ANY
+	// application write path at all - rows could only be created by
+	// direct database access, which is itself the hard prerequisite gap
+	// the canonical model names: no FK to `jurisdictions` can be
+	// satisfied by anything the platform's own code produces without it.
+	// Deliberately its own PLATFORM-ONLY permission, granted only to
+	// RolePlatformAdmin and never to any tenant-scoped role - the EXACT
+	// precedent of PermCasinoCatalogueManage (platform-wide game
+	// catalogue) and PermAssetRegistryManage (platform-wide asset
+	// registry, layers 1-3): a jurisdiction or licence row is shared
+	// reference data every tenant reads, and a tenant-scoped role must
+	// never be able to add one unilaterally. `jurisdictions`/`licences`
+	// carry no row-level security (canonical-model §6.1 - they are
+	// platform facts, not tenant-owned rows), so this permission check at
+	// the HTTP layer is the entire control on the write side; every write
+	// is still audited (jurisdiction_registry.* actions) regardless.
+	PermJurisdictionRegistryManage Permission = "jurisdiction_registry:manage"
+
+	// PermJurisdictionResolutionActiveWrite gates writing a tenant's own
+	// jurisdiction_resolution_active fact (canonical-model §4.2/§11.1
+	// item B-6) - the resolver-owned, tenant-scoped record of whether
+	// jurisdiction resolution is genuinely active for a (tenant,
+	// operation_class) pair, which RISK §2.4b's future risk.CreateRule
+	// precondition (R-2b, NOT implemented by this permission or by
+	// internal/jurisdiction - that is risk's own later implementation
+	// phase) will read. Tenant-scoped by design, following
+	// PermAssetAuthorizationWrite's exact precedent (canonical-model
+	// §4.2: "write permission follows PermAssetAuthorizationWrite's
+	// precedent: tenant-scoped, granted to RoleTenantAdmin, never
+	// RolePlatformAdmin") - a platform principal has no tenant scope to
+	// write this fact in, and migration 0071's RLS would reject the
+	// write anyway.
+	PermJurisdictionResolutionActiveWrite Permission = "jurisdiction_resolution_active:write"
 )
 
 // rolePermissions is a static, in-code role -> permission-set mapping.
@@ -252,6 +289,11 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// Stage 4H-B0-R6: the sole grantee of PermAssetRegistryManage
 		// (ADR 0037 layers 1-3). See that permission's own doc comment.
 		PermAssetRegistryManage,
+		// Stage 4I item B-1: the sole grantee of
+		// PermJurisdictionRegistryManage (platform-wide `jurisdictions`/
+		// `licences` registries). See that permission's own doc comment -
+		// same shape as PermAssetRegistryManage/PermCasinoCatalogueManage.
+		PermJurisdictionRegistryManage,
 		// Deliberately NOT PermRGRestrictionWrite/Read (Stage 4D-RG, ADR
 		// 0026 §12): platform_admin cannot resolve a specific tenant's
 		// player_account at all today (PermPlayerRead is itself
@@ -309,6 +351,11 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// offers, per brand/jurisdiction/product). Never
 		// PermAssetRegistryManage - that is platform-only.
 		PermAssetAuthorizationWrite,
+		// Stage 4I item B-6: this tenant's own jurisdiction-resolution-
+		// active facts. Never PermJurisdictionRegistryManage - that is
+		// platform-only, same split as PermAssetAuthorizationWrite versus
+		// PermAssetRegistryManage.
+		PermJurisdictionResolutionActiveWrite,
 		// Stage 4H-B1 Wave 2 (security-architecture.md §B1.1): read-only
 		// bonus visibility "exactly as it does for risk_config/
 		// verification/rg_restriction today" - a tenant admin may see
