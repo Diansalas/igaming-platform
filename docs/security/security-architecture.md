@@ -2706,3 +2706,140 @@ arriving through a legitimate read path.
   correction to its own immediately-prior design and remains subject to
   the same independent re-review by `risk` and `code-reviewer` before
   either finding is marked closed in fact.
+
+---
+
+## Stage 4H-B1 Wave 3 Phase 6 — code-level security review of the Bonus governance / EOI surfaces
+
+**Reviewer:** `security`. **Scope reviewed:** the surfaces Wave 3 Phases 2–5
+added — `internal/bonus/four_eyes_ops.go`,
+`internal/bonus/change_governance.go`,
+`internal/httpserver/bonus_governance_handlers.go`,
+`internal/httpserver/bonus_domain_ops_handlers.go`,
+`internal/httpserver/bonus_routes.go`, `internal/economicop/enforce.go`,
+migration 0063, and the three new sweep/scheduler jobs
+(`deposit_sweep.go`, `cashback_scheduler.go`, `expiry_sweep.go`,
+`schedulers.go`). **Explicitly NOT in scope of this review:**
+`internal/risk`, `internal/rg`, `internal/kyc`, CRM/Affiliate/
+Gamification/Reward-Orchestrator, sportsbook, retail, any UI, and any
+real external provider. This is a code-level and design-level review
+appropriate to a development-stage platform — **not** a penetration test
+and **not** a certification-grade audit, both of which require external,
+human-run engagements.
+
+### W3P6.1 — SEC-W15-02 / CRM-decomposition re-test
+
+The four named vector shapes (decomposition; pagination laundering;
+payload substitution; actor/subject laundering) were re-tested against
+each of the five surfaces Wave 3 added (`manual_grant_issue`,
+`bulk_job_execute`, `campaign_activate`, `offer_publish`, and the
+EOI-minting endpoint). All twenty cells now have executing integration
+coverage, across
+`internal/bonus/wave3_security_adversarial_integration_test.go`,
+`internal/bonus/wave3_security_matrix_integration_test.go`,
+`internal/bonus/four_eyes_ops_integration_test.go`,
+`internal/bonus/lifecycle_integration_test.go`, and the two
+`internal/httpserver/bonus_eoi_mint_*` suites.
+
+Three defects were found and fixed during this phase (commit `ab8ee70`):
+`ConsumeRootBudget` never enforced doc 34 §3.2's subject-set containment
+for `single_subject` scope; `ExecuteBulkGrantJobWithApproval`'s four-eyes
+payload pinned nothing about what was approved; and the EOI-minting
+endpoint treated the budget-bounding fields as optional. Two further
+defects were found and fixed afterwards — see W3P6.2.
+
+### W3P6.2 — Findings on the governance HTTP surface
+
+- **`threshold_at_decision` / `amount_at_decision` were client-supplied
+  (Medium, FIXED).** Migration 0063 created those two columns so a later
+  threshold change cannot retroactively make a past decision look
+  compliant. Accepting them from the request body handed authorship of
+  that append-only, deny-update/deny-delete-protected forensic record to
+  the very principal it exists to hold to account, and their optionality
+  additionally allowed the record to be left blank. Both are now resolved
+  server-side, inside the same transaction, from `ResolveApprovalPolicy`
+  and the request's own `amount_at_request` — the same construction
+  `internal/withdrawal.Approve` already uses, which migration 0063 itself
+  names as its model. `reason_code` is now required for a reject.
+- **`amount_at_request` could never be written (Medium, FIXED).**
+  `scanChangeRequest` scanned that `NUMERIC(38,0)` column straight into a
+  `**big.Int`, which only works while the column is NULL. Filing any
+  change request carrying an amount — i.e. exactly the above-threshold
+  requests whose amount is the load-bearing input to both the threshold
+  and the forensic record — failed with a 500 at the `RETURNING` scan.
+  Now scanned via `pgtype.Numeric`, as every other monetary column in the
+  package is.
+
+### W3P6.3 — RBAC, tenant scoping and RLS
+
+Confirmed for every route in `registerBonusRoutes`: `tenant_id` is
+derived only in `auth.Middleware` from the verified JWT and is never read
+from a header, path or body; every staff route is additionally wrapped in
+`auth.RequireTenantScope` (denying nil-tenant platform principals) plus
+either a static `auth.RequirePermission` or, on the two routes whose
+required permission depends on a body field, an equivalent in-handler
+`RoleHasPermission` check against `changeOperationPermission` /
+the `operation_type` switch. A client-supplied `brand_id` cannot name
+another tenant's brand: every Bonus table carries the composite
+`FOREIGN KEY (brand_id, tenant_id) REFERENCES brands (id, tenant_id)`.
+
+Confirmed for RLS: every new HTTP handler and every new sweep/scheduler
+job performs all tenant-owned reads and writes inside `pool.WithTenant`.
+The single cross-tenant read (`allActiveTenantIDs`, `WithoutTenant` over
+the platform-level `tenants` table) mirrors `internal/reconciliation`'s
+established pattern exactly, and every per-tenant tick runs under
+`WithTenant(tenantID)` with a `pg_try_advisory_xact_lock`. No new code
+path uses `WithPlatformAdmin` or an RLS-exempt connection.
+
+### W3P6.4 — Confirmed-safe failure modes
+
+`POST /v1/admin/bonus/bulk-jobs/{jobID}/execute` always fails today
+because `newCreateBulkGrantJobHandler` never populates
+`bulk_grant_jobs.parent_operation_id` (Phase 4's F3; `bonus-engine`'s to
+close). Reviewed as a security question — does the failure leak state? —
+and confirmed fail-closed and atomic: the four-eyes approval is consumed
+and the job flipped to `running` *before* the guard fires, but
+`WithTenant` rolls the whole transaction back, so the approval is not
+burned (which would be unrecoverable — migration 0063 forbids any
+transition out of `applied`), the job stays `queued`, and no job item,
+Grant or ledger entry survives. Asserted by
+`internal/httpserver/bonus_bulk_job_execute_failclosed_integration_test.go`.
+
+### W3P6.5 — Residual items, named rather than closed
+
+1. **The EOI budget bound lives only in the HTTP handler.**
+   `newMintEconomicOperationHandler` now requires `asset_code`,
+   `intended_aggregate_value` and a positive `recipient_ceiling`, but
+   `bonus.MintRootOperation` itself still accepts nil for all three, and
+   `economicop.ConsumeRootBudget` treats a nil ceiling as "no recipient
+   check" and a nil aggregate as "no value check". Any future non-HTTP
+   minting path therefore reopens the decomposition vector at the
+   mechanism's own entry point. Making the bound structural (enforced in
+   `MintRootOperation`, or as a DB CHECK on `economic_operations` for the
+   Bonus operation types) is the durable fix, but `MintRootOperation` is
+   `bonus-engine`'s primitive and doc 34 permits nil bounds for operation
+   types other than Bonus's two — **routed to `bonus-engine` and
+   `architect`, deliberately not changed unilaterally here.**
+2. **Subject-set containment is enforced for `single_subject` only.**
+   `enumerated_set`/`criteria_defined` roots remain bounded by
+   `recipient_ceiling` alone, because no consumer materializes doc 34
+   §2.2's `subject_set_hash`/`subject_definition_hash` on the EOI row.
+   The bulk surface's recipient set is bound instead by
+   `BulkJobExecutePayloadMatch`'s recipient-set hash in the four-eyes
+   payload and by SEP-1 — adequate today, but the EOI row itself does not
+   bind it.
+3. **`ConsumeRootBudget` skips the subject check when the caller passes
+   `uuid.Nil`.** No caller in the repository does, so this is latent, not
+   live — which is also why it carries no regression test. A future
+   caller passing a zero subject would silently bypass the containment
+   check; refusing a nil subject under `single_subject` scope would close
+   it.
+4. **The EOI-mint audit record is thin.** `MintRootOperation` audits with
+   only `operation_type`; the handler adds no IP, user-agent, request id,
+   or the authorization bounds themselves. An investigator asking "who
+   authorized this budget, from where, for what" cannot answer it from
+   the audit trail alone.
+
+**Nothing in this section is claimed to make the reviewed surfaces
+"secure" in general.** It records what was examined, what was found, and
+what deliberately was not examined.
