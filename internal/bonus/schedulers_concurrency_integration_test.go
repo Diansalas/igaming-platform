@@ -51,10 +51,12 @@ package bonus
 import (
 	"context"
 	"errors"
+	"math/big"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -238,6 +240,123 @@ func TestDepositAndCashbackSchedulers_ConcurrentDifferentNamespaces_NoDeadlock(t
 		}
 		if grantCount != 2 {
 			t.Fatalf("iteration %d: expected exactly 2 grant attempts (1 deposit + 1 cashback) after a concurrent run with no cross-job interference, got %d", i, grantCount)
+		}
+	}
+}
+
+// TestExpirySweep_TrueConcurrentTicksSameTenant_NoDoubleTerminationOrLoss
+// is the third sweep mechanism's own genuine-overlap coverage (the qa
+// dispatch names all three - deposit sweep, cashback scheduler, expiry
+// sweep - as requiring concurrent-execution proof, not just the two F1
+// names explicitly). Two ALREADY-expired Grants exist; two genuinely
+// concurrent tenant ticks race for the same tenant's
+// "bonus_expiry_sweep" lock. The invariant is not merely "the lock
+// serializes" (already proven generically by the deposit-sweep sibling
+// test, since both jobs share the identical tryAdvisoryLockedTenantJob
+// mechanism) but the DOMAIN-specific one this mechanism exists to
+// guarantee: every expired Grant is terminated EXACTLY once, never twice
+// (TerminateGrant's own CAS guard would surface as a hard error, not a
+// silent no-op, if the loser somehow raced the winner's own read), and
+// never left un-terminated (the loser's own subsequent tick, or this
+// test's own explicit follow-up tick, must still find and finish any
+// work the winner did not reach).
+func TestExpirySweep_TrueConcurrentTicksSameTenant_NoDoubleTerminationOrLoss(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	co := seedCampaignOffer(t, pool, f.tenantID, f.brandID, f.staffID)
+
+	seedExpiredGrant := func(suffix string) uuid.UUID {
+		var grantID uuid.UUID
+		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			g := newTestOfferGrant(f, co, "expiry-concurrent-"+suffix)
+			result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{
+				Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode,
+			})
+			if err != nil || !outcome.Allowed {
+				t.Fatalf("issue/activate %s: %v / %+v", suffix, err, outcome)
+			}
+			grantID = result.ID
+			_, err = SetGrantExpiryOnce(ctx, tx, f.tenantID, grantID, time.Now().UTC().Add(10*time.Millisecond))
+			return err
+		})
+		if err != nil {
+			t.Fatalf("seed expired grant %s: %v", suffix, err)
+		}
+		return grantID
+	}
+	grantA := seedExpiredGrant("a")
+	grantB := seedExpiredGrant("b")
+	time.Sleep(30 * time.Millisecond)
+
+	holdRelease := make(chan struct{})
+	firstAcquired := make(chan bool, 1)
+	secondAcquired := make(chan bool, 1)
+	secondErr := make(chan error, 1)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		acquired, err := tryAdvisoryLockedTenantJob(context.Background(), pool, f.tenantID, "bonus_expiry_sweep", func(ctx context.Context, tx pgx.Tx) error {
+			firstAcquired <- true
+			if _, runErr := RunExpirySweepForTenant(ctx, tx, f.tenantID, systemSchedulerActorID, time.Now().UTC()); runErr != nil {
+				return runErr
+			}
+			<-holdRelease
+			return nil
+		})
+		if err != nil {
+			t.Errorf("first concurrent expiry sweep tick: %v", err)
+		}
+		if !acquired {
+			t.Errorf("expected the first tick to acquire the lock")
+		}
+	}()
+
+	<-firstAcquired
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		acquired, err := tryAdvisoryLockedTenantJob(context.Background(), pool, f.tenantID, "bonus_expiry_sweep", func(ctx context.Context, tx pgx.Tx) error {
+			_, runErr := RunExpirySweepForTenant(ctx, tx, f.tenantID, systemSchedulerActorID, time.Now().UTC())
+			return runErr
+		})
+		secondAcquired <- acquired
+		secondErr <- err
+	}()
+
+	acquired := <-secondAcquired
+	err := <-secondErr
+	close(holdRelease)
+	wg.Wait()
+
+	if acquired {
+		t.Fatal("expected the second, genuinely concurrent expiry sweep tick to find the lock held and skip")
+	}
+	if err != nil {
+		t.Fatalf("second concurrent tick returned an unexpected error: %v", err)
+	}
+
+	// A follow-up tick (uncontended) must finish any work the first tick's
+	// own single pass did not reach - never double-terminate, never lose
+	// a Grant.
+	var followUp ExpirySweepOutcome
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var runErr error
+		followUp, runErr = RunExpirySweepForTenant(ctx, tx, f.tenantID, systemSchedulerActorID, time.Now().UTC())
+		return runErr
+	}); err != nil {
+		t.Fatalf("follow-up expiry sweep tick: %v", err)
+	}
+	if followUp.GrantsTerminated != 0 {
+		t.Fatalf("expected the follow-up tick to find NOTHING left to terminate (the first tick's single pass already handles every currently-expired grant), got %d", followUp.GrantsTerminated)
+	}
+
+	for _, id := range []uuid.UUID{grantA, grantB} {
+		status := readGrantStatus(t, pool, f.tenantID, id)
+		if status != GrantExpired {
+			t.Fatalf("expected grant %s to be expired exactly once, got %s", id, status)
 		}
 	}
 }
