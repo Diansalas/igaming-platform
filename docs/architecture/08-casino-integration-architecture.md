@@ -133,17 +133,43 @@ the provider declines) is `RevokeLaunchSession`'d, never deleted — the row
 is the audit-visible record that a launch attempt occurred.
 
 `LaunchGame`'s full eligibility chain, each failure mode returning a
-distinguishable sentinel error: game exists (`ErrGameNotFound`) → platform-
-enabled (`ErrGameDisabled`) → tenant/brand opted in (`ErrGameNotAvailable`)
-→ not jurisdiction-blocked (`ErrJurisdictionBlocked`) → asset supported by
-the game (`ErrInvalidInput`) → provider capability active and asset-
-supporting (`ErrProviderUnavailable`) → provider registered
-(`ErrUnknownProvider`) → provider healthy/circuit-closed
-(`ErrProviderUnavailable`) → mint session → call `provider.Launch`. Per-
-player jurisdiction resolution is `TODO(jurisdiction)` — the identical open
-scope boundary `payment-orchestration.md` §4 already carries for payment
-routing; a `nil` `JurisdictionCode` skips the check rather than silently
-ignoring a resolved one.
+distinguishable sentinel error or, for the jurisdiction gate, a
+`LaunchGameResult{Denied: true, DenialCode: ...}` (see below): game exists
+(`ErrGameNotFound`) → platform-enabled (`ErrGameDisabled`) → tenant/brand
+opted in (`ErrGameNotAvailable`) → not jurisdiction-blocked (K-3, below) →
+asset supported by the game (`ErrInvalidInput`) → provider capability
+active and asset-supporting (`ErrProviderUnavailable`) → provider
+registered (`ErrUnknownProvider`) → provider healthy/circuit-closed
+(`ErrProviderUnavailable`) → mint session → call `provider.Launch`.
+
+**K-3 jurisdiction blocklist remediation (Stage 4I,
+`docs/governance/stage-4i-canonical-model.md` §9) — `IMPLEMENTED`.** The
+per-game jurisdiction gate resolves the player's jurisdiction exactly once
+per launch (`internal/jurisdiction.Resolve`, platform core, consumed —
+never re-implemented — by this package) and feeds that ONE value to three
+consumers: the blocklist check below, the Risk request just after it, and
+the launch session's persisted `jurisdiction_code` snapshot. The control is
+only **armed** for a game whose own `jurisdiction_blocklist` array is
+non-empty (`cardinality(...) > 0`, a static, jurisdiction-resolution-free
+test) — a game with an empty blocklist has no jurisdiction-dependent
+policy in force and launches exactly as before. Within an armed game, an
+unresolved player jurisdiction denies with the internal-only
+`DenialCodeJurisdictionUnresolved`; a resolved-but-listed jurisdiction
+denies with `DenialCodeJurisdictionBlocked` — deliberately distinguishable
+internally (audit metadata, logs, `jurisdiction_resolutions`) but collapsed
+into one byte-identical player-facing HTTP response
+(`internal/httpserver/casino_handlers.go`'s `writeCasinoLaunchDenial`) to
+avoid an HTTP-boundary oracle for jurisdiction-resolution manipulation.
+This check runs identically for real and demo launches — demo is
+jurisdiction-bearing by default (architect's ruling, canonical-model §9.6):
+catalogue availability ("may this title be offered in this market") does
+not depend on which endpoint is asked. Since no player-side jurisdiction
+signal exists anywhere in this codebase yet (HDR-J-3 is unanswered), every
+player-scoped resolution is `unresolved(no_signal)` in Stage 4I — so this
+control currently denies launches ONLY for a game an operator has
+explicitly given a non-empty blocklist to (statically enumerable via
+`SELECT ... WHERE cardinality(jurisdiction_blocklist) > 0`), never for the
+platform's ordinary catalogue.
 
 ## 6. Provider callback authentication — `ARCHITECTURAL DECISION`
 

@@ -12,6 +12,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/bonus"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/risk"
@@ -63,22 +64,15 @@ type LaunchGameParams struct {
 	GameID          uuid.UUID
 	AssetCode       string
 	Mode            GameMode
-	// JurisdictionCode is the tenant's own configured jurisdiction, if
-	// known - resolution of a per-player jurisdiction is TODO(jurisdiction),
-	// the identical open scope boundary payment-orchestration.md §4
-	// carries for payment routing. A nil value skips the jurisdiction
-	// check entirely (fails open only in the sense that no jurisdiction
-	// context exists yet to check against - never silently ignores an
-	// actually-resolved jurisdiction). MUST be resolved server-side from
-	// the platform's own configuration/resolver, exactly like every other
-	// field on this struct - NEVER from client-supplied input (a request
-	// body, header, or geo hint a caller controls) - multi-tenancy review
-	// finding: this value is now persisted onto the launch session
+	// Jurisdiction is no longer a caller-supplied field (K-3 remediation,
+	// docs/governance/stage-4i-canonical-model.md §9): LaunchGame resolves
+	// it itself, server-side, via internal/jurisdiction.Resolve, using
+	// only TenantID/BrandID/PlayerAccountID already on this struct - never
+	// from client-supplied input (a request body, header, or geo hint a
+	// caller controls). See LaunchGame's own K-3 doc comment for the full
+	// contract; the resolved value is persisted onto the launch session
 	// (migration 0042) and reused as the risk scope for every bet in the
-	// round, so a client-influenced value here would let a player pick a
-	// jurisdiction that dodges a jurisdiction-scoped HARD_LIMIT for the
-	// whole round, not just one request.
-	JurisdictionCode *string
+	// round, exactly as before this fix.
 }
 
 // LaunchGameResult is what LaunchGame returns to its caller (an HTTP
@@ -135,8 +129,72 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, tx pgx.Tx, params LaunchG
 	if !available {
 		return LaunchGameResult{}, ErrGameNotAvailable
 	}
-	if params.JurisdictionCode != nil && containsString(game.JurisdictionBlocklist, *params.JurisdictionCode) {
-		return LaunchGameResult{}, ErrJurisdictionBlocked
+
+	// K-3 remediation (canonical-model §9): resolve the player's
+	// jurisdiction ONCE, here, and feed all three consumers from this one
+	// value (K3-3) - the blocklist check immediately below, the
+	// RiskRequest further down (real-mode only), and CreateLaunchSession's
+	// persisted snapshot. This closes the defect where this line used to
+	// dereference params.JurisdictionCode directly while a SEPARATELY-
+	// derived local fed Risk/the session - two dereferences of what should
+	// always have been one value.
+	//
+	// K3-4 (demo mode decided EXPLICITLY, canonical-model §9.6): this
+	// resolution, and the blocklist check it feeds, run for BOTH real AND
+	// demo launches - never conditioned on params.Mode. This is
+	// architect's deliberate ruling that demo launches are catalogue-
+	// availability-bearing BY DEFAULT: "may this title be offered in this
+	// market" is a question about the CATALOGUE, not about whether real
+	// money is at stake, so the platform's answer must not depend on which
+	// endpoint is asked. This is a stated, commented choice - not an
+	// accident of this code sitting above the params.Mode == ModeReal
+	// branch below (which gates Risk, a genuinely money-only concern).
+	//
+	// Resolve is a cheap, read-only, no-external-network-dependency
+	// Postgres read (canonical-model §9.4) - there is no cost reason to
+	// skip it for an unarmed game, and every player-scoped resolution
+	// resolves unresolved(no_signal) today regardless (HDR-J-3 is
+	// unanswered, canonical-model §11.3), so running it unconditionally
+	// changes nothing observable for a game carrying no blocklist.
+	jurisdictionResolution, err := jurisdiction.Resolve(ctx, tx, jurisdiction.Params{
+		TenantID: params.TenantID, BrandID: &params.BrandID, PlayerAccountID: &params.PlayerAccountID,
+		OperationClass:       jurisdiction.OperationPlay,
+		RequestedByActorType: jurisdiction.ActorPlayer, RequestedByActorID: &params.PlayerAccountID,
+	})
+	if err != nil {
+		return LaunchGameResult{}, fmt.Errorf("casino: resolve jurisdiction: %w", err)
+	}
+
+	// K3-1 - the one correction the canonical model makes to RISK's/
+	// security's own K-3 recommendations (canonical-model §9.1's full
+	// reasoning is not re-derived here): the control is only ARMED for a
+	// game whose OWN jurisdiction_blocklist is non-empty. This is a clean,
+	// statically-determinable test (no jurisdiction resolution needed at
+	// all) - a game with an empty blocklist has no jurisdiction-dependent
+	// policy in force, so it must not start denying launches the moment
+	// jurisdiction resolution exists in the codebase. Applying RISK's
+	// original "remove the params.JurisdictionCode != nil guard
+	// unconditionally" recommendation literally would deny 100% of casino
+	// launches in Stage 4I, since every player-scoped resolution is
+	// unresolved(no_signal) today (HDR-J-3 unanswered).
+	// canonical-model §4.4 Layer 2: every consuming gate re-asserts the
+	// resolution's own tenant/brand/player binding against its OWN
+	// authenticated context before ever calling Code() - a resolution for
+	// a different player (or a tenant-subject resolution with no player at
+	// all) is structurally unusable here. Resolve derived this SAME
+	// resolution from these SAME params two lines above, so this is
+	// defense-in-depth rather than something that can genuinely diverge in
+	// production - but it is exactly the check that keeps a future
+	// refactor from ever laundering a mismatched resolution through this
+	// gate, and it is what makes evaluateJurisdictionBlocklist below safe
+	// to feed a resolution obtained from anywhere.
+	if err := jurisdictionResolution.AssertScope(params.TenantID, &params.BrandID, &params.PlayerAccountID); err != nil {
+		return LaunchGameResult{}, fmt.Errorf("casino: jurisdiction resolution scope: %w", err)
+	}
+	if denied, denialCode, err := evaluateJurisdictionBlocklist(game.JurisdictionBlocklist, jurisdictionResolution); err != nil {
+		return LaunchGameResult{}, err
+	} else if denied {
+		return LaunchGameResult{Denied: true, DenialCode: denialCode}, nil
 	}
 	if !containsString(game.SupportedAssets, params.AssetCode) {
 		return LaunchGameResult{}, fmt.Errorf("%w: game does not support asset %s", ErrInvalidInput, params.AssetCode)
@@ -156,16 +214,17 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, tx pgx.Tx, params LaunchG
 		return LaunchGameResult{Denied: true, DenialCode: decision.Code, DenialMessage: decision.Message}, nil
 	}
 
-	// Resolved once, used both by the risk check below (real-mode only)
-	// and persisted onto the launch session unconditionally just below
-	// that (Stage 4G-FINAL Part C) - so a jurisdiction-scoped rule stays
-	// reachable from this SAME round's later bets (postBet), not just at
-	// launch time. Empty when LaunchGame itself had no resolved
-	// jurisdiction to begin with (TODO(jurisdiction) - see
-	// LaunchGameParams' own doc comment) - never silently defaulted.
+	// K3-3 (continued): the SAME jurisdictionResolution computed above
+	// feeds the risk check below and the launch session's persisted
+	// snapshot just below that (Stage 4G-FINAL Part C) - so a
+	// jurisdiction-scoped rule stays reachable from this SAME round's
+	// later bets (postBet), not just at launch time. Empty only when the
+	// resolution did not resolve - never silently defaulted
+	// (jurisdiction.Resolution.Code() is structurally unreachable for a
+	// non-Resolved outcome, canonical-model §2.3 property 2).
 	var jurisdictionCode string
-	if params.JurisdictionCode != nil {
-		jurisdictionCode = *params.JurisdictionCode
+	if jurisdictionResolution.Outcome() == jurisdiction.Resolved {
+		jurisdictionCode, _ = jurisdictionResolution.Code() // err impossible: Outcome() == Resolved, just checked
 	}
 
 	// Stage 4G: the central Risk & Limits boundary, consulted alongside
@@ -380,6 +439,13 @@ func evaluateAndAuditRisk(ctx context.Context, tx pgx.Tx, req risk.RiskRequest, 
 	// an earlier version omitted these, unlike the sibling
 	// casino_bet.declined insufficient-funds audit record) - never raw
 	// rule contents beyond the already-opaque reason code.
+	//
+	// jurisdiction_code/licensing_mode (canonical-model §9.3's "plus one
+	// item", correct today independent of the resolver, RISK §3.2): before
+	// this, a denial by a jurisdiction-scoped HARD_LIMIT produced an audit
+	// record from which the jurisdiction that actually triggered it could
+	// not be recovered. Both fields come straight off req - the SAME
+	// values risk.Evaluate itself matched against - never re-derived.
 	metadata := map[string]any{
 		"reason_code": decision.Code, "outcome": string(decision.Outcome), "operation": string(req.Operation),
 		"brand_id": req.BrandID.String(), "provider_id": req.ProviderID, "asset_code": req.AssetCode,
@@ -390,6 +456,12 @@ func evaluateAndAuditRisk(ctx context.Context, tx pgx.Tx, req risk.RiskRequest, 
 	if req.Amount != 0 {
 		metadata["amount"] = req.Amount
 	}
+	if req.JurisdictionCode != "" {
+		metadata["jurisdiction_code"] = req.JurisdictionCode
+	}
+	if req.LicensingMode != "" {
+		metadata["licensing_mode"] = req.LicensingMode
+	}
 	if err := audit.Record(ctx, tx, audit.Entry{
 		TenantID: req.TenantID, ActorType: audit.ActorSystem, Action: auditAction,
 		TargetType: "player_account", TargetID: req.PlayerAccountID.String(), Outcome: audit.OutcomeDenied,
@@ -398,6 +470,47 @@ func evaluateAndAuditRisk(ctx context.Context, tx pgx.Tx, req risk.RiskRequest, 
 		return risk.RiskDecision{}, fmt.Errorf("casino: audit risk denial: %w", err)
 	}
 	return decision, nil
+}
+
+// evaluateJurisdictionBlocklist implements K-3's per-game blocklist
+// decision (canonical-model §9.2/§9.3) given an ALREADY-RESOLVED
+// jurisdiction.Resolution - factored out of LaunchGame so it can be
+// exercised directly, in unit tests, against a GENUINELY resolved
+// Resolution obtained via the resolver's own producible tenant_licence
+// basis (jurisdiction_blocklist_test.go), since no player-side
+// jurisdiction producer exists anywhere in this codebase yet (HDR-J-3
+// unanswered, canonical-model §11.3) and Resolution is deliberately
+// non-forgeable (no exported constructor exists to fabricate one).
+//
+// K3-1: blocklist is nil/empty -> the control is not ARMED for this game;
+// never denies, regardless of res's outcome (a game with no
+// jurisdiction-dependent policy in force must not start denying launches
+// the moment jurisdiction resolution exists in the codebase - see
+// LaunchGame's own K3-1 doc comment for the full reasoning).
+//
+// K3-2: armed and res did not resolve -> denies with
+// DenialCodeJurisdictionUnresolved, NEVER DenialCodeJurisdictionBlocked -
+// these are distinguishable INTERNAL outcomes; K3-6 collapses them into
+// one player-facing response only at the HTTP boundary, never here.
+func evaluateJurisdictionBlocklist(blocklist []string, res jurisdiction.Resolution) (denied bool, denialCode string, err error) {
+	if len(blocklist) == 0 {
+		return false, "", nil
+	}
+	if res.Outcome() != jurisdiction.Resolved {
+		return true, DenialCodeJurisdictionUnresolved, nil
+	}
+	code, err := res.Code()
+	if err != nil {
+		// Unreachable: Code() is only unreachable for a non-Resolved
+		// outcome (jurisdiction.ErrNotResolved's own doc comment), and the
+		// check immediately above already confirmed Resolved. Kept as a
+		// hard stop rather than a silent fallthrough if it is ever reached.
+		return false, "", fmt.Errorf("casino: resolved jurisdiction code: %w", err)
+	}
+	if containsString(blocklist, code) {
+		return true, DenialCodeJurisdictionBlocked, nil
+	}
+	return false, "", nil
 }
 
 func containsString(list []string, s string) bool {

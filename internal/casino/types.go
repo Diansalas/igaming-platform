@@ -108,6 +108,32 @@ const (
 	LaunchSessionRevoked  LaunchSessionStatus = "revoked"
 )
 
+// DenialCode values LaunchGame reports on LaunchGameResult (K-3 remediation,
+// docs/governance/stage-4i-canonical-model.md §9.2/§9.3 K3-2/K3-5): a
+// jurisdiction-dependent denial is reported as a RESULT, not a Go error
+// (LaunchGameResult.Denied/DenialCode - same shape the RG/Risk gates
+// already use, per K3-5's return-shape-consistency requirement), and the
+// two possible jurisdiction denial reasons are DELIBERATELY
+// distinguishable INTERNALLY (this constant, the audit trail, operator
+// logs) even though K3-6 (canonical-model §6.3, the HTTP-boundary oracle
+// rule) requires them to collapse into ONE identical player-facing
+// response. That collapse happens ONLY at the HTTP boundary
+// (internal/httpserver/casino_handlers.go) - never here.
+const (
+	// DenialCodeJurisdictionUnresolved is reported when a game's own
+	// jurisdiction_blocklist is non-empty (the control is "armed" - see
+	// LaunchGame's own K-3 doc comment) but the platform could not
+	// determine the player's jurisdiction (jurisdiction.Resolve did not
+	// return Resolved). This is NOT "blocked in this jurisdiction" - the
+	// player's jurisdiction is unknown, not known-and-disallowed - and
+	// must never be reported as DenialCodeJurisdictionBlocked (K3-2).
+	DenialCodeJurisdictionUnresolved = "jurisdiction_unresolved"
+	// DenialCodeJurisdictionBlocked is reported when the player's
+	// resolved jurisdiction code appears in the game's own
+	// jurisdiction_blocklist.
+	DenialCodeJurisdictionBlocked = "jurisdiction_blocked"
+)
+
 // Sentinel errors.
 var (
 	// ErrGameNotFound is returned when a provider_game_id/game id names
@@ -121,9 +147,6 @@ var (
 	// ErrGameNotAvailable is returned when the caller's (tenant, brand)
 	// has no enabled casino_game_availability row for this game.
 	ErrGameNotAvailable = errors.New("casino: game is not available for this tenant/brand")
-	// ErrJurisdictionBlocked is returned when the game's own
-	// jurisdiction_blocklist contains the tenant's configured jurisdiction.
-	ErrJurisdictionBlocked = errors.New("casino: game is blocked in this jurisdiction")
 	// ErrUnknownProvider is returned when a capability row or routing
 	// decision names a provider_id the orchestrator has no adapter
 	// registered for.

@@ -201,10 +201,6 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "game not available")
 			return
 		}
-		if errors.Is(err, casino.ErrJurisdictionBlocked) {
-			apierror.Write(w, requestID, apierror.CodeForbidden, "game is not available in your jurisdiction")
-			return
-		}
 		if errors.Is(err, casino.ErrProviderUnavailable) {
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "game provider is temporarily unavailable")
 			return
@@ -224,12 +220,7 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if result.Denied {
-			// Stage 4D-RG: told to the player directly (never a generic
-			// "forbidden") - a player denied by their own account status or
-			// self-exclusion is legitimately owed that specific reason, the
-			// same way a real-world RG self-exclusion page always names
-			// itself rather than presenting a bare access-denied screen.
-			apierror.Write(w, requestID, apierror.CodeForbidden, "gambling is currently restricted for this account: "+result.DenialCode)
+			writeCasinoLaunchDenial(w, requestID, result)
 			return
 		}
 
@@ -237,6 +228,45 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 			LaunchURL: result.LaunchURL, SessionID: result.SessionID.String(), ExpiresAt: result.ExpiresAt.Format(rfc3339),
 		})
 	}
+}
+
+// writeCasinoLaunchDenial maps a casino.LaunchGameResult.Denied outcome to
+// its player-facing HTTP response. Factored out of
+// newLaunchCasinoGameHandler so the K3-6 collapse below is independently
+// unit-testable (casino_handlers_test.go) via httptest.ResponseRecorder,
+// asserting byte-identical output for the two jurisdiction denial codes
+// without needing a full LaunchGame/database round trip (K3-6 requires
+// "denies on a genuinely blocked jurisdiction" to be UNREACHABLE via HTTP
+// in Stage 4I - no player-side jurisdiction resolution exists yet - so
+// this is the only way to test the collapse against both codes directly).
+//
+// K3-6 / canonical-model §6.3 (the HTTP-boundary oracle rule, generalized
+// platform-wide by security/architect beyond casino):
+// DenialCodeJurisdictionUnresolved and DenialCodeJurisdictionBlocked MUST
+// produce a BYTE-IDENTICAL player-facing response - same status code,
+// same message, same body - even though they are kept fully
+// distinguishable everywhere internal to this point
+// (LaunchGameResult.DenialCode itself, casino.evaluateAndAuditRisk's/
+// evaluateAndAuditEligibility's audit records, operator-facing logs). The
+// distinction between "your jurisdiction could not be determined" and
+// "you are blocked in your jurisdiction" is EXACTLY the signal that would
+// tell an attacker whether a manipulation attempt (a VPN, a proxy, a
+// changed declared residence) registered - handled here, in this ONE
+// place, deliberately BEFORE the generic RG/Risk denial branch (which
+// DOES intentionally disclose result.DenialCode - a player denied by
+// their own account status is legitimately owed that specific reason,
+// unlike a jurisdiction determination).
+func writeCasinoLaunchDenial(w http.ResponseWriter, requestID string, result casino.LaunchGameResult) {
+	if result.DenialCode == casino.DenialCodeJurisdictionUnresolved || result.DenialCode == casino.DenialCodeJurisdictionBlocked {
+		apierror.Write(w, requestID, apierror.CodeForbidden, "game is not available in your jurisdiction")
+		return
+	}
+	// Stage 4D-RG: told to the player directly (never a generic
+	// "forbidden") - a player denied by their own account status or
+	// self-exclusion is legitimately owed that specific reason, the same
+	// way a real-world RG self-exclusion page always names itself rather
+	// than presenting a bare access-denied screen.
+	apierror.Write(w, requestID, apierror.CodeForbidden, "gambling is currently restricted for this account: "+result.DenialCode)
 }
 
 // newCasinoWebhookHandler receives a provider callback (bet/win/rollback)
