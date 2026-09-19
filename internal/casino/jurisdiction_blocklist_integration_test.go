@@ -254,6 +254,27 @@ func TestEvaluateJurisdictionBlocklist(t *testing.T) {
 		t.Fatalf("expected the player-scoped resolution to be unresolved(no_signal) in Stage 4I, got %s(%s)", playerScoped.Outcome(), playerScoped.Reason())
 	}
 
+	// A genuinely REFUSED resolution (canonical-model §6.2 scenario 9,
+	// "unavailable resolver"/dependency-failure family) - obtained via
+	// Resolve's own zero-tenant input gate (refused(scope_mismatch)),
+	// never fabricated (Resolution has no exported constructor). K3-1/K3-2
+	// make no distinction between Unresolved and Refused - both fail
+	// evaluateJurisdictionBlocklist's single `Outcome() != Resolved` test
+	// identically - and this proves that holds for Refused specifically,
+	// not merely for Unresolved: an unavailable/refused resolver must
+	// collapse into the SAME DenialCodeJurisdictionUnresolved a data gap
+	// does, never a distinguishable player-facing outcome (canonical-model
+	// §6.3's oracle rule).
+	refused, err := jurisdiction.Resolve(context.Background(), nil, jurisdiction.Params{
+		TenantID: uuid.Nil, OperationClass: jurisdiction.OperationPlay, RequestedByActorType: jurisdiction.ActorSystem,
+	})
+	if err != nil {
+		t.Fatalf("resolve refused case: %v", err)
+	}
+	if refused.Outcome() != jurisdiction.Refused {
+		t.Fatalf("expected a Refused outcome, got %s(%s)", refused.Outcome(), refused.Reason())
+	}
+
 	tests := []struct {
 		name           string
 		blocklist      []string
@@ -266,6 +287,8 @@ func TestEvaluateJurisdictionBlocklist(t *testing.T) {
 		{"K3-2: armed, unresolved -> denied unresolved", []string{jurisdictionCode}, playerScoped, true, DenialCodeJurisdictionUnresolved},
 		{"armed, resolved but not in blocklist -> not denied", []string{"SOME-OTHER-CODE"}, resolved, false, ""},
 		{"armed, resolved and blocked -> denied blocked", []string{jurisdictionCode}, resolved, true, DenialCodeJurisdictionBlocked},
+		{"K3-1: empty blocklist, refused -> not denied", nil, refused, false, ""},
+		{"unavailable resolver: armed, refused -> denied unresolved (never distinguishable from a data gap)", []string{jurisdictionCode}, refused, true, DenialCodeJurisdictionUnresolved},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
