@@ -337,18 +337,13 @@ func TestLFCert_DepositSweepPosting_B1AndRoundingAndReconciliation(t *testing.T)
 	assertReconciliationClean(t, pool, f.tenantID, "after deposit-sweep replay")
 }
 
-// TestLFCert_CashbackSchedulerPosting_B1AndNetLossArithmetic is the
-// cashback half of the same proof, driving the scheduler's own
-// campaign-resolution and NetLossAmount ledger read (the exact query
-// ledger-accounting-model.md §7.18.4 item 4 specifies) before posting.
-func TestLFCert_CashbackSchedulerPosting_B1AndNetLossArithmetic(t *testing.T) {
-	pool := testPool(t)
-	f := seedLifecycleFixture(t, pool)
-	seedCashbackOffer(t, pool, f, 1000, 86400) // 10% cashback, 1-day window
-	seedCasinoBetForCashback(t, pool, f, 1000) // 1000 staked, no win -> net loss 1000
-
-	asOf := time.Now().UTC().Add(48 * time.Hour)
-
+// runCashbackChainWithJurisdiction replays
+// RunCashbackSchedulerForTenant's OWN body for the campaign's first
+// elapsed window against the real production helpers, substituting only
+// the jurisdiction code (see this file's header). Returns the Grant, the
+// gate outcome and the NetLossAmount the real ledger read produced.
+func runCashbackChainWithJurisdiction(t *testing.T, pool *db.Pool, f lifecycleFixture, jurisdictionCode string, asOf time.Time) (Grant, GateOutcome, *big.Int) {
+	t.Helper()
 	var grant Grant
 	var outcome GateOutcome
 	var observedNetLoss *big.Int
@@ -406,7 +401,7 @@ func TestLFCert_CashbackSchedulerPosting_B1AndNetLossArithmetic(t *testing.T) {
 		issued++
 		grant, outcome, err = IssueAndActivateCashback(ctx, tx, CashbackParams{
 			Grant: g, NetLossAmount: netLoss, RateBP: rateBP, CapAmount: capAmount,
-			JurisdictionCode: f.jurisdictionCode, ActorType: ActorSystem, ActorID: uuid.Nil,
+			JurisdictionCode: jurisdictionCode, ActorType: ActorSystem, ActorID: uuid.Nil,
 		})
 		return err
 	})
@@ -416,6 +411,22 @@ func TestLFCert_CashbackSchedulerPosting_B1AndNetLossArithmetic(t *testing.T) {
 	if issued != 1 {
 		t.Fatalf("expected exactly one issuance attempt, got %d", issued)
 	}
+	return grant, outcome, observedNetLoss
+}
+
+// TestLFCert_CashbackSchedulerPosting_B1AndNetLossArithmetic is the
+// cashback half of the same proof, driving the scheduler's own
+// campaign-resolution and NetLossAmount ledger read (the exact query
+// ledger-accounting-model.md §7.18.4 item 4 specifies) before posting.
+func TestLFCert_CashbackSchedulerPosting_B1AndNetLossArithmetic(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	seedCashbackOffer(t, pool, f, 1000, 86400) // 10% cashback, 1-day window
+	seedCasinoBetForCashback(t, pool, f, 1000) // 1000 staked, no win -> net loss 1000
+
+	asOf := time.Now().UTC().Add(48 * time.Hour)
+	grant, outcome, observedNetLoss := runCashbackChainWithJurisdiction(t, pool, f, f.jurisdictionCode, asOf)
+
 	if !outcome.Allowed {
 		t.Fatalf("the full T.1 gate chain denied the cashback activation (denied_by=%s code=%s)", outcome.DeniedBy, outcome.Code)
 	}
@@ -439,6 +450,112 @@ func TestLFCert_CashbackSchedulerPosting_B1AndNetLossArithmetic(t *testing.T) {
 	}
 
 	assertReconciliationClean(t, pool, f.tenantID, "after cashback bonus_grant posting")
+
+	// DUPLICATE / REPLAY — the coverage-floor category CLAUDE.md names
+	// FIRST for financial functionality, and the one no test in this
+	// Wave covered for the cashback scheduler specifically (the deposit
+	// sweep had TestRunDepositSweepForTenant_MatchesAndAdvancesWatermark;
+	// the cashback scheduler had no equivalent). Re-running the identical
+	// window recomputes the identical deterministic trigger_reference,
+	// which the DB-enforced UNIQUE (tenant_id, campaign_id,
+	// offer_version_id, player_account_id, trigger_reference) constraint
+	// must resolve to the existing Grant — never a second cashback payout
+	// for the same window.
+	replayGrant, _, replayNetLoss := runCashbackChainWithJurisdiction(t, pool, f, f.jurisdictionCode, asOf)
+	if replayGrant.ID != grant.ID {
+		t.Fatalf("replaying the same cashback window produced a DIFFERENT grant %s (original %s) — a double payout", replayGrant.ID, grant.ID)
+	}
+	if replayNetLoss == nil || replayNetLoss.Int64() != 1000 {
+		t.Fatalf("replay NetLossAmount = %v, want the same 1000 (the window's ledger read must be deterministic)", replayNetLoss)
+	}
+	replaySums := readPostingForGrant(t, pool, f.tenantID, grant.ID, ledger.TxBonusGrant)
+	if replaySums.transactionID != s.transactionID || replaySums.creditTotal != s.creditTotal {
+		t.Fatalf("replay changed the posting: tx %s->%s, credits %d->%d",
+			s.transactionID, replaySums.transactionID, s.creditTotal, replaySums.creditTotal)
+	}
+	assertReconciliationClean(t, pool, f.tenantID, "after cashback replay")
+}
+
+// TestLFCert_DepositSweepMalformedRewardCalculation_SkipsAuditsAndContinues
+// covers the PARTIAL-FAILURE category of CLAUDE.md's financial test
+// floor for the deposit sweep: a single Offer whose reward_calculation
+// does not parse must not abort the tenant's whole tick (which would
+// roll back every other Offer's issuance and, worse, the watermark
+// advance — permanently stalling that tenant's sweep behind one
+// mistyped Offer). It must be skipped, audited, and the tick must
+// continue and still advance its cursor.
+func TestLFCert_DepositSweepMalformedRewardCalculation_SkipsAuditsAndContinues(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	// Authored malformed from the start: bonus_offer_versions rows are
+	// immutable by design, so the defect this models is an OfferVersion
+	// PUBLISHED with a reward_calculation that parses as JSON (the
+	// column's own jsonb check passes) but carries no positive rate_bp —
+	// exactly the authoring-time hole ADR 0040 D3 item 1 routes to
+	// `bonus-engine` to close at the write path. This asserts the
+	// runtime fail-safe underneath it.
+	co := seedDepositMatchableOfferWithReward(t, pool, f, `{"not_a_rate":1}`)
+	depositTxID := seedRawDeposit(t, pool, f, 10000, "card")
+
+	var outcome DepositSweepOutcome
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var runErr error
+		outcome, runErr = RunDepositSweepForTenant(ctx, tx, f.tenantID, uuid.Nil)
+		return runErr
+	}); err != nil {
+		t.Fatalf("the sweep aborted on a malformed reward_calculation instead of skipping it: %v", err)
+	}
+	if outcome.EventsProcessed != 1 {
+		t.Fatalf("events processed = %d, want 1 (the tick must not abort)", outcome.EventsProcessed)
+	}
+	if outcome.GrantsIssued != 0 || outcome.GrantsDenied != 0 {
+		t.Fatalf("no grant may be issued or denied from an unparseable reward: %+v", outcome)
+	}
+	if len(outcome.Skipped) != 1 {
+		t.Fatalf("skipped reasons = %v, want exactly one", outcome.Skipped)
+	}
+
+	// The skip must be VISIBLE to an operator, not silent.
+	var auditCount int
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'bonus_deposit_sweep.malformed_reward_calculation_skipped' AND target_id = $2`,
+			f.tenantID, co.offerVersionID.String(),
+		).Scan(&auditCount)
+	}); err != nil {
+		t.Fatalf("read audit log: %v", err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("expected exactly one malformed_reward_calculation_skipped audit row, got %d", auditCount)
+	}
+
+	// The watermark must still have advanced past the deposit, so one
+	// mistyped Offer cannot stall the tenant's sweep forever.
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		w, err := getDepositSweepWatermark(ctx, tx, f.tenantID, DepositSweepConsumerName)
+		if err != nil {
+			return err
+		}
+		if w.LastProcessedLedgerTransactionID == nil || *w.LastProcessedLedgerTransactionID != depositTxID {
+			return fmt.Errorf("watermark = %v, want it advanced to the processed deposit %s", w.LastProcessedLedgerTransactionID, depositTxID)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	// And nothing at all was posted.
+	var postings int
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'bonus_grant'`, f.tenantID,
+		).Scan(&postings)
+	}); err != nil {
+		t.Fatalf("count bonus_grant postings: %v", err)
+	}
+	if postings != 0 {
+		t.Fatalf("expected zero bonus_grant postings from an unparseable reward, got %d", postings)
+	}
 }
 
 // TestLFCert_SchedulerAsOfComesFromTheDatabaseClock guards
@@ -559,3 +676,52 @@ func TestLFCert_ExpirySweepWithDatabaseClock_TerminatesExpiredGrant(t *testing.T
 }
 
 func durationPtr(d time.Duration) *time.Duration { return &d }
+
+// seedDepositMatchableOfferWithReward mirrors seedDepositMatchableOffer
+// exactly but lets the caller author the OfferVersion's own
+// reward_calculation blob (bonus_offer_versions rows are immutable once
+// written, so a malformed one can only be modelled by authoring it that
+// way).
+func seedDepositMatchableOfferWithReward(t *testing.T, pool *db.Pool, f lifecycleFixture, rewardCalculation string) campaignOffer {
+	t.Helper()
+	var co campaignOffer
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		c, err := CreateCampaign(ctx, tx, Campaign{TenantID: f.tenantID, BrandID: &f.brandID, Status: CampaignActive, CreatedByActorType: ActorStaff, CreatedByActorID: f.staffID})
+		if err != nil {
+			return err
+		}
+		co.campaignID = c.ID
+		v, err := CreateCampaignVersion(ctx, tx, CampaignVersion{TenantID: f.tenantID, CampaignID: c.ID, VersionNumber: 1, Name: "V1", CreatedByActorType: ActorStaff, CreatedByActorID: f.staffID})
+		if err != nil {
+			return err
+		}
+		co.campaignVersionID = v.ID
+		if _, err := SetCampaignCurrentVersion(ctx, tx, f.tenantID, c.ID, v.ID); err != nil {
+			return err
+		}
+		o, err := CreateOffer(ctx, tx, Offer{
+			TenantID: f.tenantID, BrandID: &f.brandID, CampaignID: c.ID, CampaignVersionID: v.ID,
+			GrantPolicy: GrantPolicyAutoIssue, Status: OfferActive, CreatedByActorType: ActorStaff, CreatedByActorID: f.staffID,
+		})
+		if err != nil {
+			return err
+		}
+		co.offerID = o.ID
+		ov, err := CreateOfferVersion(ctx, tx, OfferVersion{
+			TenantID: f.tenantID, OfferID: o.ID, VersionNumber: 1, RewardKind: RewardPercentageWithCap, RewardAssetCode: f.assetCode,
+			RewardCalculation:      []byte(rewardCalculation),
+			FulfillmentDestination: FulfillmentIntoPlatformWallet, FundingSource: "operator",
+			CreatedByActorType: ActorStaff, CreatedByActorID: f.staffID,
+		})
+		if err != nil {
+			return err
+		}
+		co.offerVersionID = ov.ID
+		_, err = SetOfferCurrentVersion(ctx, tx, f.tenantID, o.ID, ov.ID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed deposit-matchable offer with custom reward: %v", err)
+	}
+	return co
+}
