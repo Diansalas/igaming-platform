@@ -911,6 +911,80 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # --- Player declared residence (Stage 4I Phase B, HDR-J-3b) ---
+  #
+  # Self-service only, mirroring /v1/me's own access pattern: no
+  # RequirePermission, principal must be a player, subject taken from the
+  # token only. A DECLARATION, never a verification - it does not by
+  # itself establish jurisdiction (canonical-model §1.2, "evidence is
+  # never a source"; HDR-J-2's precedence policy is not implemented in
+  # this phase). No history is kept - a new declaration overwrites the
+  # previous value outright (see the Stage 4I Phase B implementation
+  # notes on erasability, HDR-J-3f).
+  /v1/me/residence:
+    get:
+      summary: Get the caller's own declared residence
+      description: >
+        Authenticated, self-service. Returns is_set=false (no
+        country_code/captured_at) when nothing has been declared yet.
+        Not gated by the evidence-collection-active switch - turning
+        collection off does not revoke read access to an
+        already-declared value.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The caller's declared residence, or is_set=false
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerResidence"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Caller is not a player account
+        "500":
+          $ref: "#/components/responses/InternalError"
+    put:
+      summary: Declare the caller's own residence (self-declared, unverified)
+      description: >
+        Refused with 403, writing nothing, when
+        jurisdiction_evidence_collection_active is OFF for this
+        tenant's declared_residence evidence type - the activation
+        boundary is not optional and is never bypassed by a product
+        flow. Overwrites any previously declared value.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetMyResidenceRequest"
+      responses:
+        "200":
+          description: Declared residence recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerResidence"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: >-
+            Caller is not a player account, or declared-residence
+            collection is not active for this tenant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /v1/admin/kyc/verifications:
     get:
       summary: List a player account's verification attempts (compliance/tenant admin)
@@ -947,7 +1021,25 @@ paths:
       description: >
         Requires verification:review (compliance only - never
         tenant_admin/platform_admin/finance, directive §19). Rejects with
-        409 if the verification is already in a terminal status.
+        409 if the verification is already in a terminal status
+        (approved/rejected/expired).
+
+
+        Optionally records a KYC-verified residence determination in the
+        SAME call (Stage 4I Phase B, HDR-J-3c) via
+        verified_residence_country - omit the field entirely for a
+        review that makes no residence determination. A determination
+        can be attached to a non-terminal transition (e.g.
+        review_required) and is overwritable by a later review call on
+        the same verification; there is no separate clear/revoke
+        operation. Refused with 403 or the whole call fails and nothing
+        is written, including the status transition itself, when
+        jurisdiction_evidence_collection_active is OFF for this
+        tenant's verified_residence evidence type. The value is never
+        returned on this or any other verification response - only
+        presence/provenance are tracked internally
+        (kyc_verifications.verified_residence_set_at/set_by) for a
+        future phase's read surface.
       security:
         - bearerAuth: []
       parameters:
@@ -964,6 +1056,15 @@ paths:
               properties:
                 status: { type: string, enum: [approved, rejected, review_required] }
                 reason: { type: string }
+                verified_residence_country:
+                  type: string
+                  example: "ES"
+                  description: >
+                    ISO 3166-1 alpha-2. Optional. Never inferred from a
+                    document's issuing country
+                    (docs/governance/stage-4i-canonical-model.md §1.2) -
+                    this is the sole path that may set it, and only by
+                    explicit reviewer input.
               required: [status]
       responses:
         "200":
@@ -977,7 +1078,14 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          description: >-
+            Caller lacks verification:review, or (when
+            verified_residence_country is set) verified_residence
+            evidence collection is not active for this tenant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -2197,6 +2305,399 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # --- Jurisdiction Registry, Resolution-Active, and Tenant-Licence
+  # binding (Stage 4I, docs/governance/stage-4i-canonical-model.md §11.1
+  # items B-1/B-6, and Phase A item B-4) ---
+  #
+  # Split along the canonical model's own platform-vs-tenant line,
+  # mirroring the Asset Registry split above: /v1/admin/jurisdictions and
+  # /v1/admin/licences are jurisdiction_registry:manage (platform_admin
+  # only) - platform-wide reference data with no row-level security
+  # (jurisdictions/licences are FK targets every tenant-scoped transaction
+  # ultimately reads through resolution, not tenant-owned rows).
+  # /v1/admin/jurisdiction-resolution-active/** is
+  # jurisdiction_resolution_active:write (tenant_admin only, RLS-scoped to
+  # the caller's own tenant) - GET shares the same write permission because
+  # no separate read permission exists for this fact.
+  # /v1/admin/tenants/{tenantID}/licence is tenant_licence:assign
+  # (platform_admin only) - the tenant is named by the path, never the
+  # body, and platform_admin may target any tenant.
+  #
+  # There is deliberately NO endpoint that RESOLVES a jurisdiction for a
+  # player or tenant: internal/jurisdiction.Resolve takes tenant/brand/
+  # player as server-resolved values and is consumed IN-PROCESS ONLY,
+  # never over HTTP. jurisdiction_admin_routes.go's own header comment
+  # explains why - an HTTP endpoint accepting a jurisdiction identifier
+  # from a caller would be exactly the spoofable-input shape Stage 4H-B0-R5
+  # finding S-6a (and this stage's own JV-1/JV-2 ruling) forbids.
+  /v1/admin/jurisdictions:
+    get:
+      summary: List the platform jurisdiction registry
+      description: >
+        Requires jurisdiction_registry:manage (platform_admin only).
+        Platform-wide reference data with no tenant scoping - returns
+        every jurisdiction row regardless of the caller's own tenant (a
+        platform_admin token has none).
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The full jurisdiction registry, ordered by code
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Jurisdiction"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      summary: Create a jurisdiction (platform-wide reference row)
+      description: >
+        Requires jurisdiction_registry:manage (platform_admin only). Not
+        four-eyes gated - unlike the Asset Registry's own `create`, no
+        dual-control mechanism exists for this registry today. Requires
+        reason_code, recorded on an audit entry with tenant_id NULL (a
+        genuinely platform-wide reference row, not a tenant-owned one). A
+        duplicate `code` returns 400, not 409 - jurisdiction.ErrInvalidInput
+        is the sole domain-error sentinel this registry's write path maps
+        to a client error, and writeJurisdictionRegistryError maps it to
+        400 regardless of the underlying database condition (unique
+        violation or otherwise).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code: { type: string }
+                name: { type: string }
+                regulatory_body: { type: string }
+                notes: { type: string }
+                reason_code: { type: string }
+              required: [code, name, reason_code]
+      responses:
+        "201":
+          description: Jurisdiction created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Jurisdiction"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/licences:
+    get:
+      summary: List the platform licence registry
+      description: >
+        Requires jurisdiction_registry:manage (platform_admin only).
+        Platform-wide reference data with no tenant scoping, ordered by
+        created_at.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The full licence registry
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Licence"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      summary: Create a licence (platform-wide reference row, FK'd to a jurisdiction)
+      description: >
+        Requires jurisdiction_registry:manage (platform_admin only).
+        `status` always starts `active` - no status-transition endpoint
+        exists yet (a disclosed, deliberate scope limit: no current
+        consumer needs one). Not four-eyes gated. Requires reason_code,
+        recorded on an audit entry with tenant_id NULL. An unknown
+        jurisdiction_id returns 400 (jurisdiction.ErrInvalidInput wrapping
+        the foreign-key violation), never 404 - this registry's write path
+        never distinguishes "not found" from "invalid input" the way
+        AssignTenantLicence below does.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                jurisdiction_id: { type: string, format: uuid }
+                licensee:
+                  type: string
+                  enum: [platform, tenant]
+                licence_number: { type: string }
+                permitted_products:
+                  type: array
+                  items: { type: string }
+                permitted_markets:
+                  type: array
+                  items: { type: string }
+                reason_code: { type: string }
+              required: [jurisdiction_id, licensee, licence_number, reason_code]
+      responses:
+        "201":
+          description: Licence created, status=active
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Licence"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/jurisdiction-resolution-active:
+    get:
+      summary: List the caller's own tenant's jurisdiction-resolution-active facts
+      description: >
+        Requires jurisdiction_resolution_active:write (tenant_admin only)
+        and a real tenant context - GET shares the mutating permission
+        because no separate read permission exists for this fact. An
+        admin/diagnostics read only; never consumed by any enforcement
+        path (enforcement uses the narrow, read-only IsActive accessor for
+        exactly one (tenant, operation_class) pair, in-process).
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: This tenant's resolution-active facts, ordered by operation_class
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/JurisdictionResolutionActive"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/jurisdiction-resolution-active/{operationClass}:
+    put:
+      summary: Set whether jurisdiction resolution is genuinely active for one operation class
+      description: >
+        Requires jurisdiction_resolution_active:write (tenant_admin only).
+        Deliberately single-actor (no four-eyes): this records an
+        ENGINEERING precondition fact, not a financial or player-facing
+        authorization decision, and Risk's own future consumer (R-2b)
+        treats "not recorded" as inactive/fail-closed regardless of who
+        flips it. Requires reason_code, recorded on the audit entry
+        alongside the before/after active value. An unknown
+        operationClass path segment returns 400.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: operationClass
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [play, catalogue_availability, bonus_issuance, bonus_conversion]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                active: { type: boolean }
+                reason_code: { type: string }
+              required: [active, reason_code]
+      responses:
+        "200":
+          description: Resolution-active fact written (created or updated)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JurisdictionResolutionActive"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/licence:
+    put:
+      summary: Bind (or unassign) the licence a tenant actually operates under
+      description: >
+        Requires tenant_licence:assign (platform_admin only). Deliberately
+        separate from tenant:write (name/slug/licensing_model
+        provisioning) and from jurisdiction_registry:manage (which only
+        creates jurisdictions/licences REFERENCE rows, never binds a live
+        tenant to one) - binding a live tenant to a licence determines
+        which jurisdiction's rules govern that tenant's operations. The
+        tenant is always taken from the path, never the body; a
+        platform_admin may target any tenant (canActOnTenant always allows
+        a nil-tenant/platform-scoped caller - a 403 here is latent today
+        since no other role holds this permission, but is enforced
+        regardless, closing a risk should that ever change).
+
+
+        `licence_id` is a three-state field, not a plain optional string:
+        the JSON key MUST be present. An absent key returns 400 ("licence_id
+        is required; send null to unassign"). A JSON `null` unassigns the
+        tenant's current licence. A UUID string assigns that licence,
+        subject to: the licence must exist and have status `active`
+        (400 otherwise), and its `licensee` must match the tenant's own
+        `licensing_model` (enforced by the database's composite foreign
+        key, surfaced here as 400). An unknown tenantID returns 404
+        (jurisdiction.ErrNotFound) - the only ErrNotFound producer in this
+        registry's write surface, unlike the 400-only jurisdictions/
+        licences creation paths above.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssignTenantLicenceRequest"
+      responses:
+        "200":
+          description: Licence bound (or unassigned)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantLicenceAssignment"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Caller lacks tenant_licence:assign, or is targeting a tenant it cannot act on
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: Unknown tenantID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # --- Jurisdiction Evidence Collection Activation (Stage 4I Phase B) ---
+  #
+  # A lawful-basis activation switch for player-level jurisdiction
+  # EVIDENCE collection (declared_residence / verified_residence /
+  # location_signal), distinct from jurisdiction-resolution-active above,
+  # which gates resolver behavior for a (tenant, operation_class) pair
+  # only. Turning this OFF makes the corresponding write (PUT
+  # /v1/me/residence, or a verified_residence_country determination on
+  # the KYC review endpoint) fail closed with 403, writing nothing.
+  #
+  # jurisdiction_evidence_collection:activate is RoleCompliance-only
+  # (never RoleTenantAdmin, unlike jurisdiction_resolution_active:write)
+  # - switching on collection of privacy-sensitive personal data is a
+  # lawful-basis judgment (HDR-J-3e), not a commercial/engineering
+  # configuration act. GET shares the same permission - no separate read
+  # permission exists for this fact, mirroring the resolution-active
+  # precedent above.
+  #
+  # This switch gates COLLECTION only and has no effect on
+  # internal/jurisdiction.Resolve, which this phase leaves entirely
+  # unchanged - evidence existing (or being collectible) does not
+  # activate any regulatory jurisdiction decision.
+  /v1/admin/jurisdiction-evidence-collection:
+    get:
+      summary: List the caller's own tenant's evidence-collection-active facts
+      description: >
+        Requires jurisdiction_evidence_collection:activate
+        (RoleCompliance only). Absence of a row for a given
+        evidence_type is equivalent to inactive (fail-closed) - the
+        underlying accessor returns false without erroring in that case.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: This tenant's evidence-collection-active facts, ordered by evidence_type
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/JurisdictionEvidenceCollectionActive"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/jurisdiction-evidence-collection/{evidenceType}:
+    put:
+      summary: Set whether a tenant may currently collect one category of jurisdiction evidence
+      description: >
+        Requires jurisdiction_evidence_collection:activate
+        (RoleCompliance only). Requires reason_code, recorded on the
+        audit entry (jurisdiction_evidence_collection_active.changed)
+        alongside the before/after active value. An unknown
+        evidenceType path segment returns 400.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: evidenceType
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [declared_residence, verified_residence, location_signal]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetJurisdictionEvidenceCollectionActiveRequest"
+      responses:
+        "200":
+          description: Evidence-collection-active fact written (created or updated)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JurisdictionEvidenceCollectionActive"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2249,6 +2750,133 @@ components:
         eligible: { type: boolean }
         reason_code: { type: string }
       required: [operation, eligible, reason_code]
+    Jurisdiction:
+      type: object
+      description: >
+        A platform-wide `jurisdictions` registry row (migration 0002,
+        Stage 4I item B-1) - shared reference data with no per-tenant
+        scoping or row-level security (docs/governance/stage-4i-canonical-
+        model.md §6.1). An FK target every tenant-scoped transaction
+        ultimately reads through jurisdiction resolution.
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        regulatory_body: { type: string }
+        notes: { type: string }
+        created_at: { type: string, format: date-time }
+      required: [id, code, name, created_at]
+    Licence:
+      type: object
+      description: >
+        A platform-wide `licences` registry row (migration 0002, Stage 4I
+        item B-1), FK'd to a Jurisdiction. `status` always starts `active`
+        - no status-transition endpoint exists yet (a disclosed, deliberate
+        scope limit; see registry_admin.go's own doc comment).
+      properties:
+        id: { type: string, format: uuid }
+        jurisdiction_id: { type: string, format: uuid }
+        licensee: { type: string, enum: [platform, tenant] }
+        licence_number: { type: string }
+        status: { type: string }
+        permitted_products:
+          type: array
+          items: { type: string }
+        permitted_markets:
+          type: array
+          items: { type: string }
+        created_at: { type: string, format: date-time }
+      required: [id, jurisdiction_id, licensee, licence_number, status, permitted_products, permitted_markets, created_at]
+    JurisdictionResolutionActive:
+      type: object
+      description: >
+        One (tenant, operation_class) `jurisdiction_resolution_active` fact
+        (Stage 4I item B-6) - a tenant-scoped, resolver-owned engineering
+        precondition record, consumed read-only by Risk's future R-2b
+        precondition (internal/jurisdiction.IsActive) in-process, never by
+        any HTTP caller. Absent means inactive/fail-closed, never
+        "unrestricted".
+      properties:
+        id: { type: string, format: uuid }
+        operation_class:
+          type: string
+          enum: [play, catalogue_availability, bonus_issuance, bonus_conversion]
+        active: { type: boolean }
+      required: [id, operation_class, active]
+    AssignTenantLicenceRequest:
+      type: object
+      description: >
+        `licence_id` is a required JSON key with three meaningful states:
+        the key absent is rejected with 400 ("licence_id is required; send
+        null to unassign"); a JSON `null` unassigns the tenant's current
+        licence; a UUID string assigns that licence (subject to the
+        licence being `active` and its `licensee` matching the tenant's
+        own `licensing_model`). Presence vs. absence of the key is itself
+        significant, which is why the underlying Go type is
+        `json.RawMessage` rather than a plain optional string.
+      properties:
+        licence_id:
+          nullable: true
+          type: string
+          format: uuid
+          description: Required key. Omit entirely -> 400. `null` -> unassign. UUID string -> assign.
+        reason_code: { type: string }
+      required: [licence_id, reason_code]
+    TenantLicenceAssignment:
+      type: object
+      description: >
+        The result of binding (or unassigning) the licence a tenant
+        actually operates under (`tenants.licence_id`, Stage 4I Phase A).
+      properties:
+        tenant_id: { type: string, format: uuid }
+        licence_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null when no licence is currently assigned.
+      required: [tenant_id, licence_id]
+    PlayerResidence:
+      type: object
+      description: >
+        The caller's own DECLARED residence (Stage 4I Phase B,
+        self-declared, unverified - HDR-J-3b). is_set=false omits
+        country_code/captured_at entirely rather than emitting an
+        ambiguous empty country. Never establishes jurisdiction by
+        itself - see docs/governance/stage-4i-canonical-model.md §1.2.
+      properties:
+        is_set: { type: boolean }
+        country_code: { type: string, example: "ES" }
+        captured_at: { type: string, format: date-time }
+      required: [is_set]
+    SetMyResidenceRequest:
+      type: object
+      properties:
+        country_code:
+          type: string
+          example: "ES"
+          description: ISO 3166-1 alpha-2.
+      required: [country_code]
+    JurisdictionEvidenceCollectionActive:
+      type: object
+      description: >
+        Whether a tenant is currently authorized to COLLECT a given
+        category of jurisdiction evidence (Stage 4I Phase B) - a
+        lawful-basis activation switch (HDR-J-3e), never a resolution or
+        enforcement decision. Absence of a row for an evidence_type is
+        equivalent to inactive (fail-closed).
+      properties:
+        id: { type: string, format: uuid }
+        evidence_type:
+          type: string
+          enum: [declared_residence, verified_residence, location_signal]
+        active: { type: boolean }
+      required: [id, evidence_type, active]
+    SetJurisdictionEvidenceCollectionActiveRequest:
+      type: object
+      properties:
+        active: { type: boolean }
+        reason_code: { type: string }
+      required: [active, reason_code]
     TokenPair:
       type: object
       properties:

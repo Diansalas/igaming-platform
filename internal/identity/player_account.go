@@ -5,14 +5,23 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
 var ErrEmailTaken = errors.New("identity: an account with this email already exists for this brand")
+
+// ErrInvalidInput covers caller-side mistakes in this package's own
+// mutating functions (e.g. an actor_type/reason_code combination that
+// makes no sense) - mirrors internal/jurisdiction's/internal/risk's own
+// package-local ErrInvalidInput sentinel convention. Distinct from
+// ErrNotFound (a row genuinely absent or out of RLS scope).
+var ErrInvalidInput = errors.New("identity: invalid input")
 
 // PlayerAccountStatus is the lifecycle state of a player's relationship
 // with one brand. See docs/architecture/16-privacy.md and CLAUDE.md's
@@ -286,4 +295,169 @@ func SetPlayerAccountStatusIfCurrent(ctx context.Context, tx pgx.Tx, id uuid.UUI
 		return false, fmt.Errorf("identity: set player account status if current: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// --- Stage 4I Phase B: declared residence (self-service, unverified) ---
+//
+// This section deliberately does NOT extend PlayerAccount or
+// GetPlayerAccountByID's own SELECT column list - declared_residence_*
+// is read ONLY through GetDeclaredResidence below, a narrow, purpose-built
+// accessor, per the architect ruling for this phase. Neither function here
+// checks jurisdiction.IsEvidenceCollectionActive - this package imports
+// neither internal/jurisdiction nor (until now) internal/audit, and the
+// caller is REQUIRED to check that activation boundary, inside the same
+// transaction, before calling SetPlayerAccountDeclaredResidence.
+
+// RowQuerier is the minimal read handle GetDeclaredResidence needs -
+// satisfied by pgx.Tx today. Declared locally (not imported from
+// internal/jurisdiction's own identical ReadOnlyQuerier) so this package
+// gains no dependency on internal/jurisdiction.
+type RowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// SetDeclaredResidenceParams is SetPlayerAccountDeclaredResidence's input.
+type SetDeclaredResidenceParams struct {
+	PlayerAccountID uuid.UUID
+	TenantID        uuid.UUID
+	CountryCode     string          // caller must have already validated via validation.IsISO3166Alpha2
+	ActorType       audit.ActorType // ActorPlayer (self-service) or ActorStaff (a future correction path, not built this phase)
+	ActorID         uuid.UUID
+	ReasonCode      string // REQUIRED when ActorType == audit.ActorStaff; must be empty when ActorType == audit.ActorPlayer
+	IPAddress       string
+	UserAgent       string
+	RequestID       string
+}
+
+// provenanceFromActorType maps the acting principal to the audit
+// metadata's own "provenance" vocabulary. The switch above this function
+// (in SetPlayerAccountDeclaredResidence) already rejects any ActorType
+// other than player/staff before this is ever called, so the default
+// branch below is unreachable today - it exists only so this function
+// still compiles and returns something sane if that guard is ever
+// loosened without updating this switch too.
+func provenanceFromActorType(a audit.ActorType) string {
+	switch a {
+	case audit.ActorPlayer:
+		return "player_self_declared"
+	case audit.ActorStaff:
+		return "staff_correction"
+	default:
+		return string(a)
+	}
+}
+
+// SetPlayerAccountDeclaredResidence records a player's self-declared
+// residence. Returns ErrNotFound if the player_account_id doesn't exist
+// (or isn't visible under the current RLS scope). Callers MUST check
+// jurisdiction.IsEvidenceCollectionActive(tx, tenantID,
+// jurisdiction.EvidenceDeclaredResidence) BEFORE calling this - this
+// function itself does not check it, to keep internal/identity free of a
+// dependency on internal/jurisdiction.
+//
+// The before/after values are computed in ONE atomic UPDATE (a CTE reading
+// the prior value correlated into the same statement's RETURNING), never
+// a separate SELECT-then-UPDATE, so a concurrent write cannot produce a
+// stale "before" read.
+func SetPlayerAccountDeclaredResidence(ctx context.Context, tx pgx.Tx, p SetDeclaredResidenceParams) (hadPrevious, changed bool, err error) {
+	switch p.ActorType {
+	case audit.ActorStaff:
+		if strings.TrimSpace(p.ReasonCode) == "" {
+			return false, false, fmt.Errorf("%w: reason_code is required when actor_type is staff", ErrInvalidInput)
+		}
+	case audit.ActorPlayer:
+		if p.ReasonCode != "" {
+			return false, false, fmt.Errorf("%w: reason_code must be empty when actor_type is player", ErrInvalidInput)
+		}
+	default:
+		return false, false, fmt.Errorf("%w: actor_type must be player or staff", ErrInvalidInput)
+	}
+
+	var capturedAt time.Time
+	err = tx.QueryRow(ctx, `
+		WITH prev AS (SELECT declared_residence_country AS before_value FROM player_accounts WHERE id = $1 AND tenant_id = $2)
+		UPDATE player_accounts pa
+		   SET declared_residence_country = $3,
+		       declared_residence_captured_at = now(),
+		       updated_at = now()
+		  FROM prev
+		 WHERE pa.id = $1 AND pa.tenant_id = $2
+		RETURNING (prev.before_value IS NOT NULL) AS had_previous,
+		          (prev.before_value IS DISTINCT FROM $3) AS changed,
+		          pa.declared_residence_captured_at`,
+		p.PlayerAccountID, p.TenantID, p.CountryCode,
+	).Scan(&hadPrevious, &changed, &capturedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, false, ErrNotFound
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("identity: set player account declared residence: %w", err)
+	}
+
+	// CRITICAL: the country VALUE (or any hash of it - a two-letter code
+	// space is trivially brute-forced) must never appear in this metadata.
+	// captured_at is the database's own timestamp (from RETURNING), not a
+	// separate Go-side time.Now() call, so this audit record and
+	// player_accounts.declared_residence_captured_at can never skew.
+	metadata := map[string]any{
+		"provenance":         provenanceFromActorType(p.ActorType),
+		"had_previous_value": hadPrevious,
+		"value_changed":      changed,
+		"captured_at":        capturedAt.UTC().Format(time.RFC3339),
+	}
+	if p.ActorType == audit.ActorStaff {
+		metadata["reason_code"] = p.ReasonCode
+	}
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: p.TenantID, ActorType: p.ActorType, ActorID: p.ActorID,
+		Action: "player.declared_residence_set", TargetType: "player_account", TargetID: p.PlayerAccountID.String(),
+		Outcome: audit.OutcomeSuccess, IPAddress: p.IPAddress, UserAgent: p.UserAgent, RequestID: p.RequestID,
+		Metadata: metadata,
+	}); err != nil {
+		return false, false, fmt.Errorf("identity: audit declared residence set: %w", err)
+	}
+	return hadPrevious, changed, nil
+}
+
+// GetDeclaredResidence is the resolver-facing read accessor for a player's
+// self-declared residence - NOT called by anything in this phase, built
+// and tested standalone for a future phase to wire in. ok=false means "no
+// fact on file", structurally distinct from an empty-string country -
+// never conflate the two.
+//
+// Explicitly distinguishes "no tenant scope at all on this connection"
+// (an error - a caller mistake, never silently reported as ok=false) from
+// "no row visible under this tenant's RLS scope" (ok=false, the ordinary
+// cross-tenant/not-found case) - mirrors internal/jurisdiction.Resolve's
+// own assertTenantScope discipline: a resolver-facing accessor that
+// silently returned "no fact on file" for a caller that forgot to scope
+// its own connection would be indistinguishable from a genuine absence of
+// data, which is exactly the silent-wrong-answer hazard this phase's
+// architect ruling calls out.
+func GetDeclaredResidence(ctx context.Context, q RowQuerier, playerAccountID uuid.UUID) (country string, capturedAt time.Time, ok bool, err error) {
+	var scoped *uuid.UUID
+	if err := q.QueryRow(ctx,
+		`SELECT NULLIF(current_setting('app.tenant_id', true), '')::uuid`).Scan(&scoped); err != nil {
+		return "", time.Time{}, false, fmt.Errorf("identity: get declared residence: read tenant scope: %w", err)
+	}
+	if scoped == nil {
+		return "", time.Time{}, false, fmt.Errorf("identity: get declared residence: transaction has no tenant scope (use db.Pool.WithTenant)")
+	}
+
+	var countryPtr *string
+	var capturedAtPtr *time.Time
+	err = q.QueryRow(ctx,
+		`SELECT declared_residence_country, declared_residence_captured_at FROM player_accounts WHERE id = $1`,
+		playerAccountID,
+	).Scan(&countryPtr, &capturedAtPtr)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", time.Time{}, false, nil
+	}
+	if err != nil {
+		return "", time.Time{}, false, fmt.Errorf("identity: get declared residence: %w", err)
+	}
+	if countryPtr == nil {
+		return "", time.Time{}, false, nil
+	}
+	return *countryPtr, *capturedAtPtr, true, nil
 }

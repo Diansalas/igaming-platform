@@ -288,6 +288,29 @@ const (
 	// PermJurisdictionRegistryManage's exact precedent - see
 	// docs/plans/stage-4i-jurisdiction-implementation-plan.md Phase A.
 	PermTenantLicenceAssign Permission = "tenant_licence:assign"
+
+	// PermPlayerResidenceRead gates reading a player's declared or verified
+	// residence VALUE on a staff-facing surface (presence/provenance fields
+	// are NOT gated by this - they ride on PermVerificationRead/PermPlayerRead
+	// as ordinary metadata). Deliberately separate and narrower than either
+	// - HDR-J-3f requires reading these facts to need "its own specific
+	// permission, separate from ordinary player-record access"
+	// (docs/decisions/0042-human-decision-response.md). Granted ONLY to
+	// RoleCompliance - see docs/plans/stage-4i-jurisdiction-implementation-plan.md
+	// Phase B.
+	PermPlayerResidenceRead Permission = "player_residence:read"
+
+	// PermJurisdictionEvidenceCollectionActivate gates the per-tenant,
+	// per-evidence-type activation switch (jurisdiction_evidence_collection_active)
+	// that must be ON before any declared-residence write or verified-residence
+	// determination is accepted - Stage 4I Phase B's activation boundary.
+	// Switching on collection of privacy-sensitive personal data is a
+	// lawful-basis act, not a commercial-configuration act, so this sits with
+	// RoleCompliance ONLY - deliberately NOT RoleTenantAdmin, even though
+	// RoleTenantAdmin holds the analogous PermJurisdictionResolutionActiveWrite
+	// for a purely-engineering precondition fact. See
+	// docs/plans/stage-4i-jurisdiction-implementation-plan.md Phase B.
+	PermJurisdictionEvidenceCollectionActivate Permission = "jurisdiction_evidence_collection:activate"
 )
 
 // rolePermissions is a static, in-code role -> permission-set mapping.
@@ -412,6 +435,11 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// Stage 4F: the sole grantee of PermVerificationReview, plus
 		// read visibility - see both permissions' own doc comments.
 		PermVerificationRead, PermVerificationReview,
+		// Stage 4I Phase B: the sole grantee of PermPlayerResidenceRead and
+		// PermJurisdictionEvidenceCollectionActivate - see both
+		// permissions' own doc comments for why they sit with Compliance
+		// alone, never RoleTenantAdmin/RolePlatformAdmin.
+		PermPlayerResidenceRead, PermJurisdictionEvidenceCollectionActivate,
 	),
 	// finance is Stage 3B's own role, dedicated solely to withdrawal
 	// governance - it holds all four withdrawal permissions and nothing

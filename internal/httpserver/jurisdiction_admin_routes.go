@@ -48,6 +48,22 @@ func registerJurisdictionRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("PUT /v1/admin/jurisdiction-resolution-active/{operationClass}",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermJurisdictionResolutionActiveWrite)(newSetResolutionActiveHandler(deps)))))
 
+	// --- Tenant-scoped evidence-collection-active fact (Stage 4I Phase B) ---
+	//
+	// Same shape as the resolution-active block immediately above -
+	// TENANT-SCOPED, RequireTenantScope, tenant resolved from the token and
+	// never from the payload - but gated by
+	// PermJurisdictionEvidenceCollectionActivate rather than
+	// PermJurisdictionResolutionActiveWrite (RoleCompliance-only, never
+	// RoleTenantAdmin: see that permission's own doc comment in
+	// internal/auth/permission.go for why). The GET reuses the PUT's own
+	// write permission rather than a separate read permission, mirroring
+	// the resolution-active block's identical choice above.
+	mux.Handle("GET /v1/admin/jurisdiction-evidence-collection",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermJurisdictionEvidenceCollectionActivate)(newListEvidenceCollectionActiveHandler(deps)))))
+	mux.Handle("PUT /v1/admin/jurisdiction-evidence-collection/{evidenceType}",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermJurisdictionEvidenceCollectionActivate)(newSetEvidenceCollectionActiveHandler(deps)))))
+
 	// --- Tenant-licence binding (Stage 4I Phase A) ---
 	//
 	// PLATFORM-ONLY, PermTenantLicenceAssign. Deliberately NOT wrapped in

@@ -22,6 +22,13 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/validation"
 )
 
+// reviewVerificationRequest.VerifiedResidenceCountry is a plain *string
+// via ordinary encoding/json unmarshal (nil when the JSON key is absent OR
+// explicitly null) - unlike Phase A's licence_id, there is no meaningful
+// "clear" semantic to distinguish from "absent" here: both mean "no
+// residence determination this call" (kyc.ReviewVerificationParams' own
+// doc comment), so json.RawMessage presence-tracking is not needed.
+
 func newListVerificationsForAccountHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -58,8 +65,9 @@ func newListVerificationsForAccountHandler(deps Deps) http.HandlerFunc {
 }
 
 type reviewVerificationRequest struct {
-	Status string `json:"status"`
-	Reason string `json:"reason"`
+	Status                   string  `json:"status"`
+	Reason                   string  `json:"reason"`
+	VerifiedResidenceCountry *string `json:"verified_residence_country"`
 }
 
 func newReviewVerificationHandler(deps Deps) http.HandlerFunc {
@@ -90,6 +98,9 @@ func newReviewVerificationHandler(deps Deps) http.HandlerFunc {
 		}
 		v := validation.New()
 		v.RequireOneOf("status", req.Status, string(kyc.StatusApproved), string(kyc.StatusRejected), string(kyc.StatusReviewRequired))
+		if req.VerifiedResidenceCountry != nil {
+			v.RequireISO3166Alpha2("verified_residence_country", *req.VerifiedResidenceCountry)
+		}
 		if v.HasErrors() {
 			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
 			return
@@ -100,11 +111,17 @@ func newReviewVerificationHandler(deps Deps) http.HandlerFunc {
 			var err error
 			result, err = kyc.ReviewVerification(ctx, tx, kyc.ReviewVerificationParams{
 				VerificationID: verificationID, StaffID: staffID, NewStatus: kyc.VerificationStatus(req.Status), Reason: req.Reason,
+				VerifiedResidenceCountry: req.VerifiedResidenceCountry,
+				IPAddress:                clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
 			})
 			return err
 		})
 		if errors.Is(err, kyc.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "verification not found")
+			return
+		}
+		if errors.Is(err, kyc.ErrEvidenceCollectionInactive) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "verified residence evidence collection is not currently enabled for this tenant")
 			return
 		}
 		if errors.Is(err, kyc.ErrInvalidTransition) {

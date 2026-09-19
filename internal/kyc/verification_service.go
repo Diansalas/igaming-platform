@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/validation"
 )
 
 // ErrNotFound covers "no such verification/document" - mirrors
@@ -24,15 +26,29 @@ var ErrNotFound = errors.New("kyc: not found")
 // current status is not eligible for review.
 var ErrInvalidTransition = errors.New("kyc: invalid status transition")
 
+// ErrEvidenceCollectionInactive is returned by ReviewVerification when a
+// caller attempts to record a verified-residence determination
+// (ReviewVerificationParams.VerifiedResidenceCountry != nil) while
+// jurisdiction_evidence_collection_active is OFF for (tenant,
+// verified_residence) - Stage 4I Phase B's activation boundary. Distinct
+// from ErrInvalidTransition so the HTTP layer maps it to 403, not 400/409.
+// When this is returned, the ENTIRE review call - including any status
+// transition requested in the same call - is rolled back; a
+// partially-applied review (status changed, residence determination
+// silently dropped) is never allowed to happen.
+var ErrEvidenceCollectionInactive = errors.New("kyc: verified-residence evidence collection is not active for this tenant")
+
 const verificationColumns = `id, tenant_id, brand_id, player_account_id, person_id, status,
-	provider_id, provider_reference, reason, submitted_at, reviewed_at, reviewed_by, expires_at, created_at, updated_at`
+	provider_id, provider_reference, reason, submitted_at, reviewed_at, reviewed_by, expires_at, created_at, updated_at,
+	(verified_residence_country IS NOT NULL), verified_residence_set_at, verified_residence_set_by`
 
 func scanVerification(row pgx.Row) (Verification, error) {
 	var v Verification
 	var providerRef, reason *string
 	var reviewedBy *uuid.UUID
 	err := row.Scan(&v.ID, &v.TenantID, &v.BrandID, &v.PlayerAccountID, &v.PersonID, &v.Status,
-		&v.ProviderID, &providerRef, &reason, &v.SubmittedAt, &v.ReviewedAt, &reviewedBy, &v.ExpiresAt, &v.CreatedAt, &v.UpdatedAt)
+		&v.ProviderID, &providerRef, &reason, &v.SubmittedAt, &v.ReviewedAt, &reviewedBy, &v.ExpiresAt, &v.CreatedAt, &v.UpdatedAt,
+		&v.HasVerifiedResidence, &v.VerifiedResidenceSetAt, &v.VerifiedResidenceSetBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Verification{}, ErrNotFound
 	}
@@ -174,6 +190,24 @@ type ReviewVerificationParams struct {
 	StaffID        uuid.UUID
 	NewStatus      VerificationStatus // must be StatusApproved, StatusRejected, or StatusReviewRequired
 	Reason         string
+
+	// IPAddress/UserAgent/RequestID are recorded on the audit entries this
+	// call writes (CLAUDE.md's audit rule names IP explicitly for every
+	// mutating administrative action). Optional only in the sense that a
+	// non-HTTP caller may have none to supply; the HTTP handler always
+	// populates all three.
+	IPAddress string
+	UserAgent string
+	RequestID string
+
+	// VerifiedResidenceCountry, when non-nil, records THIS reviewer's
+	// explicit residence determination (HDR-J-3c) as part of this same
+	// review act. nil means "this review makes no residence
+	// determination" and leaves any existing value on the row untouched.
+	// A non-nil pointer to "" is a caller error (ErrInvalidTransition),
+	// never treated as "clear the value" - there is no clear/revoke
+	// operation in this phase.
+	VerifiedResidenceCountry *string
 }
 
 // ReviewVerification is the STAFF-driven review action
@@ -187,6 +221,9 @@ func ReviewVerification(ctx context.Context, tx pgx.Tx, params ReviewVerificatio
 	if params.StaffID == uuid.Nil || params.VerificationID == uuid.Nil {
 		return Verification{}, fmt.Errorf("%w: staff_id and verification_id are required", ErrInvalidTransition)
 	}
+	if params.VerifiedResidenceCountry != nil && !validation.IsISO3166Alpha2(*params.VerifiedResidenceCountry) {
+		return Verification{}, fmt.Errorf("%w: verified_residence_country must be a valid ISO-3166-1 alpha-2 code", ErrInvalidTransition)
+	}
 
 	current, err := GetVerificationByID(ctx, tx, params.VerificationID)
 	if err != nil {
@@ -196,10 +233,42 @@ func ReviewVerification(ctx context.Context, tx pgx.Tx, params ReviewVerificatio
 		return Verification{}, fmt.Errorf("%w: verification %s is already in a terminal status %q", ErrInvalidTransition, params.VerificationID, current.Status)
 	}
 
-	_, err = tx.Exec(ctx,
-		`UPDATE kyc_verifications SET status = $1, reason = NULLIF($2, ''), reviewed_at = now(), reviewed_by = $3, updated_at = now() WHERE id = $4`,
-		params.NewStatus, params.Reason, params.StaffID, params.VerificationID,
-	)
+	// Stage 4I Phase B's activation boundary: only checked (and only
+	// capable of failing the WHOLE call) when a residence determination is
+	// actually being attempted. Checked BEFORE the UPDATE below, inside
+	// this same transaction, so a failure here leaves the status
+	// transition unapplied too - one transaction, all-or-nothing.
+	if params.VerifiedResidenceCountry != nil {
+		active, err := jurisdiction.IsEvidenceCollectionActive(ctx, tx, current.TenantID, jurisdiction.EvidenceVerifiedResidence)
+		if err != nil {
+			return Verification{}, fmt.Errorf("kyc: check verified-residence evidence collection active: %w", err)
+		}
+		if !active {
+			return Verification{}, ErrEvidenceCollectionInactive
+		}
+	}
+
+	var hadPreviousResidence, residenceChanged bool
+	var newSetAt *time.Time
+	err = tx.QueryRow(ctx, `
+		WITH prev AS (SELECT verified_residence_country AS before_value FROM kyc_verifications WHERE id = $4)
+		UPDATE kyc_verifications
+		   SET status      = $1,
+		       reason      = NULLIF($2, ''),
+		       reviewed_at = now(),
+		       reviewed_by = $3,
+		       verified_residence_country = COALESCE($5, verified_residence_country),
+		       verified_residence_source  = CASE WHEN $5 IS NULL THEN verified_residence_source ELSE 'reviewer_determination' END,
+		       verified_residence_set_by  = CASE WHEN $5 IS NULL THEN verified_residence_set_by  ELSE $3    END,
+		       verified_residence_set_at  = CASE WHEN $5 IS NULL THEN verified_residence_set_at  ELSE now() END,
+		       updated_at  = now()
+		  FROM prev
+		 WHERE kyc_verifications.id = $4
+		RETURNING (prev.before_value IS NOT NULL) AS had_previous,
+		          (prev.before_value IS DISTINCT FROM COALESCE($5, prev.before_value)) AS changed,
+		          kyc_verifications.verified_residence_set_at`,
+		params.NewStatus, params.Reason, params.StaffID, params.VerificationID, params.VerifiedResidenceCountry,
+	).Scan(&hadPreviousResidence, &residenceChanged, &newSetAt)
 	if err != nil {
 		return Verification{}, fmt.Errorf("kyc: review verification: %w", err)
 	}
@@ -207,10 +276,92 @@ func ReviewVerification(ctx context.Context, tx pgx.Tx, params ReviewVerificatio
 	if err := audit.Record(ctx, tx, audit.Entry{
 		TenantID: current.TenantID, ActorType: audit.ActorStaff, ActorID: params.StaffID,
 		Action: "kyc.verification_status_changed", TargetType: "kyc_verification", TargetID: params.VerificationID.String(),
-		Outcome:  audit.OutcomeSuccess,
+		Outcome:   audit.OutcomeSuccess,
+		IPAddress: params.IPAddress, UserAgent: params.UserAgent, RequestID: params.RequestID,
 		Metadata: map[string]any{"previous_status": string(current.Status), "new_status": string(params.NewStatus), "reason": params.Reason},
 	}); err != nil {
 		return Verification{}, fmt.Errorf("kyc: audit review verification: %w", err)
 	}
+
+	if params.VerifiedResidenceCountry != nil {
+		// CRITICAL: the country VALUE (or any hash of it) must never
+		// appear in this metadata - not even indirectly via a free-text
+		// field. params.Reason is deliberately NOT included here (it
+		// already rides on the kyc.verification_status_changed entry
+		// above): a reviewer's free-text reason is exactly the kind of
+		// uncontrolled string that could contain the country the
+		// activation-gate mechanism exists to keep out of this record.
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: current.TenantID, ActorType: audit.ActorStaff, ActorID: params.StaffID,
+			Action: "kyc.verified_residence_determined", TargetType: "kyc_verification", TargetID: params.VerificationID.String(),
+			Outcome:   audit.OutcomeSuccess,
+			IPAddress: params.IPAddress, UserAgent: params.UserAgent, RequestID: params.RequestID,
+			Metadata: map[string]any{
+				"provenance":         "reviewer_determination",
+				"had_previous_value": hadPreviousResidence,
+				"value_changed":      residenceChanged,
+				"player_account_id":  current.PlayerAccountID.String(),
+				"determined_at":      newSetAt.UTC().Format(time.RFC3339), // non-nil: this block only runs when a determination was made this call
+			},
+		}); err != nil {
+			return Verification{}, fmt.Errorf("kyc: audit verified residence determination: %w", err)
+		}
+	}
+
 	return GetVerificationByID(ctx, tx, params.VerificationID)
+}
+
+// GetVerifiedResidence returns the country from the most recent APPROVED
+// verification carrying a residence determination for this player. This
+// selection rule (most recent approved) is a narrow, documented choice
+// that a future precedence phase may need to revisit if a player has more
+// than one approved verification with a determination.
+//
+// Explicitly distinguishes "no tenant scope at all on this connection"
+// (an error) from "no row visible/matching under this scope" (ok=false) -
+// mirrors identity.GetDeclaredResidence's own discipline, for the same
+// silent-wrong-answer reason. Deliberately takes no tenantID parameter -
+// unlike an earlier revision of this function, which took tenantID as a
+// plain argument and used it in the WHERE clause alongside RLS. That
+// shape let a caller-supplied tenantID silently diverge from the
+// connection's actual RLS scope (harmless only because RLS still
+// filtered correctly, but a trap for a future caller). This function
+// instead relies on RLS alone for tenant scoping, exactly like
+// identity.GetDeclaredResidence.
+func GetVerifiedResidence(ctx context.Context, q RowQuerier, playerAccountID uuid.UUID) (country string, setAt time.Time, verificationID uuid.UUID, ok bool, err error) {
+	var scoped *uuid.UUID
+	if err := q.QueryRow(ctx,
+		`SELECT NULLIF(current_setting('app.tenant_id', true), '')::uuid`).Scan(&scoped); err != nil {
+		return "", time.Time{}, uuid.Nil, false, fmt.Errorf("kyc: get verified residence: read tenant scope: %w", err)
+	}
+	if scoped == nil {
+		return "", time.Time{}, uuid.Nil, false, fmt.Errorf("kyc: get verified residence: transaction has no tenant scope (use db.Pool.WithTenant)")
+	}
+
+	var countryVal string
+	var setAtVal time.Time
+	var idVal uuid.UUID
+	err = q.QueryRow(ctx, `
+		SELECT verified_residence_country, verified_residence_set_at, id
+		  FROM kyc_verifications
+		 WHERE player_account_id = $1 AND verified_residence_country IS NOT NULL AND status = $2
+		 ORDER BY verified_residence_set_at DESC LIMIT 1`,
+		playerAccountID, StatusApproved,
+	).Scan(&countryVal, &setAtVal, &idVal)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", time.Time{}, uuid.Nil, false, nil
+	}
+	if err != nil {
+		return "", time.Time{}, uuid.Nil, false, fmt.Errorf("kyc: get verified residence: %w", err)
+	}
+	return countryVal, setAtVal, idVal, true, nil
+}
+
+// RowQuerier is the minimal read handle GetVerifiedResidence needs -
+// satisfied by pgx.Tx today. Declared locally, mirroring
+// identity.RowQuerier's own minimal-interface convention, rather than
+// importing that package's (this package already has no dependency on
+// internal/identity and should not gain one just for this interface).
+type RowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }

@@ -23,6 +23,16 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("GET /v1/me/sessions", auth.Middleware(deps.AuthIssuer)(newListSessionsHandler(deps)))
 	mux.Handle("DELETE /v1/me/sessions/{id}", auth.Middleware(deps.AuthIssuer)(newRevokeSessionHandler(deps)))
 
+	// Stage 4I Phase B: player self-service DECLARED residence read/write
+	// (self-declared, unverified - HDR-J-3b) - see
+	// internal/httpserver/player_residence_handlers.go's own doc comment.
+	// No RequirePermission: a player always reads/writes their OWN
+	// declared residence; jurisdiction_evidence_collection_active (checked
+	// inside the handler, same transaction as the write) is what gates
+	// whether the PUT is accepted at all.
+	mux.Handle("GET /v1/me/residence", auth.Middleware(deps.AuthIssuer)(newGetMyResidenceHandler(deps)))
+	mux.Handle("PUT /v1/me/residence", auth.Middleware(deps.AuthIssuer)(newSetMyResidenceHandler(deps)))
+
 	// Staff auth - separate endpoint from player login (different
 	// credential store, different tenant-resolution rule: platform_admin
 	// omits tenant_slug entirely).

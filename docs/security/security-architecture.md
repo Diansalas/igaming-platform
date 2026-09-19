@@ -3382,3 +3382,172 @@ development-stage platform — **not** a penetration test and **not** a
 certification-grade audit, both of which require external, human-run
 engagements. No Human Decision Register item is decided here, and nothing
 in this section authorizes a production launch.
+
+## Stage 4I Phase B — player jurisdiction evidence foundation (declared/verified residence, location-signal abstraction)
+
+Section numbering is `J4I.12.*`, continuing the Stage 4I numbering above.
+This closes out the security model for the three evidence subsystems
+authorized by the Stage 4I "Phase B" human directive (per HDR-J-3a/b/c/e/
+f/g/h, `docs/decisions/0042-human-decision-response.md`): declared
+residence, KYC-verified residence, and a physical-location signal
+*abstraction* (interface + mock only, no vendor, no HTTP surface).
+
+### J4I.12.1 New permissions
+
+Two new permissions, both `RoleCompliance`-only, added to
+`internal/auth/permission.go`'s `rolePermissions` map and verified by an
+exhaustive-role test (`internal/auth/jurisdiction_evidence_permission_test.go`,
+iterates `allRoles`):
+
+- `jurisdiction_evidence_collection:activate` — the activation-boundary
+  switch (§J4I.12.2 below). Deliberately **not** granted to
+  `RoleTenantAdmin`, unlike the structurally similar
+  `jurisdiction_resolution_active:write` — switching on collection of
+  privacy-sensitive personal data is a lawful-basis judgment (HDR-J-3e),
+  not a commercial/engineering configuration act.
+- `player_residence:read` — would gate a staff-facing read of a
+  residence *value* for a player other than the caller. **Defined and
+  role-scoped but currently wired to zero HTTP handlers** — no
+  staff-facing read surface exists in this phase. This is deliberate,
+  not an oversight: the two read accessors this permission would
+  eventually gate (`identity.GetDeclaredResidence`,
+  `kyc.GetVerifiedResidence`) are themselves built standalone, with zero
+  non-test callers, for a future phase to wire in. Recorded here so a
+  future reader does not mistake the grant for a live capability.
+
+No player-facing permission gates `GET`/`PUT /v1/me/residence` — a player
+may always read/write their *own* declared residence subject only to the
+activation boundary below, exactly like `GET`/`PUT /v1/me` and its
+siblings.
+
+### J4I.12.2 The activation boundary (two layers)
+
+Building the technical capability to collect a signal is not the same
+thing as having lawful basis to collect it (CLAUDE.md's Compliance
+section), and HDR-J-3e requires this distinction be enforced, not just
+documented. Two independent layers:
+
+1. **`internal/jurisdiction/resolver.go` has zero diff in this phase.**
+   `Resolve` does not read either residence column and does not call
+   either new read accessor. So even a tenant with collection switched
+   on and real data recorded has no path by which that data changes any
+   jurisdiction-gated behavior yet — verified by `git diff --stat` on
+   the file (empty) and by the accessors having no non-test callers.
+2. **Per-tenant, per-evidence-type collection switch**
+   (`jurisdiction_evidence_collection_active`, migration 0074;
+   `internal/jurisdiction/evidence_collection_active.go`). Absent row is
+   fail-closed (collection OFF by default for every tenant, every
+   evidence type — verified live: `IsEvidenceCollectionActive` returns
+   `false, nil` on `pgx.ErrNoRows`). Both write paths — `PUT
+   /v1/me/residence` (declared) and the `verified_residence_country`
+   field on the existing `POST /v1/admin/kyc/verifications/{id}/review`
+   (verified) — check this flag **inside the same database transaction
+   as the write** and roll back the entire call, including any
+   unrelated status transition requested in the same call, when
+   collection is off. Verified both by code inspection and by dedicated
+   tests on both paths (`TestReviewVerification_ActivationGateOff_
+   WholeCallFails` reads verification `status` before/after and asserts
+   equality, not just that no residence value was set).
+
+**Named exception — enforcement asymmetry between the two write paths
+(independently found by `security` and `architect`, tracked as one item
+below).** The KYC path's gate is inside `ReviewVerification` itself —
+unreachable-around by any caller. The declared-residence path's gate is
+enforced **only** in the HTTP handler
+(`newSetMyResidenceHandler`); the underlying
+`identity.SetPlayerAccountDeclaredResidence` is an exported, ungated
+function whose only protection is a doc comment instructing callers to
+check the switch first. This is enforcement by discipline in application
+code — the same pattern CLAUDE.md rejects for tenant isolation, applied
+here to a lawful-basis gate. **Not fixed in this phase** (see the
+disposition table below, item `PHASE-B-ARCH-1` note) — the preferred
+remedy (a `BEFORE INSERT OR UPDATE` trigger on `player_accounts`
+mirroring how this platform enforces tenant isolation structurally
+rather than conventionally) is a cross-table, `architect`+`security`
+joint design decision, and is a **hard prerequisite gate on
+`PHASE-B-ARCH-1`** (the deferred staff-correction-of-declared-residence
+endpoint): that endpoint must not land until this asymmetry has an
+explicit disposition, because it would be the second caller of the
+now-doc-comment-only-gated function.
+
+### J4I.12.3 Audit content — what changed from the original design, and why
+
+The general Stage 4I audit rules (§J4I.2–§J4I.4 above) apply unchanged:
+never the evidence *value*, only the decision/fact. Two new event
+families: `player.declared_residence_set` (identity-owned) and
+`kyc.verified_residence_determined` (kyc-owned, written only when a
+review call includes a determination, alongside the pre-existing
+`kyc.verification_status_changed`).
+
+**A real defect was found and fixed in this phase, not merely
+theorized.** The initial `kyc.verified_residence_determined` metadata
+included the reviewer's free-text `reason` field verbatim — the same
+field already recorded on the sibling `kyc.verification_status_changed`
+entry. Three independent reviewers (`security`, `architect`, and `qa`,
+working from different angles: an adversarial read of the metadata map,
+a fidelity check against the ruling's own "never record the value"
+requirement, and a test-coverage gap hunt, respectively) converged on
+the same finding. A reviewer's free-text reason is exactly the kind of
+uncontrolled string that can carry the country a residence-determination
+record exists to keep out (e.g. "resident of ES per utility bill") —
+defeating the activation-gate mechanism in substance even when the
+schema-level protections hold. **Fixed**: the `reason` key was removed
+from this specific metadata map (it remains, appropriately, on the
+sibling status-changed entry). A new test,
+`TestReviewVerification_VerifiedResidenceDeterminedAuditRecordShape`,
+deliberately puts the country in the reviewer's free-text reason and
+asserts the raw audit row for `kyc.verified_residence_determined` never
+contains it — mirroring `internal/identity`'s pre-existing
+`TestSetPlayerAccountDeclaredResidence_AuditRecordShape` pattern, which
+did not have an equivalent on the KYC side before this fix.
+
+Both new audit-writing call sites in `ReviewVerification` now also carry
+`IPAddress`/`UserAgent`/`RequestID` (previously absent on this package's
+audit entries entirely, including the pre-existing status-changed entry)
+— CLAUDE.md's audit rule names IP explicitly for every mutating
+administrative action, and a staff act against another person's data is
+exactly that.
+
+### J4I.12.4 RLS — `jurisdiction_evidence_collection_active`
+
+Built with its final hardened shape from day one (migration 0074), not
+reproducing either of the two historical defects
+`jurisdiction_resolution_active` shipped with and needed migrations
+0072/0073 to fix: per-command SELECT/INSERT/UPDATE policies (no `FOR
+ALL`, no DELETE policy), `FORCE ROW LEVEL SECURITY`, and a `BEFORE
+TRUNCATE` deny trigger present from creation. Verified live against the
+dev database (`pg_policies`, `pg_trigger`), not just against the
+migration source text. `player_accounts`/`kyc_verifications`' own
+pre-existing tenant-isolation policies are untouched by this migration
+(it adds only columns and CHECK/FK constraints to those two tables).
+
+### J4I.12.5 Findings register — Stage 4I Phase B (`security`, `architect`, `qa`)
+
+See `docs/governance/task-registry.md`'s "Stage 4I Phase B" section for
+the full disposition table (fixed/deferred, with owner and reason for
+every deferral). Verdicts: `security` — CERTIFIED WITH NAMED EXCEPTIONS
+(one P1, fixed in this phase's own fix round; the enforcement-asymmetry
+exception at §J4I.12.2 remains open pending an `architect`+`security`
+joint disposition, gating `PHASE-B-ARCH-1` only, not this phase).
+`architect` — CERTIFIED WITH NAMED EXCEPTIONS (no blocking issues; nine
+design rulings all conformed, `resolver.go` and the `Basis` enum
+verified at zero diff). `qa` — READY WITH NAMED GAPS (three P1 test-
+coverage gaps, all closed in this phase's own fix round).
+
+### J4I.12.6 Scope of this review
+
+**In scope:** `internal/identity`'s declared-residence addition,
+`internal/kyc`'s verified-residence addition, the new
+`jurisdiction_evidence_collection_active` table and its admin surface,
+the two new permissions and their role grants, `internal/geolocation` (a
+drive-by read by `security` even though it was not in the original
+review brief, since it is a new privacy-adjacent package in the same
+working tree). **Explicitly NOT in scope:** any real physical-location
+vendor (none exists — `internal/geolocation` has no vendor, no route, no
+registration); HDR-J-2's precedence policy (not implemented); production
+activation of any of this phase's collection switches; penetration
+testing or certification-grade audit. No claim is made that this
+subsystem is "secure" once and for all — the moment `player_residence:
+read` gets an actual endpoint, or the two read accessors are wired into
+`resolver.go`, that is a new review, because the value-exposure surface
+changes completely at that point.

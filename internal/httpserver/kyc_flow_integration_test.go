@@ -552,6 +552,119 @@ func TestKYC_ReviewAuthorization(t *testing.T) {
 	}
 }
 
+// --- 12a. Stage 4I Phase B: a review call that includes
+// verified_residence_country succeeds once evidence collection is
+// enabled, and the response body does not leak the raw country value
+// anywhere it wasn't asked for. ---
+
+func TestKYC_ReviewWithVerifiedResidenceDetermination(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	verResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
+	var verification map[string]any
+	decodeBody(t, verResp, &verification)
+	verificationID := verification["id"].(string)
+
+	compliance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleCompliance, "compliance-kyc-residence-pw-1")
+	complianceTokens := mustLoginStaff(t, srv, tenant.Slug, compliance.Email, "compliance-kyc-residence-pw-1")
+
+	// Enable jurisdiction_evidence_collection_active for verified_residence.
+	enableResp := sendAssetJSON(t, srv.URL+"/v1/admin/jurisdiction-evidence-collection/verified_residence", http.MethodPut, complianceTokens.AccessToken,
+		map[string]any{"active": true, "reason_code": "kyc-review-residence-test"})
+	if enableResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 enabling verified_residence collection, got %d", enableResp.StatusCode)
+	}
+	enableResp.Body.Close()
+
+	reviewResp := postJSON(t, srv, "/v1/admin/kyc/verifications/"+verificationID+"/review", complianceTokens.AccessToken,
+		map[string]any{"status": "approved", "reason": "docs_verified", "verified_residence_country": "US"})
+	defer reviewResp.Body.Close()
+	if reviewResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 reviewing with a verified_residence_country, got %d", reviewResp.StatusCode)
+	}
+	var reviewed map[string]any
+	decodeBody(t, reviewResp, &reviewed)
+	if reviewed["status"] != "approved" {
+		t.Fatalf("expected status approved, got %+v", reviewed["status"])
+	}
+	// The response shape (verificationResponse) carries no residence field
+	// at all today - confirmed deliberately, not by accident: the reviewer
+	// that just set the determination IS authorized to know it, but this
+	// phase does not wire it into the review response, so no key named
+	// (or resembling) verified_residence_country may appear here.
+	for k := range reviewed {
+		if k == "verified_residence_country" {
+			t.Fatalf("did not expect the review response to echo verified_residence_country, got %+v", reviewed)
+		}
+	}
+}
+
+// --- 12b. Activation gate OFF: attempting a residence determination is a
+// 403, and the status transition requested in the SAME call is NOT
+// applied either (verified via a follow-up GET). ---
+
+func TestKYC_ReviewWithVerifiedResidenceDetermination_ActivationGateOff(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	verResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
+	var verification map[string]any
+	decodeBody(t, verResp, &verification)
+	verificationID := verification["id"].(string)
+	originalStatus := verification["status"]
+
+	compliance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleCompliance, "compliance-kyc-residence-pw-2")
+	complianceTokens := mustLoginStaff(t, srv, tenant.Slug, compliance.Email, "compliance-kyc-residence-pw-2")
+
+	// Deliberately NOT enabling verified_residence collection - default OFF.
+	reviewResp := postJSON(t, srv, "/v1/admin/kyc/verifications/"+verificationID+"/review", complianceTokens.AccessToken,
+		map[string]any{"status": "approved", "reason": "docs_verified", "verified_residence_country": "US"})
+	defer reviewResp.Body.Close()
+	if reviewResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 attempting a residence determination while collection is inactive, got %d", reviewResp.StatusCode)
+	}
+
+	listResp := getJSON(t, srv, "/v1/admin/kyc/verifications?player_account_id="+player.ID.String(), complianceTokens.AccessToken)
+	defer listResp.Body.Close()
+	var list []map[string]any
+	decodeBody(t, listResp, &list)
+	if len(list) != 1 || list[0]["status"] != originalStatus {
+		t.Fatalf("expected the status transition to NOT have been applied (still %v), got %+v", originalStatus, list)
+	}
+}
+
+// --- 12c. An invalid verified_residence_country is a 400. ---
+
+func TestKYC_ReviewWithInvalidVerifiedResidenceCountry(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	verResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
+	var verification map[string]any
+	decodeBody(t, verResp, &verification)
+	verificationID := verification["id"].(string)
+
+	compliance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleCompliance, "compliance-kyc-residence-pw-3")
+	complianceTokens := mustLoginStaff(t, srv, tenant.Slug, compliance.Email, "compliance-kyc-residence-pw-3")
+
+	reviewResp := postJSON(t, srv, "/v1/admin/kyc/verifications/"+verificationID+"/review", complianceTokens.AccessToken,
+		map[string]any{"status": "approved", "reason": "docs_verified", "verified_residence_country": "ZZ"})
+	defer reviewResp.Body.Close()
+	if reviewResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an invalid verified_residence_country, got %d", reviewResp.StatusCode)
+	}
+}
+
 // --- 13. Cross-tenant: a different tenant's compliance staff cannot
 // read/review a verification belonging to another tenant's player ---
 

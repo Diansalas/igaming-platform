@@ -56,6 +56,15 @@ type Verification struct {
 	ExpiresAt         *time.Time
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+
+	// Stage 4I Phase B (HDR-J-3c): presence/provenance ONLY - the
+	// verified_residence_country VALUE itself never rides along on this
+	// general-purpose struct. A staff-facing read of the actual value goes
+	// through GetVerifiedResidence, gated by the caller checking
+	// PermPlayerResidenceRead.
+	HasVerifiedResidence   bool
+	VerifiedResidenceSetAt *time.Time
+	VerifiedResidenceSetBy *uuid.UUID
 }
 
 // DocumentStatus is kyc_documents.status - the document's own, narrower

@@ -5798,3 +5798,141 @@ existing specialist's ordinary authority.
 Per the authorizing directive: the Orchestrator **stops** here. Phases
 B through I, and every domain named above, remain unauthorized pending a
 separate human directive reviewing this Phase A completion report.
+
+## Stage 4I "Phase B" (human directive's own numbering — see the phase-lettering correction note in `docs/plans/stage-4i-jurisdiction-implementation-plan.md` §14) — player jurisdiction evidence foundation
+
+Authorized narrowly: build the technical evidence *foundation* for
+player-level jurisdiction determination (HDR-J-3a/b/c/e/f/g/h,
+`docs/decisions/0042-human-decision-response.md`), with an explicit
+activation boundary so building the capability never itself activates a
+regulatory decision. Three named subsystems: declared residence
+(self-reported, unverified), KYC-verified residence (reviewer-determined),
+and a physical-location signal abstraction (interface + mock only).
+
+**Built:** migration `0074` (four new nullable, paired-NULL-CHECK-
+constrained columns on `player_accounts`/`kyc_verifications`, plus a new
+`jurisdiction_evidence_collection_active` table with its final hardened
+RLS/TRUNCATE-deny shape from day one — not reproducing either historical
+defect `jurisdiction_resolution_active` needed migrations 0072/0073 to
+fix); `internal/identity.SetPlayerAccountDeclaredResidence`/
+`GetDeclaredResidence` and `GET`/`PUT /v1/me/residence`;
+`internal/kyc.ReviewVerification`'s extension with an optional
+`VerifiedResidenceCountry` (no new endpoint — the existing `POST
+/v1/admin/kyc/verifications/{id}/review` gained one optional field) and
+`GetVerifiedResidence`; `internal/jurisdiction/evidence_collection_active.go`
+(the per-tenant, per-evidence-type activation switch) and its admin
+surface (`GET`/`PUT /v1/admin/jurisdiction-evidence-collection[/{evidenceType}]`,
+a new `RoleCompliance`-only permission `PermJurisdictionEvidenceCollectionActivate`);
+`internal/geolocation` (a new package: `LocationProvider` interface +
+`MockLocationProvider` only — no vendor, no HTTP route, no resolver
+wiring); a new `PermPlayerResidenceRead` permission, defined and role-
+scoped but wired to zero handlers this phase (deliberate — the staff-
+facing read surface it would gate is a future phase); `internal/validation`'s
+ISO-3166-1 alpha-2 allowlist (`country.go`, written directly rather than
+via subagent dispatch after three reproducible content-filter failures
+generating the same content). Also landed in this phase's own commit
+series: the OpenAPI backfill for the pre-existing Stage 4I admin-endpoint
+gap Phase A had flagged and deferred (`PHASE-A-ARCH-2`, now closed), plus
+full OpenAPI documentation for this phase's own new surface.
+
+**The decisive scope-control property, verified independently by all
+three reviewers:** `internal/jurisdiction/resolver.go` has **zero diff**.
+`Resolve` does not read either residence column and does not call either
+new read accessor. Evidence is technically collectible (subject to the
+activation switch) but is not yet consumed by any jurisdiction decision —
+"evidence available to the resolver via well-defined interfaces" is
+discharged entirely by two standalone, independently-tested read
+accessors with no non-test callers, built for a future phase to wire in.
+No player/tenant-subject behavior changes as a result of this phase.
+
+**Review chain, all independent, none self-certified:** `architect`
+design ruling (12 numbered decisions) → parallel `backend`/`integrations`/
+`identity-compliance` implementation dispatches → three parallel
+independent reviews (`security`, `architect`, `qa`) → orchestrator fix
+round → orchestrator integration and independent re-verification
+(build/vet/fmt/unit/integration-against-real-Postgres/race, across every
+touched and downstream package, run directly, not merely trusted from
+agent reports).
+
+**Findings and disposition** (full ledger: `docs/governance/task-registry.md`'s
+new "Stage 4I Phase B" section): one P1 finding, independently converged
+on by all three reviewers from different angles, was fixed — the
+`kyc.verified_residence_determined` audit entry had included the
+reviewer's free-text `reason` field verbatim, the one channel that could
+carry the country value the entry's own "never record the value" rule
+existed to prevent; the `reason` key was removed from that specific
+metadata map, and a new test deliberately puts the country in the
+free-text reason and proves the raw audit row never contains it. Two
+further P1 test-coverage gaps (`qa`) were closed: no test exercised the
+new CHECK/FK constraints directly via raw SQL (four new tests added,
+mirroring this codebase's own established pattern for exactly this kind
+of test), and no cross-tenant isolation test existed for
+`kyc.GetVerifiedResidence` — closed at the root by removing that
+function's `tenantID` parameter entirely (it had zero non-test callers)
+so it relies on RLS alone, exactly like its `identity` sibling, rather
+than merely adding the missing test around the weaker shape. Several P2s
+were fixed as low-risk, already-in-scope hardening (KYC audit entries now
+carry IP/UA/request-id; both packages' audit timestamps now come from the
+database's own `RETURNING` value instead of a separate Go-side clock,
+closing a forensic clock-skew risk). One P2 — an enforcement-asymmetry
+between the two write paths' activation gates (the KYC gate is
+structurally unreachable-around; the declared-residence gate is enforced
+only in the HTTP handler, with the underlying identity function ungated
+save for a doc comment) — was **not** fixed: both `security` and
+`architect` independently flagged it and converged on the same preferred
+remedy (a database trigger), but implementing it is a cross-table,
+joint `architect`+`security` design decision, now recorded as a **hard
+prerequisite gate** on the still-deferred staff-correction-of-declared-
+residence endpoint (`PHASE-B-ARCH-1`). A handful of P3/P4 items were
+accepted as named, non-blocking exceptions (a stale ruling claim about
+verified-residence determinations being terminal-only, corrected here
+rather than repeated: a determination can be made on a non-terminal
+review and is read back only once `approved`; `effective_from`/actor
+provenance not updating on a later toggle of the activation switch,
+routed to `architect` since the identical defect exists on the sibling
+`jurisdiction_resolution_active` table; no row locks on two check-then-
+act paths, one of them pre-existing; `PermPlayerResidenceRead` and the
+two read accessors being wired to nothing yet; `GET /v1/me/residence`
+not itself being gated by the activation switch).
+
+**Verdicts:** `security` — CERTIFIED WITH NAMED EXCEPTIONS (one P1,
+fixed; the enforcement-asymmetry exception now explicitly gates
+`PHASE-B-ARCH-1`, not this phase). `architect` — CERTIFIED WITH NAMED
+EXCEPTIONS (no blocking issues; all twelve design rulings conformed,
+`resolver.go` and the `Basis` enum verified at literal zero diff). `qa`
+— READY WITH NAMED GAPS, all three P1s closed in the fix round.
+
+**Documentation updated this phase:** `docs/api/openapi/platform-api.yaml`
+(the Phase A backfill plus this phase's own new surface);
+`docs/architecture/16-privacy.md` (corrected the stale Stage-2-era "no
+name/DOB/address collected" claim; added sensitive-fields-inventory rows
+for the new residence columns and the pre-existing, previously-
+uninventoried `kyc_documents.issuing_country`; added an explicit
+lawful-basis/activation-boundary section stating collection/vendor/
+retention/enforcement are all `NOT IMPLEMENTED` pending human/legal
+decisions); `docs/security/security-architecture.md` (new §J4I.12);
+`docs/governance/ownership.md` (the first genuine ownership overlap
+between the jurisdiction and identity-compliance domains, split by
+column not by table); `docs/plans/stage-4i-jurisdiction-implementation-plan.md`
+(the phase-lettering correction note this document's §14 needed, per the
+architect's own finding).
+
+**Explicitly deferred, not performed this phase, per the authorizing
+directive's own named prohibitions:** HDR-J-2's full precedence policy
+(`jurisdiction_precedence_configs` remains shape-only, zero rows, zero
+write surface); permitted-market population; nationality; G-2, sportsbook
+cashout, converted-Grant clawback, BYOL onboarding; any resolver wiring
+of the two new read accessors; staff correction of declared residence
+(now also gated by the enforcement-asymmetry disposition above); a real
+physical-location vendor and its own selection/security review; the
+retention/erasure job (HDR-J-3f); a staff-facing read surface for
+`player_residence:read`. No new Human Decision Register item was
+required — every open question found during review either has an
+existing owner or is recorded as a named prerequisite for a specific
+future phase.
+
+Per the authorizing directive: the Orchestrator **stops** here. Phase C
+and beyond, HDR-J-2 precedence configuration, permitted-market
+population, production jurisdiction enforcement, G-2, sportsbook
+cashout, and converted-Grant clawback remain unauthorized pending a
+separate human directive reviewing this Phase B completion report.

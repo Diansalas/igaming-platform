@@ -838,6 +838,26 @@ requires another to exist first except where stated (G needs E's 3c; the
 LCD-gated activations need their respective legal clearance regardless of
 code readiness).
 
+> **Phase-lettering correction (added during the Stage 4I "Phase B"
+> implementation dispatch, per the independent architect review's finding
+> C-4/F6):** the human orchestration directives that actually authorized
+> and dispatched this work use their own, different "Phase A"/"Phase B"
+> labels, numbered strictly by dispatch order (Phase A = the tenant-licence
+> write path; Phase B = the player jurisdiction evidence foundation). Those
+> directive-level labels do **not** line up with this document's own A–I
+> lettering above: the directive's "Phase B" is substantially this
+> document's **Phase E** (player-side declared/verified residence schema +
+> code) plus a slice of **Phase F** (the geo-signal producer, built here
+> only as an interface/mock skeleton with no vendor selection, no HTTP
+> surface, and no wiring into the resolver - a narrower scope than this
+> document's own Phase F, which also includes vendor selection and a live
+> availability/security review). Wherever a human directive or a completion
+> report says "Phase A"/"Phase B", it means the directive's own numbering,
+> not this section's. This document's A–I lettering is kept unchanged
+> below as the substantive sequencing reference; readers should map
+> directive-phase names to this section's letters via this note rather
+> than assuming they match.
+
 ---
 
 ## 15. Specialist review plan

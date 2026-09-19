@@ -1480,7 +1480,108 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 4I Phase A — Tenant Licence Jurisdiction Basis — COMPLETE, awaiting human review
+## Current stage: Stage 4I Phase B — Player Jurisdiction Evidence Foundation — COMPLETE, awaiting human review
+
+**Status: IMPLEMENTED, independently reviewed, all P1 findings fixed, and
+re-verified.** Builds the technical evidence *foundation* for
+player-level jurisdiction determination (HDR-J-3a/b/c/e/f/g/h,
+`docs/decisions/0042-human-decision-response.md`), with an explicit
+activation boundary so building the capability never itself activates a
+regulatory decision. Full detail: this session's Phase B completion
+report (delivered to the human directly); see
+`docs/governance/task-registry.md`'s "Stage 4I Phase B" section and
+`docs/progress.md`'s matching narrative entry for the technical trace.
+Note on numbering: this is the human directive's own "Phase B" — see the
+phase-lettering correction note added to
+`docs/plans/stage-4i-jurisdiction-implementation-plan.md` §14, since that
+document's own internal A–I lettering uses a different scheme (this work
+is roughly that document's Phase E plus a narrowed slice of Phase F).
+
+**What Phase B built:** three evidence subsystems. (1) Declared
+residence: `player_accounts.declared_residence_{country,captured_at}`,
+`internal/identity.SetPlayerAccountDeclaredResidence`/
+`GetDeclaredResidence`, `GET`/`PUT /v1/me/residence` (player self-service
+only, no staff write surface this phase). (2) KYC-verified residence:
+`kyc_verifications.verified_residence_{country,source,set_by,set_at}`,
+an optional `verified_residence_country` field added to the *existing*
+`POST /v1/admin/kyc/verifications/{id}/review` (no new endpoint, no new
+permission — reuses `verification:review`), `internal/kyc.GetVerifiedResidence`.
+(3) A physical-location signal abstraction: `internal/geolocation`
+(`LocationProvider` interface + `MockLocationProvider` only — no vendor,
+no HTTP route, no resolver wiring). All three are gated by a new,
+per-tenant, per-evidence-type activation switch
+(`jurisdiction_evidence_collection_active`, migration `0074`,
+`internal/jurisdiction/evidence_collection_active.go`,
+`GET`/`PUT /v1/admin/jurisdiction-evidence-collection[/{evidenceType}]`,
+`RoleCompliance`-only `PermJurisdictionEvidenceCollectionActivate`) —
+absent means OFF, fail-closed, checked inside the same transaction as
+every write.
+
+**The decisive scope-control property:** `internal/jurisdiction/resolver.go`
+has **zero diff**, verified independently by all three reviewers. Evidence
+is technically collectible (subject to the activation switch) but is not
+consumed by any jurisdiction decision this phase — two standalone,
+independently-tested read accessors (`identity.GetDeclaredResidence`,
+`kyc.GetVerifiedResidence`) exist with zero non-test callers, built for a
+future phase to wire in. No player/tenant-subject behavior changes.
+
+**Review chain (all independent, none self-certified):** `architect`
+design ruling (12 numbered decisions) → parallel `backend`/`integrations`/
+`identity-compliance` implementation → parallel independent
+`security`/`architect`/`qa` review → orchestrator fix round → orchestrator
+integration and independent re-verification (build/vet/fmt/unit/
+integration-against-real-Postgres/race, run directly). Verdicts:
+`security` — CERTIFIED WITH NAMED EXCEPTIONS (one P1, fixed: a reviewer
+free-text field was leaking into an audit entry that specifically existed
+to never carry the residence value — found independently by all three
+reviewers, fixed by removing the field from that entry's metadata and
+adding a regression test that deliberately tries to leak it). `architect`
+— CERTIFIED WITH NAMED EXCEPTIONS (all twelve rulings conformed,
+`resolver.go` and the `Basis` enum verified at literal zero diff). `qa` —
+READY WITH NAMED GAPS, all three P1 test-coverage gaps closed in the fix
+round (CHECK/FK constraint tests added; a cross-tenant isolation gap
+closed at the root by removing an unnecessary caller-supplied `tenantID`
+parameter rather than just adding the missing test). One P2 — an
+enforcement-asymmetry between the two write paths' activation gates
+(the KYC gate is structurally unreachable-around; the declared-residence
+gate is enforced only in the HTTP handler) — independently found by both
+`security` and `architect`, **not fixed this phase**: both converge on a
+database-trigger remedy, but it is a cross-table `architect`+`security`
+joint design decision, now recorded as a **hard prerequisite gate** on
+the still-deferred staff-correction-of-declared-residence endpoint
+(`PHASE-B-ARCH-1`). Full findings ledger with disposition for every item:
+`docs/governance/task-registry.md`'s "Stage 4I Phase B" section.
+
+**Documentation updated this phase:** `docs/api/openapi/platform-api.yaml`
+(the Phase A backfill this phase's own architect ruling reversed the
+prior deferral recommendation on, plus this phase's own new surface);
+`docs/architecture/16-privacy.md` (corrected the stale Stage-2-era
+data-minimization claim; new sensitive-fields rows; an explicit lawful-
+basis/activation-boundary section); `docs/security/security-architecture.md`
+(new §J4I.12); `docs/governance/ownership.md` (the first genuine
+cross-domain ownership overlap between the jurisdiction and identity-
+compliance domains, split by column not by table).
+
+**Explicitly deferred, not performed this phase** (see the plan's own
+Phase C+ and the task-registry findings ledger for the full list):
+HDR-J-2's full precedence policy, permitted-market population,
+nationality, G-2, sportsbook cashout, converted-Grant clawback, BYOL
+onboarding, any resolver wiring of the two new read accessors, staff
+correction of declared residence (now also gated by the enforcement-
+asymmetry disposition above), a real physical-location vendor, the
+retention/erasure job (HDR-J-3f), a staff-facing read surface for
+`player_residence:read`. No new Human Decision Register item was
+required.
+
+**No automatic progression.** Per the authorizing directive, Phase C and
+beyond, HDR-J-2 precedence configuration, permitted-market population,
+production jurisdiction enforcement, G-2, sportsbook cashout, and
+converted-Grant clawback remain unauthorized pending a separate human
+directive reviewing this Phase B completion report.
+
+---
+
+## Prior stage: Stage 4I Phase A — Tenant Licence Jurisdiction Basis — COMPLETE, awaiting human review
 
 **Status: IMPLEMENTED, independently reviewed, fixed, and re-verified.**
 Closes the single highest-leverage gap the Stage 4I Implementation Plan's
