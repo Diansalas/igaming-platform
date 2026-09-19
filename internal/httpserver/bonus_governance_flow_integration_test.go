@@ -12,12 +12,14 @@ package httpserver
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
+	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/bonus"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
@@ -438,12 +440,35 @@ func TestMintEconomicOperation_PermissionAndIdempotency(t *testing.T) {
 	}
 }
 
-// --- manual grant issue/activate: refusal path (success path is proven
-// at the package level, four_eyes_ops_integration_test.go, which also
-// exercises the full T.1 asset-authorization gate chain a second,
-// duplicate httpserver-level fixture is not needed to re-prove) ---
+// --- manual grant issue/activate: refusal path ---
 
-func TestManualGrantIssueAndActivate_HTTP_RefusedWithoutApproval(t *testing.T) {
+// TestManualGrantIssueAndActivate_HTTP_RefusedAtJurisdictionGate asserts
+// WHICH refusal this surface produces, not merely that some 403 comes
+// back.
+//
+// SEC-4I-F6 (`security`, Stage 4I test-seam verification pass): this test
+// was previously named ..._RefusedWithoutApproval and asserted only
+// `StatusCode == 403`. Both of newActivateManualGrantHandler's refusal
+// branches - the four-eyes one ("four-eyes approval required and not
+// satisfied") and the T.1 gate-denial one ("grant activation denied: ...")
+// - write apierror.CodeForbidden, so a bare 403 check could not tell them
+// apart. Since Stage 4I, T.1's AssetAuthorization layer denies every
+// player-scoped activation BEFORE ActivateGrant's PostGateHook (and
+// therefore before the four-eyes consume) ever runs, so the 403 this test
+// observes is the GATE's, not four-eyes'. Asserting the specific branch
+// keeps the test from silently claiming to prove a control it no longer
+// reaches.
+//
+// TRIPWIRE, deliberate: once HDR-J-1/HDR-J-3 are answered and a
+// player-scoped jurisdiction can actually resolve, this assertion will
+// start failing - which is the point. At that moment the four-eyes branch
+// becomes reachable over HTTP again and this test must be re-pointed at
+// it (expect apierror message "four-eyes approval required and not
+// satisfied"). Until then, the four-eyes control on this surface is
+// proven at the package level only (four_eyes_ops_integration_test.go,
+// against the shared manualGrantApprovalPostGateHook the production
+// handler itself runs - see that function's own doc comment).
+func TestManualGrantIssueAndActivate_HTTP_RefusedAtJurisdictionGate(t *testing.T) {
 	pool, issuer := testEnv(t)
 	srv := newTestServer(t, pool, issuer)
 	tenant := mustCreateTenant(t, pool)
@@ -494,10 +519,25 @@ func TestManualGrantIssueAndActivate_HTTP_RefusedWithoutApproval(t *testing.T) {
 		"parent_operation_id": eoi.OperationID, "amount": "1000",
 	})
 	defer activateResp.Body.Close()
+	var activateErr apierror.Error
+	decodeBody(t, activateResp, &activateErr)
 	if activateResp.StatusCode != 403 {
-		var apiErr apierror.Error
-		decodeBody(t, activateResp, &apiErr)
-		t.Fatalf("expected 403 activating with no approved change request, got %d: %+v", activateResp.StatusCode, apiErr)
+		t.Fatalf("expected 403 activating a manual grant in Stage 4I, got %d: %+v", activateResp.StatusCode, activateErr)
+	}
+	if activateErr.Code != apierror.CodeForbidden {
+		t.Fatalf("expected error code %q, got %q", apierror.CodeForbidden, activateErr.Code)
+	}
+	// The handler reports GateOutcome.Code verbatim, so the expected
+	// message is AssetAuthorization's own
+	// assetregistry.ReasonJurisdictionContextMissing - the honest Stage 4I
+	// denial for an unresolved player-scoped jurisdiction, and NOT the
+	// four-eyes branch's "four-eyes approval required and not satisfied".
+	if !strings.Contains(activateErr.Message, "grant activation denied") ||
+		!strings.Contains(activateErr.Message, string(assetregistry.ReasonJurisdictionContextMissing)) {
+		t.Fatalf("expected this surface's 403 to be the T.1 asset-authorization gate denial "+
+			"(\"grant activation denied: jurisdiction_context_missing\"), got %q. If a player-scoped jurisdiction "+
+			"now resolves (HDR-J-1/HDR-J-3 answered), re-point this test at the four-eyes branch "+
+			"(\"four-eyes approval required and not satisfied\") - see this test's own doc comment", activateErr.Message)
 	}
 }
 

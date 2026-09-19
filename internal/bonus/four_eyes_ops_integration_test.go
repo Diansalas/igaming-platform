@@ -81,38 +81,33 @@ func fileAndDoublyApprove(t *testing.T, pool *db.Pool, tenantID uuid.UUID, opera
 	return requestID
 }
 
-// forceActivateManualGrantWithApprovalForTest mirrors
-// ActivateManualGrantWithApproval's own four-eyes-consume-then-EOI-consume
-// PostGateHook EXACTLY (same resolveRequiredApprovals/
-// manualGrantIssuePayloadMatch/ConsumeApprovedChangeRequest/
-// economicop.ConsumeRootBudget calls), but reaches the effecting write via
+// forceActivateManualGrantWithApprovalForTest runs
+// ActivateManualGrantWithApproval's OWN four-eyes-consume-then-EOI-consume
+// PostGateHook - the very closure the production function runs, obtained
+// from the single shared manualGrantApprovalPostGateHook (four_eyes_ops.go),
+// never a hand-copy of it - but reaches the effecting write via
 // forceActivateGrantForTestErr instead of the full ActivateGrant/T.1 gate
 // chain (see that helper's own doc comment, lifecycle_integration_test.go,
 // for why: Stage 4I's jurisdiction resolver now unconditionally denies
 // T.1's AssetAuthorization layer for every player-scoped operation, which
 // would otherwise mask - never actually exercise - the four-eyes consume
-// this file's own tests were written to prove). This is the ONLY
-// difference from calling ActivateManualGrantWithApproval directly.
+// this file's own tests were written to prove). Substituting the T.1 gate
+// chain is the ONLY difference from calling ActivateManualGrantWithApproval
+// directly.
+//
+// SEC-4I-F6 (`security`, Stage 4I test-seam verification pass): this
+// helper previously RE-IMPLEMENTED that closure. Because
+// ActivateManualGrantWithApproval has no other test caller anywhere in the
+// repository, and because the one HTTP-level test of that surface
+// (TestManualGrantIssueAndActivate_HTTP_RefusedWithoutApproval) now gets
+// its expected 403 from the jurisdiction gate rather than from the
+// four-eyes refusal, the copy meant a regression deleting the production
+// ConsumeApprovedChangeRequest call would have failed no test at all. See
+// manualGrantApprovalPostGateHook's own doc comment.
 func forceActivateManualGrantWithApprovalForTest(ctx context.Context, tx pgx.Tx, tenantID, grantID, parentOperationID, actorID uuid.UUID, amount *big.Int) (Grant, error) {
-	g, err := GetGrantByID(ctx, tx, grantID)
+	postGateHook, err := manualGrantApprovalPostGateHook(ctx, tx, tenantID, grantID, parentOperationID, actorID, amount)
 	if err != nil {
 		return Grant{}, err
-	}
-	requiredApprovals, err := resolveRequiredApprovals(ctx, tx, tenantID, ChangeOpManualGrantIssue, &g.BrandID, &g.AssetCode)
-	if err != nil {
-		return Grant{}, err
-	}
-	payloadMatch := manualGrantIssuePayloadMatch(g.PlayerAccountID, g.OfferVersionID, g.AssetCode, amount)
-	playerAccountID := g.PlayerAccountID
-	postGateHook := func(hookCtx context.Context, hookTx pgx.Tx) error {
-		if _, err := ConsumeApprovedChangeRequest(hookCtx, hookTx, tenantID, ChangeOpManualGrantIssue, grantID, payloadMatch, requiredApprovals, actorID); err != nil {
-			return err
-		}
-		op, getErr := economicop.GetByID(hookCtx, hookTx, parentOperationID)
-		if getErr != nil {
-			return getErr
-		}
-		return economicop.ConsumeRootBudget(hookCtx, hookTx, tenantID, op.RootOperationID, economicop.OperationBonusManualGrant, playerAccountID, amount)
 	}
 	return forceActivateGrantForTestErr(ctx, tx, tenantID, grantID, ActivateGrantParams{
 		ActorType: ActorStaff, ActorID: actorID, Amount: amount, PostGateHook: postGateHook,

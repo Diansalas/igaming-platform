@@ -218,18 +218,60 @@ func IssueManualGrantRequest(ctx context.Context, tx pgx.Tx, g Grant, parentOper
 // respected here exactly as targeting.go's IssueSingleManualGrant already
 // does for the EOI half alone).
 func ActivateManualGrantWithApproval(ctx context.Context, tx pgx.Tx, tenantID, grantID, parentOperationID uuid.UUID, actorID uuid.UUID, amount *big.Int) (Grant, GateOutcome, error) {
-	g, err := GetGrantByID(ctx, tx, grantID)
+	postGateHook, err := manualGrantApprovalPostGateHook(ctx, tx, tenantID, grantID, parentOperationID, actorID, amount)
 	if err != nil {
 		return Grant{}, GateOutcome{}, err
 	}
+	return ActivateGrant(ctx, tx, tenantID, grantID, ActivateGrantParams{
+		ActorType: ActorStaff, ActorID: actorID, Amount: amount,
+		PostGateHook: postGateHook,
+	})
+}
+
+// manualGrantApprovalPostGateHook builds the two-controls-in-series
+// PostGateHook ActivateManualGrantWithApproval runs (the four-eyes
+// consume, then the EOI budget consume - see that function's own doc
+// comment above for the composition rule this implements).
+//
+// SEC-4I-F6 FIX (`security`, Stage 4I test-seam verification pass): this
+// composition is extracted into its OWN function for exactly the reason
+// applyGrantActivation (lifecycle.go) was - so there is exactly ONE place
+// it is implemented, and this package's own _test.go fixture helper
+// (forceActivateManualGrantWithApprovalForTest, four_eyes_ops_integration_
+// test.go) CALLS it rather than re-implementing it.
+//
+// The concrete failure scenario this closes: since Stage 4I, T.1's
+// AssetAuthorization layer denies every player-scoped activation before
+// PostGateHook can run at all (see resolveGrantJurisdiction's own doc
+// comment, eligibility.go), so every test of this surface's four-eyes
+// control necessarily reaches the hook by a route other than the real
+// ActivateGrant call. While that route was a HAND-COPY of this closure,
+// deleting or reordering the ConsumeApprovedChangeRequest call HERE - in
+// the only code path the HTTP surface (newActivateManualGrantHandler)
+// actually executes - would have failed no test in the repository: the
+// five package-level tests exercised the copy, and
+// TestManualGrantIssueAndActivate_HTTP_RefusedWithoutApproval's expected
+// 403 is now produced by the jurisdiction gate's denial branch rather than
+// the four-eyes branch (both map to apierror.CodeForbidden). Sharing this
+// one function is what makes those tests exercise the real composition
+// again. It changes no gate, no ordering, and no behaviour.
+func manualGrantApprovalPostGateHook(
+	ctx context.Context, tx pgx.Tx,
+	tenantID, grantID, parentOperationID, actorID uuid.UUID,
+	amount *big.Int,
+) (func(context.Context, pgx.Tx) error, error) {
+	g, err := GetGrantByID(ctx, tx, grantID)
+	if err != nil {
+		return nil, err
+	}
 	requiredApprovals, err := resolveRequiredApprovals(ctx, tx, tenantID, ChangeOpManualGrantIssue, &g.BrandID, &g.AssetCode)
 	if err != nil {
-		return Grant{}, GateOutcome{}, err
+		return nil, err
 	}
 	payloadMatch := manualGrantIssuePayloadMatch(g.PlayerAccountID, g.OfferVersionID, g.AssetCode, amount)
 	playerAccountID := g.PlayerAccountID
 
-	postGateHook := func(hookCtx context.Context, hookTx pgx.Tx) error {
+	return func(hookCtx context.Context, hookTx pgx.Tx) error {
 		if _, err := ConsumeApprovedChangeRequest(hookCtx, hookTx, tenantID, ChangeOpManualGrantIssue, grantID, payloadMatch, requiredApprovals, actorID); err != nil {
 			return err
 		}
@@ -238,12 +280,7 @@ func ActivateManualGrantWithApproval(ctx context.Context, tx pgx.Tx, tenantID, g
 			return getErr
 		}
 		return economicop.ConsumeRootBudget(hookCtx, hookTx, tenantID, op.RootOperationID, economicop.OperationBonusManualGrant, playerAccountID, amount)
-	}
-
-	return ActivateGrant(ctx, tx, tenantID, grantID, ActivateGrantParams{
-		ActorType: ActorStaff, ActorID: actorID, Amount: amount,
-		PostGateHook: postGateHook,
-	})
+	}, nil
 }
 
 // --- bulk_job_execute ---
