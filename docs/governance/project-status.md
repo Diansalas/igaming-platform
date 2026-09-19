@@ -1236,6 +1236,42 @@ Gamification, sportsbook, Retail/POS, and Back Office/Partner
 Console/B2C frontend implementation remain unauthorized pending a new
 human directive.
 
+**Update — Stage 4H-B1 Wave 3 (Bonus Engine completion, integration
+hardening, final financial gate) concluded: READY**, subject to
+explicitly-open, non-blocking items and one newly-raised human decision
+question. Mandatory first action: `architect`'s from-code reconnaissance
+(`docs/governance/wave-3-reconnaissance.md`). 11 specialist phases plus
+1 product-owner-proxy dispatch built real deposit/reload/cashback/expiry
+sweep jobs, cash-funded wagering-contribution event consumption wired
+into `postBet` (bonus-funded/locked-stake staking deliberately not
+built), four-eyes application wiring for 4 of 7 `ChangeOperation` types,
+and new HTTP/API admin surfaces (API only, no Back Office UI). Migrations
+`0068`-`0070`. Twelve real defects found and fixed across the review
+chain (two live fail-opens in the wagering path; a multi-account
+eligibility gap; five security defects including a subject-set
+containment gap and an unbounded EOI-mint budget; two qa-found defects;
+two architect-found defects including a live betting-outage vector; one
+ledger-finance-found clock-source defect), each with a proven regression
+test. The branch was interrupted by a container restart twice mid-Wave;
+both times the surviving code was independently re-verified before being
+trusted and committed. Open, non-blocking: a latent lock-order inversion
+gated on future reachability; a standing-authorization EOI type with no
+mint point (inert on the jurisdiction gap); a narrow idempotency-scoping
+finding with no live exposure; the bulk-job HTTP-execute path (fail-closed,
+non-functional); 3 of 7 `ChangeOperation` types unwired (posting shapes
+now specified); the platform-wide jurisdiction-resolver gap; the KYC-tier
+taxonomy gap (scheduled, not resolved). CRM, Affiliate, Gamification,
+real sportsbook, Retail, Back Office/Partner Console/B2C frontend UI,
+and real external providers were correctly not implemented, confirmed by
+an explicit sportsbook boundary review. No pre-existing Human Decision
+Register item was selected, narrowed, or defaulted; one new item was
+raised (not resolved) — whether the platform may ever create a
+receivable from a customer via `converted`-Grant cancellation clawback.
+Full report: `docs/governance/wave-3-report.md`. Wave 4, CRM, Affiliate,
+Gamification, sportsbook, Retail/POS, and Back Office/Partner
+Console/B2C frontend implementation remain unauthorized pending a new
+human directive.
+
 ## Production blockers (summary)
 
 Every item in "Blocked stages" and "External dependencies" above is a

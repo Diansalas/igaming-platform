@@ -5536,3 +5536,78 @@ directive, the Orchestrator **stops** here — Wave 3, CRM, Affiliate,
 Gamification, sportsbook, Retail/POS, and Back Office/Partner
 Console/B2C frontend implementation remain unauthorized pending a new
 human directive.
+
+## Stage 4H-B1 Wave 3: Bonus Engine completion, integration hardening & final financial gate
+
+Human-authorized completion of Wave 2's remaining scope plus integration
+hardening. Mandatory first action: `architect` produced
+`docs/governance/wave-3-reconnaissance.md`, a from-code (not from-docs)
+reconstruction of the actual state Wave 2 had left, before any code was
+written. 11 specialist phases plus 1 out-of-band product-owner-proxy
+dispatch, commits `61601ad`..`cd6ee62`. Full report:
+`docs/governance/wave-3-report.md`.
+
+Built and tested: real deposit/reload/cashback/expiry sweep jobs (not
+just the mechanism — durable, tenant-scoped, watermarked); cash-funded
+wagering-contribution event consumption wired into `postBet` in the same
+transaction as the bet's own posting (bonus-funded/locked-stake staking
+deliberately not built — a disclosed, gated scope decision); four-eyes
+application-level wiring for 4 of 7 `ChangeOperation` types; new
+HTTP/API admin surfaces for four-eyes filing/approval, EOI minting, and
+campaign/offer/manual-grant/bulk-job operations (API only, no Back
+Office UI, per the directive). Migrations `0068`-`0070` (schema only,
+landed in Phase 2; no new migrations in later phases).
+
+Twelve real defects found and fixed across the review chain, each with
+a regression test proven to fail pre-fix and pass post-fix: two live
+fail-opens in the cash-funded wagering path (cross-asset attribution; a
+nil wagering-target read as "already satisfied"); a multi-account
+first-deposit eligibility gap; five security defects (a subject-set
+containment gap letting a `single_subject` EOI root authorize a grant to
+the wrong player; an unpinned bulk-job four-eyes payload; an
+unbounded-budget EOI-mint path; a tamperable four-eyes forensic-approval
+record; a numeric-scan bug that made the forensic fix itself
+unreachable); two qa-found defects (a deposit-sweep/cashback
+cross-matching bug; an HTTP handler 500 on an omitted optional field);
+two architect-found defects (a live betting-outage vector from an
+unvalidated Offer-authoring field; the same EOI-budget-bound gap closed
+structurally rather than only at the HTTP layer); and one
+ledger-finance-found defect (`DR-4HB1W3-LF-01`: the cashback scheduler
+and expiry sweep compared windows against the API host's clock instead
+of the database's own, a silent platform-favoring underpayment/
+early-expiry risk under clock skew).
+
+This Wave's branch was interrupted by a container restart twice
+(mid-bonus-engine's Phase 3, mid-security's first Phase 6 attempt).
+Both times the interrupted dispatch's own report was lost but its code
+survived uncommitted; the Orchestrator independently investigated and
+fully re-verified each surviving diff (build/vet/fmt/full integration
+suite/`-race`) before trusting and committing it, then re-dispatched a
+fresh phase to complete the remaining scope — no work was lost or
+discarded without investigation.
+
+**Verdict: READY**, subject to explicitly-open, non-blocking, disclosed
+items: a latent (not live) lock-order inversion gated on
+`ConvertGrant`/held-disposition resolution becoming reachable alongside
+a bet; a standing-authorization EOI type with no mint point, inert only
+because of the jurisdiction gap; a per-Offer-version idempotency scoping
+narrowness with no live exposure; the bulk-job HTTP-execute path
+confirmed fail-closed but non-functional (F3); 3 of 7 `ChangeOperation`
+types still unwired (posting shapes now specified for whoever builds
+them next); the platform-wide jurisdiction-resolver gap (pre-existing,
+shared with casino) that denies all three new sweeps' actual issuance;
+the KYC-tier taxonomy gap (scheduled as a future cross-domain dispatch,
+not resolved). CRM, Affiliate, Gamification, real sportsbook, Retail,
+Back Office/Partner Console/B2C frontend UI, and real external
+providers were correctly not implemented, confirmed by an explicit
+sportsbook boundary review this Wave.
+
+No pre-existing Human Decision Register item was selected, narrowed, or
+defaulted. One new item was raised (not resolved) for human decision:
+whether this platform may ever create a receivable from a customer by
+clawing back cash from an already-`converted` Grant's cancellation —
+blocks only that one future extension, nothing already shipped. Per
+the authorizing directive, the Orchestrator **stops** here — Wave 4,
+CRM, Affiliate, Gamification, sportsbook, Retail/POS, and Back
+Office/Partner Console/B2C frontend implementation remain unauthorized
+pending a new human directive.

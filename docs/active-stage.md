@@ -1480,34 +1480,47 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 4H-B1 Wave 2 — Bonus Engine Implementation — CONCLUDED, awaiting human authorization for the next stage
+## Current stage: Stage 4H-B1 Wave 3 — Bonus Engine Completion, Integration Hardening & Final Financial Gate — CONCLUDED, awaiting human authorization for the next stage
 
-**Status: READY**, subject to explicitly-open, non-blocking items. Full
-detail: `docs/governance/wave-2-report.md`. `docs/progress.md`'s "Stage
-4H-B1 Wave 2" entry has the running narrative.
+**Status: READY**, subject to explicitly-open, non-blocking items and one
+newly-raised Human Decision Register-adjacent question. Full detail:
+`docs/governance/wave-3-report.md`. `docs/progress.md`'s "Stage 4H-B1 Wave
+3" entry has the running narrative.
 
-The human authorized real-code implementation (not design) of the Bonus
-Engine's core scope: `internal/bonus`, `internal/economicop`, real
-casino integration, a landed `bonus_conversion` Risk Operation, and
-player/staff HTTP surfaces. 11 specialist phases plus 2 dependency-request
-fix dispatches, migrations `0050`-`0067`. Seven real defects found
-during implementation/review, all closed with proven regression tests
-(none were pre-existing — each was introduced or exposed by this Wave's
-own new code, and each was caught before this report was written).
-Segmentation (dynamic), CRM, Affiliate, Gamification, real sportsbook,
-and real external providers were correctly not implemented.
+The human authorized completion of the Bonus Engine's remaining Wave 2
+scope plus integration hardening: deposit/reload/cashback/expiry event
+consumption (real sweep jobs, not just the mechanism), four-eyes
+application wiring for 4 of 7 `ChangeOperation` types, new HTTP/API admin
+surfaces (API only, no Back Office UI), and a mandated re-test of the
+SEC-W15-02/CRM-decomposition vector class through every Bonus surface.
+11 specialist phases (reconnaissance → ledger-finance → backend →
+bonus-engine → risk → identity-compliance → security → casino →
+sportsbook → qa → architect → ledger-finance-final) plus one
+product-owner-proxy dispatch. Twelve real defects found across the review
+chain, all closed with proven regression tests, none self-certified. The
+branch was interrupted by a container restart twice mid-Wave; both times
+the surviving code was independently re-verified before being trusted and
+committed — no work was lost or discarded uninvestigated.
 
 ### Decisions/input needed from the human before any further work
 
-1. **Authorize (or not) the next stage** — options include: closing the
-   remaining open items in `wave-2-report.md` §21 (LF-10's general case,
-   the KYC-tier taxonomy gap, the multi-account abuse detector, the
-   missing HTTP admin surfaces) before anything else; Stage 6A (Back
-   Office MVP); or a further Bonus Engine wave (bonus-funded sportsbook
-   wagering, once its own explicit dependency gate clears).
-2. Wave 3, CRM, Affiliate, Gamification, sportsbook, Retail/POS, and
+1. **New item raised this Wave**: whether this platform may ever create a
+   receivable from a customer (clawing back real cash from an
+   already-`converted` Grant's cancellation) — a legal/commercial question
+   ledger-finance explicitly declined to answer unilaterally. Blocks only
+   `grant_cancel_completed`'s extension to `converted`-status Grants; does
+   not block anything already shipped.
+2. **Authorize (or not) the next stage** — options include: closing the
+   remaining named, non-blocking items (the 3 unwired `ChangeOperation`
+   types now that ledger-finance has specified their posting shapes; the
+   bulk-job HTTP-execute completeness gap, F3; the platform-wide
+   jurisdiction-resolver gap that currently denies all three sweeps'
+   actual issuance); Stage 6A (Back Office MVP); or a further Bonus Engine
+   wave.
+3. Wave 4, CRM, Affiliate, Gamification, sportsbook, Retail/POS, and
    Back Office/Partner Console/B2C frontend implementation remain **NOT
    authorized**.
-3. The four Human Decision Register items (G-2, `OpenBetSelfExclusionPolicy`
-   default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
-   none of this Wave's work required or selected one.
+4. The four pre-existing Human Decision Register items (G-2,
+   `OpenBetSelfExclusionPolicy` default, mixed/bonus-funded cashout
+   policy, FD-1) remain unmade — none of this Wave's work required,
+   selected, or narrowed one.
