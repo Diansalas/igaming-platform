@@ -223,10 +223,15 @@ func mintApprovedManualGrantEOI(t *testing.T, pool *db.Pool, f lifecycleFixture)
 	var opID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		asset := f.assetCode
+		// RecipientCeiling is mandatory for this operation_type since Stage
+		// 4H-B1 Wave 3 Phase 10 (economicop.ValidateRootAuthorizationBounds);
+		// 1 is the only value a single_subject root may declare.
+		ceiling := int32(1)
 		op, err := MintRootOperation(ctx, tx, MintRootOperationParams{
 			TenantID: f.tenantID, OperationType: economicop.OperationBonusManualGrant,
 			InitiatingActorType: "staff", InitiatingActorID: f.staffID,
 			SubjectScope: economicop.SubjectScopeSingle, SubjectRef: &f.playerID, AssetCode: &asset,
+			RecipientCeiling:       &ceiling,
 			IntendedAggregateValue: big.NewInt(1_000_000), IdempotencyKey: "manual-grant-eoi-" + uuid.NewString(),
 			CorrelationID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour), ApprovalState: economicop.ApprovalApproved,
 		})

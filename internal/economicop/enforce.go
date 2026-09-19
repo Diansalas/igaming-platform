@@ -143,6 +143,100 @@ var consumptionRealizedFilter = map[string]string{
 // never to under-count silently."
 var ErrUndeclaredConsumptionShape = errors.New("economicop: operation_type has no declared consumption-record shape")
 
+// ErrUnboundedRootAuthorization is returned by
+// ValidateRootAuthorizationBounds for a root EOI of a value-creating
+// operation_type that declares no finite budget. Distinct from
+// ErrBudgetExhausted (a bounded authorization that ran out) - this is an
+// authorization that was never bounded in the first place.
+var ErrUnboundedRootAuthorization = errors.New("economicop: this operation_type may not be minted as an unbounded root authorization")
+
+// boundedRootOperationTypes declares which operation_types may NEVER be
+// minted as an unbounded root - the structural half of the fix
+// security-architecture.md §W3P6.5 item 1 named and routed to `architect`
+// (Stage 4H-B1 Wave 3 Phase 6), recorded as a binding rule in doc 34
+// §5.6.
+//
+// The finding, restated: ConsumeRootBudget treats a nil recipient_ceiling
+// as "no recipient check at all" and a nil intended_aggregate_value (on a
+// non-null asset_code root) as "no value check at all". Wave 3's minting
+// HTTP handler (newMintEconomicOperationHandler) requires all three bounds,
+// but bonus.MintRootOperation - the mechanism's OWN entry point, and doc
+// 34 §3.1's declared mint point for both Bonus operation types - accepted
+// nil for all of them, so any future non-HTTP minting path (a job runner,
+// a CRM adapter, a fixture promoted to production code) silently reopens
+// the SEC-W15-02 decomposition vector one layer below the control. A
+// ceiling that is optional to declare is not a ceiling; enforcing it only
+// in one transport is enforcing it nowhere durable.
+//
+// This map is deliberately NOT "every operation_type". Doc 34 §2.2 states
+// plainly that a null asset_code is legal and meaningful (a pure send
+// campaign has no asset) and that such a root has no enforceable value
+// budget at all (RK-W15P2-5) - so a blanket rule would contradict the
+// document it enforces. The rule is therefore per-type and permit-by-
+// enumeration: exactly the types that CREATE PLAYER-REDEEMABLE VALUE and
+// already carry a declared consumption shape (consumptionShapes above)
+// must be bounded. A future value-creating type that omits itself here
+// gets no bound - which is why adding a consumptionShapes entry and a
+// boundedRootOperationTypes entry belong in the same change, and why doc
+// 34 §5.6 states that as a rule for whoever lands the next consumer.
+var boundedRootOperationTypes = map[OperationType]bool{
+	OperationBonusManualGrant:  true,
+	OperationBonusBulkGrant:    true,
+	OperationAPIInitiatedGrant: true,
+}
+
+// ValidateRootAuthorizationBounds is the mint-time half of doc 34 §3.2's
+// containment checks: it refuses to let a root authorization for a
+// value-creating operation_type come into existence without the finite
+// bounds ConsumeRootBudget later enforces against. It is a pure function
+// of the candidate row (no DB access), called by every mint point BEFORE
+// the row is inserted.
+//
+// It is a no-op for a non-root lineage_kind (a child inherits its root's
+// bounds by construction - §3.4's budget is a subtree aggregate keyed on
+// root_operation_id, so a child carries no independent budget to bound)
+// and for any operation_type not declared in boundedRootOperationTypes.
+func ValidateRootAuthorizationBounds(op EconomicOperation) error {
+	if op.LineageKind != LineageRoot {
+		return nil
+	}
+	if !boundedRootOperationTypes[op.OperationType] {
+		return nil
+	}
+	if op.AssetCode == nil || *op.AssetCode == "" {
+		return fmt.Errorf("%w: %q requires an asset_code (a value budget is unenforceable without one, RK-W15P2-5)", ErrUnboundedRootAuthorization, op.OperationType)
+	}
+	if op.IntendedAggregateValue == nil || op.IntendedAggregateValue.Sign() <= 0 {
+		return fmt.Errorf("%w: %q requires a positive intended_aggregate_value", ErrUnboundedRootAuthorization, op.OperationType)
+	}
+	if op.RecipientCeiling == nil || *op.RecipientCeiling <= 0 {
+		return fmt.Errorf("%w: %q requires a positive recipient_ceiling", ErrUnboundedRootAuthorization, op.OperationType)
+	}
+	if op.ExpiresAt.IsZero() {
+		return fmt.Errorf("%w: %q requires expires_at (doc 34 §2.2: an authorization that can be executed forever is not an authorization)", ErrUnboundedRootAuthorization, op.OperationType)
+	}
+	switch op.SubjectScope {
+	case SubjectScopeSingle:
+		// Mirrors ConsumeRootBudget's own single_subject containment check
+		// (above): a single_subject root with no subject_ref is a malformed
+		// authorization, refused at mint rather than left to be refused at
+		// every later consume. The ceiling must be exactly 1 - a
+		// single_subject root authorizing more than one recipient is a
+		// contradiction in terms, and is the shape an actor would use to
+		// launder a set-shaped authorization through the narrower scope's
+		// weaker declaration requirements.
+		if op.SubjectRef == nil {
+			return fmt.Errorf("%w: single_subject scope requires a subject_ref", ErrUnboundedRootAuthorization)
+		}
+		if *op.RecipientCeiling != 1 {
+			return fmt.Errorf("%w: single_subject scope requires recipient_ceiling = 1, got %d", ErrUnboundedRootAuthorization, *op.RecipientCeiling)
+		}
+	case SubjectScopeNone:
+		return fmt.Errorf("%w: %q creates player-redeemable value and cannot declare subject_scope = none", ErrUnboundedRootAuthorization, op.OperationType)
+	}
+	return nil
+}
+
 // ErrBudgetExhausted is returned by ConsumeRootBudget when the requested
 // consumption (this one more recipient, this one more unit of value)
 // would exceed the root's remaining recipient_ceiling or

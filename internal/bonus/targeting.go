@@ -70,7 +70,37 @@ type MintRootOperationParams struct {
 // DB-unique idempotency key derived from the authorization (never the
 // attempt) - a retry resolves to the SAME EOI rather than creating a
 // second one.
+//
+// Stage 4H-B1 Wave 3 Phase 10 (`architect`), closing
+// security-architecture.md §W3P6.5 item 1 ("the EOI budget bound lives
+// only in the HTTP handler... any future non-HTTP minting path reopens
+// the decomposition vector at the mechanism's own entry point"), which
+// `security` explicitly routed here rather than changing unilaterally:
+// the budget bound is now enforced STRUCTURALLY, at this mint point,
+// before any row exists - not only in newMintEconomicOperationHandler's
+// request validation. The rule itself lives in `internal/economicop`
+// (the shared contract this document's §5 owns), per-operation-type and
+// permit-by-enumeration, so doc 34 §2.2's legal nil-bound cases (a
+// non-monetary operation with a null asset_code) are not broken by a
+// blanket rule - see economicop.ValidateRootAuthorizationBounds and doc
+// 34 §5.6.
 func MintRootOperation(ctx context.Context, tx pgx.Tx, p MintRootOperationParams) (economicop.EconomicOperation, error) {
+	candidate := economicop.EconomicOperation{
+		TenantID: p.TenantID, BrandID: p.BrandID, OperationType: p.OperationType,
+		InitiatingActorType: p.InitiatingActorType, InitiatingActorID: p.InitiatingActorID, InitiatingPrincipalID: p.InitiatingPrincipalID,
+		SubjectScope: p.SubjectScope, SubjectRef: p.SubjectRef, SubjectSetCount: p.SubjectSetCount,
+		EconomicOwner: "tenant", AssetCode: p.AssetCode, IntendedAggregateValue: p.IntendedAggregateValue, RecipientCeiling: p.RecipientCeiling,
+		LineageKind: economicop.LineageRoot, ApprovalState: p.ApprovalState,
+		RequiredApprovals: 2, IdempotencyKey: p.IdempotencyKey, CorrelationID: p.CorrelationID,
+		Status: economicop.StatusOpen, ExpiresAt: p.ExpiresAt,
+	}
+	// Checked BEFORE the idempotency lookup, deliberately: an unbounded
+	// mint request is refused on its own merits, never quietly resolved to
+	// whatever bounded EOI happens to already carry the same key.
+	if err := economicop.ValidateRootAuthorizationBounds(candidate); err != nil {
+		return economicop.EconomicOperation{}, err
+	}
+
 	existing, err := economicop.GetByIdempotencyKey(ctx, tx, p.TenantID, p.IdempotencyKey)
 	if err == nil {
 		return existing, nil
@@ -79,15 +109,7 @@ func MintRootOperation(ctx context.Context, tx pgx.Tx, p MintRootOperationParams
 		return economicop.EconomicOperation{}, err
 	}
 
-	op, err := economicop.Create(ctx, tx, economicop.EconomicOperation{
-		TenantID: p.TenantID, BrandID: p.BrandID, OperationType: p.OperationType,
-		InitiatingActorType: p.InitiatingActorType, InitiatingActorID: p.InitiatingActorID, InitiatingPrincipalID: p.InitiatingPrincipalID,
-		SubjectScope: p.SubjectScope, SubjectRef: p.SubjectRef, SubjectSetCount: p.SubjectSetCount,
-		EconomicOwner: "tenant", AssetCode: p.AssetCode, IntendedAggregateValue: p.IntendedAggregateValue, RecipientCeiling: p.RecipientCeiling,
-		LineageKind: economicop.LineageRoot, ApprovalState: p.ApprovalState,
-		RequiredApprovals: 2, IdempotencyKey: p.IdempotencyKey, CorrelationID: p.CorrelationID,
-		Status: economicop.StatusOpen, ExpiresAt: p.ExpiresAt,
-	})
+	op, err := economicop.Create(ctx, tx, candidate)
 	if err != nil {
 		return economicop.EconomicOperation{}, err
 	}

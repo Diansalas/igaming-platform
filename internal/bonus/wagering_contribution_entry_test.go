@@ -23,6 +23,19 @@ func TestResolveContributionWeightBP(t *testing.T) {
 		{name: "excluded_game_types wins over everything", table: []byte(`{"default":10000,"excluded_game_types":["slot"]}`), gameType: "slot", want: 0},
 		{name: "excluded_provider_game_ids wins over everything else including by_provider_game_id", table: []byte(`{"by_provider_game_id":{"g1":10000},"excluded_provider_game_ids":["g1"]}`), providerGameID: "g1", want: 0},
 		{name: "no match anywhere falls back to full contribution", table: []byte(`{"by_game_type":{"table":5000}}`), gameType: "slot", want: 10000},
+
+		// DR-4HB1W3-ARCH-03: every TABLE-DERIVED weight is clamped into the
+		// [0, 10000] domain migration 0058's own column CHECK defines.
+		// Without the clamp each of these resolved to its raw value, which
+		// CreateWageringProgress' INSERT then rejected with a raw
+		// constraint error - rolling back the player's own cash bet inside
+		// casino's postBet. See maxContributionWeightBP's doc comment.
+		{name: "out-of-range default is clamped down, never credited", table: []byte(`{"default":100000}`), gameType: "slot", want: 10000},
+		{name: "out-of-range by_game_type is clamped down", table: []byte(`{"by_game_type":{"slot":25000}}`), gameType: "slot", want: 10000},
+		{name: "out-of-range by_provider_game_id is clamped down", table: []byte(`{"by_provider_game_id":{"g1":10001}}`), providerGameID: "g1", want: 10000},
+		{name: "negative default is clamped to zero, not to full contribution", table: []byte(`{"default":-5000}`), gameType: "slot", want: 0},
+		{name: "negative by_game_type is clamped to zero", table: []byte(`{"by_game_type":{"slot":-1}}`), gameType: "slot", want: 0},
+		{name: "in-range boundary values are untouched", table: []byte(`{"by_game_type":{"slot":10000}}`), gameType: "slot", want: 10000},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

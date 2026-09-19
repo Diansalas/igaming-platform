@@ -53,6 +53,55 @@ type ContributionWeightTable struct {
 // authorization boundary this package enforces.
 const defaultContributionWeightBP int32 = 10000
 
+// maxContributionWeightBP is the upper bound migration 0058's own column
+// CHECK already enforces (`contribution_weight_bp BETWEEN 0 AND 10000`)
+// and the only bound the field's own definition admits: 10000 basis
+// points IS full contribution, so a larger value would credit more
+// qualifying wagering than the player actually staked, which no Offer
+// semantics support.
+//
+// DR-4HB1W3-ARCH-03 (Stage 4H-B1 Wave 3 Phase 10, `architect` composition
+// review). Nothing validated an Offer author's contribution_weight_table
+// at any layer: newCreateOfferVersionHandler binds the raw JSON string
+// through, CreateOfferVersion stores it opaquely, and this resolver
+// returned whatever integer it found. A table carrying an out-of-range
+// weight (an authoring typo - 100000 for 100%, a pasted percentage, a
+// negative "exclusion") therefore travelled all the way down to
+// CreateWageringProgress' INSERT, where the column CHECK rejected it -
+// surfacing as a raw constraint error out of RecordWageringContribution,
+// out of RecordCashFundedWageringContribution, out of casino's postBet,
+// ROLLING BACK THE PLAYER'S OWN CASH BET. One mistyped Offer field was a
+// live betting outage for every player holding a Grant against it.
+//
+// That outcome directly contradicts the posture `risk` established one
+// phase earlier for the structurally identical situation
+// (DR-4HB1W3-RISK-02: a Grant-data defect must fail closed on the
+// AUTHORIZATION decision without "turning a dormant Grant-data problem
+// into a live betting outage"). Clamping here restores that symmetry in
+// the conservative direction - an out-of-range weight can now only ever
+// reduce, never inflate, credited progress - and makes this resolver's
+// contract identical to the column's own CHECK, rather than merely
+// compatible with it by convention. Authoring-time REJECTION of a
+// malformed/out-of-range table (so the operator learns at publish time,
+// not from a silent clamp) is bonus-engine's own write-path follow-up,
+// recorded in doc 13; this clamp is the fail-safe underneath it, not a
+// substitute for it.
+const maxContributionWeightBP int32 = 10000
+
+// clampContributionWeightBP constrains any TABLE-DERIVED weight to the
+// [0, maxContributionWeightBP] domain migration 0058's CHECK defines.
+// Applied only to values read out of the Offer author's table - never to
+// defaultContributionWeightBP, which is in range by construction.
+func clampContributionWeightBP(w int32) int32 {
+	if w < 0 {
+		return 0
+	}
+	if w > maxContributionWeightBP {
+		return maxContributionWeightBP
+	}
+	return w
+}
+
 // ResolveContributionWeightBP resolves a bet's own contribution weight
 // against contributionWeightTable (the raw JSONB bytes read from
 // OfferVersion.ContributionWeightTable) for a bet against gameType/
@@ -80,16 +129,16 @@ func ResolveContributionWeightBP(contributionWeightTable []byte, gameType, provi
 	}
 	if providerGameID != "" {
 		if w, ok := t.ByProviderGameID[providerGameID]; ok {
-			return w
+			return clampContributionWeightBP(w)
 		}
 	}
 	if gameType != "" {
 		if w, ok := t.ByGameType[gameType]; ok {
-			return w
+			return clampContributionWeightBP(w)
 		}
 	}
 	if t.Default != nil {
-		return *t.Default
+		return clampContributionWeightBP(*t.Default)
 	}
 	return defaultContributionWeightBP
 }

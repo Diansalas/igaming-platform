@@ -810,10 +810,15 @@ func TestEOI_SingleManualGrant_RecipientCeiling_RejectsSecondDistinctPlayer(t *t
 		op, err := MintRootOperation(ctx, tx, MintRootOperationParams{
 			TenantID: f.tenantID, OperationType: economicop.OperationBonusManualGrant,
 			InitiatingActorType: "staff", InitiatingActorID: f.staffID,
-			SubjectScope:     economicop.SubjectScopeEnumeratedSet,
-			AssetCode:        &asset,
-			RecipientCeiling: &ceiling,
-			IdempotencyKey:   "single-manual-ceiling-test", CorrelationID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+			SubjectScope: economicop.SubjectScopeEnumeratedSet,
+			AssetCode:    &asset,
+			// A value budget is mandatory for this operation_type since Stage
+			// 4H-B1 Wave 3 Phase 10 (economicop.ValidateRootAuthorizationBounds).
+			// Set deliberately far above anything this test grants so the
+			// RECIPIENT ceiling remains the only bound that can bite here.
+			IntendedAggregateValue: big.NewInt(1_000_000_000),
+			RecipientCeiling:       &ceiling,
+			IdempotencyKey:         "single-manual-ceiling-test", CorrelationID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
 			ApprovalState: economicop.ApprovalApproved,
 		})
 		if err != nil {
@@ -923,10 +928,14 @@ func TestAdversarial_ConcurrentSingleManualGrant_NeverExceedRecipientCeiling(t *
 		op, err := MintRootOperation(ctx, tx, MintRootOperationParams{
 			TenantID: f.tenantID, OperationType: economicop.OperationBonusManualGrant,
 			InitiatingActorType: "staff", InitiatingActorID: f.staffID,
-			SubjectScope:     economicop.SubjectScopeEnumeratedSet,
-			AssetCode:        &asset,
-			RecipientCeiling: &ceiling,
-			IdempotencyKey:   "concurrent-single-manual-ceiling-test", CorrelationID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+			SubjectScope: economicop.SubjectScopeEnumeratedSet,
+			AssetCode:    &asset,
+			// See the sibling fixture above: a value budget is mandatory
+			// since Stage 4H-B1 Wave 3 Phase 10, set far above this test's
+			// own grants so the RECIPIENT ceiling stays the only live bound.
+			IntendedAggregateValue: big.NewInt(1_000_000_000),
+			RecipientCeiling:       &ceiling,
+			IdempotencyKey:         "concurrent-single-manual-ceiling-test", CorrelationID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
 			ApprovalState: economicop.ApprovalApproved,
 		})
 		if err != nil {
@@ -1105,8 +1114,13 @@ func TestEOI_BulkGrantItem_ActivateDenialNeverConsumesEOIBudget(t *testing.T) {
 			TenantID: f.tenantID, OperationType: economicop.OperationBonusBulkGrant,
 			InitiatingActorType: "staff", InitiatingActorID: f.staffID,
 			SubjectScope: economicop.SubjectScopeEnumeratedSet, AssetCode: &asset,
-			RecipientCeiling: &ceiling,
-			IdempotencyKey:   "eoi-lockorder-bulk-root", CorrelationID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+			// A value budget is mandatory for this operation_type since Stage
+			// 4H-B1 Wave 3 Phase 10 (economicop.ValidateRootAuthorizationBounds).
+			// Set far above this test's own grants: the property under test is
+			// the gate-denial/lock-order path, not either budget.
+			IntendedAggregateValue: big.NewInt(1_000_000_000),
+			RecipientCeiling:       &ceiling,
+			IdempotencyKey:         "eoi-lockorder-bulk-root", CorrelationID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
 			ApprovalState: economicop.ApprovalApproved,
 		})
 		if err != nil {

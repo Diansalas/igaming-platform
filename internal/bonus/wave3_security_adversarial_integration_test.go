@@ -549,7 +549,13 @@ func TestSEC_ForeignTenantEOIRootRefused(t *testing.T) {
 	var foreignOpID uuid.UUID
 	err := pool.WithTenant(context.Background(), other.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		asset := other.assetCode
-		ceiling := int32(5)
+		// A single_subject root may only ever declare a ceiling of 1 since
+		// Stage 4H-B1 Wave 3 Phase 10 (economicop.ValidateRootAuthorizationBounds
+		// - a single_subject root authorizing more than one recipient is the
+		// shape used to launder a set-shaped authorization through the
+		// narrower scope). Irrelevant to this test's own property, which is
+		// that the CROSS-TENANT resolution is refused.
+		ceiling := int32(1)
 		op, err := MintRootOperation(ctx, tx, MintRootOperationParams{
 			TenantID: other.tenantID, OperationType: economicop.OperationBonusManualGrant,
 			InitiatingActorType: "staff", InitiatingActorID: other.staffID,
