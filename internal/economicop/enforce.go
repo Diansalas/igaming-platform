@@ -180,15 +180,17 @@ func ConsumeRootBudget(ctx context.Context, tx pgx.Tx, tenantID, rootOperationID
 	var recipientCeiling *int32
 	var intendedAggregate pgtype.Numeric
 	var assetCode *string
-	var status, approvalState string
+	var status, approvalState, subjectScope string
+	var subjectRef *uuid.UUID
 	var expiresAt time.Time
 	err := tx.QueryRow(ctx, `
-		SELECT recipient_ceiling, intended_aggregate_value, asset_code, status, approval_state, expires_at
+		SELECT recipient_ceiling, intended_aggregate_value, asset_code, status, approval_state, expires_at,
+		       subject_scope, subject_ref
 		  FROM economic_operations
 		 WHERE tenant_id = $1 AND operation_id = $2 AND lineage_kind = 'root'
 		 FOR UPDATE`,
 		tenantID, rootOperationID,
-	).Scan(&recipientCeiling, &intendedAggregate, &assetCode, &status, &approvalState, &expiresAt)
+	).Scan(&recipientCeiling, &intendedAggregate, &assetCode, &status, &approvalState, &expiresAt, &subjectScope, &subjectRef)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrParentOperationNotFound
 	}
@@ -203,6 +205,40 @@ func ConsumeRootBudget(ctx context.Context, tx pgx.Tx, tenantID, rootOperationID
 	}
 	if !time.Now().UTC().Before(expiresAt) {
 		return ErrParentNotOpenOrExpired
+	}
+
+	// Doc 34 §3.2's SUBJECT-SET CONTAINMENT check, for the one scope shape
+	// this platform can evaluate today.
+	//
+	// FIX (Stage 4H-B1 Wave 3 Phase 6, `security`): doc 34 §2.2 defines
+	// subject_ref as "For single_subject: the beneficiary's
+	// player_account_id", and §3.2 names subject-set containment as one of
+	// the five containment checks a child execution must satisfy against
+	// its authorization. Nothing enforced it: CheckEntry takes no subject
+	// argument at all (its own doc comment says so), and the code below
+	// only ever compared a COUNT(DISTINCT) against recipient_ceiling -
+	// never the identity of the subject. A single_subject root minted and
+	// approved to grant to player A therefore authorized a grant to player
+	// B exactly as well, which is SEC-W15-02's actor/subject-laundering
+	// shape ("laundering an operation through a different actor/subject
+	// pairing than the one actually authorized") reachable through the
+	// manual-grant surface. A single_subject root with a NULL subject_ref
+	// is a malformed authorization - refused rather than silently treated
+	// as "any subject", mirroring RK-W15P2-5's own "never silently treated
+	// as unlimited" posture for the value budget below.
+	//
+	// enumerated_set/criteria_defined are deliberately NOT narrowed here:
+	// their containment is subject_set_hash/subject_definition_hash-shaped
+	// (doc 34 §2.2), which no consumer in this repository materializes on
+	// the EOI row yet. They remain bounded by recipient_ceiling, exactly as
+	// before this fix - no control is loosened by this change.
+	if subjectScope == string(SubjectScopeSingle) {
+		if subjectRef == nil {
+			return fmt.Errorf("%w: root %s declares single_subject scope with no subject_ref", ErrChildScopeExceedsParent, rootOperationID)
+		}
+		if subjectPlayerAccountID != uuid.Nil && *subjectRef != subjectPlayerAccountID {
+			return fmt.Errorf("%w: root %s authorizes single subject %s, not %s", ErrChildScopeExceedsParent, rootOperationID, *subjectRef, subjectPlayerAccountID)
+		}
 	}
 
 	realizedFilter := consumptionRealizedFilter[consumptionTable] // empty string if none declared - a no-op AND clause

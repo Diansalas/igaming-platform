@@ -402,7 +402,11 @@ func TestMintEconomicOperation_PermissionAndIdempotency(t *testing.T) {
 	body := map[string]any{
 		"operation_type": "bonus_manual_grant", "subject_scope": "single_subject",
 		"subject_ref": uuid.NewString(), "asset_code": "USD", "intended_aggregate_value": "100000",
-		"idempotency_key": idemKey,
+		// recipient_ceiling is MANDATORY (Stage 4H-B1 Wave 3 Phase 6,
+		// `security`) - an EOI root minted on one actor's authority must
+		// declare a finite bound.
+		"recipient_ceiling": 1,
+		"idempotency_key":   idemKey,
 	}
 
 	// promotions_manager does not hold bonus_grant:issue - refused.
@@ -462,7 +466,8 @@ func TestManualGrantIssueAndActivate_HTTP_RefusedWithoutApproval(t *testing.T) {
 
 	eoiResp := postJSON(t, srv, "/v1/admin/bonus/economic-operations", token.AccessToken, map[string]any{
 		"operation_type": "bonus_manual_grant", "subject_scope": "single_subject", "subject_ref": playerID.String(),
-		"asset_code": "USD", "intended_aggregate_value": "100000", "idempotency_key": "eoi-manual-" + uuid.NewString(),
+		"asset_code": "USD", "intended_aggregate_value": "100000", "recipient_ceiling": 1,
+		"idempotency_key": "eoi-manual-" + uuid.NewString(),
 	})
 	var eoi economicOperationResponse
 	decodeBody(t, eoiResp, &eoi)

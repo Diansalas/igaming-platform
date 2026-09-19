@@ -319,16 +319,32 @@ func requirePermissionForOperationTx(operation bonus.ChangeOperation, tc tenant.
 // --- EOI minting ---
 
 type mintEconomicOperationRequest struct {
-	OperationType          string `json:"operation_type"` // "bonus_manual_grant" | "bonus_bulk_grant"
-	SubjectScope           string `json:"subject_scope"`  // "single_subject" | "enumerated_set"
-	SubjectRef             string `json:"subject_ref,omitempty"`
-	SubjectSetCount        int32  `json:"subject_set_count,omitempty"`
-	AssetCode              string `json:"asset_code,omitempty"`
-	IntendedAggregateValue string `json:"intended_aggregate_value,omitempty"`
-	RecipientCeiling       int32  `json:"recipient_ceiling,omitempty"`
+	OperationType string `json:"operation_type"` // "bonus_manual_grant" | "bonus_bulk_grant"
+	SubjectScope  string `json:"subject_scope"`  // "single_subject" | "enumerated_set"
+	// SubjectRef is REQUIRED for subject_scope=single_subject (doc 34
+	// §2.2: "the beneficiary's player_account_id") and SubjectSetCount is
+	// REQUIRED for subject_scope=enumerated_set.
+	SubjectRef      string `json:"subject_ref,omitempty"`
+	SubjectSetCount int32  `json:"subject_set_count,omitempty"`
+	// AssetCode, IntendedAggregateValue and RecipientCeiling are all
+	// MANDATORY - see newMintEconomicOperationHandler's own doc comment
+	// for why an optional ceiling is not a ceiling.
+	AssetCode              string `json:"asset_code"`
+	IntendedAggregateValue string `json:"intended_aggregate_value"`
+	RecipientCeiling       int32  `json:"recipient_ceiling"`
 	IdempotencyKey         string `json:"idempotency_key"`
 	ExpiresInSeconds       int64  `json:"expires_in_seconds"`
 }
+
+// mintEconomicOperationDefaultTTLSeconds/MaxTTLSeconds bound doc 34
+// §2.2's "expires_at ... Mandatory; a platform maximum bounds the
+// configured value" - an already-approved EOI root minted on one actor's
+// authority must not be long-lived (24h ceiling; 1h if the caller says
+// nothing).
+const (
+	mintEconomicOperationDefaultTTLSeconds = 3600
+	mintEconomicOperationMaxTTLSeconds     = 24 * 3600
+)
 
 type economicOperationResponse struct {
 	OperationID     string `json:"operation_id"`
@@ -352,6 +368,27 @@ type economicOperationResponse struct {
 // usage exactly - this endpoint does not invent a new EOI-approval
 // mechanism, it is the first HTTP-reachable caller of an ALREADY-
 // existing, already-tested minting shape.
+//
+// FIX (Stage 4H-B1 Wave 3 Phase 6, `security`): the budget-bounding
+// fields are MANDATORY here, not optional. Before this fix
+// intended_aggregate_value, recipient_ceiling and asset_code were all
+// optional request fields, and economicop.ConsumeRootBudget treats an
+// absent recipient_ceiling as "no recipient check at all" and an absent
+// intended_aggregate_value (with a non-null asset_code) as "no value
+// check at all" - so a SINGLE actor, on their own authority, could mint an
+// already-approved EOI root with an UNBOUNDED budget and then use it to
+// authorize an arbitrarily large decomposed grant campaign underneath it.
+// That is precisely the SEC-W15-02 decomposition vector the EOI mechanism
+// exists to close, reopened at the mechanism's own entry point: a ceiling
+// that is optional to declare is not a ceiling. Since this endpoint mints
+// on one actor's authority, the bound must be explicit and finite, and
+// expires_at must be bounded by a platform maximum (doc 34 §2.2:
+// "Mandatory; a platform maximum bounds the configured value" - "an
+// authorization that can be executed forever is not an authorization").
+// The four-eyes requirement that separately governs each operation
+// UNDERNEATH this root (four_eyes_ops.go) is unchanged and is not a
+// substitute for this bound - the two controls compose in series (doc 34
+// §5.3), they do not replace one another.
 func newMintEconomicOperationHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -374,6 +411,25 @@ func newMintEconomicOperationHandler(deps Deps) http.HandlerFunc {
 		v.RequireOneOf("operation_type", req.OperationType, string(economicop.OperationBonusManualGrant), string(economicop.OperationBonusBulkGrant))
 		v.RequireOneOf("subject_scope", req.SubjectScope, string(economicop.SubjectScopeSingle), string(economicop.SubjectScopeEnumeratedSet))
 		v.RequireNonEmpty("idempotency_key", req.IdempotencyKey)
+		v.RequireNonEmpty("asset_code", req.AssetCode)
+		v.RequireNonEmpty("intended_aggregate_value", req.IntendedAggregateValue)
+		if req.RecipientCeiling <= 0 {
+			v.Add("recipient_ceiling", "must be a positive integer - an EOI root minted on a single actor's authority must declare a finite recipient ceiling")
+		}
+		switch req.SubjectScope {
+		case string(economicop.SubjectScopeSingle):
+			v.RequireUUID("subject_ref", req.SubjectRef)
+			if req.RecipientCeiling > 1 {
+				v.Add("recipient_ceiling", "must be 1 for subject_scope=single_subject")
+			}
+		case string(economicop.SubjectScopeEnumeratedSet):
+			if req.SubjectSetCount <= 0 {
+				v.Add("subject_set_count", "must be a positive integer for subject_scope=enumerated_set")
+			}
+			if req.SubjectSetCount > 0 && req.RecipientCeiling > req.SubjectSetCount {
+				v.Add("recipient_ceiling", "must not exceed subject_set_count")
+			}
+		}
 		if v.HasErrors() {
 			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
 			return
@@ -407,22 +463,19 @@ func newMintEconomicOperationHandler(deps Deps) http.HandlerFunc {
 		if req.AssetCode != "" {
 			assetCode = &req.AssetCode
 		}
-		var intendedAggregate *big.Int
-		if req.IntendedAggregateValue != "" {
-			amt, ok := new(big.Int).SetString(req.IntendedAggregateValue, 10)
-			if !ok || amt.Sign() < 0 {
-				apierror.Write(w, requestID, apierror.CodeValidation, "intended_aggregate_value must be a non-negative decimal integer string")
-				return
-			}
-			intendedAggregate = amt
+		intendedAggregate, ok := new(big.Int).SetString(req.IntendedAggregateValue, 10)
+		if !ok || intendedAggregate.Sign() <= 0 {
+			apierror.Write(w, requestID, apierror.CodeValidation, "intended_aggregate_value must be a positive decimal integer string")
+			return
 		}
-		var recipientCeiling *int32
-		if req.RecipientCeiling > 0 {
-			recipientCeiling = &req.RecipientCeiling
-		}
+		recipientCeiling := &req.RecipientCeiling
 		expiresIn := req.ExpiresInSeconds
 		if expiresIn <= 0 {
-			expiresIn = 3600 // 1 hour default - a fresh EOI root not consumed within an hour of minting is stale by design (doc 34's own "narrowly time-bound" posture)
+			expiresIn = mintEconomicOperationDefaultTTLSeconds
+		}
+		if expiresIn > mintEconomicOperationMaxTTLSeconds {
+			apierror.Write(w, requestID, apierror.CodeValidation, "expires_in_seconds exceeds the platform maximum for an EOI root")
+			return
 		}
 
 		var resp economicOperationResponse

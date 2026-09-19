@@ -1368,6 +1368,21 @@ paths:
         on the EOI object itself for these two consumer types. Idempotent
         on (tenant_id, idempotency_key) - a retry with the SAME key
         resolves to the SAME operation_id.
+
+
+        Because the root is minted already-approved on ONE actor's
+        authority, its budget must be explicit and finite (Stage 4H-B1
+        Wave 3 Phase 6, `security`): `asset_code`,
+        `intended_aggregate_value` (> 0) and `recipient_ceiling` (> 0) are
+        all MANDATORY, `subject_ref` is mandatory for
+        `single_subject` (with `recipient_ceiling` = 1),
+        `subject_set_count` is mandatory for `enumerated_set` (with
+        `recipient_ceiling` <= `subject_set_count`), and
+        `expires_in_seconds` is capped at 86400. An absent ceiling is
+        treated by the budget-consumption function as "no check at all",
+        so an optional ceiling would reopen the SEC-W15-02 decomposition
+        vector at the entry point of the mechanism that exists to close
+        it.
       security:
         - bearerAuth: []
       requestBody:
@@ -1382,11 +1397,19 @@ paths:
                 subject_ref: { type: string, format: uuid }
                 subject_set_count: { type: integer }
                 asset_code: { type: string }
-                intended_aggregate_value: { type: string }
-                recipient_ceiling: { type: integer }
+                intended_aggregate_value: { type: string, description: "Decimal-string minor units, strictly positive" }
+                recipient_ceiling: { type: integer, minimum: 1 }
                 idempotency_key: { type: string }
-                expires_in_seconds: { type: integer, default: 3600 }
-              required: [operation_type, subject_scope, idempotency_key]
+                expires_in_seconds: { type: integer, default: 3600, maximum: 86400 }
+              required:
+                [
+                  operation_type,
+                  subject_scope,
+                  asset_code,
+                  intended_aggregate_value,
+                  recipient_ceiling,
+                  idempotency_key,
+                ]
       responses:
         "201":
           description: EOI minted (or the existing one, on an idempotent retry)
@@ -1672,9 +1695,16 @@ paths:
       summary: Execute an approved BulkGrantJob (four-eyes gated, runs synchronously)
       description: >
         Requires bonus_bulk:execute AND a pending bonus_change_requests row
-        (operation=bulk_job_execute, target_id=jobID, payload
-        `{"action":"execute"}`) with the tenant's configured number of
-        distinct approvals. Runs the job SYNCHRONOUSLY within this
+        (operation=bulk_job_execute, target_id=jobID) with the tenant's
+        configured number of distinct approvals, whose `payload` contains
+        the ECONOMIC payload being approved (Stage 4H-B1 Wave 3 Phase 6,
+        `security` - a bare `{"action":"execute"}` pinned nothing, so an
+        approval for a modest bulk grant authorized an arbitrarily larger
+        one):
+        `{"action":"execute","offer_version_id":"<uuid>","asset_code":"<code>","amount_per_recipient":"<decimal-string>","recipient_count":<int>,"recipient_set_hash":"<sha256-hex>"}`,
+        where `recipient_set_hash` is SHA-256 over the recipient
+        player_account_ids lowercased, de-duplicated, sorted ascending and
+        joined with a newline. Runs the job SYNCHRONOUSLY within this
         request (a disclosed, reversible engineering decision - a future
         background-worker invocation can call the identical job-runner
         unchanged). Per-item outcomes roll up to the job's own final

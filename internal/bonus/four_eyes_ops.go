@@ -29,8 +29,13 @@ package bonus
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
+	"sort"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -250,6 +255,69 @@ type ExecuteBulkGrantJobResult struct {
 	Job    BulkGrantJob
 }
 
+// BulkJobExecutePayloadMatch is the deterministic, ECONOMIC payload a
+// filed bonus_change_requests row (operation=bulk_job_execute) must carry
+// for ExecuteBulkGrantJobWithApproval to consume it.
+//
+// FIX (Stage 4H-B1 Wave 3 Phase 6, `security`): this replaces the fixed
+// literal `{"action":"execute"}` this wrapper previously used, which
+// pinned NOTHING about what was actually being approved. The
+// per-recipient `amount` is chosen by the EXECUTING caller (the HTTP
+// request body), never by the approver, so an approval obtained for a
+// modest bulk grant authorized an arbitrarily larger one - the
+// payload-substitution shape of SEC-W15-02 - and an approval obtained for
+// one recipient list authorized execution against a different, larger one
+// (SEC-W15-02's pagination-laundering shape; `bulk_grant_jobs` carries no
+// DB-level immutability trigger on `target_player_list`, migration 0060,
+// so the job row alone does not bind the approval either). Binding all
+// four of (offer version, asset, per-recipient amount, recipient set) into
+// the approval payload is exactly what migration 0063's own header already
+// required of this operation ("for a bulk job it pins the recipient-set
+// hash") and what manualGrantIssuePayloadMatch already does for the
+// single-grant surface - this is that same, existing pattern applied to
+// the surface that was missing it, never a new governance model.
+//
+// recipient_set_hash is SHA-256 over the recipient player_account_ids,
+// lowercased, de-duplicated, sorted ascending and joined with "\n" - a
+// stable, order-independent content hash a filing client can reproduce
+// exactly (doc 34 §2.2's `subject_set_hash`: "a content hash pinning the
+// authorized subject set").
+func BulkJobExecutePayloadMatch(offerVersionID uuid.UUID, assetCode string, amountPerRecipient *big.Int, playerAccountIDs []uuid.UUID) []byte {
+	amount := "0"
+	if amountPerRecipient != nil {
+		amount = amountPerRecipient.String()
+	}
+	unique := make(map[string]struct{}, len(playerAccountIDs))
+	for _, id := range playerAccountIDs {
+		unique[strings.ToLower(id.String())] = struct{}{}
+	}
+	ids := make([]string, 0, len(unique))
+	for id := range unique {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	sum := sha256.Sum256([]byte(strings.Join(ids, "\n")))
+
+	payload, err := json.Marshal(struct {
+		Action             string `json:"action"`
+		OfferVersionID     string `json:"offer_version_id"`
+		AssetCode          string `json:"asset_code"`
+		AmountPerRecipient string `json:"amount_per_recipient"`
+		RecipientCount     int    `json:"recipient_count"`
+		RecipientSetHash   string `json:"recipient_set_hash"`
+	}{
+		Action: "execute", OfferVersionID: offerVersionID.String(), AssetCode: assetCode,
+		AmountPerRecipient: amount, RecipientCount: len(ids), RecipientSetHash: hex.EncodeToString(sum[:]),
+	})
+	if err != nil {
+		// Unreachable (every field is a plain string/int). Returning a
+		// payload that can never match is the fail-closed outcome if it
+		// somehow were reached, never a permissive one.
+		return []byte(`{"action":"unmatchable"}`)
+	}
+	return payload
+}
+
 // ExecuteBulkGrantJobWithApproval wraps RunStaticBulkGrantJob
 // (targeting.go, unchanged) with the four-eyes consume this Wave adds -
 // closing gap-list item 32's finding that "bulk job execution always
@@ -278,7 +346,7 @@ func ExecuteBulkGrantJobWithApproval(ctx context.Context, tx pgx.Tx, tenantID, j
 	if err != nil {
 		return ExecuteBulkGrantJobResult{}, err
 	}
-	payloadMatch := []byte(`{"action":"execute"}`)
+	payloadMatch := BulkJobExecutePayloadMatch(job.OfferVersionID, assetCode, amount, target.PlayerAccountIDs)
 	if _, err := ConsumeApprovedChangeRequest(ctx, tx, tenantID, ChangeOpBulkJobExecute, jobID, payloadMatch, requiredApprovals, actorID); err != nil {
 		return ExecuteBulkGrantJobResult{}, err
 	}

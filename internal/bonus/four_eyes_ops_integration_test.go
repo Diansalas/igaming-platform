@@ -464,7 +464,11 @@ func TestExecuteBulkGrantJobWithApproval_SucceedsWithApproval(t *testing.T) {
 		t.Fatalf("seed bulk job: %v", err)
 	}
 
-	payloadMatch := []byte(`{"action":"execute"}`)
+	// Stage 4H-B1 Wave 3 Phase 6 (`security`): the approval payload now
+	// pins the ECONOMIC payload (offer version, asset, per-recipient
+	// amount, recipient set), not just the bare action - see
+	// BulkJobExecutePayloadMatch's own doc comment.
+	payloadMatch := BulkJobExecutePayloadMatch(co.offerVersionID, f.assetCode, big.NewInt(1000), []uuid.UUID{f.playerID})
 	fileAndDoublyApprove(t, pool, f.tenantID, ChangeOpBulkJobExecute, "bulk_grant_jobs", jobID, payloadMatch, f.staffID, f.staff2ID, staff3)
 
 	var result ExecuteBulkGrantJobResult
