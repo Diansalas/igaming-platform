@@ -199,6 +199,86 @@ func TestResolveTenantLicence_NoLicenceConfiguredIsUnresolvedNoSignal(t *testing
 	}
 }
 
+// TestResolveTenantLicence_CrossTenantRequestIsRefused is the integration-
+// level proof of canonical-model §4.4 Layer 2's resolver-side scope
+// assertion (`architect`, Stage 4I final cross-domain certification).
+//
+// This is a genuine cross-tenant isolation test, not a formality, and it
+// is deliberately written against the REAL database rather than a fake
+// querier: `tenants`, `licences` and `jurisdictions` all carry NO
+// row-level security (verified directly: pg_class.relrowsecurity is false
+// for all three), so RLS provides zero isolation on the resolver's only
+// producible basis. Before the assertion existed, the call below returned
+// a fully Resolved Resolution carrying tenant A's jurisdiction to a
+// transaction that had only ever proven tenant B - an actual cross-tenant
+// disclosure reachable by any caller that sourced Params.TenantID from
+// anything other than tenant.FromContext.
+func TestResolveTenantLicence_CrossTenantRequestIsRefused(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+
+	// Connection proves otherTenantID; the caller asks about tenantID,
+	// which is the tenant that actually HAS a licence and a resolvable
+	// jurisdiction - so a missing assertion would visibly leak it.
+	var res Resolution
+	err := pool.WithTenant(context.Background(), f.otherTenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		res, err = Resolve(ctx, tx, Params{TenantID: f.tenantID, OperationClass: OperationCatalogueAvailability, RequestedByActorType: ActorSystem})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("a scope mismatch is a REFUSED outcome, not a Go error: %v", err)
+	}
+	if res.Outcome() != Refused || res.Reason() != ReasonScopeMismatch {
+		t.Fatalf("expected refused(scope_mismatch) for a cross-tenant resolve, got %s(%s) - tenant isolation on the resolver's tenant_licence basis is NOT provided by RLS", res.Outcome(), res.Reason())
+	}
+	if _, err := res.Code(); err == nil {
+		t.Fatal("Code() must be unreachable for a Refused outcome - a cross-tenant request must not be able to read another tenant's jurisdiction code")
+	}
+
+	// Anti-inertness control: the SAME call, from the correctly-scoped
+	// connection, still resolves. Without this, the assertion above would
+	// also pass if Resolve had simply stopped working.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		res, err = Resolve(ctx, tx, Params{TenantID: f.tenantID, OperationClass: OperationCatalogueAvailability, RequestedByActorType: ActorSystem})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("Resolve (in-scope): %v", err)
+	}
+	if res.Outcome() != Resolved {
+		t.Fatalf("expected the in-scope resolve to still succeed, got %s(%s)", res.Outcome(), res.Reason())
+	}
+}
+
+// TestResolveTenantLicence_UnscopedConnectionErrors proves canonical-model
+// §6.1's "it must error, not return unresolved" requirement holds against
+// the real database for a platform-scoped (WithoutTenant) connection. The
+// canonical model justified that requirement by FORCE RLS returning zero
+// rows; on this path there is no RLS at all, so the explicit assertion is
+// the only thing that makes the required behaviour true.
+func TestResolveTenantLicence_UnscopedConnectionErrors(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+
+	var res Resolution
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		res, err = Resolve(ctx, tx, Params{TenantID: f.tenantID, OperationClass: OperationCatalogueAvailability, RequestedByActorType: ActorSystem})
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected a genuine error on a connection with no app.tenant_id - never a silent unresolved, and never a Resolved answer")
+	}
+	if !errors.Is(err, ErrScopeMismatch) {
+		t.Fatalf("expected ErrScopeMismatch, got %v", err)
+	}
+	if res.Outcome() == Resolved {
+		t.Fatal("an unscoped connection must never produce a Resolved outcome")
+	}
+}
+
 // --- B-2: Persist + jurisdiction_resolutions RLS/append-only contract ---
 
 func TestPersist_ResolvedAndUnresolvedBothWriteARow(t *testing.T) {

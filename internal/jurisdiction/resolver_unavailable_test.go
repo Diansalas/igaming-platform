@@ -53,11 +53,13 @@ type fakeRow struct {
 func (f fakeRow) Scan(dest ...any) error { return f.scan(dest...) }
 
 // fakeQuerier implements ReadOnlyQuerier, returning one canned pgx.Row per
-// QueryRow call in sequence (resolveTenantLicence issues exactly two,
-// in a fixed order: tenants.licence_id, then the licences/jurisdictions
-// join). Query is never called by anything Resolve/IsActive exercise
-// today and panics if it ever is, so a future accidental non-QueryRow
-// read is caught immediately rather than silently returning zero rows.
+// QueryRow call in sequence (resolveTenantLicence issues exactly three,
+// in a fixed order: the app.tenant_id scope assertion (canonical-model
+// §4.4 Layer 2, added by `architect`'s Stage 4I final certification pass),
+// then tenants.licence_id, then the licences/jurisdictions join). Query is
+// never called by anything Resolve/IsActive exercise today and panics if
+// it ever is, so a future accidental non-QueryRow read is caught
+// immediately rather than silently returning zero rows.
 type fakeQuerier struct {
 	rows []pgx.Row
 	n    int
@@ -94,10 +96,29 @@ func scanErr(err error) fakeRow {
 	return fakeRow{scan: func(dest ...any) error { return err }}
 }
 
+// scanTenantScopeInto returns a fakeRow satisfying resolveTenantLicence's
+// FIRST query - assertTenantScope's NULLIF(current_setting('app.tenant_id',
+// true), empty-string)::uuid read (canonical-model §4.4 Layer 2) -
+// reporting the connection as scoped to tenantID. Every case below that
+// needs to reach the licence lookup at all must first pass that gate, so
+// each such case pins the same tenant id it passes in Params.
+func scanTenantScopeInto(tenantID uuid.UUID) fakeRow {
+	return fakeRow{scan: func(dest ...any) error {
+		ptr := dest[0].(**uuid.UUID)
+		v := tenantID
+		*ptr = &v
+		return nil
+	}}
+}
+
 func TestResolve_TenantLicenceLookupFailure_PropagatesAsGoError(t *testing.T) {
-	q := &fakeQuerier{rows: []pgx.Row{scanErr(errSimulatedConnectionFailure)}}
+	tenantID := uuid.New()
+	q := &fakeQuerier{rows: []pgx.Row{
+		scanTenantScopeInto(tenantID),
+		scanErr(errSimulatedConnectionFailure),
+	}}
 	res, err := Resolve(context.Background(), q, Params{
-		TenantID: uuid.New(), OperationClass: OperationCatalogueAvailability, RequestedByActorType: ActorSystem,
+		TenantID: tenantID, OperationClass: OperationCatalogueAvailability, RequestedByActorType: ActorSystem,
 	})
 	if err == nil {
 		t.Fatal("expected a genuine Go error when the tenant-licence lookup itself fails - never a fabricated Resolution")
@@ -117,13 +138,15 @@ func TestResolve_TenantLicenceLookupFailure_PropagatesAsGoError(t *testing.T) {
 }
 
 func TestResolve_LicenceJurisdictionJoinFailure_PropagatesAsGoError(t *testing.T) {
+	tenantID := uuid.New()
 	licenceID := uuid.New()
 	q := &fakeQuerier{rows: []pgx.Row{
+		scanTenantScopeInto(tenantID),
 		scanLicenceIDInto(licenceID),
 		scanErr(errSimulatedConnectionFailure),
 	}}
 	res, err := Resolve(context.Background(), q, Params{
-		TenantID: uuid.New(), OperationClass: OperationCatalogueAvailability, RequestedByActorType: ActorSystem,
+		TenantID: tenantID, OperationClass: OperationCatalogueAvailability, RequestedByActorType: ActorSystem,
 	})
 	if err == nil {
 		t.Fatal("expected a genuine Go error when the licence->jurisdiction join fails")
@@ -147,13 +170,15 @@ func TestResolve_LicenceJurisdictionJoinFailure_PropagatesAsGoError(t *testing.T
 // licences.jurisdiction_id -> jurisdictions(id)) - which is exactly why a
 // fake querier, not an integration test, is what exercises it.
 func TestResolve_OrphanedLicenceReference_RefusesDependencyUnavailable(t *testing.T) {
+	tenantID := uuid.New()
 	licenceID := uuid.New()
 	q := &fakeQuerier{rows: []pgx.Row{
+		scanTenantScopeInto(tenantID),
 		scanLicenceIDInto(licenceID),
 		scanErr(pgx.ErrNoRows),
 	}}
 	res, err := Resolve(context.Background(), q, Params{
-		TenantID: uuid.New(), OperationClass: OperationCatalogueAvailability, RequestedByActorType: ActorSystem,
+		TenantID: tenantID, OperationClass: OperationCatalogueAvailability, RequestedByActorType: ActorSystem,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error (this case is a REFUSED outcome, not a Go error): %v", err)
@@ -205,5 +230,86 @@ func TestIsActive_NoRowConfigured_FailsClosedFalse(t *testing.T) {
 	}
 	if active {
 		t.Fatal("expected false for a (tenant, operation_class) pair with no row at all")
+	}
+}
+
+// --- canonical-model §4.4 Layer 2: the resolver-side tenant-scope assertion ---
+//
+// These three cases are `architect`'s Stage 4I final cross-domain
+// certification finding, and they are the regression guard for it. Before
+// the fix, Resolve produced a fully `Resolved` tenant_licence answer for
+// ANY tenant id a caller passed, because `tenants`, `licences` and
+// `jurisdictions` all carry NO row-level security whatsoever - so the RLS
+// isolation canonical-model §6.1 assumes ("a resolver query on a bare pool
+// connection reads zero rows under FORCE RLS") does not exist on this
+// path, and Resolution.AssertScope cannot help because it compares the
+// caller's own arguments against themselves.
+
+func TestResolve_TenantScopeMismatch_RefusesAndNeverReadsTheLicence(t *testing.T) {
+	// The connection is scoped to one tenant; the caller asks about
+	// another. Exactly ONE QueryRow is configured, so if Resolve were to
+	// proceed to the licence lookup anyway the fakeQuerier panics - which
+	// is the assertion that this refuses BEFORE reading another tenant's
+	// registry relationship, not merely that it refuses eventually.
+	connectionTenant := uuid.New()
+	requestedTenant := uuid.New()
+	q := &fakeQuerier{rows: []pgx.Row{scanTenantScopeInto(connectionTenant)}}
+
+	res, err := Resolve(context.Background(), q, Params{
+		TenantID: requestedTenant, OperationClass: OperationCatalogueAvailability, RequestedByActorType: ActorSystem,
+	})
+	if err != nil {
+		t.Fatalf("a scope mismatch is a REFUSED outcome, not a Go error: %v", err)
+	}
+	if res.Outcome() != Refused || res.Reason() != ReasonScopeMismatch {
+		t.Fatalf("expected refused(scope_mismatch), got %s(%s)", res.Outcome(), res.Reason())
+	}
+	if _, err := res.Code(); err == nil {
+		t.Fatal("Code() must be unreachable for a Refused outcome")
+	}
+}
+
+func TestResolve_NoTenantScopeOnTheConnection_IsAGoErrorNotUnresolved(t *testing.T) {
+	// canonical-model §6.1 is explicit that an unscoped connection "must
+	// error, not return unresolved" - otherwise a connection-setup mistake
+	// is indistinguishable from an ordinary "no signal available" data gap.
+	unscoped := fakeRow{scan: func(dest ...any) error {
+		ptr := dest[0].(**uuid.UUID)
+		*ptr = nil
+		return nil
+	}}
+	q := &fakeQuerier{rows: []pgx.Row{unscoped}}
+
+	res, err := Resolve(context.Background(), q, Params{
+		TenantID: uuid.New(), OperationClass: OperationCatalogueAvailability, RequestedByActorType: ActorSystem,
+	})
+	if err == nil {
+		t.Fatal("expected a genuine Go error for a connection with no app.tenant_id - never unresolved(no_signal)")
+	}
+	if !errors.Is(err, ErrScopeMismatch) {
+		t.Fatalf("expected ErrScopeMismatch, got %v", err)
+	}
+	if res.Outcome() == Resolved {
+		t.Fatal("an unscoped connection must never produce a Resolved outcome")
+	}
+}
+
+func TestResolve_PlayerScopedPathNeedsNoConnectionAtAll(t *testing.T) {
+	// The Layer 2 assertion is deliberately placed in resolveTenantLicence,
+	// not at the top of Resolve: the player-scoped branch returns
+	// unresolved(no_signal) without querying anything, so it can leak
+	// nothing and must not be made to require a connection it never uses.
+	// A nil ReadOnlyQuerier proves that property by construction (any query
+	// at all would nil-panic).
+	playerID := uuid.New()
+	res, err := Resolve(context.Background(), nil, Params{
+		TenantID: uuid.New(), PlayerAccountID: &playerID, OperationClass: OperationPlay,
+		RequestedByActorType: ActorPlayer, RequestedByActorID: &playerID,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Outcome() != Unresolved || res.Reason() != ReasonNoSignal {
+		t.Fatalf("expected unresolved(no_signal), got %s(%s)", res.Outcome(), res.Reason())
 	}
 }

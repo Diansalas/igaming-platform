@@ -71,6 +71,55 @@ func Resolve(ctx context.Context, q ReadOnlyQuerier, p Params) (Resolution, erro
 	return unresolved(base, ReasonNoSignal), nil
 }
 
+// assertTenantScope compares the tenant this resolution is being produced
+// FOR against the transaction's own `app.tenant_id` GUC - canonical-model
+// §4.4 Layer 2's first half ("the resolver asserts the transaction's
+// app.tenant_id GUC against the tenant it resolves for, by the same query
+// assertTenantScope uses"), deliberately written as a byte-for-byte
+// behavioural mirror of internal/assetregistry's own assertTenantScope
+// (authorization.go) so the two cannot drift.
+//
+// WHY THIS IS LOAD-BEARING AND NOT DEFENCE-IN-DEPTH (architect, Stage 4I
+// final cross-domain certification): every table resolveTenantLicence
+// reads - `tenants`, `licences`, `jurisdictions` - is a platform-wide
+// reference table with NO row-level security at all (verified against
+// pg_class.relrowsecurity; canonical-model §6.1 deliberately keeps
+// `jurisdictions` that way, and `tenants`/`licences` have never had it).
+// RLS therefore provides ZERO tenant isolation on this path. Without this
+// assertion, Resolve would hand a transaction scoped to tenant A a fully
+// `Resolved` jurisdiction belonging to tenant B, purely on the strength of
+// a caller-supplied `Params.TenantID`.
+//
+// Resolution.AssertScope cannot substitute for this: it compares the
+// resolution's binding to the values the CALLER passes, which are the same
+// values Resolve was given - the consuming gates' own comments in
+// internal/casino and internal/bonus honestly record that this makes it
+// tautological today. Only a comparison against the CONNECTION's proven
+// scope is non-tautological, which is exactly why canonical-model §4.4
+// specifies both halves and why CLAUDE.md requires tenant authority to come
+// from server-side authenticated context rather than an argument.
+//
+// Note also that canonical-model §6.1's stated safety net - "a resolver
+// query on a bare pool connection reads zero rows under FORCE RLS" - is
+// simply FALSE for this path for the same reason; this function is what
+// makes the intended behaviour real instead of assumed.
+func assertTenantScope(ctx context.Context, q ReadOnlyQuerier, tenantID uuid.UUID) (bool, error) {
+	var scoped *uuid.UUID
+	if err := q.QueryRow(ctx,
+		`SELECT NULLIF(current_setting('app.tenant_id', true), '')::uuid`).Scan(&scoped); err != nil {
+		return false, fmt.Errorf("jurisdiction: read tenant scope: %w", err)
+	}
+	if scoped == nil {
+		// A caller mistake, not a data gap: resolving a tenant-subject
+		// operation on a connection with no proven tenant scope is
+		// unanswerable, and must never be reported as an ordinary
+		// `unresolved` (canonical-model §6.1: "It must error, not return
+		// unresolved").
+		return false, fmt.Errorf("%w: transaction has no tenant scope (use db.Pool.WithTenant)", ErrScopeMismatch)
+	}
+	return *scoped == tenantID, nil
+}
+
 // resolveTenantLicence implements the ONE basis Stage 4I can genuinely
 // produce (canonical-model §11.1 B-4): tenants.licence_id ->
 // licences.jurisdiction_id -> jurisdictions.code. This is the first
@@ -78,8 +127,24 @@ func Resolve(ctx context.Context, q ReadOnlyQuerier, p Params) (Resolution, erro
 // history (RECON §10) - the columns have existed, unread, since
 // migration 0002.
 func resolveTenantLicence(ctx context.Context, q ReadOnlyQuerier, base Resolution) (Resolution, error) {
+	// canonical-model §4.4 Layer 2 - see assertTenantScope's own doc
+	// comment for why this is the ONLY non-tautological tenant check on
+	// this path. It is placed here, rather than at the top of Resolve,
+	// deliberately: this is the one and only branch that can return a
+	// `Resolved` outcome, and it is the one and only branch that queries
+	// at all (the player-scoped branch returns unresolved(no_signal)
+	// without touching the database, so it can leak nothing and must not
+	// be made to require a connection it does not use).
+	inScope, err := assertTenantScope(ctx, q, base.tenantID)
+	if err != nil {
+		return Resolution{}, err
+	}
+	if !inScope {
+		return refused(base, ReasonScopeMismatch), nil
+	}
+
 	var licenceID *uuid.UUID
-	err := q.QueryRow(ctx, `SELECT licence_id FROM tenants WHERE id = $1`, base.tenantID).Scan(&licenceID)
+	err = q.QueryRow(ctx, `SELECT licence_id FROM tenants WHERE id = $1`, base.tenantID).Scan(&licenceID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// The tenant id itself does not resolve - a scope problem, not a
 		// data gap (this can only happen if a caller passed a tenant id
