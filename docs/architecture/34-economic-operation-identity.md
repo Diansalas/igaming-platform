@@ -687,6 +687,44 @@ fail-closed denials under load (Risk's own advisory lock contends with
 whatever else is holding it), and risking an AB-BA deadlock if different
 call paths ever acquired the two locks in different orders.
 
+**Precondition to the ordering below — jurisdiction resolution does not
+participate in it at all (Stage 4I, `architect`).** Before the numbered
+rules apply, one constraint has to be stated, and it is deliberately
+**not** numbered as part of the order:
+
+> **Jurisdiction resolution completes before the guarded transaction
+> begins. It holds no lock, performs no write, and therefore does not
+> participate in this ordering at all.**
+
+The resolver takes no `FOR UPDATE`, acquires no advisory lock, and
+performs no write of any kind while any gate in the chain is running; any
+persistence of a resolution happens either entirely outside the guarded
+transaction, or strictly after the whole gate chain completes and
+immediately before or with the effecting write. This is phrased as a
+precondition rather than as a "rule 0" on purpose: rules 1-4 below are an
+**in-transaction lock order**, and the whole content of this constraint is
+that resolution is outside that order. A rule stating "this never
+participates" cannot be reordered, whereas a "rule 0" invites a future
+author to ask whether something could legitimately precede it.
+
+Without the constraint there is a genuine AB-BA between a resolver's own
+row write and Risk's advisory lock, because the platform already contains
+both orders: `internal/casino`'s `LaunchGame` runs the gate chain and
+*then* persists the jurisdiction (`launch.go:124`), while any
+resolve-and-persist resolver would write *before* the gate chain. Both
+locks are player-keyed, so two concurrent operations on the same player —
+two browser tabs — can deadlock on a real `40P01`, which under
+`internal/risk/evaluator.go:363-377`'s fail-closed contract is a DENY of a
+real bet. With the constraint in place the order is total — jurisdiction
+(no lock) → Risk advisory lock → EOI row lock — and the AB-BA
+unreachability this section exists to guarantee holds.
+
+`internal/casino`'s existing `CreateLaunchSession` write is already
+compliant (it is a post-gate-chain write); nothing in `internal/casino`
+changes for this. Full specification, including the compile-time
+enforcement mechanism and the bounded-staleness conditions:
+`docs/governance/stage-4i-canonical-model.md` §6.4.
+
 **The canonical rule, stated once, binding everywhere `internal/economicop`
 is called from:**
 

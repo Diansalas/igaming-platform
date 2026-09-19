@@ -1,0 +1,1553 @@
+# Stage 4I — Canonical Jurisdiction Resolution Model
+
+**Status of this document: CANONICAL AND BINDING for Stage 4I.** This is
+`architect`'s Phase 5 synthesis and it supersedes, for implementation
+purposes, every proposal in the four prior Stage 4I phase documents. Where
+this document and a prior phase document differ, **this document governs**;
+where they agree, this document states the answer once and cross-references
+the prior document for the reasoning rather than restating it.
+
+Implementation status label, per CLAUDE.md's no-fake-completion rule:
+**`NOT IMPLEMENTED`.** No resolver, no `jurisdiction_resolutions` table, no
+registry write surface, and no player-side jurisdiction signal exists at
+this commit. This document is a specification, not a claim of capability.
+
+**Chain position.** `architect` reconnaissance (Phase 1, `2bab29f`) →
+`identity-compliance` (Phase 2, `c91fe40`) → `risk` (Phase 3, `61c020e`) →
+`security` (Phase 4, `89af4c0`) → **`architect` synthesis (Phase 5, this
+document)** → `backend` (schema + resolver) → `casino` → `bonus-engine` →
+`payments` → `sportsbook` → `qa` → independent security/compliance final.
+
+**Source documents, cited throughout by short name:**
+
+| Short name | File |
+|---|---|
+| **RECON** | `docs/governance/stage-4i-reconnaissance.md` |
+| **IC** | `docs/governance/stage-4i-identity-compliance-model.md` |
+| **RISK** | `docs/governance/stage-4i-risk-model.md` |
+| **SEC** | `docs/governance/stage-4i-security-model.md` |
+
+**Verification method.** Every code and schema claim this document *relies
+on* was re-checked directly against the repository at HEAD `89af4c0`,
+not inherited from a prior phase's summary. The re-checks that changed or
+sharpened a prior phase's conclusion are called out in place (§2.4, §6.2,
+§9.1).
+
+**HDR discipline.** No Human Decision Register item is decided here. §10
+consolidates the six candidates and recommends which the orchestrator
+should formally open — a recommendation about *routing*, never about
+content.
+
+---
+
+## 0. The six adjudications, stated first
+
+The orchestrator dispatched this phase with six named tensions. Answers,
+in one line each; full reasoning follows in the cited section.
+
+| # | Tension | **Adjudication** | §|
+|---|---|---|---|
+| 1 | HDR-J-4 mechanism: IC's "stricter rule set" vs. RISK's "merge outcomes" | **RISK's mechanism governs.** IC's *posture* (tighten, never weaken) is retained and is correct; IC's *mechanism* is withdrawn because rule sets are not totally ordered and merging them manufactures `ErrConflictingRules`. The canonical mechanism is **Most-Restrictive-Outcome Composition (MROC)**. SEC's "the record must show both" is folded in as a recording requirement on MROC | §7 |
+| 2 | Doc 34 §5.3 placement of the read-only-resolver constraint | **SEC's placement governs: a PRECONDITION, not "rule 0."** The substance (RISK H-2) is mandatory and unchanged. Recorded in `docs/architecture/34-economic-operation-identity.md` §5.3 by this phase | §6.4 |
+| 3 | Resolved-value shape (Q-1/Q-2) | **Finalized.** One opaque `jurisdictions.code` string for matching; a non-forgeable `Resolution` value carrying both `code` and `id` for the operation; a persisted `jurisdiction_resolutions` record for reporting/audit. Three-valued `outcome` + a diagnostic `reason` enum reconciles RISK's and SEC's vocabularies | §3, §4 |
+| 4 | Casino blocklist remediation (K-3) | **Synthesized into one spec — with a correction neither RISK nor SEC made.** RISK §5.2's "remove the nil guard" is *too broad*: applied literally it denies 100% of casino launches in Stage 4I. The correct contract arms the control **per game with a non-empty blocklist**, which is RISK's own §1.4 invariant applied to K-3 | §9 |
+| 5 | C-4 removal mechanism (JV-1/JV-2/JV-3) | **Settled. Confirmed binding, carried forward unchanged**, including SEC's per-handler sequencing rule. Precision (4 structs / 5 surfaces) independently re-verified | §8 |
+| 6 | Caching (CA-1) | **Settled. Confirmed binding: no jurisdiction cache in Stage 4I.** SEC §S-7.2's conditions become the binding terms of any future reversal, and reversal requires an ADR plus `security` review | §6.5 |
+
+Three additional items the dispatch asked to be closed:
+
+- **SEC-4I-F2** (manual-grant jurisdiction metadata gap) — SEC's interim
+  control is **confirmed correct**, with one tightening: `staff_supplied`
+  must be a value in the *same* `basis` enum the resolver uses, and must be
+  **structurally unproducible by the resolver**. §8.4.
+- **SEC-4I-F1** (four-eyes threshold bypass) — **tracked separately**, not
+  Stage 4I scope, not re-analyzed here. Confirmed still unfixed at
+  `89af4c0`. §11.2.
+- **SEC-4I-F3** (`casino_game.upserted` audit gap) — **confirmed as a hard
+  prerequisite** of casino's K-3 remediation, and the K-3 contract in §9
+  makes it *more* clearly so, not less. §9.5.
+
+---
+
+## 1. The canonical data model — seven concepts, and exactly where each lives
+
+RECON §2 established that the seven concept distinctions the directive
+requires are mostly absent from the schema. This section states, finally,
+where each one lives or does not, and what gates its existence.
+
+| # | Concept | Canonical home | Status at `89af4c0` | Gated on |
+|---|---|---|---|---|
+| 1 | **Player location** — where the player physically is at operation time | **Nowhere persistent, by ruling.** It is a point-in-time signal, never an identity attribute (IC §1). It may appear only as a `basis = geo_signal` with an `evidence_ref` on a `jurisdiction_resolutions` row — never as a column on `persons`, `player_accounts`, or any other entity | **DOES NOT EXIST** | HDR-J-3 (collection), RECON Q-7 (provider interface) |
+| 2 | **Player residence** — declared or KYC-verified home jurisdiction | Two distinct facts, both **tenant-scoped**, never on `persons` (IC §1, Arguments 1–4, adopted in full): `player_accounts.declared_residence_country` (self-reported, **unverified**) and `kyc_verifications.verified_residence_country` (set only by an explicit reviewer determination) | **DOES NOT EXIST** | **HDR-J-3** — hard block |
+| 3 | **Nationality** | **Not collected.** If ever collected it is `persons`-shaped in principle, and inherits IC §1's access-control widening in its sharpest form | **DOES NOT EXIST**, and is **not to be added in Stage 4I** | HDR-J-3 **and** a demonstrated operation that needs it |
+| 4 | **Tenant licensing jurisdiction** | `licences.jurisdiction_id`, reached via `tenants.licence_id`. This is the **only jurisdiction fact the platform can establish today with no human decision and no new PII** | **EXISTS as unread configuration.** Zero production readers (RECON §1.1 items 2–3) | **Nothing.** Buildable now (§11.1) |
+| 5 | **Brand operating jurisdiction** | **RULING BI-4I-1: a brand has no independent operating jurisdiction.** Brand is a *narrowing* dimension over the tenant's jurisdiction set, never an independent source of one. See §1.1 | Resolves RECON **C-2** with no schema change | Nothing |
+| 6 | **Transaction / operation jurisdiction** | The `jurisdiction_resolutions` row (§5) is the canonical artefact. The existing snapshot columns (`casino_launch_sessions.jurisdiction_code`, `bonus_grants.jurisdiction_code`) are retained and gain a `jurisdiction_resolution_id` FK (SEC AR-2) | **Snapshot slots exist, permanently NULL.** Resolution record **DOES NOT EXIST** | Nothing for the mechanism; §11.2 for what can actually populate it |
+| 7 | **Product jurisdiction** | `asset_authorizations.product` (migration 0045, most-specific-match) is the live axis. `licences.permitted_products` is the licence-side statement and is unread | **PARTIALLY EXISTS.** ADR 0037 open question 7 is **stale** and is an owed `architect` correction (§12.3) | Nothing |
+
+### 1.1 RULING BI-4I-1 — brand narrows, never sources
+
+RECON **C-2** recorded a genuine inconsistency: `tenant_jurisdiction_configs`
+is keyed `(tenant_id, jurisdiction_id, effective_from)` with **no brand
+dimension**, while `asset_authorizations`, `risk_rules` and
+`open_bet_self_exclusion_policies` all carry brand *alongside* jurisdiction
+as if they were orthogonal.
+
+**Ruling: they are not orthogonal, and the configuration layer is right.**
+A brand does not have an operating jurisdiction of its own. What a brand
+has is a possibly-narrower subset of what its tenant is licensed to do.
+Concretely:
+
+- The **set of jurisdictions in play** for an operation is a tenant-level
+  fact, derived from the tenant's licence and its
+  `tenant_jurisdiction_configs` rows.
+- A **brand-scoped enforcement row** (`asset_authorizations` layer 5,
+  `risk_rules.brand_id`, an `open_bet_self_exclusion_policies` tightening)
+  narrows what is permitted *within* that set. It can never introduce a
+  jurisdiction the tenant is not configured for, and it can never widen.
+- Consequently a resolution produced for brand A is **refused**, never
+  silently widened, when presented to a brand-B operation — which is
+  exactly SEC §S-3.3 case 2's required behaviour, now with a stated reason
+  rather than a convention.
+
+Two consequences `backend` must implement: `jurisdiction_resolutions.brand_id`
+is **nullable** (a tenant-level or system-level resolution legitimately has
+no brand), and where it is non-NULL the consuming gate re-asserts it
+(§4.4 Layer 2). No schema change to `tenant_jurisdiction_configs` is
+authorized or needed.
+
+This ruling is reversible: if a future licensing arrangement genuinely
+gives a brand its own regulator, that is a new ADR and a brand dimension on
+the configuration table — not a silent reinterpretation of the enforcement
+rows.
+
+### 1.2 RULING BI-4I-2 — `kyc_documents.issuing_country` is evidence, never a source
+
+IC §2 is **adopted in full and without amendment**. Restated as the binding
+rule so no implementer has to reconstruct it:
+
+> No code path may read `kyc_documents.issuing_country` and assign it, or
+> any value derived from it, to a residence field, a nationality field, a
+> `jurisdiction_code`, or a resolution's `selected_basis`. Its only
+> permitted participation is as `basis = kyc_corroboration` with status
+> `agreed` / `disagreed` / `unavailable` against an
+> independently-captured residence fact — and **its value is never
+> recorded** (§5.3 item 1).
+
+Until concept 2 exists (HDR-J-3), `kyc_corroboration` has nothing to
+corroborate and the resolver must not consult it at all. RECON's Q-9
+answer "none, and that is a legitimate and probably safer answer" is
+therefore the **operative** answer for Stage 4I.
+
+### 1.3 RULING BI-4I-3 — `tenant_jurisdiction_configs` keeps four of its five roles
+
+Closing RECON **Q-12** / **C-7**. `tenant_jurisdiction_configs` remains the
+per-tenant carrier of the KYC / AML / RG / reporting ruleset references,
+the geo-block list, and the allowed payment methods. Its
+`allowed_currencies` column is **superseded** by `asset_authorizations` for
+the asset-availability question (migration 0045's own header already says
+so) and must not be read for that purpose. It is not dropped in Stage 4I —
+dropping a column on a table with RLS and effective-dating is its own
+change with its own review, and nothing reads it today either way.
+
+`docs/architecture/15-jurisdiction-and-licensing-model.md` currently
+describes an enforcement model none of this reflects. Correcting doc 15 is
+an owed `architect` action, listed in §12.3, deliberately **not** performed
+in this phase (it depends on §11's buildable/blocked split landing first,
+and doing it now would document a resolver that does not exist).
+
+---
+
+## 2. The resolution interface — the contract every domain implements against
+
+### 2.1 What the resolver is, and is not
+
+**The resolver answers exactly one question:** *for this operation, of this
+class, by this subject, under this tenant and brand — which jurisdiction's
+rules govern, and on what basis?*
+
+It does **not**: decide whether the tenant may lawfully serve that
+jurisdiction (that is a separate authorization check, §9.6 and RISK §7's
+HDR-J-6 boundary); decide whether a limit is breached (Risk); decide
+whether an asset is authorized (AssetAuthorization); or decide whether the
+player may gamble (RG).
+
+**Ownership (closing RECON Q-15, which `docs/governance/ownership.md` has
+no row for).** The resolver is **platform core**. Its *interface contract*
+is `architect`-owned (this document). Its *implementation* is
+`backend`-owned. Its *source-precedence ruleset content* is
+`identity-compliance`-owned, mirroring doc 15's existing schema/content
+split. It is **not** owned by `internal/risk` (RISK §4.3, adopted), and it
+is not owned by any consuming domain. `docs/governance/ownership.md` needs
+a jurisdiction row recording this — owed action, §12.3.
+
+### 2.2 The outcome states — reconciling three vocabularies
+
+The dispatch named five states (successful / uncertain / unavailable /
+conflicting / unsupported); SEC §S-2.2 specified three persisted ones
+(`resolved` / `unresolved` / `refused`); RISK reasons in terms of
+"empty vs. present." These are reconciled on **two axes**, and the
+distinction between the axes is load-bearing:
+
+**Axis 1 — `outcome`, three values. This is the contract axis. Every gate
+branches on this and only this.**
+
+| `outcome` | Meaning | Carries a code? | Gate behaviour |
+|---|---|---|---|
+| `resolved` | The inputs determine exactly one jurisdiction, at or above the confidence the operation class requires | **Yes**, FK to `jurisdictions (code)` | Proceed to the gate's own logic |
+| `unresolved` | The inputs do **not** determine a jurisdiction — absent, insufficient, or irreconcilable | **No**, NULL | **Never ALLOW.** Per-consumer contract in §6 |
+| `refused` | The resolver declined to answer — it was not asked a question it can answer, or a dependency was unavailable | **No**, NULL | **Never ALLOW.** Per-consumer contract in §6 |
+
+**Axis 2 — `reason`, a diagnostic enum. Recorded always; branched on by no
+gate, ever.** The dispatch's five-state vocabulary maps onto it exactly:
+
+| Dispatch term | `outcome` | `reason` |
+|---|---|---|
+| successful | `resolved` | `determined` |
+| uncertain | `unresolved` | `insufficient_confidence` — a basis was available but ranks below the operation class's requirement (IC §4's "an unverified declaration is not dispositive for enforcement-grade decisions", enforced structurally per RISK §3.1) |
+| *(absent)* | `unresolved` | `no_signal` — no basis of any kind was available. **This is Stage 4I's universal answer for player-scoped operations** (§11.3) |
+| conflicting | `unresolved` | `irreconcilable_bases` — two or more bases disagree and the precedence configuration does not determine a winner. Never an arbitrary pick, never "prefer the permissive", never "prefer the most recent" (SEC §S-3.3 case 8) |
+| unavailable | `refused` | `dependency_unavailable` |
+| unsupported | `refused` | `unsupported_operation_class` |
+| — | `refused` | `scope_mismatch` — the tenant/brand/player binding failed its cross-check (§4.4 Layer 2) |
+| — | `refused` | `registry_unknown_code` — a code was produced that is not in `jurisdictions`. See §2.5 |
+
+**Why two axes and not one flat enum.** A gate that branches on eight
+values will eventually branch on seven of them correctly and one of them
+wrongly, and the wrong one will be an ALLOW. A gate that branches on three
+values, only one of which can proceed, cannot make that mistake. The
+diagnostic detail is for humans, incident response, and regulators — it is
+recorded in full and is never a control input. This is the same discipline
+ADR 0031 §34 applied to keeping `Outcome` at four values, and the same
+reason RISK §2.3 refused a fifth `RuleStatus`.
+
+**`unresolved` vs. `refused` is not cosmetic** (SEC §S-2.2, confirmed):
+they have different remediations. `unresolved` means "get better inputs";
+`refused` means "fix the caller or the dependency." Collapsing them makes
+an outage indistinguishable from a data gap.
+
+### 2.3 The `Resolution` value — non-forgeable by construction
+
+```go
+// Package jurisdiction. ILLUSTRATIVE SIGNATURE — the exact field/method
+// names are `backend`'s; the PROPERTIES below are binding.
+//
+// Resolution is produced ONLY by Resolve. Its fields are unexported, so a
+// struct literal of this type does not compile outside this package
+// (SEC §S-1.3 Layer 1). There is deliberately no exported constructor,
+// no setter, and no function anywhere in this package that accepts a
+// jurisdiction code from a caller and returns a Resolution.
+type Resolution struct {
+    recordID       uuid.UUID // FK into jurisdiction_resolutions (SEC AR-2)
+    outcome        Outcome   // resolved | unresolved | refused  (§2.2)
+    reason         Reason
+    code           string    // jurisdictions.code; "" unless outcome == Resolved
+    id             uuid.UUID // jurisdictions.id;  Nil unless outcome == Resolved
+    asOf           time.Time
+    policyVersion  string
+    // Binding scope — re-asserted by every consuming gate (§4.4 Layer 2).
+    tenantID       uuid.UUID
+    brandID        *uuid.UUID
+    playerAcctID   *uuid.UUID
+    operationClass OperationClass
+}
+
+func (r Resolution) Outcome() Outcome
+func (r Resolution) Code() string     // panics or errors unless Resolved
+func (r Resolution) ID() uuid.UUID    // panics or errors unless Resolved
+func (r Resolution) RecordID() uuid.UUID
+func (r Resolution) AsOf() time.Time
+
+// Resolve takes a READ-ONLY database handle (§6.4), never a pgx.Tx.
+func Resolve(ctx context.Context, q ReadOnlyQuerier, p Params) (Resolution, error)
+```
+
+**Binding properties** (each is mechanically checkable; `qa` asserts each):
+
+1. **`Resolution{...}` does not compile outside the resolver package.**
+   SEC §S-6 case D-1 is a compile-fail test, not a runtime assertion.
+2. **`Code()` and `ID()` are unreachable for a non-`resolved` outcome.**
+   There is no path by which a caller obtains `""` or `uuid.Nil` from a
+   `Resolution` and proceeds as though it had a value. This is the single
+   most important property: it is what structurally prevents RECON C-3's
+   "absent looks like unscoped" family of defects from recurring.
+3. **Both `code` and `id` come from one resolution.** No domain performs
+   its own code→id translation (RISK §3.3's ask, adopted).
+   `bonus.resolveJurisdictionID` (`internal/bonus/eligibility.go:139-152`)
+   is **deleted**, not wrapped — see §2.5.
+4. **The value carries its own scope binding** and every consumer
+   re-asserts it (§4.4 Layer 2).
+5. **`Resolve` cannot write.** Its `q` parameter exposes only `Query` /
+   `QueryRow` (§6.4).
+
+### 2.4 Q-2 finally answered: the code is canonical, the id is carried
+
+`jurisdictions.code` is the **canonical carrier**. Reasons, all
+code-verified at `89af4c0`:
+
+- `risk_rules.jurisdiction_code` is `TEXT` with an FK to
+  `jurisdictions (code)`, is inside migration 0041's immutability trigger's
+  core-field set, and is compared by string equality at
+  `internal/risk/evaluator.go:174`. Migrating it is a migration on an
+  append-only table plus a rewrite of every authored rule, for nothing
+  (RISK §3.3).
+- `casino_launch_sessions.jurisdiction_code`,
+  `bonus_grants.jurisdiction_code`,
+  `open_bet_self_exclusion_policies.jurisdiction_code` and
+  `withdrawal_policies.jurisdiction_code` are all code-keyed.
+- `asset_authorizations.jurisdiction_id` is the **only** id-keyed consumer.
+
+So: the `id` is an internal representation detail of one consumer, carried
+alongside the code on the resolution so that consumer never has to look it
+up. It is not the canonical identity of a jurisdiction.
+
+**Independently re-verified sharpening.** RECON §1.2 stated that the
+jurisdiction code space is not the ISO-3166 country space, and this is
+confirmed by migration 0002's own comment
+(`code TEXT NOT NULL UNIQUE, -- e.g. 'KM-ANJ', 'MT', 'CO'`). `KM-ANJ` is a
+sub-national regulator code; `MT` and `CO` happen to collide with ISO
+alpha-2 values. **That partial collision is a trap, not a convenience**: it
+means a country→jurisdiction mapping bug produces correct-looking results
+for most inputs and silently wrong ones for the platform's own first
+licensing jurisdiction. Any country→jurisdiction mapping is therefore an
+explicit, stored, audited mapping — never a string equality, never a
+prefix match, never an implicit cast. This binds `payments` (§6.5) and
+binds any future use of IC §5's ISO-3166 `declared_residence_country`.
+
+### 2.5 The unresolved/unknown collapse is closed structurally
+
+RISK §3.3 flagged a **live latent fail-open**, re-verified at
+`internal/bonus/eligibility.go:139-152` at `89af4c0`:
+`resolveJurisdictionID` returns `uuid.Nil` for an **empty** code *and* for
+an **unknown** code. For AssetAuthorization both deny (fine). For Risk they
+differ catastrophically: an empty code is caught by `missingScopeContext`'s
+gate, while an unknown-but-non-empty code matches **zero rules** and
+resolves to **ALLOW**.
+
+**Ruling: the collapse is closed structurally, in three places at once, so
+that no single regression reopens it.**
+
+1. A code that is not in `jurisdictions` can never be produced by the
+   resolver: `Resolve` returns `refused(registry_unknown_code)`, not a
+   `Resolution` carrying an unregistered code.
+2. A code that is not in `jurisdictions` can never be *stored*: every
+   persisted jurisdiction value carries an FK to `jurisdictions (code)` or
+   `(id)` (SEC §S-1.3 Layer 3, already the precedent at migration 0042).
+3. `bonus.resolveJurisdictionID` is **deleted** when the resolver lands.
+   Bonus obtains both representations from one `Resolution`. A wrapper
+   preserving the old signature would preserve the defect.
+
+`qa` case D-4 (SEC §S-6) remains mandatory as the regression guard.
+
+---
+
+## 3. The source hierarchy
+
+### 3.1 The canonical `basis` enum — closed, with reserved values
+
+Every basis is one of the following. The set is closed; adding a value is
+an ADR, not an implementation detail.
+
+| `basis` | Meaning | Producible by `Resolve` in Stage 4I? |
+|---|---|---|
+| `player_verified_residence` | `kyc_verifications.verified_residence_country`, set by an explicit reviewer determination (IC §5) | **No** — blocked on HDR-J-3 |
+| `player_declared_residence` | `player_accounts.declared_residence_country`, self-reported, unverified (IC §5) | **No** — blocked on HDR-J-3 |
+| `kyc_corroboration` | Corroborates or disagrees with another basis. **Never a `selected_basis`** (§1.2) | **No** — nothing to corroborate |
+| `geo_signal` | A point-in-time location signal (IP-derived or provider-supplied) | **No** — no producer exists; RECON Q-7 |
+| `retail_node` | A registered shop address (doc 26 §1.4). Reserved so the shape does not have to change when retail arrives (RECON Q-17) | **No** — retail not implemented |
+| `tenant_licence` | The tenant's own licensing jurisdiction, via `tenants.licence_id → licences.jurisdiction_id` | **Yes — but only for tenant-subject operations.** See §3.2 |
+| `tenant_asserted` | A BYOL tenant's own determination. Reserved so HDR-J-5 does not require a redesign (IC §3, SEC §S-9) | **No** — blocked on HDR-J-5 |
+| `platform_fallback` | A fallback from tenant/brand jurisdiction to a player's | **No — and structurally unproducible until HDR-J-1 is answered.** §3.3 |
+| `staff_supplied` | A jurisdiction a staff member typed into a request body | **No, and never.** §8.4 |
+
+**Binding on `backend`: `Resolve` must be structurally incapable of
+emitting `staff_supplied` or `platform_fallback`.** These two exist in the
+enum only so that (a) the SEC-4I-F2 interim audit records are
+distinguishable from post-resolver records forever, and (b) a future
+HDR-J-1 "yes" answer adds a producer rather than a schema migration. A
+basis value that the resolver cannot produce and that no code path can
+assign is an inert label, which is exactly what is wanted.
+
+### 3.2 `tenant_licence` — producible, and precisely bounded
+
+This is the one basis Stage 4I can genuinely produce, and it is also the
+most dangerous one, because using it for the wrong subject **is** HDR-J-1's
+forbidden fallback wearing a different name.
+
+**Binding boundary:**
+
+> `basis = tenant_licence` may be selected **only** when the operation's
+> subject is the tenant or the brand itself — e.g. resolving which
+> jurisdiction's configuration governs a catalogue-availability question
+> asked about a tenant, or which precedence configuration applies (§3.4).
+> It may **never** be selected for an operation whose subject is a
+> **player**. A player-scoped operation with no player-side basis available
+> resolves `unresolved(no_signal)` — never `resolved` on the tenant's
+> licence.
+
+The distinction is recorded on the resolution row itself: a resolution with
+a non-NULL `player_account_id` may not carry `selected_basis =
+tenant_licence`. **This must be a database `CHECK` constraint, not an
+application convention** — it is the single rule whose violation would
+silently answer HDR-J-1 in the affirmative, and CLAUDE.md's multi-tenancy
+section already establishes that this class of rule belongs in the database
+rather than in discipline.
+
+### 3.3 Pre-KYC declaration vs. post-KYC evidence — and where the confidence threshold lives
+
+IC §4's framing is **adopted**, and RISK §3.1 supplies the mechanism that
+gives it teeth. Combined, the canonical rule:
+
+1. A **declared** residence is a real signal and is not worthless. It is
+   sufficient for low-stakes, reversible, non-enforcement uses.
+2. A declared residence is **never on its own dispositive for an
+   enforcement-grade decision** — a jurisdiction-scoped `HARD_LIMIT`, an
+   `asset_authorizations` layer-6 gate, a withdrawal jurisdiction policy —
+   unless HDR-J-2 says otherwise for that operation class specifically.
+3. **The confidence threshold lives in the resolver, keyed on operation
+   class. It does NOT live on rules.** RISK §3.1's four reasons are adopted
+   in full; the disqualifying one is the first: a per-rule
+   `min_jurisdiction_source` predicate would make `matches()` return false
+   for a present-but-insufficient value, silently excluding the rule —
+   which `missingScopeContext` structurally cannot catch, because it tests
+   emptiness. That is the exact fail-open class the gate exists to prevent,
+   reintroduced outside the reach of the mechanism built to catch it.
+4. Therefore: an enforcement-grade operation with only a declared residence
+   available receives `unresolved(insufficient_confidence)` — **empty, not
+   "resolved, low confidence."** Risk's existing string parameter and
+   existing conditional gate then do the rest, **with zero new surface in
+   `internal/risk`.**
+5. KYC evidence does **not** blanket-outrank a declaration. Its authority is
+   operation-class-dependent (HDR-J-2) and document-type-dependent (IC §2).
+   A verified residence outranks a declared one for KYC/AML/reporting-class
+   operations; whether it outranks a real-time location signal for *play*
+   is precisely HDR-J-2 and is not answered here.
+
+### 3.4 Precedence configuration — keyed on the licence side (closing RISK §4.2's circularity)
+
+IC §3 observed that source precedence is likely per-jurisdiction
+configuration. RISK §4.2 found the bootstrap circularity in that: selecting
+a per-jurisdiction precedence rule requires knowing the jurisdiction, which
+is the output of applying the rule.
+
+**RISK §4.2's correction is adopted as canonical.** The precedence
+configuration is keyed on
+
+> **`(tenant licensing jurisdiction, operation_class)`**
+
+— both knowable before any player-side resolution runs.
+`tenants.licensing_model` is already server-resolved on every operation
+today (`resolveLicensingMode`, RECON P-6), and `licences.jurisdiction_id`
+becomes readable as part of §11.1's buildable work. This preserves IC's
+insight that precedence is configuration rather than a global constant,
+while making it computable, and it composes with
+`risk_rules.licensing_mode`'s existing rationale (ADR 0031 §10): the
+platform already treats the licensing side as the knowable coarse anchor
+and the player side as the fine, currently-absent one.
+
+The **table shape** is buildable now. Its **rows** are blocked on HDR-J-2.
+A resolver with no precedence rows resolves `unresolved`, which is correct
+and is the Stage 4I steady state (§11.3).
+
+### 3.5 RISK §4.1's invariant, adopted verbatim
+
+> **One operation resolves exactly one jurisdiction, and every gate in that
+> operation's chain consumes that same value. No gate re-resolves,
+> overrides, narrows, or substitutes it.**
+
+This is binding platform-wide. It is what makes a denial interpretable, it
+is what `bonus.GateCheckpoint`'s two-representation `GateParams` already
+assumes, and it is what §7's MROC is carefully constructed **not** to
+violate.
+
+---
+
+## 4. The four consumer contracts, finalized
+
+### 4.0 The canonical absent-value invariant (closing RECON Q-3)
+
+RISK §1.4's proposed wording is **adopted as the platform-wide rule**, in
+preference to RECON Q-3's own framing of "adopt absent ⇒ deny uniformly":
+
+> **An absent jurisdiction value must never cause a jurisdiction-dependent
+> policy, gate, restriction or authorization to be evaluated as if it did
+> not exist. Where a consumer cannot determine whether any such policy
+> applies without a jurisdiction, it denies. Where a consumer can determine
+> that no such policy is in force, it may proceed — and must deny the
+> moment one is.**
+
+RISK's §1.4 correction to RECON **C-3** is accepted: there are **two
+correct specialisations of one invariant, plus two genuine defects**, not
+four incompatible contracts. Adopting AssetAuthorization's *specialisation*
+platform-wide would over-apply it to domains with a different structure;
+adopting the *invariant* is what unifies them.
+
+This is also what §9 uses to correct RISK's own K-3 recommendation.
+
+### 4.1 AssetAuthorization (K-1) — UNCHANGED
+
+`assetregistry.CheckEligibility` layer 6 keeps **unconditional
+fail-closed**: `uuid.Nil` is an immediate denial at
+`ReasonJurisdictionContextMissing`, never "unscoped." Layer 6 is
+*structurally* jurisdiction-keyed (`asset_authorizations` is keyed
+`(tenant, jurisdiction[, product])`), so with no jurisdiction there is no
+lookup to perform — the question is unanswerable, not answerable-as-yes.
+
+Only change: the caller passes `resolution.ID()`, reachable only for a
+`resolved` outcome, instead of a separately-translated uuid (§2.5).
+`assertTenantScope` (`internal/assetregistry/authorization.go:199-212`)
+is unchanged and remains the model the resolver copies (§4.4 Layer 2).
+
+**Consequence, stated plainly: Bonus stays blocked in Stage 4I.** §11.3.
+
+### 4.2 Risk (K-2) — conditional fail-closed RETAINED, per R-1
+
+RISK **R-1** is accepted as `risk`'s ruling in `risk`'s own domain and is
+binding: `risk.Evaluate` does **not** become unconditionally fail-closed.
+The existing contract — fail closed iff at least one currently-effective
+rule visible to this request scopes `jurisdiction_code` for this operation
+— is the correct specialisation of §4.0's invariant for a domain where
+jurisdiction-dependence is a per-rule configuration fact.
+
+`RiskRequest.JurisdictionCode string` is unchanged. The `Resolution` is
+**not** threaded into `RiskRequest` (RISK §3.2: a field that matching
+ignores is an invitation). The enforcement point carries the resolution's
+provenance into the audit record alongside the `RiskDecision`.
+
+**The authoring-time precondition (R-2b), specified.** RISK ruled that
+`risk.CreateRule` (`internal/risk/policy_service.go:145`) must reject
+creating a rule that scopes `jurisdiction_code` for an operation whose
+`(tenant, operation)` pair is not recorded as jurisdiction-resolution-
+active. `architect` supplies the piece RISK correctly declined to define,
+because it is not Risk's to own:
+
+- **The fact is `jurisdiction_resolution_active (tenant_id,
+  operation_class, active, effective_from, ...)`** — a tenant-scoped
+  configuration table owned by the resolver, not by `internal/risk`.
+  Tenant-scoped, `ENABLE` + `FORCE` RLS, composite FKs, per-command
+  policies, audited on change (SEC §S-2.4 class 3).
+- **Risk consumes it read-only through one narrow accessor** exposed by the
+  resolver package. Risk defines no enablement table, no flag column and no
+  `StaffRole` (RISK §2.4, respected).
+- **Write permission** follows `PermAssetAuthorizationWrite`'s precedent:
+  tenant-scoped, granted to `RoleTenantAdmin`, never `RolePlatformAdmin`
+  (SEC §S-1.7).
+- **It is buildable now** and is not blocked on any HDR item.
+- Until it exists, the fallback is RISK §2.4a's fixed activation order plus
+  RISK §2.2's enumeration as a hard `qa`-asserted gate. That is weaker but
+  acceptable, and is **not** a blocker on the resolver.
+
+RISK **R-2** (no shadow / observe / dry-run `RuleStatus`) is likewise
+accepted and binding, including the explicit trap that `RuleRiskSignal` is
+not a usable shadow mode because `internal/casino`'s `classifyRiskOutcome`
+collapses REVIEW into a block.
+
+### 4.3 Casino per-game blocklist (K-3) — remediation spec in §9
+
+Broken out into its own section because it is the one place where this
+synthesis materially corrects a prior phase's recommendation.
+
+### 4.4 The three-layer non-forgeability mechanism (SEC §S-1.3), adopted
+
+Binding on every jurisdiction-consuming enforcement path. All three layers
+are required; one or two is not compliance.
+
+- **Layer 1 — no parse path.** The field is absent from every
+  enforcement-facing request struct (`decodeJSON`'s
+  `DisallowUnknownFields`, re-verified at
+  `internal/httpserver/json.go:14`, then makes a submitted value a **400**
+  for free). The resolution type is non-forgeable (§2.3). Resolution inputs
+  are exactly: tenant from `tenant.FromContext`; the player account from
+  the authenticated subject or a tenant-scope-validated path parameter; the
+  brand **derived from the player account row** (the existing pattern,
+  `internal/httpserver/casino_handlers.go:183`); and the operation class,
+  a **compile-time constant at each call site, never a string from the
+  wire**.
+- **Layer 2 — context cross-check.** The resolver asserts the transaction's
+  `app.tenant_id` GUC against the tenant it resolves for, by the same query
+  `assertTenantScope` uses. Every consuming gate re-asserts the
+  resolution's `tenantID` / `brandID` / `playerAcctID` binding against its
+  own authenticated context before use. A resolution for player X is
+  **structurally unusable** in an operation for player Y.
+- **Layer 3 — database.** FK to `jurisdictions` on every persisted value;
+  write-once immutability triggers on operation snapshots (migration 0042's
+  pattern); and the migration-0033 precedent —
+  `CHECK (jurisdiction_code IS NULL)` plus the handler comment at
+  `internal/httpserver/withdrawal_policy_handlers.go:39-47` — for any
+  surface not yet resolution-active. SEC is right that
+  `withdrawal_policy_handlers.go` is the **reference implementation** of
+  this contract already in the repository; `backend` should cite it, not
+  the Bonus handlers.
+
+### 4.5 Payments (K-8) — explicitly NOT resolved in this phase
+
+`payments` has not had its design phase. This document **does not** specify
+the payments contract and no implementer should infer one. What is recorded
+for that phase:
+
+- RECON **C-3(d)** is **two defects, not one** (RISK §1.4): an inverted
+  absent-value semantic (`SupportedCountries` empty means *permissive*,
+  `internal/payments/types.go:188-191`), **and** a code-space confusion
+  (ISO-3166 country vs. `jurisdictions.code`).
+- Routing dimension 2 is still `TODO(jurisdiction)`
+  (`internal/payments/orchestrator.go:83-103`), re-confirmed at `89af4c0`.
+- Any country→jurisdiction mapping is an **explicit, stored, audited
+  mapping** (§2.4), is an **authorization surface**, and requires
+  `security` review when proposed (SEC §S-10).
+- `withdrawal_policies`' `CHECK (jurisdiction_code IS NULL)` (migration
+  0033) is **not lifted in Stage 4I**. Lifting it is a deliberate, reviewed
+  act in the phase that has a real jurisdiction to write, not a side effect
+  of the resolver existing. RECON Q-16 is thereby answered for Stage 4I:
+  **explicitly deferred, not silently deferred.**
+
+---
+
+## 5. The audit and provenance model
+
+SEC **AR-1** and **AR-2** are adopted as binding, unchanged in substance.
+
+### 5.1 Two artefacts, deliberately separate
+
+- **`jurisdiction_resolutions`** — its own append-only, tenant-scoped
+  table. One row per resolution attempt, **including failures**
+  (`unresolved` and `refused` are recorded outcomes, never absent rows).
+- **`audit_log`** — receives an entry for exactly four event classes
+  (SEC §S-2.4): `jurisdiction_registry.*` (writes to `jurisdictions` /
+  `licences` / `tenant_jurisdiction_configs`);
+  `jurisdiction_fact.corrected` (a staff correction to a player's
+  determining fact); `jurisdiction_resolution_active.changed` (RISK
+  §2.4b's toggle); and `jurisdiction.resolver_unavailable`, **aggregated**.
+
+Per-request denials caused by an unresolved jurisdiction are **not**
+individually written to `audit_log`. They are recorded by the existing
+per-domain denial mechanisms plus the `jurisdiction_resolutions` row.
+
+**SEC §S-2.5's amplification guard is binding**:
+`jurisdiction.resolver_unavailable` is emitted at most once per
+`(tenant, operation_class, time_bucket)` with a count. A per-request entry
+would let one degraded dependency, or one attacker, write unbounded
+immutable rows into the platform's most retention-sensitive table —
+`audit_log` is append-only by trigger (`audit_log_deny_mutation`, migration
+0014) and cannot be pruned by the application even deliberately.
+
+### 5.2 `jurisdiction_resolutions` — the finalized column set
+
+SEC §S-2.2's field list is adopted with four `architect` additions, marked
+**[new]**.
+
+| Column | Type / constraint | Notes |
+|---|---|---|
+| `id` | `UUID PK` | AR-2's FK target |
+| `tenant_id` | `UUID NOT NULL` | RLS key |
+| `brand_id` | `UUID NULL`, composite FK `(brand_id, tenant_id) → brands (id, tenant_id)` | NULL is legitimate (§1.1) |
+| `player_account_id` | `UUID NULL`, composite FK `(player_account_id, tenant_id)` | NULL for tenant-subject and config-time resolutions |
+| `operation_class` | enum, `NOT NULL` | Compile-time constant at the call site, never from the wire |
+| `requested_by_actor_type` / `requested_by_actor_id` | `staff` \| `player` \| `service` \| `system`, matching `audit_log`'s existing CHECK vocabulary (migration 0014) | For `system`, actor id NULL and the **job name** recorded (`deposit_sweep`, `cashback_scheduler`) |
+| `outcome` | `resolved` \| `unresolved` \| `refused`, `NOT NULL` | §2.2 axis 1 |
+| **`reason`** **[new]** | enum, `NOT NULL` | §2.2 axis 2. SEC's list did not carry the diagnostic axis; without it `unresolved` is uninvestigable |
+| `jurisdiction_code` | `TEXT NULL`, FK → `jurisdictions (code)` | `CHECK (jurisdiction_code IS NOT NULL) = (outcome = 'resolved')` |
+| `selected_basis` | enum `NULL` | §3.1. `CHECK (player_account_id IS NULL OR selected_basis <> 'tenant_licence')` — §3.2 |
+| `considered_bases` | enum values **with per-basis status only** (`selected` / `rejected_lower_precedence` / `unavailable` / `disagreed`) | **Never the values those bases held** (§5.3). Projected out for a caller lacking `verification:read` |
+| `confidence_class` | enum `NULL` | The bucket the resolver applied for this operation class. **Never a raw vendor score** |
+| `resolver_policy_version` | `TEXT NOT NULL` | Without it a decision made under an older precedence rule is not reproducible |
+| `registry_version` / `config_effective_from` | | Which `tenant_jurisdiction_configs` / `licences` row was in force |
+| `as_of` | `TIMESTAMPTZ NOT NULL` | Load-bearing for §6.4's staleness bound |
+| `created_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | Append-only insert time |
+
+Three further **[new]** `architect` requirements on the table:
+
+1. **No `UNIQUE` constraint keyed on an operation.** More than one
+   resolution may legitimately exist for one operation — today because a
+   retry produces a second attempt, and in future because §7's MROC
+   produces one per candidate jurisdiction. A uniqueness constraint added
+   now for tidiness would foreclose §7 and require a migration on an
+   append-only table to undo. This is the **only** MROC-related schema
+   requirement in Stage 4I (§7.4).
+2. **No composition column in Stage 4I.** `composition_group_id` and any
+   equivalent is deferred until HDR-J-4's record-of-authority half is
+   answered; the non-foreclosure requirement above is sufficient.
+3. **`operation_class` is seeded with only the classes that have a Stage 4I
+   consumer**: `play`, `catalogue_availability`, `bonus_issuance`,
+   `bonus_conversion`. `deposit`, `withdrawal`, `kyc_aml_determination`
+   and `reporting` are added by the phase that builds their consumer, not
+   speculatively now (CLAUDE.md's no-uncontrolled-scope rule).
+
+### 5.3 What must NEVER be recorded
+
+SEC §S-2.3's governing principle is adopted verbatim and is the rule from
+which the list below is derivable:
+
+> **A resolution record persists the DECISION and REFERENCES to its
+> evidence. It never persists the evidence VALUES.** Reconstruction is
+> performed by re-reading the referenced evidence under that evidence's own
+> access control and retention rule — never by reading a copy made into a
+> store with different access control and a longer retention.
+
+**An implementation that records any of the following is a blocking
+finding.** This extends `docs/security/security-architecture.md` §B1.4's
+existing never-log list, which continues to apply in full.
+
+1. `kyc_documents.issuing_country`'s **value** — never, including when it
+   was a corroborating input. Record `basis = kyc_corroboration`,
+   `evidence_ref = kyc_documents.id`, the `document_type` (needed, because
+   §1.2 requires types to be treated differently), and the agreement flag.
+2. The player's **declared or verified residence country value**.
+3. **Nationality**, in any form.
+4. Any **raw IP, geo-coordinate, city, ISP or geolocation-vendor payload**
+   as a jurisdiction-evidence field. Record `basis = geo_signal` and
+   `evidence_ref = sessions.id` or the request id, and nothing more.
+5. **`persons.person_key_hash` or any cross-brand identity correlator.**
+   `jurisdiction_resolutions` is tenant-readable; `persons` is deliberately
+   platform-scoped (ADR 0015). Putting the correlator there hands every
+   tenant a join key for correlating the same human across other operators'
+   brands — a cross-tenant privacy leak with no attacker required, and the
+   most likely accidental version of the mistake because a future
+   implementer will want it for reporting.
+6. Full name, date of birth, address, phone, email, document number,
+   document image or document URL.
+7. **Vendor raw responses**, verbatim. Store the mapped enum plus the
+   vendor's opaque reference id.
+8. Provider or vendor **credentials, HMAC secrets or API keys**.
+
+The one thing that *is* recorded and approximately discloses residence is
+the resolved `jurisdiction_code` itself. That is unavoidable and correct:
+the jurisdiction **is** the decision, RECON C-5 is the finding that not
+recording it is a defect, and a decision that cannot be reconstructed
+cannot be defended to a regulator.
+
+---
+
+## 6. RLS, isolation, lock ordering, and caching
+
+### 6.1 Universal schema rules (SEC §S-3.1, adopted)
+
+Binding on `jurisdiction_resolutions` and on `jurisdiction_resolution_active`:
+
+- `tenant_id UUID NOT NULL`; `ENABLE ROW LEVEL SECURITY` **and** `FORCE ROW
+  LEVEL SECURITY` (FORCE is the load-bearing half — the application role
+  owns these tables).
+- No `BYPASSRLS` assumption anywhere. Every read/write goes through
+  `db.Pool.WithTenant` / `WithPlayerScope` / `WithPrincipalScope` /
+  `WithoutTenant`. **A resolver query on a bare pool connection reads zero
+  rows under FORCE RLS**, which an unwary implementation reports as
+  "no residence on file" — a silent-wrong-answer bug that becomes a
+  fail-closed denial with a misleading cause. It must **error**, not return
+  `unresolved` (`qa` cases B-2 / G-3).
+- **Composite foreign keys, never plain ones** (migration 0043's
+  precedent).
+- Per-command policies. **No `FOR ALL` policy. No DELETE policy. No UPDATE
+  policy on `jurisdiction_resolutions`.** Append-only enforced by a
+  `BEFORE UPDATE OR DELETE` trigger (`ledger_deny_mutation()`'s pattern),
+  not only by the absence of a policy — a trigger is not bypassed by table
+  ownership, which is precisely why `audit_log_immutable` exists. Plus a
+  `BEFORE TRUNCATE ... FOR EACH STATEMENT` deny trigger.
+- **No player-read policy on `jurisdiction_resolutions`.** A player who can
+  read it learns which signal the platform trusted and which it ignored —
+  directly attack-useful (§6.3). Anything player-facing is a **curated
+  server-side projection**, never a passthrough.
+- **Staff read is its own permission**, not implied by `audit:read`,
+  `bonus:read` or `player:read`; `considered_bases` is projected out for a
+  caller lacking `verification:read`.
+- **`jurisdictions` stays platform-scoped with no RLS** (SEC §S-3.2). It is
+  a platform fact and an FK target every tenant-scoped transaction must
+  read. Only the **write** side changes: one new **platform-only**
+  permission on `RolePlatformAdmin`, following `PermCasinoCatalogueManage`'s
+  exact precedent (`internal/auth/permission.go:76-82`). Per-tenant
+  jurisdiction configuration writes follow `PermAssetAuthorizationWrite`'s
+  precedent instead (tenant-scoped, `RoleTenantAdmin`). **No other
+  permission and no new role is authorized.**
+
+### 6.2 The nine-scenario contract — binding on `qa`
+
+SEC §S-3.3's table is adopted as the **binding test contract** for `qa`'s
+later phase. Restated compactly; SEC §S-3.3 carries the full reasoning and
+the enforcement-point citations, and SEC §S-6's seven adversarial
+categories (~30 cases) remain mandatory in full.
+
+| # | Scenario | Required behaviour | Must NOT happen |
+|---|---|---|---|
+| 1 | **Cross-tenant** — tenant B's valid staff token requests tenant A's resolution | RLS returns zero rows; handler surfaces **404**. A tenant-A resolution is also unusable as an input to any tenant-B operation even if an id were guessed | 200 with data; an error message distinguishing "exists but forbidden" from "does not exist"; a resolution crossing a tenant boundary in-process |
+| 2 | **Cross-brand** — a brand-B-scoped token consumes a brand-A resolution, same tenant | Composite FK makes cross-tenant brand attachment impossible; within a tenant, a brand-mismatched resolution is **refused, not silently widened** (§1.1) | A brand-A resolution accepted for a brand-B operation because the tenant matched |
+| 3 | **Player-scope read** — `WithPlayerScope` reads `jurisdiction_resolutions` | **Zero rows.** No player-read policy | A "my account" endpoint passing the row through instead of projecting |
+| 4 | **Forged jurisdiction payload** | **400** from `DisallowUnknownFields`; the server-resolved value is used regardless | The supplied value reaching `GateParams`, `RiskRequest.JurisdictionCode`, `CheckEligibility`'s jurisdiction argument, or any snapshot |
+| 5 | **Forged tenant payload** | Tenant from `tenant.FromContext` only; the resolver performs `assertTenantScope`'s identical assertion | A resolution produced for a tenant the caller never proved it was |
+| 6 | **Forged brand payload** | Brand derived server-side from the player account row; a body brand on an enforcement path is refused | A body brand narrowing or widening a layer-5 answer or a brand-scoped rule match |
+| 7 | **Stale context** | Every resolution carries `as_of` and `resolver_policy_version`; the enforcement point rejects a resolution older than the operation class's configured maximum age and **fails closed**. A *frozen* per-round snapshot and a *stale* resolution are different things and are distinguishable in the record | An unbounded-age resolution reused indefinitely. *(Which jurisdiction **governs** is HDR-J-4 and is not asserted by this test.)* |
+| 8 | **Conflicting source** | Deterministic precedence keyed per §3.4; the disagreement is recorded (`status = disagreed`, values omitted); where precedence does not determine an answer the outcome is **`unresolved(irreconcilable_bases)`** | A gate re-resolving or overriding; a silent "prefer the permissive"; a silent "prefer the most recent" |
+| 9 | **Unavailable resolver** | `refused(dependency_unavailable)`; the operation **fails closed** with a distinguishable *internal* reason code; `audit_log` receives an **aggregated** entry; the **player-facing** response does not distinguish it from "blocked" (§6.3) | Falling back to a previously-known-good answer (the prohibition `internal/assetregistry/authorization.go:30-42` already states); falling back to a tenant/brand default (**that is HDR-J-1 and is not an engineering decision**); one `audit_log` row per failed request |
+
+### 6.3 The oracle rule — binding platform-wide, not only on casino
+
+SEC §S-5.3's ruling is adopted and **generalized beyond casino**, because
+the reasoning is not casino-specific:
+
+> **Internal distinctness between `jurisdiction_unresolved` and
+> `jurisdiction_blocked` is preserved in full** — in sentinels, denial
+> records, `jurisdiction_resolutions.reason`, and operator-facing logs.
+> **The player-facing response MUST NOT distinguish them**: one status
+> code, one message, one body shape, on every player-facing surface.
+
+The distinction that carries attack value is precisely the one that tells
+an attacker whether their manipulation (a VPN, a proxy, a changed declared
+residence, a timing trick) *registered*. Distinguishing
+"jurisdiction-related denial" from "game not available" **is** permitted —
+the blocklist is not a secret, the enumeration value is low, and there is
+genuine consumer-transparency value in it. This is a graded ruling, not
+blanket paranoia.
+
+`qa` asserts this on the **serialised response**, not on the sentinel, and
+also coarsely on **timing** (SEC cases E-1 / E-2).
+
+### 6.4 H-2 — the read-only constraint, and its documentation placement (TENSION 2 RESOLVED)
+
+**Substance — binding, from RISK §6.3 as elevated by SEC §S-4:**
+
+> **The jurisdiction resolver is READ-ONLY on the evaluation path.** It
+> takes no `FOR UPDATE`, acquires no advisory lock, and performs no write
+> of any kind while any gate in the chain is running. Any persistence of a
+> resolution happens either entirely outside the guarded transaction, or
+> strictly **after** the whole gate chain completes and immediately before
+> or with the effecting write.
+
+SEC's elevation is accepted: this is not only a lock-ordering correctness
+hazard, it is a **remotely triggerable availability attack**. Both
+candidate lock holders are player-keyed; "two concurrent operations on the
+same player" is two browser tabs; and under
+`internal/risk/evaluator.go:363-377`'s fail-closed contract the resulting
+`40P01` is a **DENY of a real bet**. A zero-cost, client-driven action that
+produces deterministic denials on the money path is a denial-of-service
+primitive.
+
+**Therefore the constraint is enforced structurally, not by comment**
+(SEC §S-4.2 — and SEC's argument is correct: a doc comment is worth exactly
+what `LaunchGameParams.JurisdictionCode`'s "MUST be resolved server-side…
+NEVER from client-supplied input" was worth, which is nothing, since its
+one production caller never sets the field at all):
+
+1. **`backend`:** `Resolve` does not accept a `pgx.Tx`. It accepts a narrow
+   read-only interface exposing only `Query` and `QueryRow`. A write inside
+   the resolver then **does not compile** — the only compile-time guarantee
+   of the three.
+2. **`qa`:** an integration test resolves inside `BEGIN ... READ ONLY` and
+   asserts success.
+3. **`qa`:** an integration test queries `pg_locks` after a resolution and
+   asserts no advisory lock and no row-level lock attributable to it —
+   catching a `SELECT ... FOR SHARE` that mechanisms 1 and 2 both permit.
+
+**Preferred position:** resolution runs **before the guarded transaction
+begins**, not merely before the first gate within it (SEC §S-4.3). The
+TOCTOU window this creates is accepted on two conditions, both binding:
+(a) the **resolution id is persisted inside the guarded transaction**
+(AR-2), so the window is never invisible; and (b) **`as_of` staleness is
+bounded per operation class and exceeding it fails closed** — without which
+"resolve outside the transaction" silently becomes "resolve once at login
+and reuse forever."
+
+RISK **H-1** (eager, exactly-once, strictly before the first rule is
+examined) and **H-3** (no network I/O of any kind between Risk's
+`pg_advisory_xact_lock` and commit) are adopted unchanged.
+
+**Documentation placement — ADJUDICATED IN SECURITY'S FAVOUR.** RISK §6.3
+proposed adding a **"rule 0"** to `docs/architecture/34-economic-operation-
+identity.md` §5.3's canonical lock order. SEC §S-4.5 recommended recording
+it as a **precondition** instead. SEC's placement governs, for SEC's own
+reason, which is correct: §5.3's rules 1–4 are an **in-transaction lock
+order**, and the entire content of H-2 is that jurisdiction resolution is
+**not in that order at all** — it holds no lock and ideally is not even in
+the transaction. "Rule 0" invites a future author to ask what could
+legitimately precede it; "this never participates" cannot be reordered,
+which is a strictly stronger statement.
+
+`architect` has recorded this in `docs/architecture/34-economic-operation-
+identity.md` §5.3 in this phase, as a precondition paragraph above the
+numbered list. With it in place the total order RISK wanted holds —
+jurisdiction (no lock) → Risk advisory lock → EOI row lock — and AB-BA
+stays structurally unreachable, which is the property §5.3 was written to
+guarantee.
+
+Confirmed, independently: casino's existing `CreateLaunchSession` write
+(`internal/casino/launch.go:124`) is already compliant — it is a
+post-gate-chain write. **Nothing in `internal/casino` changes for H-2.**
+The hazard is created only by how the resolver is built.
+
+### 6.5 Caching — CA-1 CONFIRMED BINDING (TENSION 6 RESOLVED)
+
+SEC **CA-1** is confirmed: **`backend` does not build a jurisdiction
+resolution cache in Stage 4I.** This is a decision for this stage, not a
+deferral, and all four of SEC's grounds are re-confirmed as factual about
+the repository at `89af4c0`: there is no cache infrastructure to use; a
+cache would create H-3's hazard where none exists; it would undo §9.4's
+availability property (resolver availability would become database
+availability **and** cache availability, on the casino launch path); and no
+measured performance requirement for one has been stated anywhere in this
+stage's chain.
+
+**Terms of any future reversal, binding now so a future implementer
+inherits them rather than rediscovering them:** SEC §S-7.2 in full — read
+only before the guarded transaction; never cache a negative outcome
+(negative caching on a fail-closed control is a DoS multiplier); never
+cache a basis whose invalidating write the platform cannot observe (which
+excludes geo-derived bases by construction); never cache evidence; never
+key without the tenant (a cache is the one place on this platform where RLS
+does not protect you); write-driven invalidation with TTL as a backstop
+only; **a cache hit may never authorise an operation that a fresh
+resolution would refuse**; and historical reads come from the persisted
+record via AR-2's FK, never from the cache and never from a recomputation.
+
+**`architect` adds one procedural term:** reversing CA-1 requires an ADR
+under `docs/decisions/` and a `security` review before implementation. It
+is not a `backend` implementation choice.
+
+---
+
+## 7. HDR-J-4's enforcement mechanism — TENSION 1 ADJUDICATED
+
+### 7.1 The disagreement, precisely
+
+IC §3 proposed, as a safe engineering default for the enforcement half of
+HDR-J-4: when an operation's jurisdiction changes between its stages,
+**"apply the stricter of the two applicable rule sets."** RISK §7 endorsed
+the **posture** (tighten, never weaken) and **dissented on the mechanism**,
+proposing instead: **merge OUTCOMES, never rule sets** — evaluate twice and
+take the most restrictive `Outcome` by the evaluator's own
+`DENY > REVIEW > ALLOW` precedence. SEC §S-9 took no position, observing
+that RISK's objection "appears correct on the code," and required only that
+**the record must show both** when they differ.
+
+### 7.2 Ruling — RISK's mechanism governs; IC's posture is retained
+
+**IC's posture is adopted. IC's mechanism is withdrawn.** RISK's three
+objections are each independently sufficient, and the second is decisive:
+
+1. **Rule sets are not totally ordered.** Jurisdiction A may carry a lower
+   `max_amount` on `casino_bet` and no cumulative cap; B the reverse. There
+   is no "stricter" rule set — only a stricter *outcome for this specific
+   request*. IC's mechanism presupposes an ordering that does not exist,
+   so it is not merely risky, it is **not computable**.
+2. **Merging rule sets manufactures a fail-closed outage.** Two
+   equally-specific `RuleConfigurableLimit` rules for the same
+   `(limit_kind, time_window)`, one per jurisdiction, tie on
+   `specificity()` and trip `ErrConflictingRules`
+   (`internal/risk/evaluator.go:26`, `:488`) — because `specificity()`
+   cannot break a tie between two rules narrowing the **same** dimension to
+   **different** values. IC's mechanism would therefore convert a
+   consumer-protective tightening into a **denial of the whole operation**.
+   A mechanism whose failure mode is "the protective case breaks" is worse
+   than the problem it solves.
+3. **It contradicts a recorded decision.** ADR 0031 §9 states: "A
+   `RiskRequest` carries exactly one `JurisdictionCode` value, never a
+   set." `architect` is the only role that may change a recorded decision,
+   and declines to: a mechanism preserving the invariant exists, so there
+   is no case for weakening it.
+
+This is a mechanism adjudication, not a posture reversal. IC's underlying
+compliance judgment — *tighten, never weaken; and the fact that two
+jurisdictions were in play must be visible* — is **correct and is
+preserved in full** by the mechanism below. IC is not overruled on
+anything inside IC's own authority.
+
+### 7.3 The canonical mechanism — Most-Restrictive-Outcome Composition (MROC)
+
+> When an operation has **two candidate jurisdictions** — a frozen one and
+> a current one, or any other pair — each **jurisdiction-dependent gate**
+> in that operation's chain is evaluated **once per candidate**, and the
+> operation takes the **most restrictive outcome** by **that gate's own
+> declared total order** on its own outcome type. **Configuration is never
+> merged.**
+
+Three binding elaborations, generalizing RISK's Risk-specific proposal to
+every gate, which is `architect`'s part of the work:
+
+1. **Every jurisdiction-dependent gate declares a total order on its own
+   outcome type, with "most restrictive" at the top.** Risk already has
+   one: `DENY > REVIEW > ALLOW` (`internal/risk/evaluator.go:518-529`).
+   AssetAuthorization's is `ineligible > eligible`. The casino blocklist's
+   is `blocked > not blocked`. **A gate that cannot declare a total order
+   on its outcomes must deny when two candidates are in play** — no
+   exceptions, no ad-hoc tie-breaks.
+2. **§3.5's one-operation-one-jurisdiction invariant is not violated**,
+   because each *evaluation* still carries exactly one code. MROC composes
+   *evaluations*; it never constructs a request carrying a set.
+3. **The composition is recorded.** One `jurisdiction_resolutions` row per
+   candidate (which is why §5.2 forbids an operation-keyed `UNIQUE`
+   constraint), and the gate's own decision record names which candidate
+   produced the restrictive outcome. This discharges SEC's "the record must
+   show both when they differ" requirement.
+
+**Two disclosed costs, carried forward from RISK §7 for whoever eventually
+builds this:** the cumulative-usage ledger query
+(`internal/risk/cumulative.go:262-312`) runs twice; and both Risk
+evaluations hash to the **same** advisory-lock key, because the key omits
+jurisdiction (`evaluator.go:337-340`), so the second acquisition is a no-op
+on an already-held transaction-scoped lock — correct, but it needs a
+`qa`-owned concurrency test if MROC is ever built.
+
+### 7.4 What Stage 4I actually does about MROC: nothing but non-foreclosure
+
+**MROC is a forward-binding specification. It is NOT built in Stage 4I.**
+No two-candidate case can arise: there is no resolver output for a player,
+so there is no second candidate to compose with.
+
+The **only** Stage 4I obligation is the non-foreclosure requirement already
+stated in §5.2: no `UNIQUE` constraint keyed on an operation, and no
+composition column added speculatively. Building MROC now would be exactly
+the scope expansion CLAUDE.md forbids — and would also pre-empt the half of
+HDR-J-4 that is genuinely human.
+
+**What remains genuinely human in HDR-J-4** (unchanged from IC §3's split,
+which is correct): which jurisdiction's *record* is authoritative for a
+regulator-facing question — which jurisdiction's SAR obligation attaches,
+which data-residency rule governs the retained record. MROC answers what
+the platform *enforces*. It does not, and must not be read to, answer what
+the platform *reports*. §10, item J-4.
+
+### 7.5 C-6 resolved: temporal grain (closing RECON Q-4)
+
+RECON **C-6** found casino and Bonus disagree on the temporal grain of an
+operation's jurisdiction, with no platform rule reconciling them.
+
+**Ruling: both are correct, and the missing piece was never the grain — it
+was the absence of a record.**
+
+- **Resolution is per operation.** A checkpoint that carries its own
+  regulatory moment (issue, activate, convert, resolve-held-disposition) is
+  its own operation and resolves its own jurisdiction. Bonus's
+  per-checkpoint behaviour stands.
+- **An operation may FREEZE its resolution for a bounded composite
+  lifecycle** — a casino round is the existing example (ADR 0031 §9,
+  enforced by migration 0042's immutability trigger). Freezing is
+  legitimate, is **explicit**, and is **recorded** as frozen so that
+  "frozen by design" and "stale" are distinguishable in the record
+  (`qa` case C-4).
+- The real defect C-6 named is that a Grant issued under one jurisdiction
+  and converted under another had **nothing detecting it**. AR-2 fixes
+  exactly that: each checkpoint persists its own resolution reference, so
+  the divergence becomes **detectable**. What the platform should *do*
+  about a detected divergence is HDR-J-4's human half plus §7.3's
+  mechanism — not a temporal-grain rule.
+
+---
+
+## 8. C-4 removal — TENSION 5 CONFIRMED SETTLED
+
+SEC's ruling reads as clean and non-contradicted, and this synthesis
+carries it forward **binding and unamended**.
+
+### 8.1 JV-1 / JV-2 / JV-3, confirmed
+
+- **JV-1.** Every jurisdiction value is exactly one of: **(a)** a scope
+  declaration on a configuration row (staff-authored by design,
+  legitimately in a request body, controlled by RBAC + FK + audit + R-2b's
+  precondition); or **(b)** a resolved fact about an operation
+  (**server-resolved only**). **No request body, header, query parameter or
+  path segment — staff- or player-supplied — may ever carry a class (b)
+  value.**
+- **JV-2.** The Bonus admin `jurisdiction_code` fields are **removed**, not
+  kept-and-cross-validated. SEC's five arguments are accepted; the
+  decisive one is factual and free: `decodeJSON` already calls
+  `DisallowUnknownFields` (re-verified at
+  `internal/httpserver/json.go:14`), so deleting the field turns a
+  submitted `jurisdiction_code` into a **400**, not a silent ignore.
+  Removal is strictly better than cross-validation on the very axis
+  cross-validation was proposed to win, at zero implementation cost.
+  Cross-validation would additionally manufacture a third state
+  (resolver-unavailable-but-field-present) whose "just trust what the
+  operator typed" resolution is a one-line change under incident pressure
+  with no security tripwire.
+- **JV-3.** `createRuleRequest.JurisdictionCode`
+  (`internal/httpserver/risk_handlers.go:127`), `AuthorizeScope`'s
+  jurisdiction, and `casino_games.jurisdiction_blocklist` on the catalogue
+  upsert are **class (a) and stay.** They acquire their own controls
+  (R-2b's precondition; §9.5's before/after audit).
+
+### 8.2 Precision, independently re-verified
+
+SEC's correction to RECON C-4 — **four structs across five handler
+surfaces**, not five structs — is **confirmed by `architect`'s own grep at
+`89af4c0`**:
+
+| # | Struct | Field | Surfaces |
+|---|---|---|---|
+| 1 | `issueManualGrantRequest` | `internal/httpserver/bonus_handlers.go:399` | `newIssueManualGrantHandler` **and** `newIssueManualGrantRequestHandler` (`bonus_domain_ops_handlers.go:402`) — **two endpoints, one struct** |
+| 2 | `resolveHeldDispositionRequest` | `bonus_handlers.go:633` | `newResolveHeldDispositionHandler` |
+| 3 | `activateManualGrantRequest` | `bonus_domain_ops_handlers.go:497` | `newActivateManualGrantHandler` |
+| 4 | `executeBulkGrantJobRequest` | `bonus_domain_ops_handlers.go:719` | `newExecuteBulkGrantJobHandler` |
+
+`bonus_domain_ops_handlers.go:546` and `:806` are **call sites**, not struct
+fields. The distinction matters for execution: removing the field from
+struct 1 changes **two endpoints at once**, and a plan written against
+"five structs, five endpoints" mis-sequences. `qa` still writes **five**
+A-1 cases, one per routed surface, because routing is what a regression
+breaks.
+
+### 8.3 Sequencing — binding
+
+**JV-2's removal and the resolver call site land in the same change, per
+handler. Never before.** SEC §S-1.4's reasoning is confirmed: the
+staff-supplied field is today the **only** way a non-empty jurisdiction
+reaches a gate in production (RECON P-3), so removing it first converts
+"manual grant issuance works when staff supply a code" into "manual grant
+issuance always denies." That is fail-closed and therefore not a security
+regression, but it is an availability regression on a staff remediation
+path and must be a deliberate, sequenced choice.
+
+**`architect`'s honest addition, which changes how `bonus-engine` should
+read this:** in Stage 4I the resolver will return `unresolved(no_signal)`
+for every player-scoped operation (§11.3). So for Bonus, JV-2-plus-resolver
+lands the *same functional outcome* as JV-2 alone — manual grant issuance
+denies either way. The difference is that after JV-2-plus-resolver the
+denial is **recorded, explained, and non-forgeable**, instead of being an
+undocumented consequence of a deleted field. `bonus-engine` should
+therefore sequence JV-2 **deliberately and visibly**, with the availability
+consequence stated to the orchestrator in advance — not discover it.
+
+### 8.4 SEC-4I-F2 — the interim control, confirmed with one tightening
+
+SEC's interim answer is **confirmed correct**: until JV-2 lands for a given
+handler, that handler's audit metadata records the staff-supplied
+jurisdiction **explicitly labelled as staff-supplied** —
+`"jurisdiction": {"code": "MT", "basis": "staff_supplied"}` — on
+`bonus_grant.manual_issue`, the manual-activate, the held-disposition
+resolve, and the bulk-execute paths.
+
+The `basis` label is not cosmetic: it is what lets a later reader
+distinguish records written before JV-2 from records written after, without
+which the post-resolver audit trail is contaminated by values of unknown
+provenance.
+
+**`architect`'s tightening, binding:**
+
+1. `staff_supplied` is a value in **the same `basis` enum the resolver
+   uses** (§3.1) — not a free string invented at the audit site. One
+   vocabulary, one place it is defined.
+2. **`Resolve` must be structurally incapable of producing it** (§3.1).
+   An interim label that the resolver could later emit would defeat its own
+   purpose.
+3. This is **not** a licence to keep the field. It is a control on the
+   window before JV-2, and it ends when JV-2 lands for that handler.
+
+This is the same one-line improvement RISK §3.2 recommends for
+`evaluateAndAuditRisk`'s denial metadata, and both are correct
+independently of Stage 4I's outcome.
+
+---
+
+## 9. Casino blocklist remediation (K-3) — TENSION 4, with a correction
+
+### 9.1 The correction neither prior phase made
+
+RISK §5.2 item 1 requires removing the `params.JurisdictionCode != nil &&`
+guard at `internal/casino/orchestrator.go:138`. SEC §S-5.1 confirmed it as
+written. **Applied literally, in Stage 4I, that change denies 100% of
+casino launches** — because the resolver will return
+`unresolved(no_signal)` for every player (§11.3), and a literal fail-closed
+blocklist check denies on every unresolved jurisdiction.
+
+SEC §S-5.2 came close: it noted that after the fix "every casino launch now
+has a hard dependency on jurisdiction resolution succeeding," and argued
+this is acceptable because resolver availability equals database
+availability. That argument is sound **about availability** and is adopted
+(§9.4) — but it assumes resolution can *succeed*. In Stage 4I it cannot,
+for any player, because its only inputs are blocked on HDR-J-3.
+
+**The fix is RISK's own §1.4 invariant, which RISK did not apply to its own
+§5.2 recommendation.** §4.0's canonical wording says: *"Where a consumer can
+determine that no such policy is in force, it may proceed — and must deny
+the moment one is."* For the blocklist, the jurisdiction-dependent policy
+is **the game's own blocklist array**, and whether one is in force is
+determined **without needing a jurisdiction at all**: it is in force iff the
+array is non-empty. Re-verified at migration
+`0035_create_casino_integration_foundation.up.sql:50` —
+`jurisdiction_blocklist TEXT[] NOT NULL DEFAULT '{}'`, so the array is
+never NULL and emptiness is a clean, total test.
+
+### 9.2 The canonical K-3 contract
+
+```go
+// CANONICAL CONTRACT — sketch for `casino` to implement properly, not
+// final code. `casino` owns the implementation and the naming.
+//
+// The blocklist is a jurisdiction-DEPENDENT control. Per the canonical
+// absent-value invariant (canonical-model §4.0), it fails closed when a
+// policy is in force and it cannot be evaluated — and only then.
+if len(game.JurisdictionBlocklist) > 0 {
+    // A policy IS in force for this game. Jurisdiction is now required.
+    if resolution.Outcome() != jurisdiction.Resolved {
+        return denied(DenialCodeJurisdictionUnresolved) // internal code
+    }
+    if containsString(game.JurisdictionBlocklist, resolution.Code()) {
+        return denied(DenialCodeJurisdictionBlocked)    // internal code
+    }
+}
+// Empty blocklist: no jurisdiction-dependent policy is in force for this
+// game, so the check is genuinely not applicable — NOT skipped-because-
+// we-lack-an-input. These are different things and only the second is a
+// fail-open.
+```
+
+**Why this is not a weakening of RISK's or SEC's requirement.** The
+fail-open RISK and SEC correctly identified is: *a jurisdiction-dependent
+control is silently not run because an input is missing.* That is fully
+closed here — whenever a game carries a blocklist, an unresolved
+jurisdiction **denies**. What is not done is deny for games that carry no
+blocklist at all, where there is no control to run and never was.
+
+**And it gives casino the same rollout-safety property RISK §2.1/§2.2 gives
+Risk.** The blast radius becomes statically enumerable before activation,
+with one query:
+
+```sql
+-- Pre-activation enumeration for K-3. `qa` asserts this, per RISK §2.4a's
+-- precedent for risk_rules — an assertion, not a checklist item.
+SELECT id, provider_id, provider_game_id, status, jurisdiction_blocklist
+FROM   casino_games
+WHERE  cardinality(jurisdiction_blocklist) > 0;
+```
+
+If that returns zero rows, fail-closing K-3 changes **no** launch outcome
+for **any** tenant. RECON §5's warning that closing the producer gap would
+"convert a fail-open control into a live one" is thereby made *measurable*
+rather than feared.
+
+### 9.3 The full remediation spec — six items
+
+Synthesizing RISK §5.2's four and SEC §S-5.3/§S-5.4/§S-5.5's additions into
+one list for `casino`'s phase.
+
+| # | Requirement | Source | Binding? |
+|---|---|---|---|
+| **K3-1** | Replace the `params.JurisdictionCode != nil &&` guard with §9.2's contract: armed per game with a non-empty blocklist, fail-closed within it | RISK §5.2(1), **corrected** by §9.1 | Binding |
+| **K3-2** | A **distinguishable internal** outcome for "could not determine jurisdiction," never reusing `ErrJurisdictionBlocked`. A player refused because the platform could not determine their jurisdiction has not been "blocked in their jurisdiction" — consistent with casino's own stated discipline at `orchestrator.go:109-112` | RISK §5.2(1), SEC §S-5.1(2) | Binding |
+| **K3-3** | **One resolution, one variable, three consumers.** Resolve once above line 138 and feed the blocklist check, the `RiskRequest`, and `CreateLaunchSession` from that single value. Today line 138 dereferences `params.JurisdictionCode` while lines 166-169 derive a separate local — same value, two dereferences, only one persisted | RISK §5.2(2); required independently by §3.5 | Binding |
+| **K3-4** | **Demo mode decided explicitly in code, with its reason in a comment** — never inherited from whether a line sits above or below the `params.Mode == ModeReal` branch at `:179`. `architect`'s ruling on the default: §9.6 | RISK §5.2(3), SEC §S-5.5 | Binding |
+| **K3-5** | **Return-shape consistency: use `LaunchGameResult{Denied: true, DenialCode: …}`** for both jurisdiction outcomes, matching the RG and Risk gates at `orchestrator.go:155-157` / `:201-204`, rather than the `error` shape `ErrJurisdictionBlocked` uses today. RISK had no preference; `architect` chooses, because routing both through one shape is what makes §6.3's byte-identical player-facing response easy to guarantee in one place instead of two. The existing `ErrJurisdictionBlocked` HTTP mapping at `casino_handlers.go:204-206` collapses into that one place | RISK §5.2(4); `architect` decides | Binding |
+| **K3-6** | **Collapse `jurisdiction_unresolved` and `jurisdiction_blocked` into one player-facing response** — same status, same message, same body. Internal distinctness preserved in full (K3-2) | SEC §S-5.3, generalized at §6.3 | Binding |
+
+Plus one item that is correct today, independent of the resolver, and
+should land with this work: **add `jurisdiction_code` and `licensing_mode`
+to `evaluateAndAuditRisk`'s denial metadata**
+(`internal/casino/orchestrator.go:383-392`). Today a denial by a
+jurisdiction-scoped `HARD_LIMIT` produces an audit record from which the
+jurisdiction cannot be recovered (RISK §3.2).
+
+### 9.4 The availability property — binding on `backend`
+
+SEC §S-5.2's requirement is adopted: **the Stage 4I resolver has no
+external network dependency.** Its inputs are Postgres rows only
+(`player_accounts`, `kyc_verifications`, `tenant_jurisdiction_configs`,
+`jurisdictions`, `licences`, `tenants.licensing_model`). With that
+property, resolver availability **equals** database availability, and
+fail-closing K-3 adds no new failure domain: if the database is down, no
+launch was going to succeed anyway. That property holds trivially today and
+must be held **on purpose**, not by accident. CA-1 (§6.5) is what keeps it
+true.
+
+**Forward constraint, flagged and not decided:** the day a geolocation or
+KYC vendor becomes an input to resolution (RECON Q-7), that vendor becomes
+a **hard dependency of the casino launch path** — a third party can then
+stop the lobby. That is a materially different operational and security
+posture requiring its own decision, its own timeout/degradation design, and
+its own security review. It must not arrive as an implementation detail of
+a provider adapter. Recorded in §12.2 as a named future consideration.
+
+### 9.5 SEC-4I-F3 is a HARD PREREQUISITE — confirmed and reinforced
+
+**Confirmed: `casino_game.upserted`'s audit gap blocks fail-closing K-3.**
+`internal/httpserver/casino_admin_handlers.go:92-97` writes
+`Metadata: {"provider_id", "provider_game_id", "status"}` with **no
+before/after state and specifically no `jurisdiction_blocklist`**, even
+though `req.JurisdictionBlocklist` is written on line 87.
+
+§9.2's contract makes this prerequisite **stronger**, not weaker. Under
+§9.2 the blocklist write is *precisely the act that arms the control* for
+that game: a platform admin adding one code to one game's array transitions
+that game from "no jurisdiction policy in force, launches proceed" to
+"jurisdiction required, unresolved denies" — which in Stage 4I means
+**every** launch of that game denies, for every tenant. A control with that
+blast radius that leaves no diff is not operable, and the remediation path
+(restore the previous array) requires a value the platform did not keep.
+
+**Binding: SEC-4I-F3 is fixed before K-3 goes live.** `casino_game.upserted`
+records before/after for `jurisdiction_blocklist` and for the other
+enforcement-relevant catalogue fields (`status`, `supported_assets`,
+`demo_supported`). CLAUDE.md's audit rule already requires before/after for
+a mutating administrative action; the current entry does not satisfy it.
+
+SEC's *non-binding* recommendation — that a blocklist addition is a
+denial-widening change and a reasonable candidate for the existing
+`bonus_change_requests` / `asset_change_requests` dual-control pattern —
+is carried forward as a **named future consideration** (§12.2), not a
+Stage 4I requirement. `architect` agrees with SEC's own reasoning for not
+requiring it: the platform already accepts single-actor platform-admin
+catalogue writes, and CLAUDE.md's no-uncontrolled-scope rule applies to
+security additions too.
+
+### 9.6 Demo mode — `architect`'s ruling on the default
+
+RISK §5.2(3) required `casino` to decide this rather than inherit it. SEC
+§S-5.5 leaned toward applying the blocklist to demo, reasoning that
+offering and advertising are regulated activities in several real regimes
+independently of whether money moves.
+
+**`architect`'s ruling, which deliberately rules on the *default and the
+burden of proof* rather than on the regulatory question:**
+
+> **Demo launches are jurisdiction-bearing by default.** The blocklist is a
+> **catalogue-availability** fact — *may this title be offered in this
+> market* — and the platform's answer to "do you offer this game in market
+> X" must not depend on which endpoint is asked. Any exemption of the demo
+> surface requires an **explicit recorded decision with a stated reason**,
+> not silence and not line ordering.
+
+`architect` deliberately does **not** assert that demo play *is* a
+regulated offering in any given jurisdiction — that is a legal
+interpretation, it varies by jurisdiction, and it belongs to the
+permitted-markets family of questions (HDR-J-6). What is ruled is the
+engineering default in the absence of that answer, and the fail-closed
+default is the conservative one.
+
+Under §9.2's contract this ruling is also **cheap**: it only bites for
+games that carry a non-empty blocklist, which §9.2's enumeration makes
+measurable before activation. SEC's concern that applying to demo "doubles
+the availability blast radius" is therefore bounded by the same query.
+
+`casino` retains the right to propose an amendment with reasons; that is an
+`architect`-reviewable change recorded in `docs/decisions/`, not a
+casino-local choice.
+
+---
+
+## 10. Human Decision Register — consolidated recommendation
+
+`architect` **does not decide any of these.** What follows is a
+recommendation to the orchestrator about **which to formally open and route
+to the human**, with one-line reasons, consolidating IC §3, RISK §7 and
+SEC §S-9.
+
+### 10.1 Recommendation
+
+| Item | Recommendation | One-line reason |
+|---|---|---|
+| **HDR-J-1** — may a missing player jurisdiction ever fall back to the tenant's/brand's? | **OPEN NOW** | It is the difference between the Bonus deposit/cashback sweeps staying fail-closed forever and issuing under an assumed jurisdiction — a compliance event if wrong, and the one item with a live, business-visible blocked path behind it |
+| **HDR-J-2** — which player-side signal is legally authoritative for which operation class? | **OPEN NOW** | It is the *content* of the precedence configuration, without which the resolver has rules-engine shape and no rules; the *keying mechanism* (§3.4) is settled engineering and is buildable meanwhile |
+| **HDR-J-3** — is a player residence/location/nationality field a privacy decision needing its own lawful basis and retention rule? | **OPEN NOW — highest leverage of the six** | It gates whether the resolver has **any** player-side input at all; until it is answered every player-scoped resolution is `unresolved` and Bonus stays blocked (§11.3) |
+| **HDR-J-4** — what happens to obligations already in flight when a player's jurisdiction changes? | **OPEN NOW, NARROWED to the record-of-authority half** | The enforcement half is adjudicated here (§7, MROC) and needs no human input; what remains genuinely human is which jurisdiction's *record* is authoritative for a regulator-facing obligation |
+| **HDR-J-5** — for a BYOL (`own_licence`) tenant, whose determination governs? | **REGISTER NOW, but mark NOT-YET-URGENT — do not route for an answer** | No BYOL tenant exists, and `tenant_asserted` being a reserved-but-unproducible `basis` (§3.1) plus `licensing_mode`-scoped platform ceilings (RISK §7) keep **both** answers open at zero cost — so this can be answered when a BYOL tenant is first contemplated, without foreclosure |
+| **HDR-J-6** — which markets is the first B2C (Anjouan-licensed) brand permitted to serve? | **OPEN NOW** | `licences.permitted_markets` is empty, and a resolver that returns a jurisdiction is worthless without a permitted-market list to validate it against; CLAUDE.md already classifies this as a stop-and-ask |
+
+**Net recommendation: formally open five (J-1, J-2, J-3, J-4-narrowed,
+J-6); register J-5 with its non-foreclosure note and do not spend human
+attention on it yet.**
+
+### 10.2 Constraints on any answer, collected in one place
+
+These were each recorded by a prior phase and are restated here so that
+whoever drafts the register carries them as constraints, not as decisions:
+
+- **On any J-1 "yes":** a fallback must be a **distinct, recorded `basis`**
+  (`platform_fallback`, §3.1), must never be injected into
+  `RiskRequest.JurisdictionCode` as if it were a resolved player
+  jurisdiction (RISK §7 — `Rule.matches` compares a bare string and cannot
+  tell the difference), and the consuming gate must be able to refuse it
+  per operation class. SEC §S-9 adds the persistence half: a fallback
+  indistinguishable from a resolved value, once written into an
+  immutability-trigger-protected snapshot, becomes a **permanent,
+  unfalsifiable record of a fact that was never established** — worse than
+  no record, because it looks authoritative to a regulator.
+- **On any J-2 answer:** it is configuration that changes enforcement, so
+  it needs a version (`resolver_policy_version`), an audit entry on change,
+  and a four-eyes posture at least as strong as `bonus_approval_policies`'.
+  It must be keyed per §3.4, which is the only shape that does not smuggle
+  in a global default while appearing configuration-driven.
+- **On any J-3 "yes":** the attribute is **projected out of every existing
+  read that does not need it** (explicit `SELECT` lists, never `SELECT *`)
+  and reading it requires its own permission rather than riding on
+  `player:read` (SEC §S-9). `docs/architecture/16-privacy.md` needs a
+  corresponding update recording the field, its sensitivity classification
+  and its access controls (IC §1). Both are implementation costs of a
+  "yes" and the orchestrator should surface them **before** the decision,
+  not after.
+- **On any J-4 answer:** the record must show **both** jurisdictions when
+  they differ (SEC §S-9) — discharged by §7.3's per-candidate resolution
+  rows.
+- **On any J-5 "yes":** a tenant-supplied determination is a distinct
+  `basis` (`tenant_asserted`), never merged into a platform-resolved one,
+  and platform-licence ceilings continue to be scoped by `licensing_mode`
+  — a value resolved server-side from `tenants.licensing_model` that a
+  tenant cannot influence (RISK §7, SEC §S-9, and already the documented
+  discipline at `internal/risk/types.go:176-185`).
+- **On any J-6 answer:** validating a resolved jurisdiction against
+  `licences.permitted_markets` is an **authorization** check, is not a Risk
+  rule, and must be distinguishable in its reason code from a limit breach
+  and from a blocklist hit (RISK §7, SEC §S-9). A licence-scope violation
+  surfacing as a generic denial is an incident nobody can triage.
+
+### 10.3 Explicitly untouched
+
+Per RECON §7 and every subsequent phase: G-2, the
+`OpenBetSelfExclusionPolicy` default, the mixed/bonus-funded cashout
+policy, FD-1, and the Grant-cancellation-after-conversion question are
+**not** selected, narrowed, defaulted, or referenced as settled by this
+document.
+
+---
+
+## 11. Migration and schema implications — buildable NOW vs. BLOCKED
+
+This is `backend`'s work list. The split is the point of the section: a
+great deal of Stage 4I is genuinely buildable with **no** human decision,
+and a small, precisely-named part is not.
+
+### 11.1 Buildable NOW — blocked by no HDR item
+
+| # | Item | Owner | Notes |
+|---|---|---|---|
+| **B-1** | **`jurisdictions` registry write surface** + one new **platform-only** permission on `RolePlatformAdmin` | `backend` (role wiring subject to `security` review before landing) | RECON P-11 / §5: registry-writability is a **hard prerequisite** of any resolver — today a resolver could not return a value that satisfies any FK. The *mechanism* is independent of HDR-J-6's *content* |
+| **B-2** | **`jurisdiction_resolutions` table** with the §5.2 column set, §6.1's RLS/trigger contract, composite FKs, and the two CHECK constraints (§3.2, §5.2) | `backend` | The single highest-value artefact of Stage 4I: it converts four silent absent-value behaviours into one explicit, recorded, queryable one |
+| **B-3** | **The resolver package skeleton** — non-forgeable `Resolution` (§2.3), read-only `ReadOnlyQuerier` (§6.4), the 3-outcome + reason contract (§2.2), the closed `basis` enum with `staff_supplied` / `platform_fallback` structurally unproducible (§3.1), `assertTenantScope`-equivalent cross-check (§4.4 Layer 2) | `backend` | Resolves `unresolved(no_signal)` for every player-scoped operation in Stage 4I. That is the correct, honest behaviour — see §11.3 |
+| **B-4** | **`tenant_licence` basis** — read `tenants.licence_id → licences.jurisdiction_id`, bounded to tenant-subject operations by a DB `CHECK` (§3.2) | `backend` | The first production read of `licences` / `tenants.licence_id` in the platform's history (RECON §10) |
+| **B-5** | **Precedence-configuration table shape**, keyed `(tenant licensing jurisdiction, operation_class)` per §3.4 | `backend` | The **shape** is buildable; the **rows** are blocked on HDR-J-2 |
+| **B-6** | **`jurisdiction_resolution_active (tenant_id, operation_class, …)`**, tenant-scoped, audited on change, with a narrow read-only accessor for Risk | `backend` (resolver-owned), consumed by `risk` | Supplies the fact RISK §2.4b's `CreateRule` precondition reads. Risk defines no table, flag or role for it |
+| **B-7** | **R-2b's authoring-time precondition** in `risk.CreateRule` | `risk`, after `security` review | Moves the failure from evaluation time (denying real players mid-round, RISK §1.6) to authoring time (a 400 to a staff member). Structurally eliminates RISK §1.6's stuck-round hazard |
+| **B-8** | **SEC-4I-F2 interim audit metadata** on the four Bonus paths, `basis: staff_supplied` per §8.4 | `bonus-engine` | Correct independently of Stage 4I's outcome |
+| **B-9** | **SEC-4I-F3 fix** — before/after on `casino_game.upserted` | `casino` | **Hard prerequisite** of K-3 (§9.5) |
+| **B-10** | **`evaluateAndAuditRisk` denial metadata** gains `jurisdiction_code` + `licensing_mode` | `casino` | One line, zero risk, correct today (RISK §3.2) |
+| **B-11** | **Delete `bonus.resolveJurisdictionID`**; Bonus takes both representations from one `Resolution` | `bonus-engine` | Closes RISK §3.3's live latent fail-open (§2.5). Lands with B-3 |
+| **B-12** | **K-3 remediation** per §9.3, after B-9 | `casino` | §9.2's contract makes its blast radius statically enumerable before activation |
+| **B-13** | **`qa`'s SEC §S-6 suite** — all seven categories; plus §9.2's and RISK §2.2's enumeration assertions; plus §6.4's `READ ONLY` and `pg_locks` tests | `qa` | Mandatory for the stage gate. The subset depending on player-side signals is written against the `unresolved` path and re-run when HDR-J-3 resolves |
+
+### 11.2 BLOCKED — each on a specific, named HDR item
+
+| Item | Blocked on | Precisely what is blocked |
+|---|---|---|
+| `player_accounts.declared_residence_country` + `captured_at`; `kyc_verifications.verified_residence_country` + `source_document_id` | **HDR-J-3** | The **migration itself**. Not the schema placement (IC §1's `player_accounts`-not-`persons` answer is pre-decided and stands), and not the column shapes (IC §5's sketch). Only the act of collecting |
+| Any nationality field | **HDR-J-3** + a demonstrated operation need | Both conditions, not either |
+| `geo_signal` as a producible basis | **HDR-J-3** + RECON Q-7 + §9.4's forward constraint | A geolocation vendor on the launch path is a separate decision |
+| Precedence-configuration **rows** | **HDR-J-2** | The table shape (B-5) is not blocked |
+| `platform_fallback` as a producible basis; unblocking the Bonus sweeps | **HDR-J-1** | The enum value exists and is inert (§3.1) |
+| Permitted-market **validation content**; lifting `withdrawal_policies`' `CHECK (jurisdiction_code IS NULL)` | **HDR-J-6** (content) and payments'/withdrawal's own phases (mechanism) | Deferred **explicitly**, closing RECON Q-16 |
+| `tenant_asserted` as a producible basis | **HDR-J-5** | Reserved; zero-cost non-foreclosure (§3.1) |
+| MROC composition machinery | **HDR-J-4**'s record-of-authority half | Only §5.2's non-foreclosure requirement applies now (§7.4) |
+| `registration_channel` on `player_accounts` | **Nothing — but NOT authorized for Stage 4I** | IC §5 correctly notes it is not PII and not HDR-gated. But it has **no consumer**, and CLAUDE.md's no-uncontrolled-scope rule applies: it is recorded as a deferred future consideration (§12.2), not built |
+
+### 11.3 The honest Stage 4I outcome — stated plainly, per CLAUDE.md
+
+**With HDR-J-3 unanswered, the resolver has no player-side input. Every
+player-scoped resolution in Stage 4I therefore returns
+`unresolved(no_signal)`.**
+
+Consequences, stated so no one discovers them:
+
+- **Bonus remains blocked.** `CheckEligibility` layer 6 still denies
+  unconditionally (§4.1), and it is right to. Stage 4I does **not** unblock
+  the Bonus deposit sweep, the cashback scheduler, or manual grant
+  issuance. Anyone reading "jurisdiction resolution foundation" as
+  "Bonus unblocked" is reading it wrong.
+- **Risk's behaviour does not change at all.** RISK §2.1's invariance proof
+  is the reason: `Rule.matches` reads `req.JurisdictionCode` only inside
+  `if r.JurisdictionCode != ""`, and `missingScopeContext` fires only when
+  a rule scopes jurisdiction and the request does not. A resolver that
+  always returns unresolved supplies the same empty string Risk already
+  receives. **Strictly non-regressive, for every tenant, for every
+  operation.**
+- **Casino's behaviour does not change** for any game with an empty
+  blocklist — which, per §9.2's enumeration, is expected to be all of them.
+- **Payments and withdrawal are untouched**; their dimensions stay off.
+
+**So what does Stage 4I actually deliver?** Precisely this: the platform
+stops having *four mutually incompatible, mostly-silent* answers to
+"jurisdiction is absent" and starts having **one explicit, recorded,
+non-forgeable, auditable, fail-closed** one — with the registry writable,
+the record queryable, the interface fixed, the RLS contract enforced, the
+staff-supplied side channel removed, and the fail-open (K-3) closed. That
+is a real and substantial foundation. It is **not** a jurisdiction
+capability, and this document does not claim one. Per CLAUDE.md: software
+capability and legal/regulatory approval are different things, and so are
+*infrastructure for a determination* and *the determination itself*.
+
+---
+
+## 12. Residual items
+
+### 12.1 Findings status
+
+| Id | Status |
+|---|---|
+| **SEC-4I-F1** (staff-supplied `required_approvals` on held-disposition resolve, HIGH) | **Tracked separately, NOT Stage 4I scope, NOT re-analyzed here.** Confirmed still unfixed at `89af4c0` — a concurrent dispatch is handling it on this branch and `architect` deliberately did not touch those files. It does not block Stage 4I; `security` records it as launch-blocking if unresolved, and it must not be closed by Stage 4I's completion report |
+| **SEC-4I-F2** (manual-grant jurisdiction metadata, MEDIUM) | Interim control **confirmed and tightened** (§8.4). Owner `bonus-engine`, item B-8 |
+| **SEC-4I-F3** (`casino_game.upserted` audit gap, MEDIUM) | **Confirmed as a hard prerequisite of K-3** and reinforced by §9.2's contract (§9.5). Owner `casino`, item B-9 |
+
+### 12.2 Named future considerations — recorded, not built
+
+Per CLAUDE.md's no-uncontrolled-scope rule, each is recorded here rather
+than built, and none is a Stage 4I requirement:
+
+1. **A vendor input to resolution makes a third party a hard dependency of
+   the casino launch path** (§9.4). Needs its own decision, timeout /
+   degradation design, and security review. Must not arrive as an
+   implementation detail of a provider adapter.
+2. **Dual control on a blocklist addition** (§9.5) — a denial-widening
+   platform-wide write. SEC explicitly declined to require it; `architect`
+   agrees.
+3. **`registration_channel` on `player_accounts`** (§11.2) — not PII, not
+   HDR-gated, genuinely a named gap in docs 05/11, and with no consumer.
+4. **A bounded Risk observability signal** — emit an observation only when
+   a jurisdiction-scoped rule matched and did not breach (RISK §2.5).
+   Deliberately not built; auditing ALLOW decisions would write an audit
+   row on the bet hot path for every bet.
+5. **A player-facing curated jurisdiction projection** (§6.1) — at most
+   "your account is registered under jurisdiction X," never a passthrough
+   of a resolution record.
+
+### 12.3 Owed `architect` document corrections
+
+Named, with their exact content, and deliberately **not** performed in this
+phase except where noted:
+
+1. **`docs/architecture/34-economic-operation-identity.md` §5.3** — the
+   H-2 precondition. **DONE in this phase** (§6.4).
+2. **`docs/governance/ownership.md`** — add a jurisdiction row recording
+   §2.1's ownership split (interface `architect`, implementation
+   `backend`, precedence content `identity-compliance`). Owed; it should
+   land with `backend`'s implementation so it describes something that
+   exists.
+3. **`docs/architecture/15-jurisdiction-and-licensing-model.md`** —
+   RECON **C-7**: doc 15 names five enforcement points for
+   `TenantJurisdictionConfig`, zero of which are wired, and its
+   `allowed_currencies` role is superseded by `asset_authorizations`
+   (§1.3). Owed; deliberately deferred until §11.1's work lands, because
+   correcting it now would document a resolver that does not exist.
+4. **`docs/decisions/0037-asset-currency-registry-and-fx-conversion-
+   architecture.md` open question 7** — stale: it flags the absence of a
+   product axis on layer 6, but migration 0045 shipped a `product` column
+   with most-specific-match semantics and `CheckEligibility` passes
+   `scope.Product` through (RECON C-7, §1 concept 7). Owed as a staleness
+   marker.
+5. **`docs/security/security-architecture.md`** — fold SEC §S-2, §S-3 and
+   §S-6 in as a numbered section (SEC's own routing request). Owed; it
+   should land with or after `backend`'s implementation so the section
+   describes enforced controls rather than intended ones.
+
+### 12.4 Cross-references, for the avoidance of doubt
+
+Where this document is silent on a detail, the prior phase document
+governs: **IC** for identity-side placement and KYC evidence semantics;
+**RISK** for `internal/risk`'s own contracts (R-1, R-2) and the H-1/H-3
+hazards; **SEC** for the full RLS contract, the ~30-case adversarial test
+specification, and the caching reversal conditions; **RECON** for the
+from-code inventory. Where this document **is** explicit, it governs.
+
+---
+
+**Labelled status, per CLAUDE.md's no-fake-completion rule:**
+**`NOT IMPLEMENTED`.** No resolver, no `jurisdiction_resolutions` table, no
+registry write surface, no player-side jurisdiction signal, and no
+jurisdiction value populating any of the platform's seventeen
+jurisdiction-bearing schema elements exists at this commit. The
+`jurisdiction_code` fields at `internal/httpserver/bonus_handlers.go:399`
+/ `:633` and `bonus_domain_ops_handlers.go:497` / `:719` are unchanged and
+still client-supplied; `internal/casino/orchestrator.go:138`'s blocklist
+check is unchanged and still fail-open; `bonus.resolveJurisdictionID` still
+collapses empty and unknown codes; and SEC-4I-F1, SEC-4I-F2 and SEC-4I-F3
+are all still open. This document is the specification those changes are
+implemented against, and nothing more.
