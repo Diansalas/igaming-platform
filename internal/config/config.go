@@ -99,6 +99,22 @@ type Config struct {
 	// is an operational tuning value, not a fact this package asserts on
 	// its own).
 	RGEnumerationStalledThreshold time.Duration
+
+	// Stage 4H-B1 Wave 3 Phase 3 (bonus-engine): the three scheduled
+	// Bonus Engine jobs (internal/bonus.RunDepositSweepSchedulerLoop/
+	// RunCashbackSchedulerLoop/RunExpirySweepSchedulerLoop), mirroring
+	// ReconciliationInterval/RGEnumerationSweepInterval's own
+	// configurable-cadence pattern exactly. Defaults chosen per each
+	// job's own consequence of running late (ledger-accounting-model.md
+	// §7.18's own text): a deposit-bonus grant delayed a few minutes is a
+	// minor player-experience lag, not a compliance/financial-drift risk,
+	// so BonusDepositSweepInterval defaults to a relatively tight 5
+	// minutes; cashback settlement and expiry are inherently window/date
+	// -grained operations where an hourly cadence (matching
+	// ReconciliationInterval's own default) is more than sufficient.
+	BonusDepositSweepInterval  time.Duration
+	BonusCashbackSweepInterval time.Duration
+	BonusExpirySweepInterval   time.Duration
 }
 
 // Load reads configuration from the process environment. It returns an
@@ -124,6 +140,9 @@ func Load() (Config, error) {
 		ReconciliationInterval:        time.Hour,
 		RGEnumerationSweepInterval:    15 * time.Minute,
 		RGEnumerationStalledThreshold: 15 * time.Minute,
+		BonusDepositSweepInterval:     5 * time.Minute,
+		BonusCashbackSweepInterval:    time.Hour,
+		BonusExpirySweepInterval:      time.Hour,
 	}
 
 	if v := os.Getenv("DATABASE_MAX_CONNS"); v != "" {
@@ -176,6 +195,37 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config: RG_ENUMERATION_STALLED_THRESHOLD_SECONDS must be positive")
 		}
 		cfg.RGEnumerationStalledThreshold = time.Duration(n) * time.Second
+	}
+
+	if v := os.Getenv("BONUS_DEPOSIT_SWEEP_INTERVAL_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid BONUS_DEPOSIT_SWEEP_INTERVAL_SECONDS: %w", err)
+		}
+		if n <= 0 {
+			return Config{}, fmt.Errorf("config: BONUS_DEPOSIT_SWEEP_INTERVAL_SECONDS must be positive")
+		}
+		cfg.BonusDepositSweepInterval = time.Duration(n) * time.Second
+	}
+	if v := os.Getenv("BONUS_CASHBACK_SWEEP_INTERVAL_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid BONUS_CASHBACK_SWEEP_INTERVAL_SECONDS: %w", err)
+		}
+		if n <= 0 {
+			return Config{}, fmt.Errorf("config: BONUS_CASHBACK_SWEEP_INTERVAL_SECONDS must be positive")
+		}
+		cfg.BonusCashbackSweepInterval = time.Duration(n) * time.Second
+	}
+	if v := os.Getenv("BONUS_EXPIRY_SWEEP_INTERVAL_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid BONUS_EXPIRY_SWEEP_INTERVAL_SECONDS: %w", err)
+		}
+		if n <= 0 {
+			return Config{}, fmt.Errorf("config: BONUS_EXPIRY_SWEEP_INTERVAL_SECONDS must be positive")
+		}
+		cfg.BonusExpirySweepInterval = time.Duration(n) * time.Second
 	}
 
 	if cfg.DatabaseURL == "" {

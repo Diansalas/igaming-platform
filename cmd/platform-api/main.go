@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/bonus"
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/db"
@@ -196,6 +197,29 @@ func run() error {
 		rg.RunEnumerationReconciliationSchedulerLoop(ctx, pool, logger, cfg.RGEnumerationSweepInterval, cfg.RGEnumerationStalledThreshold)
 	}()
 
+	// Stage 4H-B1 Wave 3 Phase 3 (bonus-engine): the three Bonus Engine
+	// scheduled jobs ledger-accounting-model.md §7.18.2/§7.18.4 and the
+	// Grant-expiry dependency-map entry specify - each had zero live
+	// caller before this dispatch (docs/governance/wave-3-reconnaissance.md
+	// gap-list items 7, 10-12, 20). Identical per-tenant advisory-lock/
+	// panic-recovery/graceful-shutdown posture as reconciliation's own
+	// loop above and rg's own enumeration sweep - see
+	// internal/bonus/schedulers.go for the shared implementation.
+	var bonusSchedulersWG sync.WaitGroup
+	bonusSchedulersWG.Add(3)
+	go func() {
+		defer bonusSchedulersWG.Done()
+		bonus.RunDepositSweepSchedulerLoop(ctx, pool, logger, cfg.BonusDepositSweepInterval)
+	}()
+	go func() {
+		defer bonusSchedulersWG.Done()
+		bonus.RunCashbackSchedulerLoop(ctx, pool, logger, cfg.BonusCashbackSweepInterval)
+	}()
+	go func() {
+		defer bonusSchedulersWG.Done()
+		bonus.RunExpirySweepSchedulerLoop(ctx, pool, logger, cfg.BonusExpirySweepInterval)
+	}()
+
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           handler,
@@ -256,6 +280,19 @@ func run() error {
 	case <-rgSweepDone:
 	case <-time.After(10 * time.Second):
 		logger.Error("self-exclusion enumeration reconciliation scheduler did not stop within the shutdown timeout")
+	}
+
+	// Identical bounded-wait treatment for the three Bonus Engine
+	// scheduler loops - same reasoning as reconcilerDone/rgSweepDone above.
+	bonusSchedulersDone := make(chan struct{})
+	go func() {
+		bonusSchedulersWG.Wait()
+		close(bonusSchedulersDone)
+	}()
+	select {
+	case <-bonusSchedulersDone:
+	case <-time.After(10 * time.Second):
+		logger.Error("bonus engine scheduler loops did not stop within the shutdown timeout")
 	}
 
 	logger.Info("shutdown complete")
