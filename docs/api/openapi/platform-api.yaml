@@ -1250,6 +1250,466 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # --- Bonus Engine: four-eyes governance, EOI minting, per-domain
+  # activate/publish/execute (Stage 4H-B1 Wave 3 Phase 3) ---
+  #
+  # NOT DOCUMENTED HERE (a pre-existing, disclosed gap this Phase does
+  # not retroactively close): Wave 2's own bonus HTTP surface (POST
+  # /v1/admin/bonus/campaigns, POST /v1/admin/bonus/grants, the
+  # suggestion-review and held-disposition-resolution endpoints,
+  # bonus_handlers.go/bonus_routes.go) was never added to this file
+  # either - this section covers only the NEW endpoints this Phase
+  # introduces.
+  /v1/admin/bonus/change-requests:
+    post:
+      summary: File a four-eyes change request for a dual-controlled bonus operation
+      description: >
+        The ONE generic filing surface for all eight of security-
+        architecture.md §B1.2's dual-controlled bonus operations - the
+        required permission is resolved DYNAMICALLY from the `operation`
+        field (campaign_activate/offer_publish -> bonus_campaign:activate/
+        bonus_offer:manage; manual_grant_issue -> bonus_grant:issue;
+        bulk_job_execute -> bonus_bulk:execute; bonus_adjustment_write ->
+        bonus_adjustment:write; grant_forced_conversion/grant_cancel_completed
+        -> bonus_grant:review/bonus_grant:cancel; held_disposition_resolve
+        -> bonus_held_disposition:resolve).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                operation:
+                  type: string
+                  enum: [manual_grant_issue, bulk_job_execute, bonus_adjustment_write, grant_forced_conversion, campaign_activate, offer_publish, grant_cancel_completed, held_disposition_resolve]
+                target_type: { type: string, description: "e.g. bonus_campaigns, bonus_offers, bonus_grants, bulk_grant_jobs, bonus_held_dispositions" }
+                target_id: { type: string, format: uuid }
+                payload: { type: object, description: "Operation-specific identifying fields the eventual consume call must match exactly (JSONB containment)." }
+                amount_at_request: { type: string, description: "Decimal-string minor units, never a JSON number." }
+                asset_code: { type: string }
+                reason_code: { type: string }
+              required: [operation, target_type, target_id, reason_code]
+      responses:
+        "201":
+          description: Change request filed, state=pending
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BonusChangeRequest"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Caller lacks the permission the named operation requires
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/bonus/change-requests/{requestID}/decide:
+    post:
+      summary: Approve or reject a pending bonus change request
+      description: >
+        Requires the SAME permission the underlying operation itself
+        requires. migration 0063's own DB triggers enforce requester !=
+        approver (distinct Person) and SEP-1 (beneficiary separation for
+        manual_grant_issue/bonus_adjustment_write/grant_forced_conversion/
+        grant_cancel_completed/held_disposition_resolve/bulk_job_execute
+        with a materialized recipient) - a refused decision surfaces as
+        403, never 500.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: requestID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                decision: { type: string, enum: [approve, reject] }
+                reason_code: { type: string }
+                threshold_at_decision: { type: string }
+                amount_at_decision: { type: string }
+              required: [decision]
+      responses:
+        "200":
+          description: Decision recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BonusChangeRequest"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Insufficient permission, self-approval, or SEP-1 beneficiary-separation refusal
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/bonus/economic-operations:
+    post:
+      summary: Mint an EconomicOperationIdentity root (doc 34 §3.1)
+      description: >
+        Bonus Engine's exactly-two mint points: a staff single-Grant
+        authorization (bonus_manual_grant, requires bonus_grant:issue) or
+        a BulkGrantJob authorization (bonus_bulk_grant, requires
+        bonus_bulk:execute). Minted already `approved` by the caller's own
+        authority - doc 34 does not require a separate approval workflow
+        on the EOI object itself for these two consumer types. Idempotent
+        on (tenant_id, idempotency_key) - a retry with the SAME key
+        resolves to the SAME operation_id.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                operation_type: { type: string, enum: [bonus_manual_grant, bonus_bulk_grant] }
+                subject_scope: { type: string, enum: [single_subject, enumerated_set] }
+                subject_ref: { type: string, format: uuid }
+                subject_set_count: { type: integer }
+                asset_code: { type: string }
+                intended_aggregate_value: { type: string }
+                recipient_ceiling: { type: integer }
+                idempotency_key: { type: string }
+                expires_in_seconds: { type: integer, default: 3600 }
+              required: [operation_type, subject_scope, idempotency_key]
+      responses:
+        "201":
+          description: EOI minted (or the existing one, on an idempotent retry)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EconomicOperation"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/bonus/campaigns/{campaignID}/activate:
+    post:
+      summary: Activate a Campaign (four-eyes gated)
+      description: >
+        Requires bonus_campaign:activate AND a pending bonus_change_requests
+        row (operation=campaign_activate, target_id=campaignID, payload
+        `{"action":"activate"}`) with the tenant's configured number of
+        distinct approvals. Consumes the approval and activates atomically.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: campaignID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Campaign activated
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Insufficient permission or four-eyes approval not satisfied
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/bonus/offers:
+    post:
+      summary: Create a Draft Offer under a Campaign
+      description: Requires bonus_offer:manage. Not four-eyes gated (a Draft Offer moves no value) - only offer_publish is.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                brand_id: { type: string, format: uuid }
+                campaign_id: { type: string, format: uuid }
+                campaign_version_id: { type: string, format: uuid }
+                grant_policy: { type: string, enum: [auto_issue, manual_approval_required, code_redeemed, external_signal, manually_assigned] }
+              required: [campaign_id, campaign_version_id]
+      responses:
+        "201":
+          description: Offer created, status=draft
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/bonus/offers/{offerID}/versions:
+    post:
+      summary: Create a new, append-only OfferVersion
+      description: Requires bonus_offer:manage. Every monetary field is a decimal-string minor-unit amount.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: offerID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                min_qualifying_amount: { type: string }
+                max_qualifying_amount: { type: string }
+                first_deposit_only: { type: boolean }
+                eligibility_deposit_methods: { type: array, items: { type: string } }
+                reward_kind: { type: string, enum: [R1, R2, R3, R5, R6] }
+                reward_asset_code: { type: string }
+                reward_calculation: { type: string, description: "Raw JSON object, as a string - e.g. {\"rate_bp\":5000,\"cap_amount\":\"10000\"}." }
+                fulfillment_destination: { type: string, enum: [into_platform_wallet, inside_provider] }
+                funding_source: { type: string }
+                wagering_multiplier_bp: { type: integer }
+                contribution_weight_table: { type: string, description: "Raw JSON object, as a string." }
+                completion_mechanic: { type: string }
+              required: [reward_kind, reward_asset_code, fulfillment_destination, funding_source]
+      responses:
+        "201":
+          description: OfferVersion created
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/bonus/offers/{offerID}/publish:
+    post:
+      summary: Publish an OfferVersion (four-eyes gated)
+      description: >
+        Requires bonus_offer:manage AND a pending bonus_change_requests row
+        (operation=offer_publish, target_id=offerID, payload
+        `{"offer_version_id":"..."}`) with the tenant's configured number
+        of distinct approvals. Pins current_version_id and flips the Offer
+        Active atomically with the consume.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: offerID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                offer_version_id: { type: string, format: uuid }
+              required: [offer_version_id]
+      responses:
+        "200":
+          description: Offer published
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Insufficient permission or four-eyes approval not satisfied
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/bonus/manual-grants:
+    post:
+      summary: Issue a manual grant request (phase 1 - issued, not yet activated)
+      description: >
+        Requires bonus_grant:issue and an already-minted, approved EOI
+        (parent_operation_id). Creates the Grant in status `issued` -
+        deliberately NOT four-eyes gated at this step (T.2: issuance moves
+        no value). File the manual_grant_issue change request against this
+        Grant's own returned id AFTER this call, before calling the
+        activate endpoint below (migration 0063's SEP-1 trigger requires
+        the Grant row to already exist at approval time).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                player_account_id: { type: string, format: uuid }
+                campaign_id: { type: string, format: uuid }
+                campaign_version_id: { type: string, format: uuid }
+                offer_id: { type: string, format: uuid }
+                offer_version_id: { type: string, format: uuid }
+                asset_code: { type: string }
+                funding_source: { type: string }
+                parent_operation_id: { type: string, format: uuid }
+                jurisdiction_code: { type: string }
+              required: [player_account_id, campaign_id, campaign_version_id, offer_id, offer_version_id, asset_code, funding_source, parent_operation_id]
+      responses:
+        "201":
+          description: Grant issued, status=issued
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Insufficient permission, EOI check failed, or the T.2 gate denied (RG/Risk)
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/bonus/manual-grants/{grantID}/activate:
+    post:
+      summary: Activate an issued manual grant (phase 2 - four-eyes AND EOI budget consumed)
+      description: >
+        Requires bonus_grant:issue AND a pending bonus_change_requests row
+        (operation=manual_grant_issue, target_id=grantID, payload matching
+        player_account_id/offer_version_id/asset_code/amount exactly) with
+        the tenant's configured number of distinct approvals. Both the
+        four-eyes consume and the EOI locking-budget consume run inside
+        the SAME PostGateHook, strictly after the T.1 gate chain and
+        strictly before the effecting ledger write.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: grantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                parent_operation_id: { type: string, format: uuid }
+                jurisdiction_code: { type: string }
+                amount: { type: string }
+              required: [parent_operation_id, amount]
+      responses:
+        "200":
+          description: Grant activated
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Four-eyes approval not satisfied, EOI budget exhausted, or the T.1 gate denied
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Grant is not in a state that can be activated
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/bonus/bulk-jobs:
+    post:
+      summary: Create a BulkGrantJob targeting a static player list
+      description: >
+        Requires bonus_bulk:execute. target_kind is restricted to
+        single_player/player_list this Wave (live segment resolution is
+        out of scope - internal/segment does not exist). Idempotent on
+        (tenant_id, idempotency_key) - a resubmission of the identical job
+        spec resolves to the existing job.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                campaign_id: { type: string, format: uuid }
+                offer_version_id: { type: string, format: uuid }
+                target_kind: { type: string, enum: [single_player, player_list] }
+                target_player_account_ids: { type: array, items: { type: string, format: uuid } }
+                idempotency_key: { type: string }
+              required: [campaign_id, offer_version_id, target_kind, target_player_account_ids, idempotency_key]
+      responses:
+        "201":
+          description: Job created (or the existing one, on an idempotent retry)
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/bonus/bulk-jobs/{jobID}/execute:
+    post:
+      summary: Execute an approved BulkGrantJob (four-eyes gated, runs synchronously)
+      description: >
+        Requires bonus_bulk:execute AND a pending bonus_change_requests row
+        (operation=bulk_job_execute, target_id=jobID, payload
+        `{"action":"execute"}`) with the tenant's configured number of
+        distinct approvals. Runs the job SYNCHRONOUSLY within this
+        request (a disclosed, reversible engineering decision - a future
+        background-worker invocation can call the identical job-runner
+        unchanged). Per-item outcomes roll up to the job's own final
+        status (completed | partially_completed | failed).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: jobID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                jurisdiction_code: { type: string }
+                amount: { type: string }
+              required: [amount]
+      responses:
+        "200":
+          description: Job executed
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Insufficient permission or four-eyes approval not satisfied
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   # --- Asset Registry / Asset Authorization (ADR 0037, Stage 4H-B0-R6) ---
   #
   # Split along ADR 0037 §C.1's two tiers: /v1/admin/assets/** is
@@ -1924,6 +2384,34 @@ components:
         description: { type: string }
         created_at: { type: string, format: date-time }
       required: [id, operation, limit_kind, time_window, threshold, rule_kind, action, status, effective_from, created_at]
+    BonusChangeRequest:
+      type: object
+      description: >
+        A dual-controlled bonus operation's own governance record
+        (bonus_change_requests, migration 0063). Immutable except state
+        (pending -> applied|rejected|cancelled).
+      properties:
+        id: { type: string, format: uuid }
+        operation:
+          type: string
+          enum: [manual_grant_issue, bulk_job_execute, bonus_adjustment_write, grant_forced_conversion, campaign_activate, offer_publish, grant_cancel_completed, held_disposition_resolve]
+        target_type: { type: string }
+        target_id: { type: string, format: uuid }
+        state: { type: string, enum: [pending, applied, rejected, cancelled] }
+      required: [id, operation, target_type, target_id, state]
+    EconomicOperation:
+      type: object
+      description: >
+        An EconomicOperationIdentity (economic_operations, doc 34) -
+        Bonus Engine's own authorization-lineage anchor for manual/bulk
+        grant issuance.
+      properties:
+        operation_id: { type: string, format: uuid }
+        root_operation_id: { type: string, format: uuid }
+        operation_type: { type: string, enum: [bonus_manual_grant, bonus_bulk_grant] }
+        approval_state: { type: string, enum: [not_required, pending, approved, rejected, expired, consumed, revoked] }
+        status: { type: string, enum: [open, exhausted, completed, aborted, superseded] }
+      required: [operation_id, root_operation_id, operation_type, approval_state, status]
     Error:
       type: object
       description: Platform-wide error envelope (internal/apierror.Error).
