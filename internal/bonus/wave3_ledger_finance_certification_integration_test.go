@@ -440,3 +440,122 @@ func TestLFCert_CashbackSchedulerPosting_B1AndNetLossArithmetic(t *testing.T) {
 
 	assertReconciliationClean(t, pool, f.tenantID, "after cashback bonus_grant posting")
 }
+
+// TestLFCert_SchedulerAsOfComesFromTheDatabaseClock guards
+// DR-4HB1W3-LF-01 (Stage 4H-B1 Wave 3 Phase 11): the instant the
+// cashback scheduler and the expiry sweep compare their windows against
+// must be the DATABASE's own clock_timestamp(), read inside the same
+// transaction, never Go's time.Now() and never now().
+//
+// The half this test CAN prove deterministically is the "never now()"
+// half, and it is a real regression guard: now() is pinned to
+// transaction start, so a future change replacing clock_timestamp() with
+// now() makes the strict inequality below fail. The "never time.Now()"
+// half is not testable on a single-host rig (the Go process and Postgres
+// share one clock there, so both implementations agree exactly) — see
+// dbClockTimestamp's own doc comment, which states that limitation
+// rather than implying a proof that does not exist.
+func TestLFCert_SchedulerAsOfComesFromTheDatabaseClock(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var txStart time.Time
+		if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&txStart); err != nil {
+			return err
+		}
+		// Force measurable wall-clock progress WITHIN the transaction, so
+		// a now()-based implementation is distinguishable from a
+		// clock_timestamp()-based one.
+		if _, err := tx.Exec(ctx, `SELECT pg_sleep(0.05)`); err != nil {
+			return err
+		}
+		asOf, err := dbClockTimestamp(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if !asOf.After(txStart) {
+			return fmt.Errorf("asOf %s is not strictly after the transaction's own now() %s — "+
+				"the scheduler clock is pinned to transaction start (now()), which doc 10 §2 forbids", asOf, txStart)
+		}
+		var txEnd time.Time
+		if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&txEnd); err != nil {
+			return err
+		}
+		if asOf.After(txEnd.UTC()) {
+			return fmt.Errorf("asOf %s is after a later clock_timestamp() read %s — not a database clock read at all", asOf, txEnd)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+}
+
+// TestLFCert_ExpirySweepWithDatabaseClock_TerminatesExpiredGrant proves
+// the production composition DR-4HB1W3-LF-01 introduces — asOf sourced
+// from dbClockTimestamp, inside the same tenant transaction as
+// RunExpirySweepForTenant — still terminates an already-expired Grant.
+// (RunExpirySweep/RunCashbackSweep, the pool-level entry points this
+// phase changed, are deliberately NOT called directly: they iterate
+// EVERY active tenant in the shared dev database and would mutate other
+// suites' Grants. This asserts the same composition, tenant-scoped.)
+func TestLFCert_ExpirySweepWithDatabaseClock_TerminatesExpiredGrant(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	co := seedCampaignOffer(t, pool, f.tenantID, f.brandID, f.staffID)
+
+	var grantID uuid.UUID
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		g := newTestOfferGrant(f, co, "lfcert-expiry-dbclock")
+		result, outcome, err := IssueAndActivateGenericWageringBonus(ctx, tx, GenericWageringBonusParams{
+			Grant: g, Amount: big.NewInt(1000), ActorType: ActorSystem, JurisdictionCode: f.jurisdictionCode,
+			WageringTimeLimit: durationPtr(10 * time.Millisecond),
+		})
+		if err != nil {
+			return err
+		}
+		if !outcome.Allowed {
+			return fmt.Errorf("activation denied: %+v", outcome)
+		}
+		grantID = result.ID
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed expiring grant: %v", err)
+	}
+	time.Sleep(40 * time.Millisecond)
+
+	var outcome ExpirySweepOutcome
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		asOf, err := dbClockTimestamp(ctx, tx)
+		if err != nil {
+			return err
+		}
+		outcome, err = RunExpirySweepForTenant(ctx, tx, f.tenantID, uuid.Nil, asOf)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("expiry sweep with database clock: %v", err)
+	}
+	if outcome.GrantsTerminated != 1 {
+		t.Fatalf("expected exactly one terminated grant, got %+v", outcome)
+	}
+	if status := readGrantStatus(t, pool, f.tenantID, grantID); status != GrantExpired {
+		t.Fatalf("grant status = %s, want %s", status, GrantExpired)
+	}
+	// A terminal write-down of a still-positive player_bonus balance is
+	// itself a posting: assert B1 on it too, so the expiry path is
+	// certified on a real posting rather than by inspection.
+	s := readPostingForGrant(t, pool, f.tenantID, grantID, ledger.TxBonusForfeiture)
+	assertBalanced(t, s, "expiry-sweep terminal write-down posting")
+	if got := s.byAccountType[string(ledger.AccountPlayerBonus)]; got != -1000 {
+		t.Fatalf("player_bonus net = %d, want -1000 (the full granted amount written down)", got)
+	}
+	if got := s.byAccountType[string(ledger.AccountPromoLiability)]; got != 1000 {
+		t.Fatalf("promo_liability net = %d, want 1000 (the Rule B2 mirror credit)", got)
+	}
+	assertReconciliationClean(t, pool, f.tenantID, "after expiry-sweep terminal write-down")
+}
+
+func durationPtr(d time.Duration) *time.Duration { return &d }

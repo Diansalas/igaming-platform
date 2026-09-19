@@ -255,9 +255,16 @@ type CashbackSchedulerOutcome struct {
 // from a live ledger read and calling IssueAndActivateCashback for every
 // player with a strictly positive net loss in that window.
 //
-// asOf is the caller's own clock_timestamp() read (RunCashbackSweep's
-// job, not this function's own - keeping this function a pure,
-// deterministic query given a fixed instant, easing testing).
+// asOf is supplied by the caller rather than read here, keeping this
+// function a pure, deterministic query given a fixed instant (easing
+// testing). The production caller (RunCashbackSweep) MUST supply the
+// DATABASE's own clock_timestamp(), read inside this same transaction -
+// never Go's time.Now(), and never now() - because every instant asOf is
+// compared against (ledger_transactions.posted_at, below) is written by
+// Postgres, and doc 10 §2's rule is binding. See schedulers.go's
+// dbClockTimestamp (DR-4HB1W3-LF-01, Stage 4H-B1 Wave 3 Phase 11,
+// `ledger-finance`) for why the second clock was a silent
+// under-payment vector, not a cosmetic inconsistency.
 func RunCashbackSchedulerForTenant(ctx context.Context, tx pgx.Tx, tenantID, actorID uuid.UUID, asOf time.Time) (CashbackSchedulerOutcome, error) {
 	var outcome CashbackSchedulerOutcome
 	campaigns, err := listCashbackMatchableCampaigns(ctx, tx, tenantID)

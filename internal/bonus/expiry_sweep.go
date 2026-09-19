@@ -33,9 +33,12 @@ type ExpirySweepOutcome struct {
 }
 
 // RunExpirySweepForTenant finds every Grant for tenantID whose
-// expires_at has passed asOf (asOf is the caller's own clock_timestamp()
-// read - doc 10 §2's already-binding "never now()" rule, kept a pure
-// input here for testability) and terminates it via TerminateGrant with
+// expires_at has passed asOf (kept a pure input here for testability;
+// the production caller RunExpirySweep MUST supply the DATABASE's own
+// clock_timestamp(), read inside this same transaction - never Go's
+// time.Now(), never now() - since expires_at is itself derived from the
+// DB-assigned created_at, doc 10 §2's binding rule and schedulers.go's
+// dbClockTimestamp, DR-4HB1W3-LF-01) and terminates it via TerminateGrant with
 // TerminalResolutionExpired - the EXISTING mechanism (lifecycle.go),
 // which itself already handles the AOE-non-empty case correctly
 // (deferring to pending_settlement rather than a direct terminal write,

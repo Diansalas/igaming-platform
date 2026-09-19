@@ -60,6 +60,56 @@ func allActiveTenantIDs(ctx context.Context, pool *db.Pool) ([]uuid.UUID, error)
 	return ids, err
 }
 
+// dbClockTimestamp reads the DATABASE's own current instant inside tx.
+//
+// DR-4HB1W3-LF-01 (Stage 4H-B1 Wave 3 Phase 11, `ledger-finance`). Both
+// window-elapsed comparisons in this file previously used Go's
+// time.Now() — read ONCE, in the API process, before the tenant loop —
+// while claiming in their own doc comments (and in cashback_scheduler.go
+// / expiry_sweep.go's) that asOf was "the caller's own clock_timestamp()
+// read". That claim was false, and the rule it cites is binding: doc 10
+// §2 (quoted verbatim at types.go's CashbackParams) requires the
+// settlement job's comparison against "now" to read clock_timestamp(),
+// and ledger-accounting-model.md §7.18.4 item 3 restates it.
+//
+// Why the distinction is financial, not cosmetic: every instant these
+// jobs compare AGAINST is written by Postgres — ledger_transactions.
+// posted_at (the boundary of the cashback window's own NetLossAmount
+// ledger read) and bonus_grants.expires_at (derived from the DB-assigned
+// created_at). Comparing a DB-written timestamp against an application
+// host's wall clock is only safe while the two hosts' clocks agree,
+// which nothing on this platform guarantees. With the API host ahead of
+// the database, the cashback scheduler settles a window before it has
+// genuinely elapsed in posted_at terms and permanently excludes every
+// bet posted inside the skew interval (the watermark advances; a window
+// is never revisited) — a silent UNDER-payment in the platform's favour,
+// driven by infrastructure, invisible to both parties. The same skew
+// terminates a Grant before the wagering deadline the player was
+// advertised. Reading the database's own clock, inside the same
+// transaction that reads those timestamps, removes the second clock
+// entirely rather than bounding it.
+//
+// clock_timestamp(), not now(): now() is fixed at transaction start, so
+// a job that re-enters/retries within one transaction would evaluate
+// "has the window elapsed" against a stale instant — the exact failure
+// doc 10 §2 names. TestLFCert_SchedulerAsOfComesFromTheDatabaseClock is
+// the regression guard for that half, and it genuinely fails if this
+// query is changed to now().
+//
+// Disclosed honestly: the time.Now() half of the failure mode above is
+// deployment-topology-dependent (it requires the Go process and Postgres
+// to be on hosts with skewed clocks) and therefore CANNOT be reproduced
+// by a failing test on a single-host test rig. That half of this change
+// is made because the code contradicted its own binding rule, not on the
+// strength of a regression test that could never exist.
+func dbClockTimestamp(ctx context.Context, tx pgx.Tx) (time.Time, error) {
+	var t time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&t); err != nil {
+		return time.Time{}, fmt.Errorf("bonus: read database clock: %w", err)
+	}
+	return t.UTC(), nil
+}
+
 // tryAdvisoryLockedTenantJob runs fn for tenantID inside its own
 // tenant-scoped transaction, guarded by a pg_try_advisory_xact_lock keyed
 // on lockNamespace+tenantID - two overlapping ticks for the SAME tenant
@@ -147,10 +197,16 @@ func RunCashbackSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger) e
 	if err != nil {
 		return fmt.Errorf("bonus: cashback scheduler: list tenants: %w", err)
 	}
-	asOf := time.Now().UTC()
 	for _, tenantID := range tenantIDs {
 		var outcome CashbackSchedulerOutcome
 		acquired, err := tryAdvisoryLockedTenantJob(ctx, pool, tenantID, "bonus_cashback_scheduler", func(ctx context.Context, tx pgx.Tx) error {
+			// DR-4HB1W3-LF-01: the database's own clock, read inside the
+			// SAME transaction as the posted_at-bounded NetLossAmount
+			// reads it gates. See dbClockTimestamp.
+			asOf, err := dbClockTimestamp(ctx, tx)
+			if err != nil {
+				return err
+			}
 			var runErr error
 			outcome, runErr = RunCashbackSchedulerForTenant(ctx, tx, tenantID, systemSchedulerActorID, asOf)
 			if runErr != nil {
@@ -199,10 +255,16 @@ func RunExpirySweep(ctx context.Context, pool *db.Pool, logger *slog.Logger) err
 	if err != nil {
 		return fmt.Errorf("bonus: expiry sweep: list tenants: %w", err)
 	}
-	asOf := time.Now().UTC()
 	for _, tenantID := range tenantIDs {
 		var outcome ExpirySweepOutcome
 		acquired, err := tryAdvisoryLockedTenantJob(ctx, pool, tenantID, "bonus_expiry_sweep", func(ctx context.Context, tx pgx.Tx) error {
+			// DR-4HB1W3-LF-01: expires_at is derived from the DB-assigned
+			// created_at, so the instant it is compared against must come
+			// from the same clock. See dbClockTimestamp.
+			asOf, err := dbClockTimestamp(ctx, tx)
+			if err != nil {
+				return err
+			}
 			var runErr error
 			outcome, runErr = RunExpirySweepForTenant(ctx, tx, tenantID, systemSchedulerActorID, asOf)
 			if runErr != nil {
