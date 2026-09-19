@@ -59,6 +59,13 @@ var ErrGrantAlreadyExists = errors.New("bonus: a grant already exists for this (
 // transition.
 var ErrIllegalTransition = errors.New("bonus: illegal grant state transition")
 
+// ErrWageringContributionAssetMismatch is returned by
+// RecordWageringContribution when a qualifying stake's own asset differs
+// from the Grant's asset - a cross-denomination wagering measure this
+// package refuses to record rather than silently mis-compare
+// (DR-4HB1W3-RISK-01, Stage 4H-B1 Wave 3 Phase 4, risk).
+var ErrWageringContributionAssetMismatch = errors.New("bonus: wagering contribution asset does not match the grant's asset")
+
 func denialReasonCode(o GateOutcome) string {
 	return fmt.Sprintf("%s_denied:%s", o.DeniedBy, o.Code)
 }
@@ -494,6 +501,22 @@ func RecordWageringContribution(ctx context.Context, tx pgx.Tx, tenantID, grantI
 	}
 	if ComputeNewStakeEligibility(g.Status) != StakeEligibilityOpen {
 		return fmt.Errorf("%w: grant %s is not open for new stakes (status %s)", ErrIllegalTransition, grantID, g.Status)
+	}
+	// DR-4HB1W3-RISK-01 (Stage 4H-B1 Wave 3 Phase 4, risk): defence in
+	// depth for EVERY caller of this function, present and future, not
+	// just wagering_contribution_entry.go's own already-asset-filtered
+	// candidate selection. DeriveWageringProgress (wagering.go) sums every
+	// contribution row's QualifyingScaled as one bare minor-unit total and
+	// CheckAndCompleteGrant compares that total against a target derived
+	// from THIS Grant's granted_amount in THIS Grant's asset - so a
+	// contribution recorded in any other asset silently corrupts a
+	// value-authorizing comparison across decimal exponents (2 vs 8 vs 18;
+	// ADR 0007's multi-wallet model, ADR 0031 §34/§35's denomination
+	// discipline). There is no correct conversion to perform here: a
+	// wagering measure is not money and there is no authorized FX boundary
+	// for it, so this fails closed rather than converting.
+	if p.AssetCode != g.AssetCode {
+		return fmt.Errorf("%w: contribution asset %q does not match grant %s asset %q", ErrWageringContributionAssetMismatch, p.AssetCode, grantID, g.AssetCode)
 	}
 
 	_, created, err := CreateWageringProgressIdempotent(ctx, tx, WageringProgress{

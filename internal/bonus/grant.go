@@ -270,18 +270,35 @@ func HasActiveWageringGrant(ctx context.Context, tx pgx.Tx, tenantID, playerAcco
 }
 
 // listActiveWageringGrants returns every Grant currently open for new
-// stakes (status activated/in_progress) for playerAccountID - the raw
-// input to this Wave's own fail-closed multi-Grant attribution posture
-// (ledger-accounting-model.md §7.18.3.3: "until bonus-engine specifies a
-// qualifying-wager attribution rule across concurrent Grants, at most one
-// Grant should be in a state that receives cash-funded wagering
-// contribution at a time").
-func listActiveWageringGrants(ctx context.Context, tx pgx.Tx, tenantID, playerAccountID uuid.UUID) ([]Grant, error) {
+// stakes (status activated/in_progress) for playerAccountID IN assetCode -
+// the raw input to this Wave's own fail-closed multi-Grant attribution
+// posture (ledger-accounting-model.md §7.18.3.3: "until bonus-engine
+// specifies a qualifying-wager attribution rule across concurrent Grants,
+// at most one Grant should be in a state that receives cash-funded
+// wagering contribution at a time").
+//
+// DR-4HB1W3-RISK-01 (Stage 4H-B1 Wave 3 Phase 4, risk): the assetCode
+// predicate is load-bearing, not a convenience filter. A Grant's wagering
+// target is derived from its own granted_amount, in ITS OWN asset's minor
+// units (wagering_contribution_entry.go WageringTargetScaled), while a
+// contribution's QualifyingScaled is in the BET's asset's minor units.
+// Without this predicate a cash bet in one asset would be summed into a
+// Grant denominated in another and compared against that Grant's target
+// as if the two were the same measure - the exact cross-denomination
+// comparison ADR 0031 §34/§35 and internal/risk/denomination.go forbid at
+// every OTHER value-authorizing boundary on this platform. This platform
+// is multi-wallet/multi-asset per player by design (ADR 0007) with
+// per-asset decimal exponents of 2, 8 or 18, so the mismatch is not
+// hypothetical: one small crypto-denominated bet (8-decimal minor units)
+// would otherwise satisfy a fiat-denominated (2-decimal) Grant's entire
+// wagering requirement outright.
+func listActiveWageringGrants(ctx context.Context, tx pgx.Tx, tenantID, playerAccountID uuid.UUID, assetCode string) ([]Grant, error) {
 	return queryGrants(ctx, tx,
 		`SELECT `+grantColumns+` FROM bonus_grants
-		  WHERE tenant_id = $1 AND player_account_id = $2 AND status IN ('activated','in_progress')
+		  WHERE tenant_id = $1 AND player_account_id = $2 AND asset_code = $3
+		    AND status IN ('activated','in_progress')
 		  ORDER BY created_at ASC`,
-		tenantID, playerAccountID,
+		tenantID, playerAccountID, assetCode,
 	)
 }
 

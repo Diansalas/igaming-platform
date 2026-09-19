@@ -14,6 +14,7 @@ package bonus
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -115,23 +116,43 @@ func ComputeQualifyingScaled(stakedAmount *big.Int, contributionWeightBP int32) 
 	return scaled.Div(scaled, big.NewInt(10000))
 }
 
+// ErrWageringTargetUnmeasurable is returned by WageringTargetScaled when
+// the issuing OfferVersion DOES configure a wagering requirement but the
+// Grant carries no granted_amount to measure it against - the target is
+// then unknown, which is emphatically NOT the same thing as "no target"
+// (DR-4HB1W3-RISK-02, Stage 4H-B1 Wave 3 Phase 4, risk).
+var ErrWageringTargetUnmeasurable = errors.New("bonus: wagering target is unmeasurable (offer configures a wagering multiplier but the grant has no granted_amount)")
+
 // WageringTargetScaled computes a Grant's own wagering-completion target
 // from its issuing OfferVersion's WageringMultiplierBP (basis points -
 // e.g. 350000 = a 35x multiplier) and its own immutable granted_amount
 // (migration 0067), in the identical minor-unit domain
 // ComputeQualifyingScaled produces, so CheckAndCompleteGrant/ConvertGrant
 // can compare the two directly. A nil WageringMultiplierBP (no wagering
-// axis configured - Cashback's own permanent case, doc 10 §2) returns
-// nil, matching CheckAndCompleteGrant's own "nil target = already
-// satisfied" contract exactly - never a fabricated zero target that
-// would look identical to "satisfied by construction" but for the wrong
-// reason.
-func WageringTargetScaled(ov OfferVersion, grantedAmount *big.Int) *big.Int {
-	if ov.WageringMultiplierBP == nil || grantedAmount == nil || grantedAmount.Sign() <= 0 {
-		return nil
+// axis configured - Cashback's own permanent case, doc 10 §2) returns a
+// nil target, matching CheckAndCompleteGrant's own "nil target = already
+// satisfied" contract exactly.
+//
+// DR-4HB1W3-RISK-02: the "offer HAS a wagering multiplier but the Grant
+// has no granted_amount" case is a hard, fail-closed ERROR, never a nil
+// target. CheckAndCompleteGrant/ConvertGrant both read a nil target as
+// "already satisfied" (lifecycle.go/conversion.go), so returning nil for
+// an UNMEASURABLE target silently completes a Grant that has done zero
+// qualifying wagering - a missing input resolving to ALLOW, which is the
+// one outcome a value-authorizing comparison on this platform may never
+// produce. granted_amount is nullable by design (migration 0067: "NULL
+// until the Grant actually activates"), and was added only in that
+// migration, so every Grant activated before it is live in exactly this
+// state today.
+func WageringTargetScaled(ov OfferVersion, grantedAmount *big.Int) (*big.Int, error) {
+	if ov.WageringMultiplierBP == nil || *ov.WageringMultiplierBP <= 0 {
+		return nil, nil
+	}
+	if grantedAmount == nil || grantedAmount.Sign() < 0 {
+		return nil, ErrWageringTargetUnmeasurable
 	}
 	scaled := new(big.Int).Mul(grantedAmount, big.NewInt(int64(*ov.WageringMultiplierBP)))
-	return scaled.Div(scaled, big.NewInt(10000))
+	return scaled.Div(scaled, big.NewInt(10000)), nil
 }
 
 // getGrantedAmount reads bonus_grants.granted_amount (migration 0067) -
@@ -191,7 +212,14 @@ func RecordCashFundedWageringContribution(ctx context.Context, tx pgx.Tx, p Cash
 	if p.StakeAmount <= 0 {
 		return nil
 	}
-	grants, err := listActiveWageringGrants(ctx, tx, p.TenantID, p.PlayerAccountID)
+	// DR-4HB1W3-RISK-01: an unidentified asset makes every downstream
+	// comparison in this function meaningless (see listActiveWageringGrants'
+	// own doc comment). Fail closed rather than fall back to "any asset",
+	// mirroring risk.ErrMissingAsset's own posture exactly.
+	if p.AssetCode == "" {
+		return fmt.Errorf("bonus: cash-funded wagering contribution requires an asset_code (bet %s)", p.BetLedgerTransactionID)
+	}
+	grants, err := listActiveWageringGrants(ctx, tx, p.TenantID, p.PlayerAccountID, p.AssetCode)
 	if err != nil {
 		return err
 	}
@@ -253,7 +281,28 @@ func checkWageringCompletion(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 	if err != nil {
 		return err
 	}
-	target := WageringTargetScaled(ov, grantedAmount)
+	target, err := WageringTargetScaled(ov, grantedAmount)
+	if errors.Is(err, ErrWageringTargetUnmeasurable) {
+		// DR-4HB1W3-RISK-02, fail-closed WITHOUT collateral damage: the
+		// Grant is NOT completed (the only outcome that would have been
+		// unsafe), the ambiguity is audited for an operator exactly as the
+		// multi-Grant case above is, and the player's own cash bet - which
+		// has nothing to do with this data defect - still posts. Rolling
+		// the bet back instead would convert a dormant Grant-data problem
+		// into a live betting outage for that player. Note the CONVERSION
+		// call site must NOT adopt this posture: WageringTargetScaled
+		// returns the error precisely so a money-moving caller can refuse
+		// outright.
+		return audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem,
+			Action: "bonus_wagering_contribution.unmeasurable_target_completion_skipped", TargetType: "bonus_grant",
+			TargetID: grant.ID.String(), Outcome: audit.OutcomeFailure,
+			Metadata: map[string]any{"offer_version_id": grant.OfferVersionID.String(), "reason": err.Error()},
+		})
+	}
+	if err != nil {
+		return fmt.Errorf("bonus: wagering completion check for grant %s: %w", grant.ID, err)
+	}
 	if _, _, err := CheckAndCompleteGrant(ctx, tx, tenantID, grant.ID, target); err != nil {
 		return fmt.Errorf("bonus: check wagering completion: %w", err)
 	}

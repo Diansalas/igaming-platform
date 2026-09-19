@@ -1,6 +1,7 @@
 package bonus
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 )
@@ -61,19 +62,33 @@ func TestComputeQualifyingScaled(t *testing.T) {
 func TestWageringTargetScaled(t *testing.T) {
 	mult35x := int32(350000)
 	t.Run("nil multiplier means no wagering axis - nil target", func(t *testing.T) {
-		got := WageringTargetScaled(OfferVersion{}, big.NewInt(1000))
+		got, err := WageringTargetScaled(OfferVersion{}, big.NewInt(1000))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if got != nil {
 			t.Errorf("expected nil target for a nil WageringMultiplierBP, got %s", got)
 		}
 	})
-	t.Run("nil granted amount refuses to fabricate a target", func(t *testing.T) {
-		got := WageringTargetScaled(OfferVersion{WageringMultiplierBP: &mult35x}, nil)
+	// DR-4HB1W3-RISK-02 regression: before this fix the nil target this
+	// case produced was read by CheckAndCompleteGrant/ConvertGrant as
+	// "already satisfied", silently completing a Grant that had wagered
+	// nothing. An unmeasurable target must fail closed, never resolve to
+	// ALLOW.
+	t.Run("configured multiplier with no granted amount fails closed", func(t *testing.T) {
+		got, err := WageringTargetScaled(OfferVersion{WageringMultiplierBP: &mult35x}, nil)
+		if !errors.Is(err, ErrWageringTargetUnmeasurable) {
+			t.Fatalf("expected ErrWageringTargetUnmeasurable, got target=%v err=%v", got, err)
+		}
 		if got != nil {
-			t.Errorf("expected nil target for a nil granted amount, got %s", got)
+			t.Errorf("expected no target alongside the error, got %s", got)
 		}
 	})
 	t.Run("computes multiplier * granted amount / 10000", func(t *testing.T) {
-		got := WageringTargetScaled(OfferVersion{WageringMultiplierBP: &mult35x}, big.NewInt(1000))
+		got, err := WageringTargetScaled(OfferVersion{WageringMultiplierBP: &mult35x}, big.NewInt(1000))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		want := big.NewInt(35000) // 1000 * 35x
 		if got.Cmp(want) != 0 {
 			t.Errorf("got %s, want %s", got, want)
