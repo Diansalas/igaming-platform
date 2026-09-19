@@ -259,6 +259,193 @@ func TestRunDepositSweepForTenant_NoMatchingOfferIsANoOp(t *testing.T) {
 	}
 }
 
+// seedSecondPlayerAccountSamePerson creates a second player_account (and
+// its own wallet) belonging to the SAME Person as f's own playerID -
+// exactly the multi-account shape detectMultiAccountFirstDepositSignal
+// exists to detect.
+func seedSecondPlayerAccountSamePerson(t *testing.T, pool *db.Pool, f lifecycleFixture) (secondPlayerID, secondWalletID uuid.UUID) {
+	t.Helper()
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var personID uuid.UUID
+		if err := tx.QueryRow(ctx, `SELECT person_id FROM player_accounts WHERE id = $1`, f.playerID).Scan(&personID); err != nil {
+			return err
+		}
+		secondPlayerID = uuid.New()
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO player_accounts (id, tenant_id, brand_id, person_id, email, password_hash, status)
+			 VALUES ($1, $2, $3, $4, $5, 'x', 'active')`,
+			secondPlayerID, f.tenantID, f.brandID, personID, secondPlayerID.String()+"@example.com"); err != nil {
+			return err
+		}
+		secondWalletID = uuid.New()
+		_, err := tx.Exec(ctx,
+			`INSERT INTO wallets (id, tenant_id, brand_id, player_account_id, asset_code) VALUES ($1, $2, $3, $4, $5)`,
+			secondWalletID, f.tenantID, f.brandID, secondPlayerID, f.assetCode)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed second player account (same person): %v", err)
+	}
+	return secondPlayerID, secondWalletID
+}
+
+// seedRawDepositForAccount mirrors seedRawDeposit but posts against an
+// explicit (playerID, walletID) pair rather than f's own default account -
+// needed to simulate a SECOND player_account of the same Person making
+// its own "first" deposit.
+func seedRawDepositForAccount(t *testing.T, pool *db.Pool, f lifecycleFixture, playerID, walletID uuid.UUID, amount int64, paymentMethod string) (ledgerTxID uuid.UUID) {
+	t.Helper()
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		intentID := uuid.New()
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO deposit_intents (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, payment_method, idempotency_key, status)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'succeeded')`,
+			intentID, f.tenantID, f.brandID, playerID, walletID, f.assetCode, amount, paymentMethod, "idem-"+intentID.String(),
+		); err != nil {
+			return err
+		}
+		clearing, err := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, nil, ledger.AccountPSPClearing, f.assetCode)
+		if err != nil {
+			return err
+		}
+		cash, err := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, &walletID, ledger.AccountPlayerCash, f.assetCode)
+		if err != nil {
+			return err
+		}
+		result, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: f.tenantID, TransactionType: ledger.TxDeposit, IdempotencyKey: "mock-psp:" + intentID.String(),
+			CorrelationID: intentID,
+			Entries: []ledger.EntryInput{
+				{LedgerAccountID: clearing, Direction: ledger.Debit, Amount: amount},
+				{LedgerAccountID: cash, Direction: ledger.Credit, Amount: amount},
+			},
+		})
+		if err != nil {
+			return err
+		}
+		ledgerTxID = result.TransactionID
+		_, err = tx.Exec(ctx, `UPDATE deposit_intents SET ledger_transaction_id = $2 WHERE id = $1`, intentID, ledgerTxID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed raw deposit for account: %v", err)
+	}
+	return ledgerTxID
+}
+
+// TestRunDepositSweepForTenant_MultiAccountSamePersonFirstDepositSignal
+// proves the REQ-SEP-BONUS-3 detection signal (deposit_sweep.go's
+// detectMultiAccountFirstDepositSignal): when the SAME Person's second
+// player_account makes its own "first" deposit against a FirstDepositOnly
+// Offer the Person's OTHER account already holds a Grant for, the sweep
+// records a bonus_deposit_sweep.multi_account_signal_detected audit entry
+// naming both accounts - WITHOUT denying, skipping, or altering the
+// Grant attempt itself (still an ordinary issuance attempt, gated
+// identically to every other one). This test FAILS against the pre-fix
+// code (no such call existed in RunDepositSweepForTenant) and PASSES
+// post-fix.
+func TestRunDepositSweepForTenant_MultiAccountSamePersonFirstDepositSignal(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	seedDepositMatchableOffer(t, pool, f, true, nil)
+
+	secondPlayerID, secondWalletID := seedSecondPlayerAccountSamePerson(t, pool, f)
+
+	// Account 2's own "first" deposit - a Grant attempt (and row) is
+	// created for account 2 against the FirstDepositOnly Offer.
+	seedRawDepositForAccount(t, pool, f, secondPlayerID, secondWalletID, 10000, "card")
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, runErr := RunDepositSweepForTenant(ctx, tx, f.tenantID, uuid.Nil)
+		return runErr
+	})
+	if err != nil {
+		t.Fatalf("RunDepositSweepForTenant (account 2): %v", err)
+	}
+
+	// Account 1 (f.playerID)'s OWN "first" deposit - per-account
+	// first-deposit-only eligibility passes (it IS f.playerID's own first
+	// deposit), but the Person behind it already holds a Grant against
+	// this Offer via account 2.
+	seedRawDeposit(t, pool, f, 10000, "card")
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, runErr := RunDepositSweepForTenant(ctx, tx, f.tenantID, uuid.Nil)
+		return runErr
+	})
+	if err != nil {
+		t.Fatalf("RunDepositSweepForTenant (account 1): %v", err)
+	}
+
+	var signalCount int
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'bonus_deposit_sweep.multi_account_signal_detected' AND target_id = (SELECT person_id::text FROM player_accounts WHERE id = $2)`,
+			f.tenantID, f.playerID,
+		).Scan(&signalCount)
+	})
+	if err != nil {
+		t.Fatalf("count multi-account signal audit rows: %v", err)
+	}
+	if signalCount != 1 {
+		t.Fatalf("expected exactly one multi-account first-deposit signal audit entry, got %d", signalCount)
+	}
+
+	// The signal is a SIGNAL ONLY - account 1's own Grant attempt still
+	// happened exactly as it would have without the signal (still exactly
+	// one attempted issuance, same jurisdiction-gap denial as every other
+	// sweep test - never silently skipped or blocked by the signal).
+	var grantCount int
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM bonus_grants WHERE tenant_id = $1 AND player_account_id = $2`, f.tenantID, f.playerID).Scan(&grantCount)
+	})
+	if err != nil {
+		t.Fatalf("count account 1 grants: %v", err)
+	}
+	if grantCount != 1 {
+		t.Fatalf("expected the signal to be non-blocking (exactly one ordinary Grant attempt for account 1), got %d", grantCount)
+	}
+}
+
+// TestRunDepositSweepForTenant_NoMultiAccountSignalWhenNotFirstDepositOnly
+// proves the detector only runs for FirstDepositOnly Offers - an ordinary
+// (non-first-deposit-only) Offer generates no signal even when the same
+// Person holds accounts with grants against it, since the per-account
+// eligibility axis this signal protects does not apply.
+func TestRunDepositSweepForTenant_NoMultiAccountSignalWhenNotFirstDepositOnly(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	seedDepositMatchableOffer(t, pool, f, false, nil)
+
+	secondPlayerID, secondWalletID := seedSecondPlayerAccountSamePerson(t, pool, f)
+	seedRawDepositForAccount(t, pool, f, secondPlayerID, secondWalletID, 10000, "card")
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, runErr := RunDepositSweepForTenant(ctx, tx, f.tenantID, uuid.Nil)
+		return runErr
+	})
+	if err != nil {
+		t.Fatalf("RunDepositSweepForTenant (account 2): %v", err)
+	}
+
+	seedRawDeposit(t, pool, f, 10000, "card")
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, runErr := RunDepositSweepForTenant(ctx, tx, f.tenantID, uuid.Nil)
+		return runErr
+	})
+	if err != nil {
+		t.Fatalf("RunDepositSweepForTenant (account 1): %v", err)
+	}
+
+	var signalCount int
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'bonus_deposit_sweep.multi_account_signal_detected'`, f.tenantID).Scan(&signalCount)
+	})
+	if err != nil {
+		t.Fatalf("count multi-account signal audit rows: %v", err)
+	}
+	if signalCount != 0 {
+		t.Fatalf("expected zero multi-account signals for a non-FirstDepositOnly Offer, got %d", signalCount)
+	}
+}
+
 // TestRunDepositSweepScheduler_TenantAdvisoryLockSerializesOverlappingTicks
 // proves the scheduler-loop wrapper's own advisory-lock guard: two
 // concurrent tenant ticks for the SAME tenant never run RunDepositSweepForTenant's

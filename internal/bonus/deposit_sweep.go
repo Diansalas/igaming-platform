@@ -276,6 +276,74 @@ func matchesDepositEligibility(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	return true, nil
 }
 
+// detectMultiAccountFirstDepositSignal implements REQ-SEP-BONUS-3's own
+// Bonus-domain-only DETECTION half (security-architecture.md §W15.1.5:
+// "bonus-engine: own the household/linked-account detection path... refuse
+// any request to make it a block") for the exact case reconnaissance
+// §3.3 named as still open against Wave 3's own first-deposit-only sweep:
+// a single Person holding more than one player_account_id, each account's
+// OWN first deposit independently qualifying it for a FirstDepositOnly
+// Offer that is meant to be granted once per Person, not once per
+// account.
+//
+// This is a SIGNAL ONLY. It never denies, defers, or alters the Grant
+// this sweep is about to attempt - it records an audit entry naming the
+// Person and every OTHER player_account_id of theirs that already holds a
+// bonus_grants row against the SAME Offer, for a human reviewer to act on
+// (or not - a shared household/joint device is a plausible, non-abusive
+// explanation §W15.1.5 explicitly warns against auto-blocking on). The
+// query reuses the identical person_id primitive targeting.go's own
+// playerPersonID/SEP-1 compensating check already uses - no new
+// cross-domain read, no new column, no new table.
+//
+// Device/payment-fingerprint correlation (OfferVersion.
+// DeviceFingerprintLinkingConfig) remains explicitly OUT of this signal's
+// scope (reconnaissance §3.3's own boundary) - it requires a fraud/device-
+// signal data source this platform does not have.
+func detectMultiAccountFirstDepositSignal(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, event depositSweepEvent, offerID uuid.UUID) error {
+	personID, err := playerPersonID(ctx, tx, event.PlayerAccountID)
+	if err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT DISTINCT g.player_account_id
+		  FROM bonus_grants g
+		  JOIN player_accounts pa ON pa.id = g.player_account_id AND pa.tenant_id = g.tenant_id
+		 WHERE g.tenant_id = $1 AND pa.person_id = $2 AND g.offer_id = $3 AND g.player_account_id <> $4`,
+		tenantID, personID, offerID, event.PlayerAccountID,
+	)
+	if err != nil {
+		return fmt.Errorf("bonus: multi-account first-deposit signal query: %w", err)
+	}
+	defer rows.Close()
+	var otherAccounts []string
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("bonus: scan multi-account first-deposit signal row: %w", err)
+		}
+		otherAccounts = append(otherAccounts, id.String())
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("bonus: multi-account first-deposit signal rows: %w", err)
+	}
+	if len(otherAccounts) == 0 {
+		return nil
+	}
+	return audit.Record(ctx, tx, audit.Entry{
+		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "bonus_deposit_sweep.multi_account_signal_detected",
+		TargetType: "person", TargetID: personID.String(), Outcome: audit.OutcomeSuccess,
+		Metadata: map[string]any{
+			"person_id":                     personID.String(),
+			"offer_id":                      offerID.String(),
+			"triggering_player_account_id":  event.PlayerAccountID.String(),
+			"other_player_account_ids":      otherAccounts,
+			"deposit_ledger_transaction_id": event.LedgerTransactionID.String(),
+			"signal_only":                   true,
+		},
+	})
+}
+
 // percentageRewardCalculation is the JSON shape this sweep expects an R1
 // OfferVersion's own RewardCalculation blob to carry - mirroring
 // internal/httpserver's own computeCouponRewardAmount precedent
@@ -384,6 +452,11 @@ func RunDepositSweepForTenant(ctx context.Context, tx pgx.Tx, tenantID, actorID 
 			}
 			if !matched {
 				continue
+			}
+			if c.OfferVersion.FirstDepositOnly {
+				if err := detectMultiAccountFirstDepositSignal(ctx, tx, tenantID, event, c.OfferID); err != nil {
+					return outcome, err
+				}
 			}
 			rateBP, cap, err := parsePercentageRewardCalculation(c.OfferVersion.RewardCalculation)
 			if err != nil {
