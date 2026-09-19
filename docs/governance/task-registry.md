@@ -1034,6 +1034,95 @@ blocking it, it does not authorize building it). No OpenAPI change. No
 migration. No change to `internal/jurisdiction/resolver.go`, the `Basis`
 enum, or `jurisdiction_precedence_configs`.
 
+## Stage 4I Phase C — jurisdiction precedence and resolution rules foundation
+
+Implementation dispatch: mandatory pre-implementation impact-map analysis
+→ `architect` design ruling (full type/function signature specification) →
+`backend` implementation exactly per that ruling → four independent
+parallel reviews (`architect` fidelity, `security`, `identity-compliance`
+for compliance/privacy, `qa`), none seeing the others' findings →
+orchestrator triage and fix round → full validation re-run → orchestrator
+integration. Built the deterministic precedence/resolution rule engine per
+HDR-J-1 through HDR-J-6 (`docs/decisions/0042-human-decision-response.md`):
+`internal/jurisdiction.DeterminePlayerJurisdiction` (`precedence.go`), the
+`Purpose` taxonomy (`purpose.go`), the `EvidenceSet`/`LocationSignalEvidence`
+evidence model (`evidence.go`), the non-forgeable `PlayerJurisdictionResult`/
+`Candidate`/`ConsideredEvidence` result types (`player_result.go`), and the
+`ComposeRestrictions` most-restrictive-outcome composition primitive
+(`restriction.go`). See `docs/governance/stage-4i-canonical-model.md` §14
+for the full canonical-contract writeup (resolution outcomes, operation
+taxonomy, evidence precedence, unresolved/fail-closed semantics,
+more-restrictive semantics, event-time semantics, tenant/player
+separation, and the four deferred PC-GAP items), and §7.3/§7.4 (amended
+this phase) for the MROC severity vocabulary and honest "primitive exists,
+nothing calls it yet" status.
+
+**`internal/jurisdiction/resolver.go` — the only resolver any consuming
+domain (`casino`, `bonus`, `risk`) actually calls — has ZERO diff
+throughout this phase**, verified by `git diff --stat` after
+implementation, after all four reviews, and after the fix round. There are
+zero production call sites of `DeterminePlayerJurisdiction` or
+`ComposeRestrictions`. All activation switches remain OFF; no production
+permitted-market list, country allow/deny content, real geolocation
+vendor, or production jurisdiction enforcement exists as a result of this
+phase.
+
+**Findings from the independent review round, and disposition.** Two
+defects were independently found by three of the four reviewers using
+different methods (direct code reading, adversarial mutation/compile
+probes, adversarial format-verb probes) and are listed first as the
+highest-confidence findings.
+
+| ID | Severity | Finding | Disposition |
+|---|---|---|---|
+| PHASE-C-ARCH-P1-3 / SEC-4I-C-01 / PHASE-C-QA-1 | P1 | `architect`, `security`, and `qa`, independently converging (three different methods): `PlayerJurisdictionResult.Candidates()`, `.ConsideredEvidence()`, and `ComposedRestriction.Contributors()` all returned their internal backing slice directly rather than a copy. A caller could reorder a `Candidates()` result in place and have `PrimaryCandidate()` then report an additional-restriction candidate (e.g. a geo signal) as the primary determination — defeating HDR-J-3a's "location never substitutes for verified residence" guarantee. `ConsideredEvidence`'s exported fields made this the more dangerous variant: a caller could relabel an entry's `Basis` to `BasisTenantLicence` in place | **FIXED.** All three accessors now return `slices.Clone` of the internal slice. New regression tests: `TestPlayerJurisdictionResult_CandidatesReturnsADefensiveCopy`, `TestPlayerJurisdictionResult_ConsideredEvidenceReturnsADefensiveCopy`, `TestComposedRestriction_ContributorsReturnsADefensiveCopy` (`player_result_test.go`) |
+| PHASE-C-ARCH-P1-1 | P1 | `architect`: `determineMarketAccess` treated any `LocationSignalRequirement` value other than the recognized zero-value `LocationRequirementUnset` as if it were `LocationAdvisory` (the more permissive of the two known values) — an unrecognized/misconfigured/stale policy value would fail OPEN rather than closed | **FIXED.** An exhaustive check now rejects any value other than `LocationRequired`/`LocationAdvisory` with `ErrInvalidInput`. New test: `TestDetermine_UnrecognizedLocationSignalRequirementIsRejected` |
+| PHASE-C-ARCH-P1-2 | P1 | `architect`: `DeterminePlayerJurisdiction` never validated `AsOf`. A zero `AsOf` makes `asOf.Sub(observedAt)` hugely negative for any real `ObservedAt`, so every location signal would read as fresh, silently disabling the entire freshness gate | **FIXED.** A zero `AsOf` is now rejected with `ErrInvalidInput` before any evaluation. New test: `TestDetermine_ZeroAsOfIsRejected` |
+| PHASE-C-ARCH-P2-1 | P2 | `architect`: the location `ConsideredEvidence` entry (including its `EvidenceRef`) was only appended on the `LocationAdvisory`-and-unusable path, not the `LocationRequired`-and-unusable path — silently dropping the one evidence reference an incident investigator needs, on exactly the path that denies a player | **FIXED.** The entry-construction block was moved before the `LocationRequired`/`LocationAdvisory` branch, so it is now appended on both. New test: `TestDetermine_LocationRequiredAndUnusableStillRecordsConsideredEvidence` |
+| PHASE-C-ARCH-P2-2 / SEC-4I-C-07 | P2 | `architect` and `security`, converging: `determineMarketAccess` already upgraded `ReasonNoSignal` to `ReasonNoApplicableEvidence` when a location signal was the only evidence supplied (location is never a residence signal), but `determineIdentity` did not perform the symmetric upgrade for the identical case | **FIXED.** The same upgrade logic was added to `determineIdentity`. The existing test asserting the old `ReasonNoSignal` behavior (`TestDetermine_LocationSignalIsNeverASubstituteForVerifiedResidence`) was updated to assert `ReasonNoApplicableEvidence`, per architect's explicit instruction; a new test, `TestDetermine_MarketAccessEmitsReasonNoApplicableEvidenceForLocationOnlyEvidence`, closes the market-access side's own zero positive-coverage gap `qa` separately found |
+| SEC-4I-C-02 | P3 | `security` (independently also found by `architect` and `qa`): `fmt`'s `%#v` verb bypasses `Stringer` entirely and dumps unexported field values in full, defeating every `String()` method's redaction on `PlayerJurisdictionCode`, `Candidate`, `PlayerJurisdictionResult`, `ComposedRestriction`, and `AppliedRestriction` | **FIXED.** `GoString() string` (`fmt.GoStringer`) added to all five types, each returning the same redacted shape as its own `String()`. New test: `TestGoStringRedaction_NeverLeaksACountryCodeViaSharpV` plus `TestPlayerJurisdictionCode_GoStringNeverLeaksTheCode` (`player_result_test.go`) |
+| SEC-4I-C-03 | P3 | `security`: a future-dated `LocationSignalEvidence.ObservedAt` (age < 0) computed as "always fresh," since the freshness check only compared against the upper bound — defeating the entire purpose of a freshness bound on a signal that should reflect the present | **FIXED.** A negative age is now explicitly treated as stale, identically to an age past the freshness boundary. New test: `TestDetermine_FutureDatedLocationSignalIsTreatedAsStale` |
+| SEC-4I-C-04 | P4 | `security`: an unrecognized caller-supplied `LocationSignalState` was echoed verbatim into the recorded diagnostic (`result.locationState`) — the decision already failed closed regardless, but a future persistence/reporting phase would see values outside the documented closed set | **FIXED.** An unrecognized state now normalizes to `LocationUnavailable` in the recorded diagnostic. New test: `TestDetermine_UnrecognizedLocationSignalStateNormalizesToUnavailable` |
+| SEC-4I-C-05 | P4 | `security`: a structurally invalid or empty declared-residence value, alongside a valid verified residence, was compared directly against the verified code and could be recorded as `StatusDisagreed` — indistinguishable from a genuine contradiction (e.g. MT vs. DE), risking a false-positive fraud/review signal for every player whose declared-residence row is blank or malformed | **FIXED.** A 3-way switch now records `StatusInvalid` (never `StatusDisagreed`, never sets `HasDisagreement()`) when the declared value is structurally invalid. New test: `TestDetermine_InvalidDeclaredResidenceNeverTriggersDisagreementWithVerified` |
+| SEC-4I-C-06 | P4 (non-blocking, doc-only) | `security`: a pointer to a ZERO (non-nil) `Duration` for `MaxLocationSignalAge` is a distinct footgun from `nil` — it means "fresh only at age == 0" because the freshness boundary is inclusive, almost certainly not what a caller building this from config actually wants. No code-level fix exists (zero is a structurally valid, distinct value from nil) | **FIXED (doc-only).** A doc-comment note added to `EvaluationPolicy.MaxLocationSignalAge` explaining the footgun explicitly, cross-referenced from PC-GAP-2 in the canonical-model doc |
+| PHASE-C-ARCH-P3-1 | P3 | `architect`: `ComposeRestrictions`' winning-outcome assignment used a last-wins loop assignment, silently contradicting the function's own doc comment ("no tie-break policy needs to exist") — harmless only by coincidence because today's three outcomes are each other's unique severity; a fourth outcome sharing a severity would reintroduce an undetected arbitrary pick | **FIXED.** Derived from an explicit `severityToOutcome` map keyed by the winning severity instead |
+| PHASE-C-ARCH-P3-2 | P3 | `architect`: `PlayerJurisdictionCode`'s doc comment claimed a non-empty code could not be constructed externally, but the empty composite literal `PlayerJurisdictionCode{}` does compile from outside the package (Go permits a field-less struct literal even with unexported fields) | **FIXED (doc + code).** Doc comment corrected; a new `IsSet() bool` method added so callers can distinguish a real code from the zero value rather than assuming external construction is impossible |
+| PHASE-C-QA-2 | (test-coverage gap, not a defect) | `qa`: `StatusUnavailable`/`StatusInvalid` on the advisory-and-unusable location path were only exercised for panic-safety, not for the actual recorded status/EvidenceRef content, once PHASE-C-ARCH-P2-1 changed which paths append this entry | **FIXED.** `TestDetermine_LocationRequiredAndUnusableStillRecordsConsideredEvidence` asserts the exact `Status`/`Ref` content on the required-and-unusable path (the more critical of the two, since it is the one that denies a player); the pre-existing table test already covered the advisory path's five unusable states |
+| PHASE-C-IC-1 | (informational, no violation) | `identity-compliance` (compliance/privacy review): found **no compliance or privacy violations** — no nationality concept introduced, no evidence value persisted where only a reference belongs, correct separation of player/tenant jurisdiction maintained. Independently surfaced the same `%#v` leak `security` and `architect` found, via its own scratch adversarial test, and deferred it to `security`'s track | Already fixed under SEC-4I-C-02 above; no separate compliance action required |
+
+**Deferred legal/policy decisions — the PC-GAP items** (full detail,
+including owner/dependency/future-phase/security-impact for each, in
+`docs/governance/stage-4i-canonical-model.md` §14.6): **PC-GAP-1**
+(whether/when a market-access operation may proceed with an unusable
+location signal — `LocationRequirement`'s zero value fails closed with
+`ErrPolicyUnset`); **PC-GAP-2** (the maximum age before a location signal
+is stale — `MaxLocationSignalAge` nil fails closed with `ErrPolicyUnset`);
+**PC-GAP-3** (the `OperationClass`→`Purpose` mapping — no code touches
+this; a legal-content decision, not an engineering one); **PC-GAP-4**
+(tenant/jurisdiction-aware precedence keying per canonical-model §3.4 —
+`architect`-flagged documentation-only debt; no code exists to key against
+yet, since HDR-J-2's precedence-configuration content is still open).
+
+**Verdicts, all independent, none self-certified:** `architect` —
+CERTIFIED WITH NAMED EXCEPTIONS (no blocking issues after the fix round;
+`resolver.go` verified at literal zero diff throughout). `security` —
+CERTIFIED WITH NAMED EXCEPTIONS (the one P1 — SEC-4I-C-01 — is the same
+defect architect and qa also found, closed with the shared fix; no
+unresolved P0/P1). `identity-compliance` — NO VIOLATIONS FOUND. `qa` —
+READY WITH NAMED GAPS, all closed in the fix round.
+
+**Carried to a future phase (not this phase's to build, confirmed
+absent):** the four PC-GAP items above; wiring `DeterminePlayerJurisdiction`
+into any production evaluation path (`casino`, `bonus-engine`, `risk`,
+`payments`, `sportsbook`); wiring `ComposeRestrictions` into any domain
+that produces a genuine second candidate; a `jurisdiction_precedence_configs`
+write/read surface with real content (HDR-J-2); real player-side evidence
+collection feeding this engine in production (HDR-J-3); the
+staff-correction endpoint (deliberately out of scope per the directive,
+confirmed no minimal seam was found strictly required); G-2; sportsbook
+cashout; converted-Grant clawback; BYOL; any payment/casino/risk behaviour
+change beyond the resolver seams already named as buildable now.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

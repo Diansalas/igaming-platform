@@ -1480,7 +1480,120 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 4I PHASE-B-ARCH-1 — Activation-Gate Enforcement Asymmetry Hardening Gate — COMPLETE, awaiting human review
+## Current stage: Stage 4I Phase C — Jurisdiction Precedence & Resolution Rules Foundation — COMPLETE, awaiting human review
+
+**Status: IMPLEMENTED, independently reviewed by four specialists
+(`architect` fidelity review, `security`, `identity-compliance` for
+compliance/privacy, `qa`), all P0/P1 findings fixed, all P2-P4 findings
+either fixed or explicitly disposed, and re-verified.** Built the
+deterministic TECHNICAL FOUNDATION for resolving a player's own
+jurisdiction from evidence — per HDR-J-1 through HDR-J-6 (including
+HDR-J-3's 8 sub-items), `docs/decisions/0042-human-decision-response.md`
+— explicitly NOT activating production enforcement. Full detail:
+`docs/governance/stage-4i-canonical-model.md` §14 (the canonical contract)
+and §7.3/§7.4 (amended this phase); `docs/governance/task-registry.md`'s
+"Stage 4I Phase C" section (full findings/disposition ledger);
+`docs/progress.md`'s matching narrative entry.
+
+**What Phase C built:** `internal/jurisdiction.DeterminePlayerJurisdiction`
+(`precedence.go`) — a pure function (no `context.Context`, no database
+handle, never calls `time.Now()`) implementing the precedence rules for
+two live purposes (`PurposeIdentityDetermination`,
+`PurposeMarketAccessControl`) plus an explicit refusal for the third
+(`PurposeHistoricalReporting` — a historical jurisdiction must be read
+from the event-time record, never recomputed). Supporting types: the
+`Purpose` taxonomy (`purpose.go`, deliberately separate from the
+pre-existing `OperationClass` enum — no mapping between them exists,
+PC-GAP-3); the `EvidenceSet`/`LocationSignalEvidence` evidence model
+(`evidence.go`, exactly three fields, no tenant/brand/licence input
+reachable); the non-forgeable `PlayerJurisdictionResult`/`Candidate`/
+`ConsideredEvidence` result types (`player_result.go`) distinguishing
+resolved / four distinct unresolved reasons / conflicting evidence
+(`HasDisagreement()`) — never a generic "unknown"; and
+`ComposeRestrictions` (`restriction.go`), the canonical-model §7.3
+most-restrictive-outcome composition primitive, built for the first time
+this phase but with zero production callers.
+
+**The decisive scope-control property, unchanged from Phase A/B/
+PHASE-B-ARCH-1:** `internal/jurisdiction/resolver.go` — the only resolver
+any consuming domain (`casino`, `bonus`, `risk`) actually calls — has
+**zero diff**, verified by `git diff --stat` after implementation, after
+all four independent reviews, and after the fix round. There are zero
+production call sites of `DeterminePlayerJurisdiction` or
+`ComposeRestrictions` anywhere in the codebase.
+
+**Review chain (all independent, none self-certified):** mandatory
+pre-implementation impact-map analysis across every consuming package →
+`architect` design ruling (full type/function signature specification,
+including an explicit **CRITICAL STOP CONDITION** clause for any element
+that would require inventing legal/policy content) → `backend`
+implementation exactly per that ruling → four independent parallel
+reviews → orchestrator triage and fix round → full validation re-run
+(`go build`, `go vet ./...`, `go vet -tags=integration ./...`,
+`gofmt -l .`, unit + race + whole-repo integration suite against a real
+Postgres) → orchestrator integration. Verdicts: `architect` — CERTIFIED
+WITH NAMED EXCEPTIONS (no blocking issues after the fix round;
+`resolver.go` verified at literal zero diff throughout). `security` —
+CERTIFIED WITH NAMED EXCEPTIONS (one P1 shared with architect/qa, closed
+with a single fix; no unresolved P0/P1). `identity-compliance` — NO
+VIOLATIONS FOUND (no nationality concept introduced; correct player/
+tenant jurisdiction separation maintained; independently surfaced the
+same redaction-bypass finding security and architect also found). `qa` —
+READY WITH NAMED GAPS, all closed in the fix round.
+
+**Two defects were independently found by three of the four reviewers**,
+using different methods (direct code reading, adversarial mutation/
+compile probes, and adversarial format-verb probes): (1) a slice-aliasing
+non-forgeability break — `Candidates()`/`ConsideredEvidence()`/
+`Contributors()` all returned their internal backing array directly,
+letting a caller reorder a resolved result's candidates in place and have
+`PrimaryCandidate()` report a location signal as the primary
+determination, defeating HDR-J-3a's core guarantee — fixed via
+`slices.Clone` on all three accessors; (2) `fmt`'s `%#v` verb bypassing
+every `String()` method's redaction and dumping the country code via
+unexported struct fields — fixed with `GoString()` (`fmt.GoStringer`)
+added to all five affected types. Three further P1/P2 architect findings
+(a fail-open `LocationRequirement` validation path, a zero `AsOf` silently
+disabling the location-freshness gate, and a dropped audit-evidence entry
+on the path that actually denies a player) were fixed in the same round,
+plus five lower-severity security findings (a future-dated signal reading
+as "always fresh"; an unrecognized location state echoed verbatim into a
+diagnostic; a structurally invalid declared residence falsely recording as
+"disagreeing" with a valid verified one; a zero-duration policy footgun,
+doc-only; and the identity-purpose path never emitting a reason the
+market-access path already emitted for the symmetric case). Full
+findings ledger with disposition for every item, including the four
+deferred PC-GAP legal/policy seams (PC-GAP-1 through 4):
+`docs/governance/task-registry.md`'s "Stage 4I Phase C" section.
+
+**Documentation updated this phase:** new §14 added to
+`docs/governance/stage-4i-canonical-model.md` (the full canonical
+resolution contract, operation taxonomy, evidence precedence, unresolved/
+fail-closed semantics, more-restrictive semantics, event-time semantics,
+tenant/player separation, and the PC-GAP register); §7.3 amended (the
+`blocked > restricted > allowed` severity vocabulary, now anchored in
+real code); §7.4 corrected (previously claimed MROC "is NOT built in
+Stage 4I" — withdrawn; the composition primitive is now built, with the
+honest caveat that it has zero production callers).
+
+**Explicitly deferred, not performed this phase (per the directive's own
+explicit scope boundary):** production market-list population, country
+allow/deny content, production jurisdiction enforcement of any kind, a
+real geolocation vendor, nationality (no concept exists anywhere in this
+engine), retention/erasure implementation, legal-basis determination, the
+staff-correction endpoint (no minimal seam was found strictly required),
+G-2, sportsbook cashout, converted-Grant clawback, BYOL, and any payment/
+casino/risk behaviour change beyond the resolver seams already buildable
+now. **All activation switches remain OFF.**
+
+**No automatic progression.** Per the directive's own mandatory stop
+condition, Phase D and any production jurisdiction activation remain
+unauthorized pending a separate human directive reviewing this Phase C
+completion report.
+
+---
+
+## Prior stage: Stage 4I PHASE-B-ARCH-1 — Activation-Gate Enforcement Asymmetry Hardening Gate — COMPLETE, awaiting human review
 
 **Status: IMPLEMENTED, independently reviewed by `security` (CERTIFIED
 WITH NAMED EXCEPTIONS) and `qa` (READY WITH NAMED GAPS), all findings

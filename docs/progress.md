@@ -6030,3 +6030,138 @@ HDR-J-2 precedence configuration, permitted-market population, a real
 geolocation provider, nationality, G-2, sportsbook cashout, converted-
 Grant clawback, and BYOL remain unauthorized pending a separate human
 directive.
+
+## Stage 4I Phase C: jurisdiction precedence and resolution rules foundation — IMPLEMENTED
+
+A human "MASTER ORCHESTRATOR" directive authorized building the
+deterministic TECHNICAL FOUNDATION for jurisdiction resolution per
+HDR-J-1 through HDR-J-6 (including HDR-J-3's 8 sub-items a-h,
+`docs/decisions/0042-human-decision-response.md`), explicitly NOT
+activating production enforcement: no production market list, no country
+allow/deny content, no production activation, no real geolocation vendor,
+no nationality, no retention/erasure implementation, no legal-basis
+determination, no staff-correction endpoint (unless the architect deemed
+a minimal seam strictly required — it did not), no G-2/sportsbook-
+cashout/converted-Grant-clawback/BYOL, and no payment/casino/risk
+behaviour change except where a resolver seam was technically required.
+
+**Mandatory pre-implementation impact-map analysis**, per the directive's
+own requirement, ran before any code: reviewed every consumer of
+`internal/jurisdiction` (`internal/casino`, `internal/bonus`, `internal/
+risk`) and confirmed none would be touched — this phase builds a
+standalone rule-engine package with zero wiring into any of them.
+
+**Architect design ruling** (persisted in full, cited throughout
+implementation): a complete type/function signature specification for
+`DeterminePlayerJurisdiction`, `PlayerJurisdictionResult`, `Candidate`,
+`ConsideredEvidence`, `Purpose`, `EvidenceSet`, `EvaluationPolicy`,
+`LocationRequirement`, and `ComposeRestrictions`/`AppliedRestriction`/
+`ComposedRestriction` — including an explicit **CRITICAL STOP CONDITION**
+clause instructing the implementation to build the correct abstraction/
+seam and flag a human decision item, rather than invent legal/policy
+content, wherever "more restrictive wins" or an evidence-validity
+threshold could not be represented without a legal judgment. The ruling
+also named PC-GAP-4 (tenant/jurisdiction-aware precedence keying per
+canonical-model §3.4) as documentation-only debt, not a code gap.
+
+**Backend implementation, exactly per the ruling:**
+`internal/jurisdiction.DeterminePlayerJurisdiction` (new file
+`precedence.go`) — a pure function: no `context.Context`, no database
+handle, never calls `time.Now()` (the caller supplies `AsOf`), verified by
+a reflection-based purity test walking `DetermineParams`' full field tree
+for any DB/context-shaped type. Implements `PurposeIdentityDetermination`
+and `PurposeMarketAccessControl`; unconditionally refuses
+`PurposeHistoricalReporting` with `ErrHistoricalPurposeNotComputable` (a
+historical jurisdiction must be read from the event-time record, never
+recomputed — the event-time semantics the directive required). New
+supporting files: `purpose.go` (the `Purpose` taxonomy — a real typed
+enum, deliberately separate from the pre-existing `OperationClass` enum,
+with no mapping function between them, PC-GAP-3); `evidence.go`
+(`EvidenceSet` — exactly three fields, `VerifiedResidence`/
+`DeclaredResidence`/`LocationSignal`, enforced by a reflection tripwire
+test; `LocationSignalState`, a closed six-value enum); `player_result.go`
+(`PlayerJurisdictionCode` — a struct with an unexported field, not a
+named string type, so a bare string conversion cannot construct one from
+outside the package; `Candidate`/`ConsideredEvidence`/
+`PlayerJurisdictionResult`, all non-forgeable by construction, mirroring
+`Resolution`'s own pattern); `restriction.go` (`ComposeRestrictions` — the
+canonical-model §7.3 most-restrictive-outcome composition primitive,
+returning every contributor tied at the winning severity, never an
+arbitrary pick).
+
+**The canonical resolution result distinguishes** (never collapsed to a
+generic "unknown," per the directive's explicit requirement): resolved;
+unresolved-no-signal; unresolved-no-applicable-evidence (new
+`ReasonNoApplicableEvidence`); unresolved-insufficient-confidence;
+unresolved-evidence-invalid (new `ReasonEvidenceInvalid`); unresolved-
+location-signal-unusable (new `ReasonLocationSignalUnusable`); and
+conflicting evidence (`HasDisagreement()`, a recorded fact about the
+evidence, never a distinct outcome value, since verified residence still
+authoritatively resolves over a disagreeing declared value).
+
+**Fail-closed/unresolved, verified structurally, not by convention:**
+`TestDetermine_NeverEmitsATenantOrFallbackBasisOnAnyInput`
+(`precedence_invariants_test.go`) exhaustively cross-products every
+verified/declared/location/purpose/policy combination the engine accepts
+and asserts no result ever carries `BasisTenantLicence`,
+`BasisTenantAsserted`, or `BasisPlatformFallback` — no player jurisdiction
+can become a tenant jurisdiction via any path this engine has. Two
+policy-gated knobs (`LocationRequirement`, `EvaluationPolicy.
+MaxLocationSignalAge`) have zero values that fail closed with
+`ErrPolicyUnset` rather than defaulting permissively — PC-GAP-1/PC-GAP-2,
+unmade human/legal decisions that must surface as caller-visible errors,
+never guessed defaults.
+
+**Independent review — four specialists in parallel, none seeing the
+others' findings:** `architect` fidelity review (checking the
+implementation against its own ruling line by line), `security`,
+`identity-compliance` (compliance/privacy), and `qa` (adversarial test
+design). Two defects were independently found by three of the four
+reviewers via different methods: a slice-aliasing non-forgeability break
+(`Candidates()`/`ConsideredEvidence()`/`Contributors()` all returned their
+internal backing array directly rather than a defensive copy — fixed via
+`slices.Clone`) and an `fmt` `%#v` redaction bypass (dumps unexported
+field values including the country code, bypassing every `String()`
+method's redaction — fixed with `GoString()`/`fmt.GoStringer` on all five
+affected types). Three further P1/P2 architect findings and five
+lower-severity security findings were fixed in the same round; full
+findings/disposition ledger: `docs/governance/task-registry.md`'s "Stage
+4I Phase C" section.
+
+**Validation, run to completion before reporting done:** `go build
+./...` clean; `go vet ./...` and `go vet -tags=integration ./...` clean;
+`gofmt -l .` clean; `internal/jurisdiction` unit suite green (45 tests,
+including 15 new regression tests added this fix round); `go test -race
+./internal/jurisdiction/...` clean; whole-repo `go test ./...` green
+(every package, no regressions); whole-repo `go test -tags=integration
+./...` green against a real local Postgres (every package, including
+`internal/bonus`, `internal/casino`, `internal/httpserver`, `internal/rg`,
+`internal/ledger`, `internal/kyc`, `internal/identity` — no regression
+anywhere).
+
+**The decisive scope-control property, unchanged from every prior Stage
+4I phase:** `internal/jurisdiction/resolver.go` — the only resolver any
+consuming domain (`casino`, `bonus`, `risk`) actually calls — has **zero
+diff**, confirmed by `git diff --stat` after implementation, after all
+four reviews, and after the fix round. Zero production call sites of
+`DeterminePlayerJurisdiction` or `ComposeRestrictions` exist anywhere.
+`git status --porcelain` after the fix round showed changes confined
+entirely to `internal/jurisdiction/` — no unrelated file touched.
+
+**Documentation/governance updated this phase:** new §14 in
+`docs/governance/stage-4i-canonical-model.md` (the canonical resolution
+contract, operation taxonomy, evidence precedence, unresolved/fail-closed
+semantics, more-restrictive semantics, event-time semantics, tenant/
+player separation, and the full PC-GAP register with owner/reason/
+dependency/future-phase/security-impact for each of PC-GAP-1 through 4);
+§7.3 amended (the `blocked > restricted > allowed` MROC severity
+vocabulary, now anchored in real code); §7.4 corrected (withdrawing the
+prior "MROC is NOT built in Stage 4I" claim, since `ComposeRestrictions`
+now exists, with the honest caveat that it has zero production callers);
+`docs/governance/task-registry.md`'s new "Stage 4I Phase C" section (full
+findings ledger); this entry.
+
+Per the directive's own mandatory stop condition: the Orchestrator
+**stops** here. Phase D and any production jurisdiction activation remain
+unauthorized pending a separate human directive reviewing this Phase C
+completion report.

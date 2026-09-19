@@ -147,3 +147,34 @@ func TestResolution_AssertScope(t *testing.T) {
 		t.Fatalf("a brand-less resolution must be usable by any brand in its tenant: %v", err)
 	}
 }
+
+// TestResolve_RemainsUnchangedAndCannotEmitThePhaseCReasons proves Stage 4I
+// Phase C's new Reason values (ReasonNoApplicableEvidence/
+// ReasonEvidenceInvalid/ReasonLocationSignalUnusable) are structurally
+// unreachable from Resolve - they belong exclusively to
+// DeterminePlayerJurisdiction (precedence.go), a separate, zero-caller
+// entry point this dispatch added. resolver.go itself has zero diff this
+// phase.
+func TestResolve_RemainsUnchangedAndCannotEmitThePhaseCReasons(t *testing.T) {
+	phaseCReasons := map[Reason]bool{
+		ReasonNoApplicableEvidence:   true,
+		ReasonEvidenceInvalid:        true,
+		ReasonLocationSignalUnusable: true,
+	}
+
+	playerID := uuid.New()
+	cases := []Params{
+		{TenantID: uuid.Nil, OperationClass: OperationPlay, RequestedByActorType: ActorSystem},
+		{TenantID: uuid.New(), OperationClass: OperationClass("withdrawal"), RequestedByActorType: ActorSystem},
+		{TenantID: uuid.New(), PlayerAccountID: &playerID, OperationClass: OperationPlay, RequestedByActorType: ActorPlayer},
+	}
+	for _, p := range cases {
+		res, err := Resolve(context.Background(), nil, p)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if phaseCReasons[res.Reason()] {
+			t.Fatalf("Resolve must never emit a Stage 4I Phase C reason, got %q", res.Reason())
+		}
+	}
+}

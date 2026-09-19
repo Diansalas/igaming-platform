@@ -87,6 +87,25 @@ const (
 	ReasonUnsupportedOperationClass Reason = "unsupported_operation_class"
 	ReasonScopeMismatch             Reason = "scope_mismatch"
 	ReasonRegistryUnknownCode       Reason = "registry_unknown_code"
+
+	// --- Stage 4I Phase C additions (docs/governance/stage-4i-canonical-model.md,
+	// docs/decisions/0042-human-decision-response.md) - see precedence.go
+	// for the algorithm that produces these.
+
+	// ReasonNoApplicableEvidence means evidence existed but none of it was
+	// a permissible determination for this purpose (e.g. only a location
+	// signal was supplied for a purpose that never treats location as a
+	// residence signal - HDR-J-3a).
+	ReasonNoApplicableEvidence Reason = "no_applicable_evidence"
+	// ReasonEvidenceInvalid means the highest-precedence applicable
+	// evidence carries a structurally invalid value (e.g. a
+	// non-ISO-3166 country code) - it must never be silently demoted to a
+	// lower-precedence basis.
+	ReasonEvidenceInvalid Reason = "evidence_invalid"
+	// ReasonLocationSignalUnusable means the physical-location signal was
+	// required by policy and was missing/stale/inconclusive/unavailable/
+	// provider-errored.
+	ReasonLocationSignalUnusable Reason = "location_signal_unusable"
 )
 
 // --- Basis: the canonical, CLOSED source-basis enum (canonical-model §3.1) ---
@@ -130,6 +149,14 @@ const (
 	StatusRejectedLowerPrecedence ConsideredBasisStatus = "rejected_lower_precedence"
 	StatusUnavailable             ConsideredBasisStatus = "unavailable"
 	StatusDisagreed               ConsideredBasisStatus = "disagreed"
+	// StatusInapplicable means the evidence existed and was valid, but this
+	// purpose's own rules say it is not authoritative here (e.g. a
+	// location signal considered for PurposeIdentityDetermination) - a
+	// SUCCESS state, not a failure (Stage 4I Phase C).
+	StatusInapplicable ConsideredBasisStatus = "inapplicable"
+	// StatusInvalid means the evidence was present but structurally
+	// unusable (e.g. a non-ISO-3166 country code) (Stage 4I Phase C).
+	StatusInvalid ConsideredBasisStatus = "invalid"
 )
 
 // ConsideredBasis records that a basis was considered and what happened

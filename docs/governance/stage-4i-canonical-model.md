@@ -989,17 +989,61 @@ jurisdiction (`evaluator.go:337-340`), so the second acquisition is a no-op
 on an already-held transaction-scoped lock — correct, but it needs a
 `qa`-owned concurrency test if MROC is ever built.
 
-### 7.4 What Stage 4I actually does about MROC: nothing but non-foreclosure
+**Stage 4I Phase C addendum (architect, fix-round action item) — the
+canonical severity vocabulary, now that code exists to anchor it.**
+`internal/jurisdiction.RestrictionOutcome` (`restriction.go`) is the first
+MROC-shaped composition this codebase has built, and it fixes a concrete
+three-level vocabulary: `blocked` (3) > `restricted` (2) > `allowed` (1),
+via `RestrictionOutcome.Severity()`. Mapping each existing gate's own total
+order onto it, per this section's own examples: Risk's `DENY > REVIEW >
+ALLOW` maps `DENY→blocked`, `REVIEW→restricted`, `ALLOW→allowed`;
+AssetAuthorization's `ineligible > eligible` maps `ineligible→blocked`,
+`eligible→allowed` (its two-valued order has no `restricted` rung); the
+casino blocklist's `blocked > not blocked` maps identically
+(`blocked→blocked`, `not blocked→allowed`). **This is a naming/severity
+convention for composing gate outcomes, not a new outcome axis** — it does
+not replace or widen §2.2's binding three-valued `Outcome` enum
+(`Resolved`/`Unresolved`/`Refused`), which remains the only axis any gate
+branches on. A future gate whose own total order needs a fourth
+distinguishable severity level (i.e. does not collapse cleanly onto
+`blocked`/`restricted`/`allowed`) needs an ADR extending
+`RestrictionOutcome`, not an ad-hoc local ordinal — extending this enum is
+a policy decision (which of two composed restrictions the platform-wide
+vocabulary calls "more severe"), the same governance bar §3.1 sets for the
+`Basis` enum.
 
-**MROC is a forward-binding specification. It is NOT built in Stage 4I.**
-No two-candidate case can arise: there is no resolver output for a player,
-so there is no second candidate to compose with.
+### 7.4 What Stage 4I actually does about MROC: the composition primitive exists; nothing calls it yet
 
-The **only** Stage 4I obligation is the non-foreclosure requirement already
-stated in §5.2: no `UNIQUE` constraint keyed on an operation, and no
-composition column added speculatively. Building MROC now would be exactly
-the scope expansion CLAUDE.md forbids — and would also pre-empt the half of
-HDR-J-4 that is genuinely human.
+**Corrected, Stage 4I Phase C (architect, fix-round action item).** This
+section previously stated "MROC is a forward-binding specification. It is
+NOT built in Stage 4I." That is no longer accurate and is withdrawn:
+`internal/jurisdiction.ComposeRestrictions` (`restriction.go`) implements
+exactly the composition rule §7.3 specifies — it takes every already-computed
+`AppliedRestriction`, returns the outcome at the maximum severity, and
+returns **every** contributor tied at that severity rather than picking
+one, per §7.3 item 2's no-arbitrary-tie-break requirement. It is a pure
+function: no I/O, no database handle, no jurisdiction resolution of its own
+— it composes restrictions a caller has already produced.
+
+**What is still true, and is the actual reason this remains
+non-production:** `ComposeRestrictions` has **zero production call sites**.
+No two-candidate case can arise yet — `DeterminePlayerJurisdiction`
+(the Phase C precedence engine, §14 below) can itself emit at most one
+additional-restriction candidate per call (the location dimension), and no
+domain (`casino`, `bonus-engine`, `risk`, `payments`, `sportsbook`) calls
+either function in its own evaluation path. `internal/jurisdiction/
+resolver.go` — the only resolver any of those domains actually call today —
+has zero diff throughout Phase C.
+
+The **only** Stage 4I obligation remains the non-foreclosure requirement
+already stated in §5.2: no `UNIQUE` constraint keyed on an operation, and no
+composition column added speculatively. Building the composition
+*primitive* was in scope for Phase C (it is a rule-engine building block,
+not a production wiring decision); wiring it into any domain's live
+evaluation path would be exactly the scope expansion CLAUDE.md forbids —
+and would also pre-empt the half of HDR-J-4 that is genuinely human (which
+jurisdiction's *record* is authoritative for a regulator-facing question,
+per this section's own closing paragraph, unchanged).
 
 **What remains genuinely human in HDR-J-4** (unchanged from IC §3's split,
 which is correct): which jurisdiction's *record* is authoritative for a
@@ -1843,3 +1887,240 @@ determination and the determination itself are different things, and so are
 software capability and regulatory approval. Real jurisdiction resolution
 remains blocked on **HDR-J-3** above all, and no engineering work in any
 later stage may route around it.
+
+---
+
+## 14. Stage 4I Phase C — player-jurisdiction precedence and resolution rules foundation
+
+**Status of this section: implementation record, added after Phase C's
+independent review and fix round.** Per HDR-J-2/HDR-J-3a (`docs/decisions/
+0042-human-decision-response.md`), this phase built the deterministic
+TECHNICAL FOUNDATION for resolving a player's own jurisdiction from
+evidence — the rule engine `internal/jurisdiction.DeterminePlayerJurisdiction`
+(`precedence.go`) and its supporting types (`purpose.go`, `evidence.go`,
+`player_result.go`, `restriction.go`). It does **not** activate production
+enforcement: `internal/jurisdiction/resolver.go` — the only resolver any
+consuming domain (`casino`, `bonus`, `risk`) actually calls — carries **zero
+diff** throughout this phase, verified by `git diff --stat` after
+implementation, after all four independent reviews, and after the fix
+round. There are zero production call sites of
+`DeterminePlayerJurisdiction` or `ComposeRestrictions`.
+
+Labelled status per CLAUDE.md's no-fake-completion rule: **`PARTIALLY
+IMPLEMENTED`** (rule engine + tests: `IMPLEMENTED`; production wiring:
+`NOT IMPLEMENTED`, deliberately, per this phase's own scope).
+
+### 14.1 The canonical resolution contract — `PlayerJurisdictionResult`
+
+`PlayerJurisdictionResult` (`player_result.go`) is this phase's answer to
+§2.2's outcome-vocabulary requirement applied at player-evidence
+granularity, and it deliberately does **not** collapse every non-resolution
+into a generic "unknown." Non-forgeable by construction (unexported fields,
+identical rationale to §2.3's `Resolution`), it distinguishes:
+
+- **resolved** — `Outcome() == Resolved`; `Candidates()`/`PrimaryCandidate()`
+  become reachable (both return `ErrNotResolved` otherwise, mirroring
+  `Resolution.Code()`/`ID()`'s own non-forgeability property).
+- **unresolved, no signal** (`ReasonNoSignal`) — no evidence at all was
+  supplied.
+- **unresolved, no applicable evidence** (`ReasonNoApplicableEvidence`) —
+  evidence existed but none of it was a permissible determination for this
+  `Purpose` (e.g. a location signal alone, for `PurposeIdentityDetermination`,
+  which never treats location as a residence signal per HDR-J-3a).
+- **unresolved, insufficient confidence** (`ReasonInsufficientConfidence`) —
+  only declared residence was present; declared residence alone is
+  insufficient for either live purpose (HDR-J-3b).
+- **unresolved, evidence invalid** (`ReasonEvidenceInvalid`) — the
+  highest-precedence applicable evidence carries a structurally invalid
+  value (a non-ISO-3166 code); it is never silently demoted to a
+  lower-precedence basis.
+- **unresolved, location signal unusable** (`ReasonLocationSignalUnusable`)
+  — the location dimension, when policy makes it required, was missing,
+  stale, inconclusive, unavailable, or provider-errored.
+- **conflicting evidence** — recorded via `HasDisagreement()` plus a
+  `StatusDisagreed` `ConsideredEvidence` entry, never as a distinct
+  `Outcome`/`Reason` value — disagreement is a recorded fact about the
+  *evidence*, not a resolution failure, because verified residence still
+  authoritatively resolves the operation over a disagreeing declared value
+  (HDR-J-3b/c).
+
+`ConsideredEvidence` records every basis considered and what happened to
+it, with a closed `ConsideredBasisStatus` vocabulary distinguishing a
+basis that lost to a higher-precedence one (`StatusRejectedLowerPrecedence`),
+one this purpose's own rules say is not authoritative here
+(`StatusInapplicable` — a success state, not a failure), one that was
+present but structurally unusable (`StatusInvalid`), and one that could not
+be evaluated at all (`StatusUnavailable`). Per canonical-model §5.3's
+governing rule — "persist the DECISION and REFERENCES to evidence, never
+the evidence VALUES" — `ConsideredEvidence` has **no code field at all**: a
+resolved candidate's code is the decision and is exposed via `Code()`;
+anything merely considered is not the decision and cannot carry one, by
+type shape rather than by convention.
+
+### 14.2 Operation/purpose taxonomy — deliberately separate from `OperationClass`
+
+`Purpose` (`purpose.go`) is a new, real, typed enum —
+`PurposeIdentityDetermination`, `PurposeMarketAccessControl`,
+`PurposeHistoricalReporting` — distinguishing identity/KYC determination
+from access/market-control from historical regulator-facing reporting, per
+the directive's taxonomy requirement.
+
+It is deliberately **not** merged with the pre-existing `OperationClass`
+enum (`OperationPlay`/`OperationCatalogueAvailability`/
+`OperationBonusIssuance`/`OperationBonusConversion`, §4.4 Layer 1). No
+mapping function between the two exists anywhere in this codebase
+(**PC-GAP-3**, §14.6) — which `OperationClass` values require which
+`Purpose` is a legal/policy content decision (e.g. does `play` require
+market-access control, identity determination, or both?), not an
+engineering one, and inventing that mapping here would be exactly the kind
+of legal-content guess CLAUDE.md and this phase's own directive forbid.
+
+### 14.3 Evidence precedence — verified residence authoritative, declared insufficient alone, location never a residence substitute
+
+`evaluateResidenceDimension` (`precedence.go`) implements the shared rule
+both `Purpose`s use for the residence dimension: a structurally valid
+verified residence (`BasisPlayerVerifiedResidence`, `ConfidenceVerified`)
+is authoritative and is never demoted by a disagreeing or invalid declared
+value sitting alongside it; a structurally invalid verified residence is
+**never** silently demoted to declared residence (`ReasonEvidenceInvalid`,
+not a declared-residence fallback); declared residence alone
+(`BasisPlayerDeclaredResidence`, `ConfidenceDeclared`) is insufficient for
+either live `Purpose` (`ReasonInsufficientConfidence`) — it is recorded,
+never selected; a location signal (`BasisGeoSignal`) is **never** a
+residence signal for `PurposeIdentityDetermination` — recorded as
+`StatusInapplicable`, never built into a residence candidate, regardless of
+how fresh or valid it is (HDR-J-3a, the specific property the directive
+names first). For `PurposeMarketAccessControl`, a resolved residence
+dimension may additionally carry a location-derived
+`RoleAdditionalRestriction` candidate (never a `RolePrimaryDetermination`
+one) — the mechanism §14.5 below describes.
+
+### 14.4 Unresolved-state semantics and the fail-closed invariant
+
+**No player jurisdiction may ever become a tenant jurisdiction via any
+default, fallback, or error-handling path — verified structurally, not by
+convention.** `TestDetermine_NeverEmitsATenantOrFallbackBasisOnAnyInput`
+(`precedence_invariants_test.go`) exhaustively cross-products every
+verified/declared/location/purpose/policy combination this engine accepts
+and asserts no result ever carries `BasisTenantLicence`,
+`BasisTenantAsserted`, or `BasisPlatformFallback` — the three tenant/
+fallback-shaped values in the closed `Basis` enum (§3.1). `EvidenceSet`
+itself (`evidence.go`) has **exactly three fields**
+(`VerifiedResidence`/`DeclaredResidence`/`LocationSignal`), enforced by a
+reflection-based tripwire test — there is no tenant, brand, or licence
+input this engine could read even if it wanted to.
+
+Two policy-gated evaluation knobs — `LocationRequirement` and
+`EvaluationPolicy.MaxLocationSignalAge` — have zero values that
+**deliberately fail closed rather than default permissively**:
+`LocationRequirementUnset` and a `nil` `MaxLocationSignalAge` both return
+`ErrPolicyUnset`, a Go error, not a silent `Unresolved` or `Resolved`
+result — an unmade human/legal decision (which operations need a fresh
+location check, and how strictly) must surface as a caller-visible error,
+never a guessed default (PC-GAP-1/PC-GAP-2, §14.6). Every string-backed
+enum this engine accepts from a caller (`LocationRequirement`,
+`LocationSignalState`) is validated by an exhaustive switch with a
+rejecting or normalizing default — never a permissive fallthrough. `AsOf`
+is mandatory and a zero value is rejected outright (`ErrInvalidInput`),
+because a zero `AsOf` would silently disable the location-freshness gate
+(every signal would compute as infinitely fresh).
+
+### 14.5 More-restrictive-outcome semantics — the composition primitive, not a policy decision
+
+See §7.3/§7.4 above (both amended in this phase) for the canonical
+severity vocabulary (`blocked > restricted > allowed`) and the honest
+statement of what is and is not built: `ComposeRestrictions`
+(`restriction.go`) is a real, tested, pure composition function — deriving
+the winning outcome from an explicit severity-to-outcome mapping (never a
+last-wins loop assignment, which would silently contradict its own
+documented "no tie-break policy" guarantee) and returning **every**
+contributor tied at the winning severity, never an arbitrary pick — but it
+has zero production callers, because no domain yet produces the
+second-candidate case it exists to compose.
+
+### 14.6 Deferred legal/policy decisions — the PC-GAP items
+
+Each of the following is an explicit, unset-by-default seam, never a
+smuggled default. None is decided here; each names its owner, why it is
+deferred, what depends on it, which future phase must close it, and its
+security/regulatory impact if left open.
+
+| ID | What is deferred | Owner | Why deferred | Depends on | Closes in | Security/regulatory impact if left open |
+|---|---|---|---|---|---|---|
+| **PC-GAP-1** | Whether a market-access operation may proceed when its location signal is unusable (missing/stale/inconclusive/unavailable/provider-errored), and under what conditions | `architect` + `identity-compliance`, with legal input | This is a legal/policy threshold (which operations require a fresh location check to proceed at all), not an engineering default. `LocationRequirementUnset` (the zero value) fails closed with `ErrPolicyUnset` rather than guessing `LocationRequired` or `LocationAdvisory` | HDR-J-3 (real player-side evidence collection); a real geolocation vendor | The phase that first wires `DeterminePlayerJurisdiction` into a production evaluation path (must supply this policy value explicitly, per operation class, before that wiring compiles into a reachable call) | **None while unset** — the seam is inert (zero production callers); a caller-supplied guess here, instead of an explicit human decision, would risk either wrongly blocking lawful play (over-strict) or wrongly permitting play from a restricted jurisdiction (under-strict, a licensing/regulatory exposure) |
+| **PC-GAP-2** | The maximum age before a physical-location signal is considered stale (`EvaluationPolicy.MaxLocationSignalAge`) | `architect` + `identity-compliance`, with legal input | Same class of decision as PC-GAP-1 — a `nil` value fails closed with `ErrPolicyUnset` rather than guessing "no limit" (which would defeat the freshness gate entirely) or an arbitrary duration (which would be a policy value invented by engineering) | PC-GAP-1 (the requirement decision this bounds); a real geolocation vendor's actual latency/refresh characteristics | Same production-wiring phase as PC-GAP-1 | **None while unset** — same reasoning as PC-GAP-1; note also SEC-4I-C-06 (a zero, non-nil duration is a distinct footgun — see `EvaluationPolicy.MaxLocationSignalAge`'s own doc comment, `precedence.go`) |
+| **PC-GAP-3** | The mapping from each `OperationClass` (`play`/`catalogue_availability`/`bonus_issuance`/`bonus_conversion`) to the `Purpose` it requires (identity determination, market-access control, both, or neither) | `identity-compliance`, with legal input | This is precisely the legal-content decision §14.2 explains this phase deliberately declined to invent — no code anywhere maps `OperationClass` to `Purpose` | HDR-J-3 (the same player-side evidence dependency as PC-GAP-1); the licensing/regulatory basis for which operations actually require which determination | The phase that first wires either `Purpose` into a per-`OperationClass` production check | **None while unset** — `DeterminePlayerJurisdiction` has no production callers; a guessed mapping would risk requiring identity determination where only market-access control is legally needed (unnecessary KYC friction) or the reverse (a compliance gap) |
+| **PC-GAP-4** | Tenant/jurisdiction-aware precedence keying — canonical-model §3.4 ("Precedence configuration — keyed on the licence side") is not yet reflected in any Phase C type. `DeterminePlayerJurisdiction` takes a single global `EvaluationPolicy`, not one keyed per tenant/licence | `architect` | Documentation-only gap, flagged by `architect`'s Phase C review: §3.4 already establishes that precedence configuration must key on the licence side once real content exists, but no `jurisdiction_precedence_configs` row shape or per-tenant policy lookup exists yet to wire this engine against — building that lookup now, with no real precedence content to populate it (HDR-J-2/HDR-J-3 both still open), would be exactly the scope expansion CLAUDE.md forbids | HDR-J-2 (precedence-configuration content); HDR-J-3 (player evidence collection, live) | The phase that gives `jurisdiction_precedence_configs` real write/read content and wires `EvaluationPolicy` construction to a per-tenant/licence lookup rather than a caller-constructed literal | **None while unset** — `EvaluationPolicy` today is always caller-constructed per call, never read from tenant configuration, so there is no cross-tenant leakage surface; the gap is purely that the eventual per-tenant policy source does not exist yet |
+
+### 14.7 Independent review and fix round
+
+Four independent specialist reviews (`architect` fidelity review,
+`security`, `identity-compliance` for compliance/privacy, `qa`), each
+without seeing the others' findings. Convergent findings (the same defect
+independently found by two or more reviewers) carried the highest
+confidence and were fixed first. Full findings/disposition table:
+`docs/governance/task-registry.md`, "Stage 4I Phase C" section.
+
+**Two defects were independently found by three of the four reviewers**
+(architect, security, and qa each found both by different methods — direct
+code reading, adversarial mutation/compile probes, and adversarial
+format-verb probes respectively):
+
+1. **Slice-aliasing non-forgeability break** (architect P1-3 / security
+   SEC-4I-C-01): `Candidates()`, `ConsideredEvidence()`, and
+   `ComposedRestriction.Contributors()` all returned their internal backing
+   array directly. A caller could reorder `Candidates()` in place and have
+   `PrimaryCandidate()` then report an additional-restriction candidate
+   (e.g. a geo signal) as the primary determination — defeating exactly
+   HDR-J-3a's "location never substitutes for verified residence"
+   guarantee. **Fixed**: all three accessors now return `slices.Clone` of
+   their internal slice.
+2. **`%#v` redaction bypass** (independently found by all three of
+   architect, security, and qa): `fmt`'s `%#v` verb bypasses `Stringer`
+   entirely and dumps unexported struct field values in full, including
+   the country code every `String()` method on these types was written to
+   redact. **Fixed**: `GoString() string` (implementing `fmt.GoStringer`)
+   added to `PlayerJurisdictionCode`, `Candidate`, `PlayerJurisdictionResult`,
+   `ComposedRestriction`, and `AppliedRestriction`, each returning the same
+   redacted shape as the type's own `String()`.
+
+Every other P1/P2 finding (fail-open `LocationRequirement` validation, a
+zero `AsOf` silently disabling the freshness gate, a dropped
+`ConsideredEvidence` entry on the required-and-unusable path, and
+`ReasonNoApplicableEvidence` never being emitted by the identity-purpose
+path despite the market-access path already emitting it for the
+symmetric case) was fixed in the same round, each with a new regression
+test. All fixes and their tests are enumerated in
+`docs/governance/task-registry.md`.
+
+### 14.8 Event-time and tenant/player separation — carried, not newly built
+
+Historical-reporting event-time semantics (a past event's jurisdiction
+context must never be silently rewritten by later evidence changes) are
+enforced the same way §7.5 already established for casino rounds:
+`DeterminePlayerJurisdiction` unconditionally refuses
+`PurposeHistoricalReporting` with `ErrHistoricalPurposeNotComputable` — a
+historical-reporting jurisdiction must be read from the event-time record,
+never recomputed from current evidence, and this phase adds no mechanism
+that could recompute one. Player-jurisdiction / tenant-licensing-jurisdiction
+/ brand-context separation is the same structural separation this whole
+stage already established (§1, §3.2, §3.3): `EvidenceSet`'s three fields
+carry only player-evidence-shaped values, and §14.4's exhaustive test
+confirms no tenant/brand/licence-shaped `Basis` can ever result from any
+input this engine accepts.
+
+### 14.9 Verdict
+
+**Stage 4I Phase C is ARCHITECTURALLY SOUND and CERTIFIED**, with all
+P0/P1 findings from the independent review fixed and re-validated (full
+build/vet/gofmt/race/integration suite green — see the Phase C completion
+report). It delivered exactly what the directive asked: a deterministic
+precedence rule engine and canonical resolution/evidence/purpose types,
+zero production wiring, zero diff to `resolver.go`, and every genuinely
+undecided legal/policy question named as an explicit, fail-closed,
+unset-by-default seam (PC-GAP-1 through 4) rather than guessed. **All
+activation switches remain OFF.** No production permitted-market list, no
+country allow/deny content, no real geolocation vendor, and no production
+jurisdiction enforcement exist as a result of this phase. Real
+player-jurisdiction resolution remains blocked on **HDR-J-3** above all,
+unchanged from §13.8's closing statement.
