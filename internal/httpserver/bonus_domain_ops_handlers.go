@@ -22,6 +22,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/bonus"
 	"github.com/Diansalas/igaming-platform/internal/economicop"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
@@ -468,11 +469,28 @@ func newIssueManualGrantRequestHandler(deps Deps) http.HandlerFunc {
 				return nil
 			}
 			result = toGrantResponse(grant, nil)
+			// SEC-4I-F2 interim control (canonical-model §8.4, confirmed
+			// by architect §8.4 with the tightening below): until JV-2
+			// removes this handler's client-supplied jurisdiction_code
+			// field, the audit record explicitly labels it as
+			// staff-supplied, using the SAME basis enum
+			// internal/jurisdiction's resolver defines
+			// (jurisdiction.BasisStaffSupplied) - a value the resolver
+			// is structurally incapable of ever producing itself (see
+			// that constant's own doc comment). This lets a later reader
+			// distinguish a pre-JV-2 record (staff-typed, unverified)
+			// from a post-resolver record without a second, ad hoc
+			// vocabulary - it is NOT a licence to keep this field; it
+			// ends the moment JV-2 lands for this handler.
+			jurisdictionMetadata := map[string]any{"basis": string(jurisdiction.BasisStaffSupplied)}
+			if req.JurisdictionCode != "" {
+				jurisdictionMetadata["code"] = req.JurisdictionCode
+			}
 			return audit.Record(ctx, tx, audit.Entry{
 				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: staffID,
 				Action: "bonus_grant.manual_issue_requested", TargetType: "bonus_grant", TargetID: grant.ID.String(), Outcome: audit.OutcomeSuccess,
 				IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
-				Metadata: map[string]any{"parent_operation_id": req.ParentOperationID},
+				Metadata: map[string]any{"parent_operation_id": req.ParentOperationID, "jurisdiction": jurisdictionMetadata},
 			})
 		})
 		if errors.Is(err, economicop.ErrParentOperationNotFound) || errors.Is(err, economicop.ErrParentNotApproved) || errors.Is(err, economicop.ErrParentNotOpenOrExpired) || errors.Is(err, economicop.ErrChildScopeExceedsParent) {
