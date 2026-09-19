@@ -677,6 +677,38 @@ chain. Full reasoning in this Phase's completion report to the human.
 
 **Final certification (Phase 11, independent financial sign-off): READY.** Every real posting shape traced against actual call sites (not re-derived from design docs) and confirmed balanced; `ACTION_ROUTE_TO_CASH`'s 4-leg posting shape (via Rule B2 firing unconditionally, since `player_bonus_held` is a BONUS_SET member) given a final, closing ruling — correct, no further ambiguity. Idempotency and reconciliation confirmed end to end. Both dependency-request fixes confirmed to carry no residual financial-correctness angle.
 
+## Stage 4H-B1, Wave 3 — Bonus Engine Completion, Integration Hardening & Final Financial Gate (Phase 10 of 11 — `architect`, IN PROGRESS)
+
+Commits `9d857dc`..`8c6ab7a` are Phases 0-9 (reconnaissance through `qa`).
+This entry records **Phase 10 only** (`architect`, cross-domain
+composition certification). Phase 11 (`ledger-finance`, final financial
+certification) has not run; the Wave 3 gate report is the Orchestrator's,
+not this entry's, and no verdict on the Wave as a whole is recorded here.
+
+| ID | Owner | Status | Dependencies | Files owned | Tests | Docs | Blockers |
+|---|---|---|---|---|---|---|---|
+| W3-P10 | architect | Done | W3-P1..P9 | `internal/economicop/enforce.go` (`ValidateRootAuthorizationBounds`, `boundedRootOperationTypes`, `ErrUnboundedRootAuthorization`), `internal/bonus/targeting.go` (`MintRootOperation` calls it), `internal/bonus/wagering_contribution_entry.go` (contribution-weight clamp), 6 test fixtures updated | `internal/economicop/bounds_test.go` (new, unit), `internal/bonus/eoi_root_bounds_integration_test.go` (new), `TestResolveContributionWeightBP` (6 new cases). Both fixes verified to FAIL pre-fix by reverting them in place. Full validation floor: `go build`/`go vet` (both tag sets)/`gofmt` clean, `-race -tags=integration` on `economicop`/`bonus`/`casino`/`httpserver`, full repo-wide `-tags=integration` green (26 packages) | `docs/decisions/0040-wave-3-cross-domain-composition-rulings.md` (new), `docs/architecture/34-economic-operation-identity.md` (§5.6, §5.7, §3.1 note, EOI-19/EOI-20, two §8 rows, §7 status correction), `docs/architecture/29-bonus-implementation-contract.md` (BI-2 correction, BI-16), `docs/architecture/13-dependency-map-and-risk-register.md` (R16, R5 update, scheduled-items table), this entry | `DR-4HB1W3-ARCH-01` open and **gated** (below); `DEP-EOI-8` open and gated; eight further items routed to other owners, all recorded in doc 13 |
+
+**Dependency Requests filed by Phase 10:**
+
+| ID | Stage | Requesting task | Target domain | What's needed | Filed | Resolved |
+|---|---|---|---|---|---|---|
+| DR-4HB1W3-ARCH-01 | 4H-B1 Wave 3 Phase 10 | Architect's independent composition review | casino + bonus-engine | `internal/casino`'s `postBet` takes the `player_cash` `wallet_balance_projection` row lock (`lockCashBalance`) and posts (migration 0023's trigger write-locks every projection row touched) **before** taking the `(tenant_id, grant_id)` advisory lock — the reverse of every Bonus-domain path, which locks the Grant first and posts second. Both lock families **block**, so the two orders form an AB-BA cycle wherever they meet on a shared projection row. This is exactly the fourth participant `ledger-accounting-model.md` §6.6.16 predicted ("'no cycle today' is not a property that survives a fourth participant"). **Latent, not live**: the only Bonus paths posting to `player_cash`/`house_gaming` are `ConvertGrant` (zero non-test callers, no route), `ACTION_ROUTE_TO_CASH` and the two G-2 win/rollback seams (all unreachable without bonus-funded stake locking). Fix: resolve the qualifying Grant and take `AdvisoryLockGrant` before `lockCashBalance`. Not made in Phase 10 — it restructures a hot path across two domains, more than a certification phase should change this late in a Wave. **Rule recorded as HR-21 extended (doc 34 §5.6) + invariant EOI-20; risk R16 added.** | Stage 4H-B1 Wave 3 Phase 10 | **Open — GATED**: must land before any conversion trigger, before `postBet`'s bonus-funded leg, and before anything else making those paths concurrently reachable with a bet |
+| DR-4HB1W3-ARCH-02 (= `DEP-EOI-8`) | 4H-B1 Wave 3 Phase 10 | Architect's independent composition review | bonus-engine + security | `bonus_campaign_activation` is declared in doc 34 §3.1 as a standing-authorization EOI type, with no mint point, no `consumptionShapes` entry and no `boundedRootOperationTypes` entry — while Wave 3's deposit sweep and cashback scheduler made the automatic, campaign-driven grant-issuing effecting writes it was declared to bound live for the first time. One four-eyes-approved activation therefore authorizes unbounded automatic issuance. Inert today only because every sweep-driven issuance denies at `AssetAuthorization` (no per-player jurisdiction resolver exists). Either mint the EOI with declared bounds, or record a `security`-co-signed determination of what bounds it instead. | Stage 4H-B1 Wave 3 Phase 10 | **Open — GATED**: before campaign-driven automatic issuance can actually succeed, i.e. as part of whatever closes the sweeps' jurisdiction-resolution gap |
+| DR-4HB1W3-ARCH-03 | 4H-B1 Wave 3 Phase 10 | Architect's independent composition review | bonus-engine (write-path half) | `contribution_weight_table` had no validation at any layer, and `ResolveContributionWeightBP` neither validated nor clamped, so migration 0058's column `CHECK (contribution_weight_bp BETWEEN 0 AND 10000)` was the only enforcement — firing at the END of the chain, as a raw constraint error that propagated out of `postBet` and **rolled back the player's own cash bet**. One mistyped Offer field was a live betting outage. **Bet-time half RESOLVED in Phase 10** (commit `5af05d2`: table-derived weights clamped into `[0, 10000]`, the value-reducing direction only, restoring symmetry with `DR-4HB1W3-RISK-02`'s own posture). **Write-path half open**: reject an unparseable/out-of-range table at Offer-version creation, and audit-signal the unparseable case at bet time (ADR 0040 D3 ruling items 1 and 3). | Stage 4H-B1 Wave 3 Phase 10 | **Partially closed** (bet-time clamp shipped); write-path validation routed to `bonus-engine` |
+
+**Phase 10 certification verdict: CERTIFY WITH GATED FINDINGS.** Wave 3's
+Phases 1-9 compose correctly — no cross-domain contradiction was found
+that makes shipped behavior wrong today. Three composition findings no
+single phase could have caught (`DR-4HB1W3-ARCH-01`/`-02`/`-03`) are
+recorded with owners and gates; two doc-vs-code contradictions created or
+exposed by this Wave were corrected in place (doc 29's BI-2 precondition;
+doc 34 §7's status). Every item `risk` (Phase 4) and `security` (Phase 6)
+routed to `architect` by name is disposed of in ADR 0040. **This verdict
+covers cross-domain architectural composition only** — it is not a
+financial certification (Phase 11, `ledger-finance`) and not a stage-gate
+authorization (human, via the Orchestrator).
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

@@ -340,6 +340,44 @@ and in doc 13.
 
 ---
 
+## D6 — `DECISION`: two boundary statements that Wave 3 made wrong, corrected in doc 29
+
+Both are cases of a document contradicting shipped code after this
+Wave — the class of finding that is invisible phase-by-phase and only
+appears on an end-to-end read.
+
+**(a) BI-2's `casino → bonus` precondition was stale, and read literally
+marked shipped code as a violation.** It conditioned the import on "ADR
+0039 Decision 2 selecting `ACTION_ROUTE_TO_CASH`". Decision 2 was never
+resolved that way — Wave 2 built all three actions as staff-resolvable
+`bonus_held_dispositions` outcomes, so no code path selects any of them —
+and Wave 3 then added a `casino → bonus` call site with nothing to do
+with G-2 at all (`postBet`'s wagering-contribution trigger, which HR-10
+requires to be in the bet's own transaction). **Corrected in doc 29
+§8's BI-2 plus a note**: the import is permitted; BI-2's real content is
+the **one-way** rule that `ledger`/`wallet`/`risk`/`rg`/`payments` never
+depend on Bonus, which is unchanged and still holds. **ADR 0039 Decision
+2 is untouched and stays open** — only the stated precondition was
+corrected, not the decision.
+
+**(b) The deposit sweep satisfied the transport design's letter by
+taking an undeclared schema dependency instead.** `internal/bonus`
+reads `deposit_intents` — an `internal/payments`-owned table — directly
+via raw SQL, for `brand_id`, `player_account_id`, `wallet_id`,
+`asset_code`, `amount` and `payment_method`. Avoiding a Go-level call
+into `internal/payments` was the right instinct, and the read is
+genuinely necessary (`ledger_transactions` carries no `payment_method`,
+which the deposit-method eligibility axis needs). But the result is a
+dependency the compiler cannot see: a payments migration renaming one of
+those columns breaks a Bonus sweep at runtime, with nothing in either
+domain's review able to notice. **Decision: accept the read, declare the
+dependency.** New invariant **BI-16** (doc 29 §8) names the table and the
+exact six columns, makes it mechanically checkable (the set of non-`bonus_*`
+tables in `internal/bonus`'s SQL must equal the declared set), and binds
+`payments` to treat those columns as a published interface. This is the
+only peer-domain table read Wave 3 introduced — verified by diffing the
+table set against `9d857dc`.
+
 ## `CONSTRAINT` RC-1 — `bonus_adjustment_write`, for whoever builds it
 
 Not built in Wave 3 (`bonus-engine` stopped on it deliberately; the
@@ -505,7 +543,9 @@ structurally true rather than conventionally true.
   inside the existing mechanisms — no new control, no new schema, no new
   migration.
 - Two normative additions to doc 34 (§5.6 lock ordering, §5.7 bounded
-  roots) and one note on §3.1.
+  roots), one note on §3.1, two new EOI invariants (EOI-19/EOI-20); one
+  corrected invariant and one new one in doc 29 (BI-2's precondition,
+  BI-16's declared peer-domain read).
 - Seven items routed to other owners and recorded in doc 13's scheduled
   cross-domain table: the `postBet` lock-order fix (`DR-4HB1W3-ARCH-01`,
   gated), `contribution_weight_table` authoring validation, the

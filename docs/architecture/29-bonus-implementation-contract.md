@@ -895,7 +895,8 @@ as a blocking finding. Each invariant below is mechanically checkable.
 | ID | Invariant | Check |
 |---|---|---|
 | **BI-1** | Every `bonus_*` and `segment*` table has `FORCE ROW LEVEL SECURITY`; every `tenant_staff_scope` policy carries the `app.player_account_id IS NULL` conjunct; every player-readable table has a **SELECT-only** `player_self_scope` policy | Schema inspection + cross-tenant and cross-player RLS integration tests. This is the exact gap `code-reviewer` found on `self_exclusion_enumeration_runs` in Stage 4H-B0-R6 (finding F2) |
-| **BI-2** | `internal/bonus` is never imported by `internal/ledger`, `internal/wallet`, `internal/risk`, `internal/rg`, `internal/payments`. (`internal/casino` importing it is permitted **only** if ADR 0039 Decision 2 selects ACTION_ROUTE_TO_CASH, §4.3) | Import inspection, the same technique doc 02 uses for the risk/rg separation |
+| **BI-2** | `internal/bonus` is never imported by `internal/ledger`, `internal/wallet`, `internal/risk`, `internal/rg`, `internal/payments`. **`internal/casino` importing it is permitted** — see the correction note below this table | Import inspection, the same technique doc 02 uses for the risk/rg separation |
+| **BI-16** *(new, Stage 4H-B1 Wave 3 Phase 10, `architect`)* | Every table `internal/bonus` reads that belongs to **another domain's Go package** is declared, by name and by the columns read, in this row. Currently exactly one: **`deposit_intents`** (owned by `internal/payments`), read by `deposit_sweep.go` for `brand_id`, `player_account_id`, `wallet_id`, `asset_code`, `amount`, `payment_method` and joined on `ledger_transaction_id`/`tenant_id`. (`ledger_transactions`/`ledger_entries`/`ledger_accounts`, `player_accounts`, `wallets`, `staff_users`, `assets`, `jurisdictions`, `tenants`, `economic_operations` and `audit_log` are platform-shared or already-established reads, not peer-domain reads, and are out of this row's scope) | A test asserting the set of non-`bonus_*` tables appearing in `internal/bonus`'s SQL equals the declared set — the same mechanical shape as BI-15's import inspection, one level down. **Why this exists:** the deposit sweep satisfied the *letter* of the transport design (no call into `internal/payments`) by taking a **schema-level** dependency on it instead, which the compiler cannot see and a payments migration can break silently at runtime. That is an acceptable trade — `ledger_transactions` alone carries no `payment_method`, which the deposit-method eligibility axis needs — but an **undeclared** one is not. `payments` owns `deposit_intents` and must treat these six columns as a published interface |
 | **BI-3** | No `bonus_*` table stores a balance. Every player-visible bonus *balance* is derived from `ledger_entries`. (`bonus_grants.granted_amount` is an immutable computation input, not a balance — the distinguishing test is whether any code path ever `UPDATE`s it) | Schema inspection + grep for `UPDATE bonus_` on amount columns |
 | **BI-4** | Wagering progress is never a stored counter. `bonus_progress` and `bonus_contribution_records` are append-only; no `UPDATE`/`DELETE` | Trigger/constraint inspection, mirroring `audit_log`'s enforcement (ADR 0013) |
 | **BI-5** | Every Grant state transition appends a `bonus_progress` row **in the same transaction**. No transition path exists without one | Code review of every transition + a test asserting Progress-row count equals transition count |
@@ -909,6 +910,34 @@ as a blocking finding. Each invariant below is mechanically checkable.
 | **BI-13** | Rule B2 holds without exception: every `player_bonus` entry has an equal, opposite `promo_liability` entry in the **same** `LedgerTransaction`; Invariant B1 nets to zero per `(tenant_id, asset_code)` at every instant, no tolerance band | `ledger-finance`-owned invariant sweep — `ledger-finance` has final authority here, not `architect` |
 | **BI-14** | No B1 artifact references a mission, tournament, level, badge, streak, point or marketplace item (§6.6) | grep across `internal/bonus`, migrations, route table |
 | **BI-15** | `internal/bonus` does not import `internal/eventbus` (§2.2) | Import inspection |
+
+**BI-2 correction note (Stage 4H-B1 Wave 3 Phase 10, `architect`).**
+BI-2's prior parenthetical conditioned the `casino → bonus` import on
+"ADR 0039 Decision 2 selecting ACTION_ROUTE_TO_CASH". That condition is
+stale and, read literally, marks shipped code as a violation of an
+invariant it does not actually violate — so it is corrected here rather
+than left to be rediscovered by every future reviewer. Two things
+changed under it:
+
+1. **Decision 2 was not resolved by selecting one option; the design
+   stopped needing it to be.** Wave 2 built all three named actions
+   (`ACTION_REFORFEIT`, `ACTION_ROUTE_TO_CASH`, `ACTION_HOLD_FOR_REVIEW`)
+   as staff-resolvable `bonus_held_dispositions` outcomes, so the code
+   selects nothing — a human does, per disposition, under four-eyes. The
+   import exists to support the holding representation itself,
+   **whichever** option is eventually chosen. Decision 2 remains an
+   **open Human Decision Register item** and nothing here resolves it
+   (BC-21 stays `BLOCKED`); only the import's stated precondition is
+   corrected.
+2. **Stage 4H-B1 Wave 3 added a `casino → bonus` call site that has
+   nothing to do with G-2 at all**: `postBet`'s cash-funded
+   wagering-contribution trigger (`ledger-accounting-model.md`
+   §7.18.3.3), which must run in the same transaction as the bet posting
+   (HR-10) and therefore cannot be inverted. §7.18.1 states the position
+   this note adopts: a `casino → bonus` call is architecturally
+   unremarkable and requires no exception. BI-2's real content — the
+   **one-way** rule that `ledger`, `wallet`, `risk`, `rg` and `payments`
+   never depend on Bonus — is unchanged and still holds.
 
 ---
 
