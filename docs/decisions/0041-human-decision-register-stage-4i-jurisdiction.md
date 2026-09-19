@@ -45,12 +45,36 @@ inventing option labels.
 - **RISK** — `docs/governance/stage-4i-risk-model.md`
 - **SEC** — `docs/governance/stage-4i-security-model.md`
 
-**Implementation status, unchanged by this document, per CLAUDE.md's
-no-fake-completion rule:** `NOT IMPLEMENTED`. No resolver, no
-`jurisdiction_resolutions` table, no registry write surface, and no
-player-side jurisdiction signal exists at the commit this document is
-written against (CANON, final section). Recording these six items does not
-change that status in either direction.
+**Implementation status, per CLAUDE.md's no-fake-completion rule.**
+
+*As originally written (commit `a7c6279`):* `NOT IMPLEMENTED` — no
+resolver, no `jurisdiction_resolutions` table, no registry write surface,
+and no player-side jurisdiction signal existed at that commit.
+
+*Corrected by `architect` at Stage 4I's final cross-domain certification,
+for factual accuracy only — no recommendation, routing, framing or
+decision in this document is altered:* the first three of those four now
+**exist**. `internal/jurisdiction` (the resolver), migration `0071`'s
+`jurisdiction_resolutions` / `jurisdiction_resolution_active` /
+`jurisdiction_precedence_configs` tables, and the `jurisdictions` /
+`licences` registry write surface all landed during Stage 4I. The overall
+label is therefore **`PARTIALLY IMPLEMENTED`**, not `NOT IMPLEMENTED`.
+
+**The fourth — a player-side jurisdiction signal — does not exist, and
+that is the one that matters for every "what is actually blocked"
+analysis below.** Each of those analyses was re-verified against the final
+Stage 4I code state and **none required correction**: the resolver
+genuinely returns `unresolved(no_signal)` for every player-scoped
+operation; `AssetAuthorization` layer 6 genuinely denies unconditionally
+on it; the precedence table genuinely exists with zero rows; the
+casino per-game blocklist is genuinely armed-per-game and fail-closed
+within it; and the MROC non-foreclosure requirements are genuinely
+satisfied by `0071`'s schema. Where an analysis below says a mechanism is
+"already specified and buildable," read it now as **built**; where it says
+a fact or a row is missing, it is still missing.
+
+Recording these six items did not, and does not, change that status in
+either direction.
 
 ---
 
