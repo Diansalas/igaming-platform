@@ -324,8 +324,16 @@ func TestSEC_EOIMintedForOwnPerson_RefusedByComposedSEP1(t *testing.T) {
 		_, _, issueErr := IssueManualGrantRequest(ctx, tx, g, parentOpID, f.jurisdictionCode, f.staffID)
 		return issueErr
 	})
+	// Per CLAUDE.md's "no fake completion"/qa-owned "check WHICH error"
+	// standard (a bare non-nil check would also incorrectly pass if
+	// issuance failed for an unrelated reason - a validation error, a
+	// foreign-key violation - masking a genuine SEP-1 bypass): the refusal
+	// must actually be migration 0062's SEP-1 self-dealing trigger, not
+	// merely "some error occurred".
 	if err == nil {
 		t.Fatal("SEP-1 bypassed: a staff principal issued a manual grant to a player account belonging to their own Person")
+	} else if !strings.Contains(err.Error(), "SEP-1") || !strings.Contains(err.Error(), "self-dealing") {
+		t.Fatalf("expected a SEP-1 self-dealing refusal, got a DIFFERENT error (does not prove SEP-1 fired): %v", err)
 	}
 	if !strings.Contains(err.Error(), "SEP-1") {
 		t.Fatalf("expected a SEP-1 refusal at issuance, got %v", err)

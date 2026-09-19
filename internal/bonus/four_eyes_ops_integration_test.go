@@ -327,8 +327,18 @@ func TestManualGrantWithApproval_SucceedsWithApproval(t *testing.T) {
 		_, _, err := ActivateManualGrantWithApproval(ctx, tx, f.tenantID, grant.ID, parentOpID, f.jurisdictionCode, f.staffID, amount)
 		return err
 	})
+	// A bare non-nil check here would also pass if the SECOND attempt
+	// failed for a DIFFERENT reason (e.g. the four-eyes consume refusing a
+	// second time because the approval was already consumed by the first
+	// activation) - which would not actually prove the CAS guard this
+	// test's own name and doc comment claim to exercise. Pin the specific
+	// sentinel ActivateGrant's own status check returns
+	// (lifecycle.go: "g.Status != GrantIssued") so a future reordering
+	// that let a different error mask this one would be caught.
 	if err == nil {
 		t.Fatal("expected a second activation attempt against an already-activated grant to fail")
+	} else if !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("expected ErrIllegalTransition (the Grant-status CAS guard, not e.g. a re-consumed-approval error), got %v", err)
 	}
 }
 
