@@ -190,10 +190,14 @@ func newFileChangeRequestHandler(deps Deps) http.HandlerFunc {
 }
 
 type decideChangeRequestRequest struct {
-	Decision            string `json:"decision"` // "approve" | "reject"
-	ReasonCode          string `json:"reason_code,omitempty"`
-	ThresholdAtDecision string `json:"threshold_at_decision,omitempty"`
-	AmountAtDecision    string `json:"amount_at_decision,omitempty"`
+	Decision string `json:"decision"` // "approve" | "reject"
+	// ReasonCode is MANDATORY for decision="reject" (migration 0063's own
+	// CHECK (decision <> 'reject' OR reason_code IS NOT NULL)) and
+	// optional for an approve.
+	ReasonCode string `json:"reason_code,omitempty"`
+	// NOTE (Stage 4H-B1 Wave 3 Phase 6, `security`): there are
+	// deliberately NO threshold_at_decision/amount_at_decision fields
+	// here - see newDecideChangeRequestHandler's own doc comment.
 }
 
 // newDecideChangeRequestHandler records an approve/reject decision - the
@@ -201,6 +205,35 @@ type decideChangeRequestRequest struct {
 // trigger (beneficiary separation) fire on THIS write and are the real
 // enforcement; this handler adds only authn/authz/audit around it, per
 // this file's own top-of-file doc comment.
+//
+// FIX (Stage 4H-B1 Wave 3 Phase 6, `security`):
+// bonus_change_approvals.threshold_at_decision/amount_at_decision are now
+// resolved SERVER-SIDE, inside this same transaction, from
+// bonus.ResolveApprovalPolicy and from the locked request's own
+// amount_at_request - they are no longer read from the request body.
+//
+// Migration 0063 created those two columns for exactly one purpose, in its
+// own words (quoting withdrawal_approvals' precedent): "what stops a later
+// threshold change from retroactively making a past decision look
+// compliant... when the record is read during a dispute." A client-supplied
+// value defeats that purpose completely: the approving principal could
+// POST threshold_at_decision=999999999, amount_at_decision=1 alongside a
+// genuinely large, genuinely above-threshold approval, and the resulting
+// bonus_change_approvals row - append-only, protected by deny-update/
+// deny-delete triggers, and therefore trusted precisely BECAUSE it cannot
+// be edited afterwards - would permanently assert that the decision was a
+// routine below-threshold one. The forensic record that exists to be
+// trustworthy in a dispute was authored by the party it is meant to hold
+// to account. Both fields were also optional, so an approver could simply
+// omit them and leave the record blank.
+//
+// internal/withdrawal.Approve (the precedent migration 0063 says it is
+// modeled on) already does exactly what this fix does - "The ApprovalPolicy
+// in force is resolved internally, from ResolveApprovalPolicy... never
+// passed in by the caller... recorded verbatim on the WithdrawalApproval
+// row (threshold_amount_at_decision) specifically so a later policy
+// mutation is detectable after the fact". This is that existing pattern
+// applied to the surface that was missing it, not a new mechanism.
 func newDecideChangeRequestHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -226,27 +259,15 @@ func newDecideChangeRequestHandler(deps Deps) http.HandlerFunc {
 		}
 		v := validation.New()
 		v.RequireOneOf("decision", req.Decision, "approve", "reject")
+		if req.Decision == "reject" {
+			// Surfaced as a 400 here rather than letting migration 0063's
+			// own CHECK constraint raise it as an opaque Postgres error a
+			// caller would see as a bare "decision refused".
+			v.RequireNonEmpty("reason_code", req.ReasonCode)
+		}
 		if v.HasErrors() {
 			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
 			return
-		}
-
-		var threshold, amount *big.Int
-		if req.ThresholdAtDecision != "" {
-			amt, ok := new(big.Int).SetString(req.ThresholdAtDecision, 10)
-			if !ok {
-				apierror.Write(w, requestID, apierror.CodeValidation, "threshold_at_decision must be a decimal integer string")
-				return
-			}
-			threshold = amt
-		}
-		if req.AmountAtDecision != "" {
-			amt, ok := new(big.Int).SetString(req.AmountAtDecision, 10)
-			if !ok {
-				apierror.Write(w, requestID, apierror.CodeValidation, "amount_at_decision must be a decimal integer string")
-				return
-			}
-			amount = amt
 		}
 
 		var reasonCode *string
@@ -263,7 +284,16 @@ func newDecideChangeRequestHandler(deps Deps) http.HandlerFunc {
 			if !requirePermissionForOperationTx(existing.Operation, tc) {
 				return errInsufficientPermission
 			}
-			if err := bonus.RecordChangeApproval(ctx, tx, tc.TenantID, changeRequestID, staffID, req.Decision, reasonCode, threshold, amount); err != nil {
+			// The policy in force AT THIS DECISION, resolved here from the
+			// request's own (tenant, operation, brand, asset) - never from
+			// the caller. ResolveApprovalPolicy fails closed to
+			// threshold 0 / 2 approvals when no row resolves.
+			policy, err := bonus.ResolveApprovalPolicy(ctx, tx, tc.TenantID, existing.Operation, existing.BrandID, existing.AssetCode)
+			if err != nil {
+				return err
+			}
+			if err := bonus.RecordChangeApproval(ctx, tx, tc.TenantID, changeRequestID, staffID, req.Decision, reasonCode,
+				policy.ApprovalThresholdMinor, existing.AmountAtRequest); err != nil {
 				return err
 			}
 			resp = toChangeRequestResponse(existing)
@@ -271,6 +301,12 @@ func newDecideChangeRequestHandler(deps Deps) http.HandlerFunc {
 				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: staffID,
 				Action: "bonus_change_request." + req.Decision + "d", TargetType: "bonus_change_request", TargetID: changeRequestID.String(), Outcome: audit.OutcomeSuccess,
 				IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+				Metadata: map[string]any{
+					"operation":          string(existing.Operation),
+					"reason_code":        req.ReasonCode,
+					"threshold_minor":    policy.ApprovalThresholdMinor.String(),
+					"required_approvals": policy.RequiredApprovals,
+				},
 			})
 		})
 		if errors.Is(err, errInsufficientPermission) {

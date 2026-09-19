@@ -82,10 +82,27 @@ func scanChangeRequest(row rowScanner) (ChangeRequest, error) {
 		r         ChangeRequest
 		operation string
 		state     string
+		// FIX (Stage 4H-B1 Wave 3 Phase 6, `security`): amount_at_request
+		// is NUMERIC(38,0) and MUST be scanned through pgtype.Numeric,
+		// exactly like every other monetary column in this package
+		// (numeric.go, offer.go, bulk_grant.go, progress.go). Scanning it
+		// straight into a **big.Int - as this function previously did -
+		// works only while the column is NULL: pgx short-circuits NULL
+		// before reaching the numeric codec, but any non-NULL value fails
+		// with "cannot scan numeric (OID 1700) in binary format into
+		// **big.Int". Every existing caller happened to file amount-less
+		// requests, so this never fired in a test; the consequence was
+		// that filing a change request WITH an amount - i.e. precisely the
+		// above-threshold requests whose amount is the load-bearing input
+		// to the approval threshold and to the append-only
+		// bonus_change_approvals forensic record - failed outright with a
+		// 500 at the RETURNING scan, and no request could ever carry a
+		// non-NULL amount_at_request.
+		amountAtRequest pgtype.Numeric
 	)
 	err := row.Scan(
 		&r.ID, &r.TenantID, &r.BrandID, &operation, &r.TargetType, &r.TargetID, &r.Payload,
-		&r.AmountAtRequest, &r.AssetCode, &r.ReasonCode, &r.RequestedByPrincipalID, &r.RequestedAt,
+		&amountAtRequest, &r.AssetCode, &r.ReasonCode, &r.RequestedByPrincipalID, &r.RequestedAt,
 		&state, &r.AppliedByPrincipalID, &r.AppliedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -94,6 +111,11 @@ func scanChangeRequest(row rowScanner) (ChangeRequest, error) {
 	if err != nil {
 		return ChangeRequest{}, fmt.Errorf("bonus: scan change request: %w", err)
 	}
+	amount, err := numericToBigInt(amountAtRequest)
+	if err != nil {
+		return ChangeRequest{}, err
+	}
+	r.AmountAtRequest = amount
 	r.Operation = ChangeOperation(operation)
 	r.State = ChangeRequestState(state)
 	return r, nil

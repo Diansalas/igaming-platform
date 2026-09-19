@@ -1319,6 +1319,15 @@ paths:
         grant_cancel_completed/held_disposition_resolve/bulk_job_execute
         with a materialized recipient) - a refused decision surfaces as
         403, never 500.
+
+
+        The threshold/amount snapshot recorded on the resulting
+        bonus_change_approvals row (threshold_at_decision,
+        amount_at_decision) is resolved SERVER-SIDE from the tenant's own
+        approval policy and the request's own amount_at_request - it is
+        deliberately NOT accepted from the request body, so the
+        append-only forensic record cannot be authored by the approving
+        principal (Stage 4H-B1 Wave 3 Phase 6, `security`).
       security:
         - bearerAuth: []
       parameters:
@@ -1334,9 +1343,9 @@ paths:
               type: object
               properties:
                 decision: { type: string, enum: [approve, reject] }
-                reason_code: { type: string }
-                threshold_at_decision: { type: string }
-                amount_at_decision: { type: string }
+                reason_code:
+                  type: string
+                  description: Mandatory when decision=reject.
               required: [decision]
       responses:
         "200":
