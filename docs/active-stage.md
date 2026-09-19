@@ -1480,7 +1480,71 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 4I Phase B — Player Jurisdiction Evidence Foundation — COMPLETE, awaiting human review
+## Current stage: Stage 4I PHASE-B-ARCH-1 — Activation-Gate Enforcement Asymmetry Hardening Gate — COMPLETE, awaiting human review
+
+**Status: IMPLEMENTED, independently reviewed by `security` (CERTIFIED
+WITH NAMED EXCEPTIONS) and `qa` (READY WITH NAMED GAPS), all findings
+either fixed or explicitly disposed, and re-verified.** Closes the one
+P2 Phase B recorded as a hard prerequisite before any Phase C-dependent
+work: the declared-residence write path's activation gate
+(`jurisdiction_evidence_collection_active`) was enforced only in the
+`PUT /v1/me/residence` HTTP handler, while the sibling KYC path enforced
+it structurally inside `kyc.ReviewVerification` itself. Full detail:
+this session's PHASE-B-ARCH-1 completion report; see
+`docs/governance/task-registry.md`'s "Stage 4I PHASE-B-ARCH-1" section
+and `docs/progress.md`'s matching narrative entry.
+
+**What this gate built:** moved the activation check INSIDE
+`identity.SetPlayerAccountDeclaredResidence` itself (in the same
+transaction as the write, mirroring `kyc.ReviewVerification`'s own gate
+exactly), added a connection-scope assertion (closing a verified hazard:
+a player-scoped caller would otherwise see a misleading "collection is
+off" 403 while collection is actually on, since the gate table's RLS
+excludes player scope while `player_accounts`' own RLS does not), and
+removed the HTTP handler's now-redundant duplicate check entirely rather
+than keeping it as defence-in-depth. A `BEFORE INSERT OR UPDATE` trigger
+— the remedy both prior Phase B reviews had floated as preferred — was
+considered by the architect and **rejected** (it would require either
+misfiring on legitimate player-scoped writes or a `SECURITY DEFINER`
+RLS-bypassing function — a net security regression).
+
+**Independent review found and the fix round closed five findings**, all
+P3/P4 (no P0/P1/P2 — the target P2 is genuinely closed, confirmed by
+`security`'s own adversarial bypass attempts across 10 distinct classes):
+missing in-function ISO-3166 validation (fixed, mirroring KYC); a real,
+previously-untested cross-tenant write-path gap (fixed, new regression
+test); a documentation overclaim (corrected); the trigger-rejection
+rationale's player-scope argument, undercut by this very fix (corrected
+in place, the overall trigger decision itself not reopened); an
+unclassifiable mis-scoped-transaction error (fixed with a dedicated
+sentinel). One gap accepted and documented, not fixed: a bounded TOCTOU
+window on the unlocked gate-check read, identical to a pre-existing
+characteristic already on the KYC path, not introduced by this pass — a
+fix belongs to a future `architect`-owned cross-path design change.
+
+**Deferred, per the architect's own explicit ruling (not silently
+dropped):** Phase B's separate `effective_from`/actor-provenance
+staleness finding — verbatim disposition (owner, affected tables,
+rationale) recorded in `docs/governance/task-registry.md`.
+
+**Validation:** build/vet/gofmt clean; full integration suite for
+`internal/identity` (29 tests), `internal/httpserver`, `internal/kyc`,
+`internal/jurisdiction`, `internal/validation` green; race-clean;
+broader regression (`casino`/`bonus`/`risk`/`ledger`/`payments`/
+`withdrawal`) green; migration-chain round-trip re-confirmed (no new
+migration this pass). `git diff --name-only` touched exactly 6 files —
+no migration, no new HTTP endpoint, no OpenAPI change,
+`internal/kyc`'s own gate at literal zero diff.
+
+**No automatic progression.** Phase C, HDR-J-2 precedence configuration,
+permitted-market population, production jurisdiction enforcement, a real
+geolocation provider, nationality, G-2, sportsbook cashout, converted-
+Grant clawback, and BYOL remain unauthorized pending a separate human
+directive.
+
+---
+
+## Prior stage: Stage 4I Phase B — Player Jurisdiction Evidence Foundation — COMPLETE, awaiting human review
 
 **Status: IMPLEMENTED, independently reviewed, all P1 findings fixed, and
 re-verified.** Builds the technical evidence *foundation* for

@@ -18,17 +18,10 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/identity"
-	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
 )
-
-// errDeclaredResidenceCollectionInactive is returned from inside the
-// WithTenant closure below when jurisdiction_evidence_collection_active is
-// OFF for (tenant, declared_residence) - mapped to 403, distinct from any
-// validation (400) or not-found (404) outcome.
-var errDeclaredResidenceCollectionInactive = errors.New("httpserver: declared residence collection is not active for this tenant")
 
 // myResidenceResponse never keys the underlying value ambiguously with
 // presence: IsSet=false omits CountryCode/CapturedAt entirely, rather than
@@ -89,9 +82,14 @@ type setMyResidenceRequest struct {
 // newSetMyResidenceHandler is PUT /v1/me/residence - a player declaring
 // their own residence. Refuses the write outright (403) when
 // jurisdiction_evidence_collection_active is OFF for this tenant/
-// declared_residence, checked INSIDE the same transaction as the write -
-// Stage 4I Phase B's activation boundary is not optional and is never
-// bypassed by a product flow.
+// declared_residence - Stage 4I Phase B's activation boundary is not
+// optional and is never bypassed by a product flow. PHASE-B-ARCH-1: the
+// activation check itself now lives inside
+// identity.SetPlayerAccountDeclaredResidence (mirroring
+// kyc.ReviewVerification's own gate), not in this handler - this handler
+// only maps identity.ErrEvidenceCollectionInactive to 403. Do not
+// re-introduce a duplicate check here; that duplication is exactly what
+// caused this path and the KYC path to drift apart in the first place.
 func newSetMyResidenceHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -123,13 +121,6 @@ func newSetMyResidenceHandler(deps Deps) http.HandlerFunc {
 		ip, ua := clientIP(r), r.UserAgent()
 		var resp myResidenceResponse
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			active, err := jurisdiction.IsEvidenceCollectionActive(ctx, tx, tc.TenantID, jurisdiction.EvidenceDeclaredResidence)
-			if err != nil {
-				return err
-			}
-			if !active {
-				return errDeclaredResidenceCollectionInactive
-			}
 			if _, _, err := identity.SetPlayerAccountDeclaredResidence(ctx, tx, identity.SetDeclaredResidenceParams{
 				PlayerAccountID: subjectID, TenantID: tc.TenantID, CountryCode: body.CountryCode,
 				ActorType: audit.ActorPlayer, ActorID: subjectID,
@@ -148,7 +139,7 @@ func newSetMyResidenceHandler(deps Deps) http.HandlerFunc {
 			}
 			return nil
 		})
-		if errors.Is(err, errDeclaredResidenceCollectionInactive) {
+		if errors.Is(err, identity.ErrEvidenceCollectionInactive) {
 			apierror.Write(w, requestID, apierror.CodeForbidden, "declared residence collection is not currently enabled for this account's tenant")
 			return
 		}

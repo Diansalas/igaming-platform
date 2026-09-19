@@ -12,6 +12,8 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
+	"github.com/Diansalas/igaming-platform/internal/validation"
 )
 
 var ErrEmailTaken = errors.New("identity: an account with this email already exists for this brand")
@@ -22,6 +24,22 @@ var ErrEmailTaken = errors.New("identity: an account with this email already exi
 // package-local ErrInvalidInput sentinel convention. Distinct from
 // ErrNotFound (a row genuinely absent or out of RLS scope).
 var ErrInvalidInput = errors.New("identity: invalid input")
+
+// ErrEvidenceCollectionInactive is returned by SetPlayerAccountDeclaredResidence
+// when jurisdiction_evidence_collection_active is OFF for (tenant,
+// declared_residence) - mirrors kyc.ErrEvidenceCollectionInactive's own role
+// and reasoning exactly: distinct from ErrInvalidInput so the HTTP layer
+// maps it to 403 (a policy refusal), never 400 (a caller input error). When
+// this is returned, nothing was written and no audit record exists.
+var ErrEvidenceCollectionInactive = errors.New("identity: declared-residence evidence collection is not active for this tenant")
+
+// ErrTransactionScope is returned by SetPlayerAccountDeclaredResidence when
+// tx is not tenant-scoped to p.TenantID specifically, or is player-scoped
+// (PHASE-B-ARCH-1 security review finding F-4). Deliberately its own
+// sentinel, never wrapping ErrInvalidInput: a mis-scoped transaction is a
+// SERVER-side caller bug (maps to 500), not a client input error (400) -
+// conflating the two would misattribute a server defect to the caller.
+var ErrTransactionScope = errors.New("identity: set player account declared residence: requires a tenant-scoped, non-player-scoped transaction for p.TenantID")
 
 // PlayerAccountStatus is the lifecycle state of a player's relationship
 // with one brand. See docs/architecture/16-privacy.md and CLAUDE.md's
@@ -302,11 +320,19 @@ func SetPlayerAccountStatusIfCurrent(ctx context.Context, tx pgx.Tx, id uuid.UUI
 // This section deliberately does NOT extend PlayerAccount or
 // GetPlayerAccountByID's own SELECT column list - declared_residence_*
 // is read ONLY through GetDeclaredResidence below, a narrow, purpose-built
-// accessor, per the architect ruling for this phase. Neither function here
-// checks jurisdiction.IsEvidenceCollectionActive - this package imports
-// neither internal/jurisdiction nor (until now) internal/audit, and the
-// caller is REQUIRED to check that activation boundary, inside the same
-// transaction, before calling SetPlayerAccountDeclaredResidence.
+// accessor, per the architect ruling for this phase.
+//
+// PHASE-B-ARCH-1 (activation-gate hardening): SetPlayerAccountDeclaredResidence
+// itself checks jurisdiction.IsEvidenceCollectionActive, inside the same
+// transaction as the write, mirroring internal/kyc.ReviewVerification's own
+// gate exactly - the earlier design (the caller alone responsible for
+// checking the gate first) left the gate enforced only in
+// internal/httpserver, not in this exported function, which any future
+// internal caller could bypass by construction. internal/jurisdiction
+// depends on neither internal/identity nor internal/kyc (verified: its own
+// only non-test dependency is internal/audit), so this package importing
+// internal/jurisdiction creates no cycle - the accepted dependency
+// direction is identity/kyc -> jurisdiction, never the reverse.
 
 // RowQuerier is the minimal read handle GetDeclaredResidence needs -
 // satisfied by pgx.Tx today. Declared locally (not imported from
@@ -320,7 +346,7 @@ type RowQuerier interface {
 type SetDeclaredResidenceParams struct {
 	PlayerAccountID uuid.UUID
 	TenantID        uuid.UUID
-	CountryCode     string          // caller must have already validated via validation.IsISO3166Alpha2
+	CountryCode     string          // validated in-function (validation.IsISO3166Alpha2) - PHASE-B-ARCH-1 F-1: this is a backstop, not a substitute for the caller's own upstream validation
 	ActorType       audit.ActorType // ActorPlayer (self-service) or ActorStaff (a future correction path, not built this phase)
 	ActorID         uuid.UUID
 	ReasonCode      string // REQUIRED when ActorType == audit.ActorStaff; must be empty when ActorType == audit.ActorPlayer
@@ -349,11 +375,19 @@ func provenanceFromActorType(a audit.ActorType) string {
 
 // SetPlayerAccountDeclaredResidence records a player's self-declared
 // residence. Returns ErrNotFound if the player_account_id doesn't exist
-// (or isn't visible under the current RLS scope). Callers MUST check
-// jurisdiction.IsEvidenceCollectionActive(tx, tenantID,
-// jurisdiction.EvidenceDeclaredResidence) BEFORE calling this - this
-// function itself does not check it, to keep internal/identity free of a
-// dependency on internal/jurisdiction.
+// (or isn't visible under the current RLS scope), and
+// ErrEvidenceCollectionInactive if jurisdiction_evidence_collection_active
+// is OFF for (p.TenantID, declared_residence) - checked inside this same
+// transaction, before the write, for EVERY actor type (including the
+// currently-unused staff-correction branch: the gate answers a lawful-basis
+// question about the DATA, not about who is writing it). tx must be
+// tenant-scoped via db.Pool.WithTenant (or an equivalent connection with
+// app.tenant_id set to p.TenantID and app.player_account_id unset) - a
+// mis-scoped transaction returns a distinct, non-sentinel error rather than
+// being silently misreported as a closed gate (see the scope assertion
+// below; jurisdiction_evidence_collection_active's own RLS policies are
+// invisible to a player-scoped connection, unlike player_accounts' own
+// policy, so this assertion is load-bearing, not defensive boilerplate).
 //
 // The before/after values are computed in ONE atomic UPDATE (a CTE reading
 // the prior value correlated into the same statement's RETURNING), never
@@ -371,6 +405,35 @@ func SetPlayerAccountDeclaredResidence(ctx context.Context, tx pgx.Tx, p SetDecl
 		}
 	default:
 		return false, false, fmt.Errorf("%w: actor_type must be player or staff", ErrInvalidInput)
+	}
+	// PHASE-B-ARCH-1 security review finding F-1: this domain function is
+	// the backstop, not just the HTTP handler - the handler's own
+	// validation is caller-side only, and a future internal caller (the
+	// still-deferred staff-correction endpoint, or a bulk/import path)
+	// must not be able to store an unassigned two-letter code (e.g. "ZZ")
+	// that happens to satisfy the DB's shape-only CHECK constraint.
+	if !validation.IsISO3166Alpha2(p.CountryCode) {
+		return false, false, fmt.Errorf("%w: country_code must be a valid ISO-3166-1 alpha-2 code", ErrInvalidInput)
+	}
+
+	var scopedTenant *uuid.UUID
+	var scopedPlayer *uuid.UUID
+	if err := tx.QueryRow(ctx,
+		`SELECT NULLIF(current_setting('app.tenant_id', true), '')::uuid,
+		        NULLIF(current_setting('app.player_account_id', true), '')::uuid`,
+	).Scan(&scopedTenant, &scopedPlayer); err != nil {
+		return false, false, fmt.Errorf("identity: set player account declared residence: read connection scope: %w", err)
+	}
+	if scopedTenant == nil || *scopedTenant != p.TenantID || scopedPlayer != nil {
+		return false, false, fmt.Errorf("%w (use db.Pool.WithTenant)", ErrTransactionScope)
+	}
+
+	active, err := jurisdiction.IsEvidenceCollectionActive(ctx, tx, p.TenantID, jurisdiction.EvidenceDeclaredResidence)
+	if err != nil {
+		return false, false, fmt.Errorf("identity: check declared-residence evidence collection active: %w", err)
+	}
+	if !active {
+		return false, false, ErrEvidenceCollectionInactive
 	}
 
 	var capturedAt time.Time

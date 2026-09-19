@@ -849,7 +849,7 @@ consumed by any jurisdiction decision.
 | PHASE-B-SEC-1 / PHASE-B-ARCH-F4 / PHASE-B-QA-1 | P1 | `security`, `architect`, and `qa`, independently converging: the `kyc.verified_residence_determined` audit entry included the reviewer's free-text `reason` field verbatim — the one channel that could carry the country value the entry's own "never record the value" comment forbade two lines above it. `qa` independently found the matching test-coverage gap (no exact-shape audit test on the KYC side, unlike `internal/identity`'s equivalent) | **FIXED.** The `reason` key was removed from this metadata map (it remains, correctly, on the sibling `kyc.verification_status_changed` entry, written in the same transaction). A new test, `TestReviewVerification_VerifiedResidenceDeterminedAuditRecordShape`, deliberately puts the country in the reviewer's free-text reason and asserts the raw audit row for this specific action never contains it |
 | PHASE-B-QA-2 | P1 | `qa`: no test exercised the four new paired-NULL CHECK constraints or the `verified_residence_set_by` FK directly via raw SQL — the established convention in this same codebase (`internal/jurisdiction`'s own CHECK-constraint tests) was not followed here, even though application code always writes the paired columns together today | **FIXED.** Four new raw-SQL tests added: `TestKYCVerifications_VerifiedResidenceCountryPairCheckConstraint`, `..._VerifiedResidenceSetByPairCheckConstraint`, `..._VerifiedResidenceSourcePairCheckConstraint`, `..._VerifiedResidenceSetByForeignKeyConstraint` (kyc package), plus `TestPlayerAccounts_DeclaredResidencePairCheckConstraint` (identity package) |
 | PHASE-B-QA-3 / PHASE-B-SEC-8 | P1 / P3 | `qa`: no cross-tenant isolation test existed for `kyc.GetVerifiedResidence`, unlike its sibling `identity.GetDeclaredResidence`. `security` independently flagged a related design trap: the function took `tenantID` as a plain caller-supplied argument used in its own `WHERE` clause, in addition to relying on RLS — asymmetric with `identity.GetDeclaredResidence`'s better shape (RLS alone, no `tenantID` parameter), and a caller passing a mismatched `tenantID` would get a silent `ok=false` rather than a loud error | **FIXED, root cause.** `kyc.GetVerifiedResidence`'s signature was changed to drop the `tenantID` parameter entirely, relying on RLS alone (matching `identity.GetDeclaredResidence`) — this closes both the missing-test gap and the design trap in one change, since the caller-supplied-mismatch class of bug is now structurally impossible. `TestGetVerifiedResidence_CrossTenantReadReturnsNotOK` added. (Safe: the function had zero non-test callers at the time of the change, confirmed by grep) |
-| PHASE-B-SEC-4 / PHASE-B-ARCH-F1 | P2 | `security` and `architect`, independently: the two write paths' activation-gate enforcement is asymmetric. The KYC path's gate is inside `ReviewVerification` itself (unreachable-around). The declared-residence path's gate is enforced only in the HTTP handler; `identity.SetPlayerAccountDeclaredResidence` is an exported, ungated function protected only by a doc comment — enforcement by application-code discipline, which CLAUDE.md rejects for exactly this class of control | **NOT FIXED — named exception, joint `architect`+`security` disposition required.** Preferred remedy (both reviewers converge on this): a `BEFORE INSERT OR UPDATE` trigger on `player_accounts` (and, for symmetry, `kyc_verifications`) that raises unless the tenant's evidence-collection switch for that type is active — structural rather than conventional, and removes the import-cycle rationale entirely. **This is now a hard prerequisite gate on `PHASE-B-ARCH-1`** (the deferred staff-correction endpoint below): that endpoint must not land until this has an explicit disposition, since it would be the second caller of the now-only-comment-gated function |
+| PHASE-B-SEC-4 / PHASE-B-ARCH-F1 | P2 | `security` and `architect`, independently: the two write paths' activation-gate enforcement is asymmetric. The KYC path's gate is inside `ReviewVerification` itself (unreachable-around). The declared-residence path's gate is enforced only in the HTTP handler; `identity.SetPlayerAccountDeclaredResidence` is an exported, ungated function protected only by a doc comment — enforcement by application-code discipline, which CLAUDE.md rejects for exactly this class of control | **CLOSED by the PHASE-B-ARCH-1 hardening gate.** The architect's design ruling for that gate (see the PHASE-B-ARCH-1 section below) REJECTED the `BEFORE INSERT OR UPDATE` trigger remedy this row originally recorded as "preferred" — the trigger would need to read `jurisdiction_evidence_collection_active`, whose RLS policies are invisible to a player-scoped connection, so the trigger would either misfire on legitimate player-scoped writes or require a `SECURITY DEFINER` RLS-bypassing function, a net security regression. The canonical fix instead moved the check INTO `identity.SetPlayerAccountDeclaredResidence` itself (mirroring `kyc.ReviewVerification`'s own gate exactly, in the same transaction as the write), accepting `internal/identity -> internal/jurisdiction` as a new, cycle-free import (`internal/jurisdiction` depends on neither `internal/identity` nor `internal/kyc`). The HTTP handler's own duplicate check was removed, not kept as defence-in-depth, closing the asymmetry rather than doubling it. See the PHASE-B-ARCH-1 section below for the full implementation, tests, and independent review disposition |
 | PHASE-B-SEC-2 | P2 | `security`: `effective_from`/`created_by_actor_id` on `jurisdiction_evidence_collection_active` are set only on first INSERT, never updated on a subsequent toggle — the table can misreport both when a lawful-basis clearance took effect and who last changed it. Verified live (an `active=false` toggle by a different actor left both fields showing the original INSERT's values) | **NOT FIXED — routed to `architect`, cross-cutting.** The identical defect exists on the sibling `jurisdiction_resolution_active` table (a purely-engineering fact, where the gap matters less); fixing one without the other would leave an inconsistent pair. Recorded as a named prerequisite for whichever future change next touches either table's audit-provenance columns |
 | PHASE-B-SEC-3 | P2 | `security`: (closed by PHASE-B-SEC-1's fix, recorded separately as it was found independently) the KYC audit entries this phase writes carried no `IPAddress`/`UserAgent`/`RequestID`, unlike the declared-residence path's equivalent entry — a gap on the *more* privileged of the two paths, since it is a staff act against another person's data | **FIXED.** `ReviewVerificationParams` gained `IPAddress`/`UserAgent`/`RequestID` fields, populated from the HTTP handler and recorded on both audit entries this call writes (also closes the same gap on the pre-existing `kyc.verification_status_changed` entry, as a side effect, not a scope expansion) |
 | PHASE-B-SEC-6 / PHASE-B-SEC-7 | P3 | `security`: no row lock (`FOR SHARE`) on the evidence-collection-active gate read, and no row lock (`FOR UPDATE`) on `ReviewVerification`'s own status pre-check — both are check-then-act with a narrow TOCTOU/race window under concurrent admin actions. The `ReviewVerification` race is pre-existing (predates Phase B; the diff only added columns to an already-unguarded UPDATE) | **NOT FIXED — deferred, named, low likelihood.** Both require a deliberate concurrent admin action (a compliance toggle mid-write, or two staff reviewing the same verification simultaneously) to manifest, both are fully audited either way, and the `ReviewVerification` race is explicitly out of Phase B's own scope (a pre-existing `internal/kyc` characteristic). Tracked as a named gap for whoever next touches either code path, not a Phase B blocker |
@@ -870,7 +870,169 @@ consumed by any jurisdiction decision.
 
 **Verdicts, all independent, none self-certified:** `security` — CERTIFIED WITH NAMED EXCEPTIONS (one P1, fixed in this phase's own fix round; the enforcement-asymmetry exception now gates `PHASE-B-ARCH-1` explicitly, not this phase). `architect` — CERTIFIED WITH NAMED EXCEPTIONS (no blocking issues; all nine design rulings conformed, `resolver.go` and the `Basis` enum verified at literal zero diff). `qa` — READY WITH NAMED GAPS, all three P1s closed in the fix round.
 
-**Carried to a future phase (not this phase's to build, confirmed absent):** BYOL onboarding; `jurisdiction_precedence_configs` content/write surface (HDR-J-2, table remains shape-only); staff correction of declared residence (`PHASE-B-ARCH-1`, now also gated by PHASE-B-SEC-4/ARCH-F1's disposition); revocation/clear of either residence fact; `verified_residence_source_document_id`/corroboration policy (HDR-J-3h); nationality; permitted-market content (HDR-J-6); the retention/erasure job (HDR-J-3f); a real geolocation vendor and its own security review; resolver wiring of the two read accessors; a staff-facing read surface consuming `player_residence:read`; `GetVerifiedResidence`'s "most-recent-approved-wins" selection rule (may need revisiting once a player can have multiple approved verifications carrying determinations).
+**Carried to a future phase (not this phase's to build, confirmed absent):** BYOL onboarding; `jurisdiction_precedence_configs` content/write surface (HDR-J-2, table remains shape-only); staff correction of declared residence (`PHASE-B-ARCH-1`'s own follow-on — see below; the activation-gate prerequisite that name originally referred to is now CLOSED); revocation/clear of either residence fact; `verified_residence_source_document_id`/corroboration policy (HDR-J-3h); nationality; permitted-market content (HDR-J-6); the retention/erasure job (HDR-J-3f); a real geolocation vendor and its own security review; resolver wiring of the two read accessors; a staff-facing read surface consuming `player_residence:read`; `GetVerifiedResidence`'s "most-recent-approved-wins" selection rule (may need revisiting once a player can have multiple approved verifications carrying determinations).
+
+## Stage 4I "PHASE-B-ARCH-1" — activation-gate enforcement asymmetry hardening gate
+
+A narrowly-scoped, human-dispatched hardening gate closing PHASE-B-SEC-4/
+PHASE-B-ARCH-F1 (above) before any Phase C-dependent work. Dispatch:
+`architect` design ruling (independently re-verifying every claim in the
+prior Phase B reviews rather than trusting them) → orchestrator
+implementation per that ruling → independent `security`/`qa` review.
+
+**The fix.** `internal/identity.SetPlayerAccountDeclaredResidence` now
+checks `jurisdiction.IsEvidenceCollectionActive(ctx, tx, p.TenantID,
+jurisdiction.EvidenceDeclaredResidence)` itself, inside the same
+transaction as the write, before the write — mirroring
+`kyc.ReviewVerification`'s own gate exactly. A new sentinel
+`identity.ErrEvidenceCollectionInactive` is returned when closed (nothing
+is written, no audit row exists). The gate applies to EVERY actor type,
+including the currently-unused `ActorStaff` branch — the architect
+ruling's own words: "the gate answers a lawful-basis question about the
+DATA, not about who is writing it," pre-answering the question for the
+still-deferred staff-correction endpoint rather than leaving it open. A
+new connection-scope assertion runs first: the transaction must be
+tenant-scoped to `p.TenantID` specifically and NOT player-scoped,
+returning a distinct non-sentinel error otherwise — required because
+`jurisdiction_evidence_collection_active`'s own RLS policies exclude a
+player-scoped connection (unlike `player_accounts`' own policy), so
+without this assertion a player-scoped caller would see a misleading
+"collection is off" result when collection is in fact on. The HTTP
+handler's own duplicate check (`internal/httpserver/player_residence_
+handlers.go`) was REMOVED, not kept as defence-in-depth — the architect
+ruling's reasoning: keeping the same predicate checked twice in the same
+transaction by the same package graph is exactly how the two sibling
+paths drifted apart in the first place; `kyc_admin_handlers.go`'s own
+precedent (checks nothing, only maps the sentinel to 403) is what the
+residence handler now matches.
+
+**The trigger alternative — considered and REJECTED**, correcting this
+registry's own prior "preferred remedy" framing. A `BEFORE INSERT OR
+UPDATE` trigger on `player_accounts` was the remedy both the original
+Phase B security and architect reviews floated as strongest. The
+PHASE-B-ARCH-1 architect ruling rejects it: the trigger body would need
+to read `jurisdiction_evidence_collection_active`, whose RLS excludes
+player-scoped connections, and the application role is
+`FORCE ROW LEVEL SECURITY`/`NOBYPASSRLS`-bound — so the trigger would
+either misfire on every legitimate player-scoped write (the same
+misleading-403 hazard the in-code fix's own scope assertion exists to
+prevent, but baked into the schema where no caller can diagnose it) or
+require a `SECURITY DEFINER` function, i.e. a deliberate RLS-bypass
+surface introduced specifically to enforce a privacy gate — a net
+security regression, not a hardening. It would also put a cross-domain
+read on the hot path of every `player_accounts` update (status changes,
+password resets, email verification), and — since this pass explicitly
+excludes touching `kyc_verifications` — would leave the two sibling
+tables enforced by different mechanisms in the opposite direction from
+today, the same class of asymmetry being closed. Revisit condition,
+recorded for the future: if a second writer of `declared_residence_
+country` ever appears outside `internal/identity` (e.g. a bulk/import
+path), this rejection must be reopened.
+
+**Dependency-direction rule recorded (INV-J-B3):** `internal/identity`
+and `internal/kyc` may import `internal/jurisdiction`; `internal/
+jurisdiction` must never import either, now or later. Verified via
+`go list -deps ./internal/jurisdiction`: its only non-test dependency is
+`internal/audit`. No import cycle was introduced.
+
+**Deferred, not fixed in this pass — directive Task 4's `effective_from`/
+actor-provenance disposition**, ruled on by the architect and copied here
+verbatim per the directive's own requirement:
+
+> **Issue:** `SetEvidenceCollectionActive` (`internal/jurisdiction/
+> evidence_collection_active.go`) and `SetResolutionActive`
+> (`internal/jurisdiction/resolution_active.go`) both upsert with
+> `ON CONFLICT (...) DO UPDATE SET active = EXCLUDED.active`.
+> `effective_from`, `created_by_actor_type`, and `created_by_actor_id`
+> are therefore written only by the first INSERT and never updated.
+> After a second toggle — in particular a toggle performed by a
+> different actor — the row reports the timestamp and the actor of the
+> FIRST activation, not of the change actually in force.
+>
+> **Owner:** `architect` (data model), with `security` consulted on the
+> audit/provenance consequences before implementation.
+>
+> **Affected tables (both, identically):**
+> `jurisdiction_evidence_collection_active` (migration `0074`, Stage 4I
+> Phase B — gates collection of privacy-sensitive personal data under a
+> lawful-basis judgment) and `jurisdiction_resolution_active` (migration
+> `0071`, pre-existing, a purely engineering-fact table). This defect is
+> **not new to Phase B**; Phase B reproduced the existing table's shape
+> faithfully, including this flaw.
+>
+> **Affected behaviour:** historical provenance only — *when* a given
+> tenant's activation last changed, and *which actor* last changed it, as
+> read from these two tables. The `active` flag itself, the column every
+> enforcement path actually reads, is correct at all times. `updated_at`
+> IS maintained correctly by each table's BEFORE UPDATE trigger, so "when
+> did this row last change" remains answerable from the table; only
+> "effective from when, by whom" is stale. Every toggle additionally
+> writes a complete, append-only `audit_log` entry with `before_active`,
+> `after_active`, the acting principal, the reason code, IP/user-agent
+> and request id, so the full and authoritative change history —
+> including who and when — is already recoverable today from the audit
+> log; the defect is a redundancy/convenience gap in the projection, not
+> a loss of record.
+>
+> **Reason for deferral:** (1) it is a pre-existing defect shared with an
+> older table, so fixing only the newer one would introduce a fresh
+> inconsistency between two deliberately symmetric tables; (2) the right
+> fix is a modelling decision, not a one-line change — naively
+> re-stamping `created_by_actor_*` on update would make columns named
+> `created_by_*` mean "last changed by", and re-stamping `effective_from`
+> on every toggle conflates creation with amendment, so the likely
+> correct answer is an append-only history of activation periods with the
+> current row as a projection; (3) that change touches both tables, needs
+> a migration and a backfill decision for existing rows, and is out of
+> scope for a hardening gate whose sole purpose is closing an
+> enforcement-placement asymmetry.
+>
+> **Must be resolved by:** the next Stage 4I phase that adds any write
+> surface, reporting surface, or compliance export that presents
+> activation *history* (rather than current state) — in particular any
+> phase that (a) exposes activation state or history in the back
+> office/partner console, (b) wires either activation fact into a
+> regulatory report or evidence pack, or (c) adds a second writer/toggler
+> of either table. It must be resolved for BOTH tables in one change,
+> with an ADR recording the chosen shape (re-stamp vs. append-only
+> history) and a migration covering existing rows. Until then, the
+> `audit_log` is the authoritative source for activation change history,
+> and no document, report, or console screen may present these three
+> columns as the record of the change in force.
+>
+> **Why deferring weakens no CURRENT enforcement:** the activation gate
+> is a binary on/off control, and its on/off state is correct and
+> fail-closed at all times — absence of a row means OFF,
+> `IsEvidenceCollectionActive`/`IsActive` read the `active` column only,
+> and neither `effective_from` nor `created_by_actor_id` is read by any
+> enforcement, authorization, RLS or privacy path anywhere in the
+> codebase. No security or privacy decision, and no data-collection
+> permission, is derived from the stale columns. The imprecision is
+> confined to the historical provenance of when the current setting took
+> effect and who set it — and even that is fully recorded, unaffected, in
+> the append-only audit log. No player data is collected, exposed, or
+> retained differently because of this defect.
+
+**Independent review findings and dispositions** (`security` CERTIFIED
+WITH NAMED EXCEPTIONS — the P2 is genuinely closed, no bypass found;
+`qa` READY WITH NAMED GAPS — no P0/P1/P2, one pre-existing P3 confirmed
+unchanged in class/severity):
+
+| ID | Severity | Finding | Disposition |
+|---|---|---|---|
+| PHASE-B-ARCH-1-SEC-1 | P3 | `security`: ISO-3166 validation of `p.CountryCode` inside `SetPlayerAccountDeclaredResidence` was caller-only (a doc comment, not enforced) — the identical doc-comment-as-control pattern this pass just removed for the gate, on a different field. An unassigned code (e.g. `"ZZ"`) would satisfy the DB's shape-only `^[A-Z]{2}$` CHECK and be stored, later feeding jurisdiction resolution/reporting as if it were a real country | **FIXED.** `validation.IsISO3166Alpha2` is now checked in-function (mirroring `kyc.ReviewVerification`'s own in-function validation), returning `ErrInvalidInput` before any write. `TestSetPlayerAccountDeclaredResidence_InvalidCountryCodeIsError` added |
+| PHASE-B-ARCH-1-SEC-2 | P3 | `security`: TOCTOU — `IsEvidenceCollectionActive` is an unlocked `SELECT`; a write in flight when the gate is toggled OFF can still commit, so `audit_log` can show a residence-set entry timestamped after the toggle-off entry | **NOT FIXED — accepted, documented.** Identical, pre-existing shape on `kyc.ReviewVerification`; not introduced or widened by this pass. Data stays internally consistent (write+audit in one transaction); only the audit trail's apparent ordering vs. the toggle is affected. A fix (e.g. `SELECT ... FOR SHARE` on the gate row) is a cross-path design change for `architect`, out of this hardening gate's scope. Documented in `docs/security/security-architecture.md` §J4I.12.2 and `docs/architecture/16-privacy.md` |
+| PHASE-B-ARCH-1-SEC-3 | P4 | `security`: `docs/architecture/16-privacy.md`'s working-tree diff overclaimed "no caller — HTTP or otherwise — can reach either write without passing this check," true only of Go callers of the two domain functions, not of arbitrary SQL | **FIXED (doc-only).** Scoped to "no Go caller of either domain function"; the trigger-rejection rationale is referenced for why a DB-level backstop was considered and rejected |
+| PHASE-B-ARCH-1-SEC-4 | P4 | `security`: the trigger-rejection rationale's "would misfire on player-scoped writes" argument is undercut by this very pass — the new connection-scope assertion guarantees residence writes are never player-scoped, so a `WHEN`-conditioned trigger would not in fact misfire that way | **Corrected in place, trigger decision NOT reopened.** `docs/security/security-architecture.md` §J4I.12.2 now records the corrected reasoning explicitly, per governance's "no specialist unilaterally overturns another's ruling" rule — the architect's rejection stands, but the "revisit if a second writer appears" condition it already recorded must be judged against the corrected argument, not the original, if it is ever revisited |
+| PHASE-B-ARCH-1-SEC-5 | P4 | `security`: the mis-scoped-transaction error was a bare, unclassifiable `fmt.Errorf` — no caller or alerting rule could distinguish "a developer mis-scoped the transaction" from a transient DB failure | **FIXED.** Added `identity.ErrTransactionScope`, a dedicated sentinel (deliberately not wrapping `ErrInvalidInput`, since this is a server-side caller bug, not a client input error) |
+| PHASE-B-ARCH-1-QA-1 | (test-coverage gap, not a defect) | `security`'s own adversarial probing found the canonical "tenant B's valid, self-consistent token targeting tenant A's data" case for the WRITE path was untested — the committed `WrongTenantIDErrors` test only covered a mismatched-params case caught by the scope assertion before ever reaching `player_accounts` | **FIXED.** `TestSetPlayerAccountDeclaredResidence_CrossTenantWriteTargetDenied` added: tenant B, self-consistent scope, targeting tenant A's `player_account_id` → `ErrNotFound`, tenant A's value untouched, zero audit rows under tenant B |
+
+**Scope discipline confirmed:** `internal/kyc`'s own gate has zero diff
+in this pass. No new HTTP endpoint (the deferred staff-correction
+endpoint remains deferred — this ruling only removes the prerequisite
+blocking it, it does not authorize building it). No OpenAPI change. No
+migration. No change to `internal/jurisdiction/resolver.go`, the `Basis`
+enum, or `jurisdiction_precedence_configs`.
 
 ## How to use this registry (for future stages)
 

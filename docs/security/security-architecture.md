@@ -3449,26 +3449,72 @@ documented. Two independent layers:
    WholeCallFails` reads verification `status` before/after and asserts
    equality, not just that no residence value was set).
 
-**Named exception — enforcement asymmetry between the two write paths
-(independently found by `security` and `architect`, tracked as one item
-below).** The KYC path's gate is inside `ReviewVerification` itself —
-unreachable-around by any caller. The declared-residence path's gate is
-enforced **only** in the HTTP handler
-(`newSetMyResidenceHandler`); the underlying
-`identity.SetPlayerAccountDeclaredResidence` is an exported, ungated
-function whose only protection is a doc comment instructing callers to
-check the switch first. This is enforcement by discipline in application
-code — the same pattern CLAUDE.md rejects for tenant isolation, applied
-here to a lawful-basis gate. **Not fixed in this phase** (see the
-disposition table below, item `PHASE-B-ARCH-1` note) — the preferred
-remedy (a `BEFORE INSERT OR UPDATE` trigger on `player_accounts`
-mirroring how this platform enforces tenant isolation structurally
-rather than conventionally) is a cross-table, `architect`+`security`
-joint design decision, and is a **hard prerequisite gate on
-`PHASE-B-ARCH-1`** (the deferred staff-correction-of-declared-residence
-endpoint): that endpoint must not land until this asymmetry has an
-explicit disposition, because it would be the second caller of the
-now-doc-comment-only-gated function.
+**Former named exception — enforcement asymmetry between the two write
+paths — CLOSED by the PHASE-B-ARCH-1 hardening gate.** The KYC path's
+gate was always inside `ReviewVerification` itself — unreachable-around
+by any caller. The declared-residence path's gate was originally enforced
+**only** in the HTTP handler (`newSetMyResidenceHandler`); the underlying
+`identity.SetPlayerAccountDeclaredResidence` was an exported, ungated
+function whose only protection was a doc comment instructing callers to
+check the switch first — enforcement by discipline in application code,
+the same pattern CLAUDE.md rejects for tenant isolation, applied here to
+a lawful-basis gate.
+
+A dedicated hardening-gate dispatch (`PHASE-B-ARCH-1`) closed this: the
+check now lives INSIDE `SetPlayerAccountDeclaredResidence` itself, in the
+same transaction as the write, mirroring `ReviewVerification`'s own gate
+exactly, so both write paths now share the identical enforcement shape —
+neither can be reached, by any Go caller, HTTP or internal, without the
+check running first (this is an application-level control; it does not
+stop a hand-written SQL statement issued outside these two functions —
+no claim beyond that is made). The HTTP handler's own duplicate check was
+removed rather than kept as defence-in-depth (the same predicate checked
+twice by the same package graph is how the two paths drifted apart
+originally).
+
+A `BEFORE INSERT OR UPDATE` trigger — the remedy this section previously
+recorded as "preferred" — was considered and rejected by the architect
+ruling for this gate: the trigger would need to read `jurisdiction_
+evidence_collection_active`, whose RLS policies exclude a player-scoped
+connection, and the application role is `FORCE ROW LEVEL SECURITY`/
+`NOBYPASSRLS`-bound, so the trigger would either misfire on legitimate
+player-scoped writes or require a `SECURITY DEFINER` RLS-bypassing
+function. **Correction (PHASE-B-ARCH-1's own independent security
+review):** the "misfire on player-scoped writes" half of that argument is
+now weaker than recorded — the fix above ADDS a connection-scope
+assertion to `SetPlayerAccountDeclaredResidence` that guarantees a
+residence write is never player-scoped, so a trigger written with a
+`WHEN (NEW.declared_residence_country IS DISTINCT FROM OLD.
+declared_residence_country)` guard would in fact never fire under player
+scope, and would read the gate table fine under tenant scope. The
+`SECURITY DEFINER`/hot-path arguments are unaffected and still hold. This
+correction does not reopen the trigger decision on its own — the
+architect's ruling stands, and no specialist unilaterally overturns
+another's ruling — but the "revisit if a second writer of `declared_
+residence_country` ever appears" condition that ruling already recorded
+should be judged against this corrected reasoning, not the original.
+
+**Named, accepted gap — TOCTOU on the gate read (both write paths,
+pre-existing on KYC, not introduced by this hardening pass).**
+`jurisdiction.IsEvidenceCollectionActive` is a plain `SELECT` with no row
+lock, under this codebase's standard READ COMMITTED isolation. A write
+already in flight when the switch is toggled OFF can still commit: the
+write and its audit record land together in one transaction (data stays
+internally consistent), but `audit_log` can then show a `player.declared_
+residence_set` (or `kyc.verified_residence_determined`) entry timestamped
+*after* the `jurisdiction_evidence_collection_active.changed` entry that
+turned collection off for that tenant — the artifact a regulator/DPA
+inquiry would notice first. Bounded to one in-flight transaction
+(milliseconds); identical on both write paths; `kyc.ReviewVerification`
+has carried this exact shape since Phase B shipped. Not fixed in this
+pass — a fix (e.g. `SELECT ... FOR SHARE` on the gate row in a
+write-path-specific accessor variant) is a cross-path design change
+belonging to `architect`, not a hardening-gate-scoped patch, and is
+recorded here as a named prerequisite for whichever future change next
+touches either gate-check call site.
+
+Full ruling, implementation, and independent review disposition:
+`docs/governance/task-registry.md`'s "Stage 4I PHASE-B-ARCH-1" section.
 
 ### J4I.12.3 Audit content — what changed from the original design, and why
 

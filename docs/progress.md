@@ -5936,3 +5936,97 @@ and beyond, HDR-J-2 precedence configuration, permitted-market
 population, production jurisdiction enforcement, G-2, sportsbook
 cashout, and converted-Grant clawback remain unauthorized pending a
 separate human directive reviewing this Phase B completion report.
+
+## Stage 4I "PHASE-B-ARCH-1" — activation-gate enforcement asymmetry hardening gate
+
+A narrowly-scoped human directive closing the one P2 Phase B recorded as a
+hard prerequisite before any Phase C-dependent work: the declared-residence
+write path's activation gate was enforced only in the HTTP handler, while
+the sibling KYC path enforced it structurally inside the domain function
+itself — any future internal caller of the exported identity function
+could have bypassed the gate entirely.
+
+**Built:** the architect ruling (independently re-verifying every claim
+from the prior Phase B reviews rather than trusting them, including the
+import graph via `go list -deps`) moved the check INSIDE
+`identity.SetPlayerAccountDeclaredResidence` itself, in the same
+transaction as the write, mirroring `kyc.ReviewVerification`'s own gate
+exactly — closing the asymmetry rather than doubling the check. A new
+connection-scope assertion (tenant-scoped to `p.TenantID` specifically,
+never player-scoped) runs first, closing a real, verified hazard: because
+`jurisdiction_evidence_collection_active`'s RLS excludes player-scoped
+connections while `player_accounts`' own RLS does not, a player-scoped
+caller would otherwise have gotten a misleading "collection is off" 403
+while collection was actually on. The HTTP handler's own duplicate check
+was deleted, not kept as defence-in-depth — the same predicate checked
+twice by the same package graph is how the two paths drifted apart in
+the first place. A `BEFORE INSERT OR UPDATE` trigger — the remedy both
+prior Phase B reviews had floated as "preferred" — was considered and
+**rejected**: it would need to read the RLS-protected gate table from
+inside a trigger body, which would either misfire on legitimate
+player-scoped writes or require a `SECURITY DEFINER` RLS-bypassing
+function, a net security regression, not a hardening.
+
+**Independent review, no self-certification:** `security` — CERTIFIED
+WITH NAMED EXCEPTIONS, having attempted 10 distinct bypass classes
+(direct service-layer calls with the gate on/off, cross-tenant and
+forged-tenant invocation, missing/player-scoped connections, concurrent
+toggle races, HTTP bypass routes, background callers, transaction
+rollback) via its own throwaway adversarial probes, not just reading the
+tests — the P2 is genuinely closed, no bypass found. `qa` — READY WITH
+NAMED GAPS, having read every test line by line and confirmed each
+proves what its name claims (in particular verifying the two
+mis-scoping tests correctly distinguish "some error" from "specifically
+not the closed-gate sentinel," and that the gate's position in the
+function still lets the pre-existing `UnknownPlayerAccountID`/
+`ActorReasonCodeValidation` tests exercise their own named branches
+rather than accidentally testing the gate instead).
+
+**Five findings from the two reviews, all P3/P4 (no P0/P1/P2 — the pass's
+one target P2 is closed), four fixed, one accepted and documented:**
+ISO-3166 validation of the country code was caller-only inside the domain
+function (the same doc-comment-as-control pattern this pass just removed
+for the gate, on a different field) — fixed by validating in-function,
+mirroring KYC's own pattern; a real, previously-untested cross-tenant
+write-path gap (tenant B's self-consistent token targeting tenant A's
+player_account_id) — fixed, new regression test added; a documentation
+overclaim about "no caller can reach either write" — corrected to scope
+it to Go callers of the domain functions specifically; the
+trigger-rejection rationale's "would misfire on player-scoped writes"
+argument — corrected in place (the new scope assertion actually
+neutralizes that specific argument, though the trigger decision itself
+was not reopened, since no specialist unilaterally overturns another's
+ruling); the mis-scoped-transaction error was an unclassifiable bare
+error — fixed with a dedicated sentinel. One accepted, documented,
+not-fixed gap: a bounded TOCTOU window on the unlocked gate-check read,
+identical to a pre-existing characteristic already on `kyc.
+ReviewVerification`, not introduced or widened by this pass — a fix
+would be a cross-path design change belonging to `architect`, out of
+this hardening gate's scope.
+
+**Deferred per the architect's own explicit ruling, not silently
+dropped:** the separate `effective_from`/actor-provenance staleness
+finding (Phase B's own PHASE-B-SEC-2) — the architect ruled this must
+NOT be fixed in this pass (the identical defect exists on the older,
+sibling `jurisdiction_resolution_active` table; fixing only the newer
+one would create a fresh inconsistency; the right fix is an append-only-
+history modelling decision, not a one-line upsert change) and recorded a
+full verbatim disposition (owner, affected tables, why deferring weakens
+no current enforcement, what future phase must resolve it) in
+`docs/governance/task-registry.md`'s "Stage 4I PHASE-B-ARCH-1" section.
+
+**Validation:** build/vet/gofmt clean; full integration suite for
+`internal/identity` (29 tests, including 9 new/updated for this gate),
+`internal/httpserver`, `internal/kyc`, `internal/jurisdiction`,
+`internal/validation` green; race-clean for the touched packages; broader
+regression (`casino`/`bonus`/`risk`/`ledger`/`payments`/`withdrawal`)
+green; migration-chain round-trip re-confirmed (no new migration in this
+pass). `git diff --name-only` confirmed to touch exactly the expected
+6 files: no migration, no new HTTP endpoint, no OpenAPI change, and
+`internal/kyc`'s own gate at literal zero diff.
+
+Per the authorizing directive: the Orchestrator **stops** here. Phase C,
+HDR-J-2 precedence configuration, permitted-market population, a real
+geolocation provider, nationality, G-2, sportsbook cashout, converted-
+Grant clawback, and BYOL remain unauthorized pending a separate human
+directive.

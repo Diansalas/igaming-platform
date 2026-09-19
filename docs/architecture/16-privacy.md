@@ -87,11 +87,33 @@ Two independent layers enforce this:
    switching on collection of privacy-sensitive personal data is a
    lawful-basis judgment, not a commercial/engineering configuration
    act). Absence of a row is fail-closed (collection is OFF by
-   default for every tenant and every evidence type). Both write paths
-   (`PUT /v1/me/residence` and the KYC review endpoint's
-   `verified_residence_country` field) check this flag inside the same
-   database transaction as the write and refuse the entire call,
+   default for every tenant and every evidence type). Both underlying
+   domain write functions — `identity.SetPlayerAccountDeclaredResidence`
+   and `kyc.ReviewVerification` — enforce this flag THEMSELVES, inside the
+   same database transaction as the write, and refuse the entire call,
    including any unrelated status transition, when it is off.
+   (PHASE-B-ARCH-1 hardening: the declared-residence check originally
+   lived only in the `PUT /v1/me/residence` HTTP handler, which any
+   future internal caller of the exported identity function could have
+   bypassed; it now lives in the domain function itself, mirroring the
+   KYC gate's own always-structural placement, so no **Go caller of either
+   domain function** — HTTP or otherwise — can reach either write without
+   passing this check. This is an application-level control only: it does
+   not, and is not intended to, stop a hand-written SQL statement executed
+   directly against the database outside these functions — see
+   `docs/governance/task-registry.md`'s "Stage 4I PHASE-B-ARCH-1" section
+   for why a database-level trigger backstop was considered and rejected
+   for this pass. Also note a bounded TOCTOU window, identical on both
+   write paths and pre-existing on the KYC side: the gate is read via a
+   plain `SELECT` with no row lock, so a write already in flight when a
+   compliance officer flips the switch OFF can still commit — the write
+   and its audit record land in the same transaction either way, so the
+   data stays internally consistent, but the audit trail can show a
+   `player.declared_residence_set`/`kyc.verified_residence_determined`
+   entry timestamped after the `jurisdiction_evidence_collection_active.
+   changed` entry that turned collection off. Accepted as a named,
+   bounded-window gap on both paths, not fixed in this pass — see
+   `docs/security/security-architecture.md` §J4I.12.2.)
 2. **The jurisdiction resolver (`internal/jurisdiction/resolver.go`) is
    entirely unchanged by Phase B** — it does not read either residence
    column, does not call the two new read accessors
