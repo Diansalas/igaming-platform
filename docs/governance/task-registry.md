@@ -709,6 +709,62 @@ covers cross-domain architectural composition only** — it is not a
 financial certification (Phase 11, `ledger-finance`) and not a stage-gate
 authorization (human, via the Orchestrator).
 
+## Stage 4H-B1, Wave 3 — Phase 11 of 11 (`ledger-finance`, final financial certification — COMPLETE)
+
+The last specialist phase of Wave 3. Records `ledger-finance`'s
+independent certification of the Wave's financial surface only. **The
+Wave 3 Gate Report is the Orchestrator's synthesis across all eleven
+phases and is not this entry**; nothing here authorizes a stage
+transition, and no Human Decision Register item is resolved.
+
+| ID | Owner | Status | Dependencies | Files owned | Tests | Docs | Blockers |
+|---|---|---|---|---|---|---|---|
+| W3-P11 | ledger-finance | Done | W3-P1..P10 | `internal/bonus/schedulers.go` (`dbClockTimestamp`; `RunCashbackSweep`/`RunExpirySweep` now read the DB clock per tenant transaction), doc-comment corrections in `internal/bonus/cashback_scheduler.go` and `internal/bonus/expiry_sweep.go` | `internal/bonus/wave3_ledger_finance_certification_integration_test.go` (new, 5 tests): the first SUCCESSFUL postings via the deposit and cashback chains with B1/Rule-B2/rounding/`granted_amount`/reconciliation assertions, duplicate-replay for both, the `never now()` regression guard (verified to fail pre-fix), expiry write-down B1, and deposit-sweep partial-failure + audit-row coverage. Validation floor: `go build`/`go vet` (both tag sets)/`gofmt` clean; full unit suite green; full repo `-tags=integration` green (exit 0, 26 packages); `-race -tags=integration` green on `bonus`/`casino`/`reconciliation` | `docs/architecture/ledger-accounting-model.md` §7.18 header + §7.18.7 (stale-status correction routed here by ADR 0040), §7.18.8 (certification outcome, `LF-W3-01`/`-03`/`-04`), §7.18.9 (`DR-4HB1W3-ARCH-01`/LF-10/RC-4 confirmations), §7.14 HR-26 (ADR 0040 D2 mirrored into this document's HR catalogue), §7.19 (RC-1/RC-3 posting shapes, DESIGN ONLY), this entry | One item escalated to the Orchestrator as an open **business** decision (below). `DR-4HB1W3-ARCH-01`/`-02` remain open and gated as `architect` left them — independently re-verified, not re-opened |
+
+**Fixes made this phase:**
+
+| ID | What | Proof |
+|---|---|---|
+| DR-4HB1W3-LF-01 | The cashback scheduler and the expiry sweep compared their windows against Go's `time.Now()` — read once in the API process, before the tenant loop — while three doc comments claimed the value was a `clock_timestamp()` read. Every instant they compare *against* (`ledger_transactions.posted_at`, `bonus_grants.expires_at`) is DB-written. With the API host's clock ahead of the database, a cashback window settles before it has elapsed in `posted_at` terms and permanently excludes every bet posted inside the skew interval — a silent under-payment in the platform's favour; the same skew expires a Grant before its advertised deadline. Fixed: `dbClockTimestamp` reads `clock_timestamp()` inside each tenant's own transaction. | The `never now()` half is a genuine failing-pre-fix regression test (verified by swapping the helper to `SELECT now()` and observing the failure). The `never time.Now()` half is deployment-topology-dependent and **cannot** be reproduced on a single-host rig — stated in the helper's own doc comment rather than implied to be proven. |
+
+**Findings recorded, deliberately not fixed** (each with its exact
+reachability stated in `ledger-accounting-model.md` §7.18.8):
+`LF-W3-01` (migration 0057's idempotency constraint includes
+`offer_version_id`, so both new triggers dedupe only *per Offer
+version* — routed to `bonus-engine`; no live exposure, since the
+watermark tables carry no RLS `DELETE` policy and nothing tenant-scoped
+can re-scan a processed event), `LF-W3-03` (the cashback net-loss
+query's nullification join fails **open** on an unclassified reversal
+where §6.6.5 fails closed — unreachable today, and a blanket widening
+would be wrong because the conservative direction is not uniform across
+the bet and win legs), `LF-W3-04` (a rollback arriving after a cashback
+window is settled cannot retroactively reduce it — inherent to window
+settlement, bounded, over-credits the player).
+
+**Escalated to the Orchestrator — open BUSINESS decision, not an
+engineering one.** `grant_cancel_completed`'s posting shape is specified
+for a `completed` Grant (§7.19.3). For a **`converted`** Grant it is
+deliberately **not** specified: the value is in `player_cash`, fungible,
+possibly already staked or withdrawn, so clawing it back debits a real
+player balance and can create a **receivable from a customer**. Whether
+this platform ever creates player receivables, under which
+jurisdictions' consumer-protection rules, and what recourse exists when
+the balance is insufficient, carries legal and insurance weight that
+`ledger-finance` does not decide alone — and inventing a posting shape
+would decide it by implication.
+
+**Phase 11 certification verdict: CERTIFY.** Wave 3's financial surface
+is sound. `SUM(DEBITS) == SUM(CREDITS)` now holds on **real postings**
+from both new mechanisms rather than trivially over the empty set (the
+gap `qa` Phase 9 §4 disclosed); no balance is ever `UPDATE`d; no
+floating point exists anywhere in the Wave's arithmetic; every financial
+write remains DB-constraint-idempotent; no historical ledger or audit
+row is edited or deleted; and both new posting-adjacent paths
+participate in the existing reconciliation sweep automatically, proven
+by running it. **This verdict covers financial invariants only** — it is
+not a security, architectural or QA sign-off, and it is not a stage-gate
+authorization.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and
