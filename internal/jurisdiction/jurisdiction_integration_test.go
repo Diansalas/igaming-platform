@@ -754,6 +754,85 @@ func TestJurisdictionResolutionActive_DeleteIsDeniedByRLS(t *testing.T) {
 	}
 }
 
+// TestJurisdictionResolutionActive_TruncateIsDenied is SEC-4I-F8
+// (`security`, Stage 4I final independent security/compliance
+// certification) and the regression guard for migration 0073.
+//
+// It is the companion to the DELETE case immediately above, and it
+// exists because PostgreSQL row-level security **does not apply to
+// TRUNCATE at all**. TRUNCATE is governed only by the TRUNCATE
+// privilege, which the application role holds implicitly by OWNING the
+// table (deploy/init-app-role.sql makes it NOSUPERUSER/NOBYPASSRLS, but
+// it still owns the database and schema). So every control migrations
+// 0071 and 0072 placed on this table -- the tenant predicate, the
+// player-scope exclusion, and SEC-4I-F4's deliberate absence of a DELETE
+// policy -- is bypassed by one statement from an ordinary tenant-scoped
+// connection.
+//
+// canonical-model §6.1 is binding on this table by its own opening line
+// and its per-command-policy bullet ends "Plus a `BEFORE TRUNCATE ...
+// FOR EACH STATEMENT` deny trigger." Migration 0071 gave that trigger to
+// jurisdiction_resolutions only.
+//
+// Pre-0073 this test fails: the TRUNCATE succeeds and every tenant's
+// resolution-active fact is gone, with audit_log still recording that
+// each one was set -- an unaudited, platform-wide control-state change,
+// which is exactly the hazard SEC-4I-F4 closed for DELETE.
+func TestJurisdictionResolutionActive_TruncateIsDenied(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	staffID := uuid.New()
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := SetResolutionActive(ctx, tx, SetResolutionActiveParams{
+			TenantID: f.tenantID, OperationClass: OperationBonusIssuance, Active: true,
+			ActorType: ActorStaff, ActorID: staffID, ReasonCode: "stage-4i-sec-f8",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// A tenant-scoped connection -- the ordinary shape every admin handler
+	// in this platform runs under.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `TRUNCATE jurisdiction_resolution_active`)
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected TRUNCATE to be rejected on jurisdiction_resolution_active - RLS does not cover TRUNCATE, so only a BEFORE TRUNCATE trigger can deny it")
+	}
+	assertPgCode(t, err, pgRaisedError)
+
+	// A player-scoped connection, which the RLS predicates exclude from
+	// this table entirely, must equally not be able to erase it.
+	err = pool.WithPlayerScope(context.Background(), f.tenantID, f.playerID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `TRUNCATE jurisdiction_resolution_active`)
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected TRUNCATE to be rejected from a player-scoped connection too")
+	}
+	assertPgCode(t, err, pgRaisedError)
+
+	// Anti-inertness: the fact is still there and still true, so the two
+	// assertions above cannot pass merely because the row never existed.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		active, err := IsActive(ctx, tx, f.tenantID, OperationBonusIssuance)
+		if err != nil {
+			return err
+		}
+		if !active {
+			t.Fatal("expected the resolution-active fact to survive both TRUNCATE attempts")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("post-truncate IsActive: %v", err)
+	}
+}
+
 // --- B-1: jurisdictions/licences registry write surface ---
 
 func TestCreateJurisdictionAndListJurisdictions(t *testing.T) {

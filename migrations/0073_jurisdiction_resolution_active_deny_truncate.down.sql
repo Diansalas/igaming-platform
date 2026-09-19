@@ -1,0 +1,2 @@
+DROP TRIGGER IF EXISTS jurisdiction_resolution_active_no_truncate ON jurisdiction_resolution_active;
+DROP FUNCTION IF EXISTS jurisdiction_resolution_active_deny_truncate();
