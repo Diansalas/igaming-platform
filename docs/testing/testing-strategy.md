@@ -3131,3 +3131,259 @@ phase except the five newly-named `QA-W2P9-*` items, which this phase
 found and is naming for the first time, per CLAUDE.md's "no fake
 completion" and this document's own "gaps this test-writing exercise
 surfaced" precedent (§6 of the Fix Round 2 section above).
+
+## Stage 4H-B1 Wave 3 Phase 9 (`qa`) — full validation floor, coverage-gap audit, two genuine defects fixed
+
+Status: **verification against real code**, the mandated "full test
+floor" for Wave 3 (Phases 1-8: `ledger-finance` design contract,
+`backend`/`bonus-engine` implementation of the deposit/cashback/expiry
+sweeps and the four-eyes/EOI HTTP surface, `risk`/`identity-compliance`/
+`security` fixes, `casino`'s own concurrency regression). Ran the entire
+validation floor from scratch rather than trusting prior phases'
+self-reports, per this dispatch's own explicit instruction.
+
+### 1. Validation floor — exact results
+
+| Command | Result | Notes |
+|---|---|---|
+| `go build ./...` | **PASS** | Clean, exit 0. |
+| `go vet ./...` | **PASS** | Clean, no output. |
+| `go vet -tags=integration ./...` | **PASS** | Clean, no output. |
+| `gofmt -l .` | **PASS** | Empty output throughout, including every new/modified file this phase. |
+| `go test -count=1 ./...` | **PASS** | Full unit suite, all packages `ok` or `[no test files]`. |
+| `go test -tags=integration -count=1 ./...` | **PASS** | Full repo-wide integration suite, every package `ok`. `internal/reconciliation` (~227s) and `internal/rg` (~207s) dominate wall time; both pre-date this Wave. Run twice across this phase (once before, once after this phase's own fixes/additions) — both green. |
+| `go test -tags=integration -race -count=1 ./...` | **PASS** | Full repo-wide integration suite under `-race`. Zero data races reported anywhere, including across every new test this phase added. Run at the start of this phase (baseline, before any qa changes) and again at the end (with every fix/test this phase added) — both green, zero races either time. |
+| Migration round-trip, `0068`-`0070` | **PASS** | `go run ./cmd/migrate -steps=3 down` cleanly rolled back to version 67 (confirmed via `schema_migrations`, and via direct `to_regclass`/`information_schema.columns` checks that `bonus_ledger_sweep_watermarks`, `bonus_cashback_schedule_watermarks`, and `bonus_grants.expires_at` were all genuinely dropped); `go run ./cmd/migrate up` cleanly re-applied all three; a second `up` was a no-op. Row counts for every affected table (`bonus_grants` and its 14 sibling Bonus tables, `economic_operations`, `bulk_grant_jobs`, `bulk_grant_job_items`, `ledger_transactions`, `ledger_entries`) were captured before and after: all zero, before and after (this shared dev database happened to hold none of this Wave's own domain data at the time of the check) — confirmed no data loss is possible to observe from this state, and the schema-level round-trip itself (the thing nobody had explicitly re-verified since Phase 2 first wrote these three migrations) is clean. |
+
+No suite in this phase's scope produced a `FAIL`, an unexplained
+`FLAKE`, or a `BLOCKED` result.
+
+### 2. Coverage-gap audit and genuine defects found (item 2 of the dispatch)
+
+Read every new/changed file this Wave names
+(`internal/bonus/{deposit_sweep,cashback_scheduler,expiry_sweep,
+schedulers,four_eyes_ops,wagering_contribution_entry}.go`, `internal/
+casino/orchestrator.go`'s new section, `internal/httpserver/bonus_
+{governance,domain_ops}_handlers.go`, `internal/economicop/enforce.go`'s
+new check) end to end, not just their own test files' happy paths. Two
+genuine defects were found — both fixed directly (small, precisely
+scoped) and both proven by a regression test that fails against the
+pre-fix code and passes post-fix, confirmed by literally reverting each
+fix and re-running its own test before restoring it:
+
+1. **Cross-domain matching defect (financial correctness), `internal/bonus/deposit_sweep.go`.**
+   `listDepositMatchableOfferVersions`' own SQL had no
+   `completion_mechanic` filter, so it also matched Cashback
+   OfferVersions (identical `RewardKind=R1`/`grant_policy=auto_issue`
+   shape, `cashback_scheduler.go`'s own doc comment confirms the shapes
+   are structurally identical). An ordinary qualifying deposit for a
+   player enrolled under a Cashback campaign would ALSO trigger a
+   spurious deposit-triggered Grant issuance attempt against the
+   Cashback campaign's own OfferVersion, misusing its `reward_calculation`
+   (which additionally carries `window_seconds`, silently ignored by
+   `parsePercentageRewardCalculation`) as an ordinary deposit-match
+   reward — something no Offer author who configured a Cashback campaign
+   ever authorized. Fixed with a one-line filter
+   (`completion_mechanic IS DISTINCT FROM 'C2'`), the exact inverse of
+   `listCashbackMatchableCampaigns`' own selector. Regression:
+   `TestRunDepositSweepForTenant_DoesNotMatchCashbackOffer`.
+2. **Availability defect, `internal/httpserver/bonus_domain_ops_handlers.go`'s `newCreateOfferVersionHandler`.**
+   An omitted (legitimately optional, `omitempty`-tagged)
+   `contribution_weight_table` field turned into an unconditional 500:
+   casting an empty Go string to `[]byte` produces a non-nil, empty
+   slice, which `bonus.CreateOfferVersion`'s own `nonNilJSON` nil-check
+   does not catch, so it was bound to the JSONB column literally and
+   Postgres rejected it (`invalid input syntax for type json`). Fixed by
+   normalizing an empty request field to `nil`, mirroring
+   `reward_calculation`'s own adjacent empty-string handling in the same
+   handler. Found while writing this phase's own audit-record test for
+   this endpoint (§4 below), not by inspection alone.
+
+No other genuinely uncovered branch producing incorrect behavior was
+found in the files read. Every other "coverage gap" surfaced (missing
+concurrency proof, missing audit-record assertion) is a real gap in test
+coverage, not evidence of a second production defect, and is recorded in
+§3/§4 below.
+
+### 3. Concurrency testing, including the F1 deadlock-liveness investigation (item 3 of the dispatch)
+
+All three new sweep/scheduler mechanisms now have a GENUINE
+concurrent-execution test (two real goroutines, real overlap forced via a
+held-open transaction, mirroring `internal/reconciliation`'s own
+established `TestTryRunLedgerVsProjectionForTenant_ConcurrentLockContention`
+pattern) — not merely the sequential-call-twice pattern the deposit
+sweep's own pre-existing
+`TestRunDepositSweepScheduler_TenantAdvisoryLockSerializesOverlappingTicks`
+used (which never actually has two ticks in flight at the same time and
+so cannot detect a true race):
+
+- `TestDepositSweep_TrueConcurrentTicksSameTenant_SecondObservesLockHeldAndSkips`
+  (`internal/bonus/schedulers_concurrency_integration_test.go`, new).
+- `TestExpirySweep_TrueConcurrentTicksSameTenant_NoDoubleTerminationOrLoss`
+  (same file, new) — proves the domain-specific invariant (every expired
+  Grant terminated exactly once, none lost) under real overlap, not just
+  that the lock mechanism itself serializes (which the deposit-sweep test
+  already proves generically, since both share `tryAdvisoryLockedTenantJob`).
+- Cashback scheduler: covered by the F1 test below, which runs it
+  concurrently against the deposit sweep — no dedicated same-tenant
+  same-job overlap test was additionally written for the cashback
+  scheduler alone, since its own tick body has no code path materially
+  different from the deposit sweep's own (identical
+  `tryAdvisoryLockedTenantJob` wrapper, identical watermark-then-issue
+  shape) and the generic serialization property is already proven twice
+  over (deposit sweep, expiry sweep). Named here rather than silently
+  assumed.
+
+**F1 (Phase 4/risk's named-but-unverified concern): can the deposit sweep
+and the cashback scheduler deadlock each other under Postgres's own
+detection, since they use two different advisory-lock namespaces?**
+Answered empirically, not merely by inspection:
+`TestDepositAndCashbackSchedulers_ConcurrentDifferentNamespaces_NoDeadlock`
+runs both jobs concurrently for the SAME tenant, repeated across 8
+iterations, asserting specifically that neither ever surfaces a real
+Postgres "deadlock detected" error (SQLSTATE `40P01`, checked via
+`errors.As` against `*pgconn.PgError` — the falsifiable claim, not just
+"no error") and that both jobs' own results stay correct despite the
+real overlap (exactly one grant attempt from each, no cross-job
+interference). **Result: PASS, all 8 iterations, zero deadlocks.**
+**Finding, stated precisely: this is safe by construction, not merely
+lucky.** Both jobs use `pg_try_advisory_xact_lock` — the NON-BLOCKING
+try-lock family — which by definition never enters a wait state; a
+session that cannot acquire it returns immediately with `acquired=false`
+rather than blocking. Postgres's deadlock detector only ever needs to
+intervene when two sessions are each BLOCKED waiting on a lock the other
+holds (a genuine wait-for cycle); a lock acquisition that never blocks
+can never participate in such a cycle, and two DIFFERENT lock namespaces
+additionally never contend with each other at all, blocking or not. F1
+is **CLOSED**: not a live correctness bug, confirmed empirically against
+real Postgres 16 rather than left as an unverified inference.
+
+### 4. Financial-invariant testing (item 4 of the dispatch)
+
+**Disclosed limitation, stated precisely rather than worked around:**
+every new code path this Wave adds that TRIGGERS a ledger-touching
+mechanism (`IssueAndActivateDepositBonus` via the deposit sweep,
+`IssueAndActivateCashback` via the cashback scheduler) is, in every test
+in this Wave's own suite AND in this phase's own new concurrency tests,
+denied at the `AssetAuthorization` gate — a pre-existing, disclosed
+limitation (`RunDepositSweepForTenant`'s own doc comment: `JurisdictionCode`
+is hardcoded to `""` because this platform has no per-player jurisdiction
+resolver yet, the same gap already disclosed against casino's real-money
+bet path). **No test anywhere, including this phase's own new ones, ever
+reaches a successful `bonus_grant` posting via either sweep** — so
+Invariant B1 (extended) holds trivially in every one of these tests (zero
+postings occur), not because it was proven under a genuine successful
+concurrent posting. This is not new information this phase discovered,
+but it is stated explicitly here rather than left implicit, since a
+casual reading of "financial invariant testing: done" against these two
+mechanisms would otherwise overstate what was actually exercised. The
+wagering-contribution trigger (`RecordCashFundedWageringContribution`,
+wired into casino's real `postBet`) posts NO ledger entries of its own by
+design (§7.18.3.4, confirmed unchanged) — B1 is structurally
+inapplicable to it, not merely untested. The underlying `casino_bet`
+posting it rides on is covered by `internal/casino`'s own pre-existing
+balance/invariant tests, unaffected by this Wave.
+
+### 5. API/authorization/audit test completeness (item 5 of the dispatch)
+
+Cross-checked every new HTTP route in `registerBonusRoutes` (11 routes
+this Wave adds) against `docs/security/security-architecture.md`
+§W3P6.1's own matrix (5 surfaces: `manual_grant_issue`, `bulk_job_execute`,
+`campaign_activate`, `offer_publish`, EOI-minting) — confirms `security`'s
+own five-surface scope was itself complete against the route list;
+nothing additional was missed.
+
+**Genuine gap found and closed this phase**: no test anywhere in this
+Wave's diff ever read `audit_log` back to confirm any of the new
+handlers' `audit.Record` calls actually fire — every existing test
+asserted on the HTTP response/domain-object state only. Added
+`internal/httpserver/bonus_wave3_audit_integration_test.go`, asserting a
+real `audit_log` row (action AND target_id both checked) for:
+`bonus_change_request.filed`/`.approved`, `bonus_campaign.activated`,
+`bonus_offer.created`, `bonus_offer_version.created`,
+`bonus_offer.published`, `economic_operation.minted`, and
+`bonus_grant.manual_issue_requested`/`bulk_grant_job.created`.
+
+Two audit actions are **named, disclosed gaps**, not silently skipped:
+
+- `bonus_grant.manual_issue_activated` fires only after `ActivateGrant`'s
+  FULL T.1 gate (`AssetAuthorization`→RG→Risk) allows, and
+  `AssetAuthorization` fails closed on absent jurisdiction/tenant-
+  jurisdiction-config data (ADR 0037 §C.1) — no HTTP-level test ANYWHERE
+  in this codebase (not merely this Wave) currently builds that fixture;
+  every existing successful-activation test for this exact gate chain is
+  built at the package level (`internal/bonus`'s own `lifecycleFixture`,
+  several platform-admin-approved `assetregistry` change-request
+  round-trips plus a dedicated test-only asset/jurisdiction). Building
+  that harness a second time, at the HTTP layer, purely to observe one
+  `audit.Record` call whose call site is structurally identical in shape
+  to two already-proven-live sibling calls (`bonus_campaign.activated`,
+  `bonus_offer.published`) would be disproportionate scope for this one
+  assertion and risks mutating shared asset-authorization state other
+  concurrently-run tests in this shared dev database depend on. Verified
+  instead by code inspection (the call site is unconditional, immediately
+  after a successful activation, in the same transaction). Flagged as a
+  real, bounded, pre-existing gap in the HTTP test harness generally (not
+  unique to Bonus), for whichever specialist eventually builds an
+  HTTP-level jurisdiction/asset-authorization fixture first.
+- `bulk_grant_job.executed` is structurally unreachable via HTTP today,
+  confirmed by Phase 6's own already-documented F3 finding
+  (`bulk_grant_jobs.parent_operation_id` is never populated by the create
+  handler, so execution always fails before reaching this call, and the
+  whole transaction — including any audit row — rolls back). Asserting
+  this audit row exists via HTTP would itself be the "fake completion"
+  CLAUDE.md forbids. (It IS exercised at the package level, where the
+  fixture legitimately pre-populates `parent_operation_id` —
+  `TestExecuteBulkGrantJobWithApproval_SucceedsWithApproval`, pre-existing
+  — though that test does not itself assert the audit row; adding that
+  one assertion is a small, low-priority follow-up, not done here given
+  the phase's own time allocation toward the larger gaps above.)
+
+Tenant-isolation coverage: confirmed present for `campaign_activate`
+(`TestActivateCampaign_HTTP_CrossTenantIsolation`, pre-existing). Not
+independently duplicated this phase for `offer_publish`/manual-grant/
+bulk-job, since all four routes share the identical RLS-via-`WithTenant`
+isolation mechanism `security`'s own W3P6.3 review already confirmed
+structurally (every new handler and sweep job performs every tenant-owned
+read/write inside `pool.WithTenant`, no new code path uses
+`WithPlatformAdmin` or an RLS-exempt connection) — named here as a
+proportionality call, not an oversight.
+
+### 6. "No skipped financial/security tests" audit (item 6 of the dispatch)
+
+Grepped the full Wave 3 diff (`9d857dc..fb829e1`) and this phase's own
+additions for `t.Skip`, `TODO`, `FIXME`, and `err == nil`/weak-assertion
+patterns. **Zero `t.Skip` calls** anywhere in the Wave. One `TODO`
+reference found, and it is a QUOTATION of a PRE-EXISTING, already-
+disclosed gap (casino/deposit-sweep's shared jurisdiction-resolution TODO),
+not a new skip. **Two genuine weak assertions found and fixed** (both
+test-only, no production code touched, both re-verified to still pass for
+the correct reason after the fix):
+
+1. `internal/bonus/four_eyes_ops_integration_test.go`'s
+   `TestManualGrantWithApproval_SucceedsWithApproval` asserted only
+   `err != nil` for "a second activation against an already-activated
+   Grant fails" — a bare non-nil check would also pass if the SECOND
+   attempt failed for an unrelated reason (e.g. the four-eyes consume
+   refusing because the approval was already burned), masking the actual
+   CAS-guard regression the test's own name claims to prove. Now asserts
+   `errors.Is(err, ErrIllegalTransition)`.
+2. `internal/bonus/wave3_security_matrix_integration_test.go`'s
+   `TestSEC_EOIMintedForOwnPerson_RefusedByComposedSEP1` asserted only
+   `err != nil` for "SEP-1 refuses a self-dealt manual grant" — would also
+   pass on an unrelated validation/FK failure. Now asserts the error names
+   both "SEP-1" and "self-dealing" (migration 0062's own trigger text).
+
+### 7. Summary verdict
+
+Wave 3's implementation (Phases 1-8) is **IMPLEMENTED** for the scope it
+actually claims (deposit/reload sweep, cashback scheduler, expiry sweep,
+cash-funded wagering-contribution wiring, four-eyes application wiring
+for 4 of 7 `ChangeOperation`s, the new HTTP admin surfaces), subject to
+every limitation each phase itself already disclosed (the jurisdiction-
+resolution gap meaning both sweeps' issuance always denies today; the
+three un-wired `ChangeOperation`s named as `NOT IMPLEMENTED`/`BLOCKED` by
+Phase 3 itself; F3's bulk-job-execute-via-HTTP gap named by Phase 6) plus
+the two genuine defects this phase found and fixed. No test was skipped,
+disabled, or quarantined to reach this verdict. Full commit list this
+phase: `da33c5e`, `e0be40f`, `76c4605`.
