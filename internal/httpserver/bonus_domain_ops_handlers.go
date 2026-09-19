@@ -256,10 +256,26 @@ func newCreateOfferVersionHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeValidation, "reward_calculation must be valid JSON")
 			return
 		}
-		contributionWeightTable := []byte(req.ContributionWeightTable)
-		if len(contributionWeightTable) > 0 && !jsonValid(contributionWeightTable) {
-			apierror.Write(w, requestID, apierror.CodeValidation, "contribution_weight_table must be valid JSON")
-			return
+		// FIX (Stage 4H-B1 Wave 3 Phase 9, `qa`): an omitted
+		// contribution_weight_table (a legitimately optional field, per its
+		// own `omitempty` JSON tag) previously reached bonus.CreateOfferVersion
+		// as a non-nil, EMPTY []byte ([]byte("") from casting an empty Go
+		// string) - nonNilJSON's own nil-check (offer.go/numeric.go) never
+		// caught this, since an empty slice is not nil, so it was bound to
+		// the JSONB column literally, and Postgres rejected it outright
+		// ("invalid input syntax for type json"), turning an ordinary,
+		// entirely valid "no contribution-weight axis configured" request
+		// into an unconditional 500. Normalizing an empty request field to
+		// nil here lets nonNilJSON's own existing "{}"-default behavior
+		// apply, exactly as rewardCalculation's own empty-string handling
+		// three lines above already does.
+		var contributionWeightTable []byte
+		if req.ContributionWeightTable != "" {
+			contributionWeightTable = []byte(req.ContributionWeightTable)
+			if !jsonValid(contributionWeightTable) {
+				apierror.Write(w, requestID, apierror.CodeValidation, "contribution_weight_table must be valid JSON")
+				return
+			}
 		}
 		var wageringMultiplierBP *int32
 		if req.WageringMultiplierBP > 0 {

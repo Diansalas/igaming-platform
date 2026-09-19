@@ -259,6 +259,49 @@ func TestRunDepositSweepForTenant_NoMatchingOfferIsANoOp(t *testing.T) {
 	}
 }
 
+// TestRunDepositSweepForTenant_DoesNotMatchCashbackOffer is Stage 4H-B1
+// Wave 3 Phase 9's (`qa`) own regression for a genuine cross-domain
+// matching defect found while writing the concurrency test suite: a
+// Cashback OfferVersion (RewardKind R1, grant_policy=auto_issue -
+// structurally IDENTICAL to a Deposit/Reload OfferVersion in every field
+// listDepositMatchableOfferVersions' query checked before this fix)
+// must NEVER be matched by the deposit sweep - only completion_mechanic
+// (nil/absent here vs 'C2' for Cashback) distinguishes the two, and the
+// pre-fix query did not check it at all. This test FAILS against the
+// pre-fix query (a second, spurious grant attempt is created against the
+// Cashback campaign's own OfferVersion for an ordinary qualifying
+// deposit) and PASSES post-fix.
+func TestRunDepositSweepForTenant_DoesNotMatchCashbackOffer(t *testing.T) {
+	pool := testPool(t)
+	f := seedLifecycleFixture(t, pool)
+	cashbackCO := seedCashbackOffer(t, pool, f, 1000, 86400)
+	depositTxID := seedRawDeposit(t, pool, f, 10000, "card")
+
+	var outcome DepositSweepOutcome
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var runErr error
+		outcome, runErr = RunDepositSweepForTenant(ctx, tx, f.tenantID, uuid.Nil)
+		return runErr
+	})
+	if err != nil {
+		t.Fatalf("RunDepositSweepForTenant: %v", err)
+	}
+	if outcome.GrantsIssued != 0 || outcome.GrantsDenied != 0 {
+		t.Fatalf("expected ZERO issuance attempts against the Cashback-only OfferVersion (no Deposit/Reload offer exists in this tenant at all), got issued=%d denied=%d", outcome.GrantsIssued, outcome.GrantsDenied)
+	}
+
+	var grantCount int
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM bonus_grants WHERE tenant_id = $1 AND offer_version_id = $2`, f.tenantID, cashbackCO.offerVersionID).Scan(&grantCount)
+	})
+	if err != nil {
+		t.Fatalf("count grants against the cashback offer version: %v", err)
+	}
+	if grantCount != 0 {
+		t.Fatalf("BUG: the deposit sweep issued %d grant attempt(s) against a Cashback-only (completion_mechanic='C2') OfferVersion for deposit %s - it must never match a Cashback offer", grantCount, depositTxID)
+	}
+}
+
 // seedSecondPlayerAccountSamePerson creates a second player_account (and
 // its own wallet) belonging to the SAME Person as f's own playerID -
 // exactly the multi-account shape detectMultiAccountFirstDepositSignal

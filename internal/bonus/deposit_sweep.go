@@ -190,6 +190,24 @@ type depositMatchableOfferVersion struct {
 // each checked afterward, per candidate, in Go (matchesDepositEligibility
 // below), rather than folded into one large query, so each check's own
 // reasoning stays legible and independently testable.
+//
+// FIX (Stage 4H-B1 Wave 3 Phase 9, `qa`): a Cashback OfferVersion also
+// uses RewardKind R1 (the identical percentage-with-cap formula shape,
+// cashback_scheduler.go's own doc comment) and is commonly also
+// grant_policy=auto_issue - the ONLY structural field distinguishing a
+// Cashback OfferVersion from a genuine Deposit/Reload one anywhere in
+// this schema is CompletionMechanic='C2' (the exact marker
+// listCashbackMatchableCampaigns itself already selects ON). Before this
+// fix, this query had no completion_mechanic filter at all, so ANY
+// qualifying deposit for a player enrolled under a Cashback campaign
+// ALSO matched here and triggered a spurious deposit-triggered Grant
+// issuance attempt against the Cashback campaign's own OfferVersion -
+// misusing its reward_calculation (which additionally carries
+// window_seconds, silently ignored by parsePercentageRewardCalculation)
+// as if it were an ordinary deposit-match reward, something no Offer
+// author who configured a Cashback campaign ever authorized. Proven by
+// TestRunDepositSweepForTenant_DoesNotMatchCashbackOffer (fails against
+// the pre-fix query, passes after).
 func listDepositMatchableOfferVersions(ctx context.Context, tx pgx.Tx, tenantID, brandID uuid.UUID, assetCode string, asOf time.Time) ([]depositMatchableOfferVersion, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT c.id, c.current_version_id, o.id, ov.id, c.fulfillment_owner
@@ -203,6 +221,7 @@ func listDepositMatchableOfferVersions(ctx context.Context, tx pgx.Tx, tenantID,
 		   AND o.status = 'active'
 		   AND o.grant_policy = 'auto_issue'
 		   AND ov.reward_kind = 'R1'
+		   AND (ov.completion_mechanic IS DISTINCT FROM 'C2')
 		   AND ov.reward_asset_code = $3
 		   AND (cv.window_start IS NULL OR cv.window_start <= $4)
 		   AND (cv.window_end IS NULL OR cv.window_end > $4)`,
