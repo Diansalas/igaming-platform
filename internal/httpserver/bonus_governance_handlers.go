@@ -1,0 +1,455 @@
+// Stage 4H-B1 Wave 3 Phase 3 (item F): the HTTP admin surface for
+// four-eyes filing/approval, EOI minting, and the per-domain activate/
+// publish/execute endpoints item E's application-level wiring needs a
+// caller for. Closes reconnaissance §3.1's own named finding ("Missing
+// HTTP admin surfaces for four-eyes filing and campaign activation").
+// API only, per the dispatch's own explicit scope - no Back Office UI.
+//
+// Every endpoint here follows this codebase's own established
+// convention exactly (bonus_handlers.go/withdrawal_handlers.go):
+// authn via auth.Middleware, tenant scoping via auth.RequireTenantScope,
+// RBAC via auth.RequirePermission (static) or a dynamic per-operation
+// permission check (RoleHasPermission, for the generic change-request
+// surface whose required permission depends on a body field), actor/
+// subject separation left to the underlying migration-0063 DB triggers
+// (never re-implemented here), input validation via internal/validation,
+// audit logging (either via the domain function's own audit.Record, or
+// added here where the domain function does not audit itself), and a
+// curated JSON response shape - never leaking a Go error's raw string
+// where a caller could confuse "denied" with "internal error".
+package httpserver
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"math/big"
+	"net/http"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/Diansalas/igaming-platform/internal/apierror"
+	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/auth"
+	"github.com/Diansalas/igaming-platform/internal/bonus"
+	"github.com/Diansalas/igaming-platform/internal/economicop"
+	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/tenant"
+	"github.com/Diansalas/igaming-platform/internal/validation"
+)
+
+// changeOperationPermission maps each of the security doc's eight
+// dual-controlled bonus operations to the ONE permission whose holder
+// may file OR approve a change request naming it - deliberately the
+// SAME domain-authority permission a caller would need to perform the
+// underlying operation directly (a promotions_manager may file/approve
+// campaign_activate/offer_publish; a bonus_operations principal may
+// file/approve manual_grant_issue/bulk_job_execute/bonus_adjustment_write/
+// grant_forced_conversion/grant_cancel_completed/held_disposition_resolve) -
+// never a separate, broader "approver" permission that would let staff
+// approve an operation class they could not themselves perform, which
+// would quietly reopen the hard-constraint separations security-
+// architecture.md §B1.1 already established between RolePromotionsManager
+// and RoleBonusOperations. The migration-0063 DB triggers separately
+// enforce requester != approver (distinct Person) - this map only
+// decides WHO may participate at all, never who specifically must.
+var changeOperationPermission = map[bonus.ChangeOperation]auth.Permission{
+	bonus.ChangeOpManualGrantIssue:       auth.PermBonusGrantIssue,
+	bonus.ChangeOpBulkJobExecute:         auth.PermBonusBulkExecute,
+	bonus.ChangeOpBonusAdjustmentWrite:   auth.PermBonusAdjustmentWrite,
+	bonus.ChangeOpGrantForcedConversion:  auth.PermBonusGrantReview,
+	bonus.ChangeOpCampaignActivate:       auth.PermBonusCampaignActivate,
+	bonus.ChangeOpOfferPublish:           auth.PermBonusOfferManage,
+	bonus.ChangeOpGrantCancelCompleted:   auth.PermBonusGrantCancel,
+	bonus.ChangeOpHeldDispositionResolve: auth.PermBonusHeldDispositionResolve,
+}
+
+func requirePermissionForOperation(w http.ResponseWriter, requestID string, tc tenant.Context, operation bonus.ChangeOperation) bool {
+	perm, ok := changeOperationPermission[operation]
+	if !ok {
+		apierror.Write(w, requestID, apierror.CodeValidation, "unrecognized operation")
+		return false
+	}
+	if !auth.RoleHasPermission(auth.Role(tc.Role), perm) {
+		apierror.Write(w, requestID, apierror.CodeForbidden, "insufficient permissions for this operation")
+		return false
+	}
+	return true
+}
+
+// --- generic four-eyes: file / approve|reject a change request ---
+
+type fileChangeRequestRequest struct {
+	Operation       string          `json:"operation"`
+	TargetType      string          `json:"target_type"`
+	TargetID        string          `json:"target_id"`
+	Payload         json.RawMessage `json:"payload"`
+	AmountAtRequest string          `json:"amount_at_request,omitempty"`
+	AssetCode       string          `json:"asset_code,omitempty"`
+	ReasonCode      string          `json:"reason_code"`
+}
+
+type changeRequestResponse struct {
+	ID         string `json:"id"`
+	Operation  string `json:"operation"`
+	TargetType string `json:"target_type"`
+	TargetID   string `json:"target_id"`
+	State      string `json:"state"`
+}
+
+func toChangeRequestResponse(r bonus.ChangeRequest) changeRequestResponse {
+	return changeRequestResponse{ID: r.ID.String(), Operation: string(r.Operation), TargetType: r.TargetType, TargetID: r.TargetID.String(), State: string(r.State)}
+}
+
+// newFileChangeRequestHandler is the ONE surface every one of the eight
+// dual-controlled bonus operations files a request through - the DB
+// layer (migration 0063) is already operation-agnostic, so a single
+// generic endpoint covers all eight, per reconnaissance §3.1's own
+// recommendation, never a per-operation filing endpoint.
+func newFileChangeRequestHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		staffID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid staff subject")
+			return
+		}
+		var req fileChangeRequestRequest
+		if err := decodeJSON(r, &req); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			return
+		}
+		v := validation.New()
+		v.RequireNonEmpty("operation", req.Operation)
+		v.RequireNonEmpty("target_type", req.TargetType)
+		v.RequireUUID("target_id", req.TargetID)
+		v.RequireNonEmpty("reason_code", req.ReasonCode)
+		if v.HasErrors() {
+			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+			return
+		}
+		operation := bonus.ChangeOperation(req.Operation)
+		if !requirePermissionForOperation(w, requestID, tc, operation) {
+			return
+		}
+		targetID, _ := uuid.Parse(req.TargetID)
+		var amount *big.Int
+		if req.AmountAtRequest != "" {
+			amt, ok := new(big.Int).SetString(req.AmountAtRequest, 10)
+			if !ok || amt.Sign() < 0 {
+				apierror.Write(w, requestID, apierror.CodeValidation, "amount_at_request must be a non-negative decimal integer string")
+				return
+			}
+			amount = amt
+		}
+		var assetCode *string
+		if req.AssetCode != "" {
+			assetCode = &req.AssetCode
+		}
+		payload := []byte(req.Payload)
+		if len(payload) == 0 {
+			payload = []byte("{}")
+		} else if !json.Valid(payload) {
+			apierror.Write(w, requestID, apierror.CodeValidation, "payload must be valid JSON")
+			return
+		}
+
+		var resp changeRequestResponse
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			created, err := bonus.FileChangeRequest(ctx, tx, bonus.ChangeRequest{
+				TenantID: tc.TenantID, Operation: operation, TargetType: req.TargetType, TargetID: targetID,
+				Payload: payload, AmountAtRequest: amount, AssetCode: assetCode,
+				ReasonCode: req.ReasonCode, RequestedByPrincipalID: staffID,
+			})
+			if err != nil {
+				return err
+			}
+			resp = toChangeRequestResponse(created)
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: staffID,
+				Action: "bonus_change_request.filed", TargetType: "bonus_change_request", TargetID: created.ID.String(), Outcome: audit.OutcomeSuccess,
+				IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+				Metadata: map[string]any{"operation": req.Operation, "target_type": req.TargetType, "target_id": req.TargetID, "reason_code": req.ReasonCode},
+			})
+		})
+		if err != nil {
+			deps.Logger.Error("file_change_request_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to file change request")
+			return
+		}
+		writeJSON(w, http.StatusCreated, resp)
+	}
+}
+
+type decideChangeRequestRequest struct {
+	Decision            string `json:"decision"` // "approve" | "reject"
+	ReasonCode          string `json:"reason_code,omitempty"`
+	ThresholdAtDecision string `json:"threshold_at_decision,omitempty"`
+	AmountAtDecision    string `json:"amount_at_decision,omitempty"`
+}
+
+// newDecideChangeRequestHandler records an approve/reject decision - the
+// migration-0063 governance trigger (requester != approver) and SEP-1
+// trigger (beneficiary separation) fire on THIS write and are the real
+// enforcement; this handler adds only authn/authz/audit around it, per
+// this file's own top-of-file doc comment.
+func newDecideChangeRequestHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		staffID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid staff subject")
+			return
+		}
+		changeRequestID, err := uuid.Parse(r.PathValue("requestID"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request id")
+			return
+		}
+		var req decideChangeRequestRequest
+		if err := decodeJSON(r, &req); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			return
+		}
+		v := validation.New()
+		v.RequireOneOf("decision", req.Decision, "approve", "reject")
+		if v.HasErrors() {
+			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+			return
+		}
+
+		var threshold, amount *big.Int
+		if req.ThresholdAtDecision != "" {
+			amt, ok := new(big.Int).SetString(req.ThresholdAtDecision, 10)
+			if !ok {
+				apierror.Write(w, requestID, apierror.CodeValidation, "threshold_at_decision must be a decimal integer string")
+				return
+			}
+			threshold = amt
+		}
+		if req.AmountAtDecision != "" {
+			amt, ok := new(big.Int).SetString(req.AmountAtDecision, 10)
+			if !ok {
+				apierror.Write(w, requestID, apierror.CodeValidation, "amount_at_decision must be a decimal integer string")
+				return
+			}
+			amount = amt
+		}
+
+		var reasonCode *string
+		if req.ReasonCode != "" {
+			reasonCode = &req.ReasonCode
+		}
+
+		var resp changeRequestResponse
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			existing, err := bonus.GetChangeRequestByID(ctx, tx, changeRequestID)
+			if err != nil {
+				return err
+			}
+			if !requirePermissionForOperationTx(existing.Operation, tc) {
+				return errInsufficientPermission
+			}
+			if err := bonus.RecordChangeApproval(ctx, tx, tc.TenantID, changeRequestID, staffID, req.Decision, reasonCode, threshold, amount); err != nil {
+				return err
+			}
+			resp = toChangeRequestResponse(existing)
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: staffID,
+				Action: "bonus_change_request." + req.Decision + "d", TargetType: "bonus_change_request", TargetID: changeRequestID.String(), Outcome: audit.OutcomeSuccess,
+				IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+			})
+		})
+		if errors.Is(err, errInsufficientPermission) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "insufficient permissions for this operation")
+			return
+		}
+		if errors.Is(err, bonus.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "change request not found")
+			return
+		}
+		// migration 0063's own governance/SEP-1 triggers (requester !=
+		// approver, beneficiary separation) refuse a policy-violating
+		// approval by raising a Postgres exception (SQLSTATE P0001) on
+		// this very INSERT - surfaced here as a 403 (a refused policy
+		// decision), never a 500 (which would incorrectly suggest an
+		// application bug rather than a working control).
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "change request decision refused: "+pgErr.Message)
+			return
+		}
+		if err != nil {
+			deps.Logger.Error("decide_change_request_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to record change request decision: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+var errInsufficientPermission = errors.New("insufficient permissions")
+
+// requirePermissionForOperationTx is requirePermissionForOperation's
+// non-HTTP-writing twin, for use INSIDE a WithTenant closure (where a
+// direct apierror.Write would run before the transaction outcome is
+// known) - the caller maps the returned false to a Forbidden response
+// itself.
+func requirePermissionForOperationTx(operation bonus.ChangeOperation, tc tenant.Context) bool {
+	perm, ok := changeOperationPermission[operation]
+	if !ok {
+		return false
+	}
+	return auth.RoleHasPermission(auth.Role(tc.Role), perm)
+}
+
+// --- EOI minting ---
+
+type mintEconomicOperationRequest struct {
+	OperationType          string `json:"operation_type"` // "bonus_manual_grant" | "bonus_bulk_grant"
+	SubjectScope           string `json:"subject_scope"`  // "single_subject" | "enumerated_set"
+	SubjectRef             string `json:"subject_ref,omitempty"`
+	SubjectSetCount        int32  `json:"subject_set_count,omitempty"`
+	AssetCode              string `json:"asset_code,omitempty"`
+	IntendedAggregateValue string `json:"intended_aggregate_value,omitempty"`
+	RecipientCeiling       int32  `json:"recipient_ceiling,omitempty"`
+	IdempotencyKey         string `json:"idempotency_key"`
+	ExpiresInSeconds       int64  `json:"expires_in_seconds"`
+}
+
+type economicOperationResponse struct {
+	OperationID     string `json:"operation_id"`
+	RootOperationID string `json:"root_operation_id"`
+	OperationType   string `json:"operation_type"`
+	ApprovalState   string `json:"approval_state"`
+	Status          string `json:"status"`
+}
+
+// newMintEconomicOperationHandler mints doc 34 §3.1's own two exactly-
+// two mint points for Bonus Engine: a staff single-Grant authorization
+// (bonus_manual_grant) or a BulkGrantJob's own authorization
+// (bonus_bulk_grant). ApprovalState is set to 'approved' by THIS
+// endpoint's own caller authority (the caller must already hold the
+// SAME permission the eventual grant/bulk-execute action itself
+// requires - PermBonusGrantIssue/PermBonusBulkExecute respectively) -
+// doc 34's own ApprovalState enum explicitly allows an EOI to be minted
+// already-approved (never a separate approval workflow ON the EOI object
+// itself for this Wave's two consumer types), mirroring every existing
+// test's own MintRootOperationParams{ApprovalState: ApprovalApproved}
+// usage exactly - this endpoint does not invent a new EOI-approval
+// mechanism, it is the first HTTP-reachable caller of an ALREADY-
+// existing, already-tested minting shape.
+func newMintEconomicOperationHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		staffID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "invalid staff subject")
+			return
+		}
+		var req mintEconomicOperationRequest
+		if err := decodeJSON(r, &req); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			return
+		}
+		v := validation.New()
+		v.RequireOneOf("operation_type", req.OperationType, string(economicop.OperationBonusManualGrant), string(economicop.OperationBonusBulkGrant))
+		v.RequireOneOf("subject_scope", req.SubjectScope, string(economicop.SubjectScopeSingle), string(economicop.SubjectScopeEnumeratedSet))
+		v.RequireNonEmpty("idempotency_key", req.IdempotencyKey)
+		if v.HasErrors() {
+			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+			return
+		}
+		operationType := economicop.OperationType(req.OperationType)
+		var requiredPerm auth.Permission
+		switch operationType {
+		case economicop.OperationBonusManualGrant:
+			requiredPerm = auth.PermBonusGrantIssue
+		case economicop.OperationBonusBulkGrant:
+			requiredPerm = auth.PermBonusBulkExecute
+		}
+		if !auth.RoleHasPermission(auth.Role(tc.Role), requiredPerm) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "insufficient permissions to mint this operation type")
+			return
+		}
+		var subjectRef *uuid.UUID
+		if req.SubjectRef != "" {
+			parsed, perr := uuid.Parse(req.SubjectRef)
+			if perr != nil {
+				apierror.Write(w, requestID, apierror.CodeValidation, "subject_ref must be a valid UUID")
+				return
+			}
+			subjectRef = &parsed
+		}
+		var subjectSetCount *int32
+		if req.SubjectSetCount > 0 {
+			subjectSetCount = &req.SubjectSetCount
+		}
+		var assetCode *string
+		if req.AssetCode != "" {
+			assetCode = &req.AssetCode
+		}
+		var intendedAggregate *big.Int
+		if req.IntendedAggregateValue != "" {
+			amt, ok := new(big.Int).SetString(req.IntendedAggregateValue, 10)
+			if !ok || amt.Sign() < 0 {
+				apierror.Write(w, requestID, apierror.CodeValidation, "intended_aggregate_value must be a non-negative decimal integer string")
+				return
+			}
+			intendedAggregate = amt
+		}
+		var recipientCeiling *int32
+		if req.RecipientCeiling > 0 {
+			recipientCeiling = &req.RecipientCeiling
+		}
+		expiresIn := req.ExpiresInSeconds
+		if expiresIn <= 0 {
+			expiresIn = 3600 // 1 hour default - a fresh EOI root not consumed within an hour of minting is stale by design (doc 34's own "narrowly time-bound" posture)
+		}
+
+		var resp economicOperationResponse
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			op, err := bonus.MintRootOperation(ctx, tx, bonus.MintRootOperationParams{
+				TenantID: tc.TenantID, OperationType: operationType,
+				InitiatingActorType: string(bonus.ActorStaff), InitiatingActorID: staffID, InitiatingPrincipalID: &staffID,
+				SubjectScope: economicop.SubjectScope(req.SubjectScope), SubjectRef: subjectRef, SubjectSetCount: subjectSetCount,
+				AssetCode: assetCode, IntendedAggregateValue: intendedAggregate, RecipientCeiling: recipientCeiling,
+				IdempotencyKey: req.IdempotencyKey, CorrelationID: uuid.New(),
+				ExpiresAt:     time.Now().UTC().Add(time.Duration(expiresIn) * time.Second),
+				ApprovalState: economicop.ApprovalApproved,
+			})
+			if err != nil {
+				return err
+			}
+			resp = economicOperationResponse{
+				OperationID: op.OperationID.String(), RootOperationID: op.RootOperationID.String(),
+				OperationType: string(op.OperationType), ApprovalState: string(op.ApprovalState), Status: string(op.Status),
+			}
+			return nil
+		})
+		if err != nil {
+			deps.Logger.Error("mint_economic_operation_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to mint economic operation")
+			return
+		}
+		writeJSON(w, http.StatusCreated, resp)
+	}
+}
