@@ -170,6 +170,48 @@ func MintRootOperation(ctx context.Context, tx pgx.Tx, p MintRootOperationParams
 // N2.4a's exactly-two paths) - there is no third path, and no fallback
 // to "no parent required" for this surface.
 func IssueSingleManualGrant(ctx context.Context, tx pgx.Tx, g Grant, parentOperationID uuid.UUID, actorID uuid.UUID, amount *big.Int) (Grant, GateOutcome, error) {
+	return issueSingleManualGrant(ctx, tx, g, parentOperationID, actorID, amount, activateGrantProd)
+}
+
+// activateGrantFunc is the injectable activation seam IssueSingleManualGrant
+// and runBulkGrantJobItem call through.
+//
+// SEC-4I-F7 FIX (`qa`, Stage 4I test-floor pass): security's SEC-4I-F6 fix
+// closed this same drift class for ActivateManualGrantWithApproval by
+// extracting its PostGateHook composition into a shared function
+// (manualGrantApprovalPostGateHook, four_eyes_ops.go) that both the
+// production caller and the test helper call. Security explicitly declined
+// to extend that fix here, reporting it as residual: this package's own
+// test helpers forceIssueSingleManualGrantForTest and
+// forceRunBulkGrantJobItemForTest hand-copied the ENTIRE bodies of
+// IssueSingleManualGrant and runBulkGrantJobItem (economicop.CheckEntry,
+// issueIdempotent, the EOI-budget PostGateHook, the SEP-1 check, wallet
+// resolution, outcome recording) rather than a single closure, because the
+// one line that has to differ for those tests - substituting
+// forceActivateGrantForTestErr for the real, T.1-gate-enforcing
+// ActivateGrant, so the tests can exercise economicop's own budget/SEP-1
+// enforcement without every player-scoped activation being denied first by
+// Stage 4I's unconditional AssetAuthorization gate - sat in the MIDDLE of
+// the function, not at a boundary a wrapper could substitute.
+//
+// This type is that boundary. Both IssueSingleManualGrant/
+// runBulkGrantJobItem (via activateGrantProd) and their test helpers (via
+// activateGrantForceAdapter) now call through ONE shared implementation
+// (issueSingleManualGrant / runBulkGrantJobItemImpl below) with this
+// function injected, so a regression in any of the shared logic - not only
+// the activation call itself - is caught by both the production callers'
+// own tests AND the EOI/SEP-1 adversarial tests that exercise the force
+// path. There is no longer any hand-copy left to drift.
+type activateGrantFunc func(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, params ActivateGrantParams) (Grant, GateOutcome, error)
+
+// activateGrantProd is the production activateGrantFunc: the real
+// ActivateGrant, running the full T.1 gate chain (AssetAuthorization -> RG
+// -> Risk) unconditionally.
+func activateGrantProd(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, params ActivateGrantParams) (Grant, GateOutcome, error) {
+	return ActivateGrant(ctx, tx, tenantID, grantID, params)
+}
+
+func issueSingleManualGrant(ctx context.Context, tx pgx.Tx, g Grant, parentOperationID uuid.UUID, actorID uuid.UUID, amount *big.Int, activate activateGrantFunc) (Grant, GateOutcome, error) {
 	if _, err := economicop.CheckEntry(ctx, tx, g.TenantID, parentOperationID, g.AssetCode); err != nil {
 		return Grant{}, GateOutcome{}, err
 	}
@@ -205,7 +247,7 @@ func IssueSingleManualGrant(ctx context.Context, tx pgx.Tx, g Grant, parentOpera
 		}
 	}
 
-	activated, activateOutcome, err := ActivateGrant(ctx, tx, created.TenantID, created.ID, ActivateGrantParams{
+	activated, activateOutcome, err := activate(ctx, tx, created.TenantID, created.ID, ActivateGrantParams{
 		ActorType: ActorStaff, ActorID: actorID, Amount: amount,
 		PostGateHook: postGateHook,
 	})
@@ -283,6 +325,17 @@ func RunStaticBulkGrantJob(ctx context.Context, tx pgx.Tx, job BulkGrantJob, tar
 }
 
 func runBulkGrantJobItem(ctx context.Context, tx pgx.Tx, job BulkGrantJob, rootOperationID, playerAccountID uuid.UUID, grantTemplate Grant, systemActorID uuid.UUID, amount *big.Int, requesterPerson uuid.UUID, approverPersons []uuid.UUID) error {
+	return runBulkGrantJobItemImpl(ctx, tx, job, rootOperationID, playerAccountID, grantTemplate, systemActorID, amount, requesterPerson, approverPersons, activateGrantProd)
+}
+
+// runBulkGrantJobItemImpl is runBulkGrantJobItem's shared implementation,
+// parameterized on the activateGrantFunc seam (see that type's doc comment,
+// above IssueSingleManualGrant/issueSingleManualGrant) so
+// forceRunBulkGrantJobItemForTest can substitute
+// forceActivateGrantForTestErr without hand-copying this function's own
+// resumability check, item creation, SEP-1 check, wallet resolution and
+// outcome-recording logic (SEC-4I-F7 fix, `qa`, Stage 4I test-floor pass).
+func runBulkGrantJobItemImpl(ctx context.Context, tx pgx.Tx, job BulkGrantJob, rootOperationID, playerAccountID uuid.UUID, grantTemplate Grant, systemActorID uuid.UUID, amount *big.Int, requesterPerson uuid.UUID, approverPersons []uuid.UUID, activate activateGrantFunc) error {
 	if _, err := GetBulkGrantJobItem(ctx, tx, job.TenantID, job.ID, playerAccountID); err == nil {
 		return nil // already processed (any outcome) - resumability (§W5)
 	} else if !errors.Is(err, ErrNotFound) {
@@ -351,7 +404,7 @@ func runBulkGrantJobItem(ctx context.Context, tx pgx.Tx, job BulkGrantJob, rootO
 	// never held across, and never acquired ahead of, that gate chain.
 	// This is doc 34 §5.3 rule 4's canonical ordering (Risk's lock always
 	// before the EOI lock), made structural rather than incidental.
-	activated, activateOutcome, err := ActivateGrant(ctx, tx, created.TenantID, created.ID, ActivateGrantParams{
+	activated, activateOutcome, err := activate(ctx, tx, created.TenantID, created.ID, ActivateGrantParams{
 		ActorType: ActorSystem, ActorID: systemActorID, Amount: amount,
 		PostGateHook: func(hookCtx context.Context, hookTx pgx.Tx) error {
 			return economicop.ConsumeRootBudget(hookCtx, hookTx, job.TenantID, rootOperationID, economicop.OperationBonusBulkGrant, playerAccountID, amount)

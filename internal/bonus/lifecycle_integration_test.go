@@ -461,46 +461,47 @@ func forceConvertGrantForTest(t *testing.T, ctx context.Context, tx pgx.Tx, tena
 	return result
 }
 
-// forceIssueSingleManualGrantForTest mirrors IssueSingleManualGrant
-// EXACTLY (targeting.go - economicop.CheckEntry, issueIdempotent, and the
-// IDENTICAL EOI-budget PostGateHook), substituting
-// forceActivateGrantForTestErr for the real ActivateGrant call. See
-// forceRunBulkGrantJobItemForTest's own doc comment (below) for why: this
-// file's EOI/adversarial tests are about economicop's own budget/ceiling
-// enforcement, not jurisdiction.
+// activateGrantForceAdapter adapts forceActivateGrantForTestErr (which
+// bypasses the T.1 gate chain entirely and so has no GateOutcome to
+// report) to the activateGrantFunc seam (targeting.go), so
+// forceIssueSingleManualGrantForTest / forceRunBulkGrantJobItemForTest can
+// call the SAME shared implementation the production functions
+// (IssueSingleManualGrant / runBulkGrantJobItem) call, rather than
+// hand-copying it.
+//
+// SEC-4I-F7 FIX (`qa`, Stage 4I test-floor pass; see activateGrantFunc's
+// own doc comment in targeting.go for the full defect and rationale).
+// Bypassing the gate means every successful call is, by construction,
+// "allowed" - matching this file's pre-existing force-helper semantics,
+// which never modeled a GateOutcome at all (forceIssueSingleManualGrantForTest
+// previously returned (Grant, error) with no outcome; that signature is
+// unchanged).
+func activateGrantForceAdapter(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID, params ActivateGrantParams) (Grant, GateOutcome, error) {
+	g, err := forceActivateGrantForTestErr(ctx, tx, tenantID, grantID, params)
+	if err != nil {
+		return Grant{}, GateOutcome{}, err
+	}
+	return g, GateOutcome{Allowed: true}, nil
+}
+
+// forceIssueSingleManualGrantForTest calls issueSingleManualGrant -
+// IssueSingleManualGrant's own shared implementation (targeting.go) -
+// substituting activateGrantForceAdapter for the real, T.1-gate-enforcing
+// activation, so this file's EOI/adversarial tests can exercise
+// economicop's own budget/ceiling enforcement without every player-scoped
+// activation being denied first by Stage 4I's unconditional
+// AssetAuthorization gate.
+//
+// SEC-4I-F7 FIX (`qa`, Stage 4I test-floor pass): this helper previously
+// RE-IMPLEMENTED IssueSingleManualGrant's entire body (economicop.CheckEntry,
+// issueIdempotent, the EOI-budget PostGateHook) rather than sharing it, so a
+// regression in any of that shared logic - not merely a change to the
+// activation call - could have gone undetected by this file's tests. See
+// activateGrantFunc's own doc comment (targeting.go) for the full defect
+// security's SEC-4I-F6 fix reported as residual here.
 func forceIssueSingleManualGrantForTest(ctx context.Context, tx pgx.Tx, g Grant, parentOperationID uuid.UUID, actorID uuid.UUID, amount *big.Int) (Grant, error) {
-	if _, err := economicop.CheckEntry(ctx, tx, g.TenantID, parentOperationID, g.AssetCode); err != nil {
-		return Grant{}, err
-	}
-	g.ParentOperationID = &parentOperationID
-	g.CreatedByActorType = ActorStaff
-	g.CreatedByActorID = actorID
-
-	created, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: g})
-	if err != nil && !errors.Is(err, ErrAlreadyGranted) {
-		return Grant{}, err
-	}
-	if !issueOutcome.Allowed {
-		return created, nil
-	}
-
-	var postGateHook func(context.Context, pgx.Tx) error
-	if !errors.Is(err, ErrAlreadyGranted) {
-		playerAccountID := created.PlayerAccountID
-		tenantID := g.TenantID
-		postGateHook = func(hookCtx context.Context, hookTx pgx.Tx) error {
-			op, getErr := economicop.GetByID(hookCtx, hookTx, parentOperationID)
-			if getErr != nil {
-				return getErr
-			}
-			return economicop.ConsumeRootBudget(hookCtx, hookTx, tenantID, op.RootOperationID, economicop.OperationBonusManualGrant, playerAccountID, amount)
-		}
-	}
-
-	return forceActivateGrantForTestErr(ctx, tx, created.TenantID, created.ID, ActivateGrantParams{
-		ActorType: ActorStaff, ActorID: actorID, Amount: amount,
-		PostGateHook: postGateHook,
-	})
+	activated, _, err := issueSingleManualGrant(ctx, tx, g, parentOperationID, actorID, amount, activateGrantForceAdapter)
+	return activated, err
 }
 
 // forceRunStaticBulkGrantJobForTest / forceRunBulkGrantJobItemForTest
@@ -543,74 +544,22 @@ func forceRunStaticBulkGrantJobForTest(ctx context.Context, tx pgx.Tx, job BulkG
 // testing package requires Fatal/FailNow to be called only from the
 // goroutine running the test function itself, and this file's own
 // concurrent adversarial tests call this helper from worker goroutines.
+//
+// It calls runBulkGrantJobItemImpl - runBulkGrantJobItem's own shared
+// implementation (targeting.go) - substituting activateGrantForceAdapter
+// for the real, T.1-gate-enforcing activation.
+//
+// SEC-4I-F7 FIX (`qa`, Stage 4I test-floor pass): this helper previously
+// RE-IMPLEMENTED runBulkGrantJobItem's entire body (the resumability check,
+// item creation, SEP-1 check, wallet resolution, issueIdempotent, the
+// EOI-budget PostGateHook, and the ErrBudgetExhausted-vs-other-error outcome
+// recording) rather than sharing it, so a regression in any of that shared
+// logic - not merely a change to the activation call - could have gone
+// undetected by this file's tests. See activateGrantFunc's own doc comment
+// (targeting.go) for the full defect security's SEC-4I-F6 fix reported as
+// residual here.
 func forceRunBulkGrantJobItemForTest(ctx context.Context, tx pgx.Tx, job BulkGrantJob, rootOperationID, playerAccountID uuid.UUID, grantTemplate Grant, systemActorID uuid.UUID, amount *big.Int, requesterPerson uuid.UUID, approverPersons []uuid.UUID) error {
-	if _, err := GetBulkGrantJobItem(ctx, tx, job.TenantID, job.ID, playerAccountID); err == nil {
-		return nil
-	} else if !errors.Is(err, ErrNotFound) {
-		return err
-	}
-	item, err := CreateBulkGrantJobItem(ctx, tx, BulkGrantJobItem{TenantID: job.TenantID, BulkGrantJobID: job.ID, PlayerAccountID: playerAccountID, ParentOperationID: &rootOperationID})
-	if err != nil {
-		if errors.Is(err, ErrDuplicateItem) {
-			return nil
-		}
-		return err
-	}
-	subjectPerson, err := playerPersonID(ctx, tx, playerAccountID)
-	if err != nil {
-		return err
-	}
-	if subjectPerson == requesterPerson || containsUUID(approverPersons, subjectPerson) {
-		reason := "SEP-1: requester or an approver of this bulk job resolves to the same person as this targeted player"
-		_, err := RecordBulkGrantJobItemOutcome(ctx, tx, job.TenantID, item.ID, ItemDenied, &reason, nil, nil, nil, time.Now().UTC())
-		return err
-	}
-	walletID, err := resolvePlayerWallet(ctx, tx, job.TenantID, playerAccountID, grantTemplate.AssetCode)
-	if err != nil {
-		return err
-	}
-	grant := grantTemplate
-	grant.PlayerAccountID = playerAccountID
-	grant.WalletID = walletID
-	grant.TriggerReference = fmt.Sprintf("bulk_grant_job:%s:%s", job.ID, playerAccountID)
-	grant.ParentOperationID = &rootOperationID
-	grant.CreatedByActorType = ActorSystem
-	grant.CreatedByActorID = uuid.Nil
-
-	created, issueOutcome, err := issueIdempotent(ctx, tx, IssueGrantParams{Grant: grant})
-	if err != nil && !errors.Is(err, ErrAlreadyGranted) {
-		return err
-	}
-	if !issueOutcome.Allowed {
-		reason := denialReasonCode(issueOutcome)
-		_, err := RecordBulkGrantJobItemOutcome(ctx, tx, job.TenantID, item.ID, ItemDenied, &reason, nil, nil, nil, time.Now().UTC())
-		return err
-	}
-	if errors.Is(err, ErrAlreadyGranted) {
-		_, err := RecordBulkGrantJobItemOutcome(ctx, tx, job.TenantID, item.ID, ItemAlreadyGranted, nil, &created.ID, nil, nil, time.Now().UTC())
-		return err
-	}
-
-	activated, err := forceActivateGrantForTestErr(ctx, tx, created.TenantID, created.ID, ActivateGrantParams{
-		ActorType: ActorSystem, ActorID: systemActorID, Amount: amount,
-		PostGateHook: func(hookCtx context.Context, hookTx pgx.Tx) error {
-			return economicop.ConsumeRootBudget(hookCtx, hookTx, job.TenantID, rootOperationID, economicop.OperationBonusBulkGrant, playerAccountID, amount)
-		},
-	})
-	if err != nil {
-		if !errors.Is(err, economicop.ErrBudgetExhausted) {
-			return err
-		}
-		reason := err.Error()
-		_, recErr := RecordBulkGrantJobItemOutcome(ctx, tx, job.TenantID, item.ID, ItemDenied, &reason, nil, nil, nil, time.Now().UTC())
-		if recErr != nil {
-			return recErr
-		}
-		return nil
-	}
-	amountCopy := new(big.Int).Set(amount)
-	_, err = RecordBulkGrantJobItemOutcome(ctx, tx, job.TenantID, item.ID, ItemIssued, nil, &activated.ID, amountCopy, nil, time.Now().UTC())
-	return err
+	return runBulkGrantJobItemImpl(ctx, tx, job, rootOperationID, playerAccountID, grantTemplate, systemActorID, amount, requesterPerson, approverPersons, activateGrantForceAdapter)
 }
 
 // forceConvertGrantSkippingAssetAuthorizationForTest mirrors ConvertGrant
