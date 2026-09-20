@@ -6855,3 +6855,187 @@ self-report).
 
 No automatic progression. Per the stage-gate rule, the next phase requires
 its own separate human authorization.
+
+## Stage 4I Exit Triage — Exit Register and Production Integration Readiness
+
+Following the Phase E-SECURITY completion report's acceptance, the human
+issued a directive explicitly changing execution strategy: stop opening
+further jurisdiction/KYC/security architecture review stages and instead
+run a final Stage 4I exit/triage pass, closing every open item with a
+concrete disposition and naming the next concrete implementation stage.
+Player-jurisdiction, licensing, operating-market, KYC, bonus, sportsbook,
+wallet/ledger, payments, and RG architecture were all explicitly declared
+FROZEN — this stage reopened none of them; no concrete implementation
+dependency was found that required it.
+
+This stage produced two new documents and zero Go code / migrations:
+
+**`docs/governance/stage-4i-exit-register.md`.** Every open Stage 4I item
+was classified A (production blocker) / B (next-feature blocker) / C
+(human decision, not urgent) / D (deferred, safe) / E (technical debt),
+with owner, why it exists, concrete consequence, what actually needs it
+fixed, whether it blocks production or the next stage, and the exact
+trigger for reopening it. Rather than accept the prior record at face
+value, several items were re-verified against their *actual* current
+reachability: `PLAT-TENANTREAD-1` was re-checked by grepping every HTTP
+handler and every `internal/identity` tenant-lookup function in the
+repository — confirmed there is still no `ListTenants`-shaped function or
+route anywhere, so the cross-tenant-enumeration exposure remains reachable
+only via direct database access (i.e., already inside the
+`PLAT-ROLESPLIT-1` trust boundary), not via any implemented product
+surface — classified D, deferred safe. `MKT-DORMANT-1` was re-checked by
+reading `internal/operatingmarket/ceiling_admin.go` directly: every
+ceiling-version write, contraction or re-expansion alike, writes a
+platform-scoped, `widening_capable`-tagged `audit_log` entry in the same
+transaction, so the only path to a dormant tenant-rung policy "resuming"
+is a platform-admin's own fully audited act at the ceiling rung — also
+classified D, deferred safe, with the residual UX question (should
+re-expansion also force a fresh tenant-rung affirmation?) left for
+`architect` to decide only if/when real ceiling content exists.
+`MKT-DUAL-1` was re-confirmed (again) to have zero HTTP/production reach.
+Net result: **exactly one production blocker** (`PLAT-ROLESPLIT-1`), and
+**nothing on the list blocks the recommended next stage**. The document
+also states a fail-closed "integration contract" table — which future
+call sites (registration, deposit, withdrawal, wagering, bonus issuance/
+conversion, catalogue availability) will eventually need player-
+jurisdiction/licence-validity/operating-country-policy checks, and what
+each needs as input — purely informational, zero wiring performed, and
+explicitly noting every one of the three underlying mechanisms already
+fails closed on any unresolved result by construction.
+
+**`docs/security/runtime-role-separation.md`.** The directive named
+`PLAT-ROLESPLIT-1` (the migration-owner/runtime-role split, previously
+escalated by the Phase E-SECURITY adversarial security reviewer as
+launch-blocking) the critical item requiring a precise, implementation-
+ready design rather than another deferral. The root cause was determined
+precisely: the application's Postgres role (`igaming`) owns the database,
+schema, and every table it migrated, and PostgreSQL row-level security
+**never applies to a table's owner**, regardless of `FORCE ROW LEVEL
+SECURITY` — the load-bearing fact is ownership, not the `rolcreaterole`
+attribute (`igaming` lacking `CREATEROLE` is why it cannot self-provision
+a new role, not why the new role would be safe). This was not left as
+theory: a temporary, genuinely non-owning role was created against this
+session's local development Postgres (not production) with only
+`SELECT`/`INSERT`/`UPDATE`/`DELETE` grants, and every capability question
+the directive posed was answered by direct reproduction rather than
+inference — connected as that role and confirmed it cannot `ALTER TABLE
+... DISABLE ROW LEVEL SECURITY`, cannot `DISABLE TRIGGER`, cannot
+`TRUNCATE`, cannot `DROP TABLE`, cannot `ALTER TABLE ... ADD COLUMN`, and
+cannot `CREATE TABLE` — while an ordinary `SELECT` still succeeds. This is
+the exact escalation chain the Phase E-SECURITY adversarial security
+reviewer used against the current single-role setup, now shown refused.
+The document specifies the exact required migration-owner role (keep
+`igaming` exactly as-is, restricted to the deploy/migration path only),
+the exact required runtime role and its exact grant list, the exact
+privileges that must never appear on it, and a ready-to-run four-statement
+provisioning script for an operator holding `CREATEROLE` to execute once
+per environment. **This is classified `PRODUCTION BLOCKER — EXTERNAL
+INFRASTRUCTURE ACTION`** — the fix cannot be applied by this repository or
+this session, because it requires a production database credential this
+session does not have and, per CLAUDE.md's Environment Safety rule, must
+not request. No Go code change is required for this fix (`internal/
+db.Pool` makes no assumption about the connecting role's ownership); it is
+deliberately not encoded as a migration file, since a migration executed
+by `igaming` itself cannot be the thing that stops `igaming` being the
+runtime identity.
+
+**Independent review.** Per this stage's own efficiency rule (minimum
+reviews for routine/documentation work, not a six-way dispatch), three
+specialists reviewed both documents in parallel: `security` independently
+reproduced the role-separation verification itself rather than trusting
+the write-up, and reviewed the security-relevant classifications;
+`architect` cross-checked every classification against the full
+task-registry history and independently verified the `ceiling_admin.go`
+audit-write claim and the "zero production wiring" claims, and evaluated
+the Back-Office next-stage recommendation's dependency-readiness claim
+against the actual repository state; `qa` re-ran the validation gate,
+independently reproduced the role-separation verification a second time,
+and spot-checked the `PLAT-TENANTREAD-1` reachability claim. The
+architect review landed first: it independently re-verified every
+load-bearing claim by reading the code directly and found six real
+inaccuracies in the first draft, all fixed in place — the exit register
+had silently narrowed `MKT-DUAL-1`'s own three-trigger scope down to one
+(restored, matching this registry's existing record); `MKT-EXPIRY-1`'s
+`issued_at` schema/write-surface sub-question had been dropped (restored);
+the Back-Office next-stage recommendation's dependency-readiness claim
+was verified line-by-line and found overstated for every named capability
+except withdrawal approval (corrected here and in `active-stage.md`);
+`PLAT-ROLESPLIT-1` and `MKT-LICSTATUS-1` needed the same explicit
+conditional "blocks next stage" flag `MKT-AUDIT-1` already carried
+(added); the `MKT-DORMANT-1` "only path to resumption" claim was
+narrower than stated, since `resolve()` also gates on licence validity
+(corrected, and cross-linked to `MKT-LICSTATUS-1`); and the runbook's
+grant script over-granted write access to `schema_migrations` (fixed
+directly in the script). Full detail in `docs/governance/task-
+registry.md`'s "Stage 4I Exit Triage" section.
+<!-- ORCHESTRATOR: append security/qa findings once they land. -->
+
+**Next stage recommendation.** Operator Back-Office MVP. Selected on
+dependency readiness, not subjective importance: it requires answering
+zero open Human Decision Register items and zero jurisdiction/licensing/
+operating-market wiring, and the repository verifiably has no frontend or
+back-office code of any kind today. **Corrected per the independent
+architect review**, which verified the claimed dependency readiness by
+reading the actual handlers rather than accepting the "already-tested
+backend, UI-only" framing this stage's first draft used: withdrawal
+approval is genuinely ready to consume as-is, but KYC case-queue,
+RG-admin, bonus-campaign-admin, tenant/brand listing, and player
+management each need new tenant-wide list/query endpoints (today's
+handlers require an already-known player-account ID, or are write-only
+with no list/approval-queue route at all), the player list is hardcoded
+to `LIMIT 50` with no pagination and no reinstate-after-suspend endpoint,
+platform-scoped audit rows (where migration 0077 now places licence-
+assignment and operating-market audit entries) are unreachable through
+the one existing audit-read route because it filters to a single tenant,
+and no pagination convention exists anywhere in the API today. The stage
+is therefore correctly scoped as "back-office read/query API surface +
+UI," not "UI over finished APIs" — the dependency-readiness verdict
+(no policy blocker, no frozen architecture to reopen) still holds, but
+the amount of new backend surface it requires does not. This option was
+already named ("Stage 6A") as a candidate in prior stages' own "decisions
+needed from the human" sections before this triage confirmed it as the
+dependency-ready choice. **Not authorized to start; no code was written
+for it this stage.**
+
+**Security review** landed last and found the review round's most
+consequential result: this session's own long-lived local development
+database had drifted from the committed migration files — its live
+`tenants_read` policy was the stale, pre-Phase-E-SECURITY-fix-round
+`USING (true)` text with no player-scope exclusion, and ten
+`internal/operatingmarket` tests were failing, despite `schema_migrations`
+showing migration 0077 applied and the current committed file already
+containing the fix. The orchestrator root-caused this directly: the local
+database had migration 0077 applied at an earlier point in this session's
+history, before that file's later in-place amendments landed — the exact
+`MKT-MIG76-1` hazard this project already documents, now recurring
+against the orchestrator's own working database rather than a reviewer's.
+**Not a defect in the committed code.** Fixed by dropping and rebuilding
+the database fresh from HEAD; the previously red tests and the full
+30-package integration suite are all green against the rebuilt database.
+A first-time deployment is not exposed to this specific drift, but the
+underlying tooling gap it exposed — `cmd/migrate` has no live-schema-vs-
+file-content verification — is real and generalizable, and is now tracked
+as new item `PLAT-MIGDRIFT-1` (classified E, observation/technical debt,
+not a blocker). The security review otherwise reproduced every
+`runtime-role-separation.md` claim with 20 additional escalation probes
+(all denied) and confirmed zero `SECURITY DEFINER` functions exist
+anywhere in the database; it found no escalation path out of the proposed
+design and approved it as the `PLAT-ROLESPLIT-1` fix. Several smaller
+corrections were folded into both documents: `casino_games` (RLS
+disabled, global catalogue data) named as an explicit exception to the
+"ordinary DML is genuinely enforced by RLS" claim; the exit register's
+"exactly one production blocker" line qualified to state it describes the
+committed code, not the live state of every already-running schema
+instance; the three actual scopeless multi-row `tenants` readers named
+explicitly instead of citing "migration 0077's rationale" vaguely; and a
+note that CI runs the integration suite as the migration-owner role only,
+so the runtime-role split (once rolled out) would be verified once by
+hand and not continuously unless a second CI job is added later.
+
+All three minimum reviews (architect, qa, security) are complete and
+folded in. No P0 found by any reviewer; the one P1 (the local database
+drift) was root-caused and fixed within this same session, not deferred.
+
+No automatic progression. Per the stage-gate rule, this stage's own
+recommendation is not an authorization — the next stage requires its own
+separate human directive.

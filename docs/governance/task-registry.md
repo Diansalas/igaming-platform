@@ -1730,6 +1730,242 @@ resolved outcome; any `operating_market_resolutions` table; any fourth
 activation switch; any real geolocation; any answer to HDR-M-1/HDR-M-2/
 HDR-J-6/HDR-J-7/HDR-J-8/HDR-J-9.
 
+## Stage 4I Exit Triage — Exit Register and Production Integration Readiness
+
+Per the "STAGE 4I — EXIT TRIAGE AND PRODUCTION INTEGRATION READINESS"
+directive: an explicit change in execution strategy away from further
+jurisdiction/KYC/security architecture review and toward delivery
+velocity. Player-jurisdiction, licensing, operating-market, KYC, bonus,
+sportsbook, wallet/ledger, payments, and RG architecture are all
+explicitly FROZEN this stage — no concrete implementation dependency was
+found that required reopening any of them. **No Go code, migration, or
+existing architecture document was modified this stage** — this stage's
+entire output is two new governance/security documents plus the routine
+doc-trailer updates (this registry, `active-stage.md`, `progress.md`).
+
+| ID | Owner | Status | Dependencies | Files owned | Tests | Docs | Blockers | Integration |
+|---|---|---|---|---|---|---|---|---|
+| 4IET-01 | Orchestrator | Done | none | `docs/governance/stage-4i-exit-register.md` (new) | n/a (documentation) | full classification of every open Stage 4I task-registry item (`PLAT-ROLESPLIT-1`, `PLAT-TENANTREAD-1`, `MKT-LICSTATUS-1`, `MKT-AUDIT-1`, `MKT-DORMANT-1`, `MKT-DUAL-1`, `MKT-EXPIRY-1`, `MKT-PM-1`, `HDR-J-6/7/8/9`, `HDR-M-1/2`) into A/B/C/D/E per the directive's own rubric, plus a fail-closed "integration contract" table (informational, zero wiring) | none | n/a |
+| 4IET-02 | Orchestrator (security-owned design), verified empirically against local dev Postgres | Done | none | `docs/security/runtime-role-separation.md` (new) | Empirical verification performed directly (not simulated): created a temporary non-owning Postgres role with only `SELECT/INSERT/UPDATE/DELETE` grants against the local dev database, connected as it, and confirmed it cannot disable RLS, disable triggers, `TRUNCATE`, `DROP`, `ALTER TABLE`, or `CREATE TABLE`, while ordinary `SELECT` still succeeds — the exact six-probe reproduction the adversarial security reviewer used against the current single-role setup in Phase E-SECURITY, now shown refused | `PLAT-ROLESPLIT-1`'s implementation-ready runbook: exact required migration-owner vs. runtime role privileges, the six-capability determination table, and the exact `GRANT`/`CREATE ROLE` script for an operator to run once per environment | **This is an infrastructure action outside this repository's reach — no production credential exists in this session, and CLAUDE.md's Environment Safety rule forbids requesting one.** Classified `PRODUCTION BLOCKER — EXTERNAL INFRASTRUCTURE ACTION` | n/a — cannot be integrated by this repository; awaits an operator running §6 of the runbook against each real environment |
+| 4IET-03 | security, architect, qa (independent review) | Done | 4IET-01, 4IET-02 | n/a (review only) | n/a | Findings folded into this section and the exit register directly | none | See findings below |
+| 4IET-04 | Orchestrator | Done | 4IET-01..03 | this registry, `docs/active-stage.md`, `docs/progress.md` | full validation gate (docs-only; `go build ./...`/`go vet ./...`/`gofmt -l` clean, no code touched) | this stage's completion report | none | n/a — **stage explicitly STOPS here; no implementation authorized** |
+
+### `PLAT-ROLESPLIT-1` — precise design (this stage's core deliverable)
+
+Full detail in `docs/security/runtime-role-separation.md`. Summary: the
+root cause is table **ownership**, not the `CREATEROLE` attribute —
+`igaming` owns the database, schema, and every table (it ran every
+migration), and PostgreSQL RLS never applies to a table's owner
+regardless of `FORCE ROW LEVEL SECURITY`. The fix is a second,
+non-owning `igaming_runtime` role granted only
+`SELECT/INSERT/UPDATE/DELETE`, with the existing `igaming` role kept
+exactly as-is but restricted to the migration/deploy path only. No Go
+code change is required (`internal/db.Pool` makes no assumption about the
+connecting role owning anything). This requires one operator action
+(`CREATE ROLE` + four `GRANT` statements, run once per environment by
+someone holding `CREATEROLE`) that this repository/session cannot perform
+itself.
+
+### `MKT-SCOPE-1`/`MKT-SCOPE-1(b)` — status unchanged
+
+Already RESOLVED (Stage 4I Phase E-SECURITY, migration 0077, ADR 0046).
+This stage's triage did not reopen or modify that resolution.
+
+### Items re-classified, not re-designed
+
+`PLAT-TENANTREAD-1` and `MKT-DORMANT-1` were both re-examined against
+their *actual* reachability (real HTTP routes / real code paths, not the
+RLS predicate or resolver algorithm in the abstract) and confirmed safe
+to leave exactly as previously recorded — see the exit register for the
+concrete evidence (grep results, `ceiling_admin.go` audit-write
+confirmation). Neither item's underlying mechanism was touched.
+`MKT-LICSTATUS-1`, `MKT-AUDIT-1`, `MKT-DUAL-1`, `MKT-EXPIRY-1`, `MKT-PM-1`
+and all six HDR items were confirmed to not block the next recommended
+stage and were left exactly as previously recorded, with no new action
+taken on any of them.
+
+### Independent review findings (4IET-03)
+
+**Architect review — landed.** Independently re-verified all three of
+the orchestrator's own load-bearing empirical claims by reading code
+directly (not trusting the draft): confirmed `ceiling_admin.go` writes a
+platform-scoped, `widening_capable`-tagged audit row on every
+`CreateLicenceCountryCeilingVersion` return path; confirmed zero
+`operatingmarket`/`DeterminePlayerJurisdiction` occurrences anywhere in
+`internal/httpserver`; confirmed no code in `internal/db` assumes the
+connecting role owns its tables (the only runtime DDL is
+`schema_migrations` creation inside `cmd/migrate`'s own path). Findings:
+one P2 (the exit register's MKT-DUAL-1 section and integration-contract
+footer had silently narrowed the registry's own three-trigger scope for
+that item down to one — fixed by restoring the other two verbatim from
+this registry's existing record); two P3 (MKT-EXPIRY-1's `issued_at`
+schema/write-surface sub-question was dropped from the register's
+restatement — restored; the "Operator Back-Office MVP" dependency-
+readiness claim was verified line-by-line and found overstated for every
+named capability except withdrawal approval — corrected throughout
+`active-stage.md`/`progress.md`/this section, see above); two more P3
+(PLAT-ROLESPLIT-1's and MKT-LICSTATUS-1's "blocks next stage: NO" needed
+the same explicit conditional flag `MKT-AUDIT-1` already carries — added);
+one P4 (the MKT-DORMANT-1 "only path to resumption" claim was narrower
+than stated — `resolve.go` also gates on licence validity, so a licence-
+validity-boundary crossing can resume a dormant policy with zero audit
+row once `MKT-LICSTATUS-1` ships a write path — corrected and the two
+items cross-linked); one P4 each on the dev/CI bootstrap script not
+mirroring the proposed runtime-role split (noted as a follow-up in
+`runtime-role-separation.md`, not applied — inseparable from actually
+switching a live credential) and on the runbook's grant script over-
+granting write access to `schema_migrations` (fixed directly in the
+script). All findings applied; nothing left open from this review.
+Classifications for `PLAT-ROLESPLIT-1`/`PLAT-TENANTREAD-1`/
+`MKT-AUDIT-1`/`MKT-DORMANT-1`/`MKT-PM-1`/the HDR row were independently
+confirmed to match this registry and ADR 0045/0046 with no discrepancy.
+No new architecture created, no frozen decision reopened, no
+jurisdiction/country content invented.
+
+**QA review — landed.** No P0-P4 findings. Independently reproduced the
+runtime-role-separation §5 verification end to end (own throwaway role,
+identical six probes, identical denials, role dropped afterward);
+independently confirmed the `PLAT-TENANTREAD-1` no-enumeration-route claim
+via grep; spot-checked `MKT-DUAL-1` (zero `operatingmarket` references
+anywhere in `internal/httpserver` — even stronger than the register's own
+claim) and `MKT-AUDIT-1` (confirmed the tenant-scoped-audit-row
+impossibility is structural, via `audit_log`'s RLS `WITH CHECK` plus the
+platform-admin transaction never setting `app.tenant_id`, not merely
+avoided by convention) against this registry's history — both matched.
+Ran the full validation gate (`go build`/`go vet`/`gofmt -l` clean;
+`git status --short` showed only the expected two new files plus this
+registry's diff) and, since the recommended next stage depends on it, a
+full fresh-scratch-database integration run (`-tags=integration`, all 30
+packages green, no flakes) plus `go test ./... -count=1` (green) as a
+back-office-readiness health check — nothing in current test coverage
+would make this a bad time to start that stage. One E-level, non-blocking
+housekeeping note (not acted on this pass): `make test-integration`
+defaults `TEST_DATABASE_URL` to the same dev `DATABASE_URL`, so the local
+dev database has accumulated ~67,000 `tenants` rows from repeated runs;
+tests avoid collision via randomized slugs so this causes no false
+passes, but it is exactly the kind of untrustworthy shared-DB history
+`MKT-MIG76-1` already warns engineers not to rely on — worth eventually
+pointing `test-integration` at a disposable database by default, tracked
+here for awareness only, not a task-registry item.
+
+**Security review — landed.** Independently reproduced §5's six probes
+plus 20 additional escalation probes (trigger-bypass via
+`session_replication_role`, `OWNER TO`, policy manipulation, `SET ROLE`,
+`SECURITY DEFINER` function creation, `pg_authid` reads, `BYPASSRLS`
+self-grant, schema creation, `GRANT ... WITH GRANT OPTION`, and more) —
+all denied, confirming ownership (not `CREATEROLE`) is the load-bearing
+fact and finding no escalation path out of the proposed design. Confirmed
+zero `SECURITY DEFINER` functions exist anywhere in the database (no
+function-invocation escalation possible) and confirmed the split is
+transparent to real application code (`internal/db/tenant_rls.go`'s GUC
+scoping needs no privilege; `identity`/`wallet`/`audit` integration suites
+pass fully as the non-owning role).
+
+**One P1 finding, root-caused and resolved during this review round:**
+the reviewer found this session's long-lived local `igaming_platform_dev`
+database had drifted — its live `tenants_read` policy was the stale,
+pre-Phase-E-SECURITY-fix-round `USING (true)` text with no player-scope
+exclusion, and ten `internal/operatingmarket` tests were failing
+(AMENDMENT-2/3 enforcement not in force) — despite `schema_migrations`
+showing migration 0077 applied and despite the CURRENT committed
+migration file already containing the fix. Root cause confirmed directly
+by the orchestrator: this local database had migration 0077 applied at an
+earlier point in this session's lifetime, before that (then still
+uncommitted) migration file's later in-place amendments landed — the
+exact `MKT-MIG76-1` hazard this registry already documents, now
+recurring against the orchestrator's own environment rather than a
+reviewer's. **Not a defect in the committed code.** Fixed by dropping and
+rebuilding the database fresh from HEAD's migration files; the previously
+red test (`TestTenantsRLS_PlayerScopedConnectionReadsZeroTenants`) and the
+ten `operatingmarket` tests all pass against the rebuilt database, and the
+full 30-package `-tags=integration` suite is green. A genuinely
+first-time deployment (staging or production) is not exposed to this
+specific drift, since it applies today's already-corrected file for the
+first time. New item opened for the underlying, generalizable tooling
+gap this exposed — see `PLAT-MIGDRIFT-1` below.
+
+Three P2/P3 corrections applied to the two documents: `docs/security/
+runtime-role-separation.md` §5 now records the drift finding and its
+resolution rather than silently citing a since-corrected verification
+run; §4 now names `casino_games` (RLS disabled, no `tenant_id` column,
+global catalogue data) as an explicit exception to the "ordinary DML is
+genuinely enforced by RLS" claim, and records that CI/`make
+test-integration` both run as the migration-owner role today, so the
+split's correctness is verified once by hand and not continuously (a
+follow-up CI recommendation, not implemented this pass). Two P4
+corrections: §4 now notes `CREATE TEMP TABLE` succeeds (harmless,
+`pg_temp`-scoped, but the capability table's "No" needs this caveat), and
+a standing rule was added that any future `igaming`-owned view must be
+created with `security_invoker = true` or it would silently defeat the
+entire split (zero views exist today, so no live exposure). `docs/
+governance/stage-4i-exit-register.md` §2 (`PLAT-TENANTREAD-1`) now names
+the three actual scopeless multi-row readers (`internal/rg/
+enumeration_sweep.go`, `internal/reconciliation/scheduler.go`,
+`internal/bonus/schedulers.go`) instead of citing "migration 0077's own
+rationale" vaguely, and the register's "exactly one production blocker"
+summary line is qualified to state explicitly that it describes the
+committed code/migration files, not the live state of every already-
+running instance of this schema. Verdict on both documents:
+`runtime-role-separation.md` approved as the `PLAT-ROLESPLIT-1` fix;
+`stage-4i-exit-register.md` approved with the §2 corrections above
+applied. No new mechanism proposed by either reviewer; no frozen
+architecture reopened.
+
+- **`PLAT-MIGDRIFT-1` — `cmd/migrate` has no live-schema-vs-file-content
+  verification (new, this stage).** Classification: **E. OBSERVATION /
+  TECHNICAL DEBT** — not a production blocker, because a genuinely
+  first-time migration apply always uses the current, correct file
+  content; it is a blind spot only for an environment that had an
+  in-place-amended migration applied before the amendment landed (this
+  codebase's own documented, permitted practice for uncommitted
+  migrations — see `MKT-MIG76-1`). Owner: `devops`/`architect`. Why it
+  matters: `schema_migrations` tracks applied versions by number only, no
+  content checksum, so `migrate status` reports "clean" even when a
+  table's actual live policy/constraint text no longer matches its
+  migration's current source. Concrete consequence: exactly the drift
+  this review round found and fixed in this session's own local
+  database — silent, and only caught here because a reviewer happened to
+  run the actual regression tests rather than trust `migrate status`.
+  Recommended action: none required now; if `devops` ever wants to close
+  it, the shape is a content-hash column on `schema_migrations` and a
+  `migrate verify` command comparing stored hash to current file — not
+  built this pass (new engineering work outside a documentation-only
+  triage's scope). Exact trigger for reopening: any incident where a
+  live environment's schema is suspected to not match its migration
+  files, or the phase (if any) that hardens migration tooling generally.
+  Related, not merged: the CI-runs-as-owner-role-only gap noted in
+  `runtime-role-separation.md` §5 (the runtime-role split, once rolled
+  out, is verified once by hand and not continuously in CI) — same
+  underlying theme (verification gaps in the deploy/migration pipeline),
+  different mechanism, tracked together here for visibility, not as one
+  fix.
+
+### Next stage recommended, not authorized
+
+**Operator Back-Office MVP.** See this stage's completion report §13 for
+the full dependency-chain rationale. Not started; no code written. Stage
+6A was already named as a candidate option in `docs/active-stage.md`'s
+prior-stage entries before this triage; this stage's own investigation
+confirms it as the dependency-ready next capability (zero unresolved
+HDR/policy dependency, zero frozen-architecture reopening, and the
+repository currently has zero frontend/back-office code of any kind —
+confirmed via `find`). **Corrected per the independent architect
+review's line-level verification:** the initial framing ("UI over
+already-built, already-tested backend APIs") overstated readiness for
+every capability except withdrawal approval — KYC case-queue and RG-admin
+handlers require an already-known player-account ID with no tenant-wide
+pending-case query at any layer, bonus-campaign-admin has zero `GET`
+routes (write-only, no approval queue), tenant/brand listing has no
+`ListTenants` anywhere in `internal/identity`, player management is
+hardcoded to `LIMIT 50` with no pagination/search and no reinstate-
+after-suspend route, and platform-scoped audit rows (where migration
+0077 now places licence-assignment and operating-market audit entries)
+are unreachable through the sole existing audit-read route because it
+filters to one tenant. Correctly scoped, the stage is "back-office
+read/query API surface + UI" — new domain query functions and endpoints
+for roughly half the named capabilities, each with its own tests, before
+any UI screen can consume them.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

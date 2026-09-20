@@ -1480,7 +1480,106 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 4I Phase E-SECURITY — Tenant/Licence/Jurisdiction Registry RLS Hardening — COMPLETE, awaiting human review
+## Current stage: Stage 4I Exit Triage — Exit Register and Production Integration Readiness — COMPLETE, awaiting human review
+
+**Purpose.** Per an explicit human directive changing execution strategy:
+stop opening further jurisdiction/KYC/security architecture review stages
+and instead perform a final Stage 4I exit/triage pass, closing out every
+open item with a concrete disposition, and identify the next concrete
+product/platform implementation stage. **Player-jurisdiction, licensing,
+operating-market, KYC, bonus, sportsbook, wallet/ledger, payments, and RG
+architecture are all explicitly FROZEN this stage** — none was reopened;
+no concrete implementation dependency was found that required it.
+
+**What this stage built.** Two new documents, zero Go code, zero
+migrations:
+
+1. `docs/governance/stage-4i-exit-register.md` — classifies every open
+   Stage 4I item (`PLAT-ROLESPLIT-1`, `PLAT-TENANTREAD-1`,
+   `MKT-LICSTATUS-1`, `MKT-AUDIT-1`, `MKT-DORMANT-1`, `MKT-DUAL-1`,
+   `MKT-EXPIRY-1`, `MKT-PM-1`, `HDR-J-6/7/8/9`, `HDR-M-1/2`) as A
+   (production blocker) / B (next-feature blocker) / C (human decision,
+   not urgent) / D (deferred, safe) / E (technical debt), each with
+   owner, concrete consequence, exact reopening trigger, and whether it
+   blocks production or the next stage. Net result: **exactly one
+   production blocker** (`PLAT-ROLESPLIT-1`), and **nothing blocks the
+   recommended next stage**. Also includes a fail-closed "integration
+   contract" table (informational only, zero wiring performed) stating
+   which future call sites will need player-jurisdiction/licence-
+   validity/operating-country-policy checks, and that every one of them
+   is fail-closed on an unresolved result by construction already.
+
+2. `docs/security/runtime-role-separation.md` — the precise,
+   implementation-ready fix for `PLAT-ROLESPLIT-1`. Root cause: the
+   application's Postgres role (`igaming`) owns every table it migrated,
+   and PostgreSQL RLS never applies to a table's owner (not `CREATEROLE`
+   — ownership is the load-bearing fact). Fix: a second, non-owning
+   `igaming_runtime` role with only `SELECT/INSERT/UPDATE/DELETE`, used
+   for runtime traffic, while `igaming` remains the migration-owner
+   credential used only at deploy time. **Empirically verified this
+   stage** against the local dev Postgres (not production): created a
+   temporary role with exactly the proposed grants and confirmed it
+   cannot disable RLS, disable triggers, `TRUNCATE`, `DROP`, `ALTER
+   TABLE`, or `CREATE TABLE`, while ordinary CRUD still works — the exact
+   attack chain the Phase E-SECURITY adversarial security reviewer used
+   against the current single-role setup, now refused. **Classified
+   `PRODUCTION BLOCKER — EXTERNAL INFRASTRUCTURE ACTION`** — closing it
+   requires an operator with Postgres `CREATEROLE` access to run a
+   four-statement `GRANT` script against each real environment, which
+   this session cannot do (no production credential; CLAUDE.md's
+   Environment Safety rule forbids requesting one).
+
+**Independent review.** Security, architect, and qa reviewed both
+documents (minimum-review set per this stage's own efficiency rule — no
+six-way review dispatched for a documentation-only pass). The security
+review's reproduction of the role-separation verification (plus 20
+additional escalation probes, all denied) surfaced its most consequential
+finding: this session's own local development database had drifted from
+the committed migration files (a stale `tenants_read` policy, ten failing
+`internal/operatingmarket` tests) — root-caused to this database having
+migration 0077 applied before that file's later in-place amendments
+landed (the `MKT-MIG76-1` hazard, recurring against the orchestrator's own
+environment, not a defect in the committed code). Fixed by rebuilding the
+database fresh; a first-time deployment is not exposed to this specific
+drift, but the underlying tooling gap (`cmd/migrate` has no live-schema-
+vs-file-content verification) is now tracked as new item
+`PLAT-MIGDRIFT-1` (E, non-blocking). See `docs/governance/task-
+registry.md`'s "Stage 4I Exit Triage" section for the full findings and
+fixes from all three reviews.
+
+**Recommended next stage (not authorized, not started): Operator
+Back-Office MVP.** Requires **zero** unresolved HDR/policy decisions and
+**zero** jurisdiction/licensing/operating-market wiring — that dependency
+claim is confirmed. **Corrected per the independent architect review's
+verification (an earlier draft of this entry overstated readiness):**
+this is NOT simply "a UI over already-finished APIs." Withdrawal approval
+is genuinely UI-ready as-is; every other named capability needs new
+backend query/list surface first: there is no tenant-wide KYC pending-
+case query (`kyc_admin_handlers.go` only looks up one already-known
+player account), no tenant-wide RG restriction list (same shape), zero
+`GET` routes anywhere under bonus admin (campaigns/offers/change-request
+approval queue are write-only over HTTP today), zero `ListTenants`/brand-
+list routes, a hardcoded `LIMIT 50` with no pagination/search on the
+player list and no suspension-reversal endpoint, and the existing
+platform-scoped audit reads are unreachable over HTTP (the one route
+filters `WHERE tenant_id = $1`, which is exactly where migration 0077
+now places `AssignTenantLicence`/`tenant.created`/operating-market audit
+rows). No pagination convention exists anywhere in the API today. The
+stage must therefore be scoped as **"back-office read/query API surface
++ UI,"** with roughly half its named capabilities needing new domain
+query functions and endpoints (each with its own tests) before any
+screen can consume them — not assumed to be UI-only. The repository has
+no frontend or back-office code of any kind today (confirmed via `find`),
+and this was already named as a candidate ("Stage 6A") in this file's own
+prior-stage entries; the dependency-readiness conclusion (no policy
+blocker, no frozen-architecture reopening needed) still holds even though
+the effort estimate was corrected. See this stage's completion report for
+the full, corrected dependency-chain rationale. **Not authorized to
+start.**
+
+---
+
+## Prior stage: Stage 4I Phase E-SECURITY — Tenant/Licence/Jurisdiction Registry RLS Hardening — COMPLETE, awaiting human review
 
 **Purpose.** Close `MKT-SCOPE-1`/`MKT-SCOPE-1(b)` (task registry, opened
 during Phase E's own fix round): `tenants`, `licences`, and
