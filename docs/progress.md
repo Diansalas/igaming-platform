@@ -6296,3 +6296,382 @@ Per the directive's own mandatory stop condition: the Orchestrator
 content, and any production jurisdiction activation remain unauthorized
 pending a separate human directive reviewing this Phase D completion
 report.
+
+## Stage 4I Phase E: operating market and country policy foundation — IMPLEMENTED (mechanism only)
+
+**Status: IMPLEMENTED as a MECHANISM ONLY**, built exactly to the
+architect design ruling recorded at `docs/decisions/0045-operating-
+market-and-country-policy-foundation.md`. Full findings ledger in
+`docs/governance/task-registry.md`'s "Stage 4I Phase E" section;
+completion report in `docs/active-stage.md`.
+
+**What this phase answers, and why it is a separate package rather than
+an addition to `internal/jurisdiction`:** "for a tenant/brand, an
+operation (registration/deposit/withdrawal/wagering), optionally a
+product, a country, at an explicit `AsOf` — is this platform permitted to
+operate, given the licence's ceiling and every narrower policy decision
+beneath it?" — a structurally different question from "which regulatory
+jurisdiction governs this player/tenant", which stays exclusively
+`internal/jurisdiction`'s. The new package, `internal/operatingmarket`,
+may import `internal/jurisdiction` for exactly one shared function
+(`EvaluateLicenceValidity`, the single technical implementation of "is
+this licence currently reliable" — new file `licence_validity.go`, every
+other file in `internal/jurisdiction` has ZERO diff) and cannot import
+`internal/identity`/`kyc`/`geolocation`/`rg` at all — mechanically
+enforced via `go list -deps` (`TestOperatingMarket_ImportGraphInvariant`),
+not merely by convention. A caller of `internal/operatingmarket`
+structurally cannot reach `PlayerJurisdictionResult`, `EvidenceSet`, or
+`Resolution`.
+
+**Schema (migration `0076`):** `jurisdictions.country_code` (nullable
+ISO-3166-1 alpha-2 administrative metadata, never auto-assigned, fenced
+by a mechanical test so it can never become a country→jurisdiction
+resolver); `platform_operations` (a new, extensible OPERATION vocabulary
+— `registration`/`deposit`/`withdrawal`/`wagering` — deliberately
+disjoint from `jurisdiction.OperationClass`/`asset_operation_eligibility.
+operation`/`risk_rules.operation`; `platform_products`, migration 0045,
+is reused unchanged for the PRODUCT dimension — product and operation are
+two independent dimensions, not one flat, combinatorial enum);
+`licence_country_ceilings` (the platform-wide, append-only, effective-
+dated ceiling a LICENCE places on permitted countries — now the sole
+authoritative source, `licences.permitted_markets` deprecated in place,
+never migrated or dropped, per task-registry item `MKT-PM-1`); and
+`operating_country_policies` (the tenant/brand/operation-scoped,
+append-only narrowing beneath that ceiling, using `asset_authorizations`'
+own `scope_kind` discriminator pattern verbatim). Both new policy tables
+use the identical close-then-insert-in-one-transaction discipline as
+migration 0075's `jurisdiction_precedence_configs` — there is NO
+`ON CONFLICT DO UPDATE` anywhere in the package, the exact PHASE-B-ARCH-1
+upsert-provenance defect this phase is built to avoid.
+
+**Resolution algorithm:** one internal `resolve()` function implements
+all five steps and feeds both `ResolveOperatingCountryPolicy` (discards
+the diagnostic chain) and `ExplainOperatingCountryPolicy` (staff-only,
+returns it) — never two implementations of the decision. Step 1 (the
+ceiling) is evaluated unconditionally on every call, before any lower
+row, so a licence contraction takes effect on the very next resolution
+with no rewrite of any lower row. Step 2 (tenant) treats absence as
+TERMINAL — a licence grants, it does not instruct. Steps 3-4 (brand,
+operation) treat absence as INHERIT, with most-specific-first ranking at
+the operation rung. The algorithm walks TOP-DOWN and stops at the FIRST
+disabled rung (not most-specific-wins), closing a real defect class: the
+write-time trigger only checks upward at write time, so a tenant disabled
+*after* a brand row was validly enabled would otherwise leave an orphaned
+"enabled" brand row that most-specific-wins would incorrectly resolve as
+permitted. The result is an eleven-valued, non-forgeable `Result` — no
+accessor for any blocking/source/licence provenance (a player-facing
+handler cannot leak which scope blocked because the language will not let
+it read the field), no `Code()`/`ID()` of any kind (cannot be substituted
+for a `jurisdiction.Resolution`), and exactly one derived boolean,
+`Permitted()`. `IsRegistrationPermitted` is the one sanctioned anonymous-
+path read, `(bool, error)` only, structurally incapable of carrying an
+outcome.
+
+**Dual control: DEFINITIVE ruling, not built this phase.**
+`asset_change_requests` cannot be safely extended (four independent
+structural blockers verified against migrations 0044 AND 0047: no asset
+column to key on, RLS makes it unreadable from a tenant-scoped connection,
+the platform-principal-only trigger excludes a tenant compliance officer,
+and the consume functions are asset-table-specific). `bonus_change_
+requests` fails for different domain-mismatch reasons. Fail-closed means
+concretely: zero production-reachable enable path exists at all (no HTTP
+route, no console surface, no service-identity caller — the only way to
+reach either write function is a direct Go call from a test), zero
+resolver wiring (an enable written this phase has zero operational
+effect), and a structurally required `authorization_reference` on every
+enable (CHECK-enforced, both tables) with the disable direction needing
+none (an emergency kill-switch must not need a second approver). New task
+registry item **MKT-DUAL-1** names the required follow-up and the three
+conditions that must all be resolved before any of: an HTTP route reaching
+either write path, resolver wiring, or the first real country row.
+
+**Testing — 32 tests/test-groups, the architect ruling's own coverage
+floor, not a ceiling:** every test named in ADR 0045 was written and
+passes, including the two states unreachable via any sanctioned write
+path (`configuration_conflict`, `policy_expired` — constructed with raw
+SQL against a temporarily-disabled trigger/CHECK, then restored), the
+four licence behavioural cases (ON allows enable; OFF refuses enable with
+nothing written and no audit row; a subsequent OFF blocks immediately
+with no lower-row rewrite; a subsequent ON does not auto-re-enable a
+previously-disabled lower scope), RLS per table including the asymmetric
+no-platform-read posture on `operating_country_policies` (a tenant's
+operating footprint is commercially sensitive, no platform-admin read
+policy exists) and the asymmetric no-DELETE-trigger posture vs.
+`licence_country_ceilings` (the former has `ON DELETE CASCADE` and
+Postgres runs referential-integrity actions with RLS/triggers on that
+path bypassed, so a full deny-DELETE trigger there would block tenant
+deletion; the latter has no cascade and gets the full trigger), and
+concurrency using ONLY the mandatory deterministic uncommitted-competing-
+row-plus-`pg_stat_activity`-poll technique — never a `sync.WaitGroup`
+barrier or `time.Sleep`, the exact mistake that cost Phase D two fix
+rounds. All pass under `-race`, independently re-run 5 consecutive times
+with zero failures.
+
+**Validation, run to completion:** `go build ./...` clean; `gofmt -l .`
+clean; `go vet ./...` and `go vet -tags=integration ./...` clean; the
+full `internal/operatingmarket` and `internal/jurisdiction` suites green
+under `-race`; whole-repo `go test ./...` and
+`go test -tags=integration ./...` green across every package (including
+`internal/bonus`'s own migration-chain-window test, updated for migration
+0076 landing on the chain's tip — the identical, already-established
+pattern every prior migration in this stage has required in turn, not a
+Phase E defect).
+
+**A real defect found and fixed during implementation, disclosed rather
+than silently patched:** the down-migration's own existence-guard
+(refusing a rollback while either new policy table holds rows) was
+initially ineffective — `db.Pool.MigrateDown` runs over a plain, scopeless
+connection, and (unlike migration 0075's deliberately permissive
+`jurisdiction_precedence_configs` read policy) both new tables' RLS is
+narrower than a scopeless connection can satisfy — `operating_country_
+policies` in particular has NO platform-wide read policy at all, by
+design. The guard's own `EXISTS` checks would therefore always see zero
+rows regardless of real content. Fixed by temporarily disabling RLS on
+both tables inside the SAME transaction as the checks — self-contained,
+since a real finding's `RAISE EXCEPTION` rolls back the `ALTER TABLE` too,
+and a clean pass proceeds to drop both tables outright regardless. Caught
+by the down-migration test genuinely failing against a real database on
+the first implementation attempt, not by code review.
+
+**Documentation/governance updated this phase:** new ADR
+`docs/decisions/0045-operating-market-and-country-policy-foundation.md`;
+`docs/governance/task-registry.md`'s new "Stage 4I Phase E" section
+(MKT-DUAL-1/MKT-PM-1/MKT-EXPIRY-1, SEC-4I-F10 re-scoped not closed,
+PHASE-B-ARCH-1 re-evaluation — none of its three trigger conditions
+fired); `docs/governance/stage-4i-canonical-model.md` §6.1's amendment
+note extended to name the four new permissions;
+`docs/architecture/15-jurisdiction-and-licensing-model.md` gained a new
+section on the operating-market model and its separation from player
+jurisdiction; `docs/active-stage.md`; this entry.
+
+Per the directive's own mandatory stop condition: the Orchestrator
+**stops** here. Any phase beyond this one, MKT-DUAL-1/MKT-PM-1/
+MKT-EXPIRY-1, any HTTP route or resolver wiring, any country/market
+content, and any answer to HDR-M-1/HDR-M-2/HDR-J-6/HDR-J-7/HDR-J-8/HDR-J-9
+remain unauthorized pending a separate human directive reviewing this
+Phase E completion report.
+
+### Stage 4I Phase E fix round (post-independent-review) — RESOLVED
+
+Six independent reviews (architect fidelity, security, DB/RLS,
+compliance/privacy, QA/adversarial, code review) ran against the Phase E
+implementation above. One BLOCKING defect (a genuine internal
+contradiction in the operation-rung resolution algorithm, found
+independently by three reviewers using three different techniques) plus
+two confirmed pure bugs and a set of P2/P3 findings were raised; all are
+now resolved, recorded in full at `docs/decisions/0045-operating-market-
+and-country-policy-foundation.md` §16 (§3.5-A AMENDMENT-1) and
+`docs/governance/task-registry.md`'s `MKT-NARROW-1` (RESOLVED) and
+`MKT-SCOPE-1` (new deferred item, owned by `security`) entries.
+
+**THE BLOCKING FIX — MKT-NARROW-1.** A more-specific operation/product
+`enabled` row could unmask a broader, in-force, active `disabled` row once
+the narrower row's own disable was withdrawn - reachable using ONLY
+narrowing writes, falsifying the resolution algorithm's own central
+correctness claim. Architect-ruled Option C amendment, implemented
+exactly: (1) migration 0076 (amended in place - it was uncommitted and
+unreleased, so no new migration file was created; still the only
+migration file for this phase) gained a write-time step in
+`operating_country_policies_enforce_ceiling()` refusing to enable a
+more-specific operation/product row while a broader in-force active
+disabled row for the same operation exists; (2)
+`internal/operatingmarket/resolve.go`'s STEP 4 was rewritten to query the
+FULL operation-rung candidate set (up to 4 rows, `LIMIT` removed) and
+evaluate it as a SET with first-disabled-wins (duplicate-rank check over
+the full set, parse check over the full set, a "live" set that excludes
+withdrawn tombstones, the LEAST specific live-disabled row blocks, the
+MOST specific live row sources a permit). `PolicyVersion` bumped
+`stage-4i-e.v1` -> `stage-4i-e.v2` (zero rows existed in either table, so
+zero backfill was needed or performed). `ChainStep` gained `BrandID`/
+`ProductCode` fields, populated only on operation-rung steps, and the
+diagnostic chain now emits one step per applicable candidate instead of
+one.
+
+A genuine placement bug in the trigger fix's own first draft was caught
+by testing, not review: the new write-time step was placed textually
+after the pre-existing brand-check block's own early `RETURN NEW` for
+`brand_id IS NULL`, making it structurally unreachable for every
+tenant-wide (non-brand-specific) operation write - the single most common
+shape. `TestOperatingCountryPolicy_MoreSpecificEnableUnderBroaderDisableIsRefused`'s
+"product-specific under every-product disable" sub-case failed against
+that first version, and the trigger was corrected (the new step moved
+before that early return) before this round closed. Disclosed here per
+this project's own "flag what a fix round's own first draft did not
+anticipate" discipline.
+
+**Fix 1 (dead `prior_effective_to` audit field).** Both write paths
+(`ceiling_admin.go`, `policy_admin.go`) read the "before" state BEFORE the
+close `UPDATE` ran, so `prior_effective_to` was always JSON `null` past
+the first version for a key. Fixed by adding `RETURNING effective_to` to
+the close `UPDATE` and using that value; switched `Exec`+`RowsAffected()`
+to `QueryRow`+`Scan`, mapping `pgx.ErrNoRows` to the existing
+`ErrConcurrentPolicyWrite`. New test
+`TestOperatingMarketAudit_SecondVersionRecordsPriorEffectiveTo` covers
+both writers.
+
+**Fix 2 (`SetJurisdictionCountryCode` missing scope assertion).**
+`internal/jurisdiction/registry_admin.go`'s `SetJurisdictionCountryCode`
+(the one Phase-E-added function affected) now calls
+`assertPlatformScope` as its first statement - `jurisdictions` carries
+zero RLS, so this Go-level check is the ONLY control. The identical,
+PRE-EXISTING gap in `CreateJurisdiction`/`CreateLicence`/
+`AssignTenantLicence`/`ListJurisdictions`/`ListLicences` is deliberately
+NOT fixed here (out of this round's scope) and is now tracked as
+`MKT-SCOPE-1`, owned by `security`, currently unexploited (no HTTP route/
+console/service-identity caller reaches any of them yet) but required
+before any does. New test
+`TestSetJurisdictionCountryCode_RequiresPlatformScope`.
+
+**Fix 3 (vacuous migration test).**
+`TestMigration0076_LeavesExistingJurisdictionCountryCodesNull` only ever
+created jurisdiction rows AFTER migration 0076 had already run, so it
+never exercised the "no auto-assignment to PRE-EXISTING rows" property
+its own name claimed to guard. Rewritten to insert a row via raw SQL on a
+scratch database BEFORE running 0076, then assert that row's
+`country_code` is still `NULL` after 0076 runs, plus an independent
+static-source grep confirming 0076's `.up.sql` contains no `UPDATE
+jurisdictions` statement.
+
+**P3 items fixed:** the `TestJurisdictionCountryCode_IsNotAJurisdictionResolver`
+guarded-file list now also covers `evaluation_policy.go`/
+`evaluation_policy_admin.go`; `Explanation.LicenceValidity` is now the
+typed `jurisdiction.LicenceValidity` enum, not a bare `string`;
+`ExplainOperatingCountryPolicy`'s internal licence-status read no longer
+silently swallows its own query error; the RLS posture test now asserts
+policy predicate text (not just names/commands) and
+`licence_country_ceilings` gained its own player-scoped negative-probe
+test (previously only `operating_country_policies` had one); a new
+`TestOperatingCountryPolicies_TenantDeleteCascadeStillWorks` guards the
+deliberately-asymmetric append-only trigger's own documented risk (a
+"well-meaning symmetry fix" silently breaking tenant-delete cascade).
+
+**P3 items deliberately NOT fixed, with disposition:** the two
+declared-but-never-returned error sentinels `ErrNotFound`/
+`ErrLicenceNotDeterminable` (`internal/operatingmarket/types.go`) were
+left in place with an explicit "RESERVED" doc comment explaining why each
+is not yet wired to a return path, rather than force-wiring them to an
+arbitrary call site or removing a currently-inert exported sentinel a
+future caller could already be depending on having reserved - a judgment
+call disclosed here rather than silently made.
+
+**Validation gate re-run in full:** `go build ./...`, `go vet ./...`, `go
+vet -tags=integration ./...`, `gofmt -l .` (all clean); the focused
+`internal/operatingmarket` and `internal/jurisdiction` packages, plus 10
+consecutive `-race` runs of the concurrency and new regression tests and
+10 consecutive full-package runs (no flakes); the full whole-repo `go test
+-tags=integration ./... -count=1` (every package green). `git diff
+--stat` confirmed no RLS policy file, no permission role-wiring change,
+and no diff to `internal/jurisdiction/resolver.go`/`precedence.go`/
+`types.go`/`evaluation_policy.go`/`evaluation_policy_admin.go`/
+`resolution_active.go`/`evidence_collection_active.go` - migration 0076
+remains the only migration file for this phase.
+
+Files touched this round: `migrations/0076_operating_market_country_
+policy.up.sql` (amended in place); `internal/operatingmarket/resolve.go`,
+`explain.go`, `types.go`, `ceiling_admin.go`, `policy_admin.go`, and new
+test file `amendment_3_5a_integration_test.go` plus additions to
+`rls_integration_test.go`/`registration_explain_audit_integration_test.go`/
+`resolve_integration_test.go`; `internal/jurisdiction/registry_admin.go`,
+`country_code_test.go`, `country_code_integration_test.go`;
+`internal/auth/permission.go` (two doc-comment corrections only - no
+permission/role-wiring change); `docs/decisions/0045-operating-market-
+and-country-policy-foundation.md`; `docs/architecture/15-jurisdiction-
+and-licensing-model.md`; `docs/governance/task-registry.md`;
+`docs/active-stage.md`; this entry.
+
+Per the directive's own mandatory stop condition: the Orchestrator
+**stops** here, unchanged from before this fix round. Nothing beyond
+independent re-verification of this fix round is authorized.
+
+### Stage 4I Phase E — second and third fix rounds (ADR 0045 §3.5-A AMENDMENT-2, AMENDMENT-3) plus F2/F4
+
+Two further, independently-found defects surfaced in this same rung
+model during adversarial re-verification of the fix round above, each
+resolved by a further architect-ruled amendment. Full detail in
+`docs/decisions/0045-operating-market-and-country-policy-
+foundation.md` §17 (AMENDMENT-2), §18 (AMENDMENT-3), `docs/active-
+stage.md`'s "THIRD FIX ROUND" entry, and `docs/governance/task-
+registry.md`'s `SEC-E-REV-1`/`SEC-E-REV-2`/`MKT-MIG76-1` entries.
+
+**AMENDMENT-2 (finding SEC-E-REV-1):** withdrawing an active `disabled`
+row at the BRAND/OPERATION rung (where absence inherits from the rung
+above) was treated as unconditionally fail-closed-safe, but is actually
+a widening act — reachable with no authorization and no audit
+distinguishability. Fixed with a new CHECK constraint,
+`ocp_inherit_rung_withdrawal_requires_authorization`, requiring a
+non-blank `authorization_reference` on any such withdrawal; a mirroring
+Go-side guard; two new audit metadata keys (`rung_block_transition`,
+`widening_capable`) so a widening-via-withdrawal event is findable by
+the correct filter (`widening_capable=true`, never `state='enabled'`
+alone). The tenant rung and `licence_country_ceilings` are deliberately
+excluded (their absence is terminal/fail-closed, never inherited).
+
+**AMENDMENT-3 (finding SEC-E-REV-2, "the bare close"):** a third
+independently-found variant of the same defect family — closing an
+open `active`+`disabled` brand/operation-rung row WITHOUT writing any
+successor removes the block exactly like a withdrawal, but every prior
+control was INSERT-shaped, so this ordinary `UPDATE` bypassed all of
+them. Fixed with a new `DEFERRABLE INITIALLY DEFERRED` constraint
+trigger, `ocp_inherit_rung_close_requires_successor`, requiring that any
+such close be followed, in the same transaction, by an open successor at
+the same key — sufficient because every legal successor shape is either
+non-widening or already gated by an existing CHECK. No `resolve.go` diff,
+no `PolicyVersion` bump (this amendment constrains what's writable, not
+what `resolve()` computes for a fixed row set). The architect gave a
+structural argument for why this is the last variant reachable via
+ordinary DML from this row-removal shape and explicitly recommended
+against a fourth sweep of the same kind, naming three different targets
+(`AsOf` provenance, `tenants`/`licences` RLS, `platform_operations`/
+`platform_products` write governance) for any future, differently-scoped
+review instead.
+
+**F2 (disclosed, not fixed):** `DELETE` on `operating_country_policies`
+remains uncontrolled for an RLS-bypassing role (by design, to preserve
+`tenants ON DELETE CASCADE`) — documented as a residual pointing to ADR
+0026's existing migration-owner/runtime-role separation item.
+
+**F3 (out of scope, tracked not fixed):** `tenants`/`licences` carry no
+RLS at all — pre-existing, but Phase E newly makes the licence the root
+of the operating-market ceiling, so this is now a live path to widening
+an operating-market answer. Amended into the existing `MKT-SCOPE-1` item
+(not a new one) with a second trigger condition, `MKT-SCOPE-1(b)`. **A
+genuine CLAUDE.md multi-tenancy-isolation concern, surfaced to the human
+directly rather than left as only a registry line.**
+
+**F4 (fixed):** `EvaluateLicenceValidity` never checked `licences.
+issued_at` — a fail-open in the ceiling's own root predicate. Fixed with
+a half-open `[issued_at, expires_at)` interval check. `PolicyVersion`
+bumped `"stage-4i-e.v2"` → `"stage-4i-e.v3"` — attributable to F4 alone.
+
+Each amendment went through the same discipline as the first: an
+architect ruling precise enough for zero-ambiguity implementation,
+backend implementation with the validation gate run to completion,
+and independent re-verification (architect fidelity and/or security and
+QA, depending on the round) before being accepted — including one
+polish round closing a code-review/security finding that the
+stale-schema regression guard (`TestMigration0076_
+SchemaMatchesTheCurrentMigrationFile`) had itself not been extended to
+check for AMENDMENT-3's own markers.
+
+Final state: 78 top-level test functions in `internal/operatingmarket`
+plus 9 in `internal/jurisdiction`'s `licence_validity`/`country_code`
+test files. Full validation gate re-run clean multiple times against
+independently-built fresh scratch databases (schema markers for all
+three amendments confirmed directly against `pg_constraint`/
+`pg_trigger`/`pg_proc` before trusting any result — this exact staleness
+hazard, tracked as `MKT-MIG76-1`, was independently rediscovered by
+several reviewers across this workstream and is now the single most
+repeated lesson of this stage): `go build`/`go vet` (both tags)/
+`gofmt -l`, the full package suite, `-race` runs of every
+concurrency-sensitive and new regression test, and the whole-repo
+`go test -tags=integration ./... -count=1` gate — all green, including
+one final independent run performed directly by the Orchestrator (not
+only trusted from agent self-reports) on a scratch database it built,
+migrated, and schema-verified itself.
+
+Per the directive's own mandatory stop condition: the Orchestrator
+**stops** here. Nothing beyond independent re-verification of this
+fix round is authorized — no HTTP route, no resolver wiring, no
+production country content, no answer to HDR-M-1/HDR-M-2/HDR-J-6/
+HDR-J-7/HDR-J-8/HDR-J-9, and no `MKT-DUAL-1`/`MKT-SCOPE-1`/`MKT-EXPIRY-1`/
+`MKT-PM-1` resolution.

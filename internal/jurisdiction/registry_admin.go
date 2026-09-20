@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/validation"
 )
 
 // This file implements item B-1 (canonical-model §11.1, RECON P-11/§5):
@@ -66,7 +67,21 @@ type Jurisdiction struct {
 	Name           string
 	RegulatoryBody string
 	Notes          string
-	CreatedAt      time.Time
+	// CountryCode is ADMINISTRATIVE METADATA ONLY (Stage 4I Phase E,
+	// migration 0076) - the ISO-3166-1 alpha-2 country this regulatory
+	// jurisdiction sits inside, where that is unambiguous. "" means unset.
+	// This field is NOT a country->jurisdiction mapping and MUST NEVER be
+	// used to derive a player's jurisdiction from a residence/location
+	// country, nor compared, cast, or FK'd against Code - see
+	// internal/validation/country.go's own governing rule (Code is a
+	// DIFFERENT code space: "KM-ANJ" is sub-national; "MT"/"CO" match ISO
+	// alpha-2 only coincidentally). INV-M-4 (docs/decisions/0045) forbids
+	// any Go code from selecting a jurisdictions row BY this field, joining
+	// it to Code, or passing it into internal/jurisdiction's own
+	// player-resolution path (Resolve, EvidenceSet, PlayerJurisdictionResult).
+	// The only sanctioned readers are the admin read surface and the ADR.
+	CountryCode string
+	CreatedAt   time.Time
 }
 
 // CreateJurisdictionParams is CreateJurisdiction's input.
@@ -75,7 +90,16 @@ type CreateJurisdictionParams struct {
 	Name           string
 	RegulatoryBody string
 	Notes          string
-	Actor          ActorContext
+	// CountryCode is optional administrative metadata - see
+	// Jurisdiction.CountryCode's own doc comment for its exact, fenced
+	// meaning. "" leaves it NULL. A non-empty value is validated by
+	// validation.IsISO3166Alpha2 - TRIMMED ONLY, NEVER UPPERCASED: a
+	// lowercase input ("mt") is REJECTED with ErrInvalidInput rather than
+	// silently coerced to "MT" (the same class of defect as SEC-4I-F9,
+	// solved in the wrong direction - "callers validate a value they
+	// intend to store, not a value they intend to coerce").
+	CountryCode string
+	Actor       ActorContext
 }
 
 // CreateJurisdiction inserts a `jurisdictions` row. tx must be a
@@ -94,14 +118,18 @@ func CreateJurisdiction(ctx context.Context, tx pgx.Tx, p CreateJurisdictionPara
 	if code == "" || name == "" {
 		return Jurisdiction{}, fmt.Errorf("%w: code and name are required", ErrInvalidInput)
 	}
+	countryCode := strings.TrimSpace(p.CountryCode)
+	if countryCode != "" && !validation.IsISO3166Alpha2(countryCode) {
+		return Jurisdiction{}, fmt.Errorf("%w: country_code must be a currently-assigned, UPPERCASE ISO-3166-1 alpha-2 code", ErrInvalidInput)
+	}
 
 	var j Jurisdiction
 	err := tx.QueryRow(ctx, `
-		INSERT INTO jurisdictions (code, name, regulatory_body, notes)
-		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''))
-		RETURNING id, code, name, COALESCE(regulatory_body, ''), COALESCE(notes, ''), created_at`,
-		code, name, p.RegulatoryBody, p.Notes,
-	).Scan(&j.ID, &j.Code, &j.Name, &j.RegulatoryBody, &j.Notes, &j.CreatedAt)
+		INSERT INTO jurisdictions (code, name, regulatory_body, notes, country_code)
+		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''))
+		RETURNING id, code, name, COALESCE(regulatory_body, ''), COALESCE(notes, ''), COALESCE(country_code, ''), created_at`,
+		code, name, p.RegulatoryBody, p.Notes, countryCode,
+	).Scan(&j.ID, &j.Code, &j.Name, &j.RegulatoryBody, &j.Notes, &j.CountryCode, &j.CreatedAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -118,9 +146,82 @@ func CreateJurisdiction(ctx context.Context, tx pgx.Tx, p CreateJurisdictionPara
 	return j, nil
 }
 
+// SetJurisdictionCountryCode assigns (or clears, with countryCode == "")
+// the administrative country_code of an existing jurisdiction (Stage 4I
+// Phase E, migration 0076) - see Jurisdiction.CountryCode's own doc
+// comment for its exact, fenced meaning. Audited in the same transaction.
+// tx MUST be platform-admin-scoped - asserted in-function via
+// assertPlatformScope, as its FIRST statement (fix-round item, Phase E
+// fix round: `jurisdictions` carries no RLS, so unlike most of this
+// package's other write paths there is no independent database-level
+// backstop here; this Go-level check is the ONLY control). Gated at any
+// future HTTP layer by the EXISTING auth.PermJurisdictionRegistryManage -
+// no new permission.
+func SetJurisdictionCountryCode(ctx context.Context, tx pgx.Tx, id uuid.UUID, countryCode string, actor ActorContext) (Jurisdiction, error) {
+	// `jurisdictions` carries ZERO row-level security policies of any
+	// kind, so this Go-level check is the ONLY control here - unlike most
+	// of this package's other tables, RLS provides no independent backstop
+	// if this assertion is ever removed or bypassed. See task registry
+	// item MKT-SCOPE-1 for the pre-existing sibling functions
+	// (CreateJurisdiction/CreateLicence/AssignTenantLicence/
+	// ListJurisdictions/ListLicences) that share this gap and are
+	// deliberately NOT fixed here (out of scope for this change).
+	if err := assertPlatformScope(ctx, tx); err != nil {
+		return Jurisdiction{}, err
+	}
+	if err := actor.validate(); err != nil {
+		return Jurisdiction{}, err
+	}
+	if id == uuid.Nil {
+		return Jurisdiction{}, fmt.Errorf("%w: id is required", ErrInvalidInput)
+	}
+	cc := strings.TrimSpace(countryCode)
+	if cc != "" && !validation.IsISO3166Alpha2(cc) {
+		return Jurisdiction{}, fmt.Errorf("%w: country_code must be a currently-assigned, UPPERCASE ISO-3166-1 alpha-2 code", ErrInvalidInput)
+	}
+
+	before, err := readJurisdictionByID(ctx, tx, id)
+	if err != nil {
+		return Jurisdiction{}, err
+	}
+
+	var after Jurisdiction
+	err = tx.QueryRow(ctx, `
+		UPDATE jurisdictions SET country_code = NULLIF($2, '')
+		 WHERE id = $1
+		 RETURNING id, code, name, COALESCE(regulatory_body, ''), COALESCE(notes, ''), COALESCE(country_code, ''), created_at`,
+		id, cc,
+	).Scan(&after.ID, &after.Code, &after.Name, &after.RegulatoryBody, &after.Notes, &after.CountryCode, &after.CreatedAt)
+	if err != nil {
+		return Jurisdiction{}, fmt.Errorf("jurisdiction: update jurisdictions.country_code: %w", err)
+	}
+
+	if err := recordRegistryAudit(ctx, tx, uuid.Nil, actor, "jurisdiction_registry.jurisdiction_country_code_set", "jurisdiction", after.ID.String(), map[string]any{
+		"before": jurisdictionState(before), "after": jurisdictionState(after),
+	}); err != nil {
+		return Jurisdiction{}, err
+	}
+	return after, nil
+}
+
+func readJurisdictionByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (Jurisdiction, error) {
+	var j Jurisdiction
+	err := tx.QueryRow(ctx, `
+		SELECT id, code, name, COALESCE(regulatory_body, ''), COALESCE(notes, ''), COALESCE(country_code, ''), created_at
+		  FROM jurisdictions WHERE id = $1`, id,
+	).Scan(&j.ID, &j.Code, &j.Name, &j.RegulatoryBody, &j.Notes, &j.CountryCode, &j.CreatedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Jurisdiction{}, fmt.Errorf("%w: jurisdiction %s", ErrNotFound, id)
+	}
+	if err != nil {
+		return Jurisdiction{}, fmt.Errorf("jurisdiction: read jurisdiction %s: %w", id, err)
+	}
+	return j, nil
+}
+
 // ListJurisdictions returns every jurisdiction row, platform-wide.
 func ListJurisdictions(ctx context.Context, tx pgx.Tx) ([]Jurisdiction, error) {
-	rows, err := tx.Query(ctx, `SELECT id, code, name, COALESCE(regulatory_body, ''), COALESCE(notes, ''), created_at FROM jurisdictions ORDER BY code`)
+	rows, err := tx.Query(ctx, `SELECT id, code, name, COALESCE(regulatory_body, ''), COALESCE(notes, ''), COALESCE(country_code, ''), created_at FROM jurisdictions ORDER BY code`)
 	if err != nil {
 		return nil, fmt.Errorf("jurisdiction: list jurisdictions: %w", err)
 	}
@@ -128,7 +229,7 @@ func ListJurisdictions(ctx context.Context, tx pgx.Tx) ([]Jurisdiction, error) {
 	var out []Jurisdiction
 	for rows.Next() {
 		var j Jurisdiction
-		if err := rows.Scan(&j.ID, &j.Code, &j.Name, &j.RegulatoryBody, &j.Notes, &j.CreatedAt); err != nil {
+		if err := rows.Scan(&j.ID, &j.Code, &j.Name, &j.RegulatoryBody, &j.Notes, &j.CountryCode, &j.CreatedAt); err != nil {
 			return nil, fmt.Errorf("jurisdiction: scan jurisdiction row: %w", err)
 		}
 		out = append(out, j)
@@ -160,8 +261,18 @@ type CreateLicenceParams struct {
 	Licensee          string
 	LicenceNumber     string
 	PermittedProducts []string
-	PermittedMarkets  []string
-	Actor             ActorContext
+	// PermittedMarkets is DEPRECATED and NON-AUTHORITATIVE as of Stage 4I
+	// Phase E (migration 0076's own column comment). It is retained -
+	// removing it would break this existing write path and its tests for
+	// no benefit - but has never had a defined value vocabulary and has
+	// ZERO enforcement readers. The authoritative, validated,
+	// effective-dated, append-only expression of a licence's permitted
+	// countries is internal/operatingmarket's licence_country_ceilings;
+	// no authorization path may read this field. Scheduled for removal
+	// (task registry item MKT-PM-1) by the phase that answers HDR-J-6 and
+	// populates real ceiling content.
+	PermittedMarkets []string
+	Actor            ActorContext
 }
 
 var validLicensees = map[string]bool{"platform": true, "tenant": true}
@@ -254,7 +365,10 @@ func ListLicences(ctx context.Context, tx pgx.Tx) ([]Licence, error) {
 }
 
 func jurisdictionState(j Jurisdiction) map[string]any {
-	return map[string]any{"id": j.ID.String(), "code": j.Code, "name": j.Name, "regulatory_body": j.RegulatoryBody}
+	return map[string]any{
+		"id": j.ID.String(), "code": j.Code, "name": j.Name, "regulatory_body": j.RegulatoryBody,
+		"country_code": j.CountryCode,
+	}
 }
 
 func licenceState(l Licence) map[string]any {

@@ -785,7 +785,22 @@ Binding on `jurisdiction_resolutions` and on `jurisdiction_resolution_active`:
   retroactively documents that Phase B had already, correctly, added two
   more named exceptions — `PermPlayerResidenceRead` and
   `PermJurisdictionEvidenceCollectionActivate` — without this sentence
-  having been updated to say so at the time.)*
+  having been updated to say so at the time. Stage 4I Phase E
+  (`docs/decisions/0045-operating-market-and-country-policy-foundation.md`
+  §6.1) names four further exceptions, for the structurally separate
+  operating-market/country-policy domain (`internal/operatingmarket`, not
+  `internal/jurisdiction`): `PermOperatingMarketCeilingManage`
+  (platform-only, `RolePlatformAdmin` — authoring a licence's country
+  ceiling), `PermOperatingMarketTenantPolicyWrite` (tenant-scoped,
+  `RoleCompliance` only — deciding whether a tenant operates in a country
+  at all), `PermOperatingMarketBrandPolicyWrite` (tenant-scoped,
+  `RoleTenantAdmin` — narrowing within the tenant footprint Compliance
+  already approved), and `PermOperatingMarketPolicyRead` (read/diagnostic
+  surface, granted to `RolePlatformAdmin` for the ceiling only,
+  `RoleCompliance` and `RoleTenantAdmin` for their own tenant's footprint).
+  No new role is created. As with Phase D's own additions, no HTTP route
+  exists in this phase — the permissions are declared and role-scoped so
+  the phase that adds routes adds a handler, not a permission model.)*
 
 ### 6.2 The nine-scenario contract — binding on `qa`
 

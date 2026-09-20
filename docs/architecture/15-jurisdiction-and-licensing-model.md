@@ -203,6 +203,83 @@ this distinction are entirely unaffected. Full precedence/specificity
 rules for how these interact with every other `Rule` dimension are
 `internal/risk`'s own concern (ADR 0031 §5), not duplicated here.
 
+## Operating market / country policy (Stage 4I Phase E) — a SEPARATE model
+
+**This is a different question from everything above.** This document's
+`Jurisdiction`/`Licence`/`TenantJurisdictionConfig` model, and
+`internal/jurisdiction`'s resolver, answer "which REGULATORY jurisdiction
+governs this player/tenant, and on what basis". Stage 4I Phase E
+(`docs/decisions/0045-operating-market-and-country-policy-foundation.md`)
+answers a structurally different question: "for a tenant/brand, an
+operation (registration/deposit/withdrawal/wagering), optionally a
+product (casino/sportsbook/...), a COUNTRY — is this platform actually
+permitted to operate, given both the licence's ceiling and every narrower
+policy decision beneath it?"
+
+The two are kept separate at the **package boundary**, not by convention:
+the mechanism lives in a new package, `internal/operatingmarket`, which
+may import `internal/jurisdiction` for exactly one function
+(`EvaluateLicenceValidity`, the shared, single technical implementation
+of "is this licence currently reliable") and nothing else — it cannot
+import `internal/identity`/`internal/kyc`/`internal/geolocation`/
+`internal/rg`, and it structurally cannot reach `PlayerJurisdictionResult`,
+`EvidenceSet`, or `Resolution`. `internal/jurisdiction` itself has **zero
+diff** from Phase E, aside from one pure addition
+(`internal/jurisdiction/licence_validity.go`) and administrative-metadata
+fields on the existing `jurisdictions`/`licences` write surface (below).
+
+Three new tables (migration `0076`), all **country-code keyed
+(ISO-3166-1 alpha-2)**, deliberately never joined or compared to
+`jurisdictions.code` (a different code space — `KM-ANJ` is sub-national;
+`MT`/`CO` match ISO alpha-2 only coincidentally, per
+`internal/validation/country.go`'s own governing rule):
+
+- **`platform_operations`** — an extensible OPERATION vocabulary
+  (`registration`/`deposit`/`withdrawal`/`wagering`), deliberately
+  disjoint from `jurisdiction.OperationClass` (the player-jurisdiction
+  resolver's own 4-value call-site taxonomy), `asset_operation_eligibility.
+  operation`, and `risk_rules.operation`. The PRODUCT dimension reuses
+  `platform_products` unchanged — product and operation are two
+  independent dimensions, not one flat enum.
+- **`licence_country_ceilings`** — the platform-wide, append-only,
+  effective-dated ceiling a LICENCE places on which countries may ever be
+  enabled beneath it. Authoritative and sole source of a licence's
+  permitted countries; `licences.permitted_markets` (this document's own
+  schema block above) is now **DEPRECATED and non-authoritative** — see
+  that column's own `COMMENT` and task-registry item `MKT-PM-1`.
+- **`operating_country_policies`** — the tenant/brand/operation-scoped,
+  append-only statement of whether a tenant actually operates in a
+  country, narrowing (never exceeding) the licence ceiling above.
+
+`jurisdictions` itself gained one administrative-metadata column,
+`country_code` (nullable, not unique, never auto-assigned by the
+migration) — the ISO-3166-1 alpha-2 country a regulatory jurisdiction
+sits inside, where unambiguous. **This is fenced, mechanically tested
+metadata, not a resolver**: it must never be used to derive a player's
+jurisdiction from a residence/location country, and no code anywhere in
+`internal/jurisdiction`'s player-resolution path may reference it
+(`TestJurisdictionCountryCode_IsNotAJurisdictionResolver`).
+
+Resolution (`internal/operatingmarket.ResolveOperatingCountryPolicy`) is
+a pure function of `AsOf` and the current row set — never cached, never
+persisted as a `*_resolutions` table (unlike `jurisdiction_resolutions`,
+which records a player-affecting determination regulators require be
+reconstructible; an operating-market answer's own inputs already are
+reconstructible, so storing the answer would be a second, driftable
+copy). It has **zero production callers** as of Phase E: no HTTP route,
+no OpenAPI change, and no consuming domain (`casino`/`bonus`/`risk`/
+`payments`/`sportsbook`/registration/withdrawal) has been wired to call
+it. Full design, the five-step algorithm, the eleven-outcome result type,
+and the permission model are ADR 0045's own subject matter, including
+ADR 0045 §3.5-A AMENDMENT-1's correction of the operation rung to a SET
+evaluated with first-disabled-wins (not most-specific-wins), AMENDMENT-2's
+CHECK requiring authorization on an inherit-rung withdrawal (§17), and
+AMENDMENT-3's deferred constraint trigger requiring an authorized
+successor on an inherit-rung close (§18) — plus finding F4's correction of
+`EvaluateLicenceValidity` to a half-open `issued_at`/`expires_at`
+interval. ADR 0045 remains authoritative for all of the above; this
+document is not updated further as amendments land.
+
 ## Ownership
 
 `architect` owns this schema; `identity-compliance` owns the KYC/AML/RG

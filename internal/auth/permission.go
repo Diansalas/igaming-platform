@@ -338,6 +338,63 @@ const (
 	// it, it requires its own permission and a dual-control ruling per
 	// HDR-J-2's recorded technical consequence.
 	PermJurisdictionEvaluationPolicyWrite Permission = "jurisdiction_evaluation_policy:write"
+
+	// --- Stage 4I Phase E: operating market / country policy (ADR 0045
+	// Section 6.1). Four named exceptions under canonical-model Section
+	// 6.1's amendment ("no other permission without a recorded architect
+	// ruling naming it") - this is that record. Declared and role-scoped
+	// now; NO HTTP route exists in this phase and no caller checks any of
+	// them - the write functions' own controls are assertPlatformScope/
+	// assertTenantScope plus migration 0076's RLS, both already scoped
+	// identically to what these permissions describe.
+
+	// PermOperatingMarketCeilingManage gates authoring a LICENCE COUNTRY
+	// CEILING version (licence_country_ceilings) - the statement of which
+	// countries a LICENCE permits at all. PLATFORM-ONLY, granted only to
+	// RolePlatformAdmin, following PermJurisdictionRegistryManage/
+	// PermTenantLicenceAssign's exact precedent. A ceiling row is shared by
+	// every tenant operating under that licence, so a tenant-scoped role
+	// must never be able to change it - editing it would change another
+	// tenant's ceiling. Deliberately NOT PermJurisdictionRegistryManage
+	// itself: creating a licence reference row and declaring the countries
+	// that licence permits are materially different authorizing acts, the
+	// same distinction PermTenantLicenceAssign already draws.
+	PermOperatingMarketCeilingManage Permission = "operating_market_ceiling:manage"
+
+	// PermOperatingMarketTenantPolicyWrite gates authoring a TENANT-scope
+	// operating-country policy version - the decision that this tenant
+	// operates (or does not operate) in a country at all, within its
+	// licence ceiling. TENANT-SCOPED, granted ONLY to RoleCompliance,
+	// deliberately NOT RoleTenantAdmin: deciding which countries a tenant
+	// serves is a licensing/compliance act, not commercial configuration -
+	// the exact reasoning and the exact placement of
+	// PermJurisdictionEvidenceCollectionActivate.
+	PermOperatingMarketTenantPolicyWrite Permission = "operating_market_tenant_policy:write"
+
+	// PermOperatingMarketBrandPolicyWrite gates authoring a BRAND- or
+	// OPERATION-scope policy version. These can ONLY ever narrow within
+	// the tenant-scope footprint Compliance has already approved, and
+	// cannot widen past a broader in-force disable at their own scope
+	// either (ADR 0045 §3.5-A): a more-specific brand/operation row can
+	// never resolve `permitted` while a broader, in-force, active
+	// `disabled` row applies to it - enforced at write time by migration
+	// 0076's ceiling trigger and, independently, by the resolver's own
+	// first-disabled-wins evaluation of the full candidate set. This is
+	// what bounds their blast radius and is why they are separated from
+	// the tenant-scope permission at all. TENANT-SCOPED, granted to
+	// RoleTenantAdmin - mirroring PermAssetAuthorizationWrite's placement
+	// for ADR 0037 layers 4-7 exactly. Never RolePlatformAdmin (no tenant
+	// scope to write in; RLS would reject it).
+	PermOperatingMarketBrandPolicyWrite Permission = "operating_market_brand_policy:write"
+
+	// PermOperatingMarketPolicyRead gates the read/diagnostic surface:
+	// current state, version history, and the admin-only explain-why.
+	// Separate from every write permission above, per ADR 0045's explicit
+	// separation requirement. Granted to RoleCompliance and RoleTenantAdmin
+	// (tenant-scoped reads) and to RolePlatformAdmin (whose reads reach the
+	// licence ceiling ONLY - a tenant's own operating footprint is not
+	// platform-readable, see migration 0076's RLS).
+	PermOperatingMarketPolicyRead Permission = "operating_market_policy:read"
 )
 
 // rolePermissions is a static, in-code role -> permission-set mapping.
@@ -373,6 +430,14 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// permission's own doc comment for why it is separate from
 		// PermJurisdictionRegistryManage.
 		PermJurisdictionEvaluationPolicyWrite,
+		// Stage 4I Phase E: the sole grantee of PermOperatingMarketCeilingManage
+		// (authoring a licence_country_ceilings version), plus
+		// PermOperatingMarketPolicyRead (whose reads reach the licence
+		// ceiling only - a tenant's own operating footprint is not
+		// platform-readable). Never PermOperatingMarketTenantPolicyWrite/
+		// PermOperatingMarketBrandPolicyWrite - platform_admin has no
+		// tenant scope to write either in; RLS would reject it.
+		PermOperatingMarketCeilingManage, PermOperatingMarketPolicyRead,
 		// Deliberately NOT PermRGRestrictionWrite/Read (Stage 4D-RG, ADR
 		// 0026 §12): platform_admin cannot resolve a specific tenant's
 		// player_account at all today (PermPlayerRead is itself
@@ -435,6 +500,18 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// platform-only, same split as PermAssetAuthorizationWrite versus
 		// PermAssetRegistryManage.
 		PermJurisdictionResolutionActiveWrite,
+		// Stage 4I Phase E: the sole grantee of PermOperatingMarketBrandPolicyWrite
+		// (authoring a BRAND- or OPERATION-scope operating-country policy
+		// version, which can only ever narrow within the tenant-scope
+		// footprint Compliance has already approved, and cannot widen past
+		// a broader in-force disable at its own scope either - ADR 0045
+		// §3.5-A), plus PermOperatingMarketPolicyRead for this tenant's own
+		// footprint.
+		// Never PermOperatingMarketTenantPolicyWrite (deciding whether the
+		// tenant serves a country at all is a Compliance act, not
+		// commercial configuration) and never PermOperatingMarketCeilingManage
+		// (platform-only).
+		PermOperatingMarketBrandPolicyWrite, PermOperatingMarketPolicyRead,
 		// Stage 4H-B1 Wave 2 (security-architecture.md §B1.1): read-only
 		// bonus visibility "exactly as it does for risk_config/
 		// verification/rg_restriction today" - a tenant admin may see
@@ -478,6 +555,13 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// permissions' own doc comments for why they sit with Compliance
 		// alone, never RoleTenantAdmin/RolePlatformAdmin.
 		PermPlayerResidenceRead, PermJurisdictionEvidenceCollectionActivate,
+		// Stage 4I Phase E: the sole grantee of
+		// PermOperatingMarketTenantPolicyWrite (deciding whether a tenant
+		// operates in a country at all, within its licence ceiling - a
+		// licensing/compliance act, never RoleTenantAdmin), plus
+		// PermOperatingMarketPolicyRead for this tenant's own footprint.
+		// Never PermOperatingMarketCeilingManage (platform-only).
+		PermOperatingMarketTenantPolicyWrite, PermOperatingMarketPolicyRead,
 	),
 	// finance is Stage 3B's own role, dedicated solely to withdrawal
 	// governance - it holds all four withdrawal permissions and nothing
