@@ -45,6 +45,17 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("POST /v1/admin/tenants",
 		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermTenantWrite)(newCreateTenantHandler(deps))))
 
+	// Stage 5 (Operator Back Office MVP): tenant list/detail. List is
+	// platform-admin-only (checked inside the handler, same reasoning as
+	// tenant creation - RequireTenantScope would reject the platform_admin's
+	// nil-tenant token before the handler's own check could run); detail
+	// uses canActOnTenant (platform_admin may read any tenant, a
+	// tenant-scoped caller only its own).
+	mux.Handle("GET /v1/admin/tenants",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermTenantRead)(newListTenantsHandler(deps))))
+	mux.Handle("GET /v1/admin/tenants/{tenantID}",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermTenantRead)(newGetTenantHandler(deps))))
+
 	// Brand creation: platform_admin may target any tenant (via the path
 	// parameter); tenant_admin may only target their own - enforced
 	// explicitly inside the handler per ADR 0011, not by
@@ -53,6 +64,13 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	// could run).
 	mux.Handle("POST /v1/admin/tenants/{tenantID}/brands",
 		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermBrandWrite)(newCreateBrandHandler(deps))))
+
+	// Stage 5 (Operator Back Office MVP): brand list/detail for a tenant -
+	// same canActOnTenant authorization as brand creation.
+	mux.Handle("GET /v1/admin/tenants/{tenantID}/brands",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermBrandRead)(newListBrandsHandler(deps))))
+	mux.Handle("GET /v1/admin/tenants/{tenantID}/brands/{brandID}",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermBrandRead)(newGetBrandHandler(deps))))
 
 	// Staff creation: same platform_admin-may-target-any-tenant,
 	// tenant_admin-only-their-own rule as brand creation.
@@ -89,6 +107,10 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermPlayerRead)(newGetPlayerHandler(deps)))))
 	mux.Handle("POST /v1/admin/players/{id}/suspend",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermPlayerSuspend)(newSuspendPlayerHandler(deps)))))
+	// Stage 5 (Operator Back Office MVP): the inverse of suspend - same
+	// authorization tier (PermPlayerSuspend), same tenant scoping.
+	mux.Handle("POST /v1/admin/players/{id}/reinstate",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermPlayerSuspend)(newReinstatePlayerHandler(deps)))))
 	// Stage 4E: clear a player_account out of identity_review_required -
 	// PermIdentityReviewManage (RoleCompliance only), never PermPlayerSuspend.
 	mux.Handle("POST /v1/admin/players/{id}/identity-review/clear",
@@ -97,4 +119,15 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	// Audit trail: read-only, tenant-scoped.
 	mux.Handle("GET /v1/admin/audit-log",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermAuditRead)(newListAuditLogHandler(deps)))))
+
+	// Stage 5 (Operator Back Office MVP): the platform-scoped counterpart
+	// to the tenant-scoped route above, for audit_log rows with
+	// tenant_id IS NULL (AssignTenantLicence, tenant.created, and
+	// operating-market audit rows per migration 0077) - see
+	// newListPlatformAuditLogHandler's own doc comment. Deliberately NOT
+	// wrapped in RequireTenantScope (which would reject the platform_admin's
+	// nil-tenant token before the handler's own, more precise check could
+	// run) - mirrors newCreateTenantHandler's own platform-scope pattern.
+	mux.Handle("GET /v1/admin/platform/audit-log",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermAuditRead)(newListPlatformAuditLogHandler(deps))))
 }

@@ -216,28 +216,48 @@ func GetPlayerAccountByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (PlayerA
 	return a, nil
 }
 
-// ListPlayerAccounts returns up to limit player accounts for the current
+// ListPlayerAccounts returns a page of player accounts for the current
 // tenant context, ordered newest first, for the admin listing endpoint.
-func ListPlayerAccounts(ctx context.Context, tx pgx.Tx, limit int) ([]PlayerAccount, error) {
-	rows, err := tx.Query(ctx,
-		`SELECT id, tenant_id, brand_id, person_id, email, password_hash, status, kyc_tier
-		 FROM player_accounts ORDER BY id DESC LIMIT $1`,
-		limit,
-	)
+// q (when non-empty) is matched case-insensitively as a substring against
+// email; status (when non-empty) is an exact match against the status
+// column. Both are passed as bound parameters, never string-concatenated.
+// total is the count of ALL rows matching the filters within the current
+// tenant scope (not just this page), computed via count(*) OVER() in the
+// same query so it can never drift from what was actually read; it is 0
+// (not queried separately) when the page itself is empty.
+func ListPlayerAccounts(ctx context.Context, tx pgx.Tx, q, status string, limit, offset int) ([]PlayerAccount, int, error) {
+	query := `SELECT id, tenant_id, brand_id, person_id, email, password_hash, status, kyc_tier, count(*) OVER()
+	          FROM player_accounts WHERE true`
+	args := []any{}
+	if q != "" {
+		args = append(args, "%"+strings.ToLower(q)+"%")
+		query += fmt.Sprintf(" AND email ILIKE $%d", len(args))
+	}
+	if status != "" {
+		args = append(args, status)
+		query += fmt.Sprintf(" AND status = $%d", len(args))
+	}
+	args = append(args, limit)
+	query += fmt.Sprintf(" ORDER BY id DESC LIMIT $%d", len(args))
+	args = append(args, offset)
+	query += fmt.Sprintf(" OFFSET $%d", len(args))
+
+	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("identity: list player accounts: %w", err)
+		return nil, 0, fmt.Errorf("identity: list player accounts: %w", err)
 	}
 	defer rows.Close()
 
 	var accounts []PlayerAccount
+	var total int
 	for rows.Next() {
 		var a PlayerAccount
-		if err := rows.Scan(&a.ID, &a.TenantID, &a.BrandID, &a.PersonID, &a.Email, &a.PasswordHash, &a.Status, &a.KYCTier); err != nil {
-			return nil, fmt.Errorf("identity: scan player account: %w", err)
+		if err := rows.Scan(&a.ID, &a.TenantID, &a.BrandID, &a.PersonID, &a.Email, &a.PasswordHash, &a.Status, &a.KYCTier, &total); err != nil {
+			return nil, 0, fmt.Errorf("identity: scan player account: %w", err)
 		}
 		accounts = append(accounts, a)
 	}
-	return accounts, rows.Err()
+	return accounts, total, rows.Err()
 }
 
 // SetPlayerAccountStatus updates a player account's status - the hook
@@ -313,6 +333,24 @@ func SetPlayerAccountStatusIfCurrent(ctx context.Context, tx pgx.Tx, id uuid.UUI
 		return false, fmt.Errorf("identity: set player account status if current: %w", err)
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// ReinstatePlayerAccount transitions a player_account from 'suspended' back
+// to 'active' - Stage 5's inverse of the admin suspend action
+// (SetPlayerAccountStatus(..., PlayerStatusSuspended), used by
+// newSuspendPlayerHandler). Deliberately built on
+// SetPlayerAccountStatusIfCurrent (an atomic conditional transition),
+// NOT a blind SetPlayerAccountStatus(..., PlayerStatusActive) write: a
+// player_account can also be 'self_excluded' or 'closed', and this generic
+// back-office reinstate action must never be usable to silently clear a
+// self-exclusion (which has its own dedicated compliance workflow and
+// jurisdiction-governed rules - see docs/decisions/0034) or reopen a closed
+// account. Returns applied=false (no error, nothing written) when the
+// account exists but is not currently 'suspended' - the caller distinguishes
+// "not found" from "not currently suspended" exactly like
+// newClearIdentityReviewHandler already does for SetPlayerAccountStatusIfCurrent.
+func ReinstatePlayerAccount(ctx context.Context, tx pgx.Tx, id uuid.UUID) (applied bool, err error) {
+	return SetPlayerAccountStatusIfCurrent(ctx, tx, id, PlayerStatusSuspended, PlayerStatusActive)
 }
 
 // --- Stage 4I Phase B: declared residence (self-service, unverified) ---

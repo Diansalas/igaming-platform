@@ -147,6 +147,45 @@ func ListCampaigns(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]Campai
 	return out, rows.Err()
 }
 
+// ListCampaignsPage returns a page of Campaigns visible under the
+// caller's current RLS scope, optionally filtered by status, most
+// recently created first, plus the total count matching the filter -
+// Stage 5 (Operator Back Office MVP)'s own read surface, additive to
+// ListCampaigns (unchanged, still used by every existing caller that
+// wants the full unfiltered/unpaginated set). Follows this package's own
+// "read functions take tenantID and never mutate" convention exactly.
+func ListCampaignsPage(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, status *CampaignStatus, limit, offset int) ([]Campaign, int, error) {
+	where := "tenant_id = $1"
+	args := []any{tenantID}
+	if status != nil {
+		args = append(args, string(*status))
+		where += fmt.Sprintf(" AND status = $%d", len(args))
+	}
+
+	var total int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM bonus_campaigns WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("bonus: count campaigns: %w", err)
+	}
+
+	pageArgs := append(append([]any{}, args...), limit, offset)
+	sql := `SELECT ` + campaignColumns + ` FROM bonus_campaigns WHERE ` + where +
+		fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, len(pageArgs)-1, len(pageArgs))
+	rows, err := tx.Query(ctx, sql, pageArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("bonus: list campaigns page: %w", err)
+	}
+	defer rows.Close()
+	var out []Campaign
+	for rows.Next() {
+		c, err := scanCampaign(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, c)
+	}
+	return out, total, rows.Err()
+}
+
 // UpdateCampaignStatus performs the one allowed-transition update this
 // package provides: an unconditional status write. It enforces no
 // transition-legality rule (doc 10's activate/suspend asymmetry, four-eyes

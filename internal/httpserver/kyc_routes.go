@@ -26,6 +26,10 @@ func registerKYCRoutes(mux *http.ServeMux, deps Deps) {
 
 	mux.Handle("GET /v1/admin/kyc/verifications",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newListVerificationsForAccountHandler(deps)))))
+	// Stage 5 Back Office: the tenant-wide case queue (no player_account_id
+	// required) - see newListKYCCasesHandler's own doc comment.
+	mux.Handle("GET /v1/admin/kyc/cases",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newListKYCCasesHandler(deps)))))
 	mux.Handle("POST /v1/admin/kyc/verifications/{id}/review",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationReview)(newReviewVerificationHandler(deps)))))
 	mux.Handle("GET /v1/admin/kyc/documents",

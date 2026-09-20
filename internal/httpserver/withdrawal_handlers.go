@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
+	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/observability"
@@ -237,6 +238,18 @@ func newGetWithdrawalHandler(deps Deps) http.HandlerFunc {
 type staffWithdrawalResponse struct {
 	withdrawalRequestResponse
 	PlayerAccountID string `json:"player_account_id"`
+	// DecimalExponent is populated ONLY by the Stage 5 admin history/detail
+	// handlers below (newListAdminWithdrawalsHandler/
+	// newGetAdminWithdrawalHandler) - omitempty so the pre-existing
+	// pending-queue/submitted-queue handlers, which do not populate it,
+	// never emit a misleading `0` (which would tell a client to render
+	// every amount as whole units regardless of the asset's real
+	// exponent). A ledger-finance review flagged the Back Office
+	// withdrawal-approval page rendering raw minor units with no exponent
+	// (e.g. "10000 EUR" for what is actually EUR 100.00) as a real
+	// financial-clarity defect at an irreversible decision point - this
+	// field, plus the frontend formatter that consumes it, closes that.
+	DecimalExponent int16 `json:"decimal_exponent,omitempty"`
 }
 
 // newListPendingWithdrawalsHandler is the staff review queue - tenant-
@@ -327,6 +340,150 @@ func newListPendingWithdrawalsHandler(deps Deps) http.HandlerFunc {
 			resp = []staffWithdrawalResponse{}
 		}
 		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// --- Stage 5 Back Office withdrawal history (read-only) ---
+
+// newListAdminWithdrawalsHandler is the Stage 5 Back Office withdrawal
+// history view: tenant-wide (not player-restricted) and across the FULL
+// state range the state machine defines (withdrawal.ValidStates), not just
+// the pending-review subset newListPendingWithdrawalsHandler serves -
+// this is the operator-facing "show me everything" queue that view needs
+// to display before drilling into one withdrawal via
+// newGetAdminWithdrawalHandler. Paginated per the shared Stage 5
+// convention (pagination.go).
+//
+// Deliberately a pure read: unlike newListPendingWithdrawalsHandler, it
+// never calls withdrawal.MoveToPendingReview - a mere history view must
+// not itself advance a player's still-cancellable `requested` window
+// (withdrawal-state-machine.md §7's documented cancel-vs-approve race
+// rationale), and doing so here would let a Back Office table simply
+// being open in a browser tab silently close that window for every
+// `requested` row in the tenant.
+func newListAdminWithdrawalsHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+
+		var statusFilter *withdrawal.State
+		if raw := r.URL.Query().Get("status"); raw != "" {
+			s := withdrawal.State(raw)
+			if !withdrawal.IsValidState(s) {
+				apierror.Write(w, requestID, apierror.CodeValidation, "invalid status filter")
+				return
+			}
+			statusFilter = &s
+		}
+		p := parsePageParams(r)
+
+		var items []staffWithdrawalResponse
+		var total int
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			requests, count, err := withdrawal.ListForTenant(ctx, tx, statusFilter, p.Limit, p.Offset)
+			if err != nil {
+				return err
+			}
+			total = count
+			items = make([]staffWithdrawalResponse, 0, len(requests))
+			// One asset-registry lookup per distinct asset code in this page,
+			// not per row - a Back Office withdrawal page realistically spans
+			// a small, repeating set of assets.
+			exponents := make(map[string]int16)
+			for _, wr := range requests {
+				exp, ok := exponents[wr.AssetCode]
+				if !ok {
+					a, err := assetregistry.GetAsset(ctx, tx, wr.AssetCode)
+					if err != nil {
+						return fmt.Errorf("withdrawal admin list: look up asset %q: %w", wr.AssetCode, err)
+					}
+					exp = a.DecimalExponent
+					exponents[wr.AssetCode] = exp
+				}
+				items = append(items, staffWithdrawalResponse{
+					withdrawalRequestResponse: toWithdrawalRequestResponse(wr),
+					PlayerAccountID:           wr.PlayerAccountID.String(),
+					DecimalExponent:           exp,
+				})
+			}
+			return nil
+		})
+		if err != nil {
+			logger.Error("list_admin_withdrawals_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to list withdrawals")
+			return
+		}
+		writeJSON(w, http.StatusOK, newPagedResponse(items, p, total))
+	}
+}
+
+// newGetAdminWithdrawalHandler is the Stage 5 Back Office withdrawal
+// detail view: tenant-wide (any withdrawal belonging to the caller's own
+// tenant, not just the caller's own - staff legitimately inspect any
+// player's withdrawal in their tenant before acting on it via the
+// existing approve/reject/submit/resolve endpoints). A pure read: takes
+// no row lock and calls no state-transition function.
+func newGetAdminWithdrawalHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid withdrawal id")
+			return
+		}
+
+		var wr withdrawal.WithdrawalRequest
+		var decimalExponent int16
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			wr, err = withdrawal.GetByID(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			a, err := assetregistry.GetAsset(ctx, tx, wr.AssetCode)
+			if err != nil {
+				return fmt.Errorf("withdrawal admin detail: look up asset %q: %w", wr.AssetCode, err)
+			}
+			decimalExponent = a.DecimalExponent
+			return nil
+		})
+		if errors.Is(err, withdrawal.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
+			return
+		}
+		if err != nil {
+			logger.Error("get_admin_withdrawal_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to load withdrawal")
+			return
+		}
+		if wr.TenantID != tc.TenantID {
+			// Belt-and-braces on top of tenant_staff_scope's own RLS filter
+			// (migration 0026), which already makes this branch practically
+			// unreachable - mirrors newGetWithdrawalHandler's identical
+			// player-ownership check, applied here at the tenant boundary:
+			// never let a caller distinguish "exists in another tenant" from
+			// "does not exist at all".
+			apierror.Write(w, requestID, apierror.CodeNotFound, "withdrawal not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, staffWithdrawalResponse{
+			withdrawalRequestResponse: toWithdrawalRequestResponse(wr),
+			PlayerAccountID:           wr.PlayerAccountID.String(),
+			DecimalExponent:           decimalExponent,
+		})
 	}
 }
 

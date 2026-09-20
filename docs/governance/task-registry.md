@@ -1966,6 +1966,111 @@ read/query API surface + UI" — new domain query functions and endpoints
 for roughly half the named capabilities, each with its own tests, before
 any UI screen can consume them.
 
+## Stage 5 — Operator Back Office MVP
+
+One large, single-authorization implementation stage (the directive's own
+"one stage = one large product objective" instruction — no intermediate
+approval gates). Frozen architecture (Stage 4I jurisdiction/licensing/
+operating-market, KYC, RG, bonus, wallet/ledger, payments, sportsbook,
+casino) was not reopened. Full narrative: `docs/progress.md`'s "Stage 5"
+section and `docs/active-stage.md`'s current-stage entry.
+
+| ID | Owner | Status | Files owned | Tests | Blockers | Integration |
+|---|---|---|---|---|---|---|
+| S5-01 | Orchestrator | Done | `internal/httpserver/pagination.go` (new, shared) | n/a | none | n/a |
+| S5-02 | backend | Done | `internal/identity/{tenant,brand,player_account}.go`, `internal/httpserver/{admin_routes,routes}.go`, `backoffice_admin_integration_test.go` (new) | 20 new integration tests, all authorized/unauthorized/cross-tenant cases | none | Verified in combined whole-repo run |
+| S5-03 | identity-compliance | Done | `internal/kyc/verification_service.go`, `internal/rg/rg.go`, `internal/httpserver/{kyc_admin_handlers,kyc_routes,rg_handlers}.go` + test files | new KYC/RG tests, cross-tenant isolation | Self-caught and self-fixed a real cross-tenant PII leak before shipping (see below) | Verified |
+| S5-04 | bonus-engine | Done | `internal/bonus/{campaign,change_governance,grant}.go`, `internal/httpserver/bonus_admin_read_handlers.go` (new) + test file | 9 new integration tests | none | Verified |
+| S5-05 | backend (2nd instance) | Done | `internal/withdrawal/withdrawal.go`, `internal/httpserver/{withdrawal_handlers,financial_routes}.go` + `stage5_admin_withdrawal_view_test.go` (new) | new admin withdrawal tests, no regression to frozen state machine | none | Verified |
+| S5-06 | backoffice | Done | `backoffice/` (new npm project, ~40+ files) | 17 Vitest tests, `npm run build` clean | one deliberate partial (player-detail audit sub-section omitted — no matching filtered endpoint exists) | Verified (build+test independently re-run by Orchestrator) |
+| S5-07 | Orchestrator | Done | `docs/api/openapi/platform-api.yaml` (72 paths, 30 schemas after this stage) | YAML-validated | none | n/a |
+| S5-08 | architect, security, qa, ledger-finance (narrow) | Done | review only | n/a | See findings below | n/a |
+| S5-09 | Orchestrator (fix round) | Done | `backoffice/src/{auth/AuthContext.tsx,api/{auth,client,withdrawals}.ts,lib/money.ts (new),features/withdrawals/*}`, `internal/httpserver/{withdrawal_handlers,rg_flow_integration_test}.go` | Full validation gate re-run clean after fixes | none | Verified |
+| S5-10 | Orchestrator | Done | this registry, `docs/active-stage.md`, `docs/progress.md` | full validation gate | none | n/a — **stage explicitly STOPS here; Stage 6 NOT authorized** |
+
+### Review findings and dispositions
+
+**Architect** (PASS, no P0/P1/P2): 2 P3s recorded, not fixed —
+`GET /v1/admin/rg/restrictions`'s two response shapes (bare array vs.
+paginated envelope) is the one inconsistency with the otherwise-uniform
+Stage 5 pagination convention; the new RG tenant-wide queue has no
+`player_account_id` field, so it can't attribute a restriction to a
+player (a real functional gap, left as a fast-follow per the reviewer's
+own "your call" framing — not fixed this stage to avoid scope creep on a
+completion-gate pass). 2 P4s (partial theming tokens; `risk_manager` role
+sees an empty nav with no held Stage 5 permission) — cosmetic, deferred.
+
+**QA** (PASS, no P0/P1/P2): full validation gate green (1492 Go tests
+across 29 packages, `-race` clean on withdrawal/identity, 17 frontend
+tests); coverage judgment confirmed every new endpoint has genuine
+authorized/unauthorized/cross-tenant tests, and the reinstate mutation's
+audit-row shape is asserted, not just its status code.
+
+**Ledger-finance** (SIGN-OFF on the withdrawal UI, narrow scope): pure
+pass-through confirmed, no client-side financial logic. **P2, fixed**:
+amounts rendered in raw minor units with no exponent formatting at the
+irreversible approval decision (e.g. "10000 EUR" for what is actually
+EUR 100.00) — fixed by adding `decimal_exponent` to the two new
+withdrawal admin response shapes and a shared frontend `formatMoney`
+helper. P3 recorded, not fixed: `amount` is a JSON number, a latent
+precision hazard once crypto-asset withdrawals (exponent 8/18) reach this
+endpoint — `bonus.ts` already uses the safer string convention, adopt it
+here when that day comes.
+
+**Security** (the review round's two most consequential findings, both
+**P2, both fixed**):
+1. The SPA's "Sign out" only cleared local browser state and never called
+   the existing `POST /v1/auth/logout` — a stolen refresh token remained
+   valid server-side for its full 30-day TTL with no user-reachable way to
+   revoke it. Fixed: `logout` now calls the server best-effort before
+   clearing local state.
+2. `TestRGAdminRestriction_TenantWideList_CrossTenantDenied` — the named
+   regression guard for S5-03's own leak fix — was itself vacuous: it
+   seeded a `scope:"tenant"` restriction the pre-existing RLS policy
+   already filtered on its own, and the comparison tenant had no player at
+   all, so the assertion passed unconditionally. Proven by mutation
+   testing (weakening the join to a `LEFT JOIN` left the OLD test green).
+   Fixed: rewritten to seed a genuinely platform-wide self-exclusion via
+   the player's own self-exclusion endpoint, assert the fixture's
+   `tenant_id IS NULL` directly, and give the comparison tenant its own
+   real restriction so the isolation check is non-vacuous — re-verified
+   by the same mutation test (weakening the join now correctly fails it).
+
+One **P3, fixed** alongside the P2s: the SPA's session-bootstrap-on-reload
+called the raw refresh function directly instead of the existing
+single-flight `refreshSessionOnce()`, so React 18 StrictMode's deliberate
+double-effect-invocation could present the same refresh token twice —
+which the backend correctly treats as reuse and revokes the entire
+session chain (`auth.session_reuse_detected`). Fixed by routing bootstrap
+through the same dedup path `apiFetch`'s own 401 handling already uses.
+
+**Deferred P3/P4s, recorded, not fixed** (per the directive's own
+"record and continue" instruction — none block this stage or the next):
+refresh token in `sessionStorage` (XSS-readable) combined with the 30-day
+TTL — security flagged this **launch-blocking for the Back Office
+specifically** (production needs httpOnly/Secure/SameSite cookies, a
+backend change out of this stage's scope), tracked alongside
+`PLAT-ROLESPLIT-1` as a second pre-production gate, not resolved here;
+zero frontend test coverage for the 401-refresh-retry logic despite it
+being the most security-sensitive module in the SPA; `tenants`/`brands`
+read isolation is handler-only (`canActOnTenant` plus an explicit
+tenant-ID comparison) with no RLS backstop — correct as written and
+tested, but a future handler against these tables should not assume
+isolation it doesn't structurally have; `q` search values are not
+LIKE-escaped in `ListTenants`/`ListPlayerAccounts` (not injection —
+bound parameters — a search-semantics quirk only).
+
+### Explicitly NOT this stage's to build (confirmed absent)
+
+The B2C player frontend, sportsbook, casino, partner console; any
+tenant/brand CREATE forms, licence management, or dual-control approval
+infrastructure in the Back Office; any change to
+`internal/operatingmarket`, `internal/jurisdiction`, KYC/RG/bonus
+business logic, or the withdrawal state machine/four-eyes controls; any
+answer to `HDR-J-6/7/8/9`/`HDR-M-1/2`; any production resolver wiring;
+any fix to `PLAT-ROLESPLIT-1` (remains documented-not-executed per
+`docs/security/runtime-role-separation.md`).
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

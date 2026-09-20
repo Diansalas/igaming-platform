@@ -98,10 +98,41 @@ type changeRequestResponse struct {
 	TargetType string `json:"target_type"`
 	TargetID   string `json:"target_id"`
 	State      string `json:"state"`
+	// ReasonCode/RequestedByPrincipalID/RequestedAt/AmountAtRequest/
+	// AssetCode/AppliedByPrincipalID/AppliedAt are additive (Stage 5
+	// Operator Back Office MVP's read surface, newListChangeRequestsHandler
+	// - the approval queue needs enough of the row to let an operator
+	// decide without a second lookup). omitempty keeps every pre-existing
+	// caller's response shape (file/decide) unchanged in substance - those
+	// handlers already populate the underlying ChangeRequest fully, so
+	// this only adds keys to their JSON, never removes or renames one.
+	ReasonCode             string `json:"reason_code,omitempty"`
+	RequestedByPrincipalID string `json:"requested_by_principal_id,omitempty"`
+	RequestedAt            string `json:"requested_at,omitempty"`
+	AmountAtRequest        string `json:"amount_at_request,omitempty"`
+	AssetCode              string `json:"asset_code,omitempty"`
+	AppliedByPrincipalID   string `json:"applied_by_principal_id,omitempty"`
+	AppliedAt              string `json:"applied_at,omitempty"`
 }
 
 func toChangeRequestResponse(r bonus.ChangeRequest) changeRequestResponse {
-	return changeRequestResponse{ID: r.ID.String(), Operation: string(r.Operation), TargetType: r.TargetType, TargetID: r.TargetID.String(), State: string(r.State)}
+	resp := changeRequestResponse{
+		ID: r.ID.String(), Operation: string(r.Operation), TargetType: r.TargetType, TargetID: r.TargetID.String(), State: string(r.State),
+		ReasonCode: r.ReasonCode, RequestedByPrincipalID: r.RequestedByPrincipalID.String(), RequestedAt: r.RequestedAt.UTC().Format(rfc3339),
+	}
+	if r.AmountAtRequest != nil {
+		resp.AmountAtRequest = r.AmountAtRequest.String()
+	}
+	if r.AssetCode != nil {
+		resp.AssetCode = *r.AssetCode
+	}
+	if r.AppliedByPrincipalID != nil {
+		resp.AppliedByPrincipalID = r.AppliedByPrincipalID.String()
+	}
+	if r.AppliedAt != nil {
+		resp.AppliedAt = r.AppliedAt.UTC().Format(rfc3339)
+	}
+	return resp
 }
 
 // newFileChangeRequestHandler is the ONE surface every one of the eight

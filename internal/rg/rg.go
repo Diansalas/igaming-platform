@@ -392,6 +392,123 @@ func ListRestrictionsForAccount(ctx context.Context, tx pgx.Tx, accountID uuid.U
 	return scanRestrictions(rows)
 }
 
+// ListRestrictionsForTenantParams is ListRestrictionsForTenant's input.
+// RestrictionType == "" means "no filter on that dimension" - today the
+// only value the restriction_type column's own CHECK constraint admits is
+// RestrictionSelfExclusion (see this file's own comment on that type), so
+// this filter is a forward-compatible no-op in practice until a future
+// migration adds a second restriction type, not a currently meaningful
+// narrowing. Limit/Offset are trusted, already-validated pagination inputs
+// (see internal/httpserver.parsePageParams, the Stage 5 Back Office
+// pagination convention) - this function does not independently
+// re-validate their bounds.
+type ListRestrictionsForTenantParams struct {
+	RestrictionType RestrictionType
+	Limit           int
+	Offset          int
+}
+
+// scanRestrictionsWithTotal is scanRestrictions' counterpart for a query
+// that additionally projects a `count(*) OVER()` window column - kept
+// separate from scanRestrictions (whose column list is exactly
+// restrictionColumns, reused verbatim by every other caller) rather than
+// complicating that helper's signature for its one caller that needs a
+// running total.
+func scanRestrictionsWithTotal(rows pgx.Rows) ([]Restriction, int, error) {
+	defer rows.Close()
+	var out []Restriction
+	total := 0
+	for rows.Next() {
+		var r Restriction
+		var createdByActorType string
+		var reasonCode *string
+		if err := rows.Scan(
+			&r.ID, &r.PersonID, &r.TenantID, &r.BrandID, &r.PlayerAccountID, &r.RestrictionType,
+			&r.StartsAt, &r.EndsAt, &r.Source, &reasonCode, &createdByActorType, &r.CreatedByActorID, &r.CreatedAt, &total,
+		); err != nil {
+			return nil, 0, fmt.Errorf("rg: scan restriction with total: %w", err)
+		}
+		if reasonCode != nil {
+			r.ReasonCode = *reasonCode
+		}
+		r.CreatedByActorType = audit.ActorType(createdByActorType)
+		out = append(out, r)
+	}
+	return out, total, rows.Err()
+}
+
+// ListRestrictionsForTenant is the Stage 5 Back Office operator queue
+// read: every player_restrictions row belonging to one of THIS tenant's
+// OWN players (see the INNER JOIN discussion below), optionally narrowed
+// by RestrictionType, newest first, paginated, along with the total
+// matching row count (ignoring Limit/Offset). Distinct from
+// ListRestrictionsForAccount, which is unpaginated and always scoped to
+// one already-resolved accountID's Person - this is the additional,
+// tenant-wide "list everyone" counterpart that function's own doc comment
+// deliberately did not provide; ListRestrictionsForAccount's behavior is
+// unchanged by this addition.
+//
+// SECURITY: deliberately NOT a bare `SELECT ... FROM player_restrictions`
+// relying on staff_and_system_read RLS alone, unlike every other read in
+// this file. That policy's own `tenant_id IS NULL OR tenant_id =
+// app.tenant_id` clause is intentionally broad - by design, it lets a
+// tenant's WithTenant transaction see a DIFFERENT tenant's player's
+// platform-wide self-exclusion row too, because that is exactly what
+// cross-tenant enforcement (EvaluateEligibility, called from every
+// tenant's own bet/launch path) requires: a tenant must be able to
+// enforce a platform-wide exclusion it did not itself create. A one-off
+// enforcement CHECK silently confirming "yes/no, excluded" never exposes
+// WHO else is affected. This function is different in kind: it lists and
+// returns the affected person/account/reason_code to a human operator, so
+// naively reusing the same bare-RLS read here would hand tenant B's
+// compliance staff the identity and reason code of tenant A's player's
+// platform-wide self-exclusion - a real cross-tenant PII exposure this
+// query must not introduce merely because a Stage 5 handler stopped
+// requiring an already-named player_account_id. (Caught in this
+// specialist's own adversarial pre-ship testing - see
+// TestRGAdminRestriction_TenantWideList_CrossTenantDenied.)
+//
+// The INNER JOIN to player_accounts closes this: player_accounts carries
+// its own, narrower tenant_isolation RLS policy (migration 0010, no
+// platform-wide read path at all) - a row survives this join only if its
+// player_account_id names an account that ACTUALLY belongs to the
+// caller's own tenant, regardless of whether the restriction's own
+// tenant_id column is NULL (platform-wide) or set. This mirrors
+// ListRestrictionsForAccount's own implicit guarantee (it only ever
+// resolves an accountID that identity.GetPlayerAccountByID's RLS already
+// limited to the caller's tenant) generalized from "one named account" to
+// "any of this tenant's own accounts."
+//
+// KNOWN LIMITATION: player_restrictions.player_account_id is nullable in
+// the schema "for a hypothetical future path with no anchor account"
+// (migration 0037's own column comment) - no writer in this codebase
+// produces such a row today (CreateSelfExclusion/CreateStaffRestriction
+// both always set it), so the INNER JOIN excludes nothing that can
+// currently exist. A future account-less restriction type would need a
+// different resolution path added here, not silently included by
+// weakening this JOIN back to a LEFT JOIN (which would reopen exactly the
+// leak this comment describes for that one row).
+//
+// tx must already be tenant-scoped (db.WithTenant) - identical
+// precondition to ListRestrictionsForAccount's own staff-read caller.
+func ListRestrictionsForTenant(ctx context.Context, tx pgx.Tx, params ListRestrictionsForTenantParams) ([]Restriction, int, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT pr.id, pr.person_id, pr.tenant_id, pr.brand_id, pr.player_account_id, pr.restriction_type,
+		        pr.starts_at, pr.ends_at, pr.source, pr.reason_code, pr.created_by_actor_type, pr.created_by_actor_id, pr.created_at,
+		        count(*) OVER() AS total_count
+		 FROM player_restrictions pr
+		 JOIN player_accounts pa ON pa.id = pr.player_account_id
+		 WHERE ($1 = '' OR pr.restriction_type = $1)
+		 ORDER BY pr.created_at DESC
+		 LIMIT $2 OFFSET $3`,
+		string(params.RestrictionType), params.Limit, params.Offset,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("rg: list restrictions for tenant: %w", err)
+	}
+	return scanRestrictionsWithTotal(rows)
+}
+
 // Decision is EvaluateEligibility's deterministic, auditable output.
 // Code is a stable, machine-readable reason - never a free-form message
 // alone - so callers (and their own callers, e.g. an HTTP handler mapping

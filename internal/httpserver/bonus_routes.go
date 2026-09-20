@@ -20,6 +20,19 @@ func registerBonusRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("POST /v1/bonus/coupons/redeem",
 		auth.Middleware(deps.AuthIssuer)(newRedeemCouponHandler(deps)))
 
+	// Stage 5 (Operator Back Office MVP): the bonus admin READ surface
+	// (bonus_admin_read_handlers.go) - campaign list, the change-request
+	// approval queue, and grant list (tenant-wide or per-player). Purely
+	// additive; PermBonusRead is this codebase's existing general
+	// read-only bonus visibility permission (see that file's own top-of-
+	// file doc comment for why it, not a new permission, is reused here).
+	mux.Handle("GET /v1/admin/bonus/campaigns",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusRead)(newListCampaignsHandler(deps)))))
+	mux.Handle("GET /v1/admin/bonus/change-requests",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusRead)(newListChangeRequestsHandler(deps)))))
+	mux.Handle("GET /v1/admin/bonus/grants",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusRead)(newListGrantsHandler(deps)))))
+
 	mux.Handle("POST /v1/admin/bonus/campaigns",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermBonusCampaignCreate)(newCreateCampaignHandler(deps)))))
 	mux.Handle("POST /v1/admin/bonus/grants",

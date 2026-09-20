@@ -801,6 +801,175 @@ func TestKYC_RLSAdversarial_CrossTenantDirectSQLDenied(t *testing.T) {
 	}
 }
 
+// --- 16. Stage 5 Back Office: GET /v1/admin/kyc/cases is a tenant-wide,
+// paginated queue - authorized request succeeds with the paged envelope
+// shape and both ?status= and ?player_account_id= filters narrow it. ---
+
+func TestKYCCases_TenantWideQueueAuthorizedAndPaginated(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, mockProvider, _ := newKYCTestServer(t, pool, issuer)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	playerA := mustRegisterPlayer(t, srv, brand.Slug)
+	playerB := mustRegisterPlayer(t, srv, brand.Slug)
+
+	verAResp := postJSON(t, srv, "/v1/me/kyc/verifications", playerA.Tokens.AccessToken, map[string]any{})
+	var verA map[string]any
+	decodeBody(t, verAResp, &verA)
+
+	verBResp := postJSON(t, srv, "/v1/me/kyc/verifications", playerB.Tokens.AccessToken, map[string]any{})
+	var verB map[string]any
+	decodeBody(t, verBResp, &verB)
+	providerReferenceB := verB["provider_reference"].(string)
+
+	// Move playerB's verification to approved via the (already-tested)
+	// provider callback path, so the two cases have different statuses to
+	// filter on.
+	body, sig := mockProvider.MockCallbackPayload(providerReferenceB, kyc.ProviderApproved, "auto_approved")
+	signed := kyc.MockSignedCallbackBody(body, sig)
+	cbResp := rawPostJSON(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", signed)
+	if cbResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 applying callback, got %d", cbResp.StatusCode)
+	}
+	cbResp.Body.Close()
+
+	compliance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleCompliance, "compliance-kyc-queue-pw-1")
+	complianceTokens := mustLoginStaff(t, srv, tenant.Slug, compliance.Email, "compliance-kyc-queue-pw-1")
+
+	// Unfiltered: both cases visible, paginated envelope shape.
+	resp := getJSON(t, srv, "/v1/admin/kyc/cases", complianceTokens.AccessToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for compliance listing the tenant-wide KYC queue, got %d", resp.StatusCode)
+	}
+	var page struct {
+		Items  []map[string]any `json:"items"`
+		Limit  int              `json:"limit"`
+		Offset int              `json:"offset"`
+		Total  int              `json:"total"`
+	}
+	decodeBody(t, resp, &page)
+	if page.Total != 2 || len(page.Items) != 2 || page.Limit != 50 || page.Offset != 0 {
+		t.Fatalf("expected a paginated envelope with 2 total/items, got %+v", page)
+	}
+	for _, item := range page.Items {
+		if item["player_account_id"] != playerA.ID.String() && item["player_account_id"] != playerB.ID.String() {
+			t.Fatalf("unexpected player_account_id in queue item: %+v", item)
+		}
+		if item["brand_id"] == nil || item["created_at"] == nil {
+			t.Fatalf("expected brand_id/created_at to be populated, got %+v", item)
+		}
+	}
+
+	// ?status=approved narrows to exactly playerB's case.
+	statusResp := getJSON(t, srv, "/v1/admin/kyc/cases?status=approved", complianceTokens.AccessToken)
+	defer statusResp.Body.Close()
+	var statusPage struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	decodeBody(t, statusResp, &statusPage)
+	if statusPage.Total != 1 || len(statusPage.Items) != 1 || statusPage.Items[0]["player_account_id"] != playerB.ID.String() {
+		t.Fatalf("expected exactly playerB's approved case, got %+v", statusPage)
+	}
+
+	// ?player_account_id= narrows to exactly playerA's case.
+	acctResp := getJSON(t, srv, "/v1/admin/kyc/cases?player_account_id="+playerA.ID.String(), complianceTokens.AccessToken)
+	defer acctResp.Body.Close()
+	var acctPage struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	decodeBody(t, acctResp, &acctPage)
+	if acctPage.Total != 1 || len(acctPage.Items) != 1 || acctPage.Items[0]["player_account_id"] != playerA.ID.String() {
+		t.Fatalf("expected exactly playerA's case, got %+v", acctPage)
+	}
+
+	// Pagination bounds: limit/offset are honored.
+	limitedResp := getJSON(t, srv, "/v1/admin/kyc/cases?limit=1&offset=1", complianceTokens.AccessToken)
+	defer limitedResp.Body.Close()
+	var limitedPage struct {
+		Items  []map[string]any `json:"items"`
+		Limit  int              `json:"limit"`
+		Offset int              `json:"offset"`
+		Total  int              `json:"total"`
+	}
+	decodeBody(t, limitedResp, &limitedPage)
+	if limitedPage.Limit != 1 || limitedPage.Offset != 1 || limitedPage.Total != 2 || len(limitedPage.Items) != 1 {
+		t.Fatalf("expected limit=1/offset=1/total=2/one item, got %+v", limitedPage)
+	}
+
+	// An invalid ?status= value is a 400, not silently ignored.
+	badStatusResp := getJSON(t, srv, "/v1/admin/kyc/cases?status=not_a_real_status", complianceTokens.AccessToken)
+	defer badStatusResp.Body.Close()
+	if badStatusResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an invalid status filter, got %d", badStatusResp.StatusCode)
+	}
+}
+
+// --- 17. GET /v1/admin/kyc/cases requires PermVerificationRead - a
+// finance/support/player token is denied ---
+
+func TestKYCCases_UnauthorizedDenied(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	finance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleFinance, "finance-kyc-queue-pw-1")
+	financeTokens := mustLoginStaff(t, srv, tenant.Slug, finance.Email, "finance-kyc-queue-pw-1")
+	resp := getJSON(t, srv, "/v1/admin/kyc/cases", financeTokens.AccessToken)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 for finance listing the KYC queue, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	support := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleSupport, "support-kyc-queue-pw-1")
+	supportTokens := mustLoginStaff(t, srv, tenant.Slug, support.Email, "support-kyc-queue-pw-1")
+	resp = getJSON(t, srv, "/v1/admin/kyc/cases", supportTokens.AccessToken)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 for support listing the KYC queue, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = getJSON(t, srv, "/v1/admin/kyc/cases", player.Tokens.AccessToken)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 for a player token listing the KYC queue, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// --- 18. Cross-tenant: tenant B's compliance staff cannot see tenant A's
+// KYC cases in the tenant-wide queue ---
+
+func TestKYCCases_CrossTenantDenied(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	tenantA := mustCreateTenant(t, pool)
+	brandA := mustCreateBrand(t, pool, tenantA)
+	playerA := mustRegisterPlayer(t, srv, brandA.Slug)
+
+	postJSON(t, srv, "/v1/me/kyc/verifications", playerA.Tokens.AccessToken, map[string]any{}).Body.Close()
+
+	tenantB := mustCreateTenant(t, pool)
+	complianceB := mustCreateStaff(t, pool, tenantB.ID, identity.StaffRoleCompliance, "compliance-kyc-queue-crosstenant-pw-1")
+	complianceBTokens := mustLoginStaff(t, srv, tenantB.Slug, complianceB.Email, "compliance-kyc-queue-crosstenant-pw-1")
+
+	resp := getJSON(t, srv, "/v1/admin/kyc/cases", complianceBTokens.AccessToken)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for tenant B listing its own (empty) queue, got %d", resp.StatusCode)
+	}
+	var page struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	decodeBody(t, resp, &page)
+	if page.Total != 0 || len(page.Items) != 0 {
+		t.Fatalf("expected tenant B to see zero KYC cases for tenant A's player, got %+v", page)
+	}
+}
+
 // extractToken pulls the raw token out of a mock email body (the mock
 // handlers embed it as "...: <token>" - see credential_handlers.go).
 func extractToken(t *testing.T, body string) string {

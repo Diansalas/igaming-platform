@@ -302,6 +302,40 @@ func listActiveWageringGrants(ctx context.Context, tx pgx.Tx, tenantID, playerAc
 	)
 }
 
+// ListGrantsPage returns a page of Grants for tenantID, optionally
+// scoped to one player (playerAccountID) and/or filtered by status, most
+// recently created first, plus the total count matching the filters -
+// Stage 5 (Operator Back Office MVP)'s own read surface: the tenant-wide
+// grant list, and (when playerAccountID is supplied) the per-player
+// bonus/reward-state view for a Back Office player-detail page. Additive
+// to ListGrantsByPlayer/ListGrantsByStatus (both unchanged).
+func ListGrantsPage(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, playerAccountID *uuid.UUID, status *GrantStatus, limit, offset int) ([]Grant, int, error) {
+	where := "tenant_id = $1"
+	args := []any{tenantID}
+	if playerAccountID != nil {
+		args = append(args, *playerAccountID)
+		where += fmt.Sprintf(" AND player_account_id = $%d", len(args))
+	}
+	if status != nil {
+		args = append(args, string(*status))
+		where += fmt.Sprintf(" AND status = $%d", len(args))
+	}
+
+	var total int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM bonus_grants WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("bonus: count grants: %w", err)
+	}
+
+	pageArgs := append(append([]any{}, args...), limit, offset)
+	sql := `SELECT ` + grantColumns + ` FROM bonus_grants WHERE ` + where +
+		fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, len(pageArgs)-1, len(pageArgs))
+	grants, err := queryGrants(ctx, tx, sql, pageArgs...)
+	if err != nil {
+		return nil, 0, err
+	}
+	return grants, total, nil
+}
+
 func queryGrants(ctx context.Context, tx pgx.Tx, sql string, args ...any) ([]Grant, error) {
 	rows, err := tx.Query(ctx, sql, args...)
 	if err != nil {

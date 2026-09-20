@@ -155,6 +155,96 @@ func ListVerificationsForAccount(ctx context.Context, tx pgx.Tx, playerAccountID
 	return out, rows.Err()
 }
 
+// ListVerificationsForTenantParams is ListVerificationsForTenant's input.
+// Status == "" and PlayerAccountID == uuid.Nil each mean "no filter on
+// that dimension" - a genuinely tenant-wide, unfiltered operator queue
+// read relies entirely on kyc_verifications' own tenant_isolation RLS
+// policy (migration 0040) for tenant scoping, never a predicate this
+// function adds itself (mirrors ListVerificationsForAccount's identical
+// reliance on ambient RLS). Limit/Offset are trusted, already-validated
+// pagination inputs (see internal/httpserver.parsePageParams, the Stage 5
+// Back Office pagination convention) - this function does not
+// independently re-validate their bounds.
+type ListVerificationsForTenantParams struct {
+	Status          VerificationStatus
+	PlayerAccountID uuid.UUID
+	Limit           int
+	Offset          int
+}
+
+// scanVerificationWithTotal is scanVerification's counterpart for a query
+// that additionally projects a `count(*) OVER()` window column - kept
+// separate from scanVerification (whose column list is exactly
+// verificationColumns, reused verbatim by callers with no extra column)
+// rather than complicating that helper's signature for its one caller
+// that needs a running total.
+func scanVerificationWithTotal(row pgx.Row) (Verification, int, error) {
+	var v Verification
+	var providerRef, reason *string
+	var reviewedBy *uuid.UUID
+	var total int
+	err := row.Scan(&v.ID, &v.TenantID, &v.BrandID, &v.PlayerAccountID, &v.PersonID, &v.Status,
+		&v.ProviderID, &providerRef, &reason, &v.SubmittedAt, &v.ReviewedAt, &reviewedBy, &v.ExpiresAt, &v.CreatedAt, &v.UpdatedAt,
+		&v.HasVerifiedResidence, &v.VerifiedResidenceSetAt, &v.VerifiedResidenceSetBy, &total)
+	if err != nil {
+		return Verification{}, 0, fmt.Errorf("kyc: scan verification with total: %w", err)
+	}
+	if providerRef != nil {
+		v.ProviderReference = *providerRef
+	}
+	if reason != nil {
+		v.Reason = *reason
+	}
+	if reviewedBy != nil {
+		v.ReviewedBy = *reviewedBy
+	}
+	return v, total, nil
+}
+
+// ListVerificationsForTenant is the Stage 5 Back Office operator queue
+// read: every verification visible under the current RLS scope, optionally
+// narrowed by Status and/or PlayerAccountID, newest first, paginated, along
+// with the total matching row count (ignoring Limit/Offset) so a caller can
+// render pagination controls. Distinct from ListVerificationsForAccount,
+// which is unpaginated and always scoped to one already-known
+// playerAccountID - this is the additional, tenant-wide "operator queue"
+// counterpart that view was never meant to serve on its own; neither
+// function's behavior changes because the other exists.
+func ListVerificationsForTenant(ctx context.Context, tx pgx.Tx, params ListVerificationsForTenantParams) ([]Verification, int, error) {
+	var playerFilter *uuid.UUID
+	if params.PlayerAccountID != uuid.Nil {
+		v := params.PlayerAccountID
+		playerFilter = &v
+	}
+	rows, err := tx.Query(ctx,
+		`SELECT `+verificationColumns+`, count(*) OVER() AS total_count
+		 FROM kyc_verifications
+		 WHERE ($1 = '' OR status = $1)
+		   AND ($2::uuid IS NULL OR player_account_id = $2)
+		 ORDER BY created_at DESC
+		 LIMIT $3 OFFSET $4`,
+		string(params.Status), playerFilter, params.Limit, params.Offset,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("kyc: list verifications for tenant: %w", err)
+	}
+	defer rows.Close()
+	var out []Verification
+	total := 0
+	for rows.Next() {
+		v, t, err := scanVerificationWithTotal(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, v)
+		total = t
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("kyc: list verifications for tenant: %w", err)
+	}
+	return out, total, nil
+}
+
 // getVerificationByProviderReference is the Orchestrator's own lookup for
 // callback dispatch - unexported, since a caller outside this package
 // should never look a verification up by provider reference (only the

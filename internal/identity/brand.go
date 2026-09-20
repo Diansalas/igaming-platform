@@ -70,6 +70,63 @@ func GetBrandBySlug(ctx context.Context, pool *db.Pool, slug string) (Brand, err
 	return b, nil
 }
 
+// GetBrandByID resolves a brand by id within an already-open transaction -
+// the admin single-brand-detail counterpart to GetBrandBySlug (used
+// pre-authentication, with no tenant context). Since brand_public_read is
+// USING (true) (migration 0008), this resolves regardless of tx's own
+// tenant scope - callers that must confine a caller to one specific tenant
+// (e.g. the admin GET /v1/admin/tenants/{tenantID}/brands/{brandID} route)
+// verify the returned TenantID against the server-derived target tenant
+// themselves, exactly like GetTenantByID's own "id must be a server-derived
+// value" discipline; id must never be trusted to already belong to the
+// right tenant just because it parsed as a UUID.
+func GetBrandByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (Brand, error) {
+	var b Brand
+	err := tx.QueryRow(ctx,
+		`SELECT id, tenant_id, name, slug, status FROM brands WHERE id = $1`,
+		id,
+	).Scan(&b.ID, &b.TenantID, &b.Name, &b.Slug, &b.Status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Brand{}, ErrNotFound
+	}
+	if err != nil {
+		return Brand{}, fmt.Errorf("identity: get brand by id: %w", err)
+	}
+	return b, nil
+}
+
+// ListBrandsForTenant returns a page of brands belonging to tenantID, for
+// the admin back-office brand list, ordered by name for stable pagination.
+// tenantID must already be a server-derived value the caller has authorized
+// (see canActOnTenant in internal/httpserver) - this function does not
+// re-check authorization, only tenant membership of the returned rows.
+// total is the count of ALL of this tenant's brands matching no filter
+// (this endpoint takes none per this stage's scope), computed via
+// count(*) OVER() in the same query so it can never drift from what was
+// actually read.
+func ListBrandsForTenant(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, limit, offset int) ([]Brand, int, error) {
+	rows, err := tx.Query(ctx,
+		`SELECT id, tenant_id, name, slug, status, count(*) OVER()
+		 FROM brands WHERE tenant_id = $1 ORDER BY name ASC, id ASC LIMIT $2 OFFSET $3`,
+		tenantID, limit, offset,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("identity: list brands for tenant: %w", err)
+	}
+	defer rows.Close()
+
+	var brands []Brand
+	var total int
+	for rows.Next() {
+		var b Brand
+		if err := rows.Scan(&b.ID, &b.TenantID, &b.Name, &b.Slug, &b.Status, &total); err != nil {
+			return nil, 0, fmt.Errorf("identity: scan brand: %w", err)
+		}
+		brands = append(brands, b)
+	}
+	return brands, total, rows.Err()
+}
+
 // CreateBrand creates a brand under tenantID. Called from an already
 // tenant-scoped transaction (the caller - an admin endpoint gated by
 // PermBrandWrite - resolves and authorizes tenantID first).

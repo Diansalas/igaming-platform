@@ -327,6 +327,27 @@ type campaignResponse struct {
 	ID               string `json:"id"`
 	Status           string `json:"status"`
 	FulfillmentOwner string `json:"fulfillment_owner"`
+	// BrandID/CurrentVersionID/CreatedAt are additive (Stage 5 Operator
+	// Back Office MVP's read surface, newListCampaignsHandler) -
+	// omitempty keeps every pre-existing caller's response shape
+	// unchanged when these fields are not populated.
+	BrandID          string `json:"brand_id,omitempty"`
+	CurrentVersionID string `json:"current_version_id,omitempty"`
+	CreatedAt        string `json:"created_at,omitempty"`
+}
+
+func toCampaignResponse(c bonus.Campaign) campaignResponse {
+	resp := campaignResponse{
+		ID: c.ID.String(), Status: string(c.Status), FulfillmentOwner: c.FulfillmentOwner,
+		CreatedAt: c.CreatedAt.UTC().Format(rfc3339),
+	}
+	if c.BrandID != nil {
+		resp.BrandID = c.BrandID.String()
+	}
+	if c.CurrentVersionID != nil {
+		resp.CurrentVersionID = c.CurrentVersionID.String()
+	}
+	return resp
 }
 
 func newCreateCampaignHandler(deps Deps) http.HandlerFunc {
@@ -368,7 +389,7 @@ func newCreateCampaignHandler(deps Deps) http.HandlerFunc {
 			if err != nil {
 				return err
 			}
-			resp = campaignResponse{ID: c.ID.String(), Status: string(c.Status), FulfillmentOwner: c.FulfillmentOwner}
+			resp = toCampaignResponse(c)
 			return audit.Record(ctx, tx, audit.Entry{
 				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: staffID,
 				Action: "bonus_campaign.created", TargetType: "bonus_campaign", TargetID: c.ID.String(), Outcome: audit.OutcomeSuccess,

@@ -900,6 +900,82 @@ func LockSubmittedForResolution(ctx context.Context, tx pgx.Tx, requestID uuid.U
 	return wr, nil
 }
 
+// ValidStates lists every value withdrawal_requests.state's CHECK
+// constraint (migration 0026) allows, in the order withdrawal-state-
+// machine.md §1 documents them - the full operational range a staff
+// history view (ListForTenant) needs to filter across, not just the
+// pending-review subset the four-eyes queue serves.
+var ValidStates = []State{
+	StateRequested, StatePendingReview, StateApproved, StateRejected,
+	StateSubmitted, StateCompleted, StateFailed, StateCancelled, StateReversed,
+}
+
+// IsValidState reports whether s is one of ValidStates. Callers accepting
+// a client-supplied status filter (e.g. an HTTP query parameter) should
+// validate against this before ever reaching a query, rather than letting
+// an arbitrary string reach the database.
+func IsValidState(s State) bool {
+	for _, v := range ValidStates {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// ListForTenant returns a paginated slice of every WithdrawalRequest in
+// the caller's tenant scope, most recently requested first, optionally
+// filtered to a single State, plus the total matching row count (ignoring
+// limit/offset) for pagination. This is the Stage 5 Back Office
+// operational-history view: tenant-wide across the FULL state range, as
+// distinct from ListSubmittedForTenant's narrower stranded-hold queue and
+// the pending-review-only queue newListPendingWithdrawalsHandler serves -
+// and, unlike that queue, a pure read with no MoveToPendingReview side
+// effect. Intended to run under db.Pool.WithTenant, same as every other
+// staff/system withdrawal query - this function applies no authorization
+// of its own beyond whatever RLS scope the caller's transaction already
+// carries.
+func ListForTenant(ctx context.Context, tx pgx.Tx, status *State, limit, offset int) ([]WithdrawalRequest, int, error) {
+	var total int
+	var countErr error
+	if status != nil {
+		countErr = tx.QueryRow(ctx, `SELECT COUNT(*) FROM withdrawal_requests WHERE state = $1`, *status).Scan(&total)
+	} else {
+		countErr = tx.QueryRow(ctx, `SELECT COUNT(*) FROM withdrawal_requests`).Scan(&total)
+	}
+	if countErr != nil {
+		return nil, 0, fmt.Errorf("withdrawal: count for tenant: %w", countErr)
+	}
+
+	var rows pgx.Rows
+	var err error
+	if status != nil {
+		rows, err = tx.Query(ctx,
+			`SELECT `+requestColumns+` FROM withdrawal_requests WHERE state = $1 ORDER BY requested_at DESC LIMIT $2 OFFSET $3`,
+			*status, limit, offset,
+		)
+	} else {
+		rows, err = tx.Query(ctx,
+			`SELECT `+requestColumns+` FROM withdrawal_requests ORDER BY requested_at DESC LIMIT $1 OFFSET $2`,
+			limit, offset,
+		)
+	}
+	if err != nil {
+		return nil, 0, fmt.Errorf("withdrawal: list for tenant: %w", err)
+	}
+	defer rows.Close()
+
+	var out []WithdrawalRequest
+	for rows.Next() {
+		wr, err := scanRequest(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, wr)
+	}
+	return out, total, rows.Err()
+}
+
 // ListSubmittedForTenant returns every WithdrawalRequest currently in
 // `submitted` state, tenant-wide - the staff review-queue equivalent for
 // stranded-hold recovery (see newListSubmittedWithdrawalsHandler) and

@@ -1480,7 +1480,136 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 4I Exit Triage — Exit Register and Production Integration Readiness — COMPLETE, awaiting human review
+## Current stage: Stage 5 — Operator Back Office MVP — COMPLETE, awaiting human review
+
+**Purpose.** Build the first genuinely usable Operator Back Office: a
+staff-facing web application that is a CLIENT of the Platform API (never
+authoritative for financial/authorization/KYC/RG/bonus/jurisdiction
+decisions), plus the additive read/query API surface it needed. Stage 4I
+and every other domain (KYC, RG, bonus, wallet/ledger, payments,
+sportsbook, casino, operating-market) is FROZEN — none was reopened or
+redesigned.
+
+**Backend — additive query surface, four parallel implementers, zero file
+conflicts.** New shared pagination helper (`internal/httpserver/
+pagination.go`, `{items,limit,offset,total}`, reused by every new
+endpoint). `backend`: `GET /v1/admin/tenants` (+detail), `GET
+/v1/admin/tenants/{id}/brands` (+detail), paginated/searchable `GET
+/v1/admin/players`, new `POST /v1/admin/players/{id}/reinstate`
+(atomic-conditional `suspended→active` only — deliberately cannot clear
+`self_excluded`/`identity_review_required`), new platform-scoped `GET
+/v1/admin/platform/audit-log`, paginated/filterable `GET
+/v1/admin/audit-log`. `identity-compliance`: tenant-wide `GET
+/v1/admin/kyc/cases`; `GET /v1/admin/rg/restrictions` extended with a
+tenant-wide mode when `player_account_id` is omitted — the implementing
+agent found and fixed a real cross-tenant PII leak in its own adversarial
+testing before shipping (a naive query surfaced every platform-wide
+self-exclusion row to any tenant's staff; fixed with an `INNER JOIN
+player_accounts`). `bonus-engine`: `GET /v1/admin/bonus/{campaigns,
+change-requests,grants}` (read-only, reusing the existing `.../decide`
+mutation). `backend` (second instance, disjoint files): `GET
+/v1/admin/withdrawals/history` + `GET /v1/admin/withdrawals/{id}`
+(pure reads, no state-transition side effect, registered at `/history`
+because `/v1/admin/withdrawals` was already bound to the frozen
+pending-only queue). My own combined-repo verification after all four
+landed: `go build`/`go vet`/`gofmt -l` clean, full 30-package
+`-tags=integration` suite green against a freshly built scratch database.
+
+**Frontend — new `backoffice/` app, built from scratch (zero prior
+frontend code existed anywhere in this repository).** Vite + React 18 +
+TypeScript + React Router + TanStack Query + Tailwind, chosen so a future
+visual redesign only touches `components/`/`layout/`/Tailwind tokens,
+never `api/` or domain logic. Hard layering enforced: `api/` is the only
+module allowed to call `fetch`; `components/` are domain-free primitives
+(one generic `Table`/`Pagination` reused by every list page); `features/*`
+holds per-domain logic; client-side permission/nav gating is explicitly
+non-authoritative (labeled as such in code) — every mutation calls the
+real server endpoint and renders its real response. Correctly models the
+real backend constraint that `db.Pool.WithTenant` errors on a nil tenant
+ID: platform_admin sees only Tenants + Platform Audit Log (no fake "view
+as tenant" capability), tenant-scoped staff see Players/KYC/RG/Bonus/
+Withdrawals/Audit scoped automatically to their own tenant. Pages: app
+shell/login/nav; Tenants (list/detail/brands, read-only); Players
+(list/detail composing KYC/RG/bonus sub-sections, Suspend/Reinstate with
+required reason); KYC case queue + detail; RG tenant-wide queue +
+per-player restrictions; Bonus campaigns/change-request approval
+queue/grants; Withdrawals (priority workflow: full history queue,
+detail, Approve/Reject wired to the existing frozen endpoints with
+mandatory confirmation and reason capture); one reusable audit-log viewer
+used for both the tenant and platform-scoped audit endpoints. `npm run
+build`/`npm test` (17 tests, 6 files) both verified independently by me,
+not just trusted from the implementing agent's report.
+
+**Independent review — architect, security, qa, and a narrowly-scoped
+ledger-finance review of the one page that moves money (the withdrawal
+approve/reject flow), per this stage's own efficiency rule (no six-way
+dispatch for routine work).** Architect: PASS, no P0/P1/P2 (two P3s on a
+minor RG-response-shape inconsistency and theming-token completeness,
+recorded not fixed). QA: full validation gate green (1492 Go tests, 17
+frontend tests, `-race` clean on withdrawal/identity), test-coverage
+judgment confirmed every new endpoint has real authorized/unauthorized/
+cross-tenant tests. Ledger-finance: SIGN-OFF on the withdrawal UI as a
+genuine pass-through with no client-side financial logic; one real P2
+(amounts rendered in raw minor units with no exponent formatting at an
+irreversible approval decision — **fixed**: new `decimal_exponent` field
+on the two new withdrawal admin endpoints, a shared frontend money
+formatter). Security found the review round's most consequential
+results, two P2s **both fixed**: (1) the SPA's "Sign out" only cleared
+local state and never revoked the session server-side, leaving a stolen
+refresh token valid for the full 30-day TTL with no way for the user to
+stop it — fixed, logout now calls the existing `POST /v1/auth/logout`
+best-effort before clearing local state; (2) the RG cross-tenant leak's
+own regression-test guard was itself vacuous — it seeded a
+tenant-scoped restriction the pre-existing RLS policy already filtered
+on its own, and tenant B had no player at all, so the test passed even
+with the join-based fix's protection reverted (verified by mutation
+testing: weakening the join to a `LEFT JOIN` made the OLD test still
+pass, and makes the REWRITTEN test correctly fail) — fixed by rewriting
+the test to seed a genuinely platform-wide self-exclusion via the
+player's own self-exclusion endpoint, verify the fixture's `tenant_id IS
+NULL` directly, and give tenant B its own real restriction so the
+isolation assertion is non-vacuous. Security also found and I fixed a
+related P3: the SPA's session-bootstrap-on-reload called the raw refresh
+function directly instead of through the existing single-flight
+`refreshSessionOnce()` dedupe, so React 18 StrictMode's deliberate
+double-effect-invocation could present the same refresh token twice,
+which the backend correctly treats as token reuse and revokes the whole
+session chain — fixed by routing bootstrap through the same dedup path
+`apiFetch`'s own 401 handling already uses.
+
+**Deferred, not fixed this stage (recorded, not blocking):** refresh
+token in `sessionStorage` (XSS-readable) combined with a 30-day TTL is a
+documented MVP tradeoff — security flagged production hardening
+(httpOnly/Secure/SameSite cookies, requires backend changes) as
+**launch-blocking for the Back Office specifically**, tracked alongside
+`PLAT-ROLESPLIT-1`, not resolved here; the 401-refresh-retry logic itself
+has zero frontend test coverage despite being the most security-sensitive
+module in the SPA; `tenants`/`brands` read isolation is handler-only with
+no RLS backstop (correct as written, but should not be assumed inherited
+by a future handler); RG tenant-wide queue rows carry no player
+attribution (a real functional gap per the architect review — the queue
+can't say whose restriction it is — deferred as a fast-follow, not fixed
+this stage); `GET /v1/admin/rg/restrictions`'s two response shapes (bare
+array vs. paginated envelope depending on a query param) is the one
+inconsistency with the otherwise-uniform Stage 5 convention; `amount` is
+a JSON number rather than the string convention `bonus.ts` already uses,
+a latent precision hazard only once crypto-asset withdrawals (exponent
+8/18) reach this endpoint.
+
+**Production wiring status:** none. No B2C frontend, sportsbook, casino,
+or partner console was started. No jurisdiction/operating-market content
+or wiring was touched — `HDR-J-6/7/8/9`/`HDR-M-1/2` remain exactly as
+Stage 4I left them. `PLAT-ROLESPLIT-1` remains the production deployment
+blocker, documented in `docs/security/runtime-role-separation.md`, not
+addressed this stage (development continues without it per that
+document's own instruction).
+
+No automatic progression. Per the stage-gate rule, Stage 6 (B2C Player/
+Brand MVP) is NOT authorized and was not started.
+
+---
+
+## Prior stage: Stage 4I Exit Triage — Exit Register and Production Integration Readiness — COMPLETE, awaiting human review
 
 **Purpose.** Per an explicit human directive changing execution strategy:
 stop opening further jurisdiction/KYC/security architecture review stages

@@ -245,9 +245,22 @@ func newCreateStaffRestrictionHandler(deps Deps) http.HandlerFunc {
 // platform-wide row, regardless of which tenant/player originally created
 // it - a tenant admin is legitimately entitled to see that one of their
 // OWN players is platform-wide self-excluded, even though they cannot see
-// who else that same restriction affects at another tenant (this query is
-// always scoped to one already-named player_account_id, never a bare
-// "list everyone").
+// who else that same restriction affects at another tenant.
+//
+// When ?player_account_id= is supplied, this is exactly the original
+// Stage 4D-RG behavior: one account's restriction history, unpaginated,
+// as a bare JSON array - unchanged by the Stage 5 addition below (see
+// rg_flow_integration_test.go's own regression coverage for this).
+//
+// When ?player_account_id= is OMITTED, this is the Stage 5 Back Office
+// operator queue addition: every restriction visible under the same RLS
+// scope, tenant-wide, paginated via the shared Stage 5 pagination
+// convention (internal/httpserver/pagination.go), optionally narrowed by
+// ?restriction_type=. There is deliberately no ?status= filter -
+// player_restrictions has no stored "status" column (only the computed,
+// point-in-time Restriction.IsActiveAt), so no such filter is added here
+// rather than inventing query semantics the domain model does not itself
+// store (CLAUDE.md's own admonition against speculative surface).
 func newListRestrictionsForAccountHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -258,28 +271,61 @@ func newListRestrictionsForAccountHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
 			return
 		}
-		targetID, err := uuid.Parse(r.URL.Query().Get("player_account_id"))
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "player_account_id query parameter is required")
+
+		if accountParam := r.URL.Query().Get("player_account_id"); accountParam != "" {
+			targetID, err := uuid.Parse(accountParam)
+			if err != nil {
+				apierror.Write(w, requestID, apierror.CodeValidation, "invalid player_account_id")
+				return
+			}
+
+			var restrictions []rg.Restriction
+			err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+				var err error
+				restrictions, err = rg.ListRestrictionsForAccount(ctx, tx, targetID)
+				return err
+			})
+			if errors.Is(err, identity.ErrNotFound) {
+				apierror.Write(w, requestID, apierror.CodeNotFound, "player account not found")
+				return
+			}
+			if err != nil {
+				logger.Error("list_rg_restrictions_failed", "error", err)
+				apierror.Write(w, requestID, apierror.CodeInternal, "failed to list restrictions")
+				return
+			}
+			writeJSON(w, http.StatusOK, toRestrictionListResponse(restrictions))
 			return
 		}
 
-		var restrictions []rg.Restriction
+		// Stage 5 Back Office: tenant-wide list, no player_account_id named.
+		p := parsePageParams(r)
+		params := rg.ListRestrictionsForTenantParams{Limit: p.Limit, Offset: p.Offset}
+		if rt := r.URL.Query().Get("restriction_type"); rt != "" {
+			v := validation.New()
+			v.RequireOneOf("restriction_type", rt, string(rg.RestrictionSelfExclusion))
+			if v.HasErrors() {
+				apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+				return
+			}
+			params.RestrictionType = rg.RestrictionType(rt)
+		}
+
+		var (
+			restrictions []rg.Restriction
+			total        int
+		)
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			restrictions, err = rg.ListRestrictionsForAccount(ctx, tx, targetID)
+			restrictions, total, err = rg.ListRestrictionsForTenant(ctx, tx, params)
 			return err
 		})
-		if errors.Is(err, identity.ErrNotFound) {
-			apierror.Write(w, requestID, apierror.CodeNotFound, "player account not found")
-			return
-		}
 		if err != nil {
 			logger.Error("list_rg_restrictions_failed", "error", err)
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to list restrictions")
 			return
 		}
-		writeJSON(w, http.StatusOK, toRestrictionListResponse(restrictions))
+		writeJSON(w, http.StatusOK, newPagedResponse(toRestrictionListResponse(restrictions), p, total))
 	}
 }
 

@@ -66,6 +66,24 @@ func registerFinancialRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("POST /v1/admin/withdrawals/{id}/resolve",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalSubmit)(newResolveWithdrawalHandler(deps)))))
 
+	// Stage 5 Back Office read-only history/detail views - reuse
+	// PermWithdrawalReview (same "may see withdrawal data" authority the
+	// pending queue above already gates). NOT registered at
+	// "GET /v1/admin/withdrawals" - that exact path is already bound to
+	// the frozen pending-only queue above (newListPendingWithdrawalsHandler,
+	// which additionally promotes requested -> pending_review as a side
+	// effect and must not be touched this stage), and net/http's ServeMux
+	// rejects a second literal registration of the same method+pattern.
+	// "/history" is this file's equivalent of the existing "/submitted"
+	// naming convention for a second, differently-scoped GET list under
+	// the same resource. See this task's own completion report for the
+	// exact rationale - flagged there for the orchestrator's OpenAPI
+	// consolidation pass.
+	mux.Handle("GET /v1/admin/withdrawals/history",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalReview)(newListAdminWithdrawalsHandler(deps)))))
+	mux.Handle("GET /v1/admin/withdrawals/{id}",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermWithdrawalReview)(newGetAdminWithdrawalHandler(deps)))))
+
 	// Provider capability configuration - tenant-scoped administrative
 	// action, gated by PermProviderConfigWrite.
 	mux.Handle("PUT /v1/admin/providers/{providerID}/capability",

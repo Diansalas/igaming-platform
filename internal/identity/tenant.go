@@ -114,6 +114,59 @@ func GetTenantByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (Tenant, error)
 	return t, nil
 }
 
+// ListTenants returns a page of tenants for the platform back office's
+// tenant list, ordered by name for stable, deterministic pagination. q (when
+// non-empty) is matched case-insensitively as a substring against name OR
+// slug; status (when non-empty) is an exact match against the status
+// column. Both filters are passed as bound parameters - never string-
+// concatenated into the query text - mirroring every other dynamic-filter
+// query in this codebase (e.g. internal/risk's rule queries). total is the
+// count of ALL rows matching the filters (not just this page), computed via
+// count(*) OVER() in the same query so it can never drift from what was
+// actually read; it is 0 (not queried separately) when the page itself is
+// empty, which is the correct total in that case regardless of why the page
+// is empty (no matches at all, or an offset past the end).
+//
+// Callers determine tx's scope - this function issues one read against
+// `tenants`, and (per migration 0077) tenants_read admits any transaction
+// that is not player-scoped, so this resolves identically whether tx came
+// from db.Pool.WithoutTenant (the platform-wide list) or db.Pool.WithTenant
+// (a tenant-scoped caller reading only itself, filtered by the caller via a
+// WHERE id = $n the caller adds - see ListTenants' own callers).
+func ListTenants(ctx context.Context, tx pgx.Tx, q, status string, limit, offset int) ([]Tenant, int, error) {
+	query := `SELECT id, name, slug, licensing_model, status, count(*) OVER() FROM tenants WHERE true`
+	args := []any{}
+	if q != "" {
+		args = append(args, "%"+q+"%")
+		query += fmt.Sprintf(" AND (name ILIKE $%d OR slug ILIKE $%d)", len(args), len(args))
+	}
+	if status != "" {
+		args = append(args, status)
+		query += fmt.Sprintf(" AND status = $%d", len(args))
+	}
+	args = append(args, limit)
+	query += fmt.Sprintf(" ORDER BY name ASC, id ASC LIMIT $%d", len(args))
+	args = append(args, offset)
+	query += fmt.Sprintf(" OFFSET $%d", len(args))
+
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("identity: list tenants: %w", err)
+	}
+	defer rows.Close()
+
+	var tenants []Tenant
+	var total int
+	for rows.Next() {
+		var t Tenant
+		if err := rows.Scan(&t.ID, &t.Name, &t.Slug, &t.LicensingModel, &t.Status, &total); err != nil {
+			return nil, 0, fmt.Errorf("identity: scan tenant: %w", err)
+		}
+		tenants = append(tenants, t)
+	}
+	return tenants, total, rows.Err()
+}
+
 // CreateTenant provisions a new tenant. Platform-admin-only (see
 // PermTenantWrite) - tenant provisioning is inherently a platform-level
 // action, never tenant-scoped. Takes a pgx.Tx (rather than opening its

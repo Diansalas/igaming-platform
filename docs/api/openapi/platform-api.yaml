@@ -365,6 +365,47 @@ paths:
 
   # --- Tenant/brand/staff administration ---
   /v1/admin/tenants:
+    get:
+      summary: List tenants (Stage 5 - Operator Back Office MVP)
+      description: >
+        platform_admin only (tenant:read) - tenant-scoped callers are
+        rejected with 403, since browsing every tenant is inherently a
+        platform-level view. Optional case-insensitive substring match on
+        name/slug via `q`, exact match on `status`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated tenant list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Tenant" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       summary: Provision a new tenant
       description: >
@@ -416,7 +457,73 @@ paths:
                 $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}:
+    get:
+      summary: Get a single tenant (Stage 5)
+      description: >
+        tenant:read. platform_admin may read any tenant; a tenant-scoped
+        caller may only read its own tenant (403 otherwise, per ADR 0011's
+        canActOnTenant rule).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The tenant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tenant"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/admin/tenants/{tenantID}/brands:
+    get:
+      summary: List brands under a tenant (Stage 5)
+      description: >
+        brand:read, canActOnTenant (platform_admin any tenant,
+        tenant-scoped caller only its own).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated brand list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Brand" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       summary: Provision a new brand under a tenant
       description: >
@@ -463,6 +570,40 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/brands/{brandID}:
+    get:
+      summary: Get a single brand under a tenant (Stage 5)
+      description: >
+        brand:read, canActOnTenant. 404s if the brand exists but belongs
+        to a different tenant than the path (brands are readable at the
+        RLS layer platform-wide, so this handler-level check is
+        load-bearing, not redundant).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: tenantID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: brandID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The brand
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Brand"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
   /v1/admin/tenants/{tenantID}/staff:
@@ -523,18 +664,40 @@ paths:
         Requires player:read, and a real (non-nil) tenant context -
         platform_admin's platform-scoped token is rejected here by
         RequireTenantScope (browsing an arbitrary tenant's players is
-        deferred - see docs/decisions/0011's "Consequences").
+        deferred - see docs/decisions/0011's "Consequences"). Stage 5
+        (Operator Back Office MVP) added pagination and search/filter -
+        this response shape CHANGED from a bare array to the paginated
+        envelope below.
       security:
         - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          description: Case-insensitive substring match on email.
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
       responses:
         "200":
-          description: Player accounts in the caller's tenant
+          description: Paginated player accounts in the caller's tenant
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/PlayerAccount"
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/PlayerAccount"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -602,6 +765,50 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/admin/players/{id}/reinstate:
+    post:
+      summary: Reinstate a suspended player account (Stage 5)
+      description: >
+        Requires player:suspend (same authorization level as suspend - it
+        is suspend's inverse). Atomic conditional transition: only
+        succeeds if the account's CURRENT status is exactly `suspended`
+        (409 otherwise) - this deliberately does NOT clear
+        self_excluded/closed/identity_review_required, which each have
+        their own dedicated workflow (self-exclusion is never cleared by
+        a generic reinstate action). Requires a reason code, recorded on
+        the audit entry (action player.reinstated) alongside the
+        before/after status.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason_code: { type: string }
+              required: [reason_code]
+      responses:
+        "204":
+          description: Player reinstated
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Account is not currently suspended
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/admin/players/{id}/identity-review/clear:
     post:
       summary: Clear a player account out of identity_review_required
@@ -647,6 +854,88 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # --- Withdrawal admin (staff-facing) visibility (Stage 5, Operator
+  # Back Office MVP). The withdrawal state machine, four-eyes approval
+  # controls (POST .../approve, .../reject, and the rest of the existing
+  # write API), and ledger postings all predate this spec's coverage and
+  # are unchanged - only these two READ endpoints are new. Documenting
+  # just the Stage 5 additions here, not backfilling the full pre-existing
+  # write API, which is a separate, tracked documentation gap. ---
+  /v1/admin/withdrawals/history:
+    get:
+      summary: Withdrawal queue - full history, tenant-wide (Stage 5)
+      description: >
+        withdrawal:review, tenant-scoped. Distinct from the pre-existing
+        pending-only review queue (which also promotes `requested` rows
+        to `pending_review` as a side effect) - this is a pure read
+        covering every state, for the Back Office's general queue/history
+        view. Registered at `/history` rather than the bare
+        `/v1/admin/withdrawals` path because that path is already bound
+        to the pending-only queue handler.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [requested, pending_review, approved, rejected, submitted, completed, failed, cancelled, reversed] }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated withdrawal history
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/WithdrawalAdmin" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/withdrawals/{id}:
+    get:
+      summary: Get a single withdrawal, staff view (Stage 5)
+      description: >
+        withdrawal:review, tenant-scoped, tenant-wide (not restricted to
+        the caller's own withdrawals, unlike the player-self-service
+        GET /v1/me/withdrawals/{id}). 404s indistinguishably for an
+        unknown id or one belonging to a different tenant.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The withdrawal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawalAdmin"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   # --- Audit trail (read-only) ---
   /v1/admin/audit-log:
     get:
@@ -654,20 +943,98 @@ paths:
       description: >
         Requires audit:read and a real tenant context. Entries are
         immutable (append-only, enforced by a database trigger - see
-        docs/decisions/0013) and ordered newest first, capped at 100 rows
-        per request in Stage 2 (no pagination yet - deferred, see the
-        Stage 2 completion report's technical debt section).
+        docs/decisions/0013) and ordered newest first. Stage 5 (Operator
+        Back Office MVP) added pagination and actor_type/action/outcome
+        filters - the Stage 2 technical-debt "no pagination yet" item is
+        now closed. Response shape CHANGED from a bare array (Stage 2) to
+        the paginated envelope below. Scope is unchanged: this route only
+        ever returns THIS tenant's own rows (tenant_id = caller's tenant);
+        platform-scoped rows (tenant_id IS NULL, e.g. tenant.created,
+        AssignTenantLicence) are never included here - see
+        GET /v1/admin/platform/audit-log.
       security:
         - bearerAuth: []
+      parameters:
+        - name: actor_type
+          in: query
+          schema: { type: string, enum: [player, staff, system] }
+        - name: action
+          in: query
+          schema: { type: string }
+        - name: outcome
+          in: query
+          schema: { type: string, enum: [success, failure, denied] }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
       responses:
         "200":
-          description: Audit log entries
+          description: Paginated audit log entries for the caller's tenant
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/AuditEntry"
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/AuditEntry"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/platform/audit-log:
+    get:
+      summary: List platform-scoped audit log entries (Stage 5)
+      description: >
+        audit:read, platform_admin only (403 for any tenant-scoped
+        caller). Reads audit_log WHERE tenant_id IS NULL via
+        db.Pool.WithPlatformAdmin - this is the only HTTP route that can
+        read platform-scoped audit rows (e.g. tenant.created,
+        AssignTenantLicence, operating-market ceiling/policy audit
+        entries), which migration 0077's RLS hardening made otherwise
+        unreachable over HTTP (see docs/governance/stage-4i-exit-register.md,
+        MKT-AUDIT-1). Same filter/pagination params and response shape as
+        the tenant-scoped audit-log route above.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: actor_type
+          in: query
+          schema: { type: string, enum: [player, staff, system] }
+        - name: action
+          in: query
+          schema: { type: string }
+        - name: outcome
+          in: query
+          schema: { type: string, enum: [success, failure, denied] }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated platform-scoped audit log entries
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/AuditEntry"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -993,6 +1360,119 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # --- Responsible Gaming (pre-existing domain; this route was never
+  # previously documented in this spec - documenting its full current
+  # shape now, not only the Stage 5 addition, to close that gap) ---
+  /v1/admin/rg/restrictions:
+    get:
+      summary: Get or list responsible-gaming restrictions/self-exclusions
+      description: >
+        rg_restriction:read, tenant-scoped. Two distinct response shapes
+        depending on whether `player_account_id` is supplied:
+        - Supplied: returns a bare (unpaginated) array of that player's
+          restrictions - this is the ORIGINAL, pre-Stage-5 behavior,
+          unchanged.
+        - Omitted (Stage 5, Operator Back Office MVP addition): returns
+          the paginated tenant-wide queue below. No `status` filter
+          exists because player_restrictions has no stored status column
+          (only the computed, point-in-time `active` field) - only
+          `restriction_type` is filterable.
+        Self-exclusion enforcement mechanics are unchanged either way -
+        this route is visibility only.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: player_account_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: restriction_type
+          in: query
+          description: Only used when player_account_id is omitted.
+          schema: { type: string, enum: [self_exclusion] }
+        - name: limit
+          in: query
+          description: Only used when player_account_id is omitted.
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          description: Only used when player_account_id is omitted.
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: >
+            A bare array of RGRestriction when player_account_id is
+            supplied, or the paginated envelope when it is omitted.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: array
+                    items: { $ref: "#/components/schemas/RGRestriction" }
+                  - allOf:
+                      - $ref: "#/components/schemas/PageMeta"
+                      - type: object
+                        properties:
+                          items:
+                            type: array
+                            items: { $ref: "#/components/schemas/RGRestriction" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Unknown player_account_id (only when supplied)
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/admin/kyc/cases:
+    get:
+      summary: KYC case queue - tenant-wide (Stage 5, Operator Back Office MVP)
+      description: >
+        verification:read, tenant-scoped. Unlike
+        GET /v1/admin/kyc/verifications below (which requires an
+        already-known player_account_id), this is the tenant-wide
+        operational queue a compliance operator lands on. Existing
+        review/decision endpoints are unchanged - this is additive
+        read-only visibility.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [unverified, pending, review_required, approved, rejected, expired] }
+        - name: player_account_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated KYC case queue
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Verification"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/admin/kyc/verifications:
     get:
       summary: List a player account's verification attempts (compliance/tenant admin)
@@ -1376,7 +1856,129 @@ paths:
   # bonus_handlers.go/bonus_routes.go) was never added to this file
   # either - this section covers only the NEW endpoints this Phase
   # introduces.
+  /v1/admin/bonus/campaigns:
+    get:
+      summary: List bonus campaigns (Stage 5, Operator Back Office MVP)
+      description: bonus:read, tenant-scoped. Read-only visibility; campaign lifecycle mutations are unchanged.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [draft, active, paused, ended, archived] }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated campaign list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/BonusCampaign" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/bonus/grants:
+    get:
+      summary: List/read bonus grants (Stage 5, Operator Back Office MVP)
+      description: >
+        bonus:read, tenant-scoped. With player_account_id, that player's
+        grant/reward state (for the player-detail view); without it, a
+        tenant-wide paginated list. Read-only visibility - grant lifecycle
+        mutations are unchanged.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: player_account_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          schema: { type: string, enum: [issued, activated, in_progress, pending_settlement, completed, converted, expired, cancelled, forfeited, reversed] }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated grant list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/BonusGrant" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/admin/bonus/change-requests:
+    get:
+      summary: Bonus change-request approval queue (Stage 5, Operator Back Office MVP)
+      description: >
+        bonus:read, tenant-scoped. Defaults to status=pending when no
+        status is given, so an operator lands on the actual approval
+        queue. The decision itself is made via the existing
+        POST .../{requestID}/decide below, unchanged.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          description: Defaults to `pending` when omitted.
+          schema: { type: string, enum: [pending, applied, rejected, cancelled] }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated change-request queue
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/BonusChangeRequest" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
     post:
       summary: File a four-eyes change request for a dual-controlled bonus operation
       description: >
@@ -2991,7 +3593,103 @@ components:
         reason: { type: string }
         reviewed_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
+        # Stage 5 (Operator Back Office MVP) additions - additive, optional,
+        # surfaced by GET /v1/admin/kyc/cases for the case-queue view.
+        brand_id: { type: string, format: uuid }
+        reviewed_by: { type: string, format: uuid }
+        expires_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        has_verified_residence: { type: boolean }
       required: [id, player_account_id, status, provider_id, created_at]
+    PageMeta:
+      type: object
+      description: >
+        Stage 5 (Operator Back Office MVP) shared pagination envelope
+        (internal/httpserver/pagination.go). Every Stage-5-era admin list
+        endpoint returns `{items: [...]}` merged with this object - see
+        each path's response schema for the concrete `items` type.
+      properties:
+        limit: { type: integer }
+        offset: { type: integer }
+        total: { type: integer }
+      required: [limit, offset, total]
+    RGRestriction:
+      type: object
+      description: >
+        A responsible-gaming restriction/self-exclusion row
+        (internal/rg.Restriction / player_restrictions). Enforcement and
+        self-exclusion mechanics are owned entirely server-side - this
+        schema is read-only visibility.
+      properties:
+        id: { type: string, format: uuid }
+        restriction_type:
+          type: string
+          enum: [self_exclusion]
+        scope: { type: string }
+        starts_at: { type: string, format: date-time }
+        ends_at: { type: string, format: date-time }
+        indefinite: { type: boolean }
+        source: { type: string }
+        reason_code: { type: string }
+        created_at: { type: string, format: date-time }
+        active: { type: boolean }
+      required: [id, restriction_type, scope, starts_at, indefinite, source, created_at, active]
+    BonusCampaign:
+      type: object
+      description: Bonus campaign summary (internal/bonus.Campaign), read-only visibility.
+      properties:
+        id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [draft, active, paused, ended, archived]
+        fulfillment_owner: { type: string }
+        brand_id: { type: string, format: uuid }
+        current_version_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+      required: [id, status, fulfillment_owner]
+    BonusGrant:
+      type: object
+      description: A player's bonus grant/reward state (internal/bonus.Grant), read-only visibility.
+      properties:
+        id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [issued, activated, in_progress, pending_settlement, completed, converted, expired, cancelled, forfeited, reversed]
+        asset_code: { type: string }
+        created_at: { type: string, format: date-time }
+        activated_at: { type: string, format: date-time }
+        terminal_at: { type: string, format: date-time }
+        terminal_reason_code: { type: string }
+        remaining_bonus_balance: { type: string }
+      required: [id, status, asset_code, created_at]
+    WithdrawalAdmin:
+      type: object
+      description: >
+        A withdrawal request as seen by staff (staffWithdrawalResponse),
+        tenant-wide (not restricted to one player). The state machine,
+        four-eyes controls, and ledger postings are unchanged from the
+        existing (pre-Stage-5) withdrawal domain - this schema and its
+        two GET endpoints are purely additive read visibility.
+      properties:
+        id: { type: string, format: uuid }
+        asset_code: { type: string }
+        amount: { type: integer }
+        state:
+          type: string
+          enum: [requested, pending_review, approved, rejected, submitted, completed, failed, cancelled, reversed]
+        requested_at: { type: string, format: date-time }
+        hold_ledger_transaction_id: { type: string, format: uuid }
+        player_account_id: { type: string, format: uuid }
+        decimal_exponent:
+          type: integer
+          description: >
+            Minor-unit exponent for asset_code (e.g. 2 for EUR meaning
+            `amount` is in cents). Absent means unknown - a client must
+            not assume 0. Added after a ledger-finance review flagged the
+            Back Office rendering raw minor units with no exponent as a
+            real financial-clarity defect at the withdrawal-approval
+            decision point.
+      required: [id, asset_code, amount, state, requested_at, player_account_id]
     Document:
       type: object
       description: >
@@ -3064,7 +3762,13 @@ components:
       description: >
         A dual-controlled bonus operation's own governance record
         (bonus_change_requests, migration 0063). Immutable except state
-        (pending -> applied|rejected|cancelled).
+        (pending -> applied|rejected|cancelled). The reason_code/
+        requested_by_principal_id/requested_at/amount_at_request/
+        asset_code/applied_by_principal_id/applied_at fields were added
+        Stage 5 (Operator Back Office MVP) to back the new
+        GET /v1/admin/bonus/change-requests approval-queue view - purely
+        additive, the POST filing/decide endpoints and their own
+        semantics are unchanged.
       properties:
         id: { type: string, format: uuid }
         operation:
@@ -3073,6 +3777,13 @@ components:
         target_type: { type: string }
         target_id: { type: string, format: uuid }
         state: { type: string, enum: [pending, applied, rejected, cancelled] }
+        reason_code: { type: string }
+        requested_by_principal_id: { type: string, format: uuid }
+        requested_at: { type: string, format: date-time }
+        amount_at_request: { type: string }
+        asset_code: { type: string }
+        applied_by_principal_id: { type: string, format: uuid }
+        applied_at: { type: string, format: date-time }
       required: [id, operation, target_type, target_id, state]
     EconomicOperation:
       type: object

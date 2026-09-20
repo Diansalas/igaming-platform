@@ -760,8 +760,11 @@ func TestAuditLog_RecordsSecurityEvents(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 reading audit log, got %d", resp.StatusCode)
 	}
-	var entries []auditEntryResponse
-	decodeBody(t, resp, &entries)
+	// Stage 5: this endpoint now returns the shared pagination envelope
+	// (see internal/httpserver/pagination.go) rather than a bare array.
+	var page pagedResponse[auditEntryResponse]
+	decodeBody(t, resp, &page)
+	entries := page.Items
 
 	byAction := map[string][]auditEntryResponse{}
 	for _, e := range entries {

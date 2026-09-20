@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -130,6 +131,100 @@ func newCreateTenantHandler(deps Deps) http.HandlerFunc {
 	}
 }
 
+// --- Tenant listing/detail (Stage 5: Operator Back Office MVP) ---
+//
+// Closes the Stage 4I Exit Triage gap that no ListTenants function existed
+// anywhere: the Back Office needs to list/search/paginate tenants and read
+// a single tenant's detail. Platform-admin-only for the list (tenant
+// provisioning/administration is inherently a platform-level view, per
+// docs/decisions/0011 - a tenant has no legitimate reason to enumerate
+// every OTHER tenant on the platform), mirroring newCreateTenantHandler's
+// own platform-scope check exactly. Detail uses canActOnTenant instead
+// (platform_admin may read any tenant; a tenant-scoped caller may read only
+// its own), since reading one's own tenant record is an ordinary, everyday
+// tenant_admin action, unlike enumerating the whole platform.
+
+func newListTenantsHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		if tc.TenantID != uuid.Nil {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "only a platform administrator may list tenants")
+			return
+		}
+
+		p := parsePageParams(r)
+		q := r.URL.Query().Get("q")
+		status := r.URL.Query().Get("status")
+
+		var resp []tenantResponse
+		var total int
+		err = deps.DB.WithoutTenant(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+			tenants, t, err := identity.ListTenants(ctx, tx, q, status, p.Limit, p.Offset)
+			if err != nil {
+				return err
+			}
+			total = t
+			resp = make([]tenantResponse, 0, len(tenants))
+			for _, ten := range tenants {
+				resp = append(resp, tenantResponse{ID: ten.ID.String(), Name: ten.Name, Slug: ten.Slug, LicensingModel: ten.LicensingModel, Status: ten.Status})
+			}
+			return nil
+		})
+		if err != nil {
+			logger.Error("list_tenants_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to list tenants")
+			return
+		}
+		writeJSON(w, http.StatusOK, newPagedResponse(resp, p, total))
+	}
+}
+
+func newGetTenantHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		targetTenantID, err := uuid.Parse(r.PathValue("tenantID"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid tenant id")
+			return
+		}
+		if !canActOnTenant(tc, targetTenantID) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "cannot act on a different tenant")
+			return
+		}
+
+		var t identity.Tenant
+		err = deps.DB.WithTenant(r.Context(), targetTenantID, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			t, err = identity.GetTenantByID(ctx, tx, targetTenantID)
+			return err
+		})
+		if errors.Is(err, identity.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "tenant not found")
+			return
+		}
+		if err != nil {
+			logger.Error("get_tenant_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to load tenant")
+			return
+		}
+		writeJSON(w, http.StatusOK, tenantResponse{ID: t.ID.String(), Name: t.Name, Slug: t.Slug, LicensingModel: t.LicensingModel, Status: t.Status})
+	}
+}
+
 // --- Brand provisioning ---
 
 type createBrandRequest struct {
@@ -205,6 +300,108 @@ func newCreateBrandHandler(deps Deps) http.HandlerFunc {
 		writeJSON(w, http.StatusCreated, brandResponse{
 			ID: brand.ID.String(), TenantID: brand.TenantID.String(), Name: brand.Name, Slug: brand.Slug, Status: brand.Status,
 		})
+	}
+}
+
+// --- Brand listing/detail (Stage 5: Operator Back Office MVP) ---
+//
+// Same canActOnTenant authorization as brand creation: platform_admin may
+// read any tenant's brands, a tenant-scoped caller may read only its own.
+
+func newListBrandsHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		targetTenantID, err := uuid.Parse(r.PathValue("tenantID"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid tenant id")
+			return
+		}
+		if !canActOnTenant(tc, targetTenantID) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "cannot act on a different tenant")
+			return
+		}
+
+		p := parsePageParams(r)
+
+		var resp []brandResponse
+		var total int
+		err = deps.DB.WithTenant(r.Context(), targetTenantID, func(ctx context.Context, tx pgx.Tx) error {
+			brands, t, err := identity.ListBrandsForTenant(ctx, tx, targetTenantID, p.Limit, p.Offset)
+			if err != nil {
+				return err
+			}
+			total = t
+			resp = make([]brandResponse, 0, len(brands))
+			for _, b := range brands {
+				resp = append(resp, brandResponse{ID: b.ID.String(), TenantID: b.TenantID.String(), Name: b.Name, Slug: b.Slug, Status: b.Status})
+			}
+			return nil
+		})
+		if err != nil {
+			logger.Error("list_brands_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to list brands")
+			return
+		}
+		writeJSON(w, http.StatusOK, newPagedResponse(resp, p, total))
+	}
+}
+
+func newGetBrandHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		targetTenantID, err := uuid.Parse(r.PathValue("tenantID"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid tenant id")
+			return
+		}
+		if !canActOnTenant(tc, targetTenantID) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "cannot act on a different tenant")
+			return
+		}
+		brandID, err := uuid.Parse(r.PathValue("brandID"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid brand id")
+			return
+		}
+
+		var brand identity.Brand
+		err = deps.DB.WithTenant(r.Context(), targetTenantID, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			brand, err = identity.GetBrandByID(ctx, tx, brandID)
+			return err
+		})
+		if errors.Is(err, identity.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "brand not found")
+			return
+		}
+		if err != nil {
+			logger.Error("get_brand_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to load brand")
+			return
+		}
+		// GetBrandByID resolves regardless of tenant scope (brand_public_read
+		// is USING (true) - see its own doc comment), so a brand belonging to
+		// a DIFFERENT tenant than the path's tenantID must be reported as
+		// not found here, never leaked as a cross-tenant read.
+		if brand.TenantID != targetTenantID {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "brand not found")
+			return
+		}
+		writeJSON(w, http.StatusOK, brandResponse{ID: brand.ID.String(), TenantID: brand.TenantID.String(), Name: brand.Name, Slug: brand.Slug, Status: brand.Status})
 	}
 }
 
@@ -606,8 +803,11 @@ func toPlayerAccountResponse(a identity.PlayerAccount) playerAccountResponse {
 	return playerAccountResponse{ID: a.ID.String(), BrandID: a.BrandID.String(), Email: a.Email, Status: string(a.Status), KYCTier: a.KYCTier}
 }
 
-const defaultPlayerListLimit = 50
-
+// Stage 5 (Operator Back Office MVP): GET /v1/admin/players gained
+// pagination (the shared internal/httpserver/pagination.go envelope),
+// ?q= (case-insensitive substring match on email), and ?status= (exact
+// match) - closing the Stage 4I Exit Triage gap that this endpoint was
+// hardcoded to LIMIT 50 with no way to page past it or search.
 func newListPlayersHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -619,12 +819,18 @@ func newListPlayersHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		p := parsePageParams(r)
+		q := r.URL.Query().Get("q")
+		status := r.URL.Query().Get("status")
+
 		var resp []playerAccountResponse
+		var total int
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			accounts, err := identity.ListPlayerAccounts(ctx, tx, defaultPlayerListLimit)
+			accounts, t, err := identity.ListPlayerAccounts(ctx, tx, q, status, p.Limit, p.Offset)
 			if err != nil {
 				return err
 			}
+			total = t
 			resp = make([]playerAccountResponse, 0, len(accounts))
 			for _, a := range accounts {
 				resp = append(resp, toPlayerAccountResponse(a))
@@ -636,7 +842,7 @@ func newListPlayersHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to list players")
 			return
 		}
-		writeJSON(w, http.StatusOK, resp)
+		writeJSON(w, http.StatusOK, newPagedResponse(resp, p, total))
 	}
 }
 
@@ -726,6 +932,91 @@ func newSuspendPlayerHandler(deps Deps) http.HandlerFunc {
 		if err != nil {
 			logger.Error("suspend_player_failed", "error", err)
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to suspend player")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+type reinstatePlayerRequest struct {
+	ReasonCode string `json:"reason_code"`
+}
+
+// newReinstatePlayerHandler is Stage 5's inverse of newSuspendPlayerHandler
+// above - same tenant-scoping, same PermPlayerSuspend authorization tier
+// (reinstating a suspension is not a lesser or greater authority than
+// imposing one), same audit-write discipline. Built on
+// identity.ReinstatePlayerAccount (an atomic conditional transition, not a
+// blind status write) - see that function's own doc comment for why a
+// 'self_excluded' or 'closed' account must never be reachable through this
+// endpoint. Follows newClearIdentityReviewHandler's own "read only to pick
+// the right response code, never to drive the mutation decision" pattern
+// for distinguishing "player not found" (404) from "player exists but is
+// not currently suspended" (409).
+func newReinstatePlayerHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		playerID, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid player id")
+			return
+		}
+
+		var req reinstatePlayerRequest
+		if err := decodeJSON(r, &req); err != nil {
+			apierror.Write(w, requestID, apierror.CodeValidation, "invalid request body")
+			return
+		}
+		v := validation.New()
+		v.RequireNonEmpty("reason_code", req.ReasonCode)
+		if v.HasErrors() {
+			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
+			return
+		}
+
+		subjectID, _ := uuid.Parse(tc.Subject)
+		var applied bool
+		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+			a, err := identity.ReinstatePlayerAccount(ctx, tx, playerID)
+			if err != nil {
+				return err
+			}
+			applied = a
+			if !applied {
+				if _, err := identity.GetPlayerAccountByID(ctx, tx, playerID); err != nil {
+					return err
+				}
+				return nil
+			}
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: subjectID,
+				Action: "player.reinstated", TargetType: "player_account", TargetID: playerID.String(),
+				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+				Metadata: map[string]any{
+					"reason_code":   req.ReasonCode,
+					"before_status": string(identity.PlayerStatusSuspended),
+					"after_status":  string(identity.PlayerStatusActive),
+				},
+			})
+		})
+		if errors.Is(err, identity.ErrNotFound) {
+			apierror.Write(w, requestID, apierror.CodeNotFound, "player not found")
+			return
+		}
+		if err != nil {
+			logger.Error("reinstate_player_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to reinstate player")
+			return
+		}
+		if !applied {
+			apierror.Write(w, requestID, apierror.CodeConflict, "player account is not currently suspended")
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -851,8 +1142,94 @@ type auditEntryResponse struct {
 	CreatedAt  string `json:"created_at"`
 }
 
-const defaultAuditListLimit = 100
+// queryAuditLog is the shared read behind both audit endpoints in this
+// file: the tenant-scoped GET /v1/admin/audit-log and the platform-scoped
+// GET /v1/admin/platform/audit-log (Stage 5). tenantID == nil means "read
+// platform-level rows" (tenant_id IS NULL - AssignTenantLicence,
+// tenant.created, and operating-market audit rows all live there per
+// migration 0077); a non-nil tenantID reads exactly that tenant's rows.
+// actorType/action/outcome (each optional) are exact-match filters against
+// their respective columns - passed as bound parameters, never string-
+// concatenated, exactly like every other dynamic-filter query in this
+// package. total is computed via count(*) OVER() in the same query so it
+// can never drift from what was actually read.
+//
+// Callers are responsible for opening tx with the RIGHT scope for the
+// tenantID they pass: db.Pool.WithTenant(tc.TenantID, ...) for a tenant-
+// scoped read (audit_log's dual_scope_isolation policy, migration 0014,
+// only admits tenant_id = current app.tenant_id rows there), and
+// db.Pool.WithPlatformAdmin(...) (no app.tenant_id set) for the platform
+// read (the same policy's OTHER arm: tenant_id IS NULL rows are visible
+// only when app.tenant_id itself is unset) - this function does not open
+// or scope the transaction itself.
+func queryAuditLog(ctx context.Context, tx pgx.Tx, tenantID *uuid.UUID, actorType, action, outcome string, p pageParams) ([]auditEntryResponse, int, error) {
+	query := `SELECT id, actor_type, actor_id, action, target_type, target_id, outcome, created_at, count(*) OVER()
+	          FROM audit_log WHERE `
+	args := []any{}
+	if tenantID != nil {
+		args = append(args, *tenantID)
+		query += fmt.Sprintf("tenant_id = $%d", len(args))
+	} else {
+		query += "tenant_id IS NULL"
+	}
+	if actorType != "" {
+		args = append(args, actorType)
+		query += fmt.Sprintf(" AND actor_type = $%d", len(args))
+	}
+	if action != "" {
+		args = append(args, action)
+		query += fmt.Sprintf(" AND action = $%d", len(args))
+	}
+	if outcome != "" {
+		args = append(args, outcome)
+		query += fmt.Sprintf(" AND outcome = $%d", len(args))
+	}
+	args = append(args, p.Limit)
+	query += fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d", len(args))
+	args = append(args, p.Offset)
+	query += fmt.Sprintf(" OFFSET $%d", len(args))
 
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var entries []auditEntryResponse
+	var total int
+	for rows.Next() {
+		var (
+			id                                  uuid.UUID
+			actorTypeVal, actionVal, outcomeVal string
+			actorID                             *uuid.UUID
+			targetType, targetID                *string
+			createdAt                           time.Time
+		)
+		if err := rows.Scan(&id, &actorTypeVal, &actorID, &actionVal, &targetType, &targetID, &outcomeVal, &createdAt, &total); err != nil {
+			return nil, 0, err
+		}
+		entry := auditEntryResponse{ID: id.String(), ActorType: actorTypeVal, Action: actionVal, Outcome: outcomeVal, CreatedAt: createdAt.Format(time.RFC3339)}
+		if actorID != nil {
+			entry.ActorID = actorID.String()
+		}
+		if targetType != nil {
+			entry.TargetType = *targetType
+		}
+		if targetID != nil {
+			entry.TargetID = *targetID
+		}
+		entries = append(entries, entry)
+	}
+	return entries, total, rows.Err()
+}
+
+// newListAuditLogHandler is the tenant-scoped audit read. Stage 5 gave it
+// the shared pagination envelope (BREAKING response-shape change: this
+// endpoint previously returned a bare JSON array - callers must now read
+// `.items`) plus optional ?actor_type=/?action=/?outcome= exact-match
+// filters. Read semantics are otherwise unchanged: still exactly this
+// tenant's own rows, never platform-level ones (see
+// newListPlatformAuditLogHandler for those).
 func newListAuditLogHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -864,50 +1241,71 @@ func newListAuditLogHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		p := parsePageParams(r)
+		query := r.URL.Query()
+
 		var resp []auditEntryResponse
+		var total int
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			rows, err := tx.Query(ctx,
-				`SELECT id, actor_type, actor_id, action, target_type, target_id, outcome, created_at
-				 FROM audit_log WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2`,
-				tc.TenantID, defaultAuditListLimit,
-			)
-			if err != nil {
-				return err
-			}
-			defer rows.Close()
-			for rows.Next() {
-				var (
-					id                         uuid.UUID
-					actorType, action, outcome string
-					actorID                    *uuid.UUID
-					targetType, targetID       *string
-					createdAt                  time.Time
-				)
-				if err := rows.Scan(&id, &actorType, &actorID, &action, &targetType, &targetID, &outcome, &createdAt); err != nil {
-					return err
-				}
-				entry := auditEntryResponse{ID: id.String(), ActorType: actorType, Action: action, Outcome: outcome, CreatedAt: createdAt.Format(time.RFC3339)}
-				if actorID != nil {
-					entry.ActorID = actorID.String()
-				}
-				if targetType != nil {
-					entry.TargetType = *targetType
-				}
-				if targetID != nil {
-					entry.TargetID = *targetID
-				}
-				resp = append(resp, entry)
-			}
-			return rows.Err()
+			var err error
+			resp, total, err = queryAuditLog(ctx, tx, &tc.TenantID, query.Get("actor_type"), query.Get("action"), query.Get("outcome"), p)
+			return err
 		})
 		if err != nil {
 			logger.Error("list_audit_log_failed", "error", err)
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to load audit log")
 			return
 		}
-		if resp == nil {
-			resp = []auditEntryResponse{}
+		writeJSON(w, http.StatusOK, newPagedResponse(resp, p, total))
+	}
+}
+
+// newListPlatformAuditLogHandler is Stage 5's platform-scoped counterpart
+// to newListAuditLogHandler above, closing the Stage 4I Exit Triage gap
+// that platform-scoped audit rows (tenant_id IS NULL - AssignTenantLicence,
+// tenant.created, operating-market audit rows per migration 0077) were
+// unreachable over HTTP by anyone: the one existing audit route filters
+// WHERE tenant_id = $1, which can never match a NULL tenant_id row.
+// Platform-admin-only, mirroring newListTenantsHandler's own platform-scope
+// check exactly - a tenant-scoped caller has no legitimate reason to read
+// platform-level events, and audit_log's own dual_scope_isolation RLS
+// policy would deny it visibility regardless (WithTenant would fail the
+// "tenant_id IS NULL requires app.tenant_id IS NULL" arm).
+func newListPlatformAuditLogHandler(deps Deps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		logger := observability.LoggerFromContext(r.Context(), deps.Logger)
+
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
 		}
-		writeJSON(w, http.StatusOK, resp)
+		if tc.TenantID != uuid.Nil {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "only a platform administrator may read the platform audit log")
+			return
+		}
+		subjectID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+
+		p := parsePageParams(r)
+		query := r.URL.Query()
+
+		var resp []auditEntryResponse
+		var total int
+		err = deps.DB.WithPlatformAdmin(r.Context(), subjectID, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			resp, total, err = queryAuditLog(ctx, tx, nil, query.Get("actor_type"), query.Get("action"), query.Get("outcome"), p)
+			return err
+		})
+		if err != nil {
+			logger.Error("list_platform_audit_log_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to load platform audit log")
+			return
+		}
+		writeJSON(w, http.StatusOK, newPagedResponse(resp, p, total))
 	}
 }

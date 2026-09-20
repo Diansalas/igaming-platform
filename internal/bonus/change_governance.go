@@ -155,6 +155,46 @@ func GetChangeRequestByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (ChangeR
 	return scanChangeRequest(row)
 }
 
+// ListChangeRequestsPage returns a page of ChangeRequests for tenantID,
+// optionally filtered by state, most recently requested first, plus the
+// total count matching the filter - Stage 5 (Operator Back Office MVP)'s
+// own read surface for the four-eyes approval queue. The caller (HTTP
+// handler) is responsible for defaulting an absent filter to
+// ChangeRequestPending so operators land on their actual queue - this
+// function itself applies no default, mirroring every other List*Page
+// function in this package (an explicit nil state means "no filter").
+func ListChangeRequestsPage(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, state *ChangeRequestState, limit, offset int) ([]ChangeRequest, int, error) {
+	where := "tenant_id = $1"
+	args := []any{tenantID}
+	if state != nil {
+		args = append(args, string(*state))
+		where += fmt.Sprintf(" AND state = $%d", len(args))
+	}
+
+	var total int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM bonus_change_requests WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("bonus: count change requests: %w", err)
+	}
+
+	pageArgs := append(append([]any{}, args...), limit, offset)
+	sql := `SELECT ` + changeRequestColumns + ` FROM bonus_change_requests WHERE ` + where +
+		fmt.Sprintf(` ORDER BY requested_at DESC LIMIT $%d OFFSET $%d`, len(pageArgs)-1, len(pageArgs))
+	rows, err := tx.Query(ctx, sql, pageArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("bonus: list change requests page: %w", err)
+	}
+	defer rows.Close()
+	var out []ChangeRequest
+	for rows.Next() {
+		r, err := scanChangeRequest(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, r)
+	}
+	return out, total, rows.Err()
+}
+
 // RecordChangeApproval inserts a bonus_change_approvals row - the write
 // that fires migration 0063's governance (four-eyes) AND SEP-1 triggers.
 // A trigger-raised exception surfaces here as a plain Postgres error;

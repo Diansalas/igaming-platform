@@ -54,7 +54,7 @@ func newActivateCampaignHandler(deps Deps) http.HandlerFunc {
 			if err != nil {
 				return err
 			}
-			resp = campaignResponse{ID: activated.ID.String(), Status: string(activated.Status), FulfillmentOwner: activated.FulfillmentOwner}
+			resp = toCampaignResponse(activated)
 			return nil
 		})
 		if errors.Is(err, bonus.ErrChangeRequestNotApproved) {

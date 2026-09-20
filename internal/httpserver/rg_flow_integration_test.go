@@ -8,8 +8,12 @@
 package httpserver
 
 import (
+	"context"
 	"net/http"
 	"testing"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/identity"
 )
@@ -272,5 +276,253 @@ func TestRGAdminRestriction_InvalidScopeRejected(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("scope=%q: expected 400, got %d", scope, resp.StatusCode)
 		}
+	}
+}
+
+// --- 9. Stage 5 Back Office: GET /v1/admin/rg/restrictions with NO
+// player_account_id lists every restriction in the tenant, paginated ---
+
+func TestRGAdminRestriction_TenantWideListAuthorizedAndPaginated(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, _ := newMockCasinoOrchestrator()
+	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	targetA := mustRegisterPlayer(t, srv, brand.Slug)
+	targetB := mustRegisterPlayer(t, srv, brand.Slug)
+
+	compliance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleCompliance, "compliance-rg-queue-pw-1")
+	complianceTokens := mustLoginStaff(t, srv, tenant.Slug, compliance.Email, "compliance-rg-queue-pw-1")
+
+	for _, targetID := range []uuid.UUID{targetA.ID, targetB.ID} {
+		resp := postJSON(t, srv, "/v1/admin/rg/restrictions", complianceTokens.AccessToken, map[string]any{
+			"player_account_id": targetID.String(), "scope": "tenant", "reason_code": "test",
+		})
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("failed to seed restriction for %s: %d", targetID, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// Unfiltered tenant-wide list: both restrictions visible, paginated
+	// envelope shape (never the bare-array shape the player_account_id-
+	// scoped path returns).
+	resp := getJSON(t, srv, "/v1/admin/rg/restrictions", complianceTokens.AccessToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for compliance listing the tenant-wide RG queue, got %d", resp.StatusCode)
+	}
+	var page struct {
+		Items  []map[string]any `json:"items"`
+		Limit  int              `json:"limit"`
+		Offset int              `json:"offset"`
+		Total  int              `json:"total"`
+	}
+	decodeBody(t, resp, &page)
+	if page.Total != 2 || len(page.Items) != 2 || page.Limit != 50 || page.Offset != 0 {
+		t.Fatalf("expected a paginated envelope with 2 total/items, got %+v", page)
+	}
+	for _, item := range page.Items {
+		if item["restriction_type"] != "self_exclusion" || item["scope"] != "tenant" {
+			t.Fatalf("unexpected restriction in tenant-wide queue: %+v", item)
+		}
+	}
+
+	// ?restriction_type=self_exclusion is accepted (the only value the
+	// domain currently admits) and still returns both.
+	filteredResp := getJSON(t, srv, "/v1/admin/rg/restrictions?restriction_type=self_exclusion", complianceTokens.AccessToken)
+	defer filteredResp.Body.Close()
+	var filteredPage struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	decodeBody(t, filteredResp, &filteredPage)
+	if filteredPage.Total != 2 {
+		t.Fatalf("expected restriction_type=self_exclusion to still return 2, got %+v", filteredPage)
+	}
+
+	// An unknown restriction_type value is a 400, never invented/ignored.
+	badTypeResp := getJSON(t, srv, "/v1/admin/rg/restrictions?restriction_type=not_a_real_type", complianceTokens.AccessToken)
+	defer badTypeResp.Body.Close()
+	if badTypeResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an invalid restriction_type filter, got %d", badTypeResp.StatusCode)
+	}
+
+	// Pagination bounds: limit/offset are honored.
+	limitedResp := getJSON(t, srv, "/v1/admin/rg/restrictions?limit=1&offset=1", complianceTokens.AccessToken)
+	defer limitedResp.Body.Close()
+	var limitedPage struct {
+		Items  []map[string]any `json:"items"`
+		Limit  int              `json:"limit"`
+		Offset int              `json:"offset"`
+		Total  int              `json:"total"`
+	}
+	decodeBody(t, limitedResp, &limitedPage)
+	if limitedPage.Limit != 1 || limitedPage.Offset != 1 || limitedPage.Total != 2 || len(limitedPage.Items) != 1 {
+		t.Fatalf("expected limit=1/offset=1/total=2/one item, got %+v", limitedPage)
+	}
+}
+
+// --- 10. The tenant-wide RG list still requires PermRGRestrictionRead -
+// a player/finance token is denied exactly like the player_account_id-
+// scoped path already is (test 5 above) ---
+
+func TestRGAdminRestriction_TenantWideList_UnauthorizedDenied(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, _ := newMockCasinoOrchestrator()
+	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	target := mustRegisterPlayer(t, srv, brand.Slug)
+
+	resp := getJSON(t, srv, "/v1/admin/rg/restrictions", target.Tokens.AccessToken)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 for a player token listing the tenant-wide RG queue, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	finance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleFinance, "finance-rg-queue-pw-1")
+	financeTokens := mustLoginStaff(t, srv, tenant.Slug, finance.Email, "finance-rg-queue-pw-1")
+	resp = getJSON(t, srv, "/v1/admin/rg/restrictions", financeTokens.AccessToken)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 for a finance token listing the tenant-wide RG queue, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+// --- 11. Cross-tenant: tenant B's compliance staff cannot see tenant A's
+// restrictions in the tenant-wide queue ---
+
+// TestRGAdminRestriction_TenantWideList_CrossTenantDenied is the
+// regression guard for the cross-tenant PII leak internal/rg.go's
+// ListRestrictionsForTenant doc comment describes: a naive
+// `SELECT * FROM player_restrictions` under WithTenant relies solely on
+// staff_and_system_read's RLS policy, whose `tenant_id IS NULL OR
+// tenant_id = app.tenant_id` clause is DELIBERATELY broad (a tenant must
+// be able to enforce another tenant's player's platform-wide
+// self-exclusion) - so a bare list surfaces every PLATFORM-WIDE row on
+// the entire platform to any tenant's compliance staff. The join to
+// player_accounts closes this. This test must seed a genuinely
+// platform-wide (tenant_id IS NULL) restriction via the player's own
+// self-exclusion endpoint - a staff-created "scope": "tenant" restriction
+// is already filtered by the RLS policy on its own and would let this
+// test pass even with the join removed, proving nothing. It must also
+// give tenant B its own real restriction, so the isolation assertion is
+// "tenant B sees its own 1 row and none of tenant A's", not a vacuous
+// "tenant B's empty queue stayed empty" that would pass unconditionally
+// against an empty tenant.
+func TestRGAdminRestriction_TenantWideList_CrossTenantDenied(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, _ := newMockCasinoOrchestrator()
+	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
+
+	tenantA := mustCreateTenant(t, pool)
+	brandA := mustCreateBrand(t, pool, tenantA)
+	targetA := mustRegisterPlayer(t, srv, brandA.Slug)
+
+	// Genuinely platform-wide (tenant_id IS NULL): the player's OWN
+	// self-exclusion, not a staff-created "scope":"tenant" restriction.
+	selfExclResp := postJSON(t, srv, "/v1/me/rg/self-exclusion", targetA.Tokens.AccessToken, map[string]any{})
+	if selfExclResp.StatusCode != http.StatusCreated {
+		t.Fatalf("failed to seed tenant A player's platform-wide self-exclusion: %d", selfExclResp.StatusCode)
+	}
+	selfExclResp.Body.Close()
+
+	// Confirm the fixture really produced a NULL-tenant row before
+	// asserting anything about isolation - otherwise a broken fixture
+	// could silently make this test vacuous again.
+	var seededTenantID *uuid.UUID
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT tenant_id FROM player_restrictions WHERE player_account_id = $1`, targetA.ID,
+		).Scan(&seededTenantID)
+	}); err != nil {
+		t.Fatalf("failed to verify seeded restriction's tenant scope: %v", err)
+	}
+	if seededTenantID != nil {
+		t.Fatalf("test fixture bug: expected a platform-wide (tenant_id IS NULL) restriction, got tenant_id=%v", *seededTenantID)
+	}
+
+	tenantB := mustCreateTenant(t, pool)
+	brandB := mustCreateBrand(t, pool, tenantB)
+	targetB := mustRegisterPlayer(t, srv, brandB.Slug)
+	selfExclRespB := postJSON(t, srv, "/v1/me/rg/self-exclusion", targetB.Tokens.AccessToken, map[string]any{})
+	if selfExclRespB.StatusCode != http.StatusCreated {
+		t.Fatalf("failed to seed tenant B player's own self-exclusion: %d", selfExclRespB.StatusCode)
+	}
+	selfExclRespB.Body.Close()
+
+	complianceB := mustCreateStaff(t, pool, tenantB.ID, identity.StaffRoleCompliance, "compliance-rg-queue-crosstenant-b-pw-1")
+	complianceBTokens := mustLoginStaff(t, srv, tenantB.Slug, complianceB.Email, "compliance-rg-queue-crosstenant-b-pw-1")
+
+	resp := getJSON(t, srv, "/v1/admin/rg/restrictions", complianceBTokens.AccessToken)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for tenant B listing its own RG queue, got %d", resp.StatusCode)
+	}
+	var page struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	decodeBody(t, resp, &page)
+	if page.Total != 1 || len(page.Items) != 1 {
+		t.Fatalf("expected tenant B to see exactly its own 1 restriction (non-vacuous check), got %+v", page)
+	}
+	if got := page.Items[0]["id"]; got == nil {
+		t.Fatalf("expected the returned restriction to have an id, got %+v", page.Items[0])
+	}
+}
+
+// --- 12. Regression: supplying ?player_account_id= is COMPLETELY
+// unchanged by the Stage 5 tenant-wide addition - still the original bare
+// JSON array (never the {"items":...} paginated envelope), still 404 for
+// a nonexistent/cross-tenant account, and query params meaningless to
+// that path (restriction_type/limit/offset) have no effect on it. ---
+
+func TestRGAdminRestriction_PlayerAccountIDSuppliedBehaviorUnchanged(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, _ := newMockCasinoOrchestrator()
+	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	target := mustRegisterPlayer(t, srv, brand.Slug)
+	other := mustRegisterPlayer(t, srv, brand.Slug)
+
+	compliance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleCompliance, "compliance-rg-regression-pw-1")
+	complianceTokens := mustLoginStaff(t, srv, tenant.Slug, compliance.Email, "compliance-rg-regression-pw-1")
+
+	// Seed a restriction for BOTH players - a bare "?player_account_id=X"
+	// list must return exactly one row (X's), never every tenant row,
+	// proving the old single-account scoping still applies verbatim.
+	for _, targetID := range []uuid.UUID{target.ID, other.ID} {
+		seedResp := postJSON(t, srv, "/v1/admin/rg/restrictions", complianceTokens.AccessToken, map[string]any{
+			"player_account_id": targetID.String(), "scope": "tenant", "reason_code": "test",
+		})
+		if seedResp.StatusCode != http.StatusCreated {
+			t.Fatalf("failed to seed restriction: %d", seedResp.StatusCode)
+		}
+		seedResp.Body.Close()
+	}
+
+	// Bare array shape, exactly one row, even though limit/offset/
+	// restriction_type are also present in the query string (this path
+	// never consulted them before Stage 5 and must not start now).
+	resp := getJSON(t, srv, "/v1/admin/rg/restrictions?player_account_id="+target.ID.String()+"&limit=1&offset=0&restriction_type=self_exclusion", complianceTokens.AccessToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 reading target's own restrictions, got %d", resp.StatusCode)
+	}
+	// Decoding directly into a bare []map[string]any (not a struct with an
+	// "items" field) is itself part of the proof: the paginated envelope
+	// ({"items":...,"limit":...}) would fail to decode into this shape.
+	var restrictions []map[string]any
+	decodeBody(t, resp, &restrictions)
+	if len(restrictions) != 1 {
+		t.Fatalf("expected exactly ONE restriction (target's own, not every tenant row), got %+v", restrictions)
+	}
+
+	// A nonexistent player_account_id under this tenant still 404s.
+	notFoundResp := getJSON(t, srv, "/v1/admin/rg/restrictions?player_account_id="+uuid.NewString(), complianceTokens.AccessToken)
+	defer notFoundResp.Body.Close()
+	if notFoundResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for a nonexistent player_account_id, got %d", notFoundResp.StatusCode)
 	}
 }
