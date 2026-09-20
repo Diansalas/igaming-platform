@@ -23,6 +23,8 @@ export interface NavPermissions {
   withdrawals: boolean
   tenantAudit: boolean
   platformAudit: boolean
+  /** Stage 6: tenant-wide sportsbook bet visibility (PermSportsbookBetRead). */
+  sportsbook: boolean
 }
 
 const NONE: NavPermissions = {
@@ -35,14 +37,20 @@ const NONE: NavPermissions = {
   withdrawals: false,
   tenantAudit: false,
   platformAudit: false,
+  sportsbook: false,
 }
 
+// Stage 6's sportsbook flag mirrors exactly which roles the backend grants
+// PermSportsbookBetRead to (internal/auth/permission.go): tenant_admin,
+// compliance, support, finance - never platform_admin, since platform_admin
+// has no tenant context to view bets in (db.Pool.WithTenant hard-errors on
+// uuid.Nil).
 const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
   platform_admin: { ...NONE, tenants: true, platformAudit: true },
-  tenant_admin: { ...NONE, ownTenant: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true },
-  support: { ...NONE, players: true, bonus: true },
-  compliance: { ...NONE, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true },
-  finance: { ...NONE, withdrawals: true },
+  tenant_admin: { ...NONE, ownTenant: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true },
+  support: { ...NONE, players: true, bonus: true, sportsbook: true },
+  compliance: { ...NONE, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true },
+  finance: { ...NONE, withdrawals: true, sportsbook: true },
   risk_manager: { ...NONE },
   promotions_manager: { ...NONE, bonus: true },
   bonus_operations: { ...NONE, bonus: true },

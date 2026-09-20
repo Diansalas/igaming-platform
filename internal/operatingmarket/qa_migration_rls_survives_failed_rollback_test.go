@@ -66,13 +66,14 @@ func TestQAAdversarial_FailedDirtyRollbackLeavesRLSEnabledAndForced(t *testing.T
 		t.Fatalf("seed a ceiling row: %v", err)
 	}
 
-	// The down-migration must fail (dirty database). Roll back 2 steps:
-	// migration 0077 (Stage 4I Phase E-SECURITY) now sits on top of 0076
-	// in the chain and is unconditionally reversible in this scenario, so
-	// it succeeds on its own before the overall call fails once it
-	// reaches 0076's own guard - mirrors migration_0076_integration_
-	// test.go's own migration0077Version precedent.
-	if _, err := pool.MigrateDown(context.Background(), dir, 2); err == nil {
+	// The down-migration must fail (dirty database). Roll back 3 steps:
+	// migrations 0078 (Stage 6) and 0077 (Stage 4I Phase E-SECURITY) now
+	// sit on top of 0076 in the chain and are both unconditionally
+	// reversible in this scenario, so they succeed on their own before the
+	// overall call fails once it reaches 0076's own guard - mirrors
+	// migration_0076_integration_test.go's own migration0077Version/
+	// migration0078Version precedent.
+	if _, err := pool.MigrateDown(context.Background(), dir, 3); err == nil {
 		t.Fatal("expected migration 0076's down migration to fail on a dirty database")
 	}
 
@@ -210,23 +211,23 @@ func TestQAAdversarial_PartialRollbackLeavesRegistryRLSDisabledButReapplyRestore
 		t.Fatalf("seed a ceiling row: %v", err)
 	}
 
-	// `-steps=2 down`: migration 0077 rolls back successfully on its own
-	// (it carries no "refuse if rows exist" guard - tenants/licences/
-	// jurisdictions are core tables that will always hold rows), and the
-	// OVERALL call only THEN fails once it reaches migration 0076's own
-	// dirty-database guard.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 2)
+	// `-steps=3 down`: migrations 0078 and 0077 both roll back successfully
+	// on their own (neither carries a "refuse if rows exist" guard -
+	// tenants/licences/jurisdictions are core tables that will always hold
+	// rows), and the OVERALL call only THEN fails once it reaches
+	// migration 0076's own dirty-database guard.
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 3)
 	if err == nil {
-		t.Fatal("expected the -steps=2 down to fail on a dirty database")
+		t.Fatal("expected the -steps=3 down to fail on a dirty database")
 	}
-	if len(rolledBack) != 1 || rolledBack[0] != migration0077Version {
-		t.Fatalf("expected exactly migration %d to have been rolled back before the overall failure, got %v", migration0077Version, rolledBack)
+	if len(rolledBack) != 2 || rolledBack[0] != migration0078Version || rolledBack[1] != migration0077Version {
+		t.Fatalf("expected exactly migrations [%d %d] to have been rolled back before the overall failure, got %v", migration0078Version, migration0077Version, rolledBack)
 	}
 
 	// THE UNDOCUMENTED STATE THIS FIX MAKES EXPLICIT: migration 0077's own
 	// rollback succeeded, so tenants/licences/jurisdictions are now WITHOUT
 	// row-level security, with zero policies and zero deny-truncate
-	// triggers - even though the overall `-steps=2 down` command reported
+	// triggers - even though the overall `-steps=3 down` command reported
 	// failure. An operator reading only "refusing to roll back migration
 	// 0076" would have no way to know this.
 	for _, table := range registryTables {

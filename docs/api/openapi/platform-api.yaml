@@ -936,6 +936,163 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # --- Sportsbook (Stage 6, B2C Player/Brand MVP + first sportsbook
+  # vertical slice). Catalogue browse is public/unauthenticated (mirrors
+  # the assets-registry/casino-catalogue precedent: platform-wide,
+  # read-open reference data with no RLS). Bet placement and history are
+  # player-authenticated; the admin list is the Stage 6 Back Office
+  # visibility counterpart to /v1/admin/withdrawals/history. Only a mock
+  # provider (internal/sportsbook.MockSportsbookProvider) is wired this
+  # stage - see docs/active-stage.md for the real-provider integration
+  # contract this was built against. ---
+  /v1/sportsbook/sports:
+    get:
+      summary: Browse the full sportsbook catalogue (sports -> competitions -> events)
+      description: >
+        Public, unauthenticated, no tenant scoping - platform-wide
+        reference data synced from the configured Provider at server
+        startup (SyncCatalogue), not baked into a migration.
+      responses:
+        "200":
+          description: The full catalogue tree
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SportCatalogue" }
+        "503":
+          description: Sportsbook is not enabled on this deployment
+  /v1/sportsbook/events/{id}:
+    get:
+      summary: Get one event's full market/selection tree
+      description: Public, unauthenticated, mirrors GET /v1/sportsbook/sports.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: The event detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: Sportsbook is not enabled on this deployment
+  /v1/me/sportsbook/bets:
+    post:
+      summary: Place a bet on a selection
+      description: >
+        Player-authenticated. selection_id/asset_code/stake_amount are the
+        actual bet; expected_odds_numerator/expected_odds_denominator are
+        what the client last saw for the selection - if the server's
+        current odds differ, the bet is rejected with
+        rejection_category=odds_changed rather than silently placed at a
+        different price. idempotency_key must be unique per placement
+        attempt (a duplicate returns the original outcome). A rejection is
+        a well-formed business decision, not an HTTP error - the response
+        is 200 with accepted=false, mirroring internal/casino's
+        webhook-decline precedent. Full server-authoritative chain:
+        validation -> RG eligibility -> risk evaluation -> wallet balance
+        authorization -> ledger post + bet row, in one transaction.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaceBetRequest"
+      responses:
+        "201":
+          description: Bet accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaceBetResponse"
+        "200":
+          description: Bet declined (accepted=false; see rejection_category)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaceBetResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Selection not found
+        "503":
+          description: Sportsbook is not enabled on this deployment
+    get:
+      summary: List the caller's own bet history
+      description: Player-authenticated, restricted to the caller's own bets (WithPlayerScope).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated bet history
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Bet" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Sportsbook is not enabled on this deployment
+  /v1/admin/sportsbook/bets:
+    get:
+      summary: Sportsbook bet queue, tenant-wide (Stage 6 Back Office visibility)
+      description: >
+        sportsbook_bet:read, tenant-scoped, tenant-wide (not restricted to
+        one player) - mirrors GET /v1/admin/withdrawals/history's identical
+        shape and rationale. Not granted to platform_admin (no tenant
+        context to scope to).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated tenant-wide bet queue
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/AdminBet" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: Sportsbook is not enabled on this deployment
+
   # --- Audit trail (read-only) ---
   /v1/admin/audit-log:
     get:
@@ -3690,6 +3847,128 @@ components:
             real financial-clarity defect at the withdrawal-approval
             decision point.
       required: [id, asset_code, amount, state, requested_at, player_account_id]
+    Selection:
+      type: object
+      description: >
+        A single backable outcome within a market
+        (internal/sportsbook.Selection). Odds are an integer numerator/
+        denominator fraction, never a float - and the ratio
+        odds_numerator/odds_denominator IS the decimal odds value
+        directly (e.g. 250/100 = decimal odds 2.50), already including
+        the stake: potential_return = stake * odds_numerator /
+        odds_denominator. Do not add 1 to this ratio.
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        odds_numerator: { type: integer, format: int64 }
+        odds_denominator: { type: integer, format: int64 }
+        status: { type: string, enum: [active, suspended] }
+      required: [id, name, odds_numerator, odds_denominator, status]
+    EventSummary:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        start_time: { type: string, format: date-time }
+        status: { type: string, enum: [scheduled, live, finished, cancelled] }
+      required: [id, name, start_time, status]
+    CompetitionCatalogue:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        events:
+          type: array
+          items: { $ref: "#/components/schemas/EventSummary" }
+      required: [id, name, events]
+    SportCatalogue:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        competitions:
+          type: array
+          items: { $ref: "#/components/schemas/CompetitionCatalogue" }
+      required: [id, code, name, competitions]
+    MarketDetail:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        status: { type: string, enum: [open, suspended, closed] }
+        selections:
+          type: array
+          items: { $ref: "#/components/schemas/Selection" }
+      required: [id, name, status, selections]
+    EventDetail:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        start_time: { type: string, format: date-time }
+        status: { type: string, enum: [scheduled, live, finished, cancelled] }
+        sport_code: { type: string }
+        sport_name: { type: string }
+        competition_name: { type: string }
+        markets:
+          type: array
+          items: { $ref: "#/components/schemas/MarketDetail" }
+      required: [id, name, start_time, status, sport_code, sport_name, competition_name, markets]
+    PlaceBetRequest:
+      type: object
+      properties:
+        selection_id: { type: string, format: uuid }
+        stake_amount: { type: integer, format: int64, description: "Minor units, must be positive" }
+        asset_code: { type: string }
+        expected_odds_numerator: { type: integer, format: int64 }
+        expected_odds_denominator: { type: integer, format: int64 }
+        idempotency_key: { type: string }
+      required: [selection_id, stake_amount, asset_code, expected_odds_numerator, expected_odds_denominator, idempotency_key]
+    Bet:
+      type: object
+      description: A placed bet (internal/sportsbook.Bet), player-owned view.
+      properties:
+        id: { type: string, format: uuid }
+        selection_id: { type: string, format: uuid }
+        asset_code: { type: string }
+        stake_amount: { type: integer, format: int64 }
+        odds_numerator: { type: integer, format: int64 }
+        odds_denominator: { type: integer, format: int64 }
+        potential_return: { type: integer, format: int64 }
+        status: { type: string, enum: [open, settled_won, settled_lost, void] }
+        placed_at: { type: string, format: date-time }
+      required: [id, selection_id, asset_code, stake_amount, odds_numerator, odds_denominator, potential_return, status, placed_at]
+    AdminBet:
+      allOf:
+        - $ref: "#/components/schemas/Bet"
+        - type: object
+          description: >
+            Stage 6 Back Office visibility view - adds the player identity
+            and the same decimal_exponent presentation aid WithdrawalAdmin
+            carries, for the identical reason (raw minor units misrepresent
+            the real staked/returned amount at a glance).
+          properties:
+            player_account_id: { type: string, format: uuid }
+            decimal_exponent: { type: integer }
+          required: [player_account_id, decimal_exponent]
+    PlaceBetResponse:
+      type: object
+      description: >
+        Response envelope for BOTH outcomes of POST /v1/me/sportsbook/bets.
+        accepted is the discriminator: when true, bet is populated and the
+        rejection_* fields are absent; when false, bet is absent and
+        rejection_category/rejection_code/rejection_message are populated.
+        A decline is a well-formed business outcome, not an HTTP error.
+      properties:
+        accepted: { type: boolean }
+        bet: { $ref: "#/components/schemas/Bet" }
+        rejection_category:
+          type: string
+          enum: [odds_changed, event_not_open, insufficient_funds, rg_denied, risk_denied]
+        rejection_code: { type: string }
+        rejection_message: { type: string }
+      required: [accepted]
     Document:
       type: object
       description: >

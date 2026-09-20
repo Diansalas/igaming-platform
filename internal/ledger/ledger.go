@@ -136,6 +136,19 @@ const (
 	TxBonusConversion TransactionType = "bonus_conversion"
 	TxBonusForfeiture TransactionType = "bonus_forfeiture"
 	TxBonusReversal   TransactionType = "bonus_reversal"
+	// TxSportsbookBet implements docs/decisions/0038 §3's cash-funded bet-
+	// placement posting (Stage 6, migration 0078's additive CHECK-
+	// constraint value): Dr player_cash / Cr player_locked_cash, no
+	// house_gaming leg at placement time (the stake is not recognized as
+	// revenue until settlement, which this stage does not build - see
+	// internal/sportsbook's own package doc comment). Settlement/void/
+	// partial-settlement/cashout/rollback transaction types
+	// (sportsbook_settlement/_void/_partial_settlement/_cashout/_rollback,
+	// ADR 0038 §5/§8/§10) remain NOT IMPLEMENTED this stage - no code path
+	// writes them, and they are deliberately absent from migration 0078's
+	// CHECK-constraint widening until a future stage actually builds
+	// settlement.
+	TxSportsbookBet TransactionType = "sportsbook_bet"
 )
 
 // Direction is a ledger entry's debit/credit side. Never a signed amount

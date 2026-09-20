@@ -54,6 +54,27 @@ const (
 	// administrative action, always audited).
 	PermProviderConfigWrite Permission = "provider_config:write"
 
+	// PermSportsbookBetRead gates STAFF, tenant-wide Back Office visibility
+	// into every player's sportsbook bets (Stage 6) - mirroring
+	// PermWithdrawalReview's read-only-visibility shape and naming
+	// convention exactly (a player always sees their OWN bet history via
+	// the self-service endpoint regardless of this permission - RLS's
+	// player_self_scope policy, migration 0078, not RBAC, is what
+	// authorizes that). Granted to the same roles that already hold other
+	// tenant-wide FINANCIAL read visibility (PermRGRestrictionRead/
+	// PermVerificationRead's precedent): RoleTenantAdmin and RoleCompliance,
+	// plus RoleSupport (which already holds bare PermPlayerRead for
+	// ordinary player-support visibility) and RoleFinance (which already
+	// holds every withdrawal-governance permission - a sportsbook bet is
+	// exactly the same class of financial fact a Finance role legitimately
+	// needs to see when investigating a player's balance history).
+	// Deliberately NOT RolePlatformAdmin - identical reasoning to
+	// PermRGRestrictionRead's own doc comment: a platform_admin cannot
+	// resolve a specific tenant's player_account at all today, so granting
+	// it would be exactly the "capability nothing can actually use"
+	// CLAUDE.md's "no fake completion" rule warns against.
+	PermSportsbookBetRead Permission = "sportsbook_bet:read"
+
 	// PermWithdrawalPolicyWrite gates the Stage 3D withdrawal_policies
 	// admin API (docs/decisions/0024 §5). Deliberately its own
 	// permission, never bundled with PermWithdrawalApprove: the role
@@ -524,11 +545,16 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// four-eyes-gated bonus permission, so it satisfies that
 		// constraint by construction.
 		PermBonusConfigRead, PermBonusRead, PermBonusReportRead, PermBonusApprovalPolicyWrite,
+		// Stage 6: tenant-wide sportsbook bet visibility - see that
+		// permission's own doc comment.
+		PermSportsbookBetRead,
 	),
 	RoleSupport: permSet(
 		PermPlayerRead,
 		// Stage 4H-B1 Wave 2 (security-architecture.md §B1.1 table).
 		PermBonusRead,
+		// Stage 6: see PermSportsbookBetRead's own doc comment.
+		PermSportsbookBetRead,
 	),
 	RoleCompliance: permSet(
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead,
@@ -562,6 +588,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// PermOperatingMarketPolicyRead for this tenant's own footprint.
 		// Never PermOperatingMarketCeilingManage (platform-only).
 		PermOperatingMarketTenantPolicyWrite, PermOperatingMarketPolicyRead,
+		// Stage 6: see PermSportsbookBetRead's own doc comment.
+		PermSportsbookBetRead,
 	),
 	// finance is Stage 3B's own role, dedicated solely to withdrawal
 	// governance - it holds all four withdrawal permissions and nothing
@@ -569,6 +597,11 @@ var rolePermissions = map[Role]map[Permission]bool{
 	// half of Stage 3D's required separation).
 	RoleFinance: permSet(
 		PermWithdrawalReview, PermWithdrawalApprove, PermWithdrawalReject, PermWithdrawalSubmit,
+		// Stage 6: see PermSportsbookBetRead's own doc comment - a
+		// sportsbook bet is the same class of financial fact Finance
+		// already needs visibility into when investigating a player's
+		// balance/withdrawal history.
+		PermSportsbookBetRead,
 	),
 	// Stage 4G: risk_manager is dedicated solely to Risk & Limits
 	// configuration - it holds both risk_config permissions and nothing

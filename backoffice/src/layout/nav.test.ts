@@ -31,13 +31,14 @@ describe('buildNavItems', () => {
     expect(items).toContain('Responsible Gaming')
     expect(items).toContain('Bonus')
     expect(items).toContain('Audit Log')
+    expect(items).toContain('Sportsbook')
     expect(items).not.toContain('Withdrawals')
     expect(items).not.toContain('Tenants')
   })
 
-  it('gives finance ONLY the withdrawals section', () => {
+  it('gives finance the withdrawals and sportsbook sections, nothing else', () => {
     const items = buildNavItems({ ...baseClaims, role: 'finance' }).map((i) => i.label)
-    expect(items).toEqual(['Withdrawals'])
+    expect(items).toEqual(['Withdrawals', 'Sportsbook'])
   })
 
   it('gives a platform_admin (nil-tenant) principal Tenants + Platform Audit Log, never tenant-operational sections', () => {

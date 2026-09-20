@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/Diansalas/igaming-platform/internal/auth"
 	"github.com/Diansalas/igaming-platform/internal/bonus"
 	"github.com/Diansalas/igaming-platform/internal/casino"
@@ -30,6 +32,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
 	"github.com/Diansalas/igaming-platform/internal/rg"
+	"github.com/Diansalas/igaming-platform/internal/sportsbook"
 )
 
 // kycMockWebhookSecret is MockKYCProvider's dev/test-only HMAC signing
@@ -123,6 +126,26 @@ func run() error {
 		"mock": casino.NewMockCasinoProvider("mock", "EUR", "USD", "GBP", "BRL", "MXN"),
 	})
 
+	// Stage 6 ships a mock sportsbook provider only (CLAUDE.md's "does not
+	// integrate a real provider without a confirmed commercial
+	// relationship" limitation) - no adapter registry is needed for bet
+	// placement itself (internal/sportsbook.PlaceBet has no external
+	// provider round-trip, see that package's own doc comment), only for
+	// catalogue sync. Synced once at startup, idempotently (SyncCatalogue
+	// upserts keyed by external_ref, safe to re-run on every restart) -
+	// event start times are computed relative to time.Now() at sync time
+	// (MockSportsbookProvider's own doc comment), so they stay "near
+	// future" regardless of how long this binary has existed. A real
+	// provider adapter implementing sportsbook.Provider is a drop-in
+	// replacement for this one call, with zero change to the domain model,
+	// the orchestrator, or the HTTP layer.
+	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return sportsbook.SyncCatalogue(ctx, tx, sportsbook.NewMockSportsbookProvider())
+	}); err != nil {
+		return fmt.Errorf("sync sportsbook catalogue: %w", err)
+	}
+	logger.Info("sportsbook catalogue synced")
+
 	handler := httpserver.New(httpserver.Deps{
 		Logger:              logger,
 		DB:                  pool,
@@ -132,6 +155,7 @@ func run() error {
 		RefreshTokenTTL:     cfg.RefreshTokenTTL,
 		PaymentOrchestrator: orchestrator,
 		CasinoOrchestrator:  casinoOrchestrator,
+		SportsbookEnabled:   true,
 		// Stage 4E: no real identity-resolution vendor is contracted yet
 		// (docs/decisions/0027 §3) - MockPersonResolver's honest default
 		// (NoMatch for every registration, since none carries verified

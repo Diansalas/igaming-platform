@@ -2071,6 +2071,123 @@ answer to `HDR-J-6/7/8/9`/`HDR-M-1/2`; any production resolver wiring;
 any fix to `PLAT-ROLESPLIT-1` (remains documented-not-executed per
 `docs/security/runtime-role-separation.md`).
 
+## Stage 6 — B2C Player/Brand MVP + First Sportsbook Vertical Slice
+
+One large, single-authorization implementation stage. Dependency
+discovery confirmed every non-sportsbook domain needed (identity/auth,
+wallet/ledger, RG, risk, KYC, audit, brand/tenant config, Back Office)
+already existed and was reused; sportsbook had zero pre-existing code
+beyond an architecture doc. Full narrative: `docs/progress.md`'s "Stage 6"
+section and `docs/active-stage.md`'s current-stage entry.
+
+| ID | Owner | Status | Files owned | Tests | Blockers | Integration |
+|---|---|---|---|---|---|---|
+| S6-01 | sportsbook | Done | `internal/sportsbook/` (new package), `internal/httpserver/{sportsbook_handlers,sportsbook_routes}.go` (new), `migrations/0078_sportsbook_foundation.{up,down}.sql` (new), `internal/ledger/ledger.go` (`TxSportsbookBet`), `internal/auth/permission.go` (`PermSportsbookBetRead`), `cmd/platform-api/main.go`, `internal/httpserver/server.go` | 10 orchestrator + 11 HTTP-flow integration tests | Disclosed and corrected the orchestrator's own wrong pointer to a non-compliant concurrency-test precedent, used the genuinely-compliant one instead | Verified in combined whole-repo run |
+| S6-02 | backoffice | Done | `backoffice/src/{api/sportsbookAdmin.ts,features/sportsbook/{SportsbookBetsPage,status}.tsx,ts,auth/permissions.ts,layout/nav.ts,app/AppRoutes.tsx}` | `nav.test.ts` updated for the new grant | none | Verified (build+test re-run) |
+| S6-03 | frontend | Done | `b2c/` (new npm project, ~entire app) | 13 Vitest tests at handoff (18 after the fix round below) | Two disclosed gaps: no dev-only way to complete a mock deposit without an out-of-band signed webhook call (needs architect/security sign-off if ever built — not built this stage); no player-facing asset-catalogue endpoint (client uses a small hardcoded list, server still authoritatively validates) | Verified (build+test independently re-run by Orchestrator) |
+| S6-04 | Orchestrator | Done | `internal/httpserver/stage6_b2c_sportsbook_acceptance_test.go` (new) — the defining acceptance test | 1 test, 10 chained assertion points | none | Passed first run against a fresh 78-migration scratch DB; full `internal/httpserver` suite stayed green after adding it |
+| S6-05 | architect, security, qa | Done | review only | n/a | See findings below | n/a |
+| S6-06 | Orchestrator (fix round) | Done | `b2c/src/lib/{odds,money}.ts` + `odds.test.ts` (new), `b2c/src/features/betslip/BetSlip.test.tsx`, `internal/sportsbook/{bets,orchestrator}.go`, `internal/httpserver/sportsbook_handlers.go`, `migrations/0078_sportsbook_foundation.up.sql`, `internal/sportsbook/orchestrator_integration_test.go` (new regression test), `docs/api/openapi/platform-api.yaml` | Full validation gate re-run clean after fixes (31 Go packages, `b2c` 18 tests, `backoffice` 17 tests) | none | Verified |
+| S6-07 | Orchestrator | Done | this registry, `docs/active-stage.md`, `docs/progress.md`, `docs/api/openapi/platform-api.yaml` (5 new paths, ~10 new schemas) | full validation gate | none | n/a — **stage explicitly STOPS here; Stage 7 NOT authorized** |
+
+### Review findings and dispositions
+
+**Architect** — one **P0, fixed**: `b2c/src/lib/odds.ts` computed decimal
+odds as `1 + numerator/denominator` and potential-return as `stake ×
+(denominator+numerator)/denominator`, but the server's `odds_numerator/
+odds_denominator` ratio IS the decimal odds value directly, already
+including the stake (`internal/sportsbook/orchestrator.go`'s
+`computePotentialReturn`: `stake × numerator/denominator`, no "+1").
+Every price and return shown in the B2C app — including the server's own
+authoritative placed-bet fields re-rendered through the same formatter —
+was overstated by the size of the stake itself (2.50 odds shown as 3.50).
+Fixed in both `formatDecimalOdds` and `estimatePotentialReturnMinorUnits`,
+the OpenAPI `Selection` schema description clarified, a new
+`lib/odds.test.ts` (5 tests) added as a permanent regression guard, and
+the one `BetSlip.test.tsx` fixture whose assertion baked in the old wrong
+value corrected.
+
+Two **P1s, fixed**: the sportsbook bet idempotency key was scoped only
+by `(tenant_id, idempotency_key)` — unlike `deposit_intents`/
+`withdrawal_requests`, both `(tenant_id, player_account_id,
+idempotency_key)` — so one player supplying a key another player had
+already used in the same tenant would silently receive the OTHER
+player's bet back as `accepted:true`, their own stake never charged (a
+cross-player financial-data disclosure; independently confirmed by
+security). Fixed: migration's unique constraint, the lookup
+(`findBetByIdempotencyKey`), and the ledger's own idempotency-key
+namespace (now `player_account_id + ":" + idempotencyKey`, previously
+the raw client string) all rescoped to include `player_account_id`; a
+genuine key collision now surfaces a new `ErrBetIdempotencyKeyReused`
+(mirroring `withdrawal`/`payments`'s identical precedent) instead of
+silently returning the wrong bet; `insertBet` rewritten onto
+`db.IdempotentInsert` (the same pattern `withdrawal.RequestWithdrawal`
+uses) as the real DB-enforced concurrent-race backstop, not just the
+pre-check; new regression test
+`TestPlaceBet_SameIdempotencyKeyDifferentPlayersNeverCollide` proves two
+players sharing a key get two independent bets with neither balance
+affected by the other's stake.
+
+Two **P2s, fixed**: the OpenAPI `EventSummary`/`EventDetail`/
+`MarketDetail`/`Selection` status enums didn't match the real Go enums
+(the Orchestrator's own transcription error when first writing the spec)
+— corrected to `scheduled|live|finished|cancelled`,
+`open|suspended|closed`, `active|suspended`. `b2c/src/lib/money.ts`'s
+`toMinorUnits` silently guessed exponent 2 for an unrecognized asset code
+on the OUTBOUND request path — changed to refuse (`null`, already
+handled by every caller) rather than risk submitting a silently-wrong
+amount.
+
+One **P2, deferred** (needs dedicated `risk`/`ledger-finance` design
+work, not a Stage 6 blocker): `internal/risk`'s cumulative-rule spec has
+no `OperationSportsbookBet` entry yet, so no cumulative stake/velocity
+cap constrains sportsbook bets beyond the per-request `risk.Evaluate`
+call this stage already wires.
+
+**P4s recorded, not fixed**: the public catalogue routes carry no
+tenant/brand/jurisdiction gating — must be addressed before any second
+tenant or jurisdiction (doc 09 §5's own open decision); the B2C app's
+one-build-per-brand env-var model needs runtime host→brand resolution
+before true multi-brand B2C; `internal/casino`/`internal/withdrawal`'s
+own concurrency tests still use the older bare-`WaitGroup` technique
+instead of this stage's (and `internal/operatingmarket`/
+`internal/jurisdiction`'s) `pg_stat_activity` convention (QA finding).
+
+**Security** — the same cross-player idempotency-key **P1**,
+independently discovered and fixed as above. Everything else verified
+sound: cross-player bet forgery structurally impossible (player identity
+always resolved server-side, never from a request field); the
+cross-tenant Back Office visibility test is genuinely non-vacuous (two
+real bets in two tenants, `total==1` asserted, correct player attributed);
+public catalogue routes are safe (no PII, no tenant scoping, read-only,
+`WithoutTenant` fails any RLS table closed); RG/risk denials and
+unrecognized risk outcomes fail closed; the audit trail is written
+in-transaction for every outcome; the `DecimalExponent` addition to the
+admin response introduces no new exposure. One **P3, fixed**: a stale
+test comment claiming support was "deliberately NOT" granted
+`sportsbook_bet:read` when the permission table does grant it to
+`RoleSupport` — corrected.
+
+**QA** — clean sign-off, no P0/P1. Independently verified the defining
+acceptance test's assertions are genuinely non-vacuous at every hop;
+confirmed idempotency is DB-enforced (not check-then-insert) and
+concurrency uses the mandated deterministic technique with exact
+balance/row-count assertions; confirmed the `backoffice/nav.test.ts`
+change (finance's nav items growing to include Sportsbook) is a
+legitimate reflection of a real backend permission grant, not a weakened
+assertion.
+
+### Explicitly NOT this stage's to build (confirmed absent)
+
+A full casino product, B2B partner console, retail surface, or every
+future brand; full production PSP integration beyond the existing mock;
+every KYC provider, every sportsbook feature (settlement/void/cashout/
+accumulators/live odds), every bonus type, every RG feature; any answer
+to `HDR-J-6/7/8/9`/`HDR-M-1/2`; any jurisdiction check on a sportsbook
+bet; bonus-funded sportsbook stakes (remain platform-wide blocked per
+`docs/decisions/0038` §9); any fix to `PLAT-ROLESPLIT-1` (remains
+documented-not-executed per `docs/security/runtime-role-separation.md`).
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

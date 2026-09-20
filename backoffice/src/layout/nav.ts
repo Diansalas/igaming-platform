@@ -29,6 +29,7 @@ export function buildNavItems(claims: StaffClaims | null): NavItem[] {
   if (perms.rg) items.push({ label: 'Responsible Gaming', to: '/rg' })
   if (perms.bonus) items.push({ label: 'Bonus', to: '/bonus/campaigns' })
   if (perms.withdrawals) items.push({ label: 'Withdrawals', to: '/withdrawals' })
+  if (perms.sportsbook) items.push({ label: 'Sportsbook', to: '/sportsbook' })
   if (perms.tenantAudit) items.push({ label: 'Audit Log', to: '/audit-log' })
 
   return items

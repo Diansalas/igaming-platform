@@ -61,6 +61,17 @@ type Deps struct {
 	// gated by whether any adapter is currently registered.
 	CasinoOrchestrator *casino.Orchestrator
 
+	// SportsbookEnabled gates every Stage 6 sportsbook route (catalogue
+	// browse, bet placement, bet history, admin visibility) - unlike
+	// PaymentOrchestrator/CasinoOrchestrator (a provider-adapter registry),
+	// internal/sportsbook.PlaceBet needs no adapter registry of its own
+	// this stage (no external provider round-trip occurs at placement
+	// time - see internal/sportsbook's own package doc comment), so this
+	// is a plain bool rather than an orchestrator pointer. false disables
+	// every sportsbook route (mirrors PaymentOrchestrator/
+	// CasinoOrchestrator's identical nil-means-disabled convention).
+	SportsbookEnabled bool
+
 	// PersonResolver is Stage 4E's identity-resolution boundary, consulted
 	// by newRegisterHandler BEFORE a Person is ever created - unlike
 	// PaymentOrchestrator/CasinoOrchestrator, this is NOT "nil means the
@@ -106,6 +117,7 @@ func New(deps Deps) http.Handler {
 	registerIdentityRoutes(mux, deps)
 	registerFinancialRoutes(mux, deps)
 	registerCasinoRoutes(mux, deps)
+	registerSportsbookRoutes(mux, deps)
 	registerRGRoutes(mux, deps)
 	registerCredentialRoutes(mux, deps)
 	registerKYCRoutes(mux, deps)

@@ -212,14 +212,15 @@ func TestMigration0077_RestoresPreMigrationRLSPostureOnDownThenFailsOnDirtyDatab
 		t.Fatalf("migrate up the full chain: %v", err)
 	}
 
-	// (a) Roll back 0077 alone (it is the chain's tip) and confirm the
-	// EXACT pre-migration posture is restored.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 1)
+	// (a) Roll back 0078 (Stage 6's sportsbook foundation, now the chain's
+	// tip - unconditionally reversible in this scenario) then 0077, and
+	// confirm 0077's own EXACT pre-migration posture is restored.
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 2)
 	if err != nil {
-		t.Fatalf("down migration 0077 on a clean database: %v", err)
+		t.Fatalf("down migrations 0078/0077 on a clean database: %v", err)
 	}
-	if len(rolledBack) != 1 || rolledBack[0] != migration0077Version {
-		t.Fatalf("expected exactly migration %d to be rolled back, got %v", migration0077Version, rolledBack)
+	if len(rolledBack) != 2 || rolledBack[0] != migration0078Version || rolledBack[1] != migration0077Version {
+		t.Fatalf("expected exactly migrations [%d %d] to be rolled back, got %v", migration0078Version, migration0077Version, rolledBack)
 	}
 	for _, table := range []string{"tenants", "licences", "jurisdictions"} {
 		p := readRLSPostureFor(t, pool, table)

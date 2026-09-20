@@ -7129,3 +7129,76 @@ content, no HDR item answered. `PLAT-ROLESPLIT-1` remains the production
 deployment blocker, unaddressed this stage per its own documented
 instruction. No automatic progression — Stage 6 (B2C Player/Brand MVP)
 is NOT authorized and was not started.
+
+## Stage 6 — B2C Player/Brand MVP + First Sportsbook Vertical Slice
+
+The first real B2C player product and first functioning sportsbook
+vertical slice, authorized as one large stage. Dependency discovery
+confirmed every non-sportsbook domain this stage needed (identity/auth,
+wallet/ledger, RG, risk, KYC, audit, brand/tenant config, Back Office)
+already existed and was reused; sportsbook itself had zero pre-existing
+code beyond an architecture doc, so a minimum mock-provider vertical
+slice was built rather than a full engine.
+
+**Backend**: new `internal/sportsbook` package (catalogue synced from a
+`Provider` interface at server startup, not baked into the migration;
+`PlaceBet` following `internal/casino`'s orchestrator pattern — validate
+→ RG → risk → wallet lock → ledger post (`TxSportsbookBet`) → bet insert,
+one transaction, single synchronous response since the mock provider
+needs no external round-trip); 5 new endpoints (public catalogue browse,
+player bet placement/history, Back Office admin queue); new
+`sportsbook_bet:read` permission (tenant_admin/compliance/support/finance,
+never platform_admin); migration `0078`. Concurrency proven with the
+codebase's own deterministic `pg_stat_activity`-poll technique, never a
+bare `WaitGroup`/`time.Sleep`.
+
+**Back Office**: a small, directly-built sportsbook bet visibility page
+mirroring Stage 5's withdrawal queue pattern exactly, plus a matching
+`decimal_exponent` field on the admin bet response.
+
+**Frontend**: new `b2c/` app (same Vite/React/TypeScript/TanStack
+Query/Tailwind architecture as `backoffice/`), correctly starting from
+Stage 5's already-fixed session-refresh and logout patterns rather than
+reintroducing old bugs. Ships app shell/auth, sportsbook browse, a
+singles-only bet slip with full three-way outcome handling (accepted /
+well-formed rejection / genuine error, each rendered distinctly), and
+paginated bet history. 18 vitest tests, clean build, both independently
+re-verified.
+
+**The defining acceptance test**: one new Go integration test chaining
+the full real HTTP path — register → activate → genuine signed-webhook
+deposit → wallet check → catalogue browse → event/selection detail → bet
+placement at server-returned odds → bet history → wallet debit → Back
+Office visibility → audit-trail visibility — every assertion checking
+exact field values, not "a row exists." Passed first run; full
+`internal/httpserver` suite stayed green after adding it.
+
+**Independent review — architect/security/qa.** Architect found a real
+P0 (the B2C app's odds/return display formula added 1 to the server's
+`numerator/denominator` ratio, which IS the decimal odds value directly —
+every price and return shown was overstated by the stake's own size) and
+two P1s (the sportsbook bet idempotency key was scoped only by
+`(tenant_id, idempotency_key)`, unlike every other player-facing
+financial idempotency key on the platform, so one player supplying a key
+another player had already used could silently receive the OTHER
+player's bet back as accepted, uncharged — independently confirmed by
+security) plus two P2s (OpenAPI status enums didn't match the real Go
+enums; the B2C money helper silently guessed an exponent for unknown
+asset codes on the outbound path). **All fixed**: `lib/odds.ts` corrected
+to match the server exactly (new regression test suite added); the
+idempotency key rescoped to `(tenant_id, player_account_id,
+idempotency_key)` across the migration, lookup, and the ledger's own key
+namespace, `insertBet` rewritten onto `db.IdempotentInsert` as the real
+concurrent-race backstop, and a new cross-player regression test proves
+the fix; OpenAPI enums corrected; the money helper now refuses an unknown
+asset code rather than guessing. One P2 deferred (sportsbook has no
+cumulative risk-rule entry yet — needs dedicated risk/ledger-finance
+design work, not a Stage 6 blocker). QA: clean sign-off, confirmed the
+acceptance test and concurrency/idempotency tests are genuinely
+non-vacuous, no P0/P1.
+
+No production wiring beyond this stage's own scope. Jurisdiction was
+correctly not reopened; bonus-funded sportsbook stakes remain
+platform-wide blocked. `PLAT-ROLESPLIT-1` remains unaddressed per its own
+documented instruction. No automatic progression — Stage 7 is NOT
+authorized and was not started.
