@@ -32,6 +32,11 @@ export function CasinoRoundsPage() {
         </span>
       ),
     },
+    {
+      key: 'provider_round_id',
+      header: 'Provider round ID',
+      render: (r) => (r.provider_round_id ? <span className="font-mono text-xs">{r.provider_round_id}</span> : '—'),
+    },
     { key: 'asset_code', header: 'Asset', render: (r) => r.asset_code },
     { key: 'bet_amount', header: 'Bet amount', render: (r) => formatOptionalMoney(r.bet_amount, r.asset_code, r.decimal_exponent) },
     { key: 'win_amount', header: 'Win amount', render: (r) => formatOptionalMoney(r.win_amount, r.asset_code, r.decimal_exponent) },

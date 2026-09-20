@@ -692,6 +692,16 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	if err := validateCallbackEvent(event); err != nil {
 		return ReceiveCallbackResult{}, err
 	}
+	// Explicit, postBet-level requirement (Stage 8 review finding): a bet
+	// is bound to a provider round later in this function (BindProviderRound),
+	// which has its own round-id validation - but that requirement must be
+	// visible and enforced here too, not only surface implicitly the first
+	// time BindProviderRound happens to be reached. round_id is otherwise
+	// not part of validateCallbackEvent (postWin/postRollback have their own
+	// distinct round_id requirements and share that function).
+	if event.RoundID == "" {
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: round_id is required to post a bet", ErrInvalidInput)
+	}
 
 	// Stage 4G-FINAL flake investigation (TestConcurrent_DuplicateBetDeliveryDuringSelfExclusion):
 	// the idempotency short-circuit immediately below only serializes
@@ -890,6 +900,34 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 			return ReceiveCallbackResult{}, fmt.Errorf("casino: audit bet decline: %w", err)
 		}
 		return ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason: "insufficient_funds"}, nil
+	}
+
+	// Stage 8 (docs/decisions/0080-provider-integration-readiness-without-
+	// external-contracts.md, Decision 1): durably bind this provider-
+	// declared round id to the resolved session's own brand/player/game
+	// identity, the first time this round is bet on (idempotent on every
+	// later bet of the same round - see BindProviderRound's own doc
+	// comment). No separate "provider session id" concept exists on
+	// CallbackEvent yet, so that field is passed nil - honest about what is
+	// not knowable from this callback shape today, never guessed. A
+	// conflict (this provider_round_id already bound to a DIFFERENT
+	// player/brand in this tenant) aborts the whole callback with no
+	// ledger effect - the exact cross-player/cross-brand round-id
+	// collision this stage requires be rejected, not silently overwritten -
+	// by returning the error as-is so the enclosing db.Pool.WithTenant
+	// transaction rolls back everything.
+	//
+	// Deliberately positioned HERE - immediately before the financial
+	// posting below, AFTER RG eligibility, Risk, and the insufficient-funds
+	// check have all already passed - and NOT earlier alongside the
+	// session/asset-match checks. All three of those declines return
+	// (OutcomeDeclined, nil error): a bet this transaction is never actually
+	// going to post must never bind a round, or a DECLINED delivery would
+	// still durably claim the round id, potentially pre-empting the
+	// legitimate bet that (re)tries it (specialist review finding - qa).
+	if err := BindProviderRound(ctx, tx, tenantID, session.BrandID, session.PlayerAccountID, session.ID, session.GameID,
+		providerID, event.RoundID, nil); err != nil {
+		return ReceiveCallbackResult{}, err
 	}
 
 	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{

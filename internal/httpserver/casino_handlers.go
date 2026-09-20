@@ -355,6 +355,21 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeValidation, "no matching prior bet for this round")
 			return
 		}
+		if errors.Is(err, casino.ErrProviderRoundOwnershipConflict) {
+			// A provider_round_id already bound to a DIFFERENT player/brand
+			// is a protocol violation exactly like ErrBetNotFound above -
+			// logged at elevated severity, never silently retried as a
+			// routine 500 (a bare 500 would tell a well-behaved-looking
+			// caller retrying makes sense, when it never will). A 409, not a
+			// 5xx: this is a caller-supplied-data conflict, not a platform
+			// failure (Stage 8 review finding - P1). The response message is
+			// as generic as ErrBetNotFound's own - it never echoes the round
+			// id or any player identity, which would let a well-behaved-
+			// looking caller enumerate which round ids are already claimed.
+			logger.Error("casino_webhook_integrity_alert_provider_round_ownership_conflict", "error", err, "provider_id", providerID, "tenant_id", t.ID.String())
+			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
+			return
+		}
 		if errors.Is(err, casino.ErrAlreadyRolledBack) {
 			apierror.Write(w, requestID, apierror.CodeConflict, "original transaction already rolled back")
 			return

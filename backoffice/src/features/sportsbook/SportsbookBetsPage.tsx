@@ -21,6 +21,11 @@ export function SportsbookBetsPage() {
     { key: 'stake', header: 'Stake', render: (b) => formatMoney(b.stake_amount, b.asset_code, b.decimal_exponent) },
     { key: 'odds', header: 'Odds', render: (b) => formatOdds(b.odds_numerator, b.odds_denominator) },
     { key: 'potential_return', header: 'Potential return', render: (b) => formatMoney(b.potential_return, b.asset_code, b.decimal_exponent) },
+    {
+      key: 'provider_ref',
+      header: 'Provider reference',
+      render: (b) => (b.provider_id || b.provider_bet_reference ? <span className="font-mono text-xs">{b.provider_id}/{b.provider_bet_reference}</span> : '—'),
+    },
     { key: 'status', header: 'Status', render: (b) => <Badge tone={betStatusTone(b.status)}>{b.status}</Badge> },
     { key: 'placed_at', header: 'Placed', render: (b) => b.placed_at },
   ]

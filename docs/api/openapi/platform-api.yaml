@@ -4153,12 +4153,19 @@ components:
             Stage 6 Back Office visibility view - adds the player identity
             and the same decimal_exponent presentation aid WithdrawalAdmin
             carries, for the identical reason (raw minor units misrepresent
-            the real staked/returned amount at a glance).
+            the real staked/returned amount at a glance). Stage 8
+            (docs/decisions/0080 Decision 5) additionally surfaces
+            provider_id/provider_bet_reference, passed through from
+            internal/sportsbook.Bet's identical nullable columns as empty
+            strings when unset - always empty today, since no real
+            sportsbook provider adapter exists yet.
           properties:
             player_account_id: { type: string, format: uuid }
             brand_id: { type: string, format: uuid }
             decimal_exponent: { type: integer }
-          required: [player_account_id, brand_id, decimal_exponent]
+            provider_id: { type: string, description: "Empty when this bet has no provider-acceptance reference recorded (always empty until a real adapter exists)." }
+            provider_bet_reference: { type: string, description: "Empty when this bet has no provider-acceptance reference recorded (always empty until a real adapter exists)." }
+          required: [player_account_id, brand_id, decimal_exponent, provider_id, provider_bet_reference]
     PlaceBetResponse:
       type: object
       description: >
@@ -4207,7 +4214,12 @@ components:
             Stage 7 Back Office minimum-visibility view - adds the player/
             brand identity, the same decimal_exponent presentation aid
             AdminBet carries, and the round's own ledger_transaction_ids
-            for audit-log cross-reference.
+            for audit-log cross-reference. Stage 8 (docs/decisions/0080
+            Decision 5) additionally surfaces provider_round_id, sourced
+            from the casino_provider_rounds binding (migration 0080) for
+            this round's own launch session when one exists - empty when
+            no provider has ever bound a round id to this session (the
+            common case today, since no real provider posts callbacks).
           properties:
             player_account_id: { type: string, format: uuid }
             brand_id: { type: string, format: uuid }
@@ -4215,7 +4227,8 @@ components:
             ledger_transaction_ids:
               type: array
               items: { type: string, format: uuid }
-          required: [player_account_id, brand_id, decimal_exponent, ledger_transaction_ids]
+            provider_round_id: { type: string, description: "Empty when no casino_provider_rounds binding exists yet for this round's session." }
+          required: [player_account_id, brand_id, decimal_exponent, ledger_transaction_ids, provider_round_id]
     CasinoPlayResult:
       type: object
       description: Response envelope shared by the wager/win/rollback play-simulation endpoints.

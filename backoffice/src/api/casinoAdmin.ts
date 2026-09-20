@@ -22,6 +22,14 @@ export interface AdminRound {
   brand_id: string
   decimal_exponent: number
   ledger_transaction_ids: string[]
+  /**
+   * Stage 8 (docs/decisions/0080 Decision 5): the casino_provider_rounds
+   * binding for this round's own launch session, when one exists. Always
+   * an empty string, never undefined, when no binding exists yet (a
+   * launched-but-never-wagered round, or - before a real provider adapter
+   * exists - the general case for historical data predating this field).
+   */
+  provider_round_id: string
 }
 
 export function listAdminCasinoRounds(params: { limit?: number; offset?: number }): Promise<PagedResponse<AdminRound>> {

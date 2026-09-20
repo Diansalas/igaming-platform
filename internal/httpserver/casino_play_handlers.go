@@ -227,6 +227,16 @@ func writeCasinoCallbackError(w http.ResponseWriter, requestID string, logger in
 		apierror.Write(w, requestID, apierror.CodeValidation, "no matching prior bet for this round")
 		return
 	}
+	if errors.Is(err, casino.ErrProviderRoundOwnershipConflict) {
+		// Mirrors newCasinoWebhookHandler's own identical branch exactly
+		// (casino_handlers.go) - this is the SAME pipeline, so the SAME
+		// integrity-alert/enumeration-resistance rationale applies: a 409,
+		// logged at elevated severity, with a response message generic
+		// enough to never reveal the round id or player identity.
+		logger.Error("casino_play_integrity_alert_provider_round_ownership_conflict", "error", err, "action", action)
+		apierror.Write(w, requestID, apierror.CodeConflict, "request rejected")
+		return
+	}
 	if errors.Is(err, casino.ErrAlreadyRolledBack) {
 		apierror.Write(w, requestID, apierror.CodeConflict, "original transaction already rolled back")
 		return

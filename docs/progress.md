@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-20 (Stage 7)
+Last updated: 2026-09-20 (Stage 8)
 
-## Status: Stage 7 (B2C Casino Player Experience + Casino Vertical Slice) — complete, pending human approval to start the next stage
+## Status: Stage 8 (Provider Integration Readiness Without External Contracts) — complete, pending human approval to start the next stage
 
 ## Stage 0 — complete (approved)
 
@@ -7336,3 +7336,58 @@ No real casino provider, sportsbook settlement/cashout, real PSP
 integration, production country approvals, B2B/partner console, or
 jurisdiction/wallet-ledger/identity/RG redesign work was performed. No
 automatic progression — Stage 8 is NOT authorized and was not started.
+
+## Stage 8 — Provider Integration Readiness Without External Contracts — complete
+
+Stage 8 was authorized by the human as "STAGE 8 — EXTERNAL PROVIDER
+INTEGRATION FOUNDATION / DUMMY SPORTSBOOK + DUMMY CASINO," opening with
+"STAGE 7 IS APPROVED." Reconnaissance at Stage 8's start (repo grep,
+`.env.example`, `docker-compose.dev.yml`, `/etc/hosts`, filesystem)
+found no trace of either dummy provider API anywhere reachable from this
+environment. The platform owner confirmed the documentation was
+temporarily unavailable and explicitly re-scoped the stage to
+"PROVIDER-INTEGRATION READINESS WITHOUT EXTERNAL API DEPENDENCIES" —
+harden the provider boundary and build everything a real adapter needs
+later, with an explicit ban on inventing either API's contract or making
+any external network call.
+
+Full design record: `docs/decisions/0080-provider-integration-readiness-
+without-external-contracts.md`. Summary of what was built, reviewed, and
+fixed is in `docs/active-stage.md`'s Stage 8 section (not duplicated
+here) and the Stage 8 completion report delivered to the user. In brief:
+`casino_provider_rounds` (migration 0080, resolving ADR 0048's residual
+round-visibility limitation), `sportsbook_bets.provider_id`/
+`provider_bet_reference` (migration 0081), a generic
+`internal/providers/httpclient` client + `internal/providers/config.go`
+loader (no specific provider wired in), `docs/integrations/dummy-casino.md`/
+`dummy-sportsbook.md` recording the pending-documentation status
+honestly, and minimal Back Office visibility additions.
+
+Three parallel specialist reviews (architect, security, qa) found three
+P1s, independently confirmed by more than one reviewer in two cases,
+all fixed before close: a credential-exfiltration path in the generic
+HTTP client (no redirect policy — fixed by refusing to auto-follow any
+redirect), an unmapped cross-player/cross-brand round-ownership-conflict
+error surfacing as a retryable 500 with no integrity alert (fixed with
+an explicit 409 + alert at both the public webhook and play-simulation
+endpoints), and the new round-binding committing even for a bet declined
+by RG/Risk/insufficient funds (fixed by moving the bind to immediately
+before the ledger post). Several P2s were fixed while still cheap
+(an over-strict same-session ownership predicate that would have
+rejected a legitimate free-spins round continuation; a missing DB-level
+immutability trigger on `casino_provider_rounds`; a context-cancellation
+retry-loop bug; a `provider_bet_ref`→`provider_bet_reference` rename to
+match this project's own pre-existing doc 09 canonical naming, done
+while the column was still unwritten by any code).
+
+Full repo test suite (32 packages, 1273 tests) passes against a fresh
+81-migration database with a clean up/down/up round-trip on the two new
+migrations; race-detector clean on every touched package; the Stage 6
+sportsbook and Stage 7 casino acceptance tests were re-run unmodified and
+remain green; both frontends build and test clean.
+
+No external network call was made. No real commercial provider, B2B,
+retail, full reconciliation/settlement platform, jurisdiction human
+decision, country approval, or wallet/ledger/identity/RG/risk redesign
+was performed. No automatic progression — Stage 9 is NOT authorized and
+was not started.

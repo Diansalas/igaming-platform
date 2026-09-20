@@ -1,0 +1,504 @@
+// This file is a provider-BOUNDARY / contract-test suite for the generic
+// internal/providers/httpclient.Client, per docs/decisions/0080-provider-
+// integration-readiness-without-external-contracts.md Decision 3. It
+// proves Client's own retry/timeout/classification behavior against
+// local httptest.Server fixtures built by the
+// internal/providers/httpclient/conformance package.
+//
+// These are explicitly NOT integration tests of any external "Dummy
+// Sportsbook"/"Dummy Casino" API or any other real vendor. No such API's
+// documentation, base URL, or credentials exist in this environment (see
+// ADR 0080's Context section) - every server used below is a synthetic
+// local fixture simulating a generic HTTP failure/success mode, never a
+// fake of a real, specific provider's actual documented contract.
+package httpclient
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/Diansalas/igaming-platform/internal/providers/httpclient/conformance"
+)
+
+func TestDo_Success(t *testing.T) {
+	srv := conformance.NewSuccessServer(t, []byte(`{"status":"ok"}`), 200)
+
+	c := New(ClientConfig{
+		ProviderName: "test-provider",
+		BaseURL:      srv.URL,
+		Timeout:      time.Second,
+	})
+
+	resp, err := c.Do(context.Background(), Request{Method: "GET", Path: "/anything", Operation: "test_op"})
+	if err != nil {
+		t.Fatalf("Do returned unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("StatusCode = %d, want 200", resp.StatusCode)
+	}
+
+	var decoded struct {
+		Status string `json:"status"`
+	}
+	if err := resp.DecodeJSON(&decoded); err != nil {
+		t.Fatalf("DecodeJSON returned unexpected error: %v", err)
+	}
+	if decoded.Status != "ok" {
+		t.Fatalf("decoded.Status = %q, want %q", decoded.Status, "ok")
+	}
+}
+
+func TestDo_Timeout(t *testing.T) {
+	srv := conformance.NewTimeoutServer(t, 300*time.Millisecond)
+
+	c := New(ClientConfig{
+		BaseURL:    srv.URL,
+		Timeout:    30 * time.Millisecond,
+		MaxRetries: 2,
+	})
+
+	// Non-idempotent: must never retry, so exactly 1 attempt.
+	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op", Idempotent: false})
+	if !errors.Is(err, ErrProviderTimeout) {
+		t.Fatalf("err = %v, want ErrProviderTimeout", err)
+	}
+	var timeoutErr *TimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("errors.As(err, *TimeoutError) failed, err = %v", err)
+	}
+	if timeoutErr.Attempts != 1 {
+		t.Fatalf("Attempts = %d, want 1 (non-idempotent must never retry)", timeoutErr.Attempts)
+	}
+}
+
+func TestDo_Timeout_RetriedWhenIdempotent(t *testing.T) {
+	srv := conformance.NewTimeoutServer(t, 300*time.Millisecond)
+
+	c := New(ClientConfig{
+		BaseURL:    srv.URL,
+		Timeout:    30 * time.Millisecond,
+		MaxRetries: 2,
+	})
+
+	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op", Idempotent: true})
+	if !errors.Is(err, ErrProviderTimeout) {
+		t.Fatalf("err = %v, want ErrProviderTimeout", err)
+	}
+	var timeoutErr *TimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("errors.As(err, *TimeoutError) failed, err = %v", err)
+	}
+	if timeoutErr.Attempts != 3 {
+		t.Fatalf("Attempts = %d, want 3 (1 initial + 2 retries)", timeoutErr.Attempts)
+	}
+}
+
+func TestDo_TransportFailure_NonIdempotentNeverRetried(t *testing.T) {
+	srv := conformance.NewTransportFailureServer(t)
+
+	c := New(ClientConfig{
+		BaseURL:    srv.URL,
+		Timeout:    time.Second,
+		MaxRetries: 3,
+	})
+
+	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op", Idempotent: false})
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
+	}
+	var unavailableErr *UnavailableError
+	if !errors.As(err, &unavailableErr) {
+		t.Fatalf("errors.As(err, *UnavailableError) failed, err = %v", err)
+	}
+	if unavailableErr.Attempts != 1 {
+		t.Fatalf("Attempts = %d, want 1 (non-idempotent must never retry)", unavailableErr.Attempts)
+	}
+	if unavailableErr.StatusCode != 0 {
+		t.Fatalf("StatusCode = %d, want 0 (no HTTP response was ever received)", unavailableErr.StatusCode)
+	}
+}
+
+func TestDo_TransportFailure_RetriedWhenIdempotent(t *testing.T) {
+	srv := conformance.NewTransportFailureServer(t)
+
+	c := New(ClientConfig{
+		BaseURL:    srv.URL,
+		Timeout:    time.Second,
+		MaxRetries: 3,
+	})
+
+	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op", Idempotent: true})
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
+	}
+	var unavailableErr *UnavailableError
+	if !errors.As(err, &unavailableErr) {
+		t.Fatalf("errors.As(err, *UnavailableError) failed, err = %v", err)
+	}
+	if unavailableErr.Attempts != 4 {
+		t.Fatalf("Attempts = %d, want 4 (1 initial + 3 retries)", unavailableErr.Attempts)
+	}
+}
+
+func TestDo_Rejected4xx_NeverRetriedEvenWhenIdempotent(t *testing.T) {
+	srv := conformance.NewStatusServer(t, 422, []byte(`{"error":"invalid"}`))
+
+	c := New(ClientConfig{
+		BaseURL:    srv.URL,
+		Timeout:    time.Second,
+		MaxRetries: 5,
+	})
+
+	resp, err := c.Do(context.Background(), Request{Method: "POST", Path: "/", Operation: "test_op", Idempotent: true})
+	if resp != nil {
+		t.Fatalf("resp = %+v, want nil on error", resp)
+	}
+	if !errors.Is(err, ErrProviderRejected) {
+		t.Fatalf("err = %v, want ErrProviderRejected", err)
+	}
+	var rejectedErr *RejectedError
+	if !errors.As(err, &rejectedErr) {
+		t.Fatalf("errors.As(err, *RejectedError) failed, err = %v", err)
+	}
+	if rejectedErr.StatusCode != 422 {
+		t.Fatalf("StatusCode = %d, want 422", rejectedErr.StatusCode)
+	}
+
+	// A 4xx must be classified and returned on the very first attempt -
+	// prove the server was only ever called once, despite Idempotent:
+	// true and MaxRetries: 5.
+	if got := rejectedErr.Header.Get("X-Conformance-Call-Count"); got != "1" {
+		t.Fatalf("X-Conformance-Call-Count = %q, want %q (4xx must never be retried)", got, "1")
+	}
+}
+
+func TestDo_5xx_RetriedThenSucceeds(t *testing.T) {
+	srv := conformance.NewFlakyServer(t, 2, 200)
+
+	c := New(ClientConfig{
+		BaseURL:    srv.URL,
+		Timeout:    time.Second,
+		MaxRetries: 2,
+	})
+
+	resp, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op", Idempotent: true})
+	if err != nil {
+		t.Fatalf("Do returned unexpected error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("StatusCode = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get("X-Conformance-Call-Count"); got != "3" {
+		t.Fatalf("X-Conformance-Call-Count = %q, want %q (1 initial + 2 retries)", got, "3")
+	}
+}
+
+func TestDo_5xx_ExhaustedRetries(t *testing.T) {
+	srv := conformance.NewStatusServer(t, 503, []byte(`{"error":"down"}`))
+
+	c := New(ClientConfig{
+		BaseURL:    srv.URL,
+		Timeout:    time.Second,
+		MaxRetries: 2,
+	})
+
+	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op", Idempotent: true})
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
+	}
+	var unavailableErr *UnavailableError
+	if !errors.As(err, &unavailableErr) {
+		t.Fatalf("errors.As(err, *UnavailableError) failed, err = %v", err)
+	}
+	if unavailableErr.Attempts != 3 {
+		t.Fatalf("Attempts = %d, want 3 (1 initial + 2 retries)", unavailableErr.Attempts)
+	}
+	if unavailableErr.StatusCode != 503 {
+		t.Fatalf("StatusCode = %d, want 503", unavailableErr.StatusCode)
+	}
+}
+
+func TestDo_5xx_NonIdempotentNeverRetried(t *testing.T) {
+	srv := conformance.NewStatusServer(t, 503, []byte(`{"error":"down"}`))
+
+	c := New(ClientConfig{
+		BaseURL:    srv.URL,
+		Timeout:    time.Second,
+		MaxRetries: 2,
+	})
+
+	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op", Idempotent: false})
+	if !errors.Is(err, ErrProviderUnavailable) {
+		t.Fatalf("err = %v, want ErrProviderUnavailable", err)
+	}
+	var unavailableErr *UnavailableError
+	if !errors.As(err, &unavailableErr) {
+		t.Fatalf("errors.As(err, *UnavailableError) failed, err = %v", err)
+	}
+	if unavailableErr.Attempts != 1 {
+		t.Fatalf("Attempts = %d, want 1 (non-idempotent must never retry)", unavailableErr.Attempts)
+	}
+}
+
+func TestDo_MalformedResponse(t *testing.T) {
+	srv := conformance.NewMalformedBodyServer(t, []byte(`not-json{`))
+
+	c := New(ClientConfig{
+		BaseURL: srv.URL,
+		Timeout: time.Second,
+	})
+
+	resp, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op"})
+	if err != nil {
+		t.Fatalf("Do returned unexpected error: %v (a malformed body is a decode-time failure, not a transport/status failure)", err)
+	}
+
+	var decoded struct{ X string }
+	decodeErr := resp.DecodeJSON(&decoded)
+	if decodeErr == nil {
+		t.Fatal("DecodeJSON returned nil error, want a malformed-response error")
+	}
+	if !errors.Is(decodeErr, ErrProviderMalformedResponse) {
+		t.Fatalf("decodeErr = %v, want ErrProviderMalformedResponse", decodeErr)
+	}
+	var malformedErr *MalformedResponseError
+	if !errors.As(decodeErr, &malformedErr) {
+		t.Fatalf("errors.As(decodeErr, *MalformedResponseError) failed, decodeErr = %v", decodeErr)
+	}
+	if malformedErr.Err == nil {
+		t.Fatal("MalformedResponseError.Err is nil, want the underlying json error")
+	}
+}
+
+// TestDo_DuplicateAck_CallerRetryIsNotDeduped documents and proves a
+// deliberate boundary: httpclient.Client never deduplicates calls on the
+// caller's behalf. If a caller-level retry (e.g. after losing track of
+// whether an earlier Do call actually succeeded) issues the same logical
+// request twice, the provider sees two calls and acks both - proving why
+// domain-level idempotency enforcement (a unique constraint on e.g.
+// (provider_id, provider_tx_id), per CLAUDE.md's ledger rules) is what
+// actually prevents a double financial effect, not this transport
+// package.
+func TestDo_DuplicateAck_CallerRetryIsNotDeduped(t *testing.T) {
+	srv, counter := conformance.NewDuplicateAckServer(t)
+
+	c := New(ClientConfig{
+		BaseURL: srv.URL,
+		Timeout: time.Second,
+	})
+
+	req := Request{Method: "POST", Path: "/settle", Operation: "settle", Idempotent: true}
+
+	resp1, err1 := c.Do(context.Background(), req)
+	if err1 != nil {
+		t.Fatalf("first Do returned unexpected error: %v", err1)
+	}
+	if resp1.StatusCode != 200 {
+		t.Fatalf("first StatusCode = %d, want 200", resp1.StatusCode)
+	}
+
+	// Simulate the caller itself retrying (not Client's own internal
+	// retry loop, which never fires here since the first call already
+	// succeeded) because it lost track of the outcome.
+	resp2, err2 := c.Do(context.Background(), req)
+	if err2 != nil {
+		t.Fatalf("second Do returned unexpected error: %v", err2)
+	}
+	if resp2.StatusCode != 200 {
+		t.Fatalf("second StatusCode = %d, want 200", resp2.StatusCode)
+	}
+
+	if got := counter.Count(); got != 2 {
+		t.Fatalf("server call count = %d, want 2 (httpclient.Client does not dedupe caller-level retries)", got)
+	}
+}
+
+// TestDo_AuthHeaderAppliedUnderConfiguredNameOnly proves the configured
+// auth header is set on the outbound request under exactly the
+// caller-configured name/value - not duplicated under some other header
+// this package might otherwise be tempted to also set (e.g.
+// "Authorization").
+// TestDo_DoesNotFollowRedirect_CredentialNeverReachesTarget is a
+// permanent regression test for the P1 finding (ADR 0080 Decision 3):
+// without an explicit no-follow CheckRedirect policy, Go's default
+// redirect behavior forwards any header that isn't
+// Authorization/WWW-Authenticate/Cookie/Cookie2 verbatim to a
+// cross-domain redirect target - exactly the shape of
+// ClientConfig.AuthHeaderName, which is deliberately an arbitrary
+// vendor-defined header name (e.g. a bespoke X-API-Key). This uses two
+// distinct httptest.Servers (distinct hosts/ports) so a redirect from one
+// to the other is a genuine opportunity for Go's default client to copy
+// the header - and proves the actual property this package relies on
+// ("a redirect is never followed at all", via http.ErrUseLastResponse),
+// which is strictly stronger than "the header is stripped on a
+// cross-domain redirect" and holds regardless of same-host-or-not.
+func TestDo_DoesNotFollowRedirect_CredentialNeverReachesTarget(t *testing.T) {
+	const secretValue = "super-secret-value"
+
+	var targetCalled bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetCalled = true
+		if got := r.Header.Get("X-Api-Key"); got != "" {
+			t.Errorf("redirect target received X-Api-Key header %q, want it never delivered", got)
+		}
+		w.WriteHeader(200)
+	}))
+	t.Cleanup(target.Close)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/landed", http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+
+	c := New(ClientConfig{
+		BaseURL:         origin.URL,
+		Timeout:         time.Second,
+		AuthHeaderName:  "X-Api-Key",
+		AuthHeaderValue: secretValue,
+	})
+
+	resp, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op"})
+	if err != nil {
+		t.Fatalf("Do returned unexpected error: %v", err)
+	}
+	if resp.StatusCode < 300 || resp.StatusCode >= 400 {
+		t.Fatalf("StatusCode = %d, want a 3xx (the redirect response itself, never followed)", resp.StatusCode)
+	}
+	if targetCalled {
+		t.Fatal("redirect target received a request at all, want the redirect to never be followed")
+	}
+}
+
+// TestDo_ContextAlreadyCanceled_ShortCircuitsImmediately is a permanent
+// regression test for the P2 finding (ADR 0080 Decision 3): the retry
+// loop must check ctx.Err() before every iteration and short-circuit
+// immediately rather than burning the entire retry budget near-instantly
+// and misclassifying the outcome as a provider-health signal. The server
+// deliberately would block far longer than the test's own timeout budget
+// if Do ever actually attempted a request against it, so a slow test run
+// here would itself prove the bug is back.
+func TestDo_ContextAlreadyCanceled_ShortCircuitsImmediately(t *testing.T) {
+	srv := conformance.NewTimeoutServer(t, 5*time.Second)
+
+	c := New(ClientConfig{
+		BaseURL:    srv.URL,
+		Timeout:    time.Second,
+		MaxRetries: 5,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	resp, err := c.Do(ctx, Request{Method: "GET", Path: "/", Operation: "test_op", Idempotent: true})
+	elapsed := time.Since(start)
+
+	if resp != nil {
+		t.Fatalf("resp = %+v, want nil on error", resp)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("Do took %v, want it to return promptly instead of burning the retry budget", elapsed)
+	}
+	if !errors.Is(err, ErrProviderTimeout) {
+		t.Fatalf("err = %v, want ErrProviderTimeout", err)
+	}
+	var timeoutErr *TimeoutError
+	if !errors.As(err, &timeoutErr) {
+		t.Fatalf("errors.As(err, *TimeoutError) failed, err = %v", err)
+	}
+	if !timeoutErr.CallerCanceled {
+		t.Fatal("CallerCanceled = false, want true (ctx was already canceled before Do could make any attempt)")
+	}
+	if timeoutErr.Attempts != 1 {
+		t.Fatalf("Attempts = %d, want 1 (must short-circuit before making any attempt, not burn the retry budget)", timeoutErr.Attempts)
+	}
+}
+
+// TestDo_Sent_RequestConstructionFailure proves the Sent=false rule for
+// a request-construction failure (never even attempted a network
+// connection).
+func TestDo_Sent_RequestConstructionFailure(t *testing.T) {
+	c := New(ClientConfig{
+		BaseURL: "http://unused.invalid",
+		Timeout: time.Second,
+	})
+
+	_, err := c.Do(context.Background(), Request{Method: "BAD METHOD", Path: "/", Operation: "test_op"})
+	var unavailableErr *UnavailableError
+	if !errors.As(err, &unavailableErr) {
+		t.Fatalf("errors.As(err, *UnavailableError) failed, err = %v", err)
+	}
+	if unavailableErr.Sent {
+		t.Fatal("Sent = true, want false (request construction failed before any network attempt was made)")
+	}
+}
+
+// TestDo_Sent_DialFailureNeverSent proves the Sent=false rule for a dial
+// failure (TCP connection never established).
+func TestDo_Sent_DialFailureNeverSent(t *testing.T) {
+	srv := conformance.NewTransportFailureServer(t)
+
+	c := New(ClientConfig{BaseURL: srv.URL, Timeout: time.Second})
+
+	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op"})
+	var unavailableErr *UnavailableError
+	if !errors.As(err, &unavailableErr) {
+		t.Fatalf("errors.As(err, *UnavailableError) failed, err = %v", err)
+	}
+	if unavailableErr.Sent {
+		t.Fatal("Sent = true, want false (a dial failure means the connection was never established)")
+	}
+}
+
+// TestDo_Sent_5xxAlwaysTrue proves the Sent=true rule whenever an HTTP
+// response (even a 5xx) was actually received - the provider definitely
+// got the request.
+func TestDo_Sent_5xxAlwaysTrue(t *testing.T) {
+	srv := conformance.NewStatusServer(t, 503, []byte(`{"error":"down"}`))
+
+	c := New(ClientConfig{BaseURL: srv.URL, Timeout: time.Second})
+
+	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op"})
+	var unavailableErr *UnavailableError
+	if !errors.As(err, &unavailableErr) {
+		t.Fatalf("errors.As(err, *UnavailableError) failed, err = %v", err)
+	}
+	if !unavailableErr.Sent {
+		t.Fatal("Sent = false, want true (an HTTP response was received, so the provider got the request)")
+	}
+}
+
+func TestDo_AuthHeaderAppliedUnderConfiguredNameOnly(t *testing.T) {
+	const secretValue = "super-secret-value"
+
+	var gotConfiguredHeader, gotAuthorizationHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotConfiguredHeader = r.Header.Get("X-Api-Key")
+		gotAuthorizationHeader = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(ClientConfig{
+		BaseURL:         srv.URL,
+		Timeout:         time.Second,
+		AuthHeaderName:  "X-Api-Key",
+		AuthHeaderValue: secretValue,
+	})
+
+	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op"})
+	if err != nil {
+		t.Fatalf("Do returned unexpected error: %v", err)
+	}
+	if gotConfiguredHeader != secretValue {
+		t.Fatalf("X-Api-Key header = %q, want %q", gotConfiguredHeader, secretValue)
+	}
+	if gotAuthorizationHeader != "" {
+		t.Fatalf("Authorization header = %q, want empty (auth header must only be set under the configured name)", gotAuthorizationHeader)
+	}
+}

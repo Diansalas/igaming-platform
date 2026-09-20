@@ -1480,7 +1480,93 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 7 — B2C Casino Player Experience + Casino Vertical Slice — COMPLETE, awaiting human review
+## Current stage: Stage 8 — Provider Integration Readiness Without External Contracts — COMPLETE, awaiting human review
+
+**Purpose.** Originally scoped as "Dummy Sportsbook/Dummy Casino API
+integration"; the platform owner confirmed at Stage 8's start that no
+documentation, base URL, or credentials for either API were actually
+available (verified by this session's own reconnaissance — repo grep,
+`.env.example`, `docker-compose.dev.yml`, `/etc/hosts`, filesystem, all
+negative) and explicitly re-scoped the stage to **provider-integration
+readiness without any external API call**: harden the existing
+`CasinoProvider`/`sportsbook.Provider` boundary and build everything a
+real adapter will need later, without guessing that adapter's actual
+shape. Full design record: `docs/decisions/0080-provider-integration-
+readiness-without-external-contracts.md`.
+
+**What was built** (all additive, no redesign of completed domain
+architecture):
+
+- `casino_provider_rounds` (migration 0080) — provider-neutral, durable
+  binding of a future real provider's own round id to the platform's
+  session/player/brand/game/correlation id, resolving ADR 0048's (Stage
+  7) documented residual round-visibility limitation. RLS mirrors
+  `casino_launch_sessions` exactly; an atomic ownership-conflict guard
+  (empirically proven race-free under concurrent binding attempts)
+  rejects a different player/brand naming an already-bound round with an
+  HTTP 409 (never a 500, never an identity/round-id echo); a same-player/
+  same-brand continuation across two launch sessions succeeds; a
+  `BEFORE UPDATE` immutability trigger matches this repo's established
+  precedent for comparable binding tables.
+- `sportsbook_bets.provider_id`/`provider_bet_reference` (migration
+  0081) — nullable, symmetric-null-constrained, tenant-scoped uniqueness,
+  always NULL this stage (bet placement remains the existing synchronous,
+  same-process `PlaceBet` flow). `sportsbook.Provider` deliberately NOT
+  extended with a bet-placement method — the real contract's sync/async
+  shape is unknown.
+- `internal/providers/httpclient` — a generic, provider-name-agnostic
+  outbound HTTP client (explicit timeout, bounded idempotent-only retry,
+  four-category error classification with a `Sent`/delivered
+  distinction, OTel spans, no automatic redirect following after a
+  security-review-confirmed credential-exfiltration finding was fixed)
+  plus a reusable `httpclient/conformance` contract-test harness, clearly
+  labeled as testing the generic client, never an external API.
+- `internal/providers/config.go` — generic, fail-closed provider
+  configuration loading (enabled/disabled, base URL, credential
+  *reference* — never a hardcoded value, timeout, retries). No specific
+  provider is wired into `cmd/platform-api/main.go`.
+- `docs/integrations/dummy-casino.md` / `dummy-sportsbook.md` — explicit
+  "PENDING — no documentation available" records, per CLAUDE.md's "no
+  fake completion" rule.
+- Minimal Back Office visibility additions (`provider_round_id` on the
+  admin casino rounds list, `provider_id`/`provider_bet_reference` on the
+  admin sportsbook bets list) — no new screen, no provider-management
+  console.
+
+**Review and fix round.** Three parallel specialist reviews (architect,
+security, qa) independently examined the above; security and qa each
+independently reproduced the same finding (the generic HTTP client
+forwarded its configured credential to any host a provider redirected
+to). Three P1s were fixed before this stage closed: the credential-
+redirect leak (client now refuses to auto-follow any redirect); an
+unmapped ownership-conflict error surfacing as a retryable 500 with no
+integrity alert (now an explicit 409 + alert log at both the public
+webhook and the play-simulation endpoints); and the round binding
+committing even when a bet was declined by RG/Risk/insufficient funds
+(binding moved to immediately before the ledger post). Several P2s were
+also fixed while still cheap (a same-session-only ownership predicate
+that would have rejected a legitimate free-spins round continuation; a
+missing DB-level immutability trigger; a context-cancellation retry-loop
+bug; a `provider_bet_ref`→`provider_bet_reference` rename to match this
+project's own pre-existing canonical naming in doc 09, done while the
+column was still unwritten by any code path). Full findings, verdicts,
+and disposition are in the Stage 8 completion report delivered to the
+user.
+
+**Validation.** Full repo test suite (32 packages, 1273 tests) passes
+against a freshly-migrated (81 migrations, clean up/down/up round-trip)
+scratch database; race-detector clean on every touched package; the
+Stage 6 sportsbook and Stage 7 casino defining acceptance tests re-run
+unmodified and pass; both frontends (`b2c/`, `backoffice/`) build and
+test clean.
+
+No external network call was made at any point. No real commercial
+provider, B2B, retail, full reconciliation/settlement platform,
+jurisdiction human decision, country approval, or wallet/ledger/identity/
+RG/risk redesign was performed. Stage 9 was NOT started; no automatic
+progression.
+
+## Prior stage: Stage 7 — B2C Casino Player Experience + Casino Vertical Slice — COMPLETE, awaiting human review
 
 **Purpose.** Prove the existing casino/provider/payment/wallet/ledger
 architecture (built and hardened Stage 4A onward) supports a real

@@ -324,17 +324,57 @@ mapping is in the Stage 4A completion report §16.
 ## 13. Security/RLS
 
 `casino_games` carries no RLS (platform-wide, like `assets`).
-`casino_game_availability`, `casino_provider_capabilities`, and
-`casino_launch_sessions` all carry `ENABLE`+`FORCE ROW LEVEL SECURITY`.
-The first two use the `tenant_isolation` staff-only pattern (with the
-player-scope-exclusion guard — `app.player_account_id` must be unset);
-`casino_launch_sessions` uses the dual `tenant_staff_scope` +
+`casino_game_availability`, `casino_provider_capabilities`,
+`casino_launch_sessions`, and `casino_provider_rounds` (Stage 8, below)
+all carry `ENABLE`+`FORCE ROW LEVEL SECURITY`. The first two use the
+`tenant_isolation` staff-only pattern (with the player-scope-exclusion
+guard — `app.player_account_id` must be unset); `casino_launch_sessions`
+and `casino_provider_rounds` both use the dual `tenant_staff_scope` +
 `player_self_scope` (SELECT-only) pattern, identical shape to
 `withdrawal_requests` (migration 0026). Every composite foreign key pins a
 launch session to its actual owning tenant/brand/player/wallet — see
 migration 0035 for the exact constraints. Casino provider credentials are
 config, never source code; Stage 4A introduces no real credential of any
 kind.
+
+## 13a. Provider-round persistence (Stage 8, ADR 0080 Decision 1)
+
+`casino_provider_rounds` (migration 0080) durably binds a
+provider-declared `provider_round_id` to the platform's own
+`launch_session_id`/`player_account_id`/`brand_id`/`game_id`/
+`correlation_id`, resolving the residual limitation ADR 0048 (Stage 7)
+documented: the round read model in `history.go` re-derives
+`correlation_id` from `roundCorrelationID(tenantID, providerID, roundID)`,
+a convention Stage 7's play-simulation seam introduced by always setting
+`RoundID = session.ID.String()` — a real provider's own round id is never
+assumed to equal a session id, so without this table a real provider's
+round would have had nowhere durable to be looked up from by provider
+identifiers alone.
+
+Uniqueness is `(tenant_id, provider_id, provider_round_id)` — a
+documented conservative assumption (mirroring
+`idx_ledger_transactions_tenant_provider_tx`'s own tenant+provider
+scoping), not a fact about any real provider's contract; see ADR 0080
+Decision 1 for the full reasoning and the revisit condition. The
+ownership-conflict guard (an atomic `INSERT ... ON CONFLICT ... DO UPDATE
+... WHERE <ownership match> RETURNING id`, verified race-free under
+concurrent binding attempts) checks `player_account_id`+`brand_id` only —
+a round belongs to exactly one player and brand, not to exactly one
+launch session, so a same-player/same-brand continuation across two
+launch sessions (e.g. a free-spins round outliving a session timeout)
+succeeds, while a different player or brand naming the same round is
+rejected with `ErrProviderRoundOwnershipConflict`, mapped to an HTTP 409
+(never a 500) at both `POST /v1/webhooks/casino/.../{providerID}` and the
+play-simulation endpoints, with no round id or identity echoed back to
+the caller. Binding happens in `postBet`, positioned immediately before
+`ledger.Post` (after RG/Risk/insufficient-funds all pass), so a declined
+bet leaves no row — the table's population semantics are "rounds actually
+bet on," not "rounds a provider attempted." `postWin`/`postRollback`
+remain unchanged, resolving accounts entirely from the ledger's own prior
+entries. The table carries the same `BEFORE UPDATE` immutability-trigger
+convention as `casino_launch_sessions` (migration 0036) and
+`withdrawal_requests` (migration 0026): only `last_seen_at` and
+`launch_session_id` may change on an existing row.
 
 ## 14. Observability
 

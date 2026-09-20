@@ -113,6 +113,14 @@ type adminRoundResponse struct {
 	BrandID              string   `json:"brand_id"`
 	DecimalExponent      int16    `json:"decimal_exponent"`
 	LedgerTransactionIDs []string `json:"ledger_transaction_ids"`
+	// ProviderRoundID surfaces the casino_provider_rounds binding (Stage 8,
+	// docs/decisions/0080-provider-integration-readiness-without-external-
+	// contracts.md Decision 5) for this round's own launch session, when
+	// one exists. Empty string ("", never omitted) when no provider has
+	// ever bound a round id to this session - the common case today, since
+	// no real provider posts callbacks and only Stage 8's own tests
+	// populate casino_provider_rounds.
+	ProviderRoundID string `json:"provider_round_id"`
 }
 
 // newListAdminCasinoRoundsHandler is the Back Office's tenant-wide,
@@ -145,6 +153,19 @@ func newListAdminCasinoRoundsHandler(deps Deps) http.HandlerFunc {
 				return err
 			}
 			total = count
+
+			// One batched casino_provider_rounds lookup for the whole page,
+			// not one query per row - mirrors the exponents map's identical
+			// per-page-not-per-row caching discipline immediately below.
+			sessionIDs := make([]uuid.UUID, 0, len(rounds))
+			for _, rnd := range rounds {
+				sessionIDs = append(sessionIDs, rnd.SessionID)
+			}
+			providerRoundIDs, err := casino.LookupProviderRoundIDsBySession(ctx, tx, tc.TenantID, sessionIDs)
+			if err != nil {
+				return fmt.Errorf("casino admin rounds: look up provider round bindings: %w", err)
+			}
+
 			items = make([]adminRoundResponse, 0, len(rounds))
 			exponents := make(map[string]int16)
 			for _, rnd := range rounds {
@@ -164,6 +185,7 @@ func newListAdminCasinoRoundsHandler(deps Deps) http.HandlerFunc {
 				items = append(items, adminRoundResponse{
 					roundResponse: toRoundResponse(rnd), PlayerAccountID: rnd.PlayerAccountID.String(),
 					BrandID: rnd.BrandID.String(), DecimalExponent: exp, LedgerTransactionIDs: txIDs,
+					ProviderRoundID: providerRoundIDs[rnd.SessionID],
 				})
 			}
 			return nil

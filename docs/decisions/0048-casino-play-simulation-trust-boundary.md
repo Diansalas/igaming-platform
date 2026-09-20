@@ -111,12 +111,35 @@ comment, and is never assumed to equal a session id). This means the
 Stage 7 visibility views are accurate for simulation-originated rounds but
 would report a real provider's own round as blank if one ever posted
 directly to the public webhook without an accompanying session-anchored
-round id. Since no real provider exists yet, this is disclosed as a known
-limitation of the read model, not fixed in Stage 7 (see task-registry.md's
-Stage 7 technical-debt entry) — the clean fix (persisting the
-provider-declared round id on `casino_launch_sessions` or a thin link
-row the first time a callback binds one) is deferred to whenever a real
-provider integration is scoped.
+round id. Since no real provider exists yet, this was disclosed at the
+time as a known limitation of the read model, not fixed in Stage 7 (see
+task-registry.md's Stage 7 technical-debt entry).
+
+**Update (Stage 8, `docs/decisions/0080-provider-integration-readiness-
+without-external-contracts.md`, Decision 1):** the durable fix this
+section originally deferred has been added. A new table,
+`casino_provider_rounds` (migration 0080), binds every provider-declared
+`(tenant_id, provider_id, provider_round_id)` to the platform's own
+`launch_session_id`/`player_account_id`/`brand_id`/`game_id`/
+`correlation_id` the first time `postBet` (`internal/casino/
+orchestrator.go`) sees it — durable, provider-neutral, and independently
+queryable by provider identifiers alone (`casino.LookupProviderRound`),
+not only by session id. This resolves the limitation described above for
+any caller that queries by provider identifiers, including a future real
+provider's own round id: it now has somewhere durable to be looked up
+from, and a `provider_round_id` already bound to a different session/
+player/brand in the same tenant is rejected outright
+(`casino.ErrProviderRoundOwnershipConflict`) rather than silently
+misattributed.
+
+This is purely additive and does **not** change `history.go`'s own
+existing correlation-id-recompute read path described above, which
+remains correct and unmodified — Decision 1 adds a durable, independently
+-queryable index alongside it, it does not replace it. `history.go` itself
+was not updated to consult the new table this stage (out of Stage 8's own
+scope); a future stage may choose to have the Back Office/history views
+prefer `casino_provider_rounds` when a binding exists, falling back to the
+recompute path otherwise.
 
 ## Removal condition
 

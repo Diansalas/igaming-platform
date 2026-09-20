@@ -1230,6 +1230,21 @@ starts.
 
 ## Open questions for reviewers
 
+0. **Stage 8 (ADR 0080 Decision 2) readiness addition, deliberately left
+   undecided**: `sportsbook_bets` now carries nullable `provider_id`/
+   `provider_bet_reference` columns for a future real provider's own bet
+   acceptance reference, but the ordering question this raises — for a
+   real provider whose bet-placement contract turns out to be
+   asynchronous (accept-then-confirm rather than immediate ack), what is
+   the correct ordering between provider acceptance and the
+   `player_locked_cash` posting, and does `sportsbook_bets.status` need a
+   pre-acceptance/pending state to represent it? — is explicitly **not
+   decided or built**. It cannot be decided without knowing whether real
+   bet placement is even synchronous, which requires the actual provider
+   contract (see `docs/integrations/dummy-sportsbook.md`, itself pending).
+   Recorded here, not only in that integration-status file, because that
+   file is expected to be rewritten in full once real documentation
+   exists — this open question should survive that rewrite.
 1. **§7.2's ADR 0033 gap** — is the recommended resolution (nullable
    `provider_id`, `NULL` = in-house) the right fix, or should the
    canonical event envelope (doc 22) instead carry an explicit

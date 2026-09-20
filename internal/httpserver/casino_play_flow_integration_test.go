@@ -24,6 +24,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -674,5 +675,60 @@ func TestAdminListCasinoRounds_TenantAdminAuthorizedAndCrossTenantIsolated(t *te
 	}
 	if len(page.Items[0].LedgerTransactionIDs) != 1 {
 		t.Fatalf("expected exactly 1 audit-linkage ledger_transaction_id, got %v", page.Items[0].LedgerTransactionIDs)
+	}
+}
+
+// TestCasinoPlay_Wager_ProviderRoundOwnershipConflict_Returns409 proves the
+// Stage 8 review fix (P1) on writeCasinoCallbackError's own error-mapping
+// block (casino_play_handlers.go): casino.ErrProviderRoundOwnershipConflict
+// surfaces as a 409, never a 5xx, and the response never echoes the round
+// id or either player's identity. The play-simulation wager endpoint always
+// sets CallbackEvent.RoundID = session.ID.String() (Stage 7's own play-
+// simulation seam), so player Y's OWN session id is pre-claimed here as a
+// provider round already bound to a DIFFERENT player (X) - player Y's own
+// subsequent wager then collides exactly like a real cross-player provider
+// round id collision would.
+func TestCasinoPlay_Wager_ProviderRoundOwnershipConflict_Returns409(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, _ := newMockCasinoOrchestrator()
+	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
+
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	playerX := mustRegisterPlayer(t, srv, brand.Slug)
+	playerY := mustRegisterPlayer(t, srv, brand.Slug)
+	mustActivatePlayer(t, pool, tenant.ID, playerX.ID)
+	mustActivatePlayer(t, pool, tenant.ID, playerY.ID)
+	fundWallet(t, pool, tenant.ID, brand.ID, playerX.ID, "EUR", 10_000)
+	fundWallet(t, pool, tenant.ID, brand.ID, playerY.ID, "EUR", 10_000)
+
+	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
+	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
+	mustEnableCasinoCapability(t, srv, pool, tenant)
+
+	launchedX := mustLaunchCasinoGame(t, srv, playerX.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launchedY := mustLaunchCasinoGame(t, srv, playerY.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	sessionX := uuid.MustParse(launchedX.SessionID)
+	sessionY := uuid.MustParse(launchedY.SessionID)
+
+	mustBindProviderRound(t, pool, tenant.ID, brand.ID, playerX.ID, sessionX, game.ID, "mock-casino", sessionY.String())
+
+	balanceBeforeY := walletCashBalance(t, srv, playerY.Tokens.AccessToken)
+
+	resp := postJSON(t, srv, "/v1/me/casino/sessions/"+sessionY.String()+"/wager", playerY.Tokens.AccessToken, wagerBody(500))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 for player Y's wager colliding with an already-bound provider round id, got %d", resp.StatusCode)
+	}
+	errBody := decodeAPIError(t, resp)
+	if strings.Contains(errBody.Message, sessionY.String()) {
+		t.Fatalf("response message must never echo the round id (enumeration oracle), got %q", errBody.Message)
+	}
+	if strings.Contains(errBody.Message, playerX.ID.String()) || strings.Contains(errBody.Message, playerY.ID.String()) {
+		t.Fatalf("response message must never echo either player's identity, got %q", errBody.Message)
+	}
+
+	if balanceAfterY := walletCashBalance(t, srv, playerY.Tokens.AccessToken); balanceAfterY != balanceBeforeY {
+		t.Fatalf("expected player Y's balance untouched after the rejected wager (%d), got %d", balanceBeforeY, balanceAfterY)
 	}
 }

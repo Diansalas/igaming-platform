@@ -307,6 +307,25 @@ var (
 	// closed, posting nothing, never guessing, never silently reusing
 	// §16.15's still-held mechanism for this structurally different case.
 	ErrHeldDispositionRollbackUnsupported = errors.New("casino: rollback of an already-resolved held disposition is LF-10 (ledger-finance's open decision); refusing to guess a resolution")
+
+	// --- Stage 8 (docs/decisions/0080-provider-integration-readiness-
+	// without-external-contracts.md, Decision 1) - casino_provider_rounds
+	// binding. ---
+
+	// ErrProviderRoundOwnershipConflict is returned by BindProviderRound
+	// when a provider_round_id already bound to a DIFFERENT
+	// launch_session_id/player_account_id/brand_id (same tenant, same
+	// provider) is bet on again - the exact cross-player/cross-tenant/
+	// cross-brand round-id collision Stage 8 requires be rejected outright
+	// rather than silently overwritten (a provider's round-id namespace is
+	// never assumed to distinguish players/sessions on its own - see the
+	// ADR's own "Uniqueness scope" discussion).
+	ErrProviderRoundOwnershipConflict = errors.New("casino: provider_round_id is already bound to a different session/player/brand")
+	// ErrProviderRoundNotFound is returned by LookupProviderRound when no
+	// casino_provider_rounds row exists for the given
+	// (tenant_id, provider_id, provider_round_id) - e.g. no bet has ever
+	// been posted for that round yet.
+	ErrProviderRoundNotFound = errors.New("casino: provider round not found")
 )
 
 // Stage 4D-RG's LaunchGame/postBet eligibility denial (internal/

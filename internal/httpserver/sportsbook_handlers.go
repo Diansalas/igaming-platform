@@ -394,6 +394,24 @@ type adminBetResponse struct {
 	// for the same reason: a staff-facing money display without it
 	// misrepresents the real amount.
 	DecimalExponent int16 `json:"decimal_exponent"`
+	// ProviderID/ProviderBetReference pass through sportsbook.Bet's identical,
+	// always-nil-today pointer fields (Stage 8, docs/decisions/0080-
+	// provider-integration-readiness-without-external-contracts.md
+	// Decision 5/Decision 2) as empty strings ("", never omitted) when nil
+	// - no real sportsbook provider adapter exists yet, so every bet
+	// placed via the existing PlaceBet flow has both NULL.
+	ProviderID           string `json:"provider_id"`
+	ProviderBetReference string `json:"provider_bet_reference"`
+}
+
+// stringOrEmpty dereferences an optional *string, returning "" for nil -
+// the same nil-tolerant flattening convention this response layer already
+// uses for every other nullable-in-the-database field it surfaces.
+func stringOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 // newListAdminBetsHandler is the Stage 6 Back Office sportsbook bet
@@ -444,6 +462,7 @@ func newListAdminBetsHandler(deps Deps) http.HandlerFunc {
 				}
 				items = append(items, adminBetResponse{
 					betResponse: toBetResponse(b), PlayerAccountID: b.PlayerAccountID.String(), BrandID: b.BrandID.String(), DecimalExponent: exp,
+					ProviderID: stringOrEmpty(b.ProviderID), ProviderBetReference: stringOrEmpty(b.ProviderBetReference),
 				})
 			}
 			return nil

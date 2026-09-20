@@ -2495,6 +2495,115 @@ integration, production country/jurisdiction approvals, any answer to
 `HDR-J-6/7/8/9`, B2B/partner console, retail, and any
 jurisdiction/wallet-ledger/identity/RG redesign.
 
+## Stage 8 — Provider Integration Readiness Without External Contracts
+
+Originally scoped as external Dummy Sportsbook/Dummy Casino API
+integration; re-scoped by the platform owner, once both APIs proved
+undiscoverable from this environment, to provider-integration readiness
+without any external network call. Full narrative:
+`docs/decisions/0080-provider-integration-readiness-without-external-
+contracts.md`, `docs/active-stage.md`'s Stage 8 section,
+`docs/progress.md`'s Stage 8 section.
+
+| ID | Owner | Status | Files owned | Tests | Blockers | Integration |
+|---|---|---|---|---|---|---|
+| S8-01 | Orchestrator | Done | reconnaissance only; `docs/decisions/0080-*.md` (new) | n/a | none | n/a |
+| S8-02 | casino (subagent) | Done | `migrations/0080_casino_provider_rounds.{up,down}.sql`, `internal/casino/rounds.go` (new), `internal/casino/orchestrator.go` (`postBet` binding), `internal/casino/types.go` (sentinel errors) | 4 initial adversarial tests, 84/84 `internal/casino` suite green | none | Verified |
+| S8-03 | sportsbook (subagent) | Done | `migrations/0081_sportsbook_bets_provider_reference.{up,down}.sql`, `internal/sportsbook/types.go`, `internal/sportsbook/bets.go`, `internal/sportsbook/provider_reference_integration_test.go` (new) | 17/17 `internal/sportsbook` suite green | none | Verified |
+| S8-04 | integrations (subagent) | Done | `internal/providers/httpclient/{client,errors}.go` (new), `internal/providers/httpclient/conformance/conformance.go` (new), `internal/providers/config.go` (new) | 24 new tests, race-clean | none | Verified |
+| S8-05 | ledger-finance (subagent) | Done | `internal/casino/failure_mode_matrix_integration_test.go` (new), `internal/sportsbook/failure_mode_matrix_integration_test.go` (new) | 15 new failure-mode tests (A/B/C/D/E/F/H/I/JK matrix items) | none | Verified |
+| S8-06 | backoffice (subagent) | Done | `internal/casino/rounds.go` (`LookupProviderRoundIDsBySession`), `internal/httpserver/casino_history_handlers.go`, `internal/httpserver/sportsbook_handlers.go`, `backoffice/src/features/casino/CasinoRoundsPage.tsx`, `backoffice/src/features/sportsbook/SportsbookBetsPage.tsx`, `docs/api/openapi/platform-api.yaml` | 5 new backend tests, 23/23 frontend tests, `tsc -b`/build clean | none | Verified |
+| S8-07 | architect, security, qa | Done | review only | n/a | See findings below | n/a |
+| S8-08 | casino (subagent, fix round) | Done | `internal/casino/rounds.go`, `internal/casino/orchestrator.go`, `migrations/0080_*.sql` (immutability trigger added), `internal/httpserver/casino_handlers.go`, `internal/httpserver/casino_play_handlers.go` | 2 new HTTP tests + 2 new domain tests, full `internal/casino`+`internal/httpserver` re-run | none | Verified |
+| S8-09 | integrations (subagent, fix round) | Done | `internal/providers/httpclient/{client,errors}.go` | 5 new tests (redirect-credential, context-cancellation, Sent classification ×3), race-clean | none | Verified |
+| S8-10 | sportsbook (subagent, fix round) | Done | rename `provider_bet_ref`→`provider_bet_reference` across migration 0081, `internal/sportsbook/*`, `internal/httpserver/sportsbook_handlers.go`, OpenAPI, `backoffice/src/api/sportsbookAdmin.ts`, `SportsbookBetsPage.tsx` | full round-trip + suite re-run, frontend build clean | none | Verified |
+| S8-11 | Orchestrator | Done | `docs/decisions/0080-*.md` (corrections), `docs/architecture/08-*.md` (§13a new), `docs/architecture/09-*.md` (open question #0), this registry, `docs/active-stage.md`, `docs/progress.md` | full validation gate re-run (32 packages, 1273 tests, race-clean) | none | n/a — **stage explicitly STOPS here; Stage 9 NOT authorized** |
+
+### Review findings and dispositions
+
+**Three P1s, two independently confirmed by more than one reviewer:**
+
+1. **Credential-exfiltration path in `internal/providers/httpclient`**
+   (security AND qa, independently reproduced via live redirect tests):
+   the client had no `CheckRedirect` policy, so Go's default redirect
+   behavior forwarded any caller-configured auth header (deliberately
+   arbitrary, e.g. a vendor `X-API-Key`) to a redirect target — a
+   compromised or malicious provider could exfiltrate the credential.
+   Fixed: `New()` now refuses to auto-follow any redirect
+   (`http.ErrUseLastResponse`); permanent regression test added.
+2. **Unmapped `ErrProviderRoundOwnershipConflict`** (architect finding F1,
+   security finding P2-2): a cross-player/cross-brand round-id collision
+   — the exact integrity signal `casino_provider_rounds` exists to catch
+   — fell through to a generic 500 with no alert, which a well-behaved
+   provider reads as "retry forever." Fixed: explicit branch at both
+   `casino_handlers.go` (public webhook) and `casino_play_handlers.go`
+   (play-simulation), logging an integrity alert and returning a generic
+   409 (no round id or identity echoed, to avoid an enumeration oracle).
+3. **Round binding committed on a declined bet** (architect finding F2,
+   security finding P3-7): `BindProviderRound` was called before the RG/
+   Risk/insufficient-funds checks, all three of which return
+   `(OutcomeDeclined, nil)` — a committed outcome — so a blocked bet still
+   left a durable binding claiming that round id. Fixed: bind moved to
+   immediately before `ledger.Post`.
+
+**P2s fixed while still cheap** (all uncommitted, so free to change):
+the ownership-conflict predicate originally required `launch_session_id`
+to match, rejecting a legitimate same-player/same-brand round
+continuation across two launch sessions (e.g. a free-spins round
+outliving a session timeout) — relaxed to `player_account_id`+`brand_id`
+only; `casino_provider_rounds` had no DB-level immutability trigger
+against this repo's own repeated precedent — added, modeled on migration
+0036's `casino_launch_sessions` trigger; the HTTP client's retry loop
+burned its entire retry budget instantly on a cancelled parent context
+and misclassified it as a provider-health signal — fixed with an
+up-front `ctx.Err()` check and a `CallerCanceled` field; the error
+taxonomy didn't distinguish "definitely never reached the provider" from
+"possibly reached it" — added a `Sent bool` field to the relevant error
+types; `sportsbook_bets.provider_bet_ref` didn't match doc 09's own
+pre-existing canonical name `provider_bet_reference` — renamed while the
+column was still unwritten by any code path (free now, would not have
+been once a real adapter started writing to it).
+
+**Documentation-accuracy corrections** (architect finding F4/F5, security
+finding P3-5/P3-6): ADR 0080 Decision 1 originally claimed `postWin`/
+`postRollback` verify a callback's `RoundID` against the existing
+binding — no such code exists (`postWin`/`postRollback` are unchanged,
+resolving accounts entirely from ledger truth, a stronger anchor) — and
+Decision 5 claimed `casino_provider_rounds` is "never populated outside
+tests," which is false (Stage 7's play-simulation seam populates it on
+every real-mode wager). Both corrected in place rather than left as
+inaccurate decision-record text, per CLAUDE.md's "no fake completion"
+rule. `docs/architecture/08-casino-integration-architecture.md` gained a
+new §13a describing the table (it was previously undocumented outside
+the ADR); `docs/architecture/09-sportsbook-architecture.md` gained an
+explicit "Open questions" entry recording the deferred provider-
+acceptance-vs-financial-posting ordering decision durably (previously
+recorded only in `docs/integrations/dummy-sportsbook.md`, which is
+expected to be rewritten in full once real documentation exists).
+
+**P3/P4 items documented, not fixed** (per Stage 8's own "fix P0/P1
+always, P2 only when directly relevant, document P3/P4" rule): a
+diagnosability gap where a late-arriving original after a tombstone
+surfaces an opaque wrapped error rather than a named sentinel (found by
+ledger-finance, requires a shared `ledger.Post`/`db.IdempotentInsert`
+change, not incidental to this stage); `MockCasinoProvider` has no hook
+to simulate a callback-path provider failure and `MockSportsbookProvider`
+has no failure-injection mechanism at all; a redundant `correlationID`
+parameter on `BindProviderRound` (removed anyway, it was cheap);
+`ProviderRound.ProviderSessionID`'s nullability convention diverged from
+`internal/sportsbook`'s `*string` idiom (fixed anyway, cheap); an RLS
+policy pattern (`player_self_scope`) that relies on `player_account_id`'s
+global uniqueness rather than stating a `tenant_id` predicate explicitly
+— pre-existing platform-wide convention, not Stage 8's to redesign.
+
+### Explicitly NOT this stage's to build (confirmed absent)
+
+External Dummy Sportsbook/Dummy Casino API integration (undiscoverable,
+per the platform owner's own instruction not to invent either contract),
+real commercial provider integration, B2B, retail, full reconciliation/
+settlement platform, any jurisdiction human decision or country approval,
+and any wallet/ledger/identity/RG/risk redesign.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

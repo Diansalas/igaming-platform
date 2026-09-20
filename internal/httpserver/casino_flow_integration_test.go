@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -320,6 +321,70 @@ func TestCasinoWebhook_UnsignedPayloadRejected(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected zero ledger_transactions rows for an unsigned callback, got %d", count)
+	}
+}
+
+// --- 6b. Stage 8 review fix (P1): a provider_round_id already bound to a
+// DIFFERENT player is a 409, not a 5xx, and the response never echoes the
+// round id or either player's identity (enumeration-resistance) ---
+
+func TestCasinoWebhook_ProviderRoundOwnershipConflict_Returns409WithoutLeakingIdentity(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, mock := newMockCasinoOrchestrator()
+	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
+
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	playerA := mustRegisterPlayer(t, srv, brand.Slug)
+	playerB := mustRegisterPlayer(t, srv, brand.Slug)
+	mustActivatePlayer(t, pool, tenant.ID, playerA.ID)
+	mustActivatePlayer(t, pool, tenant.ID, playerB.ID)
+	fundWallet(t, pool, tenant.ID, brand.ID, playerA.ID, "EUR", 10_000)
+	fundWallet(t, pool, tenant.ID, brand.ID, playerB.ID, "EUR", 10_000)
+
+	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
+	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
+	mustEnableCasinoCapability(t, srv, pool, tenant)
+
+	launchedA := mustLaunchCasinoGame(t, srv, playerA.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	launchedB := mustLaunchCasinoGame(t, srv, playerB.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	sessionA := uuid.MustParse(launchedA.SessionID)
+	sessionB := uuid.MustParse(launchedB.SessionID)
+
+	const conflictRoundID = "round-http-ownership-conflict"
+
+	payloadA := mock.CallbackPayload(casino.CallbackEventBet, "bet-http-conflict-a", "", conflictRoundID, game.ProviderGameID,
+		1000, "EUR", casino.OutcomeSucceeded, "", playerA.ID, sessionA)
+	respA := rawPostJSON(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payloadA)
+	defer respA.Body.Close()
+	if respA.StatusCode != http.StatusOK {
+		t.Fatalf("expected player A's first bet on the round to succeed, got %d", respA.StatusCode)
+	}
+
+	payloadB := mock.CallbackPayload(casino.CallbackEventBet, "bet-http-conflict-b", "", conflictRoundID, game.ProviderGameID,
+		750, "EUR", casino.OutcomeSucceeded, "", playerB.ID, sessionB)
+	respB := rawPostJSON(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payloadB)
+	defer respB.Body.Close()
+	if respB.StatusCode != http.StatusConflict {
+		t.Fatalf("expected a 409 for player B's collision with an already-bound round id, got %d", respB.StatusCode)
+	}
+	errBody := decodeAPIError(t, respB)
+	if strings.Contains(errBody.Message, conflictRoundID) {
+		t.Fatalf("response message must never echo the round id (enumeration oracle), got %q", errBody.Message)
+	}
+	if strings.Contains(errBody.Message, playerA.ID.String()) || strings.Contains(errBody.Message, playerB.ID.String()) {
+		t.Fatalf("response message must never echo either player's identity, got %q", errBody.Message)
+	}
+
+	var count int
+	err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE provider_id = 'mock-casino' AND provider_tx_id = 'bet-http-conflict-b'`).Scan(&count)
+	})
+	if err != nil {
+		t.Fatalf("query ledger_transactions: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected zero ledger_transactions rows for player B's rejected bet, got %d", count)
 	}
 }
 

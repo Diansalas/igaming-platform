@@ -198,6 +198,22 @@ type Bet struct {
 	IdempotencyKey      string
 	LedgerTransactionID uuid.UUID
 	PlacedAt            time.Time
+	// ProviderID and ProviderBetReference mirror sportsbook_bets' identical
+	// pair of nullable, additive columns (migration
+	// 0081_sportsbook_bets_provider_reference, docs/decisions/0080
+	// Decision 2). Both are ALWAYS nil today: bet placement remains this
+	// stage's existing same-process, synchronous PlaceBet flow, and no
+	// external provider round-trip exists or is added. They exist purely
+	// so a future real sportsbook provider adapter has somewhere durable
+	// to record its own bet-acceptance reference once that provider's
+	// actual bet-placement contract (sync vs async, ack shape) is known,
+	// without requiring a schema redesign at that point. Pointers, not
+	// bare strings, matching this codebase's nullable-optional-field
+	// convention (e.g. internal/casino's *string providerTxID/
+	// jurisdictionCode fields for the identical NULL-in-the-database
+	// case).
+	ProviderID           *string
+	ProviderBetReference *string
 }
 
 // Sentinel errors. Mirrors internal/casino's "specific, distinguishable
@@ -238,6 +254,18 @@ const (
 // provider round-trip occurs at placement time (a mock provider is
 // same-process, per this package's own doc comment), and no settlement/
 // cashout code is built this stage at all.
+//
+// Stage 8 addendum (docs/decisions/0080 Decision 2): a bet-placement
+// adapter method is deliberately NOT added here even though
+// sportsbook_bets now has somewhere to store a provider's own
+// acceptance reference (Bet.ProviderID/Bet.ProviderBetReference) - adding one
+// would require guessing a real provider's actual bet-placement
+// contract (synchronous vs asynchronous, its ack/rejection shape),
+// which no real provider documentation exists to confirm at this
+// stage. That method is deferred to whenever a real sportsbook
+// provider's bet-placement contract is actually known, so a future
+// reader should not read PlaceBet's continued absence of any Provider
+// call as an oversight.
 type Provider interface {
 	Catalogue() CatalogueResult
 }
