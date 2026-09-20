@@ -7,19 +7,18 @@
 //
 // Follows jurisdiction_admin_handlers.go's own conventions exactly: same
 // actor-resolution helper (jurisdictionActorFromRequest), same error
-// mapper (writeJurisdictionRegistryError). Unlike the jurisdictions/
-// licences registry writes in that file, this handler opens its
-// transaction via deps.DB.WithTenant(tenantID, ...) rather than
-// WithPlatformAdmin - AssignTenantLicence's own audit write is
-// TENANT-scoped (this operation's subject is a specific tenant, not a
-// platform-wide reference row), mirroring newCreateBrandHandler/
-// newCreateStaffHandler's exact convention (admin_routes.go) for
-// "platform_admin acts on a target tenant" writes. `tenants`/`licences`
-// still carry no row-level security, so nothing about the read/update
-// logic depends on which GUC is set - only the audit write's scope does.
-// This handler also applies canActOnTenant (admin_routes.go), the same
-// ADR 0011 guard every sibling "act on a target tenant" handler applies -
-// a no-op today (only platform_admin holds PermTenantLicenceAssign, and
+// mapper (writeJurisdictionRegistryError). AS OF STAGE 4I PHASE E-SECURITY
+// (migration 0077), this handler opens its transaction via
+// deps.DB.WithPlatformAdmin(...), exactly like jurisdiction_admin_handlers.go's
+// registry writes - NOT deps.DB.WithTenant(tenantID, ...) as it did
+// through Phase A/E. `tenants`/`licences` gained row-level security with
+// no tenant-scoped write policy of any kind (a tenant-scoped write to its
+// own `licence_id` was the exact live-reproduced attack this migration
+// closes), and AssignTenantLicence's own audit write moved platform-scoped
+// as a consequence (see tenant_licence_admin.go's header comment). This
+// handler still applies canActOnTenant (admin_routes.go), the same ADR
+// 0011 guard every sibling "act on a target tenant" handler applies - a
+// no-op today (only platform_admin holds PermTenantLicenceAssign, and
 // canActOnTenant always allows a nil-tenant/platform-scoped caller), but
 // it closes a latent risk should this permission ever be additionally
 // granted to a tenant-scoped role.
@@ -67,12 +66,13 @@ func newAssignTenantLicenceHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
 			return
 		}
-		// The uuid.Nil check (beyond a bare parse failure) matters here in
-		// a way it didn't before this fix round: db.Pool.WithTenant itself
-		// rejects a nil tenant id with a raw internal error, which would
-		// otherwise surface as a 500 instead of a controlled 400 - unlike
-		// the old WithPlatformAdmin wrapper, AssignTenantLicence's own
-		// "tenant_id is required" check never got a chance to run.
+		// The uuid.Nil check (beyond a bare parse failure) matters here:
+		// AssignTenantLicence's own "tenant_id is required" check runs
+		// under a platform-scoped transaction (see below) that does not
+		// itself reject a nil tenant id the way db.Pool.WithTenant used to,
+		// so this handler-level guard is what keeps a malformed path value
+		// mapped to a controlled 400 rather than a confusing downstream
+		// error.
 		tenantID, err := uuid.Parse(r.PathValue("tenantID"))
 		if err != nil || tenantID == uuid.Nil {
 			apierror.Write(w, requestID, apierror.CodeValidation, "tenantID must be a valid UUID")
@@ -123,7 +123,7 @@ func newAssignTenantLicenceHandler(deps Deps) http.HandlerFunc {
 		}
 
 		var state jurisdiction.TenantLicenceState
-		err = deps.DB.WithTenant(r.Context(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		err = deps.DB.WithPlatformAdmin(r.Context(), actor.ActorID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			state, err = jurisdiction.AssignTenantLicence(ctx, tx, jurisdiction.AssignTenantLicenceParams{
 				TenantID: tenantID, LicenceID: licenceID, Actor: actor,

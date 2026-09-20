@@ -8,6 +8,7 @@ package risk
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -43,10 +44,18 @@ func seedFixture(t *testing.T, pool *db.Pool) fixture {
 	t.Helper()
 	var f fixture
 	f.tenantID = uuid.New()
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'Test Tenant', 'under_platform_licence')`,
+	// Stage 4I Phase E-SECURITY (migration 0077): `tenants` writes now
+	// require a genuinely platform-admin-scoped transaction.
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'Test Tenant', 'under_platform_licence')`,
 			f.tenantID, "t-"+f.tenantID.String()[:8])
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 tenant row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("seed tenant: %v", err)
@@ -588,9 +597,17 @@ func TestEvaluate_AdditionalScopeDimensionIsMoreSpecificNotATie(t *testing.T) {
 func seedJurisdiction(t *testing.T, pool *db.Pool) string {
 	t.Helper()
 	code := "TEST-" + uuid.NewString()[:8]
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO jurisdictions (code, name) VALUES ($1, 'Test Jurisdiction')`, code)
-		return err
+	// Stage 4I Phase E-SECURITY (migration 0077): `jurisdictions` writes
+	// now require a genuinely platform-admin-scoped transaction.
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `INSERT INTO jurisdictions (code, name) VALUES ($1, 'Test Jurisdiction')`, code)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 jurisdiction row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("seed jurisdiction: %v", err)

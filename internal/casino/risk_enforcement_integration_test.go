@@ -10,6 +10,7 @@ package casino
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -82,9 +83,17 @@ func mintSessionWithJurisdiction(t *testing.T, pool *db.Pool, f casinoFixture, p
 func seedJurisdiction(t *testing.T, pool *db.Pool) string {
 	t.Helper()
 	code := "TEST-" + uuid.NewString()[:8]
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO jurisdictions (code, name) VALUES ($1, 'Test Jurisdiction')`, code)
-		return err
+	// Stage 4I Phase E-SECURITY (migration 0077): `jurisdictions` writes
+	// now require a genuinely platform-admin-scoped transaction.
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `INSERT INTO jurisdictions (code, name) VALUES ($1, 'Test Jurisdiction')`, code)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 jurisdiction row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("seed jurisdiction: %v", err)

@@ -5,6 +5,7 @@ package payments
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -26,13 +27,19 @@ func seedOrchFixture(t *testing.T, pool *db.Pool) orchFixture {
 	f := orchFixture{tenantID: uuid.New(), brandID: uuid.New(), playerAccountID: uuid.New()}
 	personID := uuid.New()
 
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
+	// Stage 4I Phase E-SECURITY (migration 0077): `tenants` writes now
+	// require a genuinely platform-admin-scoped transaction.
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'Test Tenant', 'under_platform_licence')`,
-			f.tenantID, "t-"+f.tenantID.String()[:8]); err != nil {
+			f.tenantID, "t-"+f.tenantID.String()[:8])
+		if err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID)
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 tenant row, inserted %d", tag.RowsAffected())
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID)
 		return err
 	})
 	if err != nil {

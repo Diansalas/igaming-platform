@@ -33,6 +33,7 @@ type createTenantRequest struct {
 	Name           string `json:"name"`
 	Slug           string `json:"slug"`
 	LicensingModel string `json:"licensing_model"`
+	ReasonCode     string `json:"reason_code"`
 }
 
 type tenantResponse struct {
@@ -63,14 +64,34 @@ func newCreateTenantHandler(deps Deps) http.HandlerFunc {
 		v.RequireNonEmpty("name", req.Name)
 		v.RequireNonEmpty("slug", req.Slug)
 		v.RequireOneOf("licensing_model", req.LicensingModel, "under_platform_licence", "own_licence")
+		v.RequireNonEmpty("reason_code", req.ReasonCode)
 		if v.HasErrors() {
 			apierror.Write(w, requestID, apierror.CodeValidation, v.Error())
 			return
 		}
 
+		// Stage 4I Phase E-SECURITY: unlike the pre-existing sibling
+		// `subjectID, _ := uuid.Parse(tc.Subject)` calls elsewhere in this
+		// file, a swallowed parse failure here would silently become
+		// uuid.Nil and get rejected by WithPlatformAdmin's own nil-principal
+		// guard as an opaque "db: WithPlatformAdmin called with nil
+		// principal id" error - so the parse error is surfaced explicitly
+		// instead.
+		subjectID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+
 		var t identity.Tenant
-		subjectID, _ := uuid.Parse(tc.Subject)
-		err = deps.DB.WithoutTenant(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+		// Stage 4I Phase E-SECURITY (migration 0077): `tenants` gained RLS
+		// with no tenant-scoped write policy of any kind, so tenant
+		// provisioning now requires a genuinely platform-admin-scoped
+		// transaction - identity.CreateTenant's own assertPlatformScope
+		// enforces this in Go, and migration 0077's
+		// tenants_platform_admin_insert policy enforces it independently at
+		// the database.
+		err = deps.DB.WithPlatformAdmin(r.Context(), subjectID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			t, err = identity.CreateTenant(ctx, tx, req.Name, req.Slug, req.LicensingModel)
 			if err != nil {
@@ -80,6 +101,17 @@ func newCreateTenantHandler(deps Deps) http.HandlerFunc {
 				ActorType: audit.ActorStaff, ActorID: subjectID,
 				Action: "tenant.created", TargetType: "tenant", TargetID: t.ID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
+				Metadata: map[string]any{
+					"reason_code": req.ReasonCode,
+					"before":      nil,
+					"after": map[string]any{
+						"id":              t.ID.String(),
+						"name":            t.Name,
+						"slug":            t.Slug,
+						"licensing_model": t.LicensingModel,
+						"status":          t.Status,
+					},
+				},
 			})
 		})
 		if errors.Is(err, identity.ErrSlugTaken) {

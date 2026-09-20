@@ -768,9 +768,20 @@ Binding on `jurisdiction_resolutions` and on `jurisdiction_resolution_active`:
 - **Staff read is its own permission**, not implied by `audit:read`,
   `bonus:read` or `player:read`; `considered_bases` is projected out for a
   caller lacking `verification:read`.
-- **`jurisdictions` stays platform-scoped with no RLS** (SEC §S-3.2). It is
-  a platform fact and an FK target every tenant-scoped transaction must
-  read. Only the **write** side changes: one new **platform-only**
+- **`jurisdictions` stays platform-scoped with read-open RLS** (SEC
+  §S-3.2). **CORRECTED (Stage 4I Phase E-SECURITY, migration 0077, ADR
+  0046): `jurisdictions` DOES carry row-level security as of migration
+  0077** — `ENABLE`+`FORCE ROW LEVEL SECURITY` with a `jurisdictions_read`
+  policy that is `USING (true)` (read-open, unchanged in effect from the
+  "no RLS" claim this sentence originally made), plus write policies
+  restricting INSERT/UPDATE to a genuinely platform-admin-scoped
+  transaction (there was previously no database-level backstop on writes
+  at all, closed by the same migration). It is a platform fact and an FK
+  target every tenant-scoped transaction must read, which is exactly why
+  the READ side stays open — this sentence's original point about reads
+  is unchanged; only "no RLS" (which was never true of the write side,
+  and is no longer true of the table at all) is corrected. Only the
+  **write** side changes: one new **platform-only**
   permission on `RolePlatformAdmin`, following `PermCasinoCatalogueManage`'s
   exact precedent (`internal/auth/permission.go:76-82`). Per-tenant
   jurisdiction configuration writes follow `PermAssetAuthorizationWrite`'s
@@ -1724,8 +1735,15 @@ build. **Five landed faithfully; one needed a correction (§13.3).**
 
 **§4.4 Layer 2's resolver-side half was never implemented**, and it was
 load-bearing rather than decorative. Every table `resolveTenantLicence`
-reads — `tenants`, `licences`, `jurisdictions` — carries **no row-level
-security at all**. So `Resolve` returned a fully `Resolved` Resolution
+reads — `tenants`, `licences`, `jurisdictions` — carried **no row-level
+security at all** at the time this was written (**CORRECTED, Stage 4I
+Phase E-SECURITY, migration 0077, ADR 0046: this is no longer true — all
+three tables now carry RLS, though `tenants`/`jurisdictions` remain
+deliberately read-open, so the READ-side isolation problem this paragraph
+describes is unchanged in practice; see `internal/operatingmarket/
+resolve.go`'s own updated comment for the current, accurate division of
+labor between write-side RLS and this resolver's own `assertTenantScope`
+**). So `Resolve` returned a fully `Resolved` Resolution
 carrying tenant A's jurisdiction to a transaction that had only ever proven
 tenant B, on the strength of a caller-supplied `Params.TenantID`. Confirmed
 live by mutation test, not by inspection.
@@ -1749,10 +1767,15 @@ it and are binding:**
 
 - **§6.1's stated safety net — "a resolver query on a bare pool connection
   reads zero rows under FORCE RLS" — is FALSE for the `tenant_licence`
-  path**, because those three tables have no RLS. The required behaviour
-  ("it must error, not return `unresolved`") is now real, but it is real
-  because of an explicit assertion, not because of RLS. Any future basis
-  that reads a non-RLS table inherits this obligation explicitly.
+  path**, because those three tables had no RLS at the time this was
+  written. **CORRECTED (ADR 0046): as of migration 0077 the three tables
+  DO carry RLS, but the safety net is STILL false for this path** —
+  `tenants`/`jurisdictions` are deliberately read-open (`USING (true)`),
+  so a bare pool connection reads real rows, not zero. The required
+  behaviour ("it must error, not return `unresolved`") is now real, but it
+  is real because of an explicit assertion, not because of RLS. Any
+  future basis that reads a read-open-by-design table inherits this
+  obligation explicitly.
 - **§4.4 Layer 2 is two independent checks, and a consumer implementing
   only `AssertScope` has implemented neither half usefully.** The resolver
   asserts against the connection; the consumer asserts against its own

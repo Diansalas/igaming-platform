@@ -2,10 +2,23 @@
 
 // Real-PostgreSQL tests for EvaluateLicenceValidity (ADR 0045 §2.5,
 // SEC-4I-F10's technical predicate).
+//
+// Stage 4I Phase E-SECURITY (migration 0077): `licences` gained RLS
+// narrowed to platform-admin OR the tenant whose own tenants.licence_id
+// names the row. Every fixture/read below moved from WithoutTenant to
+// WithPlatformAdmin as a consequence - these tests exercise standalone
+// licences with no tenant binding at all, so platform-admin scope (which
+// can read every licence unconditionally) is the correct fix, not binding
+// a tenant to each one. Before this fix, a WithoutTenant read of any of
+// these licences would satisfy neither policy arm and silently observe
+// ZERO rows, which EvaluateLicenceValidity's own fail-closed design maps
+// to LicenceNotFound - masking every other status this file means to
+// test, not merely "getting the wrong answer once".
 package jurisdiction
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -17,9 +30,10 @@ func TestEvaluateLicenceValidity_SuspendedExpiredBoundaryAndNotBound(t *testing.
 	pool := testPool(t)
 	f := seedFixture(t, pool)
 	asOf := time.Now().UTC()
+	platformAdmin := uuid.New()
 
 	t.Run("not bound - uuid.Nil", func(t *testing.T) {
-		err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		err := pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 			got, err := EvaluateLicenceValidity(ctx, tx, uuid.Nil, asOf)
 			if err != nil {
 				return err
@@ -35,7 +49,7 @@ func TestEvaluateLicenceValidity_SuspendedExpiredBoundaryAndNotBound(t *testing.
 	})
 
 	t.Run("not found - unknown licence id", func(t *testing.T) {
-		err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		err := pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 			got, err := EvaluateLicenceValidity(ctx, tx, uuid.New(), asOf)
 			if err != nil {
 				return err
@@ -51,7 +65,7 @@ func TestEvaluateLicenceValidity_SuspendedExpiredBoundaryAndNotBound(t *testing.
 	})
 
 	t.Run("active, no expiry - valid", func(t *testing.T) {
-		err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		err := pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 			got, err := EvaluateLicenceValidity(ctx, tx, f.licenceID, asOf)
 			if err != nil {
 				return err
@@ -68,15 +82,21 @@ func TestEvaluateLicenceValidity_SuspendedExpiredBoundaryAndNotBound(t *testing.
 
 	t.Run("suspended", func(t *testing.T) {
 		licenceID := uuid.New()
-		err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `INSERT INTO licences (id, jurisdiction_id, licensee, licence_number, status) VALUES ($1, $2, 'platform', 'LIC-SUSP', 'suspended')`,
+		err := pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
+			tag, err := tx.Exec(ctx, `INSERT INTO licences (id, jurisdiction_id, licensee, licence_number, status) VALUES ($1, $2, 'platform', 'LIC-SUSP', 'suspended')`,
 				licenceID, f.jurisdictionID)
-			return err
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != 1 {
+				t.Fatalf("expected to insert 1 licence row, inserted %d", tag.RowsAffected())
+			}
+			return nil
 		})
 		if err != nil {
 			t.Fatalf("seed suspended licence: %v", err)
 		}
-		err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		err = pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 			got, err := EvaluateLicenceValidity(ctx, tx, licenceID, asOf)
 			if err != nil {
 				return err
@@ -93,15 +113,21 @@ func TestEvaluateLicenceValidity_SuspendedExpiredBoundaryAndNotBound(t *testing.
 
 	t.Run("status expired", func(t *testing.T) {
 		licenceID := uuid.New()
-		err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `INSERT INTO licences (id, jurisdiction_id, licensee, licence_number, status) VALUES ($1, $2, 'platform', 'LIC-EXP', 'expired')`,
+		err := pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
+			tag, err := tx.Exec(ctx, `INSERT INTO licences (id, jurisdiction_id, licensee, licence_number, status) VALUES ($1, $2, 'platform', 'LIC-EXP', 'expired')`,
 				licenceID, f.jurisdictionID)
-			return err
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != 1 {
+				t.Fatalf("expected to insert 1 licence row, inserted %d", tag.RowsAffected())
+			}
+			return nil
 		})
 		if err != nil {
 			t.Fatalf("seed expired licence: %v", err)
 		}
-		err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		err = pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 			got, err := EvaluateLicenceValidity(ctx, tx, licenceID, asOf)
 			if err != nil {
 				return err
@@ -119,17 +145,23 @@ func TestEvaluateLicenceValidity_SuspendedExpiredBoundaryAndNotBound(t *testing.
 	t.Run("date expiry boundary is strict - invalid ON the expiry date itself", func(t *testing.T) {
 		licenceID := uuid.New()
 		today := time.Now().UTC().Truncate(24 * time.Hour)
-		err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `INSERT INTO licences (id, jurisdiction_id, licensee, licence_number, status, expires_at) VALUES ($1, $2, 'platform', 'LIC-DATE', 'active', $3)`,
+		err := pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
+			tag, err := tx.Exec(ctx, `INSERT INTO licences (id, jurisdiction_id, licensee, licence_number, status, expires_at) VALUES ($1, $2, 'platform', 'LIC-DATE', 'active', $3)`,
 				licenceID, f.jurisdictionID, today)
-			return err
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != 1 {
+				t.Fatalf("expected to insert 1 licence row, inserted %d", tag.RowsAffected())
+			}
+			return nil
 		})
 		if err != nil {
 			t.Fatalf("seed date-bound licence: %v", err)
 		}
 
 		// AsOf strictly BEFORE the expiry date: valid.
-		err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		err = pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 			got, err := EvaluateLicenceValidity(ctx, tx, licenceID, today.Add(-24*time.Hour))
 			if err != nil {
 				return err
@@ -144,7 +176,7 @@ func TestEvaluateLicenceValidity_SuspendedExpiredBoundaryAndNotBound(t *testing.
 		}
 
 		// AsOf ON the expiry date itself: INVALID (strict boundary).
-		err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		err = pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 			got, err := EvaluateLicenceValidity(ctx, tx, licenceID, today)
 			if err != nil {
 				return err
@@ -159,7 +191,7 @@ func TestEvaluateLicenceValidity_SuspendedExpiredBoundaryAndNotBound(t *testing.
 		}
 
 		// AsOf AFTER the expiry date: also invalid.
-		err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		err = pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 			got, err := EvaluateLicenceValidity(ctx, tx, licenceID, today.Add(24*time.Hour))
 			if err != nil {
 				return err
@@ -185,17 +217,24 @@ func TestEvaluateLicenceValidity_NotYetIssuedLicenceIsInvalid(t *testing.T) {
 	licenceID := uuid.New()
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	futureIssue := today.Add(24 * time.Hour)
+	platformAdmin := uuid.New()
 
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO licences (id, jurisdiction_id, licensee, licence_number, status, issued_at) VALUES ($1, $2, 'platform', 'LIC-FUTURE', 'active', $3)`,
+	err := pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `INSERT INTO licences (id, jurisdiction_id, licensee, licence_number, status, issued_at) VALUES ($1, $2, 'platform', 'LIC-FUTURE', 'active', $3)`,
 			licenceID, f.jurisdictionID, futureIssue)
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			t.Fatalf("expected to insert 1 licence row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("seed future-issued licence: %v", err)
 	}
 
-	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	err = pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 		got, err := EvaluateLicenceValidity(ctx, tx, licenceID, today)
 		if err != nil {
 			return err
@@ -211,7 +250,7 @@ func TestEvaluateLicenceValidity_NotYetIssuedLicenceIsInvalid(t *testing.T) {
 
 	// Once AsOf reaches the issue date, the licence is valid again (no
 	// expiry set).
-	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	err = pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 		got, err := EvaluateLicenceValidity(ctx, tx, licenceID, futureIssue)
 		if err != nil {
 			return err
@@ -235,17 +274,24 @@ func TestEvaluateLicenceValidity_LicenceIsValidOnItsOwnIssueDate(t *testing.T) {
 	f := seedFixture(t, pool)
 	licenceID := uuid.New()
 	today := time.Now().UTC().Truncate(24 * time.Hour)
+	platformAdmin := uuid.New()
 
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO licences (id, jurisdiction_id, licensee, licence_number, status, issued_at) VALUES ($1, $2, 'platform', 'LIC-TODAY', 'active', $3)`,
+	err := pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `INSERT INTO licences (id, jurisdiction_id, licensee, licence_number, status, issued_at) VALUES ($1, $2, 'platform', 'LIC-TODAY', 'active', $3)`,
 			licenceID, f.jurisdictionID, today)
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			t.Fatalf("expected to insert 1 licence row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("seed today-issued licence: %v", err)
 	}
 
-	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	err = pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 		got, err := EvaluateLicenceValidity(ctx, tx, licenceID, today)
 		if err != nil {
 			return err
@@ -271,8 +317,11 @@ func TestEvaluateLicenceValidity_NullIssuedAtIsNotTreatedAsNotYetIssued(t *testi
 	asOf := time.Now().UTC()
 
 	// f.licenceID (seedFixture's own licence) has issued_at NULL by
-	// construction - no INSERT anywhere names the column.
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	// construction - no INSERT anywhere names the column. f.tenantID is
+	// bound to f.licenceID, so a tenant-scoped read is also valid here;
+	// platform-admin scope is used for consistency with this file's other
+	// tests.
+	err := pool.WithPlatformAdmin(context.Background(), f.platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 		got, err := EvaluateLicenceValidity(ctx, tx, f.licenceID, asOf)
 		if err != nil {
 			return err
@@ -297,17 +346,24 @@ func TestEvaluateLicenceValidity_SuspendedStatusOutranksNotYetIssued(t *testing.
 	licenceID := uuid.New()
 	today := time.Now().UTC().Truncate(24 * time.Hour)
 	futureIssue := today.Add(24 * time.Hour)
+	platformAdmin := uuid.New()
 
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO licences (id, jurisdiction_id, licensee, licence_number, status, issued_at) VALUES ($1, $2, 'platform', 'LIC-SUSP-FUTURE', 'suspended', $3)`,
+	err := pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `INSERT INTO licences (id, jurisdiction_id, licensee, licence_number, status, issued_at) VALUES ($1, $2, 'platform', 'LIC-SUSP-FUTURE', 'suspended', $3)`,
 			licenceID, f.jurisdictionID, futureIssue)
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			t.Fatalf("expected to insert 1 licence row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("seed suspended future-issued licence: %v", err)
 	}
 
-	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	err = pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 		got, err := EvaluateLicenceValidity(ctx, tx, licenceID, today)
 		if err != nil {
 			return err
@@ -319,5 +375,83 @@ func TestEvaluateLicenceValidity_SuspendedStatusOutranksNotYetIssued(t *testing.
 	})
 	if err != nil {
 		t.Fatalf("EvaluateLicenceValidity: %v", err)
+	}
+}
+
+// TestEvaluateLicenceValidity_ForeignLicenceIsInvisibleAndFailsClosedNotOpen
+// is the new Stage 4I Phase E-SECURITY regression: a tenant-scoped
+// connection evaluating a licence it does NOT own (neither platform-admin
+// scope nor its own tenants.licence_id) must observe the licence as
+// invisible under `licences_read`'s narrow policy - and
+// EvaluateLicenceValidity's own fail-closed design must map that
+// invisibility to LicenceNotFound, never to LicenceValid. This is the
+// exact "identical stored row, different resolve() answer depending on
+// scope" property this migration introduces on this table for the first
+// time - EvaluateLicenceValidity's own code required NO change to get
+// this right, because it already treats "no row visible" as
+// LicenceNotFound regardless of whether that is because the row generally
+// does not exist or because RLS hides it from this connection.
+func TestEvaluateLicenceValidity_ForeignLicenceIsInvisibleAndFailsClosedNotOpen(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	asOf := time.Now().UTC()
+	platformAdmin := uuid.New()
+
+	// f.otherTenantID (seedFixture's own second tenant, never bound to any
+	// licence) is bound HERE to a brand-new, dedicated licence under
+	// f.jurisdiction2 - a DIFFERENT licence than f.tenantID's own
+	// f.licenceID - so a connection scoped to f.tenantID must not be able
+	// to see it at all.
+	otherLicenceID := uuid.New()
+	err := pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`INSERT INTO licences (id, jurisdiction_id, licensee, licence_number) VALUES ($1, $2, 'platform', 'LIC-FOREIGN')`,
+			otherLicenceID, f.jurisdiction2)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 licence row, inserted %d", tag.RowsAffected())
+		}
+		tag, err = tx.Exec(ctx, `UPDATE tenants SET licence_id = $2 WHERE id = $1`, f.otherTenantID, otherLicenceID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to update 1 tenant row, updated %d", tag.RowsAffected())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed foreign licence bound to f.otherTenantID: %v", err)
+	}
+
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		got, err := EvaluateLicenceValidity(ctx, tx, otherLicenceID, asOf)
+		if err != nil {
+			return err
+		}
+		if got != LicenceNotFound {
+			t.Fatalf("expected LicenceNotFound for a foreign tenant's licence (fail-closed on invisibility, never LicenceValid), got %q", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("EvaluateLicenceValidity from a foreign tenant scope: %v", err)
+	}
+
+	// Sanity: the OWNING tenant (f.otherTenantID) can see it fine.
+	err = pool.WithTenant(context.Background(), f.otherTenantID, func(ctx context.Context, tx pgx.Tx) error {
+		got, err := EvaluateLicenceValidity(ctx, tx, otherLicenceID, asOf)
+		if err != nil {
+			return err
+		}
+		if got != LicenceValid {
+			t.Fatalf("sanity: expected LicenceValid for the owning tenant's own licence, got %q", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("EvaluateLicenceValidity from the owning tenant scope: %v", err)
 	}
 }

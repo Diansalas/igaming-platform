@@ -80,15 +80,38 @@ func Resolve(ctx context.Context, q ReadOnlyQuerier, p Params) (Resolution, erro
 // (authorization.go) so the two cannot drift.
 //
 // WHY THIS IS LOAD-BEARING AND NOT DEFENCE-IN-DEPTH (architect, Stage 4I
-// final cross-domain certification): every table resolveTenantLicence
-// reads - `tenants`, `licences`, `jurisdictions` - is a platform-wide
-// reference table with NO row-level security at all (verified against
-// pg_class.relrowsecurity; canonical-model §6.1 deliberately keeps
-// `jurisdictions` that way, and `tenants`/`licences` have never had it).
-// RLS therefore provides ZERO tenant isolation on this path. Without this
-// assertion, Resolve would hand a transaction scoped to tenant A a fully
-// `Resolved` jurisdiction belonging to tenant B, purely on the strength of
-// a caller-supplied `Params.TenantID`.
+// final cross-domain certification; RESTATED by Stage 4I Phase E-SECURITY,
+// migration 0077, which changed the premise but not the conclusion; FURTHER
+// CORRECTED by this fix round's Fix 10, below): every table
+// resolveTenantLicence reads - `tenants`, `licences`, `jurisdictions` - was,
+// through Phase E, a platform-wide reference table with NO row-level
+// security at all (verified against pg_class.relrowsecurity). Migration
+// 0077 gave all three RLS: `tenants` and `jurisdictions` are DELIBERATELY
+// read-open for every non-player scope (`USING (true)`) - this call site
+// (identity.GetTenantBySlug and three WithoutTenant active-tenant sweeps
+// need to read `tenants` from scopes with no tenant match to offer) is one
+// of the reasons that read posture was chosen, per migration 0077's own
+// header comment - but `licences` is NOT read-open: `licences_read` is
+// narrowed to platform-admin, or the tenant whose own `tenants.licence_id`
+// names the row.
+//
+// CORRECTED (this fix round, Fix 10): a prior version of this comment
+// claimed RLS provides "ZERO READ isolation on this path" and that "without
+// this assertion, Resolve would hand a transaction scoped to tenant A a
+// fully Resolved jurisdiction belonging to tenant B" - both overstate the
+// gap as it stands today. Because `licences_read` is narrow, a transaction
+// scoped to tenant A cannot even READ tenant B's licence row: the
+// `licences JOIN jurisdictions` query below would return zero rows for a
+// foreign licence, and this function would return
+// `refused(ReasonDependencyUnavailable)`, NOT a `Resolved` result for
+// tenant B - even without this assertion. `tenants.licence_id` itself
+// remains readable cross-tenant (only `licences`' content is narrowed), so
+// the assertion is still necessary and load-bearing: without it, a
+// mis-scoped call degrades only to that misleading fail-closed
+// `refused(dependency_unavailable)` outcome instead of a diagnosable
+// `ErrScopeMismatch` - a real difference for whoever has to debug it, even
+// though neither outcome is a data leak. The assertion is therefore backed
+// by, not substituted by, this second independent layer.
 //
 // Resolution.AssertScope cannot substitute for this: it compares the
 // resolution's binding to the values the CALLER passes, which are the same
@@ -100,13 +123,18 @@ func Resolve(ctx context.Context, q ReadOnlyQuerier, p Params) (Resolution, erro
 // from server-side authenticated context rather than an argument.
 //
 // Note also that canonical-model §6.1's stated safety net - "a resolver
-// query on a bare pool connection reads zero rows under FORCE RLS" - is
-// simply FALSE for this path for the same reason; this function is what
-// makes the intended behaviour real instead of assumed.
+// query on a bare pool connection reads zero rows under FORCE RLS" - holds
+// for the `licences` leg (narrow read policy) but not for the `tenants`
+// leg (`tenants.licence_id` remains readable from a bare/tenant-scoped
+// connection) - this function is what makes the intended behaviour real on
+// the `tenants` leg instead of assumed.
 func assertTenantScope(ctx context.Context, q ReadOnlyQuerier, tenantID uuid.UUID) (bool, error) {
 	var scoped *uuid.UUID
+	var scopedPlayer *uuid.UUID
 	if err := q.QueryRow(ctx,
-		`SELECT NULLIF(current_setting('app.tenant_id', true), '')::uuid`).Scan(&scoped); err != nil {
+		`SELECT NULLIF(current_setting('app.tenant_id', true), '')::uuid,
+		        NULLIF(current_setting('app.player_account_id', true), '')::uuid`,
+	).Scan(&scoped, &scopedPlayer); err != nil {
 		return false, fmt.Errorf("jurisdiction: read tenant scope: %w", err)
 	}
 	if scoped == nil {
@@ -116,6 +144,19 @@ func assertTenantScope(ctx context.Context, q ReadOnlyQuerier, tenantID uuid.UUI
 		// `unresolved` (canonical-model §6.1: "It must error, not return
 		// unresolved").
 		return false, fmt.Errorf("%w: transaction has no tenant scope (use db.Pool.WithTenant)", ErrScopeMismatch)
+	}
+	// Fix 6 (Stage 4I Phase E-SECURITY fix round): mirrors
+	// internal/operatingmarket's own assertTenantScope exact pattern. This
+	// branch is unreachable today - both production callers of
+	// jurisdiction.Resolve always pass a non-nil PlayerAccountID, which
+	// short-circuits Resolve before this code path is ever reached (see
+	// Resolve's own doc comment) - but if that ever changes, a
+	// player-scoped transaction reaching resolveTenantLicence must fail
+	// with a diagnosable scope error, not a misleading
+	// refused(dependency_unavailable) produced by licences_read's
+	// player-exclusion conjunct silently returning zero rows.
+	if scopedPlayer != nil {
+		return false, fmt.Errorf("%w: transaction must not be player-scoped", ErrScopeMismatch)
 	}
 	return *scoped == tenantID, nil
 }

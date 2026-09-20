@@ -36,21 +36,34 @@ func sessionRLSTestPool(t *testing.T) *db.Pool {
 	return pool
 }
 
+// Stage 4I Phase E-SECURITY (migration 0077): `tenants` gained RLS with no
+// tenant-scoped/scopeless write policy, so both the INSERT and the DELETE
+// cleanup below now require a genuinely platform-admin-scoped transaction.
+// (The `DELETE FROM sessions` cleanup step is unrelated to migration
+// 0077 - `sessions` has carried FORCE RLS with no DELETE policy at all
+// since migration 0012, so it was already, and remains, a silent no-op
+// regardless of connection scope; unchanged here.)
 func createSessionRLSTestTenant(t *testing.T, pool *db.Pool) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, $2, $3, 'under_platform_licence')`,
 			id, "Session RLS Test Tenant "+id.String(), "session-rls-"+id.String(),
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			t.Fatalf("expected to insert 1 tenant row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("failed to create test tenant: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_ = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `DELETE FROM sessions WHERE tenant_id = $1`, id)
 			if err != nil {
 				return err

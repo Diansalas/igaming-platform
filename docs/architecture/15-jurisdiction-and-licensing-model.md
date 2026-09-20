@@ -158,6 +158,24 @@ comments for why the FK alone wasn't quite enough), and the Stage 2
 completion report for the verifying test
 (`TestTenant_LicensingModelMustMatchLicenceLicensee`).
 
+**Correction (Stage 4I Phase E-SECURITY, migration 0077, ADR 0046):**
+"A contradictory state is now a constraint violation, not just a bug some
+future service could introduce" overstated the composite FK's coverage.
+The FK's own `expected_licensee` is a `GENERATED` column recomputed from
+the row's CURRENT `licensing_model` at constraint-check time — a single
+`UPDATE tenants SET licensing_model = ..., licence_id = ... WHERE id =
+...` that changes BOTH columns together never produces a self-
+contradictory (old-model, new-licence) pair for the FK to reject; it only
+ever validates a self-consistent NEW state. This was live-reproduced
+(architect, ADR 0046) as an ordinary tenant-scoped write, prior to
+migration 0077. The FK still correctly rejects the SINGLE-column case
+(changing only `licence_id`, or only `licensing_model`, while the other
+is held fixed) and is not itself defective - the real gap was the
+complete absence of row-level security on `tenants`, which meant nothing
+prevented a tenant-scoped connection from issuing the combined UPDATE in
+the first place. Migration 0077 closes this by removing tenant-scoped
+write access to `tenants` entirely, not by changing the FK.
+
 ## Stage mapping
 
 Stage 1 establishes the `tenants`, `jurisdictions`, and licensing schema

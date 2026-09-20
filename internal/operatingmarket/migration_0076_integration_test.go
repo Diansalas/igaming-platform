@@ -29,6 +29,17 @@ import (
 
 const migration0076Version = int64(76)
 
+// migration0077Version (Stage 4I Phase E-SECURITY: tenant/licence/
+// jurisdiction registry RLS) now sits directly on top of 0076 in the
+// chain and must be rolled back first for 0076's own down migration to
+// run at all - mirrors internal/jurisdiction/migration_0075_integration_
+// test.go's own migration0077Version/migration0076Version precedent.
+// 0077's own down migration is unconditionally reversible in every
+// scenario this file exercises (it never inserts a licence_country_
+// ceilings/operating_country_policies row and never sets jurisdictions.
+// country_code), so it never blocks the round-trips below.
+const migration0077Version = int64(77)
+
 func migration0076MigrationsDir(t *testing.T) string {
 	t.Helper()
 	dir, err := filepath.Abs(filepath.Join("..", "..", "migrations"))
@@ -123,21 +134,23 @@ func TestMigration0076_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 		t.Fatal("expected migration 0076 to be applied")
 	}
 
-	// (a) Clean database: rolling migration 0076 back succeeds.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 1)
+	// (a) Clean database: rolling migrations 0077 then 0076 back succeeds.
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 2)
 	if err != nil {
 		t.Fatalf("down migration must succeed on an empty database: %v", err)
 	}
-	if len(rolledBack) != 1 || rolledBack[0] != migration0076Version {
-		t.Fatalf("expected exactly migration %d to be rolled back, got %v", migration0076Version, rolledBack)
+	wantDown := []int64{migration0077Version, migration0076Version}
+	if len(rolledBack) != len(wantDown) || rolledBack[0] != wantDown[0] || rolledBack[1] != wantDown[1] {
+		t.Fatalf("expected exactly migrations %v to be rolled back in that order, got %v", wantDown, rolledBack)
 	}
 
 	rolledUpAgain, err := pool.MigrateUp(context.Background(), dir)
 	if err != nil {
-		t.Fatalf("re-applying migration 0076 after a clean rollback: %v", err)
+		t.Fatalf("re-applying migrations 0076/0077 after a clean rollback: %v", err)
 	}
-	if len(rolledUpAgain) != 1 || rolledUpAgain[0] != migration0076Version {
-		t.Fatalf("expected exactly migration %d to be re-applied, got %v", migration0076Version, rolledUpAgain)
+	wantUp := []int64{migration0076Version, migration0077Version}
+	if len(rolledUpAgain) != len(wantUp) || rolledUpAgain[0] != wantUp[0] || rolledUpAgain[1] != wantUp[1] {
+		t.Fatalf("expected exactly migrations %v to be re-applied in that order, got %v", wantUp, rolledUpAgain)
 	}
 
 	// (b) Dirty database: seed a real ceiling row via the sanctioned path.
@@ -153,9 +166,15 @@ func TestMigration0076_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 	if err != nil {
 		t.Fatalf("seed a ceiling row: %v", err)
 	}
-	_, err = pool.MigrateDown(context.Background(), dir, 1)
+	// Roll back 2: 0077 succeeds on its own (it holds no rows of its own
+	// in this scenario), and the overall call then fails once it reaches
+	// 0076's own guard.
+	rolledBackDirty, err := pool.MigrateDown(context.Background(), dir, 2)
 	if err == nil {
 		t.Fatal("migration 0076's down migration must FAIL once a licence_country_ceilings row exists")
+	}
+	if len(rolledBackDirty) != 1 || rolledBackDirty[0] != migration0077Version {
+		t.Fatalf("expected exactly migration %d to have been rolled back before the failure, got %v", migration0077Version, rolledBackDirty)
 	}
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
@@ -170,6 +189,11 @@ func TestMigration0076_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 	if !migration0076AppliedVersions(t, pool)[migration0076Version] {
 		t.Fatal("a failed rollback must leave migration 0076 recorded as applied")
 	}
+	// Re-apply 0077 so this scratch database ends in a consistent, fully-
+	// migrated state.
+	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
+		t.Fatalf("re-applying migration 0077 after the aborted rollback: %v", err)
+	}
 }
 
 // TestMigration0076_RestoresPreMigrationRLSPostureAndRefusesNonNullCountryCode
@@ -183,7 +207,9 @@ func TestMigration0076_RestoresPreMigrationRLSPostureAndRefusesNonNullCountryCod
 	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
 		t.Fatalf("migrate up the full chain: %v", err)
 	}
-	if _, err := pool.MigrateDown(context.Background(), dir, 1); err != nil {
+	// Roll back 0077 then 0076 - see migration0077Version's own comment
+	// for why 0077 must be accounted for explicitly here.
+	if _, err := pool.MigrateDown(context.Background(), dir, 2); err != nil {
 		t.Fatalf("down migration on a clean database: %v", err)
 	}
 
@@ -215,25 +241,43 @@ func TestMigration0076_RestoresPreMigrationRLSPostureAndRefusesNonNullCountryCod
 	// refuses (a non-NULL administrative value must not be silently
 	// destroyed).
 	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
-		t.Fatalf("re-apply migration 0076: %v", err)
+		t.Fatalf("re-apply migrations 0076/0077: %v", err)
 	}
+	// Stage 4I Phase E-SECURITY (migration 0077): `jurisdictions` writes
+	// now require a genuinely platform-admin-scoped transaction.
 	var jurisdictionID uuid.UUID
-	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	err = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		jurisdictionID = uuid.New()
-		_, err := tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name, country_code) VALUES ($1, $2, 'Migration Test', 'MT')`,
+		tag, err := tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name, country_code) VALUES ($1, $2, 'Migration Test', 'MT')`,
 			jurisdictionID, "MJ076-"+jurisdictionID.String()[:8])
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 jurisdiction row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("seed a jurisdiction with country_code: %v", err)
 	}
 
-	_, err = pool.MigrateDown(context.Background(), dir, 1)
+	// Roll back 2: 0077 succeeds on its own, and the overall call then
+	// fails once it reaches 0076's own guard.
+	rolledBackDirty, err := pool.MigrateDown(context.Background(), dir, 2)
 	if err == nil {
 		t.Fatal("migration 0076's down migration must FAIL once a jurisdictions row has a non-NULL country_code")
 	}
+	if len(rolledBackDirty) != 1 || rolledBackDirty[0] != migration0077Version {
+		t.Fatalf("expected exactly migration %d to have been rolled back before the failure, got %v", migration0077Version, rolledBackDirty)
+	}
 	if !strings.Contains(err.Error(), "country_code") {
 		t.Fatalf("expected the guard's exception to mention country_code, got: %v", err)
+	}
+	// Re-apply 0077 so this scratch database ends in a consistent, fully-
+	// migrated state.
+	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
+		t.Fatalf("re-applying migration 0077 after the aborted rollback: %v", err)
 	}
 }
 
@@ -346,19 +390,31 @@ func TestMigration0076_SchemaMatchesTheCurrentMigrationFile(t *testing.T) {
 	}
 }
 
+// Stage 4I Phase E-SECURITY (migration 0077): `jurisdictions`/`licences`
+// writes now require a genuinely platform-admin-scoped transaction.
 func seedMinimalLicence(t *testing.T, pool *db.Pool) uuid.UUID {
 	t.Helper()
 	var licenceID uuid.UUID
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		jurisdictionID := uuid.New()
-		if _, err := tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, 'Migration Test Jurisdiction')`,
-			jurisdictionID, "MJ-"+jurisdictionID.String()[:8]); err != nil {
+		tag, err := tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, 'Migration Test Jurisdiction')`,
+			jurisdictionID, "MJ-"+jurisdictionID.String()[:8])
+		if err != nil {
 			return err
 		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 jurisdiction row, inserted %d", tag.RowsAffected())
+		}
 		licenceID = uuid.New()
-		_, err := tx.Exec(ctx, `INSERT INTO licences (id, jurisdiction_id, licensee, licence_number) VALUES ($1, $2, 'platform', $3)`,
+		tag, err = tx.Exec(ctx, `INSERT INTO licences (id, jurisdiction_id, licensee, licence_number) VALUES ($1, $2, 'platform', $3)`,
 			licenceID, jurisdictionID, "LIC-"+licenceID.String()[:8])
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 licence row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("seed minimal licence: %v", err)

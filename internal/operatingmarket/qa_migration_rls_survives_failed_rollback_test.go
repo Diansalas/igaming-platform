@@ -66,8 +66,13 @@ func TestQAAdversarial_FailedDirtyRollbackLeavesRLSEnabledAndForced(t *testing.T
 		t.Fatalf("seed a ceiling row: %v", err)
 	}
 
-	// The down-migration must fail (dirty database).
-	if _, err := pool.MigrateDown(context.Background(), dir, 1); err == nil {
+	// The down-migration must fail (dirty database). Roll back 2 steps:
+	// migration 0077 (Stage 4I Phase E-SECURITY) now sits on top of 0076
+	// in the chain and is unconditionally reversible in this scenario, so
+	// it succeeds on its own before the overall call fails once it
+	// reaches 0076's own guard - mirrors migration_0076_integration_
+	// test.go's own migration0077Version precedent.
+	if _, err := pool.MigrateDown(context.Background(), dir, 2); err == nil {
 		t.Fatal("expected migration 0076's down migration to fail on a dirty database")
 	}
 
@@ -111,5 +116,147 @@ func TestQAAdversarial_FailedDirtyRollbackLeavesRLSEnabledAndForced(t *testing.T
 	}
 	if stillThere != 1 {
 		t.Fatalf("expected the seeded ceiling row to survive the failed rollback, got count %d", stillThere)
+	}
+}
+
+// TestQAAdversarial_PartialRollbackLeavesRegistryRLSDisabledButReapplyRestoresIt
+// is Fix 9 (Stage 4I Phase E-SECURITY fix round, DB/RLS review): the test
+// above only asserted that the OVERALL `-steps=2 down` command failed. It
+// did NOT assert what state `tenants`/`licences`/`jurisdictions` are left
+// in. Since Pool.MigrateDown commits each migration's own down in its own
+// transaction, a `-steps=2 down` against migration 0077 can succeed at
+// rolling back 0077 (silently disabling the new RLS on the registry
+// tables) and only THEN fail at migration 0076's own dirty-database guard
+// - meaning an operator who sees only "refusing to roll back migration
+// 0076" has no way to know that 0077's RLS was, in fact, already reverted.
+// This test makes that currently-undocumented intermediate state explicit
+// and confirms a subsequent MigrateUp restores full protection. This is a
+// coverage/documentation fix only - Pool.MigrateDown's transaction-per-
+// migration behavior itself is unchanged and out of scope.
+func TestQAAdversarial_PartialRollbackLeavesRegistryRLSDisabledButReapplyRestoresIt(t *testing.T) {
+	scratchURL := migration0076ScratchDatabase(t)
+	pool := migration0076ScratchPool(t, scratchURL)
+	dir := migration0076MigrationsDir(t)
+
+	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
+		t.Fatalf("migrate up the full chain: %v", err)
+	}
+
+	readRLSPosture := func(table string) (enabled, forced bool) {
+		t.Helper()
+		err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = $1`, table).Scan(&enabled, &forced)
+		})
+		if err != nil {
+			t.Fatalf("read RLS posture for %s: %v", table, err)
+		}
+		return
+	}
+	countPolicies := func(table string) int {
+		t.Helper()
+		var n int
+		err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM pg_policies WHERE tablename = $1`, table).Scan(&n)
+		})
+		if err != nil {
+			t.Fatalf("count policies for %s: %v", table, err)
+		}
+		return n
+	}
+	countDenyTruncateTriggers := func(table string) int {
+		t.Helper()
+		var n int
+		err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx,
+				`SELECT count(*) FROM pg_trigger WHERE tgrelid = $1::regclass AND tgname = $2 AND NOT tgisinternal`,
+				table, table+"_deny_truncate",
+			).Scan(&n)
+		})
+		if err != nil {
+			t.Fatalf("count deny-truncate triggers for %s: %v", table, err)
+		}
+		return n
+	}
+
+	registryTables := []string{"tenants", "licences", "jurisdictions"}
+
+	// Baseline: full protection right after migrating up.
+	for _, table := range registryTables {
+		enabled, forced := readRLSPosture(table)
+		if !enabled || !forced {
+			t.Fatalf("baseline: expected %s to have RLS enabled+forced right after migrating up, got enabled=%v forced=%v", table, enabled, forced)
+		}
+		if n := countPolicies(table); n == 0 {
+			t.Fatalf("baseline: expected %s to have at least one RLS policy, found none", table)
+		}
+		if n := countDenyTruncateTriggers(table); n != 1 {
+			t.Fatalf("baseline: expected %s to have exactly 1 deny-truncate trigger, found %d", table, n)
+		}
+	}
+
+	// Seed a real row so migration 0076's own down-migration dirty-database
+	// guard has something to refuse on, exactly as the sibling test above
+	// does.
+	licenceID := seedMinimalLicence(t, pool)
+	platformAdmin := uuid.New()
+	err := pool.WithPlatformAdmin(context.Background(), platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := CreateLicenceCountryCeilingVersion(ctx, tx, CreateLicenceCountryCeilingVersionParams{
+			LicenceID: licenceID, CountryCode: "GY", State: StateEnabled, Status: StatusActive,
+			AuthorizationReference: "qa-partial-rollback-ref", Actor: testActor(platformAdmin, "qa-partial-rollback-seed"),
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed a ceiling row: %v", err)
+	}
+
+	// `-steps=2 down`: migration 0077 rolls back successfully on its own
+	// (it carries no "refuse if rows exist" guard - tenants/licences/
+	// jurisdictions are core tables that will always hold rows), and the
+	// OVERALL call only THEN fails once it reaches migration 0076's own
+	// dirty-database guard.
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 2)
+	if err == nil {
+		t.Fatal("expected the -steps=2 down to fail on a dirty database")
+	}
+	if len(rolledBack) != 1 || rolledBack[0] != migration0077Version {
+		t.Fatalf("expected exactly migration %d to have been rolled back before the overall failure, got %v", migration0077Version, rolledBack)
+	}
+
+	// THE UNDOCUMENTED STATE THIS FIX MAKES EXPLICIT: migration 0077's own
+	// rollback succeeded, so tenants/licences/jurisdictions are now WITHOUT
+	// row-level security, with zero policies and zero deny-truncate
+	// triggers - even though the overall `-steps=2 down` command reported
+	// failure. An operator reading only "refusing to roll back migration
+	// 0076" would have no way to know this.
+	for _, table := range registryTables {
+		enabled, forced := readRLSPosture(table)
+		if enabled || forced {
+			t.Fatalf("expected %s to have RLS DISABLED after migration 0077's own successful partial rollback (even though the overall -steps=2 command failed), got enabled=%v forced=%v", table, enabled, forced)
+		}
+		if n := countPolicies(table); n != 0 {
+			t.Fatalf("expected %s to have 0 policies after migration 0077's own successful partial rollback, found %d", table, n)
+		}
+		if n := countDenyTruncateTriggers(table); n != 0 {
+			t.Fatalf("expected %s to have 0 deny-truncate triggers after migration 0077's own successful partial rollback, found %d", table, n)
+		}
+	}
+
+	// A subsequent MigrateUp must restore full protection on all three
+	// tables.
+	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
+		t.Fatalf("re-applying migration 0077 after the partial rollback: %v", err)
+	}
+	for _, table := range registryTables {
+		enabled, forced := readRLSPosture(table)
+		if !enabled || !forced {
+			t.Fatalf("expected %s to have RLS enabled+forced again after MigrateUp, got enabled=%v forced=%v", table, enabled, forced)
+		}
+		if n := countPolicies(table); n == 0 {
+			t.Fatalf("expected %s to have its RLS policies restored after MigrateUp, found none", table)
+		}
+		if n := countDenyTruncateTriggers(table); n != 1 {
+			t.Fatalf("expected %s to have its deny-truncate trigger restored after MigrateUp, found %d", table, n)
+		}
 	}
 }

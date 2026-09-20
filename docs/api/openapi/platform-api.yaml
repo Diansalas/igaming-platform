@@ -371,7 +371,14 @@ paths:
         platform_admin only (tenant:write). Never tenant-scoped by design
         - provisioning a tenant is inherently a platform-level action, so
         this route deliberately does not require an existing tenant
-        context (see docs/decisions/0011).
+        context (see docs/decisions/0011). As of Stage 4I Phase E-SECURITY
+        (migration 0077, docs/decisions/0046), this handler opens its
+        transaction via db.Pool.WithPlatformAdmin (not WithoutTenant) -
+        `tenants` gained row-level security with no tenant-scoped/
+        scopeless write policy of any kind. `reason_code` is now a
+        required field, and the resulting `tenant.created` audit record
+        carries it alongside a before/after state (before: null,
+        after: {id, name, slug, licensing_model, status}).
       security:
         - bearerAuth: []
       requestBody:
@@ -386,7 +393,8 @@ paths:
                 licensing_model:
                   type: string
                   enum: [under_platform_licence, own_licence]
-              required: [name, slug, licensing_model]
+                reason_code: { type: string }
+              required: [name, slug, licensing_model, reason_code]
       responses:
         "201":
           description: Tenant created

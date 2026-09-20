@@ -54,24 +54,34 @@ func testPool(t *testing.T) *Pool {
 	return pool
 }
 
-// createTestTenant inserts a row into the (non-RLS) tenants table so a
+// createTestTenant inserts a row into the tenants table so a
 // tenant_jurisdiction_configs row can legally reference it via the
-// foreign key.
+// foreign key. Stage 4I Phase E-SECURITY (migration 0077) gave `tenants`
+// RLS with a read-open policy but NO tenant-scoped/scopeless write policy
+// of any kind, so both the INSERT and the DELETE cleanup below require a
+// genuinely platform-admin-scoped transaction (WithPlatformAdmin), not
+// WithoutTenant.
 func createTestTenant(t *testing.T, pool *Pool) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, $2, $3, 'under_platform_licence')`,
 			id, "Test Tenant "+id.String(), "test-"+id.String(),
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			t.Fatalf("expected to insert 1 tenant row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("failed to create test tenant: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_ = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, id)
 			return err
 		})
@@ -79,28 +89,43 @@ func createTestTenant(t *testing.T, pool *Pool) uuid.UUID {
 	return id
 }
 
-// createTestJurisdiction inserts a row into the (non-RLS, platform-wide)
+// createTestJurisdiction inserts a row into the platform-wide
 // jurisdictions lookup table so tenant_jurisdiction_configs rows can
-// legally reference it via the foreign key.
+// legally reference it via the foreign key. Stage 4I Phase E-SECURITY
+// (migration 0077) gave `jurisdictions` RLS with a read-open policy but
+// writes restricted to a platform-admin-scoped transaction, so the INSERT
+// uses WithPlatformAdmin, not WithoutTenant.
+//
+// NO CLEANUP: migration 0077 deliberately created no DELETE policy on
+// `jurisdictions` (by design - a jurisdiction registry row is not meant to
+// be deletable in normal operation, same posture as `licences`). A prior
+// version of this helper ran a `DELETE FROM jurisdictions` cleanup under
+// WithPlatformAdmin; that statement was always a silent zero-row no-op
+// under FORCE ROW LEVEL SECURITY once migration 0077 landed (RLS's USING
+// clause on DELETE simply filters every row out - no DELETE policy means
+// none matches), confirmed to have leaked 649 test rows across one
+// whole-repo test run. Test jurisdiction rows created by this helper are
+// therefore intentionally permanent, exactly like every other
+// non-deletable append-only-ish registry in this codebase.
 func createTestJurisdiction(t *testing.T, pool *Pool) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, $3)`,
 			id, "TEST-"+id.String()[:8], "Test Jurisdiction "+id.String(),
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			t.Fatalf("expected to insert 1 jurisdiction row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("failed to create test jurisdiction: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `DELETE FROM jurisdictions WHERE id = $1`, id)
-			return err
-		})
-	})
 	return id
 }
 
@@ -210,8 +235,11 @@ func TestTenantIsolation_InsertRequiresMatchingTenantContext(t *testing.T) {
 
 // TestWithoutTenant_DeniesRLSProtectedTable proves WithoutTenant cannot
 // be used to bypass RLS on tenant_jurisdiction_configs - it exists only
-// for genuinely platform-level, non-RLS tables (tenants, jurisdictions,
-// assets, persons).
+// for genuinely platform-level reads (e.g. `tenants`/`jurisdictions`,
+// both read-open since migration 0077) and for platform-level tables that
+// still carry no RLS at all (`persons`). It is NOT a general-purpose
+// scopeless write path - since migration 0077, `tenants`/`jurisdictions`
+// writes additionally require WithPlatformAdmin, not merely WithoutTenant.
 func TestWithoutTenant_DeniesRLSProtectedTable(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()

@@ -70,15 +70,27 @@ func seedTenantFixture(t *testing.T, pool *db.Pool) fixture {
 	var f fixture
 	f.tenantID = uuid.New()
 	f.jurisdictionID = uuid.New()
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
+	// Stage 4I Phase E-SECURITY (migration 0077): `tenants`/`jurisdictions`
+	// writes now require a genuinely platform-admin-scoped transaction.
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'Test Tenant', 'under_platform_licence')`,
-			f.tenantID, "t-"+f.tenantID.String()[:8]); err != nil {
+			f.tenantID, "t-"+f.tenantID.String()[:8])
+		if err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, 'Test Jurisdiction')`,
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 tenant row, inserted %d", tag.RowsAffected())
+		}
+		tag, err = tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, 'Test Jurisdiction')`,
 			f.jurisdictionID, "TJ-"+f.jurisdictionID.String()[:8])
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 jurisdiction row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("seed tenant/jurisdiction: %v", err)
@@ -2131,12 +2143,18 @@ func TestRLS_TenantDeletionStillCascadesAuthorizationRows(t *testing.T) {
 	// non-cascading FK to brands, so deleting that tenant fails for a
 	// reason that has nothing to do with the property under test here.
 	tenantID := uuid.New()
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
+	err := pool.WithPlatformAdmin(context.Background(), adminA, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO tenants (id, slug, name, licensing_model)
 			 VALUES ($1, $2, 'Cascade Tenant', 'under_platform_licence')`,
 			tenantID, "cas-"+tenantID.String()[:8])
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 tenant row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("seed bare tenant: %v", err)
@@ -2153,9 +2171,13 @@ func TestRLS_TenantDeletionStillCascadesAuthorizationRows(t *testing.T) {
 		t.Fatalf("authorize tenant scope: %v", err)
 	}
 
-	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, tenantID); err != nil {
+	err = pool.WithPlatformAdmin(context.Background(), adminA, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, tenantID)
+		if err != nil {
 			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to delete 1 tenant row, deleted %d", tag.RowsAffected())
 		}
 		var count int
 		if err := tx.QueryRow(ctx,

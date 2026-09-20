@@ -649,6 +649,23 @@ stage's scope):
   this stage). A genuine fix (separating the migration-owner role from
   the runtime role) is a platform-wide operational change out of this
   stage's scope.
+
+  **Correction (Stage 4I Phase E-SECURITY, ADR 0046):** this one-sentence
+  reference has been cited by name across several later stages (most
+  recently ADR 0045 §18's finding F2) as if it were itself a resolved
+  design or an owned, tracked item - it is neither. It is a single
+  deferred-scope sentence with no owner, no gate, and no task-registry
+  entry of its own. That gap is now closed: the genuine fix (a second,
+  narrower-privileged Postgres application role, separate from the
+  migration-owning role) is tracked as `PLAT-ROLESPLIT-1`
+  (`docs/governance/task-registry.md`), owned by `security`, gated on
+  infrastructure this repository does not currently have access to
+  (provisioning a second role requires `CREATEROLE`, which the
+  application role lacks - verified live by the architect during ADR
+  0046's own dispatch). Any future document that would otherwise cite
+  "ADR 0026" for this residual should cite `PLAT-ROLESPLIT-1` instead -
+  this paragraph remains here only as the historical origin point, not as
+  the tracking mechanism.
 - A casino provider webhook response discloses the specific decline
   reason (`self_excluded` vs. `insufficient_funds`) to the external
   provider (security review) - matches the pre-existing convention for

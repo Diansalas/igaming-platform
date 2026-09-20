@@ -10,6 +10,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -105,7 +107,12 @@ func TestJurisdictionCountryCode_RejectsNonISOAndLowercase(t *testing.T) {
 
 	// Raw SQL: the DB-level shape CHECK independently rejects a malformed
 	// value, proving the Go validator is not the only line of defense.
-	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	// Stage 4I Phase E-SECURITY (migration 0077): this UPDATE must run
+	// under a genuinely platform-admin-scoped transaction - a WithoutTenant
+	// attempt would now be denied by RLS as a silent zero-row no-op
+	// (raising no error at all), which would make this test observe nil
+	// instead of the CHECK violation it exists to prove.
+	err = pool.WithPlatformAdmin(context.Background(), f.platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE jurisdictions SET country_code = 'zz9' WHERE id = $1`, j.ID)
 		return err
 	})
@@ -116,12 +123,15 @@ func TestJurisdictionCountryCode_RejectsNonISOAndLowercase(t *testing.T) {
 }
 
 // TestSetJurisdictionCountryCode_RequiresPlatformScope is Fix 2 (Phase E
-// fix round): SetJurisdictionCountryCode now asserts platform scope as
-// its FIRST statement - `jurisdictions` carries ZERO row-level security,
-// so this Go-level check is the ONLY control. Tenant-scoped and
-// player-scoped transactions must both be refused with ErrTransactionScope
-// and leave the row unmodified; a genuine platform-admin transaction
-// succeeds.
+// fix round): SetJurisdictionCountryCode asserts platform scope as its
+// FIRST statement. Through Stage 4I Phase E, `jurisdictions` carried ZERO
+// row-level security, so this Go-level check was the ONLY control;
+// Stage 4I Phase E-SECURITY (migration 0077) additionally gave
+// `jurisdictions` a database-level RLS backstop for writes (this Go-level
+// check remains the first, more diagnosable line of defense). Tenant-scoped
+// and player-scoped transactions must both be refused with
+// ErrTransactionScope and leave the row unmodified; a genuine
+// platform-admin transaction succeeds.
 func TestSetJurisdictionCountryCode_RequiresPlatformScope(t *testing.T) {
 	pool := testPool(t)
 	f := seedFixture(t, pool)
@@ -264,10 +274,25 @@ func TestMigration0076_LeavesExistingJurisdictionCountryCodesNull(t *testing.T) 
 // directory, holding migration 0076's up/down files back, and returns the
 // directory plus a function that adds them back in (to be applied by a
 // subsequent MigrateUp call). Nothing in this migration chain depends on
-// 0076's prior state (it is the chain's own tip as of this phase), so
-// holding only it back - unlike migration_0048_integration_test.go's own
-// analogous helper, which must also hold back later migrations
-// structurally dependent on 0048's prior state - is sufficient here.
+// 0076's prior state for its OWN schema (it added new tables/columns, not
+// a rewrite of an earlier one), so holding only 0076 back would be
+// sufficient for 0076's own schema - unlike migration_0048_integration_
+// test.go's own analogous helper, which must also hold back later
+// migrations structurally dependent on 0048's prior state.
+//
+// STAGE 4I PHASE E-SECURITY UPDATE: migration 0077 must ALSO be held back
+// here, even though its own SQL does not reference anything 0076 added -
+// this test's whole premise is proving a raw, unscoped (WithoutTenant)
+// INSERT into `jurisdictions` succeeds at the "before 0076" checkpoint,
+// and migration 0077 is what makes that INSERT require a platform-admin-
+// scoped transaction. Without also holding 0077 back, LoadMigrations
+// would apply it in the SAME MigrateUp call that is meant to stop at
+// 0075, and the raw INSERT below would fail with an RLS violation instead
+// of proving the property this test exists to prove. Held-back versions
+// are therefore every migration numbered 76 or above, not literally just
+// "0076_" by name - this keeps the helper correct automatically if a
+// future migration is added after 0077 without anyone remembering to
+// update a hardcoded prefix list here.
 func stageMigrationsWithout0076(t *testing.T, src string) (dir string, addHeld func()) {
 	t.Helper()
 	dir = t.TempDir()
@@ -286,18 +311,28 @@ func stageMigrationsWithout0076(t *testing.T, src string) (dir string, addHeld f
 			t.Fatalf("write %s: %v", name, err)
 		}
 	}
+	versionPattern := regexp.MustCompile(`^(\d+)_`)
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
 			continue
 		}
-		if strings.HasPrefix(e.Name(), "0076_") {
-			held = append(held, e.Name())
-			continue
+		if m := versionPattern.FindStringSubmatch(e.Name()); m != nil {
+			version, err := strconv.Atoi(m[1])
+			if err != nil {
+				t.Fatalf("parse migration version from %q: %v", e.Name(), err)
+			}
+			if version >= 76 {
+				held = append(held, e.Name())
+				continue
+			}
 		}
 		copyFile(e.Name())
 	}
-	if len(held) != 2 {
-		t.Fatalf("expected to hold back exactly 2 files (up+down) for migration 0076, held %v", held)
+	if len(held) == 0 {
+		t.Fatalf("expected to hold back at least migration 0076's up/down files, held none")
+	}
+	if len(held)%2 != 0 {
+		t.Fatalf("expected an even number of held-back files (each migration has an up and a down), held %v", held)
 	}
 	return dir, func() {
 		for _, name := range held {

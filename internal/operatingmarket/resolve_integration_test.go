@@ -267,10 +267,18 @@ func TestOperatingCountryPolicy_NoPathDefaultsToEnabled(t *testing.T) {
 
 	// (a) Completely fresh tenant with no licence at all.
 	freshTenant := uuid.New()
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'No Licence Tenant', 'under_platform_licence')`,
+	// Stage 4I Phase E-SECURITY (migration 0077): `tenants` writes now
+	// require a genuinely platform-admin-scoped transaction.
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'No Licence Tenant', 'under_platform_licence')`,
 			freshTenant, "nolic-"+freshTenant.String()[:8])
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 tenant row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("seed tenant with no licence: %v", err)
@@ -510,9 +518,23 @@ func TestResolveOperatingCountryPolicy_NotYetIssuedLicenceYieldsNotPermittedByLi
 	}
 
 	futureIssue := time.Now().UTC().Truncate(24 * time.Hour).Add(48 * time.Hour)
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE licences SET issued_at = $2 WHERE id = $1`, f.licenceID, futureIssue)
-		return err
+	// Stage 4I Phase E-SECURITY (migration 0077): `licences` writes now
+	// require a genuinely platform-admin-scoped transaction - a
+	// WithoutTenant UPDATE here would be a SILENT ZERO-ROW NO-OP (RLS
+	// denies the write, no error is raised), which would make this test
+	// pass for the wrong reason (falling through to the "before" sanity
+	// assertion's own permitted outcome) rather than genuinely proving
+	// the not-yet-issued-licence behavior. Rows-affected is checked
+	// explicitly for exactly that reason.
+	err := pool.WithPlatformAdmin(context.Background(), f.platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE licences SET issued_at = $2 WHERE id = $1`, f.licenceID, futureIssue)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to update 1 licence row, updated %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("set future issued_at: %v", err)
@@ -540,9 +562,18 @@ func TestResolveOperatingCountryPolicy_NotYetIssuedLicenceYieldsNotPermittedByLi
 	}
 
 	// A licence issued in the past (or on AsOf's own date) is unaffected.
-	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE licences SET issued_at = $2 WHERE id = $1`, f.licenceID, time.Now().UTC().Truncate(24*time.Hour))
-		return err
+	// Stage 4I Phase E-SECURITY (migration 0077): same rows-affected
+	// discipline as above - a WithoutTenant UPDATE here would silently
+	// affect zero rows rather than error.
+	err = pool.WithPlatformAdmin(context.Background(), f.platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE licences SET issued_at = $2 WHERE id = $1`, f.licenceID, time.Now().UTC().Truncate(24*time.Hour))
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to update 1 licence row, updated %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("set issued_at to today: %v", err)

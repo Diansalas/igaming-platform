@@ -25,11 +25,16 @@ import (
 // HTTP, so each test's setup doesn't depend on the very endpoints other
 // tests are exercising ---
 
+// Stage 4I Phase E-SECURITY (migration 0077): `tenants` gained RLS with no
+// tenant-scoped/scopeless write policy of any kind, so both
+// identity.CreateTenant's own assertPlatformScope and the DELETE cleanup
+// below now require a genuinely platform-admin-scoped transaction
+// (db.Pool.WithPlatformAdmin), not WithoutTenant.
 func mustCreateTenant(t *testing.T, pool *db.Pool) identity.Tenant {
 	t.Helper()
 	suffix := uuid.NewString()
 	var tenant identity.Tenant
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		tenant, err = identity.CreateTenant(ctx, tx, "Test Tenant", "t-"+suffix, "under_platform_licence")
 		return err
@@ -38,7 +43,7 @@ func mustCreateTenant(t *testing.T, pool *db.Pool) identity.Tenant {
 		t.Fatalf("failed to create tenant: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_ = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, tenant.ID)
 			return err
 		})
@@ -517,7 +522,7 @@ func TestCreateTenantAndBrand_PlatformAdminOnly(t *testing.T) {
 
 	// tenant_admin does not have tenant:write.
 	resp := postJSON(t, srv, "/v1/admin/tenants", staffTokens.AccessToken, map[string]string{
-		"name": "Should Fail", "slug": "should-fail-" + uuid.NewString(), "licensing_model": "own_licence",
+		"name": "Should Fail", "slug": "should-fail-" + uuid.NewString(), "licensing_model": "own_licence", "reason_code": "attempt",
 	})
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("expected 403 for tenant_admin creating a tenant, got %d", resp.StatusCode)
@@ -527,7 +532,7 @@ func TestCreateTenantAndBrand_PlatformAdminOnly(t *testing.T) {
 	// platform_admin can.
 	slug := "new-tenant-" + uuid.NewString()
 	resp = postJSON(t, srv, "/v1/admin/tenants", adminTokens.AccessToken, map[string]string{
-		"name": "New Tenant", "slug": slug, "licensing_model": "own_licence",
+		"name": "New Tenant", "slug": slug, "licensing_model": "own_licence", "reason_code": "onboarding",
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("expected 201 for platform_admin creating a tenant, got %d", resp.StatusCode)
@@ -552,6 +557,73 @@ func TestCreateTenantAndBrand_PlatformAdminOnly(t *testing.T) {
 		t.Errorf("expected 201 for platform_admin creating a brand, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+// TestCreateTenantAPI_AuditRecordsReasonCodeAndAfterState is Stage 4I
+// Phase E-SECURITY's fix for the pre-existing tenant.created audit gap:
+// the audit entry must now carry a required reason_code and a before/
+// after state shape, mirroring jurisdictionState/licenceState's own
+// convention elsewhere in this codebase.
+func TestCreateTenantAPI_AuditRecordsReasonCodeAndAfterState(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newTestServer(t, pool, issuer)
+
+	admin := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "admin-audit-tenant-1")
+	adminTokens := mustLoginStaff(t, srv, "", admin.Email, "admin-audit-tenant-1")
+
+	slug := "audited-tenant-" + uuid.NewString()
+	resp := postJSON(t, srv, "/v1/admin/tenants", adminTokens.AccessToken, map[string]string{
+		"name": "Audited Tenant", "slug": slug, "licensing_model": "own_licence", "reason_code": "regulatory-onboarding",
+	})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating tenant, got %d", resp.StatusCode)
+	}
+	var newTenant tenantResponse
+	decodeBody(t, resp, &newTenant)
+
+	metadata := mustGetLatestAuditMetadata(t, pool, "tenant.created", newTenant.ID)
+	if metadata["reason_code"] != "regulatory-onboarding" {
+		t.Errorf("expected reason_code %q in audit metadata, got %v", "regulatory-onboarding", metadata["reason_code"])
+	}
+	if metadata["before"] != nil {
+		t.Errorf("expected before=nil for a brand-new tenant, got %v", metadata["before"])
+	}
+	after, ok := metadata["after"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected after to be a JSON object, got %T: %v", metadata["after"], metadata["after"])
+	}
+	if after["id"] != newTenant.ID {
+		t.Errorf("expected after.id %q, got %v", newTenant.ID, after["id"])
+	}
+	if after["name"] != "Audited Tenant" {
+		t.Errorf("expected after.name %q, got %v", "Audited Tenant", after["name"])
+	}
+	if after["slug"] != slug {
+		t.Errorf("expected after.slug %q, got %v", slug, after["slug"])
+	}
+	if after["licensing_model"] != "own_licence" {
+		t.Errorf("expected after.licensing_model %q, got %v", "own_licence", after["licensing_model"])
+	}
+	if after["status"] != "active" {
+		t.Errorf("expected after.status %q, got %v", "active", after["status"])
+	}
+}
+
+// TestCreateTenantAPI_MissingReasonCodeRejected proves reason_code is
+// mandatory on tenant creation, like every other mutating admin surface.
+func TestCreateTenantAPI_MissingReasonCodeRejected(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newTestServer(t, pool, issuer)
+
+	admin := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "admin-noreason-tenant-1")
+	adminTokens := mustLoginStaff(t, srv, "", admin.Email, "admin-noreason-tenant-1")
+
+	resp := postJSON(t, srv, "/v1/admin/tenants", adminTokens.AccessToken, map[string]string{
+		"name": "No Reason Tenant", "slug": "no-reason-" + uuid.NewString(), "licensing_model": "own_licence",
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a missing reason_code, got %d", resp.StatusCode)
+	}
 }
 
 // --- Session self-service: listing and ownership-checked revocation ---

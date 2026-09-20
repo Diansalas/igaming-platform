@@ -12,6 +12,7 @@ package operatingmarket
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -82,30 +83,57 @@ func seedFixture(t *testing.T, pool *db.Pool) fixture {
 	f.platformAdmin = uuid.New()
 	f.staffActorID = uuid.New()
 
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	// Stage 4I Phase E-SECURITY (migration 0077): `tenants`/`jurisdictions`/
+	// `licences` writes now require a genuinely platform-admin-scoped
+	// transaction; rows-affected is checked explicitly on every write
+	// below because a denied RLS write is a silent zero-row no-op, not an
+	// error. `staff_users` is unaffected (its dual_scope_isolation policy
+	// only keys on app.tenant_id, which WithPlatformAdmin also leaves
+	// unset, exactly like WithoutTenant).
+	err := pool.WithPlatformAdmin(context.Background(), f.platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
 		for _, id := range []uuid.UUID{f.tenantID, f.otherTenantID} {
-			if _, err := tx.Exec(ctx,
+			tag, err := tx.Exec(ctx,
 				`INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'Test Tenant', 'under_platform_licence')`,
-				id, "t-"+id.String()[:8]); err != nil {
+				id, "t-"+id.String()[:8])
+			if err != nil {
 				return err
 			}
+			if tag.RowsAffected() != 1 {
+				return fmt.Errorf("expected to insert 1 tenant row, inserted %d", tag.RowsAffected())
+			}
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, 'Test Jurisdiction')`,
-			f.jurisdictionID, "TJ-"+f.jurisdictionID.String()[:8]); err != nil {
+		tag, err := tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, 'Test Jurisdiction')`,
+			f.jurisdictionID, "TJ-"+f.jurisdictionID.String()[:8])
+		if err != nil {
 			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 jurisdiction row, inserted %d", tag.RowsAffected())
 		}
 		for _, l := range []uuid.UUID{f.licenceID, f.otherLicenceID} {
-			if _, err := tx.Exec(ctx,
+			tag, err := tx.Exec(ctx,
 				`INSERT INTO licences (id, jurisdiction_id, licensee, licence_number) VALUES ($1, $2, 'platform', $3)`,
-				l, f.jurisdictionID, "LIC-"+l.String()[:8]); err != nil {
+				l, f.jurisdictionID, "LIC-"+l.String()[:8])
+			if err != nil {
 				return err
 			}
+			if tag.RowsAffected() != 1 {
+				return fmt.Errorf("expected to insert 1 licence row, inserted %d", tag.RowsAffected())
+			}
 		}
-		if _, err := tx.Exec(ctx, `UPDATE tenants SET licence_id = $2 WHERE id = $1`, f.tenantID, f.licenceID); err != nil {
+		tag, err = tx.Exec(ctx, `UPDATE tenants SET licence_id = $2 WHERE id = $1`, f.tenantID, f.licenceID)
+		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE tenants SET licence_id = $2 WHERE id = $1`, f.otherTenantID, f.otherLicenceID); err != nil {
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to update 1 tenant row, updated %d", tag.RowsAffected())
+		}
+		tag, err = tx.Exec(ctx, `UPDATE tenants SET licence_id = $2 WHERE id = $1`, f.otherTenantID, f.otherLicenceID)
+		if err != nil {
 			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to update 1 tenant row, updated %d", tag.RowsAffected())
 		}
 		personID := uuid.New()
 		if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID); err != nil {

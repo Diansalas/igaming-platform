@@ -13,6 +13,7 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -263,9 +264,19 @@ func TestCasinoWebhook_UnknownAndSuspendedTenantIdenticalNotFound(t *testing.T) 
 	}
 
 	tenant := mustCreateTenant(t, pool)
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, tenant.ID)
-		return err
+	// Stage 4I Phase E-SECURITY (migration 0077): `tenants` writes now
+	// require a genuinely platform-admin-scoped transaction - a
+	// WithoutTenant UPDATE here would be a silent zero-row no-op, not an
+	// error, so rows-affected is checked explicitly.
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE tenants SET status = 'suspended' WHERE id = $1`, tenant.ID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to update 1 tenant row, updated %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("suspend tenant: %v", err)

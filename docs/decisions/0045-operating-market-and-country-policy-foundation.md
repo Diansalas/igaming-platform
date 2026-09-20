@@ -1082,27 +1082,52 @@ than it did under `v2`.
 **F2/F3/F4 dispositions, recorded together since all three were found in
 the same review round as SEC-E-REV-2:**
 
-- **F2 (documentation-only disclosure) — IMPLEMENTED.** The REMOVAL
+- **F2 (documentation-only disclosure) — IMPLEMENTED, DISCLOSURE
+  CORRECTED (Stage 4I Phase E-SECURITY, ADR 0046).** The REMOVAL
   direction on `operating_country_policies` is wholly uncontrolled for
   any role that bypasses RLS entirely — no trigger, no CHECK, no audit
   record, for a raw `DELETE`. Disclosed in the migration 0076 comment
   near where the DELETE arm is omitted, in this section, and folded into
-  the INV-M-7 rewrite above. The genuine fix is the migration-owner/
-  runtime-role separation already recorded at ADR 0026, a platform-wide
-  operational change out of this stage's scope. No new task-registry item
-  is opened for F2 — ADR 0026's existing item already covers it.
+  the INV-M-7 rewrite above. **Correction:** this finding's own framing
+  ("requires a role that bypasses RLS entirely") understated the
+  reachable bar — live reproduction found an ORDINARY tenant-scoped (or
+  even scopeless) connection could reach the identical removal effect
+  indirectly, by `DELETE FROM tenants WHERE id = <a different tenant's
+  id>` (no RLS existed on `tenants` at all), relying on PostgreSQL's own
+  `ON DELETE CASCADE` running with RLS bypassed regardless of the
+  deleting connection's scope. That specific escalation path is now
+  CLOSED by migration 0077 (`tenants` DELETE restricted to platform-admin
+  scope) — a net tightening, not a new capability. The narrower,
+  genuinely-RLS-bypassing-role reachable removal path this finding
+  originally described remains open and is now tracked as its own item,
+  `PLAT-ROLESPLIT-1` (task registry), rather than the vague "ADR 0026"
+  reference this finding originally used — ADR 0026 itself is amended to
+  redirect to it (see ADR 0026's own append note).
 - **F3 (RLS on `tenants`/`licences`/`jurisdictions`) — NOT AUTHORIZED
-  THIS DISPATCH.** The actual fix (adding RLS to those three tables) is
+  THIS DISPATCH.** ~~The actual fix (adding RLS to those three tables) is
   explicitly a separate, future, `security`-owned change. This dispatch
-  makes no RLS change to any of the three. `MKT-SCOPE-1` (task registry)
-  is amended, not newly created, to add `tenants` alongside
-  `jurisdictions`/`licences` and to record trigger condition (b): this
-  item must also be resolved before `ResolveOperatingCountryPolicy` is
-  wired into any enforcement path, independently of whether any HTTP
-  route reaches `internal/jurisdiction` — Phase E made licences the ROOT
-  of the operating-market ceiling, so an unprotected `licences`/`tenants`
-  row is now a direct path to widening an operating-market answer, not
-  merely a player-jurisdiction concern.
+  makes no RLS change to any of the three.~~ **UPDATE (Stage 4I Phase
+  E-SECURITY, ADR 0046): this disposition is now DISCHARGED.** Migration
+  0077 gave all three tables row-level security exactly as this finding
+  anticipated, closing `MKT-SCOPE-1`/`MKT-SCOPE-1(b)` (RESOLVED,
+  `docs/governance/task-registry.md`). The architect live-reproduced the
+  full attack this finding only implied was possible: an ordinary
+  tenant-scoped connection repointing its own `tenants.licence_id` at
+  another tenant's licence and committing an `enabled` tenant-rung policy
+  for a country its own licence never permitted — plus two further
+  attacks not previously recorded anywhere: (a) the composite FK
+  (`tenants_licence_matches_model`) can be defeated by changing
+  `licensing_model` and `licence_id` together in ONE UPDATE, since
+  `expected_licensee` is a `GENERATED` column recomputed from the NEW
+  `licensing_model` in the same statement; and (b) an ordinary
+  tenant-scoped `DELETE FROM tenants` (no privilege escalation, no RLS
+  bypass) cascades away a DIFFERENT tenant's entire
+  `operating_country_policies` set — reachable at a **strictly lower
+  bar** than finding F2 (below) originally disclosed, since F2 assumed
+  the removal path required a role that bypasses RLS entirely.
+  `internal/operatingmarket`'s own schema/triggers/algorithm required
+  zero executable change; only the premise that `tenants` had no writable
+  path was wrong. Full ruling: ADR 0046.
 - **F4 (licence validity fail-open on `issued_at`) — IMPLEMENTED.** See
   below.
 
@@ -1137,7 +1162,12 @@ tenant-scoped connection, not merely by privilege escalation or a
 trigger-disabling actor:
 
 1. A privilege-escalated `DELETE` (F2, explicitly disclosed, out of this
-   family's concern — it requires bypassing RLS entirely).
+   family's concern). **Correction (ADR 0046):** F2's own framing ("it
+   requires bypassing RLS entirely") was itself wrong — an ordinary
+   tenant-scoped `DELETE FROM tenants` reached the identical effect with
+   no privilege escalation at all, since `tenants` carried no RLS. That
+   specific path is now closed by migration 0077; the genuinely
+   RLS-bypassing-role variant remains open as `PLAT-ROLESPLIT-1`.
 2. A trigger-disabling actor (explicitly out of scope for both
    AMENDMENT-2 and AMENDMENT-3 — ADR 0026's migration-owner/runtime-role
    residual is the genuine fix).
@@ -1168,7 +1198,9 @@ AMENDMENT-4. Genuinely differently-scoped future review is still
 worthwhile and is NOT discouraged — three concrete, named targets, none
 of them this family: **AsOf provenance** (whether a caller-supplied
 `AsOf` can itself be manipulated to evade a since-corrected block),
-**`tenants`/`licences` RLS** (F3 above, already routed to `security`), and
+**`tenants`/`licences` RLS** (F3 above — RESOLVED by ADR 0046/migration
+0077; the remaining, narrower `PLAT-ROLESPLIT-1` residual is now the live
+target here), and
 **`platform_operations`/`platform_products` write-time governance**
 (whether the vocabulary tables themselves need the same
 append-only/authorization discipline as the policy tables that reference

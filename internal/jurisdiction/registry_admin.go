@@ -25,16 +25,29 @@ import (
 // the resolver can only ever return a jurisdiction code that already
 // exists as a row here.
 //
-// `jurisdictions`/`licences` are platform-scoped reference data with NO
-// row-level security (canonical-model §6.1: "jurisdictions stays
-// platform-scoped with no RLS... It is a platform fact and an FK target
-// every tenant-scoped transaction must read"). The ONLY control on the
-// write side is the new platform-only permission gating the HTTP layer
-// (auth.PermJurisdictionRegistryManage, granted only to
-// RolePlatformAdmin - the exact precedent of PermCasinoCatalogueManage/
-// PermAssetRegistryManage). Every write is audited in the same
-// transaction regardless (CLAUDE.md's audit rule has no carve-out for
-// "the table has no RLS").
+// `jurisdictions`/`licences` are platform-scoped reference data.
+// Historically (through Stage 4I Phase E) they carried NO row-level
+// security at all, so the only control on the write side was the
+// platform-only permission gating the HTTP layer
+// (auth.PermJurisdictionRegistryManage, granted only to RolePlatformAdmin
+// - the exact precedent of PermCasinoCatalogueManage/
+// PermAssetRegistryManage), backstopped only by this package's own
+// in-function assertPlatformScope calls. Stage 4I Phase E-SECURITY
+// (migration 0077) closed that gap after a live-reproduced attack showed
+// an ordinary tenant-scoped connection could WRITE `tenants.licence_id`
+// (see tenant_licence_admin.go's header comment): both tables now carry
+// RLS, `jurisdictions` read-open (USING (true), same posture as
+// migration 0044's `assets`) and `licences` narrowed to platform-admin or
+// the tenant whose own tenants.licence_id names the row, with writes
+// restricted to a genuinely platform-admin-scoped transaction on both.
+// Every function in this file that mutates either table calls
+// assertPlatformScope as its FIRST statement - a REAL, in-function
+// control, not defence-in-depth commentary: migration 0077's INSERT/
+// UPDATE RLS policies enforce the identical predicate independently at
+// the database, so a caller that bypassed this check would still fail at
+// the write, but with a much less diagnosable error. Every write is
+// audited in the same transaction regardless (CLAUDE.md's audit rule has
+// no carve-out for "the table has no RLS", and never did).
 //
 // ErrNotFound mirrors assetregistry's identical package-local sentinel
 // convention.
@@ -103,13 +116,15 @@ type CreateJurisdictionParams struct {
 }
 
 // CreateJurisdiction inserts a `jurisdictions` row. tx must be a
-// platform-scoped transaction (db.Pool.WithPlatformAdmin) - there is no
-// RLS on this table today, so this is a convention this package's own
-// callers (the HTTP handlers, same commit) must follow, not something
-// the database itself can yet enforce; see this file's own header
-// comment for why that is the canonical model's own, deliberate posture
-// for this specific table.
+// platform-scoped transaction (db.Pool.WithPlatformAdmin) - asserted
+// in-function via assertPlatformScope, as its FIRST statement, AND
+// enforced independently by migration 0077's jurisdictions_platform_admin_
+// insert RLS policy; see this file's own header comment for the full
+// history.
 func CreateJurisdiction(ctx context.Context, tx pgx.Tx, p CreateJurisdictionParams) (Jurisdiction, error) {
+	if err := assertPlatformScope(ctx, tx); err != nil {
+		return Jurisdiction{}, err
+	}
 	if err := p.Actor.validate(); err != nil {
 		return Jurisdiction{}, err
 	}
@@ -152,20 +167,17 @@ func CreateJurisdiction(ctx context.Context, tx pgx.Tx, p CreateJurisdictionPara
 // comment for its exact, fenced meaning. Audited in the same transaction.
 // tx MUST be platform-admin-scoped - asserted in-function via
 // assertPlatformScope, as its FIRST statement (fix-round item, Phase E
-// fix round: `jurisdictions` carries no RLS, so unlike most of this
-// package's other write paths there is no independent database-level
-// backstop here; this Go-level check is the ONLY control). Gated at any
-// future HTTP layer by the EXISTING auth.PermJurisdictionRegistryManage -
-// no new permission.
+// fix round). Gated at any future HTTP layer by the EXISTING
+// auth.PermJurisdictionRegistryManage - no new permission.
 func SetJurisdictionCountryCode(ctx context.Context, tx pgx.Tx, id uuid.UUID, countryCode string, actor ActorContext) (Jurisdiction, error) {
-	// `jurisdictions` carries ZERO row-level security policies of any
-	// kind, so this Go-level check is the ONLY control here - unlike most
-	// of this package's other tables, RLS provides no independent backstop
-	// if this assertion is ever removed or bypassed. See task registry
-	// item MKT-SCOPE-1 for the pre-existing sibling functions
+	// Stage 4I Phase E-SECURITY (migration 0077) gave `jurisdictions` a
+	// database-level RLS backstop for the first time (jurisdictions_
+	// platform_admin_update) - this Go-level check now has that backstop,
+	// where previously (Phase E fix round) it was the ONLY control. See
+	// task registry item MKT-SCOPE-1 (RESOLVED) for the sibling functions
 	// (CreateJurisdiction/CreateLicence/AssignTenantLicence/
-	// ListJurisdictions/ListLicences) that share this gap and are
-	// deliberately NOT fixed here (out of scope for this change).
+	// ListJurisdictions/ListLicences) that shared this gap and are now
+	// fixed identically by this same migration/fix round.
 	if err := assertPlatformScope(ctx, tx); err != nil {
 		return Jurisdiction{}, err
 	}
@@ -219,8 +231,17 @@ func readJurisdictionByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (Jurisdi
 	return j, nil
 }
 
-// ListJurisdictions returns every jurisdiction row, platform-wide.
+// ListJurisdictions returns every jurisdiction row, platform-wide. tx must
+// be a platform-scoped transaction (db.Pool.WithPlatformAdmin) - asserted
+// in-function via assertPlatformScope, as its FIRST statement; migration
+// 0077's jurisdictions_read policy is USING (true) so this would also
+// succeed from a tenant-scoped connection, but assertPlatformScope keeps
+// this admin surface's call contract uniform with its sibling functions
+// in this file.
 func ListJurisdictions(ctx context.Context, tx pgx.Tx) ([]Jurisdiction, error) {
+	if err := assertPlatformScope(ctx, tx); err != nil {
+		return nil, err
+	}
 	rows, err := tx.Query(ctx, `SELECT id, code, name, COALESCE(regulatory_body, ''), COALESCE(notes, ''), COALESCE(country_code, ''), created_at FROM jurisdictions ORDER BY code`)
 	if err != nil {
 		return nil, fmt.Errorf("jurisdiction: list jurisdictions: %w", err)
@@ -282,8 +303,15 @@ var validLicensees = map[string]bool{"platform": true, "tenant": true}
 // expose a status-transition operation: no Stage 4I consumer needs one,
 // and CLAUDE.md's no-uncontrolled-scope rule applies to admin surfaces
 // too (a suspend/expire operation is a legitimate future addition should
-// a real consumer need it).
+// a real consumer need it; see task registry item MKT-LICSTATUS-1). tx
+// must be a platform-scoped transaction (db.Pool.WithPlatformAdmin) -
+// asserted in-function via assertPlatformScope, as its FIRST statement,
+// AND enforced independently by migration 0077's licences_platform_admin_
+// insert RLS policy.
 func CreateLicence(ctx context.Context, tx pgx.Tx, p CreateLicenceParams) (Licence, error) {
+	if err := assertPlatformScope(ctx, tx); err != nil {
+		return Licence{}, err
+	}
 	if err := p.Actor.validate(); err != nil {
 		return Licence{}, err
 	}
@@ -339,8 +367,19 @@ func CreateLicence(ctx context.Context, tx pgx.Tx, p CreateLicenceParams) (Licen
 	return l, nil
 }
 
-// ListLicences returns every licence row, platform-wide.
+// ListLicences returns every licence row, platform-wide. tx MUST be a
+// platform-scoped transaction (db.Pool.WithPlatformAdmin) - asserted
+// in-function via assertPlatformScope, as its FIRST statement. Unlike
+// ListJurisdictions, this is not merely for call-contract uniformity:
+// migration 0077's licences_read policy is NARROW (platform-admin, or the
+// tenant whose own tenants.licence_id names the row) - a tenant-scoped
+// connection would silently see only its own bound licence (if any),
+// which would silently violate this function's "every row, platform-wide"
+// contract instead of erroring.
 func ListLicences(ctx context.Context, tx pgx.Tx) ([]Licence, error) {
+	if err := assertPlatformScope(ctx, tx); err != nil {
+		return nil, err
+	}
 	rows, err := tx.Query(ctx, `SELECT id, jurisdiction_id, licensee, licence_number, status, permitted_products, permitted_markets, created_at FROM licences ORDER BY created_at`)
 	if err != nil {
 		return nil, fmt.Errorf("jurisdiction: list licences: %w", err)
@@ -382,13 +421,16 @@ func licenceState(l Licence) map[string]any {
 // recordRegistryAudit writes the mandatory audit record for a mutating
 // registry operation, in the SAME transaction as the mutation itself.
 // tenantID selects the audit row's scope (audit_log's dual-scope RLS,
-// ADR 0013): uuid.Nil for a genuinely PLATFORM-scoped mutation (e.g.
-// CreateJurisdiction/CreateLicence, which create platform-wide reference
-// rows with no single-tenant subject), or a specific tenant id when the
-// mutation's subject IS a specific tenant (e.g. AssignTenantLicence) - in
-// that case tx must already be scoped to that same tenant (db.Pool.
-// WithTenant), since audit_log's WITH CHECK policy requires a non-NULL
-// tenant_id to equal the connection's app.tenant_id setting exactly.
+// ADR 0013): uuid.Nil for a genuinely PLATFORM-scoped mutation - which,
+// as of Stage 4I Phase E-SECURITY (migration 0077), is EVERY caller in
+// this package, including AssignTenantLicence (its subject is a specific
+// tenant, but its write now requires a platform-scoped transaction, so
+// its audit row is platform-scoped too; see tenant_licence_admin.go's own
+// header comment). A tenant-scoped audit row would require tx to already
+// be scoped to that same tenant (db.Pool.WithTenant), since audit_log's
+// WITH CHECK policy requires a non-NULL tenant_id to equal the
+// connection's app.tenant_id setting exactly - no caller in this file
+// does that today.
 func recordRegistryAudit(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, actor ActorContext, action, targetType, targetID string, metadata map[string]any) error {
 	if metadata == nil {
 		metadata = map[string]any{}

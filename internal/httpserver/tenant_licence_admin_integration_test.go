@@ -8,6 +8,7 @@ package httpserver
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -66,11 +67,19 @@ func insertSuspendedLicenceOverHTTP(t *testing.T, pool *db.Pool, jurisdictionID 
 		t.Fatalf("parse jurisdiction id fixture: %v", err)
 	}
 	id := uuid.New()
-	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
+	// Stage 4I Phase E-SECURITY (migration 0077): `licences` writes now
+	// require a genuinely platform-admin-scoped transaction.
+	err = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO licences (id, jurisdiction_id, licensee, licence_number, status) VALUES ($1, $2, 'platform', $3, 'suspended')`,
 			id, jid, "HTTP-TL-SUS-"+id.String()[:8])
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 licence row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("insert suspended licence fixture: %v", err)
@@ -252,8 +261,10 @@ func TestAssignTenantLicenceAPI_NoTokenUnauthenticated(t *testing.T) {
 // TestAssignTenantLicenceAPI_PlatformAdminCanTargetAnyTenant proves a
 // platform_admin (which carries no tenant scope of its own) is
 // explicitly permitted to target ANY tenant through this endpoint - not
-// a violation, since `tenants` has no RLS and platform_admin is the only
-// role holding PermTenantLicenceAssign at all.
+// a violation: this handler now opens its transaction via
+// deps.DB.WithPlatformAdmin (Stage 4I Phase E-SECURITY, migration 0077),
+// and platform_admin is the only role holding PermTenantLicenceAssign at
+// all.
 func TestAssignTenantLicenceAPI_PlatformAdminCanTargetAnyTenant(t *testing.T) {
 	pool, issuer := testEnv(t)
 	srv := newTestServer(t, pool, issuer)
@@ -355,6 +366,61 @@ func TestAssignTenantLicenceAPI_UnknownLicenceIDRejected(t *testing.T) {
 	})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 for a non-existent licence_id, got %d", resp.StatusCode)
+	}
+}
+
+// TestAssignTenantLicenceAPI_ExclusiveLicenceAlreadyBoundRejected proves
+// the migration 0077 uq_tenants_exclusive_own_licence unique-violation
+// path is mapped to a diagnosable 400, not an opaque 500 (Fix 1, this fix
+// round): a BYOL (licensee='tenant') licence already bound to one
+// own_licence tenant must be rejected, at the HTTP layer, when a second
+// own_licence tenant attempts to bind the SAME licence.
+func TestAssignTenantLicenceAPI_ExclusiveLicenceAlreadyBoundRejected(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newTestServer(t, pool, issuer)
+	admin := mustCreateStaff(t, pool, uuid.Nil, identity.StaffRolePlatformAdmin, "pa-tl-excl-1")
+	token := mustLoginStaff(t, srv, "", admin.Email, "pa-tl-excl-1").AccessToken
+
+	byolLicence := mustCreateActiveLicenceOverHTTP(t, srv, token, "tenant")
+
+	createByolTenant := func(nameSuffix string) identity.Tenant {
+		resp := sendAssetJSON(t, srv.URL+"/v1/admin/tenants", http.MethodPost, token, map[string]any{
+			"name": "Exclusive Licence Tenant " + nameSuffix, "slug": "excl-lic-" + nameSuffix + "-" + uuid.NewString()[:8],
+			"licensing_model": "own_licence", "reason_code": "test-setup",
+		})
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 creating BYOL tenant fixture, got %d", resp.StatusCode)
+		}
+		var tr tenantResponse
+		decodeBody(t, resp, &tr)
+		id, err := uuid.Parse(tr.ID)
+		if err != nil {
+			t.Fatalf("parse created tenant id: %v", err)
+		}
+		return identity.Tenant{ID: id, Name: tr.Name, Slug: tr.Slug, LicensingModel: tr.LicensingModel, Status: tr.Status}
+	}
+
+	tenantX := createByolTenant("x")
+	tenantY := createByolTenant("y")
+
+	resp := sendAssetJSON(t, srv.URL+"/v1/admin/tenants/"+tenantX.ID.String()+"/licence", http.MethodPut, token, map[string]any{
+		"licence_id": byolLicence, "reason_code": "byol-first-bind",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for the first tenant's BYOL bind, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = sendAssetJSON(t, srv.URL+"/v1/admin/tenants/"+tenantY.ID.String()+"/licence", http.MethodPut, token, map[string]any{
+		"licence_id": byolLicence, "reason_code": "byol-second-bind-attempt",
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 (not 500) for a licence already exclusively bound to another tenant, got %d", resp.StatusCode)
+	}
+	var body map[string]any
+	decodeBody(t, resp, &body)
+	if len(body) == 0 {
+		t.Fatal("expected a non-empty, structured JSON error body")
 	}
 }
 

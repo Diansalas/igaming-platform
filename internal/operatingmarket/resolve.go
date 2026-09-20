@@ -34,12 +34,40 @@ import (
 // all) would produce a misleading not_configured rather than a
 // diagnosable ErrTransactionScope.
 //
-// LOAD-BEARING, NOT DEFENCE-IN-DEPTH: `tenants` and `licences` carry NO
-// row-level security at all (resolver.go's own recorded finding, true
-// here for the identical reason), so RLS provides ZERO tenant isolation
-// on the licence-lookup leg of this resolver. Without this assertion, a
-// transaction scoped to tenant A could resolve a fully `permitted` answer
-// for a caller-supplied tenant B.
+// LOAD-BEARING, NOT DEFENCE-IN-DEPTH, STILL - EVEN AFTER MIGRATION 0077.
+// Stage 4I Phase E-SECURITY (migration 0077) gave `tenants` and `licences`
+// row-level security: `tenants` cannot be WRITTEN by a tenant-scoped
+// connection at all (closing the live-reproduced attack this migration
+// exists to fix - a tenant repointing its own licence_id at another
+// tenant's licence), and `licences` reads are narrowed to platform-admin
+// or the tenant whose own tenants.licence_id names the row. But
+// `tenants_read` is DELIBERATELY `USING (true)` for every non-player scope
+// (identity.GetTenantBySlug and three WithoutTenant active-tenant sweeps
+// read it from scopes with no tenant match to offer - see migration 0077's
+// own header comment; the fix round's Fix 5 narrowed only the player-scope
+// case, which this resolution path never runs under), which means a
+// tenant-scoped connection can still READ another tenant's
+// `tenants.licence_id` column.
+//
+// CORRECTED (this fix round, Fix 10): the assertion's job is NOT, and was
+// never accurately described as, "the ONLY check" in an unqualified sense.
+// It remains NECESSARY and LOAD-BEARING - without it, a mis-scoped call
+// degrades only to a misleading fail-closed `licensing_unknown` result
+// (because `EvaluateLicenceValidity` would read the foreign licence as
+// simply absent) instead of a diagnosable `ErrTransactionScope` - but it is
+// now backed by a SECOND, INDEPENDENT layer: `licences_read`'s narrow
+// policy means a transaction scoped to tenant A cannot even READ tenant
+// B's licence row at all, so `jurisdiction.EvaluateLicenceValidity`'s query
+// would return zero rows and this function would report
+// `OutcomeLicensingUnknown`, NOT a `permitted` answer for tenant B - even
+// if this assertion were somehow bypassed. Isolation on this resolver's
+// licence-lookup leg therefore comes from BOTH `tenants`/`licences`'
+// WRITE-side RLS (a tenant can no longer forge its own licence_id) AND
+// `licences`' READ-side RLS (a tenant can no longer read a foreign licence
+// row at all) - this assertion is not the sole backstop either property
+// depends on, but it is what turns a mis-scoped call into a diagnosable
+// error instead of an ambiguous outcome, and it must stay exactly as it
+// is.
 func assertTenantScope(ctx context.Context, q ReadOnlyQuerier, tenantID uuid.UUID) (bool, error) {
 	var scopedTenant *uuid.UUID
 	var scopedPlayer *uuid.UUID

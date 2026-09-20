@@ -6675,3 +6675,183 @@ fix round is authorized — no HTTP route, no resolver wiring, no
 production country content, no answer to HDR-M-1/HDR-M-2/HDR-J-6/
 HDR-J-7/HDR-J-8/HDR-J-9, and no `MKT-DUAL-1`/`MKT-SCOPE-1`/`MKT-EXPIRY-1`/
 `MKT-PM-1` resolution.
+
+## Stage 4I Phase E-SECURITY: tenant/licence/jurisdiction registry RLS hardening — IMPLEMENTED
+
+**Status: IMPLEMENTED**, closing task-registry items `MKT-SCOPE-1` and
+`MKT-SCOPE-1(b)` per a binding architect ruling recorded in full at
+`docs/decisions/0046-tenant-licence-registry-rls.md`. Completion report
+in `docs/active-stage.md`'s "Stage 4I Phase E-SECURITY" entry.
+
+**The defect.** `tenants`, `licences`, and `jurisdictions` had never had
+row-level security applied, in any migration, since the platform's
+earliest schema. The architect live-reproduced the full attack chain this
+gap enabled: an ordinary tenant-scoped connection repointing its own
+`tenants.licence_id` at another tenant's BYOL licence, after which
+`internal/operatingmarket`'s ceiling check (itself not defective) read the
+forged licence and resolved `permitted` for a country the tenant's real
+licence never granted. Two further attacks, live-reproduced and not
+previously recorded anywhere: (1) the composite FK
+`tenants_licence_matches_model` can be defeated by changing
+`licensing_model` and `licence_id` together in ONE UPDATE statement,
+because `expected_licensee` is a `GENERATED` column recomputed from the
+NEW `licensing_model` in the same statement; (2) an ordinary tenant-scoped
+(or even scopeless) `DELETE FROM tenants` targeting a DIFFERENT tenant
+cascades away that tenant's entire `operating_country_policies` set — a
+materially worse, lower-bar version of ADR 0045 §18 finding F2, whose own
+framing wrongly assumed the removal path required a role that bypasses
+RLS entirely.
+
+**The fix (migration `0077_tenant_licence_registry_rls`).** Row-level
+security on all three tables, asymmetric by table (`tenants`/
+`jurisdictions` read-open — several scopeless/cross-tenant readers
+legitimately need it: staff-login slug lookup, three active-tenant sweeps
+in `internal/rg`/`internal/reconciliation`/`internal/bonus`, and migration
+0076's own ceiling checks; `licences` narrowed to platform-admin or the
+tenant whose own `tenants.licence_id` names the row) but uniform on
+writes (every INSERT/UPDATE on all three, and the one DELETE policy on
+`tenants`, require a genuinely platform-admin-scoped transaction — no
+tenant-scoped write policy of any kind on any of the three tables). A new
+partial unique index, `uq_tenants_exclusive_own_licence`, independently
+closes a live-verified BYOL exclusivity gap (two tenants able to bind the
+same `licensee='tenant'` licence), keyed on the `GENERATED`
+`expected_licensee` column so it cannot drift from `licensing_model`, and
+deliberately not constraining shared `licensee='platform'` licences (ADR
+0006).
+
+**Go changes.** `internal/identity.CreateTenant` gained an
+`assertPlatformScope` first statement (new sentinel
+`ErrPlatformTransactionScope`); `internal/jurisdiction.
+AssignTenantLicence`'s contract moved from `db.Pool.WithTenant` to
+`db.Pool.WithPlatformAdmin`, its audit write moving from tenant-scoped to
+platform-scoped as a direct consequence; `CreateJurisdiction`/
+`CreateLicence`/`ListJurisdictions`/`ListLicences` each gained the
+identical `assertPlatformScope` gate `SetJurisdictionCountryCode` already
+had; `internal/httpserver.newCreateTenantHandler` moved from
+`WithoutTenant` to `WithPlatformAdmin`, gained a required `reason_code`
+field and a before/after audit shape (closing the pre-existing
+`tenant.created` audit gap), and now surfaces a `uuid.Parse` failure
+explicitly instead of silently swallowing it.
+**`internal/operatingmarket` received ZERO executable diff** — one
+comment-only correction in `resolve.go` explaining that its own
+`assertTenantScope` remains load-bearing (read-side isolation on
+`tenants` stays deliberately open) even though the write-side forgery
+path is now closed. `internal/operatingmarket`'s own schema, triggers,
+RLS policies, and resolution algorithm are unchanged — confirmed via
+`git diff`.
+
+**Task dispositions.** Fixed now: BYOL licence exclusivity. Deferred, each
+recorded as its own new task-registry item: `PLAT-ROLESPLIT-1`
+(migration-owner/runtime-role split — genuinely blocked on infrastructure
+this repository cannot provide, `CREATEROLE` unavailable to the
+application role, verified live; owner `security`; pre-production gate),
+`MKT-LICSTATUS-1` (no sanctioned write path for `licences.status`; owner
+`architect`; gated on the first real `licence_country_ceilings` row),
+`MKT-AUDIT-1` (tenant-visible licence-assignment evidence; owner
+`security`; not yet needed). `MKT-DUAL-1` unchanged. Not touched:
+`EvaluateLicenceValidity` (already correctly fail-closed).
+
+**Mechanical fixture migration.** Every existing integration test fixture
+across roughly 30 files that seeded `tenants`/`licences`/`jurisdictions`
+under a scopeless connection was moved to `db.Pool.WithPlatformAdmin`,
+with rows-affected checked explicitly on every touched write — a denied
+RLS write is a silent zero-row no-op, not an error, the exact failure
+mode the architect's own reproduction found in
+`TestResolveOperatingCountryPolicy_NotYetIssuedLicenceYieldsNotPermittedByLicence`'s
+own `UPDATE licences` fixture. Migration-mechanics tests that assumed
+migration 0076 was "the chain's tip" (`internal/jurisdiction/
+migration_0075_integration_test.go`, `internal/operatingmarket/
+migration_0076_integration_test.go`, `internal/operatingmarket/
+qa_migration_rls_survives_failed_rollback_test.go`,
+`internal/bonus/wave3_phase2_migrations_integration_test.go`) were updated
+to account for migration 0077 landing on top of it. One additional
+fixture gap (`internal/identityresolution/register_integration_test.go`)
+was found only by actually running the whole-repo suite, not by static
+`INSERT INTO tenants` text search — a `identity.CreateTenant` call under
+`WithoutTenant` that the initial mechanical sweep's search pattern missed.
+
+**New tests.** `internal/jurisdiction/migration_0077_integration_test.go`
+(4 tests) and `internal/jurisdiction/registry_rls_integration_test.go`
+(18 tests, including the crux regression
+`TestTenantsRLS_TenantScopedConnectionCannotUpdateOwnLicenceID` and the
+exact composite-FK-defeating shape
+`TestTenantsRLS_TenantScopedConnectionCannotDefeatCompositeFKByChangingLicensingModel`),
+plus three new tests in `internal/operatingmarket/rls_integration_test.go`
+reproducing the full end-to-end attack and proving it is now refused.
+`internal/jurisdiction/tenant_licence_admin_integration_test.go` and
+`internal/jurisdiction/licence_validity_integration_test.go` substantially
+updated for the new contract, each with one new regression test
+(`TestAssignTenantLicence_TenantScopedTransactionIsRejected`,
+`TestEvaluateLicenceValidity_ForeignLicenceIsInvisibleAndFailsClosedNotOpen`).
+`internal/identity/identity_integration_test.go` and
+`internal/httpserver/identity_flow_integration_test.go` each gained a
+`TestCreateTenant*_NonPlatformScopedTransactionIsRejected`/
+`TestCreateTenantAPI_AuditRecordsReasonCodeAndAfterState` pair.
+
+**Validation.** Full gate run against a FRESH scratch database built via
+`cmd/migrate up` from the current `migrations/` directory (never a reused
+local database, per `MKT-MIG76-1`'s own repeated lesson): `go build`,
+`go vet` (both tags), `gofmt -l` all clean; RLS state verified directly
+against `pg_class`/`pg_policies`/`pg_indexes` (migration 0077's exact ten
+policies and one partial unique index all present and correctly shaped)
+before trusting any test result; `internal/jurisdiction` (154 tests),
+`internal/identity` (28), `internal/operatingmarket` (80), and
+`internal/httpserver` (173) all pass; 10 consecutive `-race` runs each of
+`TestAssignTenantLicence_ConcurrentAssignmentsSerializeCleanly`,
+`TestOperatingCountryPolicy_ConcurrentCloseCannotBeRescuedByAnotherTransactionsSuccessor`,
+and `TestOperatingCountryPolicy_ConcurrentCreatesNeverCorruptState` all
+pass; the FULL whole-repo `go test -tags=integration ./... -count=1`
+passes with zero failures.
+
+**Documentation.** New ADR `0046`; `docs/decisions/0045-*.md` §18
+finding F2/F3 corrected (F3's "NOT AUTHORIZED THIS DISPATCH" disposition
+DISCHARGED); `docs/decisions/0026-*.md` amended to redirect its own
+one-sentence migration-owner/runtime-role deferral to `PLAT-ROLESPLIT-1`;
+`docs/governance/stage-4i-canonical-model.md` §6.1 and its §13.3
+resolver-scope narrative corrected; `docs/architecture/15-jurisdiction-
+and-licensing-model.md` corrected (the composite FK's actual, narrower
+coverage). `docs/governance/task-registry.md`'s `MKT-SCOPE-1`/
+`MKT-SCOPE-1(b)` marked RESOLVED with the two previously-unrecorded
+attacks recorded in full.
+
+### Stage 4I Phase E-SECURITY — fix round (post six-way independent review)
+
+Six independent reviews (architect fidelity, adversarial security,
+DB/RLS, compliance/privacy, QA regression, code review) ran against the
+implementation above. No P0/P1, but strong convergence on several real
+findings — full detail in `docs/active-stage.md`'s "Stage 4I Phase
+E-SECURITY" entry's own "FIX ROUND" subsection. Summary: the new
+`uq_tenants_exclusive_own_licence` violation's unmapped SQLSTATE 23505
+(surfacing as an HTTP 500 instead of a diagnosable 400) was found by four
+reviewers independently and is now mapped; a dead `jurisdictions` DELETE
+test-fixture cleanup (always a silent zero-row no-op under the new
+no-DELETE-policy design, with a comment incorrectly asserting it worked)
+was found by two and is now removed; `tenants_read`'s read posture being
+broader than its own stated justification (open to player scope, unlike
+every sibling policy) was found by three and is now narrowed to exclude
+player scope specifically (full tenant-to-tenant enumeration deliberately
+left open, tracked as new item `PLAT-TENANTREAD-1`); `docs/security/
+security-architecture.md` — never updated despite ADR 0046 claiming
+architecture docs were corrected — was found to still assert the exact
+opposite of the current code and has been corrected; missing deny-
+TRUNCATE triggers were added to all three tables (RLS does not govern
+TRUNCATE at all, and the prior "protection" was an accident of the FK
+graph); a concurrency test that used a bare `sync.WaitGroup` with no real
+synchronization barrier — a direct violation of this codebase's own
+binding rule, and independently found to flake under CPU contention due
+to a `created_at`-based ordering assertion — was rewritten using the
+established deterministic technique, with a new companion test covering
+the additional race the exclusivity index itself introduces. One item was
+explicitly escalated to the human rather than resolved: since the
+application's runtime database role also owns every table (no migration-
+owner/runtime-role split — `PLAT-ROLESPLIT-1`, genuinely blocked on
+missing `CREATEROLE`), a tenant-scoped connection able to issue DDL can
+disable RLS entirely; the adversarial reviewer demonstrated this as a
+full-platform-wipe and explicitly flagged it launch-blocking rather than
+a routine deferral. Full validation gate re-run clean multiple times
+against independently-built fresh scratch databases, including one final
+run performed directly by the orchestrator (not only trusted from agent
+self-report).
+
+No automatic progression. Per the stage-gate rule, the next phase requires
+its own separate human authorization.

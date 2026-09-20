@@ -26,6 +26,7 @@ package casino
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -170,23 +171,44 @@ func seedTenantWithLicence(t *testing.T, pool *db.Pool) (tenantID, brandID uuid.
 	licenceID := uuid.New()
 	jurisdictionCode = "K3-TEST-" + jurisdictionID.String()[:8]
 
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
+	// Stage 4I Phase E-SECURITY (migration 0077): `tenants`/`jurisdictions`/
+	// `licences` writes now require a genuinely platform-admin-scoped
+	// transaction; rows-affected is checked explicitly on every write
+	// below because a denied RLS write is a silent zero-row no-op, not an
+	// error.
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'Test Tenant', 'under_platform_licence')`,
-			tenantID, "t-"+tenantID.String()[:8]); err != nil {
+			tenantID, "t-"+tenantID.String()[:8])
+		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, 'K-3 Test Jurisdiction')`,
-			jurisdictionID, jurisdictionCode); err != nil {
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 tenant row, inserted %d", tag.RowsAffected())
+		}
+		tag, err = tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, 'K-3 Test Jurisdiction')`,
+			jurisdictionID, jurisdictionCode)
+		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx,
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 jurisdiction row, inserted %d", tag.RowsAffected())
+		}
+		tag, err = tx.Exec(ctx,
 			`INSERT INTO licences (id, jurisdiction_id, licensee, licence_number) VALUES ($1, $2, 'platform', 'K3-LIC-1')`,
-			licenceID, jurisdictionID); err != nil {
+			licenceID, jurisdictionID)
+		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE tenants SET licence_id = $2 WHERE id = $1`, tenantID, licenceID); err != nil {
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 licence row, inserted %d", tag.RowsAffected())
+		}
+		tag, err = tx.Exec(ctx, `UPDATE tenants SET licence_id = $2 WHERE id = $1`, tenantID, licenceID)
+		if err != nil {
 			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to update 1 tenant row, updated %d", tag.RowsAffected())
 		}
 		return nil
 	})

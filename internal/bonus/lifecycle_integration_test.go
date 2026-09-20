@@ -58,12 +58,20 @@ func seedLifecycleFixture(t *testing.T, pool *db.Pool) lifecycleFixture {
 
 	f.fixture = seedFixture(t, pool, f.assetCode)
 
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	// Stage 4I Phase E-SECURITY (migration 0077): `jurisdictions` writes
+	// now require a genuinely platform-admin-scoped transaction.
+	err := pool.WithPlatformAdmin(context.Background(), adminA, func(ctx context.Context, tx pgx.Tx) error {
 		f.jurisdictionID = uuid.New()
 		f.jurisdictionCode = "TJ-" + f.jurisdictionID.String()[:8]
-		_, err := tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, 'Test Jurisdiction')`,
+		tag, err := tx.Exec(ctx, `INSERT INTO jurisdictions (id, code, name) VALUES ($1, $2, 'Test Jurisdiction')`,
 			f.jurisdictionID, f.jurisdictionCode)
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 jurisdiction row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("seed jurisdiction: %v", err)

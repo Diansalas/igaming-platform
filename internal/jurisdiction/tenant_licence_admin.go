@@ -28,27 +28,34 @@ import (
 // pre-fetching the tenant's licensing_model and comparing it in Go, which
 // would be a second, driftable copy of the same rule.
 //
-// `tenants` and `licences` carry no row-level security (registry_admin.go's
-// own header comment explains why) - the same platform-only permission
-// check at the HTTP layer (auth.PermTenantLicenceAssign) is the entire
-// control on this write, and every call is audited in the same transaction
-// regardless.
+// STAGE 4I PHASE E-SECURITY (migration 0077) CHANGED THIS FUNCTION'S
+// CONTRACT: `tenants` and `licences` now carry row-level security with NO
+// tenant-scoped write policy of any kind - a tenant-scoped connection can
+// no longer write its own `licence_id` at all (that write was the exact
+// defect this migration closes: a tenant could otherwise repoint its own
+// licence_id at another tenant's BYOL licence and forge a permitted
+// resolution past a ceiling its real licence never granted). tx MUST
+// therefore now be a genuinely PLATFORM-scoped transaction
+// (db.Pool.WithPlatformAdmin), asserted in-function via assertPlatformScope
+// as this function's FIRST statement, exactly like registry_admin.go's
+// CreateJurisdiction/CreateLicence/ListJurisdictions/ListLicences and
+// SetJurisdictionCountryCode. The platform-only permission check at the
+// HTTP layer (auth.PermTenantLicenceAssign) remains, but is no longer the
+// only control - migration 0077's tenants_platform_admin_update and
+// licences_read policies enforce the identical predicate independently at
+// the database.
 //
-// Unlike CreateJurisdiction/CreateLicence (genuinely platform-wide
-// reference-row creations, audited with tenant_id NULL), this operation's
-// subject IS a specific tenant, so its audit row is written TENANT-scoped
-// (recordRegistryAudit(ctx, tx, p.TenantID, ...)) so the affected tenant
-// can read it back via its own PermAuditRead - mirroring
-// newCreateBrandHandler/newCreateStaffHandler's exact convention
-// (internal/httpserver/admin_routes.go) for "platform_admin acts on a
-// target tenant" writes. That means tx must be a TENANT-scoped transaction
-// (db.Pool.WithTenant(p.TenantID, ...)), not db.Pool.WithPlatformAdmin -
-// audit_log's dual-scope RLS WITH CHECK policy requires a non-NULL
-// tenant_id to equal the connection's app.tenant_id setting exactly, so a
-// WithPlatformAdmin transaction (app.tenant_id never set) would fail the
-// audit insert. `tenants`/`licences` themselves have no RLS, so nothing
-// about this function's read/update logic depends on which GUC is set -
-// only the audit write's scope does.
+// The audit write ALSO moves platform-scoped as a consequence
+// (recordRegistryAudit(ctx, tx, uuid.Nil, ...), not p.TenantID): a
+// WithPlatformAdmin transaction never sets app.tenant_id, and audit_log's
+// dual-scope RLS WITH CHECK policy requires a non-NULL tenant_id to equal
+// the connection's app.tenant_id setting exactly, so a tenant-scoped audit
+// row could not be written from this scope even if it were still desired.
+// This mirrors CreateJurisdiction/CreateLicence's own audit scope exactly
+// - this operation's audit trail is now platform-visible only
+// (task-registry item MKT-AUDIT-1 tracks the deferred question of whether
+// the affected tenant should also see tenant-visible evidence of its own
+// licence assignment).
 
 // TenantLicenceState is the result of an AssignTenantLicence call.
 type TenantLicenceState struct {
@@ -64,12 +71,15 @@ type AssignTenantLicenceParams struct {
 }
 
 // AssignTenantLicence binds (or unassigns, when p.LicenceID is nil) the
-// licence a tenant actually operates under. tx must be a TENANT-scoped
-// transaction for p.TenantID (db.Pool.WithTenant(p.TenantID, ...)) - see
-// this file's own header comment for why (the audit write is tenant-scoped,
-// unlike registry_admin.go's genuinely platform-wide CreateJurisdiction/
-// CreateLicence).
+// licence a tenant actually operates under. tx MUST now be a
+// PLATFORM-scoped transaction (db.Pool.WithPlatformAdmin) - see this
+// file's own header comment for why (Stage 4I Phase E-SECURITY, migration
+// 0077: `tenants`/`licences` gained RLS with no tenant-scoped write
+// policy, and the audit write moved platform-scoped as a consequence).
 func AssignTenantLicence(ctx context.Context, tx pgx.Tx, p AssignTenantLicenceParams) (TenantLicenceState, error) {
+	if err := assertPlatformScope(ctx, tx); err != nil {
+		return TenantLicenceState{}, err
+	}
 	if err := p.Actor.validate(); err != nil {
 		return TenantLicenceState{}, err
 	}
@@ -136,10 +146,22 @@ func AssignTenantLicence(ctx context.Context, tx pgx.Tx, p AssignTenantLicencePa
 			// unreachable here.
 			return TenantLicenceState{}, fmt.Errorf("%w: unknown licence_id %s", ErrInvalidInput, p.LicenceID)
 		}
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			if pgErr.ConstraintName == "uq_tenants_exclusive_own_licence" {
+				// Migration 0077's partial unique index: a licensee='tenant'
+				// (BYOL) licence may be bound to exactly one tenant at a time.
+				// This is a diagnosable client input error, not a server
+				// fault - mirrors the 23503 arm above exactly.
+				return TenantLicenceState{}, fmt.Errorf("%w: licence is already exclusively bound to another tenant", ErrInvalidInput)
+			}
+			// Defensive only: no other unique constraint on tenants should be
+			// reachable from this statement.
+			return TenantLicenceState{}, fmt.Errorf("jurisdiction: assign tenant licence: %w", err)
+		}
 		return TenantLicenceState{}, fmt.Errorf("jurisdiction: assign tenant licence: %w", err)
 	}
 
-	if err := recordRegistryAudit(ctx, tx, p.TenantID, p.Actor, "jurisdiction_registry.tenant_licence_assigned", "tenant", p.TenantID.String(), map[string]any{
+	if err := recordRegistryAudit(ctx, tx, uuid.Nil, p.Actor, "jurisdiction_registry.tenant_licence_assigned", "tenant", p.TenantID.String(), map[string]any{
 		"before":                    map[string]any{"licence_id": uuidOrNil(beforeLicenceID)},
 		"after":                     map[string]any{"licence_id": uuidOrNil(p.LicenceID)},
 		"licence_jurisdiction_code": licenceJurisdictionCode,

@@ -41,11 +41,15 @@ func testPool(t *testing.T) *db.Pool {
 	return pool
 }
 
+// Stage 4I Phase E-SECURITY (migration 0077): `tenants` gained RLS with no
+// tenant-scoped/scopeless write policy of any kind, so identity.CreateTenant's
+// own assertPlatformScope now requires a genuinely platform-admin-scoped
+// transaction (db.Pool.WithPlatformAdmin), not WithoutTenant.
 func createTestTenant(t *testing.T, pool *db.Pool) identity.Tenant {
 	t.Helper()
 	suffix := uuid.NewString()
 	var tenant identity.Tenant
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		tenant, err = identity.CreateTenant(ctx, tx, "Test Tenant "+suffix, "tenant-"+suffix, "under_platform_licence")
 		return err

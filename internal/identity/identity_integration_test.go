@@ -32,11 +32,16 @@ func testPool(t *testing.T) *db.Pool {
 
 // createTestTenant provisions a tenant directly (bypassing the HTTP
 // layer, since these tests exercise the identity package itself).
+// Stage 4I Phase E-SECURITY (migration 0077): `tenants` gained RLS with no
+// tenant-scoped write policy of any kind, so both CreateTenant's own
+// assertPlatformScope and the DELETE cleanup below now require a genuinely
+// platform-admin-scoped transaction (db.Pool.WithPlatformAdmin), not
+// WithoutTenant.
 func createTestTenant(t *testing.T, pool *db.Pool) Tenant {
 	t.Helper()
 	suffix := uuid.New().String()
 	var tenant Tenant
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		tenant, err = CreateTenant(ctx, tx, "Test Tenant "+suffix, "tenant-"+suffix, "under_platform_licence")
 		return err
@@ -45,9 +50,15 @@ func createTestTenant(t *testing.T, pool *db.Pool) Tenant {
 		t.Fatalf("failed to create test tenant: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, tenant.ID)
-			return err
+		_ = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+			tag, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, tenant.ID)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != 1 {
+				t.Errorf("cleanup: expected to delete 1 tenant row, deleted %d", tag.RowsAffected())
+			}
+			return nil
 		})
 	})
 	return tenant
@@ -389,9 +400,17 @@ func TestLoginAttempts_SuccessResetsLockoutWindow(t *testing.T) {
 func TestTenant_LicensingModelMustMatchLicenceLicensee(t *testing.T) {
 	pool := testPool(t)
 
+	// Stage 4I Phase E-SECURITY (migration 0077): `licences` gained RLS
+	// with writes restricted to a platform-admin-scoped transaction, so
+	// seeding here - and the two UPDATE tenants SET licence_id calls below
+	// - must move from WithoutTenant to WithPlatformAdmin. A silently
+	// zero-row UPDATE (a denied RLS write is a no-op, not an error) is
+	// exactly the failure mode this migration's own rollout discovered
+	// elsewhere, so both UPDATEs below check rows-affected explicitly
+	// rather than trusting a nil error alone.
 	var jurisdictionID uuid.UUID
 	var platformLicenceID, tenantLicenceID uuid.UUID
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO jurisdictions (code, name) VALUES ($1, 'Test Jurisdiction') RETURNING id`,
 			"TEST-"+uuid.NewString()[:8],
@@ -416,9 +435,15 @@ func TestTenant_LicensingModelMustMatchLicenceLicensee(t *testing.T) {
 	tenant := createTestTenant(t, pool) // licensing_model = under_platform_licence
 
 	// Matching case: under_platform_licence + a 'platform' licence succeeds.
-	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE tenants SET licence_id = $1 WHERE id = $2`, platformLicenceID, tenant.ID)
-		return err
+	err = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE tenants SET licence_id = $1 WHERE id = $2`, platformLicenceID, tenant.ID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			t.Errorf("expected to update 1 tenant row, updated %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Errorf("expected matching licensing_model/licensee to succeed, got error: %v", err)
@@ -426,11 +451,37 @@ func TestTenant_LicensingModelMustMatchLicenceLicensee(t *testing.T) {
 
 	// Mismatched case: same tenant (still under_platform_licence) pointed
 	// at a 'tenant' licensee licence must be rejected by the composite FK.
-	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	err = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE tenants SET licence_id = $1 WHERE id = $2`, tenantLicenceID, tenant.ID)
 		return err
 	})
 	if err == nil {
 		t.Fatal("expected an error linking a licensing_model='under_platform_licence' tenant to a licensee='tenant' licence, got nil")
+	}
+}
+
+// TestCreateTenant_NonPlatformScopedTransactionIsRejected is the new
+// regression test required by Stage 4I Phase E-SECURITY (migration 0077):
+// CreateTenant's assertPlatformScope must reject a tenant-scoped
+// transaction, distinctly from any RLS error the INSERT itself might
+// otherwise surface.
+func TestCreateTenant_NonPlatformScopedTransactionIsRejected(t *testing.T) {
+	pool := testPool(t)
+	existing := createTestTenant(t, pool)
+
+	err := pool.WithTenant(context.Background(), existing.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := CreateTenant(ctx, tx, "Should Not Exist", "should-not-exist-"+uuid.NewString(), "under_platform_licence")
+		return err
+	})
+	if !errors.Is(err, ErrPlatformTransactionScope) {
+		t.Fatalf("expected ErrPlatformTransactionScope, got %v", err)
+	}
+
+	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := CreateTenant(ctx, tx, "Should Not Exist Either", "should-not-exist-either-"+uuid.NewString(), "under_platform_licence")
+		return err
+	})
+	if !errors.Is(err, ErrPlatformTransactionScope) {
+		t.Fatalf("expected ErrPlatformTransactionScope from a scopeless transaction, got %v", err)
 	}
 }

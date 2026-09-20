@@ -3113,40 +3113,82 @@ someone is reading them.
 
 ### J4I.6 The platform registry, and a correction to the original ruling
 
-`jurisdictions` and `licences` are platform-scoped reference data with **no
-`tenant_id` and no RLS** — the same shape as `casino_games` (migration
-0035), and deliberately so: they are platform facts and FK targets every
-tenant-scoped transaction must be able to read. Adding RLS would break
-FK-validating reads from a tenant scope. **They stay that way.** What
-changes is only the **write** side: one platform-only permission
-(`PermJurisdictionRegistryManage`, `RolePlatformAdmin` only, following
-`PermCasinoCatalogueManage`'s precedent), enforced at the HTTP layer, with
-every write audited in the same transaction.
+> **Superseded by ADR 0046 (Stage 4I Phase E-SECURITY, migration 0077).**
+> Everything below this point in J4I.6, as originally written, described a
+> `jurisdictions`/`licences` posture that no longer exists. It is kept
+> (struck through in spirit, corrected in fact) so the history of the
+> finding is not lost, but it must not be read as the current state.
+> `SEC-4I-F11`, which this section's own closing correction opened, is now
+> **DISCHARGED** by migration 0077 — see the corrected text immediately
+> following.
 
-> **Correction (closing review).** §S-3.2 additionally required `qa` to
-> assert that "a tenant-scoped transaction can `SELECT` from
-> `jurisdictions` and **cannot** `INSERT`/`UPDATE`/`DELETE`", citing
-> `assets` as precedent. **That assertion is unachievable as written, and
-> the precedent was the wrong one.** `assets` genuinely carries
-> `ENABLE`+`FORCE` RLS; `jurisdictions`, `licences` and `casino_games` carry
-> none. Verified directly: a tenant-scoped transaction **can** `INSERT` into
-> `jurisdictions` today. The two halves of §S-3.2 contradicted each other —
-> a table cannot simultaneously have no RLS and have RLS-enforced write
-> denial.
->
-> The honest statement of the control, which `internal/jurisdiction/
-> registry_admin.go`'s own header already makes: **the permission check is
-> the entire control on the write side; there is no database backstop
-> behind it.** That is an accepted, pre-existing platform posture for
-> reference tables, not a Stage 4I regression — but it is a materially
-> weaker posture than every tenant-owned table in this platform has, and it
-> should be stated rather than assumed away. The assertions that *are*
-> achievable, and are required: a tenant-scoped transaction can `SELECT`
-> from `jurisdictions`; and no role other than `RolePlatformAdmin` holds
-> `PermJurisdictionRegistryManage` (pinned by
-> `internal/auth/jurisdiction_permission_test.go`). Tightening the database
-> posture of platform reference tables is a cross-cutting change belonging
-> to `architect`, recorded as `SEC-4I-F11`.
+**Current state (migration 0077 / ADR 0046).** `tenants`, `licences` and
+`jurisdictions` all now carry `ENABLE ROW LEVEL SECURITY` **and**
+`FORCE ROW LEVEL SECURITY`. The live-reproduced defect that made this
+necessary: `licence_country_ceilings_read` (migration 0076) anchors its
+composite-ownership `EXISTS` on `tenants.licence_id`, and
+`operating_country_policies_enforce_ceiling()` reads the same column, both
+under the TENANT's own connection — and that connection could **write**
+that column, letting one ordinary tenant-scoped transaction repoint its own
+`tenants.licence_id` at another tenant's BYOL licence and commit a policy
+for a country its own licence never permitted. Migration 0077 closes this.
+The posture is deliberately asymmetric, not uniform:
+
+- **`tenants` reads**: `USING (true)` for every non-player scope (Fix 5,
+  this fix round, additionally excludes `app.player_account_id`-scoped
+  connections, mirroring every sibling table). Kept open for non-player
+  scopes because `identity.GetTenantBySlug` (staff login, no tenant context
+  by construction) and several platform-wide `WithoutTenant` sweeps read
+  `tenants` from scopes with no tenant match to offer — the same reasoning
+  as the `assets` (migration 0044) precedent. This means a tenant-scoped
+  connection can still enumerate every other tenant's non-licence-content
+  columns (name/slug/licensing_model/status/licence_id) — recorded as a
+  deferred, non-blocking item (`PLAT-TENANTREAD-1`) in the task registry,
+  not a defect of this migration.
+- **`tenants` writes**: platform-admin only. **No tenant-scoped write
+  policy of any kind exists on `tenants`** — this is the actual fix for the
+  defect above: a tenant can no longer write its own `licence_id`, full
+  stop, independent of any application-level permission check.
+- **`licences` reads**: narrowed to platform-admin, or the tenant whose own
+  `tenants.licence_id` names the row — deliberately **not** `USING (true)`,
+  because a BYOL tenant's own licence must not be readable by an unrelated
+  tenant (ADR 0045 §4's ruling, applied one level down). Also excludes
+  player scope.
+- **`licences` writes**: platform-admin only, no tenant-scoped write policy.
+  No DELETE policy (no production or test code deletes a licence).
+- **`jurisdictions` reads**: `USING (true)` for every scope, including
+  player — this is the one exception to Fix 5's player-exclusion pattern,
+  kept deliberately: `jurisdictions` is public regulatory reference data,
+  and the HDR-J-5 player-jurisdiction path needs it open to every scope.
+- **`jurisdictions` writes**: platform-admin only. No DELETE policy.
+- All three tables also now carry a `BEFORE TRUNCATE FOR EACH STATEMENT`
+  deny trigger (Fix 4, this fix round) — RLS does not govern `TRUNCATE` at
+  all, so the trigger is the only mechanism that reaches it, mirroring the
+  pre-existing `licence_country_ceilings`/`operating_country_policies`/
+  `platform_operations`/`audit_log` precedent.
+
+The application-level permission check
+(`PermJurisdictionRegistryManage`/`PermTenantLicenceAssign`, both
+`RolePlatformAdmin`-only) **remains**, but as of migration 0077 it is no
+longer the *only* control on the write side — `assertPlatformScope` in Go
+and the platform-admin-only RLS policies enforce the identical predicate
+independently, at the database, exactly as every other platform reference
+table (`assets`, `asset_authorizations`) already does.
+
+> **Correction (closing review) — historical record, now superseded.**
+> §S-3.2 originally required `qa` to assert that "a tenant-scoped
+> transaction can `SELECT` from `jurisdictions` and **cannot**
+> `INSERT`/`UPDATE`/`DELETE`", citing `assets` as precedent, which was
+> unachievable **at the time**: `jurisdictions`/`licences` then carried no
+> RLS at all (unlike `assets`, which genuinely carried `ENABLE`+`FORCE`
+> RLS), and a tenant-scoped transaction **could** `INSERT` into
+> `jurisdictions`. That gap is exactly what migration 0077 closes: the
+> assertion §S-3.2 originally wanted is now true and tested
+> (`internal/jurisdiction/registry_rls_integration_test.go`,
+> `internal/jurisdiction/qa_adversarial_registry_rls_integration_test.go`).
+> "The permission check is the entire control on the write side; there is
+> no database backstop behind it" is **no longer an accurate description of
+> current state** — it described the pre-migration-0077 posture only.
 
 ### J4I.7 The three-layer non-forgeability mechanism
 
@@ -3169,13 +3211,30 @@ class (b) value.**
   the transaction's own `app.tenant_id` GUC against the tenant it is
   resolving for; the **consumer** asserts the resolution's binding against
   its own authenticated context before calling `Code()`/`ID()`. *(Corrected
-  in the closing review: the resolver-side half was originally absent, and
-  it is load-bearing rather than decorative, because `tenants`, `licences`
-  and `jurisdictions` carry no RLS — so a caller-supplied tenant argument
-  was the only thing standing between a transaction scoped to tenant B and
-  a fully `Resolved` answer belonging to tenant A. Where a consumer derives
-  both sides from the same values its half is defence-in-depth against
-  future refactors — valuable, but not isolation.)*
+  in the closing review: the resolver-side half was originally absent.
+  **Further corrected by migration 0077/ADR 0046 (this fix round, Fix 10):**
+  at the time of the original correction, this resolver-side assertion was
+  the *only* thing standing between a transaction scoped to tenant B and a
+  fully `Resolved` answer belonging to tenant A, because `tenants`,
+  `licences` and `jurisdictions` then carried no RLS at all. That is no
+  longer the whole story. Migration 0077 gave `licences` a narrow read
+  policy (platform-admin, or the tenant whose own `tenants.licence_id`
+  names the row), so tenant B's connection can no longer even **read**
+  tenant A's licence row — `resolveTenantLicence`'s query would return zero
+  rows and the function would return `refused(dependency_unavailable)`, not
+  a `Resolved` result for tenant A, even without this assertion. The
+  assertion remains necessary and load-bearing: without it, a mis-scoped
+  call degrades only to a misleading fail-closed
+  "dependency_unavailable"/"licensing unknown" result instead of a
+  diagnosable scope-mismatch error — but it is now backed by a second,
+  independent layer (the narrow `licences_read` RLS policy) that would also
+  prevent the described cross-tenant leak even if the assertion were
+  somehow bypassed. `tenants_read` remains `USING (true)` for non-player
+  scopes (Fix 5 only excludes player scope), so the read-side gap on
+  `tenants` itself is unchanged by migration 0077 — see J4I.6. Where a
+  consumer derives both sides from the same values its half is
+  defence-in-depth against future refactors — valuable, but not
+  isolation.)*
 - **Layer 3 — a non-forgeable value type.** `Resolution`'s fields are
   unexported, there is no exported constructor and no setter, and
   `Code()`/`ID()` return an error for any outcome other than `resolved`. No

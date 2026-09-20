@@ -30,23 +30,40 @@ func testPool(t *testing.T) *db.Pool {
 	return pool
 }
 
+// createTestTenant seeds a tenant. Stage 4I Phase E-SECURITY (migration
+// 0077): `tenants` gained RLS with no tenant-scoped/scopeless write policy
+// of any kind, so both the INSERT and the DELETE cleanup below now
+// require a genuinely platform-admin-scoped transaction
+// (db.Pool.WithPlatformAdmin), not WithoutTenant.
 func createTestTenant(t *testing.T, pool *db.Pool) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO tenants (id, name, slug, licensing_model) VALUES ($1, $2, $3, 'under_platform_licence')`,
 			id, "Audit Test Tenant "+id.String(), "audit-test-"+id.String(),
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			t.Fatalf("expected to insert 1 tenant row, inserted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("failed to create test tenant: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, id)
-			return err
+		_ = pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+			tag, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, id)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != 1 {
+				t.Errorf("cleanup: expected to delete 1 tenant row, deleted %d", tag.RowsAffected())
+			}
+			return nil
 		})
 	})
 	return id

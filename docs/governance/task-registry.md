@@ -1373,37 +1373,189 @@ logic (trigger steps 1-3); the two-dimension (operation × product) model
 (confirmed, not weakened); the four licence behavioral cases; no new HTTP
 route; no resolver wiring into any consuming domain.
 
-- **MKT-SCOPE-1 — pre-existing `internal/jurisdiction` platform-registry
-  functions omit `assertPlatformScope`; `jurisdictions`/`licences`/
-  `tenants` carry no RLS at all.** Found during the Phase E fix round
-  while adding the scope assertion to `SetJurisdictionCountryCode` (the
-  new function Phase E itself added, fixed in this round). The
-  PRE-EXISTING writers (`CreateJurisdiction`, `CreateLicence`,
-  `AssignTenantLicence`) and readers (`ListJurisdictions`,
-  `ListLicences`) have the identical gap and the identical missing
-  database-level backstop (`jurisdictions`, `licences`, and `tenants`
-  carry zero RLS policies of any kind — `tenants` added to this item's
-  named tables by ADR 0045 §18, finding F3) — currently **unexploited**
-  because no HTTP route, console surface, or service-identity caller
-  reaches any of them yet. **Confirmed live behavior** (ADR 0045 §18):
-  with no RLS backstop on any of the three tables, an ordinary
-  tenant-scoped connection can suspend/reactivate its own licence, extend
-  its own `expires_at`, re-point `tenants.licence_id`, and suspend a
-  DIFFERENT tenant's licence — a genuine cross-tenant write, not merely a
-  read gap. **This item MUST be resolved before any HTTP route/console/
-  service-identity caller reaches those functions.**
-  **MKT-SCOPE-1(b)** (new, independently-labeled trigger condition, ADR
-  0045 §18): this item MUST ALSO be resolved before
-  `ResolveOperatingCountryPolicy` is wired into any enforcement path —
-  independently of whether any HTTP route reaches `internal/jurisdiction`.
-  Phase E made licences the ROOT of the operating-market ceiling, so an
-  unprotected `licences`/`tenants` row is now a direct path to widening an
-  operating-market answer, not merely a player-jurisdiction concern.
-  Deliberately NOT fixed in this round (out of scope — the actual RLS fix
-  is a separate, future, `security`-owned change per ADR 0045 §18's F3
-  disposition; this dispatch's fix list names only
-  `SetJurisdictionCountryCode`, plus documenting/amending this item).
-  Owned by `security`.
+- **MKT-SCOPE-1 / MKT-SCOPE-1(b) — RESOLVED (Stage 4I Phase E-SECURITY,
+  migration 0077, ADR 0046).** Originally: pre-existing `internal/
+  jurisdiction` platform-registry functions omit `assertPlatformScope`;
+  `jurisdictions`/`licences`/`tenants` carry no RLS at all. Found during
+  the Phase E fix round while adding the scope assertion to
+  `SetJurisdictionCountryCode`. The PRE-EXISTING writers
+  (`CreateJurisdiction`, `CreateLicence`, `AssignTenantLicence`) and
+  readers (`ListJurisdictions`, `ListLicences`) had the identical gap and
+  the identical missing database-level backstop. **MKT-SCOPE-1(b)**
+  (independently-labeled trigger condition, ADR 0045 §18) required
+  resolution before `ResolveOperatingCountryPolicy` was wired into any
+  enforcement path, because Phase E made `licences` the ROOT of the
+  operating-market ceiling.
+
+  **Resolution.** A binding architect ruling (ADR 0046) gave `tenants`,
+  `licences`, and `jurisdictions` row-level security (migration 0077):
+  `tenants`/`jurisdictions` read-open (`USING (true)`, migration 0044's
+  `assets` precedent — several scopeless/cross-tenant readers legitimately
+  need it), `licences` narrowed to platform-admin or the tenant whose own
+  `tenants.licence_id` names the row; every write on all three restricted
+  to a genuinely platform-admin-scoped transaction, with `tenants` alone
+  additionally getting a platform-admin-only DELETE policy (the one
+  legitimate DELETE on that table). `AssignTenantLicence`'s contract moved
+  from `db.Pool.WithTenant` to `db.Pool.WithPlatformAdmin`, and its audit
+  row moved from tenant-scoped to platform-scoped as a direct consequence.
+  `internal/identity.CreateTenant` gained the identical
+  `assertPlatformScope` gate; the platform-admin-only `tenant.created`
+  HTTP route moved from `WithoutTenant` to `WithPlatformAdmin` and now
+  writes a `reason_code`/before-after audit record (previously present but
+  incomplete). `internal/operatingmarket`'s own schema/triggers/resolution
+  algorithm received **zero** executable diff — its `assertTenantScope`
+  remains load-bearing (read-side isolation for `tenants` is still
+  deliberately open) and its RLS policies were already correct; only the
+  premise they rested on (that `tenants` had no writable path) was wrong,
+  and that premise is what this migration fixes.
+
+  **Two previously-unrecorded attacks, live-reproduced and now closed,
+  recorded here for the historical record:**
+  1. **The composite-FK-defeating combined UPDATE.** Migration 0007's
+     `tenants_licence_matches_model` composite FK
+     (`FOREIGN KEY (licence_id, expected_licensee) REFERENCES licences
+     (id, licensee)`) was believed to make a licensee/licensing_model
+     mismatch structurally impossible. It does not defend against a
+     SINGLE UPDATE statement changing `licensing_model` AND `licence_id`
+     together: `expected_licensee` is a `GENERATED ALWAYS ... STORED`
+     column recomputed from the NEW `licensing_model` value in the same
+     statement, so the FK check only ever sees a self-consistent
+     (new-model, new-licence) pair and never detects that the tenant
+     "became" a different licensing model specifically to accept a
+     licence its ORIGINAL model would have rejected. Combined with the
+     complete absence of RLS on `tenants`, an ordinary tenant-scoped
+     connection could execute exactly this combined UPDATE and forge a
+     match the FK was trusted to prevent. Migration 0077 closes this
+     without any FK/CHECK change: a tenant-scoped connection can no
+     longer write `tenants` AT ALL, so the combined-UPDATE shape is
+     refused identically to a single-column one. Regression:
+     `TestTenantsRLS_TenantScopedConnectionCannotDefeatCompositeFKByChangingLicensingModel`.
+  2. **The cascading-DELETE escalation of finding F2.** ADR 0045 §18
+     finding F2 disclosed that `operating_country_policies` has no
+     DELETE-protecting trigger (by design, to preserve `tenants.id ...
+     ON DELETE CASCADE`), and named "the migration-owner/runtime-role
+     separation" as the residual's genuine fix, implying the exposure
+     required a privileged/bypassing role to reach. Live reproduction
+     during this dispatch found the bar was **strictly lower**: with no
+     RLS on `tenants` at all, an ORDINARY tenant-scoped (or even
+     scopeless) connection could `DELETE FROM tenants WHERE id =
+     <a different tenant's id>` directly — no elevated role, no RLS
+     bypass, nothing beyond an ordinary application connection — and the
+     `ON DELETE CASCADE` (which runs with RLS bypassed by Postgres
+     itself, regardless of the deleting connection's own scope) would
+     remove that OTHER tenant's entire `operating_country_policies` set.
+     Migration 0077 closes this as a NET TIGHTENING: `tenants` DELETE is
+     now restricted to platform-admin scope, so this specific escalation
+     path is closed, while the underlying, narrower, role-bypass-only
+     residual F2 originally described remains open (now tracked as
+     `PLAT-ROLESPLIT-1`, below — genuinely blocked on infrastructure this
+     repository cannot provide). Regression:
+     `TestTenantsRLS_TenantScopedConnectionCannotDeleteAnotherTenant`,
+     `TestOperatingCountryPolicies_TenantDeleteCascadeNowRequiresPlatformAdminScope`.
+
+  Also fixed in the same migration, not an RLS matter: **BYOL licence
+  exclusivity** — two distinct tenants, both `licensing_model=
+  'own_licence'`, could bind the SAME `licensee='tenant'` licence
+  (`tenants_licence_matches_model` only checks licensee KIND, never
+  exclusivity), silently sharing one licence's entire
+  `licence_country_ceilings` set. Closed by
+  `uq_tenants_exclusive_own_licence`, a partial unique index on
+  `tenants(licence_id) WHERE licence_id IS NOT NULL AND
+  expected_licensee = 'tenant'` — deliberately keyed on the GENERATED
+  `expected_licensee` column so it cannot drift from `licensing_model`,
+  and deliberately NOT constraining `licensee='platform'` licences, which
+  remain legitimately shared across every `under_platform_licence` tenant
+  per ADR 0006. Regressions:
+  `TestTenantsRLS_ExclusiveOwnLicenceCannotBeBoundToTwoTenants`,
+  `TestTenantsRLS_PlatformLicenceMayStillBeSharedAcrossManyTenants`.
+
+  Full ruling, task dispositions, and read-posture rationale: ADR 0046.
+  Test evidence: `internal/jurisdiction/migration_0077_integration_test.go`,
+  `internal/jurisdiction/registry_rls_integration_test.go`, and the
+  additions to `internal/operatingmarket/rls_integration_test.go`.
+
+### New items opened by Stage 4I Phase E-SECURITY (ADR 0046)
+
+- **`PLAT-ROLESPLIT-1` — migration-owner/runtime-role split.** The
+  genuinely narrower residual ADR 0045 §18 finding F2 originally
+  described (a role that bypasses RLS entirely — DDL access, or a
+  superuser/BYPASSRLS connection — can still DELETE/TRUNCATE/ALTER any of
+  these tables with no application-level control of any kind) remains
+  open; migration 0077 closes only the ORDINARY-application-connection
+  escalation (see MKT-SCOPE-1's resolution note above), not this one.
+  Owner: `security`. Dependency: a PostgreSQL superuser action
+  (`CREATEROLE`) to provision a second, narrower-privileged application
+  credential — neither is available to this repository today (verified
+  live by the architect: the application role lacks `CREATEROLE`). **Not**
+  a gate on Phase E resolver wiring itself. Pre-production gate: before
+  the first production deployment against real tenant data, OR before the
+  first `RoleTenantAdmin`/`RoleCompliance` credential grant to anyone
+  outside platform-operator staff, whichever comes first.
+- **`MKT-LICSTATUS-1` — no sanctioned write path for `licences.status`.**
+  `registry_admin.go`'s `CreateLicence` always creates `active` rows and
+  deliberately exposes no status-transition operation
+  (suspend/reinstate/expire); every non-active licence fixture in this
+  codebase is seeded via raw SQL, never through application code. A real
+  licence WILL eventually need a status change (regulatory suspension,
+  renewal, non-renewal). Owner: `architect` (the write surface's shape —
+  who may call it, what reason codes/evidence it requires, whether it
+  needs dual control — is a cross-cutting design question, not a routine
+  CRUD addition). Gate: before the first real (non-test)
+  `licence_country_ceilings` row — the same gate as `MKT-DUAL-1`/
+  `MKT-PM-1` — since a ceiling's authority is only as good as the licence
+  underneath it being genuinely current.
+- **`MKT-AUDIT-1` — tenant-visible evidence of licence assignment.**
+  `AssignTenantLicence`'s audit row is now platform-scoped only
+  (`tenant_id IS NULL`), a direct consequence of migration 0077's write-
+  scope fix (see MKT-SCOPE-1's resolution note above) — the affected
+  tenant itself can no longer read back its own licence-assignment
+  history via its own `PermAuditRead`, where it previously could (a
+  tenant-scoped audit row, Phase A's own design). Not yet needed: no
+  tenant-facing surface exposes licence-assignment history today, and no
+  consumer has asked for one. Owner: `security` (any tenant-visible
+  evidence surface over `licences`/`tenants` history is a
+  disclosure-boundary decision, not a routine reporting feature). Gate:
+  before any partner-console/back-office surface exposes a tenant's own
+  licence-assignment history to that tenant, **or before the first B2B/
+  non-first-party tenant onboarding, whichever comes first** (compliance/
+  privacy review, Stage 4I Phase E-SECURITY fix round: a real external
+  operator has a materially stronger interest in seeing its own
+  licence-assignment history than our own first-party B2C brand does, so
+  the gate must not wait solely on a UI surface existing).
+
+### New items opened by the Stage 4I Phase E-SECURITY fix round (six-review dispatch)
+
+- **`MKT-DORMANT-1` — dormant tenant-rung policy silently resumes on
+  licence-ceiling re-expansion.** (Adversarial security review's SEC-E2-5.)
+  When a licence's country ceiling is contracted (narrowed) and later
+  re-expanded, a tenant-rung `operating_country_policies` policy that was
+  left `enabled` from before the contraction silently resumes being
+  effective on re-expansion, with no new authorization event or audit
+  record generated at the tenant rung at the moment it resumes taking
+  effect. This may or may not be the intended semantics — a licence
+  contraction is typically a regulator-driven revocation, and whether
+  automatic resumption on re-issuance is correct or requires a fresh
+  affirmative act is a policy question, not obviously a bug. **Not fixed
+  this round; explicitly not a blocker.** Owner: `architect`.
+  `resolve.go`'s algorithm and ceiling/tenant-rung policy semantics were
+  NOT changed to address this — any fix is a deliberate design decision,
+  not a mechanical patch.
+- **`PLAT-TENANTREAD-1` — `tenants_read` permits full cross-tenant
+  enumeration.** (Architect fidelity review, distinct from the Fix 5
+  player-scope exclusion this same fix round shipped.) Even after Fix 5
+  excludes player scope, `tenants_read` remains `USING (true)` for every
+  other scope, so any tenant-scoped connection can enumerate every OTHER
+  tenant's `name`/`slug`/`licensing_model`/`status`/`licence_id` — no PII,
+  no licence *content* (that's `licences`, separately narrowed), but
+  potentially commercially sensitive in a B2B multi-operator context once
+  real external tenants exist (e.g. one operator learning a competitor
+  operator's licensing model or account status). Owner: `architect`/
+  `security`, to be revisited once real B2B tenant onboarding is planned.
+  **Not fixed this round; explicitly not narrowed beyond what Fix 5
+  specifies** — tenant-to-tenant read visibility is a separate, bigger
+  design question with real tradeoffs (see ADR 0046/migration 0077's own
+  "no read-side narrowing was pursued" rationale), not a mechanical
+  tightening.
 
 ### SEC-E-REV-1 — disposition: CLOSED by AMENDMENT-2
 

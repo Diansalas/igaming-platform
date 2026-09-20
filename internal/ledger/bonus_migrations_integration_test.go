@@ -27,6 +27,7 @@ package ledger
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -196,13 +197,19 @@ func TestMigration0050_BonusExpenseInsertGatedByMigration(t *testing.T) {
 // unwrapped. Uses raw SQL (never internal/ledger.GetOrCreateAccount) so
 // it can express account types this package's Go consts may not cover at
 // every point in a migration test's staged chain.
+// Stage 4I Phase E-SECURITY (migration 0077): `tenants` writes now require
+// a genuinely platform-admin-scoped transaction.
 func insertRawAccount(pool *db.Pool, accountType string) error {
 	tenantID := uuid.New()
-	return pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
+	return pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'Bonus Migration Test Tenant', 'under_platform_licence')`,
-			tenantID, "bmt-"+tenantID.String()[:8]); err != nil {
+			tenantID, "bmt-"+tenantID.String()[:8])
+		if err != nil {
 			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 tenant row, inserted %d", tag.RowsAffected())
 		}
 		return pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := tx.Exec(ctx,

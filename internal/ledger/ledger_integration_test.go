@@ -5,6 +5,7 @@ package ledger
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
 	"testing"
@@ -52,11 +53,17 @@ func seedFixture(t *testing.T, pool *db.Pool) fixture {
 	}
 	personID := uuid.New()
 
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx,
+	// Stage 4I Phase E-SECURITY (migration 0077): `tenants` writes now
+	// require a genuinely platform-admin-scoped transaction.
+	err := pool.WithPlatformAdmin(context.Background(), uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
 			`INSERT INTO tenants (id, slug, name, licensing_model) VALUES ($1, $2, 'Test Tenant', 'under_platform_licence')`,
-			f.tenantID, "t-"+f.tenantID.String()[:8]); err != nil {
+			f.tenantID, "t-"+f.tenantID.String()[:8])
+		if err != nil {
 			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to insert 1 tenant row, inserted %d", tag.RowsAffected())
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID); err != nil {
 			return err

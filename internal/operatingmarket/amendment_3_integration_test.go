@@ -786,9 +786,21 @@ func TestOperatingCountryPolicy_TenantDeletionStillCascadesAfterAmendment3(t *te
 		t.Fatalf("sanity: expected at least 4 rows (tenant-rung: one closed, one open; brand-rung: one open, active+disabled) before deletion, got %d", countBefore)
 	}
 
-	err = pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, f.tenantID)
-		return err
+	// Stage 4I Phase E-SECURITY (migration 0077): DELETE on `tenants` now
+	// requires a genuinely platform-admin-scoped transaction - a
+	// WithoutTenant DELETE here would be a silent zero-row no-op, leaving
+	// the tenant undeleted and making the cascade assertion below pass for
+	// the wrong reason (or fail misleadingly), so rows-affected is checked
+	// explicitly.
+	err = pool.WithPlatformAdmin(context.Background(), f.platformAdmin, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id = $1`, f.tenantID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("expected to delete 1 tenant row, deleted %d", tag.RowsAffected())
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("delete tenant: %v", err)
