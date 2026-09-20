@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-16 (Stage 4G-FINAL)
+Last updated: 2026-09-20 (Stage 7)
 
-## Status: Stage 4G-FINAL (Architectural Hardening & Final Gate) — complete, pending human approval to start the next stage
+## Status: Stage 7 (B2C Casino Player Experience + Casino Vertical Slice) — complete, pending human approval to start the next stage
 
 ## Stage 0 — complete (approved)
 
@@ -7257,3 +7257,82 @@ frontends (`backoffice/` 17 tests, `b2c/` 19 tests) build and pass.
 No casino, settlement, cashout, real provider integration, or country
 approval work was performed. No automatic progression — Stage 7 is NOT
 authorized and was not started.
+
+## Stage 7 — B2C Casino Player Experience + Casino Vertical Slice — complete (approved-pending)
+
+First complete B2C casino vertical slice using the EXISTING casino
+architecture (built Stage 4A onward): register → login → deposit → wallet
+→ casino lobby → select game → launch → wager → win → rollback → wallet →
+player history → Back Office visibility → audit. Not the complete casino
+product — proves the existing provider/wallet/ledger architecture supports
+a real player-facing casino flow without violating any financial/tenancy/
+identity/security/provider-boundary invariant.
+
+**Pre-stage security fix.** `casino_launch_sessions` had the identical
+brand-pinning gap Stage 6.1 found and fixed in `sportsbook_bets` — the
+original `(brand_id, tenant_id) → brands` FK never pinned brand
+specifically to the launching player's own brand. Fixed via migration
+`0079` (composite `(player_account_id, tenant_id, brand_id) →
+player_accounts` FK, reusing the same platform pattern), verified by a
+full round-trip on a scratch database and 6 new adversarial tests.
+
+**New backend surface (additive, no orchestrator/schema redesign):**
+`GET /v1/me/casino/rounds` and `GET /v1/admin/casino/rounds` (a new
+`casino_transaction:read` permission, mirroring `sportsbook_bet:read`
+exactly) reconstruct a casino "round" from `casino_launch_sessions` plus a
+re-derivation of `roundCorrelationID` — `ledger_transactions` itself has
+no player attribution or player-scope RLS at all, so the player-facing
+endpoint authorizes via an explicit `WHERE player_account_id = $1` under
+`WithTenant`, not RLS. Three new play-simulation endpoints (`POST
+/v1/me/casino/sessions/{id}/wager|win|rollback`) stand in for a real
+hosted game client (none exists this stage), each driving the exact same
+`Orchestrator.ReceiveCallback` pipeline the public provider webhook uses.
+
+**One P0, independently confirmed by FOUR specialist reviews** (architect,
+security, ledger-finance, database/RLS, each reproducing it live over
+HTTP): the play-simulation rollback endpoint let a player name ANY
+transaction as the reversal target, since the mock adapter's signature is
+self-issued by the platform on the player's own behalf and authenticates
+nothing about which transaction is named — `postRollback`'s own
+`(tenant_id, provider_id, provider_tx_id)`-scoped lookup is correct for a
+real, independently-signed provider webhook and was never designed for a
+player-supplied reference. Exploitable for cross-player fund reversal and
+a tenant-wide, unrecoverable tombstone-poisoning denial-of-service (the
+ledger is append-only). Fixed with an explicit same-round/same-wallet
+ownership check before the payload is ever signed
+(`requireRollbackTargetOwnedByRound`), a non-production-only route gate
+(`Deps.CasinoPlaySimulationEnabled`), a missing demo-mode/session-active
+guard on rollback, an amount cap, and — per ledger-finance's own
+independent P1 judgment — a required client `idempotency_key` with a
+deterministic derived `provider_tx_id` on wager/win (a retry after a lost
+response was, before this fix, a genuinely new financial transaction,
+exactly the Stage 6.1 B2C bet-slip finding recurring in new code). Also
+fixed: a multi-leg round under-reported repeated bet/win legs by
+overwriting instead of accumulating; pagination lacked a deterministic
+tiebreaker; one doc comment cited the wrong migration for an RLS
+rationale. Five new adversarial tests reproduce and close each exploit
+path directly (cross-player rollback, cross-round rollback, forged-
+reference tombstone poisoning, demo-session rollback, over-cap rejection),
+plus an idempotent-retry test and a cross-player history-isolation test.
+Recorded as ADR 0048, including its own removal condition.
+
+**Frontend**: `b2c/` casino lobby/session/history pages and a
+`backoffice/` minimum-visibility round queue (permission-gated identically
+to the sportsbook precedent), built by dedicated specialists and
+independently re-verified (40 combined tests, clean builds).
+
+**Acceptance**: a new Stage 7 defining acceptance test exercises the full
+real HTTP path with exact financial assertions at every boundary
+(including a reversed WIN correctly restoring the pre-win balance); the
+Stage 6 sportsbook acceptance test was re-run against the final state and
+remains green.
+
+Full validation gate re-run clean after every fix: 33+ Go packages
+(`-tags=integration`, fresh 79-migration database), both frontends
+(`b2c/` 31 tests, `backoffice/` 19 tests) build and pass, `gofmt`/`go vet`
+clean.
+
+No real casino provider, sportsbook settlement/cashout, real PSP
+integration, production country approvals, B2B/partner console, or
+jurisdiction/wallet-ledger/identity/RG redesign work was performed. No
+automatic progression — Stage 8 is NOT authorized and was not started.

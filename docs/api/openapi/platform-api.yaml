@@ -1093,6 +1093,212 @@ paths:
         "503":
           description: Sportsbook is not enabled on this deployment
 
+  # --- Casino round history / mock-provider play simulation (Stage 7) ---
+  # NOTE: only the Stage 7 endpoints below are documented here. The
+  # pre-existing Stage 4A casino endpoints (GET /v1/me/casino/games,
+  # POST /v1/me/casino/games/{gameID}/launch, the admin catalogue/
+  # capability/availability routes, and the provider webhook) predate
+  # this OpenAPI file's casino coverage and are tracked as separate,
+  # pre-existing documentation debt - not introduced by Stage 7.
+  /v1/me/casino/rounds:
+    get:
+      summary: List the caller's own casino round history
+      description: >
+        Player-authenticated. A "round" is one casino_launch_sessions row
+        enriched with whatever casino_bet/casino_win/casino_rollback
+        ledger transactions were posted under it (internal/casino.
+        RoundSummary) - amount fields are absent when that leg never
+        happened. Runs under db.Pool.WithTenant with an explicit
+        player_account_id filter, not RLS - ledger_transactions carries no
+        player-scope policy (see internal/casino/history.go).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated round history
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Round" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: Casino is not enabled on this deployment
+  /v1/me/casino/sessions/{sessionID}/wager:
+    post:
+      summary: Simulate a mock-provider bet for the caller's own launch session
+      description: >
+        Player-authenticated. There is no real, hosted casino-provider
+        game client for this vertical slice, so this endpoint asks the
+        tenant's own registered MockCasinoProvider to construct a
+        correctly-signed bet callback payload for the caller's own
+        session and feeds it through the exact same
+        Orchestrator.ReceiveCallback pipeline the public provider webhook
+        uses (casino_play_handlers.go) - never a shortcut around
+        signature verification or the financial posting logic. Rejects a
+        session that does not belong to the caller (404, indistinguishable
+        from an unknown session id) or is not in 'real' mode (400).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                stake_amount: { type: integer, format: int64, description: "Minor units, must be positive" }
+              required: [stake_amount]
+      responses:
+        "200":
+          description: The simulated bet's outcome
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CasinoPlayResult"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Session not found (or does not belong to the caller)
+        "503":
+          description: Casino is not enabled on this deployment, or the session's provider is not the mock adapter
+  /v1/me/casino/sessions/{sessionID}/win:
+    post:
+      summary: Simulate a mock-provider win for the caller's own launch session
+      description: >
+        Same mock-provider round-trip as the wager endpoint, for a win
+        event. Amounts credit the platform ledger (never a client-supplied
+        final balance) via the existing casino orchestrator.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                win_amount: { type: integer, format: int64, description: "Minor units, must be positive" }
+              required: [win_amount]
+      responses:
+        "200":
+          description: The simulated win's outcome
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CasinoPlayResult"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Session not found (or does not belong to the caller)
+        "503":
+          description: Casino is not enabled on this deployment, or the session's provider is not the mock adapter
+  /v1/me/casino/sessions/{sessionID}/rollback:
+    post:
+      summary: Simulate a mock-provider rollback for the caller's own launch session
+      description: >
+        Reverses the named prior bet or win via the existing compensating-
+        entry model (never a mutation of the original ledger entries). A
+        second rollback of the same original_provider_tx_id is rejected
+        with 409 (idempotent, never a double reversal).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sessionID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                original_provider_tx_id: { type: string, description: "The bet's or win's own provider_tx_id being reversed" }
+              required: [original_provider_tx_id]
+      responses:
+        "200":
+          description: The simulated rollback's outcome
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CasinoPlayResult"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Session not found (or does not belong to the caller)
+        "409":
+          description: The original transaction has already been rolled back
+        "503":
+          description: Casino is not enabled on this deployment, or the session's provider is not the mock adapter
+  /v1/admin/casino/rounds:
+    get:
+      summary: Casino round queue, tenant-wide (Stage 7 Back Office visibility)
+      description: >
+        casino_transaction:read, tenant-scoped, tenant-wide (not restricted
+        to one player) - mirrors GET /v1/admin/sportsbook/bets's identical
+        shape and rationale. Not granted to platform_admin (no tenant
+        context to scope to). Deliberately minimum-visibility, not a full
+        casino operations console.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated tenant-wide round queue
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/AdminRound" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          description: Casino is not enabled on this deployment
+
   # --- Audit trail (read-only) ---
   /v1/admin/audit-log:
     get:
@@ -3970,6 +4176,56 @@ components:
         rejection_code: { type: string }
         rejection_message: { type: string }
       required: [accepted]
+    Round:
+      type: object
+      description: >
+        A casino round (internal/casino.RoundSummary) - one launch session
+        enriched with whatever casino_bet/casino_win/casino_rollback
+        ledger transactions were posted under it. Amount/provider_tx_id
+        fields are absent when that leg never happened.
+      properties:
+        session_id: { type: string, format: uuid }
+        game_id: { type: string, format: uuid }
+        provider_id: { type: string }
+        provider_game_id: { type: string }
+        asset_code: { type: string }
+        mode: { type: string, enum: [real, demo] }
+        status: { type: string, enum: [launched, wagered, won, rolled_back] }
+        launched_at: { type: string, format: date-time }
+        bet_amount: { type: integer, format: int64 }
+        win_amount: { type: integer, format: int64 }
+        rollback_amount: { type: integer, format: int64 }
+        bet_provider_tx_id: { type: string }
+        win_provider_tx_id: { type: string }
+        rollback_provider_tx_id: { type: string }
+      required: [session_id, game_id, provider_id, provider_game_id, asset_code, mode, status, launched_at]
+    AdminRound:
+      allOf:
+        - $ref: "#/components/schemas/Round"
+        - type: object
+          description: >
+            Stage 7 Back Office minimum-visibility view - adds the player/
+            brand identity, the same decimal_exponent presentation aid
+            AdminBet carries, and the round's own ledger_transaction_ids
+            for audit-log cross-reference.
+          properties:
+            player_account_id: { type: string, format: uuid }
+            brand_id: { type: string, format: uuid }
+            decimal_exponent: { type: integer }
+            ledger_transaction_ids:
+              type: array
+              items: { type: string, format: uuid }
+          required: [player_account_id, brand_id, decimal_exponent, ledger_transaction_ids]
+    CasinoPlayResult:
+      type: object
+      description: Response envelope shared by the wager/win/rollback play-simulation endpoints.
+      properties:
+        outcome: { type: string, enum: [succeeded, declined, ambiguous, pending] }
+        provider_tx_id: { type: string, description: "This event's own provider reference - save it to name in a later rollback" }
+        ledger_transaction_id: { type: string, format: uuid }
+        tombstoned: { type: boolean }
+        decline_reason: { type: string }
+      required: [outcome, provider_tx_id, tombstoned]
     Document:
       type: object
       description: >

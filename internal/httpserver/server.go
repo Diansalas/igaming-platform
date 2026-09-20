@@ -61,6 +61,24 @@ type Deps struct {
 	// gated by whether any adapter is currently registered.
 	CasinoOrchestrator *casino.Orchestrator
 
+	// CasinoPlaySimulationEnabled gates the three Stage 7 mock-provider
+	// play-simulation routes (POST /v1/me/casino/sessions/{id}/wager|win|
+	// rollback - casino_play_handlers.go). These exist only because no
+	// real, hosted casino game client exists yet: each one asks the
+	// tenant's own registered *casino.MockCasinoProvider to mint a
+	// self-signed callback payload on the AUTHENTICATED PLAYER's behalf
+	// and feeds it through the real Orchestrator.ReceiveCallback pipeline
+	// - which means the payload's signature authenticates nothing (the
+	// platform signs it for the player), unlike a real provider webhook's
+	// signature. Two independent specialist reviews (architect,
+	// ledger-finance) both flagged this as a P0/architectural trust-
+	// boundary inversion that must never reach a real deployment "because
+	// we haven't wired it into anything yet" - the defense has to be in
+	// the code, not an assumption about what gets deployed. Defaults to
+	// the zero value (false, disabled) exactly like SportsbookEnabled;
+	// cmd/platform-api/main.go sets it only outside production.
+	CasinoPlaySimulationEnabled bool
+
 	// SportsbookEnabled gates every Stage 6 sportsbook route (catalogue
 	// browse, bet placement, bet history, admin visibility) - unlike
 	// PaymentOrchestrator/CasinoOrchestrator (a provider-adapter registry),

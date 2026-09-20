@@ -75,6 +75,16 @@ const (
 	// CLAUDE.md's "no fake completion" rule warns against.
 	PermSportsbookBetRead Permission = "sportsbook_bet:read"
 
+	// PermCasinoTransactionRead gates STAFF, tenant-wide Back Office
+	// visibility into every player's casino rounds/transactions (Stage 7) -
+	// mirrors PermSportsbookBetRead's shape and grant list exactly, for the
+	// identical reason: a player always sees their OWN casino history via
+	// the self-service endpoint regardless of this permission (RLS's
+	// player_self_scope policy on casino_launch_sessions, not RBAC,
+	// authorizes that). Deliberately NOT RolePlatformAdmin, for the same
+	// reason PermSportsbookBetRead excludes it.
+	PermCasinoTransactionRead Permission = "casino_transaction:read"
+
 	// PermWithdrawalPolicyWrite gates the Stage 3D withdrawal_policies
 	// admin API (docs/decisions/0024 §5). Deliberately its own
 	// permission, never bundled with PermWithdrawalApprove: the role
@@ -548,6 +558,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// Stage 6: tenant-wide sportsbook bet visibility - see that
 		// permission's own doc comment.
 		PermSportsbookBetRead,
+		// Stage 7: see PermCasinoTransactionRead's own doc comment.
+		PermCasinoTransactionRead,
 	),
 	RoleSupport: permSet(
 		PermPlayerRead,
@@ -555,6 +567,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermBonusRead,
 		// Stage 6: see PermSportsbookBetRead's own doc comment.
 		PermSportsbookBetRead,
+		// Stage 7: see PermCasinoTransactionRead's own doc comment.
+		PermCasinoTransactionRead,
 	),
 	RoleCompliance: permSet(
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead,
@@ -590,6 +604,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermOperatingMarketTenantPolicyWrite, PermOperatingMarketPolicyRead,
 		// Stage 6: see PermSportsbookBetRead's own doc comment.
 		PermSportsbookBetRead,
+		// Stage 7: see PermCasinoTransactionRead's own doc comment.
+		PermCasinoTransactionRead,
 	),
 	// finance is Stage 3B's own role, dedicated solely to withdrawal
 	// governance - it holds all four withdrawal permissions and nothing
@@ -602,6 +618,9 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// already needs visibility into when investigating a player's
 		// balance/withdrawal history.
 		PermSportsbookBetRead,
+		// Stage 7: see PermCasinoTransactionRead's own doc comment - the
+		// same reasoning applies to a casino round.
+		PermCasinoTransactionRead,
 	),
 	// Stage 4G: risk_manager is dedicated solely to Risk & Limits
 	// configuration - it holds both risk_config permissions and nothing

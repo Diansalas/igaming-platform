@@ -17,6 +17,7 @@ import { TenantListPage } from '../features/tenants/TenantListPage'
 import { WithdrawalDetailPage } from '../features/withdrawals/WithdrawalDetailPage'
 import { WithdrawalQueuePage } from '../features/withdrawals/WithdrawalQueuePage'
 import { SportsbookBetsPage } from '../features/sportsbook/SportsbookBetsPage'
+import { CasinoRoundsPage } from '../features/casino/CasinoRoundsPage'
 import { PlatformAuditLogPage } from '../features/audit/PlatformAuditLogPage'
 import { TenantAuditLogPage } from '../features/audit/TenantAuditLogPage'
 import { HomePage } from './HomePage'
@@ -139,6 +140,15 @@ export function AppRoutes() {
           element={
             <RequireNavPermission permission="sportsbook">
               <SportsbookBetsPage />
+            </RequireNavPermission>
+          }
+        />
+
+        <Route
+          path="casino"
+          element={
+            <RequireNavPermission permission="casino">
+              <CasinoRoundsPage />
             </RequireNavPermission>
           }
         />

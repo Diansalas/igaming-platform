@@ -25,6 +25,8 @@ export interface NavPermissions {
   platformAudit: boolean
   /** Stage 6: tenant-wide sportsbook bet visibility (PermSportsbookBetRead). */
   sportsbook: boolean
+  /** Stage 7: tenant-wide casino round visibility (PermCasinoTransactionRead). */
+  casino: boolean
 }
 
 const NONE: NavPermissions = {
@@ -38,19 +40,34 @@ const NONE: NavPermissions = {
   tenantAudit: false,
   platformAudit: false,
   sportsbook: false,
+  casino: false,
 }
 
 // Stage 6's sportsbook flag mirrors exactly which roles the backend grants
 // PermSportsbookBetRead to (internal/auth/permission.go): tenant_admin,
 // compliance, support, finance - never platform_admin, since platform_admin
 // has no tenant context to view bets in (db.Pool.WithTenant hard-errors on
-// uuid.Nil).
+// uuid.Nil). Stage 7's casino flag mirrors PermCasinoTransactionRead the
+// same way, for the identical reason and the identical role set: a player
+// always sees their own casino history via the self-service endpoint (RLS/
+// explicit ownership checks, not RBAC, authorize that), and platform_admin
+// still has no tenant-scoped player_account to resolve.
 const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
   platform_admin: { ...NONE, tenants: true, platformAudit: true },
-  tenant_admin: { ...NONE, ownTenant: true, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true },
-  support: { ...NONE, players: true, bonus: true, sportsbook: true },
-  compliance: { ...NONE, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true },
-  finance: { ...NONE, withdrawals: true, sportsbook: true },
+  tenant_admin: {
+    ...NONE,
+    ownTenant: true,
+    players: true,
+    kyc: true,
+    rg: true,
+    bonus: true,
+    tenantAudit: true,
+    sportsbook: true,
+    casino: true,
+  },
+  support: { ...NONE, players: true, bonus: true, sportsbook: true, casino: true },
+  compliance: { ...NONE, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true },
+  finance: { ...NONE, withdrawals: true, sportsbook: true, casino: true },
   risk_manager: { ...NONE },
   promotions_manager: { ...NONE, bonus: true },
   bonus_operations: { ...NONE, bonus: true },

@@ -32,13 +32,14 @@ describe('buildNavItems', () => {
     expect(items).toContain('Bonus')
     expect(items).toContain('Audit Log')
     expect(items).toContain('Sportsbook')
+    expect(items).toContain('Casino')
     expect(items).not.toContain('Withdrawals')
     expect(items).not.toContain('Tenants')
   })
 
-  it('gives finance the withdrawals and sportsbook sections, nothing else', () => {
+  it('gives finance the withdrawals, sportsbook, and casino sections, nothing else', () => {
     const items = buildNavItems({ ...baseClaims, role: 'finance' }).map((i) => i.label)
-    expect(items).toEqual(['Withdrawals', 'Sportsbook'])
+    expect(items).toEqual(['Withdrawals', 'Sportsbook', 'Casino'])
   })
 
   it('gives a platform_admin (nil-tenant) principal Tenants + Platform Audit Log, never tenant-operational sections', () => {

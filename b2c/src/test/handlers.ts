@@ -66,6 +66,19 @@ export const handlers = [
     ])
   }),
 
+  http.get('/v1/me/wallets/:assetCode', ({ params }) => {
+    return HttpResponse.json({
+      wallet_id: 'wallet-1',
+      asset_code: params.assetCode,
+      status: 'active',
+      cash_balance: 10000,
+      available_balance: 9500,
+      held_for_withdrawal: 0,
+      locked_balance: 500,
+      bonus_balance: 0,
+    })
+  }),
+
   http.get('/v1/sportsbook/sports', () => {
     return HttpResponse.json([
       {
@@ -132,5 +145,60 @@ export const handlers = [
 
   http.get('/v1/me/deposits', () => {
     return HttpResponse.json([])
+  }),
+
+  http.get('/v1/me/casino/games', () => {
+    return HttpResponse.json([
+      {
+        id: 'game-1',
+        provider_id: 'mock-casino',
+        name: 'Mock Slots Deluxe',
+        game_type: 'slot',
+        rtp_variant: 'standard',
+        volatility: 'medium',
+        feature_flags: [],
+        supported_assets: ['USD'],
+        mobile_supported: true,
+        demo_supported: true,
+      },
+    ])
+  }),
+
+  http.post('/v1/me/casino/games/:gameId/launch', () => {
+    return HttpResponse.json(
+      { launch_url: 'https://mock-casino.example/launch/session-1', session_id: 'session-1', expires_at: '2026-01-01T01:00:00Z' },
+      { status: 201 },
+    )
+  }),
+
+  http.post('/v1/me/casino/sessions/:sessionId/wager', () => {
+    return HttpResponse.json({
+      outcome: 'succeeded',
+      provider_tx_id: 'ptx-wager-1',
+      ledger_transaction_id: 'ltx-wager-1',
+      tombstoned: false,
+    })
+  }),
+
+  http.post('/v1/me/casino/sessions/:sessionId/win', () => {
+    return HttpResponse.json({
+      outcome: 'succeeded',
+      provider_tx_id: 'ptx-win-1',
+      ledger_transaction_id: 'ltx-win-1',
+      tombstoned: false,
+    })
+  }),
+
+  http.post('/v1/me/casino/sessions/:sessionId/rollback', () => {
+    return HttpResponse.json({
+      outcome: 'succeeded',
+      provider_tx_id: 'ptx-rollback-1',
+      ledger_transaction_id: 'ltx-rollback-1',
+      tombstoned: false,
+    })
+  }),
+
+  http.get('/v1/me/casino/rounds', () => {
+    return HttpResponse.json({ items: [], limit: 20, offset: 0, total: 0 })
   }),
 ]

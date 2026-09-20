@@ -30,6 +30,7 @@ export function buildNavItems(claims: StaffClaims | null): NavItem[] {
   if (perms.bonus) items.push({ label: 'Bonus', to: '/bonus/campaigns' })
   if (perms.withdrawals) items.push({ label: 'Withdrawals', to: '/withdrawals' })
   if (perms.sportsbook) items.push({ label: 'Sportsbook', to: '/sportsbook' })
+  if (perms.casino) items.push({ label: 'Casino', to: '/casino' })
   if (perms.tenantAudit) items.push({ label: 'Audit Log', to: '/audit-log' })
 
   return items

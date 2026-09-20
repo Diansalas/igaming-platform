@@ -34,14 +34,15 @@ import (
 func newCasinoTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, orchestrator *casino.Orchestrator) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(New(Deps{
-		Logger:             slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		DB:                 pool,
-		AuthIssuer:         issuer,
-		ServiceName:        "platform-api-test",
-		AccessTokenTTL:     5 * time.Minute,
-		RefreshTokenTTL:    time.Hour,
-		CasinoOrchestrator: orchestrator,
-		PersonResolver:     identityresolution.NewMockPersonResolver(),
+		Logger:                      slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:                          pool,
+		AuthIssuer:                  issuer,
+		ServiceName:                 "platform-api-test",
+		AccessTokenTTL:              5 * time.Minute,
+		RefreshTokenTTL:             time.Hour,
+		CasinoOrchestrator:          orchestrator,
+		CasinoPlaySimulationEnabled: true,
+		PersonResolver:              identityresolution.NewMockPersonResolver(),
 	}))
 	t.Cleanup(srv.Close)
 	return srv

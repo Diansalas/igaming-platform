@@ -155,7 +155,15 @@ func run() error {
 		RefreshTokenTTL:     cfg.RefreshTokenTTL,
 		PaymentOrchestrator: orchestrator,
 		CasinoOrchestrator:  casinoOrchestrator,
-		SportsbookEnabled:   true,
+		// Stage 7: the mock-provider play-simulation routes let an
+		// authenticated player mint self-signed casino callbacks on their
+		// own behalf (casino_play_handlers.go's own doc comment) - a
+		// deliberate, disclosed MOCK seam for a vertical slice with no
+		// real hosted game client, never safe to expose once "production"
+		// means real money. Specialist review requirement (architect/
+		// security/ledger-finance, independently).
+		CasinoPlaySimulationEnabled: cfg.Environment != "production",
+		SportsbookEnabled:           true,
 		// Stage 4E: no real identity-resolution vendor is contracted yet
 		// (docs/decisions/0027 §3) - MockPersonResolver's honest default
 		// (NoMatch for every registration, since none carries verified

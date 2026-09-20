@@ -2354,6 +2354,147 @@ production country/jurisdiction approvals, any answer to
 for sportsbook, any catalogue jurisdiction-blocklist mechanism (recorded
 as a future precondition only, per ADR 0047 — not built this stage).
 
+## Stage 7 — B2C Casino Player Experience + Casino Vertical Slice
+
+First complete B2C casino vertical slice using the existing casino
+architecture (built Stage 4A onward and hardened through 4G/4H/4I). Full
+narrative: `docs/progress.md`'s "Stage 7" section, `docs/active-stage.md`'s
+current-stage entry, and
+`docs/decisions/0048-casino-play-simulation-trust-boundary.md`.
+
+| ID | Owner | Status | Files owned | Tests | Blockers | Integration |
+|---|---|---|---|---|---|---|
+| S7-01 | Orchestrator | Done | baseline re-verification only | full 32-package suite, fresh migration | none | Verified |
+| S7-02 | Orchestrator | Done | `migrations/0079_casino_launch_session_brand_pinning.{up,down}.sql`, `internal/casino/launch_session_brand_pinning_test.go` (6 new tests) | up/down/up round-trip on scratch DB, 6 adversarial tests, full `internal/casino` re-run | none | Verified |
+| S7-03 | Orchestrator | Done | `internal/casino/history.go` (new), `internal/httpserver/casino_history_handlers.go` (new), `internal/auth/permission.go` (`PermCasinoTransactionRead`), `internal/httpserver/casino_routes.go` | covered by S7-05's HTTP tests | none | Verified |
+| S7-04 | Orchestrator | Done | `internal/httpserver/casino_play_handlers.go` (new) | covered by S7-05's HTTP tests | none | Verified |
+| S7-05 | frontend (subagent) | Done | `b2c/src/api/casino.ts`, `b2c/src/features/casino/*` (new), `b2c/src/app/AppRoutes.tsx`, `b2c/src/layout/nav.ts`, `b2c/src/test/handlers.ts` | 12 new Vitest+RTL+MSW tests, 31/31 total green, `tsc -b`/build clean | none | Verified (independently re-run) |
+| S7-06 | backoffice (subagent) | Done | `backoffice/src/api/casinoAdmin.ts`, `backoffice/src/features/casino/*` (new), `backoffice/src/auth/permissions.ts`, `backoffice/src/layout/nav.ts`, `backoffice/src/app/AppRoutes.tsx` | 2 new tests, 19/19 total green, `tsc -b`/build clean | none | Verified (independently re-run) |
+| S7-07 | architect, security, ledger-finance, architect (DB/RLS), qa | Done | review only | n/a | See findings below | n/a |
+| S7-08 | Orchestrator (fix round) | Done | `internal/httpserver/casino_play_handlers.go` (rewritten), `internal/casino/history.go` (`TransactionBelongsToRound`, multi-leg accumulation, pagination tiebreaker), `internal/httpserver/server.go` (`CasinoPlaySimulationEnabled`), `internal/httpserver/casino_routes.go` (route gate), `cmd/platform-api/main.go` (wiring) | 5 new adversarial regression tests + 1 idempotent-retry test + 1 cross-player-isolation test, full suite re-run | none | Verified |
+| S7-09 | Orchestrator | Done | `docs/decisions/0048-*.md` (new) | n/a | none | n/a |
+| S7-10 | Orchestrator | Done | `internal/httpserver/stage7_b2c_casino_acceptance_test.go` (new) | 11-step acceptance test, exact financial assertions; Stage 6 sportsbook acceptance test re-run | none | Verified |
+| S7-11 | Orchestrator | Done | this registry, `docs/active-stage.md`, `docs/progress.md`, `docs/api/openapi/platform-api.yaml` | full validation gate | none | n/a — **stage explicitly STOPS here; Stage 8 NOT authorized** |
+
+### Review findings and dispositions
+
+**The headline finding — one P0, independently confirmed FOUR times**
+(architect, security, ledger-finance, database/RLS, each reproducing it
+live over HTTP against a real database, none aware of the others' work
+until after independently finding the same defect): the play-simulation
+rollback endpoint (`POST /v1/me/casino/sessions/{id}/rollback`) let an
+authenticated player name ANY `original_provider_tx_id` as the reversal
+target. `postRollback`'s own lookup
+(`internal/casino/orchestrator.go`) is scoped to `(tenant_id, provider_id,
+provider_tx_id)` only — correct for a real, independently-signed provider
+webhook, where that triple is fully provider-attested, and never designed
+to receive a player-supplied reference, since the mock adapter's signature
+on this endpoint is self-issued by the platform on the player's own
+behalf and authenticates nothing about which transaction they name.
+Confirmed exploitable, live, for: cross-player fund reversal (player B,
+using B's own genuinely-owned session, reverses player A's win or bet,
+crediting/debiting A's wallet); cross-round reversal (the same player
+using one round to reverse a transaction from an unrelated round of their
+own); and a tenant-wide, unrecoverable denial-of-service (a rollback
+naming a never-issued reference writes a permanent ledger tombstone,
+later making a genuine bet/win that happens to mint that exact reference
+fail outright, with no recovery possible since the ledger is append-only).
+**Fixed** in `casino_play_handlers.go` via
+`requireRollbackTargetOwnedByRound`/`casino.TransactionBelongsToRound`
+(the named transaction must belong to the calling session's own round —
+same `correlation_id` — and wallet, checked before the payload is ever
+signed, returning the same enumeration-resistant 404 as a session
+mismatch). Recorded as ADR 0048.
+
+**Compounding P0-adjacent findings, all fixed in the same round**: the
+three play-simulation routes were registered unconditionally in the
+production binary with no deployment gate (a mock provider is by
+definition one that says yes to everything, so "the provider type is
+restricted" was not itself a safety property) — fixed with
+`Deps.CasinoPlaySimulationEnabled`, set only outside `production`; the
+rollback handler was missing the `ModeReal`/session-active/expiry guard
+wager and win both already had — fixed; a player could declare an
+unbounded `win_amount` with no real game outcome behind it — fixed with
+`maxCasinoPlaySimulationAmount`.
+
+**Ledger-finance's own independent P1 judgment call** (explicitly asked
+for, not just flagged): minting a fresh `provider_tx_id` per wager/win
+call meant a client retry after a lost response was, by construction, a
+SECOND financial transaction — ledger-finance rated this **P1, not P0**
+(each posting stays individually well-formed and balanced; the failure is
+a duplicate instruction, not ledger corruption, and is correctable via
+the existing rollback path) but explicitly **not acceptable as a disclosed
+mock-only limitation**, since the platform already decided this exact
+question one stage ago for `POST /v1/me/sportsbook/bets`'s required
+`idempotency_key` contract (Stage 6.1), and this file is now the repo's
+reference implementation of "a request-scoped caller drives
+`ReceiveCallback`" that a future specialist would copy. **Fixed**: wager/win
+now require a client `idempotency_key`, deriving a deterministic
+`provider_tx_id` from it (rollback did not need this — a retry naming the
+same original is already safe via `postRollback`'s own
+`ErrAlreadyRolledBack` check, independently confirmed by reading that
+code path).
+
+**Ledger-finance also found, fixed**: `internal/casino/history.go`'s
+round summary overwrote rather than accumulated repeated bet/win/rollback
+legs, silently under-reporting a round's true stake/payout the moment a
+player interacts with a session more than once (the normal way the new
+session screen is used, not a corner case) — fixed to sum each leg type.
+
+**Database/RLS review, fixed**: `listSessionsPage`'s `ORDER BY
+created_at DESC` had no tiebreaker, so pagination was non-deterministic
+under same-transaction timestamp ties — added `, id DESC`. Also
+recommended (not yet added, recorded as tech debt): a
+`(tenant_id, created_at DESC)` index on `casino_launch_sessions` before
+either round-visibility view carries real volume (matches the sportsbook
+precedent's own identical, already-disclosed gap).
+
+**Security review, fixed**: added a player-attributed
+`casino_play_simulation.{wager,win,rollback}` audit record alongside the
+existing system-attributed `postBet`/`postWin`/`postRollback` records
+(which remain correct, unchanged, for their real intended caller) — a
+player-triggered financial mutation was otherwise indistinguishable in
+`audit_log` from a genuine provider callback, which would make an abuse
+investigation of this simulation seam impossible.
+
+**Architect review, disclosed as a known limitation, not fixed this
+stage**: the round read model (session-anchored, `roundCorrelationID`
+re-derivation, deliberately never a new "rounds" table — confirmed
+consistent with `docs/architecture/08-casino-integration-architecture.md`
+§7's own frozen design) is accurate only for rounds whose bet/win/rollback
+callbacks all shared the session's own id as `RoundID` — the convention
+this stage's play-simulation endpoints introduce. A real provider posting
+via the public webhook with its own, different round id would render
+blank in this view. Recorded in ADR 0048's "known residual limitation"
+section; the clean fix (persisting the provider-declared round id) is
+deferred to whenever a real provider integration is actually scoped, not
+spent effort on speculatively now.
+
+**QA review**: independently reproduced the same P0 (a fifth confirmation,
+via its own from-scratch test before the fix landed), confirmed none of
+the pre-existing three new backend test files were vacuous under direct
+mutation (6 separate mutations tried, each caused the expected, correctly-
+targeted test failure), and confirmed the frontend's decline-vs-error
+rendering distinction is genuinely tested (mutation-verified). Its
+mid-review snapshot caught the fix-in-flight test/contract mismatch this
+same round resolved (new tests added, existing tests updated for the new
+`idempotency_key`/`CasinoPlaySimulationEnabled` contract, full suite
+re-confirmed green after).
+
+### Dispositions carried over from prior stages (unaffected by this one)
+
+None of Stage 6.1's four disposed items (cumulative sportsbook risk rule,
+catalogue tenant/jurisdiction gating, casino/withdrawal concurrency-test
+convention backfill, B2C build-time brand model) were reopened or affected
+by Stage 7's casino work.
+
+### Explicitly NOT this stage's to build (confirmed absent)
+
+Real casino provider integration, sportsbook settlement/cashout, real PSP
+integration, production country/jurisdiction approvals, any answer to
+`HDR-J-6/7/8/9`, B2B/partner console, retail, and any
+jurisdiction/wallet-ledger/identity/RG redesign.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

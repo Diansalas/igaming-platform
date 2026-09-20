@@ -4,6 +4,9 @@ import { RegisterPage } from '../auth/RegisterPage'
 import { RequireAuth } from '../auth/RequireAuth'
 import { AccountPage } from '../features/account/AccountPage'
 import { BetHistoryPage } from '../features/bets/BetHistoryPage'
+import { CasinoHistoryPage } from '../features/casino/CasinoHistoryPage'
+import { CasinoLobbyPage } from '../features/casino/CasinoLobbyPage'
+import { CasinoSessionPage } from '../features/casino/CasinoSessionPage'
 import { DepositPage } from '../features/deposit/DepositPage'
 import { EventDetailPage } from '../features/sportsbook/EventDetailPage'
 import { SportsListPage } from '../features/sportsbook/SportsListPage'
@@ -45,6 +48,38 @@ export function AppRoutes() {
           element={
             <RequireAuth>
               <BetHistoryPage />
+            </RequireAuth>
+          }
+        />
+
+        {/*
+          GET /v1/me/casino/games requires auth per its own route naming
+          (unlike the sportsbook's public /v1/sportsbook/sports), and there
+          is no meaningful anonymous casino experience without a session
+          anyway - so the whole /casino/* subtree is wrapped in RequireAuth,
+          not just the mutating routes.
+        */}
+        <Route
+          path="casino"
+          element={
+            <RequireAuth>
+              <CasinoLobbyPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="casino/sessions/:sessionId"
+          element={
+            <RequireAuth>
+              <CasinoSessionPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="casino/history"
+          element={
+            <RequireAuth>
+              <CasinoHistoryPage />
             </RequireAuth>
           }
         />

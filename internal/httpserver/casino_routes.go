@@ -21,6 +21,33 @@ func registerCasinoRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("GET /v1/me/casino/games", auth.Middleware(deps.AuthIssuer)(newListCasinoGamesHandler(deps)))
 	mux.Handle("POST /v1/me/casino/games/{gameID}/launch", auth.Middleware(deps.AuthIssuer)(newLaunchCasinoGameHandler(deps)))
 
+	// Player self-service round history (Stage 7 §16).
+	mux.Handle("GET /v1/me/casino/rounds", auth.Middleware(deps.AuthIssuer)(newListMyCasinoRoundsHandler(deps)))
+
+	// Stage 7 §6/§7: mock-provider play simulation for the player's own
+	// launch session - see casino_play_handlers.go's own doc comment for
+	// why this exists only because no real provider integration exists yet
+	// this stage. Gated behind CasinoPlaySimulationEnabled (never routed
+	// at all when false, not merely 404'd inside the handler) - specialist
+	// review finding (architect/security/ledger-finance, independently):
+	// a mock provider is by definition one that says yes to everything, so
+	// registering these routes unconditionally would ship a player-
+	// authenticated money-minting/reversal surface in every deployment of
+	// this binary, relying only on "no tenant happens to be configured
+	// against a non-mock provider" - an assumption that holds today only
+	// because no other adapter exists yet. cmd/platform-api/main.go sets
+	// this outside production.
+	if deps.CasinoPlaySimulationEnabled {
+		mux.Handle("POST /v1/me/casino/sessions/{sessionID}/wager", auth.Middleware(deps.AuthIssuer)(newWagerCasinoRoundHandler(deps)))
+		mux.Handle("POST /v1/me/casino/sessions/{sessionID}/win", auth.Middleware(deps.AuthIssuer)(newWinCasinoRoundHandler(deps)))
+		mux.Handle("POST /v1/me/casino/sessions/{sessionID}/rollback", auth.Middleware(deps.AuthIssuer)(newRollbackCasinoRoundHandler(deps)))
+	}
+
+	// Back Office - tenant-wide, staff-scoped, read-only round visibility
+	// (Stage 7 §15).
+	mux.Handle("GET /v1/admin/casino/rounds",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoTransactionRead)(newListAdminCasinoRoundsHandler(deps)))))
+
 	// Provider callback (bet/win/rollback) - no bearer-token middleware (a
 	// provider webhook is not an authenticated platform principal); the
 	// handler resolves tenant scope from the URL's tenant slug and
