@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
+import { newIdempotencyKey } from '../../lib/idempotencyKey'
 
 // Singles-only bet slip state (matching the backend's scope this stage -
 // no accumulator/multi-leg support). Selecting a new outcome REPLACES
@@ -9,6 +10,19 @@ import { createContext, useCallback, useContext, useMemo, useState, type ReactNo
 // so the server can detect and reject a stale price
 // (`rejection_category: odds_changed`) rather than trusting this slip's
 // copy of the odds.
+//
+// idempotencyKey is minted ONCE per selection (here, in setSelection) and
+// held for the lifetime of this slip composition - Stage 6.1 security
+// review finding: the original design minted a FRESH key on every submit
+// attempt (inside onPlaceBet itself), which defeats the server's
+// idempotency guarantee for the exact case it exists to cover - a
+// network/timeout error where the original POST actually committed but
+// the response was lost. Retrying with a NEW key placed a genuine second
+// bet and a second stake debit. The key now survives a retry after any
+// error, and is regenerated only when the player picks a different
+// selection (a new SlipSelection) or explicitly starts over (clear()) -
+// both cases are genuinely a different bet attempt, not a retry of the
+// same one.
 export interface SlipSelection {
   selectionId: string
   selectionName: string
@@ -17,12 +31,16 @@ export interface SlipSelection {
   eventName: string
   oddsNumerator: number
   oddsDenominator: number
+  idempotencyKey: string
 }
+
+/** What a caller (e.g. EventDetailPage) provides when picking a selection - everything except the idempotency key, which this context mints itself. */
+export type NewSlipSelection = Omit<SlipSelection, 'idempotencyKey'>
 
 interface BetSlipContextValue {
   selection: SlipSelection | null
-  setSelection: (selection: SlipSelection) => void
-  /** Updates only the odds of the CURRENT selection - used after an odds_changed rejection re-fetches the live price. */
+  setSelection: (selection: NewSlipSelection) => void
+  /** Updates only the odds of the CURRENT selection - used after an odds_changed rejection re-fetches the live price. Deliberately does NOT touch idempotencyKey: this is still the same bet attempt, now armed with a fresher price. */
   updateOdds: (oddsNumerator: number, oddsDenominator: number) => void
   clear: () => void
   isOpen: boolean
@@ -37,8 +55,8 @@ export function BetSlipProvider({ children }: { children: ReactNode }) {
   const [selection, setSelectionState] = useState<SlipSelection | null>(null)
   const [isOpen, setIsOpen] = useState(false)
 
-  const setSelection = useCallback((next: SlipSelection) => {
-    setSelectionState(next)
+  const setSelection = useCallback((next: NewSlipSelection) => {
+    setSelectionState({ ...next, idempotencyKey: newIdempotencyKey() })
     setIsOpen(true)
   }, [])
 

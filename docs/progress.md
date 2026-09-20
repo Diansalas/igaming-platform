@@ -7202,3 +7202,58 @@ correctly not reopened; bonus-funded sportsbook stakes remain
 platform-wide blocked. `PLAT-ROLESPLIT-1` remains unaddressed per its own
 documented instruction. No automatic progression — Stage 7 is NOT
 authorized and was not started.
+
+## Stage 6.1 — B2C/Sportsbook Hardening & Architectural Closure Gate
+
+A focused hardening pass over Stage 6, not a feature stage. Baseline
+re-verified independently (fresh migration, full suite, both frontends).
+Five focused specialist reviews (architect, security, ledger-finance, a
+DB/RLS-specific pass, qa).
+
+**One P0-equivalent fix**: the B2C bet slip and deposit form minted a
+FRESH idempotency key on every submit click rather than once per attempt,
+so a retry after a network/timeout error (where the original request may
+have actually committed) placed a genuine second bet or deposit with a
+real second stake/amount debit — defeating the idempotency mechanism for
+the exact failure mode it exists to cover. Fixed by minting the key once
+per bet-slip/deposit-form composition and holding it across any retry,
+regenerated only when the player starts a genuinely new attempt. New
+regression test locks this in.
+
+**Financial-integrity hardening**: the ledger idempotency key gained an
+explicit transaction-type discriminator (not just player-scoping);
+ledger-finance's own review then found that change itself could allow a
+double stake-lock during a mixed-version rolling deploy, closed with a
+3-line cross-check that aborts (and rolls back) a transaction whose
+ledger posting doesn't match the idempotency-resolved bet.
+
+**One real DB-level gap fixed**: `sportsbook_bets.brand_id` wasn't pinned
+to the specific player's own brand at the database level (only "some
+brand in the tenant") — not reachable via the application today, but a
+genuine missing invariant per CLAUDE.md's RLS-not-application-discipline
+rule. Fixed with a composite FK reusing the exact pattern `wallets` and
+`bonus_grants` already established. Also added `asset_code`→`assets` FK.
+
+**Test-coverage gaps fixed**: two of three sibling rejection branches
+(market-not-open, selection-not-active) had zero test coverage — a
+refactor could have silently deleted either. `brand_id`/`decimal_exponent`
+were populated but never asserted against known-correct values anywhere.
+
+**Two factually wrong doc comments corrected**: sportsbook's own comment
+claimed no other domain applies jurisdiction blocklisting — casino
+actually does (though inert, since every blocklist is empty). A stale
+risk-package comment said "no internal/sportsbook exists."
+
+**New ADR 0047** formally documents the jurisdiction/catalogue-gating
+boundary and the cumulative-risk gap, both disposed as SAFE DEFERMENT —
+required before a second jurisdiction/B2B tenant, not before Stage 7. All
+four originally-deferred Stage 6 items received a formal disposition
+(all SAFE DEFERMENT, none blocking).
+
+Full validation gate re-run clean after every fix: 31 Go packages,
+concurrency/idempotency tests re-run 3x fresh under `-race`, both
+frontends (`backoffice/` 17 tests, `b2c/` 19 tests) build and pass.
+
+No casino, settlement, cashout, real provider integration, or country
+approval work was performed. No automatic progression — Stage 7 is NOT
+authorized and was not started.

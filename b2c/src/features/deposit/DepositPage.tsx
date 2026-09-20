@@ -54,6 +54,14 @@ export function DepositPage() {
   const [paymentMethod, setPaymentMethod] = useState('card')
   const [lastIntent, setLastIntent] = useState<DepositIntent | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
+  // Minted once per deposit ATTEMPT, not per submit click - Stage 6.1
+  // security review finding: generating a fresh key inside onSubmit meant
+  // a retry after a network/timeout error (where the original POST may
+  // have actually committed) placed a genuine second deposit request.
+  // Reused across any retry of the SAME attempt; only regenerated once
+  // this attempt actually succeeds, since the next submit is then a
+  // genuinely new attempt. See BetSlipContext.tsx's identical fix.
+  const [idempotencyKey, setIdempotencyKey] = useState(() => newIdempotencyKey())
 
   const depositsQuery = useQuery({ queryKey: ['deposits'], queryFn: listMyDeposits })
 
@@ -75,6 +83,7 @@ export function DepositPage() {
     onSuccess: async (intent) => {
       setLastIntent(intent)
       setFormError(null)
+      setIdempotencyKey(newIdempotencyKey())
       await queryClient.invalidateQueries({ queryKey: ['deposits'] })
     },
     onError: (err) => setFormError(err instanceof ApiError ? err.message : 'Failed to start this deposit.'),
@@ -88,7 +97,7 @@ export function DepositPage() {
       return
     }
     setFormError(null)
-    mutation.mutate({ assetCode, amount: amountMinorUnits, paymentMethod, idempotencyKey: newIdempotencyKey() })
+    mutation.mutate({ assetCode, amount: amountMinorUnits, paymentMethod, idempotencyKey })
   }
 
   return (

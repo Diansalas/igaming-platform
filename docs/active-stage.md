@@ -1480,7 +1480,172 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 6 — B2C Player/Brand MVP + First Sportsbook Vertical Slice — COMPLETE, awaiting human review
+## Current stage: Stage 6.1 — B2C/Sportsbook Hardening & Architectural Closure Gate — COMPLETE, awaiting human review
+
+**Purpose.** A focused hardening/closure pass over the just-completed
+Stage 6 diff — verify boundaries, fix real defects, document safe
+deferrals, stop. Not a feature stage: no casino, no settlement/cashout,
+no real sportsbook provider integration, no production country
+approvals, no HDR-J-6/7/8/9 answers, no jurisdiction architecture
+reopened.
+
+**Baseline verification.** Re-confirmed independently rather than
+trusting the Stage 6 completion report: branch/commit/push status
+matched (`be6042d1189a365bd9026577422dea69df8bbec4`), working tree was
+clean, a fresh 78-migration scratch database built cleanly, the full
+31-package `-tags=integration` suite was green, and both frontends
+(`backoffice/` 17 tests, `b2c/` 18 tests at baseline) built and passed.
+
+**Five focused specialist reviews** (architect, security, ledger-finance,
+a database/RLS-specific architect pass, qa) — no broad re-review of
+frozen architecture, each scoped to this diff only.
+
+**One P0-severity fix (found by security, independently reasoned through
+by me before dispatch): the B2C bet slip and deposit form minted a FRESH
+idempotency key on every submit ATTEMPT**, not once per composition.
+Because the button-disable-while-pending only covers a double-click, a
+genuine network/timeout error - where the original POST may have
+actually committed and only the response was lost - meant the retry sent
+a DIFFERENT key and placed a real second bet (or second deposit) with a
+real second stake/amount debit. This defeated the entire purpose of the
+idempotency-key mechanism for the exact failure mode it exists to cover.
+**Fixed**: `BetSlipContext.setSelection` now mints the key once per
+selection and holds it for the lifetime of that composition (regenerated
+only on a new selection or `clear()`, never on retry);
+`DepositPage` mints it once per form composition, regenerated only after
+a successful submission. New regression tests
+(`BetSlip.test.tsx`'s "reuses the exact same idempotency key on a retry
+after a network error") lock this in. The `idempotencyKey.ts` helper's
+own doc comment, which had codified the wrong contract, was corrected.
+
+**Two P1/P2-equivalent financial-integrity fixes, both found
+independently by the architect and ledger-finance reviews:**
+1. Strengthened the Stage 6 ledger-idempotency-key fix further: the key
+   is now `"sportsbook_bet:" + player_account_id + ":" + idempotency_key`
+   (previously just `player_account_id + ":" + idempotency_key`) - an
+   explicit transaction-type discriminator, not reliance on other
+   domains' key formats happening to differ. New regression test
+   (`TestPlaceBet_LedgerIdempotencyKeyIsNamespacedByTypeAndPlayer`) pins
+   the exact stored format.
+2. **Ledger-finance's own finding**: the Stage 6.1 key-format change
+   itself introduced a latent rolling-deploy hazard - if an old-format
+   node and a new-format node both handled the same (player,
+   idempotency_key) bet concurrently, each would derive a DIFFERENT
+   ledger key, each successfully post its OWN ledger transaction (a
+   genuine double stake-lock), and only one would win the
+   `sportsbook_bets` unique-constraint race - silently orphaning the
+   loser's ledger posting with no bet row pointing at it. **Fixed**: a
+   3-line cross-check after `insertBet`'s conflict-resolution path
+   verifies the resolved bet's `ledger_transaction_id` matches what THIS
+   call posted; a mismatch aborts the whole transaction (rolling back its
+   own orphaned posting) rather than silently committing one.
+
+**One real DB-level integrity gap, found by the database/RLS review and
+fixed via an additive migration change (migration 0078 is still
+unreleased, so edited in place rather than superseded):** the original
+three composite FKs on `sportsbook_bets` pinned wallet→tenant and
+wallet→player, but left `brand_id` pinned only to "some brand in this
+tenant," not specifically the player's own brand - not reachable through
+the application today (`newPlaceBetHandler` always derives `brand_id`
+correctly via `identity.GetPlayerAccountByID`), but a real DB-level gap
+per CLAUDE.md's RLS/integrity-by-database rule. **Fixed**: replaced the
+separate `brand_id`→`brands` FK with a single composite
+`(player_account_id, tenant_id, brand_id)` FK against `player_accounts`,
+reusing the exact `UNIQUE (id, tenant_id, brand_id)` key migration 0019
+already added for `wallets`' identical pinning (the same established
+platform pattern migration 0057's `bonus_grants` also uses). Also added a
+plain FK from `sportsbook_bets.asset_code` to `assets(code)` (a QA/DB
+review P3, cheap and correct - `wallets` already has this FK,
+`sportsbook_bets` didn't).
+
+**QA-found test-coverage gaps, fixed:** the three sibling rejection
+branches (event finished/cancelled, market not open, selection not
+active) shared one `RejectionCategory` and only the first had a test - a
+refactor that deleted either of the other two checks would have passed
+the full suite silently. Added `TestPlaceBet_MarketNotOpenRejected` and
+`TestPlaceBet_SelectionNotActiveRejected`. `brand_id` was a write-only
+field with no HTTP surface and no test assertion anywhere - added to
+`adminBetResponse` (Back Office visibility, per this stage's own §9 ask)
+and asserted against the known correct brand in the existing cross-tenant
+test. `decimal_exponent` was populated but never asserted against a
+known-correct value (EUR=2) - added.
+
+**Two cheap correctness/quality fixes, found by security review:**
+unknown `asset_code` on `POST /v1/me/sportsbook/bets` returned a bare 500
+instead of the established `db.IsForeignKeyViolation` → 400 "unknown
+asset code" pattern casino already uses - fixed for consistency. A test
+comment claiming `rg.EvaluateEligibility` takes "its own row lock on
+player_accounts" was wrong - it is a `pg_advisory_xact_lock` keyed on
+`person_id`, not a row lock - corrected (the test's own logic was
+already valid regardless).
+
+**Two factually-incorrect doc comments found and corrected during the
+architectural trace** (not defects in behavior, defects in what the code
+claimed about itself): `internal/sportsbook/orchestrator.go`'s own
+comment claimed "no jurisdiction-blocklist-style check is applied to a
+sportsbook bet this stage, exactly as none is applied by any other
+production code path today" - false: `internal/casino`'s `LaunchGame`
+DOES call `jurisdiction.Resolve` + `evaluateJurisdictionBlocklist` against
+`casino_games.jurisdiction_blocklist`, a real, tested, already-shipped
+mechanism (though every blocklist row in this codebase is `'{}'` today,
+so it is currently inert - no HDR-J item has been answered). Corrected,
+and the real boundary formally documented in a new
+`docs/decisions/0047-sportsbook-catalogue-jurisdiction-boundary-and-
+cumulative-risk-deferral.md`. `internal/risk/cumulative.go`'s comment
+still said "no internal/sportsbook exists," stale since Stage 6 - also
+corrected.
+
+**New ADR 0047** formally documents, without answering any human
+decision or inventing policy: the six-then-seven distinct concepts
+(player jurisdiction determination / licence ceiling / tenant and brand
+operating-country policy / per-request risk operation availability /
+sportsbook catalogue blocklist availability / asset-product eligibility),
+which of these sportsbook actually wires today (only per-request
+`risk.Evaluate`), the casino-parity gap (casino's blocklist mechanism is
+real and admin-configurable TODAY via `PUT /v1/admin/casino/games`, even
+though every blocklist is currently empty - a sharper asymmetry than "both
+are equally inert by construction"), and the cumulative-risk disposition
+(the exact future measurement shape is already specified in ADR 0038 §13;
+wiring it later is one additive map entry, not a design question).
+**Disposition for both: SAFE DEFERMENT — required before a second
+jurisdiction or the first B2B tenant, NOT required before Stage 7.**
+
+**Four deferred-item dispositions** (formal, per this stage's own ask):
+1. Cumulative sportsbook risk rule — **SAFE DEFERMENT** (ADR 0047 §4).
+2. Catalogue tenant/jurisdiction gating — **SAFE DEFERMENT, required
+   before second jurisdiction/B2B** (ADR 0047 §2-3).
+3. Casino/withdrawal concurrency-test convention backfill (a Stage 6 QA
+   finding, unchanged) — **SAFE DEFERMENT**, a backlog item, no financial-
+   integrity impact (those tests already pass, just via an older
+   technique).
+4. B2C build-time brand model before true multi-brand — **SAFE
+   DEFERMENT, required before a second B2C brand goes live** (confirmed
+   by architect review: `brand_slug` only ever selects which brand a
+   login/register call resolves to server-side; every subsequent call is
+   scoped purely from the verified JWT, never a client-supplied brand
+   value - build-time config is a presentation mechanism, not an
+   authorization seam, today).
+
+Three additional SAFE-DEFERMENT items recorded in ADR 0047 §5 (a
+cumulative-rule write-time validation gap in `internal/risk` generally,
+not sportsbook-specific; no explicit `PrincipalType==player` assertion on
+`/v1/me/sportsbook/bets`, consistent with casino's identical shape; a
+non-`FOR SHARE` catalogue read, inert until a live-odds feed exists).
+
+**Full validation gate re-run after every fix**: `go build`/`vet`/`gofmt`
+clean; fresh 78-migration scratch database; full 31-package
+`-tags=integration` suite green; the sportsbook concurrency and
+idempotency-collision tests re-run 3x fresh under `-race`; `backoffice/`
+(17 tests) and `b2c/` (19 tests, +1 from the idempotency-retry regression
+test) both build and pass clean.
+
+No automatic progression. Per the stage-gate rule, Stage 7 is NOT
+authorized and was not started. No casino, settlement, cashout, real
+provider integration, or country-approval work was performed.
+
+---
+
+## Prior stage: Stage 6 — B2C Player/Brand MVP + First Sportsbook Vertical Slice — COMPLETE, awaiting human review
 
 **Purpose.** Ship the first real B2C player product and the first
 functioning sportsbook vertical slice: a genuine end-to-end chain from

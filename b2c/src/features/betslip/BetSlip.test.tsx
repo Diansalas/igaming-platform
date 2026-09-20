@@ -18,6 +18,7 @@ const SELECTION: SlipSelection = {
   eventName: 'Home FC vs Away FC',
   oddsNumerator: 3,
   oddsDenominator: 2,
+  idempotencyKey: 'test-fixture-key-1',
 }
 
 /** Seeds the bet-slip context with a selection before rendering the real BetSlip component, standing in for "the player already picked an outcome on the event page." */
@@ -158,5 +159,49 @@ describe('BetSlip', () => {
 
     expect(await sidebar().findByText(/Could not reach the server/)).toBeInTheDocument()
     expect(screen.queryByText('Bet placed.')).not.toBeInTheDocument()
+  })
+
+  // Stage 6.1 regression test for a real finding: idempotencyKey used to
+  // be minted fresh on every submit click, so a retry after a network
+  // error (where the original POST may have actually committed) sent a
+  // DIFFERENT key and would have placed a genuine second bet. The key is
+  // now minted once per selection (BetSlipContext.setSelection) and must
+  // survive an error, unchanged, across a retry of the SAME attempt.
+  it('reuses the exact same idempotency key on a retry after a network error', async () => {
+    const seenKeys: string[] = []
+    server.use(
+      http.post('/v1/me/sportsbook/bets', async ({ request }) => {
+        const body = (await request.json()) as { idempotency_key: string }
+        seenKeys.push(body.idempotency_key)
+        if (seenKeys.length === 1) return HttpResponse.error()
+        return HttpResponse.json({
+          accepted: true,
+          bet: {
+            id: 'bet-retry-1',
+            selection_id: 'sel-1',
+            asset_code: 'USD',
+            stake_amount: 1000,
+            odds_numerator: 3,
+            odds_denominator: 2,
+            potential_return: 2500,
+            status: 'open',
+            placed_at: '2026-01-01T00:00:00Z',
+          },
+        })
+      }),
+    )
+
+    renderWithProviders(<Harness />)
+    const user = userEvent.setup()
+
+    await user.type(sidebar().getByLabelText(/Stake/), '10')
+    await user.click(sidebar().getByRole('button', { name: 'Place bet' }))
+    expect(await sidebar().findByText(/Could not reach the server/)).toBeInTheDocument()
+
+    await user.click(sidebar().getByRole('button', { name: 'Place bet' }))
+    expect(await sidebar().findByText('Bet placed.')).toBeInTheDocument()
+
+    expect(seenKeys).toHaveLength(2)
+    expect(seenKeys[0]).toBe(seenKeys[1])
   })
 })

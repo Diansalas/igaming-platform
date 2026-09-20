@@ -457,6 +457,65 @@ func TestPlaceBet_EventFinishedRejected(t *testing.T) {
 	if result.RejectionCategory != RejectionEventNotOpen {
 		t.Fatalf("expected rejection category %q, got %q", RejectionEventNotOpen, result.RejectionCategory)
 	}
+	if result.RejectionCode != string(EventFinished) {
+		t.Fatalf("expected rejection code %q, got %q", EventFinished, result.RejectionCode)
+	}
+}
+
+// TestPlaceBet_MarketNotOpenRejected is a Stage 6.1 QA-review regression
+// test: this is a SIBLING branch to the event-finished check above, both
+// sharing RejectionCategory=RejectionEventNotOpen but distinguished by
+// RejectionCode - before this test existed, a refactor that deleted the
+// market-status check entirely would have passed the full suite silently
+// (only the event-status branch had a test).
+func TestPlaceBet_MarketNotOpenRejected(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	fundWallet(t, pool, f, 10_000)
+	sel := seedSelection(t, pool, seedSelectionParams{MarketStatus: MarketSuspended})
+
+	result, err := placeBet(t, pool, f, sel, 1_000, "place-market-suspended-1")
+	if err != nil {
+		t.Fatalf("place bet: %v", err)
+	}
+	if result.Accepted {
+		t.Fatal("expected bet to be rejected for a suspended market")
+	}
+	if result.RejectionCategory != RejectionEventNotOpen {
+		t.Fatalf("expected rejection category %q, got %q", RejectionEventNotOpen, result.RejectionCategory)
+	}
+	if result.RejectionCode != string(MarketSuspended) {
+		t.Fatalf("expected rejection code %q, got %q", MarketSuspended, result.RejectionCode)
+	}
+	if countBets(t, pool, f) != 0 {
+		t.Fatal("expected zero bet rows for a market-suspended rejection")
+	}
+}
+
+// TestPlaceBet_SelectionNotActiveRejected is the third sibling branch -
+// same rationale as TestPlaceBet_MarketNotOpenRejected above.
+func TestPlaceBet_SelectionNotActiveRejected(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	fundWallet(t, pool, f, 10_000)
+	sel := seedSelection(t, pool, seedSelectionParams{SelectionStatus: SelectionSuspended})
+
+	result, err := placeBet(t, pool, f, sel, 1_000, "place-selection-suspended-1")
+	if err != nil {
+		t.Fatalf("place bet: %v", err)
+	}
+	if result.Accepted {
+		t.Fatal("expected bet to be rejected for a suspended selection")
+	}
+	if result.RejectionCategory != RejectionEventNotOpen {
+		t.Fatalf("expected rejection category %q, got %q", RejectionEventNotOpen, result.RejectionCategory)
+	}
+	if result.RejectionCode != string(SelectionSuspended) {
+		t.Fatalf("expected rejection code %q, got %q", SelectionSuspended, result.RejectionCode)
+	}
+	if countBets(t, pool, f) != 0 {
+		t.Fatal("expected zero bet rows for a selection-suspended rejection")
+	}
 }
 
 func TestPlaceBet_RGDeniedForSelfExcludedPlayer(t *testing.T) {
@@ -632,6 +691,49 @@ func TestPlaceBet_SameIdempotencyKeyDifferentPlayersNeverCollide(t *testing.T) {
 	}
 }
 
+// TestPlaceBet_LedgerIdempotencyKeyIsNamespacedByTypeAndPlayer is a Stage
+// 6.1 hardening regression test: the ledger's own idempotency_key column
+// is a FLAT namespace across (tenant_id, idempotency_key) shared by EVERY
+// transaction type this tenant ever posts (deposits, withdrawals, casino,
+// bonus, sportsbook) - see ledger.ErrIdempotencyKeyReused's own doc
+// comment. Stage 6's fix prefixed the player's own id onto the raw client
+// key (closing the cross-player collision found by architect review), but
+// that alone still relied on every OTHER domain's key format happening to
+// differ from sportsbook's "playerID:clientKey" shape rather than on an
+// explicit, structural separation. This test locks in the stronger,
+// self-evidently-scoped format
+// "sportsbook_bet:<player_account_id>:<idempotency_key>" so a future edit
+// that silently drops the transaction-type prefix fails this test, not
+// just a production incident.
+func TestPlaceBet_LedgerIdempotencyKeyIsNamespacedByTypeAndPlayer(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+	fundWallet(t, pool, f, 10_000)
+	sel := seedSelection(t, pool, seedSelectionParams{})
+
+	const key = "ledger-namespace-check-1"
+	result, err := placeBet(t, pool, f, sel, 1_000, key)
+	if err != nil {
+		t.Fatalf("place bet: %v", err)
+	}
+	if !result.Accepted {
+		t.Fatalf("expected the bet to be accepted, got %q", result.RejectionCategory)
+	}
+
+	var storedKey string
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT idempotency_key FROM ledger_transactions WHERE id = $1`, result.Bet.LedgerTransactionID).Scan(&storedKey)
+	})
+	if err != nil {
+		t.Fatalf("read stored ledger idempotency_key: %v", err)
+	}
+
+	want := "sportsbook_bet:" + f.playerAccountID.String() + ":" + key
+	if storedKey != want {
+		t.Fatalf("expected ledger idempotency_key %q, got %q", want, storedKey)
+	}
+}
+
 // waitForBlockedCount polls pg_stat_activity - fully deterministic, no
 // timing assumption - for at least `want` backends genuinely blocked
 // (wait_event_type = 'Lock') in the current database. This is the
@@ -646,9 +748,12 @@ func TestPlaceBet_SameIdempotencyKeyDifferentPlayersNeverCollide(t *testing.T) {
 // directive technique instead.
 //
 // Deliberately NOT filtered to one specific query-text fragment (unlike
-// operatingmarket's own helper): rg.EvaluateEligibility takes its own row
-// lock on player_accounts for the remainder of its caller's transaction
-// (see that function's own doc comment), so of the two concurrent
+// operatingmarket's own helper): rg.EvaluateEligibility takes its own
+// transaction-scoped advisory lock (pg_advisory_xact_lock keyed on
+// person_id, not a row lock on player_accounts - Stage 6.1 security
+// review correction of this comment's own earlier claim) for the
+// remainder of its caller's transaction (see that function's own doc
+// comment), so of the two concurrent
 // PlaceBet calls this test races, only the FIRST to reach it is actually
 // blocked on the wallet_balance_projection row (behind the blocker
 // transaction below) - the SECOND is blocked earlier, on the player_

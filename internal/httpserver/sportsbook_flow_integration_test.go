@@ -444,4 +444,19 @@ func TestAdminListBets_TenantAdminAuthorizedAndCrossTenantIsolated(t *testing.T)
 	if page.Items[0].PlayerAccountID != playerA.ID.String() {
 		t.Fatalf("expected the visible bet to belong to player A, got player_account_id=%s", page.Items[0].PlayerAccountID)
 	}
+	// Stage 6.1 QA-review regression: brand_id was write-only (a
+	// PlaceBetParams input) with no assertion anywhere and no HTTP field
+	// to check it against - a bet misattributed to the wrong brand within
+	// tenant A would have passed every existing test silently.
+	if page.Items[0].BrandID != brandIDA.String() {
+		t.Fatalf("expected the visible bet's brand_id to be player A's own brand %s, got %s", brandIDA, page.Items[0].BrandID)
+	}
+	// Stage 6.1 QA-review regression: decimal_exponent was populated but
+	// never asserted against a known-correct value anywhere - a
+	// regression that always returned 0, or looked up the wrong asset,
+	// would have passed every existing test. EUR's exponent is 2
+	// (migrations/0003_create_assets.up.sql's seed data).
+	if page.Items[0].DecimalExponent != 2 {
+		t.Fatalf("expected decimal_exponent=2 for EUR, got %d", page.Items[0].DecimalExponent)
+	}
 }

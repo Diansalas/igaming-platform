@@ -107,9 +107,14 @@ type cumulativeSpec struct {
 // but must not be counted, and which direction consumes capacity. For
 // reference, the two shapes already specified by other ADRs would be:
 //
-//	sportsbook_bet (ADR 0038 §13, NOT wired here - no internal/sportsbook
-//	exists): {[sportsbook_bet], [sportsbook_void],
-//	measured=[player_cash], ignored=[player_locked], debit}
+//	sportsbook_bet (ADR 0038 §13, NOT wired here - internal/sportsbook
+//	exists as of Stage 6 and calls risk.Evaluate per-request, but no
+//	cumulative/rolling-window rule is wired for it yet; deferred to a
+//	dedicated risk/ledger-finance design pass, Stage 6.1 disposition):
+//	{[sportsbook_bet], [sportsbook_void], measured=[player_cash],
+//	ignored=[player_locked_cash], debit} - note the leg name is
+//	player_locked_cash (migration 0048's origin split), not the
+//	pre-split player_locked this comment originally named
 //	withdrawal step A (Flow 3, NOT wired here - no withdrawal Risk call
 //	site exists): {[withdrawal_requested], [...], measured=[player_cash],
 //	ignored=[player_withdrawal_hold], debit}

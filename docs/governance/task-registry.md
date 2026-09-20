@@ -2188,6 +2188,172 @@ bet; bonus-funded sportsbook stakes (remain platform-wide blocked per
 `docs/decisions/0038` §9); any fix to `PLAT-ROLESPLIT-1` (remains
 documented-not-executed per `docs/security/runtime-role-separation.md`).
 
+## Stage 6.1 — B2C/Sportsbook Hardening & Architectural Closure Gate
+
+A focused hardening/closure pass over Stage 6 (commit
+`be6042d1189a365bd9026577422dea69df8bbec4`), not a feature stage. Full
+narrative: `docs/progress.md`'s "Stage 6.1" section,
+`docs/active-stage.md`'s current-stage entry, and
+`docs/decisions/0047-sportsbook-catalogue-jurisdiction-boundary-and-
+cumulative-risk-deferral.md`.
+
+| ID | Owner | Status | Files owned | Tests | Blockers | Integration |
+|---|---|---|---|---|---|---|
+| S61-01 | Orchestrator | Done | baseline re-verification only | full 31-package suite, fresh migration, both frontends | none | Verified |
+| S61-02 | architect, security, ledger-finance, architect (DB/RLS), qa | Done | review only | n/a | See findings below | n/a |
+| S61-03 | Orchestrator (fix round) | Done | `b2c/src/features/betslip/{BetSlipContext,BetSlip}.tsx` + `BetSlip.test.tsx`, `b2c/src/features/deposit/DepositPage.tsx`, `b2c/src/lib/idempotencyKey.ts` | new idempotency-retry regression test | none | Verified |
+| S61-04 | Orchestrator (fix round) | Done | `internal/sportsbook/{orchestrator,bets}.go`, `internal/sportsbook/orchestrator_integration_test.go` (4 new tests), `internal/risk/cumulative.go` (comment) | 4 new sportsbook tests, full package re-run | none | Verified |
+| S61-05 | Orchestrator (fix round) | Done | `migrations/0078_sportsbook_foundation.up.sql`, `internal/httpserver/sportsbook_handlers.go`, `internal/httpserver/sportsbook_flow_integration_test.go` | fresh-migration re-verification, 2 new assertions in existing test | none | Verified |
+| S61-06 | Orchestrator | Done | `docs/decisions/0047-*.md` (new) | n/a | none | n/a |
+| S61-07 | Orchestrator | Done | this registry, `docs/active-stage.md`, `docs/progress.md`, `docs/api/openapi/platform-api.yaml` (AdminBet.brand_id) | full validation gate | none | n/a — **stage explicitly STOPS here; Stage 7 NOT authorized** |
+
+### Review findings and dispositions
+
+**Architect**: no P0/P1. Verified the PlaceBet financial path is sound
+(single authoritative path, no float, atomic, correct rollback). Found
+and I fixed 3 P2/P3 factual corrections in ADR 0047's first draft: (1)
+casino's `jurisdiction_blocklist` IS admin-configurable today via
+`PUT /v1/admin/casino/games` (my draft had wrongly claimed no
+configuration path exists — this sharpens the asymmetry, doesn't change
+the SAFE DEFERMENT disposition); (2) `jurisdiction.Resolve` is also
+called by `internal/bonus/eligibility.go`, not "only casino"; (3)
+sportsbook's own `risk.RiskRequest` doesn't set `JurisdictionCode`
+(fail-closed via `ErrMissingJurisdiction` if ever relevant — safe, but
+worth documenting). One P2 recorded, not fixed: the bet stores only
+`selection_id`, and `SyncCatalogue`'s upsert-on-`external_ref` could in
+principle re-parent a selection under a different market/event for a
+misbehaving future real provider, silently changing what an OPEN bet's
+`selection_id` points to. Not exploitable with the mock provider;
+recorded in ADR 0047 as a precondition for any live-odds/real-provider
+work, not fixed via migration this stage (architect's own recommendation
+— additive if/when actually needed, not speculative now).
+
+**Security**: no P0. One **P2, fixed**: the B2C bet slip and deposit form
+minted a fresh idempotency key per submit click rather than once per
+attempt — the P0-equivalent fix described above (a duplicate-stake/
+duplicate-deposit exposure security explicitly flagged as needing
+resolution "before any real-money B2C traffic"). Three **P3s**, two
+fixed: unknown `asset_code` returned 500 not 400 on
+`POST /v1/me/sportsbook/bets` — fixed to match casino's
+`db.IsForeignKeyViolation` → 400 pattern; a test comment wrongly
+described `rg.EvaluateEligibility`'s concurrency-safety mechanism as "a
+row lock on player_accounts" when it is actually a
+`pg_advisory_xact_lock` keyed on `person_id` — fixed. One P3 recorded,
+not fixed (pre-existing class, not sportsbook-specific): a
+`cumulative_amount` risk rule for an operation with a live `risk.Evaluate`
+call site but no `operationCumulativeSpecs` entry is accepted at write
+time but fails every subsequent request at evaluation time — fails safe
+(no money at risk) but is a self-inflicted outage lever; a real fix
+belongs in `risk.CreateRule` generally, out of this stage's scope. One P3
+also recorded: no explicit `PrincipalType==player` assertion on
+`/v1/me/sportsbook/bets` (safe today, matches casino's identical shape).
+One P4 recorded: `getSelectionWithContext`'s read is not `FOR SHARE`
+(inert until a live-odds feed exists). Extensive adversarial verification
+(A-K per the directive) found every scenario genuinely safe by
+construction — see the security review's own report for the full
+evidence trail (advisory-lock serialization, composite-FK structural
+impossibility of cross-tenant/cross-player misattribution, RLS fail-closed
+on malformed settings, etc).
+
+**Ledger-finance**: SOUND, no P0/P1. Verified the full financial chain
+independently: SUM(DEBITS)==SUM(CREDITS) holds (exactly 2 legs, same
+variable), zero floating-point (grep-verified across the whole path),
+asset exponent correctly looked up (never assumed), ledger amount and
+`sportsbook_bets.stake_amount` cannot diverge (same variable, same
+transaction), atomicity holds end-to-end. **Found the review round's
+most consequential result, a real P2**: my own Stage 6.1 ledger-key
+strengthening (adding the transaction-type prefix) introduced a latent
+rolling-deploy hazard — two application versions deriving different
+ledger keys for the same (player, idempotency_key) pair could each post
+a genuinely new (and, for the loser, orphaned) ledger transaction before
+the `sportsbook_bets` unique constraint resolved which bet row wins. Not
+live (Stage 6 is unreleased), but the guard is 3 lines. **Fixed**: a
+cross-check after `insertBet`'s conflict-resolution path aborts the whole
+transaction if the resolved bet's `ledger_transaction_id` doesn't match
+what this call itself posted. Two P3s recorded, not fixed (test
+thoroughness, not correctness): the ledger-balance test doesn't assert
+exact leg count/accounts (only debit-total==credit-total); the
+concurrency test doesn't assert ledger-transaction-count/locked-balance
+alongside cash/bet-row-count. One P4 recorded: the player-facing
+`betResponse` omits `decimal_exponent` (only the admin response has it) —
+same money-display rationale, not fixed (player-facing display precision
+is a real but lower-priority gap than Back Office's approval-decision
+context).
+
+**Database/RLS** (architect, DB/RLS-scoped pass): no P0/P1. Confirmed RLS
+fail-closed in both directions (forged/empty `app.player_account_id`,
+NULL/malformed `app.tenant_id`), the two-policy shape textually identical
+to `casino_launch_sessions`' established precedent, `db.IdempotentInsert`
+correctly SAVEPOINT-isolated, append-only discipline holds (no DELETE
+anywhere), lock ordering consistent with casino/withdrawal (no new
+deadlock edge), and a CHECK constraint for
+`potential_return = stake*num/den` correctly rejected as inexpressible at
+the DB level (depends on an `assets` lookup and a rounding rule — money's
+own `RoundToMinorUnits` is the right layer). **One real P2, fixed**: the
+original three composite FKs left `brand_id` pinned only to "some brand
+in this tenant," not the player's own specific brand — not reachable via
+the application (which always derives `brand_id` correctly), but a real
+DB-level gap. Fixed via a composite `(player_account_id, tenant_id,
+brand_id)` FK against `player_accounts`, reusing the exact `UNIQUE (id,
+tenant_id, brand_id)` key `wallets` and `bonus_grants` already use for
+the identical pinning — noted `casino_launch_sessions` (migration 0035)
+has the SAME gap, recorded as a backlog item (not fixed — "do not build
+casino" this stage). One **P3, fixed**: `asset_code` had no FK to
+`assets(code)` (contrast `wallets`, which does) — added. Two P3s
+recorded, not fixed: audit-attribution completeness (`brand_id` added to
+the accepted-bet audit record for consistency with RG/risk denial
+records, which already included it — the insufficient-funds record still
+targets the wallet with no direct player/brand attribution, a smaller
+residual gap); unindexed `ledger_transaction_id` (not a real problem —
+nothing queries by it today; if ever indexed, should be `UNIQUE`).
+
+**QA**: no P0. One **P1, fixed**: two of three sibling rejection
+branches (event-finished had a test; market-not-open and
+selection-not-active did not) — a refactor deleting either would have
+passed the full suite silently. Added
+`TestPlaceBet_MarketNotOpenRejected`/`TestPlaceBet_SelectionNotActiveRejected`,
+plus a `RejectionCode` assertion on the existing event-finished test (the
+three branches share one `RejectionCategory`, differing only by code).
+Two **P2s, fixed**: `brand_id` was never asserted anywhere and had no
+HTTP field to check it against — added to `adminBetResponse` and
+asserted in the cross-tenant test; `decimal_exponent` was populated but
+never asserted against a known-correct value (EUR=2) — added. Confirmed
+the acceptance test and other mutation-style scenarios (tenant/player
+swap, idempotency-key reuse, insufficient-funds/RG/risk-denial residue,
+authorization removal) are all genuinely non-vacuous, backed by
+RLS/unique-constraint/exact-balance assertions, not just status-code
+checks. One P4 recorded: no test exists for a mid-transaction failure
+injection (consistent with casino/withdrawal, which also have none) —
+reasonably covered structurally by Postgres transaction guarantees plus
+the SAVEPOINT-based conflict handling ledger-finance reviewed separately.
+
+### Four deferred-item dispositions (from Stage 6's own registry)
+
+1. **Cumulative sportsbook risk rule** — SAFE DEFERMENT (ADR 0047 §4; the
+   measurement shape is already specified in ADR 0038 §13, wiring it
+   later is one additive map entry).
+2. **Catalogue tenant/jurisdiction gating** — SAFE DEFERMENT, required
+   before a second jurisdiction or the first B2B tenant, NOT required
+   before Stage 7 (ADR 0047 §2-3; inert today since every jurisdiction
+   blocklist on the platform is empty, but casino's mechanism is
+   admin-configurable today while sportsbook's isn't).
+3. **Casino/withdrawal concurrency-test convention backfill** — SAFE
+   DEFERMENT, a backlog item with no financial-integrity impact (those
+   tests already pass correctly via an older, still-valid technique).
+4. **B2C build-time brand model before true multi-brand** — SAFE
+   DEFERMENT, required before a second B2C brand goes live (confirmed by
+   architect review: `brand_slug` only selects the login/register target
+   server-side; every authenticated call derives tenant/brand purely from
+   the verified JWT).
+
+### Explicitly NOT this stage's to build (confirmed absent)
+
+Casino, settlement, void, cashout, real sportsbook provider integration,
+production country/jurisdiction approvals, any answer to
+`HDR-J-6/7/8/9`, any new human decision, any cumulative risk calculation
+for sportsbook, any catalogue jurisdiction-blocklist mechanism (recorded
+as a future precondition only, per ADR 0047 — not built this stage).
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

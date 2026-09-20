@@ -120,7 +120,7 @@ CREATE TABLE sportsbook_bets (
     player_account_id     UUID NOT NULL,
     wallet_id             UUID NOT NULL,
     selection_id          UUID NOT NULL REFERENCES sb_selections (id),
-    asset_code            TEXT NOT NULL,
+    asset_code            TEXT NOT NULL REFERENCES assets (code),
     stake_amount          BIGINT NOT NULL CHECK (stake_amount > 0),
     -- Odds FROZEN AT ACCEPTANCE (doc 09 §1.4) - copied from the
     -- selection's live odds at placement time, never a live reference to
@@ -141,7 +141,19 @@ CREATE TABLE sportsbook_bets (
     placed_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
     FOREIGN KEY (wallet_id, tenant_id) REFERENCES wallets (id, tenant_id),
     FOREIGN KEY (wallet_id, player_account_id) REFERENCES wallets (id, player_account_id),
-    FOREIGN KEY (brand_id, tenant_id) REFERENCES brands (id, tenant_id),
+    -- Stage 6.1 hardening (DB/RLS review finding): the original three FKs
+    -- above pin wallet->tenant and wallet->player, but left brand_id
+    -- pinned only to "some brand in this tenant", not specifically the
+    -- player's own brand - a direct INSERT (bypassing the application,
+    -- which always derives brand_id correctly via
+    -- identity.GetPlayerAccountByID) could misattribute a bet to a
+    -- different brand within the same tenant. This composite FK reuses
+    -- the exact (id, tenant_id, brand_id) unique key migration 0019
+    -- already added to player_accounts for wallets' own identical
+    -- pinning, closing the same class of gap here at the DB level rather
+    -- than relying on application discipline alone (CLAUDE.md's RLS/
+    -- integrity-by-database rule, applied to ownership FKs generally).
+    FOREIGN KEY (player_account_id, tenant_id, brand_id) REFERENCES player_accounts (id, tenant_id, brand_id),
     UNIQUE (tenant_id, player_account_id, idempotency_key)
 );
 

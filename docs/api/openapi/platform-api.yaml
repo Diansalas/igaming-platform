@@ -3950,8 +3950,9 @@ components:
             the real staked/returned amount at a glance).
           properties:
             player_account_id: { type: string, format: uuid }
+            brand_id: { type: string, format: uuid }
             decimal_exponent: { type: integer }
-          required: [player_account_id, decimal_exponent]
+          required: [player_account_id, brand_id, decimal_exponent]
     PlaceBetResponse:
       type: object
       description: >

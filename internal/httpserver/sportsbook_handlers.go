@@ -11,6 +11,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/assetregistry"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
@@ -313,6 +314,10 @@ func newPlaceBetHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeConflict, "idempotency key already used with different bet parameters")
 			return
 		}
+		if db.IsForeignKeyViolation(err) {
+			apierror.Write(w, requestID, apierror.CodeValidation, "unknown asset code")
+			return
+		}
 		if err != nil {
 			logger.Error("place_bet_failed", "error", err)
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to place bet")
@@ -382,6 +387,7 @@ func newListMyBetsHandler(deps Deps) http.HandlerFunc {
 type adminBetResponse struct {
 	betResponse
 	PlayerAccountID string `json:"player_account_id"`
+	BrandID         string `json:"brand_id"`
 	// DecimalExponent lets the Back Office render stake/potential-return as
 	// a real decimal amount instead of raw minor units, mirroring the
 	// Stage 5 admin withdrawal fix (staffWithdrawalResponse.DecimalExponent)
@@ -437,7 +443,7 @@ func newListAdminBetsHandler(deps Deps) http.HandlerFunc {
 					exponents[b.AssetCode] = exp
 				}
 				items = append(items, adminBetResponse{
-					betResponse: toBetResponse(b), PlayerAccountID: b.PlayerAccountID.String(), DecimalExponent: exp,
+					betResponse: toBetResponse(b), PlayerAccountID: b.PlayerAccountID.String(), BrandID: b.BrandID.String(), DecimalExponent: exp,
 				})
 			}
 			return nil

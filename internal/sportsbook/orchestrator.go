@@ -95,9 +95,20 @@ type PlaceBetResult struct {
 // is out of scope - that function's own doc comment states it has zero
 // production callers today and any wiring decision needs human answers to
 // HDR-J-7/8/9 first (Stage 4I). This is a recorded, deferred item, not a
-// silent gap: no jurisdiction-blocklist-style check is applied to a
-// sportsbook bet this stage, exactly as none is applied by any other
-// production code path today.
+// silent gap - but NOTE (Stage 6.1 correction of an earlier, inaccurate
+// claim in this comment): unlike casino, which DOES apply a per-game
+// jurisdiction_blocklist check at launch time via jurisdiction.Resolve +
+// evaluateJurisdictionBlocklist (internal/casino/orchestrator.go), a real
+// enforcement point that is wired and tested today, sb_selections/
+// sb_events carry NO equivalent blocklist column, so sportsbook has no
+// symmetric mechanism to arm even if a future decision populated one.
+// This is inert today (casino's own blocklists are all empty - no
+// HDR-J item has been answered, so no country is actually blocked
+// anywhere on the platform), so it is NOT a live fail-open regression,
+// but it IS a real architecture-parity gap: sportsbook must gain an
+// equivalent per-selection/per-event blocklist mechanism before any
+// second jurisdiction or B2B tenant goes live (docs/governance/
+// task-registry.md's Stage 6.1 section tracks this explicitly).
 //
 // Bonus-funded stakes: OUT OF SCOPE. Every stake this function locks is
 // assumed 100% player_cash-funded - docs/decisions/0038 §9 confirms
@@ -251,18 +262,29 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 	// rule: this mock provider is same-process, so there is no external
 	// provider reference at all) - idempotency routes through
 	// ledger.Post's own IdempotencyKey field, which is namespaced
-	// (tenant_id, idempotency_key) GLOBALLY across every domain sharing
-	// this tenant's ledger. params.IdempotencyKey alone is a raw,
-	// player-chosen string with no player_account_id in it, so passing it
-	// through unmodified would let one player's key collide with another
-	// player's (or a future domain's) ledger idempotency slot in the same
-	// tenant. Every other domain avoids this by deriving its own
-	// server-controlled key (see internal/casino/internal/withdrawal/
-	// internal/payments' own IdempotencyKey call sites, all of which
-	// prefix a server-side identifier); this does the same by prefixing
-	// the player's own id, which sportsbook_bets' own (tenant, player,
-	// idempotency_key) unique constraint already treats as the true scope.
-	ledgerIdempotencyKey := params.PlayerAccountID.String() + ":" + params.IdempotencyKey
+	// (tenant_id, idempotency_key) GLOBALLY across EVERY transaction type
+	// sharing this tenant's ledger (ledger.ErrIdempotencyKeyReused's own
+	// doc comment: the same key IS allowed to repeat across different
+	// transaction types is exactly the failure mode this guards against -
+	// it is REJECTED, not silently treated as a different domain's
+	// unrelated key). params.IdempotencyKey alone is a raw, player-chosen
+	// string with no player_account_id in it, so passing it through
+	// unmodified would let one player's key collide with another player's
+	// ledger idempotency slot in the same tenant. Every other domain
+	// avoids this by deriving its own server-controlled key (see
+	// internal/casino/internal/withdrawal/internal/payments' own
+	// IdempotencyKey call sites, all of which prefix a server-side
+	// identifier); this does the same, prefixed with BOTH this
+	// transaction type's own tag and the player's id - the type tag makes
+	// the namespace self-evidently sportsbook's own slice of the flat
+	// per-tenant key space (Stage 6.1 hardening: a bare
+	// "playerID:clientKey" string, while not colliding with any domain's
+	// key format today, relied on every other domain's key format
+	// happening to differ rather than on an explicit, structural
+	// separation) and the player id makes it impossible for two different
+	// players' bets to collide on the same client-chosen string (the
+	// Stage 6 fix for the P1 an architect review found).
+	ledgerIdempotencyKey := string(ledger.TxSportsbookBet) + ":" + params.PlayerAccountID.String() + ":" + params.IdempotencyKey
 	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 		TenantID: params.TenantID, TransactionType: ledger.TxSportsbookBet,
 		IdempotencyKey: ledgerIdempotencyKey, CorrelationID: betID,
@@ -284,12 +306,35 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 	if err != nil {
 		return PlaceBetResult{}, err
 	}
+	// Stage 6.1 hardening (ledger-finance review finding): insertBet's own
+	// unique-violation conflict path returns a PRE-EXISTING bet row rather
+	// than the one this call tried to insert - which is exactly right for
+	// the normal case (a genuine retry with the same idempotency key that
+	// ALSO derives the same ledgerIdempotencyKey, so ledger.Post itself
+	// already returned the SAME transaction via its own AlreadyPosted
+	// short-circuit). But the sportsbook-level key and the ledger-level
+	// key are two SEPARATE derivations from the same inputs; if they were
+	// ever to disagree (e.g. two application versions with different
+	// ledgerIdempotencyKey formats running concurrently during a rolling
+	// deploy), THIS call's ledger.Post could have posted a genuinely NEW,
+	// now-orphaned ledger transaction (locking a second stake) moments
+	// before insertBet's conflict path discarded it in favor of another
+	// call's bet row. Cross-checking here turns a silent double-lock into
+	// a loud, safely-rolled-back error - this transaction (and its own
+	// ledger post from earlier in this same tx) is undone, never the
+	// winning transaction.
+	if bet.LedgerTransactionID != postResult.TransactionID {
+		return PlaceBetResult{}, fmt.Errorf(
+			"sportsbook: idempotency key resolved to bet %s (ledger transaction %s) but this call posted ledger transaction %s - refusing to leave an orphaned posting",
+			bet.ID, bet.LedgerTransactionID, postResult.TransactionID)
+	}
 
 	if err := audit.Record(ctx, tx, audit.Entry{
 		TenantID: params.TenantID, ActorType: audit.ActorPlayer, ActorID: params.PlayerAccountID,
 		Action: "sportsbook_bet.placed", TargetType: "sportsbook_bet", TargetID: bet.ID.String(), Outcome: audit.OutcomeSuccess,
 		Metadata: map[string]any{
-			"selection_id": params.SelectionID.String(), "stake_amount": params.StakeAmount, "asset_code": params.AssetCode,
+			"brand_id": params.BrandID.String(), "selection_id": params.SelectionID.String(),
+			"stake_amount": params.StakeAmount, "asset_code": params.AssetCode,
 			"ledger_transaction_id": postResult.TransactionID.String(), "already_posted": postResult.AlreadyPosted,
 		},
 	}); err != nil {

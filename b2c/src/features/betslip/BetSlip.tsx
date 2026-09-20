@@ -6,7 +6,6 @@ import { ApiError } from '../../api/types'
 import { Button } from '../../components/Button'
 import { TextInput } from '../../components/TextInput'
 import { brandConfig } from '../../config/brand'
-import { newIdempotencyKey } from '../../lib/idempotencyKey'
 import { formatMoney, toMinorUnits } from '../../lib/money'
 import { estimatePotentialReturnMinorUnits, formatDecimalOdds } from '../../lib/odds'
 import { useBetSlip } from './BetSlipContext'
@@ -97,7 +96,14 @@ export function BetSlip() {
         assetCode,
         expectedOddsNumerator: selection.oddsNumerator,
         expectedOddsDenominator: selection.oddsDenominator,
-        idempotencyKey: newIdempotencyKey(),
+        // The SAME key for every retry of this bet attempt (minted once
+        // by BetSlipContext.setSelection) - never a fresh key per submit
+        // click. A fresh key per attempt would defeat the server's
+        // idempotency guarantee exactly when it matters most: a network/
+        // timeout error where the original POST actually committed but
+        // the response was lost, which a fresh-keyed retry would then
+        // place as a genuine second bet with a second stake debit.
+        idempotencyKey: selection.idempotencyKey,
       })
       if (result.accepted && result.bet) {
         setOutcome({ kind: 'accepted', bet: result.bet })
