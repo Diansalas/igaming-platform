@@ -1123,6 +1123,131 @@ confirmed no minimal seam was found strictly required); G-2; sportsbook
 cashout; converted-Grant clawback; BYOL; any payment/casino/risk behaviour
 change beyond the resolver seams already named as buildable now.
 
+## Stage 4I Phase D — jurisdiction policy configuration and operational semantics
+
+Implementation dispatch: mandatory pre-implementation impact-map analysis
+(confirming, contrary to a tempting but invalid inference from consumer
+code, that the `OperationClass`→`Purpose` mapping cannot be deterministically
+derived) → `architect` design ruling (binding, exhaustive, covering all four
+PC-GAP items) → `backend` implementation exactly per that ruling → five
+independent parallel reviews (`architect` fidelity, `security`
+double-hatting as DB/RLS specialist, `identity-compliance` for
+compliance/privacy, `qa`, `risk` for cross-domain integration) → orchestrator
+fix round → a focused `security` re-verification of that fix round (which
+found one fix itself still incomplete) → a second, targeted fix closing the
+one remaining defect with a genuinely deterministic replacement, independently
+re-run by the orchestrator → orchestrator integration.
+
+Built the configuration infrastructure for three of the four Phase C
+deferred gaps (`docs/governance/stage-4i-canonical-model.md` §14.6):
+`internal/jurisdiction.RequiredPurposes` (the PC-GAP-3 mapping seam — zero
+mapping content, all four `OperationClass` values fail closed with
+`ErrPurposeMappingUndetermined`), `internal/jurisdiction.ResolveEvaluationPolicy`/
+`CreateEvaluationPolicyVersion`/`ListEvaluationPolicyVersions` (the PC-GAP-1/
+PC-GAP-2/PC-GAP-4 config read/write API, backed by migration `0075` widening
+`jurisdiction_precedence_configs` in place — new `status`/`location_requirement`/
+`max_location_signal_age_seconds`/`precedence_status`/`precedence_policy_version`/
+`legal_review_reference`/`reason_code` columns, RLS added for the first time
+on this table, three new triggers enforcing forge-proof `effective_from`/
+`effective_to` stamping and append-only immutability), and one new permission
+(`PermJurisdictionEvaluationPolicyWrite`, platform-admin-only, no HTTP route).
+Three new human-decision items were opened and registered, never guessed at:
+**HDR-J-7** (which `Purpose`(s) each `OperationClass` requires), **HDR-J-8**
+(location-requirement threshold per licensing jurisdiction/operation class),
+**HDR-J-9** (location-staleness bound per licensing jurisdiction/operation
+class) — `docs/decisions/0044-human-decision-register-stage-4i-phase-d.md`.
+Design record: `docs/decisions/0043-jurisdiction-evaluation-policy-configuration.md`.
+
+`internal/jurisdiction/resolver.go`, `precedence.go`, and `types.go` have
+**ZERO diff**; `purpose.go` carries a doc-comment-only diff. Zero production
+callers of any new function exist. No HTTP route, no OpenAPI change, no
+country/market content, no real geolocation vendor, no production
+jurisdiction enforcement.
+
+**A genuinely load-bearing architect correction, recorded so it is never
+re-litigated:** the orchestrator's own pre-implementation reconnaissance
+concluded all four `OperationClass` values deterministically require
+`PurposeMarketAccessControl`, reasoning that every existing consumer
+(casino blocklist, bonus issuance/conversion gates, `assetregistry` layer 6)
+makes an availability/restriction decision, never a KYC/identity decision.
+**`architect` explicitly rejected this inference as invalid** — `Purpose`
+does not classify what kind of decision a consumer makes; it selects which
+evidence hierarchy is legally authoritative, and a per-game blocklist
+applied to *verified residence* is an equally coherent, and in several
+regulated markets legally correct, design. Guessing the mapping in either
+direction is dangerous asymmetrically (one direction silently deletes a
+geolocation control a licence may require; the other invents a denial
+condition no regulator asked for) — hence HDR-J-7, not a coded default.
+
+**Findings from the independent review round, and disposition:**
+
+| ID | Severity | Finding | Disposition |
+|---|---|---|---|
+| PHASE-D-ARCH/SEC/QA-CONCURRENCY | P1 (three-way independent convergence) | `architect`, `security`, and `qa`, each independently and empirically (not by code reading — the defect was invisible from reading): the integration test proving `CreateEvaluationPolicyVersion`'s concurrency control (`ErrConcurrentPolicyWrite`) launched two goroutines with no synchronization barrier, so depending on scheduling the two calls either genuinely raced (the intended, asserted outcome) or effectively serialized into a legitimate supersession (2 successes) — failing the test's assertions roughly 30-50% of the time under a plain repeat run | **FIXED, in two rounds.** Round 1 added a `sync.WaitGroup` barrier — closed the failure mode `qa`/`architect` reproduced directly, but a dedicated `security` re-verification pass then reproduced the SAME class of failure under CPU contention (9/200 runs), because the barrier synchronized only transaction start, not the write race itself. Round 2 replaced scheduling-dependent assertions entirely: a loosened invariant-only test (`TestCreateEvaluationPolicyVersion_ConcurrentCreatesNeverCorruptState`, asserting only what holds under every legitimate interleaving) plus a new, genuinely deterministic test (`TestCreateEvaluationPolicyVersion_DeterministicConflictViaUncommittedCompetingRow`) that forces the race via real PostgreSQL unique-index locking semantics — an uncommitted competing row blocks the real call's `INSERT`, confirmed via a `pg_stat_activity` poll (not a sleep, zero timing assumption) before the blocker is released. Independently re-run by the orchestrator: 30 consecutive passes (`-race`, two repeat batches) plus a clean whole-repo integration run |
+| PHASE-D-ARCH-P2-1 | P2 | `architect`, empirically (applied the down migration against a live database): the down migration for `0075` silently `DROP COLUMN`s content an append-only table's own design says must never be destroyed, and re-applying `up.sql` after `down.sql` then fails once any row exists (the added `NOT NULL` columns have no DEFAULT) | **FIXED.** Guarded with a `RAISE EXCEPTION` refusal when the table holds any row, matching migrations 0048/0052's own precedent for a destructive rollback on a table that may hold real data. New test `TestMigration0075_DownMigrationCleanThenFailsOnDirtyDatabase` (clean round-trip; dirty refusal with row survival), matching `internal/ledger/migration_0048_integration_test.go`'s scratch-database convention |
+| PHASE-D-SEC-P4-1 (folded into P2-1's fix) | P4 | `security`: the down migration's `DISABLE ROW LEVEL SECURITY` never issued the matching `NO FORCE`, leaving `relforcerowsecurity=true` after rollback instead of restoring the pre-0075 `false` | **FIXED** in the same edit. New test `TestMigration0075_DownMigrationRestoresPreMigrationRLSPosture` asserts both flags read `false` after a clean rollback |
+| PHASE-D-SEC-P3-1 | P2 (real cross-tenant read gap) | `security`, code-reading + empirical: `ListEvaluationPolicyVersions` took a raw `pgx.Tx` and a caller-supplied jurisdiction id with **no scope assertion at all** — combined with the deliberately permissive `FOR SELECT USING (true)` RLS policy, any tenant- or player-scoped Go caller of this function could enumerate another licensing jurisdiction's full authoring history (`reason_code`, `legal_review_reference`, actor ids included), contradicting ADR 0043's own "no caller handles a jurisdiction id" principle. The integration test file's own header additionally overclaimed coverage of this function while never calling it | **FIXED.** `assertPlatformScope` added as the function's first statement. New tests: tenant-scoped and player-scoped calls → `ErrTransactionScope`; a genuine happy-path history test. Doc comment corrected (per `code-reviewer`'s follow-up finding, PHASE-D-CR-P3-4 below) to scope the guarantee to "Go callers of this function" — the permissive RLS `SELECT` policy itself is unchanged and still permits a raw-SQL reader with a tenant- or player-scoped connection to read this table directly; whether to narrow that policy is recorded as a `security`-owned open question, not decided by this fix |
+| PHASE-D-ARCH/SEC-P3-2 | P3 (both independently found; one fix closes both) | `architect` and `security`, independently: `ResolveEvaluationPolicy`'s selection query had no `ORDER BY`/`LIMIT`, and — though unreachable via the sanctioned Go write path — two SEPARATE raw-platform-admin-SQL transactions (one holding a bare close with no successor, another inserting under an earlier-pinned transaction timestamp) could still construct an overlapping or gapped `[effective_from, effective_to)` window; `security` reproduced this live | **FIXED (mechanism-hardening), residual accepted and disclosed.** The append-only trigger now forces `NEW.effective_to := now()` on any UPDATE transitioning it from NULL to non-NULL (mirroring the existing `effective_from` forgery-proofing on INSERT), closing the caller-supplied-timestamp half of the attack; `ResolveEvaluationPolicy`'s query gained `ORDER BY effective_from DESC LIMIT 1` for deterministic resolution if the underlying near-simultaneous-raw-SQL scenario is ever hit. `security`'s own narrower residual (a true overlap constructed via two raw sessions with one holding a bare close open) is disclosed in the migration's own trigger comment as an accepted, named gap requiring a raw-SQL bypass of every sanctioned write path to reach, with a future range-exclusion-constraint hardening option named and deferred (adds a `btree_gist` extension dependency for a gap only reachable outside every sanctioned path) |
+| PHASE-D-ARCH-P2-2/P2-3 | P2 (two overstated claims) | `architect`, empirically: ADR 0043 claimed "the only draft a caller could author today is content-free" (false — `CreateEvaluationPolicyVersion` accepts real content on a `draft`, only `withdrawn` is forced content-free, and a passing test proves it) and "`ResolveEvaluationPolicy` never returns a zero policy with a nil error" (false for the deliberate field-level-unset case, which is correct behaviour but wrongly described in absolute terms) | **FIXED.** Both claims corrected in ADR 0043, canonical-model §15, and the relevant Go doc comments, restating the TRUE invariant each was reaching for without overclaiming |
+| PHASE-D-ARCH-P3-1 | P3 | `architect`: canonical-model §14.6's Phase-D status note for PC-GAP-4 said bare "CLOSED", overclaiming against its own "closes in" criterion (content still HDR-J-2-blocked, zero production callers) | **FIXED.** Restated as "lookup/config mechanism CLOSED; production wiring NOT IMPLEMENTED", matching the honest form the other three PC-GAP rows already used |
+| PHASE-D-SEC-P3-3 | P3 | `security`: §15.4 self-declared a "CERTIFIED... full build/vet/gofmt/race/integration coverage" verdict written by the implementer BEFORE any independent review ran — inverting CLAUDE.md's "security review before marked complete" rule, and inaccurate at the time for the two defects above | **FIXED.** §15.4 rewritten to state factual CLAUDE.md labels and the five reviewers' own actual verdicts, including — after the fix round's own doc rewrite initially re-introduced a similar problem by asserting the P1 was closed when `security`'s own re-verification had just reproduced it — a further correction recording that item as genuinely open until the deterministic replacement test (above) actually closed it |
+| PHASE-D-CR-P2-1 | P2 | `code-reviewer`: none of `docs/active-stage.md`, `docs/progress.md`, or this registry's own Phase D section (every prior Stage 4I phase's commit updated all three) were touched by the implementation/fix-round commits, leaving the repo self-contradicting (`active-stage.md` asserting Phase D "remains unauthorized" while Phase D code existed in the working tree) | **FIXED.** This section, plus the `active-stage.md`/`progress.md` entries accompanying this commit |
+| PHASE-D-CR-P3-3 | P3 | `code-reviewer`: ADR 0043/canonical-model §15.2/`evaluation_policy_admin.go`'s header each said writing `status='active'` "is refused outright"/"blocks it structurally" — true only of the sanctioned Go write path; migration 0075 imposes no database-level guard against an `active` row (the CHECK and RLS INSERT policy both admit one from any platform-admin-scoped writer) | **FIXED.** All three re-worded to state the refusal is an application-layer control, not a schema-level one, with an explicit note that a future activation-writer phase must not assume otherwise |
+| PHASE-D-CR-P3-5 | P4 | `code-reviewer`: the 23514→`ErrConcurrentPolicyWrite` mapping is correctly scoped to the one UPDATE it's meant to cover, but the same 23514 also fires — deterministically, not as a race — when a caller invokes `CreateEvaluationPolicyVersion` twice for the same key inside ONE transaction (each call shares that transaction's single `now()`), surfacing a misleading "retry" signal for what is actually a caller-usage-contract violation | **NOT FIXED — documented instead.** Distinguishing the two cases reliably requires additional bookkeeping (e.g. an `xmin`-based check) disproportionate to a diagnostic-quality issue with zero functional or security impact (nothing is written either way; the transaction rolls back). `CreateEvaluationPolicyVersion`'s doc comment now states the constraint explicitly: call at most once per transaction per key |
+| PHASE-D-CR-P3-2 | P3 | `code-reviewer`: ~35 lines of row-scanning (column list, scan targets, post-processing) are byte-identical between `ListEvaluationPolicyVersions` and `readEvaluationPolicyRecordByID`, with no shared helper — a future column addition updating only one risks a silent divergence between the audit trail and the list surface | **NOT FIXED — accepted, deferred.** Genuine simplification opportunity, but the code has already been through two full review-and-fix rounds; reopening tested code for a refactor with no behavioural defect is deferred to whichever future phase next adds a column to `EvaluationPolicyRecord` (the PC-GAP-1/2 content phase, at the earliest) |
+| PHASE-D-CR-P4-2 | P4 | `code-reviewer`: withdrawing an already-withdrawn key succeeds, producing an unbounded chain of content-free tombstones with no semantic content | **NOT FIXED — accepted.** Harmless (the read path still correctly returns `ErrPolicyNotActive`); a future admin UI would need its own idempotency guard on repeated withdrawal clicks, not a change to this function's contract |
+| PHASE-D-CR-P4-3 | P4 | `code-reviewer`: a no-op `UPDATE ... SET status = status` on an open row falls through to the append-only trigger's last branch and raises "effective_to may not be cleared" — a confusing message for what the caller actually did | **NOT FIXED — accepted, cosmetic.** No caller in this phase issues such an update; correct outcome (rejection), misleading diagnostic only |
+| PHASE-D-QA/CR gaps (audit content, dead subtest, doc-comment duplication) | P2-P4 | `qa` and `code-reviewer`, independently: the audit-shape test declared `var after map[string]any` and never scanned into it (before/after content unverified); the immutability test's `delete_rejected` subtest asserted nothing (a 0-row-affected DELETE returns no error); three near-identical doc-comment paragraphs were duplicated verbatim across file headers and their own exported symbols | **Audit content and dead subtest: FIXED** (real JSON assertions added; `RowsAffected()==0` plus row-survival asserted). **Doc-comment duplication: NOT FIXED — accepted, cosmetic**, no functional risk |
+
+**Verdicts, all independent, none self-certified:** `architect` — original
+review BLOCKED (one P1, four P2s); CERTIFIED WITH NAMED EXCEPTIONS after
+both fix rounds, the P1 closed by a genuinely deterministic test
+independently re-run by the orchestrator (30 consecutive passes, no
+failure). `security` — CERTIFIED WITH NAMED EXCEPTIONS on both its original
+review and its fix-round re-verification (no P0/P1 on either pass; the
+named residual on `max_location_signal_age_seconds`'s unbounded staleness
+ceiling is accepted with conditions per ADR 0043 Decision 8). `identity-compliance`
+— NO VIOLATIONS FOUND. `qa` — original review NOT READY (the same P1,
+found independently); READY WITH NAMED GAPS after both fix rounds.
+`risk` — NO INTEGRATION CONCERNS (two informational notes: a correction to
+this dispatch's own overstated premise about `internal/risk`'s coupling to
+`OperationClass`, and a suggested — not applied — clarifying clause in
+HDR-J-7's "not blocked" list naming Risk's R-2b precondition explicitly).
+`code-reviewer` — READY WITH NAMED EXCEPTIONS (no P0/P1; the governance-doc
+gap was the only P2, closed by this section and its companion entries).
+
+**Independently confirmed, not merely trusted:** the orchestrator itself
+re-ran (rather than accepted on report) the two concurrency tests 15× each
+under `-race` after the final fix, the full `internal/jurisdiction`/
+`internal/auth` integration suites, and the whole-repo
+`go test -tags=integration ./...` gate — all green. One pre-existing,
+unrelated test outside this phase's own files
+(`internal/bonus/wave3_phase2_migrations_integration_test.go`'s
+`TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip`) required updating
+its hardcoded migration-chain window by one entry, mirroring the identical,
+already-established pattern each of migrations 0071-0074 required in turn
+when it became the chain's new tip — not a Phase D defect, a routine
+consequence of adding a migration, fixed and re-verified passing.
+
+**Carried to a future phase (not this phase's to build, confirmed
+absent):** HDR-J-7/HDR-J-8/HDR-J-9's actual content (all three genuinely
+open, correctly worded as neutral questions per `identity-compliance`'s
+review); any production wiring of `ResolveEvaluationPolicy`/
+`RequiredPurposes`/`CreateEvaluationPolicyVersion` into `casino`, `bonus`,
+`risk`, or `assetregistry`; an activation permission and dual-control
+ruling for writing `status='active'` (ADR 0043 Decision 5); the
+`jurisdiction_resolutions.reason` CHECK widening for Phase C's three new
+`Reason` values (architect's Correction 2, deliberately not touched —
+shape-without-a-writer); the deferred PHASE-B-ARCH-1 `effective_from`/
+actor-provenance defect on `jurisdiction_resolution_active`/
+`jurisdiction_evidence_collection_active` (re-evaluated this phase per its
+own three trigger conditions — none fired, remains deferred, unchanged);
+a `btree_gist`-based range-exclusion constraint closing PHASE-D-ARCH/SEC-P3-2's
+narrow raw-SQL-only residual; a maximum-staleness ceiling for
+`max_location_signal_age_seconds` (framed as a sub-question inside HDR-J-9,
+not decided); the row-scan duplication refactor (PHASE-D-CR-P3-2); all
+carried-forward items from every prior Stage 4I phase, unchanged.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

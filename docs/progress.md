@@ -6165,3 +6165,134 @@ Per the directive's own mandatory stop condition: the Orchestrator
 **stops** here. Phase D and any production jurisdiction activation remain
 unauthorized pending a separate human directive reviewing this Phase C
 completion report.
+
+## Stage 4I Phase D: jurisdiction policy configuration and operational semantics — IMPLEMENTED
+
+A human "MASTER ORCHESTRATOR" directive, issued after review of the Phase C
+completion report, authorized Stage 4I Phase D to resolve/formalize the
+four Phase C deferred gaps (PC-GAP-1 through 4) as far as they could be
+resolved without inventing legal/policy content, and to build the config
+infrastructure the already-recorded human decisions (`docs/decisions/
+0042-human-decision-response.md`) made safe to build now.
+
+**Mandatory pre-implementation reconnaissance**, per the directive's own
+requirement: confirmed `internal/jurisdiction/resolver.go` still treats
+`OperationClass` as an opaque validated string with zero semantic
+branching; confirmed all four existing `OperationClass` consumers (the
+casino per-game blocklist, `assetregistry` layer 6, Bonus issuance/
+conversion) are eligibility/availability/restriction-type decisions;
+discovered `jurisdiction_precedence_configs` (migration 0071) already
+existed as a shape-only, zero-row, zero-Go-reference table with the
+*correct* append-only, effective-dated pattern — a materially better
+foundation for PC-GAP-4 than the upsert-in-place pattern the two older
+activation tables use (the PHASE-B-ARCH-1-deferred defect).
+
+**Architect design ruling**, dispatched with the full reconnaissance
+findings: a complete, binding specification covering all four gaps. The
+ruling **corrected a load-bearing error in the orchestrator's own
+reconnaissance** — the tempting inference that every `OperationClass`
+deterministically requires `PurposeMarketAccessControl`, since every
+current consumer makes an availability/restriction decision. The
+architect rejected this: `Purpose` selects which evidence hierarchy is
+*legally authoritative*, not what kind of decision a consumer makes, and
+a per-game blocklist keyed on a player's *verified residence* (identity
+determination) is an equally coherent, and in several regulated markets
+the legally correct, design. The ruling: extend
+`jurisdiction_precedence_configs` in place (not a sibling table) with
+seven new columns; key strictly on the tenant's licensing jurisdiction
+(`tenants.licence_id → licences.jurisdiction_id`), never `tenant_id`
+directly, per canonical-model §3.4's pre-existing bootstrap-circularity
+fix; forge-proof `effective_from`/`effective_to` via BEFORE INSERT/UPDATE
+triggers so no writer — sanctioned or raw SQL — can backdate or
+reopen a version; add RLS to this table for the first time (permissive
+read, platform-admin-only write); build the `RequiredPurposes` mapping
+seam with **zero mapping content** (all four `OperationClass` values fail
+closed with `ErrPurposeMappingUndetermined`); and register three new
+human-decision items (HDR-J-7/8/9) for the genuinely undecided legal
+content, rather than guess.
+
+**Backend implementation, exactly per the ruling:** migration `0075`
+(zero `INSERT`s — no seed jurisdiction, no example policy value);
+`internal/jurisdiction/operation_purpose.go` (`RequiredPurposes`);
+`evaluation_policy.go` (`ResolveEvaluationPolicy`, the read seam —
+reuses the existing `assertTenantScope`, never returns a permissive
+default); `evaluation_policy_admin.go` (`CreateEvaluationPolicyVersion`,
+the write seam — no `ON CONFLICT DO UPDATE` anywhere, refuses `status =
+'active'` outright); one new permission
+(`PermJurisdictionEvaluationPolicyWrite`, `RolePlatformAdmin`-only, no
+HTTP route). `internal/jurisdiction/resolver.go`/`precedence.go`/
+`types.go`: zero diff, confirmed by `git diff --stat`. `purpose.go`:
+doc-comment-only diff.
+
+**Independent review — five specialists in parallel:** `architect`
+fidelity review, `security` (also covering DB/RLS), `identity-compliance`
+(compliance/privacy), `qa` (adversarial), `risk` (cross-domain
+integration). Three of the five — `architect`, `security`, `qa` — each
+independently and empirically (the defect was invisible from reading
+alone) found the same P1: the integration test proving the config write
+path's optimistic-concurrency control did not reliably force the race it
+claimed to test, failing on a meaningful fraction of repeat runs.
+`architect` also found three further P2s (a destructive/non-round-
+trippable down-migration; a real cross-tenant read gap in
+`ListEvaluationPolicyVersions`, which had no scope assertion at all
+despite the table's permissive read RLS policy; two overstated claims in
+the design record about what the code actually does). `identity-
+compliance` found no violations. `risk` found no integration concerns
+(and corrected an overstated premise in the orchestrator's own
+reconnaissance about Risk's coupling to `OperationClass`).
+
+**Fix round one** closed the P2s and attempted to close the P1 with a
+`sync.WaitGroup` synchronization barrier — this closed the specific
+failure the three reviewers had reproduced. **A dedicated `security`
+re-verification pass** (deliberately scoped narrowly to the fix round's
+own changes, not a full re-review) then reproduced the SAME class of
+failure under artificial CPU contention (9 failures in 200 runs) and
+diagnosed why: the barrier synchronized only "both transactions have
+begun," not the actual write race, so under scheduling pressure one
+transaction could still fully commit before the other even started.
+This re-verification pass also caught that the fix round's own governance-
+doc rewrite had, in the course of correcting an earlier self-certification
+problem, introduced a NEW inaccuracy — asserting the P1 was closed when it
+was not.
+
+**Fix round two** replaced scheduling-dependent assertions entirely,
+using exactly the technique `security`'s own report proposed: a loosened
+invariant-only regression test asserting only what holds under every
+legitimate interleaving, plus a new, genuinely deterministic test that
+forces the race via real PostgreSQL unique-index locking semantics — an
+uncommitted competing row blocks the real write, confirmed via a
+`pg_stat_activity` poll (never a sleep, zero timing assumption) before
+the blocking transaction is released. The Orchestrator independently
+re-ran this fix directly (not merely trusting the report): 30 consecutive
+passes under `-race` across two repeat batches, plus a clean whole-repo
+`go test -tags=integration ./...` run. One pre-existing, unrelated test
+outside this phase's own files
+(`internal/bonus/wave3_phase2_migrations_integration_test.go`'s full-chain
+round-trip test) required updating its hardcoded migration-count window by
+one entry — the identical, already-established pattern each of migrations
+0071-0074 required in turn when landing on the chain's tip, not a Phase D
+defect — fixed and re-verified passing.
+
+**Validation, run to completion:** `go build ./...` clean; `gofmt -l .`
+clean; `go vet ./...` and `go vet -tags=integration ./...` clean;
+`internal/jurisdiction`/`internal/auth` unit and integration suites green;
+`go test -race` clean; whole-repo `go test ./...` and
+`go test -tags=integration ./...` green (every package, no regressions).
+
+**Documentation/governance updated this phase:** new §15 in
+`docs/governance/stage-4i-canonical-model.md`, written to record the
+concurrency-test defect's full, honest lifecycle (found → first fix →
+re-found under load → second fix → independently re-verified) rather than
+a premature certification; §3.4/§6.1 amendment notes; §14.6's PC-GAP
+table gained a "status after Phase D" note per item; new ADR
+`docs/decisions/0043-jurisdiction-evaluation-policy-configuration.md`; new
+HDR register `docs/decisions/0044-human-decision-register-stage-4i-phase-d.md`
+(HDR-J-7/8/9, all genuinely open, worded as neutral questions per
+`identity-compliance`'s review); `docs/governance/task-registry.md`'s new
+"Stage 4I Phase D" section (full findings ledger); this entry.
+
+Per the directive's own mandatory stop condition: the Orchestrator
+**stops** here. Any phase beyond this one, HDR-J-7/HDR-J-8/HDR-J-9's
+content, and any production jurisdiction activation remain unauthorized
+pending a separate human directive reviewing this Phase D completion
+report.

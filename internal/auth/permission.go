@@ -311,6 +311,33 @@ const (
 	// for a purely-engineering precondition fact. See
 	// docs/plans/stage-4i-jurisdiction-implementation-plan.md Phase B.
 	PermJurisdictionEvidenceCollectionActivate Permission = "jurisdiction_evidence_collection:activate"
+
+	// PermJurisdictionEvaluationPolicyWrite is the permission that WILL gate
+	// authoring an evaluation policy VERSION for a licensing jurisdiction
+	// (jurisdiction_precedence_configs, canonical-model §3.4 as widened by
+	// Stage 4I Phase D). It is declared and role-scoped now, but NO caller
+	// checks it in this phase - there is no HTTP route, and
+	// CreateEvaluationPolicyVersion itself does not check it (its only
+	// controls are assertPlatformScope and migration 0075's RLS INSERT/
+	// UPDATE policies, both of which are already platform-admin-only).
+	// PLATFORM-ONLY, granted only to RolePlatformAdmin, following
+	// PermJurisdictionRegistryManage's exact precedent: this is platform-wide
+	// reference configuration with no tenant_id, shared by every tenant
+	// licensed in that jurisdiction, so a tenant-scoped role must never be
+	// able to change it - a tenant admin editing it would be changing another
+	// tenant's evaluation policy. Deliberately NOT PermJurisdictionRegistry
+	// Manage itself: creating a jurisdiction/licence reference row and
+	// authoring the policy that will govern whether players may play are
+	// materially different authorizing acts, the same distinction
+	// PermTenantLicenceAssign's own doc comment already draws against
+	// PermTenantWrite/PermJurisdictionRegistryManage.
+	//
+	// ACTIVATION is deliberately NOT covered by this permission: writing an
+	// active version is refused outright in this phase (ErrActivationNot
+	// Authorized) and, when the phase that has HDR-J-8/HDR-J-9 content adds
+	// it, it requires its own permission and a dual-control ruling per
+	// HDR-J-2's recorded technical consequence.
+	PermJurisdictionEvaluationPolicyWrite Permission = "jurisdiction_evaluation_policy:write"
 )
 
 // rolePermissions is a static, in-code role -> permission-set mapping.
@@ -335,6 +362,17 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// that permission's own doc comment for why it is separate from
 		// both PermTenantWrite and PermJurisdictionRegistryManage.
 		PermTenantLicenceAssign,
+		// Stage 4I Phase D: the sole grantee of
+		// PermJurisdictionEvaluationPolicyWrite (authoring a
+		// jurisdiction_precedence_configs evaluation-policy VERSION -
+		// canonical-model section 3.4 as widened by that phase). Canonical-
+		// model section 6.1's "no other permission and no new role is
+		// authorized" sentence is amended by that phase's architect ruling
+		// to "no other permission without a recorded architect ruling
+		// naming it" - this permission is that named exception. See that
+		// permission's own doc comment for why it is separate from
+		// PermJurisdictionRegistryManage.
+		PermJurisdictionEvaluationPolicyWrite,
 		// Deliberately NOT PermRGRestrictionWrite/Read (Stage 4D-RG, ADR
 		// 0026 §12): platform_admin cannot resolve a specific tenant's
 		// player_account at all today (PermPlayerRead is itself

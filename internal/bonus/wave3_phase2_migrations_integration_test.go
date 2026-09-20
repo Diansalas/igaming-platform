@@ -58,6 +58,11 @@ const (
 	// jurisdiction_evidence_collection_active) is now the chain's tip, for
 	// the same reason 0071/0072/0073 each were in turn.
 	migration0074Version = int64(74)
+	// migration0075Version (Stage 4I Phase D: widens
+	// jurisdiction_precedence_configs into the evaluation-policy config
+	// table) is now the chain's tip, for the same reason
+	// 0071/0072/0073/0074 each were in turn.
+	migration0075Version = int64(75)
 )
 
 // migrationsDir resolves the real migrations directory relative to this
@@ -244,19 +249,20 @@ func TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip(t *testing.T) {
 		t.Fatal("bonus_grants.expires_at does not exist after migrating up")
 	}
 
-	// Roll back exactly the seven most recently applied migrations (0074,
-	// 0073, 0072, 0071, 0070, 0069, 0068, in that order - MigrateDown
-	// orders by applied_at DESC). 0071/0072/0073/0074 are not this test's
-	// own subject (Stage 4I, jurisdiction resolution foundation plus its
-	// security-review follow-ups and Phase B's evidence foundation) but
-	// all four are unconditionally reversible and sit directly on top of
-	// 0070 in the chain, so they must be rolled back first for 0070's own
-	// down migration to run at all.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 7)
+	// Roll back exactly the eight most recently applied migrations (0075,
+	// 0074, 0073, 0072, 0071, 0070, 0069, 0068, in that order - MigrateDown
+	// orders by applied_at DESC). 0071/0072/0073/0074/0075 are not this
+	// test's own subject (Stage 4I, jurisdiction resolution foundation
+	// plus its security-review follow-ups, Phase B's evidence foundation,
+	// and Phase D's evaluation-policy config widening) but all five are
+	// unconditionally reversible and sit directly on top of 0070 in the
+	// chain, so they must be rolled back first for 0070's own down
+	// migration to run at all.
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 8)
 	if err != nil {
-		t.Fatalf("migrate down 7 (0074/0073/0072/0071/0070/0069/0068): %v", err)
+		t.Fatalf("migrate down 8 (0075/0074/0073/0072/0071/0070/0069/0068): %v", err)
 	}
-	wantDown := []int64{migration0074Version, migration0073Version, migration0072Version, migration0071Version, migration0070Version, migration0069Version, migration0068Version}
+	wantDown := []int64{migration0075Version, migration0074Version, migration0073Version, migration0072Version, migration0071Version, migration0070Version, migration0069Version, migration0068Version}
 	if !wave3EqualVersions(rolledBack, wantDown) {
 		t.Fatalf("expected exactly migrations %v to be rolled back in that order, got %v", wantDown, rolledBack)
 	}
@@ -306,9 +312,9 @@ func TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip(t *testing.T) {
 	// Round trip: up again, cleanly.
 	reapplied, err := pool.MigrateUp(context.Background(), dir)
 	if err != nil {
-		t.Fatalf("re-applying migrations 0068/0069/0070/0071/0072/0073/0074: %v", err)
+		t.Fatalf("re-applying migrations 0068/0069/0070/0071/0072/0073/0074/0075: %v", err)
 	}
-	wantUp := []int64{migration0068Version, migration0069Version, migration0070Version, migration0071Version, migration0072Version, migration0073Version, migration0074Version}
+	wantUp := []int64{migration0068Version, migration0069Version, migration0070Version, migration0071Version, migration0072Version, migration0073Version, migration0074Version, migration0075Version}
 	if !wave3EqualVersions(reapplied, wantUp) {
 		t.Fatalf("expected exactly migrations %v to be re-applied in that order, got %v", wantUp, reapplied)
 	}

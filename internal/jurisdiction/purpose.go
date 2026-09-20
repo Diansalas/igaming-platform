@@ -8,11 +8,15 @@ package jurisdiction
 // OperationClass answers "which call site, is resolution switched on";
 // Purpose answers "which evidence hierarchy governs this determination."
 //
-// No mapping function between OperationClass and Purpose exists or should
-// be added in this package. That mapping is undecided HDR-J-2 content -
-// tracked as PC-GAP-3, owned by identity-compliance + legal, not
-// engineering. A future caller supplies Purpose as a compile-time
-// constant, exactly as OperationClass is supplied today; there is no wire
+// The mapping from OperationClass to Purpose is owned by exactly one
+// place: RequiredPurposes (operation_purpose.go), added by Stage 4I
+// Phase D. That function deliberately contains NO mapping content - all
+// four operation classes return ErrPurposeMappingUndetermined, because
+// which Purpose an operation requires is undecided HDR-J-2/PC-GAP-3
+// legal content owned by identity-compliance + legal (human decision
+// item HDR-J-7), not engineering. No other code may branch on an
+// OperationClass to select a Purpose. Purpose itself remains a
+// compile-time constant at each future call site: there is no wire
 // representation, no HTTP surface, and no database column for it.
 type Purpose string
 

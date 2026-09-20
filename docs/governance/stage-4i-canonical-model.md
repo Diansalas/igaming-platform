@@ -456,6 +456,19 @@ The **table shape** is buildable now. Its **rows** are blocked on HDR-J-2.
 A resolver with no precedence rows resolves `unresolved`, which is correct
 and is the Stage 4I steady state (§11.3).
 
+**Amendment (Stage 4I Phase D, `docs/decisions/0043-jurisdiction-
+evaluation-policy-configuration.md`).** `jurisdiction_precedence_configs`'
+role is widened, not replaced: it is now "the effective-dated
+evaluation-policy configuration for a licensing jurisdiction and operation
+class, of which the source-precedence ordering described above is one
+(currently unset) component." Phase D adds the PC-GAP-1/PC-GAP-2 location-
+policy knobs (`status`, `location_requirement`,
+`max_location_signal_age_seconds`, `precedence_status`, and their
+accompanying provenance columns) to this SAME table, at the SAME key —
+closing PC-GAP-4. See §14.6 and §15 below for the full account; this
+paragraph exists so a reader of §3.4 alone is not left believing the table
+remains shape-only for precedence content alone.
+
 ### 3.5 RISK §4.1's invariant, adopted verbatim
 
 > **One operation resolves exactly one jurisdiction, and every gate in that
@@ -762,7 +775,17 @@ Binding on `jurisdiction_resolutions` and on `jurisdiction_resolution_active`:
   exact precedent (`internal/auth/permission.go:76-82`). Per-tenant
   jurisdiction configuration writes follow `PermAssetAuthorizationWrite`'s
   precedent instead (tenant-scoped, `RoleTenantAdmin`). **No other
-  permission and no new role is authorized.**
+  permission and no new role is authorized** *(amended by Stage 4I Phase D,
+  `docs/decisions/0043-jurisdiction-evaluation-policy-configuration.md`
+  Decision 5, to: "no other permission without a recorded architect
+  ruling naming it." Phase D names one such exception,
+  `PermJurisdictionEvaluationPolicyWrite` — platform-only, granted only to
+  `RolePlatformAdmin`, gating authoring a `jurisdiction_precedence_configs`
+  evaluation-policy version. No new role is created. This amendment also
+  retroactively documents that Phase B had already, correctly, added two
+  more named exceptions — `PermPlayerResidenceRead` and
+  `PermJurisdictionEvidenceCollectionActivate` — without this sentence
+  having been updated to say so at the time.)*
 
 ### 6.2 The nine-scenario contract — binding on `qa`
 
@@ -2045,12 +2068,12 @@ smuggled default. None is decided here; each names its owner, why it is
 deferred, what depends on it, which future phase must close it, and its
 security/regulatory impact if left open.
 
-| ID | What is deferred | Owner | Why deferred | Depends on | Closes in | Security/regulatory impact if left open |
-|---|---|---|---|---|---|---|
-| **PC-GAP-1** | Whether a market-access operation may proceed when its location signal is unusable (missing/stale/inconclusive/unavailable/provider-errored), and under what conditions | `architect` + `identity-compliance`, with legal input | This is a legal/policy threshold (which operations require a fresh location check to proceed at all), not an engineering default. `LocationRequirementUnset` (the zero value) fails closed with `ErrPolicyUnset` rather than guessing `LocationRequired` or `LocationAdvisory` | HDR-J-3 (real player-side evidence collection); a real geolocation vendor | The phase that first wires `DeterminePlayerJurisdiction` into a production evaluation path (must supply this policy value explicitly, per operation class, before that wiring compiles into a reachable call) | **None while unset** — the seam is inert (zero production callers); a caller-supplied guess here, instead of an explicit human decision, would risk either wrongly blocking lawful play (over-strict) or wrongly permitting play from a restricted jurisdiction (under-strict, a licensing/regulatory exposure) |
-| **PC-GAP-2** | The maximum age before a physical-location signal is considered stale (`EvaluationPolicy.MaxLocationSignalAge`) | `architect` + `identity-compliance`, with legal input | Same class of decision as PC-GAP-1 — a `nil` value fails closed with `ErrPolicyUnset` rather than guessing "no limit" (which would defeat the freshness gate entirely) or an arbitrary duration (which would be a policy value invented by engineering) | PC-GAP-1 (the requirement decision this bounds); a real geolocation vendor's actual latency/refresh characteristics | Same production-wiring phase as PC-GAP-1 | **None while unset** — same reasoning as PC-GAP-1; note also SEC-4I-C-06 (a zero, non-nil duration is a distinct footgun — see `EvaluationPolicy.MaxLocationSignalAge`'s own doc comment, `precedence.go`) |
-| **PC-GAP-3** | The mapping from each `OperationClass` (`play`/`catalogue_availability`/`bonus_issuance`/`bonus_conversion`) to the `Purpose` it requires (identity determination, market-access control, both, or neither) | `identity-compliance`, with legal input | This is precisely the legal-content decision §14.2 explains this phase deliberately declined to invent — no code anywhere maps `OperationClass` to `Purpose` | HDR-J-3 (the same player-side evidence dependency as PC-GAP-1); the licensing/regulatory basis for which operations actually require which determination | The phase that first wires either `Purpose` into a per-`OperationClass` production check | **None while unset** — `DeterminePlayerJurisdiction` has no production callers; a guessed mapping would risk requiring identity determination where only market-access control is legally needed (unnecessary KYC friction) or the reverse (a compliance gap) |
-| **PC-GAP-4** | Tenant/jurisdiction-aware precedence keying — canonical-model §3.4 ("Precedence configuration — keyed on the licence side") is not yet reflected in any Phase C type. `DeterminePlayerJurisdiction` takes a single global `EvaluationPolicy`, not one keyed per tenant/licence | `architect` | Documentation-only gap, flagged by `architect`'s Phase C review: §3.4 already establishes that precedence configuration must key on the licence side once real content exists, but no `jurisdiction_precedence_configs` row shape or per-tenant policy lookup exists yet to wire this engine against — building that lookup now, with no real precedence content to populate it (HDR-J-2/HDR-J-3 both still open), would be exactly the scope expansion CLAUDE.md forbids | HDR-J-2 (precedence-configuration content); HDR-J-3 (player evidence collection, live) | The phase that gives `jurisdiction_precedence_configs` real write/read content and wires `EvaluationPolicy` construction to a per-tenant/licence lookup rather than a caller-constructed literal | **None while unset** — `EvaluationPolicy` today is always caller-constructed per call, never read from tenant configuration, so there is no cross-tenant leakage surface; the gap is purely that the eventual per-tenant policy source does not exist yet |
+| ID | What is deferred | Owner | Why deferred | Depends on | Closes in | Security/regulatory impact if left open | Status after Phase D |
+|---|---|---|---|---|---|---|---|
+| **PC-GAP-1** | Whether a market-access operation may proceed when its location signal is unusable (missing/stale/inconclusive/unavailable/provider-errored), and under what conditions | `architect` + `identity-compliance`, with legal input | This is a legal/policy threshold (which operations require a fresh location check to proceed at all), not an engineering default. `LocationRequirementUnset` (the zero value) fails closed with `ErrPolicyUnset` rather than guessing `LocationRequired` or `LocationAdvisory` | HDR-J-3 (real player-side evidence collection); a real geolocation vendor | The phase that first wires `DeterminePlayerJurisdiction` into a production evaluation path (must supply this policy value explicitly, per operation class, before that wiring compiles into a reachable call) | **None while unset** — the seam is inert (zero production callers); a caller-supplied guess here, instead of an explicit human decision, would risk either wrongly blocking lawful play (over-strict) or wrongly permitting play from a restricted jurisdiction (under-strict, a licensing/regulatory exposure) | **Mechanism CLOSED, content BLOCKED on HDR-J-8.** `jurisdiction_precedence_configs.location_requirement` (unset/required/advisory), `ResolveEvaluationPolicy`, and the four-state fail-closed distinction (key-level unset / field-level unset / not-active / active) are built (Stage 4I Phase D, §15). Zero rows exist. |
+| **PC-GAP-2** | The maximum age before a physical-location signal is considered stale (`EvaluationPolicy.MaxLocationSignalAge`) | `architect` + `identity-compliance`, with legal input | Same class of decision as PC-GAP-1 — a `nil` value fails closed with `ErrPolicyUnset` rather than guessing "no limit" (which would defeat the freshness gate entirely) or an arbitrary duration (which would be a policy value invented by engineering) | PC-GAP-1 (the requirement decision this bounds); a real geolocation vendor's actual latency/refresh characteristics | Same production-wiring phase as PC-GAP-1 | **None while unset** — same reasoning as PC-GAP-1; note also SEC-4I-C-06 (a zero, non-nil duration is a distinct footgun — see `EvaluationPolicy.MaxLocationSignalAge`'s own doc comment, `precedence.go`) | **Mechanism CLOSED, content BLOCKED on HDR-J-9.** `jurisdiction_precedence_configs.max_location_signal_age_seconds` (whole positive seconds, NULL = unset) is built, with the database and the write API both rejecting zero/negative/sub-second values (closing SEC-4I-C-06 for every config-sourced policy). No upper bound is imposed (Stage 4I Phase D, §15; residual risk named for `security`). Zero rows exist. |
+| **PC-GAP-3** | The mapping from each `OperationClass` (`play`/`catalogue_availability`/`bonus_issuance`/`bonus_conversion`) to the `Purpose` it requires (identity determination, market-access control, both, or neither) | `identity-compliance`, with legal input | This is precisely the legal-content decision §14.2 explains this phase deliberately declined to invent — no code anywhere maps `OperationClass` to `Purpose` | HDR-J-3 (the same player-side evidence dependency as PC-GAP-1); the licensing/regulatory basis for which operations actually require which determination | The phase that first wires either `Purpose` into a per-`OperationClass` production check | **None while unset** — `DeterminePlayerJurisdiction` has no production callers; a guessed mapping would risk requiring identity determination where only market-access control is legally needed (unnecessary KYC friction) or the reverse (a compliance gap) | **Seam CLOSED, mapping BLOCKED on HDR-J-7.** `RequiredPurposes` (`internal/jurisdiction/operation_purpose.go`) is the single canonical owner of this mapping; all four classes return `ErrPurposeMappingUndetermined` today (Stage 4I Phase D, §15). No other code may branch on an `OperationClass` to select a `Purpose`. |
+| **PC-GAP-4** | Tenant/jurisdiction-aware precedence keying — canonical-model §3.4 ("Precedence configuration — keyed on the licence side") is not yet reflected in any Phase C type. `DeterminePlayerJurisdiction` takes a single global `EvaluationPolicy`, not one keyed per tenant/licence | `architect` | Documentation-only gap, flagged by `architect`'s Phase C review: §3.4 already establishes that precedence configuration must key on the licence side once real content exists, but no `jurisdiction_precedence_configs` row shape or per-tenant policy lookup exists yet to wire this engine against — building that lookup now, with no real precedence content to populate it (HDR-J-2/HDR-J-3 both still open), would be exactly the scope expansion CLAUDE.md forbids | HDR-J-2 (precedence-configuration content); HDR-J-3 (player evidence collection, live) | The phase that gives `jurisdiction_precedence_configs` real write/read content and wires `EvaluationPolicy` construction to a per-tenant/licence lookup rather than a caller-constructed literal | **None while unset** — `EvaluationPolicy` today is always caller-constructed per call, never read from tenant configuration, so there is no cross-tenant leakage surface; the gap is purely that the eventual per-tenant policy source does not exist yet | **Lookup/config mechanism CLOSED** (schema + Go read/write API delivered: `ResolveEvaluationPolicy` — tenant-keyed input, licensing-jurisdiction-keyed storage, ADR 0043 Decision 2 — and `CreateEvaluationPolicyVersion`/`ListEvaluationPolicyVersions`, Stage 4I Phase D, §15); **production wiring NOT IMPLEMENTED** (zero callers of `ResolveEvaluationPolicy` outside this package's own tests); content still blocked on HDR-J-2. |
 
 ### 14.7 Independent review and fix round
 
@@ -2124,3 +2147,201 @@ country allow/deny content, no real geolocation vendor, and no production
 jurisdiction enforcement exist as a result of this phase. Real
 player-jurisdiction resolution remains blocked on **HDR-J-3** above all,
 unchanged from §13.8's closing statement.
+
+---
+
+## 15. Stage 4I Phase D — jurisdiction policy configuration & operational semantics
+
+Full ruling: the Stage 4I Phase D architect design ruling; full reasoning
+and decisions: `docs/decisions/0043-jurisdiction-evaluation-policy-
+configuration.md`. This section records the summary a reader of the
+canonical model needs without re-reading either document in full.
+
+### 15.1 What this phase closed
+
+- **PC-GAP-4 (precedence-configuration keying), lookup/config mechanism
+  CLOSED; production wiring NOT IMPLEMENTED (zero callers outside this
+  package's own tests).**
+  `jurisdiction_precedence_configs` (migration 0071) is widened, not
+  replaced, by migration `0075_jurisdiction_evaluation_policy_config`: new
+  columns `status`, `location_requirement`,
+  `max_location_signal_age_seconds`, `precedence_status`,
+  `precedence_policy_version`, `legal_review_reference`, `reason_code`;
+  new append-only/provenance triggers; new RLS (added, hardening
+  direction only — permissive read, platform-admin-only write, no DELETE,
+  no FOR ALL). `internal/jurisdiction/evaluation_policy.go` adds
+  `ResolveEvaluationPolicy` (tenant-keyed input, licensing-jurisdiction-
+  keyed storage — §3.4's reconciliation, restated in this section's own
+  amendment note above) and `ListEvaluationPolicyVersions`.
+  `internal/jurisdiction/evaluation_policy_admin.go` adds
+  `CreateEvaluationPolicyVersion` (authors/supersedes/withdraws a
+  version; refuses to author an `active` one — `ErrActivationNotAuthorized`
+  — since activation requires HDR-J-8/HDR-J-9 content plus its own
+  permission and dual-control ruling, none of which exist yet).
+- **PC-GAP-3 (`OperationClass` → `Purpose` mapping), seam CLOSED, mapping
+  content BLOCKED on the new HDR-J-7.**
+  `internal/jurisdiction/operation_purpose.go` adds `RequiredPurposes`,
+  the single canonical owner of this mapping. It contains zero mapping
+  content: all four operation classes (`play`,
+  `catalogue_availability`, `bonus_issuance`, `bonus_conversion`) return
+  `ErrPurposeMappingUndetermined`. §14.2's own consumer-behaviour argument
+  ("every existing consumer makes an availability/restriction decision, so
+  `Purpose` must be `PurposeMarketAccessControl` for all four") is
+  explicitly rejected as invalid by the Phase D ruling: `Purpose` selects
+  which evidence hierarchy governs a determination, not what kind of
+  decision a consumer happens to make, and the two evidence hierarchies
+  differ in whether a real-time geolocation signal may ever restrict an
+  operation at all (HDR-J-3a). That is licensing content, not a fact
+  recoverable from consumer code.
+- **PC-GAP-1/PC-GAP-2 (location-requirement threshold and staleness
+  bound), mechanism CLOSED, content BLOCKED on the new HDR-J-8/HDR-J-9.**
+  The four-state fail-closed distinction — location-required,
+  location-advisory, field-level policy-unset (a row exists, the field is
+  explicitly `unset`), key-level policy-not-configured (no row at all),
+  and policy-not-active (a row exists and is in force but is `draft` or
+  `withdrawn`) — is real and tested, and every non-value state (key-level
+  unset, not-active, mismatched-version, unknown-jurisdiction) fails
+  closed as a distinguishable error. **Correction:** a nil error from
+  `ResolveEvaluationPolicy` does NOT mean the policy's fields are all
+  decided — a field-level `unset` value (`LocationRequirementUnset` with a
+  nil `MaxLocationSignalAge`, which is exactly the zero `EvaluationPolicy`)
+  is returned WITH a nil error BY DESIGN, so it is distinguishable from the
+  key-level `ErrPolicyNotConfigured`, and fails closed only downstream, at
+  `DeterminePlayerJurisdiction`, via `ErrPolicyUnset`. No caller may treat
+  a nil error from `ResolveEvaluationPolicy` as license to skip feeding the
+  result through `DeterminePlayerJurisdiction`. No permanent global
+  default exists anywhere in this mechanism — no package-level default
+  `EvaluationPolicy`, no env var, no config-file fallback.
+
+### 15.2 What this phase deliberately did NOT do
+
+- **No policy content for any real jurisdiction.** Zero rows are inserted
+  by migration 0075. No seed, no fixture outside tests, no example
+  jurisdiction.
+- **No HTTP route, no OpenAPI change, no console/back-office surface.**
+  A `draft` MAY carry real location/staleness content authored ahead of
+  legal review (`CreateEvaluationPolicyVersion` accepts it; only
+  `withdrawn` is forced content-free) — but no HTTP authoring route exists
+  in this phase because that content can never be activated
+  (`ErrActivationNotAuthorized` refuses it at the sanctioned Go write
+  path) until HDR-J-8/HDR-J-9 are answered and a future phase adds the
+  activation permission and dual-control mechanism; shipping an authoring
+  endpoint for content that cannot yet be approved is a needless surface.
+- **No activation writer, and no database-level guard against one either
+  — an application-layer control, not a structural one.** Writing
+  `status = 'active'` is refused by `CreateEvaluationPolicyVersion`
+  (`ErrActivationNotAuthorized`), but migration 0075's own CHECK
+  constraint and RLS `INSERT` policy both admit an `active` row from any
+  platform-admin-scoped writer — verified directly by `code-reviewer`'s
+  Phase D review. The database representation exists so a future phase
+  adds a writer, not a migration; that future phase must not assume the
+  schema itself blocks activation.
+- **No change to `resolver.go`, `precedence.go`, or `types.go` (zero diff,
+  verified by `git diff --stat`).** `purpose.go` carries a doc-comment-only
+  diff (one paragraph, replacing the sentence that predated
+  `RequiredPurposes`'s existence).
+- **No coupling to `jurisdiction_resolution_active` or
+  `jurisdiction_evidence_collection_active`.** `ResolveEvaluationPolicy`
+  reads neither. The future wiring phase must require all three switches
+  independently (§3.4's amendment note above; ADR 0043 Decision 6).
+- **No widening of `jurisdiction_resolutions.reason`'s CHECK** (Correction
+  2 in the Phase D ruling) — nothing persists a `PlayerJurisdictionResult`
+  yet, so widening it now would be shape without a writer. Named as a
+  prerequisite of the future phase that first calls `Persist` on a
+  player-jurisdiction determination.
+
+### 15.3 New human decision register items
+
+`docs/decisions/0044-human-decision-register-stage-4i-phase-d.md` registers
+three new, open items — **HDR-J-7** (which of the four operation classes
+require identity determination, market-access control, both, or neither),
+**HDR-J-8** (location-requirement threshold, per licensing jurisdiction and
+operation class), and **HDR-J-9** (location-staleness bound, per licensing
+jurisdiction and operation class). None of the six items in
+`docs/decisions/0041-human-decision-register-stage-4i-jurisdiction.md` /
+`docs/decisions/0042-human-decision-response.md` is restated, altered, or
+reopened by this phase.
+
+### 15.4 Status and independent review record
+
+Per CLAUDE.md's no-fake-completion rule, this section states Phase D's
+factual labels directly rather than a self-declared verdict written before
+independent review ran (an earlier revision of this section stated
+"CERTIFIED... with full build/vet/gofmt/race/integration coverage" — that
+was the implementer's own claim, made before any of the five reviews below
+ran, and some of its coverage claims were not yet accurate at the time it
+was written, e.g. the concurrency test's own flakiness and
+`ListEvaluationPolicyVersions`' missing coverage, both closed by the fix
+round recorded below).
+
+**Labels:**
+- Config schema + Go read/write API + mapping seam: `IMPLEMENTED`.
+- Any actual jurisdiction policy content (location requirement, staleness
+  bound, operation-class → Purpose mapping): `BLOCKED` on
+  HDR-J-7/HDR-J-8/HDR-J-9.
+- Production wiring of any of this into an enforcement path:
+  `NOT IMPLEMENTED`, deliberately.
+
+**Independent review record** (five reviews ran against the initial Phase D
+implementation; a fix round closed most of what they raised; a focused
+security re-verification of that fix round then found one of the fixes
+itself still incomplete; a second, targeted fix replaced the
+scheduling-dependent test with a genuinely deterministic one, independently
+re-run by the orchestrator directly against a live database — 30 repeat
+runs with no failure, plus the whole-repo integration suite green):
+- `architect` — original review BLOCKED on one P1 (a concurrency
+  integration test that did not reliably force the race it claimed to
+  test — found independently by `architect`, `security`, and `qa`) plus
+  four P2s. The fix round closed the four P2s. A first attempted fix for
+  the P1 (a `sync.WaitGroup` barrier) was found by `security`'s
+  re-verification to still fail intermittently under CPU contention,
+  because the barrier synchronized only transaction start, not the actual
+  write race. **Now CLOSED**: the test was replaced with (a) a loosened
+  invariant-only regression test
+  (`TestCreateEvaluationPolicyVersion_ConcurrentCreatesNeverCorruptState`)
+  asserting only the properties that hold under every legitimate
+  scheduling, and (b) a genuinely deterministic test
+  (`TestCreateEvaluationPolicyVersion_DeterministicConflictViaUncommittedCompetingRow`)
+  that forces the race via real PostgreSQL unique-index locking semantics
+  (an uncommitted competing row blocks the real call's INSERT; a
+  `pg_stat_activity` poll — not a sleep — confirms the block before
+  release), removing the timing assumption entirely rather than narrowing
+  it. Independently re-run by the orchestrator: 30 consecutive passes
+  (`-race`, `-count=15` × 2 tests) with no failure, plus a clean whole-repo
+  `go test -tags=integration ./...` run.
+- `security` — CERTIFIED WITH NAMED EXCEPTIONS on its original review (no
+  P0/P1). Its follow-up re-verification of the first fix round confirmed
+  five of six fixes solid (the append-only-trigger hardening, the
+  down-migration guard, `ListEvaluationPolicyVersions`' scope assertion,
+  the 23514 error mapping, and the corrected doc claims) and reproduced
+  the then-still-open concurrency-test defect, explicitly not blocking on
+  security grounds (no data-integrity or authorization impact — a real
+  race between two concurrent authors can only ever produce a correct
+  supersession or a correct `ErrConcurrentPolicyWrite`, never corruption)
+  but naming the defect's persistence as a no-fake-completion issue for
+  `architect` to adjudicate. The deterministic replacement test above
+  uses exactly the locking-based technique `security`'s own report
+  proposed.
+- `identity-compliance` — NO VIOLATIONS FOUND.
+- `qa` — original review NOT READY, citing the same concurrency-test
+  defect independently (the third of three independent reviewers to find
+  it by different methods). Its other P2/P3 findings were closed by the
+  fix round; the concurrency-test item is closed by the deterministic
+  replacement test above.
+- `risk` — NO INTEGRATION CONCERNS.
+
+A pre-existing, unrelated test outside this phase's own files
+(`internal/bonus/wave3_phase2_migrations_integration_test.go`'s
+`TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip`) hardcodes the
+migration chain's most-recently-applied window by count; migration 0075
+landing on the chain's tip required extending that window by one
+(mirroring the identical, already-established pattern each of migrations
+0071/0072/0073/0074 required in turn) — updated and re-verified passing,
+per this project's standing convention for that test.
+
+No jurisdiction policy content exists for any real jurisdiction as a
+result of this phase, and none is claimed. Real player-jurisdiction
+resolution and any per-operation-class enforcement remain blocked on
+**HDR-J-3** (collection at all) jointly with the three new items this
+phase registers (**HDR-J-7/HDR-J-8/HDR-J-9**), unchanged in direction from
+§13.8's and §14.9's closing statements.

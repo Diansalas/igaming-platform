@@ -1480,7 +1480,116 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 4I Phase C — Jurisdiction Precedence & Resolution Rules Foundation — COMPLETE, awaiting human review
+## Current stage: Stage 4I Phase D — Jurisdiction Policy Configuration & Operational Semantics — COMPLETE, awaiting human review
+
+**Status: IMPLEMENTED, independently reviewed by five specialists
+(`architect` fidelity, `security` double-hatting as DB/RLS specialist,
+`identity-compliance` for compliance/privacy, `qa`, `risk` for cross-domain
+integration), all P0/P1 findings fixed across two fix rounds (the second
+triggered by a focused `security` re-verification that caught the first
+fix's own residual defect), and independently re-verified.** Built the
+configuration infrastructure for three of Phase C's four deferred PC-GAP
+items — deliberately NOT the actual policy content, which remains a
+legal/regulatory decision. Full detail: `docs/decisions/0043-jurisdiction-
+evaluation-policy-configuration.md` (the design ADR), `docs/decisions/
+0044-human-decision-register-stage-4i-phase-d.md` (three new open human-
+decision items), `docs/governance/stage-4i-canonical-model.md` §15, and
+`docs/governance/task-registry.md`'s "Stage 4I Phase D" section (full
+findings/disposition ledger).
+
+**What Phase D built:** `internal/jurisdiction.RequiredPurposes` (PC-GAP-3's
+`OperationClass`→`Purpose` mapping seam — one canonical owner, zero mapping
+content, all four operation classes fail closed with
+`ErrPurposeMappingUndetermined`); `ResolveEvaluationPolicy`/
+`CreateEvaluationPolicyVersion`/`ListEvaluationPolicyVersions` (PC-GAP-1/
+PC-GAP-2/PC-GAP-4's config read/write API, backed by migration `0075`
+widening the existing shape-only `jurisdiction_precedence_configs` table in
+place — new `status`/`location_requirement`/`max_location_signal_age_seconds`/
+`precedence_status`/`precedence_policy_version`/`legal_review_reference`/
+`reason_code` columns, RLS added to this table for the first time,
+forge-proof append-only triggers); one new permission
+(`PermJurisdictionEvaluationPolicyWrite`, platform-admin-only, no HTTP
+route in this phase). Three new human-decision items opened and registered
+rather than guessed at: **HDR-J-7** (which `Purpose`(s) each
+`OperationClass` requires — the architect explicitly rejected a tempting
+but invalid engineering inference here, since the choice governs whether a
+real-time geolocation signal may restrict an operation at all, a licensing
+judgement, not a fact recoverable from existing code), **HDR-J-8**
+(location-requirement threshold per licensing jurisdiction/operation
+class), **HDR-J-9** (location-staleness bound, same key).
+
+**The decisive scope-control property, unchanged from every prior Stage 4I
+phase:** `internal/jurisdiction/resolver.go`, `precedence.go`, and
+`types.go` have **zero diff**; `purpose.go` carries a doc-comment-only
+diff. Zero production callers of any new function exist anywhere in the
+codebase. No HTTP route, no OpenAPI change, no country/market content, no
+real geolocation vendor, no production jurisdiction enforcement.
+
+**Review chain (all independent, none self-certified), including a real
+mid-course correction:** the orchestrator's own pre-implementation
+reconnaissance concluded all four operation classes deterministically
+require market-access control, reasoning from what each existing consumer
+does. `architect`'s design ruling explicitly rejected this as an invalid
+inference — `Purpose` selects which evidence hierarchy is legally
+authoritative, not what kind of decision a consumer makes, and a per-game
+blocklist keyed on *verified residence* is an equally coherent, sometimes
+legally required, design. Guessing wrong in either direction carries real
+harm with no safe default, hence HDR-J-7 rather than a coded answer.
+
+Three independent reviewers (`architect`, `security`, `qa`) each
+independently and empirically found the same P1: an integration test
+proving the config write path's concurrency control did not reliably
+force the race it claimed to test, failing ~30-50% of repeat runs. A first
+fix (a synchronization barrier) closed the reproducible failure but was
+then shown by a dedicated `security` re-verification pass to still fail
+under CPU contention (9/200 runs) — the barrier synchronized transaction
+start, not the actual write race. A second, targeted fix replaced
+scheduling-dependent assertions entirely with a genuinely deterministic
+test forcing the race via real PostgreSQL unique-index locking semantics
+(a `pg_stat_activity` poll confirms the block, never a sleep) — verified
+by the orchestrator directly: 30 consecutive passes under `-race`, plus a
+clean whole-repo `go test -tags=integration ./...` run. Verdicts:
+`architect` — CERTIFIED WITH NAMED EXCEPTIONS (BLOCKED on the P1 through
+both review passes; closed by the deterministic replacement).
+`security` — CERTIFIED WITH NAMED EXCEPTIONS on both its original review
+and its fix-round re-verification (no P0/P1 on either pass). `identity-
+compliance` — NO VIOLATIONS FOUND. `qa` — READY WITH NAMED GAPS (originally
+NOT READY on the same P1, found independently). `risk` — NO INTEGRATION
+CONCERNS. A subsequent `code-reviewer` pass over the final diff found one
+P2 (this governance-doc gap, closed by this entry) and several accepted/
+deferred P3-P4 cosmetic items, all recorded in the task registry.
+
+**Documentation updated this phase:** new §15 in `docs/governance/
+stage-4i-canonical-model.md` (the full Phase D record, including an honest
+account of the concurrency-test defect's full lifecycle rather than a
+premature self-certification); §3.4 and §6.1 amendment notes; §14.6's
+PC-GAP table gained a "status after Phase D" note per item (PC-GAP-1/2
+mechanism closed, content blocked on HDR-J-8/HDR-J-9; PC-GAP-3 seam
+closed, mapping blocked on HDR-J-7; PC-GAP-4 lookup/config mechanism
+closed, production wiring not implemented); new ADR 0043; new HDR register
+0044.
+
+**Explicitly deferred, not performed this phase:** HDR-J-7/HDR-J-8/HDR-J-9's
+actual content; any production wiring of the new functions into `casino`,
+`bonus`, `risk`, or `assetregistry`; an activation permission and
+dual-control ruling for writing `status='active'`; the
+`jurisdiction_resolutions.reason` CHECK widening for Phase C's three new
+`Reason` values; the pre-existing PHASE-B-ARCH-1 `effective_from`/actor-
+provenance defect on the two older activation tables (re-evaluated against
+its own three trigger conditions this phase — none fired, remains
+deferred); a `btree_gist` range-exclusion constraint for a narrow,
+raw-SQL-only residual on overlapping policy windows; a maximum-staleness
+ceiling (framed as a sub-question inside HDR-J-9); a shared-helper refactor
+for duplicated row-scanning code between the list and admin read paths.
+
+**No automatic progression.** Per the directive's own mandatory stop
+condition, any phase beyond this one, HDR-J-7/HDR-J-8/HDR-J-9's content,
+and any production jurisdiction activation remain unauthorized pending a
+separate human directive reviewing this Phase D completion report.
+
+---
+
+## Prior stage: Stage 4I Phase C — Jurisdiction Precedence & Resolution Rules Foundation — COMPLETE, awaiting human review
 
 **Status: IMPLEMENTED, independently reviewed by four specialists
 (`architect` fidelity review, `security`, `identity-compliance` for
