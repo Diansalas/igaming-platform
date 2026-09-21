@@ -19,6 +19,18 @@ import (
 func registerCredentialRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("POST /v1/me/email-verification/request", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newRequestEmailVerificationHandler(deps))))
 
+	// Stage 9.3: account-activation test support - see
+	// Deps.AccountActivationTestSupportEnabled's own doc comment
+	// (server.go) and email_verification_dev_token_handlers.go's doc
+	// comment for the full rationale. Gated exactly like
+	// registerFinancialRoutes' PaymentsMockSettlementEnabled route: never
+	// routed at all when the flag is false, not merely 404'd inside the
+	// handler. cmd/platform-api/main.go sets this outside production.
+	if deps.AccountActivationTestSupportEnabled {
+		mux.Handle("GET /v1/me/email-verification/dev-token",
+			auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newAccountActivationDevTokenHandler(deps))))
+	}
+
 	// Stage 9 §21: the three UNAUTHENTICATED credential endpoints share one
 	// per-IP bucket (ratelimit.go). The request endpoint is already
 	// per-ACCOUNT limited (auth.CountRecentCredentialTokens) but nothing

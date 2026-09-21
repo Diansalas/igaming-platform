@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -22,15 +23,36 @@ type Config struct {
 	// informational (used in logs/traces) and must never gate a security
 	// control - environments are otherwise identically configured.
 	//
-	// One deliberate, reviewed exception:
-	// db.VerifyRuntimeRoleInProduction (PLAT-ROLESPLIT-1,
-	// docs/security/runtime-role-separation.md) gates a fail-closed
-	// startup check on Environment == "production" specifically, because
-	// development/CI legitimately and intentionally connect as the
-	// database's table-owning role today (a large share of this repo's
-	// integration suite requires owner/DDL privileges to run migration
-	// mechanics at all), while production must never do so. See that
-	// function's own doc comment for the full reasoning.
+	// Three deliberate, reviewed exceptions exist - the sentence above is
+	// the DEFAULT rule, not an invariant, and this list is exhaustive:
+	//
+	//  1. db.VerifyRuntimeRoleInProduction (PLAT-ROLESPLIT-1,
+	//     docs/security/runtime-role-separation.md) gates a fail-closed
+	//     startup check on Environment == "production" specifically,
+	//     because development/CI legitimately and intentionally connect as
+	//     the database's table-owning role today (a large share of this
+	//     repo's integration suite requires owner/DDL privileges to run
+	//     migration mechanics at all), while production must never do so.
+	//     See that function's own doc comment for the full reasoning.
+	//  2. httpserver.Deps.CasinoPlaySimulationEnabled (Stage 7).
+	//  3. httpserver.Deps.PaymentsMockSettlementEnabled (Stage 9.3).
+	//  4. httpserver.Deps.AccountActivationTestSupportEnabled (Stage 9.3).
+	//
+	// (1) fails CLOSED on a mis-set value (a typo just re-enables a check
+	// production should pass anyway). (2), (3), and (4) fail OPEN:
+	// cmd/platform-api/main.go computes them as
+	// `cfg.Environment != "production"`, so any value that is not exactly
+	// "production" - including the "development" default below when
+	// APP_ENV is simply unset - REGISTERS routes that let an authenticated
+	// player mint mock casino callbacks, settle their own deposits without
+	// a real provider, and retrieve their own pending email-verification
+	// token without a real inbox. Nothing here validates Environment against
+	// a closed set, deliberately (dev/CI use ad-hoc values), so the
+	// operational control is the deployment checklist
+	// (docs/runbooks/production-configuration-checklist.md) plus the
+	// startup log line, not this type. Adding a fourth fail-open
+	// Environment-gated control without revisiting that trade-off is a
+	// security decision, not a configuration one.
 	Environment string
 
 	HTTPAddr string
@@ -151,6 +173,23 @@ type Config struct {
 	// validate against would make the limiter trivially bypassable.
 	// Closes S9.1-LAUNCH-1 (docs/security/security-architecture.md).
 	TrustedProxyCount int
+
+	// CORSAllowedOrigins is the exact-match allowlist of browser Origins
+	// permitted to make cross-origin requests (comma-separated in
+	// CORS_ALLOWED_ORIGINS, e.g. "https://staging.example.com,https://
+	// admin-staging.example.com"). Empty (the default) means no CORS
+	// headers are emitted at all - the correct behavior for a same-origin
+	// deployment (a reverse proxy serving the frontend and API from one
+	// origin) and for every existing dev/CI/test setup, none of which
+	// need it. Introduced for Stage 9.3 staging, where the B2C and Back
+	// Office frontends are deliberately deployed on different subdomains
+	// than the API (docs/architecture/38-deployment-architecture.md's own
+	// "production hosting is a deployment-time decision" note, made
+	// concrete). This is a browser-enforced convenience, never a security
+	// boundary: the Origin header is caller-supplied and unauthenticated,
+	// so every route's real authorization decision is unchanged and still
+	// enforced server-side regardless of Origin.
+	CORSAllowedOrigins []string
 }
 
 // Load reads configuration from the process environment. It returns an
@@ -282,6 +321,18 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config: TRUSTED_PROXY_COUNT must not be negative")
 		}
 		cfg.TrustedProxyCount = n
+	}
+	if v := os.Getenv("CORS_ALLOWED_ORIGINS"); v != "" {
+		for _, origin := range strings.Split(v, ",") {
+			origin = strings.TrimSpace(origin)
+			if origin == "" {
+				continue
+			}
+			if origin == "*" {
+				return Config{}, fmt.Errorf("config: CORS_ALLOWED_ORIGINS must not contain a wildcard; list exact origins")
+			}
+			cfg.CORSAllowedOrigins = append(cfg.CORSAllowedOrigins, origin)
+		}
 	}
 
 	if cfg.DatabaseURL == "" {

@@ -33,6 +33,25 @@ func registerFinancialRoutes(mux *http.ServeMux, deps Deps) {
 	// payment-orchestration.md §10 and deposit_handlers.go's own comment.
 	mux.HandleFunc("POST /v1/webhooks/payments/{tenantSlug}/{providerID}", newPaymentWebhookHandler(deps))
 
+	// Stage 9.3: mock-provider deposit-settlement simulation for the
+	// caller's own, still-pending deposit intent - see
+	// payment_deposit_simulation_handlers.go's own doc comment and
+	// Deps.PaymentsMockSettlementEnabled's doc comment for why this exists
+	// only because no real, hosted PSP exists to deliver a genuine webhook
+	// against a live staging process. Gated behind
+	// PaymentsMockSettlementEnabled (never routed at all when false, not
+	// merely 404'd inside the handler) - mirrors
+	// registerCasinoRoutes' identical CasinoPlaySimulationEnabled gate for
+	// the identical reason: a mock provider is by definition one that
+	// says yes to everything, so registering this route unconditionally
+	// would ship a player-authenticated money-minting surface in every
+	// deployment of this binary. cmd/platform-api/main.go sets this
+	// outside production.
+	if deps.PaymentsMockSettlementEnabled {
+		mux.Handle("POST /v1/me/deposits/{id}/simulate-callback",
+			auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newSimulateDepositCallbackHandler(deps))))
+	}
+
 	// Player self-service withdrawals.
 	mux.Handle("POST /v1/me/withdrawals", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newRequestWithdrawalHandler(deps))))
 	mux.Handle("GET /v1/me/withdrawals", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newListWithdrawalsHandler(deps))))

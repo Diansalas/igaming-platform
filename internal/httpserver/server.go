@@ -47,6 +47,31 @@ type Deps struct {
 	// to wire one up.
 	PaymentOrchestrator *payments.Orchestrator
 
+	// PaymentsMockSettlementEnabled gates the Stage 9.3 mock-provider
+	// deposit-settlement-simulation route (POST /v1/me/deposits/{id}/
+	// simulate-callback - payment_deposit_simulation_handlers.go). This
+	// exists only because there is no real, hosted PSP to deliver a
+	// genuine webhook against a live, HTTP-only staging process: the mock
+	// adapter's HMAC signing secret is generated in-process and never
+	// exposed via any API (internal/payments/mock.go's own doc comment -
+	// that unrecoverability is deliberate and must not change), so the
+	// only way to complete a mock deposit through the real HTTP surface
+	// alone is to ask the tenant's own registered *payments.MockProvider
+	// to mint a correctly-signed callback payload on the AUTHENTICATED
+	// PLAYER's own behalf and feed it through the real
+	// Orchestrator.ReceiveCallback pipeline - mirrors
+	// CasinoPlaySimulationEnabled's identical rationale below byte for
+	// byte, including its trust-boundary caveat: the payload's signature
+	// authenticates nothing about which deposit/amount/outcome is being
+	// named (the platform signs it for the player), unlike a real
+	// provider webhook's signature, so every identifying/effect-bearing
+	// field the handler builds the payload from must come from the
+	// caller's OWN, already-created, still-pending deposit intent row -
+	// never from this request's body. Defaults to the zero value (false,
+	// disabled) exactly like CasinoPlaySimulationEnabled;
+	// cmd/platform-api/main.go sets it only outside production.
+	PaymentsMockSettlementEnabled bool
+
 	// CasinoOrchestrator resolves a game's provider, mints/resolves
 	// game-launch sessions, and dispatches provider bet/win/rollback
 	// callbacks (Stage 4A). Nil disables every route that actually calls
@@ -122,6 +147,41 @@ type Deps struct {
 	// "temporarily unavailable".
 	EmailProvider email.Provider
 
+	// AccountActivationTestSupportEnabled gates the Stage 9.3
+	// GET /v1/me/email-verification/dev-token route
+	// (email_verification_dev_token_handlers.go) - the account-activation
+	// twin of CasinoPlaySimulationEnabled/PaymentsMockSettlementEnabled
+	// above, closing the identical shape of gap for identity instead of
+	// casino/payments: email.MockProvider deliberately never exposes a
+	// sent message's raw token via any API (its own doc comment - there is
+	// no real inbox to deliver a mock email to), so a player registered
+	// through the real HTTP API alone can never learn their own
+	// email-verification token and can therefore never reach 'active'
+	// status, which every financial/gambling gate
+	// (internal/rg.EvaluateEligibility) requires. This route lets an
+	// authenticated player retrieve THEIR OWN currently-pending
+	// email-verification raw token, to be fed into the ALREADY-EXISTING,
+	// UNMODIFIED POST /v1/auth/email-verification/confirm endpoint - it
+	// changes nothing about the real confirm path (token hashing,
+	// expiry, single-use are all untouched) and deliberately does not add
+	// a second, competing "force-activate" mechanism. Defaults to the
+	// zero value (false, disabled) exactly like the two precedents above;
+	// cmd/platform-api/main.go sets it only outside production.
+	//
+	// SECURITY-SENSITIVE: this is a new mechanism for retrieving an
+	// auth-adjacent credential/token. Per CLAUDE.md, it requires explicit
+	// `security` specialist review before being marked complete.
+	AccountActivationTestSupportEnabled bool
+
+	// accountActivationDevTokens is built by New when
+	// AccountActivationTestSupportEnabled is true - mirrors authLimiter's
+	// identical "constructed by New, not caller-supplied" convention. Nil
+	// when the flag is false, which is also what
+	// newAccountActivationDevTokenHandler treats as "unavailable" (belt
+	// and suspenders alongside the route genuinely not being registered
+	// at all - see registerCredentialRoutes).
+	accountActivationDevTokens *devVerificationTokenStore
+
 	// AuthRateLimitPerMinute overrides the per-IP limit New applies to the
 	// unauthenticated credential endpoints (see ratelimit.go for exactly
 	// what is limited and why):
@@ -171,6 +231,15 @@ type Deps struct {
 	// 38-deployment-architecture.md §4 for that accepted limitation.
 	TrustedProxyCount int
 
+	// CORSAllowedOrigins is the exact-match allowlist of browser Origins
+	// permitted to make cross-origin requests to this API - see cors.go's
+	// corsMiddleware for the full model. Empty (the default) disables CORS
+	// entirely (a complete no-op), which is correct for every existing
+	// dev/CI/test setup and for a same-origin production deployment.
+	// Plumbed from the CORS_ALLOWED_ORIGINS environment variable via
+	// internal/config.Config and cmd/platform-api/main.go.
+	CORSAllowedOrigins []string
+
 	// authLimiter is built by New from AuthRateLimitPerMinute/
 	// TrustedProxyCount and shared by every rate-limited route. Unexported
 	// deliberately: a caller configures the POLICY (above), never hands in
@@ -188,6 +257,16 @@ func New(deps Deps) http.Handler {
 	// here so no caller can forget to wire it and no test server silently
 	// runs without it. See ratelimit.go.
 	deps.authLimiter = newFixedWindowLimiter(rateLimitWindow, deps.AuthRateLimitPerMinute, deps.TrustedProxyCount)
+
+	// Stage 9.3: only allocate the dev-token store when the feature is
+	// actually enabled - see Deps.AccountActivationTestSupportEnabled's
+	// own doc comment. A nil store (the production default) is what
+	// newRequestEmailVerificationHandler checks before recording
+	// anything into it, so no raw token is ever retained in memory at
+	// all when this flag is off.
+	if deps.AccountActivationTestSupportEnabled {
+		deps.accountActivationDevTokens = newDevVerificationTokenStore()
+	}
 
 	mux.HandleFunc("GET /healthz", livezHandler)
 	mux.HandleFunc("GET /readyz", readyzHandler(deps.DB))
@@ -207,6 +286,7 @@ func New(deps Deps) http.Handler {
 	instrumented := otelhttp.NewHandler(mux, deps.ServiceName)
 
 	return chain(instrumented,
+		corsMiddleware(deps.CORSAllowedOrigins),
 		requestIDMiddleware,
 		loggingMiddleware(deps.Logger),
 		recoverMiddleware(deps.Logger),

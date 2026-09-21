@@ -1,0 +1,15 @@
+# Applies to every image built from this repo root as build context
+# (deploy/docker/platform-api.Dockerfile and deploy/docker/
+# frontend.Dockerfile both build with `.` as context - see
+# deploy/docker/README.md). Keeps the build context small AND makes sure
+# nothing gitignored-but-locally-present (a developer's own .env, a local
+# node_modules/dist from a native `npm run build`) can ever be COPYed into
+# an image layer, even an intermediate/discarded multi-stage one -
+# CLAUDE.md's "never store secrets in ... config files checked into git"
+# extends to "never let them ride along into a build context" too.
+.git
+.env
+.env.*
+!.env.example
+**/node_modules
+**/dist

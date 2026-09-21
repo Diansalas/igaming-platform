@@ -116,11 +116,29 @@ func run() error {
 	// registered exactly like a future real adapter would be, via the
 	// same PaymentProvider interface and provider_id-keyed registry
 	// (docs/decisions/0022 §2.1). A tenant must still write its own
-	// ProviderCapability row (PUT /v1/admin/providers/mock/capability)
-	// before any deposit can route to it - registering the adapter here
-	// does not itself enable it for any tenant.
+	// ProviderCapability row (PUT /v1/admin/providers/mock-payments/
+	// capability) before any deposit can route to it - registering the
+	// adapter here does not itself enable it for any tenant.
+	//
+	// Stage 9.3 finding: this provider_id must be distinct from casino's
+	// own mock adapter's id below. Both post to the SAME ledger, whose
+	// idempotency key is (provider_id, provider_tx_id) (CLAUDE.md's
+	// financial rules), and both mock adapters independently generate
+	// provider_tx_id via an identical low-entropy per-instance sequential
+	// counter starting at 1 ("<providerID>-1", "<providerID>-2", ...) -
+	// see MockProvider/MockCasinoProvider's own tx-ref generation. Two
+	// adapters sharing the literal id "mock" therefore alias their FIRST
+	// transaction onto the same idempotency key ("mock:mock-1"), and
+	// internal/ledger's own reused-key guard correctly refuses the second
+	// one as a cross-type collision - found via a real Stage 9.3 staging
+	// acceptance run (a funded deposit followed by the first-ever casino
+	// rollback in that environment failed with exactly this error). No
+	// real deployment would ever register two different vendors under the
+	// identical provider_id in the first place; this is that same
+	// uniqueness requirement, just not yet enforced by a doc convention
+	// before this stage found it the hard way.
 	orchestrator := payments.NewOrchestrator(map[string]payments.PaymentProvider{
-		"mock": payments.NewMockProvider("mock", "EUR", "USD", "GBP", "BRL", "MXN"),
+		"mock-payments": payments.NewMockProvider("mock-payments", "EUR", "USD", "GBP", "BRL", "MXN"),
 	})
 
 	// Stage 4A ships a mock casino adapter only (CLAUDE.md's Stage 4A
@@ -128,12 +146,13 @@ func run() error {
 	// would be, via the same CasinoProvider interface and provider_id-
 	// keyed registry (ADR 0025 §1/§4). A tenant must still write its own
 	// CasinoProviderCapability row (PUT
-	// /v1/admin/casino/providers/mock/capability) and opt a platform-
-	// catalogue title into its own availability before any player can
-	// launch it - registering the adapter here does not itself enable it
-	// for any tenant.
+	// /v1/admin/casino/providers/mock-casino/capability) and opt a
+	// platform-catalogue title into its own availability before any
+	// player can launch it - registering the adapter here does not itself
+	// enable it for any tenant. See the payments registration above for
+	// why this provider_id must differ from it.
 	casinoOrchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{
-		"mock": casino.NewMockCasinoProvider("mock", "EUR", "USD", "GBP", "BRL", "MXN"),
+		"mock-casino": casino.NewMockCasinoProvider("mock-casino", "EUR", "USD", "GBP", "BRL", "MXN"),
 	})
 
 	// Stage 6 ships a mock sportsbook provider only (CLAUDE.md's "does not
@@ -184,6 +203,7 @@ func run() error {
 		// exact semantics).
 		AuthRateLimitPerMinute: cfg.AuthRateLimitPerMinute,
 		TrustedProxyCount:      cfg.TrustedProxyCount,
+		CORSAllowedOrigins:     cfg.CORSAllowedOrigins,
 		// Stage 7: the mock-provider play-simulation routes let an
 		// authenticated player mint self-signed casino callbacks on their
 		// own behalf (casino_play_handlers.go's own doc comment) - a
@@ -192,7 +212,20 @@ func run() error {
 		// means real money. Specialist review requirement (architect/
 		// security/ledger-finance, independently).
 		CasinoPlaySimulationEnabled: cfg.Environment != "production",
-		SportsbookEnabled:           true,
+		// Stage 9.3: the payments-domain twin of the above - see
+		// Deps.PaymentsMockSettlementEnabled's own doc comment
+		// (internal/httpserver/server.go) and payment_deposit_simulation_
+		// handlers.go's doc comment for the full rationale. Same gate,
+		// same "never in production" structural guarantee.
+		PaymentsMockSettlementEnabled: cfg.Environment != "production",
+		// Stage 9.3: closes the account-activation gap the two flags above
+		// don't - see Deps.AccountActivationTestSupportEnabled's own doc
+		// comment (internal/httpserver/server.go) and
+		// email_verification_dev_token_handlers.go's doc comment for the
+		// full rationale. Same gate, same "never in production" structural
+		// guarantee.
+		AccountActivationTestSupportEnabled: cfg.Environment != "production",
+		SportsbookEnabled:                   true,
 		// Stage 4E: no real identity-resolution vendor is contracted yet
 		// (docs/decisions/0027 §3) - MockPersonResolver's honest default
 		// (NoMatch for every registration, since none carries verified

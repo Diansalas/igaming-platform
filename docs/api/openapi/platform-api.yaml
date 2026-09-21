@@ -1490,6 +1490,65 @@ paths:
           description: The original transaction has already been rolled back
         "503":
           description: Casino is not enabled on this deployment, or the session's provider is not the mock adapter
+  /v1/me/deposits/{id}/simulate-callback:
+    post:
+      summary: >-
+        STAGING/NON-PRODUCTION TEST SUPPORT ONLY - simulate a mock-provider
+        settlement callback for the caller's own, still-pending deposit
+      description: >
+        Never available in production (structurally gated by
+        Deps.PaymentsMockSettlementEnabled, which cmd/platform-api/main.go
+        sets to `cfg.Environment != "production"` - not merely documented
+        as unsafe). Payments' equivalent of the casino play-simulation
+        endpoints above: there is no real, hosted PSP to deliver a webhook
+        against a live, HTTP-only staging process, so this endpoint asks
+        the tenant's own registered MockProvider to construct a correctly-
+        signed deposit-succeeded callback payload for the caller's own
+        deposit intent and feeds it through the exact same
+        Orchestrator.ReceiveCallback pipeline the public provider webhook
+        (POST /v1/webhooks/payments/{tenantSlug}/{providerID}) uses - never
+        a shortcut around signature verification or the financial posting
+        logic. The amount, asset, and provider reference are always read
+        from the caller's OWN deposit intent row, never accepted from this
+        request's body. Rejects a deposit that does not belong to the
+        caller (404, indistinguishable from an unknown deposit id), is not
+        currently 'pending' (409 - already succeeded/declined/failed), or
+        whose resolved provider is not concretely the mock adapter (503).
+        Idempotent: the financial effect of settling a given deposit posts
+        at most once even under concurrent or repeated calls.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              description: No fields are read from the body - every identifying/effect-bearing value comes from the deposit intent itself.
+      responses:
+        "200":
+          description: The simulated deposit callback's outcome
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deposit_intent_id: { type: string, format: uuid }
+                  status: { type: string, enum: [pending, succeeded, declined, ambiguous, failed] }
+                  tombstoned: { type: boolean }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Deposit not found (or does not belong to the caller)
+        "409":
+          description: The deposit is not currently awaiting a provider callback (already succeeded/declined/failed)
+        "503":
+          description: Deposits are not enabled on this deployment, or the deposit's resolved provider is not the mock adapter
   /v1/admin/casino/rounds:
     get:
       summary: Casino round queue, tenant-wide (Stage 7 Back Office visibility)
@@ -1657,6 +1716,62 @@ paths:
           description: Email delivery is not configured
         "500":
           $ref: "#/components/responses/InternalError"
+
+  /v1/me/email-verification/dev-token:
+    get:
+      summary: >-
+        STAGING/NON-PRODUCTION TEST SUPPORT ONLY - retrieve the caller's own
+        currently-pending email-verification raw token
+      description: >
+        Never available in production (structurally gated by
+        Deps.AccountActivationTestSupportEnabled, which
+        cmd/platform-api/main.go sets to `cfg.Environment != "production"` -
+        not merely documented as unsafe). Identity's equivalent of the
+        casino/payments play-simulation endpoints above: no player account
+        created through the real public registration flow can ever reach
+        'active' status through the real HTTP API alone, because
+        email.MockProvider deliberately never exposes a sent message's raw
+        token via any API (there is no real inbox to deliver a mock email
+        to). This endpoint closes exactly that gap and nothing else - it
+        does NOT bypass or duplicate POST /v1/auth/email-verification/
+        confirm, which remains completely unmodified (token hashing,
+        expiry, and single-use consumption are unchanged). The returned
+        token is only ever the CALLER's own currently-pending
+        email_verification token (resolved exclusively from the
+        authenticated JWT subject - there is no id parameter to name
+        another player's token with), and only when it is still genuinely
+        unconsumed and unexpired; an already-confirmed account, or one
+        whose token was superseded by a newer request, returns 404.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The caller's own currently-pending email-verification raw token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: A staff/back-office bearer token was presented to this player-self-service route
+        "404":
+          description: >-
+            No pending email-verification token for the caller (never
+            issued, already confirmed, or superseded) - AND ALSO what a
+            deployment with account-activation test support disabled
+            returns, because the route is then not registered on the mux
+            at all. A caller therefore cannot distinguish "nothing pending
+            for me" from "this endpoint does not exist here", which is the
+            intended, fail-closed behaviour.
+        "503":
+          description: >-
+            Defensive only, and not reachable in practice: the handler's
+            own "test support not enabled" branch exists as belt-and-
+            suspenders behind a route that is never registered when the
+            feature is off (see the 404 above).
 
   /v1/auth/email-verification/confirm:
     post:

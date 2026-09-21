@@ -62,6 +62,7 @@ func newRequestEmailVerificationHandler(deps Deps) http.HandlerFunc {
 		ip := clientIP(r)
 
 		var recipient, rawToken string
+		var tokenID uuid.UUID
 		var rateLimited bool
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
@@ -87,7 +88,7 @@ func newRequestEmailVerificationHandler(deps Deps) http.HandlerFunc {
 			}); err != nil {
 				return err
 			}
-			recipient, rawToken = account.Email, tok.RawToken
+			recipient, rawToken, tokenID = account.Email, tok.RawToken, tok.ID
 			return nil
 		})
 		if errors.Is(err, identity.ErrNotFound) {
@@ -105,6 +106,20 @@ func newRequestEmailVerificationHandler(deps Deps) http.HandlerFunc {
 			// from success at the HTTP layer.
 			w.WriteHeader(http.StatusNoContent)
 			return
+		}
+
+		// Stage 9.3: capture the raw token for the account-activation
+		// dev-token route (email_verification_dev_token_handlers.go) -
+		// ONLY when that test-support seam is actually enabled
+		// (deps.accountActivationDevTokens is nil otherwise, e.g. in
+		// production, where no raw token is ever retained anywhere beyond
+		// this function's own stack). This is the exact moment this
+		// handler already holds the raw value, immediately before handing
+		// it to EmailProvider.Send below - nothing about the real
+		// player_credential_tokens row (which stores only its SHA-256
+		// hash) changes.
+		if deps.accountActivationDevTokens != nil {
+			deps.accountActivationDevTokens.record(playerAccountID, tokenID, rawToken)
 		}
 
 		if err := deps.EmailProvider.Send(r.Context(), email.Message{

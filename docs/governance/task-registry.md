@@ -3513,6 +3513,102 @@ for this wave's own steps 10-11 insertion into the same function);
 wave); `internal/jurisdiction`, `internal/operatingmarket` (out of
 scope).
 
+## Stage 9.3 — Staging Deployment + Real End-to-End Acceptance
+
+Directive: "STAGE 9.3 — STAGING DEPLOYMENT + REAL END-TO-END ACCEPTANCE,"
+opening with "Stage 9.2 is approved." Deploy the existing B2C and Back
+Office MVPs into a real, isolated, non-production staging environment and
+prove it with genuine browser/API acceptance — not a production launch.
+The human explicitly directed a production-grade AWS staging design but
+refused to let this session use the ambient AWS credentials present in
+the container (unconfirmed account/billing ownership), so the deliverable
+is a complete, independently-validated deployment package plus a
+locally-run staging-equivalent stack, not a live cloud URL.
+
+| ID | Owner | Status | Files owned | Tests | Blockers | Integration |
+|---|---|---|---|---|---|---|
+| S93-01 | devops | Done | `deploy/docker/{platform-api,frontend}.Dockerfile`, `nginx-spa.conf`, `README.md`, `.dockerignore` | reviewed line-by-line + hadolint (no Docker daemon in this sandbox — stated honestly, not claimed as executed) | none | Verified |
+| S93-02 | devops | Done | `deploy/aws/` (10 modules: network/security/database/ecr/secrets/iam/ecs/alb/dns/observability, `environments/staging/`, `scripts/deploy.sh`, `sql/init-runtime-role.rds.sql`), `docs/decisions/0084-stage-9-3-staging-aws-architecture.md`, `docs/runbooks/stage-9-3-staging-deployment-runbook.md` | `terraform fmt -check -recursive` and `terraform validate` clean, run independently by both the implementing agent and the Orchestrator (fresh `terraform init -backend=false`) | AWS account/billing ownership not confirmed — package not applied anywhere real, by explicit human instruction | Verified |
+| S93-03 | Orchestrator | Done | `internal/httpserver/cors.go`+`cors_test.go`, `internal/config/config.go` (`CORSAllowedOrigins`), `internal/httpserver/server.go`, `cmd/platform-api/main.go`, `docs/runbooks/production-configuration-checklist.md` | 6 new unit tests (empty-allowlist no-op, allowlisted/non-allowlisted origin, preflight short-circuit, Vary header, config parsing) | none | Verified |
+| S93-04 | Orchestrator | Done | local staging-equivalent stack: fresh Postgres, 90 migrations + `migrate verify`, `igaming`/`igaming_runtime` role split (including the schema_migrations write-revoke, corrected mid-stage after being applied out of order once), `platform-api` under `APP_ENV=staging` | `migrate verify` clean; runtime-role privilege probes | none | n/a (infrastructure, not a deliverable file) |
+| S93-05 | payments | Done | `internal/httpserver/{server.go,financial_routes.go,payment_deposit_simulation_handlers.go (new),payment_deposit_simulation_test.go (new)}`, `cmd/platform-api/main.go`, `docs/api/openapi/platform-api.yaml` | 6 tests, extended to 12 by security review (cross-tenant, body-ignored, staff-denied, race-vs-real-webhook, declined-deposit-rejection, audit-with-IP/UA/request-id) | none (flagged pre-existing `APP_ENV` fail-open risk, not fixed here — see findings) | Verified |
+| S93-06 | backend | Done | `internal/httpserver/{server.go,credential_routes.go,credential_handlers.go,email_verification_dev_token_handlers.go (new),email_verification_dev_token_test.go (new)}`, `cmd/platform-api/main.go`, `internal/config/config.go`, `docs/runbooks/production-configuration-checklist.md`, `docs/api/openapi/platform-api.yaml` | 6 tests | none (flagged a real multi-replica operational gap, not fixed here — see findings) | Verified |
+| S93-07 | security | Done | review only — payments seam (S93-05) | independently re-ran all 6 original tests + wrote and ran 6 more; empirically proved the `requireDepositAwaitingCallback` gap is load-bearing by driving a `Succeeded` callback into an already-`declined` intent and watching it post a real credit before the fix | 0 blocking; 1 pre-existing `APP_ENV` fail-open finding (HIGH if it ever reaches production, latent today) | n/a |
+| S93-08 | security | Done | review only — account-activation seam (S93-06) | independently re-ran all 6 tests under `-race`; wrote and ran a cross-tenant adversarial probe, concurrent fetch/resend/confirm storms | 0 blocking; 1 correctness note (store staleness under concurrent resend, sequential use unaffected) + 1 operational note (multi-replica gap) + fixed one OpenAPI inaccuracy (503 documented but structurally unreachable — actual behavior is 404) | n/a |
+| S93-09 | qa | Done | staging test-data seeding via real HTTP APIs only (platform admins, tenant `staging-demo` + `staging-demo-brand`, 6 staff roles across 4 approval flows, 4+ players, asset authorization, casino/sportsbook catalogue, KYC/RG/bonus/withdrawal records, isolation-check tenant `staging-tenant-b`), full B2C+Back Office acceptance checklist run via headless Chromium + curl, live discovery and diagnosis of S93-10 | every acceptance-checklist item PASS (see Stage 9.3 completion report); found and fully root-caused S93-10 rather than working around it | none remaining | n/a |
+| S93-10 | Orchestrator | Done | `cmd/platform-api/main.go` (payments/casino mock provider ids: `mock` → `mock-payments`/`mock-casino`) | full repo build/vet/gofmt/unit/integration suite re-run clean; regression proven directly by qa (fresh deposit, wager, win, and the exact previously-failing rollback, now all succeed with non-colliding idempotency keys) | none | Verified |
+
+### Review findings and dispositions
+
+**One genuine, deterministic financial defect (S93-10), found by real
+end-to-end use, fixed.** `payments.MockProvider` and `casino.
+MockCasinoProvider` were both registered under the literal `provider_id`
+`"mock"`, and each independently generates `provider_tx_id` via an
+identical low-entropy per-instance sequential counter starting at 1.
+Since the ledger's idempotency key is `(provider_id, provider_tx_id)`,
+the first transaction from each domain aliased onto the same key
+(`"mock:mock-1"`) — reproduced live when a funded deposit was followed by
+the first-ever casino rollback in the freshly-seeded staging environment,
+which failed as `internal/ledger`'s own reused-key guard correctly
+refused the collision (no corruption resulted; the guard did its job, but
+the operation was unusable). Fixed by re-registering the two adapters
+under distinct ids (`mock-payments`/`mock-casino`) — the shape any real
+deployment would have anyway, since no two real vendors share a provider
+identity. `qa` (S93-09) diagnosed the exact root cause via direct
+`ledger_transactions.idempotency_key` inspection rather than guessing,
+and re-verified the fix by direct regression (not by trusting the fix
+description).
+
+**Two testability gaps, closed as reviewed, non-production-gated seams
+mirroring the Stage 7 `CasinoPlaySimulationEnabled` precedent — never
+worked around:** S93-05 (mock deposit completion) and S93-06 (account
+activation). Both were found by `qa` running real acceptance flows, both
+were explicitly declined as a unilateral QA-authored workaround (`qa`
+correctly stopped and asked rather than building its own bypass harness
+when blocked, twice), and both were implemented by the owning domain
+specialist and independently security-reviewed before being accepted.
+
+**Security findings on the two new seams, both closed or explicitly
+deferred as informational/pre-existing:**
+- S93-07 (payments seam): confirmed `requireDepositAwaitingCallback`'s
+  pending-only gate is load-bearing, not hygiene, by empirically driving
+  a `Succeeded` callback into an already-`declined` intent pre-fix and
+  observing a real ledger credit post; fixed one real gap itself
+  (`recordDepositSimulationAudit` lacked IP/user-agent/request-id, and a
+  factually wrong doc comment claiming the audit write was best-effort
+  when it in fact runs inside the same transaction as the settlement).
+- S93-08 (account-activation seam): confirmed cross-tenant isolation
+  holds via a fresh adversarial probe (RLS backstop, not just
+  application logic); found and fixed one OpenAPI documentation defect
+  (503 documented for the disabled case, but the route is structurally
+  absent when disabled, so the real response is 404 — a client written
+  against the old spec would poll for a response that never arrives);
+  surfaced but did not fix a real operational gap (the in-memory token
+  store is per-process, so it will silently fail under the staging
+  Terraform's own default 2-replica ALB topology with no sticky
+  sessions) — recommended fix (return the raw token from the existing
+  `POST /v1/auth/email-verification/request` response instead of a
+  separate stateful store) is `backend`/`architect`'s to make, not
+  applied this stage.
+- Both reviews independently surfaced the SAME pre-existing (Stage
+  7-origin) finding: `APP_ENV` fails OPEN for all three non-production
+  simulation flags (`CasinoPlaySimulationEnabled`,
+  `PaymentsMockSettlementEnabled`, `AccountActivationTestSupportEnabled`)
+  — an unset or mistyped value in real production would silently
+  register these routes. Recorded as a remaining production blocker
+  (see the Stage 9.3 completion report), not fixed unilaterally since it
+  changes platform-wide config semantics and needs an `architect`/
+  `config` decision.
+
+**Explicitly NOT this stage's territory (confirmed untouched):** no
+B2B/Partner/Retail/Stage 10 work; no undocumented external provider API;
+no HDR-SB-1/HDR-J-7 decision made or worked around; no gambling-AUP
+determination (ADR 0009 remains the open umbrella decision); no
+production credential requested, created, or used (the ambient AWS
+credentials present in this environment were identified and explicitly
+declined per the human's own instruction); no claim of production
+readiness.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

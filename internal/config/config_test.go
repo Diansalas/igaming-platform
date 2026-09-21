@@ -7,7 +7,7 @@ import (
 
 func clearEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"APP_ENV", "HTTP_ADDR", "DATABASE_URL", "DATABASE_MAX_CONNS", "JWT_SIGNING_SECRET", "OTEL_SERVICE_NAME", "OTEL_EXPORTER"} {
+	for _, k := range []string{"APP_ENV", "HTTP_ADDR", "DATABASE_URL", "DATABASE_MAX_CONNS", "JWT_SIGNING_SECRET", "OTEL_SERVICE_NAME", "OTEL_EXPORTER", "CORS_ALLOWED_ORIGINS"} {
 		t.Setenv(k, "")
 		_ = os.Unsetenv(k)
 	}
@@ -179,5 +179,52 @@ func TestLoad_InvalidTrustedProxyCount(t *testing.T) {
 	_, err := Load()
 	if err == nil {
 		t.Fatal("expected error for non-numeric TRUSTED_PROXY_COUNT, got nil")
+	}
+}
+
+func TestLoad_CORSAllowedOriginsUnsetIsEmpty(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.CORSAllowedOrigins) != 0 {
+		t.Errorf("expected no CORS origins by default, got %v", cfg.CORSAllowedOrigins)
+	}
+}
+
+func TestLoad_CORSAllowedOriginsParsedAndTrimmed(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+	t.Setenv("CORS_ALLOWED_ORIGINS", "https://staging.example.com, https://admin-staging.example.com ,")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"https://staging.example.com", "https://admin-staging.example.com"}
+	if len(cfg.CORSAllowedOrigins) != len(want) {
+		t.Fatalf("expected %v, got %v", want, cfg.CORSAllowedOrigins)
+	}
+	for i, origin := range want {
+		if cfg.CORSAllowedOrigins[i] != origin {
+			t.Errorf("expected origin %d to be %q, got %q", i, origin, cfg.CORSAllowedOrigins[i])
+		}
+	}
+}
+
+func TestLoad_CORSAllowedOriginsWildcardRejected(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+	t.Setenv("CORS_ALLOWED_ORIGINS", "*")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for wildcard CORS_ALLOWED_ORIGINS, got nil")
 	}
 }

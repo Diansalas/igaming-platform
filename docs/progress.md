@@ -7671,3 +7671,97 @@ payout-liability ceiling question (HDR-SB-1) and the pre-existing
 player-jurisdiction-evidence question (HDR-J-7) remain open and were not
 decided silently. No automatic progression — Stage 10 is NOT authorized
 and was not started.
+
+## Stage 9.3 — Staging Deployment + Real End-to-End Acceptance — complete
+
+Directed as "STAGE 9.3 — STAGING DEPLOYMENT + REAL END-TO-END
+ACCEPTANCE": deploy the existing B2C and Back Office MVPs into a real,
+isolated, non-production staging environment and prove it with genuine
+end-to-end acceptance — not a production launch, and not a re-read of
+existing tests.
+
+**Hosting.** The human explicitly declined this session's use of the
+ambient AWS credentials present in the container (unconfirmed account/
+billing ownership) and directed a production-grade AWS staging design
+without provisioning anything. A complete, independently `terraform fmt`/
+`validate`-clean Terraform package (10 modules, a staging environment,
+Dockerfiles, an RDS role-init script correcting a real ordering mistake
+found mid-session, and a full runbook) was delivered under
+`deploy/aws/`/`deploy/docker/` and ADR 0084, with the exact one-time
+operator action named rather than any credential fabricated. The
+application itself was validated by actually running it — a fresh
+Postgres with all 90 migrations, the real `igaming`/`igaming_runtime`
+role split, `platform-api` under `APP_ENV=staging`, and both frontends
+built and served against it — inside this sandbox, since no real cloud
+account was authorized this stage.
+
+**A real, load-bearing gap was found and closed**: no CORS middleware
+existed anywhere in this codebase, and the directive's required
+three-subdomain staging URL structure is cross-origin by construction.
+Closed with a small, config-driven, exact-origin-allowlist mechanism
+(`internal/httpserver/cors.go`) explicitly documented as a browser
+convenience, never an authorization boundary.
+
+**Two genuine testability gaps were found by real acceptance testing and
+closed as small, reviewed, non-production-gated seams**, mirroring the
+already-reviewed Stage 7 `CasinoPlaySimulationEnabled` precedent exactly:
+no mock deposit could be completed through the real HTTP API alone (the
+mock payment provider's signing secret is intentionally unrecoverable
+outside its own process) — closed by `POST /v1/me/deposits/{id}/
+simulate-callback`; and no player registered through the real flow could
+ever reach `active` status, the gate every deposit/bet/casino-launch
+action depends on (the mock email provider deliberately never exposes
+verification tokens) — closed by `GET /v1/me/email-verification/
+dev-token`, which only ever feeds the real, unmodified confirm endpoint.
+Both are structurally absent in production (`cfg.Environment !=
+"production"`) and both received an independent, adversarial security
+review before being accepted — each APPROVED WITH MINOR NOTES, with one
+real omission fixed (missing audit fields on the deposit seam) and one
+real operational gap named but not fixed (the activation seam's
+in-memory store is per-process and will silently fail on the staging
+Terraform's own default multi-replica topology).
+
+**One genuine, deterministic financial defect was found by real
+end-to-end use — not a contrived test — and fixed.** The payments and
+casino mock adapters shared the literal `provider_id` "mock" and each
+independently generated transaction references via an identical
+low-entropy sequential counter, so the ledger's `(provider_id,
+provider_tx_id)` idempotency key aliased the first transaction from each
+domain onto the same key. A funded deposit followed by the first-ever
+casino rollback in the freshly-seeded environment failed as a result
+(the ledger's own reused-key guard correctly refused it — no corruption
+occurred, but the operation was unusable). Fixed by registering the two
+adapters under distinct ids (`mock-payments`/`mock-casino`); verified by
+a direct regression proving the exact previously-failing rollback now
+posts correctly, with the full repo build and test suite re-run clean
+afterward.
+
+**Full acceptance, run for real** (headless-Chromium browser flows plus
+direct HTTP calls, not existing test re-runs): every B2C and Back Office
+checklist item passed, including a complete critical end-to-end chain
+(deposit → ledger → audit → Back Office UI, and separately sportsbook,
+casino wager/win/rollback, and a genuine two-approver withdrawal
+four-eyes) with a non-trivial `SUM(debits) = SUM(credits)` verification.
+A full, independent live security acceptance pass covering 18 named
+items (anonymous/cross-player/cross-tenant/cross-staff access, forged
+tenant/brand ids, JWT forgery/expiry/reuse, CORS, cookies, frontend
+bypass, RLS, runtime DB role, secret/source-map leakage, rate limiting)
+passed all 18 with no blocking findings.
+
+**Remaining production blockers** (not staging blockers, and none newly
+introduced): `APP_ENV` fails open for all three non-production
+simulation flags if ever misconfigured in real production (pre-existing
+since Stage 7, formally flagged this stage per the reviewing specialist's
+recommendation, not fixed unilaterally since it changes platform-wide
+config semantics); the new activation-seam token store's per-process
+multi-replica gap (documented interim mitigation, no redesign applied);
+ADR 0009's hyperscale-cloud gambling-AUP confirmation, unaffected by this
+stage; and HDR-SB-1/HDR-J-7, neither decided nor worked around.
+
+No B2B/partner/retail/Stage-10 work was performed. No undocumented
+external provider API was integrated or invented. No production
+credential was requested, created, or used — the ambient AWS credentials
+present in this environment were explicitly identified and explicitly
+not used, per the human's own direction. No production-readiness claim
+is made. No automatic progression — Stage 10 is NOT authorized and was
+not started.
