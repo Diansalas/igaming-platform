@@ -127,6 +127,23 @@ type Selection struct {
 	OddsNumerator   int64
 	OddsDenominator int64
 	Status          SelectionStatus
+	// Available/UnavailableReason (Stage 9.2, ADR 0083 §5.4.1) are set by
+	// AnnotateCatalogueAvailability/AnnotateEventAvailability
+	// (catalogue.go) - default true/"" so an unannotated read (including
+	// every anonymous read, since both annotators are no-ops for the zero
+	// AvailabilityContext) is byte-identical to pre-Stage-9.2 behaviour. A
+	// jurisdiction-restricted selection is MARKED unavailable here, never
+	// omitted from the response (§5.4.1's decision). No JSON tag here,
+	// deliberately, mirroring every other field on this domain type and
+	// on EventSummary/MarketDetail: this package never serializes its own
+	// domain structs directly (ADR 0083's own illustrative
+	// `json:"available"` sketch predates a from-source check of this
+	// codebase's actual convention - internal/httpserver's own
+	// eventSummaryResponse/marketDetailResponse/selectionResponse mapper
+	// structs are where a JSON tag belongs; toSelectionResponse etc. carry
+	// these two fields through explicitly).
+	Available         bool
+	UnavailableReason string
 }
 
 // EventDetail is one event with its full market/selection tree - the
@@ -145,6 +162,13 @@ type EventDetail struct {
 type MarketDetail struct {
 	Market
 	Selections []Selection
+	// Available/UnavailableReason - see Selection's identical fields' doc
+	// comment. A market is marked unavailable only by a restriction on
+	// itself or on its owning event (downward propagation, §5.4.1) - never
+	// by one of its own selections being restricted (a market with one
+	// restricted selection is still a real, bettable market).
+	Available         bool
+	UnavailableReason string
 }
 
 // SportCatalogue is one sport with its nested competitions/events - the
@@ -174,6 +198,10 @@ type EventSummary struct {
 	Name      string
 	StartTime time.Time
 	Status    EventStatus
+	// Available/UnavailableReason - see Selection's identical fields' doc
+	// comment.
+	Available         bool
+	UnavailableReason string
 }
 
 // Bet mirrors a sportsbook_bets row - the tenant-owned, RLS-protected
@@ -214,6 +242,15 @@ type Bet struct {
 	// case).
 	ProviderID           *string
 	ProviderBetReference *string
+	// JurisdictionCode is the historical-stability snapshot (Stage 9.2,
+	// ADR 0083 §5.2.4/§5.5): the jurisdiction PlaceBet's jurisdiction gate
+	// resolved at placement time, frozen by
+	// sportsbook_bets_enforce_immutable_fields (migration 0087) and never
+	// recomputed by any later reader (INV-SB-JUR-6) - mirrors
+	// casino.LaunchSession.JurisdictionCode's identical plain-string-for-
+	// NULL convention exactly (empty string means "did not resolve",
+	// never "unknown", never a default).
+	JurisdictionCode string
 }
 
 // Sentinel errors. Mirrors internal/casino's "specific, distinguishable
@@ -224,6 +261,22 @@ var (
 	ErrEventNotFound     = errors.New("sportsbook: event not found")
 	ErrSelectionNotFound = errors.New("sportsbook: selection not found")
 	ErrBetNotFound       = errors.New("sportsbook: bet not found")
+	// ErrExposureTenantScopeMismatch/ErrExposurePlayerScopedConnection
+	// (Stage 9.2, ADR 0083 Part B2, exposure.go's
+	// verifyTenantScopedExposureConnection) mirror
+	// internal/risk.ErrTenantScopeMismatch/ErrPlayerScopedConnection - the
+	// evaluateExposureLimits gate must fail closed (never ALLOW, never a
+	// business decline) on a mis-scoped transaction, exactly like
+	// risk.Evaluate.
+	ErrExposureTenantScopeMismatch    = errors.New("sportsbook: exposure evaluation transaction is not scoped to the expected tenant")
+	ErrExposurePlayerScopedConnection = errors.New("sportsbook: exposure evaluation requires a tenant-scoped, not player-scoped, connection")
+	// ErrExposureUnscannableLimit is returned when a configured
+	// sb_exposure_limits.max_open_potential_payout value cannot be
+	// converted to *big.Int (a negative NUMERIC exponent - a fractional
+	// count of minor units cannot exist in this schema). Fail-closed: this
+	// aborts the whole PlaceBet transaction, never a silent skip of that
+	// limit.
+	ErrExposureUnscannableLimit = errors.New("sportsbook: exposure limit threshold is not a scannable non-negative-exponent NUMERIC")
 )
 
 // Rejection categories - PlaceBetResult.RejectionCategory's closed set,
@@ -239,6 +292,22 @@ const (
 	RejectionInsufficientFunds = "insufficient_funds"
 	RejectionRGDenied          = "rg_denied"
 	RejectionRiskDenied        = "risk_denied"
+	// RejectionJurisdictionDenied is Stage 9.2's addition (ADR 0083 Part C,
+	// §7.1 step 7): PlaceBet's jurisdiction gate denied this bet, with
+	// RejectionCode carrying one of jurisdiction.go's two
+	// DenialCodeJurisdiction* values internally - collapsed into one
+	// opaque player-facing message at the HTTP boundary (K3-6, mirroring
+	// casino's identical collapse in internal/httpserver/casino_handlers.go).
+	RejectionJurisdictionDenied = "jurisdiction_denied"
+	// RejectionExposureLimit is Stage 9.2 Part B2's addition (ADR 0083
+	// §6.2/§7.1 step 11): PlaceBet's cross-player book-exposure gate
+	// (exposure.go's evaluateExposureLimits) breached a configured
+	// sb_exposure_limits ceiling. RejectionCode and RejectionMessage carry
+	// NO amount, threshold, scope_kind or limit id (INV-SB-EXP-2) - that
+	// detail exists only in ExposureDecision (audit-only) and the
+	// sportsbook_bet.denied_by_exposure_policy audit record, never in this
+	// result or any HTTP response derived from it.
+	RejectionExposureLimit = "exposure_limit"
 )
 
 // Provider is sportsbook's minimal, provider-neutral catalogue-sync

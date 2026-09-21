@@ -14,6 +14,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/risk"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
@@ -32,10 +33,20 @@ type eventSummaryResponse struct {
 	Name      string `json:"name"`
 	StartTime string `json:"start_time"`
 	Status    string `json:"status"`
+	// Available/UnavailableReason (Stage 9.2, ADR 0083 §5.4.1) - Available
+	// is always present (never omitted), UnavailableReason only when
+	// Available is false. An unannotated/anonymous read leaves Available
+	// true and UnavailableReason empty for every event, mirroring
+	// sportsbook.EventSummary's own defaults exactly.
+	Available         bool   `json:"available"`
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
 }
 
 func toEventSummaryResponse(e sportsbook.EventSummary) eventSummaryResponse {
-	return eventSummaryResponse{ID: e.ID.String(), Name: e.Name, StartTime: e.StartTime.UTC().Format(rfc3339), Status: string(e.Status)}
+	return eventSummaryResponse{
+		ID: e.ID.String(), Name: e.Name, StartTime: e.StartTime.UTC().Format(rfc3339), Status: string(e.Status),
+		Available: e.Available, UnavailableReason: e.UnavailableReason,
+	}
 }
 
 type competitionCatalogueResponse struct {
@@ -67,6 +78,17 @@ func toSportCatalogueResponse(s sportsbook.SportCatalogue) sportCatalogueRespons
 // competitions -> event summaries). Platform-wide, read-open catalogue
 // data - no authentication, no tenant scoping (mirrors the assets
 // registry/casino_games precedent: this data carries no RLS).
+//
+// Stage 9.2 (ADR 0083 §5.4.1): this route is GENUINELY anonymous today -
+// no auth middleware is attached to it (sportsbook_routes.go), so there is
+// no server-authenticated player/brand identity to build a populated
+// AvailabilityContext from. The zero value is passed explicitly (never
+// omitted) so the intent is on the record: AnnotateCatalogueAvailability
+// is a no-op for it (IsAnonymous()), which is what keeps this endpoint's
+// behaviour unchanged. If an authenticated variant of this route is ever
+// added, it derives a populated AvailabilityContext the same way
+// newPlaceBetHandler derives its own player identity - server-side only,
+// never from a client-supplied field - and passes it here instead.
 func newListSportsHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -81,6 +103,9 @@ func newListSportsHandler(deps Deps) http.HandlerFunc {
 		err := deps.DB.WithoutTenant(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
 			sports, err := sportsbook.ListSportsCatalogue(ctx, tx)
 			if err != nil {
+				return err
+			}
+			if err := sportsbook.AnnotateCatalogueAvailability(ctx, tx, sports, sportsbook.AvailabilityContext{}); err != nil {
 				return err
 			}
 			resp = make([]sportCatalogueResponse, 0, len(sports))
@@ -104,10 +129,17 @@ type selectionResponse struct {
 	OddsNumerator   int64  `json:"odds_numerator"`
 	OddsDenominator int64  `json:"odds_denominator"`
 	Status          string `json:"status"`
+	// Available/UnavailableReason - see eventSummaryResponse's identical
+	// doc comment.
+	Available         bool   `json:"available"`
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
 }
 
 func toSelectionResponse(s sportsbook.Selection) selectionResponse {
-	return selectionResponse{ID: s.ID.String(), Name: s.Name, OddsNumerator: s.OddsNumerator, OddsDenominator: s.OddsDenominator, Status: string(s.Status)}
+	return selectionResponse{
+		ID: s.ID.String(), Name: s.Name, OddsNumerator: s.OddsNumerator, OddsDenominator: s.OddsDenominator, Status: string(s.Status),
+		Available: s.Available, UnavailableReason: s.UnavailableReason,
+	}
 }
 
 type marketDetailResponse struct {
@@ -115,6 +147,10 @@ type marketDetailResponse struct {
 	Name       string              `json:"name"`
 	Status     string              `json:"status"`
 	Selections []selectionResponse `json:"selections"`
+	// Available/UnavailableReason - see eventSummaryResponse's identical
+	// doc comment.
+	Available         bool   `json:"available"`
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
 }
 
 type eventDetailResponse struct {
@@ -134,7 +170,10 @@ func toEventDetailResponse(d sportsbook.EventDetail) eventDetailResponse {
 		SportCode: d.SportCode, SportName: d.SportName, CompetitionName: d.CompetitionName, Markets: []marketDetailResponse{},
 	}
 	for _, m := range d.Markets {
-		md := marketDetailResponse{ID: m.ID.String(), Name: m.Name, Status: string(m.Status), Selections: []selectionResponse{}}
+		md := marketDetailResponse{
+			ID: m.ID.String(), Name: m.Name, Status: string(m.Status), Selections: []selectionResponse{},
+			Available: m.Available, UnavailableReason: m.UnavailableReason,
+		}
 		for _, sel := range m.Selections {
 			md.Selections = append(md.Selections, toSelectionResponse(sel))
 		}
@@ -144,7 +183,9 @@ func toEventDetailResponse(d sportsbook.EventDetail) eventDetailResponse {
 }
 
 // newGetEventHandler returns one event's full market/selection tree -
-// public, no authentication, mirroring newListSportsHandler.
+// public, no authentication, mirroring newListSportsHandler (see that
+// handler's own Stage 9.2 doc comment for why the zero-value
+// AvailabilityContext is passed explicitly here too).
 func newGetEventHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -165,7 +206,10 @@ func newGetEventHandler(deps Deps) http.HandlerFunc {
 		err = deps.DB.WithoutTenant(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			detail, err = sportsbook.GetEventDetail(ctx, tx, eventID)
-			return err
+			if err != nil {
+				return err
+			}
+			return sportsbook.AnnotateEventAvailability(ctx, tx, &detail, sportsbook.AvailabilityContext{})
 		})
 		if errors.Is(err, sportsbook.ErrEventNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "event not found")
@@ -348,14 +392,88 @@ func newPlaceBetHandler(deps Deps) http.HandlerFunc {
 				}
 				logger.Warn("sportsbook_bet_policy_blocked", "policy", policy, "reason_code", result.RejectionCode)
 			}
-			writeJSON(w, http.StatusOK, placeBetResponse{
-				Accepted: false, RejectionCategory: result.RejectionCategory,
-				RejectionCode: result.RejectionCode, RejectionMessage: result.RejectionMessage,
-			})
+			writeJSON(w, http.StatusOK, toPlaceBetRejectionResponse(result))
 			return
 		}
 		betResp := toBetResponse(result.Bet)
 		writeJSON(w, http.StatusCreated, placeBetResponse{Accepted: true, Bet: &betResp})
+	}
+}
+
+// toPlaceBetRejectionResponse maps a rejected sportsbook.PlaceBetResult to
+// its player-facing response. Factored out of newPlaceBetHandler so the
+// K3-6 collapse below is independently unit-testable, mirroring
+// writeCasinoLaunchDenial's identical structure/rationale
+// (internal/httpserver/casino_handlers.go) exactly, applied here to
+// sportsbook.RejectionJurisdictionDenied (ADR 0083 Part C, §7.1 step 7):
+// sportsbook.DenialCodeJurisdictionUnresolved and
+// sportsbook.DenialCodeJurisdictionBlocked MUST produce a BYTE-IDENTICAL
+// player-facing rejection_code/rejection_message - same values, every
+// time - even though they stay fully distinguishable everywhere internal
+// to this point (PlaceBetResult.RejectionCode itself, PlaceBet's own
+// sportsbook_bet.denied_by_jurisdiction_policy audit record). The
+// distinction between "your jurisdiction could not be determined" and
+// "you are blocked in your jurisdiction" is exactly the signal that would
+// tell an attacker whether a manipulation attempt registered - collapsed
+// here, in this ONE place, before any other rejection category (every
+// other category DOES intentionally disclose its own RejectionCode - a
+// player declined for insufficient funds or a stale price is legitimately
+// owed that specific reason, unlike a jurisdiction determination).
+//
+// SEC-S92-6 fix round (security review of ADR 0083 Part B2): a second,
+// distinct collapse for sportsbook.RejectionExposureLimit. INV-SB-EXP-2
+// (no amount/threshold/scope/limit-id ever reaches a player-facing
+// payload) already held before this fix and is untouched here - the gap
+// this closes is different: RejectionCategory being the DISTINCT,
+// never-otherwise-used literal "exposure_limit" is itself an oracle. A
+// client that binary-searches stake amounts against one selection can
+// read the exact point the response category flips to "exposure_limit"
+// and reconstruct the book's remaining open capacity under a configured
+// ceiling, purely from WHICH category comes back - no number is ever
+// literally returned, but the category name alone leaks the fact that
+// exposure (as opposed to any other reason) is why this particular stake
+// was declined.
+//
+// Fix: an exposure-limit decline is reported to the player in the exact
+// same shape sportsbook.RejectionRiskDenied already uses for a genuine
+// risk.CodeLimitBreach decline (internal/risk's own real, non-exposure
+// "a configured limit was breached" outcome) - same RejectionCategory,
+// same RejectionCode, same RejectionMessage, byte-for-byte identical to
+// what orchestrator.go's own risk-denial branch produces when
+// riskDecision.Code == risk.CodeLimitBreach ("this bet was declined by
+// platform risk policy: " + code). This is deliberately NOT a brand-new,
+// exposure-only opaque value (unlike jurisdiction's "jurisdiction_
+// unavailable", which only has to hide which of two internal jurisdiction
+// sub-reasons applied, not that a jurisdiction gate fired at all): a new
+// exposure-only literal would just relocate the oracle instead of closing
+// it. Reusing a REAL, already-possible, stake-and-limit-shaped risk
+// outcome means a client cannot tell "the book's cross-player exposure
+// ceiling was breached" apart from "my own applicable risk/limit policy
+// declined this bet" - both are stake-amount-sensitive, non-player-
+// verifiable (unlike insufficient_funds, which a player can independently
+// falsify against their own wallet balance read), plausible causes for
+// the identical response. The internal sportsbook.RejectionExposureLimit
+// category, PlaceBetResult.RejectionCode/RejectionMessage (already empty/
+// generic per INV-SB-EXP-2) and the sportsbook_bet.denied_by_exposure_
+// policy audit record are completely unchanged by this - only this one
+// player-facing mapping function changes.
+func toPlaceBetRejectionResponse(result sportsbook.PlaceBetResult) placeBetResponse {
+	if result.RejectionCategory == sportsbook.RejectionJurisdictionDenied {
+		return placeBetResponse{
+			Accepted: false, RejectionCategory: sportsbook.RejectionJurisdictionDenied,
+			RejectionCode: "jurisdiction_unavailable", RejectionMessage: "this bet is not available in your jurisdiction",
+		}
+	}
+	if result.RejectionCategory == sportsbook.RejectionExposureLimit {
+		return placeBetResponse{
+			Accepted: false, RejectionCategory: sportsbook.RejectionRiskDenied,
+			RejectionCode:    risk.CodeLimitBreach,
+			RejectionMessage: "this bet was declined by platform risk policy: " + risk.CodeLimitBreach,
+		}
+	}
+	return placeBetResponse{
+		Accepted: false, RejectionCategory: result.RejectionCategory,
+		RejectionCode: result.RejectionCode, RejectionMessage: result.RejectionMessage,
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/assetregistry"
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/money"
 	"github.com/Diansalas/igaming-platform/internal/rg"
@@ -90,25 +91,29 @@ type PlaceBetResult struct {
 // same (tenant_id, idempotency_key) returns the original bet, never
 // re-evaluates policy or posts a second ledger transaction.
 //
-// Jurisdiction: DELIBERATELY NOT evaluated here. This stage's directive is
-// explicit that wiring internal/jurisdiction.DeterminePlayerJurisdiction
-// is out of scope - that function's own doc comment states it has zero
-// production callers today and any wiring decision needs human answers to
-// HDR-J-7/8/9 first (Stage 4I). This is a recorded, deferred item, not a
-// silent gap - but NOTE (Stage 6.1 correction of an earlier, inaccurate
-// claim in this comment): unlike casino, which DOES apply a per-game
-// jurisdiction_blocklist check at launch time via jurisdiction.Resolve +
-// evaluateJurisdictionBlocklist (internal/casino/orchestrator.go), a real
-// enforcement point that is wired and tested today, sb_selections/
-// sb_events carry NO equivalent blocklist column, so sportsbook has no
-// symmetric mechanism to arm even if a future decision populated one.
-// This is inert today (casino's own blocklists are all empty - no
-// HDR-J item has been answered, so no country is actually blocked
-// anywhere on the platform), so it is NOT a live fail-open regression,
-// but it IS a real architecture-parity gap: sportsbook must gain an
-// equivalent per-selection/per-event blocklist mechanism before any
-// second jurisdiction or B2B tenant goes live (docs/governance/
-// task-registry.md's Stage 6.1 section tracks this explicitly).
+// Jurisdiction (Stage 9.2, ADR 0083 Part C - closes this comment's own
+// prior gap): jurisdiction.Resolve IS now evaluated here, mirroring
+// internal/casino's K-3 remediation (evaluateJurisdictionBlocklist)
+// exactly, against the new sb_jurisdiction_restrictions table (migration
+// 0087) rather than a column on sb_selections/sb_events (ADR 0083 §5.2.1
+// gives five reasons a column would have been the wrong answer post-
+// migration-0084). See jurisdiction.go's own doc comment for the shared
+// evaluation both this function and the catalogue annotators
+// (catalogue.go) call (INV-SB-JUR-1). Rung 2 (licence-ceiling/operating-
+// market policy) remains SPECIFIED, NOT IMPLEMENTED - BLOCKED on HDR-J-7
+// (ADR 0083 §5.3.3) - see jurisdiction.go's own closing doc comment.
+//
+// Exposure (Stage 9.2, ADR 0083 Part B2/Wave 3): a cross-player,
+// per-(scope_kind, asset_code) trading-book exposure ceiling
+// (exposure.go's evaluateExposureLimits) is now evaluated after Risk and
+// before any wallet_balance_projection lock - a DIFFERENT concept from
+// internal/risk's player-scoped cumulative cap (§6.0's table), and from
+// player_locked_cash itself (the platform's Liability, doc 09 §1.7):
+// Exposure is the aggregate POTENTIAL RETURN the book would owe across
+// every player's open bets on one outcome, never a ledger-visible fact and
+// never surfaced to a player (INV-SB-EXP-2). Unarmed (zero
+// sb_exposure_limits rows, the shipped default - HDR-SB-1, §8.2) this is a
+// single indexed no-op SELECT and no lock at all.
 //
 // Bonus-funded stakes: OUT OF SCOPE. Every stake this function locks is
 // assumed 100% player_cash-funded - docs/decisions/0038 §9 confirms
@@ -178,6 +183,45 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 			RejectionMessage: "the odds for this selection have changed since you last viewed them"}, nil
 	}
 
+	// ADR 0083 §7.1 steps 5-7: the jurisdiction gate. Takes NO lock
+	// (player-scoped jurisdiction.Resolve does not touch the database, and
+	// loadActiveRestrictions is an unlocked SELECT) - inserted here,
+	// between the existing status/odds checks and RG, per §7.2's R8
+	// compliance argument ("every advisory lock, including the new L0.6,
+	// is taken before L3; a gate that takes no lock at all cannot violate
+	// R8 by construction, wherever it is inserted").
+	availabilityCtx := AvailabilityContext{TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID}
+	jurisdictionResolution, err := ResolvePlayerJurisdiction(ctx, tx, availabilityCtx, jurisdiction.OperationPlay)
+	if err != nil {
+		return PlaceBetResult{}, err
+	}
+	scope := catalogueScope{EventID: sel.EventID, MarketID: sel.MarketID, SelectionID: sel.ID}
+	restricted, err := loadActiveRestrictions(ctx, tx, scope)
+	if err != nil {
+		return PlaceBetResult{}, err
+	}
+	jurisdictionDecision, err := evaluateJurisdictionRestriction(restricted, jurisdictionResolution)
+	if err != nil {
+		return PlaceBetResult{}, err
+	}
+	if !jurisdictionDecision.Available {
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: params.TenantID, ActorType: audit.ActorSystem, Action: "sportsbook_bet.denied_by_jurisdiction_policy",
+			TargetType: "player_account", TargetID: params.PlayerAccountID.String(), Outcome: audit.OutcomeDenied,
+			Metadata: map[string]any{
+				"reason_code": jurisdictionDecision.DenialCode, "brand_id": params.BrandID.String(),
+				"selection_id": params.SelectionID.String(), "event_id": sel.EventID.String(), "market_id": sel.MarketID.String(),
+			},
+		}); err != nil {
+			return PlaceBetResult{}, fmt.Errorf("sportsbook: audit jurisdiction denial: %w", err)
+		}
+		return PlaceBetResult{Accepted: false, RejectionCategory: RejectionJurisdictionDenied, RejectionCode: jurisdictionDecision.DenialCode,
+			RejectionMessage: "this bet is not available in your jurisdiction"}, nil
+	}
+	// Rung 2, evaluateOperatingMarket, occupies this position when HDR-J-7
+	// is answered (ADR 0083 §5.3.3/§7.1 step 7's own note) - deliberately
+	// not stubbed here (jurisdiction.go's own closing doc comment).
+
 	// Stage 4D-RG: the single authoritative "may this player gamble right
 	// now" policy boundary, consulted before any ledger effect - identical
 	// call and audit shape to internal/casino.evaluateAndAuditEligibility.
@@ -199,11 +243,21 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 	if err != nil {
 		return PlaceBetResult{}, err
 	}
+	// ADR 0083 §6.1.5/§7.1 step 9: JurisdictionCode is populated from THIS
+	// SAME resolution the jurisdiction gate above used - never a separate
+	// dereference - mirroring internal/casino.LaunchGame's identical
+	// pattern (K3-3). Empty only when the resolution did not resolve,
+	// never silently defaulted (jurisdiction.Resolution.Code() is
+	// structurally unreachable for a non-Resolved outcome).
+	var jurisdictionCode string
+	if jurisdictionResolution.Outcome() == jurisdiction.Resolved {
+		jurisdictionCode, _ = jurisdictionResolution.Code() // err impossible: Outcome() == Resolved, just checked
+	}
 	betID := uuid.New()
 	riskDecision, err := evaluateAndAuditRisk(ctx, tx, risk.RiskRequest{
 		TenantID: params.TenantID, BrandID: params.BrandID, PlayerAccountID: params.PlayerAccountID,
 		Operation: risk.OperationSportsbookBet, Product: "sportsbook", AssetCode: params.AssetCode,
-		LicensingMode: licensingMode, Amount: params.StakeAmount, CorrelationID: betID,
+		LicensingMode: licensingMode, JurisdictionCode: jurisdictionCode, Amount: params.StakeAmount, CorrelationID: betID,
 	})
 	if err != nil {
 		return PlaceBetResult{}, err
@@ -215,6 +269,63 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 	if !proceed {
 		return PlaceBetResult{Accepted: false, RejectionCategory: RejectionRiskDenied, RejectionCode: riskDecision.Code,
 			RejectionMessage: "this bet was declined by platform risk policy: " + riskDecision.Code}, nil
+	}
+
+	// ADR 0083 §7.1 step 10 (Part B2, Wave 3): computePotentialReturn
+	// MOVED here from after the balance check (its pre-Stage-9.2 position,
+	// still visible further down this function at the point it now merely
+	// READS the already-computed potentialReturn into insertBet) because
+	// step 11 (the exposure gate immediately below) needs it. Takes no
+	// lock (assetregistry.GetAsset is an unlocked read plus *big.Rat
+	// arithmetic). Stated behaviour change (ADR 0083 §7.1 step 10): an
+	// asset-registry or rounding error now surfaces before the
+	// insufficient-funds decline rather than after it - both are
+	// fail-closed, and the new order is strictly better (a structurally
+	// uncomputable bet errors before any projection row is locked or
+	// materialised).
+	potentialReturn, err := computePotentialReturn(ctx, tx, params.StakeAmount, sel.OddsNumerator, sel.OddsDenominator, params.AssetCode)
+	if err != nil {
+		return PlaceBetResult{}, err
+	}
+
+	// ADR 0083 §7.1 step 11 (Part B2, Wave 3): the cross-player
+	// book-exposure gate (exposure.go's evaluateExposureLimits) - class
+	// L0.6 advisory (ADR 0082 Amendment A2), taken only if at least one
+	// sb_exposure_limits row is configured for (tenant_id, asset_code)
+	// (§6.2.4 step 1's "none configured => not armed => no lock" contract;
+	// zero rows is the shipped, unarmed default - HDR-SB-1, §8.2). Runs
+	// AFTER risk (step 9) and BEFORE ledger.GetOrCreateAccounts/
+	// LockProjectionsForPosting (R8/INV-SB-ORDER-1: every decision gate
+	// precedes the wallet_balance_projection pre-lock). Scope is the SAME
+	// catalogueScope the jurisdiction gate (steps 5-7) already resolved
+	// from getSelectionWithContext - no extra query is introduced here.
+	exposureDecision, err := evaluateExposureLimits(ctx, tx, exposureParams{
+		TenantID: params.TenantID, BrandID: params.BrandID, Scope: scope, AssetCode: params.AssetCode,
+		IncrementalPotentialReturn: potentialReturn,
+	})
+	if err != nil {
+		return PlaceBetResult{}, err
+	}
+	if exposureDecision.Breached {
+		// INV-SB-EXP-2: ScopeKind/LimitID are audit-only. Neither the
+		// aggregate, the configured threshold, nor these two fields ever
+		// reach PlaceBetResult's RejectionCode/RejectionMessage or any HTTP
+		// response derived from it - see RejectionExposureLimit's own doc
+		// comment (types.go) and toPlaceBetRejectionResponse
+		// (internal/httpserver/sportsbook_handlers.go).
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: params.TenantID, ActorType: audit.ActorSystem, Action: "sportsbook_bet.denied_by_exposure_policy",
+			TargetType: "player_account", TargetID: params.PlayerAccountID.String(), Outcome: audit.OutcomeDenied,
+			Metadata: map[string]any{
+				"scope_kind": exposureDecision.ScopeKind, "limit_id": exposureDecision.LimitID.String(),
+				"brand_id": params.BrandID.String(), "selection_id": params.SelectionID.String(),
+				"event_id": sel.EventID.String(), "market_id": sel.MarketID.String(), "asset_code": params.AssetCode,
+			},
+		}); err != nil {
+			return PlaceBetResult{}, fmt.Errorf("sportsbook: audit exposure denial: %w", err)
+		}
+		return PlaceBetResult{Accepted: false, RejectionCategory: RejectionExposureLimit,
+			RejectionMessage: "this bet cannot be accepted at this time"}, nil
 	}
 
 	// ADR 0082 §3.2/§4.4: canonical (wallet, account_type, asset)
@@ -308,10 +419,9 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 			RejectionMessage: "insufficient available balance for this stake"}, nil
 	}
 
-	potentialReturn, err := computePotentialReturn(ctx, tx, params.StakeAmount, sel.OddsNumerator, sel.OddsDenominator, params.AssetCode)
-	if err != nil {
-		return PlaceBetResult{}, err
-	}
+	// potentialReturn was already computed at step 10 (ADR 0083 §7.1),
+	// above, before this pre-lock - the exposure gate (step 11) needed it
+	// first. Reused here unchanged, never recomputed.
 
 	// The SAME betInput the pre-lock above was computed from - never a
 	// rebuilt one (ADR 0082 R3).
@@ -325,6 +435,15 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 		WalletID: params.WalletID, SelectionID: params.SelectionID, AssetCode: params.AssetCode,
 		StakeAmount: params.StakeAmount, OddsNumerator: sel.OddsNumerator, OddsDenominator: sel.OddsDenominator,
 		PotentialReturn: potentialReturn, IdempotencyKey: params.IdempotencyKey, LedgerTransactionID: postResult.TransactionID,
+		// ADR 0083 §5.2.4/§5.5: the historical-stability snapshot - the
+		// SAME resolution the jurisdiction gate (steps 5-7 above) and
+		// step 9's RiskRequest.JurisdictionCode used, frozen onto this row
+		// by sportsbook_bets_enforce_immutable_fields (migration 0087) and
+		// never recomputed by any later reader (INV-SB-JUR-6). Empty
+		// string when the resolution did not resolve - insertBet/scanBet
+		// convert "" <-> NULL, mirroring casino_launch_sessions'
+		// jurisdiction_code identical nullable-string convention.
+		JurisdictionCode: jurisdictionCode,
 	})
 	if err != nil {
 		return PlaceBetResult{}, err
@@ -359,6 +478,11 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 			"brand_id": params.BrandID.String(), "selection_id": params.SelectionID.String(),
 			"stake_amount": params.StakeAmount, "asset_code": params.AssetCode,
 			"ledger_transaction_id": postResult.TransactionID.String(), "already_posted": postResult.AlreadyPosted,
+			// ADR 0083 §7.1 step 18: the resolved jurisdiction snapshot,
+			// alongside its outcome - "resolved"/"unresolved"/"refused",
+			// never the bare Reason (which could leak a dependency-failure
+			// detail into a record a player-support agent might read).
+			"jurisdiction_code": jurisdictionCode, "jurisdiction_outcome": string(jurisdictionResolution.Outcome()),
 		},
 	}); err != nil {
 		return PlaceBetResult{}, fmt.Errorf("sportsbook: audit bet placed: %w", err)

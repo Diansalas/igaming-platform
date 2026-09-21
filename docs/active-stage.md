@@ -1480,7 +1480,112 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 9.1 — Production Blocker Closure — COMPLETE, awaiting human review
+## Current stage: Stage 9.2 — Sportsbook Risk + Jurisdiction Enforcement + Casino Governance — COMPLETE, awaiting human review
+
+**Purpose.** Authorized by the human as "STAGE 9.2 — SPORTSBOOK RISK +
+JURISDICTION ENFORCEMENT + CASINO GOVERNANCE," opening with "Stage 9.1 is
+approved." A consolidated production-critical stage closing the three
+items Stage 9.1 classified FIX BEFORE PRODUCTION: `ARCH-DB-2` Phase 2
+(casino four-eyes governance for `casino_games.jurisdiction_blocklist`
+removal), the missing sportsbook cumulative risk/exposure architecture,
+and the missing sportsbook jurisdiction/operating-market enforcement
+path. Explicit operating principle: fix meaningful risk now, do not
+reopen completed architecture without a concrete defect, no mini-stages
+for cosmetic issues. Full task table and review findings:
+`docs/governance/task-registry.md`'s Stage 9.2 section.
+
+**Workstream A — casino four-eyes governance: CLOSED.** New migration
+`0086` (hardened to `0089` after review) implements exactly ADR 0081
+§5.2's already-specified design: two new platform-scoped tables
+(`casino_catalogue_change_requests`/`_approvals`), maker/checker
+separation with self-approval denial, atomic consume-and-apply,
+payload-matched request selection, and full audit records. Two real
+bugs were found by independent review and fixed before this stage closed:
+the self-approval check initially mirrored a weaker precedent that two
+unlinked staff accounts (the actual default shape `seed-admin` produces)
+could defeat entirely — upgraded to this codebase's own later, stronger
+precedent; and the approval-consumption logic initially picked the
+oldest pending request rather than the one whose payload actually
+matched, which could deadlock two legitimate, independently-approved
+compliance actions on the same game — fixed by adopting the exact
+pattern this codebase already uses for the identical problem elsewhere.
+
+**Workstream B — sportsbook cumulative risk: CLOSED (mechanism), unarmed
+by design.** A full trace of the existing Risk & Limits engine found the
+prior stage's characterization of this gap was itself stale in several
+respects (corrected after verification, not assumed). One new
+`risk_rules` map entry activates player-scoped rolling-window stake caps
+for sportsbook bets, reusing the exact same tenant-configurable,
+already-audited mechanism every other risk rule already uses — no new
+threshold was invented. A separate, structurally distinct mechanism (a
+new `sb_exposure_limits` table plus an event-scoped advisory lock) closes
+cross-player, per-outcome book exposure, which was proven — with four
+independently-verified structural reasons — to be inexpressible in the
+generic risk-rules model and therefore correctly built as its own
+sportsbook-domain control rather than forced into the wrong system. Both
+mechanisms ship completely unarmed: zero rows configure either control
+anywhere. **A new Human Decision Register item, `HDR-SB-1`, records
+that sportsbook production go-live under a platform-carries-the-book
+model must not proceed without this ceiling being authorized** — the
+mechanism's existence required no such decision, only its eventual
+arming does.
+
+**Workstream C — sportsbook jurisdiction/market gating: PARTIALLY
+CLOSED, correctly and explicitly not fully closed.** Player jurisdiction
+resolution and sportsbook-catalogue-level restriction (a new
+platform-scoped `sb_jurisdiction_restrictions` table, deny-only by
+construction) are both implemented and independently verified, mirroring
+casino's own existing jurisdiction-blocklist mechanism exactly, with
+both the catalogue-visibility and bet-placement enforcement points
+sharing one single implementation (a static regression test enforces
+this can never drift into two divergent copies). The licence-ceiling/
+operating-market rung of the canonical flow is **specified in complete,
+implementation-ready detail but deliberately not shipped even as a stub**,
+because it is genuinely blocked on the platform's pre-existing,
+already-registered `HDR-J-7` decision — no player-scoped operating-
+country determination exists anywhere in this codebase to feed it. This
+is not a new gap this stage discovered; it is an existing, disclosed
+blocker this stage could not and did not attempt to route around.
+
+**Mandatory five-specialist review** (security, ledger-finance, an
+architect self-verification pass against its own design's binding
+invariants, qa, code-reviewer) found: one P1 security finding and one
+independently-corroborated correctness bug (both described under
+Workstream A above, both fixed); one genuine information-leak channel
+(a rejection-category side-channel letting a client infer trading-book
+capacity even though no raw number ever leaked — fixed by collapsing the
+player-facing signal); one defense-in-depth gap in the new sportsbook
+jurisdiction table mirroring a class of issue already fixed once for
+casino in Stage 9.1 (fixed by applying the identical, already-established
+pattern); and several test-integrity gaps, including two tests that
+silently exercised nothing due to a context-handling bug (repaired and
+re-verified to actually test what they claimed).
+
+**Full independent validation, run by the Orchestrator against a fresh
+`stage92_final` database** (not merely trusted from ten specialist
+self-reports): all 90 migrations apply cleanly with `migrate verify`
+reporting the whole chain clean; the full integration suite and the full
+`-race` suite (32 packages) are green; the 12-probe runtime-role
+adversarial suite is green; every new concurrency-sensitive test family
+was repeated 3x under `-race` with identical results; the Stage 6
+sportsbook and Stage 7 casino defining acceptance tests pass by exact
+name; both frontends' tests, typechecks, and production builds are clean
+and confirmed unchanged (this stage touched no frontend code); the
+OpenAPI specification validates cleanly.
+
+**Human/legal decisions this stage neither made nor attempted:** any
+answer to `HDR-J-6/7/8/9` or `HDR-M-1/2`; the new `HDR-SB-1` (exposure
+ceiling ownership); any production database cutover, hosting decision,
+or credential action; any legal or regulatory determination.
+
+**Status: technically COMPLETE. No B2B/partner/retail work started. No
+undocumented external provider API was integrated — no real sportsbook,
+casino, payment, or KYC provider contract was invented or assumed
+anywhere in this stage's work. Per the directive's own final instruction,
+this session STOPS here — Stage 10 is NOT authorized and will not begin
+without explicit human authorization.**
+
+## Stage 9.1 — Production Blocker Closure — COMPLETE (superseded by Stage 9.2 above)
 
 **Purpose.** Authorized by the human as "STAGE 9.1 — PRODUCTION BLOCKER
 CLOSURE," opening with "STAGE 9 IS APPROVED." A focused hardening stage

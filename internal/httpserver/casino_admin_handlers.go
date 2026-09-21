@@ -47,6 +47,21 @@ type upsertCasinoGameRequest struct {
 // must never be able to register a brand-new title into the shared
 // catalogue, only opt into one the platform has already vetted.
 //
+// Stage 9.2 (ADR 0081 §5/§5.2, ARCH-DB-2 Phase 2): this handler still
+// performs BOTH directions of jurisdiction_blocklist/status directly -
+// adding a code and disabling a game (status 'active'->'disabled') remain
+// single-actor, unchanged. REMOVING a code and reactivating a game
+// (status 'disabled'->'active') are the fail-open/compliance-widening
+// direction and now additionally require an approved
+// casino_catalogue_change_requests row (migration 0086's
+// casino_games_dual_control trigger) filed and decided through this
+// package's newFileCasinoCatalogueChangeRequestHandler/
+// newDecideCasinoCatalogueChangeRequestHandler
+// (casino_catalogue_governance_handlers.go) before this call will
+// succeed - an attempt without one is refused with a 409, not silently
+// applied and not a generic 500 (writeCasinoGovernanceError classifies
+// the trigger's refusal).
+//
 // SEC-4I-F3 fix (docs/governance/stage-4i-canonical-model.md §9.5,
 // confirmed a HARD PREREQUISITE of casino's own K-3 remediation): the
 // audit record now captures before/after state for every enforcement-
@@ -164,8 +179,14 @@ func newUpsertCasinoGameHandler(deps Deps) http.HandlerFunc {
 			})
 		})
 		if err != nil {
-			logger.Error("upsert_casino_game_failed", "error", err)
-			apierror.Write(w, requestID, apierror.CodeInternal, "failed to upsert game")
+			// Stage 9.2 (ADR 0081 §5.2): a removal from jurisdiction_blocklist
+			// or a 'disabled'->'active' status change with no approved
+			// casino_catalogue_change_requests row is refused here -
+			// writeCasinoGovernanceError classifies that into 409/400 rather
+			// than a generic 500 (see this file's own POST .../change-requests
+			// and .../approvals handlers, casino_catalogue_governance_
+			// handlers.go, which is how such an approval is obtained).
+			writeCasinoGovernanceError(w, requestID, logger, "upsert_casino_game", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, toCasinoGameResponse(game))

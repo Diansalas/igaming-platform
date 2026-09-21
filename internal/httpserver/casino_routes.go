@@ -64,6 +64,21 @@ func registerCasinoRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("PUT /v1/admin/casino/games",
 		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermCasinoCatalogueManage)(newUpsertCasinoGameHandler(deps))))
 
+	// Stage 9.2 (ADR 0081 §5.2, ARCH-DB-2 Phase 2): four-eyes governance
+	// for the two fail-open/compliance-widening casino_games transitions
+	// (removing a jurisdiction_blocklist code, re-enabling a disabled
+	// game). File a request, then have a DIFFERENT platform principal
+	// decide it - both gated by PermCasinoCatalogueGovern, never
+	// PermCasinoCatalogueManage alone (migration 0086's
+	// casino_games_dual_control trigger is the authoritative enforcement;
+	// this permission only gates who may attempt either HTTP call).
+	// Deliberately NOT wrapped in RequireTenantScope, same reasoning as
+	// PUT /v1/admin/casino/games above.
+	mux.Handle("POST /v1/admin/casino/games/{gameID}/change-requests",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermCasinoCatalogueGovern)(newFileCasinoCatalogueChangeRequestHandler(deps))))
+	mux.Handle("POST /v1/admin/casino/change-requests/{requestID}/approvals",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermCasinoCatalogueGovern)(newDecideCasinoCatalogueChangeRequestHandler(deps))))
+
 	// Tenant-scoped casino provider capability configuration.
 	mux.Handle("PUT /v1/admin/casino/providers/{providerID}/capability",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoConfigWrite)(newWriteCasinoCapabilityHandler(deps)))))

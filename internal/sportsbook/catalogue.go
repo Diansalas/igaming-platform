@@ -10,7 +10,19 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 )
+
+// catalogueUnavailableReason is the ONE opaque, player-facing reason every
+// jurisdiction-gated catalogue annotation reports (Stage 9.2, ADR 0083
+// §5.4.1: "the marker must not leak the blocking rung... One opaque
+// player-facing reason only"). Unlike PlaceBetResult.RejectionCode (which
+// stays internally distinguishable and is collapsed only at the HTTP
+// boundary, K3-6), EventSummary/MarketDetail/Selection.UnavailableReason
+// is serialized directly, so the collapse happens HERE, at the point of
+// annotation - never DenialCodeJurisdictionBlocked/
+// DenialCodeJurisdictionUnresolved themselves.
+const catalogueUnavailableReason = "not_available_in_your_jurisdiction"
 
 // SyncCatalogue upserts provider's full catalogue into the platform-wide
 // sb_sports/sb_competitions/sb_events/sb_markets/sb_selections tables,
@@ -225,7 +237,12 @@ func ListSportsCatalogue(ctx context.Context, tx pgx.Tx) ([]SportCatalogue, erro
 			}
 			var events []EventSummary
 			for eventRows.Next() {
-				var e EventSummary
+				// Available defaults true (Stage 9.2, ADR 0083 §5.4.1) - an
+				// unannotated read (every read this function itself performs;
+				// annotation is the caller's own separate, opt-in step via
+				// AnnotateCatalogueAvailability) reports every event
+				// available, exactly like today.
+				e := EventSummary{Available: true}
 				if err := eventRows.Scan(&e.ID, &e.Name, &e.StartTime, &e.Status); err != nil {
 					eventRows.Close()
 					return nil, fmt.Errorf("sportsbook: scan event: %w", err)
@@ -288,7 +305,9 @@ func GetEventDetail(ctx context.Context, tx pgx.Tx, eventID uuid.UUID) (EventDet
 		}
 		var selections []Selection
 		for selRows.Next() {
-			var sel Selection
+			// Available defaults true - see ListSportsCatalogue's identical
+			// doc comment.
+			sel := Selection{Available: true}
 			if err := selRows.Scan(&sel.ID, &sel.MarketID, &sel.Name, &sel.OddsNumerator, &sel.OddsDenominator, &sel.Status); err != nil {
 				selRows.Close()
 				return EventDetail{}, fmt.Errorf("sportsbook: scan selection: %w", err)
@@ -299,7 +318,7 @@ func GetEventDetail(ctx context.Context, tx pgx.Tx, eventID uuid.UUID) (EventDet
 			return EventDetail{}, err
 		}
 		selRows.Close()
-		d.Markets = append(d.Markets, MarketDetail{Market: m, Selections: selections})
+		d.Markets = append(d.Markets, MarketDetail{Market: m, Selections: selections, Available: true})
 	}
 	return d, nil
 }
@@ -337,4 +356,185 @@ func getSelectionWithContext(ctx context.Context, tx pgx.Tx, selectionID uuid.UU
 		return selectionWithContext{}, fmt.Errorf("sportsbook: resolve selection: %w", err)
 	}
 	return sc, nil
+}
+
+// --- Jurisdiction availability annotation (Stage 9.2, ADR 0083 §5.4.1) ---
+
+// AnnotateCatalogueAvailability marks every event in cat unavailable if an
+// active sb_jurisdiction_restrictions row applies to it under ac's
+// resolved jurisdiction - a NO-OP for an anonymous ac (the zero value),
+// so both genuinely anonymous readers of GET /v1/sportsbook/sports get
+// exactly today's response. Uses the SAME ResolvePlayerJurisdiction +
+// evaluateJurisdictionRestriction pair PlaceBet uses (INV-SB-JUR-1) - only
+// the bulk restriction load below (loadActiveRestrictionsForScopes) is
+// specific to annotating a whole tree in one query rather than PlaceBet's
+// single selection, per §5.4.1's stated cost model ("one SELECT... covering
+// the whole browse tree, evaluated in memory"); it contains no
+// arm/deny reasoning of its own; evaluateJurisdictionRestriction remains
+// the ONLY place that reasoning lives.
+//
+// The shallow browse tree (SportCatalogue) carries no market/selection
+// nodes, so only event-level marking applies here - GetEventDetail's own
+// full tree is annotated by AnnotateEventAvailability below.
+func AnnotateCatalogueAvailability(ctx context.Context, tx pgx.Tx, cat []SportCatalogue, ac AvailabilityContext) error {
+	if ac.IsAnonymous() {
+		return nil
+	}
+	res, err := ResolvePlayerJurisdiction(ctx, tx, ac, jurisdiction.OperationCatalogueAvailability)
+	if err != nil {
+		return err
+	}
+	var eventIDs []uuid.UUID
+	for _, sc := range cat {
+		for _, cc := range sc.Competitions {
+			for _, e := range cc.Events {
+				eventIDs = append(eventIDs, e.ID)
+			}
+		}
+	}
+	byEvent, _, _, err := loadActiveRestrictionsForScopes(ctx, tx, eventIDs, nil, nil)
+	if err != nil {
+		return err
+	}
+	for si := range cat {
+		for ci := range cat[si].Competitions {
+			for ei := range cat[si].Competitions[ci].Events {
+				e := &cat[si].Competitions[ci].Events[ei]
+				decision, err := evaluateJurisdictionRestriction(byEvent[e.ID], res)
+				if err != nil {
+					return err
+				}
+				e.Available = decision.Available
+				if !decision.Available {
+					e.UnavailableReason = catalogueUnavailableReason
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// AnnotateEventAvailability marks d's markets/selections unavailable under
+// ac's resolved jurisdiction, exactly like AnnotateCatalogueAvailability -
+// a NO-OP for an anonymous ac. Restrictions flow DOWNWARD only (§5.4.1):
+// an event-level restriction marks every market and selection beneath it
+// unavailable; a market-level restriction marks its own selections
+// unavailable; a selection-level restriction never propagates up to its
+// market, and a market's restriction never propagates up to its event - a
+// market with one restricted selection is still a real, bettable market.
+func AnnotateEventAvailability(ctx context.Context, tx pgx.Tx, d *EventDetail, ac AvailabilityContext) error {
+	if ac.IsAnonymous() {
+		return nil
+	}
+	res, err := ResolvePlayerJurisdiction(ctx, tx, ac, jurisdiction.OperationCatalogueAvailability)
+	if err != nil {
+		return err
+	}
+	marketIDs := make([]uuid.UUID, 0, len(d.Markets))
+	var selectionIDs []uuid.UUID
+	for _, m := range d.Markets {
+		marketIDs = append(marketIDs, m.ID)
+		for _, sel := range m.Selections {
+			selectionIDs = append(selectionIDs, sel.ID)
+		}
+	}
+	byEvent, byMarket, bySelection, err := loadActiveRestrictionsForScopes(ctx, tx, []uuid.UUID{d.ID}, marketIDs, selectionIDs)
+	if err != nil {
+		return err
+	}
+	eventDecision, err := evaluateJurisdictionRestriction(byEvent[d.ID], res)
+	if err != nil {
+		return err
+	}
+	for mi := range d.Markets {
+		m := &d.Markets[mi]
+		switch {
+		case !eventDecision.Available:
+			// Downward propagation from the event - never re-evaluated
+			// against the market's own (possibly empty) restriction set,
+			// since the event-level denial already governs.
+			m.Available = false
+			m.UnavailableReason = catalogueUnavailableReason
+		default:
+			marketDecision, err := evaluateJurisdictionRestriction(byMarket[m.ID], res)
+			if err != nil {
+				return err
+			}
+			m.Available = marketDecision.Available
+			if !marketDecision.Available {
+				m.UnavailableReason = catalogueUnavailableReason
+			}
+		}
+		for si := range m.Selections {
+			sel := &m.Selections[si]
+			if !m.Available {
+				// Downward propagation from the event or the market.
+				sel.Available = false
+				sel.UnavailableReason = catalogueUnavailableReason
+				continue
+			}
+			selDecision, err := evaluateJurisdictionRestriction(bySelection[sel.ID], res)
+			if err != nil {
+				return err
+			}
+			sel.Available = selDecision.Available
+			if !selDecision.Available {
+				sel.UnavailableReason = catalogueUnavailableReason
+			}
+		}
+	}
+	return nil
+}
+
+// loadActiveRestrictionsForScopes is loadActiveRestrictions' bulk sibling
+// (jurisdiction.go), used ONLY by the two catalogue annotators above to
+// satisfy §5.4.1's "one query covering the whole browse tree" cost model -
+// PlaceBet's own call site always uses the single-scope
+// loadActiveRestrictions and is never routed through this function. It
+// performs no arm/deny reasoning of its own (evaluateJurisdictionRestriction
+// remains the only place that logic lives) - it is purely a bulk data load,
+// bucketed by scope_kind into three maps keyed by the relevant id.
+func loadActiveRestrictionsForScopes(
+	ctx context.Context, tx pgx.Tx, eventIDs, marketIDs, selectionIDs []uuid.UUID,
+) (byEvent, byMarket, bySelection map[uuid.UUID][]string, err error) {
+	byEvent = make(map[uuid.UUID][]string)
+	byMarket = make(map[uuid.UUID][]string)
+	bySelection = make(map[uuid.UUID][]string)
+	if len(eventIDs) == 0 && len(marketIDs) == 0 && len(selectionIDs) == 0 {
+		return byEvent, byMarket, bySelection, nil
+	}
+	rows, err := tx.Query(ctx,
+		`SELECT scope_kind, event_id, market_id, selection_id, jurisdiction_code
+		 FROM sb_jurisdiction_restrictions
+		 WHERE status = 'active'
+		   AND (event_id = ANY($1) OR market_id = ANY($2) OR selection_id = ANY($3))`,
+		eventIDs, marketIDs, selectionIDs,
+	)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("sportsbook: load active jurisdiction restrictions for tree: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var scopeKind string
+		var eventID, marketID, selectionID *uuid.UUID
+		var code string
+		if err := rows.Scan(&scopeKind, &eventID, &marketID, &selectionID, &code); err != nil {
+			return nil, nil, nil, fmt.Errorf("sportsbook: scan active jurisdiction restriction for tree: %w", err)
+		}
+		switch scopeKind {
+		case "event":
+			if eventID != nil {
+				byEvent[*eventID] = append(byEvent[*eventID], code)
+			}
+		case "market":
+			if marketID != nil {
+				byMarket[*marketID] = append(byMarket[*marketID], code)
+			}
+		case "selection":
+			if selectionID != nil {
+				bySelection[*selectionID] = append(bySelection[*selectionID], code)
+			}
+		}
+	}
+	return byEvent, byMarket, bySelection, rows.Err()
 }

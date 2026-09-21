@@ -30,4 +30,28 @@ func registerSportsbookRoutes(mux *http.ServeMux, deps Deps) {
 	// Back Office - tenant-wide, staff-scoped, read-only bet visibility.
 	mux.Handle("GET /v1/admin/sportsbook/bets",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermSportsbookBetRead)(newListAdminBetsHandler(deps)))))
+
+	// Stage 9.2 (ADR 0083 §5.2/§9.2): platform-admin jurisdiction/market
+	// gating governance for sb_jurisdiction_restrictions - never
+	// RequireTenantScope-wrapped, same reasoning as PUT
+	// /v1/admin/casino/games (a platform-admin token's tenant_id is nil).
+	mux.Handle("POST /v1/admin/sportsbook/jurisdiction-restrictions",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermSportsbookJurisdictionRestrictionManage)(newCreateSportsbookJurisdictionRestrictionHandler(deps))))
+	mux.Handle("POST /v1/admin/sportsbook/jurisdiction-restrictions/{id}/withdraw",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermSportsbookJurisdictionRestrictionManage)(newWithdrawSportsbookJurisdictionRestrictionHandler(deps))))
+	mux.Handle("GET /v1/admin/sportsbook/jurisdiction-restrictions",
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePermission(auth.PermSportsbookJurisdictionRestrictionRead)(newListSportsbookJurisdictionRestrictionsHandler(deps))))
+
+	// Stage 9.2 Part B2 / Wave 3 (ADR 0083 §6.2.3/§9.2): TENANT-scoped
+	// cross-player book-exposure limit governance for sb_exposure_limits -
+	// RequireTenantScope-wrapped (unlike the jurisdiction-restriction
+	// routes immediately above), mirroring registerRiskRoutes exactly:
+	// this table carries a tenant_id and is ordinary tenant-owned
+	// commercial configuration, not a platform-wide control.
+	mux.Handle("POST /v1/admin/sportsbook/exposure-limits",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermSportsbookExposureLimitManage)(newCreateSportsbookExposureLimitHandler(deps)))))
+	mux.Handle("POST /v1/admin/sportsbook/exposure-limits/{id}/disable",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermSportsbookExposureLimitManage)(newDisableSportsbookExposureLimitHandler(deps)))))
+	mux.Handle("GET /v1/admin/sportsbook/exposure-limits",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermSportsbookExposureLimitRead)(newListSportsbookExposureLimitsHandler(deps)))))
 }

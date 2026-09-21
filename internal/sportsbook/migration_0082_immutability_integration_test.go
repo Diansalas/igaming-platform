@@ -74,6 +74,15 @@ func TestMigration0082_SportsbookBetsImmutableFields(t *testing.T) {
 		{"idempotency_key", `idempotency_key = 'hijacked'`, nil},
 		{"ledger_transaction_id", `ledger_transaction_id = $2`, uuid.New()},
 		{"placed_at", `placed_at = now() - interval '1 year'`, nil},
+		// Stage 9.2 (ADR 0083 §5.2.4/§5.5, migration 0087): the resolved-
+		// jurisdiction historical-stability snapshot joined this same
+		// immutable-fields IF - INV-SB-JUR-6, TestSportsbookBet_
+		// JurisdictionSnapshotIsImmutable's own dedicated regression test
+		// covers the end-to-end scenario (a genuinely non-NULL snapshot);
+		// this table-driven case proves the trigger's own raw-SQL rejection
+		// symmetrically with every other frozen column, on the (today
+		// always-NULL) fixture bet this test already seeds.
+		{"jurisdiction_code", `jurisdiction_code = 'SOME-CODE'`, nil},
 	}
 
 	for _, tc := range cases {

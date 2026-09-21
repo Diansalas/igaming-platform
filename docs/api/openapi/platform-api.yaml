@@ -1093,6 +1093,235 @@ paths:
         "503":
           description: Sportsbook is not enabled on this deployment
 
+  # --- Stage 9.2 (ADR 0083 §5.2/§9.2): sportsbook jurisdiction/market
+  # gating governance - platform-admin only, mirrors PUT
+  # /v1/admin/casino/games's identical platform-scope shape ---
+  /v1/admin/sportsbook/jurisdiction-restrictions:
+    get:
+      summary: List sb_jurisdiction_restrictions (active and withdrawn)
+      description: >
+        Requires sportsbook_jurisdiction_restriction:read (platform_admin
+        only). Returns every restriction, active and withdrawn, so the
+        full compliance history is visible - newest first.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Every jurisdiction restriction
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SportsbookJurisdictionRestriction" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      summary: Arm a new jurisdiction restriction (event/market/selection)
+      description: >
+        Requires sportsbook_jurisdiction_restriction:manage (platform_admin
+        only). Deny-only by construction (INV-SB-JUR-2) - exactly one of
+        event_id/market_id/selection_id must be set, matching scope_kind.
+        Arming ANY restriction row blocks that event/market/selection for
+        EVERY player until player jurisdiction resolution exists (ADR 0083
+        §5.3.2) - this is the fail-closed, disclosed consequence of K3-1/
+        K3-2, not a bug.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scope_kind: { type: string, enum: [event, market, selection] }
+                event_id: { type: string, format: uuid }
+                market_id: { type: string, format: uuid }
+                selection_id: { type: string, format: uuid }
+                jurisdiction_code: { type: string }
+                authorization_reference: { type: string, description: "Required on every row (ADR 0045 §4's authorization discipline)." }
+                reason_code: { type: string }
+              required: [scope_kind, jurisdiction_code, authorization_reference, reason_code]
+      responses:
+        "201":
+          description: Restriction created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SportsbookJurisdictionRestriction"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/sportsbook/jurisdiction-restrictions/{id}/withdraw:
+    post:
+      summary: Withdraw an active jurisdiction restriction
+      description: >
+        Requires sportsbook_jurisdiction_restriction:manage. Never a
+        delete - migration 0087's deny-delete trigger refuses one
+        regardless, so compliance history survives. Only transitions an
+        'active' row; reason_code REPLACES the row's own reason_code
+        (the one other mutable field, alongside status).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason_code: { type: string }
+              required: [reason_code]
+      responses:
+        "200":
+          description: Restriction withdrawn
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SportsbookJurisdictionRestriction"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # --- Stage 9.2 Part B2 / Wave 3 (ADR 0083 §6.2.3/§9.2): TENANT-scoped
+  # cross-player book-exposure limit governance for sb_exposure_limits -
+  # UNLIKE the jurisdiction-restriction routes above, this table carries a
+  # tenant_id and is RequireTenantScope-wrapped, mirroring
+  # /v1/admin/risk/rules exactly ---
+  /v1/admin/sportsbook/exposure-limits:
+    get:
+      summary: List sb_exposure_limits for the caller's own tenant (active and disabled)
+      description: >
+        Requires sportsbook_exposure_limit:read (RoleRiskManager,
+        RoleTenantAdmin), tenant-scoped. Returns every limit, active and
+        disabled, so the full configuration history is visible - newest
+        first. A limit has no player-facing read path.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Every exposure limit for this tenant
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SportsbookExposureLimit" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      summary: Arm a new cross-player book-exposure ceiling
+      description: >
+        Requires sportsbook_exposure_limit:manage (RoleRiskManager only),
+        tenant-scoped. max_open_potential_payout is the GROSS potential
+        payout ceiling (stake included, never netted - ADR 0083 §6.2.2),
+        denominated in asset_code's minor units. brand_id omitted means
+        tenant-wide (every brand); a brand-specific limit takes precedence
+        over a tenant-wide one for the same (scope_kind, asset_code). At
+        most one ACTIVE limit may exist per (tenant, brand, scope_kind,
+        asset_code) - disable the existing one first to supersede it with
+        a new ceiling (a limit is never edited in place).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                brand_id: { type: string, format: uuid, description: "Omit for tenant-wide." }
+                scope_kind: { type: string, enum: [event, market, selection] }
+                asset_code: { type: string }
+                max_open_potential_payout: { type: integer, format: int64, description: "Positive integer, asset_code's minor units, gross potential payout." }
+                authorization_reference: { type: string, description: "Required on every row (ADR 0045 §4's authorization discipline)." }
+                reason_code: { type: string }
+              required: [scope_kind, asset_code, max_open_potential_payout, authorization_reference, reason_code]
+      responses:
+        "201":
+          description: Exposure limit created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SportsbookExposureLimit"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: An active exposure limit already exists for this (brand, scope_kind, asset_code)
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/sportsbook/exposure-limits/{id}/disable:
+    post:
+      summary: Disable an active exposure limit
+      description: >
+        Requires sportsbook_exposure_limit:manage. Never an edit or a
+        delete - migration 0088's immutability/deny-delete triggers refuse
+        both regardless, so max_open_potential_payout itself is immutable;
+        changing a ceiling means authoring a new row. Only transitions an
+        'active' row; reason_code REPLACES the row's own reason_code (the
+        one other mutable field, alongside status).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason_code: { type: string }
+              required: [reason_code]
+      responses:
+        "200":
+          description: Exposure limit disabled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SportsbookExposureLimit"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   # --- Casino round history / mock-provider play simulation (Stage 7) ---
   # NOTE: only the Stage 7 endpoints below are documented here. The
   # pre-existing Stage 4A casino endpoints (GET /v1/me/casino/games,
@@ -3003,6 +3232,111 @@ paths:
           $ref: "#/components/responses/Conflict"
         "500":
           $ref: "#/components/responses/InternalError"
+  # --- Casino catalogue four-eyes governance (Stage 9.2, ADR 0081 §5.2,
+  # ARCH-DB-2 Phase 2). Documented here, alongside the analogous asset
+  # change-request endpoints above, rather than next to the pre-existing
+  # (undocumented) Stage 4A casino admin routes - see the casino round-
+  # history section's own note on that pre-existing documentation debt,
+  # which this addition does not attempt to backfill. ---
+  /v1/admin/casino/games/{gameID}/change-requests:
+    post:
+      summary: File a four-eyes catalogue change request
+      description: >
+        Requires casino_catalogue:govern. Only the two fail-open/
+        compliance-widening transitions are representable
+        (ADR 0081 §5): removing one or more codes from a game's
+        jurisdiction_blocklist, and re-enabling a disabled game
+        (status 'disabled' -> 'active'). Adding a blocklist code and
+        disabling a game are the fail-closed direction and remain
+        single-actor via PUT /v1/admin/casino/games, unaffected by this
+        endpoint. removed_codes must each currently be present in the
+        game's blocklist.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: gameID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operation, reason_code]
+              properties:
+                operation:
+                  type: string
+                  enum: [jurisdiction_unblock, status_activate]
+                removed_codes:
+                  type: array
+                  items: { type: string }
+                  description: >
+                    Required (non-empty) for operation=jurisdiction_unblock,
+                    rejected for status_activate.
+                reason_code: { type: string }
+      responses:
+        "201":
+          description: Request filed (state = pending)
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/casino/change-requests/{requestID}/approvals:
+    post:
+      summary: Approve or reject a catalogue change request
+      description: >
+        Requires casino_catalogue:govern. Returns 409 for a self-approval,
+        a second decision by the same principal (reported as a duplicate
+        decision, distinct from self-approval), or a decision on a
+        request that has already left the pending state (applied,
+        rejected, or cancelled) - all enforced by the database
+        (migration 0086, mirroring the asset-registry four-eyes
+        precedent). Returns 403 when the deciding principal does not
+        resolve to a platform-scoped staff row. Approving a
+        jurisdiction_unblock request only ever authorizes the EXACT set
+        of codes named in the request that was approved - a later attempt
+        to remove a different or larger set of codes is refused even with
+        a valid approval on file.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: requestID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decision, reason_code]
+              properties:
+                decision: { type: string, enum: [approve, reject] }
+                reason_code: { type: string }
+      responses:
+        "201":
+          description: Decision recorded (immutable)
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /v1/admin/assets/{code}:
     patch:
       summary: Update mutable asset metadata (layer 1)
@@ -4069,7 +4403,19 @@ components:
         odds_numerator: { type: integer, format: int64 }
         odds_denominator: { type: integer, format: int64 }
         status: { type: string, enum: [active, suspended] }
-      required: [id, name, odds_numerator, odds_denominator, status]
+        available:
+          type: boolean
+          description: >-
+            Stage 9.2 (ADR 0083 §5.4.1). true unless an active
+            sb_jurisdiction_restrictions row applies to this selection (or
+            propagates down from its market/event) for the caller's
+            resolved jurisdiction - always true for an anonymous/
+            unauthenticated read. A restricted selection is MARKED
+            unavailable here, never omitted from the response.
+        unavailable_reason:
+          type: string
+          description: One opaque reason, present only when available is false. Never distinguishes "blocked" from "jurisdiction undetermined" (that distinction is never player-facing).
+      required: [id, name, odds_numerator, odds_denominator, status, available]
     EventSummary:
       type: object
       properties:
@@ -4077,7 +4423,11 @@ components:
         name: { type: string }
         start_time: { type: string, format: date-time }
         status: { type: string, enum: [scheduled, live, finished, cancelled] }
-      required: [id, name, start_time, status]
+        available:
+          type: boolean
+          description: Stage 9.2 (ADR 0083 §5.4.1) - see Selection.available's identical doc comment.
+        unavailable_reason: { type: string }
+      required: [id, name, start_time, status, available]
     CompetitionCatalogue:
       type: object
       properties:
@@ -4106,7 +4456,16 @@ components:
         selections:
           type: array
           items: { $ref: "#/components/schemas/Selection" }
-      required: [id, name, status, selections]
+        available:
+          type: boolean
+          description: >-
+            Stage 9.2 (ADR 0083 §5.4.1) - see Selection.available's
+            identical doc comment. A restriction on this market's own
+            event marks this market (and every selection beneath it)
+            unavailable too (downward propagation); a restriction on one
+            of this market's own selections never propagates upward here.
+        unavailable_reason: { type: string }
+      required: [id, name, status, selections, available]
     EventDetail:
       type: object
       properties:
@@ -4179,7 +4538,13 @@ components:
         bet: { $ref: "#/components/schemas/Bet" }
         rejection_category:
           type: string
-          enum: [odds_changed, event_not_open, insufficient_funds, rg_denied, risk_denied]
+          enum: [odds_changed, event_not_open, insufficient_funds, rg_denied, risk_denied, jurisdiction_denied]
+          description: >-
+            jurisdiction_denied (Stage 9.2, ADR 0083 Part C) collapses two
+            internally-distinguishable outcomes (jurisdiction_blocked /
+            jurisdiction_unresolved) into one opaque
+            rejection_code/rejection_message at this HTTP boundary (K3-6)
+            - the two are never distinguishable in this response.
         rejection_code: { type: string }
         rejection_message: { type: string }
       required: [accepted]
@@ -4306,6 +4671,52 @@ components:
         description: { type: string }
         created_at: { type: string, format: date-time }
       required: [id, operation, limit_kind, time_window, threshold, rule_kind, action, status, effective_from, created_at]
+    SportsbookJurisdictionRestriction:
+      type: object
+      description: >
+        A deny-only sb_jurisdiction_restrictions row (internal/sportsbook.
+        JurisdictionRestriction, migration 0087, ADR 0083 §5.2). Platform-
+        wide - carries no tenant_id. Immutable except status/reason_code;
+        withdrawn, never deleted.
+      properties:
+        id: { type: string, format: uuid }
+        scope_kind: { type: string, enum: [event, market, selection] }
+        event_id: { type: string, format: uuid }
+        market_id: { type: string, format: uuid }
+        selection_id: { type: string, format: uuid }
+        jurisdiction_code: { type: string }
+        restriction_kind: { type: string, enum: [blocked] }
+        status: { type: string, enum: [active, withdrawn] }
+        authorization_reference: { type: string }
+        reason_code: { type: string }
+        created_by_actor_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+      required: [id, scope_kind, jurisdiction_code, restriction_kind, status, authorization_reference, reason_code, created_by_actor_id, created_at, updated_at]
+    SportsbookExposureLimit:
+      type: object
+      description: >
+        A cross-player, per-(scope_kind, asset_code) trading-book exposure
+        ceiling (internal/sportsbook.ExposureLimit, migration 0088, ADR
+        0083 §6.2.3). Tenant-owned (carries tenant_id, unlike
+        SportsbookJurisdictionRestriction) - no player-facing read path
+        exists for this data class. Immutable except status/reason_code;
+        disabled and superseded by a new row, never edited or deleted.
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        brand_id: { type: string, format: uuid, description: "Absent means tenant-wide (every brand)." }
+        scope_kind: { type: string, enum: [event, market, selection] }
+        asset_code: { type: string }
+        max_open_potential_payout: { type: integer, format: int64 }
+        measure: { type: string, enum: [gross_potential_payout], description: "Which figure max_open_potential_payout is denominated in (ADR 0083 §6.2.2) - stake included, never netted." }
+        status: { type: string, enum: [active, disabled] }
+        authorization_reference: { type: string }
+        reason_code: { type: string }
+        created_by_actor_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+      required: [id, tenant_id, scope_kind, asset_code, max_open_potential_payout, measure, status, authorization_reference, reason_code, created_by_actor_id, created_at, updated_at]
     BonusChangeRequest:
       type: object
       description: >

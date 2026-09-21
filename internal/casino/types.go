@@ -341,6 +341,42 @@ var (
 	// bypassed this check would still fail at the INSERT/UPDATE, but with a
 	// much less diagnosable error.
 	ErrTransactionScope = errors.New("casino: requires a platform-admin-scoped transaction (use db.Pool.WithPlatformAdmin)")
+
+	// --- Stage 9.2 (ADR 0081 §5/§5.2, ARCH-DB-2 Phase 2) - four-eyes
+	// governance for casino_games.jurisdiction_blocklist removals and
+	// status 'disabled'->'active' re-enablement (migration 0086). ---
+
+	// ErrDualControlRequired is returned when a jurisdiction_unblock/
+	// status_activate mutation has no independently-approved
+	// casino_catalogue_change_requests row behind it. The authoritative
+	// refusal is migration 0086's casino_games_dual_control trigger; this
+	// sentinel lets the HTTP layer answer 409 rather than 500.
+	ErrDualControlRequired = errors.New("casino: operation requires an approved catalogue change request by a different platform principal (four-eyes, ADR 0081 §5)")
+	// ErrSelfApproval is returned when a principal tries to approve or
+	// reject its own catalogue change request - including through a second
+	// staff account resolving to the same Person.
+	ErrSelfApproval = errors.New("casino: a principal may not approve its own catalogue change request")
+	// ErrDuplicateDecision is returned when a principal that has ALREADY
+	// decided a request submits a second decision on it - the only
+	// reachable unique-constraint violation on
+	// casino_catalogue_change_approvals is
+	// UNIQUE (request_id, approver_principal_id), mirrors
+	// assetregistry.ErrDuplicateDecision's identical rationale: a retry is
+	// not the same thing as self-dealing.
+	ErrDuplicateDecision = errors.New("casino: this principal has already decided this catalogue change request")
+	// ErrChangeRequestNotFound covers "no such casino_catalogue_change_requests row".
+	ErrChangeRequestNotFound = errors.New("casino: catalogue change request not found")
+	// ErrChangeRequestNotPending is returned by DecideChangeRequest when
+	// the named request has already left the 'pending' state (applied,
+	// rejected, or cancelled) - a decision on a request that is no longer
+	// pending is never silently accepted, mirroring
+	// internal/withdrawal.Approve's own lockRequestForUpdate/
+	// ErrStateConflict pattern.
+	ErrChangeRequestNotPending = errors.New("casino: catalogue change request is no longer pending")
+	// ErrPrincipalNotEligible is returned when the requesting or deciding
+	// principal does not resolve to a platform-scoped (tenant_id IS NULL)
+	// staff_users row.
+	ErrPrincipalNotEligible = errors.New("casino: principal is not eligible to request or decide a catalogue change (must be a platform-scoped staff principal)")
 )
 
 // Stage 4D-RG's LaunchGame/postBet eligibility denial (internal/

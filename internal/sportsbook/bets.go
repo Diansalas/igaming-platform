@@ -13,16 +13,23 @@ import (
 
 const betColumns = `id, tenant_id, brand_id, player_account_id, wallet_id, selection_id, asset_code,
 	stake_amount, odds_numerator, odds_denominator, potential_return, status, idempotency_key,
-	ledger_transaction_id, placed_at, provider_id, provider_bet_reference`
+	ledger_transaction_id, placed_at, provider_id, provider_bet_reference, jurisdiction_code`
 
 func scanBet(row pgx.Row) (Bet, error) {
 	var b Bet
+	var jurisdictionCode *string
 	err := row.Scan(
 		&b.ID, &b.TenantID, &b.BrandID, &b.PlayerAccountID, &b.WalletID, &b.SelectionID, &b.AssetCode,
 		&b.StakeAmount, &b.OddsNumerator, &b.OddsDenominator, &b.PotentialReturn, &b.Status, &b.IdempotencyKey,
-		&b.LedgerTransactionID, &b.PlacedAt, &b.ProviderID, &b.ProviderBetReference,
+		&b.LedgerTransactionID, &b.PlacedAt, &b.ProviderID, &b.ProviderBetReference, &jurisdictionCode,
 	)
-	return b, err
+	if err != nil {
+		return Bet{}, err
+	}
+	if jurisdictionCode != nil {
+		b.JurisdictionCode = *jurisdictionCode
+	}
+	return b, nil
 }
 
 // ErrBetIdempotencyKeyReused is returned when a retried PlaceBet call's
@@ -74,6 +81,10 @@ type insertBetParams struct {
 	PotentialReturn     int64
 	IdempotencyKey      string
 	LedgerTransactionID uuid.UUID
+	// JurisdictionCode - see Bet.JurisdictionCode's own doc comment.
+	// Empty string is written as NULL (matches casino.CreateLaunchSession's
+	// identical NULLIF(..., '') convention below).
+	JurisdictionCode string
 }
 
 // insertBet writes the new bet row via db.IdempotentInsert - the real,
@@ -90,10 +101,12 @@ func insertBet(ctx context.Context, tx pgx.Tx, p insertBetParams) (Bet, error) {
 		_, err := spTx.Exec(ctx,
 			`INSERT INTO sportsbook_bets
 				(id, tenant_id, brand_id, player_account_id, wallet_id, selection_id, asset_code,
-				 stake_amount, odds_numerator, odds_denominator, potential_return, status, idempotency_key, ledger_transaction_id)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+				 stake_amount, odds_numerator, odds_denominator, potential_return, status, idempotency_key, ledger_transaction_id,
+				 jurisdiction_code)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NULLIF($15, ''))`,
 			p.ID, p.TenantID, p.BrandID, p.PlayerAccountID, p.WalletID, p.SelectionID, p.AssetCode,
 			p.StakeAmount, p.OddsNumerator, p.OddsDenominator, p.PotentialReturn, BetStatusOpen, p.IdempotencyKey, p.LedgerTransactionID,
+			p.JurisdictionCode,
 		)
 		return err
 	})

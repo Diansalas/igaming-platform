@@ -3210,6 +3210,309 @@ THREE occurrences needing the bump, not two — a plain `grep -c
 the reliable way to find all of them, rather than assuming the count
 from a prior stage's pattern.
 
+## Stage 9.2 — Sportsbook Risk + Jurisdiction Enforcement + Casino Governance
+
+Directive: "STAGE 9.2 — SPORTSBOOK RISK + JURISDICTION ENFORCEMENT +
+CASINO GOVERNANCE," opening with "Stage 9.1 is approved." A consolidated
+production-critical stage closing the three items Stage 9.1 classified
+FIX BEFORE PRODUCTION: ARCH-DB-2 Phase 2 (casino four-eyes governance),
+sportsbook cumulative risk, and sportsbook jurisdiction/market gating.
+Explicit operating principle: fix meaningful risk now, do not reopen
+completed architecture without a concrete defect, do not create
+mini-stages for cosmetic issues. Full narrative in the Stage 9.2 final
+report delivered to the human; this table and the two detailed wave
+records below (Part C, Part B2) are the durable record.
+
+Structured as: Phase 1 (parallel) — an architect design ruling covering
+both sportsbook workstreams together (ADR 0083, since both terminate in
+`PlaceBet` and needed one authoritative composed order) plus direct
+implementation of Workstream A (already fully specified in ADR 0081 §5.2
+from Stage 9.1, needing no fresh design). Phase 2 — three implementation
+waves, sequenced per ADR 0083 §9.4 (B1 risk map entry and Part C
+jurisdiction gating ran in parallel since they touch disjoint files; Part
+B2 exposure limits ran only after Part C landed, since both edit
+`PlaceBet`'s composed order and landing them concurrently is explicitly
+unsafe). Phase 3 — mandatory five-specialist review (security,
+ledger-finance, architect self-verification against ADR 0083's own
+invariants, qa, code-reviewer). Phase 4 — a two-track fix round closing
+every P1/P2 finding. Phase 5 — the orchestrator's own independent full
+validation gate against a fresh 90-migration database.
+
+| ID | Owner | Status | Files owned | Tests | Blockers | Integration |
+|---|---|---|---|---|---|---|
+| S92-01 | architect | Done | `docs/decisions/0083-sportsbook-jurisdiction-gating-and-cumulative-exposure.md` (new — combined design ruling for Workstreams B+C, no code) | n/a | none | n/a |
+| S92-02 | casino | Done | `migrations/0086_casino_catalogue_dual_control.{up,down}.sql` (new), `internal/casino/catalogue_governance.go` (new), `internal/httpserver/casino_catalogue_governance_handlers.go` (new), `internal/auth/permission.go` (`PermCasinoCatalogueGovern`), `docs/api/openapi/platform-api.yaml` | 5 new adversarial test files covering concurrent approval/rejection, self-approval, duplicate/replay, rollback, payload-match, atomicity | none (initial P1s closed in S92-06) | Verified |
+| S92-03 | risk | Done | `internal/risk/cumulative.go` (one map entry, `OperationSportsbookBet`, no migration) | 2 new test files verifying every field against actual code | none | Verified |
+| S92-04 | sportsbook | Done | `migrations/0087_sportsbook_jurisdiction_restrictions.{up,down}.sql` (new), `internal/sportsbook/jurisdiction.go`+`jurisdiction_admin.go` (new), `orchestrator.go` steps 5-7/9/17-18, `catalogue.go` annotators, `internal/httpserver/sportsbook_handlers.go`+new admin handlers, `internal/auth/permission.go`, `docs/decisions/0082-*.md` (Amendment A3/E-3) | 19 of ADR §12.1's 20 named tests implemented and green; 5 rung-2 tests correctly stubbed `t.Skip`-BLOCKED-on-HDR-J-7 rather than omitted | rung 2 (`evaluateOperatingMarket`) SPECIFIED, NOT IMPLEMENTED, blocked on pre-existing HDR-J-7 (`SB-JUR-RUNG2-1`) | Verified |
+| S92-05 | sportsbook | Done | `migrations/0088_sportsbook_exposure_limits.{up,down}.sql` (new), `internal/sportsbook/exposure.go`+`exposure_admin.go` (new), `orchestrator.go` steps 10-11, new admin handlers, `docs/decisions/0082-*.md` (Amendment A2/L0.6) | 12 of ADR §12.2's 14 named tests implemented; items 31/33 delivered by S92-03 at the `internal/risk` level, not duplicated | none (initial gaps closed in S92-07) | Verified |
+| S92-06 | security, ledger-finance, architect, qa, code-reviewer | Done | review only | n/a | 1 P1 (four-eyes self-approval defeatable), 1 correctness bug found independently by two reviewers (approval-consumption picks wrong request), 1 real information-leak (exposure rejection category is a trading-book oracle), 1 defense-in-depth gap mirroring an already-fixed Stage 9.1 issue, several test-integrity/coverage gaps — see findings below | n/a |
+| S92-07 | casino (fix round) | Done | `migrations/0089_casino_catalogue_governance_hardening.{up,down}.sql` (new), `internal/casino/catalogue_governance.go`, 3 test files | 4 new adversarial tests including a reproduction of the exact pre-fix bypass scenario, now rejected | none | Verified |
+| S92-08 | sportsbook (fix round) | Done | `migrations/0090_sb_jurisdiction_restrictions_require_platform_principal.{up,down}.sql` (new), `internal/sportsbook/exposure.go` test fixes, `internal/httpserver/sportsbook_handlers.go` (rejection collapse), 2 new RLS/admin-flow test files | 6+ new/repaired tests, 2 previously-vacuous tests repaired and re-verified to actually exercise their claimed code path | none | Verified |
+| S92-09 | Orchestrator | Done | this registry, `docs/active-stage.md`, `docs/progress.md` | full independent validation gate: 90 migrations clean, `migrate verify` clean, full integration suite + `-race` green (32 packages), runtime-role adversarial suite green, all new concurrency-sensitive tests repeated 3x under `-race`, Stage 6/7 acceptance tests by exact name, both frontends re-verified unchanged, OpenAPI spec validated | none | n/a |
+
+### Review findings and dispositions
+
+**One P1 security finding, fixed:** the casino four-eyes self-approval
+check mirrored migration 0044's original (weaker) shape rather than
+0047's later-hardened shape; security reproduced, empirically, that two
+`platform_admin` staff accounts with `person_id IS NULL` (the actual
+`seed-admin` default) could file→approve→apply the same change end to
+end, and that a suspended principal was accepted as a valid approver.
+Both justifications originally given for choosing the weaker shape were
+verified false at HEAD (0047's own deployment blocker no longer exists;
+migration 0085 is a principal-*resolution* check, not a precedent for
+self-approval strength). Fixed in migration 0089 by upgrading both
+triggers to 0047's actual stricter shape (mandatory, unconditional
+person-linkage comparison, active-status required on both principals),
+with a new adversarial test reproducing the exact pre-fix bypass and
+proving it now fails.
+
+**One real correctness bug, found independently by `code-reviewer` and
+`security`:** the casino consume-approved-request function selected the
+OLDEST pending approved request for a game rather than the one whose
+payload actually matched the mutation being applied — meaning two
+legitimate, independently-approved requests for the same game (e.g.
+"unblock DE" and, separately, "unblock FR") could deadlock each other,
+with no cancel path to recover. Fixed in migration 0089 by switching to
+migration 0047's own established pattern (payload-containment matching
+inside the `SELECT ... FOR UPDATE`), verified by new tests proving two
+disjoint approved requests now apply independently in either order. The
+"add a cancel endpoint" option was evaluated and explicitly NOT built —
+the payload-matching fix alone was proven, by test, to fully resolve the
+practical deadlock, and building an unneeded endpoint would have violated
+this stage's own "smallest correct API surface" principle.
+
+**One real information-leak channel, distinct from (and not covered by)
+the exposure-limit design's own INV-SB-EXP-2 invariant:** INV-SB-EXP-2
+(no amount/threshold/scope/limit-id ever reaches a player-facing payload)
+was independently confirmed by security to hold literally. The separate
+problem: the DISTINCT `RejectionCategory: "exposure_limit"` value itself
+was a trading-book oracle — an attacker could binary-search stake amounts
+against a selection and, purely from which rejection category came back,
+reconstruct remaining open capacity under a configured ceiling, without
+any number ever literally appearing in a response. Fixed by collapsing
+the player-facing shape of an exposure-limit decline into the same shape
+a genuine risk decline already produces, while leaving the internal
+category and its audit trail unchanged (staff/audit visibility of the
+real reason remains correct and desired).
+
+**One defense-in-depth gap, mirroring an already-fixed Stage 9.1 issue:**
+the new `sb_jurisdiction_restrictions` table (migration 0087) had the
+identical `SEC-S91-3`-class gap Stage 9.1 already fixed once for
+`casino_games` in migration 0085 — its write policy checked only that a
+platform-admin GUC was non-null, not that it resolved to a real staff
+row. Fixed in migration 0090 by adding the identical defense-in-depth
+trigger `casino_games`'s own migration-0085 fix already established as
+this codebase's pattern.
+
+**Test-integrity gaps found and fixed:** two new exposure tests were
+passing a pre-cancelled `context.Context` into `pool.WithTenant`, which
+fails before the callback under test ever runs — silently proving nothing
+about the rollback/database-error scenarios they claimed to cover; both
+repaired with genuine fault-injection mechanisms and verified (by
+temporarily breaking the code under test and confirming the repaired
+tests then fail). The idempotent-retry test for cumulative/exposure gates
+disarmed the limit between its two calls, so it could not actually
+distinguish correct short-circuit behavior from a coincidentally-matching
+re-evaluation; fixed by keeping the limit armed and unchanged across both
+calls. `sb_exposure_limits` had zero RLS or admin-HTTP-API test coverage
+(unlike its sibling `sb_jurisdiction_restrictions`); both gaps closed
+with new test files mirroring the sibling's own established pattern.
+
+**Explicitly documented, not fixed, with full reasoning:** rung 2 of
+sportsbook jurisdiction gating (`evaluateOperatingMarket`) — SPECIFIED in
+full by ADR 0083 §5.3.3, deliberately NOT shipped as a stub ("no stub is
+shipped" was itself the ADR's ruling, to avoid dead fail-open-shaped
+code), blocked on the pre-existing HDR-J-7 (no player-scoped operating-
+country determination exists anywhere in the codebase to feed it — a
+platform-wide gap, not sportsbook-specific; casino has the identical gap,
+also unfixed, per ADR 0083 §11). `sb_jurisdiction_restrictions`'
+withdrawal action lacking four-eyes (unlike casino's analogous action) —
+this was a deliberate, already-reasoned design choice in ADR 0083 §8.1
+(deny-only data, platform-admin-only write already sufficient per that
+section's own analysis), not something this fix round should redesign
+unilaterally. The read-open RLS policy on `sb_jurisdiction_restrictions`
+technically exposing `authorization_reference`/`reason_code` to any
+connection — deferred, since exploiting it requires raw database access
+no untrusted external party has. Several P3 findings across all five
+reviews (annotators currently inert in production pending an
+authenticated catalogue route; `NaN` passing a `> 0` CHECK and becoming a
+zero threshold; no structured log/alert for the two new controls firing;
+approvals never expire; admin-surface boilerplate duplication between the
+two new tenant-scoped admin files) — documented, not fixed, per this
+stage's own "document and defer minor/cosmetic issues" classification
+rule.
+
+### Human Decision Register — HDR-SB-1 (new)
+
+Recorded verbatim in the Part B2 wave record below (ADR 0083 §8.2): who
+carries the sportsbook trading-book liability, and whether an exposure
+ceiling must exist before go-live. Fail-closed/fail-open default stated
+honestly: the mechanism ships genuinely unarmed (zero `sb_exposure_limits`
+rows anywhere), identical in kind to every other tenant-configurable risk
+control on this platform. What is blocked until answered is sportsbook
+production go-live under a platform-carries-the-book model, not anything
+in this stage's own implementation.
+
+### Explicitly NOT this stage's to build (confirmed absent)
+
+B2B/partner/retail work of any kind; any undocumented external
+sportsbook/casino/payment/KYC provider integration; any answer to
+HDR-J-6/7/8/9 or HDR-M-1/2; rung 2 of sportsbook jurisdiction gating
+(blocked on HDR-J-7, specified not implemented); any redesign of
+`PlayerJurisdictionResult`, jurisdiction precedence, `OperatingCountryPolicy`,
+licence ceiling, tenant/brand/operation policy, `internal/risk`'s core
+evaluation engine, or the wallet/ledger canonical lock order beyond the
+two ADR-0082 amendments this stage's own design required; four-eyes
+governance for `sb_jurisdiction_restrictions`' withdrawal action (a
+deliberate, already-reasoned design choice, not a gap); a cancel endpoint
+for casino change requests (evaluated and proven unnecessary by test); any
+production database cutover, cloud provider selection, backup
+infrastructure, or production credential action.
+
+### Detailed wave record — Part C (sportsbook specialist, S92-04)
+
+Written by the implementing wave itself at landing time; retained
+verbatim as the detailed record beneath the consolidated table above.
+
+**What this wave (Part C, `docs/decisions/0083-sportsbook-jurisdiction-
+gating-and-cumulative-exposure.md`) delivered:** migration `0087`
+(`sb_jurisdiction_restrictions` + `sportsbook_bets.jurisdiction_code`
+snapshot column); `internal/sportsbook/jurisdiction.go` (the shared
+`ResolvePlayerJurisdiction`/`loadActiveRestrictions`/
+`evaluateJurisdictionRestriction` triple, INV-SB-JUR-1); `PlaceBet`'s new
+composed-order steps 5-7/9/17/18 (`internal/sportsbook/orchestrator.go`);
+the two catalogue availability annotators
+(`internal/sportsbook/catalogue.go`); the platform-admin governance
+surface for the new table (`internal/sportsbook/jurisdiction_admin.go`,
+`internal/httpserver/sportsbook_jurisdiction_admin_handlers.go`, new
+routes under `/v1/admin/sportsbook/jurisdiction-restrictions`); and ADR
+0082 Amendment A3 (naming pre-existing exception E-3).
+
+**Closes Stage 9.1's Item 5 disposition** ("Sportsbook catalogue
+jurisdiction gating: real mechanism gap confirmed, FIX BEFORE PRODUCTION,
+NOT implemented" - this same file, Stage 9.1 section) and **ADR 0047's
+§3 catalogue/jurisdiction deferral** ("MUST FIX BEFORE PRODUCTION/B2B, not
+now") - both are now IMPLEMENTED for rungs 1 and 3 (player jurisdiction
+resolution; sportsbook catalogue restriction). Neither disposition is
+fully closed: rung 2 (licence-ceiling/operating-market policy) remains
+open, tracked as follows.
+
+**New tracking item `SB-JUR-RUNG2-1`:** rung 2
+(`evaluateOperatingMarket`, ADR 0083 §5.3.3) is SPECIFIED but NOT
+IMPLEMENTED, BLOCKED on HDR-J-7 (no operating-country determination exists
+anywhere in this codebase for a player-scoped subject - this is a
+platform-wide gap, not sportsbook-specific, and casino has the identical
+gap, recorded but not fixed per ADR 0083 §11). Consequence to schedule
+alongside the HDR-J-7 answer, not discover reactively: on the day an
+operating-country determination becomes available, every tenant serving
+sportsbook must already have its `licence_country_ceilings` and
+tenant-scope `operating_country_policies` rows configured, or its bets
+will correctly begin failing closed the moment rung 2 is wired. Rung 2
+remains blocked on the **pre-existing HDR-J-7** - this is not a new Human
+Decision Register item.
+
+**Explicitly NOT this wave's territory (confirmed untouched):** Part B
+(cross-player exposure, `sb_exposure_limits`, `evaluateExposureLimits`,
+orchestrator steps 10-11, ADR 0082 Amendment A2/L0.6) - a separate,
+concurrently-run Stage 9.2 wave's own territory, deliberately sequenced
+after this one per ADR 0083 §9.4; the `internal/risk/cumulative.go`
+player-scoped cumulative map entry (a third, concurrently-run Stage 9.2
+workstream in this same sandbox); casino's own four-eyes governance
+(`internal/casino/catalogue_governance.go` and migration `0086`, a
+fourth, concurrently-run Stage 9.2 workstream).
+
+### Detailed wave record — Part B2 / Wave 3 (sportsbook specialist, S92-05)
+
+Landed AFTER the Part C wave above, per ADR 0083 §9.4's own wave-split
+requirement (both waves edit `PlaceBet`'s composed call order; landing
+them concurrently is explicitly not fine). Written by the implementing
+wave itself at landing time; retained verbatim as the detailed record.
+
+**What this wave (Part B2, `docs/decisions/0083-sportsbook-jurisdiction-
+gating-and-cumulative-exposure.md` §6.2) delivered:** migration `0088`
+(`sb_exposure_limits` + `idx_sportsbook_bets_open_exposure`);
+`internal/sportsbook/exposure.go` (`evaluateExposureLimits`, the class
+**L0.6** advisory lock, `numericToBigInt`/`verifyTenantScopedExposureConnection`
+mirroring `internal/risk`'s identical disciplines); `PlaceBet`'s composed
+steps 10 (moved `computePotentialReturn`) and 11 (the exposure gate,
+`internal/sportsbook/orchestrator.go`); the tenant-scoped governance
+surface for the new table (`internal/sportsbook/exposure_admin.go`,
+`internal/httpserver/sportsbook_exposure_admin_handlers.go`, new routes
+under `/v1/admin/sportsbook/exposure-limits`, gated by the new tenant
+`risk_manager`-class permissions `sportsbook_exposure_limit:manage`/`:read`);
+and ADR 0082 Amendment A2 (new lock class L0.6), landed alongside Wave
+2's own Amendment A3 without duplicating or conflicting with it.
+
+**Confirms the full combined Part-B-and-Part-C composed order now matches
+ADR 0083 §7.2 exactly:** (no lock) steps 1-7 jurisdiction gate → L0.4 (RG)
+→ L0.5 (risk cumulative, when scoped) → **L0.6 (sportsbook exposure, when
+armed) [this wave]** → L3 (`wallet_balance_projection`) → L4
+(`ledger_transactions`) → L1 `sportsbook_bets` insertion wait (E-3,
+pre-existing, unchanged).
+
+**New Human Decision Register item — HDR-SB-1** (ADR 0083 §8.2, recorded
+here verbatim per this wave's own directive):
+
+> **Exact question:** For the platform's own Anjouan-licensed B2C
+> sportsbook, does the platform itself carry the payout liability on
+> accepted bets - a trading book it owns and must cap - or will
+> sportsbook operate under a commercial arrangement in which a
+> third-party provider underwrites payouts, making the
+> per-event/market/selection exposure ceiling a provider-contract term
+> rather than a platform-set number? If the platform carries it: what is
+> the per-scope_kind, per-asset ceiling on aggregate open gross potential
+> payout (§6.2.2's measure), and who owns reviewing it?
+>
+> **Why engineering cannot decide it:** the answer depends on a
+> commercial provider contract that does not exist (ADR 0080;
+> `docs/integrations/dummy-sportsbook.md` is still pending) and on the
+> operator's own risk appetite and solvency position. Any number
+> engineering chose would be an invented financial control, which
+> CLAUDE.md forbids. Choosing "no ceiling" is not a neutral default
+> either - it is a decision to accept unbounded trading-book exposure,
+> which doc 09 §12 characterises as "not a bounded engineering-bug cost, a
+> trading-book loss". There is no fail-safe direction engineering can
+> pick.
+>
+> **Affected domains:** `sportsbook`, `ledger-finance` (the Liability vs
+> Exposure boundary, doc 09 §1.7), `risk`, and the commercial/product
+> owner.
+>
+> **Options:** (a) the platform carries the book => a ceiling per
+> (`scope_kind`, `asset_code`) must be set, authorized and owned before
+> sportsbook go-live; (b) a provider underwrites payouts => the ceiling is
+> a contract term and the platform's own mechanism stays unarmed, or is
+> armed only as a defence-in-depth backstop at a number the contract
+> implies; (c) no sportsbook go-live until (a) or (b) is settled.
+>
+> **Fail-closed / fail-open default until answered, stated honestly:** no
+> migration, seed or fixture creates any `sb_exposure_limits` row. With
+> zero rows the exposure gate is unarmed and applies no check - genuinely
+> fail-OPEN-when-unconfigured, identical to `risk_rules`,
+> `casino_games.jurisdiction_blocklist` and `operating_country_policies`,
+> and identical to today's behaviour, so this wave introduces no new
+> permissiveness. The fail-CLOSED half is the other half: once a limit row
+> exists, any error reading it, any unscannable NUMERIC, any wrongly
+> scoped transaction, or any failure computing the aggregate aborts the
+> bet rather than allowing it.
+>
+> **What is blocked until answered:** nothing in this wave's own
+> implementation - the mechanism ships unarmed. What is blocked is
+> **sportsbook production go-live**, which must not proceed without
+> HDR-SB-1 being answered and, if (a), a configured and authorized
+> ceiling.
+
+**Explicitly NOT this wave's territory (confirmed untouched):** rung 2
+(`evaluateOperatingMarket`, `SB-JUR-RUNG2-1`, still BLOCKED on HDR-J-7 -
+Wave 2's own territory, unchanged here); `internal/sportsbook/
+jurisdiction.go`, `jurisdiction_admin.go`, and the jurisdiction-gate
+portion of `orchestrator.go`'s steps 5-9/17-18 (Wave 2, untouched except
+for this wave's own steps 10-11 insertion into the same function);
+`internal/risk/cumulative.go` (a separate, already-completed Stage 9.2
+wave); `internal/jurisdiction`, `internal/operatingmarket` (out of
+scope).
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

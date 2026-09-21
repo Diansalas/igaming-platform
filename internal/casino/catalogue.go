@@ -142,7 +142,13 @@ func UpsertGame(ctx context.Context, tx pgx.Tx, in UpsertGameInput) (Game, error
 		nonNilStrings(in.JurisdictionBlocklist), status,
 	)
 	if err != nil {
-		return Game{}, fmt.Errorf("casino: upsert game: %w", err)
+		// Stage 9.2 (ADR 0081 §5.2): an UPDATE that removes a
+		// jurisdiction_blocklist code or reactivates a disabled game
+		// without an approved casino_catalogue_change_requests row is
+		// refused by migration 0086's casino_games_dual_control trigger -
+		// classified here into ErrDualControlRequired/ErrInvalidInput so
+		// the HTTP layer can answer 409/400 instead of a generic 500.
+		return Game{}, classifyChangeRequestTriggerError(fmt.Errorf("casino: upsert game: %w", err))
 	}
 	return GetGameByProviderRef(ctx, tx, in.ProviderID, in.ProviderGameID)
 }

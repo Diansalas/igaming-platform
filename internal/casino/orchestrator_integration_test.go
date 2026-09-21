@@ -127,17 +127,77 @@ func seedCasinoFixture(t *testing.T, pool *db.Pool) casinoFixture {
 // suffices for a legitimate casino_games write in this suite -
 // password_hash is a dummy literal, these principals are never used to
 // log in, only to satisfy the trigger's staff_users lookup.
+//
+// Migration 0089 (SEC-S92-1 fix round) requires every principal that
+// files or decides a casino_catalogue_change_requests row to carry a
+// confirmed, active Person linkage - so this default fixture now creates
+// one, each principal resolving to its OWN distinct person (two calls
+// are two genuinely distinct humans, never a same-person bypass). A test
+// that specifically needs an UNLINKED or SUSPENDED principal, or two
+// principals sharing one person, uses a purpose-built helper instead
+// (seedUnlinkedPlatformAdminStaffPrincipal,
+// seedSuspendedPlatformAdminStaffPrincipal,
+// seedTwoPlatformPrincipalsSharingPerson), never this one - mirroring
+// internal/httpserver's mustCreateStaff/mustCreateStaffWithPerson split.
 func seedPlatformAdminStaffPrincipal(t *testing.T, pool *db.Pool) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
+	personID := uuid.New()
 	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx,
-			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, NULL, $2, 'x', 'platform_admin')`,
-			id, "platform-admin-"+id.String()+"@test.example")
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status) VALUES ($1, NULL, $2, 'x', 'platform_admin', $3, 'active')`,
+			id, "platform-admin-"+id.String()+"@test.example", personID)
 		return err
 	})
 	if err != nil {
 		t.Fatalf("seed platform admin staff principal: %v", err)
+	}
+	return id
+}
+
+// seedUnlinkedPlatformAdminStaffPrincipal inserts a platform-scoped staff
+// principal with NO Person linkage (person_id IS NULL) - the exact shape
+// security found empirically reachable from cmd/seed-admin's default
+// output, and the shape migration 0089's fix now refuses outright rather
+// than silently treating as "no person to compare against".
+func seedUnlinkedPlatformAdminStaffPrincipal(t *testing.T, pool *db.Pool) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status) VALUES ($1, NULL, $2, 'x', 'platform_admin', NULL, 'active')`,
+			id, "platform-admin-unlinked-"+id.String()+"@test.example")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed unlinked platform admin staff principal: %v", err)
+	}
+	return id
+}
+
+// seedSuspendedPlatformAdminStaffPrincipal inserts a platform-scoped
+// staff principal that IS person-linked (a distinct person from any
+// other fixture) but whose status is 'suspended' - proves migration
+// 0089's new status='active' check, which migration 0086 had nowhere at
+// all, actually fires.
+func seedSuspendedPlatformAdminStaffPrincipal(t *testing.T, pool *db.Pool) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	personID := uuid.New()
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO persons (id) VALUES ($1)`, personID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx,
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role, person_id, status) VALUES ($1, NULL, $2, 'x', 'platform_admin', $3, 'suspended')`,
+			id, "platform-admin-suspended-"+id.String()+"@test.example", personID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed suspended platform admin staff principal: %v", err)
 	}
 	return id
 }

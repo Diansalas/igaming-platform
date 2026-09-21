@@ -104,23 +104,29 @@ type cumulativeSpec struct {
 // of them ledger-finance's to supply (ADR 0031 §33 restates §16 step 5
 // accordingly) - the ledger transaction type ALONE is no longer enough:
 // which player-side leg measures the usage, which player-side legs exist
-// but must not be counted, and which direction consumes capacity. For
-// reference, the two shapes already specified by other ADRs would be:
+// but must not be counted, and which direction consumes capacity.
 //
-//	sportsbook_bet (ADR 0038 §13, NOT wired here - internal/sportsbook
-//	exists as of Stage 6 and calls risk.Evaluate per-request, but no
-//	cumulative/rolling-window rule is wired for it yet; deferred to a
-//	dedicated risk/ledger-finance design pass, Stage 6.1 disposition):
-//	{[sportsbook_bet], [sportsbook_void], measured=[player_cash],
-//	ignored=[player_locked_cash], debit} - note the leg name is
-//	player_locked_cash (migration 0048's origin split), not the
-//	pre-split player_locked this comment originally named
+// sportsbook_bet was described in this comment block as a not-yet-wired
+// reference shape, and that description named a `sportsbook_void`
+// reversal type. THAT TYPE DOES NOT EXIST: it is not an admitted
+// ledger_transactions.transaction_type in migration 0078 (which widened
+// the CHECK to seventeen values, `sportsbook_bet` being the seventeenth)
+// nor in any later migration, and internal/ledger declares no
+// TxSportsbookVoid constant. The operation is a real production entry
+// below as of Stage 9.2, with ReversalTypes deliberately EMPTY - see ADR
+// 0083 §6.1.1/§6.1.2 for the per-field rationale, and INV-SB-CUM-1
+// (§10) for the binding requirement that whoever widens the
+// transaction_type CHECK with a sportsbook reversal type updates this
+// spec in the SAME change.
+//
+// One reference shape is still written down here, so the next author does
+// not have to re-derive it from the flows document:
+//
 //	withdrawal step A (Flow 3, NOT wired here - no withdrawal Risk call
 //	site exists): {[withdrawal_requested], [...], measured=[player_cash],
 //	ignored=[player_withdrawal_hold], debit}
 //
-// Neither is added by this stage; they are written down only so the next
-// author does not have to re-derive the shape from the flows document.
+// It is not added by this stage.
 var operationCumulativeSpecs = map[Operation]cumulativeSpec{
 	OperationCasinoBet: {
 		TransactionTypes: []string{"casino_bet"},
@@ -187,6 +193,51 @@ var operationCumulativeSpecs = map[Operation]cumulativeSpec{
 		MeasuredAccountTypes: []string{"player_cash"},
 		IgnoredAccountTypes:  []string{"player_bonus"},
 		ConsumingDirection:   directionCredit,
+	},
+	// OperationSportsbookBet (ADR 0083 §6.1.1, Stage 9.2 Workstream B
+	// Wave 1). Every field below was verified against HEAD, not copied
+	// from a flows document:
+	//
+	//   - TransactionTypes: ledger.TxSportsbookBet == "sportsbook_bet"
+	//     (internal/ledger/ledger.go), the seventeenth value admitted by
+	//     migration 0078's ledger_transactions_transaction_type_check.
+	//   - MeasuredAccountTypes: internal/sportsbook's PlaceBet builds one
+	//     betInput whose two entries are Dr player_cash / Cr
+	//     player_locked_cash (ADR 0038 §3's cash-funded placement shape).
+	//     The player_cash DEBIT is the stake, and the stake is the usage.
+	//   - IgnoredAccountTypes: player_locked_cash is the SECOND
+	//     PLAYER-OWNED leg of that same posting, so ledger_entries
+	//     denormalizes the identical player_account_id onto both legs.
+	//     Without this declaration the two legs cancel and cumulative
+	//     usage computes as exactly zero no matter how much was staked -
+	//     ADR 0031 §32(a)'s fail-OPEN, whose structurally identical
+	//     Dr player_cash / Cr player_withdrawal_hold instance is pinned by
+	//     TestEvaluate_CumulativeUsageIsLegAwareForATwoPlayerOwnedLegOperation.
+	//   - ConsumingDirection: debit. A stake consumes capacity.
+	//
+	// player_locked_bonus is DELIBERATELY NOT declared. Bonus-funded
+	// sportsbook wagering is blocked as a matter of policy (ADR 0038 §9,
+	// an OPEN DECISION referred upward) and, more decisively, as a matter
+	// of structure: PlaceBet's betInput hardcodes the player_cash /
+	// player_locked_cash pair and has no bonus branch to take. NOTE for
+	// whoever unblocks it: the ledger-level guard ADR 0083 §6.1.1 cites
+	// (assertNoBonusSetEntries / ErrBonusPostingBlocked, HR-9) was REMOVED
+	// in Stage 4H-B1 Wave 2 once the mirror generator landed
+	// (internal/ledger/bonus_mirror.go's own header records the removal),
+	// so internal/ledger would today accept a bonus-funded sportsbook
+	// posting if one were ever constructed. That does not make this spec
+	// unsafe: the first such posting makes cumulativeUsage observe an
+	// undeclared player-side account_type and return
+	// ErrUnrecognizedCumulativeLeg, which aborts the evaluation (and the
+	// bet's whole transaction) instead of silently under-counting the cap.
+	// Failing closed first, then being extended deliberately, is the
+	// correct order of events (ADR 0031 §33).
+	OperationSportsbookBet: {
+		TransactionTypes:     []string{"sportsbook_bet"},
+		ReversalTypes:        nil, // sportsbook_void does not exist - see ADR 0083 §6.1.2
+		MeasuredAccountTypes: []string{"player_cash"},
+		IgnoredAccountTypes:  []string{"player_locked_cash"},
+		ConsumingDirection:   directionDebit,
 	},
 }
 

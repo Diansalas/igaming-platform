@@ -535,6 +535,25 @@ established extension process — this document states the boundary and
 integration point only, consistent with the task's own instruction not to
 design a second Risk engine here.
 
+**Open Question 3 answered (Stage 9.2 Part B2, ADR 0083 §6.2.1) — no, a
+per-market/per-selection exposure ceiling is NOT a first-class
+`risk_rules` scope dimension.** Four structural reasons, verified against
+HEAD (ADR 0083 §6.2.1 has the full argument): `risk_rules` has no
+selection-level entity axis and `game_id UUID REFERENCES casino_games (id)`
+cannot be repurposed for one without a cross-domain FK violation;
+`cumulativeUsage`'s aggregation is player-scoped by construction
+(`ErrMissingPlayer` without one), while Exposure is explicitly the
+aggregate *across* players; the measured quantity — `potential_return` —
+is a domain projection (ADR 0038 §2) the ledger deliberately does not
+hold, and teaching `internal/risk` to read `sportsbook_bets` would couple
+the generic risk engine to one product's schema; and §1.7 above already
+ruled that Exposure must never become a second source of truth for what
+the platform owes. Exposure is therefore a sportsbook-domain control
+(`internal/sportsbook/exposure.go`'s `evaluateExposureLimits`, a new
+`sb_exposure_limits` table, migration 0088) that sits **alongside**
+`risk.Evaluate` in `PlaceBet`'s own call order — never instead of it, and
+adding no new `risk` `Operation` or `LimitKind`.
+
 ### 3.5 Settlement, result ingestion, cashout, and operational controls
 
 - **Result ingestion**: a canonical `Result` (§1.1) is recorded from a data
@@ -1653,3 +1672,92 @@ the sportsbook shape exists only as an unwired, explicitly-labeled
 reference comment. All three remain correctly gated behind
 `NOT IMPLEMENTED`/`BLOCKED` for any actual sportsbook capability — nothing
 in this section authorizes wiring any of them.
+
+### 16.5 Stage 9.2 closure note (ADR 0083 Part C)
+
+**§16.3's drift note is RESOLVED.** `docs/decisions/0083-sportsbook-
+jurisdiction-gating-and-cumulative-exposure.md` §1 item 3/§6.1.2
+re-verified against HEAD that `sportsbook_void` is not, and has never
+been, an admitted `ledger_transactions.transaction_type` value, and
+corrected the `operationCumulativeSpecs[OperationSportsbookBet]` shape
+accordingly (empty `ReversalTypes`, `player_locked_cash` as the ignored
+account type, post-migration-0048 naming). The map entry itself is a
+separate wave's deliverable (ADR 0083 §9.4 Wave 1); this note records that
+the NAMING drift §16.3 flagged is closed, not that the wiring is done -
+see ADR 0083 for the map entry's actual landing status.
+
+**Jurisdiction/market gating (§12) is PARTIALLY delivered, not fully.**
+ADR 0083 Part C wires rung 1 (player jurisdiction resolution) and rung 3
+(a new, sportsbook-owned `sb_jurisdiction_restrictions` deny-only table,
+migration 0087) into both `PlaceBet` and the catalogue read paths. Rung 2
+— the licence-ceiling/tenant/brand/operation-policy chain §12 otherwise
+describes as already covered "unchanged" via `internal/risk`'s
+jurisdiction/licensing-mode dimensions — is **SPECIFIED, NOT
+IMPLEMENTED, BLOCKED on HDR-J-7** (ADR 0083 §5.3.3): no operating-country
+determination exists anywhere in this codebase for a player-scoped
+subject today, so `operatingmarket.ResolveOperatingCountryPolicy` cannot
+be wired for sportsbook (or for casino - this is a platform-wide gap, not
+sportsbook-specific).
+
+**Governance tracking item `SB-JUR-RUNG2-1`** (recorded in
+`docs/governance/task-registry.md`): on the day an operating-country
+determination becomes available and HDR-J-7 is answered, every tenant
+serving sportsbook must already have its `licence_country_ceilings` and
+tenant-scope `operating_country_policies` rows configured, or its bets
+will correctly begin failing closed the moment rung 2 is wired. That
+sequencing is a launch dependency to schedule alongside the HDR-J-7
+answer, not a defect to fix reactively.
+
+**Correction (Stage 9.2 fix round, code-reviewer SEC-S92-7-adjacent
+doc-accuracy finding): "wires ... into ... the catalogue read paths" above
+overstates §5.4.1's enforcement point 1 (catalogue-visibility marking,
+`AnnotateCatalogueAvailability`/`AnnotateEventAvailability`,
+`internal/sportsbook/catalogue.go`).** The mechanism is fully built and
+tested — it correctly marks a restricted event/market/selection
+unavailable given a non-zero `AvailabilityContext` — but it is **currently
+inert in production**: `GET /v1/sportsbook/sports` and `GET
+/v1/sportsbook/events/{id}` are genuinely anonymous routes (no
+authenticated catalogue-read route exists anywhere in this codebase
+today, confirmed by security), so both call sites pass only the zero-value
+`AvailabilityContext{}`, for which both annotators are documented no-ops.
+Enforcement point 1 is therefore mechanism-only today, not an active
+control — it protects nothing yet because there is nothing authenticated
+for it to run against. This does **not** weaken the platform's actual
+jurisdiction posture: enforcement point 2 (§5.4.2, bet placement,
+`PlaceBet` re-running the whole gate against the server-resolved
+selection) is the authoritative control and **is** live, exactly as
+designed to be independent of whatever the catalogue displayed. Enforcement
+point 1 activates automatically, with zero `internal/sportsbook` code
+change required, the moment any authenticated sportsbook catalogue-read
+route is added — a future implementer should read its current inertness as
+"no live route to feed it a real context yet," not as an oversight or a
+regression to fix.
+
+### 16.6 Stage 9.2 closure note (ADR 0083 Part B2 / Wave 3)
+
+**Cross-player book exposure is now delivered, unarmed.** ADR 0083 §6.2's
+cross-player, per-(scope_kind, asset_code) exposure gate
+(`internal/sportsbook/exposure.go`'s `evaluateExposureLimits`, a new
+`sb_exposure_limits` table, migration 0088, class **L0.6** advisory lock —
+ADR 0082 Amendment A2) is wired into `PlaceBet` at ADR 0083 §7.1 step 11,
+after Risk (step 9) and before any `wallet_balance_projection` lock. §3.4's
+Open Question 3 is answered immediately above.
+
+**Deliberately unarmed at ship time (HDR-SB-1, ADR 0083 §8.2).** No
+migration, seed or fixture creates any `sb_exposure_limits` row — with
+zero rows configured, the mechanism takes no lock and runs one indexed,
+empty `SELECT` per bet. Whether the platform's own Anjouan-licensed
+sportsbook carries payout liability at all (versus a provider underwriting
+it commercially) is an unanswered commercial/licensing question this
+document cannot resolve engineering-side; **sportsbook production go-live
+must not proceed under option (a) (platform carries the book) without
+HDR-SB-1 being answered and a ceiling configured and authorized** (ADR
+0083 §8.2's own "what is blocked" statement).
+
+**§1.7's Exposure/Liability distinction is now load-bearing, not merely
+descriptive.** The gate measures GROSS `potential_return` (stake
+included, never netted) per §6.2.2, deliberately the same "aggregate
+potential payout the book would owe" quantity §1.7 names — computed from
+`sportsbook_bets` (a domain projection), never written to or read from the
+ledger, and never surfaced to a player (INV-SB-EXP-2): no amount or
+threshold reaches `PlaceBetResult` or any HTTP response.

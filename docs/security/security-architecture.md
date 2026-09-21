@@ -4463,3 +4463,639 @@ launch authorization of any kind.
 records that two specific changes were probed against the threat model
 above and that the defects found are the nine listed, at the severities
 listed.
+
+## Stage 9.2 (2026-09-21) — security review of casino catalogue four-eyes (ARCH-DB-2 Phase 2), sportsbook jurisdiction/market gating, and cumulative risk + cross-player exposure
+
+`security`-owned, mandatory review under CLAUDE.md's "Security-sensitive
+functionality requires explicit review by the `security` specialist before
+being marked complete", covering three already-implemented Stage 9.2
+changes, each shipped with its own passing suites:
+
+- **A — casino catalogue four-eyes governance** (design ruling: ADR 0081
+  §5/§5.2). `migrations/0086_casino_catalogue_dual_control.{up,down}.sql`,
+  `internal/casino/catalogue_governance.go`,
+  `internal/httpserver/casino_catalogue_governance_handlers.go`,
+  `internal/httpserver/casino_routes.go`, `auth.PermCasinoCatalogueGovern`,
+  and the four new suites.
+- **B — cumulative risk + cross-player exposure** (ADR 0083 §6).
+  `internal/risk/cumulative.go`'s `OperationSportsbookBet` entry,
+  `migrations/0088_sportsbook_exposure_limits.{up,down}.sql`,
+  `internal/sportsbook/exposure.go`, `exposure_admin.go`,
+  `internal/httpserver/sportsbook_exposure_admin_handlers.go`,
+  `orchestrator.go` steps 10–11, and the two new
+  `sportsbook_exposure_limit:{manage,read}` permissions.
+- **C — sportsbook jurisdiction/market gating** (ADR 0083 §5).
+  `migrations/0087_sportsbook_jurisdiction_restrictions.{up,down}.sql`,
+  `internal/sportsbook/jurisdiction.go`, `jurisdiction_admin.go`,
+  `catalogue.go`'s two annotators, `orchestrator.go` steps 5–7/9/17–18,
+  `internal/httpserver/sportsbook_jurisdiction_admin_handlers.go` and
+  `sportsbook_handlers.go`.
+
+This review was **adversarial and empirical, not a read-through**: a
+throwaway database (`secreview_scratch`) was created, all 88 migrations
+applied, and every claim below about policy, trigger and four-eyes
+behaviour was reproduced by direct SQL under each real connection scope,
+as the table-owning non-superuser `igaming` role. The database was dropped
+afterwards. No project file outside this document was modified.
+
+**Result: one P1, five P2, six P3.** The P1 is a *pre-launch* blocker, not
+an operational emergency: the control it concerns is brand new, so nothing
+regresses — but the control as shipped does not do what ADR 0081 §5 says
+it does.
+
+### S92.1 What was verified empirically, and held
+
+- **Change C RLS write-scope matrix, reproduced by hand.** `INSERT` into
+  `sb_jurisdiction_restrictions` is refused (`new row violates row-level
+  security policy`) from: a bare connection with no GUCs; a tenant-scoped
+  connection; a connection with **both** `app.tenant_id` and
+  `app.platform_admin_principal_id` set (proving the `tenant_id IS NULL`
+  conjunct does real work, not just the principal conjunct); a
+  player-scoped connection; and a
+  `app.platform_service_id = 'sportsbook_catalogue_sync'` connection.
+- **Change C immutability and deletion.** `UPDATE ... SET
+  jurisdiction_code` raises `catalogue_enforce_immutable_identity`'s named
+  exception; `DELETE` raises the deny-delete exception loudly rather than
+  silently affecting zero rows; a third `status` value is refused by the
+  CHECK. `status`/`reason_code` are the only mutable columns, as specified.
+- **Change B tenant isolation is real, not asserted.** Tenant B's
+  connection sees **zero** of tenant A's `sb_exposure_limits` rows,
+  is refused on an `INSERT` naming tenant A's `tenant_id`, and its
+  `UPDATE ... SET status='disabled'` against tenant A's row affects zero
+  rows (surfacing as `ErrExposureLimitNotFound`, never data). A
+  player-scoped connection sees zero rows (no player policy exists at
+  all). A platform-admin-scoped connection also sees zero rows — there is
+  no cross-tenant read path, which is INV-SB-EXP-1 holding structurally.
+  `evaluateExposureLimits` additionally asserts the connection scope
+  (`verifyTenantScopedExposureConnection`, `internal/sportsbook/exposure.go:72`)
+  *before* reading any limit, converting the silently-partial
+  player-scoped aggregate into a loud fail-closed error.
+- **INV-SB-EXP-2 traced end-to-end and holds.** `ExposureDecision`
+  (`exposure.go:48`) carries no amount and no threshold by construction.
+  `orchestrator.go:327-328` returns `RejectionCategory:
+  RejectionExposureLimit` with an **empty** `RejectionCode` and the fixed
+  string `"this bet cannot be accepted at this time"`.
+  `toPlaceBetRejectionResponse` (`internal/httpserver/sportsbook_handlers.go:421`)
+  passes that through unchanged. `ScopeKind`/`LimitID` reach only
+  `audit.Record`. The only place a limit id appears in an error string is
+  `ErrExposureUnscannableLimit`, which is not an `ErrInvalidInput` and so
+  takes the handler's generic-500 branch (`logger.Error` + `"failed to
+  place bet"`). No aggregate, threshold, scope kind or limit id reaches an
+  HTTP body. See `SEC-S92-6` for the residual *inferential* leak.
+- **`numericToBigInt` overflow handling is correct.** The aggregate is
+  read as `pgtype.Numeric` and compared as `*big.Int` throughout; it is
+  never narrowed to `int64` on the evaluation path (only
+  `scanExposureLimit`'s admin-response path narrows, and it refuses
+  loudly via `!thresholdBigInt.IsInt64()`). A negative exponent is
+  refused; a positive exponent is scaled up, never truncated. An
+  attacker-influenced `max_open_potential_payout` cannot overflow into a
+  larger effective ceiling. See `SEC-S92-8` for the one residual branch.
+- **`AvailabilityContext` is never constructible from client input.**
+  Exhaustive grep: three non-test construction sites —
+  `internal/sportsbook/orchestrator.go:193` (all three fields from
+  `PlaceBetParams`, themselves derived from the verified token subject plus
+  a server-side `identity.GetPlayerAccountByID` lookup) and
+  `internal/httpserver/sportsbook_handlers.go:107` and `:211`, both the
+  explicit zero value. `PlaceBetParams` carries no jurisdiction, country or
+  availability field. INV-SB-JUR-3 holds.
+- **The direct-`PlaceBet` bypass test exists and genuinely proves the
+  claim.** `internal/sportsbook/jurisdiction_integration_test.go:449`
+  seeds a selection-level restriction, calls `PlaceBet` with the raw
+  `selection_id` with **no** catalogue read anywhere in the test, and
+  asserts `RejectionJurisdictionDenied`. The enforcement it proves is real
+  because `PlaceBet` rebuilds `catalogueScope` from
+  `getSelectionWithContext`'s server-side resolution, never from input
+  (`orchestrator.go:196`). See `SEC-S92-11` for the one way it is narrower
+  than ADR 0083 §12.1 item 12 specifies.
+- **K3-1/K3-2 logic is correct and fails closed in every branch probed.**
+  `evaluateJurisdictionRestriction` (`internal/sportsbook/jurisdiction.go:155`):
+  empty restricted set ⇒ available regardless of outcome (K3-1, which is
+  what keeps every sportsbook bet on the platform working today, since
+  every player-scoped `jurisdiction.Resolve` is `unresolved(no_signal)`);
+  non-`Resolved` with a non-empty set ⇒ `jurisdiction_unresolved`, never
+  `jurisdiction_blocked` (K3-2); `Resolved` + code present ⇒ `blocked`;
+  `Resolved` + code absent ⇒ available; a `Code()` error is a hard stop,
+  not a fallthrough. No branch returns "available" for an armed control
+  whose outcome is unknown. Table-driven coverage of all five states exists
+  at `jurisdiction_integration_test.go:283-306`, including the `Resolved`
+  branch via a tenant-licence-basis resolution.
+- **The jurisdiction denial codes are collapsed at exactly one boundary.**
+  `toPlaceBetRejectionResponse` maps both `DenialCodeJurisdiction*` values
+  onto the single `"jurisdiction_unavailable"` / `"this bet is not
+  available in your jurisdiction"` pair, and the catalogue annotators
+  collapse even earlier, at annotation time, onto the single
+  `catalogueUnavailableReason = "not_available_in_your_jurisdiction"`
+  (`internal/sportsbook/catalogue.go:24`). **`unavailable_reason` never
+  names a jurisdiction, a scope kind or a blocking rung** — probed by
+  reading every assignment: there is exactly one constant and it is
+  jurisdiction-free. The distinguishable codes survive only in
+  `PlaceBetResult.RejectionCode` and the
+  `sportsbook_bet.denied_by_jurisdiction_policy` audit record. K3-6 holds.
+- **The admin surfaces are scoped as specified.**
+  `PermSportsbookJurisdictionRestriction{Manage,Read}` are granted to
+  `RolePlatformAdmin` only; `staff_users`' own CHECK makes
+  `role = 'platform_admin'` ⟺ `tenant_id IS NULL`, so no tenant-scoped
+  staff member can hold either, and the un-`RequireTenantScope`-wrapped
+  routes are therefore not reachable by one (confirmed by
+  `TestSportsbookJurisdictionRestrictionAdmin_TenantAdminForbidden`).
+  `PermSportsbookExposureLimit{Manage,Read}` are tenant
+  `risk_manager`-class and their routes **are** `RequireTenantScope`-
+  wrapped, matching `registerRiskRoutes`. Both write handlers take the
+  acting principal from `tc.Subject` with an explicit parse-error branch,
+  never from a body field.
+- **Change A: payload matching cannot be defeated by type coercion.** All
+  five probes fail **closed** against a clean game with no stale approved
+  request: `removed_codes` as a JSON scalar `"DE"` raises `cannot extract
+  elements from a scalar`; `[null]` mismatches; `["DE","DE"]` against an
+  actual removal of `{DE}` mismatches; a `NULL` blocklist assignment
+  (removing everything) against a `["DE"]` approval mismatches; and an
+  `INSERT ... ON CONFLICT DO UPDATE` — the production `UpsertGame` shape —
+  fires the `BEFORE UPDATE` trigger and is refused with no approved
+  request at all. `disabled → active` with no approved `status_activate`
+  request is refused.
+- **Change A: the consume-and-apply function cannot be raced into a
+  double-apply.** Reproduced with two concurrent sessions applying the same
+  removal to the same game: session 2 blocks on the `casino_games` row
+  lock, and after session 1 commits, session 2's `OLD` already carries the
+  reduced blocklist, so `v_removed` is empty, no consume happens, and the
+  statement passes through as a no-op. The request ends `state = 'applied'`
+  exactly once. The `FOR UPDATE` + `state = 'pending'` predicate inside
+  `casino_catalogue_change_consume_approved_request` is re-evaluated under
+  READ COMMITTED EvalPlanQual, so a second consumer of the same row finds
+  no candidate and raises. A second removal attempt inside the *same*
+  transaction is also refused.
+- **Change A: two `staff_users` rows sharing one `person_id` do NOT defeat
+  self-approval.** Probed directly and refused by
+  `casino_catalogue_change_approvals_deny_self_approval`. The gap is the
+  opposite case — see `SEC-S92-1`.
+- **ADR 0082 composition.** Both new gates are pre-posting decision gates
+  taken before `ledger.GetOrCreateAccounts`/`LockProjectionsForPosting`
+  (`orchestrator.go`: jurisdiction at ~line 186, exposure at line 302, the
+  L3 pre-lock well after both), so INV-SB-ORDER-1 and R8 hold. The L0.6
+  advisory key is `'sb_exposure:' || tenant_id || ':' || event_id`, both
+  server-derived UUIDs hashed with `hashtextextended` over the full 64-bit
+  space and tenant-namespaced — not attacker-controllable, and taken only
+  when at least one limit row is configured.
+- `go build ./...` clean; `internal/auth`, `internal/casino`,
+  `internal/risk`, `internal/sportsbook` unit suites pass.
+
+### S92.2 Findings
+
+#### `SEC-S92-1` (P1) — migration 0086's four-eyes control is defeatable by one human, and the two reasons given for choosing the weaker shape are both false at HEAD
+
+`migrations/0086_casino_catalogue_dual_control.up.sql:170-186`
+(`casino_catalogue_change_requests_require_platform_principal`) and
+`:206-248` (`casino_catalogue_change_approvals_deny_self_approval`). The
+file's header (lines 24-37) records the choice explicitly and asks a
+reviewer to sign it off. **This review does not sign it off.**
+
+The shipped checks require only that requester and approver resolve to
+*some* `staff_users` row with `tenant_id IS NULL`, plus a person
+comparison that is skipped whenever either side's `person_id` is NULL.
+Neither side's `status` is checked.
+
+*Concrete failure scenario 1 — the person gap.* `cmd/seed-admin` mints
+`platform_admin` accounts with `person_id = NULL` unless a person is
+supplied, and its own output warns about exactly this. One operator runs
+it twice, obtaining principals A and B. A files
+`POST /v1/admin/casino/games/{gameID}/change-requests` for
+`jurisdiction_unblock ["DE"]`; B calls
+`POST /v1/admin/casino/change-requests/{requestID}/approvals` with
+`approve`; A then `PUT /v1/admin/casino/games` with DE removed. **All
+three calls succeed**; the blocklist goes from `{DE,FR}` to `{FR}`, and
+DE is re-permitted platform-wide with one human throughout. Reproduced
+live on the scratch database, end to end.
+
+*Concrete failure scenario 2 — the status gap.* A `platform_admin` account
+is suspended (`status = 'suspended'`) in response to a credential
+compromise. Access tokens are JWTs validated without a `staff_users`
+lookup, so the attacker's live token keeps working until it expires. The
+attacker uses that suspended principal as the *second* pair of eyes on a
+request filed from the account they also control. Reproduced live: the
+approval row inserts successfully and the subsequent `casino_games`
+`UPDATE` applies. Migration 0034 (withdrawals) and migration 0047 (assets)
+both refuse a non-`active` approver; migration 0086 does not.
+
+Both of migration 0086's stated justifications fail on inspection:
+
+1. *"Consistent with migration 0085, which also used the simpler
+   0044-style check."* Migration 0085's
+   `casino_games_require_platform_principal` is a **principal-resolution**
+   check answering SEC-S91-3 ("the GUC names a real platform principal").
+   It is not a four-eyes check and there was no four-eyes control on
+   `casino_games` before 0086, so it cannot be a precedent for weakening
+   one.
+2. *"casino_games has no person-linking deployment dependency to manage."*
+   The deployment dependency migration 0047 warned about **no longer
+   exists**. `POST /v1/admin/platform-staff/{staffID}/person-link`
+   (`internal/httpserver/admin_routes.go:686-770`,
+   `newLinkPlatformStaffPersonHandler`) and `cmd/seed-admin`'s
+   `resolvedPersonID` argument (`cmd/seed-admin/main.go:92-131`) both
+   exist and are tested. Verified live on the same scratch database that
+   the 0047-hardened `asset_change_requests_require_platform_principal` is
+   active and refuses a person-unlinked platform principal today — so the
+   operational cost of the stronger shape is already being paid elsewhere
+   on this platform, for a control of the same class.
+
+Aggravating: the new suite pins the weak behaviour as correct.
+`seedPlatformAdminStaffPrincipal`
+(`internal/casino/orchestrator_integration_test.go:130-143`) creates
+platform admins with `person_id` NULL, and the happy-path four-eyes tests
+use two of them. `TestDecideChangeRequest_SelfApprovalDenied_SamePersonTwoLogins`
+proves the person check when it is populated, which is the case that is
+not the exposure.
+
+*Proposed fix.* A new migration bringing both functions to migration
+0047's shape — requester and approver must each resolve to a `staff_users`
+row, be `tenant_id IS NULL`, carry a non-NULL `person_id`, and be
+`status = 'active'`; the requester's `person_id` is re-resolved and
+required non-NULL on the approval path so the person comparison becomes
+unconditional. Update `seedPlatformAdminStaffPrincipal` (or add a
+person-linking variant) so the governance suite exercises linked
+principals, and add a test asserting that two *unlinked* platform
+principals are refused. If the platform ever decides mandatory Person
+linkage is wrong for platform-scoped four-eyes, that decision belongs in
+an ADR that amends migration 0047 too — not in a per-subsystem divergence.
+
+#### `SEC-S92-2` (P2) — `sb_jurisdiction_restrictions` re-opens SEC-S91-3: an unresolvable platform principal can arm *and withdraw* a compliance control
+
+`migrations/0087_sportsbook_jurisdiction_restrictions.up.sql:107-137`. The
+migration header (lines 38-41) states the RLS shape is "BYTE-IDENTICAL, in
+predicate structure, to `casino_games`' own platform-admin write policies
+(migration 0084 §2)". That is true of migration **0084**, and it is exactly
+the problem: `casino_games` at HEAD additionally carries
+`casino_games_platform_principal` (migration 0085), added because "the
+RLS policy alone only checks the GUC is set to some non-null uuid, not
+that it names a genuine platform-scoped principal". The new table copies
+the pre-0085 posture.
+
+Reproduced live, on the same database, back to back:
+
+- `set_config('app.platform_admin_principal_id','99999999-9999-9999-9999-999999999999')`
+  then `INSERT INTO sb_jurisdiction_restrictions ...` → **succeeds**,
+  returning the new row.
+- The same GUC then `INSERT INTO casino_games ...` → refused with
+  migration 0085's named exception.
+- Worse, the **fail-open** direction: the same unresolvable principal runs
+  `UPDATE sb_jurisdiction_restrictions SET status='withdrawn',
+  reason_code='oops' WHERE id = ...` → **succeeds**, disarming a
+  jurisdiction block.
+
+`created_by_actor_id` compounds it: `UUID NOT NULL` with no FK to
+`staff_users` and no trigger, and `CreateJurisdictionRestriction`
+(`internal/sportsbook/jurisdiction_admin.go:152-159`) writes whatever it is
+given. The on-row compliance attribution — the thing ADR 0083 §5.2.1 point
+4 says a separate table exists to carry — is therefore unvalidated at the
+database.
+
+*Concrete failure scenario.* Any future handler that opens a
+`WithPlatformAdmin` transaction for an unrelated purpose, or any SQL
+injection reaching an already-platform-scoped connection, can withdraw
+every active sportsbook jurisdiction restriction. SEC-S91-3 reasoned
+exactly this way about `casino_games` and was accepted as worth closing.
+
+*Proposed fix.* Add `sb_jurisdiction_restrictions_platform_principal`
+(`BEFORE INSERT OR UPDATE FOR EACH ROW`), a copy of
+`casino_games_require_platform_principal`, and additionally require
+`NEW.created_by_actor_id` to resolve to the same platform-scoped
+`staff_users` row the GUC names. Correct migration 0087's header, which
+currently tells a future reader the two tables are equivalent.
+
+#### `SEC-S92-3` (P2) — withdrawing a sportsbook jurisdiction restriction is the fail-open direction and is single-actor, in the same stage that gave the identical casino act four-eyes
+
+`internal/sportsbook/jurisdiction_admin.go:203-236`
+(`WithdrawJurisdictionRestriction`), `POST /v1/admin/sportsbook/jurisdiction-restrictions/{id}/withdraw`.
+
+ADR 0081 §5's ruling is explicit about the asymmetry that governs this
+class of control: bringing a compliance gate from **on to off** is the
+fail-open, compliance-widening direction and requires four-eyes; bringing
+it from off to on is the kill-switch and must stay instant and
+single-actor. Change A implements exactly that for
+`casino_games.jurisdiction_blocklist` removal. Change C ships the
+structurally identical sportsbook act — a single platform admin turning
+off a jurisdiction denial that was armed with a stated
+`authorization_reference` — with **no** dual control at all. Both landed
+in Stage 9.2.
+
+*Concrete failure scenario.* A single compromised or coerced
+`platform_admin` credential calls the withdraw endpoint on every active
+restriction. Play is re-permitted in every previously-blocked jurisdiction
+across every tenant, in as many calls as there are rows, with no second
+approver and no delay. The same actor cannot do this to a casino title.
+
+ADR 0083 §8.1 argues no new governance is needed because the write path is
+platform-admin-only, reason-coded and audited — but that is precisely the
+set of properties `casino_games` already had, and ADR 0081 §5 judged them
+insufficient for the widening direction.
+
+*Proposed fix.* Either extend migration 0086's
+`casino_catalogue_change_requests` vocabulary (or add a sibling table) with
+a `sportsbook_jurisdiction_unwithdraw`-equivalent operation consumed by a
+`BEFORE UPDATE` trigger on `sb_jurisdiction_restrictions` when
+`OLD.status = 'active' AND NEW.status = 'withdrawn'`; or record an ADR
+amendment stating why the asymmetry ruling does not transfer. Silence is
+not an option here — the two controls are the same control.
+
+#### `SEC-S92-4` (P2) — `FOR SELECT USING (true)` on `sb_jurisdiction_restrictions` exposes the compliance-enforcement basis to every connection, including player-scoped ones
+
+`migrations/0087_sportsbook_jurisdiction_restrictions.up.sql:100-105`. The
+justification given is that this is "byte-identical to `casino_games_read`
+… for the identical data class". The data class is **not** identical:
+`casino_games.jurisdiction_blocklist` is a bare `TEXT[]` of codes, while
+each `sb_jurisdiction_restrictions` row carries
+`authorization_reference NOT NULL`, `reason_code NOT NULL` and
+`created_by_actor_id` — precisely the per-restriction provenance ADR 0083
+§5.2.1 point 4 says the separate table exists to carry.
+
+Reproduced live: under `app.tenant_id` = tenant A and
+`app.player_account_id` set, a plain `SELECT` returns
+`jurisdiction_code | status | authorization_reference | reason_code |
+created_by_actor_id` in full.
+
+*Concrete failure scenario.* ADR 0045 §4 property 2 and K3-6 both require
+that the *blocking rung* never reach a player, and Change C goes to real
+trouble to honour that above the database (one opaque
+`unavailable_reason`, one collapsed rejection code). The database layer —
+the backstop that is supposed to hold when the application layer has a bug
+— contradicts it. Any future query that joins this table under a player
+scope, or any admin read endpoint that is later relaxed, discloses which
+jurisdictions the operator has been forced to block and under what
+regulatory reference. That is operator-sensitive compliance intelligence,
+and for a bring-your-own-licence B2B tenant it is commercially sensitive
+about the platform, not about them.
+
+*Proposed fix.* Either narrow the SELECT policy to the platform-admin
+predicate (nothing reads this table outside
+`ResolvePlayerJurisdiction`'s own evaluation, which runs under
+`WithTenant`/`WithoutTenant` — so check that first and keep a read policy
+wide enough for it), or split the sensitive columns out. ADR 0081 §2.3's
+own closing paragraph already flagged the `casino_games` version of this
+("if populated blocklists are later judged operator-sensitive, narrowing
+is a separate, small, reversible decision … it should be taken before the
+first blocklist entry is written"). The same applies here, and Change C is
+the first mechanism on the platform that will actually have rows.
+
+#### `SEC-S92-5` (P2) — `casino_catalogue_change_consume_approved_request` consumes the oldest request and checks the payload afterwards, so a stale approval blocks a legitimate one; and there is no way to clear a stale request
+
+`migrations/0086_casino_catalogue_dual_control.up.sql:262-305` selects
+`ORDER BY r.requested_at ... LIMIT 1` **without** any payload predicate,
+and `casino_games_enforce_dual_control` (`:338-345`) compares the payload
+only after the consume. Migration 0047 fixed exactly this for assets by
+adding `p_payload_match JSONB` and filtering with `r.payload @>
+p_payload_match` **inside** the SELECT; migration 0086 copies the
+pre-0047 two-argument form.
+
+Reproduced live: with two pending, independently-approved
+`jurisdiction_unblock` requests on one game — an older `["FR"]` and a newer
+`["DE"]` — applying the **DE** removal is refused, naming the `["FR"]`
+request. Fail-closed, so this is not a bypass.
+
+*Concrete failure scenario.* Compliance approves "unblock FR, effective
+when legal confirms" and does not apply it. A week later an urgent,
+separately-approved "unblock DE" must go out. `PUT /v1/admin/casino/games`
+returns 400 and the DE unblock cannot be applied at all until the FR
+request is neutralised. Neutralising it is awkward: `DecideChangeRequest`
+(`internal/casino/catalogue_governance.go:238-293`) records a `reject`
+approval row but **never sets `state = 'rejected'`**, and no Go path ever
+sets `state = 'cancelled'` — that CHECK value is unreachable from the
+application. So the only way out is a second staff member recording an
+explicit rejection (which does correctly block the consume via the
+`NOT EXISTS (reject)` clause), leaving a permanently `pending`-looking row
+in every listing.
+
+*Proposed fix.* Add the `p_payload_match JSONB` overload exactly as
+migration 0047 did, and have `casino_games_enforce_dual_control` pass
+`jsonb_build_object('removed_codes', to_jsonb(<sorted v_removed>))`,
+keeping the post-consume equality check as a belt-and-braces assertion.
+Separately, either set `state = 'rejected'` on a reject decision or expose
+a cancel path, so a stale request is visibly terminal.
+
+#### `SEC-S92-6` (P2) — the exposure rejection is a trading-book oracle, which is the substance INV-SB-EXP-2 exists to protect
+
+`internal/sportsbook/orchestrator.go:327-328` and
+`internal/httpserver/sportsbook_handlers.go:421-425`. INV-SB-EXP-2 is
+satisfied *literally* — no number reaches the response (verified above).
+But `RejectionCategory` is returned to the player as the distinct string
+`"exposure_limit"`, which names the control that fired.
+
+*Concrete failure scenario.* With a selection-level limit armed, a player
+places bets of increasing stake on one selection. The stake at which the
+rejection first flips from accepted to `exposure_limit` reveals
+`(threshold − current_open_aggregate) / decimal_odds` to within one
+binary-search step. Repeated across selections in a market, this recovers
+the book's open position per outcome — trading intelligence worth real
+money to an arbitrageur or a colluding syndicate, and exactly the quantity
+ADR 0083 §6.2 calls "trading-book intelligence [that] must never reach a
+player-facing response". A player with a modest balance can run the search
+cheaply because a rejected bet costs nothing (§7.2: the rejection happens
+before L3, so no ledger effect and no projection row).
+
+This is *inferential*, not a direct disclosure, and it cannot be closed
+completely — a rejected bet must be reported as rejected. But the platform
+already made the equivalent judgement in the other direction for
+jurisdiction (K3-6: collapse two distinguishable codes into one opaque
+answer *because* the distinction "is exactly the signal that would tell an
+attacker whether a manipulation attempt registered"). The same reasoning
+applies here and was not applied.
+
+*Proposed fix.* Either collapse `RejectionExposureLimit` into the same
+opaque player-facing shape as another non-committal decline at the HTTP
+boundary (keeping the category distinguishable internally and in the audit
+record, exactly as `toPlaceBetRejectionResponse` already does for
+jurisdiction), or accept it explicitly as an ADR 0083 amendment together
+with a compensating control (per-player rate limiting on repeated
+exposure rejections, alerting on a rejection-probing pattern). Since the
+mechanism ships unarmed and HDR-SB-1 blocks sportsbook go-live, deciding
+this before the first `sb_exposure_limits` row is written is sufficient.
+
+#### `SEC-S92-7` (P3) — catalogue enforcement point 1 is unreachable in production; "DELIVERED" overstates it
+
+`internal/httpserver/sportsbook_handlers.go:107` and `:211` are the only
+non-test callers of `AnnotateCatalogueAvailability`/
+`AnnotateEventAvailability`, and both pass the zero-value
+`AvailabilityContext`, for which both annotators return immediately. Both
+catalogue routes are genuinely anonymous, so there is no authenticated
+variant anywhere. ADR 0083 §5.1 marks rung 3 catalogue visibility
+"DELIVERED"; what is delivered is the mechanism, not an enforcement point
+that has ever evaluated a real player. Not a hole — enforcement point 2
+(`PlaceBet`) is authoritative, and ADR 0083 §5.4.1 is explicit that
+catalogue omission is not the control — but the status label should read
+`IMPLEMENTED (mechanism); NOT REACHED (no authenticated catalogue route
+exists)` per CLAUDE.md's no-fake-completion rule, and
+`docs/api/openapi/platform-api.yaml` should say that `available` is always
+`true` on the anonymous routes.
+
+#### `SEC-S92-8` (P3) — `NaN` survives `CHECK (max_open_potential_payout > 0)` and `numericToBigInt` silently maps it to a threshold of zero
+
+`migrations/0088_sportsbook_exposure_limits.up.sql:52` and
+`internal/sportsbook/exposure.go:157-169`. PostgreSQL orders `NaN` above
+every non-NaN numeric, so `'NaN'::numeric > 0` is **true** — reproduced:
+the `INSERT` succeeds and the row stores `NaN`. `numericToBigInt` then
+takes its `!n.Valid || n.Int == nil` branch and returns
+`big.NewInt(0), nil` — no error — so the ceiling becomes zero and *every*
+bet in that `(tenant, brand, scope_kind, asset)` is rejected with
+`exposure_limit`.
+
+The direction is fail-closed and the value is unreachable through
+`CreateExposureLimit` (which takes an `int64` and requires `> 0`), so this
+is P3. But it is the one branch of `numericToBigInt` that swallows an
+unrepresentable value instead of failing loudly, and the same function is
+used for the *aggregate*, where a silent zero would understate exposure.
+
+*Proposed fix.* Tighten the CHECK to
+`(max_open_potential_payout > 0 AND max_open_potential_payout = max_open_potential_payout)`
+(the standard NaN exclusion) or add an explicit `<> 'NaN'`, and make
+`numericToBigInt` return an error rather than zero when `n.Valid` is true
+but `n.Int` is nil (NaN/Infinity), keeping the `!n.Valid` → 0 case only
+for a genuine SQL NULL.
+
+#### `SEC-S92-9` (P3) — the two new control firings produce no structured log line
+
+`internal/httpserver/sportsbook_handlers.go:387-393` logs
+`sportsbook_bet_policy_blocked` only for `RejectionRGDenied` and
+`RejectionRiskDenied`. A jurisdiction denial — a *new compliance-blocking
+control* — and an exposure breach — a *new trading-book control* — are both
+silent in the request log, visible only by polling `audit_log`. The Stage 9
+§16 gap-closure comment immediately above explains why control firings,
+unlike ordinary commercial declines, need to be log-alertable; both new
+categories meet that test. Add them to the same branch, logging the
+internal `RejectionCode` (server-side only) for jurisdiction and the
+`ScopeKind` for exposure.
+
+#### `SEC-S92-10` (P3) — approvals never expire and are not bound to the state they were approved against
+
+`migrations/0086_casino_catalogue_dual_control.up.sql:262-291`. A pending,
+approved `jurisdiction_unblock ["DE"]` request remains spendable
+indefinitely. Adding DE back to the blocklist is single-actor (correctly —
+fail-closed direction, ADR 0081 §5), so the sequence *approve unblock DE →
+apply → re-block DE for a new and different legal reason → spend a second
+stale approval* is possible whenever more than one approval for the same
+code ever existed. Nothing ties an approval to the blocklist contents at
+approval time. Inherited from migration 0044 and not worse here, but it
+should be recorded rather than discovered: the fix is either an expiry on
+`requested_at` or including a hash of the pre-image blocklist in the
+payload match.
+
+#### `SEC-S92-11` (P3) — the named direct-API-bypass proof is a domain-level test, not the HTTP-level one ADR 0083 §12.1 item 12 specifies
+
+`internal/sportsbook/jurisdiction_integration_test.go:449` calls
+`sportsbook.PlaceBet` directly; the ADR item says
+"POST `/v1/me/sportsbook/bets` with a restricted `selection_id`". The
+proof is substantively equivalent — `newPlaceBetHandler` adds no gate of
+its own and calls `PlaceBet` unconditionally inside `WithTenant` — so this
+is not a coverage hole, but the test that would catch a *future* handler
+change that short-circuits placement (a cache, a fast path, a pre-flight
+availability check) does not exist. Add the HTTP-level variant in
+`internal/httpserver`.
+
+#### `SEC-S92-12` (P3) — trigger-error classification is substring-based and one real refusal falls through to a 500
+
+`internal/casino/catalogue_governance.go:96-117`. Classification matches on
+`pgErr.Message` substrings (`"self-approval"`, `"four-eyes"`). The
+malformed-payload refusal reproduced above (`cannot extract elements from
+a scalar`, raised when `payload.removed_codes` is not a JSON array) matches
+nothing and surfaces as a generic 500 with `"casino catalogue governance
+operation failed"`, which reads as a platform fault rather than a refused
+governance action. The classified branches also echo the raw PostgreSQL
+message — including request ids and principal UUIDs — into the HTTP body;
+the caller always holds `PermCasinoCatalogueGovern`, so that is acceptable
+here, but it should not be copied to a less-privileged surface. Prefer
+matching on `SQLSTATE` plus an explicit error code embedded in each
+`RAISE` over prose matching.
+
+### S92.3 Authorization and tenant-isolation tests this change's `qa` coverage must include
+
+Per this specialist's standing testing responsibility. The existing
+suites already cover ADR 0083 §12's items and ADR 0081 §7.6's; these are
+the additions this review requires on top of them:
+
+1. **Four-eyes cannot be satisfied by one human** (`SEC-S92-1`): two
+   platform principals with `person_id IS NULL` must **fail** to complete a
+   file → approve → apply cycle; two linked to the *same* person must fail
+   (already covered); two linked to *different* persons must succeed; and a
+   `status = 'suspended'` approver must be refused. This is the test whose
+   absence let the defect ship.
+2. **Platform-principal resolution on `sb_jurisdiction_restrictions`**
+   (`SEC-S92-2`): `app.platform_admin_principal_id` set to a UUID with no
+   `staff_users` row must fail to INSERT **and** must fail to UPDATE
+   `status` to `'withdrawn'` — the fail-open direction asserted explicitly,
+   not only the arming direction.
+3. **Standing tenant-isolation form, applied to both new tables.** A
+   request for tenant A's `sb_exposure_limits` using tenant B's valid
+   staff token must return 403/404 with an empty list or a not-found —
+   never a row, never a threshold. Assert at the HTTP layer, not only at
+   the RLS layer, so a future handler that reads under the wrong scope is
+   caught.
+4. **No player-scoped read of either new table**, asserted as a positive
+   test: a player-scoped connection selecting `sb_exposure_limits` returns
+   zero rows, and (once `SEC-S92-4` is decided) the same for
+   `sb_jurisdiction_restrictions`.
+5. **`unavailable_reason` is a single constant** — a source-level or
+   response-level assertion that no jurisdiction code, scope kind or
+   denial code can ever appear in that field, so a future author cannot
+   "helpfully" enrich it.
+6. **Exposure rejection shape under an armed limit, at the HTTP layer**:
+   assert the response body's full key set, not just the absence of a
+   known field name — an added field is what this test must catch.
+7. **Payload-match selection** (`SEC-S92-5`): with two distinct pending,
+   approved requests on one game, applying either one must succeed. The
+   current suite only proves a mismatch is refused, which the defective
+   implementation also passes.
+8. **A restriction armed at the event level denies a `PlaceBet` against a
+   selection two levels beneath it** *and* leaves a sibling event's
+   selections bettable — asserted through `PlaceBet`, not only through the
+   annotators, since the annotators are unreachable in production
+   (`SEC-S92-7`).
+
+### S92.4 Scope of this review
+
+**In scope:** migrations `0086`, `0087` and `0088` (up only — the down
+migrations were read but not round-tripped, see below), exercised against a
+live PostgreSQL 16 database as the table-owning non-superuser `igaming`
+role; `internal/casino/catalogue_governance.go` and `catalogue.go`'s
+`UpsertGame`; `internal/httpserver/casino_catalogue_governance_handlers.go`
+and `casino_routes.go`; `auth.PermCasinoCatalogueGovern` and the four new
+sportsbook permissions plus their role grants;
+`internal/sportsbook/jurisdiction.go`, `jurisdiction_admin.go`,
+`exposure.go`, `exposure_admin.go`, `catalogue.go`'s annotators,
+`orchestrator.go`'s new steps, `types.go`'s new fields and constants;
+`internal/httpserver/sportsbook_jurisdiction_admin_handlers.go`,
+`sportsbook_exposure_admin_handlers.go`, `sportsbook_handlers.go` and
+`sportsbook_routes.go`; `internal/risk/cumulative.go`'s new map entry; and
+the full construction-site graph of `AvailabilityContext`.
+
+**Read but not independently re-derived:** ADR 0082 Amendments A2/A3's
+deadlock-freedom argument and the financial correctness of the L0.6 lock
+placement — that is `ledger-finance`'s review; this review confirmed only
+the security-facing properties (advisory key derivation, gate ordering
+relative to the L3 pre-lock, and that neither gate writes or reads a
+balance). The `internal/jurisdiction` resolver's own internals were taken
+as given from the Stage 4I reviews; this review verified only that
+sportsbook calls it with a compile-time `OperationClass`, always with a
+non-nil `PlayerAccountID`, and refuses on `AssertScope`.
+
+**Explicitly NOT in scope and NOT claimed:** penetration testing;
+certification-grade audit; up → down → up round-trip verification of the
+three new migrations (a standing repo gate, but a migration-mechanics gate
+rather than a security one — `qa` owns it and it was not performed here);
+rung 2 (`evaluateOperatingMarket`), which is correctly NOT IMPLEMENTED and
+BLOCKED on HDR-J-7, so nothing about licence-ceiling enforcement is
+reviewed or claimed; behaviour under any role other than the table-owning
+`igaming` role, since `PLAT-ROLESPLIT-1`'s production cutover has not
+happened; the commercial adequacy of any exposure ceiling (HDR-SB-1 is
+unanswered and is a human decision); and production launch authorization
+of any kind.
+
+**Launch-blocking flags.** `SEC-S92-1` must be closed before the casino
+catalogue four-eyes control is described to anyone — internally, to a
+tenant, or to a regulator — as four-eyes; a control that one human can
+complete alone is worse than no control, because it will be relied upon.
+`SEC-S92-3` and `SEC-S92-4` should be decided before the first
+`sb_jurisdiction_restrictions` row is written in any environment that is
+not synthetic. `SEC-S92-6` should be decided before the first
+`sb_exposure_limits` row is written, which HDR-SB-1 already gates.
+
+**Passing this review does not make these subsystems "secure."** It
+records that three specific changes were probed against the threat model
+above and that the defects found are the twelve listed, at the severities
+listed.

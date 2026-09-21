@@ -112,6 +112,26 @@ const (
 	// title to the shared catalogue every other tenant can then also see.
 	PermCasinoCatalogueManage Permission = "casino_catalogue:manage"
 
+	// PermCasinoCatalogueGovern gates the Stage 9.2 (ADR 0081 §5/§5.2,
+	// ARCH-DB-2 Phase 2) four-eyes governance surface for casino_games:
+	// filing and deciding a casino_catalogue_change_requests row. Holding
+	// PermCasinoCatalogueManage alone is NOT enough to remove a
+	// jurisdiction_blocklist code or reactivate a disabled game -
+	// migration 0086's casino_games_dual_control trigger additionally
+	// requires an approved request filed by a DIFFERENT platform
+	// principal, exactly as PermAssetRegistryManage does not by itself
+	// satisfy the asset registry's own dual-control checks (migration
+	// 0044). Deliberately its own permission rather than folded into
+	// PermCasinoCatalogueManage: a role that can request a catalogue
+	// widening should not automatically be able to decide (approve/reject)
+	// one - separation of duties is enforced by the database's own
+	// self-approval trigger regardless, but keeping the permission
+	// distinct documents the intent and leaves room for a future role
+	// split (e.g. a compliance role that may only decide, never request).
+	// Platform-only, granted only to RolePlatformAdmin - same shape as
+	// PermAssetRegistryManage/PermCasinoCatalogueManage.
+	PermCasinoCatalogueGovern Permission = "casino_catalogue:govern"
+
 	// PermRGRestrictionWrite gates creating a staff-initiated Responsible
 	// Gaming restriction (Stage 4D-RG, ADR 0026 §12) - today, only
 	// self-exclusion, always scoped to the caller's own tenant/brand (never
@@ -426,6 +446,54 @@ const (
 	// licence ceiling ONLY - a tenant's own operating footprint is not
 	// platform-readable, see migration 0076's RLS).
 	PermOperatingMarketPolicyRead Permission = "operating_market_policy:read"
+
+	// PermSportsbookJurisdictionRestrictionManage gates creating/withdrawing
+	// a sb_jurisdiction_restrictions row (Stage 9.2, ADR 0083 §5.2/§9.2) -
+	// the sportsbook-owned, deny-only, event/market/selection jurisdiction
+	// gate, modelled on PermCasinoCatalogueManage's identical platform-only
+	// shape: this table carries no tenant_id column at all (a restriction
+	// is a platform-level statement applying identically to every tenant -
+	// ADR 0083 §5.2.2), so, exactly like the platform-wide game catalogue,
+	// no tenant-scoped role may hold it - a tenant administering its own
+	// operation must never be able to widen or narrow a platform-level
+	// jurisdiction control. Granted only to RolePlatformAdmin.
+	PermSportsbookJurisdictionRestrictionManage Permission = "sportsbook_jurisdiction_restriction:manage"
+	// PermSportsbookJurisdictionRestrictionRead gates the admin list
+	// endpoint for sb_jurisdiction_restrictions - deliberately separate
+	// from PermSportsbookJurisdictionRestrictionManage (mirrors
+	// PermRiskConfigRead/PermRiskConfigManage's identical read/write
+	// split), even though the underlying table's own RLS read policy is
+	// platform-uniform read-open (migration 0087) - the split documents
+	// intent and leaves room for a future read-only compliance role.
+	// Granted only to RolePlatformAdmin, since only a platform admin can
+	// ever hold the write half here.
+	PermSportsbookJurisdictionRestrictionRead Permission = "sportsbook_jurisdiction_restriction:read"
+
+	// PermSportsbookExposureLimitManage gates creating/disabling a
+	// sb_exposure_limits row (Stage 9.2 Part B2, ADR 0083 §6.2.3/§9.2) -
+	// the sportsbook-owned, cross-player, per-(scope_kind, asset_code)
+	// trading-book exposure ceiling. UNLIKE
+	// PermSportsbookJurisdictionRestrictionManage, this table carries a
+	// tenant_id and IS ordinary tenant-owned commercial configuration
+	// (identical in kind to a risk_rules max-stake limit, ADR 0083
+	// §6.1.3) - so this is a TENANT risk_manager-class permission,
+	// mirroring PermRiskConfigManage's identical shape and grant
+	// (RoleRiskManager only, never RoleTenantAdmin/RoleCompliance/
+	// RoleFinance/RolePlatformAdmin - a risk-specific judgment call, same
+	// separation-of-duties rationale as PermRiskConfigManage's own doc
+	// comment).
+	PermSportsbookExposureLimitManage Permission = "sportsbook_exposure_limit:manage"
+	// PermSportsbookExposureLimitRead gates the admin list endpoint for
+	// sb_exposure_limits - deliberately separate from
+	// PermSportsbookExposureLimitManage (mirrors PermRiskConfigRead/
+	// PermRiskConfigManage's identical read/write split). Granted to
+	// RoleRiskManager and RoleTenantAdmin (an operational admin reasonably
+	// needs to see what exposure ceilings apply, exactly like
+	// PermRiskConfigRead's own rationale) - never RoleCompliance/
+	// RoleFinance/RolePlatformAdmin: this table has no platform-wide rows
+	// at all (unlike risk_rules), and platform_admin has no tenant scope
+	// to read it in.
+	PermSportsbookExposureLimitRead Permission = "sportsbook_exposure_limit:read"
 )
 
 // rolePermissions is a static, in-code role -> permission-set mapping.
@@ -437,6 +505,9 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermTenantRead, PermTenantWrite, PermBrandRead, PermBrandWrite,
 		PermPlayerRead, PermPlayerSuspend, PermAuditRead, PermStaffManage,
 		PermCasinoCatalogueManage,
+		// Stage 9.2 (ADR 0081 §5.2): the sole grantee of
+		// PermCasinoCatalogueGovern. See that permission's own doc comment.
+		PermCasinoCatalogueGovern,
 		// Stage 4H-B0-R6: the sole grantee of PermAssetRegistryManage
 		// (ADR 0037 layers 1-3). See that permission's own doc comment.
 		PermAssetRegistryManage,
@@ -469,6 +540,10 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// PermOperatingMarketBrandPolicyWrite - platform_admin has no
 		// tenant scope to write either in; RLS would reject it.
 		PermOperatingMarketCeilingManage, PermOperatingMarketPolicyRead,
+		// Stage 9.2 (ADR 0083 §5.2/§9.2): the sole grantee of both
+		// sportsbook jurisdiction-restriction permissions. See their own
+		// doc comments.
+		PermSportsbookJurisdictionRestrictionManage, PermSportsbookJurisdictionRestrictionRead,
 		// Deliberately NOT PermRGRestrictionWrite/Read (Stage 4D-RG, ADR
 		// 0026 §12): platform_admin cannot resolve a specific tenant's
 		// player_account at all today (PermPlayerRead is itself
@@ -522,6 +597,11 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// Stage 4G: read-only Risk & Limits visibility, same reasoning -
 		// never PermRiskConfigManage.
 		PermRiskConfigRead,
+		// Stage 9.2 Part B2 (ADR 0083 §6.2.3/§9.2): read-only sportsbook
+		// exposure-limit visibility, identical reasoning to
+		// PermRiskConfigRead immediately above - never
+		// PermSportsbookExposureLimitManage.
+		PermSportsbookExposureLimitRead,
 		// Stage 4H-B0-R6: ADR 0037 layers 4-7 (which assets this tenant
 		// offers, per brand/jurisdiction/product). Never
 		// PermAssetRegistryManage - that is platform-only.
@@ -632,6 +712,12 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// read-only bonus config visibility plus the fail-closed
 		// kill-switch, same reasoning as RoleCompliance above.
 		PermBonusConfigRead, PermBonusCampaignSuspend,
+		// Stage 9.2 Part B2 (ADR 0083 §6.2.3/§9.2): sportsbook exposure
+		// limits are the sportsbook-domain analogue of a risk_rules
+		// cumulative cap (identical "ordinary tenant risk configuration"
+		// shape, ADR 0083 §6.1.3) - RoleRiskManager is the sole grantee of
+		// the MANAGE half, exactly like PermRiskConfigManage above.
+		PermSportsbookExposureLimitManage, PermSportsbookExposureLimitRead,
 	),
 	RolePlayer: permSet(),
 

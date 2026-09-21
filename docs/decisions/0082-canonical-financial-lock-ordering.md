@@ -208,8 +208,11 @@ This ADR subsumes them; none is contradicted.
 
 Every transaction that writes to the ledger acquires locks in strictly
 non-decreasing class order. Within a class, the stated key breaks ties.
-**No exceptions except E-1 (§5.1) and E-2 (§5.1a), each of which is
-named, bounded and guarded.**
+**No exceptions except E-1 (§5.1), E-2 (§5.1a) and E-3 (Amendment A3),
+each of which is named, bounded and guarded.** *(E-3 was added by
+Amendment A3 in Stage 9.2; this sentence was updated by the Stage 9.2
+`ledger-finance` review — see the addendum at the end of this file — so
+that the rule and its own exception list cannot drift apart.)*
 
 | Class | What | Within-class order |
 | --- | --- | --- |
@@ -219,6 +222,7 @@ named, bounded and guarded.**
 | L0.3 | Grant advisory (`bonus_grant:<tenant>:<grant>`) | ascending `grant_id` if more than one |
 | L0.4 | RG person advisory (`rg.lockPerson`) | one per person |
 | L0.5 | Risk cumulative advisory (`risk/evaluator.go:338`) | one per scope key |
+| L0.6 | **Sportsbook event-exposure advisory** (`sb_exposure:<tenant>:<event>`) — **new**, Amendment A2, `docs/decisions/0083-sportsbook-jurisdiction-gating-and-cumulative-exposure.md` §6.2.5 | one per bet; keyed on the event id so no ordering question arises |
 | **L1** | Domain state rows (`withdrawal_requests`, `bonus_grants`, `bonus_held_dispositions`, `economic_operations`, `casino_launch_sessions`, sportsbook bets) | ascending `id` within a table; tables in the order listed |
 | **L2** | `ledger_transactions` rows locked for read (`FOR UPDATE` on an existing transaction) | ascending `id` (`ORDER BY id FOR UPDATE`) |
 | **L3** | **`wallet_balance_projection` rows — ascending `ledger_accounts.id`** | strictly ascending UUID byte order (Postgres `uuid` comparison; in Go `bytes.Compare(a[:], b[:])`) |
@@ -955,3 +959,256 @@ uses two bonus-touching postings that share `house_gaming` and
 `player_bonus_held` in opposite orders (internal/casino's
 `postWinLockedBonus`-terminal and `postRollbackHeldWin` shapes), which is
 a genuine ABBA and does fail on HEAD.
+
+---
+
+## Amendment A3 — Stage 9.2 — named exception E-3 (`sportsbook`, per `docs/decisions/0083-sportsbook-jurisdiction-gating-and-cumulative-exposure.md` §7.3)
+
+`docs/decisions/0083-sportsbook-jurisdiction-gating-and-cumulative-exposure.md`
+Part C found that `sportsbook.PlaceBet` already contains an ordering
+inversion this ADR's own §1.5 classification implied but never named. This
+amendment names it, alongside E-1 (§5.1) and E-2 (§5.1a), per §2's own
+"no exceptions except E-1 and E-2, each of which is named, bounded and
+guarded by a standing invariant" rule — E-3 is now a third such named,
+bounded exception, not a new violation of that rule.
+
+> **E-3 — `sportsbook_bets` (L1) insertion wait taken after the L3
+> pre-lock.** `sportsbook.PlaceBet` calls `insertBet` *after*
+> `ledger.Post`, so the `UNIQUE (tenant_id, player_account_id,
+> idempotency_key)` index insertion wait — a class L1 acquisition — happens
+> after L3/L4. §1.5 classified sportsbook bets as L1 but did not name this
+> inversion.
+>
+> **Why it is not reordered:** `insertBet` must carry
+> `ledger_transaction_id`, which does not exist until `Post` returns, and
+> the cross-check immediately after it (the Stage 6.1 orphaned-posting
+> guard) depends on comparing the two. Reordering means either splitting
+> the insert into reserve/confirm or dropping that guard — the same shape
+> of trade-off as E-2, and the same decision: name it, guard it, do not
+> restructure the bet path under schedule pressure.
+>
+> **Why it is safe today:** a cycle needs a counterpart holding a
+> `sportsbook_bets` row lock and then waiting on a
+> `wallet_balance_projection` lock. None exists: `findBetByIdempotencyKey`,
+> `GET /v1/me/sportsbook/bets` and the admin list are all unlocked reads,
+> and settlement/void are NOT IMPLEMENTED (§5.3, unchanged by ADR 0083's
+> own Part C/Part B — neither adds a settlement/void ledger-posting code
+> path). Two concurrent `PlaceBet` transactions take L3 then L1 in the
+> *same* order as each other, which is consistent and therefore
+> deadlock-free even though it is not canonical.
+>
+> **INV-LOCK-E3:** `sportsbook_bets` has exactly one writer
+> (`sportsbook.insertBet`, from `PlaceBet`). Any second writer — in
+> particular a future settlement/void path — must resolve E-3 first, by
+> taking its `sportsbook_bets` row lock at L1, *before*
+> `LockProjectionsForPosting`.
+
+This amendment names a pre-existing inversion; it does not introduce one.
+ADR 0083 Part C's own new jurisdiction gate (steps 5-7 of that ADR's §7.1)
+takes no lock at all and is inserted before the existing L0.4 (RG) lock,
+so it cannot violate R8 by construction and does not change this ADR's
+lock-acquisition sequence in any other respect. Amendment A2 (new lock
+class L0.6, ADR 0083 Part B / §6.2.5) is deliberately NOT made here — it
+belongs to the separate wave implementing ADR 0083's cross-player exposure
+gate, per that ADR's own §9.4 wave split.
+
+---
+
+## Amendment A2 — Stage 9.2 Part B2 / Wave 3 — new lock class L0.6 (`sportsbook`, per `docs/decisions/0083-sportsbook-jurisdiction-gating-and-cumulative-exposure.md` §6.2.5/§7.3)
+
+`docs/decisions/0083-sportsbook-jurisdiction-gating-and-cumulative-exposure.md`
+Part B2 adds the cross-player, per-event/market/selection book-exposure
+gate (`internal/sportsbook/exposure.go`'s `evaluateExposureLimits`), which
+this Amendment gives its own advisory-lock class. §2.1's table (above) now
+carries this row directly; it is restated here as the amendment record,
+alongside Amendment A1 (R6) and Amendment A3 (E-3, Wave 2/Part C).
+
+> **L0.6 — Sportsbook event-exposure advisory
+> (`sb_exposure:<tenant>:<event>`).** Acquired by
+> `sportsbook.evaluateExposureLimits`, ONLY when at least one
+> `sb_exposure_limits` row is configured for the bet's `(tenant_id,
+> asset_code)` (§6.2.4 step 1's "none configured ⇒ not armed ⇒ no lock"
+> contract — zero rows is the shipped, unarmed default). Keyed on the
+> **event id**, never market or selection, whatever mix of `scope_kind`s
+> is configured for that tenant: any two bets whose exposure aggregates
+> can interact at market or selection level necessarily share the same
+> event (selection ⊂ market ⊂ event — §6.2.5's own argument), so one
+> event-keyed lock closes every race at all three levels and removes the
+> need to invent a within-class ordering rule for multiple L0.6 locks
+> (exactly the class of rule R2 exists to avoid having to invent). One per
+> bet — never more than one L0.6 acquisition in a single `PlaceBet` call.
+>
+> **Where it sits in the total order:** immediately **after L0.5** (the
+> Risk cumulative advisory) and **before L3** — `evaluateExposureLimits`
+> runs after `risk.Evaluate` (ADR 0083 §7.1 step 11 follows step 9) and
+> before `ledger.GetOrCreateAccounts`/`LockProjectionsForPosting`. A
+> single, consistent L0 sub-ordering (L0.1 → L0.2 → L0.3 → L0.4 → L0.5 →
+> L0.6) is what keeps a future reader from reversing any two of them.
+>
+> **Mechanism:** `hashtextextended` for the full 64-bit key space,
+> tenant-scoped, exactly like `AdvisoryLockGrant` and
+> `AdvisoryLockPlayerBonusScope` (`internal/bonus/lifecycle.go`) — a
+> single 32-bit `hashtext` component is an unacceptable collision risk for
+> a shared advisory-lock namespace, and a platform-global (untenanted) key
+> would make two tenants' unrelated events serialize against each other.
+> Held for the remainder of the caller's transaction; Postgres releases it
+> at COMMIT/ROLLBACK, there is no unlock call.
+>
+> **R8 compliance:** every L0.6 acquisition strictly precedes L3 in
+> `PlaceBet`'s own call order (ADR 0083 §7.2's own compliance check) —
+> satisfied by construction, since `evaluateExposureLimits` (step 11) runs
+> before `ledger.GetOrCreateAccounts`/`LockProjectionsForPosting` (steps
+> 12/14) and never itself locks or reads a `wallet_balance_projection`
+> row.
+>
+> **Prospective binding:** sportsbook settlement, void, partial settlement
+> and cashout, when built (NOT IMPLEMENTED today), must take L0.6 before
+> any L1/L2/L3 lock on the same event, exactly like every other L0
+> sub-class's own prospective binding.
+
+This amendment adds a new lock class; it does not alter any existing
+class's position, and it does not touch Amendment A3/E-3, which is a
+separate, pre-existing ordering inversion this wave does not revisit.
+
+---
+
+## `ledger-finance` review addendum — 2026-09-21 — Stage 9.2 Amendments A2 and A3
+
+Scope: the financial-invariant and lock-ordering review of Stage 9.2's two
+amendments to this ADR (A2, new class **L0.6**; A3, named exception
+**E-3**) and of the `sportsbook.PlaceBet` changes they describe. Requested
+as a review; not a redesign. Security review ran separately and is not
+covered here.
+
+**Verdict: ACCEPTED. No P0 and no P1. No financial invariant is
+encroached on.** `SUM(DEBITS) == SUM(CREDITS)`, the append-only rule, the
+"never `UPDATE` a balance" rule, the no-floating-point rule and the
+database-enforced idempotency guarantee are all untouched by this stage.
+Amendments A2 and A3 are internally consistent with R1–R8 and with E-1/E-2,
+with the one drafting defect corrected below.
+
+### What was verified, and how
+
+Verified by direct reading of `internal/sportsbook/orchestrator.go`,
+`exposure.go`, `jurisdiction.go` and `internal/risk/cumulative.go` at their
+current state (not from the implementing agents' reports), and by running
+`internal/sportsbook`, `internal/risk` and `internal/ledger` under
+`-tags=integration -race -count=1` against a freshly migrated scratch
+database (88 migrations): **`internal/ledger` 52/52 pass, 0 skip;
+`internal/sportsbook` 56 pass, 0 fail, 5 skip (all five are the rung-2
+operating-market tests, correctly skipped as BLOCKED on HDR-J-7);
+`internal/risk` pass.** `TestLockOrder_SportsbookPlaceBetAcquiresLocksInCanonicalOrder`,
+`TestLockOrder_ConcurrentSportsbookBetsOnSameEventNoDeadlock`,
+`TestLockOrder_NoProjectionForUpdateOutsideLedgerPackage` (R4 guard),
+`TestLockOrder_PreLockCoversEveryEntryIncludingGeneratedLegs`,
+`TestLockOrder_ProjectionRowIsMaterialisedAndLockedWhenAbsent` (R6) and
+`TestLedger_BalancedUnderConcurrentLoad` all pass unmodified.
+
+1. **Nothing posted changed.** `PlaceBet` still contains exactly one
+   `ledger.Post` call site, and `git diff` shows the `betInput`
+   construction, the derived `ledgerIdempotencyKey`, the two-entry
+   `Dr player_cash / Cr player_locked_cash` shape,
+   `ledger.GetOrCreateAccounts`, `ledger.LockProjectionsForPosting` and
+   `ledger.Post` as literally unchanged lines. Neither new gate reads or
+   writes a balance, and neither can reach `betInput` (both receive only a
+   `catalogueScope` value copy plus scalars; the sole changed field on the
+   whole path is `RiskRequest.JurisdictionCode`, which is not a ledger
+   input). No new package writes `wallet_balance_projection`; no
+   floating-point money was introduced.
+2. **Idempotency untouched.** `findBetByIdempotencyKey` is still strictly
+   first after structural validation and returns before
+   `getSelectionWithContext` and before both new gates, so a retry
+   re-evaluates neither jurisdiction, risk nor exposure and acquires no
+   lock. (See P2-1 below on the test that is supposed to prove this.)
+3. **Lock order confirmed line by line**, not from a report:
+   idempotency/selection/status/odds and the whole jurisdiction gate take
+   no lock; RG (**L0.4**) → risk (**L0.5**) → `computePotentialReturn` (no
+   lock) → `evaluateExposureLimits` (**L0.6**, conditional) →
+   `GetOrCreateAccounts` → `LockProjectionsForPosting` (**L3**) →
+   `ledger.Post` (**L4**) → `insertBet` (**L1**, E-3). This is exactly ADR
+   0083 §7.2. **R8 holds for L0.6 specifically**: the advisory `Exec` in
+   `evaluateExposureLimits` strictly precedes every L3 acquisition, and the
+   function takes no row lock of its own (both its reads —
+   `sb_exposure_limits` and the `sportsbook_bets` aggregate — are plain
+   unlocked `SELECT`s). L0.6's key, guard condition ("zero configured rows
+   ⇒ no lock"), `hashtextextended` mechanism and one-acquisition-per-bet
+   property all match Amendment A2's text exactly.
+4. **`IgnoredAccountTypes: ["player_locked_cash"]` is correct**, and
+   `TestSportsbookCumulative_TwoPlayerOwnedLegsAreNotNettedToZero` is a
+   real proof rather than a tautology: it posts the genuine placement shape
+   through `ledger.Post`, then asserts three distinct things — the shipped
+   spec measures the full stake, an account-type-blind sum over *the same
+   rows* nets to exactly zero (the ADR 0031 §32(a) defect signature,
+   reproduced), and emptying `IgnoredAccountTypes` now fails closed with
+   `ErrUnrecognizedCumulativeLeg` rather than under-counting.
+5. **Exposure is correctly kept out of the ledger.** The aggregate reads
+   only `sportsbook_bets.potential_return` (a domain projection, doc 09
+   §1.7) and never `ledger_entries`, `ledger_accounts`,
+   `wallet_balance_projection` or the `player_locked_cash` balance, so no
+   second financial-truth system is created. `SUM(bigint)` returns
+   `numeric` in PostgreSQL and is scanned as `pgtype.Numeric`;
+   `numericToBigInt` scales a positive `Exp` up rather than truncating and
+   refuses a negative one, and comparison is `*big.Int`. No int64 or float
+   intermediate exists on the threshold path. This bet's own
+   `potential_return` reaches `int64` only through `money.ToInt64`, which
+   fails closed on overflow.
+6. **R6 residue: better than the ADR claims.** A jurisdiction or exposure
+   rejection returns before `ledger.GetOrCreateAccounts`, i.e. before L3
+   *and* before the `ledger_accounts` creation step — so it leaves neither
+   a zero-totals `wallet_balance_projection` row nor a `ledger_accounts`
+   row. §7.2's "strictly better than the insufficient-funds decline" is
+   correct and understated.
+7. **The `computePotentialReturn` move is inert.** The call is
+   byte-identical and its arguments (`params.StakeAmount`,
+   `sel.OddsNumerator/Denominator`, `params.AssetCode`) are unmodified
+   between the old and new positions, so the computed value cannot differ.
+   `assetregistry.GetAsset` is a plain unlocked `SELECT`, so the move
+   introduces no lock. Only the moment an asset-registry/rounding error
+   surfaces changes, and both orders are fail-closed.
+
+### Findings
+
+- **P2-1 — the idempotency test does not prove what its own comment claims
+  is "the decisive proof".** `TestSportsbookCumulativeAndExposure_IdempotentRetryReevaluatesNothing`
+  disables the exposure limit between the two calls. With the limit
+  disabled, a *full re-evaluation* would also pass the gate, also hit
+  `ledger.Post`'s `AlreadyPosted` short-circuit, also take `insertBet`'s
+  conflict path and also return the same bet id — so neither
+  `retry.Bet.ID == first.Bet.ID` nor `countBets() == 1` distinguishes
+  "short-circuited at step 2" from "re-evaluated and converged". The
+  decisive form is to **leave the limit armed**: at ceiling 3 000 with a
+  2 000 `potential_return` per bet, re-evaluation would compute
+  2 000 (already open) + 2 000 (incremental) > 3 000 and return
+  `RejectionExposureLimit`, so an accepted retry could then only come from
+  the short-circuit. The underlying property is correct (verified by direct
+  reading); the *test* is the gap. Owner: `sportsbook`/`qa`.
+- **P3-1 — FIXED IN THIS EDIT.** §2.1's rule text still read "No
+  exceptions except E-1 (§5.1) and E-2 (§5.1a)" after Amendment A3 added
+  E-3. A rule whose own exception list is out of date is precisely the
+  drift ADR 0083's Status section warns about. Updated in place.
+- **P3-2 — Amendment A3's closing paragraph is now stale.** It states that
+  "Amendment A2 ... is deliberately NOT made here — it belongs to the
+  separate wave", which was true when Wave 2 landed but is no longer: A2
+  sits immediately below it in this same file. (A3 also physically precedes
+  A2, so the file order is A1, A3, A2.) Recommend a one-line
+  "subsequently made — see the A2 block below" note rather than rewriting
+  the amendment record. Not corrected here, to avoid editing another
+  wave's amendment text under a review task.
+- **P3-3 — the L0.6 arming transition is an unrecorded, transient
+  under-count.** A bet that entered `evaluateExposureLimits` while zero
+  limits were configured takes no L0.6 lock; if an operator arms and
+  commits a limit before that bet commits, the next bet's aggregate misses
+  the in-flight one. Bounded by the bets in flight at the instant of
+  arming, self-healing on the next bet, and structurally incapable of
+  affecting the ledger — but it should be one sentence in ADR 0083 §6.2.5
+  and on the admin write surface, not folklore.
+- **P3-4 — R6 no-residue is asserted by proxy.**
+  `TestSportsbookExposure_BalanceInteraction` asserts
+  `countLedgerTransactions() == 0`; it never queries
+  `wallet_balance_projection` directly, so it would not catch a future
+  reordering that materialised a zero-totals row while still posting
+  nothing. One extra `SELECT count(*) FROM wallet_balance_projection ...`
+  would make the assertion direct.
+
+None of P2-1 or P3-1..4 blocks Stage 9.2. No part of ADR 0083 §6.2 is
+rejected under ADR 0082 §7.4 / CLAUDE.md's financial-invariant authority.
