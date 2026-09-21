@@ -217,43 +217,17 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 			RejectionMessage: "this bet was declined by platform risk policy: " + riskDecision.Code}, nil
 	}
 
-	cashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, params.TenantID, &params.WalletID, ledger.AccountPlayerCash, params.AssetCode)
+	// ADR 0082 §3.2/§4.4: canonical (wallet, account_type, asset)
+	// creation order for the ledger_accounts unique-index insertion
+	// waits, never this call site's argument order.
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, params.TenantID,
+		ledger.AccountSpec{WalletID: &params.WalletID, AccountType: ledger.AccountPlayerCash, AssetCode: params.AssetCode},
+		ledger.AccountSpec{WalletID: &params.WalletID, AccountType: ledger.AccountPlayerLockedCash, AssetCode: params.AssetCode},
+	)
 	if err != nil {
-		return PlaceBetResult{}, fmt.Errorf("sportsbook: resolve player_cash account: %w", err)
+		return PlaceBetResult{}, fmt.Errorf("sportsbook: resolve bet ledger accounts: %w", err)
 	}
-	lockedAccountID, err := ledger.GetOrCreateAccount(ctx, tx, params.TenantID, &params.WalletID, ledger.AccountPlayerLockedCash, params.AssetCode)
-	if err != nil {
-		return PlaceBetResult{}, fmt.Errorf("sportsbook: resolve player_locked_cash account: %w", err)
-	}
-
-	// Invariant #15: lock and check the balance INSIDE this transaction,
-	// immediately before posting - identical pattern and rationale to
-	// internal/casino.postBet's own lockCashBalance/insufficient-funds
-	// check. This is also the row lock the concurrency test relies on to
-	// serialize two concurrent placements against a balance that can only
-	// cover one.
-	debitTotal, creditTotal, err := lockCashBalance(ctx, tx, cashAccountID)
-	if err != nil {
-		return PlaceBetResult{}, err
-	}
-	available := creditTotal - debitTotal
-	if available < params.StakeAmount {
-		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: params.TenantID, ActorType: audit.ActorSystem, Action: "sportsbook_bet.declined",
-			TargetType: "wallet", TargetID: params.WalletID.String(), Outcome: audit.OutcomeFailure,
-			Metadata: map[string]any{"selection_id": params.SelectionID.String(), "amount": params.StakeAmount,
-				"asset_code": params.AssetCode, "decline_reason": "insufficient_funds"},
-		}); err != nil {
-			return PlaceBetResult{}, fmt.Errorf("sportsbook: audit bet decline: %w", err)
-		}
-		return PlaceBetResult{Accepted: false, RejectionCategory: RejectionInsufficientFunds,
-			RejectionMessage: "insufficient available balance for this stake"}, nil
-	}
-
-	potentialReturn, err := computePotentialReturn(ctx, tx, params.StakeAmount, sel.OddsNumerator, sel.OddsDenominator, params.AssetCode)
-	if err != nil {
-		return PlaceBetResult{}, err
-	}
+	cashAccountID, lockedAccountID := accounts[0], accounts[1]
 
 	// docs/decisions/0038 §3: cash-funded bet placement is exactly two
 	// entries (Dr player_cash / Cr player_locked_cash) - no house_gaming
@@ -284,15 +258,64 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 	// separation) and the player id makes it impossible for two different
 	// players' bets to collide on the same client-chosen string (the
 	// Stage 6 fix for the P1 an architect review found).
+	//
+	// This whole input is built HERE, before the balance check, rather
+	// than at the ledger.Post call site further down, so the pre-lock
+	// below covers every account it touches and both steps use one
+	// identical TransactionInput value (ADR 0082 R3: a pre-lock over a
+	// SUBSET of the posted accounts, or over a different input than the
+	// one posted, is the LOCK-1 bug itself).
 	ledgerIdempotencyKey := string(ledger.TxSportsbookBet) + ":" + params.PlayerAccountID.String() + ":" + params.IdempotencyKey
-	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+	betInput := ledger.TransactionInput{
 		TenantID: params.TenantID, TransactionType: ledger.TxSportsbookBet,
 		IdempotencyKey: ledgerIdempotencyKey, CorrelationID: betID,
 		Entries: []ledger.EntryInput{
 			{LedgerAccountID: cashAccountID, Direction: ledger.Debit, Amount: params.StakeAmount},
 			{LedgerAccountID: lockedAccountID, Direction: ledger.Credit, Amount: params.StakeAmount},
 		},
-	})
+	}
+
+	// Invariant #15: lock and check the balance INSIDE this transaction,
+	// immediately before posting - identical pattern and rationale to
+	// internal/casino.postBet. ADR 0082 R1/R4: the lock is taken by
+	// internal/ledger over ALL of this posting's projection rows at once,
+	// in canonical ascending ledger_account_id order; the package-local
+	// lockCashBalance helper that used to lock only player_cash is
+	// DELETED, not wrapped, because a partial pre-lock is precisely the
+	// LOCK-1 defect. This is still the row lock the concurrency test
+	// relies on to serialize two concurrent placements against a balance
+	// that can only cover one - now strictly stronger, since both
+	// placements also hold player_locked_cash.
+	locked, err := ledger.LockProjectionsForPosting(ctx, tx, betInput)
+	if err != nil {
+		return PlaceBetResult{}, fmt.Errorf("sportsbook: lock bet projections: %w", err)
+	}
+	cashBalance, err := locked.Balance(cashAccountID)
+	if err != nil {
+		return PlaceBetResult{}, fmt.Errorf("sportsbook: read locked player_cash balance: %w", err)
+	}
+	available := cashBalance.Signed()
+	if available < params.StakeAmount {
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: params.TenantID, ActorType: audit.ActorSystem, Action: "sportsbook_bet.declined",
+			TargetType: "wallet", TargetID: params.WalletID.String(), Outcome: audit.OutcomeFailure,
+			Metadata: map[string]any{"selection_id": params.SelectionID.String(), "amount": params.StakeAmount,
+				"asset_code": params.AssetCode, "decline_reason": "insufficient_funds"},
+		}); err != nil {
+			return PlaceBetResult{}, fmt.Errorf("sportsbook: audit bet decline: %w", err)
+		}
+		return PlaceBetResult{Accepted: false, RejectionCategory: RejectionInsufficientFunds,
+			RejectionMessage: "insufficient available balance for this stake"}, nil
+	}
+
+	potentialReturn, err := computePotentialReturn(ctx, tx, params.StakeAmount, sel.OddsNumerator, sel.OddsDenominator, params.AssetCode)
+	if err != nil {
+		return PlaceBetResult{}, err
+	}
+
+	// The SAME betInput the pre-lock above was computed from - never a
+	// rebuilt one (ADR 0082 R3).
+	postResult, err := ledger.Post(ctx, tx, betInput)
 	if err != nil {
 		return PlaceBetResult{}, fmt.Errorf("sportsbook: post bet: %w", err)
 	}
@@ -457,21 +480,4 @@ func resolveLicensingMode(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (s
 		return "", fmt.Errorf("sportsbook: resolve tenant licensing mode: %w", err)
 	}
 	return t.LicensingModel, nil
-}
-
-// lockCashBalance mirrors internal/casino's identical helper (invariant
-// #15: the balance read and the prospective debit happen inside the same
-// transaction, via a row lock on wallet_balance_projection).
-func lockCashBalance(ctx context.Context, tx pgx.Tx, ledgerAccountID uuid.UUID) (debitTotal, creditTotal int64, err error) {
-	err = tx.QueryRow(ctx,
-		`SELECT debit_total, credit_total FROM wallet_balance_projection WHERE ledger_account_id = $1 FOR UPDATE`,
-		ledgerAccountID,
-	).Scan(&debitTotal, &creditTotal)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, 0, nil
-	}
-	if err != nil {
-		return 0, 0, fmt.Errorf("sportsbook: lock cash balance: %w", err)
-	}
-	return debitTotal, creditTotal, nil
 }

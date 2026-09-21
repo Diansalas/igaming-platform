@@ -217,6 +217,17 @@ posting functions, each implementing an already-BLUEPRINT flow from
 | Win | 6 | debit `house_gaming`, credit `player_cash` | a win naming a round with no matching, still-valid (never rolled back) prior bet under the SAME tenant is `ErrBetNotFound` — an integrity alert (provider protocol violation), never silently posted. The wallet credited is resolved from the round's own bet transaction's ledger entries, never from the win callback's own `player_account_id` |
 | Rollback | 7 | exact inverse of whichever of Flow 5/6 the named original posted | looked up by `(tenant_id, provider_id, provider_tx_id)` under a row lock (`SELECT ... FOR UPDATE`, closing a concurrent-double-reversal race found in review); an original never seen writes a `tombstone` (mirrors `payments.postDepositReversalTombstone`), never an error |
 
+**Lock ordering:** the "balance locked (`SELECT ... FOR UPDATE`)"
+mechanism named in the Bet row above is superseded in form (never in
+effect) by `docs/decisions/0082-canonical-financial-lock-ordering.md`,
+which closes finding LOCK-1 — the real ABBA deadlock between `postBet`
+and `postWinDirectCash` on the same two projection rows. Under ADR 0082
+`postBet` no longer takes its own projection lock: it pre-locks its
+complete account set through `ledger.LockProjectionsForPosting` and reads
+the balance from that result. Invariant #15 (balance read and debit in
+one transaction, under a held lock) is unchanged. Read ADR 0082 before
+changing any locking behaviour in `internal/casino`.
+
 Every bet/win/rollback callback is additionally gated by the tenant's own
 `CasinoProviderCapability` (§9) inside `ReceiveCallback`, before dispatch —
 a disabled or unconfigured capability is a real kill switch on the money

@@ -233,39 +233,6 @@ func lockRequestForUpdate(ctx context.Context, tx pgx.Tx, id uuid.UUID) (Withdra
 	return scanRequest(row)
 }
 
-// lockCashBalanceForUpdate takes a row lock on the wallet's player_cash
-// wallet_balance_projection row (if it exists yet) and returns its raw
-// debit/credit totals. internal/ledger deliberately exposes no locking
-// balance read of its own (GetProjectedBalance is a plain, unlocked read,
-// correct for reporting but not for a check-then-post decision) - per
-// this task's own instruction, that lock is implemented here, directly
-// against wallet_balance_projection, rather than by changing
-// internal/ledger. Two concurrent RequestWithdrawal calls against the
-// same wallet therefore serialize on this single row: the second call's
-// SELECT ... FOR UPDATE blocks until the first's transaction commits (at
-// which point the AFTER INSERT trigger on ledger_entries has already
-// updated this exact row) or rolls back (at which point nothing changed),
-// so the second call always sees a balance that already reflects the
-// first's hold - never a stale "sufficient" read (invariant #15).
-//
-// A wallet whose player_cash account has never been posted to has no
-// projection row at all; that is reported as a zero balance (not an
-// error), which is always insufficient for any positive withdrawal
-// amount (withdrawal_requests_amount_check requires amount > 0).
-func lockCashBalanceForUpdate(ctx context.Context, tx pgx.Tx, ledgerAccountID uuid.UUID) (debitTotal, creditTotal int64, err error) {
-	err = tx.QueryRow(ctx,
-		`SELECT debit_total, credit_total FROM wallet_balance_projection WHERE ledger_account_id = $1 FOR UPDATE`,
-		ledgerAccountID,
-	).Scan(&debitTotal, &creditTotal)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, 0, nil
-	}
-	if err != nil {
-		return 0, 0, fmt.Errorf("withdrawal: lock cash balance: %w", err)
-	}
-	return debitTotal, creditTotal, nil
-}
-
 // RequestParams is everything RequestWithdrawal needs to create a
 // WithdrawalRequest and post its hold.
 //
@@ -305,12 +272,22 @@ type RequestParams struct {
 // ErrIdempotencyKeyReused.
 //
 // Concurrency/sufficiency (invariant #15): the wallet's player_cash
-// balance is locked (SELECT ... FOR UPDATE on its
-// wallet_balance_projection row, see lockCashBalanceForUpdate) and
-// compared against Amount INSIDE this same transaction, immediately
-// before posting the debit - two concurrent requests against a wallet
-// with only enough balance for one of them will not both observe
-// "sufficient".
+// balance is locked and compared against Amount INSIDE this same
+// transaction, immediately before posting the debit - two concurrent
+// requests against a wallet with only enough balance for one of them
+// will not both observe "sufficient".
+//
+// That lock is now taken by internal/ledger, over ALL of this posting's
+// wallet_balance_projection rows at once (player_cash AND
+// player_withdrawal_hold) in canonical ascending ledger_account_id order
+// - ledger.LockProjectionsForPosting, ADR 0082 R1/R4. The package-local
+// lockCashBalanceForUpdate helper that used to lock player_cash alone is
+// DELETED, not wrapped: it locked a SUBSET of the accounts this posting
+// touches, which is finding LOCK-1c (RequestWithdrawal took
+// (player_cash, player_withdrawal_hold) while Reject/Fail/Cancel took the
+// same pair in the opposite order, and the withdrawal_requests row lock
+// does NOT serialize them because a second request is a DIFFERENT request
+// row on the same wallet).
 func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (WithdrawalRequest, error) {
 	if params.TenantID == uuid.Nil || params.BrandID == uuid.Nil || params.PlayerAccountID == uuid.Nil || params.WalletID == uuid.Nil {
 		return WithdrawalRequest{}, fmt.Errorf("%w: tenant/brand/player/wallet ids are required", ErrInvalidInput)
@@ -351,25 +328,25 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 		return existing, nil
 	}
 
-	cashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, params.TenantID, &params.WalletID, ledger.AccountPlayerCash, params.AssetCode)
+	// ADR 0082 §3.2/§4.6: load-bearing here, not cosmetic. This function
+	// resolved (cash, hold) while Reject/Complete/Fail/Cancel resolve
+	// (hold, cash), so two of them creating both accounts for the first
+	// time could block on each other's uncommitted ledger_accounts index
+	// entries in opposite orders. GetOrCreateAccounts creates in canonical
+	// (wallet, account_type, asset) order regardless of argument order.
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, params.TenantID,
+		ledger.AccountSpec{WalletID: &params.WalletID, AccountType: ledger.AccountPlayerCash, AssetCode: params.AssetCode},
+		ledger.AccountSpec{WalletID: &params.WalletID, AccountType: ledger.AccountPlayerWithdrawalHold, AssetCode: params.AssetCode},
+	)
 	if err != nil {
-		return WithdrawalRequest{}, fmt.Errorf("withdrawal: get or create cash account: %w", err)
+		return WithdrawalRequest{}, fmt.Errorf("withdrawal: resolve hold ledger accounts: %w", err)
 	}
-	holdAccountID, err := ledger.GetOrCreateAccount(ctx, tx, params.TenantID, &params.WalletID, ledger.AccountPlayerWithdrawalHold, params.AssetCode)
-	if err != nil {
-		return WithdrawalRequest{}, fmt.Errorf("withdrawal: get or create withdrawal hold account: %w", err)
-	}
+	cashAccountID, holdAccountID := accounts[0], accounts[1]
 
-	debitTotal, creditTotal, err := lockCashBalanceForUpdate(ctx, tx, cashAccountID)
-	if err != nil {
-		return WithdrawalRequest{}, err
-	}
-	available := creditTotal - debitTotal // player_cash is credit-normal (ledger-accounting-model.md §5)
-	if available < params.Amount {
-		return WithdrawalRequest{}, ErrInsufficientFunds
-	}
-
-	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+	// The COMPLETE, final posting, built before the sufficiency check so
+	// the pre-lock below covers every account it touches. The very same
+	// value is handed to ledger.Post; it is never rebuilt (ADR 0082 R3).
+	holdInput := ledger.TransactionInput{
 		TenantID:        params.TenantID,
 		TransactionType: ledger.TxWithdrawalRequested,
 		// Step A's own idempotency key is the WithdrawalRequest's own id,
@@ -384,7 +361,22 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 			{LedgerAccountID: cashAccountID, Direction: ledger.Debit, Amount: params.Amount},
 			{LedgerAccountID: holdAccountID, Direction: ledger.Credit, Amount: params.Amount},
 		},
-	})
+	}
+
+	locked, err := ledger.LockProjectionsForPosting(ctx, tx, holdInput)
+	if err != nil {
+		return WithdrawalRequest{}, fmt.Errorf("withdrawal: lock hold projections: %w", err)
+	}
+	cashBalance, err := locked.Balance(cashAccountID)
+	if err != nil {
+		return WithdrawalRequest{}, fmt.Errorf("withdrawal: read locked player_cash balance: %w", err)
+	}
+	// player_cash is credit-normal (ledger-accounting-model.md §5).
+	if cashBalance.Signed() < params.Amount {
+		return WithdrawalRequest{}, ErrInsufficientFunds
+	}
+
+	postResult, err := ledger.Post(ctx, tx, holdInput)
 	if err != nil {
 		return WithdrawalRequest{}, fmt.Errorf("withdrawal: post hold: %w", err)
 	}
@@ -785,14 +777,22 @@ func Reject(ctx context.Context, tx pgx.Tx, requestID, approverPrincipalID uuid.
 		return fmt.Errorf("withdrawal: insert rejection: %w", err)
 	}
 
-	holdAccountID, err := ledger.GetOrCreateAccount(ctx, tx, wr.TenantID, &wr.WalletID, ledger.AccountPlayerWithdrawalHold, wr.AssetCode)
+	// ADR 0082 §4.6: no LOCKING change is needed here - finding LOCK-1c
+	// is closed by ledger.Post's own internal L3 pre-lock, and this
+	// function's lockRequestForUpdate call is class L1, which already
+	// precedes L3. The account resolution DOES change, and is
+	// load-bearing: this function resolves (hold, cash) while
+	// RequestWithdrawal resolves (cash, hold), so first-time creation of
+	// both accounts could otherwise block on each other's uncommitted
+	// ledger_accounts index entries in opposite orders.
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, wr.TenantID,
+		ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerWithdrawalHold, AssetCode: wr.AssetCode},
+		ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerCash, AssetCode: wr.AssetCode},
+	)
 	if err != nil {
-		return fmt.Errorf("withdrawal: get hold account: %w", err)
+		return fmt.Errorf("withdrawal: resolve hold/cash ledger accounts: %w", err)
 	}
-	cashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, wr.TenantID, &wr.WalletID, ledger.AccountPlayerCash, wr.AssetCode)
-	if err != nil {
-		return fmt.Errorf("withdrawal: get cash account: %w", err)
-	}
+	holdAccountID, cashAccountID := accounts[0], accounts[1]
 
 	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 		TenantID:              wr.TenantID,
@@ -1061,14 +1061,16 @@ func Complete(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, providerID, p
 		return fmt.Errorf("%w: request %s is in state %q, expected %q", ErrStateConflict, requestID, wr.State, StateSubmitted)
 	}
 
-	holdAccountID, err := ledger.GetOrCreateAccount(ctx, tx, wr.TenantID, &wr.WalletID, ledger.AccountPlayerWithdrawalHold, wr.AssetCode)
+	// ADR 0082 §4.6: account resolution only - see Reject's own comment
+	// for why no locking change is needed on this path.
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, wr.TenantID,
+		ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerWithdrawalHold, AssetCode: wr.AssetCode},
+		ledger.AccountSpec{AccountType: ledger.AccountPSPClearing, AssetCode: wr.AssetCode},
+	)
 	if err != nil {
-		return fmt.Errorf("withdrawal: get hold account: %w", err)
+		return fmt.Errorf("withdrawal: resolve hold/psp_clearing ledger accounts: %w", err)
 	}
-	clearingAccountID, err := ledger.GetOrCreateAccount(ctx, tx, wr.TenantID, nil, ledger.AccountPSPClearing, wr.AssetCode)
-	if err != nil {
-		return fmt.Errorf("withdrawal: get psp clearing account: %w", err)
-	}
+	holdAccountID, clearingAccountID := accounts[0], accounts[1]
 
 	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 		TenantID:        wr.TenantID,
@@ -1149,14 +1151,22 @@ func Fail(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, reasonCode string
 		return fmt.Errorf("%w: request %s is in state %q, expected %q", ErrStateConflict, requestID, wr.State, StateSubmitted)
 	}
 
-	holdAccountID, err := ledger.GetOrCreateAccount(ctx, tx, wr.TenantID, &wr.WalletID, ledger.AccountPlayerWithdrawalHold, wr.AssetCode)
+	// ADR 0082 §4.6: no LOCKING change is needed here - finding LOCK-1c
+	// is closed by ledger.Post's own internal L3 pre-lock, and this
+	// function's lockRequestForUpdate call is class L1, which already
+	// precedes L3. The account resolution DOES change, and is
+	// load-bearing: this function resolves (hold, cash) while
+	// RequestWithdrawal resolves (cash, hold), so first-time creation of
+	// both accounts could otherwise block on each other's uncommitted
+	// ledger_accounts index entries in opposite orders.
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, wr.TenantID,
+		ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerWithdrawalHold, AssetCode: wr.AssetCode},
+		ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerCash, AssetCode: wr.AssetCode},
+	)
 	if err != nil {
-		return fmt.Errorf("withdrawal: get hold account: %w", err)
+		return fmt.Errorf("withdrawal: resolve hold/cash ledger accounts: %w", err)
 	}
-	cashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, wr.TenantID, &wr.WalletID, ledger.AccountPlayerCash, wr.AssetCode)
-	if err != nil {
-		return fmt.Errorf("withdrawal: get cash account: %w", err)
-	}
+	holdAccountID, cashAccountID := accounts[0], accounts[1]
 
 	// NOTE: reason_code is deliberately NOT set on the ledger transaction
 	// itself - ledger_transactions' CHECK constraint (migration 0021)
@@ -1234,14 +1244,22 @@ func Cancel(ctx context.Context, tx pgx.Tx, requestID uuid.UUID) error {
 		return fmt.Errorf("%w: request %s is in state %q, expected %q", ErrStateConflict, requestID, wr.State, StateRequested)
 	}
 
-	holdAccountID, err := ledger.GetOrCreateAccount(ctx, tx, wr.TenantID, &wr.WalletID, ledger.AccountPlayerWithdrawalHold, wr.AssetCode)
+	// ADR 0082 §4.6: no LOCKING change is needed here - finding LOCK-1c
+	// is closed by ledger.Post's own internal L3 pre-lock, and this
+	// function's lockRequestForUpdate call is class L1, which already
+	// precedes L3. The account resolution DOES change, and is
+	// load-bearing: this function resolves (hold, cash) while
+	// RequestWithdrawal resolves (cash, hold), so first-time creation of
+	// both accounts could otherwise block on each other's uncommitted
+	// ledger_accounts index entries in opposite orders.
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, wr.TenantID,
+		ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerWithdrawalHold, AssetCode: wr.AssetCode},
+		ledger.AccountSpec{WalletID: &wr.WalletID, AccountType: ledger.AccountPlayerCash, AssetCode: wr.AssetCode},
+	)
 	if err != nil {
-		return fmt.Errorf("withdrawal: get hold account: %w", err)
+		return fmt.Errorf("withdrawal: resolve hold/cash ledger accounts: %w", err)
 	}
-	cashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, wr.TenantID, &wr.WalletID, ledger.AccountPlayerCash, wr.AssetCode)
-	if err != nil {
-		return fmt.Errorf("withdrawal: get cash account: %w", err)
-	}
+	holdAccountID, cashAccountID := accounts[0], accounts[1]
 
 	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 		TenantID:              wr.TenantID,

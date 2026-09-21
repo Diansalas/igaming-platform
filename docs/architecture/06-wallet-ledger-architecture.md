@@ -91,6 +91,20 @@ makes a repeated call a no-op returning the same answer.
 Rollbacks write compensating entries, never deletions. A rollback for a
 transaction never seen writes a tombstone.
 
+## Lock ordering (see ADR 0082)
+
+Concurrency safety here is not only idempotency: every posting also
+acquires row locks, both explicitly (`SELECT ... FOR UPDATE` on
+`wallet_balance_projection`) and *implicitly* (migration `0023`'s
+projection trigger takes a row lock per `ledger_entries` insert, in
+entry order). **`docs/decisions/0082-canonical-financial-lock-ordering.md`
+is the single authority on the order in which those locks are acquired**
+— including the rule that no package outside `internal/ledger` may lock
+a `wallet_balance_projection` row, and that every posting pre-locks its
+complete account set in ascending `ledger_accounts.id` order through
+`ledger.LockProjectionsForPosting`. Any description of locking elsewhere
+in this document or in docs 07–10 is subordinate to that ADR.
+
 ## Cross-currency operations (new — architecture only, not implemented in Stage 1)
 
 Per the human-approved decision, moving value between two wallets of

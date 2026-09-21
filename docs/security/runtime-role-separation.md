@@ -110,8 +110,11 @@ the runtime role by way of invoking it, and sequence grants are
 `USAGE, SELECT` only (no `UPDATE`, so no `setval`).
 
 **Exceptions to "ordinary DML is genuinely enforced by RLS," corrected by
-the Stage 9 architect review (ARCH-DB-1) — SIX tables, not one.**
-`casino_games` (the global game catalogue, migration 0035) has row-level
+the Stage 9 architect review (ARCH-DB-1) — SIX tables, not one.** (Read
+this paragraph as the HISTORICAL record of the finding; the "Stage 9.1
+update" paragraph below it records the actual fix, migration `0084`,
+which closed the "no RLS at all" gap described here.)
+`casino_games` (the global game catalogue, migration 0035) had row-level
 security disabled entirely (`relrowsecurity = false`) and no `tenant_id`
 column — deliberately global, not tenant-owned data. Stage 6's migration
 0078 added **five more** in the identical shape: `sb_sports`,
@@ -133,6 +136,79 @@ giving the sportsbook catalogue sync a defined service-identity scope,
 mirroring the `assets` registry's own `ENABLE`+`FORCE` RLS precedent) that
 this role-split document does not attempt to close and that the split
 itself cannot substitute for.
+
+**Stage 9.1 update — `ARCH-DB-2` is now CLOSED. This exception is
+HISTORICAL** (kept below, struck through in substance rather than
+deleted, because the surrounding numbered exception list and its
+reasoning remain useful context for why the gap existed in the first
+place).
+`docs/decisions/0081-arch-db-2-catalogue-write-authorization.md` is the
+architect's decision for all six tables, implemented by migration
+**`0084`** (not `0083` — see the renumbering note at the top of that ADR:
+by the time this ruling was implemented, a separate, parallel Stage 9.1
+devops workstream, PLAT-MIGDRIFT-1, had already landed migration `0083`
+for schema-migration checksum tracking, an unrelated change, so this
+migration became `0084` instead; no design changed as a result). Its
+substance, so this section can be read without following the link:
+
+- The six tables stay **permanently without a `tenant_id`/`brand_id`
+  column**, and ADR 0081 §2.2 rules that adding one would be
+  *semantically wrong*, not merely unnecessary — they are single-canonical-
+  row platform catalogue data, and per-tenant scoping already lives where
+  it belongs (`casino_game_availability` for casino; a future, separate
+  tenant-owned availability table for sportsbook). So the "no `tenant_id`
+  column" half of this exception is **permanent and intentional**, and the
+  regression test that asserts it keeps asserting it.
+- The "no RLS at all" half **is now closed** by migration `0084`: all six
+  tables have `ENABLE` + `FORCE ROW LEVEL SECURITY`, with
+  `FOR SELECT USING (true)` (all five `sb_*` tables have genuinely
+  anonymous readers — `GET /v1/sportsbook/sports` and
+  `GET /v1/sportsbook/events/{id}` are unauthenticated routes, confirmed
+  still returning data end-to-end after this change) and a write policy
+  scoped to a platform identity: the existing
+  `app.platform_admin_principal_id` GUC for `casino_games`
+  (`db.Pool.WithPlatformAdmin`, used by `newUpsertCasinoGameHandler` and
+  asserted independently in Go by `casino.UpsertGame`), and a new,
+  closed-vocabulary `app.platform_service_id = 'sportsbook_catalogue_sync'`
+  GUC for the five `sb_*` tables, set only by the new
+  `db.Pool.WithPlatformService` (`internal/db/platform_service.go`) and
+  asserted independently in Go by `sportsbook.SyncCatalogue` via
+  `db.AssertPlatformServiceScope`. The sportsbook catalogue sync
+  (`cmd/platform-api/main.go`'s startup call) now uses
+  `WithPlatformService` instead of `WithoutTenant`.
+- Plus a shared `catalogue_enforce_immutable_identity()` trigger function
+  freezing each table's identity and parent-link columns only (never
+  price/status — `sb_selections.odds_*` are deliberately left mutable),
+  and deny-DELETE / deny-TRUNCATE triggers on all six (TRUNCATE reuses the
+  existing shared `ledger_deny_mutation()` from migration `0021`, this
+  repo's established convention).
+
+**§6's blanket `GRANT … ON ALL TABLES IN SCHEMA public` is now
+constrained for these six tables by row-level security, exactly like
+every other RLS-protected table in this schema** — the runtime role's
+raw `INSERT`/`UPDATE`/`DELETE` grant still exists at the SQL-privilege
+level (unchanged, and not the mechanism that matters here — see this
+document's own "critical structural point" below), but the policies
+introduced by migration `0084` are what actually decide whether a given
+connection's write takes effect, per this document's general model for
+every other table.
+
+`TestRuntimeRole_CasinoGamesExceptionUnchanged` (§9 point 5,
+`internal/db/runtime_role_separation_test.go`) has been REPLACED by
+`TestRuntimeRole_PlatformCatalogueTablesForceRLSAndHaveNoTenantColumn`,
+per ADR 0081 §7.5: it asserts `relrowsecurity AND relforcerowsecurity`
+on all six tables, asserts the absence of a `tenant_id`/`brand_id` column
+as an intentional positive invariant, and asserts the expected policy
+names (`<table>_read`, plus either `<table>_platform_admin_*` for
+`casino_games` or `<table>_catalogue_sync_*` for the five `sb_*` tables)
+are present. A separate, direct-SQL adversarial suite,
+`internal/db/catalogue_write_authorization_integration_test.go`, exercises
+the write policies, immutable-identity triggers, and deny-DELETE/
+deny-TRUNCATE triggers themselves under every connection scope
+(`WithTenant`, `WithPlayerScope`, `WithoutTenant`, `WithPlatformAdmin`,
+`WithPlatformService`) — the level of verification this document's §5
+adversarial-probe suite already applies to the runtime-role split itself,
+now applied to ARCH-DB-2's fix too.
 
 **A second exception, not yet live but worth a standing rule:** this
 database currently has zero `VIEW`s, so there is no current exposure —
@@ -403,11 +479,18 @@ to hold (CLAUDE.md, "Environment safety").
    the runtime role itself, then confirming a tenant-A-scoped connection
    genuinely reads zero rows for tenant B (not merely "the role is
    denied outright" — RLS is actually enforced for it, unlike `igaming`
-   today). A dedicated test additionally confirms the documented
-   `casino_games` no-RLS exception (§5's second exception paragraph)
-   still holds exactly as described, so a future schema change to that
-   table is caught here rather than silently invalidating this
-   document's own claim.
+   today). A dedicated test,
+   `TestRuntimeRole_PlatformCatalogueTablesForceRLSAndHaveNoTenantColumn`,
+   confirms the SIX-table catalogue exception's current, post-`ARCH-DB-2`
+   state: `casino_games`/`sb_sports`/`sb_competitions`/`sb_events`/
+   `sb_markets`/`sb_selections` all have `relrowsecurity AND
+   relforcerowsecurity` true (migration `0084`) and none carries a
+   `tenant_id`/`brand_id` column (permanent by design, ADR 0081 §2.2), so
+   a future schema change to any of the six is caught here rather than
+   silently invalidating this document's own claim. (This test replaced
+   the earlier `TestRuntimeRole_CasinoGamesExceptionUnchanged`, which
+   asserted the OPPOSITE — RLS disabled — before migration `0084` closed
+   that gap.)
 6. **`internal/db/production_safety.go`** adds
    `ConnectingRoleOwnsNoTables` (queries `pg_tables` for rows the
    connecting role owns in `public`) and

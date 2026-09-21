@@ -130,22 +130,51 @@ type Deps struct {
 	//	>0 - use this value for EVERY bucket instead.
 	//	<0 - disable the limiter entirely.
 	//
-	// The override exists because the limiter keys on RemoteAddr and NOT on
-	// X-Forwarded-For (clientIP's own doc comment explains why): the first
-	// deployment to put a load balancer in front of platform-api will see
-	// every request arrive from one address, at which point these limits
-	// become a global cap on login throughput rather than a per-client one.
-	// That deployment needs a way to raise or disable them without a code
-	// change, and this is the hook for it - but NOTE that nothing plumbs
-	// this from internal/config or cmd/platform-api yet
-	// (docs/security/security-architecture.md, S9.1-LAUNCH-2, owner
-	// devops): until an AUTH_RATE_LIMIT_PER_MINUTE environment variable
-	// reaches this field, only a code change or a test can set it.
+	// Plumbed end to end from the AUTH_RATE_LIMIT_PER_MINUTE environment
+	// variable via internal/config.Config and cmd/platform-api/main.go
+	// (closes S9.1-LAUNCH-2, docs/security/security-architecture.md) - an
+	// operator can raise or disable these limits without a code change.
 	AuthRateLimitPerMinute int
 
-	// authLimiter is built by New from AuthRateLimitPerMinute and shared by
-	// every rate-limited route. Unexported deliberately: a caller configures
-	// the POLICY (above), never hands in its own limiter instance.
+	// TrustedProxyCount is the number of the platform's OWN trusted
+	// reverse-proxy hops sitting in front of this instance (a load
+	// balancer, an ingress controller, etc - infrastructure this
+	// deployment controls, never an arbitrary intermediary). It controls
+	// how the rate limiter (ratelimit.go) determines caller identity:
+	//
+	//	0   - X-Forwarded-For is never read for rate-limiting purposes;
+	//	      RemoteAddr is the caller's identity, unconditionally. This is
+	//	      the safe default for an unconfigured deployment: an attacker
+	//	      cannot spoof RemoteAddr across a completed TCP handshake, but
+	//	      CAN set X-Forwarded-For to anything, so trusting it with no
+	//	      known hop count to validate against would make the limiter
+	//	      trivially bypassable (a fresh forged header = a fresh bucket).
+	//	N>0 - this deployment's own proxy chain is N hops deep; the real
+	//	      client's address is taken from the Nth-from-the-right entry
+	//	      of X-Forwarded-For (trustedProxyClientIP's own doc comment
+	//	      has the full reasoning for why counting from the right, not
+	//	      the left, is what makes the header safe to use at all: the
+	//	      trusted hops only ever APPEND to the right, so nothing a
+	//	      client injects on the left can shift which entry is trusted).
+	//
+	// Plumbed from the TRUSTED_PROXY_COUNT environment variable via
+	// internal/config.Config and cmd/platform-api/main.go (closes
+	// S9.1-LAUNCH-1, docs/security/security-architecture.md). Set this to
+	// EXACTLY the number of proxy hops this deployment controls - setting
+	// it too high lets a client's own injected X-Forwarded-For entry be
+	// mistaken for the trusted one; setting it too low (including leaving
+	// it at the default 0 behind a real proxy) collapses every caller to
+	// one shared bucket. This platform never builds a distributed/shared-
+	// state rate limiter (Redis or otherwise) - each replica still
+	// enforces its own independent in-memory window; see ratelimit.go's
+	// own "WHAT THIS IS NOT" section and docs/architecture/
+	// 38-deployment-architecture.md §4 for that accepted limitation.
+	TrustedProxyCount int
+
+	// authLimiter is built by New from AuthRateLimitPerMinute/
+	// TrustedProxyCount and shared by every rate-limited route. Unexported
+	// deliberately: a caller configures the POLICY (above), never hands in
+	// its own limiter instance.
 	authLimiter *fixedWindowLimiter
 }
 
@@ -158,7 +187,7 @@ func New(deps Deps) http.Handler {
 	// Stage 9 §21: one limiter shared by every rate-limited route, built
 	// here so no caller can forget to wire it and no test server silently
 	// runs without it. See ratelimit.go.
-	deps.authLimiter = newFixedWindowLimiter(rateLimitWindow, deps.AuthRateLimitPerMinute)
+	deps.authLimiter = newFixedWindowLimiter(rateLimitWindow, deps.AuthRateLimitPerMinute, deps.TrustedProxyCount)
 
 	mux.HandleFunc("GET /healthz", livezHandler)
 	mux.HandleFunc("GET /readyz", readyzHandler(deps.DB))

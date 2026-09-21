@@ -323,14 +323,19 @@ func bigIntToInt64(v *big.Int) (int64, error) {
 // only reachable path in production today, ADR 0025 §6) is provably
 // byte-for-byte unaffected by this dispatch.
 func (o *Orchestrator) postWinDirectCash(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, event CallbackEvent, origin winOrigin, correlationID uuid.UUID) (ReceiveCallbackResult, error) {
-	cashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &origin.WalletID, ledger.AccountPlayerCash, event.AssetCode)
+	// ADR 0082 §4.3: no LOCKING change is needed here - this path posts
+	// through ledger.Post and takes no projection lock of its own, so
+	// Post's internal L3 pre-lock now orders it. Only the account
+	// resolution moves to GetOrCreateAccounts, for canonical
+	// ledger_accounts creation order.
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, tenantID,
+		ledger.AccountSpec{WalletID: &origin.WalletID, AccountType: ledger.AccountPlayerCash, AssetCode: event.AssetCode},
+		ledger.AccountSpec{AccountType: ledger.AccountHouseGaming, AssetCode: event.AssetCode},
+	)
 	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve player_cash account: %w", err)
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve direct-cash win ledger accounts: %w", err)
 	}
-	houseAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, nil, ledger.AccountHouseGaming, event.AssetCode)
-	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve house_gaming account: %w", err)
-	}
+	cashAccountID, houseAccountID := accounts[0], accounts[1]
 
 	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 		TenantID: tenantID, TransactionType: ledger.TxCasinoWin,
@@ -365,18 +370,18 @@ func (o *Orchestrator) postWinDirectCash(ctx context.Context, tx pgx.Tx, tenantI
 // same posting bundles the lock release (Dr player_locked_cash X / Cr
 // player_cash X). No Grant dimension exists for a cash lock - never G-2.
 func (o *Orchestrator) postWinLockedCash(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, event CallbackEvent, origin winOrigin, correlationID uuid.UUID) (ReceiveCallbackResult, error) {
-	cashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &origin.WalletID, ledger.AccountPlayerCash, event.AssetCode)
+	// ADR 0082 §4.3: account resolution only - no locking change (this
+	// path posts through ledger.Post, whose internal L3 pre-lock now
+	// orders it).
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, tenantID,
+		ledger.AccountSpec{WalletID: &origin.WalletID, AccountType: ledger.AccountPlayerCash, AssetCode: event.AssetCode},
+		ledger.AccountSpec{AccountType: ledger.AccountHouseGaming, AssetCode: event.AssetCode},
+		ledger.AccountSpec{WalletID: &origin.WalletID, AccountType: ledger.AccountPlayerLockedCash, AssetCode: event.AssetCode},
+	)
 	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve player_cash account: %w", err)
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve locked-cash win ledger accounts: %w", err)
 	}
-	houseAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, nil, ledger.AccountHouseGaming, event.AssetCode)
-	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve house_gaming account: %w", err)
-	}
-	lockedCashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &origin.WalletID, ledger.AccountPlayerLockedCash, event.AssetCode)
-	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve player_locked_cash account: %w", err)
-	}
+	cashAccountID, houseAccountID, lockedCashAccountID := accounts[0], accounts[1], accounts[2]
 
 	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 		TenantID: tenantID, TransactionType: ledger.TxCasinoWin,
@@ -448,21 +453,26 @@ func (o *Orchestrator) postWinLockedBonus(ctx context.Context, tx pgx.Tx, tenant
 		return ReceiveCallbackResult{}, err
 	}
 
+	// ADR 0082 §4.3: account resolution only - neither branch takes a
+	// projection lock of its own, so both are ordered by ledger.Post's
+	// own internal L3 pre-lock, which (unlike anything this file could
+	// do) also covers the Rule B2 mirror/recognition legs Post generates
+	// for these BONUS_SET postings. Each branch resolves its COMPLETE
+	// account set in one GetOrCreateAccounts call so ledger_accounts
+	// creation is canonically ordered across all three, not just the two
+	// that used to be resolved before the branch.
 	walletID := origin.WalletID
-	houseAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, nil, ledger.AccountHouseGaming, event.AssetCode)
-	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve house_gaming account: %w", err)
-	}
-	lockedBonusAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &walletID, ledger.AccountPlayerLockedBonus, event.AssetCode)
-	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve player_locked_bonus account: %w", err)
-	}
 
 	if !isGrantTerminalForG2(grant.Status) {
-		playerBonusAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &walletID, ledger.AccountPlayerBonus, event.AssetCode)
+		accounts, err := ledger.GetOrCreateAccounts(ctx, tx, tenantID,
+			ledger.AccountSpec{AccountType: ledger.AccountHouseGaming, AssetCode: event.AssetCode},
+			ledger.AccountSpec{WalletID: &walletID, AccountType: ledger.AccountPlayerLockedBonus, AssetCode: event.AssetCode},
+			ledger.AccountSpec{WalletID: &walletID, AccountType: ledger.AccountPlayerBonus, AssetCode: event.AssetCode},
+		)
 		if err != nil {
-			return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve player_bonus account: %w", err)
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve locked-bonus win ledger accounts: %w", err)
 		}
+		houseAccountID, lockedBonusAccountID, playerBonusAccountID := accounts[0], accounts[1], accounts[2]
 
 		postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 			TenantID: tenantID, TransactionType: ledger.TxCasinoWin,
@@ -504,10 +514,15 @@ func (o *Orchestrator) postWinLockedBonus(ctx context.Context, tx pgx.Tx, tenant
 	// corrected call order, §16.14's exact two-leg posting): capture is
 	// UNCONDITIONAL, decided before any of G-2's three eventual actions is
 	// known.
-	playerBonusHeldAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &walletID, ledger.AccountPlayerBonusHeld, event.AssetCode)
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, tenantID,
+		ledger.AccountSpec{AccountType: ledger.AccountHouseGaming, AssetCode: event.AssetCode},
+		ledger.AccountSpec{WalletID: &walletID, AccountType: ledger.AccountPlayerLockedBonus, AssetCode: event.AssetCode},
+		ledger.AccountSpec{WalletID: &walletID, AccountType: ledger.AccountPlayerBonusHeld, AssetCode: event.AssetCode},
+	)
 	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve player_bonus_held account: %w", err)
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve terminal hold-capture ledger accounts: %w", err)
 	}
+	houseAccountID, lockedBonusAccountID, playerBonusHeldAccountID := accounts[0], accounts[1], accounts[2]
 
 	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 		TenantID: tenantID, TransactionType: ledger.TxCasinoWin,
@@ -640,15 +655,18 @@ func (o *Orchestrator) postRollbackHeldWin(ctx context.Context, tx pgx.Tx, tenan
 		return true, ReceiveCallbackResult{}, err
 	}
 
+	// ADR 0082 §4.3: account resolution only - no locking change (this
+	// path posts through ledger.Post, whose internal L3 pre-lock now
+	// orders it, generated mirror legs included).
 	walletID := disposition.WalletID
-	houseAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, nil, ledger.AccountHouseGaming, disposition.AssetCode)
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, tenantID,
+		ledger.AccountSpec{AccountType: ledger.AccountHouseGaming, AssetCode: disposition.AssetCode},
+		ledger.AccountSpec{WalletID: &walletID, AccountType: ledger.AccountPlayerBonusHeld, AssetCode: disposition.AssetCode},
+	)
 	if err != nil {
-		return true, ReceiveCallbackResult{}, fmt.Errorf("casino: resolve house_gaming account: %w", err)
+		return true, ReceiveCallbackResult{}, fmt.Errorf("casino: resolve held-win rollback ledger accounts: %w", err)
 	}
-	playerBonusHeldAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &walletID, ledger.AccountPlayerBonusHeld, disposition.AssetCode)
-	if err != nil {
-		return true, ReceiveCallbackResult{}, fmt.Errorf("casino: resolve player_bonus_held account: %w", err)
-	}
+	houseAccountID, playerBonusHeldAccountID := accounts[0], accounts[1]
 
 	payoutAmount, err := bigIntToInt64(disposition.PayoutAmount)
 	if err != nil {

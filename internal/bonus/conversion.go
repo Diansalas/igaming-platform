@@ -212,14 +212,18 @@ func applyGrantConversion(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid
 		return ConvertGrantResult{}, err
 	}
 	walletID := g.WalletID
-	playerBonusAccount, err := ledger.GetOrCreateAccount(ctx, tx, g.TenantID, &walletID, ledger.AccountPlayerBonus, g.AssetCode)
+	// ADR 0082 §3.2/§4.7: resolved through GetOrCreateAccounts so the
+	// ledger_accounts unique-index insertion waits happen in canonical
+	// (wallet, account_type, asset) order rather than this call site's
+	// argument order - the mechanism-3 half of the lock-ordering fix.
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, g.TenantID,
+		ledger.AccountSpec{WalletID: &walletID, AccountType: ledger.AccountPlayerBonus, AssetCode: g.AssetCode},
+		ledger.AccountSpec{WalletID: &walletID, AccountType: ledger.AccountPlayerCash, AssetCode: g.AssetCode},
+	)
 	if err != nil {
 		return ConvertGrantResult{}, err
 	}
-	playerCashAccount, err := ledger.GetOrCreateAccount(ctx, tx, g.TenantID, &walletID, ledger.AccountPlayerCash, g.AssetCode)
-	if err != nil {
-		return ConvertGrantResult{}, err
-	}
+	playerBonusAccount, playerCashAccount := accounts[0], accounts[1]
 	idempotencyKey := fmt.Sprintf("bonus_conversion:%s", g.ID)
 	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 		TenantID: g.TenantID, TransactionType: ledger.TxBonusConversion, IdempotencyKey: idempotencyKey,

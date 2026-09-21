@@ -17,7 +17,7 @@ import (
 // in the tagged one.
 
 func TestFixedWindowLimiter_AllowsUpToLimitThenDenies(t *testing.T) {
-	l := newFixedWindowLimiter(time.Minute, 0)
+	l := newFixedWindowLimiter(time.Minute, 0, 0)
 	now := time.Now()
 	l.now = func() time.Time { return now }
 
@@ -32,7 +32,7 @@ func TestFixedWindowLimiter_AllowsUpToLimitThenDenies(t *testing.T) {
 }
 
 func TestFixedWindowLimiter_WindowResets(t *testing.T) {
-	l := newFixedWindowLimiter(time.Minute, 0)
+	l := newFixedWindowLimiter(time.Minute, 0, 0)
 	now := time.Now()
 	l.now = func() time.Time { return now }
 
@@ -54,7 +54,7 @@ func TestFixedWindowLimiter_WindowResets(t *testing.T) {
 // makes the limiter a per-caller control rather than a global kill switch:
 // one attacker's exhausted bucket must never lock out everyone else.
 func TestFixedWindowLimiter_KeysAreIndependent(t *testing.T) {
-	l := newFixedWindowLimiter(time.Minute, 0)
+	l := newFixedWindowLimiter(time.Minute, 0, 0)
 	now := time.Now()
 	l.now = func() time.Time { return now }
 
@@ -73,7 +73,7 @@ func TestFixedWindowLimiter_KeysAreIndependent(t *testing.T) {
 }
 
 func TestFixedWindowLimiter_OverrideReplacesEveryLimit(t *testing.T) {
-	l := newFixedWindowLimiter(time.Minute, 1)
+	l := newFixedWindowLimiter(time.Minute, 1, 0)
 	now := time.Now()
 	l.now = func() time.Time { return now }
 
@@ -87,7 +87,7 @@ func TestFixedWindowLimiter_OverrideReplacesEveryLimit(t *testing.T) {
 }
 
 func TestFixedWindowLimiter_NegativeOverrideDisablesLimiter(t *testing.T) {
-	l := newFixedWindowLimiter(time.Minute, -1)
+	l := newFixedWindowLimiter(time.Minute, -1, 0)
 	now := time.Now()
 	l.now = func() time.Time { return now }
 
@@ -106,7 +106,7 @@ func TestFixedWindowLimiter_NegativeOverrideDisablesLimiter(t *testing.T) {
 // code actually does - a reader must not have to take the comment's word
 // for which way it fails.
 func TestFixedWindowLimiter_FailsOpenAndBoundsMemoryAtMaxKeys(t *testing.T) {
-	l := newFixedWindowLimiter(time.Minute, 0)
+	l := newFixedWindowLimiter(time.Minute, 0, 0)
 	now := time.Now()
 	l.now = func() time.Time { return now }
 
@@ -125,7 +125,7 @@ func TestFixedWindowLimiter_FailsOpenAndBoundsMemoryAtMaxKeys(t *testing.T) {
 }
 
 func TestFixedWindowLimiter_EvictsExpiredBeforeResetting(t *testing.T) {
-	l := newFixedWindowLimiter(time.Minute, 0)
+	l := newFixedWindowLimiter(time.Minute, 0, 0)
 	now := time.Now()
 	l.now = func() time.Time { return now }
 
@@ -149,7 +149,7 @@ func TestFixedWindowLimiter_EvictsExpiredBeforeResetting(t *testing.T) {
 // --- the HTTP wrapper ---
 
 func TestRateLimit_Returns429WithTheStandardErrorEnvelope(t *testing.T) {
-	l := newFixedWindowLimiter(time.Minute, 0)
+	l := newFixedWindowLimiter(time.Minute, 0, 0)
 	now := time.Now()
 	l.now = func() time.Time { return now }
 
@@ -198,7 +198,7 @@ func TestRateLimit_Returns429WithTheStandardErrorEnvelope(t *testing.T) {
 // attacker gets a free bucket per forged header value and the control
 // becomes decorative, so it is asserted here explicitly.
 func TestRateLimit_IgnoresXForwardedFor(t *testing.T) {
-	l := newFixedWindowLimiter(time.Minute, 0)
+	l := newFixedWindowLimiter(time.Minute, 0, 0)
 	now := time.Now()
 	l.now = func() time.Time { return now }
 
@@ -249,7 +249,7 @@ func TestRateLimit_NilLimiterIsPassThrough(t *testing.T) {
 // gives staff login its own bucket without thinking about it, an attacker
 // gets double the Argon2 budget per address - so the sharing is asserted.
 func TestRateLimit_PlayerAndStaffLoginShareOneBucket(t *testing.T) {
-	l := newFixedWindowLimiter(time.Minute, 0)
+	l := newFixedWindowLimiter(time.Minute, 0, 0)
 	now := time.Now()
 	l.now = func() time.Time { return now }
 

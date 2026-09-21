@@ -24,6 +24,48 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/risk"
 )
 
+// AdvisoryLockPlayerBonusScope takes ADR 0082 class L0.2: the
+// (tenant_id, player_account_id) advisory lock that every operation
+// touching BOTH this player's bonus state AND the ledger must hold
+// before any grant-level advisory lock (L0.3) and before any
+// wallet_balance_projection lock (L3).
+//
+// It exists because casino.postBet takes its projection locks and THEN,
+// after posting, acquires a grant advisory lock for the wagering
+// contribution, while bonus.ConvertGrant holds a grant advisory lock and
+// THEN takes the player_cash projection lock inside ledger.Post - an ABBA
+// across a row lock and an advisory lock (finding LOCK-1d). Serializing
+// both behind one player-scoped advisory lock, taken first, removes the
+// cycle without moving the contribution out of the bet's own transaction
+// (HR-10 requires it stay there).
+//
+// hashtextextended (not hashtext) for the full 64-bit key space,
+// tenant-scoped, exactly like AdvisoryLockGrant: a single 32-bit hashtext
+// component is an unacceptable collision risk for a shared advisory-lock
+// namespace, and a platform-global (untenanted) key would make two
+// tenants' unrelated players serialize against each other. Held for the
+// remainder of the caller's transaction - Postgres releases it at
+// COMMIT/ROLLBACK, there is no unlock call.
+//
+// ADR 0082 §5.2, recorded because the reasoning is non-obvious: this lock
+// is deliberately PLAYER-scoped, not grant-scoped. Narrowing it back to
+// grant level would silently reopen LOCK-1d, because a grant activated by
+// another transaction mid-bet would then be visible to postBet's
+// post-Post contribution read without either transaction ever having held
+// a common lock.
+func AdvisoryLockPlayerBonusScope(ctx context.Context, tx pgx.Tx, tenantID, playerAccountID uuid.UUID) error {
+	if tenantID == uuid.Nil || playerAccountID == uuid.Nil {
+		return fmt.Errorf("bonus: acquire player bonus-scope advisory lock: tenant and player account ids are required")
+	}
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended('bonus_player:' || $1::text || ':' || $2::text, 0))`,
+		tenantID, playerAccountID,
+	); err != nil {
+		return fmt.Errorf("bonus: acquire player bonus-scope advisory lock: %w", err)
+	}
+	return nil
+}
+
 // AdvisoryLockGrant acquires the (tenant_id, grant_id) advisory lock doc
 // 10 §9/N1.5 specify for every transaction that reads or writes anything
 // about a Grant - "every transaction that reads or writes anything about
@@ -32,12 +74,45 @@ import (
 // (orchestrator.go:617). Held for the remainder of the caller's
 // transaction (Postgres releases it at COMMIT/ROLLBACK automatically -
 // there is no unlock call).
+//
+// ADR 0082 §3.3: this now acquires class L0.2 (the player bonus-scope
+// advisory lock) as an internal PRECONDITION before class L0.3 (the grant
+// lock itself). player_account_id is resolved from the grant's own
+// bonus_grants row, which is immutable on that column, so an unlocked
+// read is sound. Folding it in here rather than at each call site is
+// deliberate: it makes every existing and every future AdvisoryLockGrant
+// caller correct with no call-site change, and removes the possibility of
+// a caller taking L0.3 without L0.2 and silently reopening LOCK-1d.
+//
+// A grant id that resolves to no row in this tenant is a hard error, not
+// a silently-weaker lock: it means either a bug in the caller or a
+// cross-tenant grant reference, and taking a meaningless advisory key
+// while continuing as if the grant were locked is the exact fail-open
+// this package refuses everywhere else. It wraps ErrNotFound: before this
+// precondition existed, an unknown grant id fell through to
+// LockGrantForUpdate/scanGrant and surfaced ErrNotFound, which the HTTP
+// layer maps to 404 via errors.Is. Returning a bare error here would turn
+// every "bad grant id" request into a 500.
 func AdvisoryLockGrant(ctx context.Context, tx pgx.Tx, tenantID, grantID uuid.UUID) error {
-	_, err := tx.Exec(ctx,
+	var playerAccountID uuid.UUID
+	err := tx.QueryRow(ctx,
+		`SELECT player_account_id FROM bonus_grants WHERE tenant_id = $1 AND id = $2`,
+		tenantID, grantID,
+	).Scan(&playerAccountID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: acquire grant advisory lock: grant %s does not exist in this tenant", ErrNotFound, grantID)
+	}
+	if err != nil {
+		return fmt.Errorf("bonus: resolve grant player scope for advisory lock: %w", err)
+	}
+	if err := AdvisoryLockPlayerBonusScope(ctx, tx, tenantID, playerAccountID); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended('bonus_grant:' || $1::text || ':' || $2::text, 0))`,
 		tenantID, grantID,
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("bonus: acquire grant advisory lock: %w", err)
 	}
 	return nil

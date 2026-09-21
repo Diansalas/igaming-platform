@@ -149,7 +149,19 @@ func run() error {
 	// provider adapter implementing sportsbook.Provider is a drop-in
 	// replacement for this one call, with zero change to the domain model,
 	// the orchestrator, or the HTTP layer.
-	if err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
+	//
+	// Migration 0084 (ADR 0081, ARCH-DB-2) gave sb_sports/sb_competitions/
+	// sb_events/sb_markets/sb_selections ENABLE+FORCE row-level security
+	// with a write policy scoped to a new, closed-vocabulary
+	// app.platform_service_id = 'sportsbook_catalogue_sync' GUC, so a
+	// plain WithoutTenant transaction (the scope every ordinary platform
+	// read already uses) can no longer write these tables - this startup
+	// sync is the sole legitimate writer and now authorizes itself as
+	// such via db.Pool.WithPlatformService, rather than laundering as an
+	// unscoped connection. If the sync cannot authorize itself, the
+	// binary must not serve traffic with a half-synced catalogue, so the
+	// existing fail-the-startup wrap below is unchanged.
+	if err := pool.WithPlatformService(ctx, db.ServiceSportsbookCatalogueSync, func(ctx context.Context, tx pgx.Tx) error {
 		return sportsbook.SyncCatalogue(ctx, tx, sportsbook.NewMockSportsbookProvider())
 	}); err != nil {
 		return fmt.Errorf("sync sportsbook catalogue: %w", err)
@@ -165,6 +177,13 @@ func run() error {
 		RefreshTokenTTL:     cfg.RefreshTokenTTL,
 		PaymentOrchestrator: orchestrator,
 		CasinoOrchestrator:  casinoOrchestrator,
+		// S9.1-LAUNCH-1/S9.1-LAUNCH-2 (docs/security/security-
+		// architecture.md): both plumbed straight from environment-sourced
+		// config, with no hardcoded default overriding cfg's own (0/0 -
+		// see internal/config.Config's doc comments on each field for the
+		// exact semantics).
+		AuthRateLimitPerMinute: cfg.AuthRateLimitPerMinute,
+		TrustedProxyCount:      cfg.TrustedProxyCount,
 		// Stage 7: the mock-provider play-simulation routes let an
 		// authenticated player mint self-signed casino callbacks on their
 		// own behalf (casino_play_handlers.go's own doc comment) - a

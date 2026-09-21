@@ -541,6 +541,59 @@ func TestManualGrantIssueAndActivate_HTTP_RefusedAtJurisdictionGate(t *testing.T
 	}
 }
 
+// TestActivateManualGrant_UnknownGrantID_Returns404 is the HTTP-level
+// regression guard for the ErrNotFound sentinel contract of the ADR 0082
+// §3.3 grant advisory-lock precondition.
+//
+// The precondition (bonus.AdvisoryLockGrant resolving player_account_id
+// before taking the L0.2 lock) made a grant-id lookup the FIRST thing
+// every grant entry point does. Its first implementation returned a bare
+// fmt.Errorf for "no such grant in this tenant", which turns the
+// errors.Is(err, bonus.ErrNotFound) branch in this handler (and in every
+// other bonus handler) into the catch-all 500 branch: an opaque server
+// error for what is a client-supplied bad identifier, and a needless
+// error-budget/alerting signal on a path that is also reachable
+// cross-tenant.
+//
+// No test in the tree asserted a 404 from this endpoint before now - the
+// existing manual-grant HTTP test only exercises a grant it issued
+// itself, so the sentinel could be (and was) swapped out silently. The
+// assertion is on the status code AND on apierror.CodeNotFound, so a
+// future change that returns 404 with a different code still fails here.
+func TestActivateManualGrant_UnknownGrantID_Returns404(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newTestServer(t, pool, issuer)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	bonusOps := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleBonusOperations, "ops-pw-404")
+	token := mustLoginStaff(t, srv, tenant.Slug, bonusOps.Email, "ops-pw-404")
+
+	playerID, _ := seedActiveBonusPlayer(t, pool, tenant.ID, brand.ID, "manual-grant-404")
+	eoiResp := postJSON(t, srv, "/v1/admin/bonus/economic-operations", token.AccessToken, map[string]any{
+		"operation_type": "bonus_manual_grant", "subject_scope": "single_subject", "subject_ref": playerID.String(),
+		"asset_code": "USD", "intended_aggregate_value": "100000", "recipient_ceiling": 1,
+		"idempotency_key": "eoi-manual-404-" + uuid.NewString(),
+	})
+	var eoi economicOperationResponse
+	decodeBody(t, eoiResp, &eoi)
+
+	// A well-formed uuid that names no grant in this tenant - the exact
+	// shape of a stale bookmark, a typo, or a cross-tenant id.
+	resp := postJSON(t, srv, "/v1/admin/bonus/manual-grants/"+uuid.NewString()+"/activate", token.AccessToken,
+		map[string]any{"parent_operation_id": eoi.OperationID, "amount": "1000"})
+	defer resp.Body.Close()
+	var apiErr apierror.Error
+	decodeBody(t, resp, &apiErr)
+	if resp.StatusCode != 404 {
+		t.Fatalf("expected 404 activating a grant id that does not exist in this tenant, got %d: %+v. "+
+			"A 500 here means a grant lookup stopped wrapping bonus.ErrNotFound (%%w) - see "+
+			"internal/bonus/advisory_lock_notfound_integration_test.go", resp.StatusCode, apiErr)
+	}
+	if apiErr.Code != apierror.CodeNotFound {
+		t.Fatalf("expected error code %q, got %q", apierror.CodeNotFound, apiErr.Code)
+	}
+}
+
 // --- bulk grant job: refusal path (success path proven at the package
 // level, four_eyes_ops_integration_test.go) ---
 

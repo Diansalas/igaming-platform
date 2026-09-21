@@ -448,8 +448,30 @@ not redesigned).
 
 ## 9. `PLAT-MIGDRIFT-1` — `cmd/migrate` has no live-schema-vs-file-content verification
 
-**Classification: E. OBSERVATION / TECHNICAL DEBT.** New this pass,
-surfaced by the independent security review.
+**Classification: E. OBSERVATION / TECHNICAL DEBT — CLOSED (Stage 9.1).**
+New this pass, surfaced by the independent security review; upgraded to
+FIX BEFORE PRODUCTION by the Stage 9 architect review after a live
+instance of exactly this drift was found in the shared dev database; and
+closed by Stage 9.1 as recommended below.
+
+**Update (Stage 9.1 production-readiness pass):** a content-hash column
+(`schema_migrations.checksum`, migration `0083_migration_checksum_tracking`)
+now records a SHA-256 of each migration's up-file content automatically on
+every `migrate up`; a new `migrate verify` subcommand
+(`internal/db.Pool.VerifyMigrations`, wired into `cmd/migrate` and into
+CI right after `migrate up`) recomputes every applied migration's current
+on-disk hash and reports any mismatch, plus any version gap or duplicate.
+Exact documented scope (see `docs/architecture/38-deployment-
+architecture.md`): it detects up-file content drift on already-applied
+migrations and version-number gaps/duplicates; it does **not** check
+`.down.sql` files or live schema against migration SQL, and it cannot
+retroactively detect drift that predates checksum tracking (a legacy
+NULL-checksum row is backfilled from current on-disk content, which is an
+honest, documented limit, not a false-positive gap). Run for real against
+the shared `igaming_platform_dev` database that carried the originally-
+found drift: it correctly reported clean (per its documented scope), and
+that database was separately rebuilt from a clean migration chain as part
+of the same fix.
 
 - **Owner:** `devops`/`architect`.
 - **Why it exists:** `schema_migrations` tracks applied migrations by
@@ -517,7 +539,7 @@ compliance policy was invented while producing this register.**
 | `MKT-DUAL-1` | C | No | No | architect / security |
 | `MKT-EXPIRY-1` | C | No | No | architect / compliance |
 | `MKT-PM-1` | B | No | No | (phase answering HDR-J-6) |
-| `PLAT-MIGDRIFT-1` | E | No | No | devops / architect |
+| `PLAT-MIGDRIFT-1` | E — **CLOSED (Stage 9.1)**, see §9 | No | No | devops / architect |
 | `HDR-J-6/7/8/9`, `HDR-M-1/2` | C | No | No | human |
 
 **Net result: exactly one production blocker (`PLAT-ROLESPLIT-1`), and it

@@ -501,6 +501,18 @@ A Bet is created (status `accepted`, ledger-locked) only if all four steps
 pass; any failure produces a `rejected` outcome with **no** ledger effect,
 mirroring Casino's "Declined never posts a `LedgerTransaction`" rule.
 
+**Lock ordering (see ADR 0082):** step 4's funds check and lock is
+governed by
+`docs/decisions/0082-canonical-financial-lock-ordering.md`. `PlaceBet`
+does not take its own `wallet_balance_projection` lock; it pre-locks its
+complete account set in canonical order through
+`ledger.LockProjectionsForPosting` and reads the balance from that
+result. The still-unbuilt settlement, void, partial-settlement and
+cashout paths (§6, ADR 0038 §5/§8/§10) are bound by that ADR
+prospectively: when they are implemented they must use the same
+pre-lock API and must not introduce a projection `FOR UPDATE` of their
+own.
+
 ### 3.4 Trading, exposure, and the Risk boundary
 
 `ARCHITECTURAL DECISION` — the boundary the directive specifically asks to

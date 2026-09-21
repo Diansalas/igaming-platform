@@ -14,6 +14,7 @@
 package httpclient
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -611,4 +612,188 @@ func TestGoStringRedaction_NeverLeaksCredentialOrBodyViaSharpV(t *testing.T) {
 
 func bytesContains(body []byte, substr string) bool {
 	return strings.Contains(string(body), substr)
+}
+
+// TestBoundResponseBody_UnderBoundUnchanged proves boundResponseBody is a
+// true no-op (same content, no truncation marker) when body is already
+// within maxErrorContentBytes - the common case, since a real diagnostic
+// body is ordinarily small.
+func TestBoundResponseBody_UnderBoundUnchanged(t *testing.T) {
+	body := []byte(`{"error":"invalid request"}`)
+	got := boundResponseBody(body)
+	if string(got) != string(body) {
+		t.Fatalf("boundResponseBody(%q) = %q, want unchanged", body, got)
+	}
+}
+
+// TestBoundResponseBody_OverBoundTruncated is the Stage 9.1 permanent
+// regression test for the residual gap ADR 0080 Decision 3 / Stage 9
+// addendum disclosed and left open: an oversized vendor-echoed body must
+// never be retained past maxErrorContentBytes.
+func TestBoundResponseBody_OverBoundTruncated(t *testing.T) {
+	body := bytes.Repeat([]byte("x"), maxErrorContentBytes+5000)
+	got := boundResponseBody(body)
+	if len(got) <= maxErrorContentBytes {
+		t.Fatalf("boundResponseBody result length = %d, want it to include the truncation marker (> %d)", len(got), maxErrorContentBytes)
+	}
+	if !bytes.HasPrefix(got, body[:maxErrorContentBytes]) {
+		t.Fatal("boundResponseBody result does not start with the first maxErrorContentBytes bytes of the original body")
+	}
+	wantMarker := fmt.Sprintf(truncationMarkerFmt, len(body))
+	if !strings.HasSuffix(string(got), wantMarker) {
+		t.Fatalf("boundResponseBody result does not end with the expected truncation marker %q, got %q", wantMarker, got)
+	}
+}
+
+// TestBoundResponseHeader_OverBoundTruncated mirrors
+// TestBoundResponseBody_OverBoundTruncated for header values.
+func TestBoundResponseHeader_OverBoundTruncated(t *testing.T) {
+	longValue := strings.Repeat("y", maxErrorContentBytes+100)
+	h := http.Header{"X-Diagnostic": []string{longValue}, "X-Short": []string{"fine"}}
+
+	got := boundResponseHeader(h)
+
+	gotLong := got.Get("X-Diagnostic")
+	if len(gotLong) <= maxErrorContentBytes {
+		t.Fatalf("X-Diagnostic length = %d, want it to include the truncation marker (> %d)", len(gotLong), maxErrorContentBytes)
+	}
+	wantMarker := fmt.Sprintf(truncationMarkerFmt, len(longValue))
+	if !strings.HasSuffix(gotLong, wantMarker) {
+		t.Fatalf("X-Diagnostic does not end with the expected truncation marker %q, got %q", wantMarker, gotLong)
+	}
+	if got.Get("X-Short") != "fine" {
+		t.Fatalf("X-Short = %q, want unchanged %q", got.Get("X-Short"), "fine")
+	}
+}
+
+// TestDo_Rejected4xx_LargeBodyIsTruncated proves Client.Do itself (not
+// just the boundResponseBody unit) bounds an oversized 4xx diagnostic
+// body before it ever reaches RejectedError.
+func TestDo_Rejected4xx_LargeBodyIsTruncated(t *testing.T) {
+	hugeBody := bytes.Repeat([]byte("b"), maxErrorContentBytes*3)
+	srv := conformance.NewStatusServer(t, 422, hugeBody)
+
+	c := New(ClientConfig{BaseURL: srv.URL, Timeout: time.Second})
+
+	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op"})
+	var rejectedErr *RejectedError
+	if !errors.As(err, &rejectedErr) {
+		t.Fatalf("errors.As(err, *RejectedError) failed, err = %v", err)
+	}
+	if len(rejectedErr.Body) >= len(hugeBody) {
+		t.Fatalf("RejectedError.Body length = %d, want it bounded well under the original %d bytes", len(rejectedErr.Body), len(hugeBody))
+	}
+	if len(rejectedErr.Body) > maxErrorContentBytes+100 {
+		t.Fatalf("RejectedError.Body length = %d, want it within maxErrorContentBytes plus a short marker", len(rejectedErr.Body))
+	}
+}
+
+// TestDo_5xx_LargeBodyIsTruncated mirrors
+// TestDo_Rejected4xx_LargeBodyIsTruncated for UnavailableError's 5xx path.
+func TestDo_5xx_LargeBodyIsTruncated(t *testing.T) {
+	hugeBody := bytes.Repeat([]byte("c"), maxErrorContentBytes*3)
+	srv := conformance.NewStatusServer(t, 502, hugeBody)
+
+	c := New(ClientConfig{BaseURL: srv.URL, Timeout: time.Second})
+
+	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op"})
+	var unavailableErr *UnavailableError
+	if !errors.As(err, &unavailableErr) {
+		t.Fatalf("errors.As(err, *UnavailableError) failed, err = %v", err)
+	}
+	if len(unavailableErr.Body) >= len(hugeBody) {
+		t.Fatalf("UnavailableError.Body length = %d, want it bounded well under the original %d bytes", len(unavailableErr.Body), len(hugeBody))
+	}
+	if len(unavailableErr.Body) > maxErrorContentBytes+100 {
+		t.Fatalf("UnavailableError.Body length = %d, want it within maxErrorContentBytes plus a short marker", len(unavailableErr.Body))
+	}
+}
+
+// TestDo_Rejected4xx_TruncationComposesWithRedaction_SecretStraddlesBoundary
+// is the composition proof the residual-gap fix requires: it constructs a
+// body where the configured credential straddles the maxErrorContentBytes
+// cut point (part of the secret's bytes fall before the cut, part after),
+// so a WRONG implementation that truncated before redacting would leave
+// the surviving prefix of the raw credential behind, unredacted, in
+// RejectedError.Body. The actual implementation (redact, then truncate -
+// see boundResponseBody's own doc comment) must never do that: the full
+// credential is matched and replaced before any byte is discarded, so no
+// fragment of it can survive truncation, regardless of where the vendor's
+// body happened to place it.
+func TestDo_Rejected4xx_TruncationComposesWithRedaction_SecretStraddlesBoundary(t *testing.T) {
+	const secretValue = "super-secret-api-key-value-0123456789" // 38 bytes
+
+	// Padding placed so the RAW secret straddles maxErrorContentBytes (30
+	// bytes before the cut, 8 after, secret is 38 bytes long) - but its
+	// redacted-placeholder replacement (shorter than the raw secret) lands
+	// entirely before the cut, so the truncation marker this test checks
+	// for below isn't itself coincidentally split by the same cut.
+	leadingPadding := bytes.Repeat([]byte("A"), maxErrorContentBytes-30)
+	trailingPadding := bytes.Repeat([]byte("Z"), 2000)
+
+	var body []byte
+	body = append(body, leadingPadding...)
+	body = append(body, []byte(secretValue)...)
+	body = append(body, trailingPadding...)
+
+	srv := conformance.NewStatusServer(t, 422, body)
+
+	c := New(ClientConfig{
+		BaseURL:         srv.URL,
+		Timeout:         time.Second,
+		AuthHeaderName:  "X-Api-Key",
+		AuthHeaderValue: secretValue,
+	})
+
+	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op"})
+	var rejectedErr *RejectedError
+	if !errors.As(err, &rejectedErr) {
+		t.Fatalf("errors.As(err, *RejectedError) failed, err = %v", err)
+	}
+
+	// Truncation must still have happened.
+	if len(rejectedErr.Body) > maxErrorContentBytes+200 {
+		t.Fatalf("RejectedError.Body length = %d, want it bounded", len(rejectedErr.Body))
+	}
+	// The full secret must never appear.
+	if bytesContains(rejectedErr.Body, secretValue) {
+		t.Fatalf("RejectedError.Body contains the raw credential: %s", rejectedErr.Body)
+	}
+	// Nor may any meaningfully-long prefix of it survive as an unredacted
+	// fragment - the exact failure mode a truncate-then-redact ordering
+	// would produce.
+	if leakedPrefix := secretValue[:10]; bytesContains(rejectedErr.Body, leakedPrefix) {
+		t.Fatalf("RejectedError.Body contains an unredacted fragment of the credential (%q): %s", leakedPrefix, rejectedErr.Body)
+	}
+	// Redaction must have actually run (proves this isn't passing only
+	// because the secret got trimmed away by coincidence).
+	if !bytesContains(rejectedErr.Body, redactedPlaceholder) {
+		t.Fatalf("RejectedError.Body does not contain the redaction placeholder, want %q present: %s", redactedPlaceholder, rejectedErr.Body)
+	}
+}
+
+// TestGoStringRedaction_StillFullyElidesOversizedContent extends
+// TestGoStringRedaction_NeverLeaksCredentialOrBodyViaSharpV with
+// larger-than-bound payloads, proving GoString's blanket elision (a fixed
+// placeholder, not a bounded rendering) makes the maxErrorContentBytes
+// truncation moot for %#v specifically - it never had any content to
+// bound in the first place - across all three error types.
+func TestGoStringRedaction_StillFullyElidesOversizedContent(t *testing.T) {
+	const secretValue = "super-secret-api-key-value"
+	hugeEchoed := strings.Repeat("provider-side-sensitive-value-", 1000) // far over maxErrorContentBytes
+
+	rejected := &RejectedError{StatusCode: 422, Body: []byte(hugeEchoed), Header: http.Header{"X-Echo": []string{secretValue}}}
+	if got := fmt.Sprintf("%#v", rejected); bytesContains([]byte(got), secretValue) || bytesContains([]byte(got), hugeEchoed) || len(got) > 500 {
+		t.Fatalf("RejectedError.GoString leaked or bloated on oversized content: len=%d", len(got))
+	}
+
+	unavailable := &UnavailableError{Attempts: 2, StatusCode: 502, Body: []byte(hugeEchoed), Header: http.Header{"X-Echo": []string{secretValue}}, Err: fmt.Errorf("dial tcp: %s", secretValue)}
+	if got := fmt.Sprintf("%#v", unavailable); bytesContains([]byte(got), secretValue) || bytesContains([]byte(got), hugeEchoed) || len(got) > 500 {
+		t.Fatalf("UnavailableError.GoString leaked or bloated on oversized content: len=%d", len(got))
+	}
+
+	timeout := &TimeoutError{Attempts: 1, Err: fmt.Errorf("context deadline exceeded: %s", strings.Repeat(secretValue, 1000))}
+	if got := fmt.Sprintf("%#v", timeout); bytesContains([]byte(got), secretValue) || len(got) > 500 {
+		t.Fatalf("TimeoutError.GoString leaked or bloated on an oversized wrapped error: len=%d", len(got))
+	}
 }

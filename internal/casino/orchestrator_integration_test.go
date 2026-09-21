@@ -119,13 +119,37 @@ func seedCasinoFixture(t *testing.T, pool *db.Pool) casinoFixture {
 	return f
 }
 
+// seedPlatformAdminStaffPrincipal inserts a genuine platform-scoped
+// (tenant_id IS NULL) staff_users row and returns its id. Migration 0085
+// (SEC-S91-3) added a trigger requiring app.platform_admin_principal_id
+// to resolve to a REAL staff_users row before casino_games can be
+// written, so WithPlatformAdmin(ctx, uuid.New(), ...) alone no longer
+// suffices for a legitimate casino_games write in this suite -
+// password_hash is a dummy literal, these principals are never used to
+// log in, only to satisfy the trigger's staff_users lookup.
+func seedPlatformAdminStaffPrincipal(t *testing.T, pool *db.Pool) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, NULL, $2, 'x', 'platform_admin')`,
+			id, "platform-admin-"+id.String()+"@test.example")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed platform admin staff principal: %v", err)
+	}
+	return id
+}
+
 // seedGame registers a platform-catalogue title for providerID - a
-// platform-administrative action (WithoutTenant), mirroring
-// newUpsertCasinoGameHandler.
+// platform-administrative action (db.Pool.WithPlatformAdmin, required
+// since migration 0084/ADR 0081 gave casino_games ENABLE+FORCE RLS),
+// mirroring newUpsertCasinoGameHandler.
 func seedGame(t *testing.T, pool *db.Pool, providerID string, assetCodes ...string) Game {
 	t.Helper()
 	var g Game
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	err := pool.WithPlatformAdmin(context.Background(), seedPlatformAdminStaffPrincipal(t, pool), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		g, err = UpsertGame(ctx, tx, UpsertGameInput{
 			ProviderID: providerID, ProviderGameID: "game-" + uuid.New().String()[:8],
@@ -460,7 +484,7 @@ func TestLaunchGame_DisabledGameAtPlatformLevel(t *testing.T) {
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
 
 	// Platform pulls the title (a licence problem, not a tenant decision).
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	err := pool.WithPlatformAdmin(context.Background(), seedPlatformAdminStaffPrincipal(t, pool), func(ctx context.Context, tx pgx.Tx) error {
 		_, err := UpsertGame(ctx, tx, UpsertGameInput{
 			ProviderID: game.ProviderID, ProviderGameID: game.ProviderGameID, Name: game.Name, GameType: game.GameType,
 			SupportedAssets: game.SupportedAssets, Status: GameStatusDisabled,

@@ -125,6 +125,32 @@ type Config struct {
 	BonusDepositSweepInterval  time.Duration
 	BonusCashbackSweepInterval time.Duration
 	BonusExpirySweepInterval   time.Duration
+
+	// AuthRateLimitPerMinute overrides the per-IP-per-minute limit applied
+	// to the unauthenticated credential endpoints (internal/httpserver/
+	// ratelimit.go's own doc comment names exactly which routes and why).
+	// 0 (the default) uses ratelimit.go's own per-bucket defaults, which
+	// is the sane production-appropriate starting point: those defaults
+	// were sized to comfortably exceed any plausible legitimate single-IP
+	// burst while still bounding Argon2id cost-amplification abuse.
+	// Positive values replace EVERY bucket's limit; negative disables the
+	// limiter entirely. Closes S9.1-LAUNCH-2 (docs/security/security-
+	// architecture.md) - previously only reachable via a code change.
+	AuthRateLimitPerMinute int
+
+	// TrustedProxyCount is the number of this deployment's OWN trusted
+	// reverse-proxy hops in front of platform-api (a load balancer,
+	// ingress controller, etc - never an arbitrary intermediary). It
+	// governs how the rate limiter determines caller identity from
+	// X-Forwarded-For; see httpserver.Deps.TrustedProxyCount's own doc
+	// comment (internal/httpserver/server.go) and trustedProxyClientIP
+	// (internal/httpserver/ratelimit.go) for the exact trust model.
+	// Defaults to 0: X-Forwarded-For is never read, RemoteAddr is used
+	// unconditionally - the safe default for an unconfigured deployment,
+	// since trusting a client-settable header with no known hop count to
+	// validate against would make the limiter trivially bypassable.
+	// Closes S9.1-LAUNCH-1 (docs/security/security-architecture.md).
+	TrustedProxyCount int
 }
 
 // Load reads configuration from the process environment. It returns an
@@ -153,6 +179,8 @@ func Load() (Config, error) {
 		BonusDepositSweepInterval:     5 * time.Minute,
 		BonusCashbackSweepInterval:    time.Hour,
 		BonusExpirySweepInterval:      time.Hour,
+		AuthRateLimitPerMinute:        0,
+		TrustedProxyCount:             0,
 	}
 
 	if v := os.Getenv("DATABASE_MAX_CONNS"); v != "" {
@@ -236,6 +264,24 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("config: BONUS_EXPIRY_SWEEP_INTERVAL_SECONDS must be positive")
 		}
 		cfg.BonusExpirySweepInterval = time.Duration(n) * time.Second
+	}
+
+	if v := os.Getenv("AUTH_RATE_LIMIT_PER_MINUTE"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid AUTH_RATE_LIMIT_PER_MINUTE: %w", err)
+		}
+		cfg.AuthRateLimitPerMinute = n
+	}
+	if v := os.Getenv("TRUSTED_PROXY_COUNT"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid TRUSTED_PROXY_COUNT: %w", err)
+		}
+		if n < 0 {
+			return Config{}, fmt.Errorf("config: TRUSTED_PROXY_COUNT must not be negative")
+		}
+		cfg.TrustedProxyCount = n
 	}
 
 	if cfg.DatabaseURL == "" {

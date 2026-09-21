@@ -41,7 +41,12 @@ import (
 func seedGameWithBlocklist(t *testing.T, pool *db.Pool, providerID string, blocklist []string, assetCodes ...string) Game {
 	t.Helper()
 	var g Game
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	// Migration 0084 (ADR 0081): casino_games writes now require a
+	// genuinely platform-admin-scoped transaction. Migration 0085
+	// (SEC-S91-3) further requires that transaction's principal to
+	// resolve to a real staff_users row - see
+	// seedPlatformAdminStaffPrincipal (orchestrator_integration_test.go).
+	err := pool.WithPlatformAdmin(context.Background(), seedPlatformAdminStaffPrincipal(t, pool), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		g, err = UpsertGame(ctx, tx, UpsertGameInput{
 			ProviderID: providerID, ProviderGameID: "game-" + uuid.New().String()[:8],

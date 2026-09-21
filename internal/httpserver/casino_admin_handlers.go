@@ -38,9 +38,11 @@ type upsertCasinoGameRequest struct {
 
 // newUpsertCasinoGameHandler registers or updates a title in the
 // PLATFORM-WIDE game catalogue (ADR 0025 §2) - never tenant-scoped, run
-// under db.Pool.WithoutTenant exactly like newCreateTenantHandler, since
-// casino_games (migration 0035) carries no RLS at all (same shape as the
-// `assets` registry). Gated by PermCasinoCatalogueManage, held only by
+// under db.Pool.WithPlatformAdmin: migration 0084 (ADR 0081,
+// ARCH-DB-2) gave casino_games ENABLE+FORCE row-level security with a
+// write policy scoped to the app.platform_admin_principal_id GUC, so a
+// WithoutTenant transaction can no longer write this table at all. Gated
+// by PermCasinoCatalogueManage, held only by
 // RolePlatformAdmin: a tenant administering its OWN routing/availability
 // must never be able to register a brand-new title into the shared
 // catalogue, only opt into one the platform has already vetted.
@@ -97,9 +99,19 @@ func newUpsertCasinoGameHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		subjectID, _ := uuid.Parse(tc.Subject)
+		// Migration 0084 (ADR 0081): a swallowed parse failure here
+		// would silently become uuid.Nil and get rejected by
+		// WithPlatformAdmin's own nil-principal guard as an opaque
+		// "db: WithPlatformAdmin called with nil principal id" error -
+		// so the parse error is surfaced explicitly instead, mirroring
+		// admin_routes.go's identical newCreateTenantHandler pattern.
+		subjectID, err := uuid.Parse(tc.Subject)
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
 		var game casino.Game
-		err = deps.DB.WithoutTenant(r.Context(), func(ctx context.Context, tx pgx.Tx) error {
+		err = deps.DB.WithPlatformAdmin(r.Context(), subjectID, func(ctx context.Context, tx pgx.Tx) error {
 			// Before-image, read in the SAME transaction immediately ahead
 			// of the write it precedes (SEC-4I-F3) - nil (not an empty
 			// struct) for a brand-new title, so the metadata shape itself
@@ -121,15 +133,23 @@ func newUpsertCasinoGameHandler(deps Deps) http.HandlerFunc {
 			if err != nil {
 				return err
 			}
+			// Migration 0084 (ADR 0081 §7.1, recommended widening): name/
+			// game_type are added alongside the pre-existing enforcement-
+			// relevant fields - §4.2 deliberately leaves game_type mutable
+			// even though it feeds bonus wagering-contribution weighting
+			// (bonus.RecordCashFundedWageringContribution), so its change
+			// must be visible in the audit trail too.
 			metadata := map[string]any{
 				"provider_id": req.ProviderID, "provider_game_id": req.ProviderGameID,
 				"after": map[string]any{
+					"name": game.Name, "game_type": game.GameType,
 					"status": string(game.Status), "supported_assets": game.SupportedAssets,
 					"demo_supported": game.DemoSupported, "jurisdiction_blocklist": game.JurisdictionBlocklist,
 				},
 			}
 			if before != nil {
 				metadata["before"] = map[string]any{
+					"name": before.Name, "game_type": before.GameType,
 					"status": string(before.Status), "supported_assets": before.SupportedAssets,
 					"demo_supported": before.DemoSupported, "jurisdiction_blocklist": before.JurisdictionBlocklist,
 				}

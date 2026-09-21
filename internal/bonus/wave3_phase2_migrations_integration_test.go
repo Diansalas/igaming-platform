@@ -105,6 +105,29 @@ const (
 	// triggers, indexes and foreign keys (no data dependency), so it is
 	// unconditionally reversible in this test's scenario.
 	migration0082Version = int64(82)
+	// migration0083Version (Stage 9.1, PLAT-MIGDRIFT-1: adds
+	// schema_migrations.checksum) is now the chain's tip, for the same
+	// reason 0071-0082 each were in turn - it only adds a single nullable
+	// column to schema_migrations itself (no data dependency on anything
+	// this test touches), so it is unconditionally reversible in this
+	// test's scenario.
+	migration0083Version = int64(83)
+	// migration0084Version (Stage 9.1, ARCH-DB-2: RLS + immutable-identity
+	// + deny-delete/truncate triggers on the six platform catalogue
+	// tables) is now the chain's tip, for the same reason 0071-0083 each
+	// were in turn - it only adds RLS policies, triggers and a shared
+	// trigger function to tables this test's own up-migration run never
+	// writes to, so it is unconditionally reversible in this test's
+	// scenario.
+	migration0084Version = int64(84)
+	// migration0085Version (Stage 9.1, SEC-S91-3: casino_games write
+	// policies now require app.platform_admin_principal_id to resolve to a
+	// real platform-scoped staff_users row) is now the chain's tip, for the
+	// same reason 0071-0084 each were in turn - it only adds one trigger
+	// function and one trigger on casino_games, a table this test's own
+	// up-migration run never writes to, so it is unconditionally reversible
+	// in this test's scenario.
+	migration0085Version = int64(85)
 )
 
 // migrationsDir resolves the real migrations directory relative to this
@@ -291,29 +314,31 @@ func TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip(t *testing.T) {
 		t.Fatal("bonus_grants.expires_at does not exist after migrating up")
 	}
 
-	// Roll back exactly the twelve most recently applied migrations (0079,
-	// 0078, 0077, 0076, 0075, 0074, 0073, 0072, 0071, 0070, 0069, 0068, in
-	// that order - MigrateDown orders by applied_at DESC).
-	// 0071/0072/0073/0074/0075/0076/0077/0078/0079 are not this test's own
-	// subject (Stage 4I, jurisdiction resolution foundation plus its
-	// security-review follow-ups, Phase B's evidence foundation, Phase D's
-	// evaluation-policy config widening, Phase E's operating-market/
-	// country-policy foundation, Phase E-SECURITY's tenant/licence/
-	// jurisdiction registry RLS, Stage 6's sportsbook foundation, and Stage
-	// 7's casino_launch_sessions brand-pinning fix, and Stage 8's
-	// casino_provider_rounds table plus sportsbook_bets provider reference
-	// columns, and Stage 9's bundled DB-hardening migration 0082) but all
-	// of them are unconditionally reversible (Phase E's
-	// down migration refuses only on a non-empty policy/ceiling table,
-	// which this test's up-migration run never populates; the others
-	// carry no such guard at all) and sit directly on top of 0070 in the
-	// chain, so they must be rolled back first for 0070's own down
-	// migration to run at all.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 15)
+	// Roll back exactly the seventeen most recently applied migrations
+	// (0084, 0083, 0082, 0081, 0080, 0079, 0078, 0077, 0076, 0075, 0074,
+	// 0073, 0072, 0071, 0070, 0069, 0068, in that order - MigrateDown
+	// orders by applied_at DESC).
+	// 0071/0072/0073/0074/0075/0076/0077/0078/0079/0080/0081/0082/0083/0084
+	// are not this test's own subject (Stage 4I, jurisdiction resolution
+	// foundation plus its security-review follow-ups, Phase B's evidence
+	// foundation, Phase D's evaluation-policy config widening, Phase E's
+	// operating-market/country-policy foundation, Phase E-SECURITY's
+	// tenant/licence/jurisdiction registry RLS, Stage 6's sportsbook
+	// foundation, Stage 7's casino_launch_sessions brand-pinning fix,
+	// Stage 8's casino_provider_rounds table plus sportsbook_bets provider
+	// reference columns, Stage 9's bundled DB-hardening migration 0082,
+	// and Stage 9.1's schema_migrations checksum column (0083) plus
+	// catalogue-write-authorization RLS (0084)) but all of them are
+	// unconditionally reversible (Phase E's down migration refuses only on
+	// a non-empty policy/ceiling table, which this test's up-migration run
+	// never populates; the others carry no such guard at all) and sit
+	// directly on top of 0070 in the chain, so they must be rolled back
+	// first for 0070's own down migration to run at all.
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 18)
 	if err != nil {
-		t.Fatalf("migrate down 15 (0082/0081/0080/0079/0078/0077/0076/0075/0074/0073/0072/0071/0070/0069/0068): %v", err)
+		t.Fatalf("migrate down 17 (0084/0083/0082/0081/0080/0079/0078/0077/0076/0075/0074/0073/0072/0071/0070/0069/0068): %v", err)
 	}
-	wantDown := []int64{migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version, migration0076Version, migration0075Version, migration0074Version, migration0073Version, migration0072Version, migration0071Version, migration0070Version, migration0069Version, migration0068Version}
+	wantDown := []int64{migration0085Version, migration0084Version, migration0083Version, migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version, migration0076Version, migration0075Version, migration0074Version, migration0073Version, migration0072Version, migration0071Version, migration0070Version, migration0069Version, migration0068Version}
 	if !wave3EqualVersions(rolledBack, wantDown) {
 		t.Fatalf("expected exactly migrations %v to be rolled back in that order, got %v", wantDown, rolledBack)
 	}
@@ -363,9 +388,9 @@ func TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip(t *testing.T) {
 	// Round trip: up again, cleanly.
 	reapplied, err := pool.MigrateUp(context.Background(), dir)
 	if err != nil {
-		t.Fatalf("re-applying migrations 0068/0069/0070/0071/0072/0073/0074/0075/0076/0077/0078/0079/0080/0081/0082: %v", err)
+		t.Fatalf("re-applying migrations 0068/0069/0070/0071/0072/0073/0074/0075/0076/0077/0078/0079/0080/0081/0082/0083/0084: %v", err)
 	}
-	wantUp := []int64{migration0068Version, migration0069Version, migration0070Version, migration0071Version, migration0072Version, migration0073Version, migration0074Version, migration0075Version, migration0076Version, migration0077Version, migration0078Version, migration0079Version, migration0080Version, migration0081Version, migration0082Version}
+	wantUp := []int64{migration0068Version, migration0069Version, migration0070Version, migration0071Version, migration0072Version, migration0073Version, migration0074Version, migration0075Version, migration0076Version, migration0077Version, migration0078Version, migration0079Version, migration0080Version, migration0081Version, migration0082Version, migration0083Version, migration0084Version, migration0085Version}
 	if !wave3EqualVersions(reapplied, wantUp) {
 		t.Fatalf("expected exactly migrations %v to be re-applied in that order, got %v", wantUp, reapplied)
 	}

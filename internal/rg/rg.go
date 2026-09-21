@@ -120,15 +120,19 @@ var ErrInvalidInput = errors.New("rg: invalid input")
 // all, and the "no restriction" case is exactly the one that needs
 // locking) - an advisory lock keyed on the person id is the standard
 // Postgres idiom for serializing on a fact rather than a row, applied
-// here the same way internal/casino.lockCashBalance's row lock serializes
-// concurrent bets against one wallet.
+// here the same way ledger.LockProjectionsForPosting's row locks on
+// wallet_balance_projection serialize concurrent bets against one wallet.
 //
-// LOCK ORDERING RULE (financial correctness specialist review): every
-// caller in this codebase takes this lock BEFORE any wallet-balance lock
-// (internal/casino.lockCashBalance's FOR UPDATE) within the same
-// transaction, never after. A future money path that calls
-// EvaluateEligibility (which calls this) while already holding a balance
-// lock would create a lock-ordering cycle with any other transaction that
+// LOCK ORDERING RULE (financial correctness specialist review, now
+// codified as ADR 0082 §2.1): this lock is class L0.4, so every caller in
+// this codebase takes it BEFORE any wallet-balance lock (class L3, taken
+// exclusively by ledger.LockProjectionsForPosting - rule R4 forbids a
+// projection FOR UPDATE anywhere outside internal/ledger, and the three
+// lockCashBalance* helpers that used to take one were deleted by that
+// ADR's dispatch) within the same transaction, never after. A future
+// money path that calls EvaluateEligibility (which calls this) while
+// already holding a balance lock would create a lock-ordering cycle
+// (L3-before-L0.4) with any other transaction that
 // takes the two in the opposite order - always resolve eligibility FIRST,
 // exactly as internal/casino.postBet already does.
 func lockPerson(ctx context.Context, tx pgx.Tx, personID uuid.UUID) error {

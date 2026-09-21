@@ -101,7 +101,13 @@ func (e *TimeoutError) Unwrap() error { return ErrProviderTimeout }
 // (internal/jurisdiction's redacted GoString implementations): Err may
 // wrap a *url.Error carrying an unredacted request URL/credential, so
 // fmt.Sprintf("%#v", err) must not be allowed to bypass Error()'s own
-// safe formatting.
+// safe formatting. Unlike UnavailableError/RejectedError, TimeoutError
+// never carries a response Body/Header at all (a timeout means no
+// complete response was ever received), so the maxErrorContentBytes
+// truncation bound (client.go) has nothing to apply to here - Err is
+// still fully elided, same as before, which already bounds this to a
+// fixed-length output regardless of how large the wrapped error's own
+// message happens to be.
 func (e *TimeoutError) GoString() string {
 	return fmt.Sprintf("httpclient.TimeoutError{Attempts:%d, CallerCanceled:%v, Sent:%v, Err:<redacted>}", e.Attempts, e.CallerCanceled, e.Sent)
 }
@@ -116,12 +122,32 @@ func (e *TimeoutError) GoString() string {
 type UnavailableError struct {
 	Attempts   int
 	StatusCode int
-	// Body/Header are scrubbed of the configured ClientConfig.
-	// AuthHeaderValue (if any) before being stored here - see
-	// redactCredential's doc comment (client.go) for the exact rule and
-	// its documented limits. This does not make Body/Header generically
-	// safe to log: a provider may echo a different sensitive value this
-	// package has no way to recognize.
+	// Body/Header go through two independent, composed protections before
+	// being stored here, in this order:
+	//
+	//  1. redactCredential/redactCredentialHeader (client.go) scrub every
+	//     literal occurrence of the configured ClientConfig.AuthHeaderValue
+	//     - see that function's own doc comment for the exact rule.
+	//  2. boundResponseBody/boundResponseHeader (client.go) then truncate
+	//     whatever remains to maxErrorContentBytes (4 KiB) per Body/per
+	//     header value, appending a marker noting the truncation and the
+	//     original length. This runs strictly AFTER step 1 - see
+	//     boundResponseBody's own doc comment for why that order (not the
+	//     reverse) is required for the two to compose correctly.
+	//
+	// Together these mean: (a) the ONE secret this package itself was
+	// configured with can never appear verbatim, and (b) Body/Header can
+	// never grow without bound, however large or however many times a
+	// vendor's response echoes something back. Neither claims Body/Header
+	// is generically safe to log: this package has no way to recognize a
+	// session token, a different credential, or a PII fragment a provider
+	// might echo that it wasn't itself configured to know about, and
+	// deliberately does no content-sniffing/heuristic detection of what
+	// "looks like" a secret to try to catch one (see maxErrorContentBytes'
+	// doc comment for why that is a deliberate non-goal). A caller must
+	// still treat Body/Header as bounded, partially-scrubbed diagnostic
+	// data from an untrusted third party - never as a value guaranteed
+	// free of a secret or PII.
 	Body   []byte
 	Header http.Header // nil for a transport-level failure (no HTTP response was ever received)
 
@@ -147,10 +173,21 @@ func (e *UnavailableError) Error() string {
 
 func (e *UnavailableError) Unwrap() error { return ErrProviderUnavailable }
 
-// GoString mirrors TimeoutError.GoString's reasoning: Body/Header are
-// scrubbed of the platform's own configured credential only (see
-// redactCredential's documented limits) and may still carry a different
-// sensitive value a provider echoed - %#v must not bypass that.
+// GoString mirrors TimeoutError.GoString's reasoning: %#v must not be
+// allowed to bypass the two protections already applied to Body/Header
+// when this struct was constructed (see the Body/Header field doc
+// comment above for both: credential redaction, then a fixed-length
+// truncation bound). GoString goes a step further than either of those
+// and elides Body/Header entirely - a fixed "<redacted>" placeholder,
+// never any of their actual, even if already-bounded-and-scrubbed,
+// content - which is strictly the stronger protection of the two; the
+// field-level redaction+bound still matters for every OTHER way this
+// struct gets read (direct field access, Error()'s own formatting, a
+// caller's own logging of e.Body/e.Header). Residual risk, stated
+// plainly per this repo's no-fake-completion rule: an
+// already-bounded, already-credential-redacted Body/Header can still
+// contain a provider-echoed secret or PII fragment this package has no
+// way to recognize - this does not, and cannot, claim otherwise.
 func (e *UnavailableError) GoString() string {
 	return fmt.Sprintf("httpclient.UnavailableError{Attempts:%d, StatusCode:%d, Sent:%v, Body:<redacted>, Header:<redacted>, Err:<redacted>}", e.Attempts, e.StatusCode, e.Sent)
 }
@@ -161,12 +198,15 @@ func (e *UnavailableError) GoString() string {
 // regardless of Request.Idempotent or ClientConfig.MaxRetries.
 type RejectedError struct {
 	StatusCode int
-	// Body/Header are scrubbed of the configured ClientConfig.
-	// AuthHeaderValue (if any) before being stored here - see
-	// redactCredential's doc comment (client.go) for the exact rule and
-	// its documented limits. This does not make Body/Header generically
-	// safe to log: a provider may echo a different sensitive value this
-	// package has no way to recognize.
+	// Body/Header go through the identical two-step, composed protection
+	// documented on UnavailableError.Body/Header's own field doc comment:
+	// redactCredential/redactCredentialHeader scrub the one configured
+	// credential first, then boundResponseBody/boundResponseHeader
+	// truncate whatever remains to maxErrorContentBytes (4 KiB) per
+	// Body/per header value. See that doc comment for the full rationale,
+	// the required ordering, and the residual risk it explicitly does not
+	// claim to have closed (a provider-echoed secret or PII fragment this
+	// package has no way to recognize).
 	Body   []byte
 	Header http.Header
 }
@@ -178,7 +218,13 @@ func (e *RejectedError) Error() string {
 func (e *RejectedError) Unwrap() error { return ErrProviderRejected }
 
 // GoString mirrors TimeoutError.GoString's reasoning - see
-// UnavailableError.GoString for the identical Body/Header caveat.
+// UnavailableError.GoString for the identical Body/Header caveat: %#v
+// elides Body/Header entirely, which is strictly stronger than the
+// redaction+truncation already applied at construction time, but the
+// residual risk that an already-bounded, already-scrubbed Body/Header
+// can still carry a provider-echoed secret or PII fragment this package
+// cannot recognize is unchanged and still applies to every other way
+// this struct's fields are read.
 func (e *RejectedError) GoString() string {
 	return fmt.Sprintf("httpclient.RejectedError{StatusCode:%d, Body:<redacted>, Header:<redacted>}", e.StatusCode)
 }

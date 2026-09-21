@@ -84,6 +84,13 @@ investigating an incident).
 | `BonusCashbackSweepInterval` | `BONUS_CASHBACK_SWEEP_INTERVAL_SECONDS` | `3600` (1h) | Must be positive if set. Not a secret. |
 | `BonusExpirySweepInterval` | `BONUS_EXPIRY_SWEEP_INTERVAL_SECONDS` | `3600` (1h) | Must be positive if set. Not a secret. |
 
+## Rate limiting (S9.1-LAUNCH-1/S9.1-LAUNCH-2, closed Stage 9.1)
+
+| Field | Env var | Required | Dev default | Production action |
+|---|---|---|---|---|
+| `AuthRateLimitPerMinute` | `AUTH_RATE_LIMIT_PER_MINUTE` | No | `0` (per-bucket defaults in `internal/httpserver/ratelimit.go`) | Not a secret. `0` uses the built-in per-bucket defaults (the sane production-appropriate starting point); a positive value overrides EVERY bucket; a negative value disables the limiter entirely (do not do this in production without an equivalent control at the edge). Normally leave at the default. |
+| `TrustedProxyCount` | `TRUSTED_PROXY_COUNT` | No — but see action | `0` (X-Forwarded-For never trusted) | Not a secret, but load-bearing and easy to get subtly wrong. **Must be set to the EXACT number of this deployment's own trusted reverse-proxy hops** the moment any load balancer/ingress/reverse proxy sits in front of `platform-api` — leaving it at `0` behind a real proxy collapses every distinct client onto the proxy's own address (the rate limiter becomes "per service," not "per client"); setting it too HIGH lets a client's own injected `X-Forwarded-For` entry be mistaken for the trusted one. See `internal/httpserver/server.go`'s `Deps.TrustedProxyCount` doc comment and `docs/architecture/38-deployment-architecture.md` §2/§4 for the exact trust model. |
+
 ## Fields intentionally NOT in `internal/config.Config` — do not add them here casually
 
 - **Mock provider credentials/webhook secrets** (`kycMockWebhookSecret`

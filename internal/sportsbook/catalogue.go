@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
 // SyncCatalogue upserts provider's full catalogue into the platform-wide
@@ -17,15 +19,27 @@ import (
 // provider's own reference again, mirroring internal/casino.UpsertGame's
 // identical (provider_id, provider_game_id) keying discipline.
 //
-// tx must NOT be tenant-scoped (db.Pool.WithoutTenant) - this catalogue is
-// platform-wide, read-open, platform-admin-write-only data, exactly like
-// casino_games (migration 0035) and the assets registry (migration 0003).
-// A real provider adapter implementing Provider is a drop-in replacement
-// for MockSportsbookProvider here - this function, the domain model, and
-// every downstream reader are unchanged by which adapter produced the
-// CatalogueResult (docs/architecture/09-sportsbook-architecture.md §0's
-// design test, applied at this stage's narrower scope).
+// tx MUST come from db.Pool.WithPlatformService(ctx,
+// db.ServiceSportsbookCatalogueSync, ...) - migration 0084 (ADR 0081,
+// ARCH-DB-2) gave these five tables ENABLE+FORCE row-level security with
+// a write policy scoped to the app.platform_service_id =
+// 'sportsbook_catalogue_sync' GUC, so a plain WithoutTenant transaction
+// can no longer write them. AssertPlatformServiceScope below is this
+// function's own in-Go, defence-in-depth check of that requirement,
+// mirroring internal/jurisdiction's assertPlatformScope - migration
+// 0084's policies enforce the identical predicate independently at the
+// database regardless. Read is open (FOR SELECT USING (true)), exactly
+// like casino_games (migration 0035) and the assets registry (migration
+// 0003), unaffected by this requirement. A real provider adapter
+// implementing Provider is a drop-in replacement for MockSportsbookProvider
+// here - this function, the domain model, and every downstream reader are
+// unchanged by which adapter produced the CatalogueResult
+// (docs/architecture/09-sportsbook-architecture.md §0's design test,
+// applied at this stage's narrower scope).
 func SyncCatalogue(ctx context.Context, tx pgx.Tx, provider Provider) error {
+	if err := db.AssertPlatformServiceScope(ctx, tx, db.ServiceSportsbookCatalogueSync); err != nil {
+		return err
+	}
 	result := provider.Catalogue()
 	for _, s := range result.Sports {
 		sportID, err := upsertSport(ctx, tx, s.ExternalRef, s.Code, s.Name)

@@ -106,6 +106,9 @@ jobs:
       - name: Run migrations (up)
         run: go run ./cmd/migrate up
 
+      - name: Verify migrations (checksum drift + version gaps, PLAT-MIGDRIFT-1)
+        run: go run ./cmd/migrate verify
+
       - name: Narrow igaming_runtime's schema_migrations access to read-only
         env:
           PGPASSWORD: igaming_ci_superuser_password

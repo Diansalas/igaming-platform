@@ -71,10 +71,39 @@ func putJSON(t *testing.T, srv *httptest.Server, path, bearerToken string, body 
 	return resp
 }
 
+// mustSeedPlatformAdminStaffPrincipal inserts a genuine platform-scoped
+// (tenant_id IS NULL) staff_users row and returns its id. Migration 0085
+// (SEC-S91-3) added a trigger requiring app.platform_admin_principal_id
+// to resolve to a REAL staff_users row before casino_games can be
+// written, so WithPlatformAdmin(ctx, uuid.New(), ...) alone no longer
+// suffices for a legitimate casino_games write in this suite. Deliberately
+// a lightweight raw-SQL insert rather than mustCreateStaff (which hashes
+// a real password via Argon2id) - these principals are never used to log
+// in, only to satisfy the trigger's staff_users lookup, so paying that
+// cost on every casino_games fixture write would be pure overhead.
+func mustSeedPlatformAdminStaffPrincipal(t *testing.T, pool *db.Pool) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO staff_users (id, tenant_id, email, password_hash, role) VALUES ($1, NULL, $2, 'x', 'platform_admin')`,
+			id, "platform-admin-"+id.String()+"@test.example")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed platform admin staff principal: %v", err)
+	}
+	return id
+}
+
 func mustSeedCasinoGame(t *testing.T, pool *db.Pool, providerID string, assetCodes ...string) casino.Game {
 	t.Helper()
 	var g casino.Game
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	// Migration 0084 (ADR 0081): casino_games writes now require a
+	// genuinely platform-admin-scoped transaction. Migration 0085
+	// (SEC-S91-3) further requires that transaction's principal to
+	// resolve to a real staff_users row.
+	err := pool.WithPlatformAdmin(context.Background(), mustSeedPlatformAdminStaffPrincipal(t, pool), func(ctx context.Context, tx pgx.Tx) error {
 		var err error
 		g, err = casino.UpsertGame(ctx, tx, casino.UpsertGameInput{
 			ProviderID: providerID, ProviderGameID: "game-" + uuid.New().String()[:8],
@@ -393,7 +422,8 @@ func TestCasinoWebhook_ProviderRoundOwnershipConflict_Returns409WithoutLeakingId
 // mustGetLatestAuditMetadata reads the most recent audit_log row for
 // (action, targetID) and decodes its metadata JSONB - platform-level rows
 // only (tenant_id IS NULL), matching newUpsertCasinoGameHandler's own
-// db.Pool.WithoutTenant scope.
+// db.Pool.WithPlatformAdmin scope (migration 0084 / ADR 0081), which -
+// like WithoutTenant before it - never sets app.tenant_id.
 func mustGetLatestAuditMetadata(t *testing.T, pool *db.Pool, action, targetID string) map[string]any {
 	t.Helper()
 	var raw []byte

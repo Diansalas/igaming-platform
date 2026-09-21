@@ -66,6 +66,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -99,7 +100,49 @@ const (
 	// algorithm.
 	backoffBase = 10 * time.Millisecond
 	backoffCap  = 200 * time.Millisecond
+
+	// maxErrorContentBytes bounds how much of a response body (and, per
+	// value, how much of a response header) is retained on
+	// RejectedError.Body/.Header and UnavailableError.Body/.Header -
+	// a defensive cap independent of maxResponseBodyBytes above, which
+	// bounds how much of the wire response this package will read into
+	// memory AT ALL. This bound instead governs what stays behind on a
+	// long-lived error struct - and anywhere that struct is subsequently
+	// logged, formatted, or serialized - for the life of the call and
+	// after.
+	//
+	// This is a Stage 9.1 (`integrations`) hardening of the residual gap
+	// ADR 0080 Decision 3 / Stage 9 addendum documented and left open: the
+	// existing redactCredential/redactCredentialHeader only scrub the ONE
+	// secret this package itself was configured with (ClientConfig.
+	// AuthHeaderValue), and do nothing for content this package has no way
+	// to recognize as sensitive (a session token, a different credential,
+	// a PII fragment) that a vendor's own response might echo back - e.g.
+	// a debug endpoint reflecting the full request, or a large gateway
+	// error page. Deliberately NOT a heuristic/content-sniffing "does this
+	// look like a secret" detector - that would be false confidence, and
+	// this package's own "no cleverness" convention (see the package doc
+	// comment) rules it out. A hard length bound is the honest version of
+	// this mitigation: it cannot stop an in-bound secret from being
+	// present, but it does stop an unbounded or enormous vendor payload
+	// from sitting verbatim in application state/logs indefinitely - see
+	// boundResponseBody/boundResponseHeader's own doc comments for the
+	// exact mechanism and its documented limits.
+	//
+	// 4 KiB (well below maxResponseBodyBytes' 10 MiB wire-read cap) is
+	// generous for a diagnostic 4xx/5xx body while still bounding the
+	// blast radius - Body/Header exist for a human or an adapter's
+	// error-path logging to read, not to reproduce the provider's full
+	// response.
+	maxErrorContentBytes = 4 << 10 // 4 KiB
 )
+
+// truncationMarkerFmt is appended after a Body/header value this package
+// cut off at maxErrorContentBytes, so a reader (human or log parser) can
+// tell "the platform truncated this" apart from "the provider's response
+// genuinely ended here" - and recover the original length even though the
+// content past the cut is gone.
+const truncationMarkerFmt = "...[truncated by platform, original length %d bytes]"
 
 // ClientConfig configures a Client. BaseURL, Timeout, MaxRetries, and the
 // auth header fields are all supplied by the caller at construction time
@@ -434,20 +477,22 @@ func (c *Client) attempt(ctx context.Context, req Request) (resp *Response, err 
 		return &Response{StatusCode: httpResp.StatusCode, Header: httpResp.Header, Body: body}, nil, false
 	case httpResp.StatusCode >= 400 && httpResp.StatusCode < 500:
 		// redactCredential (Stage 9 hardening, ADR 0080 Decision 3's own
-		// documented P3 gap) - see that function's doc comment for why
-		// only the error paths are scrubbed, never a successful Response.
+		// documented P3 gap) runs BEFORE boundResponseBody/
+		// boundResponseHeader (Stage 9.1 hardening) - see boundResponseBody's
+		// own doc comment for why that order, not the reverse, is what
+		// makes redaction and truncation compose correctly.
 		return nil, &RejectedError{
 			StatusCode: httpResp.StatusCode,
-			Body:       redactCredential(body, c.authHeaderValue),
-			Header:     redactCredentialHeader(httpResp.Header, c.authHeaderValue),
+			Body:       boundResponseBody(redactCredential(body, c.authHeaderValue)),
+			Header:     boundResponseHeader(redactCredentialHeader(httpResp.Header, c.authHeaderValue)),
 		}, false
 	case httpResp.StatusCode >= 500:
 		// An HTTP response was received, so the provider definitely got
 		// the request - Sent is always true here.
 		return nil, &UnavailableError{
 			StatusCode: httpResp.StatusCode,
-			Body:       redactCredential(body, c.authHeaderValue),
-			Header:     redactCredentialHeader(httpResp.Header, c.authHeaderValue),
+			Body:       boundResponseBody(redactCredential(body, c.authHeaderValue)),
+			Header:     boundResponseHeader(redactCredentialHeader(httpResp.Header, c.authHeaderValue)),
 			Sent:       true,
 		}, true
 	default:
@@ -522,6 +567,82 @@ func redactCredentialHeader(h http.Header, secret string) http.Header {
 		for i, v := range values {
 			if strings.Contains(v, secret) {
 				copied[i] = redactedPlaceholder
+			} else {
+				copied[i] = v
+			}
+		}
+		out[k] = copied
+	}
+	return out
+}
+
+// boundResponseBody returns body unchanged if it is already at or under
+// maxErrorContentBytes, or a copy truncated to that length with a
+// trailing marker (truncationMarkerFmt) noting the truncation and the
+// original length otherwise.
+//
+// Callers MUST apply this AFTER redactCredential, never before: this
+// package's own configured credential is matched as a whole-string
+// substring, so if the raw body were truncated first, a credential value
+// that happened to straddle the cut point would survive as an unmatched,
+// un-redacted PREFIX of itself in the retained bytes - redactCredential
+// only replaces a fully-intact occurrence of the secret, so a partial one
+// left behind by an earlier truncation would leak silently. Running
+// redactCredential over the full, untruncated body first (its own
+// existing maxResponseBodyBytes wire-read cap already bounds that cost)
+// and only then truncating means the secret is always matched against its
+// complete form before any of the body is ever discarded.
+//
+// This function itself has no notion of what is "sensitive" beyond what
+// redactCredential already scrubbed - it is a size bound only, not a
+// scrubber, and deliberately does no content-sniffing/heuristic detection
+// of what "looks like" a secret or PII (see maxErrorContentBytes' own doc
+// comment for why that is a deliberate non-goal, not an oversight). A
+// bounded Body can still contain a provider-echoed secret or PII fragment
+// this package has no way to recognize - callers must not treat a bounded
+// Body as safe to log unconditionally, only as "no longer capable of
+// growing without bound".
+func boundResponseBody(body []byte) []byte {
+	if len(body) <= maxErrorContentBytes {
+		return body
+	}
+	marker := fmt.Sprintf(truncationMarkerFmt, len(body))
+	out := make([]byte, 0, maxErrorContentBytes+len(marker))
+	out = append(out, body[:maxErrorContentBytes]...)
+	out = append(out, marker...)
+	return out
+}
+
+// boundResponseHeader returns h unchanged if every value is already at or
+// under maxErrorContentBytes, or a copy with every over-long value
+// truncated (identically to boundResponseBody, marker included)
+// otherwise. Callers MUST apply this AFTER redactCredentialHeader, for
+// the identical straddling-the-cut-point reason boundResponseBody's own
+// doc comment explains for Body - see it for the full rationale and its
+// documented "size bound, not a scrubber" limits, which apply here
+// unchanged.
+func boundResponseHeader(h http.Header) http.Header {
+	overLong := false
+	for _, values := range h {
+		for _, v := range values {
+			if len(v) > maxErrorContentBytes {
+				overLong = true
+				break
+			}
+		}
+		if overLong {
+			break
+		}
+	}
+	if !overLong {
+		return h
+	}
+	out := make(http.Header, len(h))
+	for k, values := range h {
+		copied := make([]string, len(values))
+		for i, v := range values {
+			if len(v) > maxErrorContentBytes {
+				copied[i] = v[:maxErrorContentBytes] + fmt.Sprintf(truncationMarkerFmt, len(v))
 			} else {
 				copied[i] = v
 			}

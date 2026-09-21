@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
@@ -28,7 +29,7 @@ func run() error {
 	flag.Parse()
 
 	if flag.NArg() != 1 {
-		return fmt.Errorf("usage: migrate [-dir=migrations] [-steps=N] <up|down|status>")
+		return fmt.Errorf("usage: migrate [-dir=migrations] [-steps=N] <up|down|status|verify>")
 	}
 	command := flag.Arg(0)
 
@@ -70,7 +71,37 @@ func run() error {
 		}
 		fmt.Printf("migrate: %d migration(s) found in %s: %s\n", len(migrations), *dir, db.DescribeMigrations(migrations))
 		return nil
+	case "verify":
+		// PLAT-MIGDRIFT-1 (docs/architecture/38-deployment-architecture.md
+		// §3/§4): checksum-verifies every already-applied migration's
+		// up-file against what was recorded when it was applied, and
+		// checks the on-disk migration set for version-number gaps. See
+		// db.VerifyMigrations' own doc comment for the exact, non-
+		// aspirational scope of what this does and does not check.
+		report, err := pool.VerifyMigrations(ctx, *dir)
+		if err != nil {
+			return err
+		}
+		for _, res := range report.Results {
+			label := fmt.Sprintf("%04d_%s", res.Version, res.Description)
+			switch res.Status {
+			case db.MigrationCheckOK:
+				fmt.Printf("migrate verify: OK           %s\n", label)
+			case db.MigrationCheckUnverifiable:
+				fmt.Printf("migrate verify: UNVERIFIABLE %s: %s\n", label, res.Detail)
+			default:
+				fmt.Printf("migrate verify: %-12s %s: %s\n", strings.ToUpper(string(res.Status)), label, res.Detail)
+			}
+		}
+		for _, gap := range report.VersionGaps {
+			fmt.Printf("migrate verify: GAP          %s\n", gap)
+		}
+		if !report.OK() {
+			return fmt.Errorf("migrate verify: FAILED - see above (mismatch, missing file, or version gap detected)")
+		}
+		fmt.Println("migrate verify: all applied migrations verified clean, no version gaps")
+		return nil
 	default:
-		return fmt.Errorf("unknown command %q: expected up, down, or status", command)
+		return fmt.Errorf("unknown command %q: expected up, down, status, or verify", command)
 	}
 }

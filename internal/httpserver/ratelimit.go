@@ -38,28 +38,33 @@
 //     own independent window, so the effective platform-wide limit is
 //     (limit x replicas). That is still a bound; it is not the configured
 //     number.
-//   - It keys on clientIP(r), which is RemoteAddr - see clientIP's own doc
-//     comment: X-Forwarded-For is deliberately NOT trusted, because no
-//     specific reverse-proxy chain is configured yet. CONSEQUENCE, AND THE
-//     REASON THE DEFAULTS BELOW ARE DELIBERATELY GENEROUS: once a load
-//     balancer sits in front of this service, every request arrives from
-//     the balancer's own address, and this limiter degrades from "per
-//     client" to "per service, globally." Whoever introduces that proxy
-//     MUST either teach clientIP to trust its X-Forwarded-For, or raise/
-//     disable these limits via Deps.AuthRateLimitPerMinute, or move the
-//     control to the edge - otherwise the platform silently caps its own
-//     total login throughput. Recorded as launch-gate item S9.1-LAUNCH-1
-//     in docs/security/security-architecture.md's Stage 9 section.
-//   - Deps.AuthRateLimitPerMinute is the intended escape hatch for the
-//     bullet above, but it is NOT yet plumbed from internal/config or
-//     cmd/platform-api - see S9.1-LAUNCH-2 in the same section. Until
-//     that exists, these defaults can only be changed by editing this
-//     file, which is precisely what the escape hatch was meant to avoid.
+//   - It keys on the caller's identity as determined by clientKey (below),
+//     which by default is clientIP(r) (RemoteAddr) - see clientIP's own
+//     doc comment. X-Forwarded-For is used ONLY when a deployment
+//     explicitly configures Deps.TrustedProxyCount (env TRUSTED_PROXY_COUNT)
+//     to the exact number of its own trusted reverse-proxy hops; the
+//     default of 0 means X-Forwarded-For is never read for rate-limiting
+//     purposes, which is the safe behavior for an unconfigured deployment
+//     (Deps.TrustedProxyCount's own doc comment has the full trust model;
+//     this closes launch-gate item S9.1-LAUNCH-1). CONSEQUENCE OF LEAVING
+//     IT AT 0 BEHIND A REAL LOAD BALANCER: every request arrives from the
+//     balancer's own address, and this limiter degrades from "per client"
+//     to "per service, globally" - whoever introduces that proxy MUST set
+//     TRUSTED_PROXY_COUNT to the number of hops it controls, or raise/
+//     disable these limits via AUTH_RATE_LIMIT_PER_MINUTE, or move the
+//     control to the edge.
+//   - AuthRateLimitPerMinute/TrustedProxyCount are both plumbed end to end
+//     through internal/config -> cmd/platform-api/main.go -> this package
+//     (this closes launch-gate item S9.1-LAUNCH-2) - the
+//     AUTH_RATE_LIMIT_PER_MINUTE and TRUSTED_PROXY_COUNT environment
+//     variables reach here without a code change.
 package httpserver
 
 import (
+	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -120,15 +125,74 @@ type fixedWindowLimiter struct {
 	// override, when > 0, replaces every per-bucket limit (see
 	// Deps.AuthRateLimitPerMinute). Negative disables the limiter entirely.
 	override int
+	// trustedProxyHops is Deps.TrustedProxyCount, carried onto the limiter
+	// itself so clientKey has it without threading it through every call
+	// site. See trustedProxyClientIP's own doc comment for the trust model.
+	trustedProxyHops int
 }
 
-func newFixedWindowLimiter(window time.Duration, override int) *fixedWindowLimiter {
+func newFixedWindowLimiter(window time.Duration, override int, trustedProxyHops int) *fixedWindowLimiter {
 	return &fixedWindowLimiter{
-		window:   window,
-		entries:  make(map[string]*rateWindow),
-		now:      time.Now,
-		override: override,
+		window:           window,
+		entries:          make(map[string]*rateWindow),
+		now:              time.Now,
+		override:         override,
+		trustedProxyHops: trustedProxyHops,
 	}
+}
+
+// clientKey is the per-request identity the limiter counts against -
+// trustedProxyClientIP applied to this limiter's own configured hop count.
+func (l *fixedWindowLimiter) clientKey(r *http.Request) string {
+	return trustedProxyClientIP(r, l.trustedProxyHops)
+}
+
+// trustedProxyClientIP determines the caller's IP for rate-limiting when
+// trustedHops trusted reverse-proxy hops are configured in front of this
+// service (Deps.TrustedProxyCount / TRUSTED_PROXY_COUNT):
+//
+//   - trustedHops <= 0: X-Forwarded-For is never read. RemoteAddr
+//     (clientIP(r)) is the answer, unconditionally - the safe default for
+//     an unconfigured deployment. A header the caller can set to anything
+//     is worthless without a known number of trusted hops to skip past it,
+//     and reading it anyway would let any client mint itself a fresh rate
+//     limit bucket for free.
+//   - trustedHops == N > 0: this deployment's own reverse-proxy chain is N
+//     hops deep, and each of those N hops appends exactly one entry to the
+//     RIGHT of X-Forwarded-For - the standard behavior of nginx/HAProxy/
+//     ALB/etc ("append the address of whoever just connected to me,
+//     comma-separated, after whatever was already there"). The real
+//     client's address is therefore always the Nth entry counting from
+//     the right, REGARDLESS of how much garbage a malicious client
+//     prepends on the LEFT of its own X-Forwarded-For before the request
+//     ever reaches the first trusted hop: the trusted hops only ever add
+//     to the right, so counting from the right is exactly what makes
+//     left-side injection irrelevant. For example, with trustedHops=1 and
+//     a client-supplied header of "9.9.9.9" arriving at the single trusted
+//     proxy, the proxy forwards "9.9.9.9, <real client>" - the rightmost
+//     entry is always the one the trusted proxy itself appended.
+//
+// Any failure mode (header absent, fewer than trustedHops comma-separated
+// entries, an entry that doesn't parse as an IP) falls back to RemoteAddr -
+// never to "no limit" and never to trusting attacker-controlled input as
+// the fallback.
+func trustedProxyClientIP(r *http.Request, trustedHops int) string {
+	if trustedHops <= 0 {
+		return clientIP(r)
+	}
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return clientIP(r)
+	}
+	parts := strings.Split(xff, ",")
+	if len(parts) < trustedHops {
+		return clientIP(r)
+	}
+	candidate := strings.TrimSpace(parts[len(parts)-trustedHops])
+	if candidate == "" || net.ParseIP(candidate) == nil {
+		return clientIP(r)
+	}
+	return candidate
 }
 
 // allow reports whether one more request against key is permitted, and
@@ -188,7 +252,7 @@ func rateLimit(limiter *fixedWindowLimiter, bucket string, limit int, h http.Han
 		return h
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !limiter.allow(bucket+"|"+clientIP(r), limit) {
+		if !limiter.allow(bucket+"|"+limiter.clientKey(r), limit) {
 			requestID := observability.RequestIDFromContext(r.Context())
 			w.Header().Set("Retry-After", strconv.Itoa(int(limiter.window.Seconds())))
 			apierror.Write(w, requestID, apierror.CodeRateLimited, "too many requests; try again shortly")

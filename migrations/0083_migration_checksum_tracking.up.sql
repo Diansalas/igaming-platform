@@ -1,0 +1,32 @@
+-- Stage 9.1 devops item 2 (PLAT-MIGDRIFT-1, docs/architecture/
+-- 38-deployment-architecture.md §3/§4): schema_migrations gets a content-
+-- checksum column so `cmd/migrate verify` can detect a historical
+-- migration's up-file being edited in place AFTER it was already applied
+-- somewhere. This closes the exact blind spot that let one dev database
+-- (igaming_platform_dev) keep a stale `provider_bet_ref` column name on
+-- sportsbook_bets long after migration 0081's committed file was renamed
+-- to `provider_bet_reference` - `migrate status` never noticed, because it
+-- (and schema_migrations itself) tracked only version numbers, never
+-- content.
+--
+-- This ALTER is also applied defensively and unconditionally by
+-- internal/db.Pool.MigrateUp itself, BEFORE this migration (or any other)
+-- ever runs - see ensureSchemaMigrationsChecksumColumn's own doc comment
+-- in internal/db/migrate.go for why: a brand-new database applying
+-- migrations 1..N in one pass needs the column to exist before migration
+-- 1's own row is inserted, which is before this migration has had a
+-- chance to run. This migration's own effect here is therefore usually a
+-- no-op in practice (IF NOT EXISTS) - it exists anyway so this schema
+-- change has the same versioned, reviewable audit trail as every other
+-- schema change in this repository, rather than living only in Go code.
+--
+-- Scope note (exact, not aspirational): a checksum recorded from this
+-- point forward proves the up-file's content is unchanged since it was
+-- applied. It does NOT retroactively prove anything about a migration
+-- applied before this column existed - those rows get their checksum
+-- backfilled from whatever the file looks like AT BACKFILL TIME (see
+-- backfillMissingChecksums), which cannot detect an edit that already
+-- happened before the backfill ran. It also never inspects the
+-- corresponding .down.sql file, nor the live database schema itself -
+-- only the up-file's own bytes.
+ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum TEXT;

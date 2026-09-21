@@ -3696,11 +3696,20 @@ edge/WAF control, and must not be described as either:
 
 - With more than one `platform-api` replica each replica enforces its own
   window, so the platform-wide effective limit is (limit × replicas).
-  Still a bound; not the configured number.
-- It keys on `clientIP(r)`, i.e. `RemoteAddr`. `X-Forwarded-For` is
-  deliberately not trusted, because no specific reverse-proxy chain is
-  configured yet (see `clientIP`'s own doc comment, and
-  `TestRateLimit_IgnoresXForwardedFor`).
+  Still a bound; not the configured number. This platform deliberately
+  does not build a distributed/shared-state (e.g. Redis-backed) rate
+  limiter to close this — CLAUDE.md's "no premature optimization" rule —
+  it is an accepted, documented limitation for a first production
+  deployment.
+- It keys on the caller identity `trustedProxyClientIP` (ratelimit.go)
+  computes, which by default (`TrustedProxyCount` / `TRUSTED_PROXY_COUNT`
+  = 0) is `clientIP(r)`, i.e. `RemoteAddr`. `X-Forwarded-For` is read ONLY
+  when a deployment explicitly configures the exact number of its own
+  trusted reverse-proxy hops (see `TestRateLimit_IgnoresXForwardedFor` for
+  the default-0 case and the `TestTrustedProxyClientIP_*`/
+  `TestRateLimit_TrustedProxy_*` suite in
+  `internal/httpserver/ratelimit_trustedproxy_test.go` for the configured
+  case).
 - `rateLimiterMaxKeys` fails OPEN, on purpose: an attacker reaching the
   service from ~100k distinct real source addresses already has a botnet
   this control was never going to stop, and denying every login in that
@@ -3708,25 +3717,32 @@ edge/WAF control, and must not be described as either:
   authentication outage for legitimate players. The property being
   protected at that boundary is bounded memory, not the rate limit.
 
-**S9.1-LAUNCH-1 (launch gate, open).** The first deployment that puts a
-load balancer or ingress in front of `platform-api` makes every request
-arrive from one address, at which point this control degrades from "per
-client" to "per service, globally", and the configured numbers become a
-cap on total login throughput. Whoever introduces that proxy MUST do one
-of: teach `clientIP` to trust that specific proxy chain's
-`X-Forwarded-For`; raise/disable the limits via
-`httpserver.Deps.AuthRateLimitPerMinute`; or move the control to the
-edge. This must not be discovered in production.
+**S9.1-LAUNCH-1 (launch gate, CLOSED in Stage 9.1).** The first deployment
+that puts a load balancer or ingress in front of `platform-api` makes
+every request arrive from one address unless configured otherwise — this
+was the "makes every request arrive from one address" gap. Closed by
+`Deps.TrustedProxyCount` (`TRUSTED_PROXY_COUNT` env var, default 0):
+setting it to the exact number of trusted proxy hops in front of this
+instance makes the limiter extract the real client from the correct,
+non-spoofable position in `X-Forwarded-For` (the Nth entry from the
+right — trusted hops only ever append to the right, so nothing a client
+injects further left can shift which entry is trusted; see
+`trustedProxyClientIP`'s own doc comment in `internal/httpserver/
+ratelimit.go` for the full reasoning). Leaving it at 0 behind a real
+proxy reproduces the original degradation exactly as before — this is a
+configuration responsibility for whoever deploys behind a proxy, not
+something the code can infer on its own.
 
-**S9.1-LAUNCH-2 (launch gate, open — owner: `devops`).**
-`Deps.AuthRateLimitPerMinute` exists precisely so S9.1-LAUNCH-1 can be
-answered without a code change, but it is **not wired to
-`internal/config` or `cmd/platform-api/main.go` yet**, so today it is
-reachable only from a code change or a test. It needs an
+**S9.1-LAUNCH-2 (launch gate, CLOSED in Stage 9.1).**
+`Deps.AuthRateLimitPerMinute` is now plumbed end to end: the
 `AUTH_RATE_LIMIT_PER_MINUTE` environment variable (0 = per-bucket
-defaults, >0 = override every bucket, <0 = disable) plumbed through
-`config.Config` into the `Deps` literal. Until that exists, the documented
-escape hatch is not operationally available.
+defaults, >0 = override every bucket, <0 = disable) reaches
+`internal/config.Config.AuthRateLimitPerMinute`, which
+`cmd/platform-api/main.go` passes straight into the `Deps` literal — no
+code change needed to raise, lower, or disable the limiter in any
+environment. See `docs/runbooks/production-configuration-checklist.md`
+for the field-by-field entry (alongside the new `TrustedProxyCount`
+field).
 
 ### S9.2 `RequirePlayerPrincipal` — the player self-service surface
 
@@ -3843,12 +3859,69 @@ reviewer knows these were actually looked at, not skipped:
   vendor adapter MUST NOT put the body into the error it returns, since
   `newRequestPasswordResetHandler` logs that error.
 
-### S9.5 Scope of this review
+### S9.5 `internal/providers/httpclient` — bounded response body/header on error types (Stage 9.1, `integrations`)
+
+ADR 0080 Decision 3's Stage 9 addendum recorded a P3 finding it fixed
+(credential redaction on `RejectedError`/`UnavailableError`) and a residual
+gap it explicitly disclosed and left open: `redactCredential`/
+`redactCredentialHeader` only scrub the ONE secret this package itself was
+configured with (`ClientConfig.AuthHeaderValue`); they do nothing for
+content this package has no way to recognize as sensitive that a vendor's
+own response might echo back (a debug endpoint reflecting the full
+request, a gateway/proxy error page reflecting request headers, a session
+token or PII fragment neither this package nor its caller configured it to
+know about). No production call site consumes these errors yet (no real
+provider is wired in), so this was disclosed as real-but-inert, not fixed.
+
+**Status: bounded/mitigated, not closed.** `boundResponseBody`/
+`boundResponseHeader` (`internal/providers/httpclient/client.go`) now cap
+`RejectedError.Body`/`.Header` and `UnavailableError.Body`/`.Header` at
+`maxErrorContentBytes` (4 KiB, chosen well below the package's existing
+10 MiB wire-read cap, `maxResponseBodyBytes`) before they are ever stored
+on the error struct, appending a marker noting the truncation and the
+original length. This runs strictly AFTER the existing credential
+redaction, never before - truncating first could leave an unmatched,
+un-redacted PREFIX of a credential that happened to straddle the cut
+point, since `redactCredential` only replaces a fully-intact occurrence of
+the secret. A regression test
+(`TestDo_Rejected4xx_TruncationComposesWithRedaction_SecretStraddlesBoundary`,
+`internal/providers/httpclient/client_test.go`) constructs exactly that
+straddling scenario and proves the correct order closes it.
+
+**What this is and is not.** This is a generic size bound, not a secret or
+PII detector, and deliberately does no content-sniffing/heuristic guessing
+at what "looks like" a token - that would be false confidence, not a real
+mitigation, and this package's own "no cleverness" convention (Stage 8
+§12) rules it out. It closes the concrete, honest part of the risk this
+finding was actually about: an unbounded or enormous vendor-echoed payload
+can no longer sit verbatim and unbounded in an error struct (and whatever
+subsequently logs or formats it). **It does not, and cannot, guarantee
+`Body`/`Header` are free of a secret or PII a provider chooses to echo
+within the retained window** - a value still within the 4 KiB bound that
+this package doesn't recognize as sensitive passes through untouched, same
+as before this change. `GoString()` on all three error types
+(`TimeoutError`, `UnavailableError`, `RejectedError`) is unaffected by (and
+strictly stronger than) this bound: each already elides its
+credential/body-carrying fields entirely with a fixed placeholder, so
+`fmt.Sprintf("%#v", err)` was never a vector for this content to leak
+regardless of body size, before or after this change.
+
+Verified: `go build ./...`, `go vet ./...`, `gofmt -l .` clean; full
+`internal/providers/...` suite (including `-race`) passes, including every
+pre-existing credential-redaction/`GoString` regression test unchanged.
+Scope confined to `internal/providers/httpclient/*.go` and its own test
+file - no domain package (`casino`/`sportsbook`/`payments`) touched, since
+none consumes these errors yet.
+
+### S9.6 Scope of this review
 
 **In scope:** `internal/auth` in full; `internal/httpserver`'s route
 table, middleware chain, and the player self-service and admin handlers
 spot-checked per domain; `internal/httpserver/ratelimit.go`;
-`internal/identity`'s login-attempt lockout; the credential-token flows.
+`internal/identity`'s login-attempt lockout; the credential-token flows;
+and, as a narrowly-scoped Stage 9.1 addition (`integrations` specialist,
+see S9.5), `internal/providers/httpclient`'s error-type Body/Header
+bounding.
 **Read-only, not modified:** `b2c/` and `backoffice/` auth modules.
 **Explicitly NOT in scope and NOT claimed:** penetration testing,
 certification-grade audit, any TLS/ingress/WAF configuration, the
@@ -3864,3 +3937,529 @@ tradeoff and the intended fix (server-set `httpOnly`, `Secure`,
 `SameSite` cookies, which requires a backend change). This is materially
 worse for a public B2C app than for internal staff and should be treated
 as a pre-launch item, not an indefinite deferral.
+
+## Stage 9.1 (2026-09-21) — security review of ARCH-DB-2 (migration 0084) and LOCK-1 (ADR 0082)
+
+`security`-owned, mandatory review under CLAUDE.md's "Security-sensitive
+functionality requires explicit review by the `security` specialist before
+being marked complete", covering two already-implemented Stage 9.1
+changes:
+
+1. **ARCH-DB-2** — `migrations/0084_catalogue_write_authorization.{up,down}.sql`,
+   `internal/db/platform_service.go`, `internal/casino/catalogue.go`
+   (`UpsertGame`), `internal/sportsbook/catalogue.go` (`SyncCatalogue`),
+   `internal/httpserver/casino_admin_handlers.go`
+   (`newUpsertCasinoGameHandler`), `cmd/platform-api/main.go`, and the
+   three new adversarial suites (design ruling: ADR 0081).
+2. **LOCK-1** — `internal/ledger/lockorder.go`, `ledger.Post`'s reordering,
+   `bonus.AdvisoryLockPlayerBonusScope`, and the call-site changes in
+   `internal/casino`, `internal/sportsbook`, `internal/payments`,
+   `internal/withdrawal`, `internal/bonus` (design ruling: ADR 0082 incl.
+   Amendment A1). Reviewed for the **security** angle only — authorization,
+   tenant isolation, DoS, and the durability of the regression guards.
+   Financial-invariant review is `ledger-finance`'s and was done
+   separately.
+
+This review was **adversarial and empirical, not a read-through**: a
+throwaway database was created, all 84 migrations applied, and every claim
+below about RLS, trigger and policy behaviour was reproduced by direct SQL
+under each real connection scope. The database was dropped afterwards; no
+project file outside this document was modified.
+
+**Result: no P0 and no P1 findings.** Three P2 and six P3 findings follow.
+Saying so plainly is the honest outcome — CLAUDE.md's "no fake completion"
+rule cuts both ways, and manufacturing a blocking finding to look thorough
+would be as wrong as missing one.
+
+### S91.1 What was verified empirically, and held
+
+All of the following were executed against a freshly-migrated database
+connecting as `igaming` (the table-owning, non-superuser role — the exact
+dev/CI posture, where `FORCE` is the only thing that makes any of this
+apply):
+
+- `relrowsecurity` **and** `relforcerowsecurity` are both `true` on all six
+  tables, owner is `igaming`, `rolsuper` is `false`. `FORCE` is therefore
+  genuinely load-bearing here, not a claim inherited from the ADR. With no
+  GUC set at all (`WithoutTenant` — the scope *both* production writers
+  used before this change), `INSERT` into `casino_games` and `sb_sports`
+  fails with `new row violates row-level security policy`.
+- Write-scope matrix, all reproduced by hand: `WithTenant`,
+  `WithPlayerScope` and `WithoutTenant` can write none of the six;
+  `WithPlatformAdmin` writes `casino_games` and is refused on every `sb_*`
+  table; `WithPlatformService(sportsbook_catalogue_sync)` writes the five
+  `sb_*` tables and is refused on `casino_games`; a *different* service
+  string (`some_other_service`) is refused, confirming the policy's
+  literal string equality rather than a mere "is set" test.
+- `INSERT ... ON CONFLICT (provider_id, provider_game_id) DO UPDATE` from
+  a tenant-scoped connection against an **existing** `casino_games` row —
+  the shape that would matter if `UpsertGame`'s Go-level assertion were
+  ever bypassed — raises an RLS violation rather than succeeding.
+- **Immutable-identity trigger, all 22 frozen columns and all 21 mutable
+  columns across the six tables were exercised individually.** Every
+  column in ADR 0081 §4.2's "immutable" column raises `P0001` naming the
+  table and column; every column in its "mutable" column updates
+  successfully; a same-value rewrite (`SET provider_id = provider_id`) is
+  correctly *not* treated as a change. `updated_at` is force-overwritten
+  by the trigger, so a writer cannot spoof it. §4.2's table and the
+  migration's `TG_ARGV` lists agree exactly — no frozen column is missing
+  and no mutable column is over-frozen.
+- `DELETE ... RETURNING` leaks nothing. Under platform-admin/service scope
+  the `BEFORE DELETE` trigger raises before any row is produced; under a
+  denied scope the DELETE policy makes the rows invisible, so the
+  statement returns zero rows and no column values. There is no scope from
+  which a `RETURNING` clause yields data a plain `SELECT` would not
+  already have yielded (SELECT is deliberately open).
+- `TRUNCATE` and `TRUNCATE ... CASCADE` are both refused by
+  `ledger_deny_mutation()` with a named exception.
+- The `app.platform_service_id` GUC is set with a **bound parameter**
+  (`SELECT set_config('app.platform_service_id', $1, true)`,
+  `internal/db/platform_service.go:77`) and the policy predicate compares
+  against a SQL literal. All thirteen `set_config` call sites in the tree
+  use `is_local = true` and a bound parameter. No injection surface exists
+  in either half.
+- The allowlist check in `WithPlatformService` runs at lines 64–69,
+  **before** `p.pool.Begin` at line 71. There is no window in which an
+  unknown service string reaches an open transaction — the structure is
+  correct, not merely the outcome.
+- Migration `0084` up → down → up round-trips cleanly: 24 policies and 18
+  triggers present, zero after `down`, 24/18 again after re-`up`, with the
+  shared trigger function dropped and recreated and `NO FORCE` correctly
+  preceding `DISABLE`.
+- **Exhaustive writer search.** `INSERT INTO`/`UPDATE` against any of the
+  six tables appears in exactly two production files
+  (`internal/casino/catalogue.go`, `internal/sportsbook/catalogue.go`) plus
+  test fixtures, all of which were re-scoped rather than having a policy
+  loosened to accommodate them. No background job, seed tool, `cmd/`
+  utility, provider callback or back-office handler writes any of the six.
+  No test anywhere disables RLS or a trigger on these tables.
+- **LOCK-1, R6 and RLS.** `wallet_balance_projection` carries `ENABLE` +
+  `FORCE` RLS with a `tenant_staff_scope` `FOR ALL` policy whose
+  `WITH CHECK` requires `tenant_id = app.tenant_id` **and**
+  `app.player_account_id` unset, plus a SELECT-only `player_self_scope`.
+  R6's zero-row materialisation (`internal/ledger/lockorder.go:176-182`)
+  therefore **cannot** run under any scope that should not write the
+  table: reproduced against a policy-identical probe table, a
+  player-scoped `INSERT` and an unscoped `INSERT` both fail with an RLS
+  violation, and a player-scoped `SELECT ... FOR UPDATE` returns zero rows
+  — which `ensureAndLockProjectionsInOrder` converts into a hard
+  `ErrInvalidEntry` ("no lockable projection row in this tenant"), not a
+  silent zero balance. The R6 write is fail-closed in every direction.
+- **Amendment A1 point 4's claim independently re-verified.** Every
+  `WithPlayerScope` call site in the tree (`withdrawal_handlers.go:164,
+  211, 1190`, `bonus_handlers.go:86, 149`, `sportsbook_handlers.go:387`,
+  `deposit_handlers.go:176, 221`, `wallet_handlers.go:65`,
+  `rg_handlers.go:96, 141`) was read: all are read-only. No posting path
+  runs player-scoped.
+- **R4 holds today.** Outside `internal/ledger`, the only remaining
+  mentions of `wallet_balance_projection` in non-test Go are in comments
+  (`internal/withdrawal/withdrawal.go`, `internal/casino/orchestrator.go`,
+  `internal/bonus/lifecycle.go`) plus the unlocked reads in
+  `internal/wallet` and `internal/reconciliation`. All three
+  `lockCashBalance*` helpers are genuinely deleted, not wrapped.
+- **`LockProjectionsForPosting` cannot cross a tenant boundary.** Its
+  ensure step filters `ledger_accounts` on `la.tenant_id = $2`, and both
+  `ledger_accounts` and `wallet_balance_projection` are `FORCE`-RLS'd on
+  `app.tenant_id`. A `TenantID`/connection-scope mismatch produces an RLS
+  denial or a `pgx.ErrNoRows`-derived hard error, never a cross-tenant
+  balance read. Running it before the idempotency-key check does **not**
+  move it ahead of any authorization decision: in `casino.postBet` and
+  `sportsbook.PlaceBet` the pre-lock stays after RG and Risk evaluation,
+  and in `withdrawal.RequestWithdrawal` after the request-row work.
+- **R5 does not create a usable replay-amplification lever.** Every
+  production `ledger.Post` caller short-circuits a redelivery *before*
+  reaching the pre-lock: `casino.postBet`'s
+  `findPostedBetTransaction`, `sportsbook.PlaceBet`'s
+  `findBetByIdempotencyKey`, `payments.postDepositSuccess`'s
+  `intent.Status == DepositIntentSucceeded` guard, and the withdrawal
+  state machine's own state checks. The ADR's accepted consequence ("an
+  idempotent replay now takes its projection locks before discovering it
+  is a no-op") is real in `ledger.Post` but is not reachable from any
+  current external-input path. This was specifically probed as a DoS
+  vector and found closed. It is, however, a property a future `Post`
+  caller could silently lose.
+- **`bonus.AdvisoryLockPlayerBonusScope` is not an attacker-controllable
+  lock key.** The key is `'bonus_player:' || tenant_id || ':' ||
+  player_account_id`, both server-derived UUIDs (in `postBet`,
+  `session.PlayerAccountID` from the platform's own
+  `casino_launch_sessions` row, never from the callback payload), hashed
+  with `hashtextextended` over the full 64-bit space and tenant-namespaced.
+  There is no input by which one request can take a lock scoped to another
+  tenant or another player. The widening from grant-scope to player-scope
+  means a player's own bonus-touching operations serialize with their own
+  bets — intended, and self-limited to that player.
+- `go build ./...`, `go vet ./...` clean; both static guards pass; the
+  full `-tags integration` suites for `internal/db`, `internal/ledger`,
+  `internal/casino` and `internal/sportsbook` pass against the throwaway
+  database.
+
+### S91.2 Findings
+
+#### `SEC-S91-1` (P2) — the R4 regression guard is trivially evadable
+
+`internal/ledger/lockorder_static_test.go:92-119`
+(`TestLockOrder_NoProjectionForUpdateOutsideLedgerPackage`). The file's own
+doc comment calls this "the single test that stops LOCK-1 from being
+reintroduced" and "the one test that prevents this ADR from decaying". It
+matches `wallet_balance_projection` and `for\s+update` **within the same
+string literal**, which six realistic constructions defeat. All six were
+confirmed against the test's exact regexes:
+
+| Construction | Flagged? |
+|---|---|
+| ``q := `SELECT ... FROM wallet_balance_projection WHERE ... FOR UPDATE` `` | yes |
+| ``q := `SELECT ... FROM wallet_balance_projection WHERE id = $1 ` + `FOR UPDATE` `` | **no** |
+| ``fmt.Sprintf(`SELECT ... FROM %s WHERE ... FOR UPDATE`, projTable)`` | **no** |
+| ``... wallet_balance_projection ... FOR NO KEY UPDATE`` | **no** |
+| ``... wallet_balance_projection ... FOR SHARE`` | **no** |
+| ``UPDATE wallet_balance_projection SET ...`` | **no** |
+| ``INSERT INTO wallet_balance_projection ... ON CONFLICT (ledger_account_id) DO UPDATE ...`` | **no** |
+
+`FOR NO KEY UPDATE`, `FOR SHARE`, a direct `UPDATE` and an
+`ON CONFLICT DO UPDATE` all take a real row lock on the projection row and
+all participate in deadlock cycles exactly like `FOR UPDATE` — the last
+one is literally mechanism 2 from ADR 0082 §"How row locks are actually
+acquired", so a domain package reproducing migration 0023's trigger
+statement by hand reopens LOCK-1 with the guard green. The walk root is
+also `internal/` only, so anything under `cmd/` is unexamined.
+
+*Concrete failure scenario.* Stage 10 adds sportsbook settlement (ADR 0082
+§5.3 binds it prospectively). A developer, wanting the same
+"check-the-balance-under-a-lock" shape the three deleted helpers had,
+writes in `internal/sportsbook`:
+
+```go
+const projSelect = `SELECT debit_total, credit_total FROM wallet_balance_projection WHERE ledger_account_id = $1 `
+...
+tx.QueryRow(ctx, projSelect+`FOR UPDATE`, cashAccountID)
+```
+
+That is a partial pre-lock — R3's exact prohibition and the LOCK-1 bug
+verbatim — and the guard passes. Nothing else in the tree catches it:
+`code-reviewer` is not a mechanical control, and `ledger-finance`'s
+deadlock tests only cover the cycles that exist today.
+
+**Nothing currently violates this** — the tree is clean, verified
+independently. This is a P2 because the control is load-bearing for a rule
+the ADR itself says will otherwise decay, not because there is a live
+defect.
+
+*Fix.* In `lockorder_static_test.go`:
+1. Broaden the lock-clause regex to
+   `(?is)\bfor\s+(no\s+key\s+)?update\b|\bfor\s+(key\s+)?share\b`.
+2. Add a second offence class: any literal containing
+   `wallet_balance_projection` that also matches
+   `(?is)^\s*update\b|\bon\s+conflict\b.*\bdo\s+update\b`.
+3. Do the correlation at **file** scope, not per-literal: if a
+   non-`internal/ledger` file contains `wallet_balance_projection`
+   anywhere in a string literal **and** any lock clause anywhere in any
+   literal in the same file, flag it and require an explicit
+   `//nolint:adr0082` style waiver comment naming a reason. A file-scope
+   rule has false positives; that is the correct trade for a guard whose
+   false negative is a reopened financial deadlock.
+4. Extend `loWalkGoFiles`'s root set to include `cmd/` (`filepath.Join("..",
+   "..", "cmd")`), keeping the existing "inspected nothing ⇒ fail" guard
+   for each root separately.
+
+#### `SEC-S91-2` (P2) — a third-party catalogue feed can now prevent the API from starting
+
+`internal/sportsbook/catalogue.go:112-130` (`upsertEvent`, and the same
+shape in `upsertCompetition`/`upsertMarket`/`upsertSelection`) combined
+with `migrations/0084_...up.sql:317-319` and
+`cmd/platform-api/main.go:164-168`.
+
+Each `sb_*` table's natural key is `UNIQUE (external_ref)` **globally**,
+not `(parent_id, external_ref)`, and `SyncCatalogue`'s upsert writes
+`competition_id = EXCLUDED.competition_id` (respectively `sport_id`,
+`event_id`, `market_id`) on the conflict branch. Migration 0084 froze
+exactly those parent-link columns. Reproduced on a live database:
+
+```
+INSERT INTO sb_events (...) VALUES (..., 'ev1', ...)
+ON CONFLICT (external_ref) DO UPDATE SET competition_id = EXCLUDED.competition_id, ...
+ERROR:  sb_events.competition_id is immutable after creation (ADR 0081) ...
+```
+
+`SyncCatalogue` returns that error, and `cmd/platform-api/main.go` wraps it
+as `sync sportsbook catalogue: %w` and **fails startup**. So one
+data-quality anomaly in a vendor's feed — a fixture moved to a different
+competition, a market re-keyed, or an `external_ref` reused across
+parents, all ordinary occurrences in real odds feeds — takes down every
+instance of the platform API on its next restart or deploy, including the
+casino, wallet, payments and back-office surfaces that have nothing to do
+with sportsbook.
+
+ADR 0081 §4.2 calls the loud failure "an accepted, intentional fail-closed
+behaviour", and as a *data* decision it is right: silently re-parenting a
+selection would corrupt bet resolution. But ADR 0081 §7.3's instruction to
+keep the fail-the-startup wrap is justified there by an **authorization**
+failure ("if the sync cannot authorize itself, the binary must not serve
+traffic"), and that rationale does not transfer to a per-row integrity
+violation. The ADR does not anywhere state that the blast radius of a
+frozen parent link is a full platform outage. That conflation is the
+finding.
+
+Unreachable today: `MockSportsbookProvider` emits stable `external_ref`s,
+and no real adapter exists (`PROVIDER DEPENDENT`). It becomes reachable
+the moment one lands, which is why it must be fixed before, not after,
+that integration.
+
+*Fix.* Separate the two failure classes at the call site in
+`cmd/platform-api/main.go`:
+
+- A `db.ErrPlatformServiceScope` / RLS-violation failure (the sync cannot
+  authorize itself) keeps today's fail-the-startup behaviour.
+- A `P0001` immutable-identity violation from
+  `catalogue_enforce_immutable_identity` is logged at ERROR with the table
+  and `external_ref`, raises an operational alert, and **does not stop the
+  binary**: the platform continues serving the previously-synced
+  catalogue, which is stale but internally consistent and still correctly
+  bound to every already-placed bet.
+
+Implementation note: `SyncCatalogue` should collect per-row violations and
+return them as a distinct, typed error (e.g. `ErrCatalogueIdentityConflict`
+wrapping the offending refs) rather than aborting the whole tree walk on
+the first one, so one bad fixture does not also block the rest of the
+feed. Whether a genuine re-parent is then corrected by a reviewed
+platform-admin operation is ADR 0081 §4.2's existing answer and is
+unchanged.
+
+#### `SEC-S91-3` (P2) — `casino_games`' database backstop authenticates GUC *shape*, not identity
+
+`migrations/0084_catalogue_write_authorization.up.sql:113-145`. The three
+write policies require only that
+`NULLIF(current_setting('app.platform_admin_principal_id', true), '')::uuid
+IS NOT NULL`. Any UUID satisfies it —
+`TestCatalogueRLS_PlatformAdminWritesCasinoGamesOnlyNotSportsbook`
+demonstrates this itself by passing a fresh `uuid.New()` and successfully
+inserting a catalogue row.
+
+The consequence is an authorization asymmetry between the two identities
+this migration introduces. The `sb_*` policies pin an exact string, so
+only the one named service can write them. The `casino_games` policies pin
+*any* value of a GUC that `db.Pool.WithPlatformAdmin` sets on behalf of
+**every** platform-admin handler in the tree — tenant creation, the asset
+registry, jurisdiction licence assignment, platform-wide operation
+eligibility — each of which is gated by a *different* permission than
+`PermCasinoCatalogueManage`.
+
+*Concrete failure scenario.* A future (or existing, undiscovered) defect in
+any handler that runs under `WithPlatformAdmin` — a dynamic filter built
+by string concatenation, an over-broad generic "admin query" endpoint, an
+ORM-style pass-through — becomes, at the database layer, a
+`casino_games` write. The attacker is a platform staff member who holds,
+say, `PermJurisdictionManage` but deliberately not
+`PermCasinoCatalogueManage`, and the payoff is direct: removing a code from
+`jurisdiction_blocklist` re-permits play in a jurisdiction the platform
+recorded as a licence problem, platform-wide, for every tenant, with no
+four-eyes (Phase 2 is `NOT IMPLEMENTED`) and with the audit record
+attributed to whatever the other handler writes. The RLS backstop that
+exists specifically to stop "an application permission check with no
+database backstop at all" does not distinguish these two admins.
+
+This mirrors migration 0044's `assets` shape, so it is a consistent
+choice rather than an oversight, and ADR 0081 §3.1's honest limitation
+("a policy keyed on a session GUC binds a code path, not an OS boundary")
+covers the general case. But migration 0044 *does* have the missing piece
+for its governance tables, and it is cheap to transfer.
+
+*Fix.* Add, in a follow-up migration, a
+`casino_games_platform_principal` `BEFORE INSERT OR UPDATE ... FOR EACH
+ROW` trigger whose function is a structural copy of migration 0044's
+`asset_change_requests_require_platform_principal()`: resolve
+`current_setting('app.platform_admin_principal_id', true)::uuid` against
+`staff_users` and raise unless the row exists with `tenant_id IS NULL`.
+Under `staff_users`' own `dual_scope_isolation` policy a platform-scoped
+transaction sees exactly the `tenant_id IS NULL` rows, so no
+`SECURITY DEFINER` is needed. This turns "some UUID was set" into "a real,
+platform-scoped staff principal was set", which is what the policy is
+already documented as meaning. Deferral is defensible if recorded against
+ADR 0081 as an explicit amendment — silently inheriting the `assets`
+shape without noting the asymmetry is not.
+
+#### `SEC-S91-4` (P3) — the catalogue GUCs are settable by the application role itself
+
+Restating ADR 0081 §3.1's own admission so it is visible outside the ADR
+and is not later mistaken for a closed item: `app.platform_service_id` and
+`app.platform_admin_principal_id` are ordinary custom GUCs. Any SQL
+executed on the application connection can `set_config` them, including
+`igaming_runtime` after `PLAT-ROLESPLIT-1`'s cutover (that role is blocked
+from `session_replication_role` and from `ALTER TABLE ... DISABLE ROW
+LEVEL SECURITY`, but not from setting an `app.*` parameter — verified in
+`internal/db/runtime_role_separation_test.go`). So a SQL-injection defect
+anywhere in the platform escalates to full catalogue write.
+
+No cheap fix exists: both legitimate writers run as the same database role
+as everything else, so `GRANT`-based separation (the only real OS/role
+boundary) is not available without splitting the startup sync and the
+admin handler onto their own credentials. What migration 0084 *does* close
+completely — and this is genuine, not theatre — is that tenant-scoped and
+player-scoped connections are now **structurally** unable to write these
+tables, because they always set `app.tenant_id`/`app.player_account_id`
+and every write predicate requires those unset. `SEC-4I-F11`'s
+`casino_games` limb is therefore **CLOSED**; the finding's general form
+(GUC-keyed rather than role-keyed platform write control) remains open and
+is a `PLAT-ROLESPLIT-1` successor question, not an ARCH-DB-2 one.
+
+#### `SEC-S91-5` (P3) — denied-scope `UPDATE`s are silent no-ops, not errors
+
+Confirmed on a live database: from `WithTenant`, `WithPlayerScope` or
+`WithoutTenant`, `UPDATE casino_games SET jurisdiction_blocklist = '{}'`
+returns `UPDATE 0` with no error, because the UPDATE policy's `USING`
+clause simply makes the rows invisible. Only `INSERT` (and
+`ON CONFLICT DO UPDATE` against an existing row) raises.
+
+This is standard PostgreSQL RLS behaviour and matches the `assets`
+precedent, and the new test suite's `assertRowsAffectedZero` documents it
+honestly. It is recorded here because it has an operational consequence
+the ADR does not state: a future writer that ends up under the wrong scope
+will report *success* to its caller and write nothing. The Go-level
+assertions (`casino.assertPlatformScope`,
+`db.AssertPlatformServiceScope`) are what convert that into a loud
+failure, which makes them a real control rather than the "defence in
+depth" belt-and-braces their own comments describe. Any new writer of
+these six tables must call one of them; that requirement should be stated
+in ADR 0081 rather than left as a convention.
+
+#### `SEC-S91-6` (P3) — partial regression coverage of the new invariants
+
+Three gaps, none of which is a defect (I exercised all of them by hand and
+all behave correctly) but each of which is a place the invariant could
+later drift unnoticed:
+
+1. `TestCatalogueRLS_ImmutableColumnsRaiseOnGenuineChangeOnly`
+   (`internal/db/catalogue_write_authorization_integration_test.go:385-450`)
+   covers 3 of the 22 frozen columns (`casino_games.provider_id`,
+   `sb_events.competition_id`, `sb_selections.external_ref`). ADR 0081
+   §7.6 item 8 asks for "each immutable column, per §4.2's table". Driving
+   the existing table-driven fixture over all 22 frozen and all 21 mutable
+   columns is mechanical.
+2. `TestRuntimeRole_PlatformCatalogueTablesForceRLSAndHaveNoTenantColumn`
+   (`internal/db/runtime_role_separation_test.go`) asserts the 24 expected
+   policies are **present** but not that no *other* policy exists. A
+   future migration adding a permissive `FOR ALL USING (true)` policy to
+   any of the six would pass this test while silently reopening
+   ARCH-DB-2 — Postgres OR's every applicable permissive policy together.
+   Add an exact set comparison of `pg_policies.policyname` per table.
+3. Nothing mechanically enforces ADR 0081 §3.4's binding escape-hatch rule
+   (a future migration touching the six must set the GUC inside its own
+   transaction and must never toggle `NO FORCE`/`FORCE` around a
+   statement — `security` finding `S-1`'s rule). A repo-wide static test
+   over `migrations/*.up.sql` asserting that no file contains `NO FORCE
+   ROW LEVEL SECURITY` outside a `.down.sql` would pin it.
+
+#### `SEC-S91-7` (P3) — scope helpers rely on every GUC setter being transaction-local
+
+`internal/db/platform_service.go:63-88` and
+`internal/db/tenant_rls.go:99-121` both depend for their correctness on
+`app.tenant_id` and `app.player_account_id` being unset on a freshly
+acquired pooled connection. That holds today — all thirteen `set_config`
+call sites in the tree pass `is_local = true`, there is no `pgxpool`
+`AfterConnect`/`BeforeAcquire` hook, and no exported helper
+(`SetPrincipalIDForCurrentTx`, `SetSessionInternalOpID`) touches either
+GUC. But it is an invariant of the whole package rather than a property of
+these two functions, and a single future session-level `set_config` would
+silently make platform-scoped transactions unable to write (fail-closed,
+so not dangerous — but a confusing outage).
+
+*Optional hardening:* have `WithPlatformService` and `WithPlatformAdmin`
+explicitly issue `set_config('app.tenant_id', '', true)` and
+`set_config('app.player_account_id', '', true)` before setting their own
+GUC. Two statements, turns a tree-wide convention into a local guarantee.
+
+#### `SEC-S91-8` (P3) — open `SELECT` on `casino_games` exposes `jurisdiction_blocklist`
+
+ADR 0081 §2.3 states and accepts this. Restated here because it is
+launch-relevant rather than merely architectural: `casino_games_read`
+grants `FOR SELECT USING (true)`, so once any jurisdiction blocklist is
+populated, the set of jurisdictions the platform has blocked for a given
+title is readable by any connection — including a player-scoped one, and
+including an unauthenticated one if a public catalogue route is ever
+added. Today every blocklist is empty (no `HDR-J` item is answered), so
+nothing is exposed. This is **not a regression** — `casino_games` had no
+RLS at all before migration 0084 — and narrowing that policy is a
+separate, small, reversible decision. It should be taken before the first
+blocklist entry is written, not after.
+
+#### `SEC-S91-9` (P3) — stale reference to a non-existent writer
+
+`internal/casino/types.go:411` says "`UpsertGamesFromCatalogue`
+(catalogue.go) maps this into a `casino_games` row". No such function
+exists anywhere in the tree. Documentation-only, but it names a *writer of
+a now-access-controlled table*, so a future reviewer auditing "who can
+write `casino_games`" is pointed at a function that cannot be found and
+may conclude the audit is incomplete. Delete or correct the reference.
+
+### S91.3 Authorization and tenant-isolation tests this change's `qa` coverage must include
+
+Per this specialist's standing testing responsibility. Items 1–11 of ADR
+0081 §7.6 are implemented and pass; these are the additions this review
+requires on top of them:
+
+1. **Cross-scope catalogue write, both directions, both identities.** A
+   transaction holding `app.platform_service_id =
+   'sportsbook_catalogue_sync'` **and** `app.tenant_id` simultaneously
+   must be refused on all six tables — proving the `tenant_id IS NULL`
+   conjunct, not just the identity conjunct, is doing work.
+2. **Policy-set exactness**, per `SEC-S91-6` item 2: the policy name set
+   per table must equal the expected set, not merely contain it.
+3. **Every frozen column, every table** (`SEC-S91-6` item 1), and its
+   mirror: every column ADR 0081 §4.2 marks mutable must be provably
+   updatable, so an over-broad `TG_ARGV` list is caught.
+4. **The R4 guard's own evasions** (`SEC-S91-1`): a unit test of the
+   guard's matcher, asserting it flags each of the seven constructions in
+   that finding's table. A guard with no test of its own matcher is a
+   guard nobody has checked.
+5. **A re-parent must not take the platform down** (`SEC-S91-2`): drive
+   `SyncCatalogue` with a stub `Provider` that re-parents an existing
+   `external_ref`, and assert the chosen behaviour (per the fix) — that
+   the error is typed, that unaffected rows still sync, and that
+   `cmd/platform-api`'s startup path distinguishes it from a scope
+   failure.
+6. **Tenant-isolation on the LOCK-1 path**: `LockProjectionsForPosting`
+   called with a `TransactionInput` whose `TenantID` is tenant B, on a
+   connection scoped to tenant A, must return an error and must never
+   return a `Balance` for any of tenant A's accounts. This is the standing
+   form of the rule — a request for tenant A's data using tenant B's
+   context returns an error, never data.
+7. **`AdvisoryLockGrant`'s new cross-tenant read**: calling it with a
+   `grantID` belonging to another tenant must return the "does not exist
+   in this tenant" error and must not acquire any advisory lock — the
+   fail-closed behaviour its own doc comment promises.
+
+### S91.4 Scope of this review
+
+**In scope:** migration `0084` up and down in full, exercised against a
+live PostgreSQL 16 database as the table-owning non-superuser role;
+`internal/db/platform_service.go`; the `UpsertGame`/`SyncCatalogue` scope
+assertions and their two call sites; `newUpsertCasinoGameHandler`;
+`cmd/platform-api/main.go`'s startup sync; the three new catalogue
+adversarial suites and the rewritten
+`runtime_role_separation_test.go` assertion; `internal/ledger/lockorder.go`
+and `ledger.Post`'s reordering; `bonus.AdvisoryLockPlayerBonusScope` and
+`AdvisoryLockGrant`'s new precondition; the call-site diffs in
+`internal/casino`, `internal/sportsbook`, `internal/payments`,
+`internal/withdrawal`, `internal/bonus`; both static guards; and the RLS
+posture of `wallet_balance_projection`, `ledger_accounts`,
+`ledger_entries` and `ledger_transactions` as it bears on R6.
+
+**Read but not independently re-derived:** the financial correctness of
+the lock ordering itself (deadlock-freedom, entry-order preservation,
+reconciliation impact) — that is `ledger-finance`'s review and Amendment
+A1, and this review neither confirms nor disputes it beyond the four
+security-facing claims it re-verified (R6 under RLS, player-scope
+read-only, tenant scoping of the pre-lock, advisory-key derivation).
+
+**Explicitly NOT in scope and NOT claimed:** penetration testing;
+certification-grade audit; ADR 0081 §5.2's Phase 2 four-eyes design (still
+`NOT IMPLEMENTED` and not authorized, so `jurisdiction_blocklist` removal
+and `disabled → active` remain single-actor — unchanged from before this
+change, but a real pre-launch gap); any statement about the six tables'
+behaviour under a role other than the table-owning `igaming` role, since
+`PLAT-ROLESPLIT-1`'s production cutover has not happened; and production
+launch authorization of any kind.
+
+**Passing this review does not make these subsystems "secure."** It
+records that two specific changes were probed against the threat model
+above and that the defects found are the nine listed, at the severities
+listed.

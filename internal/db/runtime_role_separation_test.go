@@ -251,49 +251,97 @@ func TestRuntimeRole_OrdinaryDMLIsGenuinelyRLSScoped(t *testing.T) {
 	}
 }
 
-// TestRuntimeRole_CasinoGamesExceptionUnchanged confirms the one known,
-// deliberate exception docs/security/runtime-role-separation.md §5 names
-// - "casino_games" (the global game catalogue) has row-level security
-// disabled entirely and no tenant_id column, so this role split does not
-// make it tenant-scoped or newly protected - is still exactly true after
-// this split lands. This is not a new gap; it exists so a future change
-// to casino_games's schema is caught here rather than silently
-// invalidating that documented claim.
-func TestRuntimeRole_CasinoGamesExceptionUnchanged(t *testing.T) {
+// platformCatalogueTables is the six platform-wide catalogue tables
+// migration 0084 (ADR 0081, ARCH-DB-2) hardened, and their expected
+// policy names (ADR 0081 §3.3) - casino_games gets a platform_admin-scoped
+// write policy set, the five sb_* tables get a catalogue_sync-scoped one.
+var platformCatalogueTables = []struct {
+	table          string
+	policySuffixes []string
+}{
+	{"casino_games", []string{"read", "platform_admin_insert", "platform_admin_update", "platform_admin_delete_visibility"}},
+	{"sb_sports", []string{"read", "catalogue_sync_insert", "catalogue_sync_update", "catalogue_sync_delete_visibility"}},
+	{"sb_competitions", []string{"read", "catalogue_sync_insert", "catalogue_sync_update", "catalogue_sync_delete_visibility"}},
+	{"sb_events", []string{"read", "catalogue_sync_insert", "catalogue_sync_update", "catalogue_sync_delete_visibility"}},
+	{"sb_markets", []string{"read", "catalogue_sync_insert", "catalogue_sync_update", "catalogue_sync_delete_visibility"}},
+	{"sb_selections", []string{"read", "catalogue_sync_insert", "catalogue_sync_update", "catalogue_sync_delete_visibility"}},
+}
+
+// TestRuntimeRole_PlatformCatalogueTablesForceRLSAndHaveNoTenantColumn
+// replaces TestRuntimeRole_CasinoGamesExceptionUnchanged, which asserted
+// the PRE-migration-0084 state (casino_games had RLS disabled entirely) -
+// that assertion is now false by construction. This test asserts the NEW
+// invariant docs/security/runtime-role-separation.md §5's "Stage 9.1
+// update" section documents for all six platform-wide catalogue tables
+// (ADR 0081 §7.5):
+//
+//   - relrowsecurity AND relforcerowsecurity are both true (RLS is
+//     genuinely enabled AND enforced against the table-owning role, not
+//     merely nominally present);
+//   - no tenant_id/brand_id column exists - this half of the OLD
+//     exception is permanent and intentional (ADR 0081 §2.2: these are
+//     single-canonical-row platform catalogue data, never tenant-owned),
+//     and stays asserted as a positive invariant rather than silently
+//     dropped;
+//   - the expected policy names (ADR 0081 §3.3) are present.
+func TestRuntimeRole_PlatformCatalogueTablesForceRLSAndHaveNoTenantColumn(t *testing.T) {
 	runtime := runtimeTestPool(t)
 	ctx := context.Background()
 
-	var rowSecurity, forceRowSecurity bool
-	err := runtime.pool.QueryRow(ctx,
-		`SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'casino_games'`,
-	).Scan(&rowSecurity, &forceRowSecurity)
-	if err != nil {
-		t.Fatalf("failed to read casino_games's row-level-security state: %v", err)
-	}
-	if rowSecurity || forceRowSecurity {
-		t.Errorf(
-			"casino_games unexpectedly has row-level security enabled (relrowsecurity=%t relforcerowsecurity=%t) - "+
-				"docs/security/runtime-role-separation.md §5's documented exception no longer holds; update that "+
-				"document if this is an intentional change, don't just let this test start failing silently",
-			rowSecurity, forceRowSecurity,
-		)
-	}
+	for _, tc := range platformCatalogueTables {
+		tc := tc
+		t.Run(tc.table, func(t *testing.T) {
+			var rowSecurity, forceRowSecurity bool
+			err := runtime.pool.QueryRow(ctx,
+				`SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = $1`, tc.table,
+			).Scan(&rowSecurity, &forceRowSecurity)
+			if err != nil {
+				t.Fatalf("failed to read %s's row-level-security state: %v", tc.table, err)
+			}
+			if !rowSecurity || !forceRowSecurity {
+				t.Errorf(
+					"%s: expected relrowsecurity AND relforcerowsecurity both true after migration 0084 "+
+						"(ADR 0081), got relrowsecurity=%t relforcerowsecurity=%t",
+					tc.table, rowSecurity, forceRowSecurity,
+				)
+			}
 
-	var hasTenantID bool
-	err = runtime.pool.QueryRow(ctx,
-		`SELECT EXISTS (
-			SELECT 1 FROM information_schema.columns
-			WHERE table_schema = 'public' AND table_name = 'casino_games' AND column_name = 'tenant_id'
-		)`,
-	).Scan(&hasTenantID)
-	if err != nil {
-		t.Fatalf("failed to check casino_games's columns: %v", err)
-	}
-	if hasTenantID {
-		t.Error(
-			"casino_games unexpectedly has a tenant_id column - it is documented as the platform's one " +
-				"deliberately global catalogue table with no RLS; if this changed, update " +
-				"docs/security/runtime-role-separation.md §5, don't just let this test start failing silently",
-		)
+			for _, col := range []string{"tenant_id", "brand_id"} {
+				var hasCol bool
+				err := runtime.pool.QueryRow(ctx,
+					`SELECT EXISTS (
+						SELECT 1 FROM information_schema.columns
+						WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
+					)`, tc.table, col,
+				).Scan(&hasCol)
+				if err != nil {
+					t.Fatalf("failed to check %s's columns: %v", tc.table, err)
+				}
+				if hasCol {
+					t.Errorf(
+						"%s unexpectedly has a %s column - ADR 0081 §2.2 rules this platform-wide catalogue "+
+							"table must never carry one; if this changed, update "+
+							"docs/security/runtime-role-separation.md §5 and ADR 0081, don't just let this "+
+							"test start failing silently",
+						tc.table, col,
+					)
+				}
+			}
+
+			for _, suffix := range tc.policySuffixes {
+				policyName := tc.table + "_" + suffix
+				var exists bool
+				err := runtime.pool.QueryRow(ctx,
+					`SELECT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = $1 AND policyname = $2)`,
+					tc.table, policyName,
+				).Scan(&exists)
+				if err != nil {
+					t.Fatalf("failed to check policy %s on %s: %v", policyName, tc.table, err)
+				}
+				if !exists {
+					t.Errorf("%s: expected policy %q (ADR 0081 §3.3) to exist, it does not", tc.table, policyName)
+				}
+			}
+		})
 	}
 }

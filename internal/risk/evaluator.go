@@ -326,9 +326,11 @@ func (r Rule) breach(ctx context.Context, tx pgx.Tx, req RiskRequest, exponents 
 		// Serializes concurrent evaluations of the SAME (tenant, player,
 		// operation, limit_kind, asset) cumulative rule so two racing
 		// requests can never both read a stale "under threshold" snapshot
-		// and both proceed - identical pattern to rg.lockPerson/
-		// internal/casino.lockCashBalance's own transaction-scoped
-		// advisory/row locking, released automatically at this
+		// and both proceed - identical pattern to rg.lockPerson's own
+		// transaction-scoped advisory locking (and to the class L3
+		// wallet_balance_projection row locks
+		// ledger.LockProjectionsForPosting takes on the posting path),
+		// released automatically at this
 		// transaction's commit or rollback. Held until the CALLER's own
 		// transaction commits (this function does not commit anything
 		// itself), which is what actually closes the race: the caller

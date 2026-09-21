@@ -52,10 +52,11 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-// GetGameByID looks up a Game by its platform id. casino_games carries no
-// RLS (platform-wide, like the assets registry) so tx may come from
-// either WithTenant or WithoutTenant - this function applies no tenant
-// filtering itself.
+// GetGameByID looks up a Game by its platform id. casino_games is
+// platform-wide, read-open catalogue data (migration 0084 / ADR 0081:
+// FOR SELECT USING (true)), so tx may come from any scope - WithTenant,
+// WithoutTenant, WithPlatformAdmin, or WithPlayerScope - this function
+// applies no tenant filtering itself.
 func GetGameByID(ctx context.Context, tx pgx.Tx, id uuid.UUID) (Game, error) {
 	row := tx.QueryRow(ctx, `SELECT `+gameColumns+` FROM casino_games WHERE id = $1`, id)
 	g, err := scanGame(row)
@@ -109,8 +110,14 @@ type UpsertGameInput struct {
 // once, at first insert, and never changes on a later update (ADR 0025
 // §2). A platform-administrative action, audited by the caller per
 // CLAUDE.md, exactly like internal/payments.WriteCapability leaves the
-// audit record to its own caller.
+// audit record to its own caller. tx MUST be a platform-admin-scoped
+// transaction (db.Pool.WithPlatformAdmin) - asserted in-function AND
+// enforced independently by migration 0084's casino_games write policies
+// (ADR 0081, ARCH-DB-2).
 func UpsertGame(ctx context.Context, tx pgx.Tx, in UpsertGameInput) (Game, error) {
+	if err := assertPlatformScope(ctx, tx); err != nil {
+		return Game{}, err
+	}
 	if in.ProviderID == "" || in.ProviderGameID == "" || in.Name == "" || in.GameType == "" {
 		return Game{}, fmt.Errorf("%w: provider_id, provider_game_id, name, and game_type are required", ErrInvalidInput)
 	}
@@ -138,6 +145,32 @@ func UpsertGame(ctx context.Context, tx pgx.Tx, in UpsertGameInput) (Game, error
 		return Game{}, fmt.Errorf("casino: upsert game: %w", err)
 	}
 	return GetGameByProviderRef(ctx, tx, in.ProviderID, in.ProviderGameID)
+}
+
+// assertPlatformScope is UpsertGame's write-side Go-level scope
+// assertion, mirroring internal/jurisdiction's own assertPlatformScope
+// (evaluation_policy_admin.go) exactly: it reads the three relevant GUCs
+// in ONE query and requires app.platform_admin_principal_id to be set AND
+// both app.tenant_id and app.player_account_id to be unset. This is a
+// REAL control - migration 0084's casino_games RLS policies enforce the
+// identical predicate independently at the database, so a caller that
+// bypassed this check would still fail at the INSERT/UPDATE, but with a
+// much less diagnosable error surfacing from deep inside a tx.Exec call.
+func assertPlatformScope(ctx context.Context, tx pgx.Tx) error {
+	var platformAdmin *uuid.UUID
+	var scopedTenant *uuid.UUID
+	var scopedPlayer *uuid.UUID
+	if err := tx.QueryRow(ctx,
+		`SELECT NULLIF(current_setting('app.platform_admin_principal_id', true), '')::uuid,
+		        NULLIF(current_setting('app.tenant_id', true), '')::uuid,
+		        NULLIF(current_setting('app.player_account_id', true), '')::uuid`,
+	).Scan(&platformAdmin, &scopedTenant, &scopedPlayer); err != nil {
+		return fmt.Errorf("casino: read platform admin scope: %w", err)
+	}
+	if platformAdmin == nil || scopedTenant != nil || scopedPlayer != nil {
+		return ErrTransactionScope
+	}
+	return nil
 }
 
 func nonEmptyPtr(s string) *string {

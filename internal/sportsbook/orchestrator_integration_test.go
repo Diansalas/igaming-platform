@@ -205,7 +205,10 @@ func seedSelection(t *testing.T, pool *db.Pool, p seedSelectionParams) Selection
 	sel.OddsDenominator = p.OddsDenominator
 	sel.Status = p.SelectionStatus
 
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	// Migration 0084 (ADR 0081): sb_* writes now require a genuinely
+	// platform-service-scoped transaction (WithoutTenant is no longer
+	// sufficient - see SyncCatalogue's own doc comment).
+	err := pool.WithPlatformService(context.Background(), db.ServiceSportsbookCatalogueSync, func(ctx context.Context, tx pgx.Tx) error {
 		var sportID, compID, eventID, marketID uuid.UUID
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO sb_sports (external_ref, code, name) VALUES ($1, $2, 'Test Sport') RETURNING id`,

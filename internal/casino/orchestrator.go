@@ -654,26 +654,6 @@ func findPostedBetTransaction(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID
 	return id, true, nil
 }
 
-// lockCashBalance takes a row lock on the wallet's player_cash
-// wallet_balance_projection row and returns its raw debit/credit
-// totals - identical pattern and rationale to
-// internal/withdrawal.lockCashBalanceForUpdate (invariant #15: the
-// balance read and the prospective debit happen inside the same
-// transaction, never a stale check-then-post).
-func lockCashBalance(ctx context.Context, tx pgx.Tx, ledgerAccountID uuid.UUID) (debitTotal, creditTotal int64, err error) {
-	err = tx.QueryRow(ctx,
-		`SELECT debit_total, credit_total FROM wallet_balance_projection WHERE ledger_account_id = $1 FOR UPDATE`,
-		ledgerAccountID,
-	).Scan(&debitTotal, &creditTotal)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, 0, nil
-	}
-	if err != nil {
-		return 0, 0, fmt.Errorf("casino: lock cash balance: %w", err)
-	}
-	return debitTotal, creditTotal, nil
-}
-
 // postBet implements Flow 5 (financial-transaction-flows.md §5): debit
 // player_cash, credit house_gaming. Player_bonus-funded stakes are
 // explicitly out of scope this stage (ADR 0025 §6) - every bet here is
@@ -791,6 +771,26 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: asset_code does not match the launch session", ErrInvalidInput)
 	}
 
+	// ADR 0082 §3.3/§4.2, class L0.2 - closes finding LOCK-1d. This bet
+	// takes its wallet_balance_projection locks below and THEN, after
+	// posting, acquires a grant advisory lock for the cash-funded
+	// wagering contribution; bonus.ConvertGrant does the exact reverse
+	// (grant advisory lock, then player_cash inside ledger.Post). That is
+	// a genuine ABBA across a row lock and an advisory lock, and no
+	// amount of projection-row sorting touches it. Serializing both
+	// behind this one player-scoped advisory lock, taken FIRST, removes
+	// the cycle while leaving the contribution inside the bet's own
+	// transaction where HR-10 requires it.
+	//
+	// Positioned immediately after the L0.1 delivery lock's own session
+	// resolution and validation (it needs session.PlayerAccountID) and
+	// before RG/Risk, so the whole remainder of this function runs under
+	// it - including the post-Post contribution block, which is then
+	// simply reentrant under a lock this transaction already holds.
+	if err := bonus.AdvisoryLockPlayerBonusScope(ctx, tx, tenantID, session.PlayerAccountID); err != nil {
+		return ReceiveCallbackResult{}, err
+	}
+
 	wl, err := wallet.GetByID(ctx, tx, session.WalletID)
 	if err != nil {
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve wallet: %w", err)
@@ -869,13 +869,38 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		return ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason: riskDecision.Code}, nil
 	}
 
-	cashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &wl.ID, ledger.AccountPlayerCash, event.AssetCode)
+	// ADR 0082 §3.2/§4.2: resolved through GetOrCreateAccounts so the
+	// ledger_accounts unique-index insertion waits happen in canonical
+	// (wallet, account_type, asset) order, never this call site's
+	// argument order.
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, tenantID,
+		ledger.AccountSpec{WalletID: &wl.ID, AccountType: ledger.AccountPlayerCash, AssetCode: event.AssetCode},
+		ledger.AccountSpec{AccountType: ledger.AccountHouseGaming, AssetCode: event.AssetCode},
+	)
 	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve player_cash account: %w", err)
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve bet ledger accounts: %w", err)
 	}
-	houseAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, nil, ledger.AccountHouseGaming, event.AssetCode)
-	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve house_gaming account: %w", err)
+	cashAccountID, houseAccountID := accounts[0], accounts[1]
+
+	// The COMPLETE, final posting this bet will make, built BEFORE the
+	// balance check so the pre-lock below covers every account it touches
+	// (ADR 0082 R3: pre-locking a subset - which is exactly what the
+	// deleted lockCashBalance did, locking only player_cash out of
+	// {player_cash, house_gaming} - is the LOCK-1 bug itself). The very
+	// same value is handed to ledger.Post below; it is never rebuilt.
+	betInput := ledger.TransactionInput{
+		TenantID: tenantID, TransactionType: ledger.TxCasinoBet,
+		// Namespaced by providerID - see the identical rationale on
+		// internal/payments' deposit-posting idempotency key: nothing in
+		// the CasinoProvider contract guarantees provider_tx_id
+		// uniqueness ACROSS providers.
+		IdempotencyKey: providerID + ":" + event.ProviderTxID,
+		ProviderID:     &providerID, ProviderTxID: &event.ProviderTxID,
+		CorrelationID: roundCorrelationID(tenantID, providerID, event.RoundID),
+		Entries: []ledger.EntryInput{
+			{LedgerAccountID: cashAccountID, Direction: ledger.Debit, Amount: event.Amount},
+			{LedgerAccountID: houseAccountID, Direction: ledger.Credit, Amount: event.Amount},
+		},
 	}
 
 	// Invariant #15: lock and check the balance INSIDE this transaction,
@@ -883,11 +908,26 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	// wallet cannot both observe "sufficient" (financial-transaction-
 	// flows.md §5's "insufficient funds -> rejected before posting,
 	// checked in the same DB transaction that would post it").
-	debitTotal, creditTotal, err := lockCashBalance(ctx, tx, cashAccountID)
+	//
+	// ADR 0082 R1/R4: the lock is taken by internal/ledger, over ALL of
+	// this posting's projection rows at once, in canonical ascending
+	// ledger_account_id order - not by a projection FOR UPDATE of this
+	// package's own, which R4 forbids and which was the LOCK-1 cycle's
+	// first edge. Kept in exactly its previous position (after RG and
+	// Risk, before BindProviderRound) so R8 and the existing "no ledger
+	// entry touched yet at decline time" property both still hold: the
+	// pre-lock writes no entry, and the zero-totals projection row R6
+	// materialises rolls back with a declined transaction and is in any
+	// case an account this bet was about to use.
+	locked, err := ledger.LockProjectionsForPosting(ctx, tx, betInput)
 	if err != nil {
-		return ReceiveCallbackResult{}, err
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: lock bet projections: %w", err)
 	}
-	available := creditTotal - debitTotal
+	cashBalance, err := locked.Balance(cashAccountID)
+	if err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: read locked player_cash balance: %w", err)
+	}
+	available := cashBalance.Signed()
 	if available < event.Amount {
 		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_bet.declined",
@@ -925,25 +965,26 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	// going to post must never bind a round, or a DECLINED delivery would
 	// still durably claim the round id, potentially pre-empting the
 	// legitimate bet that (re)tries it (specialist review finding - qa).
+	//
+	// ADR 0082 named exception E-2 (§5.1a): casino_provider_rounds is a
+	// class L1 domain state row, and its lock is therefore taken here
+	// AFTER the class L3 pre-lock above - an inversion of the canonical
+	// order, kept deliberately for the reason immediately above. It is
+	// safe only because postBet is the SOLE writer of that table
+	// (INV-LOCK-E2), so no transaction anywhere holds a
+	// casino_provider_rounds row lock and then waits on a projection lock,
+	// and two concurrent postBets take L3-then-L1 in the same order as
+	// each other. A second writer of casino_provider_rounds must resolve
+	// E-2 first - see §5.1a for what resolving it requires.
 	if err := BindProviderRound(ctx, tx, tenantID, session.BrandID, session.PlayerAccountID, session.ID, session.GameID,
 		providerID, event.RoundID, nil); err != nil {
 		return ReceiveCallbackResult{}, err
 	}
 
-	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
-		TenantID: tenantID, TransactionType: ledger.TxCasinoBet,
-		// Namespaced by providerID - see the identical rationale on
-		// internal/payments' deposit-posting idempotency key: nothing in
-		// the CasinoProvider contract guarantees provider_tx_id
-		// uniqueness ACROSS providers.
-		IdempotencyKey: providerID + ":" + event.ProviderTxID,
-		ProviderID:     &providerID, ProviderTxID: &event.ProviderTxID,
-		CorrelationID: roundCorrelationID(tenantID, providerID, event.RoundID),
-		Entries: []ledger.EntryInput{
-			{LedgerAccountID: cashAccountID, Direction: ledger.Debit, Amount: event.Amount},
-			{LedgerAccountID: houseAccountID, Direction: ledger.Credit, Amount: event.Amount},
-		},
-	})
+	// The SAME betInput the pre-lock above was computed from - never a
+	// rebuilt one, or the pre-lock would be a lock over a different
+	// account set than the one actually posted (ADR 0082 R3).
+	postResult, err := ledger.Post(ctx, tx, betInput)
 	if err != nil {
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: post bet: %w", err)
 	}
@@ -1348,21 +1389,29 @@ type ledgerEntry struct {
 }
 
 func loadEntries(ctx context.Context, tx pgx.Tx, transactionID uuid.UUID) ([]ledgerEntry, error) {
-	// ORDER BY e.ledger_account_id is load-bearing, not cosmetic (Stage 9,
-	// LOCK-2). postRollback feeds these rows straight into ledger.Post in
-	// the order returned, and every ledger_entries INSERT fires migration
-	// 0023's AFTER trigger, whose ON CONFLICT DO UPDATE takes a ROW LOCK
-	// on that account's wallet_balance_projection row. So this SELECT's
-	// row order IS postRollback's projection-lock acquisition order.
-	// Without an ORDER BY that order is planner-dependent (a seq scan, a
-	// bitmap heap scan and an index scan can each return a different
-	// order for the same rows), which means two concurrent rollbacks of
-	// two different transactions touching the SAME pair of accounts can
-	// acquire those two locks in opposite orders and deadlock. This is
-	// the same class of nondeterministic-row-order bug this codebase
-	// already fixed once on the read side
-	// (TestGetSummary_CombinesBothLockedOriginsInEitherRowOrder). Sorting
-	// by ledger_account_id gives every rollback the same total order.
+	// ORDER BY e.ledger_account_id is NO LONGER the lock-ordering
+	// mechanism, and this comment no longer claims it is (ADR 0082 §4.2).
+	//
+	// It was introduced as the Stage 9 LOCK-2 fix, on the reasoning that
+	// postRollback feeds these rows straight into ledger.Post in the
+	// order returned, every ledger_entries INSERT fires migration 0023's
+	// AFTER trigger, and that trigger's ON CONFLICT DO UPDATE takes a ROW
+	// LOCK - so this SELECT's row order WAS the projection-lock
+	// acquisition order, and an unordered read (planner-dependent: seq
+	// scan, bitmap heap scan and index scan can each return a different
+	// order for the same rows) let two concurrent rollbacks over the same
+	// account pair deadlock.
+	//
+	// That reasoning was correct but provably incomplete: ledger.Post
+	// APPENDS the Rule B2 mirror/recognition legs AFTER the caller's
+	// entries (§7.4.2's fixed order), so a bonus-touching rollback's
+	// final lock sequence was "sorted caller entries, then unsorted
+	// generated legs" - not sorted at all. ADR 0082's pre-lock step
+	// inside Post now covers the complete final account set, generated
+	// legs included, which is the case an ORDER BY here could never
+	// reach. This clause is kept because a deterministic read order is
+	// correct and documents intent, not because anything depends on it
+	// for locking.
 	rows, err := tx.Query(ctx,
 		`SELECT e.ledger_account_id, e.direction, e.amount, la.account_type
 		   FROM ledger_entries e

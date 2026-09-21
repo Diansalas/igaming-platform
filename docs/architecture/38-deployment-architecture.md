@@ -78,9 +78,10 @@ deployment needs regardless of this platform's specifics; it is the
    (`internal/httpserver/ratelimit.go`'s doc comment): with N replicas,
    each enforces its own independent per-IP window, so whoever
    provisions the load balancer must account for `limit × replicas` as
-   the effective platform-wide throughput, and must either teach
-   `clientIP()` to trust a specific reverse-proxy's `X-Forwarded-For`
-   (not done today — see §4) or accept coarser IP-based limiting.
+   the effective platform-wide throughput, and MUST set
+   `TRUSTED_PROXY_COUNT` to the exact number of its own proxy hops (see
+   §4) — leaving it at its safe default of 0 behind a real load balancer
+   collapses every client to the balancer's own address.
 3. **Migration step runs once, before the new version receives traffic,
    as the migration-owner role.** `go run ./cmd/migrate up` (or the
    compiled equivalent) — never run by the application's own runtime
@@ -132,14 +133,71 @@ with this exact hazard — not a hypothetical:
   throughout `docs/governance/stage-4i-exit-register.md`) documents this
   codebase's own permitted practice of amending an uncommitted migration
   in place during active development — explicitly NOT a practice that
-  extends past a migration actually being deployed anywhere real;
-  `PLAT-MIGDRIFT-1` (same document, §9) records the known, accepted gap
-  that `cmd/migrate` has no live-schema-vs-file-content checksum, so an
+  extends past a migration actually being deployed anywhere real.
+  `PLAT-MIGDRIFT-1` (same document, §9) recorded the known gap that
+  `cmd/migrate` tracked only version numbers, not content, so an
   environment that had a pre-amendment version applied would not
-  self-detect the drift. This is not fixed by this document — it is
-  classified `E. OBSERVATION / TECHNICAL DEBT`, non-blocking, and the
-  fix (a checksum column plus a `migrate verify` command) is new
-  engineering work outside this pass's scope.
+  self-detect the drift — **closed in Stage 9.1** by
+  `schema_migrations.checksum` (migration `0083`) and the `migrate verify`
+  subcommand; see "Migration checksum verification (`migrate verify`) —
+  exact scope" below for precisely what it does and does not catch. This
+  gap materialized for real, not just hypothetically: `igaming_platform_
+  dev`'s `sportsbook_bets` table carried a stale `provider_bet_ref` column
+  (predating migration `0081`'s in-place rename to
+  `provider_bet_reference`) undetected by `migrate status` until Stage
+  9.1's audit found it by direct schema inspection and rebuilt the
+  database from the migration chain from scratch (the drift predated
+  checksum tracking, so `migrate verify` could not have retroactively
+  detected that specific instance either — see the scope section).
+
+### Migration checksum verification (`migrate verify`) — exact scope
+
+`schema_migrations` carries a `checksum` column (SHA-256 hex of the
+up-file's raw bytes, recorded at the moment a migration is actually
+applied — `internal/db.Pool.MigrateUp`). `go run ./cmd/migrate verify`
+(wired into `.github/workflows/ci.yml` immediately after the migration
+step) uses it to check two, and only two, things:
+
+1. **Content drift on already-applied migrations.** For every row in
+   `schema_migrations`, it recomputes the SHA-256 of the CURRENT on-disk
+   `<version>_<name>.up.sql` file and compares it to the checksum recorded
+   when that migration was applied. A mismatch means the file was edited
+   after this database already applied the earlier content — exactly the
+   `provider_bet_ref`/`provider_bet_reference` defect class.
+2. **Version-sequence gaps.** The full on-disk migration set (not just
+   applied ones) is checked for missing version numbers between the
+   lowest and highest present. `internal/db.LoadMigrations` itself
+   (called by every `migrate` subcommand, not just `verify`) separately
+   rejects two different files declaring the same version number outright
+   — true duplicates cannot reach `verify` at all.
+
+**What it explicitly does NOT check** (no fake completion — read this
+before treating a clean `migrate verify` as a stronger guarantee than it
+is):
+
+- **The corresponding `.down.sql` file.** Only the up-file that was
+  actually executed is hashed. An edited down-file is invisible to this
+  tool entirely.
+- **The live database schema itself.** A checksum match proves the FILE
+  is byte-identical to what was applied; it does NOT re-derive or compare
+  the actual live schema (columns, constraints, indexes) against what
+  that SQL would produce. A schema hand-altered outside the migration
+  chain (e.g. a manual `ALTER TABLE` run directly against the database)
+  is invisible to `verify` even though the migration file itself is
+  untouched.
+- **Any migration applied before checksum tracking existed, for any edit
+  that happened before its checksum was backfilled.** `MigrateUp`
+  automatically backfills a NULL checksum for legacy rows using
+  whatever the file looks like AT BACKFILL TIME (there is no earlier
+  recorded value to compare against) — this establishes a real baseline
+  for every FUTURE edit, but cannot retroactively prove anything about
+  edits that already happened before the backfill ran. This is exactly
+  why `igaming_platform_dev`'s specific historical drift required a full
+  rebuild from the migration chain (Stage 9.1), not a `migrate verify`
+  finding — the drift predated the column that would have caught it.
+- **Anything about migrations recorded with no on-disk file at all**
+  (a deleted migration file) is reported as `missing_file`, a genuine
+  failure — but `verify` cannot say what that file used to contain.
 
 **Standing rule for every future migration, restated here as an
 enforceable checklist rather than left implicit:**
@@ -186,22 +244,35 @@ incident instead of a document:
   adding leader election) is a genuine next step once replica count
   grows past a handful, not before.
 - **The per-IP rate limiter (`internal/httpserver/ratelimit.go`) trusts
-  `RemoteAddr`, not `X-Forwarded-For`**, by design, because no specific
-  reverse-proxy chain is configured yet (§2 point 2). Whoever introduces
-  a load balancer/reverse proxy in front of `platform-api` MUST either
-  teach `clientIP()` to trust that proxy's own header (never trust
-  `X-Forwarded-For` from the public Internet directly — it is trivially
-  spoofable) or explicitly accept the degraded "per-service, not
-  per-client" limiting this document's §2 already names.
+  `RemoteAddr` by default (`TrustedProxyCount`/`TRUSTED_PROXY_COUNT` = 0)
+  and reads `X-Forwarded-For` ONLY when explicitly configured** — closed
+  in Stage 9.1 (was `S9.1-LAUNCH-1`). Whoever introduces a load balancer/
+  reverse proxy in front of `platform-api` MUST set `TRUSTED_PROXY_COUNT`
+  to the EXACT number of proxy hops it controls (never guess high — an
+  over-count lets a client's own injected `X-Forwarded-For` entry be
+  mistaken for the trusted one); leaving it at the default 0 behind a real
+  proxy reproduces the original "per-service, not per-client" degradation
+  this bullet used to describe as unconditional. See
+  `internal/httpserver/server.go`'s `Deps.TrustedProxyCount` doc comment
+  and `docs/security/security-architecture.md`'s Stage 9 section for the
+  full trust model. `AUTH_RATE_LIMIT_PER_MINUTE` is likewise now plumbed
+  end to end through `internal/config` (was `S9.1-LAUNCH-2`) — see
+  `docs/runbooks/production-configuration-checklist.md`.
 - **No distributed rate limiting.** Each replica's limiter is
   independent, in-process, in-memory state — restarting a replica resets
   its own counters, and the effective platform-wide limit scales with
   replica count (§2 point 2). This is an accepted, documented tradeoff
   for a first production deployment, not an oversight; moving to a
   shared store (Redis) is future work if abuse patterns actually require
-  it.
-- **`PLAT-MIGDRIFT-1`** (§3) — no content-checksum verification that a
-  live schema matches its migration files.
+  it. `TRUSTED_PROXY_COUNT`/`AUTH_RATE_LIMIT_PER_MINUTE` (above) make the
+  per-replica limit correctly keyed and operator-tunable; they do not
+  change this — it is a separate, still-accepted limitation.
+- **`PLAT-MIGDRIFT-1`** (§3) — closed in Stage 9.1 by
+  `schema_migrations.checksum` and `migrate verify` — see "Migration
+  checksum verification (`migrate verify`) — exact scope" in §3 for
+  precisely what is (and is not) covered; it is a real, bounded
+  improvement, not a claim that every possible drift class is now
+  detectable.
 - **No multi-region, no read replicas for query offloading, no message
   bus.** All explicitly out of scope per `CLAUDE.md`'s "no premature
   optimization" rule until there is a concrete load or availability

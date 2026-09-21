@@ -710,14 +710,22 @@ func (o *Orchestrator) postDepositSuccess(ctx context.Context, tx pgx.Tx, intent
 			ErrCallbackProviderMismatch, intent.ID, intent.Amount, intent.AssetCode, amount, assetCode)
 	}
 
-	cashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, intent.TenantID, &intent.WalletID, ledger.AccountPlayerCash, intent.AssetCode)
+	// ADR 0082 §4.5: this package needs NO locking change - finding
+	// LOCK-1b (a deposit and a reversal of a DIFFERENT deposit on the same
+	// wallet taking (psp_clearing, player_cash) in opposite orders) is
+	// closed entirely by ledger.Post's own internal L3 pre-lock, because
+	// neither path takes any lock outside Post. The switch to
+	// GetOrCreateAccounts is the uniform, defensive half: canonical
+	// (wallet, account_type, asset) creation order for the
+	// ledger_accounts unique-index insertion waits.
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, intent.TenantID,
+		ledger.AccountSpec{WalletID: &intent.WalletID, AccountType: ledger.AccountPlayerCash, AssetCode: intent.AssetCode},
+		ledger.AccountSpec{AccountType: ledger.AccountPSPClearing, AssetCode: intent.AssetCode},
+	)
 	if err != nil {
-		return intent, fmt.Errorf("payments: resolve player_cash account: %w", err)
+		return intent, fmt.Errorf("payments: resolve deposit ledger accounts: %w", err)
 	}
-	clearingAccountID, err := ledger.GetOrCreateAccount(ctx, tx, intent.TenantID, nil, ledger.AccountPSPClearing, intent.AssetCode)
-	if err != nil {
-		return intent, fmt.Errorf("payments: resolve psp_clearing account: %w", err)
-	}
+	cashAccountID, clearingAccountID := accounts[0], accounts[1]
 
 	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 		// IdempotencyKey is namespaced by providerID, not the bare
@@ -976,14 +984,17 @@ func (o *Orchestrator) receiveDepositReversalCallback(ctx context.Context, tx pg
 		return ReceiveCallbackResult{}, ErrDepositAlreadyReversed
 	}
 
-	cashAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &original.WalletID, ledger.AccountPlayerCash, original.AssetCode)
+	// ADR 0082 §4.5: account resolution only - see the identical comment
+	// on the deposit-success posting above for why the reversal path
+	// (the other half of finding LOCK-1b) needs no locking change.
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, tenantID,
+		ledger.AccountSpec{WalletID: &original.WalletID, AccountType: ledger.AccountPlayerCash, AssetCode: original.AssetCode},
+		ledger.AccountSpec{AccountType: ledger.AccountPSPClearing, AssetCode: original.AssetCode},
+	)
 	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("payments: resolve player_cash account: %w", err)
+		return ReceiveCallbackResult{}, fmt.Errorf("payments: resolve deposit reversal ledger accounts: %w", err)
 	}
-	clearingAccountID, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, nil, ledger.AccountPSPClearing, original.AssetCode)
-	if err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("payments: resolve psp_clearing account: %w", err)
-	}
+	cashAccountID, clearingAccountID := accounts[0], accounts[1]
 
 	reversalRef := event.ProviderReference
 	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{

@@ -326,6 +326,21 @@ var (
 	// (tenant_id, provider_id, provider_round_id) - e.g. no bet has ever
 	// been posted for that round yet.
 	ErrProviderRoundNotFound = errors.New("casino: provider round not found")
+
+	// --- Migration 0084 / ADR 0081 (ARCH-DB-2) ---
+
+	// ErrTransactionScope is returned by UpsertGame when tx is not a
+	// genuinely platform-admin-scoped transaction
+	// (app.platform_admin_principal_id set AND app.tenant_id/
+	// app.player_account_id both unset) - a SERVER-side caller bug, not a
+	// client input error, mirroring internal/jurisdiction's own
+	// ErrTransactionScope/assertPlatformScope exactly: this is a REAL,
+	// in-function control, not defence-in-depth commentary, since migration
+	// 0084's casino_games_platform_admin_insert/update RLS policies enforce
+	// the identical predicate independently at the database - a caller that
+	// bypassed this check would still fail at the INSERT/UPDATE, but with a
+	// much less diagnosable error.
+	ErrTransactionScope = errors.New("casino: requires a platform-admin-scoped transaction (use db.Pool.WithPlatformAdmin)")
 )
 
 // Stage 4D-RG's LaunchGame/postBet eligibility denial (internal/
@@ -393,7 +408,7 @@ type ProviderHealth struct {
 
 // CatalogueEntry is one title a CasinoProvider's Catalogue() call
 // returns - the provider's own declared facts about a game it offers.
-// UpsertGamesFromCatalogue (catalogue.go) maps this into a casino_games
+// UpsertGame (catalogue.go) maps this into a casino_games
 // row, keyed on (ProviderID, ProviderGameID) - the platform's own game id
 // is assigned once, at first sync, and never re-derived from this shape
 // again (ADR 0025 §2: "provider game identifier... never promoted to

@@ -2741,6 +2741,475 @@ fix, LOCK-1's cross-cutting lock-ordering discipline, and an actual
 production backup/restore mechanism (structurally blocked on the open
 hosting decision, not skipped).
 
+## Stage 9.1 — Production Blocker Closure
+
+Directive: "STAGE 9.1 — PRODUCTION BLOCKER CLOSURE," opening with "STAGE
+9 IS APPROVED." A focused hardening stage closing the concrete
+engineering gaps Stage 9 identified but did not fix: ARCH-DB-2 (database
+backstop for 6 RLS-free catalogue tables), LOCK-1 (canonical financial
+lock ordering), the two rate-limiter launch gates, PLAT-MIGDRIFT-1
+(migration content-drift protection), the live shared-dev-DB drift
+instance, a provider-error-body safety P3, and 6 named minor technical
+debt items. Explicitly out of scope: B2B/retail, undocumented external
+providers, any jurisdiction/legal decision, any redesign of completed
+architecture. Full narrative in the Stage 9.1 final report delivered to
+the human; this table and the sections below are the durable record.
+
+Structured as: Phase 1 (parallel, design-only) — two architect rulings
+(ADR 0081 for ARCH-DB-2, ADR 0082 for LOCK-1) plus three independent
+hardening workstreams (rate limiter/migration-drift/dev-DB-rebuild;
+provider error-body safety; casino/sportsbook debt classification, the
+QA audit below). Phase 2 — two implementation waves executing the two
+ADRs exactly (migration 0084 + `db.WithPlatformService`; the
+`ledger.LockProjectionsForPosting` canonical-lock-ordering rewrite across
+6 packages). Phase 3 — mandatory `security` review + `code-reviewer`
+review of both large changes (CLAUDE.md: "security-sensitive
+functionality requires explicit review… before being marked complete").
+Phase 4 — a fix round closing every P1/P2 finding from Phase 3 (one real
+regression: `AdvisoryLockGrant` losing its `ErrNotFound` wrapping,
+causing a 404→500 regression; migration 0085 adding a
+staff-principal-resolution trigger to `casino_games`; two anti-decay
+static-guard tests meaningfully strengthened; a genuine test-isolation
+flake between two new test files fixed). Phase 5 — the orchestrator's own
+independent full validation gate against a fresh 85-migration database
+(not merely trusted from agent self-reports), governance docs, commit,
+push, final report.
+
+| ID | Owner | Status | Files owned | Tests | Blockers | Integration |
+|---|---|---|---|---|---|---|
+| S91-01 | architect | Done | `docs/decisions/0081-arch-db-2-catalogue-write-authorization.md` (new — design ruling only, no code) | n/a | none | n/a |
+| S91-02 | architect | Done | `docs/decisions/0082-canonical-financial-lock-ordering.md` (new — design ruling only, no code) | n/a | E-1 exception named (a real but currently-unreachable L2-before-L0 inversion in casino settlement, documented not fixed) | n/a |
+| S91-03 | devops | Done | `internal/httpserver/ratelimit.go` (trusted-proxy client-identity model), `internal/config/config.go` (`AuthRateLimitPerMinute`/`TrustedProxyCount`), `cmd/platform-api/main.go`, `migrations/0083_migration_checksum_tracking.{up,down}.sql` (new), `internal/db/migrate.go` (checksum recording + `VerifyMigrations`), `cmd/migrate/main.go` (`migrate verify`), `.github/workflows/ci.yml` | new trusted-proxy/rate-limit tests, migration-checksum integration tests | none | Verified |
+| S91-04 | integrations | Done | `internal/providers/httpclient/{client,errors}.go` (bounded truncation, redact-then-truncate ordering), `docs/security/security-architecture.md` | new truncation/composition tests | none | Verified |
+| S91-05 | qa | Done | review + `docs/governance/task-registry.md` (QA technical-debt-classification subsection below) | re-ran `internal/casino`/`internal/sportsbook` suites | none | n/a |
+| S91-06 | backend | Done | `migrations/0084_catalogue_write_authorization.{up,down}.sql` (new), `internal/db/platform_service.go` (new), `internal/httpserver/casino_admin_handlers.go`, `internal/casino/catalogue.go`+`types.go`, `internal/sportsbook/catalogue.go`, `cmd/platform-api/main.go`, re-scoped test fixtures across 5 files | 3 new adversarial test files covering all 11 ADR §7.6 invariants, end-to-end HTTP proof public catalogue reads still work | none | Verified |
+| S91-07 | ledger-finance | Done | `internal/ledger/lockorder.go` (new), `internal/ledger/ledger.go`, `internal/casino/{orchestrator,bonus_settlement}.go`, `internal/sportsbook/orchestrator.go`, `internal/payments/orchestrator.go`, `internal/withdrawal/withdrawal.go`, `internal/bonus/{lifecycle,conversion}.go` | all 14 ADR 0082 tests + 2 extra, tests 1-6 individually shown to fail pre-fix (40P01), full suite `-race -count=5` | none | Verified |
+| S91-08 | security | Done | review only — appended `docs/security/security-architecture.md`'s Stage 9.1 dated section | n/a | 3 P2s found (SEC-S91-1/2/3), 6 P3s documented | n/a |
+| S91-09 | code-reviewer | Done | review only | n/a | 1 correctness regression found (AdvisoryLockGrant sentinel), 2 documented-not-fixed ordering gaps, 1 simplification noted (deferred) | n/a |
+| S91-10 | ledger-finance (fix round) | Done | `internal/bonus/lifecycle.go` (ErrNotFound fix), `internal/ledger/lockorder_static_test.go` (both anti-decay guards widened on `go/ast`), `docs/decisions/0082-*.md` (§5.1a, E-2 exception), `internal/rg/rg.go`+`internal/risk/evaluator.go` (stale comments), `internal/bonus/wave3_phase2_migrations_integration_test.go` (nit) | new regression test for the ErrNotFound fix, new evasion-pinning test for the widened guards | flagged (not its own to fix): migration-count fixture needed a further bump for migration 0085 | Verified |
+| S91-11 | backend (fix round) | Done | `migrations/0085_casino_games_require_platform_principal.{up,down}.sql` (new — SEC-S91-3), test-isolation fix in `internal/sportsbook/catalogue_write_authorization_integration_test.go`, `errors.Is` nits, `internal/casino/types.go` stale comment | new staff-principal-rejection test, flake re-verified gone under 5x concurrent-package runs | none | Verified |
+| S91-12 | Orchestrator | Done | migration-count fixture bump for 0085 across the same 5 files Stage 9 established (found and fixed one occurrence S91-10 missed, caught by the orchestrator's own independent full-suite run — see below), `docs/governance/stage-4i-exit-register.md` (PLAT-MIGDRIFT-1 closure update), this registry, `docs/active-stage.md`, `docs/progress.md` | full independent validation gate: 85 migrations clean, `migrate verify` clean, full integration suite + `-race` green (32 packages), runtime-role adversarial suite green, lock-ordering concurrency tests repeated 3x under `-race`, Stage 6+7 acceptance tests by exact name, both frontends re-verified | none | n/a |
+
+### Review findings and dispositions
+
+**One genuine correctness regression found and fixed** (code-reviewer):
+the LOCK-1 implementation's new `AdvisoryLockGrant` precondition (added
+to resolve `player_account_id` before acquiring the new L0.2 player-scope
+advisory lock) returned a bare error for an unknown/cross-tenant grant id
+instead of wrapping the package's `ErrNotFound` sentinel — every
+`AdvisoryLockGrant` caller (`ActivateGrant`, `ConvertGrant`,
+`TerminateGrant`, `RecordWageringContribution`,
+`CheckAndCompleteGrant`) would have returned HTTP 500 instead of 404 for
+a bad grant id the first time a handler was wired directly to one of
+them. Fixed by wrapping with `%w`; verified by reverting the fix and
+confirming 7 sub-tests fail loudly.
+
+**One defense-in-depth gap closed** (security finding SEC-S91-3,
+migration 0085): the ARCH-DB-2 `casino_games` write policies checked only
+that `app.platform_admin_principal_id` was SOME non-null UUID, not that
+it resolved to a real platform-scoped `staff_users` row — meaning any
+`WithPlatformAdmin`-scoped code path, regardless of what permission
+gated it, would satisfy the policy. The five `sb_*` tables' policies
+already pinned an exact literal service-identity string and were
+unaffected. Fixed by mirroring migration 0044's `assets` precedent — a
+new trigger validating the principal against `staff_users` — while
+deliberately deferring to the pre-existing RLS-policy error (SQLSTATE
+42501) when the GUC is unset at all, so no unrelated scope's tests broke.
+
+**Two anti-decay regression guards meaningfully strengthened**
+(code-reviewer + security, independently): the R4 guard
+(`TestLockOrder_NoProjectionForUpdateOutsideLedgerPackage`) was a
+single-pattern string match security defeated with 6 different
+constructions (string concatenation, `fmt.Sprintf` table names, `FOR NO
+KEY UPDATE`/`FOR SHARE`, direct `UPDATE`, `ON CONFLICT…DO UPDATE`) and
+never walked `cmd/`; rewritten on `go/ast` to catch all 6 plus walk
+`cmd/`, with a new test pinning every evasion. The INV-LOCK-E1 guard only
+walked `internal/bonus`; widened to also cover `internal/casino` (which
+now transitively holds the same lock scope via the L0.2 fold-in) with a
+function-scoped positional check.
+
+**One real, previously-latent test defect found while fixing a nit**: the
+`_ = activeGrant` placeholder in a new concurrency test turned out to
+mask a genuine ordering bug in the test's own setup (the grant was seeded
+*before* the racing bet, so it was already `completed` by the time of the
+race and the test asserted nothing about actual lock contention) — fixed
+by reordering the seed, which now genuinely exercises contention.
+
+**One genuine test-isolation flake found and fixed** (qa, reproduced
+1-in-3 running two packages concurrently): two new ARCH-DB-2 test files,
+written independently by the same implementation wave, both assumed
+exclusive ownership of `sb_*` tables' row counts in the shared
+integration database. Fixed by scoping one test's counts to its own
+known `external_ref` prefix.
+
+**Two exceptions named rather than silently left inconsistent**
+(architect + code-reviewer, ADR 0082 §5.1/§5.1a): E-1 (pre-existing, a
+casino-settlement L2-before-L0 lock inversion, safe today because no
+counterpart path holds a grant advisory lock and waits on
+`ledger_transactions`) and the new E-2 (`postBet`'s `BindProviderRound`
+call taking an L1 lock after the L3 pre-lock step, safe today because
+`postBet` is `casino_provider_rounds`' sole writer). Both are standing,
+grep-testable invariants, not silent gaps.
+
+**Explicitly documented, not fixed, with full reasoning:** ARCH-DB-2's
+Phase 2 four-eyes governance for `casino_games.jurisdiction_blocklist`
+removals/`status` re-activation (ADR 0081 §5.1-5.2 — specified in detail,
+requires new public API surface, its own stage slot); LOCK-1's E-1/E-2
+exceptions (above); the ~1,280-line duplication across
+`internal/{casino,payments,withdrawal}/lockorder_harness_test.go`
+(code-reviewer's simplification finding — SAFE DEFERMENT, a later
+stage's refactor, not a correctness issue); security's 6 P3 findings
+(GUC-settable-by-app-role — already ADR-acknowledged; silent-no-op
+denied-scope UPDATEs; partial regression coverage on frozen columns;
+scope-helper reliance on the tree-wide `is_local=true` GUC convention;
+open SELECT exposing `jurisdiction_blocklist` — already an accepted
+consequence per ADR 0081 §2.3; one stale code comment, fixed anyway).
+
+### QA Technical Debt Classification (S91-05)
+
+Purpose: classify six named pieces of prior-stage technical debt
+(casino round-visibility index, migration 0079's constraint-addition
+strategy, mock inbound-failure injection, sportsbook cumulative risk,
+sportsbook catalogue jurisdiction gating, B2C build-time brand model) as
+exactly one of `FIX NOW`, `FIX BEFORE PRODUCTION`, `SAFE DEFERMENT`, or
+`EXTERNAL/HUMAN DEPENDENCY`, and implement only what is genuinely small
+and within a `qa`-owned surface. Explicitly did NOT touch jurisdiction/
+country-approval policy (HDR-J-6/7/8/9 untouched), did NOT touch
+`internal/db`, RLS policies, or the sportsbook catalogue tables'
+ownership model (another Stage 9.1 workstream's territory), and did NOT
+unilaterally implement any cross-domain architecture change per
+CLAUDE.md's "no specialist redesigns shared architecture unilaterally"
+rule. Verified every claim against live code/schema/tests, not prior
+summaries.
+
+| ID | Owner | Status | Files touched | Tests | Classification |
+|---|---|---|---|---|---|
+| S91-QA-01 | qa | Done | none — verification only | re-ran `internal/casino` full integration suite against a fresh `qa_stage91_scratch` DB (82 migrations, clean up) | Item 1 (casino round-visibility index) |
+| S91-QA-02 | qa | Done | none — review only | n/a | Item 2 (migration 0079 constraint strategy) |
+| S91-QA-03 | qa | Done | none — review only | re-ran `internal/casino` and `internal/sportsbook` full integration suites | Item 3 (mock inbound-failure injection) |
+| S91-QA-04 | qa | Done | none — review only, `internal/risk` out of this agent's allowed scope | n/a | Item 4 (sportsbook cumulative risk) |
+| S91-QA-05 | qa | Done | none — review only | n/a | Item 5 (sportsbook catalogue jurisdiction gating) |
+| S91-QA-06 | qa | Done | none — review only | n/a | Item 6 (B2C build-time brand model) |
+| S91-QA-07 | qa | Done | this registry section | full validation gate (see below) | Governance write-up |
+
+### Item 1 — Casino round-visibility index: ALREADY FIXED, no action taken
+
+The `(tenant_id, created_at DESC)`-style index the Stage 7 DB/RLS review
+recommended (task registry's Stage 7 section: "recommended (not yet
+added, recorded as tech debt): a `(tenant_id, created_at DESC)` index on
+`casino_launch_sessions` before either round-visibility view carries
+real volume") **was already added** by Stage 9's `ledger-finance`
+workstream in `migrations/0082_stage9_db_hardening.up.sql` §3
+("Pagination indexes (audit §26 item 2)"):
+`idx_casino_launch_sessions_tenant_time ON casino_launch_sessions
+(tenant_id, created_at DESC, id DESC)`. Verified live against a fresh
+`qa_stage91_scratch` database built from all 82 migrations — the index
+exists exactly as described, matching `listSessionsPage`'s own `ORDER BY
+created_at DESC, id DESC` query shape (`internal/casino/history.go`)
+column-for-column.
+
+Checked `casino_provider_rounds` for the same class of gap: its only two
+production call sites (`internal/casino/rounds.go`'s
+`BindProviderRound`/point lookup by the `UNIQUE (tenant_id, provider_id,
+provider_round_id)` constraint, and `LookupProviderRoundIDsBySession`'s
+`WHERE tenant_id = $1 AND launch_session_id = ANY($2)` used only against
+the page-bounded set of session ids `ListRoundsForTenant`/
+`ListRoundsForPlayer` already paginated) are both already covered by
+existing indexes (`idx_casino_provider_rounds_session (tenant_id,
+launch_session_id)` and the unique constraint's own index) — no
+unbounded scan exists at either call site, so no additional index is
+needed there.
+
+**Classification: no longer applicable — resolved prior to this audit.**
+No migration added by this stage.
+
+### Item 2 — Migration 0079 constraint-addition strategy: SAFE DEFERMENT (process reminder only)
+
+`migrations/0079_casino_launch_session_brand_pinning.up.sql` drops one
+FK constraint and adds a replacement composite FK
+(`casino_launch_sessions_player_tenant_brand_fkey`) with a bare `ADD
+CONSTRAINT ... FOREIGN KEY`, not the `NOT VALID` + separate `VALIDATE
+CONSTRAINT` split. `ADD CONSTRAINT` for a foreign key without `NOT
+VALID` takes `ACCESS EXCLUSIVE` on the table for the full duration of
+its initial validation scan (blocking all reads/writes), whereas `NOT
+VALID` acquires the exclusive lock only briefly and defers the scan to a
+separate `VALIDATE CONSTRAINT` step that takes the much weaker `SHARE
+UPDATE EXCLUSIVE` lock instead.
+
+Note: this specific document could not locate a committed ADR
+documenting "migration safety Rules A-E" — `docs/governance/
+task-registry.md`'s own Stage 9 row (`S9-12`) references it as
+`architect (review)`'s output ("migration-safety Rules A-E for 0083+")
+but no `docs/decisions/*.md` file or `docs/architecture/*.md` file
+contains that content; it appears to exist only in the Stage 9
+completion report delivered to the human, never backfilled into a
+committed doc. This is itself a minor governance-record gap (same class
+as the Stage 8→9 httpclient P3 backfill already recorded in this file),
+noted here rather than silently worked around, but out of this agent's
+scope to fix (would require locating/reconstructing the original Stage 9
+`architect` output, not something `qa` should reconstruct unilaterally).
+
+Per this repo's own established rule, migration 0079 is **not
+retro-edited** — it is already applied everywhere and doing so would
+create exactly the `PLAT-MIGDRIFT-1`-style drift this project already
+suffered once. Two additional facts bound the real-world risk to
+effectively zero for this specific migration: (a) `casino_launch_sessions`
+had at most a handful of synthetic test rows when 0079 was authored and
+applied (Stage 7, pre any real player traffic), and (b) the platform's
+real production database does not exist yet (Stage 9's own disclosure:
+ADR 0009's hosting decision is still open) — when migrations are
+eventually applied to a real production database, they will be applied
+as the full ordered sequence starting from an empty schema, so
+`casino_launch_sessions` will be empty at the moment 0079 runs. This
+migration therefore poses no actual downtime risk to the real, eventual
+production rollout, only to a hypothetical scenario where 0079 is
+replayed in isolation against an already-populated table via drift.
+
+**Classification: SAFE DEFERMENT for migration 0079 itself (already
+applied, inert, and provably harmless given production doesn't exist
+yet). Recorded as a PROCESS REMINDER for future migration authors**: any
+migration adding a `NOT NULL`-validated or foreign-key constraint against
+a table that could hold non-trivial production rows by the time it runs
+should use the `NOT VALID` + `VALIDATE CONSTRAINT` split (the pattern
+Stage 9's `architect` ruling establishes for migrations 0083+), not
+0079's own bare `ADD CONSTRAINT` — 0079 should not be cited as precedent
+by a future migration touching a genuinely populated table.
+
+### Item 3 — Mock inbound-failure injection: SAFE DEFERMENT (both packages)
+
+**Casino (`MockCasinoProvider`)**: `FailNextCall`/`consumeFailure`
+already exist and are wired into every OUTBOUND call
+(`Launch`/`Bet`/`Win`/`Rollback`), and are exercised by
+`TestFailureModeMatrix_F_ProviderTransportFailureAtLaunchLeavesNoTrace`.
+The gap Stage 8 flagged is narrower than "no failure injection at all":
+`HandleCallback` (the INBOUND webhook-parsing path) has no
+error-injection hook beyond signature/parse rejection (already tested).
+Read `internal/casino/failure_mode_matrix_integration_test.go`'s own
+item-F doc comment (lines ~883-891, pre-existing, not written by this
+audit): it already reasons through why this has no real analogue — "an
+HTTP 5xx on the INBOUND callback path... There is no such thing — a
+callback is the provider calling US; a 5xx would be the platform's own
+response, and retrying it is the provider's business." No other
+downstream failure mode inside `HandleCallback` exists to inject (it is
+a pure parse-and-verify function articulating exactly two failure
+branches: malformed JSON, bad signature — both tested). No concrete,
+currently-writable test is blocked by this gap.
+
+**Sportsbook (`MockSportsbookProvider`)**: has zero failure-injection
+mechanism, but this is not a mock-completeness gap — it is a structural
+fact about the `Provider` interface itself:
+`type Provider interface { Catalogue() CatalogueResult }`
+(`internal/sportsbook/types.go`) has **no error return at all**, so
+`SyncCatalogue` (`internal/sportsbook/catalogue.go`) has no failure
+channel from the provider to receive in the first place. Adding a
+`FailNext`-style hook to the mock would be inert until the `Provider`
+interface itself is widened to return `(CatalogueResult, error)` — an
+interface change spanning `SyncCatalogue`, every future adapter, and
+`cmd/platform-api`'s wiring, which is an architecture-level change, not
+a "minimal mock hook." Confirmed via
+`internal/sportsbook/failure_mode_matrix_integration_test.go`'s own item
+F disposition ("DOES NOT APPLY... MockSportsbookProvider is consulted
+for catalogue data only; no call it makes is on the money path... It
+also has no error-injection hook") — `Catalogue()` runs once at
+same-process startup/sync, never per-request, and is not on the money
+path, so no financial-integrity or authorization test is blocked by its
+absence either.
+
+**Classification: SAFE DEFERMENT for both.** No mock code changed, no
+new test added — implementing either would be cosmetic (casino) or
+require a real interface redesign (sportsbook), neither of which this
+audit's "minimal hook, only if genuinely blocking real coverage today"
+bar clears.
+
+### Item 4 — Sportsbook cumulative risk: FIX BEFORE PRODUCTION, architect/risk/ledger-finance-owned, NOT implemented here
+
+Confirmed still unwired in current code:
+`internal/risk/types.go`'s `operationCumulativeSpecs` map has an explicit
+`OperationSportsbookBet: {}` placeholder entry (a comment, not a real
+`cumulativeSpec`), and `internal/risk/cumulative.go`'s
+`operationCumulativeSpecs` map itself has exactly one production entry
+(`casino_bet`) — matching `docs/architecture/09-sportsbook-architecture.md`
+§16.3's own "no sportsbook operation is wired yet" statement and ADR
+0047 §4's disposition, both still accurate. This refers to the
+rolling-window/cumulative-exposure RISK LIMIT wiring (`risk_rules`'
+`cumulative_amount` kind for `sportsbook_bet`), not the separate
+"open-liability reporting" concept (doc 09 §9, which is a reporting-line
+computation off the existing `player_locked` ledger projection, owned
+jointly with `data-analytics`, and not part of this audit's scope since
+no reporting surface has been authorized at all).
+
+Per-bet risk (max/min, hard/soft limits) and RG eligibility are already
+enforced on every sportsbook bet, fail-closed; nothing can currently even
+configure a sportsbook cumulative rule (it fails closed with
+`ErrUnsupportedCumulativeOperation` if attempted), so there is no live
+exposure gap today. Wiring the map entry is described by three separate
+specialist reviews (Stage 6.1 ADR 0047 §4, Stage 4H-B0-R6 doc 09 §16.3)
+as small in isolation, but doc 09 §16.3's own "drift note" flags that the
+correct `IgnoredAccountTypes` value changed from `player_locked` to
+`player_locked_cash`/`player_locked_bonus` once migration 0048 landed —
+meaning whoever wires this must re-verify the exact account-type set
+against current code, not copy the older reference comment literally.
+`internal/risk` is outside this agent's allowed scope for this task, and
+wiring a real risk limit is also a `risk_rules` configuration/business
+decision, not a pure mechanism fix — so this is left to `architect`/
+`risk`/`ledger-finance` as a scoped, well-specified follow-up, not
+attempted here.
+
+**Classification: FIX BEFORE PRODUCTION** (specifically: before any
+tenant is expected to configure a sportsbook exposure cap), owned by
+`risk` with `ledger-finance` confirming the post-migration-0048 account
+types — not a `qa`-agent patch.
+
+### Item 5 — Sportsbook catalogue jurisdiction gating: real mechanism gap confirmed, FIX BEFORE PRODUCTION, NOT implemented here
+
+Verified current code still matches ADR 0047 §2-3's disposition exactly:
+`internal/sportsbook/orchestrator.go`'s `PlaceBet` doc comment (lines
+~92-110) states, unchanged, that jurisdiction is "DELIBERATELY NOT
+evaluated here," and `sb_events`/`sb_selections` (migration 0078) still
+carry no `jurisdiction_blocklist`-equivalent column — confirmed absent
+from the current schema. Casino's own mechanism
+(`casino_games.jurisdiction_blocklist` +
+`internal/casino/orchestrator.go`'s `evaluateJurisdictionBlocklist`,
+called with an already-resolved `jurisdiction.Resolution` at `LaunchGame`
+time) remains real, tested, and — since `PUT /v1/admin/casino/games`
+already lets a `platform_admin` populate it today with no further code
+change — one authorized admin action away from being live, while
+sportsbook has no equivalent lever to reach for at all. This is the same
+architectural-symmetry gap ADR 0047 named, still open, still inert today
+(every blocklist on the platform is empty; no HDR-J item is answered).
+
+This is **not** a "one missing filter check reusing the same existing
+jurisdiction-resolution service" — it requires: (1) a new migration
+adding a blocklist-equivalent column to `sb_events`/`sb_selections`
+(schema change, on the SAME 5 tables another Stage 9.1 workstream is
+concurrently redesigning write-authorization/ownership for — explicitly
+out of this agent's territory this stage, and a genuine collision risk
+if attempted in parallel); and (2) wiring `jurisdiction.Resolve` into
+`PlaceBet` for the first time (sportsbook's `RiskRequest` does not even
+set `JurisdictionCode` today, per ADR 0047 §1 row E) — comparable in
+shape and size to what casino's `LaunchGame` already does, but new code
+in `internal/sportsbook`, not a one-line reuse. Per this task's own
+fallback instruction and CLAUDE.md's "no specialist redesigns shared
+architecture unilaterally" rule, this is documented precisely rather
+than implemented.
+
+**Exact missing mechanism** (for whoever picks this up): add a
+nullable/defaulted `jurisdiction_blocklist text[]` column to `sb_events`
+and/or `sb_selections`; export (or duplicate under an
+`internal/sportsbook`-local name) casino's `evaluateJurisdictionBlocklist`
+shape; call `jurisdiction.Resolve` inside `PlaceBet` before the ledger
+posting, exactly where casino calls it inside `LaunchGame`; gate the
+control identically to casino's K3-1 "empty blocklist = not armed" rule
+so it stays a no-op until a real blocklist entry is ever configured. No
+new human/policy decision is required to BUILD the mechanism — only to
+ever populate a blocklist with it, per ADR 0047 §3's own reasoning,
+unchanged.
+
+**Classification: FIX BEFORE PRODUCTION** (specifically: before a second
+jurisdiction or the first B2B tenant is onboarded, per ADR 0047's own
+already-recorded disposition — re-verified accurate today), requiring
+`architect`-level sequencing against the parallel catalogue-ownership
+workstream plus `sportsbook`/`identity-compliance` implementation — not
+a `qa`-agent patch.
+
+### Item 6 — B2C build-time brand model: SAFE DEFERMENT, confirmed already-decided MVP scope limitation
+
+Verified `b2c/src/config/brand.ts`'s own doc comment: "Stage 6 brand-
+awareness mechanism (per the directive: build-time env vars are
+acceptable for this MVP, a full runtime multi-brand theming engine is
+explicitly out of scope/future work)" — an already-recorded, explicit
+Stage 6 directive decision, not an unexamined default. The Stage 6.1
+registry section's own item 4 disposition ("B2C build-time brand model
+before true multi-brand — SAFE DEFERMENT, required before a second B2C
+brand goes live... every authenticated call derives tenant/brand purely
+from the verified JWT") remains accurate: `slug` only selects the
+pre-authentication login/register target; nothing in `internal/httpserver`
+trusts a client-supplied tenant/brand id post-authentication (CLAUDE.md's
+"tenant_id is authoritative from server-side authenticated context
+only" is not violated by this build-time mechanism).
+
+`docs/architecture/37-b2c-brand-frontend-architecture.md` §3.3
+recommends a future SSR/per-request brand-resolution architecture
+(Next.js/SvelteKit-class) specifically for when true runtime multi-brand
+serving is needed — but that document is explicitly a Stage 4H-B1 Wave
+1.5 architecture-freeze document that "does not authorize" building
+anything, and B2B (the only scenario that would require more than one
+brand build) remains entirely out of scope for the whole platform right
+now (Stage 9's own directive: "Explicitly out of scope: B2B/partner/
+retail"). The underlying data model this frontend consumes (`brands`
+table, `tenant_jurisdiction_configs`, casino tenant-scoped availability,
+withdrawal policy) is already fully data-driven, not brand-name-coded —
+only the frontend's own DEPLOYMENT artifact (which brand's slug/colors
+get compiled into a given build) is build-time, which is the accepted
+MVP limitation, not a mechanism defect.
+
+**Classification: SAFE DEFERMENT**, confirmed, not assumed — required
+before a second B2C brand or any B2B rollout, not before current
+production launch of the single existing B2C brand.
+
+### Explicitly NOT this stage's to build (confirmed absent)
+
+Any answer to HDR-J-6/J-7/J-8/J-9 or any new jurisdiction/country policy
+value; any change to `internal/db`, RLS policies, or the sportsbook
+catalogue tables' (`sb_sports`/`sb_competitions`/`sb_events`/
+`sb_markets`/`sb_selections`) write-authorization/ownership model (another
+Stage 9.1 workstream's territory); any retro-edit of migration 0079; any
+`internal/risk` code change; any sportsbook jurisdiction-blocklist
+migration or `PlaceBet` wiring; any B2C frontend architecture change.
+
+### Validation
+
+Fresh scratch database (`qa_stage91_scratch`) built from all 82
+migrations (clean up-only run, no down/up round-trip needed since no
+migration was added); `go build ./...`, `go vet ./...`, `gofmt -l .` all
+clean; `go test -tags=integration ./internal/casino/...` and
+`./internal/sportsbook/...` both green against the fresh database. No
+production code, test code, or migration was added or modified by this
+audit — every classification above was reached by reading live code/
+schema/tests directly, not by trusting prior summaries.
+
+### Explicitly NOT this stage's to build (confirmed absent, stage-wide)
+
+B2B/partner/retail work of any kind; any undocumented external provider
+API integration; any answer to HDR-J-6/J-7/J-8/J-9 or HDR-M-1/M-2; any
+production database cutover, cloud provider selection, hosting AUP,
+backup infrastructure, production restore, or production credentials;
+any legal retention period; any redesign of completed architecture
+outside the two named ADRs; ARCH-DB-2's Phase 2 four-eyes governance API
+(specified, not authorized); a distributed/shared-state rate limiter
+(deliberately not built — an accepted, documented single-instance
+limitation).
+
+### Governance-record note: the migration-count fixture pattern, twice in one stage
+
+Two new migrations landed independently this stage (`0083` from S91-03,
+`0084` from S91-06), then a third (`0085` from S91-11, in the fix round).
+Each advance requires bumping the same 5 hardcoded-rollback-step-count
+test files this project has bumped at every migration-tip advance since
+Stage 8 (`internal/bonus/wave3_phase2_migrations_integration_test.go`,
+`internal/jurisdiction/migration_0075_integration_test.go`,
+`internal/jurisdiction/migration_0077_integration_test.go`,
+`internal/operatingmarket/migration_0076_integration_test.go`,
+`internal/operatingmarket/qa_migration_rls_survives_failed_rollback_test.go`).
+S91-05 (qa) correctly bumped all 5 for `0083`+`0084` together. S91-10
+(the ledger-finance fix round) correctly flagged that `0085` needed the
+same treatment but explicitly left it for whoever owned that pass, per
+its own stated file-territory boundary. The Orchestrator's own bump for
+`0085` initially missed ONE occurrence — a third, distinct `MigrateDown`
+call inside `TestMigration0075_DownMigrationRestoresPreMigrationRLSPosture`
+(a full clean rollback including migration 0075 itself, not the two
+"roll back on top of 0075" scenarios the other two occurrences in that
+file cover) — which the Orchestrator's own independent full-suite run
+(not any agent's self-report) caught as a real, reproducible test
+failure, diagnosed, and fixed before this stage was marked done. Recorded
+here as a concrete instance of why the final validation gate is always
+run independently rather than trusted from agent summaries, and as a
+reminder for a future migration-tip advance: this specific file has
+THREE occurrences needing the bump, not two — a plain `grep -c
+"MigrateDown(context.Background(), dir"` against each of the 5 files is
+the reliable way to find all of them, rather than assuming the count
+from a prior stage's pattern.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

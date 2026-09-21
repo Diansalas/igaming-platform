@@ -102,10 +102,14 @@ glossed over; see `docs/runbooks/observability-and-alerting.md` and
 1. Symptoms: login/register/refresh endpoints erroring or the rate limiter
    (`internal/httpserver/ratelimit.go`) over-triggering.
 2. Check whether the cause is the rate limiter's IP-keying degrading
-   behind a load balancer (known launch gate `S9.1-LAUNCH-1` — it keys on
-   `RemoteAddr`, not a trusted `X-Forwarded-For`). If so, this presents as
-   many distinct users all being throttled together; the fix is
-   operational (trust XFF at the edge) not a code rollback.
+   behind a load balancer because `TRUSTED_PROXY_COUNT` is misconfigured
+   (left at its default `0`, or set to the wrong hop count) — closed as a
+   code gap in Stage 9.1 (`S9.1-LAUNCH-1`), but still a real operational
+   misconfiguration risk. If so, this presents as many distinct users all
+   being throttled together; the fix is operational (set
+   `TRUSTED_PROXY_COUNT` to the exact number of trusted proxy hops in
+   front of this deployment — see `docs/runbooks/production-configuration-
+   checklist.md`) not a code rollback.
 3. If the JWT signing key or key registry is implicated, do not rotate
    keys ad hoc mid-incident without checking `docs/decisions/` for the
    production signing architecture ADR — a bad rotation can invalidate

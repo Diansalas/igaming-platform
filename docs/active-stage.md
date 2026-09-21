@@ -1480,7 +1480,93 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 9 — Production Readiness, Security, Resilience & Launch Hardening — COMPLETE, awaiting human review
+## Current stage: Stage 9.1 — Production Blocker Closure — COMPLETE, awaiting human review
+
+**Purpose.** Authorized by the human as "STAGE 9.1 — PRODUCTION BLOCKER
+CLOSURE," opening with "STAGE 9 IS APPROVED." A focused hardening stage
+closing the concrete, within-engineering-boundary gaps Stage 9 identified
+but did not fix: `ARCH-DB-2` (database backstop for 6 RLS-free
+platform-wide catalogue tables), `LOCK-1` (canonical financial lock
+ordering across ledger/casino/sportsbook/payments/withdrawal/bonus), the
+two rate-limiter launch gates, `PLAT-MIGDRIFT-1` (migration content-drift
+protection), the live shared-dev-DB drift instance it caused, a
+provider-error-body safety P3, and 6 named minor technical debt items.
+Full task table and review findings: `docs/governance/task-registry.md`'s
+Stage 9.1 section.
+
+**`ARCH-DB-2` closed.** New ADR 0081 ruled, after verifying the actual
+schema, that none of the 6 tables (`casino_games` + 5 sportsbook
+catalogue tables) has any tenant/brand column — they are genuinely
+platform-wide catalogue data, so per-tenant RLS is the wrong model
+entirely (not merely unbuilt). The correct backstop, built in migration
+`0084`: `ENABLE`+`FORCE ROW LEVEL SECURITY` with open reads and writes
+scoped to one of two platform-level identities — the existing
+`WithPlatformAdmin` for `casino_games`, and a new, closed-vocabulary
+`db.WithPlatformService` for the sportsbook catalogue's unattended
+startup sync (explicitly not the human-admin identity, to avoid
+laundering a machine process as a person). A fix-round migration (`0085`)
+closed a related defense-in-depth gap a security review found: the
+`casino_games` write policy checked only that a platform-admin GUC was
+set, not that it resolved to a real staff member — now mirrors the
+`assets` table's existing precedent.
+
+**`LOCK-1` closed, and scope widened honestly.** New ADR 0082 traced
+every money-touching lock site across 6 packages and found the original
+finding understated the problem: three more genuine ABBA cycles existed
+(`LOCK-1b` in payments, `LOCK-1c` in withdrawal, `LOCK-1d` a row-lock/
+advisory-lock cycle between casino and bonus) that had never been
+recorded. A new canonical lock order and a single new
+`ledger.LockProjectionsForPosting` pre-lock step (implemented by
+`ledger-finance`, who made an independent, documented judgment call
+accepting the ADR's proposed zero-row-materialization design after
+verifying it doesn't weaken any financial invariant) closes all four.
+Every one of the 6 required deadlock-freedom tests was individually
+proven to fail on pre-fix code (a real `40P01` deadlock) before being
+shown to pass after — not merely written and trusted. One exception
+(`E-1`, pre-existing) and one new exception (`E-2`) are named, bounded,
+and grep-testable rather than silently left inconsistent — the directive
+required this honesty over a clean "fully fixed" claim.
+
+**Mandatory security + code-reviewer review of both changes** (CLAUDE.md:
+security-sensitive work is not complete without it) found no P0/P1
+security findings, one genuine correctness regression (a grant-lookup
+error losing its `ErrNotFound` wrapping, causing 404→500 — fixed), and
+strengthened two regression-guard tests that were meaningfully easier to
+defeat than intended. All P1/P2 findings were closed in a fix round; P3s
+are documented, not fixed, consistent with this project's "fix P0/P1
+always, document P3/P4" convention.
+
+**Other closures:** the rate limiter now has an explicit trusted-proxy
+model (default: trust nothing, an untrusted `X-Forwarded-For` is never
+read) and its per-minute limit is wired through real configuration;
+`PLAT-MIGDRIFT-1` is closed with a migration content-hash column and a
+new `migrate verify` CLI subcommand, run for real against CI and against
+the exact shared dev database that had previously drifted (which was
+also rebuilt from a clean chain); a provider-error-body safety net now
+bounds and redacts captured response content without removing legitimate
+diagnostics.
+
+**Full independent validation, run by the Orchestrator against a fresh
+`stage91_final` database** (not merely trusted from specialist
+self-reports): all 85 migrations apply cleanly; `migrate verify` reports
+the whole chain clean with no drift or gaps; the full integration suite
+and the full `-race` suite (32 packages) are green; the runtime-role
+adversarial suite and the new catalogue-RLS assertions are green; the
+lock-ordering concurrency tests were repeated 3x under `-race` with
+identical results; the Stage 6 sportsbook and Stage 7 casino defining
+acceptance tests pass by exact name; both frontends' tests, typechecks,
+and production builds are clean. This run itself caught and fixed one
+real, missed occurrence of the project's own migration-count-fixture
+maintenance pattern (documented in the task registry as a concrete
+argument for never skipping this independent final gate).
+
+**Status: technically COMPLETE. No B2B/partner/retail work started. No
+undocumented external provider API integrated. No jurisdiction, legal, or
+production-infrastructure decision made or attempted — those remain
+explicitly out of this session's reach. Per the directive's own final
+instruction, this session STOPS here — Stage 10 is NOT authorized.**
+
+## Stage 9 — Production Readiness, Security, Resilience & Launch Hardening — COMPLETE (superseded by Stage 9.1 above)
 
 **Purpose.** Directed by the platform owner as "STAGE 8 IS APPROVED...
 Begin STAGE 9," a large, deliberately non-micro-staged production-

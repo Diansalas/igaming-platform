@@ -93,3 +93,91 @@ func TestLoad_InvalidMaxConns(t *testing.T) {
 		t.Fatal("expected error for non-numeric DATABASE_MAX_CONNS, got nil")
 	}
 }
+
+// S9.1-LAUNCH-1/S9.1-LAUNCH-2: AuthRateLimitPerMinute/TrustedProxyCount
+// must default to 0 (per-bucket defaults / X-Forwarded-For never trusted)
+// so an unconfigured deployment is safe, and must be overridable via their
+// documented environment variables without any other side effect.
+
+func TestLoad_AuthRateLimitAndTrustedProxyDefaultToZero(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AuthRateLimitPerMinute != 0 {
+		t.Errorf("expected default AuthRateLimitPerMinute 0, got %d", cfg.AuthRateLimitPerMinute)
+	}
+	if cfg.TrustedProxyCount != 0 {
+		t.Errorf("expected default TrustedProxyCount 0, got %d", cfg.TrustedProxyCount)
+	}
+}
+
+func TestLoad_AuthRateLimitPerMinuteOverride(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+	t.Setenv("AUTH_RATE_LIMIT_PER_MINUTE", "-1")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.AuthRateLimitPerMinute != -1 {
+		t.Errorf("expected AuthRateLimitPerMinute -1 (disabled), got %d", cfg.AuthRateLimitPerMinute)
+	}
+}
+
+func TestLoad_InvalidAuthRateLimitPerMinute(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+	t.Setenv("AUTH_RATE_LIMIT_PER_MINUTE", "not-a-number")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for non-numeric AUTH_RATE_LIMIT_PER_MINUTE, got nil")
+	}
+}
+
+func TestLoad_TrustedProxyCountOverride(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+	t.Setenv("TRUSTED_PROXY_COUNT", "2")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.TrustedProxyCount != 2 {
+		t.Errorf("expected TrustedProxyCount 2, got %d", cfg.TrustedProxyCount)
+	}
+}
+
+func TestLoad_NegativeTrustedProxyCountRejected(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+	t.Setenv("TRUSTED_PROXY_COUNT", "-1")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for negative TRUSTED_PROXY_COUNT, got nil")
+	}
+}
+
+func TestLoad_InvalidTrustedProxyCount(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+	t.Setenv("TRUSTED_PROXY_COUNT", "not-a-number")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for non-numeric TRUSTED_PROXY_COUNT, got nil")
+	}
+}

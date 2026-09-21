@@ -45,14 +45,17 @@ func newSportsbookTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer) *
 }
 
 // mustSeedSportsbookSelection inserts a full sport->competition->event->
-// market->selection chain directly via SQL - the platform-wide, RLS-free
-// catalogue tables (migration 0078), mirroring internal/sportsbook's own
-// unexported seedSelection test helper (not reusable across packages).
+// market->selection chain directly via SQL - the platform-wide catalogue
+// tables (migration 0078, RLS-protected since migration 0084/ADR 0081),
+// mirroring internal/sportsbook's own unexported seedSelection test helper
+// (not reusable across packages).
 func mustSeedSportsbookSelection(t *testing.T, pool *db.Pool, oddsNumerator, oddsDenominator int64) uuid.UUID {
 	t.Helper()
 	ref := uuid.NewString()[:8]
 	var selectionID uuid.UUID
-	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+	// Migration 0084 (ADR 0081): sb_* writes now require a genuinely
+	// platform-service-scoped transaction.
+	err := pool.WithPlatformService(context.Background(), db.ServiceSportsbookCatalogueSync, func(ctx context.Context, tx pgx.Tx) error {
 		var sportID, compID, eventID, marketID uuid.UUID
 		if err := tx.QueryRow(ctx,
 			`INSERT INTO sb_sports (external_ref, code, name) VALUES ($1, $2, 'HTTP Test Sport') RETURNING id`,

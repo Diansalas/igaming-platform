@@ -244,64 +244,57 @@ type PostResult struct {
 // forces to run immediately (rather than at the caller's eventual
 // COMMIT) so an unbalanced call fails synchronously, here, with a clear
 // error - not silently at some later, unrelated commit.
+//
+// Lock ordering (docs/decisions/0082, lockorder.go). Post takes ALL of
+// this posting's wallet_balance_projection locks (class L3) in one step,
+// in canonical ascending-ledger_account_id order, over the COMPLETE final
+// entry set - caller entries plus the Rule B2 mirror/recognition legs
+// generated below - and it does so BEFORE db.IdempotentInsert's
+// ledger_transactions key insert (class L4, ADR 0082 R5, reversing the
+// order these two steps used to run in). Two consequences the caller must
+// know:
+//
+//   - A caller may NOT take a wallet_balance_projection lock itself (R4);
+//     if it needs a balance before deciding whether to post, it calls
+//     LockProjectionsForPosting with the SAME TransactionInput it will
+//     later hand to Post, and reads the balance from that result.
+//     Re-locking here is then a no-op.
+//   - A caller may NOT take any L0 (advisory), L1 (domain state row) or
+//     L2 (ledger_transactions FOR UPDATE) lock AFTER calling
+//     LockProjectionsForPosting or Post (R8), with the single named and
+//     tested exception E-1 (ADR 0082 §5.1).
+//
+// Entry insertion order into ledger_entries is deliberately unchanged
+// (R7): §7.4.2's byte-identical-entry-rows property is an auditability
+// property, and once the pre-lock step exists, entry order has no locking
+// meaning left to exploit.
 func Post(ctx context.Context, tx pgx.Tx, in TransactionInput) (PostResult, error) {
-	if in.TenantID == uuid.Nil {
-		return PostResult{}, fmt.Errorf("%w: tenant id is required", ErrInvalidEntry)
-	}
-	if in.IdempotencyKey == "" {
-		return PostResult{}, fmt.Errorf("%w: idempotency key is required", ErrInvalidEntry)
-	}
-	if in.CorrelationID == uuid.Nil {
-		return PostResult{}, fmt.Errorf("%w: correlation id is required", ErrInvalidEntry)
-	}
-	if (in.ProviderID == nil) != (in.ProviderTxID == nil) {
-		return PostResult{}, fmt.Errorf("%w: provider_id and provider_tx_id must both be set or both be nil", ErrInvalidEntry)
-	}
-	// reason_code is required on manual_adjustment (CLAUDE.md's four-eyes
-	// rule) AND on bonus_forfeiture (ADR 0032 §3.1: expiry vs. staff
-	// cancellation is distinguished ONLY by reason_code) - migration
-	// 0051's widened ledger_transactions_check1 enforces the same
-	// equality at the database; this is the boundary-level copy with a
-	// legible error (ledger-accounting-model.md §7.3).
-	if (in.TransactionType == TxManualAdjustment || in.TransactionType == TxBonusForfeiture) &&
-		(in.ReasonCode == nil || *in.ReasonCode == "") {
-		return PostResult{}, fmt.Errorf("%w: %s requires a reason code", ErrInvalidEntry, in.TransactionType)
-	}
-	for _, e := range in.Entries {
-		if e.Amount <= 0 {
-			return PostResult{}, fmt.Errorf("%w: entry amount must be positive, got %d", ErrInvalidEntry, e.Amount)
-		}
-		if e.Direction != Debit && e.Direction != Credit {
-			return PostResult{}, fmt.Errorf("%w: entry direction must be debit or credit, got %q", ErrInvalidEntry, e.Direction)
-		}
-	}
-
-	// Rule B2 (extended) mirror generator (ledger-accounting-model.md
-	// §7.4, bonus_mirror.go): resolves every entry's account_type/
-	// asset_code from ledger_accounts (never trusting the caller),
-	// validates BonusCost's fail-closed rules, enforces HR-17, and - for
-	// every asset touched by a BONUS_SET account - returns the mirror and
-	// recognition legs invariant B1 requires. Returns no entries and an
-	// error for a non-bonus posting (the overwhelming majority of calls),
-	// after one lightweight account-type lookup. Runs BEFORE the
-	// idempotent insert below, so a validation failure leaves no
-	// ledger_transactions row and no ledger_entries row - "before Post
-	// writes anything at all", HR-9's own original standard, preserved
-	// under the generator that replaces it.
-	generatedEntries, err := applyBonusMirror(ctx, tx, in.TenantID, in)
+	// Validation + Rule B2 (extended) mirror generation + §7.4.2's fixed-
+	// order concatenation, extracted so LockProjectionsForPosting computes
+	// the identical final entry set from the identical input. Runs BEFORE
+	// anything is locked or written, so a validation failure leaves no
+	// ledger_transactions row, no ledger_entries row and no projection
+	// row.
+	entriesToPost, err := prepareEntries(ctx, tx, in)
 	if err != nil {
 		return PostResult{}, err
 	}
-	entriesToPost := in.Entries
-	if len(generatedEntries) > 0 {
-		// Fixed order (§7.4.2): the caller's own entries first, then the
-		// generated legs in the order applyBonusMirror produced them (all
-		// step-2 legs, then all step-3 legs, assets in sorted order) - so
-		// a given logical posting always produces byte-identical entry
-		// rows, never mutating in.Entries itself.
-		entriesToPost = make([]EntryInput, 0, len(in.Entries)+len(generatedEntries))
-		entriesToPost = append(entriesToPost, in.Entries...)
-		entriesToPost = append(entriesToPost, generatedEntries...)
+
+	// ADR 0082 class L3, before L4 (rule R5). Every projection row this
+	// posting's ledger_entries inserts would otherwise lock implicitly -
+	// via migration 0023's AFTER INSERT trigger, one exclusive row lock
+	// per entry in slice order - is materialised and locked here instead,
+	// in one canonical ascending order, so the trigger below acquires
+	// nothing new. Also closes finding L-a: a transaction can no longer
+	// hold the (tenant_id, idempotency_key) index entry while waiting on a
+	// projection row, because two deliveries of one key necessarily target
+	// the same projection set and therefore serialize here, at L3.
+	//
+	// Accepted consequence, stated in the ADR: an idempotent replay now
+	// takes its projection locks before discovering it is a no-op.
+	if _, err := ensureAndLockProjectionsInOrder(ctx, tx, in.TenantID,
+		canonicalAccountOrder(entryAccountIDs(entriesToPost))); err != nil {
+		return PostResult{}, err
 	}
 
 	transactionID := uuid.New()
@@ -500,6 +493,15 @@ func RebuildBalance(ctx context.Context, tx pgx.Tx, ledgerAccountID uuid.UUID) (
 // is the exercised disaster-recovery path docs/decisions/0019 requires
 // exist, not merely a theoretical property: a corrupted or manually
 // deleted projection row is always fully recoverable.
+//
+// Lock ordering (ADR 0082 class L3): this takes an exclusive row lock on
+// the projection row via its ON CONFLICT DO UPDATE. Callers iterating
+// MULTIPLE accounts must iterate in ascending ledger_account_id order -
+// use canonicalAccountOrder - or two concurrent repairs over overlapping
+// account sets can deadlock. It has no production caller today (DR and
+// tests only), which is why it is not routed through
+// ensureAndLockProjectionsInOrder; that is a fact about today's callers,
+// not a licence for a future one to iterate unordered.
 func RebuildProjectionRow(ctx context.Context, tx pgx.Tx, ledgerAccountID uuid.UUID) (Balance, error) {
 	b, err := RebuildBalance(ctx, tx, ledgerAccountID)
 	if err != nil {

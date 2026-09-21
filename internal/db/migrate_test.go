@@ -3,6 +3,7 @@ package db
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -71,6 +72,70 @@ func TestLoadMigrations_EmptyDirectory(t *testing.T) {
 func TestLoadMigrations_NonexistentDirectory(t *testing.T) {
 	if _, err := LoadMigrations(filepath.Join(t.TempDir(), "does-not-exist")); err == nil {
 		t.Fatal("expected an error for a nonexistent directory, got nil")
+	}
+}
+
+// PLAT-MIGDRIFT-1: two different filenames declaring an up file for the
+// same version number must fail loudly, not silently merge (the
+// map-keyed-by-version logic would otherwise let the second file
+// overwrite the first's UpPath without complaint).
+func TestLoadMigrations_DuplicateUpVersionErrors(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "0001_first.up.sql", "-- up 1a")
+	writeFile(t, dir, "0001_first.down.sql", "-- down 1a")
+	writeFile(t, dir, "0001_second.up.sql", "-- up 1b")
+
+	_, err := LoadMigrations(dir)
+	if err == nil {
+		t.Fatal("expected an error for duplicate up files sharing version 1, got nil")
+	}
+}
+
+// Same property for down files.
+func TestLoadMigrations_DuplicateDownVersionErrors(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "0001_first.up.sql", "-- up 1")
+	writeFile(t, dir, "0001_first.down.sql", "-- down 1a")
+	writeFile(t, dir, "0001_second.down.sql", "-- down 1b")
+
+	_, err := LoadMigrations(dir)
+	if err == nil {
+		t.Fatal("expected an error for duplicate down files sharing version 1, got nil")
+	}
+}
+
+func TestFindVersionGaps_NoGapsInContiguousSequence(t *testing.T) {
+	migrations := []migration{{Version: 1}, {Version: 2}, {Version: 3}}
+	if gaps := findVersionGaps(migrations); len(gaps) != 0 {
+		t.Errorf("expected no gaps, got %v", gaps)
+	}
+}
+
+func TestFindVersionGaps_DetectsSingleGap(t *testing.T) {
+	migrations := []migration{{Version: 1}, {Version: 3}}
+	gaps := findVersionGaps(migrations)
+	if len(gaps) != 1 {
+		t.Fatalf("expected exactly 1 gap, got %v", gaps)
+	}
+	if !strings.Contains(gaps[0], "2") {
+		t.Errorf("expected the gap to name version 2, got: %s", gaps[0])
+	}
+}
+
+func TestFindVersionGaps_DetectsMultipleGaps(t *testing.T) {
+	migrations := []migration{{Version: 1}, {Version: 5}}
+	gaps := findVersionGaps(migrations)
+	if len(gaps) != 3 {
+		t.Fatalf("expected exactly 3 gaps (versions 2, 3, 4), got %v", gaps)
+	}
+}
+
+func TestFindVersionGaps_EmptyAndSingleMigrationHaveNoGaps(t *testing.T) {
+	if gaps := findVersionGaps(nil); len(gaps) != 0 {
+		t.Errorf("expected no gaps for an empty set, got %v", gaps)
+	}
+	if gaps := findVersionGaps([]migration{{Version: 42}}); len(gaps) != 0 {
+		t.Errorf("expected no gaps for a single migration, got %v", gaps)
 	}
 }
 

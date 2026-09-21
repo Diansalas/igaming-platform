@@ -7485,3 +7485,74 @@ provider API was integrated. No jurisdiction human decision, licence
 status/expiry/dual-licensing determination, or wallet/ledger/identity
 redesign was made. No automatic progression — Stage 10 is NOT authorized
 and was not started.
+
+## Stage 9.1 — Production Blocker Closure — complete
+
+Stage 9.1 was authorized by the human as "STAGE 9.1 — PRODUCTION BLOCKER
+CLOSURE," opening with "STAGE 9 IS APPROVED." A focused pass closing the
+concrete engineering gaps Stage 9 identified but deferred: `ARCH-DB-2`,
+`LOCK-1`, the two rate-limiter launch gates, `PLAT-MIGDRIFT-1`, the live
+shared-dev-DB drift it caused, a provider-error-body safety P3, and 6
+named minor technical debt items. Full task table and review findings:
+`docs/governance/task-registry.md`'s Stage 9.1 section; narrative in
+`docs/active-stage.md`'s Stage 9.1 section (not duplicated here) and the
+Stage 9.1 completion report delivered to the human.
+
+**`ARCH-DB-2` closed** (new ADR 0081, migration `0084`, fix-round
+migration `0085`): all 6 platform-wide catalogue tables (`casino_games` +
+5 sportsbook tables) now carry `ENABLE`+`FORCE ROW LEVEL SECURITY` with
+open reads and platform-scoped writes only — a new
+`db.WithPlatformService` closed-vocabulary identity for the unattended
+sportsbook sync, the existing `WithPlatformAdmin` for `casino_games`,
+plus a new staff-principal-resolution trigger (`0085`, closing a security
+review's defense-in-depth finding) mirroring the existing `assets` table
+precedent. The architect's own analysis correctly rejected adding
+`tenant_id` columns to these tables as semantically wrong, not merely
+unnecessary, after verifying none of the 6 has any tenant/brand scope to
+begin with.
+
+**`LOCK-1` closed, scope honestly widened** (new ADR 0082): a full trace
+of every money-touching lock site found three more genuine ABBA cycles
+beyond the originally-known one (`LOCK-1b` payments, `LOCK-1c`
+withdrawal, `LOCK-1d` a row-lock/advisory-lock cycle spanning casino and
+bonus). A new canonical lock order and a single `ledger.
+LockProjectionsForPosting` pre-lock step close all four; `ledger-finance`
+made and documented an independent judgment call accepting the ADR's
+proposed zero-row-materialization design. Every required deadlock-freedom
+test was proven to fail on pre-fix code (`40P01`) before being shown to
+pass after. Two exceptions (one pre-existing, one new) are named and
+grep-testable rather than silently inconsistent.
+
+**Mandatory security + code-reviewer review** of both large changes
+found no P0/P1 security findings but one genuine correctness regression
+(a grant-lookup error losing its `ErrNotFound` wrapping, 404→500 — fixed)
+and two regression-guard tests meaningfully easier to defeat than
+intended (both strengthened, one rewritten on `go/ast`). All P1/P2
+findings closed in a fix round; P3s documented per this project's
+established "fix P0/P1 always, document P3/P4" convention.
+
+**Other closures:** the rate limiter now has an explicit trusted-proxy
+client-identity model (default: never trust an untrusted `X-Forwarded-
+For`) with its per-minute limit wired through real configuration;
+`PLAT-MIGDRIFT-1` is closed with a migration content-hash column and a
+new `migrate verify` subcommand, run for real in CI and against the exact
+shared dev database that had drifted (separately rebuilt from a clean
+chain); a provider-error-body safety net bounds and redacts captured
+response content.
+
+**Full independent validation, run by the Orchestrator against a fresh
+`stage91_final` database** (not merely trusted from specialist
+self-reports): all 85 migrations apply cleanly; `migrate verify` reports
+the chain clean; the full integration and `-race` suites (32 packages)
+are green; the runtime-role adversarial suite is green; the
+lock-ordering concurrency tests were repeated 3x under `-race`; the
+Stage 6 sportsbook and Stage 7 casino defining acceptance tests pass by
+exact name; both frontends are clean. This independent run itself caught
+and fixed one real, previously-missed instance of the project's own
+migration-count-fixture maintenance pattern (recorded in the task
+registry).
+
+No B2B/partner/retail work was performed. No undocumented external
+provider API was integrated. No jurisdiction, legal, or
+production-infrastructure decision was made or attempted. No automatic
+progression — Stage 10 is NOT authorized and was not started.

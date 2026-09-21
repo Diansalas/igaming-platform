@@ -66,16 +66,19 @@ func TestQAAdversarial_FailedDirtyRollbackLeavesRLSEnabledAndForced(t *testing.T
 		t.Fatalf("seed a ceiling row: %v", err)
 	}
 
-	// The down-migration must fail (dirty database). Roll back 7 steps:
-	// migrations 0082 (Stage 9), 0081 (Stage 8), 0080 (Stage 8), 0079
-	// (Stage 7), 0078 (Stage 6), and 0077 (Stage 4I Phase E-SECURITY) now
-	// sit on top of 0076 in the chain and are all unconditionally
-	// reversible in this scenario, so they succeed on their own before the
-	// overall call fails once it reaches 0076's own guard - mirrors
-	// migration_0076_integration_test.go's own migration0077Version/
-	// migration0078Version/migration0079Version/migration0080Version/
-	// migration0081Version/migration0082Version precedent.
-	if _, err := pool.MigrateDown(context.Background(), dir, 7); err == nil {
+	// The down-migration must fail (dirty database). Roll back 10 steps:
+	// migrations 0085 (Stage 9.1), 0084 (Stage 9.1), 0083 (Stage 9.1), 0082
+	// (Stage 9), 0081 (Stage 8), 0080 (Stage 8), 0079 (Stage 7), 0078
+	// (Stage 6), and 0077 (Stage 4I Phase E-SECURITY) now sit on top of
+	// 0076 in the chain and are all unconditionally reversible in this
+	// scenario, so they succeed on their own before the overall call fails
+	// once it reaches 0076's own guard - mirrors
+	// migration_0076_integration_test.go's own
+	// migration0077Version/migration0078Version/migration0079Version/
+	// migration0080Version/migration0081Version/migration0082Version/
+	// migration0083Version/migration0084Version/migration0085Version
+	// precedent.
+	if _, err := pool.MigrateDown(context.Background(), dir, 10); err == nil {
 		t.Fatal("expected migration 0076's down migration to fail on a dirty database")
 	}
 
@@ -213,17 +216,18 @@ func TestQAAdversarial_PartialRollbackLeavesRegistryRLSDisabledButReapplyRestore
 		t.Fatalf("seed a ceiling row: %v", err)
 	}
 
-	// `-steps=7 down`: migrations 0082, 0081, 0080, 0079, 0078, and 0077 all
-	// roll back successfully on their own (none carries a "refuse if rows
-	// exist" guard - tenants/licences/jurisdictions are core tables that
-	// will always hold rows), and the OVERALL call only THEN fails once it
-	// reaches migration 0076's own dirty-database guard.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 7)
+	// `-steps=10 down`: migrations 0085, 0084, 0083, 0082, 0081, 0080,
+	// 0079, 0078, and 0077 all roll back successfully on their own (none
+	// carries a "refuse if rows exist" guard - tenants/licences/
+	// jurisdictions are core tables that will always hold rows), and the
+	// OVERALL call only THEN fails once it reaches migration 0076's own
+	// dirty-database guard.
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 10)
 	if err == nil {
-		t.Fatal("expected the -steps=7 down to fail on a dirty database")
+		t.Fatal("expected the -steps=10 down to fail on a dirty database")
 	}
-	if len(rolledBack) != 6 || rolledBack[0] != migration0082Version || rolledBack[1] != migration0081Version || rolledBack[2] != migration0080Version || rolledBack[3] != migration0079Version || rolledBack[4] != migration0078Version || rolledBack[5] != migration0077Version {
-		t.Fatalf("expected exactly migrations [%d %d %d %d %d %d] to have been rolled back before the overall failure, got %v", migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version, rolledBack)
+	if len(rolledBack) != 9 || rolledBack[0] != migration0085Version || rolledBack[1] != migration0084Version || rolledBack[2] != migration0083Version || rolledBack[3] != migration0082Version || rolledBack[4] != migration0081Version || rolledBack[5] != migration0080Version || rolledBack[6] != migration0079Version || rolledBack[7] != migration0078Version || rolledBack[8] != migration0077Version {
+		t.Fatalf("expected exactly migrations [%d %d %d %d %d %d %d %d %d] to have been rolled back before the overall failure, got %v", migration0085Version, migration0084Version, migration0083Version, migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version, rolledBack)
 	}
 
 	// THE UNDOCUMENTED STATE THIS FIX MAKES EXPLICIT: migration 0077's own
