@@ -4,6 +4,7 @@ import { Badge } from '../../components/Badge'
 import { Card } from '../../components/Card'
 import { ErrorState } from '../../components/ErrorState'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
+import { formatUnscaledAmount } from '../../lib/money'
 import { grantStatusTone } from './status'
 
 /** Player-detail sub-section: this player's own bonus grants/reward state. */
@@ -26,7 +27,10 @@ export function PlayerBonusSummary({ playerAccountId }: { playerAccountId: strin
           {data.items.map((g) => (
             <li key={g.id} className="flex items-center justify-between rounded-md border border-border px-3 py-2 text-sm">
               <span className="font-mono text-xs text-slate-500">{g.id}</span>
-              <span>{g.remaining_bonus_balance ?? '—'} {g.asset_code}</span>
+              {/* remaining_bonus_balance is a decimal-string minor-units
+                  value with no decimal_exponent in the Grant API response -
+                  see formatUnscaledAmount's doc comment. */}
+              <span>{g.remaining_bonus_balance !== undefined ? formatUnscaledAmount(g.remaining_bonus_balance, g.asset_code) : '—'}</span>
               <Badge tone={grantStatusTone(g.status)}>{g.status}</Badge>
             </li>
           ))}

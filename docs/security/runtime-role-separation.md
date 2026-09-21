@@ -1,17 +1,18 @@
 # Runtime / Migration-Owner Role Separation (`PLAT-ROLESPLIT-1`)
 
-**Status: PRODUCTION BLOCKER — EXTERNAL INFRASTRUCTURE ACTION.**
+**Status: IMPLEMENTED IN-REPO. Remains a PRODUCTION BLOCKER only for the
+genuinely external, non-repository action described in §9 below.**
 
-This document is implementation-ready for an infrastructure/operations
-actor with Postgres superuser (or `CREATEROLE`) access to the target
-database. It requires no Go code change and no migration file — the fix
-is entirely a role/privilege change, executed once per environment
-(dev/staging/production) by a human or a deploy pipeline running with
-elevated, non-application credentials. **This session did not, and could
-not, execute this against any production database** — it has no
-production credential and CLAUDE.md's Environment Safety rule forbids
-requesting one. Everything below was verified empirically against this
-session's local development Postgres only (see §5), which is not
+Everything this repository's own code, migrations-bootstrap, CI, and test
+suite can do to close `PLAT-ROLESPLIT-1` has been done (§9 records exactly
+what and where). What is described through §8 below is the original
+design/verification record from the pass that specified the fix, kept
+intact for its reasoning and empirical evidence; §9 is the later pass that
+actually rolled it into the codebase. **This session (§9's pass) still
+did not, and could not, execute anything against a real production
+database** — it has no production credential and CLAUDE.md's Environment
+Safety rule forbids requesting one. Everything verified in this document,
+including §9's, was run against local development/CI Postgres only, never
 production data.
 
 ## 1. The problem, precisely
@@ -108,15 +109,30 @@ false`), so no existing trigger or function confers elevated privilege to
 the runtime role by way of invoking it, and sequence grants are
 `USAGE, SELECT` only (no `UPDATE`, so no `setval`).
 
-**One exception to "ordinary DML is genuinely enforced by RLS," flagged
-by the security review:** `casino_games` (the global game catalogue) has
-row-level security disabled entirely (`relrowsecurity = false`) and no
-`tenant_id` column — it is deliberately global, not tenant-owned data.
-The blanket `GRANT ... ON ALL TABLES IN SCHEMA public` in §6 therefore
-gives the runtime role unconstrained `INSERT`/`UPDATE`/`DELETE` on that
-one table from any connection, RLS or no RLS. This is pre-existing (not
-introduced by this split) and not a tenant-isolation issue, but the claim
-above should not be read as "every table" without this named exception.
+**Exceptions to "ordinary DML is genuinely enforced by RLS," corrected by
+the Stage 9 architect review (ARCH-DB-1) — SIX tables, not one.**
+`casino_games` (the global game catalogue, migration 0035) has row-level
+security disabled entirely (`relrowsecurity = false`) and no `tenant_id`
+column — deliberately global, not tenant-owned data. Stage 6's migration
+0078 added **five more** in the identical shape: `sb_sports`,
+`sb_competitions`, `sb_events`, `sb_markets`, `sb_selections` (the
+sportsbook catalogue, mirroring `casino_games`' own precedent per that
+migration's own header comment). This document's earlier draft named only
+`casino_games`; that was accurate when written (Stage 4I exit triage,
+before migration 0078 existed) and is now factually incomplete. The
+blanket `GRANT ... ON ALL TABLES IN SCHEMA public` in §6 gives the runtime
+role unconstrained `INSERT`/`UPDATE`/`DELETE` on all six of these tables
+from any connection, RLS or no RLS. This is pre-existing (not introduced
+by this split) and not a tenant-isolation issue (none of the six carries
+tenant-owned data), but the claim above should not be read as "every
+table" without this six-table exception. **The architect review separately
+classified the six tables' complete lack of a DB-level write backstop as
+`ARCH-DB-2` (HIGH, FIX BEFORE PRODUCTION)** — a cross-domain fix (routing
+`casino_games`' admin writer through `db.Pool.WithPlatformAdmin` and
+giving the sportsbook catalogue sync a defined service-identity scope,
+mirroring the `assets` registry's own `ENABLE`+`FORCE` RLS precedent) that
+this role-split document does not attempt to close and that the split
+itself cannot substitute for.
 
 **A second exception, not yet live but worth a standing rule:** this
 database currently has zero `VIEW`s, so there is no current exposure —
@@ -213,6 +229,17 @@ a follow-up recommendation, not implementing it this pass, since it is a
 CI/tooling change beyond a documentation-only triage's scope; see the new
 task-registry note.
 
+**Closed by §9, below:** `internal/db/runtime_role_separation_test.go` is
+the permanent regression test this paragraph called for. It reproduces
+every probe above (plus the six additional ones the independent security
+review's 20-probe extension added — `ALTER TABLE ... OWNER TO`, `DROP`/
+`ALTER POLICY`, `SET ROLE igaming`, `SET session_replication_role`,
+`CREATE ROLE`, `ALTER ROLE ... BYPASSRLS`, `CREATE FUNCTION ...
+SECURITY DEFINER`) as ordinary, always-in-tree Go test code, gated on a
+new `TEST_RUNTIME_DATABASE_URL` env var so it skips cleanly wherever that
+role hasn't been provisioned and runs for real in CI, which now
+provisions `igaming_runtime` and sets that var on every run (see §9).
+
 ## 6. Minimum infrastructure action required (exact script)
 
 To be run ONCE per environment by an operator holding a role with
@@ -256,7 +283,7 @@ credential from `igaming` to `igaming_runtime`. Keep `igaming`'s
 credential reachable only from the deploy pipeline's migration step, not
 from any application server's runtime environment or secret mount.
 
-## 7. What this document deliberately does NOT do
+## 7. What this document deliberately does NOT do (original pass; superseded in part by §9)
 
 - It does not add a migration file. Role/privilege provisioning is an
   environment concern (dev/staging/production have, or will have,
@@ -265,16 +292,27 @@ from any application server's runtime environment or secret mount.
   itself would not close the gap (the migration-owner role running the
   script is exactly the role this split exists to stop being the runtime
   identity), and per this stage's directive, "no speculative
-  infrastructure automation" was to be built.
+  infrastructure automation" was to be built. **Still true after §9**:
+  `deploy/init-app-role.sql` is a one-time bootstrap script run by an
+  operator/CI step with elevated credentials, not a `cmd/migrate`
+  migration — that distinction was preserved when it was extended to
+  create `igaming_runtime` too.
 - It does not change any Go code. `internal/db.Pool` already connects
   using whatever `DATABASE_URL` it is given; no code assumes the
   connecting role owns anything. Repointing the credential is sufficient.
+  **No longer true as stated — see §9.** A small, narrowly-scoped Go
+  change was added: `db.VerifyRuntimeRoleInProduction`
+  (`internal/db/production_safety.go`), a fail-closed startup check that
+  refuses to run in `production` if the connecting role owns tables. This
+  does not touch `Pool`'s connection behavior itself (the original claim
+  about `Pool` remains true) — it is an additional safety check called
+  once at startup, from `cmd/platform-api/main.go`.
 - It does not touch RLS policies, migrations, or any jurisdiction/
   licensing/operating-market schema. This is orthogonal hardening of the
   connection identity, not the authorization model those policies
-  express.
+  express. **Still true after §9.**
 
-## 8. Residual note
+## 8. Residual note (original pass)
 
 Once this split lands, `PLAT-ROLESPLIT-1` is closed and the corresponding
 task-registry entry should be marked resolved with the production
@@ -286,20 +324,140 @@ or requires a human policy decision that has no urgency; this one is a
 mechanical, fully specified fix blocked only on someone with the right
 credential running four `GRANT` statements.
 
-**Follow-up flagged by the independent architect review, not applied this
-pass:** `deploy/init-app-role.sql` (the local dev/CI bootstrap) still
-creates only the single owning `igaming` role and makes it the database
-and schema owner — dev and CI will keep connecting as the owner even
-after production adopts this split, so no local test signal would ever
-catch a future migration or handler that accidentally relies on an
-owner-only operation. When this split is actually rolled out, the
-repository's own dev/CI bootstrap should be updated in the same change to
-mirror it (create `igaming_runtime` there too, point the local
-`DATABASE_URL` the application actually runs against at it, keep
-`igaming` for `cmd/migrate` only), ideally paired with a lightweight
-regression test that connects as the runtime role and asserts the same
-six denials from §5. Not done here because it is inseparable from
-actually switching a running credential — exactly the action §7 explains
-this document deliberately does not perform on its own — and doing only
-half of it (creating an unused role nothing connects as) would not
-improve real coverage.
+**Follow-up flagged by the independent architect review, applied in §9:**
+`deploy/init-app-role.sql` (the local dev/CI bootstrap) previously
+created only the single owning `igaming` role and made it the database
+and schema owner — dev and CI kept connecting as the owner even though
+production was meant to adopt this split, so no local test signal would
+ever catch a future migration or handler that accidentally relies on an
+owner-only operation. §9 records exactly what changed: `igaming_runtime`
+is now created alongside `igaming` in every dev/CI bootstrap path, paired
+with the permanent regression test this section originally asked for
+(`internal/db/runtime_role_separation_test.go`). One thing this follow-up
+explicitly did NOT do, deliberately: it did not repoint local dev's own
+`DATABASE_URL`/`TEST_DATABASE_URL` at `igaming_runtime` — see §9's own
+explanation of why a large share of this repository's integration suite
+still needs to run as the owning role, and why that is a considered
+choice, not an oversight.
+
+## 9. What was actually implemented in-repo, and what still is not
+
+This section records the pass that turned §1-§8's design into committed
+code, closing every part of `PLAT-ROLESPLIT-1` that does not require a
+real production credential this repository's own session is not permitted
+to hold (CLAUDE.md, "Environment safety").
+
+**Implemented, in this repository, verified locally and in CI:**
+
+1. **`deploy/init-app-role.sql`** now creates both `igaming` (unchanged,
+   migration-owner) and `igaming_runtime` (non-owning, exactly the §3
+   privilege set: `CONNECT`, `USAGE` on schema `public`, `SELECT,
+   INSERT, UPDATE, DELETE` on all tables via `ALTER DEFAULT PRIVILEGES
+   FOR ROLE igaming IN SCHEMA public` plus direct grants for
+   already-existing tables, `USAGE, SELECT` on sequences, and a
+   `REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM
+   igaming_runtime` narrowing). Dev-only placeholder password, same
+   convention as `igaming`'s own.
+2. **`.github/workflows/ci.yml`** provisions `igaming_runtime` on every
+   CI run (mirroring the same SQL as `init-app-role.sql`, since CI's
+   Postgres service container doesn't run that file directly), narrows
+   its `schema_migrations` access after migrations create that table,
+   and sets `TEST_RUNTIME_DATABASE_URL` unconditionally so
+   `internal/db/runtime_role_separation_test.go`'s adversarial-probe
+   suite runs for real on every push/PR, not only by hand. This closes
+   the exact "operational consequence... not yet addressed by any CI
+   change" gap §5 named.
+3. **`Makefile`** gained `dev-db-init-roles` (provisions both roles
+   against this sandbox's native, non-Docker Postgres — there is no
+   `docker-entrypoint-initdb.d` mechanism available here, so this target
+   is the sandbox's equivalent bootstrap path) and
+   `test-integration-runtime-role` (runs the new regression test with
+   `TEST_RUNTIME_DATABASE_URL` set). `deploy/docker-compose.dev.yml`'s
+   comments were updated to explain the same split for the Docker path,
+   where `init-app-role.sql` continues to be used directly.
+4. **`TEST_DATABASE_URL` was deliberately left pointed at `igaming`,
+   unchanged.** A large share of this repository's integration suite
+   (every `internal/*/migration_*_test.go` file, e.g.
+   `internal/jurisdiction/migration_*_test.go`,
+   `internal/operatingmarket/migration_*_test.go`,
+   `internal/bonus/wave3_phase2_migrations_integration_test.go`) calls
+   `Pool.MigrateUp`/`Pool.MigrateDown` directly against the test
+   database and requires owner (DDL) privileges to do that at all.
+   Switching `TEST_DATABASE_URL` to the non-owning role would not make
+   the suite "more correct" — it would simply break every one of those
+   tests, for a reason unrelated to what they actually verify. This is
+   why a *second*, additive env var (`TEST_RUNTIME_DATABASE_URL`) was
+   introduced instead of repointing the existing one.
+5. **`internal/db/runtime_role_separation_test.go`** (`//go:build
+   integration`) is the permanent regression test called for throughout
+   §5 and §8. It reads `TEST_RUNTIME_DATABASE_URL`, skips cleanly
+   (`t.Skip`) if unset, and — connected as `igaming_runtime` — proves
+   every one of the following is denied with SQLSTATE `42501`
+   (`insufficient_privilege`) and a message naming the specific reason:
+   `SET session_replication_role = 'replica'`, `SET ROLE igaming`,
+   `ALTER TABLE` (add column), `DROP TABLE`, `TRUNCATE`, `ALTER POLICY`,
+   `DROP POLICY`, `ALTER TABLE ... DISABLE ROW LEVEL SECURITY`,
+   `ALTER TABLE ... OWNER TO`, `CREATE ROLE`, `ALTER ROLE ... BYPASSRLS`,
+   and `CREATE FUNCTION ... SECURITY DEFINER`. It also proves the flip
+   side: seeding two tenants' `tenant_jurisdiction_configs` rows using
+   the runtime role itself, then confirming a tenant-A-scoped connection
+   genuinely reads zero rows for tenant B (not merely "the role is
+   denied outright" — RLS is actually enforced for it, unlike `igaming`
+   today). A dedicated test additionally confirms the documented
+   `casino_games` no-RLS exception (§5's second exception paragraph)
+   still holds exactly as described, so a future schema change to that
+   table is caught here rather than silently invalidating this
+   document's own claim.
+6. **`internal/db/production_safety.go`** adds
+   `ConnectingRoleOwnsNoTables` (queries `pg_tables` for rows the
+   connecting role owns in `public`) and
+   `VerifyRuntimeRoleInProduction(ctx, environment, checker)`, called
+   once from `cmd/platform-api/main.go` immediately after the database
+   connects. Gated strictly on `environment == "production"` (the exact
+   string, case-sensitive) — development/CI/staging are unaffected,
+   because they legitimately and intentionally still connect as
+   `igaming` today (see point 4 above). If, in production, the
+   connecting role owns any table, startup fails immediately with a
+   fatal error naming the exact problem and pointing back at this
+   document, converting "an operator forgot to switch the credential in
+   production" from a silent, platform-wide RLS bypass into a startup
+   crash. `internal/db/production_safety_test.go` unit-tests all four
+   branches (non-production never gated, production + non-owning role
+   passes, production + owning role fails closed, production +
+   ownership-check-itself-fails also fails closed) against a fake
+   checker, with no real database required.
+
+**Genuinely NOT implemented — remains an external operational action, not
+something this or any future session inside this repository can perform
+without a production credential:**
+
+- Creating `igaming_runtime` in the real production database, generating
+  its real secret in a real secrets manager (never a value copied from
+  `deploy/init-app-role.sql`'s dev placeholder), and repointing
+  production's `DATABASE_URL` at it. §6's exact script is what an
+  operator holding `CREATEROLE` on the production database runs, once,
+  outside this repository. `db.VerifyRuntimeRoleInProduction` (point 6
+  above) exists specifically so that if this step is skipped or done
+  incorrectly, the application refuses to start in production rather
+  than serving traffic with RLS silently inert — but it cannot perform
+  the provisioning itself, by design (see §7's unchanged point that no
+  code in this repository should ever be the thing that grants itself
+  elevated privilege).
+- Re-running §5's verification (or `internal/db/
+  runtime_role_separation_test.go` directly, pointed at the real
+  production database via `TEST_RUNTIME_DATABASE_URL`) against
+  production itself, once that switch is made. This is the exact trigger
+  the corresponding `docs/governance/stage-4i-exit-register.md` entry
+  names for actually closing the item.
+
+**Net effect on classification:** `PLAT-ROLESPLIT-1` is no longer a gap
+in the *committed code* — the mechanism, the CI enforcement, the
+regression test, and the fail-closed safety net all exist in-repo today
+and were verified locally (build, vet, the full `-tags=integration`
+suite, and the new regression test's adversarial probes all pass against
+a freshly migrated scratch database with `igaming_runtime` provisioned).
+It remains classified a production blocker only in the narrow sense that
+no engineering session without a production credential can complete the
+one remaining step (creating the role for real, in production, with a
+real secret) — see `docs/governance/stage-4i-exit-register.md` §1 for the
+updated disposition.

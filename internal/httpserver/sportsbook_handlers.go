@@ -325,6 +325,29 @@ func newPlaceBetHandler(deps Deps) http.HandlerFunc {
 		}
 
 		if !result.Accepted {
+			// Stage 9 §16 observability gap closure: an RG/self-exclusion or
+			// Risk & Limits policy block was, until now, visible ONLY in the
+			// audit_log table (sportsbook.PlaceBet's own audit.Record calls
+			// for RejectionRGDenied/RejectionRiskDenied) - nothing reached
+			// the structured request log, so no log-based alert rule could
+			// ever page on a spike in either without polling the audit
+			// table. Every OTHER decline reason here (odds changed, event/
+			// market/selection no longer open, insufficient funds) is an
+			// ordinary, expected commercial outcome, not a control firing,
+			// so this deliberately does NOT log those - logging every
+			// decline would bury the two categories that actually matter
+			// for compliance/fraud alerting in routine noise. One event
+			// name for both, distinguished by the policy field (mirrors
+			// this file's own "one rejection response shape, distinguished
+			// by RejectionCategory" convention) rather than two near-
+			// duplicate event names.
+			if result.RejectionCategory == sportsbook.RejectionRGDenied || result.RejectionCategory == sportsbook.RejectionRiskDenied {
+				policy := "rg"
+				if result.RejectionCategory == sportsbook.RejectionRiskDenied {
+					policy = "risk"
+				}
+				logger.Warn("sportsbook_bet_policy_blocked", "policy", policy, "reason_code", result.RejectionCode)
+			}
 			writeJSON(w, http.StatusOK, placeBetResponse{
 				Accepted: false, RejectionCategory: result.RejectionCategory,
 				RejectionCode: result.RejectionCode, RejectionMessage: result.RejectionMessage,

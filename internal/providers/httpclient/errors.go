@@ -97,6 +97,15 @@ func (e *TimeoutError) Error() string {
 
 func (e *TimeoutError) Unwrap() error { return ErrProviderTimeout }
 
+// GoString mirrors this codebase's established SEC-4I-C-02 remedy
+// (internal/jurisdiction's redacted GoString implementations): Err may
+// wrap a *url.Error carrying an unredacted request URL/credential, so
+// fmt.Sprintf("%#v", err) must not be allowed to bypass Error()'s own
+// safe formatting.
+func (e *TimeoutError) GoString() string {
+	return fmt.Sprintf("httpclient.TimeoutError{Attempts:%d, CallerCanceled:%v, Sent:%v, Err:<redacted>}", e.Attempts, e.CallerCanceled, e.Sent)
+}
+
 // UnavailableError is the concrete error Client.Do returns when a call
 // ultimately failed because of a transport-level failure or a 5xx
 // response. StatusCode is 0 for a transport-level failure (no HTTP
@@ -107,8 +116,14 @@ func (e *TimeoutError) Unwrap() error { return ErrProviderTimeout }
 type UnavailableError struct {
 	Attempts   int
 	StatusCode int
-	Body       []byte
-	Header     http.Header // nil for a transport-level failure (no HTTP response was ever received)
+	// Body/Header are scrubbed of the configured ClientConfig.
+	// AuthHeaderValue (if any) before being stored here - see
+	// redactCredential's doc comment (client.go) for the exact rule and
+	// its documented limits. This does not make Body/Header generically
+	// safe to log: a provider may echo a different sensitive value this
+	// package has no way to recognize.
+	Body   []byte
+	Header http.Header // nil for a transport-level failure (no HTTP response was ever received)
 
 	// Sent reports whether the request behind this attempt may have
 	// reached the provider over the wire. See TimeoutError.Sent's doc
@@ -132,14 +147,28 @@ func (e *UnavailableError) Error() string {
 
 func (e *UnavailableError) Unwrap() error { return ErrProviderUnavailable }
 
+// GoString mirrors TimeoutError.GoString's reasoning: Body/Header are
+// scrubbed of the platform's own configured credential only (see
+// redactCredential's documented limits) and may still carry a different
+// sensitive value a provider echoed - %#v must not bypass that.
+func (e *UnavailableError) GoString() string {
+	return fmt.Sprintf("httpclient.UnavailableError{Attempts:%d, StatusCode:%d, Sent:%v, Body:<redacted>, Header:<redacted>, Err:<redacted>}", e.Attempts, e.StatusCode, e.Sent)
+}
+
 // RejectedError is the concrete error Client.Do returns when a provider
 // responds with a 4xx status. It is never the product of a retry - a 4xx
 // is classified and returned on the first attempt that observes it,
 // regardless of Request.Idempotent or ClientConfig.MaxRetries.
 type RejectedError struct {
 	StatusCode int
-	Body       []byte
-	Header     http.Header
+	// Body/Header are scrubbed of the configured ClientConfig.
+	// AuthHeaderValue (if any) before being stored here - see
+	// redactCredential's doc comment (client.go) for the exact rule and
+	// its documented limits. This does not make Body/Header generically
+	// safe to log: a provider may echo a different sensitive value this
+	// package has no way to recognize.
+	Body   []byte
+	Header http.Header
 }
 
 func (e *RejectedError) Error() string {
@@ -147,6 +176,12 @@ func (e *RejectedError) Error() string {
 }
 
 func (e *RejectedError) Unwrap() error { return ErrProviderRejected }
+
+// GoString mirrors TimeoutError.GoString's reasoning - see
+// UnavailableError.GoString for the identical Body/Header caveat.
+func (e *RejectedError) GoString() string {
+	return fmt.Sprintf("httpclient.RejectedError{StatusCode:%d, Body:<redacted>, Header:<redacted>}", e.StatusCode)
+}
 
 // MalformedResponseError is the concrete error Response.DecodeJSON
 // returns when the response body cannot be decoded into the

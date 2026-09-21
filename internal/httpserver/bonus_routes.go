@@ -14,11 +14,11 @@ import (
 // never inferred from the UI, mirroring registerRiskRoutes).
 func registerBonusRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("GET /v1/bonus/grants",
-		auth.Middleware(deps.AuthIssuer)(newListMyGrantsHandler(deps)))
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newListMyGrantsHandler(deps))))
 	mux.Handle("GET /v1/bonus/grants/{grantID}/progress",
-		auth.Middleware(deps.AuthIssuer)(newGetMyGrantProgressHandler(deps)))
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newGetMyGrantProgressHandler(deps))))
 	mux.Handle("POST /v1/bonus/coupons/redeem",
-		auth.Middleware(deps.AuthIssuer)(newRedeemCouponHandler(deps)))
+		auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newRedeemCouponHandler(deps))))
 
 	// Stage 5 (Operator Back Office MVP): the bonus admin READ surface
 	// (bonus_admin_read_handlers.go) - campaign list, the change-request

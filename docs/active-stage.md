@@ -1480,7 +1480,119 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 8 — Provider Integration Readiness Without External Contracts — COMPLETE, awaiting human review
+## Current stage: Stage 9 — Production Readiness, Security, Resilience & Launch Hardening — COMPLETE, awaiting human review
+
+**Purpose.** Directed by the platform owner as "STAGE 8 IS APPROVED...
+Begin STAGE 9," a large, deliberately non-micro-staged production-
+readiness pass across 28 named sections: database/role hardening,
+migration safety, deployment, config/secrets, auth/session, RBAC,
+tenant/brand security, financial-integrity adversarial concurrency,
+withdrawal four-eyes, payment/provider readiness, RG/KYC, jurisdiction,
+observability, health/readiness, backup/DR, retention/audit,
+performance/load, API security, frontend readiness, CI/CD, operational
+runbooks, compliance-evidence-only, and technical-debt disposition.
+Explicitly out of scope: B2B/partner/retail, any undocumented external
+provider integration, invented regulatory requirements, and any of the
+unresolved jurisdiction human decisions (HDR-J-6/J-7/J-8/J-9). Full task
+table and review findings: `docs/governance/task-registry.md`'s Stage 9
+section.
+
+**Critical production blocker closed at the in-repo/mechanical level:**
+`PLAT-ROLESPLIT-1` — the platform previously ran all runtime traffic as
+`igaming`, the table-owning migration role, which (regardless of RLS
+correctness for ordinary DML) can always issue owner-only DDL
+(`DISABLE ROW LEVEL SECURITY`, `DROP TABLE`, etc.) to remove that
+protection entirely. A new non-owning `igaming_runtime` role now exists
+with exactly `CONNECT`/`USAGE`/`SELECT`/`INSERT`/`UPDATE`/`DELETE` grants
+(no `TRUNCATE`, no `schema_migrations` write access), a fail-closed
+production-startup check (`internal/db.VerifyRuntimeRoleInProduction`)
+refuses to start if the connecting role owns tables, and a 12-probe
+adversarial test suite (session_replication_role, SET ROLE, ALTER TABLE,
+DROP TABLE, TRUNCATE, ALTER/DROP POLICY, DISABLE RLS, OWNER TO, CREATE
+ROLE, ALTER ROLE BYPASSRLS, SECURITY DEFINER) confirms every escalation
+path is denied. **The actual production cutover to this role still
+requires a human operator with real production database credentials —
+this session cannot perform it.**
+
+**Two genuine, previously-undetected financial defects found and fixed**
+(both empirically reproduced by stashing the fix and re-running): a
+double stake-release race allowing two concurrent win callbacks on one
+locked round to each credit the player (driving `player_locked_cash`
+negative while every individual posting still balanced — invisible to
+the platform-wide debit/credit invariant); and an unhandled Postgres
+deadlock between a win and rollback of the same round from a lock-order
+inversion. Both fixed in `internal/casino/orchestrator.go`'s `postWin`.
+
+**Other real gaps closed:** a responsible-gaming enforcement gap (a
+self-excluded or suspended player could deposit indefinitely — RG was
+only ever checked on gameplay, never on deposit) wired into
+`InitiateDeposit`; a brand-pinning integrity gap on 6 tenant-owned tables
+(`ARCH-DB-3`, same defect class Stage 6.1/7 already fixed elsewhere); a
+sportsbook-bet/deposit-intent/reconciliation/login-attempt immutability
+gap closed via new column-level triggers (migration 0082); a back-office
+double-submit gap on the bonus four-eyes approval queue (the one
+protected action that had been missed); an incidental-only (not
+enforced-by-design) block on staff tokens reaching player self-service
+endpoints, now enforced by a new `RequirePlayerPrincipal` middleware
+across all 31 player-only routes; and unauthenticated-credential-route
+rate limiting (register/login/refresh/password-reset/email-verification).
+
+**Deferred, not silently dropped — both with full documented reasoning:**
+`ARCH-DB-2` (6 RLS-free catalogue tables have application-level-only
+write authorization, no DB backstop — a cross-domain casino+sportsbook+
+internal/db+cmd fix, not attempted in a parallel window) and `LOCK-1` (a
+real ABBA deadlock risk between `postBet` and `postWinDirectCash` on
+wallet-projection rows; the architect's suggested in-`Post` sort fix was
+rigorously proven not to close the cycle, since `postBet` locks its cash
+account outside and before calling `ledger.Post` — needs a cross-cutting
+lock-ordering discipline, an architect-level decision for a future
+stage).
+
+**Backup/disaster-recovery: confirmed, not assumed, near-empty.** No
+automated backup mechanism, no tested restore, no replica/standby exist
+anywhere in this codebase or its `deploy/` tooling. This is structurally
+blocked on ADR 0009's still-open hyperscale-hosting-provider decision (no
+cloud account has been provisioned; only local/dev environments exist),
+not an oversight of this stage — documented honestly, with a concrete
+minimum action plan, in `docs/runbooks/backup-and-disaster-recovery.md`.
+Stated targets (RPO=0 for the ledger, RTO<15min) are **NOT MET**.
+
+**Full independent validation, run by the Orchestrator against a fresh
+`stage9_final` database** (not merely trusted from specialist self-
+reports): all 82 migrations apply cleanly with a verified up→down→up
+round-trip; `go build`/`go vet`/`gofmt` clean; the full integration suite
+(32 packages) green; the full `-race` suite green; the 12-probe runtime-
+role adversarial suite green; the Stage 6 sportsbook and Stage 7 casino
+defining acceptance tests pass by exact name; both `b2c` and `backoffice`
+frontends' test suites, typechecks, and production builds are clean
+against the final merged state.
+
+**Mid-stage infrastructure event:** 6 of 9 initially-dispatched specialist
+agents failed to a weekly API rate-limit error. The Orchestrator diagnosed
+actual repo damage (one build break, fixed directly — an unused import
+left by an interrupted agent), stopped and explicitly asked the human
+before proceeding rather than guessing, and resumed all 6 workstreams
+(each instructed to inspect its own partial work first, not restart or
+duplicate) once an empirical probe confirmed the human's plan upgrade had
+resolved the block. No rework resulted; three resumed agents' interrupted
+work was found already ~85-100% complete and correct.
+
+**Human/legal decisions this stage neither made nor attempted:** the
+production `igaming_runtime` cutover (needs real prod credentials); the
+hyperscale hosting-provider selection and its gambling AUP confirmation
+(ADR 0009, blocks real backup/DR); the data-retention-period decision
+(`docs/architecture/16-privacy.md`); any of HDR-J-6/J-7/J-8/J-9; and any
+licence-status/expiry/dual-licensing legal determination
+(`MKT-LICSTATUS-1`, `MKT-EXPIRY-1`, `MKT-DUAL-1`).
+
+**Status: technically COMPLETE. Full Stage 9 report delivered to the
+human with an evidence-based final classification. No B2B/partner/retail
+work started. No undocumented external provider API was integrated. Per
+the directive's own final instruction, this session STOPS here — Stage
+10 is NOT authorized and will not begin without explicit human
+authorization.**
+
+## Stage 8 — Provider Integration Readiness Without External Contracts — COMPLETE (superseded by Stage 9 above)
 
 **Purpose.** Originally scoped as "Dummy Sportsbook/Dummy Casino API
 integration"; the platform owner confirmed at Stage 8's start that no

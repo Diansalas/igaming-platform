@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router-dom'
@@ -72,5 +72,42 @@ describe('WithdrawalDetailPage approve flow', () => {
 
     expect(await screen.findByText('cannot approve your own withdrawal')).toBeInTheDocument()
     expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('calls the approve endpoint exactly once when the confirm button is triggered twice in immediate succession', async () => {
+    const approveSpy = vi.fn()
+    server.use(
+      http.post('/v1/admin/withdrawals/:id/approve', async ({ params }) => {
+        approveSpy(params.id)
+        // A small delay so a naive re-render-driven disable (rather than
+        // the synchronous useOnceGuard ref) would have a real window to
+        // fail in - see useOnceGuard's own doc comment.
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        return HttpResponse.json({ approved: true })
+      }),
+    )
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/withdrawals/:id" element={<WithdrawalDetailPage />} />
+      </Routes>,
+      { route: '/withdrawals/wd-1' },
+    )
+    const user = userEvent.setup()
+
+    await screen.findByText('Withdrawal wd-1')
+    await user.click(screen.getByRole('button', { name: 'Approve' }))
+    await screen.findByRole('dialog', { name: 'Approve withdrawal' })
+    const confirmButton = screen.getByRole('button', { name: 'Approve withdrawal' })
+
+    // Two synchronous fireEvent.click calls in the same tick, deliberately
+    // not using userEvent's own await-between-events helper, to reproduce
+    // the exact double-dispatch race useOnceGuard exists to close.
+    fireEvent.click(confirmButton)
+    fireEvent.click(confirmButton)
+
+    await waitFor(() => expect(approveSpy).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(approveSpy).toHaveBeenCalledTimes(1)
   })
 })

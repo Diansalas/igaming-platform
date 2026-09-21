@@ -92,6 +92,16 @@ func run() error {
 	defer pool.Close()
 	logger.Info("database connected")
 
+	// PLAT-ROLESPLIT-1 (docs/security/runtime-role-separation.md):
+	// fail-closed production safety check. Refuses to start if the
+	// connecting role owns tables (i.e. it is the migration-owner role,
+	// not a non-owning runtime role) - see db.VerifyRuntimeRoleInProduction's
+	// own doc comment for exactly why this is scoped to production only
+	// and does not apply to development/CI/staging.
+	if err := db.VerifyRuntimeRoleInProduction(ctx, cfg.Environment, pool); err != nil {
+		return err
+	}
+
 	keys := map[string]string{cfg.JWTActiveKID: cfg.JWTSigningSecret}
 	if cfg.JWTPreviousSecret != "" {
 		keys[cfg.JWTPreviousKID] = cfg.JWTPreviousSecret

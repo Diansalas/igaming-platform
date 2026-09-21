@@ -24,8 +24,8 @@ func registerSportsbookRoutes(mux *http.ServeMux, deps Deps) {
 	mux.HandleFunc("GET /v1/sportsbook/events/{id}", newGetEventHandler(deps))
 
 	// Player self-service - bet placement and own bet history.
-	mux.Handle("POST /v1/me/sportsbook/bets", auth.Middleware(deps.AuthIssuer)(newPlaceBetHandler(deps)))
-	mux.Handle("GET /v1/me/sportsbook/bets", auth.Middleware(deps.AuthIssuer)(newListMyBetsHandler(deps)))
+	mux.Handle("POST /v1/me/sportsbook/bets", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newPlaceBetHandler(deps))))
+	mux.Handle("GET /v1/me/sportsbook/bets", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newListMyBetsHandler(deps))))
 
 	// Back Office - tenant-wide, staff-scoped, read-only bet visibility.
 	mux.Handle("GET /v1/admin/sportsbook/bets",

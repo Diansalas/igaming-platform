@@ -18,8 +18,8 @@ func registerRGRoutes(mux *http.ServeMux, deps Deps) {
 	// authentication - a player has an inherent right to self-exclude and
 	// to see their own status; RLS (migration 0037's player_self_*
 	// policies), not RBAC, is what authorizes both.
-	mux.Handle("POST /v1/me/rg/self-exclusion", auth.Middleware(deps.AuthIssuer)(newCreateSelfExclusionHandler(deps)))
-	mux.Handle("GET /v1/me/rg/status", auth.Middleware(deps.AuthIssuer)(newGetMyRGStatusHandler(deps)))
+	mux.Handle("POST /v1/me/rg/self-exclusion", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newCreateSelfExclusionHandler(deps))))
+	mux.Handle("GET /v1/me/rg/status", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newGetMyRGStatusHandler(deps))))
 
 	// Staff/admin: create and read a tenant/brand-scoped restriction for a
 	// named player_account_id. Both RequireTenantScope-gated - every

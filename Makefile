@@ -1,7 +1,14 @@
-.PHONY: build run test test-integration lint fmt fmt-check vet migrate-up migrate-down migrate-status dev-db-up dev-db-down ci
+.PHONY: build run test test-integration test-integration-runtime-role lint fmt fmt-check vet migrate-up migrate-down migrate-status dev-db-up dev-db-down dev-db-init-roles ci
 
 GO ?= go
 DATABASE_URL ?= postgres://igaming:igaming_dev_password@127.0.0.1:5432/igaming_platform_dev?sslmode=disable
+DEV_DB ?= igaming_platform_dev
+# igaming_runtime is PLAT-ROLESPLIT-1's non-owning runtime role (see
+# deploy/init-app-role.sql and docs/security/runtime-role-separation.md).
+# Not used by DATABASE_URL/TEST_DATABASE_URL above (see dev-db-init-roles
+# below for why) - only by test-integration-runtime-role's dedicated
+# regression test.
+RUNTIME_DATABASE_URL ?= postgres://igaming_runtime:igaming_runtime_dev_password@127.0.0.1:5432/igaming_platform_dev?sslmode=disable
 
 build:
 	$(GO) build ./...
@@ -14,6 +21,17 @@ test:
 
 test-integration:
 	TEST_DATABASE_URL=$(DATABASE_URL) $(GO) test -tags=integration -v ./...
+
+# test-integration-runtime-role additionally sets TEST_RUNTIME_DATABASE_URL
+# so internal/db/runtime_role_separation_test.go's adversarial-probe suite
+# actually runs (it t.Skip()s cleanly without this var, exactly like every
+# other integration test skips on a missing TEST_DATABASE_URL). Requires
+# `make dev-db-init-roles` to have been run first so igaming_runtime
+# exists. Kept as a separate target rather than folded into
+# test-integration so a contributor who hasn't provisioned the runtime
+# role yet still gets a clean, fast `make test-integration`.
+test-integration-runtime-role:
+	TEST_DATABASE_URL=$(DATABASE_URL) TEST_RUNTIME_DATABASE_URL=$(RUNTIME_DATABASE_URL) $(GO) test -tags=integration -v ./internal/db/...
 
 lint:
 	golangci-lint run ./...
@@ -44,6 +62,20 @@ dev-db-up:
 
 dev-db-down:
 	service postgresql stop
+
+# dev-db-init-roles provisions deploy/init-app-role.sql's roles
+# ("igaming", the migration-owner, and "igaming_runtime", the
+# PLAT-ROLESPLIT-1 non-owning runtime role) against this environment's
+# native Postgres cluster - the "actual script that creates the igaming
+# role" for this sandboxed dev environment (docker-compose.dev.yml uses
+# init-app-role.sql directly via docker-entrypoint-initdb.d instead; this
+# target keeps the two paths running identical SQL). Requires the
+# "igaming_platform_dev" database to already exist and requires
+# passwordless-via-sudo access to the "postgres" OS/cluster superuser
+# (the standard arrangement for a native apt-installed Postgres). Safe to
+# re-run: every statement in init-app-role.sql is idempotent.
+dev-db-init-roles:
+	sudo -u postgres psql -d $(DEV_DB) -v ON_ERROR_STOP=1 -f deploy/init-app-role.sql
 
 # ci runs the same checks CI runs, so failures are caught locally first.
 ci: fmt-check vet lint build test

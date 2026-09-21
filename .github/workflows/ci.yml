@@ -37,6 +37,14 @@ jobs:
     env:
       DATABASE_URL: postgres://igaming:igaming_ci_password@localhost:5432/igaming_platform_test?sslmode=disable
       TEST_DATABASE_URL: postgres://igaming:igaming_ci_password@localhost:5432/igaming_platform_test?sslmode=disable
+      # PLAT-ROLESPLIT-1 (docs/security/runtime-role-separation.md):
+      # exercises internal/db/runtime_role_separation_test.go's
+      # adversarial-probe suite against a real, non-owning role every CI
+      # run, not just by hand - the "Operational consequence... not yet
+      # addressed by any CI change" gap that document's §5 named. That
+      # test t.Skip()s cleanly if this var is unset, so it is harmless to
+      # set unconditionally.
+      TEST_RUNTIME_DATABASE_URL: postgres://igaming_runtime:igaming_runtime_ci_password@localhost:5432/igaming_platform_test?sslmode=disable
       JWT_SIGNING_SECRET: ci-signing-secret-at-least-32-characters-long
 
     steps:
@@ -58,6 +66,28 @@ jobs:
           ALTER SCHEMA public OWNER TO igaming;
           SQL
 
+      - name: Create non-owning runtime application role (PLAT-ROLESPLIT-1)
+        env:
+          PGPASSWORD: igaming_ci_superuser_password
+        run: |
+          # Mirrors deploy/init-app-role.sql's igaming_runtime block - see
+          # docs/security/runtime-role-separation.md §3/§6. No tables
+          # exist yet at this point (migrations run in a later step), so
+          # existing-table grants below are no-ops; ALTER DEFAULT
+          # PRIVILEGES is what actually reaches the tables migrations are
+          # about to create.
+          psql -h localhost -U postgres -d igaming_platform_test -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE igaming_runtime LOGIN PASSWORD 'igaming_runtime_ci_password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+          GRANT CONNECT ON DATABASE igaming_platform_test TO igaming_runtime;
+          GRANT USAGE ON SCHEMA public TO igaming_runtime;
+          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO igaming_runtime;
+          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO igaming_runtime;
+          ALTER DEFAULT PRIVILEGES FOR ROLE igaming IN SCHEMA public
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO igaming_runtime;
+          ALTER DEFAULT PRIVILEGES FOR ROLE igaming IN SCHEMA public
+            GRANT USAGE, SELECT ON SEQUENCES TO igaming_runtime;
+          SQL
+
       - name: Verify gofmt
         run: |
           test -z "$(gofmt -l .)" || (echo "gofmt needs to be run on:"; gofmt -l .; exit 1)
@@ -76,13 +106,63 @@ jobs:
       - name: Run migrations (up)
         run: go run ./cmd/migrate up
 
-      - name: Unit tests
-        run: go test ./...
+      - name: Narrow igaming_runtime's schema_migrations access to read-only
+        env:
+          PGPASSWORD: igaming_ci_superuser_password
+        run: |
+          # The blanket "ALL TABLES IN SCHEMA public" grant above also
+          # covers schema_migrations (the migration ledger cmd/migrate
+          # owns) - only meaningful once that table exists, i.e. after
+          # the migrations step above, per
+          # docs/security/runtime-role-separation.md §6 step 3b.
+          psql -h localhost -U postgres -d igaming_platform_test -v ON_ERROR_STOP=1 <<'SQL'
+          REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM igaming_runtime;
+          SQL
 
-      - name: Integration tests (RLS, HTTP foundation)
-        run: go test -tags=integration -v ./...
+      - name: Unit tests (race detector)
+        run: go test -race ./...
+
+      - name: Integration tests (RLS, HTTP foundation, race detector)
+        run: go test -race -tags=integration -v ./...
 
       - name: Migration reversibility (down then up)
         run: |
           go run ./cmd/migrate -steps=4 down
           go run ./cmd/migrate up
+
+  frontend:
+    # Stage 9 (§23 CI/CD coverage audit): the b2c and backoffice SPAs
+    # (docs/architecture/38-deployment-architecture.md §1 - each an
+    # independent static Vite build with no runtime dependency on
+    # platform-api's own deploy cadence) had a build and a real vitest
+    # suite (39 + 23 passing tests respectively, confirmed locally) that
+    # NOTHING in CI ever ran - a broken frontend build or a genuinely
+    # failing frontend test could merge to main undetected. This job
+    # closes that gap; it does not rebuild or reorganize the existing Go
+    # pipeline above.
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [b2c, backoffice]
+    defaults:
+      run:
+        working-directory: ${{ matrix.app }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check and build
+        run: npm run build
+
+      - name: Unit tests
+        run: npm test

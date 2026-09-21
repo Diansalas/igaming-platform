@@ -7391,3 +7391,97 @@ retail, full reconciliation/settlement platform, jurisdiction human
 decision, country approval, or wallet/ledger/identity/RG/risk redesign
 was performed. No automatic progression — Stage 9 is NOT authorized and
 was not started.
+
+## Stage 9 — Production Readiness, Security, Resilience & Launch Hardening — complete
+
+Stage 9 was authorized by the human as "STAGE 9 — PRODUCTION READINESS,
+SECURITY, RESILIENCE & LAUNCH HARDENING," opening with "STAGE 8 IS
+APPROVED." Explicitly framed as a large, deliberately non-micro-staged
+pass across 28 named sections moving the platform from an
+architecturally-proven B2C MVP toward a production launch candidate.
+Full task table and review findings: `docs/governance/task-registry.md`'s
+Stage 9 section; full narrative in `docs/active-stage.md`'s Stage 9
+section (not duplicated here) and the Stage 9 completion report
+delivered to the human.
+
+**Critical production blocker (`PLAT-ROLESPLIT-1`) closed at the
+in-repo/mechanical level.** The platform previously ran all runtime
+traffic as `igaming`, the table-owning migration role — a genuinely
+non-owning role structurally cannot issue owner-only DDL
+(`DISABLE ROW LEVEL SECURITY`, `DROP TABLE`, etc.) regardless of grants,
+which ordinary RLS-scoped DML alone does not prevent for an owner. A new
+`igaming_runtime` role, a fail-closed production-startup check, and a
+12-probe adversarial test suite (all denied) close this structurally.
+The actual production cutover still needs a human operator with real
+production credentials.
+
+**Two genuine, previously-undetected financial defects found and fixed**
+(both reproduced empirically by stashing the fix): a double
+stake-release race letting two concurrent win callbacks on one locked
+round each credit the player (driving `player_locked_cash` negative while
+every individual posting still balanced — invisible to the platform-wide
+debit/credit invariant), and an unhandled Postgres deadlock between a win
+and a rollback of the same round from a lock-order inversion. Both fixed
+in `internal/casino/orchestrator.go`'s `postWin`.
+
+**Other real gaps closed:** responsible-gaming enforcement wired into
+deposit initiation (previously only checked on gameplay); a
+brand-pinning integrity gap on 7 tenant-owned tables (`ARCH-DB-3`, same
+defect class Stage 6.1/7 already fixed elsewhere — 6 fixed by
+drop-and-replace, one by an additive composite FK since a drop-and-replace
+would have silently weakened a nullable-column check, one correctly
+excluded as already-fixed and semantically distinct); new immutability/
+TRUNCATE-deny triggers on 6 more tables (migration 0082); a back-office
+double-submit gap on the bonus four-eyes approval queue; a
+`RequirePlayerPrincipal` middleware closing an incidental-only (not
+enforced-by-design) block on staff tokens reaching all 31 player
+self-service routes; and per-IP rate limiting on the 7 unauthenticated
+credential routes.
+
+**Deferred with full documented reasoning, not silently dropped:**
+`ARCH-DB-2` (6 RLS-free catalogue tables have application-level-only
+write authorization — a cross-domain casino+sportsbook+internal/db+cmd
+fix, not attempted in a parallel window) and `LOCK-1` (a real ABBA
+deadlock risk between `postBet` and `postWinDirectCash`; the architect's
+suggested in-`ledger.Post` sort fix was rigorously proven not to close
+the cycle, since `postBet` locks its cash account outside and before
+calling `ledger.Post` — needs a cross-cutting lock-ordering discipline,
+an architect-level decision for a future stage).
+
+**Backup/disaster-recovery: confirmed, not assumed, near-empty.** No
+automated backup mechanism, no tested restore, no replica/standby exist
+anywhere in this codebase or its `deploy/` tooling — structurally blocked
+on ADR 0009's still-open hyperscale-hosting-provider decision, not an
+oversight of this stage. Documented honestly with a concrete minimum
+action plan in the new `docs/runbooks/backup-and-disaster-recovery.md`.
+Stated targets (RPO=0 for the ledger, RTO<15min) are **NOT MET**. Two new
+operational runbook documents were also written
+(`docs/runbooks/operational-runbooks.md`, 9 concise incident procedures)
+alongside the pre-existing observability/alerting and production-config
+checklist runbooks. Data-retention/audit (§19) was reconfirmed already
+correctly modeled as deferred pending a human legal decision — no code
+or doc change needed there.
+
+**Mid-stage infrastructure event:** 6 of 9 initially-dispatched
+specialist agents failed to a weekly API rate-limit error. The
+Orchestrator diagnosed the actual repo damage (one build break, fixed
+directly), stopped and explicitly asked the human before proceeding, and
+resumed all 6 workstreams (instructed to inspect partial work first, not
+restart or duplicate) once an empirical probe confirmed a plan upgrade
+had resolved the block. No rework resulted.
+
+**Full independent validation, run by the Orchestrator against a fresh
+`stage9_final` database** (not merely trusted from specialist
+self-reports): all 82 migrations apply cleanly with a verified
+up→down→up round-trip; `go build`/`go vet`/`gofmt` clean; the full
+integration suite (32 packages) green; the full `-race` suite green; the
+12-probe runtime-role adversarial suite green; the Stage 6 sportsbook and
+Stage 7 casino defining acceptance tests pass by exact name; both `b2c`
+and `backoffice` frontends' test suites, typechecks, and production
+builds are clean against the final merged state.
+
+No B2B/partner/retail work was performed. No undocumented external
+provider API was integrated. No jurisdiction human decision, licence
+status/expiry/dual-licensing determination, or wallet/ledger/identity
+redesign was made. No automatic progression — Stage 10 is NOT authorized
+and was not started.

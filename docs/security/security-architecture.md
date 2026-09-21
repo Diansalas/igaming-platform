@@ -3656,3 +3656,211 @@ subsystem is "secure" once and for all — the moment `player_residence:
 read` gets an actual endpoint, or the two read accessors are wired into
 `resolver.go`, that is a new review, because the value-exposure surface
 changes completely at that point.
+
+## Stage 9 — production readiness: session/auth, RBAC audit, API resilience
+
+`security`-owned record for Stage 9 §7 (authentication/session), §8
+(authorization/RBAC audit) and §21 (API security/resilience). Scope of
+this review is stated explicitly at the end — nothing here says the
+platform "is secure".
+
+### S9.1 Per-IP rate limiting on the unauthenticated credential surface
+
+`internal/httpserver/ratelimit.go` adds a single-process, in-memory,
+fixed-window per-IP limiter in front of the endpoints that are reachable
+without any credential: `POST /v1/auth/register`, `/v1/auth/login`,
+`/v1/staff/auth/login`, `/v1/auth/refresh`,
+`/v1/auth/password-reset/request`, `/v1/auth/password-reset/confirm`,
+`/v1/auth/email-verification/confirm`.
+
+**The gap it closes** is specific, not a generic "APIs should have rate
+limits" gesture:
+
+1. `internal/identity/login_attempt.go`'s lockout is per-IDENTIFIER
+   (brand+email / tenant+email): five failures against ONE account in
+   fifteen minutes. It does nothing against one password tried against
+   ten thousand accounts, which is what a credential-stuffing run
+   actually is. Nothing bounded that before.
+2. `auth.HashPassword`/`VerifyPassword` deliberately cost ~64 MiB and
+   ~100 ms each, and login pays that cost even for an email with no
+   account (`auth.DummyPasswordHash`'s constant-time branch). Unbounded,
+   the platform's own password-hardening parameters become a remote
+   memory-exhaustion lever usable with no credentials at all.
+3. `/v1/auth/password-reset/request` was per-ACCOUNT limited
+   (`auth.CountRecentCredentialTokens`) but not per-caller, so one caller
+   could still walk an address list; both `confirm` endpoints had no
+   per-caller bound of any kind.
+
+**What it deliberately is NOT.** It is not distributed and not an
+edge/WAF control, and must not be described as either:
+
+- With more than one `platform-api` replica each replica enforces its own
+  window, so the platform-wide effective limit is (limit × replicas).
+  Still a bound; not the configured number.
+- It keys on `clientIP(r)`, i.e. `RemoteAddr`. `X-Forwarded-For` is
+  deliberately not trusted, because no specific reverse-proxy chain is
+  configured yet (see `clientIP`'s own doc comment, and
+  `TestRateLimit_IgnoresXForwardedFor`).
+- `rateLimiterMaxKeys` fails OPEN, on purpose: an attacker reaching the
+  service from ~100k distinct real source addresses already has a botnet
+  this control was never going to stop, and denying every login in that
+  situation would convert their resource exhaustion into a complete
+  authentication outage for legitimate players. The property being
+  protected at that boundary is bounded memory, not the rate limit.
+
+**S9.1-LAUNCH-1 (launch gate, open).** The first deployment that puts a
+load balancer or ingress in front of `platform-api` makes every request
+arrive from one address, at which point this control degrades from "per
+client" to "per service, globally", and the configured numbers become a
+cap on total login throughput. Whoever introduces that proxy MUST do one
+of: teach `clientIP` to trust that specific proxy chain's
+`X-Forwarded-For`; raise/disable the limits via
+`httpserver.Deps.AuthRateLimitPerMinute`; or move the control to the
+edge. This must not be discovered in production.
+
+**S9.1-LAUNCH-2 (launch gate, open — owner: `devops`).**
+`Deps.AuthRateLimitPerMinute` exists precisely so S9.1-LAUNCH-1 can be
+answered without a code change, but it is **not wired to
+`internal/config` or `cmd/platform-api/main.go` yet**, so today it is
+reachable only from a code change or a test. It needs an
+`AUTH_RATE_LIMIT_PER_MINUTE` environment variable (0 = per-bucket
+defaults, >0 = override every bucket, <0 = disable) plumbed through
+`config.Config` into the `Deps` literal. Until that exists, the documented
+escape hatch is not operationally available.
+
+### S9.2 `RequirePlayerPrincipal` — the player self-service surface
+
+`auth.RequirePlayerPrincipal` (`internal/auth/middleware.go`) now gates
+every `/v1/me/**` and `/v1/bonus/**` player route. Those routes carry no
+`RequirePermission` gate by design ("a player has an inherent right to
+act on their own account") and instead derive the acting
+`player_account_id` from the token subject.
+
+Before Stage 9 that left the whole surface reachable by a STAFF bearer
+token. Nothing was actually disclosed — every such handler feeds
+`tc.Subject` into a `player_accounts` lookup or a player-scoped RLS GUC,
+and a staff id matches no player account — but the safety was
+INCIDENTAL, resting on "no staff id will ever collide with a player id"
+and on every future handler remembering to do a lookup that happens to
+fail. `CLAUDE.md`'s rule is that authorization is enforced server-side,
+not inferred, so the principal type a route is written for is now
+asserted once, at the route, rather than re-derived by accident in each
+handler. Severity as found: **P3 (defense-in-depth / latent-P1)** — no
+exploitable disclosure today, a P1 the moment a `/v1/me` handler is added
+that trusts `tc.Subject` without a lookup.
+
+**Named exception, asserted not assumed:** `GET /v1/me/sessions` and
+`DELETE /v1/me/sessions/{id}` deliberately stay open to every principal
+type. "Which devices am I logged in on, and log that one out" is a
+self-service capability a staff user owns over its OWN sessions;
+`auth.ListActiveSessions`/`auth.RevokeSession` both scope strictly to the
+caller's `principal_type` + `principal_id`, and `sessions`' RLS
+additionally requires `app.principal_id` to match. Pinned by
+`TestSessionRoutes_RemainOpenToStaffPrincipals`.
+
+### S9.3 Required authorization / tenant-isolation test coverage
+
+Every domain specialist's `qa` coverage for a new endpoint must include,
+as a minimum:
+
+1. **Cross-tenant:** a request for tenant A's data carrying tenant B's
+   VALID token returns 403/404 — never data, never a 500 that leaks
+   existence.
+2. **Principal-type:** a staff token on a player self-service route
+   returns 403; a player token on an admin route returns 403.
+3. **Permission:** a token holding a role WITHOUT the route's permission
+   returns 403, even when the same role can reach neighbouring routes.
+4. **Identifier ownership (IDOR):** an id belonging to another
+   player/tenant, presented in the path or body by an otherwise valid
+   caller, returns 404 (not 403 — not leaking existence) and performs no
+   write.
+5. **Anonymous:** no bearer token returns 401, not 403 and not 500.
+
+The Stage 9 additions of this shape live in
+`internal/httpserver/player_surface_principal_test.go`,
+`internal/httpserver/ratelimit_routes_test.go`,
+`internal/httpserver/ratelimit_test.go` and
+`internal/auth/require_player_principal_test.go`.
+
+### S9.4 Verified, with no defect found
+
+Reviewed at code level this stage and found correct — recorded so a later
+reviewer knows these were actually looked at, not skipped:
+
+- **Algorithm confusion / `alg: none`.** `Issuer.Verify` pins
+  `jwt.WithValidMethods([]string{"HS256"})` AND re-checks
+  `*jwt.SigningMethodHMAC` inside the keyfunc, requires `iss`, `aud` and
+  a present `exp` (`jwt.WithExpirationRequired`), and rejects an unknown
+  `kid` before any signature check.
+- **Key rotation.** `auth.KeyRegistry` genuinely supports active +
+  previous (`JWT_ACTIVE_KID`/`JWT_SIGNING_SECRET` +
+  `JWT_PREVIOUS_KID`/`JWT_PREVIOUS_SECRET`), enforces a 32-character
+  minimum on every key, and rejects a previous kid equal to the active
+  one. Operationally, rotation is a restart-with-new-env-vars, and a
+  token signed by a retired key stays valid only until its own `exp` —
+  acceptable given the short access-token TTL, but there is no
+  force-revoke-by-kid mechanism, and no written runbook. Noted, not
+  blocking.
+- **Refresh rotation and reuse detection.** Single-use rotation with a
+  conditional `UPDATE ... WHERE replaced_by_session_id IS NULL AND
+  revoked_at IS NULL` checked via `RowsAffected` (race-safe); presenting
+  an already-rotated token revokes the entire chain AND writes an
+  `auth.session_reuse_detected` audit record atomically with the
+  revocation; `revokeChainFrom` continues past an already-revoked
+  mid-chain node.
+- **Hashed-at-rest tokens.** Refresh tokens and credential tokens are
+  256-bit random values stored only as SHA-256 hashes; raw values are
+  returned exactly once and never read back.
+- **Argon2id parameters.** 64 MiB / t=1 / p=4 / 16-byte salt / 32-byte
+  key, at or above OWASP's baseline, with parameters embedded in the
+  stored hash so they can be raised without breaking existing hashes.
+  Comparison is `subtle.ConstantTimeCompare`.
+- **Lockout is enforced, not merely recorded.** Both
+  `newLoginHandler` and `newStaffLoginHandler` call
+  `identity.IsLockedOut` BEFORE any password comparison and refuse the
+  request regardless of whether the presented password is correct. Both
+  normalize the email before building the lockout identifier, so
+  case/whitespace variants cannot each get their own bucket.
+- **Request body limits.** `decodeJSON` caps at 1 MiB with
+  `DisallowUnknownFields`; the three provider webhooks cap independently
+  (`maxWebhookBodyBytes`, `maxCasinoWebhookBodyBytes` = 1 MiB,
+  `maxKYCWebhookBodyBytes` = 256 KiB) and reject an oversized body rather
+  than truncating it; document upload uses `http.MaxBytesReader`.
+- **Pagination.** `parsePageParams` clamps `?limit=` to
+  `maxPageLimit` (200) and treats malformed input as the default. No
+  list endpoint accepts a client-controlled unbounded limit.
+- **Malformed input / panic.** `recoverMiddleware` converts any handler
+  panic into the standard 500 envelope with the stack logged server-side
+  only; every `r.PathValue` id goes through `uuid.Parse` with a 400 on
+  failure.
+- **Replay protection** on financial callbacks already exists from Stage
+  8 (`internal/idempotency`, whose `OccurrenceSource` contract refuses to
+  derive an occurrence discriminator from any unsigned transport-level
+  signal). Confirmed, not rebuilt.
+- **Secrets.** No hardcoded credential and no secret value in any log
+  call. `internal/email`'s package contract forbids logging a message
+  body (which carries a raw verification/reset token) — a future real
+  vendor adapter MUST NOT put the body into the error it returns, since
+  `newRequestPasswordResetHandler` logs that error.
+
+### S9.5 Scope of this review
+
+**In scope:** `internal/auth` in full; `internal/httpserver`'s route
+table, middleware chain, and the player self-service and admin handlers
+spot-checked per domain; `internal/httpserver/ratelimit.go`;
+`internal/identity`'s login-attempt lockout; the credential-token flows.
+**Read-only, not modified:** `b2c/` and `backoffice/` auth modules.
+**Explicitly NOT in scope and NOT claimed:** penetration testing,
+certification-grade audit, any TLS/ingress/WAF configuration, the
+production secrets backend (Vault/KMS — still only the design in
+"Secrets" above, no implementation), and production launch authorization
+of any kind.
+
+**Known, documented, still open:** both B2C and Back Office store the
+refresh token in `sessionStorage` and the access token in a module
+variable (`b2c/src/auth/tokenStore.ts`,
+`backoffice/src/auth/tokenStore.ts`). Both files already state the
+tradeoff and the intended fix (server-set `httpOnly`, `Secure`,
+`SameSite` cookies, which requires a backend change). This is materially
+worse for a public B2C app than for internal staff and should be treated
+as a pre-launch item, not an indefinite deferral.

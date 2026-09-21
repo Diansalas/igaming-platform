@@ -21,6 +21,16 @@ type Config struct {
 	// Environment is "development", "staging", or "production". It is
 	// informational (used in logs/traces) and must never gate a security
 	// control - environments are otherwise identically configured.
+	//
+	// One deliberate, reviewed exception:
+	// db.VerifyRuntimeRoleInProduction (PLAT-ROLESPLIT-1,
+	// docs/security/runtime-role-separation.md) gates a fail-closed
+	// startup check on Environment == "production" specifically, because
+	// development/CI legitimately and intentionally connect as the
+	// database's table-owning role today (a large share of this repo's
+	// integration suite requires owner/DDL privileges to run migration
+	// mechanics at all), while production must never do so. See that
+	// function's own doc comment for the full reasoning.
 	Environment string
 
 	HTTPAddr string

@@ -121,6 +121,32 @@ type Deps struct {
 	// sent when it wasn't is a worse outcome than an explicit, honest
 	// "temporarily unavailable".
 	EmailProvider email.Provider
+
+	// AuthRateLimitPerMinute overrides the per-IP limit New applies to the
+	// unauthenticated credential endpoints (see ratelimit.go for exactly
+	// what is limited and why):
+	//
+	//	0  - use ratelimit.go's per-bucket defaults (the normal case).
+	//	>0 - use this value for EVERY bucket instead.
+	//	<0 - disable the limiter entirely.
+	//
+	// The override exists because the limiter keys on RemoteAddr and NOT on
+	// X-Forwarded-For (clientIP's own doc comment explains why): the first
+	// deployment to put a load balancer in front of platform-api will see
+	// every request arrive from one address, at which point these limits
+	// become a global cap on login throughput rather than a per-client one.
+	// That deployment needs a way to raise or disable them without a code
+	// change, and this is the hook for it - but NOTE that nothing plumbs
+	// this from internal/config or cmd/platform-api yet
+	// (docs/security/security-architecture.md, S9.1-LAUNCH-2, owner
+	// devops): until an AUTH_RATE_LIMIT_PER_MINUTE environment variable
+	// reaches this field, only a code change or a test can set it.
+	AuthRateLimitPerMinute int
+
+	// authLimiter is built by New from AuthRateLimitPerMinute and shared by
+	// every rate-limited route. Unexported deliberately: a caller configures
+	// the POLICY (above), never hands in its own limiter instance.
+	authLimiter *fixedWindowLimiter
 }
 
 // New builds the fully-wired http.Handler for platform-api: global
@@ -128,6 +154,11 @@ type Deps struct {
 // the route table.
 func New(deps Deps) http.Handler {
 	mux := http.NewServeMux()
+
+	// Stage 9 §21: one limiter shared by every rate-limited route, built
+	// here so no caller can forget to wire it and no test server silently
+	// runs without it. See ratelimit.go.
+	deps.authLimiter = newFixedWindowLimiter(rateLimitWindow, deps.AuthRateLimitPerMinute)
 
 	mux.HandleFunc("GET /healthz", livezHandler)
 	mux.HandleFunc("GET /readyz", readyzHandler(deps.DB))

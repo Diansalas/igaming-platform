@@ -12,6 +12,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/rg"
 )
 
 // defaultMaxCascadeDepth bounds how many distinct providers a single
@@ -489,6 +490,49 @@ func (o *Orchestrator) InitiateDeposit(ctx context.Context, tx pgx.Tx, params In
 		Metadata: map[string]any{"amount": params.Amount, "asset_code": params.AssetCode, "payment_method": params.PaymentMethod},
 	}); err != nil {
 		return DepositIntent{}, fmt.Errorf("payments: audit deposit request: %w", err)
+	}
+
+	// Stage 9 production-readiness fix (identity-compliance): internal/
+	// rg.EvaluateEligibility - the single authoritative "may this player
+	// perform a gambling-adjacent financial action right now" boundary
+	// (ADR 0026 §5), consulted by internal/casino's LaunchGame/postBet
+	// since Stage 4D-RG - was never consulted anywhere on the deposit
+	// path. An active platform-wide self-exclusion (or a suspended
+	// player account, or a non-active wallet) had NO effect on whether a
+	// deposit could be initiated: a self-excluded player could fund a
+	// wallet indefinitely even though they could never launch a game or
+	// place a bet with the resulting balance. Checked here, inside the
+	// SAME transaction that created intent above, and strictly BEFORE
+	// RouteProvider/provider.Deposit ever run - a denied player must
+	// never reach a real payment provider at all.
+	//
+	// Deliberately surfaced as a DepositIntentDeclined RESULT via
+	// finalizeDeclined, never as a Go error: a non-nil error returned
+	// from inside this same db.Pool.WithTenant callback rolls back the
+	// whole transaction, which would silently discard the very audit
+	// record this check exists to create - the identical class of bug
+	// internal/casino.evaluateAndAuditEligibility's own doc comment
+	// already records finding and fixing once before on the casino
+	// launch/bet path ("an earlier error-based attempt was found, by
+	// test, to silently roll back its own audit record").
+	eligibility, err := rg.EvaluateEligibility(ctx, tx, rg.EligibilityParams{
+		TenantID: intent.TenantID, BrandID: intent.BrandID, PlayerAccountID: intent.PlayerAccountID, WalletID: intent.WalletID,
+	})
+	if err != nil {
+		return DepositIntent{}, fmt.Errorf("payments: evaluate rg eligibility: %w", err)
+	}
+	if !eligibility.Allowed {
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: intent.TenantID, ActorType: audit.ActorSystem, Action: "payments.deposit_denied_by_rg",
+			TargetType: "player_account", TargetID: intent.PlayerAccountID.String(), Outcome: audit.OutcomeDenied,
+			Metadata: map[string]any{
+				"reason_code": eligibility.Code, "person_id": eligibility.PersonID.String(),
+				"deposit_intent_id": intent.ID.String(), "brand_id": intent.BrandID.String(),
+			},
+		}); err != nil {
+			return DepositIntent{}, fmt.Errorf("payments: audit rg denial: %w", err)
+		}
+		return o.finalizeDeclined(ctx, tx, intent, nil, nil, "rg_ineligible:"+eligibility.Code)
 	}
 
 	return o.attemptDeposit(ctx, tx, intent, nil)

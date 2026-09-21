@@ -220,6 +220,26 @@ func newLaunchCasinoGameHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if result.Denied {
+			// Stage 9 §16 observability gap closure: an RG/self-exclusion or
+			// Risk & Limits policy block was, until now, visible ONLY in the
+			// audit_log table (evaluateAndAuditEligibility/evaluateAndAuditRisk's
+			// own audit.Record calls) - despite this function's own sibling
+			// doc comment on writeCasinoLaunchDenial already claiming
+			// "operator-facing logs" as one of the places this distinction
+			// is kept, which was not actually true until this line. Excludes
+			// the two jurisdiction denial codes deliberately: K3-6 (see
+			// writeCasinoLaunchDenial below) requires those two to stay
+			// byte-identical at the HTTP boundary specifically so a
+			// response-timing/shape difference can't become the oracle;
+			// logging them under their own real, distinguishable codes here
+			// would be harmless to a PLAYER (this log is operator-only,
+			// never returned in any response), but jurisdiction availability
+			// is a catalogue/geo-blocking concern, not the RG/Risk policy
+			// category this event exists to make alertable - see
+			// docs/runbooks/observability-and-alerting.md.
+			if result.DenialCode != casino.DenialCodeJurisdictionUnresolved && result.DenialCode != casino.DenialCodeJurisdictionBlocked {
+				logger.Warn("casino_launch_policy_blocked", "reason_code", result.DenialCode)
+			}
 			writeCasinoLaunchDenial(w, requestID, result)
 			return
 		}

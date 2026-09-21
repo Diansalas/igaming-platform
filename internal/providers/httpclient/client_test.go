@@ -16,8 +16,10 @@ package httpclient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -501,4 +503,112 @@ func TestDo_AuthHeaderAppliedUnderConfiguredNameOnly(t *testing.T) {
 	if gotAuthorizationHeader != "" {
 		t.Fatalf("Authorization header = %q, want empty (auth header must only be set under the configured name)", gotAuthorizationHeader)
 	}
+}
+
+// TestDo_Rejected4xx_EchoedCredentialIsRedacted is a permanent regression
+// test for the P3 finding ADR 0080 Decision 3 documented but deliberately
+// left unfixed at Stage 8 ("provider response body logging" - a provider
+// that reflects a request back in its 4xx diagnostic body/headers would
+// otherwise leak ClientConfig.AuthHeaderValue into RejectedError.Body/
+// .Header, exactly the field a future adapter's own error-path logging is
+// most likely to include verbatim). The fake server here simulates a
+// vendor "here is what you sent us" diagnostic response, echoing the
+// caller's own auth header value back in both the body and a response
+// header, to prove neither ever reaches RejectedError un-redacted.
+func TestDo_Rejected4xx_EchoedCredentialIsRedacted(t *testing.T) {
+	const secretValue = "super-secret-api-key-value"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Echo-Received-Auth", r.Header.Get("X-Api-Key"))
+		w.WriteHeader(422)
+		_, _ = w.Write([]byte(`{"error":"invalid request","you_sent":{"X-Api-Key":"` + secretValue + `"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(ClientConfig{
+		BaseURL:         srv.URL,
+		Timeout:         time.Second,
+		AuthHeaderName:  "X-Api-Key",
+		AuthHeaderValue: secretValue,
+	})
+
+	_, err := c.Do(context.Background(), Request{Method: "POST", Path: "/", Operation: "test_op"})
+	var rejectedErr *RejectedError
+	if !errors.As(err, &rejectedErr) {
+		t.Fatalf("errors.As(err, *RejectedError) failed, err = %v", err)
+	}
+	if bytesContains(rejectedErr.Body, secretValue) {
+		t.Fatalf("RejectedError.Body contains the raw credential: %s", rejectedErr.Body)
+	}
+	if got := rejectedErr.Header.Get("X-Echo-Received-Auth"); got == secretValue {
+		t.Fatalf("RejectedError.Header[X-Echo-Received-Auth] contains the raw credential: %q", got)
+	}
+}
+
+// TestDo_5xx_EchoedCredentialIsRedacted mirrors
+// TestDo_Rejected4xx_EchoedCredentialIsRedacted for UnavailableError's 5xx
+// path (e.g. a gateway/proxy error page echoing request headers back).
+func TestDo_5xx_EchoedCredentialIsRedacted(t *testing.T) {
+	const secretValue = "super-secret-api-key-value"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Echo-Received-Auth", r.Header.Get("X-Api-Key"))
+		w.WriteHeader(502)
+		_, _ = w.Write([]byte(`{"error":"bad gateway","request_headers":{"X-Api-Key":"` + secretValue + `"}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c := New(ClientConfig{
+		BaseURL:         srv.URL,
+		Timeout:         time.Second,
+		AuthHeaderName:  "X-Api-Key",
+		AuthHeaderValue: secretValue,
+	})
+
+	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op", Idempotent: false})
+	var unavailableErr *UnavailableError
+	if !errors.As(err, &unavailableErr) {
+		t.Fatalf("errors.As(err, *UnavailableError) failed, err = %v", err)
+	}
+	if bytesContains(unavailableErr.Body, secretValue) {
+		t.Fatalf("UnavailableError.Body contains the raw credential: %s", unavailableErr.Body)
+	}
+	if got := unavailableErr.Header.Get("X-Echo-Received-Auth"); got == secretValue {
+		t.Fatalf("UnavailableError.Header[X-Echo-Received-Auth] contains the raw credential: %q", got)
+	}
+}
+
+// TestGoStringRedaction_NeverLeaksCredentialOrBodyViaSharpV is the
+// Stage 9 architect-review fix for the residual gap in
+// TestDo_Rejected4xx_EchoedCredentialIsRedacted /
+// TestDo_5xx_EchoedCredentialIsRedacted: scrubbing Body/Header at
+// construction time does not stop fmt.Sprintf("%#v", err) from dumping
+// every field verbatim via Go's default GoStringer-less formatting,
+// bypassing Error() entirely - the identical bypass class this
+// codebase's own SEC-4I-C-02 fix closed for internal/jurisdiction's
+// types. Mirrors that fix (a redacting GoString method) on all three
+// httpclient error types that carry a credential or a provider-supplied
+// body.
+func TestGoStringRedaction_NeverLeaksCredentialOrBodyViaSharpV(t *testing.T) {
+	const secretValue = "super-secret-api-key-value"
+	const echoedProviderSecret = "provider-side-sensitive-value"
+
+	rejected := &RejectedError{StatusCode: 422, Body: []byte(echoedProviderSecret), Header: http.Header{"X-Echo": []string{secretValue}}}
+	if got := fmt.Sprintf("%#v", rejected); bytesContains([]byte(got), secretValue) || bytesContains([]byte(got), echoedProviderSecret) {
+		t.Fatalf("RejectedError.GoString leaked a secret: %s", got)
+	}
+
+	unavailable := &UnavailableError{Attempts: 2, StatusCode: 502, Body: []byte(echoedProviderSecret), Header: http.Header{"X-Echo": []string{secretValue}}, Err: fmt.Errorf("dial tcp %s:443: connect: %s", secretValue, "connection refused")}
+	if got := fmt.Sprintf("%#v", unavailable); bytesContains([]byte(got), secretValue) || bytesContains([]byte(got), echoedProviderSecret) {
+		t.Fatalf("UnavailableError.GoString leaked a secret: %s", got)
+	}
+
+	timeout := &TimeoutError{Attempts: 1, Err: fmt.Errorf("context deadline exceeded fetching %s?api_key=%s", "https://provider.example/v1", secretValue)}
+	if got := fmt.Sprintf("%#v", timeout); bytesContains([]byte(got), secretValue) {
+		t.Fatalf("TimeoutError.GoString leaked a secret: %s", got)
+	}
+}
+
+func bytesContains(body []byte, substr string) bool {
+	return strings.Contains(string(body), substr)
 }

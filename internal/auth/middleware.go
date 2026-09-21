@@ -55,3 +55,45 @@ func Middleware(issuer *Issuer) func(http.Handler) http.Handler {
 		})
 	}
 }
+
+// RequirePlayerPrincipal denies a request unless the authenticated
+// principal is a PLAYER. It is the structural counterpart to
+// RequirePermission for the player self-service surface: those routes
+// (/v1/me/..., /v1/bonus/...) carry no permission gate at all by design -
+// "a player has an inherent right to act on their own account" - and
+// instead derive the acting player_account_id from the token's own
+// subject.
+//
+// Before Stage 9 §8 that left the entire /v1/me surface reachable by a
+// STAFF bearer token. Nothing was actually disclosed: every such handler
+// feeds tc.Subject into a player_accounts lookup or a player-scoped RLS
+// GUC, and a staff user's id matches no player_account, so the handlers
+// failed safe - some with 404, some with an empty 200. But that safety was
+// INCIDENTAL, resting on "no staff id will ever collide with a player id"
+// and on every future /v1/me handler remembering to do a lookup that
+// happens to fail. CLAUDE.md's rule is that authorization is enforced
+// server-side, not inferred - so the principal type a route is written for
+// is asserted here, once, rather than re-derived by accident in each
+// handler. newMeHandler and the /v1/me/residence handlers already made this
+// check inline; this middleware is that same check, applied uniformly.
+//
+// Returns 403 (not 404): a staff token is a valid, authenticated
+// credential presented to an endpoint it has no authority over, which is
+// exactly what 403 means. There is no enumeration concern - the response
+// is identical for every staff caller and reveals nothing about the path's
+// underlying resource.
+func RequirePlayerPrincipal(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		if tc.PrincipalType != string(PrincipalPlayer) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "this endpoint is for player accounts only")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}

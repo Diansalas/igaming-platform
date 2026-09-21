@@ -18,11 +18,11 @@ import (
 // session), and a back-office catalogue-management UI (API only).
 func registerCasinoRoutes(mux *http.ServeMux, deps Deps) {
 	// Player self-service catalogue read + game launch.
-	mux.Handle("GET /v1/me/casino/games", auth.Middleware(deps.AuthIssuer)(newListCasinoGamesHandler(deps)))
-	mux.Handle("POST /v1/me/casino/games/{gameID}/launch", auth.Middleware(deps.AuthIssuer)(newLaunchCasinoGameHandler(deps)))
+	mux.Handle("GET /v1/me/casino/games", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newListCasinoGamesHandler(deps))))
+	mux.Handle("POST /v1/me/casino/games/{gameID}/launch", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newLaunchCasinoGameHandler(deps))))
 
 	// Player self-service round history (Stage 7 §16).
-	mux.Handle("GET /v1/me/casino/rounds", auth.Middleware(deps.AuthIssuer)(newListMyCasinoRoundsHandler(deps)))
+	mux.Handle("GET /v1/me/casino/rounds", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newListMyCasinoRoundsHandler(deps))))
 
 	// Stage 7 §6/§7: mock-provider play simulation for the player's own
 	// launch session - see casino_play_handlers.go's own doc comment for
@@ -38,9 +38,9 @@ func registerCasinoRoutes(mux *http.ServeMux, deps Deps) {
 	// because no other adapter exists yet. cmd/platform-api/main.go sets
 	// this outside production.
 	if deps.CasinoPlaySimulationEnabled {
-		mux.Handle("POST /v1/me/casino/sessions/{sessionID}/wager", auth.Middleware(deps.AuthIssuer)(newWagerCasinoRoundHandler(deps)))
-		mux.Handle("POST /v1/me/casino/sessions/{sessionID}/win", auth.Middleware(deps.AuthIssuer)(newWinCasinoRoundHandler(deps)))
-		mux.Handle("POST /v1/me/casino/sessions/{sessionID}/rollback", auth.Middleware(deps.AuthIssuer)(newRollbackCasinoRoundHandler(deps)))
+		mux.Handle("POST /v1/me/casino/sessions/{sessionID}/wager", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newWagerCasinoRoundHandler(deps))))
+		mux.Handle("POST /v1/me/casino/sessions/{sessionID}/win", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newWinCasinoRoundHandler(deps))))
+		mux.Handle("POST /v1/me/casino/sessions/{sessionID}/rollback", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newRollbackCasinoRoundHandler(deps))))
 	}
 
 	// Back Office - tenant-wide, staff-scoped, read-only round visibility

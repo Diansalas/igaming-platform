@@ -1029,6 +1029,42 @@ func (o *Orchestrator) postWin(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	}
 
 	correlationID := roundCorrelationID(tenantID, providerID, event.RoundID)
+
+	// Stage 9 §10 (adversarial concurrency re-audit, ledger-finance):
+	// resolveWinOrigin below is a check-then-act read - "is this round's
+	// bet still unreversed" (the ErrBetNotFound guard) and "is any of its
+	// stake still locked" (LF-18's ErrLockAlreadyReleased guard, §16.4
+	// outcome 6). Both guards were unlocked reads, so two genuinely
+	// concurrent settlements of one round each observed the pre-race
+	// answer and each acted on it: empirically reproduced (Stage 9,
+	// TestStage9_ConcurrentDistinctWinsOnLockedRound_ReleasesLockExactly-
+	// Once) as two distinct win callbacks for one locked round EACH
+	// posting the full stake release - crediting the player the same
+	// stake twice and driving player_locked_cash negative. Every
+	// individual posting balanced, so SUM(debits) == SUM(credits) did not
+	// catch it; the guard simply never ran against committed state.
+	//
+	// Locking the round's own casino_bet transaction row(s) first makes
+	// every settlement of one round serialize on the SAME row
+	// postRollback already locks for the identical reason (see its own
+	// FOR UPDATE and rationale) - so by the time the second caller
+	// re-reads below, the first's effect (a release, or a reversal) is
+	// committed and visible, and its guard fires. A row lock on an
+	// append-only table is not a mutation and does not trip
+	// ledger_deny_mutation(). Ordered by id so several bet rows under one
+	// correlation id are always taken in the same order. Scoped to one
+	// round, so it adds no contention beyond the case it exists to fix;
+	// a round with no bet at all locks nothing and still falls through to
+	// resolveWinOrigin's own ErrBetNotFound.
+	if _, err := tx.Exec(ctx,
+		`SELECT 1 FROM ledger_transactions
+		  WHERE tenant_id = $1 AND correlation_id = $2 AND transaction_type = $3
+		  ORDER BY id FOR UPDATE`,
+		tenantID, correlationID, ledger.TxCasinoBet,
+	); err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("casino: lock round bet transactions: %w", err)
+	}
+
 	origin, err := resolveWinOrigin(ctx, tx, tenantID, correlationID)
 	if err != nil {
 		// Covers "no bet was ever posted for this round", "the round's bet
@@ -1312,11 +1348,27 @@ type ledgerEntry struct {
 }
 
 func loadEntries(ctx context.Context, tx pgx.Tx, transactionID uuid.UUID) ([]ledgerEntry, error) {
+	// ORDER BY e.ledger_account_id is load-bearing, not cosmetic (Stage 9,
+	// LOCK-2). postRollback feeds these rows straight into ledger.Post in
+	// the order returned, and every ledger_entries INSERT fires migration
+	// 0023's AFTER trigger, whose ON CONFLICT DO UPDATE takes a ROW LOCK
+	// on that account's wallet_balance_projection row. So this SELECT's
+	// row order IS postRollback's projection-lock acquisition order.
+	// Without an ORDER BY that order is planner-dependent (a seq scan, a
+	// bitmap heap scan and an index scan can each return a different
+	// order for the same rows), which means two concurrent rollbacks of
+	// two different transactions touching the SAME pair of accounts can
+	// acquire those two locks in opposite orders and deadlock. This is
+	// the same class of nondeterministic-row-order bug this codebase
+	// already fixed once on the read side
+	// (TestGetSummary_CombinesBothLockedOriginsInEitherRowOrder). Sorting
+	// by ledger_account_id gives every rollback the same total order.
 	rows, err := tx.Query(ctx,
 		`SELECT e.ledger_account_id, e.direction, e.amount, la.account_type
 		   FROM ledger_entries e
 		   JOIN ledger_accounts la ON la.id = e.ledger_account_id
-		  WHERE e.ledger_transaction_id = $1`,
+		  WHERE e.ledger_transaction_id = $1
+		  ORDER BY e.ledger_account_id`,
 		transactionID,
 	)
 	if err != nil {

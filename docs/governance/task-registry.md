@@ -2596,6 +2596,24 @@ policy pattern (`player_self_scope`) that relies on `player_account_id`'s
 global uniqueness rather than stating a `tenant_id` predicate explicitly
 — pre-existing platform-wide convention, not Stage 8's to redesign.
 
+**Governance-record backfill (Stage 9 architect review, §26 item 24):**
+one Stage 8 security-review P3 finding was missing from this table
+entirely — it existed only in the Stage 8 completion report delivered to
+the human, not in any committed document. Recorded here for completeness:
+`RejectedError.Body`/`.Header` and `UnavailableError.Body`/`.Header`
+(`internal/providers/httpclient/errors.go`) can carry a provider-echoed
+value verbatim (a vendor debug endpoint reflecting the request back, or a
+gateway error page). Stage 9's `integrations` agent closed the
+platform's-own-credential half of this with `redactCredential`/
+`redactCredentialHeader` scrubbing; the orchestrator additionally added
+`GoString()` to `TimeoutError`/`UnavailableError`/`RejectedError`
+(mirroring `internal/jurisdiction`'s established `SEC-4I-C-02` remedy) so
+`fmt.Sprintf("%#v", err)` cannot bypass that scrubbing — see Stage 9's own
+section below for the fix. Residual, disclosed and accepted: a provider
+echoing a value the platform does not itself recognize (e.g. a player PAN
+fragment or its own session token) is still stored unredacted in `Body`;
+no production call site consumes these errors today, so this remains P3.
+
 ### Explicitly NOT this stage's to build (confirmed absent)
 
 External Dummy Sportsbook/Dummy Casino API integration (undiscoverable,
@@ -2603,6 +2621,125 @@ per the platform owner's own instruction not to invent either contract),
 real commercial provider integration, B2B, retail, full reconciliation/
 settlement platform, any jurisdiction human decision or country approval,
 and any wallet/ledger/identity/RG/risk redesign.
+
+## Stage 9 — Production Readiness, Security, Resilience & Launch Hardening
+
+Directive: move from an architecturally-proven B2C MVP toward a production
+launch candidate across 28 named sections (database/role hardening,
+migration safety, deployment, config/secrets, auth/session, RBAC,
+tenant/brand security, financial-integrity adversarial concurrency,
+withdrawal four-eyes, payment/provider readiness, RG/KYC, jurisdiction,
+observability, health/readiness, backup/DR, retention/audit,
+performance/load, API security, frontend readiness, CI/CD, runbooks,
+compliance-evidence-only, technical-debt disposition). Explicitly out of
+scope: B2B/partner/retail, undocumented external provider integration,
+invented regulatory requirements, and any of the unresolved jurisdiction
+human decisions (HDR-J-6/J-7/J-8/J-9). Full narrative in the Stage 9 final
+report delivered to the human; this table is the durable record.
+
+Mid-stage, 6 of 9 initially-dispatched specialist agents failed to a
+weekly API rate-limit error. The Orchestrator diagnosed actual repo damage
+(one build break, fixed directly), stopped and asked the human how to
+proceed rather than guessing, and resumed all 6 workstreams after an
+empirical probe confirmed the human's plan upgrade had resolved the
+block — each resumed agent was instructed to inspect its own partial work
+first rather than restart or duplicate.
+
+| ID | Owner | Status | Files owned | Tests | Blockers | Integration |
+|---|---|---|---|---|---|---|
+| S9-01 | Orchestrator | Done | baseline re-verification only | full pre-existing suite re-run | none | n/a |
+| S9-02 | devops (subagent) | Done | `deploy/init-app-role.sql`, `Makefile` (role/runtime-test targets), `.github/workflows/ci.yml` (runtime role provisioning, `-race`, new `frontend` CI job), `internal/db/production_safety.go` (new), `cmd/platform-api/main.go` (wiring), `docs/security/runtime-role-separation.md` (§9), `docs/architecture/38-deployment-architecture.md` (new), `docs/runbooks/production-configuration-checklist.md` (new) | `internal/db/production_safety_test.go` (4 branches), `internal/db/runtime_role_separation_test.go` (12 adversarial probes + 2 supplementary — independently re-run by Orchestrator against `stage9_final`, all pass) | PLAT-ROLESPLIT-1's actual production rollout still needs a human with real prod credentials — mechanical/in-repo half only | Verified |
+| S9-03 | security (subagent) | Done | `internal/httpserver/ratelimit.go` (new), `internal/httpserver/server.go` (`Deps.AuthRateLimitPerMinute`/`authLimiter`), `internal/httpserver/{bonus,casino,credential,financial,kyc,rg,sportsbook}_routes.go`, `internal/auth/middleware.go` (`RequirePlayerPrincipal`), `docs/security/security-architecture.md` (Stage 9 section) | `ratelimit_test.go`, `ratelimit_routes_test.go`, `require_player_principal_test.go`, `player_surface_principal_test.go` (31-route table) | S9.1-LAUNCH-1 (rate limiter keys on RemoteAddr, needs trusted XFF at the edge), S9.1-LAUNCH-2 (`AuthRateLimitPerMinute` not yet plumbed from config — one-line devops follow-up) | Verified |
+| S9-04 | identity-compliance (subagent) | Done | `internal/payments/orchestrator.go` (`rg.EvaluateEligibility` wired into `InitiateDeposit`) | `internal/payments/rg_enforcement_integration_test.go` (new); fixed 2 stale fixtures in `internal/httpserver/financial_flow_integration_test.go` | Implicit new policy ("pending_verification can't deposit") flagged by ledger-finance as deserving an explicit ADR, not decided here | Verified |
+| S9-05 | ledger-finance (subagent) | Done | `migrations/0082_stage9_db_hardening.{up,down}.sql` (new tip — immutability/TRUNCATE-deny triggers on 6 tables, ARCH-DB-3 composite-FK fix on 7 tables, LOCK-2 fix, 3 pagination indexes), `internal/casino/orchestrator.go` (postWin FOR UPDATE lock — double-stake-release + deadlock fix) | 6 new migration-0082 regression test files (one per trigger/domain), `internal/casino/stage9_concurrency_integration_test.go` (4 tests, 2 proving genuine pre-existing defects via stash-and-rerun) | LOCK-1 (ABBA deadlock risk between postBet/postWinDirectCash) correctly proven NOT fixable by the architect's suggested in-`Post` sort, and deferred with full documented reasoning — needs a cross-cutting `ledger.LockProjectionsInOrder`-style discipline, architect-level, not this stage | Verified |
+| S9-06 | payments (subagent) | Done | review + `internal/payments/stage9_concurrency_integration_test.go` (new, 2 tests) | concurrent-deposit no-lost-update, tampered-webhook-never-reaches-ledger | none | Verified |
+| S9-07 | identity-compliance / security (withdrawal four-eyes re-audit) | Done | `internal/withdrawal/stage9_four_eyes_adversarial_test.go` (new) | duplicate-approve, concurrent-same-approver-double-submit, two-logins-one-person-cannot-satisfy-four-eyes (+ concurrent twin) | none | Verified |
+| S9-08 | qa (subagent) | Done | `internal/httpserver/stage9_concurrency_integration_test.go` (new, 6 tests — fixed an RLS-scoping bug in the test harness itself via `pool.WithPrincipalScope`), `internal/httpserver/{sportsbook,casino}_handlers.go` (policy-blocked log events), `docs/runbooks/observability-and-alerting.md` (new), `docs/testing/testing-strategy.md` (§20) | 6 new concurrency tests | Explicitly discloses no metrics backend is deployed yet | Verified |
+| S9-09 | frontend (subagent) | Done | `b2c/src/app/ErrorBoundary.tsx` (new), `b2c/src/app/App.tsx`, `b2c/src/config/brand.ts` (fail-closed `resolveBrandSlug`), `b2c/.env.example` | `ErrorBoundary.test.tsx`, `brand.test.ts`, `AuthContext.test.tsx` (new) | none | Verified |
+| S9-10 | backoffice (subagent, resumed after rate-limit interruption) | Done | `backoffice/src/lib/useOnceGuard.ts` (new), `backoffice/src/features/bonus/ChangeRequestQueuePage.tsx` (double-submit guard + self-approval warning — the one genuine gap found), `backoffice/src/features/bonus/PlayerBonusSummary.tsx`, `backoffice/src/lib/money.ts`, `backoffice/.env.example` (new) | `useOnceGuard.test.ts`, `ChangeRequestQueuePage.test.tsx` (double-submit regression), `money.test.ts`, `WithdrawalDetailPage.test.tsx` (double-submit regression) | No manual-balance-adjustment UI exists anywhere — confirmed, flagged as a real out-of-scope Blueprint gap, not built | Verified |
+| S9-11 | integrations (subagent, resumed) | Done | `internal/providers/httpclient/client.go` (`redactCredential`/`redactCredentialHeader`), `internal/providers/casino_adapter_composition_demo_test.go` (new), `docs/decisions/0080-*.md` (Stage 9 addendum) | new composition-demo test against a real `httptest.Server` | none | Verified |
+| S9-12 | architect (review) | Done | review only — ARCH-DB-1/2/3, LOCK-1..4, `PLAT-MIGDRIFT-1` upgrade, migration-safety Rules A-E for 0083+ | n/a | ARCH-DB-2 (6 RLS-free catalogue tables have app-only write authorization, no DB backstop — cross-domain casino+sportsbook+internal/db+cmd fix, explicitly deferred) | n/a |
+| S9-13 | Orchestrator | Done | `internal/providers/httpclient/errors.go` (`GoString()` redaction on 3 error types, mirroring `internal/jurisdiction`'s `SEC-4I-C-02` pattern), `internal/providers/httpclient/client_test.go`, `docs/security/runtime-role-separation.md` (ARCH-DB-1 exception-list correction), `docs/governance/task-registry.md` (backfill), `docs/governance/stage-4i-exit-register.md` (PLAT-ROLESPLIT-1 status update) | `TestGoStringRedaction_NeverLeaksCredentialOrBodyViaSharpV` (new) | none | n/a |
+| S9-14 | Orchestrator | Done | `docs/runbooks/backup-and-disaster-recovery.md` (new — honest NOT MET/NOT IMPLEMENTED evidence status), `docs/runbooks/operational-runbooks.md` (new — 9 concise incident runbooks), `docs/runbooks/README.md` (updated index) | n/a (documentation) | Backup/DR genuinely blocked on ADR 0009's hosting decision (no cloud account provisioned yet) — production blocker, not a gap in this stage's work | n/a |
+| S9-15 | Orchestrator | Done | this registry (Stage 9 section), `docs/active-stage.md`, `docs/progress.md` | full independent validation gate re-run against fresh `stage9_final` DB: 82 migrations, build/vet/gofmt clean, full integration suite (32 packages), full `-race` suite, runtime-role adversarial suite, Stage 6+7 defining acceptance tests by exact name, both frontends' test+build re-verified against final merged state | none | n/a |
+
+### Review findings and dispositions
+
+**Genuine, previously-undetected financial defects found and fixed**
+(both empirically reproduced by stashing the fix and re-running): (1) a
+double stake-release race in `resolveWinOrigin`'s pre-existing `LF-18`
+`ErrLockAlreadyReleased` guard — an unlocked check-then-act read allowed
+two concurrent distinct win callbacks on one locked round to each read
+"still locked" and each post the full release, driving
+`player_locked_cash` negative while every individual posting still
+balanced (invisible to the tenant-wide debit/credit invariant); (2) an
+unhandled Postgres deadlock (40P01) between a win and a rollback of the
+same round from a lock-order inversion — fixed with a `FOR UPDATE` lock on
+the round's own `casino_bet` rows at the top of `postWin`.
+
+**ARCH-DB-3 (composite brand-pinning FK gap)**: 7 tenant-owned tables
+pinned `brand_id` to "some brand in this tenant" rather than the player's
+own brand — the same defect class Stage 6.1/Stage 7 already fixed
+elsewhere. 6 fixed via drop-and-replace; `jurisdiction_resolutions` got
+the composite added alongside its existing FK rather than replacing it
+(a MATCH-SIMPLE composite-only FK would silently skip nullable rows);
+`player_restrictions` was correctly excluded — the architect's claim it
+needed fixing was stale (migration 0038 already added the correct
+composite) and further widening would have been semantically wrong
+(brand_id there is deliberately independent administrative scope).
+
+**LOCK-1 (deferred, not a silent drop)**: the architect's suggested fix —
+sorting entries inside `ledger.Post` — was rigorously proven not to close
+the ABBA cycle, because `postBet` acquires its cash-account lock outside
+and before calling `ledger.Post`. Documented in full rather than landing
+a fix that looked complete but wasn't; needs a cross-cutting
+`ledger.LockProjectionsInOrder`-style discipline spanning ledger, casino,
+sportsbook, and withdrawal — an architect-level decision for a future
+stage.
+
+**`PLAT-MIGDRIFT-1` upgraded from observation to FIX BEFORE PRODUCTION**,
+and a live instance of it was independently discovered: the shared
+`igaming_platform_dev` database still carries a stale `provider_bet_ref`
+column name predating Stage 8's rename, despite presumably reporting a
+clean migration status. Worked around by building/testing against a
+fresh scratch database instead of trusting the shared one; flagged for a
+rebuild before that specific shared DB is trusted again.
+
+**ARCH-DB-2 (deferred, cross-domain, not built this stage)**: 6 RLS-free
+catalogue tables (`casino_games` + 5 sportsbook catalogue tables from
+migration 0078) have only application-level write authorization, no DB
+backstop — the platform already solved the identical problem for
+`assets` (migrations 0044/0045). Fix requires routing casino/sportsbook
+catalogue writes through `db.Pool.WithPlatformAdmin` and defining a
+service-identity scope for the sportsbook sync — spans casino, sportsbook,
+internal/db, and cmd, so explicitly not attempted in a parallel window.
+
+**Backup/disaster-recovery: genuinely near-empty evidence category**,
+confirmed rather than assumed. No automated backup mechanism, no tested
+restore, no replica/standby exist anywhere in this codebase or its
+deploy/ tooling. This is not an oversight of this stage's work — it is
+structurally blocked on ADR 0009's still-open hosting-provider decision
+(no cloud account has been provisioned; only local/dev environments
+exist). Documented honestly in `docs/runbooks/backup-and-disaster-
+recovery.md` as NOT MET / NOT IMPLEMENTED / PROVIDER DEPENDENT, with a
+concrete minimum action plan for when a provider is selected, rather than
+fabricating a runbook that would produce evidence that doesn't transfer
+to the eventual real topology.
+
+**Data retention/audit (§19)**: already correctly modeled in
+`docs/architecture/16-privacy.md`'s "Retention" section as deferred
+future configuration pending a human legal decision on retention periods
+(CLAUDE.md forbids inventing one) — reconfirmed current and accurate this
+stage, no code or doc change needed.
+
+### Explicitly NOT this stage's to build (confirmed absent)
+
+B2B/partner/retail work of any kind, undocumented external provider API
+integration, any answer to HDR-J-6/J-7/J-8/J-9, any invented regulatory
+or certification claim, ARCH-DB-2's cross-domain catalogue-authorization
+fix, LOCK-1's cross-cutting lock-ordering discipline, and an actual
+production backup/restore mechanism (structurally blocked on the open
+hosting decision, not skipped).
 
 ## How to use this registry (for future stages)
 

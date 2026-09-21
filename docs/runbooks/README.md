@@ -1,10 +1,17 @@
 # Runbooks
 
-Operational incident runbooks (failover, reconciliation-drift
-investigation, provider outage handling) start once there is a running
-system with real operational risk - realistically Stage 3 (wallet/ledger/
-payments) onward. This directory carries only local development setup
-until then.
+Operational incident runbooks now exist (Stage 9) — see:
+
+- `operational-runbooks.md` — deployment, rollback, financial incident,
+  provider/payment/auth/database outages, security incident.
+- `backup-and-disaster-recovery.md` — honest RPO/RTO evidence status
+  (currently NOT MET/NOT IMPLEMENTED — see that file for why and what's
+  needed).
+- `observability-and-alerting.md` — minimum alert-rule inventory.
+- `production-configuration-checklist.md` — field-by-field production
+  config audit.
+
+This directory also still carries local development setup, below.
 
 ## Local development setup (Stage 1)
 

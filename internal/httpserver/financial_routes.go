@@ -18,13 +18,13 @@ import (
 // authenticated session (see each handler's own doc comment).
 func registerFinancialRoutes(mux *http.ServeMux, deps Deps) {
 	// Player self-service wallet/balance reads.
-	mux.Handle("GET /v1/me/wallets", auth.Middleware(deps.AuthIssuer)(newListWalletsHandler(deps)))
-	mux.Handle("GET /v1/me/wallets/{assetCode}", auth.Middleware(deps.AuthIssuer)(newGetWalletHandler(deps)))
+	mux.Handle("GET /v1/me/wallets", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newListWalletsHandler(deps))))
+	mux.Handle("GET /v1/me/wallets/{assetCode}", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newGetWalletHandler(deps))))
 
 	// Player self-service deposits.
-	mux.Handle("POST /v1/me/deposits", auth.Middleware(deps.AuthIssuer)(newInitiateDepositHandler(deps)))
-	mux.Handle("GET /v1/me/deposits", auth.Middleware(deps.AuthIssuer)(newListDepositsHandler(deps)))
-	mux.Handle("GET /v1/me/deposits/{id}", auth.Middleware(deps.AuthIssuer)(newGetDepositHandler(deps)))
+	mux.Handle("POST /v1/me/deposits", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newInitiateDepositHandler(deps))))
+	mux.Handle("GET /v1/me/deposits", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newListDepositsHandler(deps))))
+	mux.Handle("GET /v1/me/deposits/{id}", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newGetDepositHandler(deps))))
 
 	// Provider callback - no bearer-token middleware (a provider webhook
 	// is not an authenticated platform principal); the handler itself
@@ -34,10 +34,10 @@ func registerFinancialRoutes(mux *http.ServeMux, deps Deps) {
 	mux.HandleFunc("POST /v1/webhooks/payments/{tenantSlug}/{providerID}", newPaymentWebhookHandler(deps))
 
 	// Player self-service withdrawals.
-	mux.Handle("POST /v1/me/withdrawals", auth.Middleware(deps.AuthIssuer)(newRequestWithdrawalHandler(deps)))
-	mux.Handle("GET /v1/me/withdrawals", auth.Middleware(deps.AuthIssuer)(newListWithdrawalsHandler(deps)))
-	mux.Handle("GET /v1/me/withdrawals/{id}", auth.Middleware(deps.AuthIssuer)(newGetWithdrawalHandler(deps)))
-	mux.Handle("POST /v1/me/withdrawals/{id}/cancel", auth.Middleware(deps.AuthIssuer)(newCancelWithdrawalHandler(deps)))
+	mux.Handle("POST /v1/me/withdrawals", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newRequestWithdrawalHandler(deps))))
+	mux.Handle("GET /v1/me/withdrawals", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newListWithdrawalsHandler(deps))))
+	mux.Handle("GET /v1/me/withdrawals/{id}", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newGetWithdrawalHandler(deps))))
+	mux.Handle("POST /v1/me/withdrawals/{id}/cancel", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newCancelWithdrawalHandler(deps))))
 
 	// Staff four-eyes withdrawal review queue - tenant-scoped. Stage 3D
 	// splits what was one PermWithdrawalApprove into four distinct

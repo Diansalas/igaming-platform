@@ -12,14 +12,33 @@ import (
 // visible in one place.
 func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	// Player auth - no bearer token required (that's the point: these
-	// establish one).
-	mux.HandleFunc("POST /v1/auth/register", newRegisterHandler(deps))
-	mux.HandleFunc("POST /v1/auth/login", newLoginHandler(deps))
-	mux.HandleFunc("POST /v1/auth/refresh", newRefreshHandler(deps))
+	// establish one). Register/login/refresh are additionally wrapped in
+	// the Stage 9 §21 per-IP limiter: they are unauthenticated, they are
+	// the platform's brute-force/credential-stuffing surface, and
+	// register/login each pay a full ~64 MiB Argon2id cost per request
+	// before any credential has been proven. See ratelimit.go for the
+	// full rationale and for what this limiter deliberately is NOT.
+	// Logout is not limited - it proves possession of an unguessable
+	// refresh token, costs one indexed hash lookup, and refusing it would
+	// only keep a session alive that its owner asked to end.
+	mux.Handle("POST /v1/auth/register",
+		rateLimitFunc(deps.authLimiter, rateBucketRegister, rateLimitRegisterPerMin, newRegisterHandler(deps)))
+	mux.Handle("POST /v1/auth/login",
+		rateLimitFunc(deps.authLimiter, rateBucketLogin, rateLimitLoginPerMinute, newLoginHandler(deps)))
+	mux.Handle("POST /v1/auth/refresh",
+		rateLimitFunc(deps.authLimiter, rateBucketRefresh, rateLimitRefreshPerMin, newRefreshHandler(deps)))
 	mux.HandleFunc("POST /v1/auth/logout", newLogoutHandler(deps))
 
 	// Player self-service - requires a valid player access token.
-	mux.Handle("GET /v1/me", auth.Middleware(deps.AuthIssuer)(newMeHandler(deps)))
+	mux.Handle("GET /v1/me", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newMeHandler(deps))))
+	// The two session routes are deliberately NOT auth.RequirePlayerPrincipal-
+	// gated, unlike every other /v1/me route: "which devices am I logged in
+	// on, and log that one out" is a self-service capability every principal
+	// type owns over its OWN sessions (newListSessionsHandler/
+	// auth.RevokeSession both scope strictly to the caller's own
+	// principal_type + principal_id, and sessions' RLS additionally requires
+	// app.principal_id to match). A staff user managing their own sessions is
+	// the intended behaviour here, not an authorization gap.
 	mux.Handle("GET /v1/me/sessions", auth.Middleware(deps.AuthIssuer)(newListSessionsHandler(deps)))
 	mux.Handle("DELETE /v1/me/sessions/{id}", auth.Middleware(deps.AuthIssuer)(newRevokeSessionHandler(deps)))
 
@@ -30,13 +49,14 @@ func registerIdentityRoutes(mux *http.ServeMux, deps Deps) {
 	// declared residence; jurisdiction_evidence_collection_active (checked
 	// inside the handler, same transaction as the write) is what gates
 	// whether the PUT is accepted at all.
-	mux.Handle("GET /v1/me/residence", auth.Middleware(deps.AuthIssuer)(newGetMyResidenceHandler(deps)))
-	mux.Handle("PUT /v1/me/residence", auth.Middleware(deps.AuthIssuer)(newSetMyResidenceHandler(deps)))
+	mux.Handle("GET /v1/me/residence", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newGetMyResidenceHandler(deps))))
+	mux.Handle("PUT /v1/me/residence", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newSetMyResidenceHandler(deps))))
 
 	// Staff auth - separate endpoint from player login (different
 	// credential store, different tenant-resolution rule: platform_admin
 	// omits tenant_slug entirely).
-	mux.HandleFunc("POST /v1/staff/auth/login", newStaffLoginHandler(deps))
+	mux.Handle("POST /v1/staff/auth/login",
+		rateLimitFunc(deps.authLimiter, rateBucketLogin, rateLimitLoginPerMinute, newStaffLoginHandler(deps)))
 
 	// Platform-admin-only: tenant provisioning is inherently a
 	// platform-level action (see docs/decisions/0011), never tenant-

@@ -433,11 +433,23 @@ func (c *Client) attempt(ctx context.Context, req Request) (resp *Response, err 
 	case httpResp.StatusCode >= 200 && httpResp.StatusCode < 300:
 		return &Response{StatusCode: httpResp.StatusCode, Header: httpResp.Header, Body: body}, nil, false
 	case httpResp.StatusCode >= 400 && httpResp.StatusCode < 500:
-		return nil, &RejectedError{StatusCode: httpResp.StatusCode, Body: body, Header: httpResp.Header}, false
+		// redactCredential (Stage 9 hardening, ADR 0080 Decision 3's own
+		// documented P3 gap) - see that function's doc comment for why
+		// only the error paths are scrubbed, never a successful Response.
+		return nil, &RejectedError{
+			StatusCode: httpResp.StatusCode,
+			Body:       redactCredential(body, c.authHeaderValue),
+			Header:     redactCredentialHeader(httpResp.Header, c.authHeaderValue),
+		}, false
 	case httpResp.StatusCode >= 500:
 		// An HTTP response was received, so the provider definitely got
 		// the request - Sent is always true here.
-		return nil, &UnavailableError{StatusCode: httpResp.StatusCode, Body: body, Header: httpResp.Header, Sent: true}, true
+		return nil, &UnavailableError{
+			StatusCode: httpResp.StatusCode,
+			Body:       redactCredential(body, c.authHeaderValue),
+			Header:     redactCredentialHeader(httpResp.Header, c.authHeaderValue),
+			Sent:       true,
+		}, true
 	default:
 		// 1xx, and 3xx now that the default *http.Client's CheckRedirect
 		// refuses to follow a redirect (see New's own doc comment): a 3xx
@@ -450,6 +462,73 @@ func (c *Client) attempt(ctx context.Context, req Request) (resp *Response, err 
 		// guessing.
 		return &Response{StatusCode: httpResp.StatusCode, Header: httpResp.Header, Body: body}, nil, false
 	}
+}
+
+// redactedPlaceholder replaces every occurrence of the configured
+// credential value found in a provider's error response - see
+// redactCredential's own doc comment.
+const redactedPlaceholder = "[REDACTED-BY-PLATFORM]"
+
+// redactCredential returns a copy of body with every literal occurrence of
+// secret replaced by redactedPlaceholder, or body unchanged (same slice,
+// no copy) if secret is empty. This closes the gap ADR 0080 Decision 3
+// documented and deliberately left unfixed at Stage 8 ("P3 provider
+// response body logging"): RejectedError.Body/UnavailableError.Body is
+// exactly what a future adapter's own error handling is most likely to log
+// verbatim for debugging a rejected/failed call, and a provider that
+// reflects a request back in its error body (a surprisingly common vendor
+// behavior for a 4xx "here is what you sent us" diagnostic response, or a
+// 5xx proxy/gateway error page that echoes request headers) would
+// otherwise leak ClientConfig.AuthHeaderValue - the same secret New's
+// CheckRedirect hardening (see New's own doc comment) already protects on
+// the request path - into every place that error ends up.
+//
+// This is scoped to the two error-carrying types only (RejectedError,
+// UnavailableError), never a successful Response.Body: a caller MUST
+// receive an untouched success body to decode it correctly, whereas an
+// error body exists purely for diagnostics, where a scrubbed credential
+// costs nothing. This is also a genuinely partial mitigation, not a
+// guarantee of no leak: it can only scrub the ONE secret this package
+// itself knows about (ClientConfig.AuthHeaderValue) - a provider echoing
+// some other sensitive value this package has no visibility into (a
+// session token issued in an earlier call, a signed URL, a second
+// credential a caller passed via Request.Headers) would not be caught
+// here. Callers still must not log a RejectedError/UnavailableError's
+// Body/Header as an unqualified assumption of safety; this only removes
+// the one leak this package's own design could otherwise directly cause.
+func redactCredential(body []byte, secret string) []byte {
+	if secret == "" || len(body) == 0 || !bytes.Contains(body, []byte(secret)) {
+		return body
+	}
+	return bytes.ReplaceAll(body, []byte(secret), []byte(redactedPlaceholder))
+}
+
+// redactCredentialHeader returns a shallow copy of h with every header
+// value that contains secret replaced by redactedPlaceholder (the whole
+// value, not just the matched substring, since a header value containing a
+// credential is itself not useful for diagnostics once scrubbed). Returns
+// h unchanged (same map, no copy) if secret is empty. See redactCredential
+// for the full rationale; this covers the identical risk for
+// RejectedError.Header/UnavailableError.Header (e.g. a gateway/proxy error
+// response echoing a request header back, which some do for
+// diagnostics).
+func redactCredentialHeader(h http.Header, secret string) http.Header {
+	if secret == "" || len(h) == 0 {
+		return h
+	}
+	out := make(http.Header, len(h))
+	for k, values := range h {
+		copied := make([]string, len(values))
+		for i, v := range values {
+			if strings.Contains(v, secret) {
+				copied[i] = redactedPlaceholder
+			} else {
+				copied[i] = v
+			}
+		}
+		out[k] = copied
+	}
+	return out
 }
 
 // requestWasSent classifies a transport-level failure returned by

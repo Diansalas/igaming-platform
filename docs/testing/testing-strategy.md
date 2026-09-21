@@ -3387,3 +3387,89 @@ Phase 3 itself; F3's bulk-job-execute-via-HTTP gap named by Phase 6) plus
 the two genuine defects this phase found and fixed. No test was skipped,
 disabled, or quarantined to reach this verdict. Full commit list this
 phase: `da33c5e`, `e0be40f`, `76c4605`.
+
+## Stage 9 §20 — Targeted load/concurrency testing methodology (`qa`)
+
+Added as this codebase's standing convention for "realistic-for-this-
+project concurrency" (dozens to low hundreds of goroutines, never
+thousands, per the Stage 9 dispatch): a Go-level concurrent integration
+test against the REAL HTTP handlers/domain functions and a REAL Postgres
+pool, sized to `internal/config/config.go`'s own actually-configured
+`DatabaseMaxConns` (its `Load()` default of 10, or a `DATABASE_MAX_CONNS`
+override) - never an invented pool size, so a test's observed contention
+reflects what production would actually see at its own configured pool
+size.
+
+Two complementary techniques are now established side by side in this
+codebase, used for different questions:
+
+1. **Forced interleaving** (pre-existing, `internal/casino`'s
+   `fmWaitForLockWaiters`/`s9Blocker` pattern and its `internal/sportsbook`
+   counterpart): an uncommitted blocker transaction holds a row lock the
+   racing calls must also take, plus a `pg_stat_activity` poll, so a test
+   proving a SPECIFIC interleaving (e.g. "two distinct bets racing one
+   wallet's balance") is deterministic rather than sleep-guessed. Owned by
+   whichever specialist owns the financial invariant under test
+   (`ledger-finance` for wallet/ledger/casino/withdrawal/payments money
+   paths).
+2. **Bulk concurrent burst with a bounded-wait deadlock check**
+   (`internal/httpserver/stage9_concurrency_integration_test.go`, new this
+   stage): N goroutines (dozens, scaled off the real configured pool size
+   - e.g. 3x `DatabaseMaxConns` - rather than a fixed number) fire real
+   HTTP requests at once; a `stage9AwaitAll`-style helper fails with a
+   clear message if they have not ALL finished within an explicit timeout
+   (never relying on `go test`'s own overall timeout to surface a hang),
+   and returns the wall-clock elapsed for a human to sanity-check
+   "genuinely parallel" versus "silently serialized." Used for the
+   "should show zero/minimal contention" cheap cases explicitly called
+   out in the Stage 9 dispatch: concurrent authentication (same account
+   and distinct accounts, checking `login_attempts`/`sessions` - noting
+   `sessions`' own per-principal RLS, migration 0018, means a bulk session
+   count must go through `auth.ListActiveSessions`/`WithPrincipalScope`,
+   never a raw tenant-scoped `SELECT * FROM sessions`, which sees zero
+   rows by design), concurrent sportsbook catalogue reads, concurrent
+   casino game launch (both many distinct players and many sessions for
+   one already-funded player - deliberately NOT the wallet-row-creation
+   race, which is `ledger-finance`'s financial-concurrency territory), and
+   concurrent Back Office queue reads (the bonus change-request approval
+   queue, `GET /v1/admin/bonus/change-requests`).
+
+A goroutine-safe-HTTP-call convention was also established here for any
+future bulk-burst test: `postJSON`/`getJSON` (this package's existing
+helpers) call `t.Fatalf` on a request-build/send error, which is unsafe
+from a non-test goroutine (`testing.T.FailNow` must run on the test's own
+goroutine); bulk-burst tests instead use a raw variant
+(`stage9RawPostJSON`/`stage9RawGetJSON`) returning `(*http.Response,
+error)` with no `*testing.T` dependency, collecting per-goroutine results
+into a slice the MAIN test goroutine alone asserts against after
+`wg.Wait()`.
+
+**Findings**: all six new tests passed, including under `-race`, against
+a freshly-migrated (81/81) scratch database - no deadlock, no lost/
+duplicate effect, no unexpected serialization beyond ordinary connection-
+pool queuing once concurrency exceeded the configured pool size. Same-
+account concurrent logins (30 goroutines) and distinct-account concurrent
+logins (30 goroutines) showed comparable per-operation wall-clock cost
+(~250ms/op average in this environment), consistent with Argon2id
+password-verification CPU cost (`internal/auth/password.go`'s own
+documented ~100ms-per-call target, amplified by CPU contention across
+concurrent goroutines in a constrained sandbox) dominating over any
+database-level lock contention - neither `login_attempts` (append-only
+insert) nor `sessions` (no per-account uniqueness constraint) has a row
+for two concurrent logins to serialize on, which the measurement is
+consistent with. Catalogue reads (60 goroutines), casino launches (30/20
+goroutines), and Back Office queue reads (60 goroutines) all completed in
+well under one second, the expected shape for reads/independent inserts
+with no shared row.
+
+A stale-scratch-database pitfall was found and is recorded here so a
+future session doesn't repeat it: a pre-existing scratch database left
+over from an earlier interrupted session reported `schema_migrations`
+version 81 (matching the current migration file count) yet still carried
+a pre-rename column (`provider_bet_reference` did not exist) and a
+pre-fix trigger definition from BEFORE two Stage 8 fixes - i.e., its
+migration-version bookkeeping did not guarantee its schema matched the
+CURRENT migration files' actual content. Dropping and fully re-creating
+the scratch database (not merely trusting its recorded migration version)
+resolved it; the full suite is clean against a genuinely fresh database
+(see this stage's completion report for the full test run).

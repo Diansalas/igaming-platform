@@ -18,11 +18,11 @@ import (
 // principal; tenant resolution and payload authentication are the
 // handler's own responsibility).
 func registerKYCRoutes(mux *http.ServeMux, deps Deps) {
-	mux.Handle("POST /v1/me/kyc/verifications", auth.Middleware(deps.AuthIssuer)(newCreateMyVerificationHandler(deps)))
-	mux.Handle("GET /v1/me/kyc/verifications", auth.Middleware(deps.AuthIssuer)(newListMyVerificationsHandler(deps)))
-	mux.Handle("POST /v1/me/kyc/documents", auth.Middleware(deps.AuthIssuer)(newUploadMyDocumentHandler(deps)))
-	mux.Handle("GET /v1/me/kyc/documents", auth.Middleware(deps.AuthIssuer)(newListMyDocumentsHandler(deps)))
-	mux.Handle("GET /v1/me/kyc/documents/{id}/content", auth.Middleware(deps.AuthIssuer)(newGetMyDocumentContentHandler(deps)))
+	mux.Handle("POST /v1/me/kyc/verifications", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newCreateMyVerificationHandler(deps))))
+	mux.Handle("GET /v1/me/kyc/verifications", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newListMyVerificationsHandler(deps))))
+	mux.Handle("POST /v1/me/kyc/documents", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newUploadMyDocumentHandler(deps))))
+	mux.Handle("GET /v1/me/kyc/documents", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newListMyDocumentsHandler(deps))))
+	mux.Handle("GET /v1/me/kyc/documents/{id}/content", auth.Middleware(deps.AuthIssuer)(auth.RequirePlayerPrincipal(newGetMyDocumentContentHandler(deps))))
 
 	mux.Handle("GET /v1/admin/kyc/verifications",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newListVerificationsForAccountHandler(deps)))))

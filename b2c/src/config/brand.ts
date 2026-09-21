@@ -26,10 +26,36 @@ export interface BrandConfig {
   defaultAssetCode: string
 }
 
+/**
+ * `slug` resolves which tenant every register/login call is scoped to
+ * server-side - unlike the purely cosmetic fields below (display name,
+ * colors), silently defaulting it in a production build is not a harmless
+ * placeholder: a real brand's deployment that forgot to set
+ * `VITE_BRAND_SLUG` would silently register and log in every one of its
+ * visitors against the "demo-casino" tenant instead of its own (a
+ * cross-tenant misconfiguration `CLAUDE.md` treats as a hard rule
+ * violation, not a cosmetic gap). Stage 9 production-readiness finding:
+ * this used to fall back to `'demo-casino'` unconditionally. A production
+ * build (`import.meta.env.PROD`, i.e. `vite build`'s default mode) now
+ * fails loudly instead - a dev/test run (`vite`/`vitest`, where `PROD` is
+ * false) keeps the convenience default so local development and the test
+ * suite never need their own `.env` file.
+ */
+export function resolveBrandSlug(env: { VITE_BRAND_SLUG?: string; PROD?: boolean }): string {
+  if (env.VITE_BRAND_SLUG) return env.VITE_BRAND_SLUG
+  if (env.PROD) {
+    throw new Error(
+      'VITE_BRAND_SLUG is not set. This is required in a production build - see b2c/.env.example. ' +
+        'Without it, this deployment would silently register/log in every visitor against the wrong tenant.',
+    )
+  }
+  return 'demo-casino'
+}
+
 const env = import.meta.env
 
 export const brandConfig: BrandConfig = {
-  slug: env.VITE_BRAND_SLUG ?? 'demo-casino',
+  slug: resolveBrandSlug(env),
   displayName: env.VITE_BRAND_DISPLAY_NAME ?? 'Demo Casino',
   primaryColorHex: env.VITE_BRAND_PRIMARY_COLOR ?? '#2563eb',
   primaryColorHoverHex: env.VITE_BRAND_PRIMARY_COLOR_HOVER ?? '#1d4ed8',

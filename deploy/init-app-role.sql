@@ -10,6 +10,40 @@
 -- See docs/decisions/0002-multi-tenancy-isolation-strategy.md and the
 -- Stage 1 specialist review that caught the original config connecting
 -- as the superuser directly (docs/active-stage.md).
+--
+-- PLAT-ROLESPLIT-1 (docs/security/runtime-role-separation.md): this file
+-- also provisions a second, non-owning role, "igaming_runtime". Table
+-- ownership grants ALTER/DROP/TRUNCATE/DISABLE ROW LEVEL SECURITY
+-- unconditionally, independent of any RLS policy - RLS never applies to
+-- a table's owner. "igaming" therefore remains ONLY the migration-owner
+-- role (used by cmd/migrate at deploy time); the running application
+-- should connect as "igaming_runtime" instead in any environment where
+-- this split has actually been rolled out. In this dev/CI bootstrap both
+-- roles are created side by side, but DATABASE_URL/TEST_DATABASE_URL
+-- still point at "igaming" - a large share of this repo's own
+-- integration suite (every internal/*/migration_*_test.go file) calls
+-- Pool.MigrateUp/MigrateDown directly and needs owner (DDL) privileges
+-- to do that at all. See internal/db/runtime_role_separation_test.go for
+-- the permanent regression test that exercises "igaming_runtime"
+-- specifically (opt-in via TEST_RUNTIME_DATABASE_URL).
+--
+-- The password below ("igaming_runtime_dev_password") is a placeholder
+-- exactly like "igaming"'s own "igaming_dev_password" above: this exact
+-- password must never be reused anywhere near production. Production
+-- provisioning follows docs/security/runtime-role-separation.md §6, run
+-- once by an operator holding CREATEROLE, with a freshly generated
+-- secret from a real secrets manager - never a value copied from this
+-- file.
+--
+-- Everything from "CREATE ROLE igaming_runtime" down is written to be
+-- idempotent (a DO-block-guarded CREATE ROLE, and GRANT/ALTER DEFAULT
+-- PRIVILEGES statements, which are safe to re-run by nature) so this
+-- same file can be used unmodified both for a fresh
+-- docker-entrypoint-initdb.d run (no tables exist yet - see the ALTER
+-- DEFAULT PRIVILEGES statements below) AND to backfill "igaming_runtime"
+-- onto an already-bootstrapped, already-migrated cluster, such as this
+-- repository's native-Postgres sandbox/CI environments (see the
+-- Makefile's dev-db-init-roles target).
 
 CREATE ROLE igaming
     LOGIN
@@ -21,3 +55,54 @@ CREATE ROLE igaming
 
 ALTER DATABASE igaming_platform_dev OWNER TO igaming;
 ALTER SCHEMA public OWNER TO igaming;
+
+-- --- PLAT-ROLESPLIT-1: non-owning runtime application role ---
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
+        CREATE ROLE igaming_runtime
+            LOGIN
+            PASSWORD 'igaming_runtime_dev_password'
+            NOSUPERUSER
+            NOCREATEDB
+            NOCREATEROLE
+            NOBYPASSRLS;
+    END IF;
+END
+$$;
+
+GRANT CONNECT ON DATABASE igaming_platform_dev TO igaming_runtime;
+GRANT USAGE ON SCHEMA public TO igaming_runtime;
+
+-- Direct grants cover any table/sequence that already exists (relevant
+-- when this file is re-run against an already-migrated database, e.g.
+-- this repo's native sandbox dev environment). The ALTER DEFAULT
+-- PRIVILEGES statements below cover every table/sequence a FUTURE
+-- migration creates - the only path that matters on a genuinely fresh
+-- docker-entrypoint-initdb.d run, since no tables exist yet at that
+-- point (this script runs before cmd/migrate ever does).
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO igaming_runtime;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO igaming_runtime;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE igaming IN SCHEMA public
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO igaming_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE igaming IN SCHEMA public
+    GRANT USAGE, SELECT ON SEQUENCES TO igaming_runtime;
+
+-- Narrow write access on the migration ledger back to read-only: the
+-- blanket grant above also covers schema_migrations, which only
+-- cmd/migrate (running as "igaming") should ever write to. Guarded
+-- because schema_migrations does not exist yet on a fresh bootstrap (no
+-- migration has run) - a harmless no-op there, and effective the moment
+-- this same file is re-run after migrations have created the table.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'schema_migrations'
+    ) THEN
+        EXECUTE 'REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM igaming_runtime';
+    END IF;
+END
+$$;

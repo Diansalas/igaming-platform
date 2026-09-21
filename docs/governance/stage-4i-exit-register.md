@@ -32,7 +32,30 @@ policy) is FROZEN per this directive and was not reopened.
 
 ## 1. `PLAT-ROLESPLIT-1` — migration-owner/runtime-role split
 
-**Classification: A. PRODUCTION BLOCKER — EXTERNAL INFRASTRUCTURE ACTION.**
+**Classification: A. PRODUCTION BLOCKER — NARROWED TO EXTERNAL
+INFRASTRUCTURE ACTION ONLY. Everything this repository's own code, CI,
+and test suite can do has been IMPLEMENTED and verified; see the update
+below and `docs/security/runtime-role-separation.md` §9 for the full
+record.**
+
+**Update (Stage 9 production-readiness pass):** `deploy/init-app-role.sql`
+now provisions both `igaming` (unchanged) and `igaming_runtime` (the
+non-owning role this item calls for); `.github/workflows/ci.yml`
+provisions `igaming_runtime` and runs the adversarial-probe regression
+suite (`internal/db/runtime_role_separation_test.go`, previously only a
+one-off manual verification) against it on every push/PR; and
+`cmd/platform-api/main.go` now calls a new fail-closed startup check
+(`db.VerifyRuntimeRoleInProduction`) that refuses to start in production
+if the connecting role owns tables. `TEST_DATABASE_URL` was deliberately
+left pointed at `igaming` (see that document's §9 point 4 for exactly
+why — a large share of the integration suite needs owner/DDL privileges
+to run migration mechanics at all). **What remains, and is genuinely
+outside any engineering session's reach without a production
+credential:** an operator with `CREATEROLE` on the real production
+database must still run §6's script there with a freshly generated
+secret, and repoint production's own `DATABASE_URL`. This is why the
+classification below is unchanged at "blocks production" — it is not a
+code gap, and the trigger for closing it (below) is unchanged.
 
 - **Owner:** `security` (design), operations/infra (execution — outside
   this repository's reach).
@@ -84,7 +107,11 @@ policy) is FROZEN per this directive and was not reopened.
   security/runtime-role-separation.md`. **This document does not execute
   that action** — it requires a credential this session does not have and
   must not request (CLAUDE.md "Environment safety": no production
-  credentials without explicit later authorization).
+  credentials without explicit later authorization). **As of the Stage 9
+  pass, everything up to that exact action is done in-repo** (role
+  definition, dev/CI provisioning, the fail-closed startup guard, and the
+  permanent regression test) — see `docs/security/runtime-role-
+  separation.md` §9.
 - **Exact trigger for reopening (i.e., for treating this as done, not for
   reopening the investigation — the investigation is already complete):**
   closed the moment infra confirms the runtime role has been switched and
@@ -482,7 +509,7 @@ compliance policy was invented while producing this register.**
 
 | ID | Class | Blocks production | Blocks next stage | Owner |
 |---|---|---|---|---|
-| `PLAT-ROLESPLIT-1` | A | **YES** | No (conditional — see §1) | security / infra |
+| `PLAT-ROLESPLIT-1` | A | **YES** (external action only — in-repo code/CI/test closed, see §1) | No (conditional — see §1) | security / infra |
 | `PLAT-TENANTREAD-1` | D | No | No | architect / security |
 | `MKT-LICSTATUS-1` | B | No | No (conditional — see §3) | architect |
 | `MKT-AUDIT-1` | B | No | No (conditional) | security |
@@ -495,7 +522,12 @@ compliance policy was invented while producing this register.**
 
 **Net result: exactly one production blocker (`PLAT-ROLESPLIT-1`), and it
 is an infrastructure action, not a code defect this repository can fix
-directly. Nothing blocks the recommended next stage.** **Qualified per
+directly — as of the Stage 9 production-readiness pass, this repository's
+own share of that fix (role definition, dev/CI provisioning, the
+fail-closed startup guard, and the permanent regression test) is
+committed and verified; only the real production execution step remains,
+by design outside any session's reach here. Nothing blocks the
+recommended next stage.** **Qualified per
 the independent security review:** this statement is about the
 *committed code and migration files*, which is what "production blocker"
 must mean for a repository-level triage — a genuinely fresh deployment of

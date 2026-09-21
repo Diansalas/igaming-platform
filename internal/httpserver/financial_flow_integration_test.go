@@ -574,6 +574,17 @@ func TestFinancialHappyPath_EndToEnd(t *testing.T) {
 
 	// Register.
 	player := mustRegisterPlayer(t, srv, brand.Slug)
+	// Stage 9 (identity-compliance): InitiateDeposit now consults
+	// internal/rg.EvaluateEligibility, exactly like internal/casino's
+	// LaunchGame/postBet have since Stage 4D-RG - which requires
+	// PlayerAccountStatus == active, not the pending_verification a fresh
+	// registration starts in. mustActivatePlayer stands in for the (out
+	// of scope here) real email-verification flow, mirroring the
+	// established Stage 6/7 defining-acceptance-test convention
+	// (stage6_b2c_sportsbook_acceptance_test.go,
+	// stage7_b2c_casino_acceptance_test.go both activate immediately
+	// after registration, before any financial action).
+	mustActivatePlayer(t, pool, tenant.ID, player.ID)
 
 	// Deposit - amount deliberately NOT one of MockProvider's magic
 	// synchronous-outcome amounts, so this takes the normal
@@ -715,6 +726,10 @@ func TestPaymentWebhook_ForgedCrossTenantProviderReferenceDenied(t *testing.T) {
 	mustRegisterCapability(t, pool, tenantA.ID, mockProvider)
 
 	playerA := mustRegisterPlayer(t, srv, brandA.Slug)
+	// Stage 9 (identity-compliance): see TestFinancialHappyPath_EndToEnd's
+	// identical comment - InitiateDeposit now requires an active (not
+	// pending_verification) player account.
+	mustActivatePlayer(t, pool, tenantA.ID, playerA.ID)
 	var walletA wallet.Wallet
 	err := pool.WithTenant(context.Background(), tenantA.ID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error

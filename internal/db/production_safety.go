@@ -1,0 +1,95 @@
+package db
+
+import (
+	"context"
+	"fmt"
+)
+
+// tableOwnershipChecker is satisfied by *Pool; kept as an interface so
+// VerifyRuntimeRoleInProduction is unit-testable without a real
+// database connection (see production_safety_test.go).
+type tableOwnershipChecker interface {
+	ConnectingRoleOwnsNoTables(ctx context.Context) (bool, error)
+}
+
+// ConnectingRoleOwnsNoTables reports whether the role this Pool is
+// connected as owns zero tables in the "public" schema. It exists purely
+// as a PLAT-ROLESPLIT-1 (docs/security/runtime-role-separation.md)
+// production safety signal: table ownership is what lets a Postgres role
+// bypass every row-level-security policy regardless of GRANTs (RLS never
+// applies to a table's owner, and FORCE ROW LEVEL SECURITY only changes
+// that for the owner's own DML - it does not stop the owner from turning
+// FORCE, or RLS itself, back off, since altering either is itself an
+// owner-only operation). A role that owns nothing structurally cannot do
+// any of that, no matter what it is granted.
+func (p *Pool) ConnectingRoleOwnsNoTables(ctx context.Context) (bool, error) {
+	var ownsNothing bool
+	err := p.pool.QueryRow(ctx,
+		`SELECT NOT EXISTS (
+			SELECT 1 FROM pg_tables
+			WHERE schemaname = 'public' AND tableowner = current_user
+		)`,
+	).Scan(&ownsNothing)
+	if err != nil {
+		return false, fmt.Errorf("db: check connecting role's table ownership: %w", err)
+	}
+	return ownsNothing, nil
+}
+
+// VerifyRuntimeRoleInProduction is a fail-closed production startup
+// check for PLAT-ROLESPLIT-1. It refuses to let the application start in
+// production if the connecting database role owns any table it is about
+// to serve traffic against - i.e. it is the migration-owner role
+// ("igaming" in this repo's dev/CI convention) rather than a genuinely
+// non-owning runtime role ("igaming_runtime") - see
+// docs/security/runtime-role-separation.md §1 for why that specific
+// distinction is the actual security boundary (not the role's name, not
+// its GRANTs, only whether it owns anything). This converts "an operator
+// forgot to switch the credential in production" from a silent, severe
+// vulnerability (every RLS policy platform-wide silently inert for that
+// connection) into a startup crash with a clear, named cause.
+//
+// Deliberately gated on environment being the exact string "production":
+// development/CI/staging legitimately connect as the owning role today,
+// and that is intentional, not a gap this check should flag. A large
+// share of this repository's own integration suite (every
+// internal/*/migration_*_test.go file, e.g.
+// internal/jurisdiction/migration_*_test.go,
+// internal/operatingmarket/migration_*_test.go,
+// internal/bonus/wave3_phase2_migrations_integration_test.go) calls
+// Pool.MigrateUp/Pool.MigrateDown directly and needs owner (DDL)
+// privileges to run at all - see
+// internal/db/runtime_role_separation_test.go's own doc comment. Config's
+// own doc comment (internal/config/config.go) states environment "must
+// never gate a security control" as a general rule, written for the
+// Stage 1 finding this codebase learned from (a case where every
+// environment DID need identical security posture, and didn't have it).
+// This check is the deliberate, reviewed exception to that general rule,
+// not a silent violation of it: dev/CI's own ability to run
+// migration-mechanics tests structurally requires owner privileges no
+// production deployment should ever grant its runtime credential, so
+// "identically configured" is not achievable (or desirable) here without
+// either breaking that test suite or leaving production unchecked. This
+// tension is a security-review item, not something this session
+// resolved unilaterally - see docs/security/runtime-role-separation.md's
+// "IMPLEMENTED" section for the record of it.
+func VerifyRuntimeRoleInProduction(ctx context.Context, environment string, checker tableOwnershipChecker) error {
+	if environment != "production" {
+		return nil
+	}
+
+	ownsNothing, err := checker.ConnectingRoleOwnsNoTables(ctx)
+	if err != nil {
+		return fmt.Errorf("db: production role-ownership safety check failed (fail-closed - refusing to start): %w", err)
+	}
+	if !ownsNothing {
+		return fmt.Errorf(
+			"db: refusing to start in production - the connecting database role owns tables in schema " +
+				"\"public\", which means it is the migration-owner role, not a non-owning runtime role; " +
+				"row-level security is silently inert for every request this process would serve (see " +
+				"docs/security/runtime-role-separation.md, PLAT-ROLESPLIT-1) - point DATABASE_URL at the " +
+				"runtime role's credential instead",
+		)
+	}
+	return nil
+}

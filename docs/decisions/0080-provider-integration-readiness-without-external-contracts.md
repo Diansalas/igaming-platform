@@ -267,6 +267,81 @@ carry the identifier set a future reconciliation job would need — see the
 Stage 8 completion report's reconciliation-readiness section for the full
 inventory).
 
+## Stage 9 addendum — re-verification, credential-redaction fix, and a composition proof
+
+Stage 9's provider-integration-readiness re-verification (`integrations`
+specialist) confirmed this ADR's scaffolding still holds with zero
+external network calls made and no real provider invented, and made one
+narrowly-scoped fix plus one proof, both confined to
+`internal/providers/`:
+
+- **P3 finding fixed**: this ADR's Decision 3 originally documented, but
+  deliberately left unfixed, the risk that `RejectedError.Body`/`.Header`
+  (and, identically, `UnavailableError.Body`/`.Header` for a 5xx) could
+  carry `ClientConfig.AuthHeaderValue` echoed back by a provider's own
+  diagnostic error response (a vendor "here is what you sent us" 4xx body,
+  or a gateway/proxy 5xx error page reflecting request headers) — exactly
+  the field a future adapter's own error-path logging is most likely to
+  include verbatim. Given Stage 9's production-readiness framing, this was
+  judged worth fixing now rather than carrying forward again: it is a
+  self-contained change inside `internal/providers/httpclient` only, with
+  no dependency on any real provider's contract. Fixed via
+  `redactCredential`/`redactCredentialHeader` (`internal/providers/
+  httpclient/client.go`) — every literal occurrence of the configured
+  credential value is replaced with a fixed placeholder before being
+  stored on a `RejectedError`/`UnavailableError`, never on a successful
+  `Response` (which a caller must receive untouched to decode correctly).
+  This is a genuinely partial mitigation, documented as such on both
+  error types' own doc comments: it can only scrub the one secret this
+  package itself knows about, not an arbitrary sensitive value a provider
+  might echo that this package has no visibility into. Regression tests:
+  `TestDo_Rejected4xx_EchoedCredentialIsRedacted`,
+  `TestDo_5xx_EchoedCredentialIsRedacted`
+  (`internal/providers/httpclient/client_test.go`).
+- **Mock inbound-failure-injection gap assessed, left as-is**: Stage 8
+  also flagged that `MockCasinoProvider` has no hook to simulate a
+  callback-path (inbound webhook) provider failure, and
+  `MockSportsbookProvider` has no failure-injection at all. Re-examined
+  this stage and deliberately NOT added: `MockCasinoProvider.
+  HandleCallback` already accepts an arbitrary caller-constructed
+  `rawPayload []byte`, and the existing failure-mode-matrix integration
+  tests (`internal/casino/failure_mode_matrix_integration_test.go`)
+  already exercise a bad signature, a malformed amount/asset, an unknown
+  session, and a cross-player/cross-tenant reference this exact way —
+  every "callback-path failure" shape that concept actually has (there is
+  no transport leg on the inbound side to fail, unlike `Launch`/`Bet`/
+  `Win`/`Rollback`, which `FailNextCall` already covers). A `FailNextCall`-
+  style toggle for `HandleCallback` would add convenience, not coverage,
+  for a case this repo's own tests already prove is exercisable without
+  it — and `internal/casino`/`internal/sportsbook` are the owning domain
+  specialists' files besides, which this stage's own scope
+  (`internal/providers/` plus narrowly-scoped proof only) does not
+  license changing beyond that. `MockSportsbookProvider` has no
+  provider-initiated failure mode to inject in the first place (bet
+  placement is same-process/synchronous, ADR 0080 Decision 2) — nothing
+  to add there either.
+- **Composition proof added**: `internal/providers/
+  casino_adapter_composition_demo_test.go` (`providers_test` package) is
+  a throwaway-but-committed demonstration that a `casino.CasinoProvider`
+  implementation composed entirely from `internal/providers/httpclient.
+  Client` + `internal/providers.ProviderConfig`/`LoadProviderConfig`
+  round-trips Catalogue/Launch/Bet/HealthStatus against a real
+  `httptest.Server` (real sockets, real JSON, real HTTP) with a
+  compile-time assertion (`var _ casino.CasinoProvider = ...`) that no
+  interface change was needed. Its own doc comment states plainly it is
+  not a real vendor adapter, encodes no real or guessed contract, and is
+  not wired into `cmd/platform-api/main.go`.
+- **Everything else re-verified unchanged**: `casino.CasinoProvider` and
+  `sportsbook.Provider` are untouched since Stage 8; the redirect-
+  credential-leak fix, context-cancellation fix, and `Sent`/delivered
+  distinction (all documented above under Decision 3) remain intact and
+  covered by their own still-passing regression tests; `docs/integrations/
+  dummy-casino.md`/`dummy-sportsbook.md` still correctly state PENDING
+  with no drift; `casino_provider_rounds` and `sportsbook_bets`' provider-
+  reference columns remain readiness-only and always NULL absent a real
+  adapter (re-confirmed via the existing integration test suite against a
+  scratch database, migrations 1-81 applying cleanly).
+
 ## Removal / extension condition
 
 The moment real Dummy Sportsbook/Casino API documentation is available, a

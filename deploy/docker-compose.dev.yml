@@ -21,6 +21,21 @@ services:
       # init-app-role.sql, which creates a separate, ordinary "igaming"
       # role and hands it ownership of the database. Only manual/
       # administrative access should ever use the postgres superuser.
+      #
+      # init-app-role.sql also provisions "igaming_runtime", a second,
+      # non-owning role - PLAT-ROLESPLIT-1
+      # (docs/security/runtime-role-separation.md). "igaming" owns every
+      # table (it runs migrations) and RLS never applies to a table's
+      # owner, so it must never be the credential the running application
+      # actually serves traffic with in a real deployment; "igaming" is
+      # the migration-owner role for cmd/migrate only, "igaming_runtime"
+      # is what the application should connect as instead once this split
+      # is rolled out. This dev compose file still points a locally-run
+      # platform-api at "igaming" (DATABASE_URL in .env.example) because a
+      # large share of this repo's integration suite exercises migration
+      # mechanics directly and needs owner privileges to do that at all -
+      # see internal/db/runtime_role_separation_test.go for the
+      # regression test that exercises "igaming_runtime" specifically.
       POSTGRES_PASSWORD: igaming_dev_superuser_password
       POSTGRES_DB: igaming_platform_dev
     ports:

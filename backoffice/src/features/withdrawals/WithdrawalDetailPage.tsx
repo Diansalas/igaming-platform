@@ -11,6 +11,7 @@ import { ErrorState } from '../../components/ErrorState'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { PageHeader } from '../../components/PageHeader'
 import { formatMoney } from '../../lib/money'
+import { useOnceGuard } from '../../lib/useOnceGuard'
 import { withdrawalStatusTone } from './status'
 
 type DialogState = 'approve' | 'reject' | null
@@ -30,6 +31,13 @@ export function WithdrawalDetailPage() {
   const [dialog, setDialog] = useState<DialogState>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
+  // This page moves real money via a distinct-approver/four-eyes-enforced
+  // endpoint - a stray double-submit (see useOnceGuard's doc comment) is a
+  // genuinely serious operational risk here, not just a UX nuisance, so
+  // approve/reject each get their own synchronous once-guard on top of
+  // ConfirmDialog's own isSubmitting-disables-the-button behavior.
+  const approveGuard = useOnceGuard()
+  const rejectGuard = useOnceGuard()
 
   const query = useQuery({
     queryKey: ['withdrawal', id],
@@ -47,6 +55,7 @@ export function WithdrawalDetailPage() {
       await queryClient.invalidateQueries({ queryKey: ['withdrawals'] })
     },
     onError: (err) => setActionError(err instanceof ApiError ? err.message : 'Failed to approve this withdrawal.'),
+    onSettled: () => approveGuard.release(),
   })
 
   const rejectMutation = useMutation({
@@ -59,6 +68,7 @@ export function WithdrawalDetailPage() {
       await queryClient.invalidateQueries({ queryKey: ['withdrawals'] })
     },
     onError: (err) => setActionError(err instanceof ApiError ? err.message : 'Failed to reject this withdrawal.'),
+    onSettled: () => rejectGuard.release(),
   })
 
   if (query.isLoading) return <LoadingSpinner label="Loading withdrawal..." />
@@ -141,7 +151,7 @@ export function WithdrawalDetailPage() {
           confirmLabel="Approve withdrawal"
           isSubmitting={approveMutation.isPending}
           errorMessage={actionError}
-          onConfirm={() => approveMutation.mutate()}
+          onConfirm={() => approveGuard.run(() => approveMutation.mutate())}
           onCancel={() => {
             setDialog(null)
             setActionError(null)
@@ -158,7 +168,7 @@ export function WithdrawalDetailPage() {
           reasonLabel="Reason code"
           isSubmitting={rejectMutation.isPending}
           errorMessage={actionError}
-          onConfirm={(reason) => rejectMutation.mutate(reason)}
+          onConfirm={(reason) => rejectGuard.run(() => rejectMutation.mutate(reason))}
           onCancel={() => {
             setDialog(null)
             setActionError(null)
