@@ -39,6 +39,45 @@ const (
 
 // --- Email verification ---
 
+// newRequestEmailVerificationHandler serves POST
+// /v1/me/email-verification/request. It is unchanged for a real
+// deployment (Deps.AccountActivationTestSupportEnabled false): the
+// response is always 204 with no body, exactly as before Stage 9.4.
+//
+// Stage 9.4 (replacing the Stage 9.3 GET /v1/me/email-verification/
+// dev-token route and its in-memory devVerificationTokenStore, which
+// Stage 9.3's own security review diagnosed as not replica-safe: two
+// requests from the same player, load-balanced across two different
+// platform-api replicas, would 404 on the second one, since the raw
+// token was only ever recorded in the replica that happened to handle
+// the request): when deps.AccountActivationTestSupportEnabled is true,
+// this handler returns the raw token it already holds - at the EXACT
+// point it is about to hand that value to EmailProvider.Send, and
+// nowhere else - directly in THIS response's own body
+// (200 {"token": "..."}), instead of 204. This is stateless by
+// construction: the client receives the token in the SAME HTTP
+// response that requested it, from whichever replica happened to
+// handle that one request. There is no follow-up GET, so "request 1
+// reaches replica A, request 2 reaches replica B" cannot apply to this
+// flow at all - there is only one request. Nothing about the real
+// player_credential_tokens row (which stores only a SHA-256 hash) or
+// the real confirm endpoint's hashing/TTL/single-use semantics
+// changes; the token is fed into the completely unmodified
+// POST /v1/auth/email-verification/confirm exactly as before, and that
+// endpoint's own correctness is already backed by the shared Postgres
+// player_credential_tokens table (internal/auth/credential_token.go),
+// which is already correctly replica-safe.
+//
+// This endpoint is already scoped to the authenticated caller (tc.Subject
+// resolves to the CALLER's own player_account_id, never a path
+// parameter), so returning the token here introduces no new
+// authorization surface: it is always, and only ever, the caller's own
+// newly-issued token.
+//
+// SECURITY-SENSITIVE: this changes WHERE a credential-adjacent raw
+// token is exposed (an authenticated player's own response body,
+// non-production only). Per CLAUDE.md, it requires explicit `security`
+// specialist review before being marked complete.
 func newRequestEmailVerificationHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -62,7 +101,6 @@ func newRequestEmailVerificationHandler(deps Deps) http.HandlerFunc {
 		ip := clientIP(r)
 
 		var recipient, rawToken string
-		var tokenID uuid.UUID
 		var rateLimited bool
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			account, err := identity.GetPlayerAccountByID(ctx, tx, playerAccountID)
@@ -88,7 +126,7 @@ func newRequestEmailVerificationHandler(deps Deps) http.HandlerFunc {
 			}); err != nil {
 				return err
 			}
-			recipient, rawToken, tokenID = account.Email, tok.RawToken, tok.ID
+			recipient, rawToken = account.Email, tok.RawToken
 			return nil
 		})
 		if errors.Is(err, identity.ErrNotFound) {
@@ -103,23 +141,19 @@ func newRequestEmailVerificationHandler(deps Deps) http.HandlerFunc {
 		if rateLimited {
 			// Same 204 as success - see this file's own top-level doc
 			// comment on why rate-limiting must not be distinguishable
-			// from success at the HTTP layer.
+			// from success at the HTTP layer. Deliberately NOT affected by
+			// AccountActivationTestSupportEnabled: a rate-limited request
+			// issued no new token, so there is nothing to return either
+			// way. Note the consequence, which is intended: with that flag
+			// ON (non-production only), success is 200+token and
+			// rate-limited is 204, so the two ARE distinguishable there.
+			// That leaks nothing beyond the caller's OWN account state
+			// (this route is authenticated and self-scoped, and the caller
+			// already knows how many requests they made), and the
+			// production shape - always 204, never distinguishable - is
+			// byte-for-byte unchanged.
 			w.WriteHeader(http.StatusNoContent)
 			return
-		}
-
-		// Stage 9.3: capture the raw token for the account-activation
-		// dev-token route (email_verification_dev_token_handlers.go) -
-		// ONLY when that test-support seam is actually enabled
-		// (deps.accountActivationDevTokens is nil otherwise, e.g. in
-		// production, where no raw token is ever retained anywhere beyond
-		// this function's own stack). This is the exact moment this
-		// handler already holds the raw value, immediately before handing
-		// it to EmailProvider.Send below - nothing about the real
-		// player_credential_tokens row (which stores only its SHA-256
-		// hash) changes.
-		if deps.accountActivationDevTokens != nil {
-			deps.accountActivationDevTokens.record(playerAccountID, tokenID, rawToken)
 		}
 
 		if err := deps.EmailProvider.Send(r.Context(), email.Message{
@@ -128,6 +162,15 @@ func newRequestEmailVerificationHandler(deps Deps) http.HandlerFunc {
 		}); err != nil {
 			logger.Error("send_email_verification_failed", "error", err)
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to send verification email")
+			return
+		}
+
+		// Stage 9.4: the ONLY place the raw token is ever exposed outside
+		// this function's own stack, and only when the test-support seam
+		// is enabled - see this handler's own doc comment above for the
+		// full replica-safety rationale.
+		if deps.AccountActivationTestSupportEnabled {
+			writeJSON(w, http.StatusOK, map[string]any{"token": rawToken})
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

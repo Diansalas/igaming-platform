@@ -1498,7 +1498,10 @@ paths:
       description: >
         Never available in production (structurally gated by
         Deps.PaymentsMockSettlementEnabled, which cmd/platform-api/main.go
-        sets to `cfg.Environment != "production"` - not merely documented
+        sets only when BOTH `APP_ENV != "production"` AND
+        `TEST_SUPPORT_ENDPOINTS_ENABLED=true` - Stage 9.4's two independent
+        conditions, see `internal/config/config.go`'s `Environment`/
+        `TestSupportEndpointsEnabled` doc comments - not merely documented
         as unsafe). Payments' equivalent of the casino play-simulation
         endpoints above: there is no real, hosted PSP to deliver a webhook
         against a live, HTTP-only staging process, so this endpoint asks
@@ -1700,78 +1703,76 @@ paths:
       summary: Request a new email-verification token for the caller's own account
       description: >
         Authenticated, self-service. Rate-limited to 3 requests/hour per
-        account - a rate-limited request returns the SAME 204 as a
-        successful one (never distinguishable), and any prior outstanding
-        token of this purpose is superseded. Delivered via the configured
-        EmailProvider (MockProvider in this stage - no production SMTP/API
-        dependency).
+        account - in production, and in any deployment without test
+        support explicitly enabled, a rate-limited request returns the
+        SAME 204 as a successful one (never distinguishable). Any prior
+        outstanding token of this purpose is superseded. Delivered via the
+        configured EmailProvider (MockProvider in this stage - no
+        production SMTP/API dependency).
+
+
+        Note for the test-support configuration described below: when
+        test support IS enabled, a rate-limited request still returns
+        `204` (it issued no token, so there is nothing to return) while a
+        successful one returns `200` with a token, so the two ARE
+        distinguishable in that configuration. That is deliberate and
+        confined to non-production deployments - the caller can only ever
+        observe the rate-limit state of THEIR OWN account (this endpoint
+        is authenticated and self-scoped), which they already know from
+        their own request count. The production response shape, and its
+        indistinguishability property, are unchanged.
+
+
+        **Stage 9.4 conditional response shape** (replacing Stage 9.3's
+        separate `GET /v1/me/email-verification/dev-token` route, which no
+        longer exists): whether this endpoint returns `204` with no body
+        or `200` with the raw token in the body depends ENTIRELY on the
+        deployment's own server-side configuration
+        (`Deps.AccountActivationTestSupportEnabled`, gated by BOTH
+        `APP_ENV != "production"` AND `TEST_SUPPORT_ENDPOINTS_ENABLED=true`
+        - see `internal/config/config.go`'s `Environment`/
+        `TestSupportEndpointsEnabled` doc comments) - never by anything in
+        the request. In production, and in any deployment that has not
+        explicitly opted into test support, the response is `204` with no
+        body, byte-for-byte identical to before Stage 9.4. In a
+        staging/non-production deployment with test support explicitly
+        enabled, the response is `200` with the raw token in the body -
+        STAGING/NON-PRODUCTION TEST SUPPORT ONLY, never available in
+        production. The token is only ever the CALLER's own newly-issued
+        token (this endpoint is already scoped to the authenticated
+        caller, so no new authorization surface is introduced), to be fed
+        into the completely unmodified `POST /v1/auth/email-verification/
+        confirm` below - token hashing, expiry, and single-use consumption
+        are unaffected by this flag either way.
       security:
         - bearerAuth: []
       responses:
         "204":
-          description: Verification email sent, or silently rate-limited
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "503":
-          description: Email delivery is not configured
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /v1/me/email-verification/dev-token:
-    get:
-      summary: >-
-        STAGING/NON-PRODUCTION TEST SUPPORT ONLY - retrieve the caller's own
-        currently-pending email-verification raw token
-      description: >
-        Never available in production (structurally gated by
-        Deps.AccountActivationTestSupportEnabled, which
-        cmd/platform-api/main.go sets to `cfg.Environment != "production"` -
-        not merely documented as unsafe). Identity's equivalent of the
-        casino/payments play-simulation endpoints above: no player account
-        created through the real public registration flow can ever reach
-        'active' status through the real HTTP API alone, because
-        email.MockProvider deliberately never exposes a sent message's raw
-        token via any API (there is no real inbox to deliver a mock email
-        to). This endpoint closes exactly that gap and nothing else - it
-        does NOT bypass or duplicate POST /v1/auth/email-verification/
-        confirm, which remains completely unmodified (token hashing,
-        expiry, and single-use consumption are unchanged). The returned
-        token is only ever the CALLER's own currently-pending
-        email_verification token (resolved exclusively from the
-        authenticated JWT subject - there is no id parameter to name
-        another player's token with), and only when it is still genuinely
-        unconsumed and unexpired; an already-confirmed account, or one
-        whose token was superseded by a newer request, returns 404.
-      security:
-        - bearerAuth: []
-      responses:
+          description: >-
+            Verification email sent, or silently rate-limited. This is the
+            ONLY possible success response in production (or any
+            deployment without test support explicitly enabled) - no body.
         "200":
-          description: The caller's own currently-pending email-verification raw token
+          description: >-
+            STAGING/NON-PRODUCTION TEST SUPPORT ONLY. Verification email
+            "sent" (via the mock EmailProvider), with the caller's own
+            newly-issued raw email-verification token also returned
+            directly in this response body - never available in
+            production. See this operation's own description above for
+            the exact two-condition gate.
           content:
             application/json:
               schema:
                 type: object
                 properties:
                   token: { type: string }
+                required: [token]
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "403":
-          description: A staff/back-office bearer token was presented to this player-self-service route
-        "404":
-          description: >-
-            No pending email-verification token for the caller (never
-            issued, already confirmed, or superseded) - AND ALSO what a
-            deployment with account-activation test support disabled
-            returns, because the route is then not registered on the mux
-            at all. A caller therefore cannot distinguish "nothing pending
-            for me" from "this endpoint does not exist here", which is the
-            intended, fail-closed behaviour.
         "503":
-          description: >-
-            Defensive only, and not reachable in practice: the handler's
-            own "test support not enabled" branch exists as belt-and-
-            suspenders behind a route that is never registered when the
-            feature is off (see the 404 above).
+          description: Email delivery is not configured
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /v1/auth/email-verification/confirm:
     post:

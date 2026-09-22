@@ -39,20 +39,60 @@ type Config struct {
 	//  4. httpserver.Deps.AccountActivationTestSupportEnabled (Stage 9.3).
 	//
 	// (1) fails CLOSED on a mis-set value (a typo just re-enables a check
-	// production should pass anyway). (2), (3), and (4) fail OPEN:
-	// cmd/platform-api/main.go computes them as
-	// `cfg.Environment != "production"`, so any value that is not exactly
-	// "production" - including the "development" default below when
-	// APP_ENV is simply unset - REGISTERS routes that let an authenticated
-	// player mint mock casino callbacks, settle their own deposits without
-	// a real provider, and retrieve their own pending email-verification
-	// token without a real inbox. Nothing here validates Environment against
-	// a closed set, deliberately (dev/CI use ad-hoc values), so the
-	// operational control is the deployment checklist
-	// (docs/runbooks/production-configuration-checklist.md) plus the
-	// startup log line, not this type. Adding a fourth fail-open
-	// Environment-gated control without revisiting that trade-off is a
-	// security decision, not a configuration one.
+	// production should pass anyway). (2), (3), and (4) used to fail OPEN
+	// on a typo or an unset variable, per two independent Stage 9.3
+	// security reviews - Load() computed Environment from an unvalidated,
+	// open string, and cmd/platform-api/main.go gated all three simulation
+	// flags purely on `cfg.Environment != "production"`, so
+	// "Production"/"prod"/"production " (trailing space) or an unset
+	// APP_ENV all silently REGISTERED the three test-support routes on
+	// what the operator believed was a production deployment. Stage 9.4
+	// closed this with a two-layer, fail-closed design (both layers are
+	// independently required - a single mistake in either one can never
+	// register a test-support route on a real production deployment):
+	//
+	//   - Layer 1 (this field): Load() now validates Environment against
+	//     the exact closed set {"development", "staging", "production"}
+	//     whenever APP_ENV is explicitly set to ANY value, including an
+	//     explicit empty string (`APP_ENV=`) - only a variable that is
+	//     genuinely absent from the environment (os.LookupEnv's `ok ==
+	//     false`) resolves to the "development" default; a present-but-
+	//     empty value is treated as an explicit, invalid setting and fails
+	//     Load() outright, the same as a typo or stray whitespace would.
+	//     This closes the one gap an earlier version of Layer 1 left open:
+	//     folding "APP_ENV unset" and "APP_ENV explicitly empty" into the
+	//     same default (as a naive getEnvDefault-style helper does) would
+	//     let a future orchestration tool that ever emits an empty string
+	//     for an unset variable (rather than omitting it) silently resolve
+	//     to "development" and pass Layer 1 undetected. Leaving APP_ENV
+	//     UNSET is unchanged and still defaults to "development" (existing,
+	//     tested local/CI convenience - many of this repo's own tests and
+	//     local dev flows rely on never having to set it) - but any REAL
+	//     deployment (staging or production) MUST set APP_ENV explicitly;
+	//     relying on the unset default in a real environment is an operator
+	//     error this field cannot detect by itself, precisely because
+	//     "unset" and "deliberately development" are indistinguishable once
+	//     resolved.
+	//   - Layer 2 (TestSupportEndpointsEnabled, below): a second,
+	//     independent, explicit opt-in that must ALSO be true before any
+	//     of the three flags actually register a route.
+	//     cmd/platform-api/main.go now computes each flag as
+	//     `cfg.Environment != "production" && cfg.TestSupportEndpointsEnabled`
+	//     - a wrong/typoed Environment value alone can no longer register
+	//     anything (Layer 1 already rejects it at startup), and a
+	//     deployment that simply forgets to set TestSupportEndpointsEnabled
+	//     gets it disabled by default, regardless of Environment.
+	//   - Contradictory configuration (Environment == "production" AND
+	//     TestSupportEndpointsEnabled explicitly true) is not silently
+	//     corrected - Load() FAILS STARTUP with a clear, named error. An
+	//     operator setting both is directly attempting something unsafe;
+	//     the correct response is a loud, hard failure, not a silent
+	//     override.
+	//
+	// See docs/runbooks/production-configuration-checklist.md's
+	// `Environment`/`APP_ENV` and `TestSupportEndpointsEnabled`/
+	// `TEST_SUPPORT_ENDPOINTS_ENABLED` rows for the operator-facing
+	// version of this.
 	Environment string
 
 	HTTPAddr string
@@ -190,6 +230,24 @@ type Config struct {
 	// so every route's real authorization decision is unchanged and still
 	// enforced server-side regardless of Origin.
 	CORSAllowedOrigins []string
+
+	// TestSupportEndpointsEnabled is Stage 9.4's Layer 2 gate (see
+	// Environment's own doc comment above for the full two-layer design).
+	// It must be explicitly set to "true" (TEST_SUPPORT_ENDPOINTS_ENABLED)
+	// for any of the three non-production simulation flags -
+	// CasinoPlaySimulationEnabled, PaymentsMockSettlementEnabled,
+	// AccountActivationTestSupportEnabled - to actually register their
+	// routes; cmd/platform-api/main.go requires this field AND
+	// `Environment != "production"` together. Defaults to false: an
+	// unconfigured deployment (including one that also gets Environment
+	// wrong) never exposes any test-support route. Only a genuine
+	// staging/test deployment that deliberately wants the mock-settlement/
+	// self-signed-play/account-activation seams should set this to true -
+	// see deploy/aws/environments/staging's Terraform, which sets it
+	// explicitly for exactly that reason. Load() FAILS startup if this is
+	// true at the same time Environment == "production" - see Environment's
+	// own doc comment.
+	TestSupportEndpointsEnabled bool
 }
 
 // Load reads configuration from the process environment. It returns an
@@ -197,7 +255,7 @@ type Config struct {
 // misconfigured environment explicitly.
 func Load() (Config, error) {
 	cfg := Config{
-		Environment:                   getEnvDefault("APP_ENV", "development"),
+		Environment:                   resolveAppEnv(),
 		HTTPAddr:                      getEnvDefault("HTTP_ADDR", ":8080"),
 		DatabaseURL:                   os.Getenv("DATABASE_URL"),
 		DatabaseMaxConns:              10,
@@ -220,6 +278,7 @@ func Load() (Config, error) {
 		BonusExpirySweepInterval:      time.Hour,
 		AuthRateLimitPerMinute:        0,
 		TrustedProxyCount:             0,
+		TestSupportEndpointsEnabled:   false,
 	}
 
 	if v := os.Getenv("DATABASE_MAX_CONNS"); v != "" {
@@ -335,6 +394,39 @@ func Load() (Config, error) {
 		}
 	}
 
+	if v := os.Getenv("TEST_SUPPORT_ENDPOINTS_ENABLED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("config: invalid TEST_SUPPORT_ENDPOINTS_ENABLED: %w", err)
+		}
+		cfg.TestSupportEndpointsEnabled = b
+	}
+
+	// Stage 9.4, Layer 1 (see Environment's own doc comment): validate
+	// against the exact closed set this codebase's own Terraform
+	// convention already uses (deploy/aws/modules/ecs/variables.tf's
+	// app_environment). Leaving APP_ENV genuinely unset (resolveAppEnv's
+	// os.LookupEnv sees it absent) resolves to the "development" default
+	// above and always passes this check - but APP_ENV explicitly set to
+	// ANY other value, including an explicit empty string, is rejected:
+	// an unrecognized value (wrong case, a known alias like "prod", stray
+	// whitespace) or an explicit empty string are all equally an operator
+	// error, not a silent "development".
+	switch cfg.Environment {
+	case "development", "staging", "production":
+	default:
+		return Config{}, fmt.Errorf("config: invalid APP_ENV %q: must be exactly one of \"development\", \"staging\", or \"production\" (case-sensitive, no surrounding whitespace, not empty); leave APP_ENV unset entirely to default to \"development\"", cfg.Environment)
+	}
+
+	// Stage 9.4, contradictory-configuration fail-closed case (see
+	// Environment's own doc comment): an operator explicitly requesting
+	// BOTH "this is production" AND "enable test-support endpoints" is
+	// directly attempting something unsafe. Fail loudly rather than
+	// silently ignoring TestSupportEndpointsEnabled in that case.
+	if cfg.Environment == "production" && cfg.TestSupportEndpointsEnabled {
+		return Config{}, fmt.Errorf("config: TEST_SUPPORT_ENDPOINTS_ENABLED must not be true when APP_ENV=production - test-support endpoints (mock casino play/payment settlement/account-activation) are never permitted in production")
+	}
+
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("config: DATABASE_URL is required")
 	}
@@ -354,9 +446,40 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
+// TestSupportRoutesEnabled reports whether the three Stage 7/9.3
+// non-production simulation routes (CasinoPlaySimulationEnabled,
+// PaymentsMockSettlementEnabled, AccountActivationTestSupportEnabled in
+// internal/httpserver.Deps) should register - the single, shared
+// Stage 9.4 two-layer gate: never true in production (Load() has
+// already refused to start if TestSupportEndpointsEnabled were true
+// there), and never true unless TestSupportEndpointsEnabled was also
+// explicitly opted into. cmd/platform-api/main.go computes all three
+// flags from this one method rather than duplicating the composition
+// inline three times, so there is exactly one place this logic can be
+// gotten wrong.
+func (c Config) TestSupportRoutesEnabled() bool {
+	return c.Environment != "production" && c.TestSupportEndpointsEnabled
+}
+
 func getEnvDefault(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {
 		return v
 	}
 	return def
+}
+
+// resolveAppEnv reads APP_ENV directly via os.LookupEnv rather than
+// getEnvDefault, deliberately NOT treating a present-but-empty value the
+// same as an absent one. getEnvDefault's `ok && v != ""` folds both into
+// the same default, which is exactly right for every other setting here
+// (an empty override is never meaningfully different from "not set") but
+// wrong for APP_ENV specifically once Layer 1 validation (below, in
+// Load()) exists to catch operator mistakes: it must see the true raw
+// value, including an explicit empty string, in order to reject it - see
+// Environment's own doc comment for why this one gap mattered.
+func resolveAppEnv() string {
+	if v, ok := os.LookupEnv("APP_ENV"); ok {
+		return v
+	}
+	return "development"
 }

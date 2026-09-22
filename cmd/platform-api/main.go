@@ -211,20 +211,31 @@ func run() error {
 		// real hosted game client, never safe to expose once "production"
 		// means real money. Specialist review requirement (architect/
 		// security/ledger-finance, independently).
-		CasinoPlaySimulationEnabled: cfg.Environment != "production",
+		//
+		// Stage 9.4: two independent conditions are now both required -
+		// see internal/config.Config's Environment/TestSupportEndpointsEnabled
+		// doc comments, and Config.TestSupportRoutesEnabled's own doc
+		// comment, for the full two-layer, fail-closed design this
+		// replaced (a Stage 9.3 security-review finding: `cfg.Environment
+		// != "production"` alone fails OPEN on a typo or an unset APP_ENV).
+		// config.Load() itself already refuses to start if Environment is
+		// an unrecognized value, or if TestSupportEndpointsEnabled is true
+		// while Environment == "production" - so by the time this line
+		// runs, both operands are already known-good; TestSupportRoutesEnabled
+		// is the second, independent layer, not a redundant restatement of
+		// the first.
+		CasinoPlaySimulationEnabled: cfg.TestSupportRoutesEnabled(),
 		// Stage 9.3: the payments-domain twin of the above - see
 		// Deps.PaymentsMockSettlementEnabled's own doc comment
 		// (internal/httpserver/server.go) and payment_deposit_simulation_
 		// handlers.go's doc comment for the full rationale. Same gate,
-		// same "never in production" structural guarantee.
-		PaymentsMockSettlementEnabled: cfg.Environment != "production",
+		// same Stage 9.4 two-layer guarantee as above.
+		PaymentsMockSettlementEnabled: cfg.TestSupportRoutesEnabled(),
 		// Stage 9.3: closes the account-activation gap the two flags above
 		// don't - see Deps.AccountActivationTestSupportEnabled's own doc
-		// comment (internal/httpserver/server.go) and
-		// email_verification_dev_token_handlers.go's doc comment for the
-		// full rationale. Same gate, same "never in production" structural
-		// guarantee.
-		AccountActivationTestSupportEnabled: cfg.Environment != "production",
+		// comment (internal/httpserver/server.go) for the full rationale.
+		// Same gate, same Stage 9.4 two-layer guarantee as above.
+		AccountActivationTestSupportEnabled: cfg.TestSupportRoutesEnabled(),
 		SportsbookEnabled:                   true,
 		// Stage 4E: no real identity-resolution vendor is contracted yet
 		// (docs/decisions/0027 §3) - MockPersonResolver's honest default

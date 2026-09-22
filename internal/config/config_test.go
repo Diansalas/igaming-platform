@@ -2,12 +2,13 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
 func clearEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"APP_ENV", "HTTP_ADDR", "DATABASE_URL", "DATABASE_MAX_CONNS", "JWT_SIGNING_SECRET", "OTEL_SERVICE_NAME", "OTEL_EXPORTER", "CORS_ALLOWED_ORIGINS"} {
+	for _, k := range []string{"APP_ENV", "HTTP_ADDR", "DATABASE_URL", "DATABASE_MAX_CONNS", "JWT_SIGNING_SECRET", "OTEL_SERVICE_NAME", "OTEL_EXPORTER", "CORS_ALLOWED_ORIGINS", "TEST_SUPPORT_ENDPOINTS_ENABLED"} {
 		t.Setenv(k, "")
 		_ = os.Unsetenv(k)
 	}
@@ -226,5 +227,205 @@ func TestLoad_CORSAllowedOriginsWildcardRejected(t *testing.T) {
 	_, err := Load()
 	if err == nil {
 		t.Fatal("expected error for wildcard CORS_ALLOWED_ORIGINS, got nil")
+	}
+}
+
+// --- Stage 9.4: APP_ENV closed-set validation, TEST_SUPPORT_ENDPOINTS_ENABLED,
+// and the contradictory-configuration fail-closed case. ---
+
+// Unset APP_ENV must still default to "development" and Load() must
+// still succeed - the existing local/CI convenience this stage's
+// directive explicitly required not be broken. TestLoad_DefaultsAndOverrides
+// above already covers this for the base case; this test names the
+// property explicitly for this stage's own record.
+func TestLoad_UnsetAppEnvStillDefaultsToDevelopment(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error with APP_ENV unset: %v", err)
+	}
+	if cfg.Environment != "development" {
+		t.Errorf("expected default environment 'development', got %q", cfg.Environment)
+	}
+	if cfg.TestSupportEndpointsEnabled {
+		t.Error("expected TestSupportEndpointsEnabled to default to false")
+	}
+	if cfg.TestSupportRoutesEnabled() {
+		t.Error("expected TestSupportRoutesEnabled() to be false when TestSupportEndpointsEnabled was never set, even though Environment != production")
+	}
+}
+
+// A typo'd, wrongly-cased, or whitespace-padded APP_ENV value must FAIL
+// Load() outright - the exact vector two independent Stage 9.3 security
+// reviews flagged as failing OPEN (a mis-set value silently resolved to
+// "not production").
+func TestLoad_InvalidAppEnvRejected(t *testing.T) {
+	for _, bad := range []string{"Production", "PRODUCTION", "prod", "production ", " production", "Staging", "dev", "test"} {
+		t.Run(bad, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("DATABASE_URL", "postgres://localhost/test")
+			t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+			t.Setenv("APP_ENV", bad)
+
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("expected error for invalid APP_ENV %q, got nil", bad)
+			}
+		})
+	}
+}
+
+// APP_ENV explicitly set to an empty string is NOT the same as APP_ENV
+// being unset, and must be rejected exactly like any other invalid value -
+// the one gap both the Stage 9.4 security and architecture reviews
+// independently found: a naive getEnvDefault-style helper folds "unset"
+// and "present but empty" into the same default, which would let a future
+// deployment tool that emits `APP_ENV=` (rather than omitting the
+// variable) silently resolve to "development" and slip past Layer 1
+// undetected. resolveAppEnv() uses os.LookupEnv directly specifically to
+// keep this case distinguishable from a genuinely unset variable.
+func TestLoad_ExplicitEmptyAppEnvRejected(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+	t.Setenv("APP_ENV", "")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for explicit APP_ENV=\"\", got nil - an explicit empty value must not silently resolve to \"development\"")
+	}
+}
+
+// The three valid, exact values must all still succeed.
+func TestLoad_ValidAppEnvValuesAccepted(t *testing.T) {
+	for _, good := range []string{"development", "staging", "production"} {
+		t.Run(good, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("DATABASE_URL", "postgres://localhost/test")
+			t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+			t.Setenv("APP_ENV", good)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("unexpected error for valid APP_ENV %q: %v", good, err)
+			}
+			if cfg.Environment != good {
+				t.Errorf("expected Environment %q, got %q", good, cfg.Environment)
+			}
+		})
+	}
+}
+
+// TEST_SUPPORT_ENDPOINTS_ENABLED must default to false and be overridable
+// to true in a non-production environment.
+func TestLoad_TestSupportEndpointsEnabledOverride(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+	t.Setenv("APP_ENV", "staging")
+	t.Setenv("TEST_SUPPORT_ENDPOINTS_ENABLED", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.TestSupportEndpointsEnabled {
+		t.Error("expected TestSupportEndpointsEnabled true after override")
+	}
+	if !cfg.TestSupportRoutesEnabled() {
+		t.Error("expected TestSupportRoutesEnabled() true for staging + TestSupportEndpointsEnabled=true")
+	}
+}
+
+func TestLoad_InvalidTestSupportEndpointsEnabled(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+	t.Setenv("TEST_SUPPORT_ENDPOINTS_ENABLED", "not-a-bool")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for non-boolean TEST_SUPPORT_ENDPOINTS_ENABLED, got nil")
+	}
+}
+
+// The explicit, required contradictory-configuration case: APP_ENV=production
+// AND TEST_SUPPORT_ENDPOINTS_ENABLED=true together must FAIL Load() with a
+// clear, specific error - never silently ignored/corrected.
+func TestLoad_ProductionWithTestSupportEndpointsEnabledFailsClosed(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+	t.Setenv("APP_ENV", "production")
+	t.Setenv("TEST_SUPPORT_ENDPOINTS_ENABLED", "true")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for APP_ENV=production combined with TEST_SUPPORT_ENDPOINTS_ENABLED=true, got nil")
+	}
+	if got := err.Error(); !strings.Contains(got, "TEST_SUPPORT_ENDPOINTS_ENABLED") || !strings.Contains(got, "production") {
+		t.Errorf("expected a specific error naming both APP_ENV=production and TEST_SUPPORT_ENDPOINTS_ENABLED, got: %v", got)
+	}
+}
+
+// Production with the flag left at its default (false) must still start
+// cleanly - the contradiction check must not be a blanket rejection of
+// production, only of the unsafe combination.
+func TestLoad_ProductionWithTestSupportEndpointsDefaultSucceeds(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+	t.Setenv("APP_ENV", "production")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error for plain APP_ENV=production: %v", err)
+	}
+	if cfg.TestSupportRoutesEnabled() {
+		t.Error("expected TestSupportRoutesEnabled() to be false in production")
+	}
+}
+
+// Each of the two gates is independently insufficient: Environment !=
+// "production" alone (with TestSupportEndpointsEnabled left false) must
+// not enable the routes, and TestSupportEndpointsEnabled=true alone (with
+// Environment left at its "development" default) must ALSO not be
+// reachable in production - proven here by the fact that a "development"
+// environment with the flag off computes false, exercising both operands
+// of the AND independently.
+func TestLoad_TestSupportRoutesEnabled_BothConditionsIndependentlyRequired(t *testing.T) {
+	cases := []struct {
+		name              string
+		environment       string
+		testSupportEnvVal string // "" means unset
+		want              bool
+	}{
+		{"development_flag_unset", "development", "", false},
+		{"development_flag_false", "development", "false", false},
+		{"development_flag_true", "development", "true", true},
+		{"staging_flag_true", "staging", "true", true},
+		{"staging_flag_unset", "staging", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("DATABASE_URL", "postgres://localhost/test")
+			t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+			t.Setenv("APP_ENV", tc.environment)
+			if tc.testSupportEnvVal != "" {
+				t.Setenv("TEST_SUPPORT_ENDPOINTS_ENABLED", tc.testSupportEnvVal)
+			}
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := cfg.TestSupportRoutesEnabled(); got != tc.want {
+				t.Errorf("TestSupportRoutesEnabled() = %v, want %v (environment=%q test_support_env=%q)", got, tc.want, tc.environment, tc.testSupportEnvVal)
+			}
+		})
 	}
 }

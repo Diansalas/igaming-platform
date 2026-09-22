@@ -18,14 +18,23 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/payments"
 )
 
-// --- Stage 9.3 account-activation dev-token test fixtures ---
+// --- Stage 9.4 account-activation test-support tests ---
+//
+// Stage 9.3 shipped a separate GET /v1/me/email-verification/dev-token
+// route backed by an in-memory, per-process store. A Stage 9.3 security
+// review diagnosed that store as not safe under a multi-replica
+// deployment: a token recorded in one replica's memory is invisible to a
+// request that lands on a different replica. Stage 9.4 replaces that
+// design entirely - see newRequestEmailVerificationHandler's own doc
+// comment (credential_handlers.go) and Deps.AccountActivationTestSupportEnabled's
+// own doc comment (server.go). These tests replace the old dev-token
+// route tests; the file keeps its original name for history/diff
+// locality, but every test body below exercises the new, stateless shape.
 //
 // Sibling to payment_deposit_simulation_test.go's own fixtures - reuses
 // mustCreateTenant/mustCreateBrand/mustRegisterPlayer/mustRegisterCapability/
 // postJSON/getJSON/decodeBody/decodeAPIError from the existing test files in
-// this package, and follows the same adversarial-suite shape: happy path,
-// wrong-caller denial, disabled-outside-non-production, staff-token denial,
-// and an already-confirmed/stale-token case.
+// this package.
 
 // newAccountActivationTestServer wires every Deps field
 // TestAccountActivationDevToken_* needs: an EmailProvider (so
@@ -53,29 +62,35 @@ func newAccountActivationTestServer(t *testing.T, pool *db.Pool, issuer *auth.Is
 	return srv
 }
 
-// requestEmailVerification calls the existing, unmodified
-// POST /v1/me/email-verification/request endpoint for player - the real
-// entry point that mints a token today; nothing in this file touches it.
-func requestEmailVerification(t *testing.T, srv *httptest.Server, accessToken string) {
-	t.Helper()
-	resp := postJSON(t, srv, "/v1/me/email-verification/request", accessToken, map[string]any{})
-	if resp.StatusCode != 204 {
-		body := decodeAPIError(t, resp)
-		t.Fatalf("expected 204 requesting email verification, got %d (%s)", resp.StatusCode, body.Message)
-	}
-	resp.Body.Close()
-}
-
 type devTokenResponse struct {
 	Token string `json:"token"`
 }
 
-// --- 1. Full happy path: register -> fetch dev token -> confirm (the
-// REAL, unmodified confirm endpoint) -> status becomes active -> a
-// previously RG-blocked financial action (deposit initiation) now
-// succeeds end to end (bonus assertion). ---
+// requestEmailVerificationAndCaptureToken calls the existing, unmodified
+// POST /v1/me/email-verification/request endpoint but
+// asserts the AccountActivationTestSupportEnabled=true shape: 200 with a
+// non-empty token in the body.
+func requestEmailVerificationAndCaptureToken(t *testing.T, srv *httptest.Server, accessToken string) string {
+	t.Helper()
+	resp := postJSON(t, srv, "/v1/me/email-verification/request", accessToken, map[string]any{})
+	if resp.StatusCode != 200 {
+		body := decodeAPIError(t, resp)
+		t.Fatalf("expected 200 requesting email verification with test support enabled, got %d (%s)", resp.StatusCode, body.Message)
+	}
+	var tok devTokenResponse
+	decodeBody(t, resp, &tok)
+	if tok.Token == "" {
+		t.Fatal("expected a non-empty raw token in the response body")
+	}
+	return tok.Token
+}
 
-func TestAccountActivationDevToken_HappyPath_RegisterFetchConfirmActivatesAndUnblocksDeposit(t *testing.T) {
+// --- 1. Full happy path: register -> request (token in the SAME response)
+// -> confirm (the REAL, unmodified confirm endpoint) -> status becomes
+// active -> a previously RG-blocked financial action (deposit initiation)
+// now succeeds end to end (bonus assertion). ---
+
+func TestAccountActivationDevToken_HappyPath_RegisterRequestConfirmActivatesAndUnblocksDeposit(t *testing.T) {
 	pool, issuer := testEnv(t)
 	orchestrator, mockProvider := newMockOrchestrator()
 	srv := newAccountActivationTestServer(t, pool, issuer, orchestrator, true)
@@ -109,33 +124,18 @@ func TestAccountActivationDevToken_HappyPath_RegisterFetchConfirmActivatesAndUnb
 		t.Fatalf("expected the pre-activation deposit to be RG-declined, got status %q", preActivationIntent.Status)
 	}
 
-	// Before requesting a token at all, there is nothing to fetch.
-	resp = getJSON(t, srv, "/v1/me/email-verification/dev-token", player.Tokens.AccessToken)
-	if resp.StatusCode != 404 {
-		t.Fatalf("expected 404 fetching a dev-token before any was requested, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-
-	requestEmailVerification(t, srv, player.Tokens.AccessToken)
-
-	resp = getJSON(t, srv, "/v1/me/email-verification/dev-token", player.Tokens.AccessToken)
-	if resp.StatusCode != 200 {
-		body := decodeAPIError(t, resp)
-		t.Fatalf("expected 200 fetching the dev-token, got %d (%s)", resp.StatusCode, body.Message)
-	}
-	var tok devTokenResponse
-	decodeBody(t, resp, &tok)
-	if tok.Token == "" {
-		t.Fatal("expected a non-empty raw token")
-	}
+	// Request email verification: with test support enabled, the raw
+	// token comes back in THIS SAME response - no separate fetch route
+	// exists anymore.
+	token := requestEmailVerificationAndCaptureToken(t, srv, player.Tokens.AccessToken)
 
 	// Feed it into the REAL, UNMODIFIED confirm endpoint - this proves the
-	// dev-token route produces a token the genuine flow actually accepts,
+	// request endpoint's token response is accepted by the genuine flow,
 	// not a parallel/competing mechanism.
-	resp = postJSON(t, srv, "/v1/auth/email-verification/confirm", "", map[string]any{"token": tok.Token})
+	resp = postJSON(t, srv, "/v1/auth/email-verification/confirm", "", map[string]any{"token": token})
 	if resp.StatusCode != 204 {
 		body := decodeAPIError(t, resp)
-		t.Fatalf("expected 204 confirming with the fetched dev-token, got %d (%s)", resp.StatusCode, body.Message)
+		t.Fatalf("expected 204 confirming with the returned token, got %d (%s)", resp.StatusCode, body.Message)
 	}
 	resp.Body.Close()
 
@@ -177,11 +177,14 @@ func TestAccountActivationDevToken_HappyPath_RegisterFetchConfirmActivatesAndUnb
 	}
 }
 
-// --- 2. A different player cannot fetch someone else's token - there is
-// no id parameter to name another player's resource with at all, so this
-// asserts the caller only ever sees THEIR OWN (empty) result. ---
+// --- 2. The response body only ever reflects the CALLER's own
+// newly-created token - never another player's. There is no longer a
+// shared store to query cross-player at all (trivially true by
+// construction), but this proves it end to end: two different players'
+// own request calls return two different tokens, and each only ever
+// activates its own account. ---
 
-func TestAccountActivationDevToken_WrongPlayerNeverSeesAnothersToken(t *testing.T) {
+func TestAccountActivationDevToken_ResponseOnlyEverReflectsCallersOwnToken(t *testing.T) {
 	pool, issuer := testEnv(t)
 	orchestrator, _ := newMockOrchestrator()
 	srv := newAccountActivationTestServer(t, pool, issuer, orchestrator, true)
@@ -191,38 +194,16 @@ func TestAccountActivationDevToken_WrongPlayerNeverSeesAnothersToken(t *testing.
 	victim := mustRegisterPlayer(t, srv, brand.Slug)
 	attacker := mustRegisterPlayer(t, srv, brand.Slug)
 
-	requestEmailVerification(t, srv, victim.Tokens.AccessToken)
+	victimToken := requestEmailVerificationAndCaptureToken(t, srv, victim.Tokens.AccessToken)
+	attackerToken := requestEmailVerificationAndCaptureToken(t, srv, attacker.Tokens.AccessToken)
 
-	// The victim's own token is genuinely available to the victim.
-	resp := getJSON(t, srv, "/v1/me/email-verification/dev-token", victim.Tokens.AccessToken)
-	if resp.StatusCode != 200 {
-		t.Fatalf("expected 200 for the victim fetching their own dev-token, got %d", resp.StatusCode)
-	}
-	var victimTok devTokenResponse
-	decodeBody(t, resp, &victimTok)
-
-	// The attacker, authenticated as themselves (there is no id parameter
-	// to substitute the victim's identity into), never requested a token
-	// of their own, so they see a clean 404 - never the victim's value.
-	resp = getJSON(t, srv, "/v1/me/email-verification/dev-token", attacker.Tokens.AccessToken)
-	if resp.StatusCode != 404 {
-		t.Fatalf("expected 404 for the attacker (no token of their own requested), got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-
-	// Even once the attacker requests their OWN token, it is a DIFFERENT
-	// value from the victim's.
-	requestEmailVerification(t, srv, attacker.Tokens.AccessToken)
-	resp = getJSON(t, srv, "/v1/me/email-verification/dev-token", attacker.Tokens.AccessToken)
-	var attackerTok devTokenResponse
-	decodeBody(t, resp, &attackerTok)
-	if attackerTok.Token == victimTok.Token {
-		t.Fatal("the attacker's own dev-token must never equal the victim's")
+	if attackerToken == victimToken {
+		t.Fatal("the attacker's own token response must never equal the victim's")
 	}
 
 	// The victim's own token, fed into the real confirm endpoint, still
 	// only ever activates the VICTIM's account.
-	resp = postJSON(t, srv, "/v1/auth/email-verification/confirm", "", map[string]any{"token": victimTok.Token})
+	resp := postJSON(t, srv, "/v1/auth/email-verification/confirm", "", map[string]any{"token": victimToken})
 	if resp.StatusCode != 204 {
 		t.Fatalf("expected 204 confirming the victim's own token, got %d", resp.StatusCode)
 	}
@@ -234,12 +215,20 @@ func TestAccountActivationDevToken_WrongPlayerNeverSeesAnothersToken(t *testing.
 	if me.Status == "active" {
 		t.Fatal("the victim's confirmed token must not have activated the attacker's account")
 	}
+
+	resp = getJSON(t, srv, "/v1/me", victim.Tokens.AccessToken)
+	decodeBody(t, resp, &me)
+	if me.Status != "active" {
+		t.Fatal("the victim's own confirm must have activated the victim's own account")
+	}
 }
 
-// --- 3. Disabled outside non-production: the route does not exist at all
-// when AccountActivationTestSupportEnabled is false. ---
+// --- 3. Flag-off behavior is byte-for-byte unchanged: 204, no body. This
+// diffs the response shape explicitly rather than merely checking the
+// status code, closing the directive's "verify this with a test that
+// diffs the response shape" requirement. ---
 
-func TestAccountActivationDevToken_DisabledWhenFlagOff(t *testing.T) {
+func TestAccountActivationDevToken_FlagOffResponseUnchanged(t *testing.T) {
 	pool, issuer := testEnv(t)
 	orchestrator, _ := newMockOrchestrator()
 	srv := newAccountActivationTestServer(t, pool, issuer, orchestrator, false)
@@ -247,88 +236,26 @@ func TestAccountActivationDevToken_DisabledWhenFlagOff(t *testing.T) {
 	brand := mustCreateBrand(t, pool, tenant)
 
 	player := mustRegisterPlayer(t, srv, brand.Slug)
-	requestEmailVerification(t, srv, player.Tokens.AccessToken)
 
-	resp := getJSON(t, srv, "/v1/me/email-verification/dev-token", player.Tokens.AccessToken)
-	if resp.StatusCode != 404 {
-		t.Fatalf("expected 404 (route not registered) when AccountActivationTestSupportEnabled is false, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-}
-
-// --- 4. A STAFF bearer token must not reach this player-self-service
-// route. ---
-
-func TestAccountActivationDevToken_StaffTokenDenied(t *testing.T) {
-	pool, issuer := testEnv(t)
-	orchestrator, _ := newMockOrchestrator()
-	srv := newAccountActivationTestServer(t, pool, issuer, orchestrator, true)
-	tenant := mustCreateTenant(t, pool)
-	brand := mustCreateBrand(t, pool, tenant)
-
-	player := mustRegisterPlayer(t, srv, brand.Slug)
-	requestEmailVerification(t, srv, player.Tokens.AccessToken)
-
-	staffToken, err := issuer.Issue(uuid.NewString(), tenant.ID, auth.RoleTenantAdmin, auth.PrincipalStaff, time.Hour)
-	if err != nil {
-		t.Fatalf("issue staff token: %v", err)
-	}
-	resp := getJSON(t, srv, "/v1/me/email-verification/dev-token", staffToken)
-	if resp.StatusCode != 403 {
-		t.Fatalf("expected 403 for a staff bearer token, got %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-}
-
-// --- 5. Already-confirmed account: no stale/replayed-token issue. Once
-// the real confirm endpoint has consumed the token, the dev-token route
-// must not keep handing back a value that would only fail later - it
-// re-verifies liveness against the database rather than trusting its own
-// in-memory copy. ---
-
-func TestAccountActivationDevToken_AlreadyConfirmedReturnsCleanNotFound(t *testing.T) {
-	pool, issuer := testEnv(t)
-	orchestrator, _ := newMockOrchestrator()
-	srv := newAccountActivationTestServer(t, pool, issuer, orchestrator, true)
-	tenant := mustCreateTenant(t, pool)
-	brand := mustCreateBrand(t, pool, tenant)
-
-	player := mustRegisterPlayer(t, srv, brand.Slug)
-	requestEmailVerification(t, srv, player.Tokens.AccessToken)
-
-	resp := getJSON(t, srv, "/v1/me/email-verification/dev-token", player.Tokens.AccessToken)
-	var tok devTokenResponse
-	decodeBody(t, resp, &tok)
-
-	resp = postJSON(t, srv, "/v1/auth/email-verification/confirm", "", map[string]any{"token": tok.Token})
+	resp := postJSON(t, srv, "/v1/me/email-verification/request", player.Tokens.AccessToken, map[string]any{})
+	defer resp.Body.Close()
 	if resp.StatusCode != 204 {
-		t.Fatalf("expected 204 confirming, got %d", resp.StatusCode)
+		t.Fatalf("expected 204 with test support disabled, got %d", resp.StatusCode)
 	}
-	resp.Body.Close()
-
-	// The dev-token route must now report cleanly that nothing is
-	// pending, rather than serving the stale (already-consumed) raw value.
-	resp = getJSON(t, srv, "/v1/me/email-verification/dev-token", player.Tokens.AccessToken)
-	if resp.StatusCode != 404 {
-		t.Fatalf("expected 404 for an already-confirmed account, got %d", resp.StatusCode)
+	if cl := resp.ContentLength; cl > 0 {
+		t.Fatalf("expected no body with test support disabled, got Content-Length %d", cl)
 	}
-	resp.Body.Close()
-
-	// The already-consumed token must also not work a second time against
-	// the real confirm endpoint (single-use, unweakened by any of this).
-	resp = postJSON(t, srv, "/v1/auth/email-verification/confirm", "", map[string]any{"token": tok.Token})
-	if resp.StatusCode != 400 {
-		t.Fatalf("expected 400 replaying an already-consumed token, got %d", resp.StatusCode)
+	buf := make([]byte, 1)
+	n, _ := resp.Body.Read(buf)
+	if n != 0 {
+		t.Fatalf("expected zero bytes of body with test support disabled, read %d", n)
 	}
-	resp.Body.Close()
 }
 
-// --- 6. A player who requests a SECOND verification token must only ever
-// be able to fetch the newest one - the superseded first token must not
-// remain fetchable or usable, mirroring IssueCredentialToken's own
-// "at most one live token per purpose" invariant. ---
+// --- 4. The old GET /v1/me/email-verification/dev-token route is gone
+// entirely - never routed, regardless of the flag. ---
 
-func TestAccountActivationDevToken_OnlyNewestTokenIsFetchableAfterResend(t *testing.T) {
+func TestAccountActivationDevToken_OldRouteNoLongerExists(t *testing.T) {
 	pool, issuer := testEnv(t)
 	orchestrator, _ := newMockOrchestrator()
 	srv := newAccountActivationTestServer(t, pool, issuer, orchestrator, true)
@@ -336,33 +263,142 @@ func TestAccountActivationDevToken_OnlyNewestTokenIsFetchableAfterResend(t *test
 	brand := mustCreateBrand(t, pool, tenant)
 
 	player := mustRegisterPlayer(t, srv, brand.Slug)
-	requestEmailVerification(t, srv, player.Tokens.AccessToken)
+	requestEmailVerificationAndCaptureToken(t, srv, player.Tokens.AccessToken)
 
 	resp := getJSON(t, srv, "/v1/me/email-verification/dev-token", player.Tokens.AccessToken)
-	var first devTokenResponse
-	decodeBody(t, resp, &first)
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("expected 404 - the old dev-token route must no longer be routed at all, got %d", resp.StatusCode)
+	}
+}
 
-	requestEmailVerification(t, srv, player.Tokens.AccessToken)
+// --- 5. A resend (second request call) returns the NEW token, and only
+// the new one still confirms - exercises the exact "only newest token
+// works" property IssueCredentialToken's supersession invariant
+// guarantees, now observed via the response body instead of a separate
+// fetch route. ---
 
-	resp = getJSON(t, srv, "/v1/me/email-verification/dev-token", player.Tokens.AccessToken)
-	var second devTokenResponse
-	decodeBody(t, resp, &second)
-	if second.Token == first.Token {
+func TestAccountActivationDevToken_ResendReturnsNewTokenOnlyNewOneConfirms(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, _ := newMockOrchestrator()
+	srv := newAccountActivationTestServer(t, pool, issuer, orchestrator, true)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	first := requestEmailVerificationAndCaptureToken(t, srv, player.Tokens.AccessToken)
+	second := requestEmailVerificationAndCaptureToken(t, srv, player.Tokens.AccessToken)
+
+	if second == first {
 		t.Fatal("expected a resend to supersede the first token with a distinct value")
 	}
 
 	// The first (superseded) token must no longer be accepted by the real
 	// confirm endpoint.
-	resp = postJSON(t, srv, "/v1/auth/email-verification/confirm", "", map[string]any{"token": first.Token})
+	resp := postJSON(t, srv, "/v1/auth/email-verification/confirm", "", map[string]any{"token": first})
 	if resp.StatusCode != 400 {
 		t.Fatalf("expected 400 confirming with the superseded first token, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 
 	// The current (second) token still works.
-	resp = postJSON(t, srv, "/v1/auth/email-verification/confirm", "", map[string]any{"token": second.Token})
+	resp = postJSON(t, srv, "/v1/auth/email-verification/confirm", "", map[string]any{"token": second})
 	if resp.StatusCode != 204 {
 		t.Fatalf("expected 204 confirming with the current second token, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+// --- 6. THE multi-replica test. Proves what the stateless redesign
+// claims: two SEPARATE httpserver.New(...) instances (each its own fresh
+// Deps, no shared in-process state whatsoever - the literal shape of two
+// independent replica processes, sharing only the same Postgres) can
+// split the request/confirm flow across them and it still works, because
+// there is no longer a second request in the flow that could ever land on
+// "the other" replica - the token travels in the SAME response as the
+// request that minted it, and the confirm step's own correctness is
+// already backed by the shared, replica-safe player_credential_tokens
+// table.
+//
+// This is the literal "request 1 reaches replica A, request 2 reaches
+// replica B" scenario the old in-memory devVerificationTokenStore could
+// fail under (a token recorded in replica A's memory would 404 if the
+// follow-up GET landed on replica B) - and it is now structurally
+// impossible to reproduce that failure, because there is no follow-up GET
+// at all. ---
+
+func TestAccountActivationDevToken_MultiReplica_RequestOnReplicaA_ConfirmOnReplicaB(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, _ := newMockOrchestrator()
+
+	// Two INDEPENDENT httpserver.New(...) calls, each with its OWN zero
+	// value / freshly-constructed Deps - simulating two separate replica
+	// processes. Neither is built from the other, and neither shares any
+	// Go-level state with the other; the only thing they have in common
+	// is the same *db.Pool (the same Postgres, exactly as two real
+	// replica processes would share the same database and nothing else).
+	replicaA := httptest.NewServer(New(Deps{
+		Logger:                              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:                                  pool,
+		AuthIssuer:                          issuer,
+		ServiceName:                         "platform-api-test-replica-a",
+		AccessTokenTTL:                      5 * time.Minute,
+		RefreshTokenTTL:                     time.Hour,
+		PersonResolver:                      identityresolution.NewMockPersonResolver(),
+		EmailProvider:                       email.NewMockProvider(),
+		AccountActivationTestSupportEnabled: true,
+		PaymentOrchestrator:                 orchestrator,
+	}))
+	t.Cleanup(replicaA.Close)
+
+	replicaB := httptest.NewServer(New(Deps{
+		Logger:                              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:                                  pool,
+		AuthIssuer:                          issuer,
+		ServiceName:                         "platform-api-test-replica-b",
+		AccessTokenTTL:                      5 * time.Minute,
+		RefreshTokenTTL:                     time.Hour,
+		PersonResolver:                      identityresolution.NewMockPersonResolver(),
+		EmailProvider:                       email.NewMockProvider(),
+		AccountActivationTestSupportEnabled: true,
+		PaymentOrchestrator:                 orchestrator,
+	}))
+	t.Cleanup(replicaB.Close)
+
+	// Registration itself can happen on either replica - use replicaA for
+	// everything up to and including the request call.
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, replicaA, brand.Slug)
+
+	// Request 1 (the ONLY request that ever mints/exposes the token) is
+	// handled by replica A.
+	token := requestEmailVerificationAndCaptureToken(t, replicaA, player.Tokens.AccessToken)
+
+	// Confirm is handled by replica B - a SEPARATE httpserver.New call,
+	// proving no in-process state is shared. If any replica-local state
+	// were involved in this flow, this call would have no way to succeed
+	// (replica B never ran the request handler that minted this token).
+	resp := postJSON(t, replicaB, "/v1/auth/email-verification/confirm", "", map[string]any{"token": token})
+	if resp.StatusCode != 204 {
+		body := decodeAPIError(t, resp)
+		t.Fatalf("expected 204 confirming on a DIFFERENT replica than the one that issued the request, got %d (%s)", resp.StatusCode, body.Message)
+	}
+	resp.Body.Close()
+
+	// The account is active - readable from EITHER replica, since both
+	// only ever read the shared, authoritative Postgres state.
+	var me meResponse
+	resp = getJSON(t, replicaA, "/v1/me", player.Tokens.AccessToken)
+	decodeBody(t, resp, &me)
+	if me.Status != "active" {
+		t.Fatalf("expected status 'active' reading from replica A after confirming on replica B, got %q", me.Status)
+	}
+
+	resp = getJSON(t, replicaB, "/v1/me", player.Tokens.AccessToken)
+	decodeBody(t, resp, &me)
+	if me.Status != "active" {
+		t.Fatalf("expected status 'active' reading from replica B, got %q", me.Status)
+	}
 }

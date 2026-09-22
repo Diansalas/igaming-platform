@@ -1480,7 +1480,117 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 9.3 — Staging Deployment + Real End-to-End Acceptance — COMPLETE, awaiting human review
+## Current stage: Stage 9.4 Part 1 — APP_ENV Fail-Closed Validation + Stateless Activation Seam — COMPLETE, awaiting human review
+
+**Purpose.** Authorized by the human as "STAGE 9.4 — STAGING DEPLOYMENT
+READINESS + AWS STAGING DEPLOYMENT," opening with "Stage 9.3 is
+approved." Part 1 closes the two issues Stage 9.3 deferred as needing a
+dedicated config/architecture decision rather than a unilateral fix (see
+"Remaining production blockers" in the Stage 9.3 section below). Part 2
+(AWS account safety verification) and Parts 3-11 (actual AWS
+provisioning) required authorized AWS credentials; the human explicitly
+declined to supply or authorize any (same "produce operator instructions
+only" answer as Stage 9.3's equivalent gate) — see
+`docs/runbooks/stage-9-4-aws-account-verification.md` for the operator
+verification runbook this stage produced in place of a real deployment.
+**No AWS provisioning was attempted or performed this stage.** Full design
+and rationale for both Part 1 fixes: ADR 0085.
+
+**Fix 1 — APP_ENV two-layer fail-closed gate: IMPLEMENTED.**
+`internal/config.Load()` now validates `Environment` against the closed
+set `{"development", "staging", "production"}` whenever `APP_ENV` is
+explicitly set to any value — including an explicit empty string, a gap
+found independently by both the security and architecture reviews of this
+exact change after the initial implementation, and closed via
+`resolveAppEnv()` reading `os.LookupEnv` directly rather than folding
+"unset" and "present-but-empty" into the same default. A second,
+independent opt-in (`TestSupportEndpointsEnabled`/
+`TEST_SUPPORT_ENDPOINTS_ENABLED`, default `false`) must ALSO be true
+before any of the three non-production simulation flags
+(`CasinoPlaySimulationEnabled`, `PaymentsMockSettlementEnabled`,
+`AccountActivationTestSupportEnabled`) register, computed in one place
+(`Config.TestSupportRoutesEnabled()`) — confirmed by grep, during
+security review, to be the only call site. `Environment == "production"
+&& TestSupportEndpointsEnabled == true` is a hard `Load()` startup
+failure, not a silent correction.
+
+**Fix 2 — stateless, multi-replica-safe activation seam: IMPLEMENTED.**
+`GET /v1/me/email-verification/dev-token` (Stage 9.3's per-process,
+in-memory token store) is removed entirely.
+`POST /v1/me/email-verification/request`/`/resend` now, when
+`AccountActivationTestSupportEnabled` is true, return the raw token
+directly in that same request's `200` response body, at the exact point
+the handler already holds it in memory — no new shared infrastructure
+(no Redis, no new table) was introduced, per the directive's own
+instruction to prefer the smallest correct fix. Flag-off/production
+response shape is byte-for-byte unchanged (`204`, no body). Multi-replica
+correctness is proven directly by
+`TestAccountActivationDevToken_MultiReplica_RequestOnReplicaA_ConfirmOnReplicaB`,
+which constructs two genuinely independent `httptest.NewServer` instances
+sharing only the same `*db.Pool`, issues the request on one and confirms
+on the other, and asserts both independently observe the account reach
+`active`.
+
+**A related, genuine multi-replica financial-correctness bug was found
+and fixed in the same pass.** While reviewing Fix 2, the `architect`
+review independently found the same bug *shape* on the actual financial
+simulation path: `internal/payments.MockProvider.nextReference()` and
+`internal/casino.MockCasinoProvider.nextReference()` each minted
+references from a bare per-process `seq int` counter, so two replicas
+could mint the same `provider_reference`/`provider_tx_id` for their own
+first transaction, colliding on `deposit_intents`' uniqueness constraint
+and aliasing the ledger idempotency key. Both now append a
+`uuid.NewString()` suffix (no new dependency — already used elsewhere in
+both packages); the sequence number remains as a log-readability hint
+only. No test hardcoded the old exact reference format (confirmed by
+grep before changing it). See ADR 0085's "Related fix" section.
+
+**Reviews.** `security` and `architect` both independently reviewed the
+diff: **APPROVED WITH MINOR NOTES** from both. Security found and itself
+fixed one doc-only inaccuracy (a rate-limited-vs-success response
+distinguishability claim, now corrected in the OpenAPI spec) and reconfirmed
+`internal/auth/credential_token.go` genuinely untouched. Both
+independently flagged the same residual gap (`APP_ENV=""` slipping past
+the first implementation's validation) — closed directly, with a new
+regression test (`TestLoad_ExplicitEmptyAppEnvRejected`), rather than
+left as a further deferred item. Architect additionally flagged: this
+change needed a new ADR (now ADR 0085, written this stage);
+`docs/decisions/0048-casino-play-simulation-trust-boundary.md`'s mitigation
+list still described the superseded single-condition gate (amended in
+place, with an inline "Update (Stage 9.4)" note, same pattern that
+document already used for its own Stage 8 update); and
+`deploy/aws/modules/ecs/variables.tf`'s new variable's doc comment
+described a scenario (a future production invocation of *this* module
+setting both flags) that this module's own existing `app_environment`
+validation block already structurally prevents — trimmed to describe the
+actual defense-in-depth reasoning instead.
+
+**Validation.** `go build ./...`, `go vet`, `gofmt -l` clean on every
+changed file. Focused suites re-run against real Postgres after each
+fix and again after the mock-provider fix:
+`internal/config/...`, `internal/payments/...`, `internal/casino/...`,
+`internal/httpserver/...` — all pass, including the new/rewritten
+`internal/config/config_test.go` cases (`TestLoad_UnsetAppEnvStillDefaultsToDevelopment`,
+`TestLoad_InvalidAppEnvRejected` (8 subtests), `TestLoad_ExplicitEmptyAppEnvRejected`,
+`TestLoad_ValidAppEnvValuesAccepted`, `TestLoad_TestSupportEndpointsEnabledOverride`,
+`TestLoad_InvalidTestSupportEndpointsEnabled`,
+`TestLoad_ProductionWithTestSupportEndpointsEnabledFailsClosed`,
+`TestLoad_ProductionWithTestSupportEndpointsDefaultSucceeds`,
+`TestLoad_TestSupportRoutesEnabled_BothConditionsIndependentlyRequired`)
+and `internal/httpserver/email_verification_dev_token_test.go`'s full
+6-test rewrite (including the multi-replica test above).
+
+**What this stage does not do.** No AWS resources were created, no
+`terraform plan`/`apply` was run, no credential of any kind (ambient or
+supplied) was used against a real cloud account. No B2B/Partner/Retail/
+Stage 10 work. No HDR-SB-1/HDR-J-7 decision made or worked around. ADR
+0009's open AUP/legal confirmation is untouched and still blocks any real
+production deployment. The pre-existing, non-9.4-caused
+`IssueCredentialToken` concurrent-request race (documented in ADR 0085's
+"What this decision does not do") remains open, recorded as a separate,
+narrower deferred item, not folded into this fix.
+
+## Stage 9.3 — Staging Deployment + Real End-to-End Acceptance — COMPLETE (superseded by Stage 9.4 above)
 
 **Purpose.** Authorized by the human as "STAGE 9.3 — STAGING DEPLOYMENT +
 REAL END-TO-END ACCEPTANCE," opening with "Stage 9.2 is approved." Not a
@@ -1647,6 +1757,19 @@ hyperscale-cloud gambling-AUP confirmation remains open — unaffected by
 this stage, still blocks any real production deployment regardless of
 provider. (4) HDR-SB-1 and HDR-J-7 remain unresolved by design — this
 stage neither decided nor worked around either.
+
+**Update (Stage 9.4, see the "Current stage" section above and ADR
+0085):** blockers (1) and (2) above are now CLOSED. (1) `Load()` now
+validates `APP_ENV` against a closed set at startup and requires a second,
+independent, explicit opt-in before any simulation flag registers — a
+mis-set or unset `APP_ENV` can no longer silently enable anything. (2)
+`GET /v1/me/email-verification/dev-token` (the per-process store this
+item describes) has been removed; the token is now returned directly in
+the same request that creates it, and multi-replica correctness (the
+staging Terraform's default `desired_count=2`, no longer requiring the
+`desired_count=1` interim mitigation described above) is proven by a
+dedicated test. Blockers (3) and (4) remain open, unaffected by Stage 9.4,
+exactly as this section originally described.
 
 **No B2B/Partner/Retail/Stage 10 work was performed. No undocumented
 external provider API was integrated or invented. No production

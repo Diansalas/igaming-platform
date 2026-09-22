@@ -147,40 +147,48 @@ type Deps struct {
 	// "temporarily unavailable".
 	EmailProvider email.Provider
 
-	// AccountActivationTestSupportEnabled gates the Stage 9.3
-	// GET /v1/me/email-verification/dev-token route
-	// (email_verification_dev_token_handlers.go) - the account-activation
-	// twin of CasinoPlaySimulationEnabled/PaymentsMockSettlementEnabled
-	// above, closing the identical shape of gap for identity instead of
+	// AccountActivationTestSupportEnabled gates Stage 9.3/9.4's
+	// account-activation test-support seam - the identity twin of
+	// CasinoPlaySimulationEnabled/PaymentsMockSettlementEnabled above,
+	// closing the identical shape of gap for identity instead of
 	// casino/payments: email.MockProvider deliberately never exposes a
 	// sent message's raw token via any API (its own doc comment - there is
 	// no real inbox to deliver a mock email to), so a player registered
 	// through the real HTTP API alone can never learn their own
 	// email-verification token and can therefore never reach 'active'
 	// status, which every financial/gambling gate
-	// (internal/rg.EvaluateEligibility) requires. This route lets an
-	// authenticated player retrieve THEIR OWN currently-pending
-	// email-verification raw token, to be fed into the ALREADY-EXISTING,
-	// UNMODIFIED POST /v1/auth/email-verification/confirm endpoint - it
-	// changes nothing about the real confirm path (token hashing,
-	// expiry, single-use are all untouched) and deliberately does not add
-	// a second, competing "force-activate" mechanism. Defaults to the
-	// zero value (false, disabled) exactly like the two precedents above;
-	// cmd/platform-api/main.go sets it only outside production.
+	// (internal/rg.EvaluateEligibility) requires.
 	//
-	// SECURITY-SENSITIVE: this is a new mechanism for retrieving an
-	// auth-adjacent credential/token. Per CLAUDE.md, it requires explicit
-	// `security` specialist review before being marked complete.
+	// Stage 9.4 (replacing Stage 9.3's separate GET /v1/me/
+	// email-verification/dev-token route and its in-memory,
+	// per-process devVerificationTokenStore, which a Stage 9.3 security
+	// review diagnosed as not safe under a multi-replica deployment - a
+	// token recorded in one replica's memory is invisible to a request
+	// that lands on a different replica): when this flag is true, the
+	// EXISTING POST /v1/me/email-verification/request endpoint
+	// (newRequestEmailVerificationHandler, credential_handlers.go) itself
+	// returns the raw token in its own response body
+	// (200 {"token": "..."} instead of 204) at the exact moment it
+	// already holds the raw value in memory, immediately before handing
+	// it to EmailProvider.Send. This is stateless and trivially
+	// replica-safe: the client receives the token in the SAME HTTP
+	// response that requested it, from whichever replica handled that
+	// one request - there is no second, follow-up request to a
+	// potentially different replica at all. The token is then fed into
+	// the completely UNMODIFIED POST /v1/auth/email-verification/confirm
+	// endpoint exactly as before (token hashing, expiry, and single-use
+	// consumption are all untouched, and already correctly replica-safe
+	// via the shared Postgres player_credential_tokens table). Defaults
+	// to the zero value (false, disabled) exactly like the two
+	// precedents above; cmd/platform-api/main.go sets it only when BOTH
+	// `Environment != "production"` AND TestSupportEndpointsEnabled are
+	// true (internal/config.Config's own doc comments have the full
+	// two-layer rationale).
+	//
+	// SECURITY-SENSITIVE: this changes WHERE a credential-adjacent raw
+	// token is exposed. Per CLAUDE.md, it requires explicit `security`
+	// specialist review before being marked complete.
 	AccountActivationTestSupportEnabled bool
-
-	// accountActivationDevTokens is built by New when
-	// AccountActivationTestSupportEnabled is true - mirrors authLimiter's
-	// identical "constructed by New, not caller-supplied" convention. Nil
-	// when the flag is false, which is also what
-	// newAccountActivationDevTokenHandler treats as "unavailable" (belt
-	// and suspenders alongside the route genuinely not being registered
-	// at all - see registerCredentialRoutes).
-	accountActivationDevTokens *devVerificationTokenStore
 
 	// AuthRateLimitPerMinute overrides the per-IP limit New applies to the
 	// unauthenticated credential endpoints (see ratelimit.go for exactly
@@ -257,16 +265,6 @@ func New(deps Deps) http.Handler {
 	// here so no caller can forget to wire it and no test server silently
 	// runs without it. See ratelimit.go.
 	deps.authLimiter = newFixedWindowLimiter(rateLimitWindow, deps.AuthRateLimitPerMinute, deps.TrustedProxyCount)
-
-	// Stage 9.3: only allocate the dev-token store when the feature is
-	// actually enabled - see Deps.AccountActivationTestSupportEnabled's
-	// own doc comment. A nil store (the production default) is what
-	// newRequestEmailVerificationHandler checks before recording
-	// anything into it, so no raw token is ever retained in memory at
-	// all when this flag is off.
-	if deps.AccountActivationTestSupportEnabled {
-		deps.accountActivationDevTokens = newDevVerificationTokenStore()
-	}
 
 	mux.HandleFunc("GET /healthz", livezHandler)
 	mux.HandleFunc("GET /readyz", readyzHandler(deps.DB))

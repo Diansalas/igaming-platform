@@ -7765,3 +7765,82 @@ present in this environment were explicitly identified and explicitly
 not used, per the human's own direction. No production-readiness claim
 is made. No automatic progression — Stage 10 is NOT authorized and was
 not started.
+
+## Stage 9.4 Part 1 — APP_ENV Fail-Closed Validation + Stateless Activation Seam — complete
+
+Authorized as "STAGE 9.4 — STAGING DEPLOYMENT READINESS + AWS STAGING
+DEPLOYMENT," Stage 9.3 approved. Closes the two issues Stage 9.3's own
+"Remaining production blockers" deferred as needing a config/architecture
+decision rather than a unilateral fix. Part 2 (AWS account verification)
+and Parts 3-11 (actual provisioning) required authorized AWS credentials;
+the human again declined to supply any ("produce operator instructions
+only"), so **no AWS provisioning was attempted this stage** — see
+`docs/runbooks/stage-9-4-aws-account-verification.md`. Full design: ADR
+0085.
+
+**Fix 1 (`APP_ENV` two-layer fail-closed gate).** `internal/config
+.Load()` validates `Environment` against `{"development", "staging",
+"production"}` whenever `APP_ENV` is explicitly set to any value —
+including an explicit empty string, a residual gap found independently by
+both the security and architecture reviews of this exact change and
+closed via a dedicated `resolveAppEnv()` (`os.LookupEnv` directly, not
+the existing `getEnvDefault` helper, which deliberately folds "unset" and
+"empty" together for every other setting but must not for this one). A
+second, independent, explicit opt-in
+(`TestSupportEndpointsEnabled`/`TEST_SUPPORT_ENDPOINTS_ENABLED`, default
+`false`) must also be true before any of the three non-production
+simulation flags register, computed in exactly one place
+(`Config.TestSupportRoutesEnabled()`). `Environment == "production" &&
+TestSupportEndpointsEnabled == true` is a hard `Load()` startup failure.
+
+**Fix 2 (stateless, multi-replica-safe activation seam).** `GET
+/v1/me/email-verification/dev-token` (Stage 9.3's per-process in-memory
+store) is removed. `POST /v1/me/email-verification/request`/`/resend`
+now return the raw token directly in that same request's `200` response
+body when `AccountActivationTestSupportEnabled` is true — no new shared
+infrastructure introduced. Flag-off/production response shape unchanged
+(`204`, no body). A new test,
+`TestAccountActivationDevToken_MultiReplica_RequestOnReplicaA
+_ConfirmOnReplicaB`, constructs two genuinely independent
+`httptest.NewServer` instances sharing only the database and proves the
+seam works correctly across them.
+
+**A related, genuine multi-replica financial-correctness bug was found
+and fixed in the same pass**, not merely as a hypothetical: the
+`architect` review, while examining Fix 2, found the same bug shape on
+the actual financial simulation path —
+`internal/payments.MockProvider.nextReference()` and
+`internal/casino.MockCasinoProvider.nextReference()` both minted
+references from a bare per-process `seq int` counter, so two replicas
+could mint the same reference for their own first transaction, colliding
+on `deposit_intents`' uniqueness constraint and the ledger's
+`(provider_id, provider_tx_id)` idempotency key. Both now append a
+`uuid.NewString()` suffix (`google/uuid`, already a dependency used
+elsewhere in both packages); no test hardcoded the old exact format
+(confirmed by grep before changing it).
+
+**Reviews.** `security` and `architect` independently reviewed the diff:
+**APPROVED WITH MINOR NOTES** from both. Security fixed one doc-only
+inaccuracy itself (a response-distinguishability claim in the OpenAPI
+spec) and reconfirmed `internal/auth/credential_token.go` untouched.
+Both independently found the `APP_ENV=""` gap, closed directly with a new
+regression test rather than left deferred. Architect additionally
+required a new ADR (0085, written this stage), an inline correction to
+`docs/decisions/0048-casino-play-simulation-trust-boundary.md`'s stale
+single-condition-gate description, and a trim to
+`deploy/aws/modules/ecs/variables.tf`'s new variable's doc comment (it
+described a scenario this module's own `app_environment` validation
+block already structurally prevents).
+
+**Validation.** `go build ./...`, `go vet`, `gofmt -l` clean. Focused
+suites (`internal/config`, `internal/payments`, `internal/casino`,
+`internal/httpserver`) re-run against real Postgres after each fix,
+including the mock-provider fix — all pass.
+
+No AWS resources were created or modified. No B2B/Partner/Retail/Stage 10
+work performed. No HDR-SB-1/HDR-J-7 decision made or worked around. ADR
+0009's open AUP/legal confirmation is untouched. The pre-existing,
+non-9.4-caused `IssueCredentialToken` concurrent-request race (ADR 0085's
+"What this decision does not do") remains open as a separate, narrower
+deferred item. No automatic progression — Stage 10 is NOT authorized and
+was not started.

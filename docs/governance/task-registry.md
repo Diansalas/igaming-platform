@@ -3609,6 +3609,77 @@ credentials present in this environment were identified and explicitly
 declined per the human's own instruction); no claim of production
 readiness.
 
+## Stage 9.4 Part 1 — APP_ENV Fail-Closed Validation + Stateless Activation Seam
+
+Directive: "STAGE 9.4 — STAGING DEPLOYMENT READINESS + AWS STAGING
+DEPLOYMENT," opening with "Stage 9.3 is approved." Part 1 closes the two
+issues Stage 9.3 explicitly deferred (S93-05/S93-06/S93-07/S93-08 above)
+as needing a config/architecture decision rather than a unilateral fix.
+Part 2 (AWS account safety verification) and Parts 3-11 (actual
+provisioning) required authorized AWS credentials; the human again
+declined ("produce operator instructions only"), so this table covers
+Part 1 only — no AWS work was performed or attempted.
+
+| ID | Owner | Status | Files owned | Tests | Blockers | Integration |
+|---|---|---|---|---|---|---|
+| S94-01 | backend | Done | `internal/config/{config.go,config_test.go}`, `cmd/platform-api/main.go` | 9 test functions (`TestLoad_UnsetAppEnvStillDefaultsToDevelopment`, `TestLoad_InvalidAppEnvRejected` — 8 subtests, `TestLoad_ValidAppEnvValuesAccepted`, `TestLoad_TestSupportEndpointsEnabledOverride`, `TestLoad_InvalidTestSupportEndpointsEnabled`, `TestLoad_ProductionWithTestSupportEndpointsEnabledFailsClosed`, `TestLoad_ProductionWithTestSupportEndpointsDefaultSucceeds`, `TestLoad_TestSupportRoutesEnabled_BothConditionsIndependentlyRequired`) | none | Verified |
+| S94-02 | backend | Done | `internal/httpserver/{server.go,credential_routes.go,credential_handlers.go,email_verification_dev_token_test.go}` (rewritten), `internal/httpserver/email_verification_dev_token_handlers.go` (deleted), `docs/api/openapi/platform-api.yaml` | 6 tests (rewritten), including `TestAccountActivationDevToken_MultiReplica_RequestOnReplicaA_ConfirmOnReplicaB` (two independent `httptest.NewServer` instances sharing only `*db.Pool`) | none | Verified |
+| S94-03 | security | Done | review only — S94-01/S94-02 | independently re-verified every trust-boundary claim; grepped the repo to confirm `TestSupportRoutesEnabled()` is the only call site computing the three flags | 0 blocking; fixed 1 doc-only inaccuracy itself (OpenAPI rate-limit-distinguishability claim); found the `APP_ENV=""` residual gap (see S94-05) | Verified |
+| S94-04 | architect | Done | review only — S94-01/S94-02 | independently re-verified the two-layer design against `docs/architecture/`; grepped for reference-format assumptions before recommending the mock-provider fix | 0 blocking; required a new ADR (S94-06); found the `APP_ENV=""` residual gap (see S94-05); found the mock-provider multi-replica bug (see S94-07); flagged 2 doc-drift items (see S94-06/S94-08) | Verified |
+| S94-05 | Orchestrator | Done | `internal/config/{config.go,config_test.go}` (`resolveAppEnv`, `TestLoad_ExplicitEmptyAppEnvRejected`) | new regression test passes; full `internal/config` suite re-run clean | none | Verified |
+| S94-06 | Orchestrator | Done | `docs/decisions/0085-app-env-fail-closed-and-stateless-activation-seam.md` (new), `docs/decisions/0048-casino-play-simulation-trust-boundary.md` (amended in place, Stage-8-update pattern) | n/a (documentation) | none | n/a |
+| S94-07 | Orchestrator | Done | `internal/payments/mock.go`, `internal/casino/mock.go` (`nextReference()` — `uuid.NewString()` suffix, no new dependency) | `internal/payments/...` and `internal/casino/...` full package suites re-run against real Postgres, clean; confirmed by grep that no test hardcoded the old exact reference format before changing it | none | Verified |
+| S94-08 | Orchestrator | Done | `deploy/aws/modules/ecs/variables.tf` (`test_support_endpoints_enabled` doc-comment trimmed) | n/a (documentation/comment only, no `.tf` logic changed) | terraform CLI unavailable in this sandbox to re-run `fmt`/`validate`; heredoc block structure verified by inspection | n/a |
+| S94-09 | Orchestrator | Done | `docs/runbooks/stage-9-4-aws-account-verification.md` (new) | n/a (documentation) | AWS account/billing ownership not confirmed — no credential supplied or used, per explicit human instruction | n/a |
+| S94-10 | Orchestrator | Done | `docs/active-stage.md`, `docs/progress.md`, `docs/governance/task-registry.md` (this entry) | n/a (documentation) | none | n/a |
+
+### Review findings and dispositions
+
+**Both reviews (S94-03, S94-04) independently found the same residual
+gap**: `APP_ENV=""` (explicit empty string, distinct from unset) still
+resolved to `"development"` under the first implementation's
+`getEnvDefault`-style helper, the one value Layer 1 did not reject.
+Closed directly (S94-05) rather than left deferred, per the directive's
+own "fix any genuine review findings in the same batch" instruction —
+`resolveAppEnv()` now reads `APP_ENV` via `os.LookupEnv` directly so a
+present-but-empty value is distinguishable from a genuinely absent one.
+
+**Architect (S94-04) found a genuine, previously-undiscovered multi-replica
+correctness bug on the actual financial simulation path**, not merely a
+theoretical one: `internal/payments.MockProvider.nextReference()` and
+`internal/casino.MockCasinoProvider.nextReference()` both minted
+references from a bare per-process `seq int` counter, so two ECS/Fargate
+replicas (the staging Terraform's own `desired_count=2`, per ADR 0084)
+could each mint the identical `provider_reference` for their own first
+transaction — colliding on `deposit_intents`' `(tenant_id, provider_id,
+provider_reference)` uniqueness constraint and aliasing the ledger
+idempotency key `(provider_id, provider_tx_id)`. This is squarely a
+multi-replica correctness issue in scope per the directive's own
+efficiency rule (FIX NOW), not a redesign of approved architecture, so it
+was fixed in the same pass (S94-07) rather than merely recorded. Casino's
+copy of the bug was "safe today by accident, not by construction" (per
+architect's own words — nothing on the live orchestrator path currently
+calls it) and was fixed for symmetry rather than left as a second
+instance of the same defect shape in the codebase.
+
+**Architect (S94-04) also found the `deploy/aws/modules/ecs/variables.tf`
+doc comment on `test_support_endpoints_enabled` described a scenario (a
+future production invocation of *this* module setting both flags) that
+this module's own existing `app_environment` `validation` block already
+structurally prevents.** Trimmed (S94-08) to describe the actual
+defense-in-depth reasoning (module reuse outside this validated context,
+backstopped by `config.Load()`'s own hard-fail check) instead.
+
+**Explicitly NOT this stage's territory (confirmed untouched):** no
+AWS resource of any kind created, modified, or planned against a real
+account; no B2B/Partner/Retail/Stage 10 work; no HDR-SB-1/HDR-J-7
+decision made or worked around; no gambling-AUP determination (ADR 0009
+remains the open umbrella decision); no production credential requested,
+created, or used. The pre-existing, non-9.4-caused
+`IssueCredentialToken` concurrent-request race (documented in ADR 0085's
+"What this decision does not do") was reconfirmed as out of scope by
+both reviews and remains a separate, narrower deferred item.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

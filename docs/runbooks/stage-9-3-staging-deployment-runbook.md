@@ -224,6 +224,18 @@ there — and, blocking all of it, ADR 0009's still-open gambling AUP/legal
 confirmation, which is a human/legal task, not something any engineering
 session can close.
 
+Stage 9.4 adds one more item to this list: a future `environments/
+production` module invocation must NOT set `test_support_endpoints_enabled
+= true` (`modules/ecs/variables.tf` defaults it to `false` at the module
+level, exactly so an operator copying `environments/staging/main.tf` as a
+starting point has to deliberately remove that line, not merely change
+`app_environment`). If both were ever set together anyway,
+`internal/config.Load()`'s own contradictory-configuration check fails
+the container's startup outright rather than silently registering the
+mock-settlement/self-signed-play/account-activation test-support routes —
+see `docs/runbooks/production-configuration-checklist.md`'s `Environment`/
+`TestSupportEndpointsEnabled` rows for the full two-layer design.
+
 ## 7. Every variable an operator must supply or review before `apply`
 
 None are required to have a non-default value for a first apply — every

@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/google/uuid"
 )
 
 // MockProvider is a PaymentProvider implementation with synthetic,
@@ -59,13 +61,14 @@ type MockProvider struct {
 	// made POST /v1/webhooks/payments/{tenantSlug}/{providerID} - which
 	// has no bearer-auth middleware by design, since a provider webhook
 	// isn't an authenticated platform principal - trivially forgeable:
-	// provider_reference values are sequential ("mock-1", "mock-2", ...)
-	// and are even returned to the player in InitiateDeposit's
-	// redirect_url, so anyone could post a synthetic "succeeded" callback
-	// for any reference and mint an arbitrary ledger credit. This closes
-	// that hole for the mock exactly as payment-orchestration.md §3
-	// requires of every adapter: "webhook signature verification happens
-	// inside HandleCallback before any payload field is used."
+	// provider_reference values were originally sequential per-instance
+	// counters ("mock-1", "mock-2", ...) and are even returned to the
+	// player in InitiateDeposit's redirect_url, so anyone could post a
+	// synthetic "succeeded" callback for any reference and mint an
+	// arbitrary ledger credit. This closes that hole for the mock exactly
+	// as payment-orchestration.md §3 requires of every adapter: "webhook
+	// signature verification happens inside HandleCallback before any
+	// payload field is used."
 	signingSecret []byte
 }
 
@@ -209,9 +212,24 @@ func (m *MockProvider) sign(body mockCallbackBody) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// nextReference mints a provider_reference unique across every replica of
+// this process, not just within one. A bare per-process counter (the
+// original implementation) lets two ECS/Fargate replicas each mint
+// "mock-payments-1" for their own first deposit; those references then
+// collide on deposit_intents' (tenant_id, provider_id, provider_reference)
+// uniqueness constraint and alias onto the same ledger idempotency key
+// (provider_id, provider_tx_id) used by internal/payments/orchestrator.go -
+// a genuine multi-replica correctness bug, not merely a cosmetic one,
+// found during Stage 9.4's activation of desired_count=2 for platform-api.
+// The sequence number is kept as a human-readable, per-process ordering
+// hint for logs/debugging; uuid.NewString() is what actually guarantees
+// cross-replica uniqueness, exactly as m.signingSecret's doc comment above
+// already documents this mock relying on signature verification - not
+// reference unpredictability - for forgery resistance, so widening the
+// reference format here does not change that security property.
 func (m *MockProvider) nextReference() string {
 	m.seq++
-	return fmt.Sprintf("%s-%d", m.providerID, m.seq)
+	return fmt.Sprintf("%s-%d-%s", m.providerID, m.seq, uuid.NewString())
 }
 
 // Deposit implements PaymentProvider.

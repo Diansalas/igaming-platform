@@ -115,6 +115,28 @@ variable "cors_allowed_origins" {
   type = string
 }
 
+variable "test_support_endpoints_enabled" {
+  description = <<-EOT
+    TEST_SUPPORT_ENDPOINTS_ENABLED value (Stage 9.4). The second,
+    independent gate the three non-production simulation routes
+    (casino play simulation, mock payment settlement, account-activation
+    test support) require IN ADDITION TO app_environment != "production"
+    — see internal/config/config.go's Environment/TestSupportEndpointsEnabled
+    doc comments for the full two-layer, fail-closed design. Defaults to
+    false at THIS module level (not per-environment) so any future
+    environment that reuses this module without explicitly overriding it
+    stays fully closed by default — this module's own app_environment
+    variable already has a hard validation block rejecting "production",
+    so THIS module can never itself produce the contradictory pairing;
+    the default-false-at-module-level choice is defense in depth for a
+    module that is reused or copied into a context where that validation
+    no longer applies, backstopped in every case by config.Load()'s own
+    hard-fail contradiction check at container startup.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "trusted_proxy_count" {
   description = "Exact number of proxy hops in front of platform-api. An ALB in front of ECS Fargate is 1 hop."
   type        = number

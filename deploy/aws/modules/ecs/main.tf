@@ -93,6 +93,11 @@ resource "aws_ecs_task_definition" "platform_api" {
         { name = "CORS_ALLOWED_ORIGINS", value = var.cors_allowed_origins },
         { name = "OTEL_SERVICE_NAME", value = "platform-api" },
         { name = "OTEL_EXPORTER", value = "stdout" },
+        # Stage 9.4: the second, independent gate app_environment alone is
+        # no longer sufficient for — see variables.tf's own doc comment on
+        # this variable and internal/config/config.go's Environment/
+        # TestSupportEndpointsEnabled doc comments.
+        { name = "TEST_SUPPORT_ENDPOINTS_ENABLED", value = tostring(var.test_support_endpoints_enabled) },
       ]
       secrets = [
         { name = "DATABASE_URL", valueFrom = var.database_url_runtime_secret_arn },

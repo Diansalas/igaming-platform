@@ -241,11 +241,21 @@ func (m *MockCasinoProvider) Rollback(_ context.Context, req RollbackRequest) (R
 	return RollbackResult{Outcome: OutcomeSucceeded}, nil
 }
 
+// nextReference mints a provider reference unique across every replica of
+// this process, not just within one - see internal/payments.MockProvider.
+// nextReference's identical rationale. Today's orchestrator.go simulation
+// path (LaunchGame/PlaceBet/etc.) doesn't call this - it derives its own
+// provider-side identifiers - so this mock was safe by accident rather
+// than by construction; NextProviderTxID below is a direct test helper, so
+// a bare per-process counter here would collide the moment two replicas
+// (or two parallel tests sharing an instance) called it. Fixed for
+// symmetry with the payments mock rather than leaving a second instance of
+// the same bug shape in the codebase.
 func (m *MockCasinoProvider) nextReference() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.seq++
-	return fmt.Sprintf("%s-%d", m.providerID, m.seq)
+	return fmt.Sprintf("%s-%d-%s", m.providerID, m.seq, uuid.NewString())
 }
 
 // NextProviderTxID is a test helper for minting a fresh, deterministic-

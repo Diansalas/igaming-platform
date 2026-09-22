@@ -238,6 +238,13 @@ module "ecs" {
   cors_allowed_origins = local.cors_allowed_origins
   trusted_proxy_count  = 1
 
+  # Stage 9.4: staging is exactly where the three test-support routes
+  # (casino play simulation, mock payment settlement, account-activation
+  # test support) are needed — the staging acceptance-test flows depend
+  # on them. See modules/ecs/variables.tf's own doc comment: this module
+  # defaults to false, so this environment deliberately opts in.
+  test_support_endpoints_enabled = true
+
   target_group_arns = module.alb.target_group_arns
 
   database_url_runtime_secret_arn   = aws_secretsmanager_secret.database_url_runtime.arn
