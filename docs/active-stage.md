@@ -1480,7 +1480,40 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 9.4 Part 1 — APP_ENV Fail-Closed Validation + Stateless Activation Seam — COMPLETE, awaiting human review
+## Current stage: Stage 9.4 — Staging Infrastructure Hardening + Cost Optimization — COMPLETE (repository-side), awaiting AWS deployment authorization
+
+**Purpose.** After the human configured a READ-ONLY AWS credential
+(`arn:aws:iam::765578795051:user/claude-staging-readonly`, account
+765578795051 confirmed in writing as the authorized staging account,
+eu-central-1 confirmed as the staging region), the first real read-only
+`terraform plan` of the Stage 9.3 package surfaced blocking and costly
+defects (PostgreSQL 16.4 not offered in eu-central-1, secrets in local
+state, broken RDS alarms, HTTP-only public ALB, NAT/24x7 cost). The human
+approved a consolidated hardening + cost pass (ADR 0086). Repository-side
+work only: **no AWS resource was created, modified or deleted**; `terraform
+apply`/`destroy` were never run; no credential was created or requested.
+
+**Status: IMPLEMENTED (repository) / NOT DEPLOYED.** Terraform, scripts,
+IAM policy documents, tests and runbooks are complete and verified offline
+and with read-only AWS calls (plan: staging 74 to add, bootstrap 9 to
+add). Deployment is **BLOCKED** on human authorization of a deployment
+credential and the one-time bootstrap.
+
+**Reviews** (independent, none self-approved; findings fixed and
+re-verified by the finding reviewer): architect, security, FinOps,
+backend, qa, code-reviewer — final verdicts in `docs/progress.md`.
+
+**Remaining human inputs before deployment**: authorize and create the
+deployment principal with `deploy/aws/iam/staging-{bootstrap,deployer-network,deployer-infra,deployer-edge-iam-state}-policy.json`;
+run the bootstrap; supply `staging_access_cidrs` (own public IPv4 /32);
+optionally `alarm_email` / `budget_alert_email`.
+
+**Next step requires explicit authorization**: Stage 9.4 AWS deployment
+(bootstrap + first `deploy.sh up`) per
+`docs/runbooks/stage-9-4-staging-lifecycle-runbook.md`. Stage 10 is NOT
+authorized.
+
+## Stage 9.4 Part 1 — APP_ENV Fail-Closed Validation + Stateless Activation Seam — COMPLETE
 
 **Purpose.** Authorized by the human as "STAGE 9.4 — STAGING DEPLOYMENT
 READINESS + AWS STAGING DEPLOYMENT," opening with "Stage 9.3 is

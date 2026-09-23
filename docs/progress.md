@@ -7844,3 +7844,107 @@ non-9.4-caused `IssueCredentialToken` concurrent-request race (ADR 0085's
 "What this decision does not do") remains open as a separate, narrower
 deferred item. No automatic progression — Stage 10 is NOT authorized and
 was not started.
+
+## Stage 9.4 — Staging Infrastructure Hardening + Cost Optimization — complete (repository-side; not deployed)
+
+Directed as "STAGE 9.4 — STAGING INFRASTRUCTURE HARDENING + COST
+OPTIMIZATION" after the human configured a READ-ONLY AWS credential and
+confirmed in writing that account **765578795051** is the authorized
+staging account and **eu-central-1** the staging region. Design: ADR 0086
+(amends ADR 0084 for staging only). Operator procedure:
+`docs/runbooks/stage-9-4-staging-lifecycle-runbook.md`.
+
+**AWS access this stage: read-only only.** Identity/permission checks
+(user `claude-staging-readonly`, `ReadOnlyAccess` only; every simulated
+write action denied, re-checked at the end), read-only `terraform plan`
+(first on the Stage 9.3 package: 77 resources, ~$135–155/month, PostgreSQL
+16.4 unavailable in eu-central-1; final: staging 74 to add, bootstrap 9 to
+add, 0 change/destroy), AWS Pricing API, `describe-db-engine-versions`
+(16.15 available, db.t4g.micro orderable), IAM Access Analyzer
+`ValidatePolicy`, IAM `SimulateCustomPolicy`, and read-only
+`verify-teardown.sh` runs (no staging resources exist). **No AWS resource
+was created, modified or deleted; no `terraform apply`/`destroy`; no
+credential created or requested.**
+
+**Implemented (repository):** eu-central-1 canonical and validated;
+PostgreSQL pinned to 16.15; remote S3 state with native lockfile locking
+plus a one-time bootstrap (versioned, SSE-S3, TLS-only, deletion-protected
+bucket; IAM permissions boundary; IAM Access Analyzer account analyzer);
+secrets kept out of Terraform state (RDS-managed master password,
+ephemeral + write-only runtime/JWT/seed-admin secrets, password-free
+`DATABASE_URL` + `PGPASSWORD`); staging-only force-delete of secrets/ECR;
+RDS alarms fixed to `DBInstanceIdentifier`; Container Insights off (ALB
+healthy-host alarms instead); SNS only with `alarm_email`; no NAT
+(public-IP tasks, ingress only from the ALB; RDS private); HTTPS without a
+domain via CloudFront VPC origins in front of an internal ALB, with an
+IPv4 allowlist (≥ /24) protecting the test-support endpoints;
+`TRUSTED_PROXY_COUNT = 2`; Fargate Spot for frontends and a mixed strategy
+for platform-api (1 replica by default, `deploy.sh scale 2` for the
+multi-replica test); immutable full-SHA ECR tags; split service/one-off
+execution roles; `deploy.sh` lifecycle (up/scale/migrate/seed-admin/
+status/down, one commit per environment lifetime) and read-only
+`verify-teardown.sh`; least-privilege deployer IAM policies that cannot
+escalate to admin; ~$0.10/hour while running, ≈$0.00–0.01/month after
+teardown.
+
+**Real defects found by the reviews and fixed in this stage** (each fixed
+and then re-verified by the reviewer who found it):
+- **security P1**: the deployer policy allowed escalation to account
+  admin through role creation/inline policies. Now fixed: exact role
+  names, a mandatory permissions boundary, explicit denies, 28/28
+  read-only simulations.
+- **security P1**: the Stage 9.3 role-init SQL printed the runtime DB
+  password to stdout (CloudWatch Logs). Fixed and proven on a real
+  PostgreSQL 16: the old script leaked it once, the fixed script never
+  does.
+- **architect P1**: a redeploy of a new commit would serve traffic before
+  migrations ran.
+- **code-reviewer / architect P1**: ECS services lacked a dependency on
+  the capacity-provider association.
+- **code-reviewer P1**: the deployer lacked `GetSecretValue` needed for
+  provider refresh.
+- **qa P0/P1**: the security-group module and the root-level decisions
+  were untested. Six mutations survived before the fix; all are caught
+  now.
+- **P2s**: Back Office admin seeding impossible; `sns:ListTopics` missing;
+  rotation left services stale; stale verification runbook; stale
+  frontend images possible; VPC-origin teardown leftovers unchecked;
+  security-group rule changes not tag-scoped.
+
+One review claim was rejected with evidence: backend questioned
+`TRUSTED_PROXY_COUNT=2`. The primary AWS documentation shows CloudFront
+adds or appends the viewer IP to `X-Forwarded-For` for custom origins.
+Backend accepted this; architect and security concurred.
+
+**Independent review verdicts** (no specialist reviewed its own work):
+- **architect**: CHANGES REQUIRED → APPROVED WITH MINOR NOTES (its three
+  P3 follow-ups are fixed in 5c4ac51).
+- **security**: CHANGES REQUIRED → APPROVED WITH MINOR NOTES. Its N-1/N-2
+  follow-ups and the SG-scoping change are in 09553fa/5c4ac51; final
+  sign-off on those two commits is recorded below.
+- **FinOps**: APPROVED WITH MINOR NOTES (corrections applied).
+- **backend**: CHANGES REQUIRED → APPROVED.
+- **qa**: CHANGES REQUIRED → APPROVED (no surviving mutations).
+- **code-reviewer**: CHANGES REQUIRED → APPROVED WITH MINOR NOTES.
+
+**Verification:** `terraform fmt -check` / `validate` clean (staging,
+bootstrap and all 11 modules); 43 `terraform test` runs with mock
+providers + 7 CloudFront-function node tests; mutation checks; repository
+guards (no state/plan/tfvars tracked, no Stage 9.3 regressions, role-init
+password guard); new `infrastructure` CI job; Go build/vet/unit tests
+clean (no Go code changed); secrets scan: false positives only; the AWS
+credential is absent from git history and the working tree.
+
+**Deferred (recorded in ADR 0086, not built):**
+- audit records use `RemoteAddr` (the ALB's IP) instead of the client IP
+  — a **production launch gate**, backend owner;
+- joining duplicate `X-Forwarded-For` headers;
+- CloudFront, ALB and VPC flow logs;
+- RDS `verify-full` TLS verification;
+- the FinOps recommendation to serve the SPAs from S3.
+
+**Remaining before deployment (human):** authorize and create a deployment
+principal with the four `deploy/aws/iam/*.json` policies; run the
+bootstrap; supply `staging_access_cidrs`. First-apply verification items
+are listed in the lifecycle runbook §12. No B2B/Partner/Retail/Stage 10
+work was performed. **Stage 10 is NOT authorized and was not started.**
