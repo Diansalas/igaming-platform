@@ -60,3 +60,21 @@ run "values_are_write_only" {
     error_message = "secret_string_wo_version must follow var.secret_version."
   }
 }
+
+run "app_secret_rotation_does_not_touch_seed_admin" {
+  command = apply
+
+  variables {
+    secret_version = 2
+  }
+
+  assert {
+    condition     = aws_secretsmanager_secret_version.db_runtime.secret_string_wo_version == 2 && aws_secretsmanager_secret_version.jwt_signing.secret_string_wo_version == 2
+    error_message = "secret_version must rotate the runtime and JWT secrets."
+  }
+
+  assert {
+    condition     = aws_secretsmanager_secret_version.seed_admin.secret_string_wo_version == 1
+    error_message = "Rotating app secrets must not rewrite the seed-admin password (its DB hash would not follow)."
+  }
+}

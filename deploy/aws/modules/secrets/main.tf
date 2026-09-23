@@ -91,7 +91,11 @@ resource "aws_secretsmanager_secret" "seed_admin" {
 }
 
 resource "aws_secretsmanager_secret_version" "seed_admin" {
-  secret_id                = aws_secretsmanager_secret.seed_admin.id
-  secret_string_wo         = ephemeral.random_password.seed_admin.result
-  secret_string_wo_version = var.secret_version
+  secret_id        = aws_secretsmanager_secret.seed_admin.id
+  secret_string_wo = ephemeral.random_password.seed_admin.result
+  # Deliberately NOT var.secret_version: cmd/seed-admin only creates the
+  # admin (its password hash is then stored in the database), so rotating
+  # this secret alone would silently break the Back Office login. It
+  # changes only with its own counter (new environment / new admin).
+  secret_string_wo_version = var.seed_admin_secret_version
 }

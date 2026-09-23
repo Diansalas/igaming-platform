@@ -133,6 +133,7 @@ it no longer needs NAT Gateway, ACM or Route53 actions for staging:
 ```sh
 aws iam simulate-principal-policy \
   --policy-source-arn <the ARN from step 1> \
+  --context-entries ContextKeyName=aws:RequestedRegion,ContextKeyValues=eu-central-1,ContextKeyType=string \
   --action-names \
     ec2:CreateVpc ec2:CreateSubnet ec2:CreateInternetGateway \
     ec2:CreateSecurityGroup ec2:AuthorizeSecurityGroupIngress \
@@ -146,8 +147,12 @@ aws iam simulate-principal-policy \
     s3:GetObject s3:PutObject
 ```
 
-Every action above should report `allowed` (use the real resource ARNs
-with `--resource-arns` for the name-scoped ones). The IAM, `PassRole` and
+Every action above should report `allowed`. The region context entry is
+required: EC2 and ECS are conditioned on `aws:RequestedRegion`, so without
+it they evaluate as `implicitDeny`. The name-scoped actions (RDS, ELB,
+logs, alarms, S3 state) also deny against `*`, so pass the real
+`igaming-staging-*` ARNs with `--resource-arns` or check them in
+`python3 deploy/aws/tests/simulate-deployer-policies.py`. The IAM, `PassRole` and
 `GetSecretValue` permissions are conditional — boundary-carrying roles
 only, `ecs-tasks` only, `igaming-staging/*` only — so check them with
 `python3 deploy/aws/tests/simulate-deployer-policies.py` (read-only), which

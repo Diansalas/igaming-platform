@@ -9,7 +9,7 @@ The only AWS access so far is the read-only credential
 `arn:aws:iam::765578795051:user/claude-staging-readonly`, used only for
 identity checks, `terraform plan` (staging: 74 to add; bootstrap: 9 to
 add), pricing lookups, IAM Access Analyzer policy validation, IAM policy
-simulation (`deploy/aws/tests/simulate-deployer-policies.py`, 25/25), and
+simulation (`deploy/aws/tests/simulate-deployer-policies.py`, 28/28), and
 read-only `verify-teardown.sh` runs (no staging resources exist). Every AWS-changing step below needs a separate,
 human-authorized **deployment credential** (§1.1).
 
@@ -42,17 +42,20 @@ role assumed via SSO, or an IAM user with MFA and short-lived keys) and
 attach these customer-managed policies from the repository (all validated
 with IAM Access Analyzer `ValidatePolicy`: 0 findings; escalation paths
 checked with `python3 deploy/aws/tests/simulate-deployer-policies.py`,
-read-only, 25/25 — re-run it once the credential exists):
+read-only, 28/28 — re-run it once the credential exists):
 
 - `deploy/aws/iam/staging-bootstrap-policy.json` — state bucket, the
   `igaming-staging-ecs-role-boundary` IAM policy, the Access Analyzer
   account analyzer, and the budget (only needed for §1.2; detach
   afterwards).
-- `deploy/aws/iam/staging-deployer-infra-policy.json` — VPC/EC2 networking
-  (region-scoped create; delete/detach/route-replace only on resources
-  tagged `Project=igaming-platform, Environment=staging`; `CreateTags` only
-  as tag-on-create), RDS / ELB / CloudWatch Logs / alarms / SNS scoped to
-  `igaming-staging-*` ARNs, ECS region-scoped.
+- `deploy/aws/iam/staging-deployer-network-policy.json` — VPC/EC2
+  networking: region-scoped create; delete/detach/route-replace/attribute
+  changes and **security-group rule changes only on resources tagged
+  `Project=igaming-platform, Environment=staging`**; `CreateTags` only as
+  tag-on-create.
+- `deploy/aws/iam/staging-deployer-infra-policy.json` — RDS / ELB /
+  CloudWatch Logs / alarms / SNS scoped to `igaming-staging-*` ARNs, ECS
+  region-scoped.
 - `deploy/aws/iam/staging-deployer-edge-iam-state-policy.json` — state
   object + lock file only (the state object cannot be deleted), Secrets
   Manager on `igaming-staging/*` (including `GetSecretValue`, which the AWS
@@ -120,6 +123,22 @@ deploy/aws/scripts/deploy.sh up
 
 Each `terraform apply` inside is interactive: review every plan and type
 `yes`. The script never passes `-auto-approve`.
+
+**The first real `up` and `down` are also the first real test of the
+deployer policies.** The read-only simulation checks one action at a time;
+it cannot prove that every API call the provider makes is covered. The
+likely suspects are RDS create/delete across db/subgrp/pg/og ARNs,
+tag-on-create for each EC2 create action, and CloudFront VPC origin
+creation. An `AccessDenied` part-way through is therefore expected to be
+fixable: note the denied action and ARN, extend the right policy
+narrowly, re-validate it (Access Analyzer + `simulate-deployer-policies.py`),
+then re-run. Terraform resumes from state.
+
+**Trust-policy changes need a re-create.** The deployer is denied
+`iam:UpdateAssumeRolePolicy` (decision 18), so a change to the ECS roles'
+trust policy (like the `aws:SourceAccount` condition) can only reach a
+running environment through `down`/`up`. That matches "one commit per
+environment lifetime".
 
 **One commit per environment lifetime.** `up` refuses to deploy a
 different commit onto a running environment: a full apply would start new
@@ -335,12 +354,13 @@ used to justify a design decision.
   task can briefly fail DB authentication, so rotate outside a test run.
   `deploy.sh migrate` alone also re-runs role-init and migrate and then
   rolls the services.
-- The **seed-admin password** secret is rewritten by the same bump, but
-  the password hash already stored for the existing `platform_admin` is
-  **not** changed (`cmd/seed-admin` only creates users; a re-run for the
-  same email fails on the unique email). After a rotation, that login
-  keeps its old password. In practice, rotate by tearing staging down and
-  re-creating it, or seed a new admin email.
+- The **seed-admin password** is deliberately **not** rotated by
+  `secret_version`: it has its own counter (`seed_admin_secret_version` in
+  `modules/secrets`, fixed at 1 in staging). `cmd/seed-admin` only creates
+  users and stores the password hash in the database, so rewriting the
+  secret alone would break the Back Office login. To get a new admin
+  password, tear staging down and re-create it (or seed a different
+  email).
 - RDS master password: rotated by RDS itself (RDS-managed secret). The
   one-off tasks read it fresh each run.
 
@@ -377,7 +397,16 @@ Run these on the first authorized deployment and record the results:
    runtime password.
 5. From a non-allowlisted network, every URL returns 403. From the
    allowlisted one, the API's CORS preflight succeeds.
-6. After `down`, `verify-teardown.sh` exits 0. Record whether any
+6. role-init, migrate and seed-admin start successfully. They read the
+   RDS-managed master secret through the permissions boundary's statement
+   conditioned on `secretsmanager:ResourceTag/aws:rds:primaryDBInstanceArn`.
+   If that condition does not match on AWS, these one-off tasks fail loudly
+   at start (`ResourceInitializationError`); the services are unaffected.
+   The fallback is to condition on `aws:ResourceTag/aws:rds:primaryDBInstanceArn`
+   in `deploy/aws/bootstrap`, then re-apply the bootstrap.
+7. Traffic reaches the internal ALB through the VPC-origin ENIs placed in
+   the ALB's private subnets (ALB ingress admits only those CIDRs).
+8. After `down`, `verify-teardown.sh` exits 0. Record whether any
    `CloudFront-VPCOrigins-Service-SG` or VPC-origin ENIs lingered, and
    whether the RDS-managed secret was deleted outright or scheduled for
    deletion.

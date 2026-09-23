@@ -21,9 +21,14 @@ variable "allowed_account_ids" {
 }
 
 variable "name_prefix" {
-  description = "Prefix applied to every resource name."
+  description = "Prefix applied to every resource name. Pinned: the bootstrap-created permissions boundary (igaming-staging-ecs-role-boundary), its ECR/log/secret scopes and the deployer IAM policies all use this exact prefix."
   type        = string
   default     = "igaming-staging"
+
+  validation {
+    condition     = var.name_prefix == "igaming-staging"
+    error_message = "name_prefix is pinned to \"igaming-staging\": the bootstrap boundary policy and the deployer IAM policies are scoped to that exact prefix."
+  }
 }
 
 # --- Access (ADR 0086) ---

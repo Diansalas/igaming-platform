@@ -2,10 +2,10 @@
 
 Status: Accepted (human-approved decision set, Stage 9.4, 2026-09-23).
 Owner: `devops` (orchestrator-implemented). Independent reviews by
-`architect`, `security`, FinOps, `backend`, `qa` and `code-reviewer`, and
-what each found, are recorded in `docs/progress.md` (Stage 9.4 staging
-hardening entry); this ADR describes the design as amended by those
-reviews. Amends ADR 0084 (Stage 9.3 staging architecture) for
+`architect`, `security`, FinOps, `backend`, `qa` and `code-reviewer`, with
+their verdicts and the findings fixed, are recorded in `docs/progress.md`
+("Stage 9.4 — Staging Infrastructure Hardening + Cost Optimization"); this
+ADR describes the design as amended by those reviews. Amends ADR 0084 (Stage 9.3 staging architecture) for
 the **staging environment only**. Nothing here was applied to AWS: the
 only AWS access used was the human-authorized read-only credential
 (`arn:aws:iam::765578795051:user/claude-staging-readonly`).
@@ -342,10 +342,12 @@ non-staging resources:
   only to `ecs-tasks.amazonaws.com`. The ECS trust policy also requires
   `aws:SourceAccount` = this account.
 - **ELB/RDS/logs/alarms/SNS**: mutations scoped by name ARN
-  (`igaming-staging-*`); **EC2**: deletes/detaches/route replacement only
-  on resources tagged `Project=igaming-platform, Environment=staging`, and
+  (`igaming-staging-*`); **EC2**: deletes/detaches/route replacement,
+  VPC/subnet attribute changes and security-group rule changes only on
+  resources tagged `Project=igaming-platform, Environment=staging`, and
   `CreateTags` only as tag-on-create; `elasticloadbalancing:*` replaced by
-  an explicit list.
+  an explicit list. Four policy documents (bootstrap, network, infra,
+  edge/IAM/state), each under the 6,144-character managed-policy limit.
 - **Secrets**: the deployer's own policy grants `GetSecretValue` only on
   `igaming-staging/*` (needed by the AWS provider to refresh
   `aws_secretsmanager_secret_version`), not on the RDS-managed master
@@ -354,16 +356,17 @@ non-staging resources:
   below.
 - All four documents validate with IAM Access Analyzer (0 findings), and
   `deploy/aws/tests/simulate-deployer-policies.py` (read-only
-  `SimulateCustomPolicy`) shows 25/25 expectations — every escalation path
+  `SimulateCustomPolicy`) shows 28/28 expectations — every escalation path
   the review described is denied, every operation the lifecycle needs is
   allowed.
 - **Residual (accepted for synthetic staging, recorded)**: the deployer
   can still create/modify staging-named resources in ways the Terraform
   would not (e.g. an internet-facing ALB named `igaming-staging-*`, or
-  loosen a staging security group) — it is the staging operator. EC2
-  create/authorize actions are region-scoped rather than tag-scoped
-  because EC2 evaluates new sub-resources (e.g. security-group rules) that
-  carry no tag yet; tightening further needs a real-credential test.
+  loosen a staging-tagged security group) — it is the staging operator.
+  EC2 *create* actions remain region-scoped (new resources carry no tag
+  yet at authorization time). Full call-set coverage of the scoped
+  statements can only be proven by the first real `up`/`down` (runbook
+  §3).
 - **Residual — role trust (security re-review N-1)**: IAM has no condition
   key that restricts the trust-policy principals of `CreateRole`. A
   deployer may `DeleteRole` + `CreateRole` one of the three staging role

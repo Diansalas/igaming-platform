@@ -96,9 +96,14 @@ check "IAM roles" aws iam list-roles \
 # security group ("CloudFront-VPCOrigins-Service-SG") inside the VPC; they
 # are not Terraform-managed. If either lingers, VPC deletion fails with
 # DependencyViolation (runbook §6 troubleshooting).
-staging_vpcs="$(aws ec2 describe-vpcs --region "${REGION}" \
+if ! staging_vpcs="$(aws ec2 describe-vpcs --region "${REGION}" \
   --filters "Name=tag:Project,Values=igaming-platform" "Name=tag:Environment,Values=staging" \
-  --query "Vpcs[].VpcId" --output text 2>/dev/null | tr '\t' ',')"
+  --query "Vpcs[].VpcId" --output text)"; then
+  echo "  [ERROR] staging VPC lookup failed — cannot check network interfaces / security groups"
+  FOUND=1
+  staging_vpcs=""
+fi
+staging_vpcs="$(echo "${staging_vpcs}" | tr '\t' ',')"
 if [[ -n "${staging_vpcs}" && "${staging_vpcs}" != "None" ]]; then
   check "Network interfaces in staging VPC(s)" aws ec2 describe-network-interfaces --region "${REGION}" \
     --filters "Name=vpc-id,Values=${staging_vpcs}" \

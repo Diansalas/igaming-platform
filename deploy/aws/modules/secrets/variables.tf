@@ -18,6 +18,17 @@ variable "secret_version" {
   }
 }
 
+variable "seed_admin_secret_version" {
+  description = "Write-only version counter for the seed-admin password only (NOT bumped by secret_version: the admin's stored password hash would not follow). Bump only together with seeding a new admin in a fresh environment."
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = var.seed_admin_secret_version >= 1 && floor(var.seed_admin_secret_version) == var.seed_admin_secret_version
+    error_message = "seed_admin_secret_version must be a positive integer."
+  }
+}
+
 variable "recovery_window_in_days" {
   description = <<-EOT
     Secrets Manager recovery window applied when these secrets are deleted

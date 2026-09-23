@@ -1,0 +1,123 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Ec2Describe",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "eu-central-1"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2CreateAndWire",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateVpc",
+        "ec2:CreateSubnet",
+        "ec2:CreateInternetGateway",
+        "ec2:AttachInternetGateway",
+        "ec2:CreateRouteTable",
+        "ec2:AssociateRouteTable",
+        "ec2:CreateRoute",
+        "ec2:AllocateAddress",
+        "ec2:CreateNatGateway",
+        "ec2:CreateSecurityGroup"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "eu-central-1"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2TagOnCreateOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateTags"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "eu-central-1",
+          "ec2:CreateAction": [
+            "CreateVpc",
+            "CreateSubnet",
+            "CreateInternetGateway",
+            "CreateRouteTable",
+            "CreateSecurityGroup",
+            "AllocateAddress",
+            "CreateNatGateway"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "Ec2ChangeOrDeleteStagingTaggedOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateTags",
+        "ec2:DeleteTags",
+        "ec2:DeleteVpc",
+        "ec2:DeleteSubnet",
+        "ec2:DeleteInternetGateway",
+        "ec2:DetachInternetGateway",
+        "ec2:DeleteRouteTable",
+        "ec2:DisassociateRouteTable",
+        "ec2:DeleteRoute",
+        "ec2:ReplaceRoute",
+        "ec2:ReleaseAddress",
+        "ec2:DisassociateAddress",
+        "ec2:DeleteNatGateway",
+        "ec2:DeleteSecurityGroup",
+        "ec2:ModifyVpcAttribute",
+        "ec2:ModifySubnetAttribute"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "igaming-platform",
+          "aws:ResourceTag/Environment": "staging"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2SgRulesOnStagingTaggedGroupsOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:UpdateSecurityGroupRuleDescriptionsIngress",
+        "ec2:UpdateSecurityGroupRuleDescriptionsEgress"
+      ],
+      "Resource": "arn:aws:ec2:eu-central-1:765578795051:security-group/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "igaming-platform",
+          "aws:ResourceTag/Environment": "staging"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2SgRuleSubResource",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:UpdateSecurityGroupRuleDescriptionsIngress",
+        "ec2:UpdateSecurityGroupRuleDescriptionsEgress"
+      ],
+      "Resource": "arn:aws:ec2:eu-central-1:765578795051:security-group-rule/*"
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """READ-ONLY IAM policy simulation for the staging deployer policies (ADR 0086).
 
-Evaluates deploy/aws/iam/staging-deployer-*.json with IAM's
+Evaluates the three deploy/aws/iam/staging-deployer-*.json policies with IAM's
 SimulateCustomPolicy API (no resources are created or changed) and asserts
 that the privilege-escalation paths found in the Stage 9.4 security review
 are denied while every operation the staging lifecycle needs is allowed.
@@ -25,6 +25,7 @@ STATE = "arn:aws:s3:::igaming-platform-staging-tfstate-765578795051/staging/terr
 
 IAM_DIR = pathlib.Path(__file__).resolve().parent.parent / "iam"
 POLICIES = [
+    (IAM_DIR / "staging-deployer-network-policy.json").read_text(),
     (IAM_DIR / "staging-deployer-infra-policy.json").read_text(),
     (IAM_DIR / "staging-deployer-edge-iam-state-policy.json").read_text(),
 ]
@@ -58,6 +59,9 @@ CASES = [
     ("Modify the staging DB", "rds:ModifyDBInstance", f"arn:aws:rds:{REGION}:{ACCOUNT}:db:igaming-staging-db", None, True),
     ("Delete an untagged security group", "ec2:DeleteSecurityGroup", f"arn:aws:ec2:{REGION}:{ACCOUNT}:security-group/sg-0123", REGION_CTX, False),
     ("Delete a staging-tagged security group", "ec2:DeleteSecurityGroup", f"arn:aws:ec2:{REGION}:{ACCOUNT}:security-group/sg-0123", STAGING_TAGS, True),
+    ("Open a foreign security group", "ec2:AuthorizeSecurityGroupIngress", f"arn:aws:ec2:{REGION}:{ACCOUNT}:security-group/sg-0123", REGION_CTX, False),
+    ("Add a rule to a staging-tagged security group", "ec2:AuthorizeSecurityGroupIngress", f"arn:aws:ec2:{REGION}:{ACCOUNT}:security-group/sg-0123", STAGING_TAGS, True),
+    ("Modify a foreign VPC attribute", "ec2:ModifyVpcAttribute", f"arn:aws:ec2:{REGION}:{ACCOUNT}:vpc/vpc-0123", REGION_CTX, False),
     ("Tag a foreign resource (tag hijack)", "ec2:CreateTags", f"arn:aws:ec2:{REGION}:{ACCOUNT}:security-group/sg-0123", REGION_CTX, False),
     ("Read a staging app secret (provider refresh)", "secretsmanager:GetSecretValue", f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:igaming-staging/jwt-signing-secret-AbCdEf", None, True),
     ("Read the RDS-managed master secret", "secretsmanager:GetSecretValue", f"arn:aws:secretsmanager:{REGION}:{ACCOUNT}:secret:rds!db-123", None, False),
