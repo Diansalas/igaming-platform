@@ -1,11 +1,18 @@
 # Three security groups forming the isolation chain described in
-# docs/architecture/38-deployment-architecture.md: internet -> ALB ->
-# ECS tasks (private subnets) -> RDS (private subnets). Nothing but the
-# ALB is reachable from 0.0.0.0/0; nothing but the ECS tasks can reach RDS.
+# docs/architecture/38-deployment-architecture.md: edge -> ALB -> ECS tasks
+# -> RDS. The ALB accepts only var.alb_ingress_cidrs; ECS tasks accept
+# only the ALB security group; RDS accepts only the ECS tasks security
+# group. These rules are what isolate the ECS tasks even when they carry
+# public IPs (the staging root's public-IP task mode, ADR 0086): a task's
+# public address accepts nothing that did not come from the ALB.
+#
+# The staging root sets alb_ingress_cidrs to the VPC CIDR only: its ALB is
+# internal and is reached exclusively through CloudFront VPC origins,
+# whose elastic network interfaces live inside the VPC (ADR 0086).
 
 resource "aws_security_group" "alb" {
   name        = "${var.name_prefix}-alb-sg"
-  description = "Ingress from the internet on 80/443; egress to ECS tasks."
+  description = "Ingress on 80/443 from alb_ingress_cidrs only; egress to ECS tasks."
   vpc_id      = var.vpc_id
 
   ingress {
@@ -36,7 +43,7 @@ resource "aws_security_group" "alb" {
 
 resource "aws_security_group" "ecs_tasks" {
   name        = "${var.name_prefix}-ecs-tasks-sg"
-  description = "Ingress only from the ALB security group on the container port; egress to RDS/ECR/Secrets Manager/CloudWatch via the NAT gateway."
+  description = "Ingress only from the ALB security group on the container port; egress to RDS and to ECR/Secrets Manager/CloudWatch Logs (via NAT or the task public IP)."
   vpc_id      = var.vpc_id
 
   ingress {

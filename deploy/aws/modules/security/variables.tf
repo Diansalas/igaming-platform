@@ -18,7 +18,7 @@ variable "db_port" {
 }
 
 variable "alb_ingress_cidrs" {
-  description = "CIDRs allowed to reach the ALB on 80/443. Staging default is open to the internet since this is a staging URL meant to be reachable for testing; narrow this for any environment that should not be public."
+  description = "CIDRs allowed to reach the ALB on 80/443. The module default is open to the internet (a public ALB); the staging root overrides it with the VPC CIDR only, because its ALB is internal and fronted by CloudFront VPC origins (ADR 0086)."
   type        = list(string)
   default     = ["0.0.0.0/0"]
 }

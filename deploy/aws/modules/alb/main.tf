@@ -1,30 +1,61 @@
-# Application Load Balancer with host-based routing for the three
-# conceptual staging hostnames (api/app/admin). HTTPS + ACM + Route53 are
-# handled entirely outside this module (see modules/dns and the root
-# module) — this module only ever receives an optional certificate_arn,
-# and is genuinely conditional on it: when null, it falls back to plain
-# HTTP on the ALB's own DNS name, per the explicit instruction not to
-# fabricate a domain decision.
+# Application Load Balancer routing to the three services (platform-api,
+# b2c, backoffice). Two routing modes:
 #
-# Host-based routing works even in the no-domain fallback: a caller can
-# still exercise it by sending `curl -H "Host: <hostname>" http://<alb-dns-name>/...`
-# — the ALB routes on the Host header regardless of whether that hostname
-# actually resolves in DNS. This is documented in the runbook as a
-# smoke-test-only technique for the fallback case, not a substitute for a
-# real domain.
+# - HOST routing (routing_header_name = null, the module default): listener
+#   rules match the Host header against api/app/admin hostnames. This is the
+#   production-shaped mode for a public ALB with its own domain; HTTPS is
+#   genuinely conditional on certificate_arn (see modules/dns). With no
+#   certificate the ALB serves plain HTTP and the default action forwards to
+#   platform-api.
+#
+# - HEADER routing (routing_header_name set): listener rules match a request
+#   header whose value names the service. This is what the staging root uses
+#   (ADR 0086): the ALB is INTERNAL (var.internal = true, private subnets, no
+#   public IPs) and is reached only through CloudFront VPC origins; each of
+#   the three CloudFront distributions stamps its own origin custom header
+#   (modules/edge), because CloudFront replaces the viewer's Host header with
+#   the ALB's own DNS name. The header is a routing key, not a secret — an
+#   internal ALB is not reachable from outside the VPC in the first place.
+#   Any request without a matching header gets a fixed 404, never a default
+#   forward to a service.
 
 locals {
-  https_enabled = var.certificate_arn != null
+  https_enabled  = var.certificate_arn != null
+  header_routing = var.routing_header_name != null
+
+  # key => routing attributes. Priorities match the Stage 9.3 rules.
+  routes = {
+    platform_api = { priority = 10, hostname = var.api_hostname, header_value = "platform-api" }
+    b2c          = { priority = 20, hostname = var.app_hostname, header_value = "b2c" }
+    backoffice   = { priority = 30, hostname = var.admin_hostname, header_value = "backoffice" }
+  }
+
+  target_groups = {
+    platform_api = aws_lb_target_group.platform_api.arn
+    b2c          = aws_lb_target_group.b2c.arn
+    backoffice   = aws_lb_target_group.backoffice.arn
+  }
 }
 
 resource "aws_lb" "this" {
   name               = "${var.name_prefix}-alb"
-  internal           = false
+  internal           = var.internal
   load_balancer_type = "application"
   security_groups    = [var.security_group_id]
-  subnets            = var.public_subnet_ids
+  subnets            = var.subnet_ids
+
+  # Reject requests carrying malformed/ambiguous headers rather than
+  # forwarding them (request-smuggling hardening).
+  drop_invalid_header_fields = true
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-alb" })
+
+  lifecycle {
+    precondition {
+      condition     = local.header_routing || (var.api_hostname != null && var.app_hostname != null && var.admin_hostname != null)
+      error_message = "Host routing (routing_header_name = null) requires api_hostname, app_hostname and admin_hostname."
+    }
+  }
 }
 
 resource "aws_lb_target_group" "platform_api" {
@@ -88,13 +119,11 @@ resource "aws_lb_target_group" "backoffice" {
 
 # --- HTTP listener (always created) ---
 #
-# When HTTPS is enabled, ALL HTTP traffic is redirected to HTTPS
-# (regardless of host/path) rather than duplicating host-based rules on
-# both listeners. When HTTPS is not enabled (no domain supplied), the
-# default action forwards to platform-api (useful for hitting /healthz
-# and /readyz directly against the raw ALB DNS name), and explicit
-# host-based rules handle the b2c/backoffice hostnames via a Host header
-# override.
+# - HTTPS enabled: ALL HTTP traffic is redirected to HTTPS.
+# - Header routing: unmatched requests get a fixed 404.
+# - Otherwise (host routing, no HTTPS): the default action forwards to
+#   platform-api (handy for /healthz and /readyz against the raw ALB DNS
+#   name), and explicit host rules handle b2c/backoffice.
 resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.this.arn
   port              = 80
@@ -113,7 +142,19 @@ resource "aws_lb_listener" "http" {
   }
 
   dynamic "default_action" {
-    for_each = local.https_enabled ? [] : [1]
+    for_each = !local.https_enabled && local.header_routing ? [1] : []
+    content {
+      type = "fixed-response"
+      fixed_response {
+        content_type = "text/plain"
+        message_body = "Not Found"
+        status_code  = "404"
+      }
+    }
+  }
+
+  dynamic "default_action" {
+    for_each = !local.https_enabled && !local.header_routing ? [1] : []
     content {
       type             = "forward"
       target_group_arn = aws_lb_target_group.platform_api.arn
@@ -121,53 +162,33 @@ resource "aws_lb_listener" "http" {
   }
 }
 
-resource "aws_lb_listener_rule" "http_api" {
-  count        = local.https_enabled ? 0 : 1
+resource "aws_lb_listener_rule" "http" {
+  for_each = local.https_enabled ? {} : local.routes
+
   listener_arn = aws_lb_listener.http.arn
-  priority     = 10
+  priority     = each.value.priority
 
   action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.platform_api.arn
+    target_group_arn = local.target_groups[each.key]
   }
 
-  condition {
-    host_header {
-      values = [var.api_hostname]
+  dynamic "condition" {
+    for_each = local.header_routing ? [] : [1]
+    content {
+      host_header {
+        values = [each.value.hostname]
+      }
     }
   }
-}
 
-resource "aws_lb_listener_rule" "http_app" {
-  count        = local.https_enabled ? 0 : 1
-  listener_arn = aws_lb_listener.http.arn
-  priority     = 20
-
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.b2c.arn
-  }
-
-  condition {
-    host_header {
-      values = [var.app_hostname]
-    }
-  }
-}
-
-resource "aws_lb_listener_rule" "http_admin" {
-  count        = local.https_enabled ? 0 : 1
-  listener_arn = aws_lb_listener.http.arn
-  priority     = 30
-
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.backoffice.arn
-  }
-
-  condition {
-    host_header {
-      values = [var.admin_hostname]
+  dynamic "condition" {
+    for_each = local.header_routing ? [1] : []
+    content {
+      http_header {
+        http_header_name = var.routing_header_name
+        values           = [each.value.header_value]
+      }
     }
   }
 }
@@ -188,53 +209,33 @@ resource "aws_lb_listener" "https" {
   }
 }
 
-resource "aws_lb_listener_rule" "https_app" {
-  count        = local.https_enabled ? 1 : 0
+resource "aws_lb_listener_rule" "https" {
+  for_each = local.https_enabled ? local.routes : {}
+
   listener_arn = aws_lb_listener.https[0].arn
-  priority     = 20
+  priority     = each.value.priority
 
   action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.b2c.arn
+    target_group_arn = local.target_groups[each.key]
   }
 
-  condition {
-    host_header {
-      values = [var.app_hostname]
+  dynamic "condition" {
+    for_each = local.header_routing ? [] : [1]
+    content {
+      host_header {
+        values = [each.value.hostname]
+      }
     }
   }
-}
 
-resource "aws_lb_listener_rule" "https_admin" {
-  count        = local.https_enabled ? 1 : 0
-  listener_arn = aws_lb_listener.https[0].arn
-  priority     = 30
-
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.backoffice.arn
-  }
-
-  condition {
-    host_header {
-      values = [var.admin_hostname]
-    }
-  }
-}
-
-resource "aws_lb_listener_rule" "https_api" {
-  count        = local.https_enabled ? 1 : 0
-  listener_arn = aws_lb_listener.https[0].arn
-  priority     = 10
-
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.platform_api.arn
-  }
-
-  condition {
-    host_header {
-      values = [var.api_hostname]
+  dynamic "condition" {
+    for_each = local.header_routing ? [1] : []
+    content {
+      http_header {
+        http_header_name = var.routing_header_name
+        values           = [each.value.header_value]
+      }
     }
   }
 }

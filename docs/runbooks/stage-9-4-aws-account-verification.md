@@ -5,9 +5,15 @@ stage-9-3-staging-deployment-runbook.md` (the deployment package itself,
 `terraform fmt`/`validate`-clean, never applied) and an actual `terraform
 apply`: the exact verification an operator must run against a candidate
 AWS account/credential **before** pointing this project's Terraform at
-it, and why each check exists. Nothing in this document has been run
-against a real account — no authorized AWS credentials have been
-supplied to this project as of Stage 9.4.
+it, and why each check exists. **Update (2026-09-23):** §1 (identity) and the
+read-only half of §4 were run against the human-authorized READ-ONLY
+credential `arn:aws:iam::765578795051:user/claude-staging-readonly`
+(long-lived IAM user key, `ReadOnlyAccess` only; 41 write actions
+simulated → all `implicitDeny`). The human confirmed in writing that
+765578795051 is the newly authorized staging account and that staging uses
+eu-central-1. No deployment credential exists yet; the rest of this
+document applies to it when one is authorized. The operating procedure is
+now `docs/runbooks/stage-9-4-staging-lifecycle-runbook.md` (ADR 0086).
 
 This is not a general AWS security primer. Every check below exists
 because CLAUDE.md's "Environment safety" rule ("Never request or create
@@ -101,12 +107,10 @@ aws configure get region 2>&1
 echo "AWS_REGION=$AWS_REGION AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION"
 ```
 
-Confirm the target region matches `deploy/aws/environments/staging/
-terraform.tfvars`'s `aws_region` (default `eu-west-1` per `terraform.
-tfvars.example` — change it deliberately if the operator's account
-should use a different region, e.g. for data-residency reasons already
-recorded in `docs/architecture/15-jurisdiction-and-licensing-model.md`,
-and note that decision in the deployment log). Never let an ambient
+Confirm the target region is `eu-central-1` — the canonical staging
+region (ADR 0086). `deploy/aws/environments/staging` validates
+`aws_region` to exactly that value and its S3 backend lives there, so a
+different region is a recorded decision, not a tfvars edit. Never let an ambient
 `AWS_REGION`/`AWS_DEFAULT_REGION` environment variable silently pick a
 region nobody chose — pass `--region` explicitly on every verification
 command in this document if there is any ambiguity.
@@ -116,7 +120,15 @@ command in this document if there is any ambiguity.
 Rather than discovering missing permissions one `terraform apply`
 failure at a time (which can leave a partially-provisioned, inconsistent
 stack), dry-run the exact permission surface `deploy/aws/environments/
-staging/`'s Terraform needs, using IAM's own simulator:
+staging/`'s Terraform needs, using IAM's own simulator. The intended
+least-privilege deployment policies are committed as
+`deploy/aws/iam/staging-{bootstrap,deployer-infra,deployer-edge-iam-state}-policy.json`
+(IAM Access Analyzer–validated); simulate against those actions. Since
+ADR 0086 the list below also needs `cloudfront:CreateDistribution`,
+`cloudfront:CreateVpcOrigin`, `cloudfront:CreateFunction`/`PublishFunction`,
+`s3:GetObject`/`PutObject`/`DeleteObject` on the state object and lock
+file, and `iam:CreateServiceLinkedRole` (ECS/ELB/RDS/CloudFront VPC origin);
+it no longer needs NAT Gateway, ACM or Route53 actions for staging:
 
 ```sh
 aws iam simulate-principal-policy \
@@ -161,11 +173,11 @@ log) that everyone involved agrees on:
    `apply`) run first, its output reviewed line by line for anything
    unexpected (an unexpectedly large instance class, an unexpected
    `count`, a resource in the wrong region) before ever running `apply`.
-   Staging-sized defaults per ADR 0084: `db.t4g.micro` RDS, Fargate tasks
-   at minimal CPU/memory, a single shared NAT Gateway, `desired_count=2`
-   for platform-api (see Part 1's activation-seam fix, which this exact
-   replica count is meant to exercise correctly), `desired_count=1` for
-   each frontend.
+   Staging-sized defaults per ADR 0086: `db.t4g.micro` RDS 16.15,
+   Fargate tasks at minimal CPU/memory, no NAT Gateway, `desired_count=1`
+   for platform-api normally (raised to 2 only for the multi-replica
+   acceptance test via `deploy.sh scale 2`), `desired_count=1` for each
+   frontend (Fargate Spot).
 3. **No real-money integration, no production data** — confirmed by
    inspecting `terraform plan`'s output for the ECS task definitions'
    environment: `APP_ENV=staging` (never `production`), the mock

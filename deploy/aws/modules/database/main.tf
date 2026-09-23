@@ -1,12 +1,29 @@
 # RDS PostgreSQL 16, private (no public access, no public subnet),
-# encrypted at rest with a dedicated KMS key, rds.force_ssl enforced,
-# automated backups. Sizing (instance class, multi_az, deletion_protection)
-# is entirely variable-driven so this exact module can be reused for a
-# future `environments/production` root module with different values,
-# per the "swap staging sizing for production sizing without rewriting the
-# module" requirement.
+# encrypted at rest, rds.force_ssl enforced, automated backups. Sizing
+# (instance class, multi_az, deletion_protection) is entirely
+# variable-driven so this exact module can be reused for a future
+# `environments/production` root module with different values, per the
+# "swap staging sizing for production sizing without rewriting the module"
+# requirement.
+#
+# MASTER PASSWORD (ADR 0086): RDS generates and stores the master password
+# itself in an RDS-managed Secrets Manager secret
+# (manage_master_user_password = true). Terraform never sees the value, so
+# it is never written to Terraform state or plan files — unlike the Stage
+# 9.3 design, which generated it with random_password and passed it in.
+# Consumers receive only the secret's ARN (output master_user_secret_arn)
+# and inject its "password" JSON key into containers at task start.
+#
+# ENCRYPTION KEY: create_kms_key (default true) creates a dedicated
+# customer-managed KMS key, as Stage 9.3 did. The staging root sets it
+# false and uses the AWS-managed aws/rds key instead (still encrypted at
+# rest): a disposable staging environment would otherwise leave a
+# pending-deletion customer-managed key behind on every teardown
+# (deletion_window_in_days is 7 minimum). See ADR 0086.
 
 resource "aws_kms_key" "rds" {
+  count = var.create_kms_key ? 1 : 0
+
   description             = "${var.name_prefix} RDS encryption-at-rest key"
   deletion_window_in_days = var.kms_deletion_window_days
   enable_key_rotation     = true
@@ -15,8 +32,10 @@ resource "aws_kms_key" "rds" {
 }
 
 resource "aws_kms_alias" "rds" {
+  count = var.create_kms_key ? 1 : 0
+
   name          = "alias/${var.name_prefix}-rds"
-  target_key_id = aws_kms_key.rds.key_id
+  target_key_id = aws_kms_key.rds[0].key_id
 }
 
 resource "aws_db_subnet_group" "this" {
@@ -53,12 +72,16 @@ resource "aws_db_instance" "this" {
   allocated_storage = var.allocated_storage
   storage_type      = "gp3"
   storage_encrypted = true
-  kms_key_id        = aws_kms_key.rds.arn
+  # null => the AWS-managed aws/rds key (create_kms_key = false).
+  kms_key_id = var.create_kms_key ? aws_kms_key.rds[0].arn : null
 
   db_name  = var.db_name
   username = var.master_username
-  password = var.master_password
   port     = 5432
+
+  # RDS owns the master password (see file header): never in Terraform
+  # state. The RDS-managed secret uses the default aws/secretsmanager key.
+  manage_master_user_password = true
 
   db_subnet_group_name   = aws_db_subnet_group.this.name
   vpc_security_group_ids = [var.security_group_id]

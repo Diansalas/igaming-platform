@@ -19,5 +19,6 @@ output "availability_zones" {
 }
 
 output "nat_gateway_id" {
-  value = aws_nat_gateway.this.id
+  description = "Null when enable_nat_gateway = false."
+  value       = one(aws_nat_gateway.this[*].id)
 }

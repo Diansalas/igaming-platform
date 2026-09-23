@@ -13,6 +13,12 @@ variable "untagged_image_expiry_days" {
   default     = 1
 }
 
+variable "force_delete" {
+  description = "Allow terraform destroy to delete repositories that still contain images. Default false; the disposable staging root sets true (ADR 0086)."
+  type        = bool
+  default     = false
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

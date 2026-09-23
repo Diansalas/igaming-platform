@@ -16,15 +16,21 @@ variable "az_count" {
 }
 
 variable "public_subnet_cidrs" {
-  description = "CIDR blocks for public subnets, one per AZ (ALB lives here)."
+  description = "CIDR blocks for public subnets, one per AZ (internet-facing load balancers, the optional NAT Gateway, and — in the staging root's public-IP task mode — the ECS tasks themselves)."
   type        = list(string)
   default     = ["10.20.0.0/20", "10.20.16.0/20"]
 }
 
 variable "private_subnet_cidrs" {
-  description = "CIDR blocks for private subnets, one per AZ (ECS tasks + RDS live here, no public IP/route)."
+  description = "CIDR blocks for private subnets, one per AZ (RDS and internal load balancers; ECS tasks too when NAT is enabled). No public IPs; an outbound internet route only when enable_nat_gateway = true."
   type        = list(string)
   default     = ["10.20.128.0/20", "10.20.144.0/20"]
+}
+
+variable "enable_nat_gateway" {
+  description = "Create a single shared NAT Gateway (plus its Elastic IP) and route the private subnets' outbound traffic through it. Default true (production-shaped). The staging root sets false — see ADR 0086."
+  type        = bool
+  default     = true
 }
 
 variable "tags" {

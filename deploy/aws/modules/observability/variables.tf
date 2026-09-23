@@ -7,25 +7,22 @@ variable "alb_arn_suffix" {
 }
 
 variable "target_group_arn_suffixes" {
-  description = "map(service_name => arn_suffix), used for per-target-group unhealthy-host alarms."
+  description = "map(service_name => arn_suffix), used for per-target-group healthy/unhealthy-host alarms."
   type        = map(string)
 }
 
-variable "rds_resource_id" {
-  type = string
-}
+variable "rds_instance_identifier" {
+  description = "The RDS instance IDENTIFIER (e.g. \"igaming-staging-db\") — the DBInstanceIdentifier dimension AWS/RDS publishes CPUUtilization/FreeStorageSpace under. NOT the \"db-XXXX\" DbiResourceId."
+  type        = string
 
-variable "ecs_cluster_name" {
-  type = string
-}
-
-variable "ecs_services" {
-  description = "map(service_name => desired_count) — used for the running-task-count-below-desired alarm."
-  type        = map(number)
+  validation {
+    condition     = !can(regex("^db-[A-Z0-9]+$", var.rds_instance_identifier))
+    error_message = "rds_instance_identifier looks like a DbiResourceId (db-XXXX). Pass the instance identifier (aws_db_instance.identifier) instead — the AWS/RDS alarm metrics are published under DBInstanceIdentifier."
+  }
 }
 
 variable "alarm_email" {
-  description = "Optional email address subscribed to the SNS alarm topic. Staging does not require this to be set."
+  description = "Optional email address. When set, an SNS topic + email subscription are created and every alarm notifies it; when null (default), no SNS resources exist and alarms have no actions."
   type        = string
   default     = null
 }

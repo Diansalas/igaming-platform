@@ -1,173 +1,275 @@
 #!/usr/bin/env bash
-# Stage 9.3 staging deploy script.
+# Staging lifecycle script (Stage 9.4, ADR 0086). The narrated procedure —
+# including the one-time bootstrap, acceptance, teardown and cost notes —
+# is docs/runbooks/stage-9-4-staging-lifecycle-runbook.md; this script is
+# its scriptable form.
 #
-# This script documents/automates the exact sequence an operator runs
-# AFTER `terraform apply` has created the infrastructure (ECR repos, ECS
-# cluster/task definitions, RDS, Secrets Manager secrets, etc.). It does
-# NOT run `terraform apply` unattended without confirmation, and it does
-# NOT invent AWS credentials — it uses whatever AWS CLI credentials/
-# profile are already configured in the operator's own shell.
+# Commands (run from anywhere inside the repo):
+#   deploy.sh up                 create/update the whole environment and deploy HEAD
+#   deploy.sh scale <N>          set platform-api's desired count (2 = multi-replica test, then back to 1)
+#   deploy.sh migrate            re-run role-init then migrate (e.g. after a secret rotation)
+#   deploy.sh status             print URLs and service state (read-only)
+#   deploy.sh down               terraform destroy, then run verify-teardown.sh
 #
-# Kept deliberately simple and readable rather than bulletproof, per the
-# Stage 9.3 brief. Read docs/runbooks/stage-9-3-staging-deployment-runbook.md
-# for the full narrated procedure and troubleshooting; this script is the
-# condensed, scriptable version of the same steps.
+# Guarantees:
+# - Image identity is the FULL git commit SHA of a CLEAN checkout (ECR tags
+#   are immutable). A dirty working tree is refused — an image must be
+#   reproducible from a commit.
+# - Every `terraform apply`/`destroy` is interactive: this script never
+#   passes -auto-approve. Review each plan before typing "yes".
+# - It uses whatever AWS credentials the operator's shell already has; it
+#   never reads, writes or assumes a specific credential. Terraform's
+#   allowed_account_ids refuses any account other than 765578795051.
 #
-# Usage:
-#   cd deploy/aws/environments/staging
-#   terraform init            # first time only, or after adding a module
-#   terraform apply           # review the plan, then confirm
-#   ../../scripts/deploy.sh   # build+push images, run migration+role-init, roll services
-#
-# Required tools: terraform, docker, aws CLI (v2), jq.
-# Required env: AWS credentials for the confirmed staging account (e.g.
-# via `aws sso login` or exported AWS_PROFILE) — this script never reads
-# or assumes any specific credential variable itself.
+# Required tools: terraform (>= 1.11), docker (with buildx for
+# --platform), aws CLI v2, jq, git, curl.
+# Required file: deploy/aws/environments/staging/terraform.tfvars (git-
+# ignored) with at least staging_access_cidrs — see terraform.tfvars.example.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 TF_DIR="${REPO_ROOT}/deploy/aws/environments/staging"
-IMAGE_TAG="${IMAGE_TAG:-$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || echo latest)}"
+AWS_REGION="eu-central-1"
+# Fargate task definitions here run on the default X86_64 platform; build
+# for it explicitly so an ARM (e.g. Apple Silicon) workstation cannot
+# produce an image that fails with "exec format error" on Fargate.
+DOCKER_PLATFORM="linux/amd64"
+PLATFORM_API_DESIRED_COUNT="${PLATFORM_API_DESIRED_COUNT:-1}"
 
-echo "== Stage 9.3 staging deploy =="
-echo "Repo root:  ${REPO_ROOT}"
-echo "TF dir:     ${TF_DIR}"
-echo "Image tag:  ${IMAGE_TAG}"
-echo
+die() { echo "ERROR: $*" >&2; exit 1; }
+say() { echo; echo "-- $* --"; }
 
-for bin in terraform docker aws jq; do
-  command -v "${bin}" >/dev/null 2>&1 || { echo "ERROR: ${bin} is required but not on PATH" >&2; exit 1; }
-done
-
-pushd "${TF_DIR}" >/dev/null
-
-echo "-- Reading current Terraform outputs (infrastructure must already be applied) --"
-ECR_URLS_JSON=$(terraform output -json ecr_repository_urls)
-CLUSTER_NAME=$(terraform output -raw ecs_cluster_name)
-MIGRATE_TASK_DEF=$(terraform output -raw ecs_migrate_task_definition_arn)
-ROLE_INIT_TASK_DEF=$(terraform output -raw ecs_role_init_task_definition_arn)
-PRIVATE_SUBNETS_JSON=$(terraform output -json private_subnet_ids)
-ECS_SG=$(terraform output -raw ecs_security_group_id)
-AWS_REGION=$(terraform output -raw aws_region 2>/dev/null || echo "")
-if [[ -z "${AWS_REGION}" ]]; then
-  AWS_REGION=$(aws configure get region)
-fi
-# Default the frontends' build-time API base URL to whatever this
-# deployment's own api_url output resolves to (the real HTTPS hostname if
-# a domain was supplied, otherwise the plain-HTTP ALB DNS name — see the
-# runbook's §5 on why the no-domain case is a smoke-test-only fallback).
-# Override VITE_API_BASE_URL_B2C/VITE_API_BASE_URL_BACKOFFICE explicitly
-# if you need something different.
-API_URL=$(terraform output -raw api_url)
-
-PLATFORM_API_REPO=$(echo "${ECR_URLS_JSON}" | jq -r '.["platform-api"]')
-B2C_REPO=$(echo "${ECR_URLS_JSON}" | jq -r '.["b2c"]')
-BACKOFFICE_REPO=$(echo "${ECR_URLS_JSON}" | jq -r '.["backoffice"]')
-
-REGISTRY_HOST=$(echo "${PLATFORM_API_REPO}" | cut -d/ -f1)
-
-popd >/dev/null
-
-echo "-- Logging into ECR (${REGISTRY_HOST}) --"
-aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${REGISTRY_HOST}"
-
-echo "-- Building and pushing platform-api --"
-docker build -f "${REPO_ROOT}/deploy/docker/platform-api.Dockerfile" \
-  -t "${PLATFORM_API_REPO}:${IMAGE_TAG}" "${REPO_ROOT}"
-docker push "${PLATFORM_API_REPO}:${IMAGE_TAG}"
-
-# b2c/backoffice share one parameterized Dockerfile (deploy/docker/
-# frontend.Dockerfile, APP_DIR selects which app to build) — see
-# deploy/docker/README.md. VITE_* build args are baked into the static
-# bundle at build time (Vite has no runtime env mechanism); override any
-# of the *_B2C env vars below before running this script if the defaults
-# aren't right for your deployment. VITE_BRAND_SLUG is NOT cosmetic —
-# b2c/src/config/brand.ts throws at browser startup in a production build
-# if it's unset, to stop visitors silently registering against the wrong
-# tenant; "demo-casino" matches this repo's seeded demo tenant.
-echo "-- Building and pushing b2c --"
-docker build -f "${REPO_ROOT}/deploy/docker/frontend.Dockerfile" \
-  --build-arg APP_DIR=b2c \
-  --build-arg "VITE_API_BASE_URL=${VITE_API_BASE_URL_B2C:-$API_URL}" \
-  --build-arg "VITE_BRAND_SLUG=${VITE_BRAND_SLUG:-demo-casino}" \
-  --build-arg "VITE_BRAND_DISPLAY_NAME=${VITE_BRAND_DISPLAY_NAME:-Demo Casino}" \
-  --build-arg "VITE_BRAND_PRIMARY_COLOR=${VITE_BRAND_PRIMARY_COLOR:-#2563eb}" \
-  --build-arg "VITE_BRAND_PRIMARY_COLOR_HOVER=${VITE_BRAND_PRIMARY_COLOR_HOVER:-#1d4ed8}" \
-  --build-arg "VITE_BRAND_DEFAULT_ASSET=${VITE_BRAND_DEFAULT_ASSET:-USD}" \
-  -t "${B2C_REPO}:${IMAGE_TAG}" "${REPO_ROOT}"
-docker push "${B2C_REPO}:${IMAGE_TAG}"
-
-echo "-- Building and pushing backoffice --"
-docker build -f "${REPO_ROOT}/deploy/docker/frontend.Dockerfile" \
-  --build-arg APP_DIR=backoffice \
-  --build-arg "VITE_API_BASE_URL=${VITE_API_BASE_URL_BACKOFFICE:-$API_URL}" \
-  -t "${BACKOFFICE_REPO}:${IMAGE_TAG}" "${REPO_ROOT}"
-docker push "${BACKOFFICE_REPO}:${IMAGE_TAG}"
-
-echo
-echo "-- Applying Terraform with image_tag=${IMAGE_TAG} (updates ECS task definitions) --"
-pushd "${TF_DIR}" >/dev/null
-terraform apply -var "image_tag=${IMAGE_TAG}"
-
-# Re-read task def ARNs: `terraform apply` above creates new task
-# definition revisions for platform-api/b2c/backoffice, and the migrate/
-# role-init task definitions may also have moved if unrelated inputs
-# changed.
-MIGRATE_TASK_DEF=$(terraform output -raw ecs_migrate_task_definition_arn)
-ROLE_INIT_TASK_DEF=$(terraform output -raw ecs_role_init_task_definition_arn)
-popd >/dev/null
-
-NETWORK_CONFIG=$(jq -n \
-  --argjson subnets "${PRIVATE_SUBNETS_JSON}" \
-  --arg sg "${ECS_SG}" \
-  '{awsvpcConfiguration: {subnets: $subnets, securityGroups: [$sg], assignPublicIp: "DISABLED"}}')
-
-run_one_off_task() {
-  local task_def="$1"
-  local label="$2"
-  echo "-- Running one-off task: ${label} (${task_def}) --"
-  local task_arn
-  task_arn=$(aws ecs run-task \
-    --cluster "${CLUSTER_NAME}" \
-    --task-definition "${task_def}" \
-    --launch-type FARGATE \
-    --network-configuration "${NETWORK_CONFIG}" \
-    --query 'tasks[0].taskArn' --output text)
-  echo "   task ARN: ${task_arn}"
-  echo "   waiting for it to stop..."
-  aws ecs wait tasks-stopped --cluster "${CLUSTER_NAME}" --tasks "${task_arn}"
-  local exit_code
-  exit_code=$(aws ecs describe-tasks --cluster "${CLUSTER_NAME}" --tasks "${task_arn}" \
-    --query 'tasks[0].containers[0].exitCode' --output text)
-  if [[ "${exit_code}" != "0" ]]; then
-    echo "ERROR: ${label} task exited with code ${exit_code}. Check CloudWatch Logs (log group for '${label}') before proceeding." >&2
-    exit 1
-  fi
-  echo "   ${label} completed successfully (exit code 0)."
+require_tools() {
+  local bin
+  for bin in "$@"; do
+    command -v "${bin}" >/dev/null 2>&1 || die "${bin} is required but not on PATH"
+  done
 }
 
-# ORDER MATTERS — see deploy/aws/modules/ecs's header comment and the
-# runbook: role-init MUST complete before migrate, and migrate's own
-# command chains the authoritative schema_migrations write-revoke after
-# `cmd/migrate up` in the same task invocation.
-run_one_off_task "${ROLE_INIT_TASK_DEF}" "role-init"
-run_one_off_task "${MIGRATE_TASK_DEF}" "migrate"
+resolve_image_tag() {
+  [[ -z "$(git -C "${REPO_ROOT}" status --porcelain)" ]] \
+    || die "working tree is not clean — commit or stash first (images must be reproducible from a commit)"
+  IMAGE_TAG="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+  [[ "${IMAGE_TAG}" =~ ^[0-9a-f]{40}$ ]] || die "could not resolve a full commit SHA for HEAD"
+}
 
-echo
-echo "-- Forcing a new deployment of the 3 long-running services --"
-pushd "${TF_DIR}" >/dev/null
-SERVICE_NAMES_JSON=$(terraform output -json ecs_service_names)
-popd >/dev/null
+# Current image tag of the deployed environment (for commands that must not
+# change the image, e.g. scale). Falls back to HEAD.
+deployed_image_tag() {
+  (cd "${TF_DIR}" && terraform output -raw image_tag 2>/dev/null) || true
+}
 
-for key in platform_api b2c backoffice; do
-  svc_name=$(echo "${SERVICE_NAMES_JSON}" | jq -r --arg k "${key}" '.[$k]')
-  aws ecs update-service --cluster "${CLUSTER_NAME}" --service "${svc_name}" \
-    --force-new-deployment >/dev/null
-  echo "   ${svc_name}: new deployment requested"
-done
+require_tfvars() {
+  [[ -f "${TF_DIR}/terraform.tfvars" ]] \
+    || die "${TF_DIR}/terraform.tfvars not found — copy terraform.tfvars.example and set staging_access_cidrs"
+}
 
-echo
-echo "Done. Check the staging URL outputs (terraform output staging_url / backoffice_url / api_url)"
-echo "and confirm /healthz and /readyz both return 200 before considering this deploy live."
+tf() { (cd "${TF_DIR}" && terraform "$@"); }
+
+tf_apply() {
+  # Interactive on purpose (no -auto-approve).
+  tf apply -var "image_tag=${IMAGE_TAG}" -var "platform_api_desired_count=${PLATFORM_API_DESIRED_COUNT}" "$@"
+}
+
+tf_out() { tf output -raw "$1"; }
+
+ecr_login() {
+  local registry="$1"
+  aws ecr get-login-password --region "${AWS_REGION}" | docker login --username AWS --password-stdin "${registry}"
+}
+
+image_exists() {
+  local repo_url="$1" tag="$2"
+  local repo_name="${repo_url#*/}"
+  aws ecr describe-images --region "${AWS_REGION}" --repository-name "${repo_name}" \
+    --image-ids "imageTag=${tag}" >/dev/null 2>&1
+}
+
+# build_and_push <repo_url> <docker build args...>
+build_and_push() {
+  local repo_url="$1"; shift
+  if image_exists "${repo_url}" "${IMAGE_TAG}"; then
+    echo "   ${repo_url}:${IMAGE_TAG} already exists (immutable tag) — skipping build"
+    return 0
+  fi
+  docker build --platform "${DOCKER_PLATFORM}" -t "${repo_url}:${IMAGE_TAG}" "$@" "${REPO_ROOT}"
+  docker push "${repo_url}:${IMAGE_TAG}"
+}
+
+run_one_off_task() {
+  local task_def="$1" label="$2"
+  local cluster subnets sg assign network_config task_arn exit_code
+  cluster="$(tf_out ecs_cluster_name)"
+  subnets="$(tf output -json ecs_task_subnet_ids)"
+  sg="$(tf_out ecs_security_group_id)"
+  assign="$(tf_out ecs_assign_public_ip)"
+  network_config="$(jq -n --argjson subnets "${subnets}" --arg sg "${sg}" --arg assign "${assign}" \
+    '{awsvpcConfiguration: {subnets: $subnets, securityGroups: [$sg], assignPublicIp: $assign}}')"
+
+  say "one-off task: ${label}"
+  task_arn="$(aws ecs run-task --region "${AWS_REGION}" --cluster "${cluster}" \
+    --task-definition "${task_def}" --launch-type FARGATE \
+    --network-configuration "${network_config}" \
+    --query 'tasks[0].taskArn' --output text)"
+  [[ -n "${task_arn}" && "${task_arn}" != "None" ]] || die "${label}: run-task returned no task"
+  echo "   task ${task_arn} — waiting for it to stop..."
+  aws ecs wait tasks-stopped --region "${AWS_REGION}" --cluster "${cluster}" --tasks "${task_arn}"
+  exit_code="$(aws ecs describe-tasks --region "${AWS_REGION}" --cluster "${cluster}" --tasks "${task_arn}" \
+    --query 'tasks[0].containers[0].exitCode' --output text)"
+  [[ "${exit_code}" == "0" ]] \
+    || die "${label} exited with code ${exit_code} — see CloudWatch log group /ecs/igaming-staging/${label}"
+  echo "   ${label} completed (exit 0)"
+}
+
+run_migrations() {
+  # ORDER MATTERS (modules/ecs header, ADR 0084): role-init before migrate;
+  # migrate chains the schema_migrations write-revoke itself.
+  run_one_off_task "$(tf_out ecs_role_init_task_definition_arn)" "role-init"
+  run_one_off_task "$(tf_out ecs_migrate_task_definition_arn)" "migrate"
+}
+
+roll_services() {
+  local cluster svc
+  cluster="$(tf_out ecs_cluster_name)"
+  say "forcing a new deployment of the 3 services and waiting until stable"
+  for svc in $(tf output -json ecs_service_names | jq -r '.[]'); do
+    aws ecs update-service --region "${AWS_REGION}" --cluster "${cluster}" --service "${svc}" \
+      --force-new-deployment >/dev/null
+    echo "   ${svc}: new deployment requested"
+  done
+  # shellcheck disable=SC2046
+  aws ecs wait services-stable --region "${AWS_REGION}" --cluster "${cluster}" \
+    --services $(tf output -json ecs_service_names | jq -r '.[]')
+  echo "   all services stable"
+}
+
+smoke_check() {
+  local api
+  api="$(tf_out api_url)"
+  say "smoke check via CloudFront (requires this machine's IP to be in staging_access_cidrs)"
+  curl -fsS "${api}/healthz" >/dev/null && echo "   ${api}/healthz OK" || echo "   WARNING: ${api}/healthz failed"
+  curl -fsS "${api}/readyz" >/dev/null && echo "   ${api}/readyz OK" || echo "   WARNING: ${api}/readyz failed"
+}
+
+cmd_up() {
+  require_tools terraform docker aws jq git curl
+  require_tfvars
+  resolve_image_tag
+  echo "== staging up: image ${IMAGE_TAG}, platform-api replicas ${PLATFORM_API_DESIRED_COUNT} =="
+
+  tf init -input=false
+
+  # Phase 1: ECR repositories only, so the platform-api image can be
+  # pushed before the ECS services that reference it exist.
+  say "phase 1/5: ECR repositories (targeted apply)"
+  tf_apply -target=module.ecr
+
+  local api_repo b2c_repo backoffice_repo registry
+  api_repo="$(tf output -json ecr_repository_urls | jq -r '.["platform-api"]')"
+  b2c_repo="$(tf output -json ecr_repository_urls | jq -r '.b2c')"
+  backoffice_repo="$(tf output -json ecr_repository_urls | jq -r '.backoffice')"
+  registry="${api_repo%%/*}"
+  ecr_login "${registry}"
+
+  say "phase 2/5: platform-api image"
+  build_and_push "${api_repo}" -f "${REPO_ROOT}/deploy/docker/platform-api.Dockerfile"
+
+  # Phase 3: everything else. CloudFront distributions/VPC origin take
+  # several minutes. The frontend services start pulling images that do
+  # not exist yet; ECS keeps retrying until phase 4 pushes them.
+  say "phase 3/5: full environment (full apply)"
+  tf_apply
+
+  # Phase 4: frontends. Vite bakes the API base URL in at build time, so
+  # they can only be built once the API's CloudFront URL exists. Their
+  # repositories are destroyed with the environment (force_delete), so an
+  # image's baked-in URL always matches the environment it runs in.
+  local api_url
+  api_url="$(tf_out api_url)"
+  say "phase 4/5: frontend images (VITE_API_BASE_URL=${api_url})"
+  # VITE_BRAND_SLUG is NOT cosmetic — b2c/src/config/brand.ts throws at
+  # startup in a production build if unset; "demo-casino" is this repo's
+  # seeded demo tenant (see deploy/docker/README.md).
+  build_and_push "${b2c_repo}" -f "${REPO_ROOT}/deploy/docker/frontend.Dockerfile" \
+    --build-arg APP_DIR=b2c \
+    --build-arg "VITE_API_BASE_URL=${api_url}" \
+    --build-arg "VITE_BRAND_SLUG=${VITE_BRAND_SLUG:-demo-casino}" \
+    --build-arg "VITE_BRAND_DISPLAY_NAME=${VITE_BRAND_DISPLAY_NAME:-Demo Casino}" \
+    --build-arg "VITE_BRAND_PRIMARY_COLOR=${VITE_BRAND_PRIMARY_COLOR:-#2563eb}" \
+    --build-arg "VITE_BRAND_PRIMARY_COLOR_HOVER=${VITE_BRAND_PRIMARY_COLOR_HOVER:-#1d4ed8}" \
+    --build-arg "VITE_BRAND_DEFAULT_ASSET=${VITE_BRAND_DEFAULT_ASSET:-USD}"
+  build_and_push "${backoffice_repo}" -f "${REPO_ROOT}/deploy/docker/frontend.Dockerfile" \
+    --build-arg APP_DIR=backoffice \
+    --build-arg "VITE_API_BASE_URL=${api_url}"
+
+  say "phase 5/5: database roles + migrations, then roll services"
+  run_migrations
+  roll_services
+  smoke_check
+
+  cmd_status
+}
+
+cmd_scale() {
+  local n="${1:-}"
+  [[ "${n}" =~ ^[1-4]$ ]] || die "usage: deploy.sh scale <1-4>"
+  require_tools terraform aws jq
+  require_tfvars
+  IMAGE_TAG="$(deployed_image_tag)"
+  [[ "${IMAGE_TAG}" =~ ^[0-9a-f]{40}$ ]] || die "no deployed image_tag in state — run 'deploy.sh up' first"
+  PLATFORM_API_DESIRED_COUNT="${n}"
+  say "platform-api desired count -> ${n} (image unchanged: ${IMAGE_TAG})"
+  tf_apply
+  local cluster
+  cluster="$(tf_out ecs_cluster_name)"
+  aws ecs wait services-stable --region "${AWS_REGION}" --cluster "${cluster}" \
+    --services "$(tf output -json ecs_service_names | jq -r '.platform_api')"
+  echo "   platform-api stable at ${n} task(s)"
+}
+
+cmd_migrate() {
+  require_tools terraform aws jq
+  run_migrations
+}
+
+cmd_status() {
+  require_tools terraform aws jq
+  say "status"
+  echo "   image_tag:      $(tf_out image_tag)"
+  echo "   B2C:            $(tf_out staging_url)"
+  echo "   Back Office:    $(tf_out backoffice_url)"
+  echo "   API:            $(tf_out api_url)"
+  local cluster
+  cluster="$(tf_out ecs_cluster_name)"
+  # shellcheck disable=SC2046
+  aws ecs describe-services --region "${AWS_REGION}" --cluster "${cluster}" \
+    --services $(tf output -json ecs_service_names | jq -r '.[]') \
+    --query 'services[].{service:serviceName,desired:desiredCount,running:runningCount,pending:pendingCount}' \
+    --output table
+}
+
+cmd_down() {
+  require_tools terraform aws jq
+  require_tfvars
+  IMAGE_TAG="$(deployed_image_tag)"
+  [[ "${IMAGE_TAG}" =~ ^[0-9a-f]{40}$ ]] || IMAGE_TAG="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+  say "terraform destroy (interactive — review the plan, then type yes)"
+  # CloudFront distributions are disabled then deleted, and the VPC origin
+  # must finish deleting before its subnets can go: expect ~15-30 minutes.
+  tf destroy -var "image_tag=${IMAGE_TAG}"
+  "${SCRIPT_DIR}/verify-teardown.sh"
+}
+
+case "${1:-}" in
+  up) cmd_up ;;
+  scale) shift; cmd_scale "$@" ;;
+  migrate) cmd_migrate ;;
+  status) cmd_status ;;
+  down) cmd_down ;;
+  *)
+    sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    exit 2
+    ;;
+esac

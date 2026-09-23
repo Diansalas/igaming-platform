@@ -27,6 +27,23 @@
 # execution role's policy be scoped to these exact log groups without
 # creating a module dependency cycle between iam and ecs (iam must exist
 # BEFORE ecs, since ecs task definitions reference iam's role ARNs).
+#
+# DATABASE CREDENTIALS (ADR 0086): DATABASE_URL is a plain, NON-secret
+# environment variable naming host/port/database/user only — it carries no
+# password. The password is injected separately from Secrets Manager as
+# PGPASSWORD, which both pgx (internal/db, via pgconn's standard PG*
+# environment fallback) and psql read whenever the connection string
+# carries no password. This is what lets Terraform avoid composing (and so
+# storing in state) any connection string containing a credential, and it
+# works with the RDS-managed master password, whose generated characters
+# would otherwise need URL-encoding. platform-api uses the runtime
+# credential; migrate/role-init use the RDS master credential, through a
+# separate execution role (modules/iam) that the services do not have.
+#
+# CAPACITY (ADR 0086): each service takes an explicit capacity provider
+# strategy. The module default is on-demand FARGATE only (production-
+# shaped); the staging root opts b2c/backoffice into FARGATE_SPOT and gives
+# platform-api an on-demand base task with Spot for any extra replicas.
 
 locals {
   services = {
@@ -46,12 +63,22 @@ resource "aws_cloudwatch_log_group" "this" {
   tags = merge(var.tags, { Name = "${var.name_prefix}-${each.key}-logs" })
 }
 
+locals {
+  # Non-secret connection strings: no password component, ever (see file
+  # header). sslmode=require matches the database module's rds.force_ssl=1.
+  database_url_runtime   = "postgres://${var.db_runtime_username}@${var.database_host}:${var.database_port}/${var.database_name}?sslmode=require"
+  database_url_migration = "postgres://${var.db_master_username}@${var.database_host}:${var.database_port}/${var.database_name}?sslmode=require"
+}
+
 resource "aws_ecs_cluster" "this" {
   name = "${var.name_prefix}-cluster"
 
+  # Container Insights is billed as custom CloudWatch metrics. The module
+  # default keeps it on (production-shaped); the minimal staging root turns
+  # it off — nothing in staging depends on it (ADR 0086).
   setting {
     name  = "containerInsights"
-    value = "enabled"
+    value = var.container_insights_enabled ? "enabled" : "disabled"
   }
 
   tags = merge(var.tags, { Name = "${var.name_prefix}-cluster" })
@@ -75,7 +102,7 @@ resource "aws_ecs_task_definition" "platform_api" {
   network_mode             = "awsvpc"
   cpu                      = var.platform_api_cpu
   memory                   = var.platform_api_memory
-  execution_role_arn       = var.execution_role_arn
+  execution_role_arn       = var.service_execution_role_arn
   task_role_arn            = var.task_role_arn
 
   container_definitions = jsonencode([
@@ -88,6 +115,7 @@ resource "aws_ecs_task_definition" "platform_api" {
       ]
       environment = [
         { name = "APP_ENV", value = var.app_environment },
+        { name = "DATABASE_URL", value = local.database_url_runtime },
         { name = "HTTP_ADDR", value = ":${var.container_port}" },
         { name = "TRUSTED_PROXY_COUNT", value = tostring(var.trusted_proxy_count) },
         { name = "CORS_ALLOWED_ORIGINS", value = var.cors_allowed_origins },
@@ -100,7 +128,7 @@ resource "aws_ecs_task_definition" "platform_api" {
         { name = "TEST_SUPPORT_ENDPOINTS_ENABLED", value = tostring(var.test_support_endpoints_enabled) },
       ]
       secrets = [
-        { name = "DATABASE_URL", valueFrom = var.database_url_runtime_secret_arn },
+        { name = "PGPASSWORD", valueFrom = "${var.db_runtime_secret_arn}:password::" },
         { name = "JWT_SIGNING_SECRET", valueFrom = var.jwt_signing_secret_arn },
       ]
       # Liveness only (process is up) — never /readyz here. Probing
@@ -133,12 +161,20 @@ resource "aws_ecs_service" "platform_api" {
   cluster         = aws_ecs_cluster.this.id
   task_definition = aws_ecs_task_definition.platform_api.arn
   desired_count   = var.platform_api_desired_count
-  launch_type     = "FARGATE"
+
+  dynamic "capacity_provider_strategy" {
+    for_each = var.platform_api_capacity_provider_strategy
+    content {
+      capacity_provider = capacity_provider_strategy.value.capacity_provider
+      base              = capacity_provider_strategy.value.base
+      weight            = capacity_provider_strategy.value.weight
+    }
+  }
 
   network_configuration {
-    subnets          = var.private_subnet_ids
+    subnets          = var.task_subnet_ids
     security_groups  = [var.ecs_security_group_id]
-    assign_public_ip = false
+    assign_public_ip = var.assign_public_ip
   }
 
   load_balancer {
@@ -162,7 +198,7 @@ resource "aws_ecs_task_definition" "b2c" {
   network_mode             = "awsvpc"
   cpu                      = var.b2c_cpu
   memory                   = var.b2c_memory
-  execution_role_arn       = var.execution_role_arn
+  execution_role_arn       = var.service_execution_role_arn
   task_role_arn            = var.task_role_arn
 
   container_definitions = jsonencode([
@@ -199,12 +235,20 @@ resource "aws_ecs_service" "b2c" {
   cluster         = aws_ecs_cluster.this.id
   task_definition = aws_ecs_task_definition.b2c.arn
   desired_count   = var.b2c_desired_count
-  launch_type     = "FARGATE"
+
+  dynamic "capacity_provider_strategy" {
+    for_each = var.b2c_capacity_provider_strategy
+    content {
+      capacity_provider = capacity_provider_strategy.value.capacity_provider
+      base              = capacity_provider_strategy.value.base
+      weight            = capacity_provider_strategy.value.weight
+    }
+  }
 
   network_configuration {
-    subnets          = var.private_subnet_ids
+    subnets          = var.task_subnet_ids
     security_groups  = [var.ecs_security_group_id]
-    assign_public_ip = false
+    assign_public_ip = var.assign_public_ip
   }
 
   load_balancer {
@@ -228,7 +272,7 @@ resource "aws_ecs_task_definition" "backoffice" {
   network_mode             = "awsvpc"
   cpu                      = var.backoffice_cpu
   memory                   = var.backoffice_memory
-  execution_role_arn       = var.execution_role_arn
+  execution_role_arn       = var.service_execution_role_arn
   task_role_arn            = var.task_role_arn
 
   container_definitions = jsonencode([
@@ -265,12 +309,20 @@ resource "aws_ecs_service" "backoffice" {
   cluster         = aws_ecs_cluster.this.id
   task_definition = aws_ecs_task_definition.backoffice.arn
   desired_count   = var.backoffice_desired_count
-  launch_type     = "FARGATE"
+
+  dynamic "capacity_provider_strategy" {
+    for_each = var.backoffice_capacity_provider_strategy
+    content {
+      capacity_provider = capacity_provider_strategy.value.capacity_provider
+      base              = capacity_provider_strategy.value.base
+      weight            = capacity_provider_strategy.value.weight
+    }
+  }
 
   network_configuration {
-    subnets          = var.private_subnet_ids
+    subnets          = var.task_subnet_ids
     security_groups  = [var.ecs_security_group_id]
-    assign_public_ip = false
+    assign_public_ip = var.assign_public_ip
   }
 
   load_balancer {
@@ -300,7 +352,7 @@ resource "aws_ecs_task_definition" "migrate" {
   network_mode             = "awsvpc"
   cpu                      = var.one_off_task_cpu
   memory                   = var.one_off_task_memory
-  execution_role_arn       = var.execution_role_arn
+  execution_role_arn       = var.one_off_execution_role_arn
   task_role_arn            = var.task_role_arn
 
   container_definitions = jsonencode([
@@ -312,8 +364,11 @@ resource "aws_ecs_task_definition" "migrate" {
         "sh", "-c",
         "/app/migrate up && psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -c \"REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM igaming_runtime;\""
       ]
+      environment = [
+        { name = "DATABASE_URL", value = local.database_url_migration },
+      ]
       secrets = [
-        { name = "DATABASE_URL", valueFrom = var.database_url_migration_secret_arn },
+        { name = "PGPASSWORD", valueFrom = "${var.db_master_secret_arn}:password::" },
       ]
       logConfiguration = {
         logDriver = "awslogs"
@@ -333,8 +388,9 @@ resource "aws_ecs_task_definition" "migrate" {
 #
 # Runs BEFORE the migrate task in the deployment sequence (see this file's
 # header comment). Connects as the master/"igaming" role
-# (DATABASE_URL secret) and creates/updates igaming_runtime using the
-# password ECS injects from Secrets Manager into IGAMING_RUNTIME_PASSWORD
+# (DATABASE_URL + PGPASSWORD from the RDS-managed master secret) and
+# creates/updates igaming_runtime using the password ECS injects from
+# Secrets Manager into IGAMING_RUNTIME_PASSWORD
 # — never a CLI argument, never hardcoded (deploy/aws/sql/init-runtime-role.rds.sql).
 resource "aws_ecs_task_definition" "role_init" {
   family                   = "${var.name_prefix}-role-init"
@@ -342,7 +398,7 @@ resource "aws_ecs_task_definition" "role_init" {
   network_mode             = "awsvpc"
   cpu                      = var.one_off_task_cpu
   memory                   = var.one_off_task_memory
-  execution_role_arn       = var.execution_role_arn
+  execution_role_arn       = var.one_off_execution_role_arn
   task_role_arn            = var.task_role_arn
 
   container_definitions = jsonencode([
@@ -354,8 +410,11 @@ resource "aws_ecs_task_definition" "role_init" {
         "sh", "-c",
         "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f /app/sql/init-runtime-role.rds.sql"
       ]
+      environment = [
+        { name = "DATABASE_URL", value = local.database_url_migration },
+      ]
       secrets = [
-        { name = "DATABASE_URL", valueFrom = var.database_url_migration_secret_arn },
+        { name = "PGPASSWORD", valueFrom = "${var.db_master_secret_arn}:password::" },
         { name = "IGAMING_RUNTIME_PASSWORD", valueFrom = "${var.db_runtime_secret_arn}:password::" },
       ]
       logConfiguration = {

@@ -16,10 +16,20 @@ output "identifier" {
 }
 
 output "resource_id" {
-  description = "RDS resource ID, used for CloudWatch alarm dimensions."
+  description = "RDS resource ID (DbiResourceId). NOT a valid dimension for the AWS/RDS CPUUtilization/FreeStorageSpace metrics — alarms must use `identifier` (DBInstanceIdentifier) instead."
   value       = aws_db_instance.this.resource_id
 }
 
+output "master_username" {
+  value = aws_db_instance.this.username
+}
+
+output "master_user_secret_arn" {
+  description = "ARN of the RDS-managed Secrets Manager secret holding the master credentials (JSON keys \"username\" and \"password\"). The value itself never passes through Terraform."
+  value       = aws_db_instance.this.master_user_secret[0].secret_arn
+}
+
 output "kms_key_arn" {
-  value = aws_kms_key.rds.arn
+  description = "Null when create_kms_key = false (AWS-managed aws/rds key)."
+  value       = one(aws_kms_key.rds[*].arn)
 }

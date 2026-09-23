@@ -1,0 +1,230 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "StateBucketList",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation",
+        "s3:GetBucketVersioning"
+      ],
+      "Resource": "arn:aws:s3:::igaming-platform-staging-tfstate-765578795051"
+    },
+    {
+      "Sid": "StateObject",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::igaming-platform-staging-tfstate-765578795051/staging/terraform.tfstate"
+    },
+    {
+      "Sid": "StateLockFile",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject"
+      ],
+      "Resource": "arn:aws:s3:::igaming-platform-staging-tfstate-765578795051/staging/terraform.tfstate.tflock"
+    },
+    {
+      "Sid": "RdsManagedMasterSecret",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:TagResource",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:RotateSecret",
+        "secretsmanager:DeleteSecret"
+      ],
+      "Resource": "arn:aws:secretsmanager:eu-central-1:765578795051:secret:rds!*"
+    },
+    {
+      "Sid": "AppSecrets",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:CreateSecret",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:GetResourcePolicy",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:UpdateSecret",
+        "secretsmanager:TagResource",
+        "secretsmanager:UntagResource",
+        "secretsmanager:ListSecretVersionIds"
+      ],
+      "Resource": "arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/*"
+    },
+    {
+      "Sid": "SecretsList",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:ListSecrets"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "KmsViaManagedServices",
+      "Effect": "Allow",
+      "Action": [
+        "kms:DescribeKey",
+        "kms:CreateGrant",
+        "kms:Decrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": [
+            "rds.eu-central-1.amazonaws.com",
+            "secretsmanager.eu-central-1.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "EcrAuth",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetAuthorizationToken"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EcrRepositories",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:CreateRepository",
+        "ecr:DeleteRepository",
+        "ecr:DescribeRepositories",
+        "ecr:DescribeImages",
+        "ecr:ListImages",
+        "ecr:BatchDeleteImage",
+        "ecr:PutLifecyclePolicy",
+        "ecr:GetLifecyclePolicy",
+        "ecr:DeleteLifecyclePolicy",
+        "ecr:PutImageScanningConfiguration",
+        "ecr:PutImageTagMutability",
+        "ecr:TagResource",
+        "ecr:UntagResource",
+        "ecr:ListTagsForResource",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:InitiateLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload",
+        "ecr:PutImage",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer"
+      ],
+      "Resource": "arn:aws:ecr:eu-central-1:765578795051:repository/igaming-staging/*"
+    },
+    {
+      "Sid": "EcrDescribeAll",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:DescribeRepositories"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudFrontGlobal",
+      "Effect": "Allow",
+      "Action": [
+        "cloudfront:CreateDistribution",
+        "cloudfront:UpdateDistribution",
+        "cloudfront:DeleteDistribution",
+        "cloudfront:GetDistribution",
+        "cloudfront:GetDistributionConfig",
+        "cloudfront:ListDistributions",
+        "cloudfront:CreateVpcOrigin",
+        "cloudfront:UpdateVpcOrigin",
+        "cloudfront:DeleteVpcOrigin",
+        "cloudfront:GetVpcOrigin",
+        "cloudfront:ListVpcOrigins",
+        "cloudfront:CreateFunction",
+        "cloudfront:UpdateFunction",
+        "cloudfront:PublishFunction",
+        "cloudfront:DeleteFunction",
+        "cloudfront:DescribeFunction",
+        "cloudfront:GetFunction",
+        "cloudfront:ListFunctions",
+        "cloudfront:GetCachePolicy",
+        "cloudfront:ListCachePolicies",
+        "cloudfront:GetOriginRequestPolicy",
+        "cloudfront:ListOriginRequestPolicies",
+        "cloudfront:GetResponseHeadersPolicy",
+        "cloudfront:ListResponseHeadersPolicies",
+        "cloudfront:TagResource",
+        "cloudfront:UntagResource",
+        "cloudfront:ListTagsForResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IamStagingRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:UpdateRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:PutRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole"
+      ],
+      "Resource": "arn:aws:iam::765578795051:role/igaming-staging-*"
+    },
+    {
+      "Sid": "IamPassStagingRolesToEcsOnly",
+      "Effect": "Allow",
+      "Action": [
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::765578795051:role/igaming-staging-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "IamServiceLinkedRoles",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateServiceLinkedRole"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": [
+            "ecs.amazonaws.com",
+            "elasticloadbalancing.amazonaws.com",
+            "rds.amazonaws.com",
+            "vpcorigin.cloudfront.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "TeardownVerificationReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "tag:GetResources",
+        "iam:ListRoles",
+        "kms:ListAliases",
+        "s3:ListAllMyBuckets",
+        "budgets:ViewBudget"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

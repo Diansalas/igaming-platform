@@ -2,30 +2,37 @@ output "aws_region" {
   value = var.aws_region
 }
 
+output "image_tag" {
+  description = "The immutable image identity (full git SHA) this apply deployed."
+  value       = var.image_tag
+}
+
 output "staging_url" {
-  description = "The primary way to reach the b2c staging frontend. HTTPS custom domain if domain_name+route53_zone_id were supplied; otherwise the ALB's own DNS name over plain HTTP (see alb_dns_name_fallback_warning)."
-  value       = local.domain_configured ? "https://${local.app_hostname}" : "http://${module.alb.dns_name}"
+  description = "B2C player frontend (HTTPS, CloudFront default certificate, allowlisted viewers only)."
+  value       = module.edge.urls["b2c"]
 }
 
 output "backoffice_url" {
-  value = local.domain_configured ? "https://${local.admin_hostname}" : "http://${module.alb.dns_name}"
+  description = "Back Office frontend (HTTPS, allowlisted viewers only)."
+  value       = module.edge.urls["backoffice"]
 }
 
 output "api_url" {
-  value = local.domain_configured ? "https://${local.api_hostname}" : "http://${module.alb.dns_name}"
+  description = "platform-api base URL (HTTPS only, allowlisted viewers only). Baked into the frontend images at build time by deploy.sh."
+  value       = module.edge.urls["platform_api"]
+}
+
+output "cloudfront_distribution_ids" {
+  value = module.edge.distribution_ids
 }
 
 output "alb_dns_name" {
-  description = "Raw ALB DNS name. Always populated; use with a Host header override to reach a specific service when no domain is configured (see the runbook)."
+  description = "INTERNAL ALB DNS name — resolvable/reachable only from inside the VPC. Use the CloudFront URLs above from anywhere else."
   value       = module.alb.dns_name
 }
 
-output "alb_dns_name_fallback_warning" {
-  value = local.domain_configured ? "HTTPS is enabled via the supplied domain; this ALB DNS name still works for direct/debug access with a Host header." : "NON-HTTPS TEMPORARY FALLBACK: no domain_name/route53_zone_id was supplied, so this deployment serves plain HTTP only on the ALB's own *.elb.amazonaws.com name. Host-based routing to b2c/backoffice requires a Host header override (curl -H \"Host: ${local.app_hostname}\" ...) since there is no real DNS entry for that hostname. Supply domain_name + route53_zone_id for a real HTTPS staging URL."
-}
-
 output "rds_endpoint" {
-  description = "RDS hostname (no port, no credentials)."
+  description = "RDS hostname (no port, no credentials). Private: reachable only from the ECS tasks security group."
   value       = module.database.address
 }
 
@@ -53,29 +60,34 @@ output "ecs_role_init_task_definition_arn" {
   value = module.ecs.task_definition_arns["role_init"]
 }
 
+output "ecs_task_subnet_ids" {
+  description = "Subnets deploy.sh runs the one-off tasks in (same as the services)."
+  value       = var.ecs_public_ip_mode ? module.network.public_subnet_ids : module.network.private_subnet_ids
+}
+
+output "ecs_assign_public_ip" {
+  description = "\"ENABLED\"/\"DISABLED\" for aws ecs run-task's awsvpcConfiguration.assignPublicIp."
+  value       = var.ecs_public_ip_mode ? "ENABLED" : "DISABLED"
+}
+
+output "ecs_security_group_id" {
+  value = module.security.ecs_security_group_id
+}
+
 output "log_group_names" {
   value = local.log_group_names
 }
 
 output "secret_arns" {
-  description = "Secrets Manager ARNs only — never the underlying values."
+  description = "Secrets Manager ARNs only — never the underlying values (which are not in Terraform state either; ADR 0086)."
   value = {
-    db_master              = module.secrets.db_master_secret_arn
-    db_runtime             = module.secrets.db_runtime_secret_arn
-    jwt_signing            = module.secrets.jwt_signing_secret_arn
-    database_url_runtime   = aws_secretsmanager_secret.database_url_runtime.arn
-    database_url_migration = aws_secretsmanager_secret.database_url_migration.arn
+    db_master_rds_managed = module.database.master_user_secret_arn
+    db_runtime            = module.secrets.db_runtime_secret_arn
+    jwt_signing           = module.secrets.jwt_signing_secret_arn
   }
 }
 
 output "sns_alerts_topic_arn" {
-  value = module.observability.sns_topic_arn
-}
-
-output "private_subnet_ids" {
-  value = module.network.private_subnet_ids
-}
-
-output "ecs_security_group_id" {
-  value = module.security.ecs_security_group_id
+  description = "Null unless alarm_email is set."
+  value       = module.observability.sns_topic_arn
 }

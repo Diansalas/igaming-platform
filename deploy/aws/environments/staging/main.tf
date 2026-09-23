@@ -1,53 +1,65 @@
-# Stage 9.3 staging deployment — root module wiring every deploy/aws/modules/*
-# module together. See docs/decisions/0084-stage-9-3-staging-aws-architecture.md
-# (ADR number may differ — check docs/decisions/ for the actual filename)
-# and docs/runbooks/stage-9-3-staging-deployment-runbook.md for the
-# operator-facing procedure. Nothing in this file has been applied against
-# a real AWS account — see the runbook's prerequisites.
+# Staging environment — root module wiring every deploy/aws/modules/*
+# module together. Architecture: ADR 0084 (Stage 9.3), amended by ADR 0086
+# (Stage 9.4 hardening + cost optimization). Operator procedure:
+# docs/runbooks/stage-9-4-staging-lifecycle-runbook.md.
+#
+# Shape (ADR 0086):
+#
+#   browser/acceptance suite (allowlisted IPv4 only)
+#     --HTTPS--> 3 CloudFront distributions (*.cloudfront.net, IP allowlist)
+#     --VPC origin--> internal ALB (private subnets, header routing)
+#     --> ECS Fargate tasks (public subnets + public IP, ingress ALB-only;
+#         no NAT Gateway)
+#     --> RDS PostgreSQL 16.15 (private subnets, never public)
+#
+# This is an EPHEMERAL acceptance environment: create -> deploy -> accept
+# -> inspect -> destroy. Nothing here is meant to run continuously.
 
 data "aws_caller_identity" "current" {}
 
 locals {
   name_prefix = var.name_prefix
 
-  domain_configured = var.domain_name != null && var.route53_zone_id != null
-
-  api_hostname    = local.domain_configured ? "api-staging.${var.domain_name}" : "api.staging.internal"
-  app_hostname    = local.domain_configured ? "app-staging.${var.domain_name}" : "app.staging.internal"
-  admin_hostname  = local.domain_configured ? "admin-staging.${var.domain_name}" : "admin.staging.internal"
-  url_scheme      = local.domain_configured ? "https" : "http"
-  cors_scheme_app = local.domain_configured ? "https://${local.app_hostname}" : "http://${local.app_hostname}"
-  cors_scheme_adm = local.domain_configured ? "https://${local.admin_hostname}" : "http://${local.admin_hostname}"
-
-  # Frontends are cross-origin from the API under this deployment shape
-  # (see the Stage 9.3 brief) — CORS_ALLOWED_ORIGINS must name both exact
-  # browser origins. In the no-domain fallback these are synthetic
-  # hostnames only reachable via a Host-header override (see the ALB
-  # module and the runbook) — a real cross-origin frontend demo requires
-  # domain_name + route53_zone_id.
-  cors_allowed_origins = "${local.cors_scheme_app},${local.cors_scheme_adm}"
+  # One origin custom header, shared by modules/edge (sets it) and
+  # modules/alb (routes on it).
+  routing_header_name = "X-Igaming-Service"
 
   # Deterministic CloudWatch log group names/ARNs, computed WITHOUT
   # depending on the ecs module's own resources — this is what lets the
-  # iam module (created before ecs) scope its execution-role policy to
+  # iam module (created before ecs) scope its execution-role policies to
   # these exact log groups without a module dependency cycle (ecs also
   # needs iam's role ARNs). The ecs module independently creates log
   # groups with names built the identical way from the same name_prefix.
-  ecs_service_keys = ["platform-api", "b2c", "backoffice", "migrate", "role-init"]
-  log_group_names  = { for k in local.ecs_service_keys : k => "/ecs/${local.name_prefix}/${k}" }
-  log_group_arns = [
-    for k, name in local.log_group_names :
-    "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:${name}:*"
+  service_log_keys = ["platform-api", "b2c", "backoffice"]
+  one_off_log_keys = ["migrate", "role-init"]
+  log_group_names  = { for k in concat(local.service_log_keys, local.one_off_log_keys) : k => "/ecs/${local.name_prefix}/${k}" }
+  log_group_arn    = { for k, name in local.log_group_names : k => "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:${name}:*" }
+
+  # Frontends are cross-origin from the API: each app has its own
+  # CloudFront distribution/origin. CORS_ALLOWED_ORIGINS names both exact
+  # browser origins.
+  cors_allowed_origins = "${module.edge.urls["b2c"]},${module.edge.urls["backoffice"]}"
+
+  # Staging capacity strategy (ADR 0086). Frontends: Spot only (an
+  # interruption briefly takes a static site down; acceptable for
+  # staging). platform-api: the first task always on on-demand FARGATE, so
+  # acceptance runs are not exposed to Spot interruption; any extra
+  # replica (the multi-replica test) on Spot.
+  spot_only = [{ capacity_provider = "FARGATE_SPOT", base = 0, weight = 1 }]
+  platform_api_strategy = [
+    { capacity_provider = "FARGATE", base = 1, weight = 0 },
+    { capacity_provider = "FARGATE_SPOT", base = 0, weight = 1 },
   ]
 }
 
 module "network" {
   source = "../../modules/network"
 
-  name_prefix = local.name_prefix
-  vpc_cidr    = var.vpc_cidr
-  az_count    = var.az_count
-  tags        = var.tags
+  name_prefix        = local.name_prefix
+  vpc_cidr           = var.vpc_cidr
+  az_count           = var.az_count
+  enable_nat_gateway = !var.ecs_public_ip_mode
+  tags               = var.tags
 }
 
 module "security" {
@@ -55,21 +67,27 @@ module "security" {
 
   name_prefix = local.name_prefix
   vpc_id      = module.network.vpc_id
-  tags        = var.tags
+  # The ALB is internal and reached only via CloudFront VPC origins, whose
+  # network interfaces live inside this VPC.
+  alb_ingress_cidrs = [module.network.vpc_cidr]
+  tags              = var.tags
 }
 
 module "ecr" {
   source = "../../modules/ecr"
 
-  name_prefix = local.name_prefix
-  tags        = var.tags
+  name_prefix  = local.name_prefix
+  force_delete = true # disposable staging: teardown must not leave images billing
+  tags         = var.tags
 }
 
 module "secrets" {
   source = "../../modules/secrets"
 
-  name_prefix = local.name_prefix
-  tags        = var.tags
+  name_prefix             = local.name_prefix
+  secret_version          = var.secret_version
+  recovery_window_in_days = 0 # disposable staging: force delete, names reusable at once
+  tags                    = var.tags
 }
 
 module "database" {
@@ -81,150 +99,74 @@ module "database" {
   instance_class        = var.db_instance_class
   allocated_storage     = var.db_allocated_storage
   engine_version        = var.db_engine_version
-  master_username       = module.secrets.db_master_username
-  master_password       = module.secrets.db_master_password
   db_name               = var.db_name
   backup_retention_days = var.db_backup_retention_days
   multi_az              = var.db_multi_az
   deletion_protection   = var.db_deletion_protection
+  create_kms_key        = false # AWS-managed aws/rds key; no CMK left pending deletion per teardown
   tags                  = var.tags
-}
-
-# --- Composed DATABASE_URL secrets ---
-#
-# internal/config reads a single DATABASE_URL env var (full connection
-# string). ECS can only inject a secret's raw value (or a JSON key within
-# it) as an env var — it cannot compose one from multiple secrets/outputs
-# at container-start time. So this root module derives two FULL connection
-# strings (never fresh randomness — just formatting of values already
-# generated by modules.secrets + modules.database's own endpoint) and
-# stores each as its own Secrets Manager secret. This keeps the 3
-# Terraform-generated credentials (db master, igaming_runtime, JWT signing
-# secret) as the only actual "generated" secrets, per the Stage 9.3 brief,
-# while still letting the containers receive one ready-to-use DSN.
-locals {
-  database_url_runtime   = "postgres://${module.secrets.db_runtime_username}:${module.secrets.db_runtime_password}@${module.database.address}:${module.database.port}/${module.database.db_name}?sslmode=require"
-  database_url_migration = "postgres://${module.secrets.db_master_username}:${module.secrets.db_master_password}@${module.database.address}:${module.database.port}/${module.database.db_name}?sslmode=require"
-}
-
-resource "aws_secretsmanager_secret" "database_url_runtime" {
-  name        = "${local.name_prefix}/database-url-runtime"
-  description = "Full DATABASE_URL for platform-api, using the non-owning igaming_runtime credential. Derived (not independently random) from the secrets and database modules' outputs."
-  tags        = var.tags
-}
-
-resource "aws_secretsmanager_secret_version" "database_url_runtime" {
-  secret_id     = aws_secretsmanager_secret.database_url_runtime.id
-  secret_string = local.database_url_runtime
-}
-
-resource "aws_secretsmanager_secret" "database_url_migration" {
-  name        = "${local.name_prefix}/database-url-migration"
-  description = "Full DATABASE_URL for cmd/migrate and the role-init task, using the migration-owner ('igaming') master credential. Never used by the running application."
-  tags        = var.tags
-}
-
-resource "aws_secretsmanager_secret_version" "database_url_migration" {
-  secret_id     = aws_secretsmanager_secret.database_url_migration.id
-  secret_string = local.database_url_migration
 }
 
 module "iam" {
   source = "../../modules/iam"
 
-  name_prefix         = local.name_prefix
-  ecr_repository_arns = values(module.ecr.repository_arns)
-  secret_arns = [
-    module.secrets.db_master_secret_arn,
+  name_prefix = local.name_prefix
+
+  service_ecr_repository_arns = values(module.ecr.repository_arns)
+  service_secret_arns = [
     module.secrets.db_runtime_secret_arn,
     module.secrets.jwt_signing_secret_arn,
-    aws_secretsmanager_secret.database_url_runtime.arn,
-    aws_secretsmanager_secret.database_url_migration.arn,
   ]
-  log_group_arns = local.log_group_arns
-  tags           = var.tags
-}
+  service_log_group_arns = [for k in local.service_log_keys : local.log_group_arn[k]]
 
-# --- DNS / ACM (genuinely conditional on domain_name + route53_zone_id) ---
+  one_off_ecr_repository_arns = [module.ecr.repository_arns["platform-api"]]
+  one_off_secret_arns = [
+    module.database.master_user_secret_arn,
+    module.secrets.db_runtime_secret_arn,
+  ]
+  one_off_log_group_arns = [for k in local.one_off_log_keys : local.log_group_arn[k]]
 
-module "dns" {
-  count  = local.domain_configured ? 1 : 0
-  source = "../../modules/dns"
-
-  route53_zone_id = var.route53_zone_id
-  hostnames       = [local.api_hostname, local.app_hostname, local.admin_hostname]
-  tags            = var.tags
+  tags = var.tags
 }
 
 module "alb" {
   source = "../../modules/alb"
 
-  name_prefix       = local.name_prefix
-  vpc_id            = module.network.vpc_id
-  public_subnet_ids = module.network.public_subnet_ids
-  security_group_id = module.security.alb_security_group_id
-  certificate_arn   = local.domain_configured ? module.dns[0].certificate_arn : null
-  container_port    = 8080
-  api_hostname      = local.api_hostname
-  app_hostname      = local.app_hostname
-  admin_hostname    = local.admin_hostname
-  tags              = var.tags
+  name_prefix         = local.name_prefix
+  vpc_id              = module.network.vpc_id
+  internal            = true
+  subnet_ids          = module.network.private_subnet_ids
+  security_group_id   = module.security.alb_security_group_id
+  routing_header_name = local.routing_header_name
+  container_port      = 8080
+  tags                = var.tags
 }
 
-# Alias A records live at the root level, not inside modules/dns, to avoid
-# a circular module dependency (modules/dns's certificate_arn output feeds
-# modules/alb; these records need modules/alb's own dns_name/zone_id
-# output) — see modules/dns/main.tf's header comment.
-resource "aws_route53_record" "api" {
-  count   = local.domain_configured ? 1 : 0
-  zone_id = var.route53_zone_id
-  name    = local.api_hostname
-  type    = "A"
+module "edge" {
+  source = "../../modules/edge"
 
-  alias {
-    name                   = module.alb.dns_name
-    zone_id                = module.alb.zone_id
-    evaluate_target_health = true
-  }
-}
-
-resource "aws_route53_record" "app" {
-  count   = local.domain_configured ? 1 : 0
-  zone_id = var.route53_zone_id
-  name    = local.app_hostname
-  type    = "A"
-
-  alias {
-    name                   = module.alb.dns_name
-    zone_id                = module.alb.zone_id
-    evaluate_target_health = true
-  }
-}
-
-resource "aws_route53_record" "admin" {
-  count   = local.domain_configured ? 1 : 0
-  zone_id = var.route53_zone_id
-  name    = local.admin_hostname
-  type    = "A"
-
-  alias {
-    name                   = module.alb.dns_name
-    zone_id                = module.alb.zone_id
-    evaluate_target_health = true
-  }
+  name_prefix          = local.name_prefix
+  alb_arn              = module.alb.alb_arn
+  alb_dns_name         = module.alb.dns_name
+  routing_header_name  = local.routing_header_name
+  allowed_viewer_cidrs = var.staging_access_cidrs
+  tags                 = var.tags
 }
 
 module "ecs" {
   source = "../../modules/ecs"
 
-  name_prefix           = local.name_prefix
-  aws_region            = var.aws_region
-  private_subnet_ids    = module.network.private_subnet_ids
-  ecs_security_group_id = module.security.ecs_security_group_id
-  execution_role_arn    = module.iam.execution_role_arn
-  task_role_arn         = module.iam.task_role_arn
-  log_retention_days    = var.log_retention_days
-  container_port        = 8080
+  name_prefix                = local.name_prefix
+  aws_region                 = var.aws_region
+  task_subnet_ids            = var.ecs_public_ip_mode ? module.network.public_subnet_ids : module.network.private_subnet_ids
+  assign_public_ip           = var.ecs_public_ip_mode
+  container_insights_enabled = false
+  ecs_security_group_id      = module.security.ecs_security_group_id
+  service_execution_role_arn = module.iam.service_execution_role_arn
+  one_off_execution_role_arn = module.iam.one_off_execution_role_arn
+  task_role_arn              = module.iam.task_role_arn
+  log_retention_days         = var.log_retention_days
+  container_port             = 8080
 
   platform_api_image = "${module.ecr.repository_urls["platform-api"]}:${var.image_tag}"
   b2c_image          = "${module.ecr.repository_urls["b2c"]}:${var.image_tag}"
@@ -234,29 +176,41 @@ module "ecs" {
   b2c_desired_count          = var.b2c_desired_count
   backoffice_desired_count   = var.backoffice_desired_count
 
+  platform_api_capacity_provider_strategy = local.platform_api_strategy
+  b2c_capacity_provider_strategy          = local.spot_only
+  backoffice_capacity_provider_strategy   = local.spot_only
+
   app_environment      = "staging"
   cors_allowed_origins = local.cors_allowed_origins
-  trusted_proxy_count  = 1
+  # viewer -> CloudFront (appends the viewer IP to X-Forwarded-For) -> ALB
+  # (appends CloudFront's address) -> task: the real client is 2 hops from
+  # the right (internal/httpserver trustedProxyClientIP).
+  trusted_proxy_count = 2
 
   # Stage 9.4: staging is exactly where the three test-support routes
   # (casino play simulation, mock payment settlement, account-activation
   # test support) are needed — the staging acceptance-test flows depend
   # on them. See modules/ecs/variables.tf's own doc comment: this module
-  # defaults to false, so this environment deliberately opts in.
+  # defaults to false, so this environment deliberately opts in. They are
+  # reachable only by allowlisted viewers (modules/edge, ADR 0086).
   test_support_endpoints_enabled = true
 
   target_group_arns = module.alb.target_group_arns
 
-  database_url_runtime_secret_arn   = aws_secretsmanager_secret.database_url_runtime.arn
-  database_url_migration_secret_arn = aws_secretsmanager_secret.database_url_migration.arn
-  jwt_signing_secret_arn            = module.secrets.jwt_signing_secret_arn
-  db_runtime_secret_arn             = module.secrets.db_runtime_secret_arn
+  database_host        = module.database.address
+  database_port        = module.database.port
+  database_name        = module.database.db_name
+  db_runtime_username  = module.secrets.db_runtime_username
+  db_master_username   = module.database.master_username
+  db_master_secret_arn = module.database.master_user_secret_arn
+
+  db_runtime_secret_arn  = module.secrets.db_runtime_secret_arn
+  jwt_signing_secret_arn = module.secrets.jwt_signing_secret_arn
 
   tags = var.tags
 
-  # ECS services attach to ALB target groups; the ALB's listeners (and,
-  # when a domain is configured, its HTTPS listener depending on ACM
-  # validation) must exist first.
+  # ECS services attach to ALB target groups; the ALB's listener must
+  # exist first.
   depends_on = [module.alb]
 }
 
@@ -266,9 +220,7 @@ module "observability" {
   name_prefix               = local.name_prefix
   alb_arn_suffix            = module.alb.alb_arn_suffix
   target_group_arn_suffixes = module.alb.target_group_arn_suffixes
-  rds_resource_id           = module.database.resource_id
-  ecs_cluster_name          = module.ecs.cluster_name
-  ecs_services              = module.ecs.service_desired_counts
+  rds_instance_identifier   = module.database.identifier
   alarm_email               = var.alarm_email
   tags                      = var.tags
 }

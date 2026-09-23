@@ -169,3 +169,29 @@ jobs:
 
       - name: Unit tests
         run: npm test
+
+  infrastructure:
+    # Stage 9.4 (ADR 0086): offline Terraform checks for deploy/aws —
+    # fmt, validate (-backend=false), `terraform test` with mock AWS
+    # providers, the CloudFront allowlist function's unit tests, script
+    # syntax, and repository guards (no state/plan/tfvars tracked, no
+    # regression of the Stage 9.3 alarm/secret/ECR defects). Uses NO AWS
+    # credentials and creates NO AWS resources.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.16.3"
+          terraform_wrapper: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: deploy/aws static checks
+        run: deploy/aws/tests/run-static-checks.sh

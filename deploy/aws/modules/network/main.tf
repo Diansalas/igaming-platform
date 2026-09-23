@@ -1,11 +1,20 @@
-# Isolated VPC, 2 AZs (default), public subnets (ALB + a single shared NAT
-# Gateway) and private subnets (ECS tasks + RDS, no public IP, no direct
-# internet route). This is the staging-sized shape described in
-# docs/architecture/38-deployment-architecture.md / ADR 0009: a single NAT
-# Gateway is a deliberate staging cost tradeoff, NOT a production pattern —
-# a NAT Gateway is a single point of failure for all outbound traffic from
-# both AZs' private subnets. Production must provision one NAT Gateway per
-# AZ (see the runbook's "Promoting to production" section).
+# Isolated VPC, 2 AZs (default), public subnets and private subnets (no
+# public IP, no direct internet route).
+#
+# NAT is optional (enable_nat_gateway, default true — the module default is
+# the production-shaped posture, where private-subnet workloads reach the
+# internet through NAT). When enabled, a SINGLE shared NAT Gateway is
+# created: a deliberate cost tradeoff, NOT a production pattern — it is a
+# single point of failure for all outbound traffic from both AZs' private
+# subnets. Production must provision one NAT Gateway per AZ (see ADR 0084's
+# "Promoting to production" section).
+#
+# The staging root disables NAT entirely (ADR 0086): its ECS tasks run in
+# the public subnets with public IPs, reachable only from the ALB security
+# group, and the private subnets hold only RDS and the internal ALB, which
+# need no outbound internet route at all. With NAT disabled, the private
+# route table has no default route — it carries only the implicit VPC-local
+# route (aws_route.private_nat below is not created).
 
 data "aws_availability_zones" "available" {
   state = "available"
@@ -59,9 +68,10 @@ resource "aws_subnet" "private" {
   })
 }
 
-# --- Single shared NAT Gateway (staging cost tradeoff — see file header) ---
+# --- Optional single shared NAT Gateway (see file header) ---
 
 resource "aws_eip" "nat" {
+  count  = var.enable_nat_gateway ? 1 : 0
   domain = "vpc"
 
   tags = merge(var.tags, {
@@ -72,7 +82,8 @@ resource "aws_eip" "nat" {
 }
 
 resource "aws_nat_gateway" "this" {
-  allocation_id = aws_eip.nat.id
+  count         = var.enable_nat_gateway ? 1 : 0
+  allocation_id = aws_eip.nat[0].id
   subnet_id     = aws_subnet.public[0].id
 
   tags = merge(var.tags, {
@@ -103,17 +114,24 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+# No inline routes: the optional NAT default route is a standalone
+# aws_route below, so toggling enable_nat_gateway adds/removes exactly that
+# route (an inline dynamic "route" block that renders to nothing would
+# leave the table's routes unmanaged and a stale NAT route in place).
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.this.id
-
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.this.id
-  }
 
   tags = merge(var.tags, {
     Name = "${var.name_prefix}-private-rt"
   })
+}
+
+resource "aws_route" "private_nat" {
+  count = var.enable_nat_gateway ? 1 : 0
+
+  route_table_id         = aws_route_table.private.id
+  destination_cidr_block = "0.0.0.0/0"
+  nat_gateway_id         = aws_nat_gateway.this[0].id
 }
 
 resource "aws_route_table_association" "private" {

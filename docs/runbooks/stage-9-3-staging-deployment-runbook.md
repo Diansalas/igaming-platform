@@ -1,5 +1,12 @@
 # Stage 9.3 — Staging AWS Deployment Runbook
 
+> **Superseded for operation by
+> `docs/runbooks/stage-9-4-staging-lifecycle-runbook.md` (ADR 0086).** The
+> commands, variables (`domain_name`, `image_tag = latest`, `eu-west-1`),
+> outputs and teardown notes below describe the Stage 9.3 package and no
+> longer match `deploy/aws/`. Kept for history: the reasoning in §3 about
+> role-init → migrate → revoke ordering still applies unchanged.
+
 Owner: `devops`. Companion to
 `docs/decisions/0084-stage-9-3-staging-aws-architecture.md` (the ADR
 recording this as a scoped STAGING decision under ADR 0009) and

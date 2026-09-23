@@ -1,7 +1,19 @@
 # ADR 0084 — Stage 9.3 Staging AWS Architecture
 
 Status: Accepted (devops implementation, scoped to STAGING only). Owner:
-`devops`.
+`devops`. **Amended by ADR 0086 (Stage 9.4)** — for the staging
+environment, the following parts of this ADR are superseded: the single
+NAT Gateway and private-subnet ECS tasks (now public-IP tasks, no NAT),
+the internet-facing HTTP ALB and domain fallback (now an internal ALB
+behind IP-allowlisted CloudFront HTTPS distributions), Terraform-generated
+master/runtime/JWT secrets and the two `DATABASE_URL` secrets (now
+RDS-managed master password, write-only secrets, password-free
+`DATABASE_URL` + `PGPASSWORD`), Container Insights and ECS running-task
+alarms (now ALB healthy-host alarms), the unconditional SNS topic, the
+single execution role (now service + one-off roles), mutable image tags,
+local state, `eu-west-1` defaults, and PostgreSQL 16.4. The module
+structure, role separation, deployment ordering and the "Promoting to
+production" list below still stand.
 
 ## Context
 
