@@ -33,3 +33,11 @@ output "kms_key_arn" {
   description = "Null when create_kms_key = false (AWS-managed aws/rds key)."
   value       = one(aws_kms_key.rds[*].arn)
 }
+
+output "engine_version" {
+  value = aws_db_instance.this.engine_version
+}
+
+output "publicly_accessible" {
+  value = aws_db_instance.this.publicly_accessible
+}

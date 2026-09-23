@@ -29,15 +29,15 @@ variable "name_prefix" {
 # --- Access (ADR 0086) ---
 
 variable "staging_access_cidrs" {
-  description = "REQUIRED, no default. IPv4 CIDRs allowed through the CloudFront edge (everyone else gets 403) — the operator's own public IP(s) as /32, plus wherever the acceptance suite runs from. Put it in the git-ignored terraform.tfvars (see terraform.tfvars.example). modules/edge re-validates the same rules."
+  description = "REQUIRED, no default. IPv4 CIDRs allowed through the CloudFront edge (everyone else gets 403) — the operator's own public IP(s) as /32 (prefix ≥ /24 enforced), plus wherever the acceptance suite runs from. Put it in the git-ignored terraform.tfvars (see terraform.tfvars.example). modules/edge re-validates the same rules."
   type        = list(string)
 
   validation {
     condition = length(var.staging_access_cidrs) > 0 && alltrue([
       for c in var.staging_access_cidrs :
-      can(cidrnetmask(c)) && can(regex("^[0-9.]+/[0-9]+$", c)) && tonumber(split("/", c)[1]) >= 16
+      can(regex("^[0-9]{1,3}(\\.[0-9]{1,3}){3}/[0-9]{1,2}$", c)) && can(cidrnetmask(c)) && try(tonumber(split("/", c)[1]) >= 24, false)
     ])
-    error_message = "staging_access_cidrs must list at least one IPv4 CIDR (a.b.c.d/nn) with a prefix of at least /16 — never 0.0.0.0/0."
+    error_message = "staging_access_cidrs must list at least one IPv4 CIDR (a.b.c.d/nn) with a prefix of at least /24 — never 0.0.0.0/0 or a carrier-sized block."
   }
 }
 

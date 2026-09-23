@@ -2,6 +2,12 @@
 # execution role can never read the RDS master credential.
 
 mock_provider "aws" {
+  mock_data "aws_caller_identity" {
+    defaults = {
+      account_id = "765578795051"
+    }
+  }
+
   mock_data "aws_iam_policy_document" {
     defaults = {
       json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}"
@@ -40,5 +46,30 @@ run "service_role_cannot_read_master_secret" {
   assert {
     condition     = length(aws_iam_role.execution) == 2
     error_message = "Exactly two execution roles (service, one_off)."
+  }
+
+  assert {
+    # Non-empty AND every condition pins this account (alltrue([]) would be vacuous).
+    condition = length(one(data.aws_iam_policy_document.ecs_tasks_assume.statement).condition) == 1 && alltrue([
+      for c in one(data.aws_iam_policy_document.ecs_tasks_assume.statement).condition :
+      c.variable == "aws:SourceAccount" && toset(c.values) == toset(["765578795051"])
+    ])
+    error_message = "The ECS trust policy must be restricted to this account (aws:SourceAccount)."
+  }
+}
+
+run "every_role_carries_the_boundary" {
+  command = plan
+
+  variables {
+    permissions_boundary_arn = "arn:aws:iam::765578795051:policy/igaming-staging-ecs-role-boundary"
+  }
+
+  assert {
+    condition = alltrue([
+      for r in concat(values(aws_iam_role.execution), [aws_iam_role.task]) :
+      r.permissions_boundary == "arn:aws:iam::765578795051:policy/igaming-staging-ecs-role-boundary"
+    ])
+    error_message = "Every role must carry the permissions boundary the deployer policy requires."
   }
 }

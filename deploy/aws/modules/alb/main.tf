@@ -16,8 +16,10 @@
 #   (modules/edge), because CloudFront replaces the viewer's Host header with
 #   the ALB's own DNS name. The header is a routing key, not a secret — an
 #   internal ALB is not reachable from outside the VPC in the first place.
-#   Any request without a matching header gets a fixed 404, never a default
-#   forward to a service.
+#   On the HTTP listener, any request without a matching header gets a
+#   fixed 404, never a default forward to a service. (If a certificate is
+#   ALSO supplied, the HTTPS listener keeps the host-mode default of
+#   forwarding to platform-api; the staging root supplies no certificate.)
 
 locals {
   https_enabled  = var.certificate_arn != null

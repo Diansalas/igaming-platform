@@ -54,7 +54,8 @@
         "secretsmanager:UpdateSecret",
         "secretsmanager:TagResource",
         "secretsmanager:UntagResource",
-        "secretsmanager:ListSecretVersionIds"
+        "secretsmanager:ListSecretVersionIds",
+        "secretsmanager:GetSecretValue"
       ],
       "Resource": "arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/*"
     },
@@ -164,24 +165,43 @@
       "Resource": "*"
     },
     {
-      "Sid": "IamStagingRoles",
+      "Sid": "IamCreateStagingRolesOnlyWithBoundary",
       "Effect": "Allow",
       "Action": [
         "iam:CreateRole",
-        "iam:DeleteRole",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy"
+      ],
+      "Resource": [
+        "arn:aws:iam::765578795051:role/igaming-staging-ecs-service-execution",
+        "arn:aws:iam::765578795051:role/igaming-staging-ecs-one-off-execution",
+        "arn:aws:iam::765578795051:role/igaming-staging-ecs-task-role"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::765578795051:policy/igaming-staging-ecs-role-boundary"
+        }
+      }
+    },
+    {
+      "Sid": "IamManageStagingRoles",
+      "Effect": "Allow",
+      "Action": [
         "iam:GetRole",
+        "iam:DeleteRole",
         "iam:UpdateRole",
-        "iam:UpdateAssumeRolePolicy",
         "iam:TagRole",
         "iam:UntagRole",
-        "iam:PutRolePolicy",
         "iam:GetRolePolicy",
-        "iam:DeleteRolePolicy",
         "iam:ListRolePolicies",
         "iam:ListAttachedRolePolicies",
         "iam:ListInstanceProfilesForRole"
       ],
-      "Resource": "arn:aws:iam::765578795051:role/igaming-staging-*"
+      "Resource": [
+        "arn:aws:iam::765578795051:role/igaming-staging-ecs-service-execution",
+        "arn:aws:iam::765578795051:role/igaming-staging-ecs-one-off-execution",
+        "arn:aws:iam::765578795051:role/igaming-staging-ecs-task-role"
+      ]
     },
     {
       "Sid": "IamPassStagingRolesToEcsOnly",
@@ -189,12 +209,45 @@
       "Action": [
         "iam:PassRole"
       ],
-      "Resource": "arn:aws:iam::765578795051:role/igaming-staging-*",
+      "Resource": [
+        "arn:aws:iam::765578795051:role/igaming-staging-ecs-service-execution",
+        "arn:aws:iam::765578795051:role/igaming-staging-ecs-one-off-execution",
+        "arn:aws:iam::765578795051:role/igaming-staging-ecs-task-role"
+      ],
       "Condition": {
         "StringEquals": {
           "iam:PassedToService": "ecs-tasks.amazonaws.com"
         }
       }
+    },
+    {
+      "Sid": "IamReadBoundary",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion"
+      ],
+      "Resource": "arn:aws:iam::765578795051:policy/igaming-staging-ecs-role-boundary"
+    },
+    {
+      "Sid": "DenyBoundaryEscape",
+      "Effect": "Deny",
+      "Action": [
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:PutRolePermissionsBoundary",
+        "iam:AttachRolePolicy",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:CreatePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicy",
+        "iam:DeletePolicyVersion",
+        "iam:SetDefaultPolicyVersion",
+        "iam:CreateUser",
+        "iam:CreateAccessKey",
+        "iam:AttachUserPolicy",
+        "iam:PutUserPolicy"
+      ],
+      "Resource": "*"
     },
     {
       "Sid": "IamServiceLinkedRoles",
@@ -222,7 +275,8 @@
         "iam:ListRoles",
         "kms:ListAliases",
         "s3:ListAllMyBuckets",
-        "budgets:ViewBudget"
+        "budgets:ViewBudget",
+        "sns:ListTopics"
       ],
       "Resource": "*"
     }

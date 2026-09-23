@@ -5,11 +5,19 @@
 # its scriptable form.
 #
 # Commands (run from anywhere inside the repo):
-#   deploy.sh up                 create/update the whole environment and deploy HEAD
+#   deploy.sh up                 create the environment and deploy HEAD (or re-apply the SAME commit)
 #   deploy.sh scale <N>          set platform-api's desired count (2 = multi-replica test, then back to 1)
-#   deploy.sh migrate            re-run role-init then migrate (e.g. after a secret rotation)
+#   deploy.sh migrate            re-run role-init + migrate, then roll the services (e.g. after a rotation)
+#   deploy.sh seed-admin <email> create the first platform_admin (Back Office login); password in Secrets Manager
 #   deploy.sh status             print URLs and service state (read-only)
 #   deploy.sh down               terraform destroy, then run verify-teardown.sh
+#
+# One commit per environment lifetime: `up` refuses to deploy a DIFFERENT
+# commit onto a running environment, because a full apply would put the
+# new code in front of the old schema before migrations run (ADR 0086 /
+# docs/architecture/38-deployment-architecture.md §2.3: migrations run
+# before the new version receives traffic). To test a new commit: `down`,
+# then `up`.
 #
 # Guarantees:
 # - Image identity is the FULL git commit SHA of a CLEAN checkout (ECR tags
@@ -87,20 +95,41 @@ image_exists() {
     --image-ids "imageTag=${tag}" >/dev/null 2>&1
 }
 
-# build_and_push <repo_url> <docker build args...>
+# build_and_push <repo_url> <expected_api_url|-> <docker build args...>
+#
+# Frontend images bake VITE_API_BASE_URL in at build time, so their content
+# depends on the environment's API URL as well as the commit. They carry it
+# as the image label igaming.api_url; an already-pushed tag is reused only
+# if that label matches this environment's API URL (a half-finished
+# teardown can leave old images behind while CloudFront gets a new domain).
+# Pass "-" for images with no baked-in URL (platform-api).
 build_and_push() {
-  local repo_url="$1"; shift
+  local repo_url="$1" expected_api_url="$2"; shift 2
+  local ref="${repo_url}:${IMAGE_TAG}" label
   if image_exists "${repo_url}" "${IMAGE_TAG}"; then
-    echo "   ${repo_url}:${IMAGE_TAG} already exists (immutable tag) — skipping build"
+    if [[ "${expected_api_url}" == "-" ]]; then
+      echo "   ${ref} already exists (immutable tag) — skipping build"
+      return 0
+    fi
+    docker pull --platform "${DOCKER_PLATFORM}" "${ref}" >/dev/null
+    label="$(docker image inspect --format '{{ index .Config.Labels "igaming.api_url" }}' "${ref}")"
+    [[ "${label}" == "${expected_api_url}" ]] \
+      || die "${ref} exists but was built for API ${label:-<unknown>}, not ${expected_api_url} — the environment was re-created without its ECR repositories being deleted; run 'deploy.sh down' to completion, then 'up'"
+    echo "   ${ref} already exists for ${expected_api_url} — skipping build"
     return 0
   fi
-  docker build --platform "${DOCKER_PLATFORM}" -t "${repo_url}:${IMAGE_TAG}" "$@" "${REPO_ROOT}"
-  docker push "${repo_url}:${IMAGE_TAG}"
+  local -a label_args=()
+  [[ "${expected_api_url}" != "-" ]] && label_args=(--label "igaming.api_url=${expected_api_url}")
+  docker build --platform "${DOCKER_PLATFORM}" -t "${ref}" ${label_args[@]+"${label_args[@]}"} "$@" "${REPO_ROOT}"
+  docker push "${ref}"
 }
 
+# run_one_off_task <task_def_arn> <label> [overrides_json]
 run_one_off_task() {
-  local task_def="$1" label="$2"
-  local cluster subnets sg assign network_config task_arn exit_code
+  local task_def="$1" label="$2" overrides="${3:-}"
+  local cluster subnets sg assign network_config task_arn exit_code log_group
+  local -a extra=()
+  [[ -n "${overrides}" ]] && extra=(--overrides "${overrides}")
   cluster="$(tf_out ecs_cluster_name)"
   subnets="$(tf output -json ecs_task_subnet_ids)"
   sg="$(tf_out ecs_security_group_id)"
@@ -111,15 +140,16 @@ run_one_off_task() {
   say "one-off task: ${label}"
   task_arn="$(aws ecs run-task --region "${AWS_REGION}" --cluster "${cluster}" \
     --task-definition "${task_def}" --launch-type FARGATE \
-    --network-configuration "${network_config}" \
+    --network-configuration "${network_config}" ${extra[@]+"${extra[@]}"} \
     --query 'tasks[0].taskArn' --output text)"
   [[ -n "${task_arn}" && "${task_arn}" != "None" ]] || die "${label}: run-task returned no task"
   echo "   task ${task_arn} — waiting for it to stop..."
   aws ecs wait tasks-stopped --region "${AWS_REGION}" --cluster "${cluster}" --tasks "${task_arn}"
   exit_code="$(aws ecs describe-tasks --region "${AWS_REGION}" --cluster "${cluster}" --tasks "${task_arn}" \
     --query 'tasks[0].containers[0].exitCode' --output text)"
+  log_group="$(tf output -json log_group_names | jq -r --arg k "${label}" '.[$k]')"
   [[ "${exit_code}" == "0" ]] \
-    || die "${label} exited with code ${exit_code} — see CloudWatch log group /ecs/igaming-staging/${label}"
+    || die "${label} exited with code ${exit_code} — see CloudWatch log group ${log_group}"
   echo "   ${label} completed (exit 0)"
 }
 
@@ -131,17 +161,18 @@ run_migrations() {
 }
 
 roll_services() {
-  local cluster svc
+  local cluster svc services
   cluster="$(tf_out ecs_cluster_name)"
+  services="$(tf output -json ecs_service_names | jq -r '.[]')" || die "could not read ecs_service_names"
+  [[ -n "${services}" ]] || die "no ECS services in Terraform outputs"
   say "forcing a new deployment of the 3 services and waiting until stable"
-  for svc in $(tf output -json ecs_service_names | jq -r '.[]'); do
+  for svc in ${services}; do
     aws ecs update-service --region "${AWS_REGION}" --cluster "${cluster}" --service "${svc}" \
       --force-new-deployment >/dev/null
     echo "   ${svc}: new deployment requested"
   done
-  # shellcheck disable=SC2046
-  aws ecs wait services-stable --region "${AWS_REGION}" --cluster "${cluster}" \
-    --services $(tf output -json ecs_service_names | jq -r '.[]')
+  # shellcheck disable=SC2086
+  aws ecs wait services-stable --region "${AWS_REGION}" --cluster "${cluster}" --services ${services}
   echo "   all services stable"
 }
 
@@ -161,6 +192,12 @@ cmd_up() {
 
   tf init -input=false
 
+  local deployed
+  deployed="$(deployed_image_tag)"
+  if [[ "${deployed}" =~ ^[0-9a-f]{40}$ && "${deployed}" != "${IMAGE_TAG}" ]]; then
+    die "this environment is running ${deployed}; refusing to deploy ${IMAGE_TAG} onto it (new code would serve traffic before migrations run). Run 'deploy.sh down', then 'deploy.sh up'."
+  fi
+
   # Phase 1: ECR repositories only, so the platform-api image can be
   # pushed before the ECS services that reference it exist.
   say "phase 1/5: ECR repositories (targeted apply)"
@@ -174,7 +211,7 @@ cmd_up() {
   ecr_login "${registry}"
 
   say "phase 2/5: platform-api image"
-  build_and_push "${api_repo}" -f "${REPO_ROOT}/deploy/docker/platform-api.Dockerfile"
+  build_and_push "${api_repo}" - -f "${REPO_ROOT}/deploy/docker/platform-api.Dockerfile"
 
   # Phase 3: everything else. CloudFront distributions/VPC origin take
   # several minutes. The frontend services start pulling images that do
@@ -192,7 +229,7 @@ cmd_up() {
   # VITE_BRAND_SLUG is NOT cosmetic — b2c/src/config/brand.ts throws at
   # startup in a production build if unset; "demo-casino" is this repo's
   # seeded demo tenant (see deploy/docker/README.md).
-  build_and_push "${b2c_repo}" -f "${REPO_ROOT}/deploy/docker/frontend.Dockerfile" \
+  build_and_push "${b2c_repo}" "${api_url}" -f "${REPO_ROOT}/deploy/docker/frontend.Dockerfile" \
     --build-arg APP_DIR=b2c \
     --build-arg "VITE_API_BASE_URL=${api_url}" \
     --build-arg "VITE_BRAND_SLUG=${VITE_BRAND_SLUG:-demo-casino}" \
@@ -200,7 +237,7 @@ cmd_up() {
     --build-arg "VITE_BRAND_PRIMARY_COLOR=${VITE_BRAND_PRIMARY_COLOR:-#2563eb}" \
     --build-arg "VITE_BRAND_PRIMARY_COLOR_HOVER=${VITE_BRAND_PRIMARY_COLOR_HOVER:-#1d4ed8}" \
     --build-arg "VITE_BRAND_DEFAULT_ASSET=${VITE_BRAND_DEFAULT_ASSET:-USD}"
-  build_and_push "${backoffice_repo}" -f "${REPO_ROOT}/deploy/docker/frontend.Dockerfile" \
+  build_and_push "${backoffice_repo}" "${api_url}" -f "${REPO_ROOT}/deploy/docker/frontend.Dockerfile" \
     --build-arg APP_DIR=backoffice \
     --build-arg "VITE_API_BASE_URL=${api_url}"
 
@@ -232,6 +269,24 @@ cmd_scale() {
 cmd_migrate() {
   require_tools terraform aws jq
   run_migrations
+  # Services must pick up any rotated PGPASSWORD/JWT secret only AFTER
+  # role-init has applied the new runtime password in Postgres.
+  roll_services
+}
+
+cmd_seed_admin() {
+  local email="${1:-}"
+  [[ "${email}" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || die "usage: deploy.sh seed-admin <email>"
+  require_tools terraform aws jq
+  local overrides secret_arn
+  # The email is not a secret, so it travels as a command override; the
+  # password never does (SEED_ADMIN_PASSWORD comes from Secrets Manager).
+  overrides="$(jq -n --arg email "${email}" \
+    '{containerOverrides: [{name: "seed-admin", command: ["/app/seed-admin", "-email", $email, "-create-person"]}]}')"
+  run_one_off_task "$(tf_out ecs_seed_admin_task_definition_arn)" "seed-admin" "${overrides}"
+  secret_arn="$(tf output -json secret_arns | jq -r '.seed_admin_password')"
+  echo "   platform_admin ${email} created. Its password is in Secrets Manager (not printed here):"
+  echo "     aws secretsmanager get-secret-value --region ${AWS_REGION} --secret-id '${secret_arn}' --query SecretString --output text"
 }
 
 cmd_status() {
@@ -266,10 +321,11 @@ case "${1:-}" in
   up) cmd_up ;;
   scale) shift; cmd_scale "$@" ;;
   migrate) cmd_migrate ;;
+  seed-admin) shift; cmd_seed_admin "$@" ;;
   status) cmd_status ;;
   down) cmd_down ;;
   *)
-    sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 2
     ;;
 esac

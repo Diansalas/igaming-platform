@@ -31,7 +31,7 @@ locals {
   # needs iam's role ARNs). The ecs module independently creates log
   # groups with names built the identical way from the same name_prefix.
   service_log_keys = ["platform-api", "b2c", "backoffice"]
-  one_off_log_keys = ["migrate", "role-init"]
+  one_off_log_keys = ["migrate", "role-init", "seed-admin"]
   log_group_names  = { for k in concat(local.service_log_keys, local.one_off_log_keys) : k => "/ecs/${local.name_prefix}/${k}" }
   log_group_arn    = { for k, name in local.log_group_names : k => "arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:${name}:*" }
 
@@ -68,8 +68,10 @@ module "security" {
   name_prefix = local.name_prefix
   vpc_id      = module.network.vpc_id
   # The ALB is internal and reached only via CloudFront VPC origins, whose
-  # network interfaces live inside this VPC.
-  alb_ingress_cidrs = [module.network.vpc_cidr]
+  # network interfaces are created in the ALB's own (private) subnets. The
+  # public subnets — where the public-IP ECS tasks run — are deliberately
+  # NOT allowed to reach the ALB.
+  alb_ingress_cidrs = module.network.private_subnet_cidrs
   tags              = var.tags
 }
 
@@ -104,7 +106,9 @@ module "database" {
   multi_az              = var.db_multi_az
   deletion_protection   = var.db_deletion_protection
   create_kms_key        = false # AWS-managed aws/rds key; no CMK left pending deletion per teardown
-  tags                  = var.tags
+  # engine_version is pinned exactly (16.15) — keep RDS from drifting it.
+  auto_minor_version_upgrade = false
+  tags                       = var.tags
 }
 
 module "iam" {
@@ -123,8 +127,13 @@ module "iam" {
   one_off_secret_arns = [
     module.database.master_user_secret_arn,
     module.secrets.db_runtime_secret_arn,
+    module.secrets.seed_admin_password_secret_arn,
   ]
   one_off_log_group_arns = [for k in local.one_off_log_keys : local.log_group_arn[k]]
+
+  # Created once by deploy/aws/bootstrap; the deployer policy only permits
+  # creating/editing roles that carry exactly this boundary (ADR 0086).
+  permissions_boundary_arn = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/${local.name_prefix}-ecs-role-boundary"
 
   tags = var.tags
 }
@@ -204,14 +213,15 @@ module "ecs" {
   db_master_username   = module.database.master_username
   db_master_secret_arn = module.database.master_user_secret_arn
 
-  db_runtime_secret_arn  = module.secrets.db_runtime_secret_arn
-  jwt_signing_secret_arn = module.secrets.jwt_signing_secret_arn
+  db_runtime_secret_arn          = module.secrets.db_runtime_secret_arn
+  jwt_signing_secret_arn         = module.secrets.jwt_signing_secret_arn
+  seed_admin_password_secret_arn = module.secrets.seed_admin_password_secret_arn
 
   tags = var.tags
 
-  # ECS services attach to ALB target groups; the ALB's listener must
-  # exist first.
-  depends_on = [module.alb]
+  # ECS services attach to ALB target groups, so the ALB's listener must
+  # exist first; and no task may start before its secret VALUES exist.
+  depends_on = [module.alb, module.secrets]
 }
 
 module "observability" {

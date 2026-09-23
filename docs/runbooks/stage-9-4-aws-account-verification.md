@@ -134,19 +134,25 @@ it no longer needs NAT Gateway, ACM or Route53 actions for staging:
 aws iam simulate-principal-policy \
   --policy-source-arn <the ARN from step 1> \
   --action-names \
-    ec2:CreateVpc ec2:CreateSubnet ec2:CreateNatGateway ec2:CreateInternetGateway \
+    ec2:CreateVpc ec2:CreateSubnet ec2:CreateInternetGateway \
     ec2:CreateSecurityGroup ec2:AuthorizeSecurityGroupIngress \
     rds:CreateDBInstance rds:CreateDBSubnetGroup \
-    ecr:CreateRepository ecr:PutLifecyclePolicy \
-    secretsmanager:CreateSecret secretsmanager:GetSecretValue \
-    iam:CreateRole iam:PutRolePolicy iam:PassRole \
+    ecr:CreateRepository ecr:PutLifecyclePolicy ecr:PutImage \
+    secretsmanager:CreateSecret secretsmanager:PutSecretValue \
     ecs:CreateCluster ecs:RegisterTaskDefinition ecs:CreateService ecs:RunTask \
     elasticloadbalancing:CreateLoadBalancer elasticloadbalancing:CreateTargetGroup \
     logs:CreateLogGroup cloudwatch:PutMetricAlarm \
-    acm:RequestCertificate route53:ChangeResourceRecordSets
+    cloudfront:CreateDistribution cloudfront:CreateVpcOrigin cloudfront:CreateFunction \
+    s3:GetObject s3:PutObject
 ```
 
-Every action should report `allowed`. A `PassRole` denial is worth
+Every action above should report `allowed` (use the real resource ARNs
+with `--resource-arns` for the name-scoped ones). The IAM, `PassRole` and
+`GetSecretValue` permissions are conditional — boundary-carrying roles
+only, `ecs-tasks` only, `igaming-staging/*` only — so check them with
+`python3 deploy/aws/tests/simulate-deployer-policies.py` (read-only), which
+also asserts the escalation paths are **denied**. Staging needs no NAT
+Gateway, ACM or Route53 permissions (ADR 0086). A `PassRole` denial is worth
 flagging specifically — it is the single most common reason a
 Terraform-driven ECS/IAM deployment fails partway through with a
 confusing error, since it is required to hand the ECS execution/task
@@ -210,13 +216,9 @@ quickly once ownership is actually established.
 3. Run every command in §1–§4 above; resolve any `denied` result by
    attaching the missing permission (or granting broader access
    deliberately, per §4's note) before proceeding.
-4. Pick/confirm the target region (§3) and, if you want real HTTPS, a
-   domain + Route53 hosted zone (see the deployment runbook's §5 — both
-   `domain_name` and `route53_zone_id` are optional and independently
-   safe to leave unset for the plain-HTTP ALB-DNS-name fallback).
-5. `cd deploy/aws/environments/staging && terraform init && terraform
-   plan` — review the plan in full (§5.2 above) before `terraform
-   apply`.
-6. Follow the deployment runbook's §3 step-by-step from there (build/push
-   images, `apply`, run the one-off migration/role-init tasks, verify
-   `/healthz`/`/readyz`).
+4. Confirm the region is eu-central-1 (§3). No domain is needed: staging
+   serves HTTPS on CloudFront's own `*.cloudfront.net` names (ADR 0086).
+5. Follow `docs/runbooks/stage-9-4-staging-lifecycle-runbook.md` from
+   there: the one-time bootstrap (§1), `terraform init` against the S3
+   backend, then `deploy/aws/scripts/deploy.sh up`, which reviews every
+   plan interactively and passes the immutable `image_tag` itself.

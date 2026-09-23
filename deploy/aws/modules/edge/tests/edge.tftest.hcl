@@ -80,3 +80,23 @@ run "empty_allowlist_rejected" {
 
   expect_failures = [var.allowed_viewer_cidrs]
 }
+
+run "carrier_sized_block_rejected" {
+  command = plan
+
+  variables {
+    allowed_viewer_cidrs = ["100.64.0.0/16"]
+  }
+
+  expect_failures = [var.allowed_viewer_cidrs]
+}
+
+run "missing_prefix_rejected_cleanly" {
+  command = plan
+
+  variables {
+    allowed_viewer_cidrs = ["203.0.113.10"]
+  }
+
+  expect_failures = [var.allowed_viewer_cidrs]
+}

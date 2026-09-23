@@ -58,7 +58,8 @@ RUN go mod download
 COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/platform-api ./cmd/platform-api \
-    && CGO_ENABLED=0 GOOS=linux go build -o /out/migrate ./cmd/migrate
+    && CGO_ENABLED=0 GOOS=linux go build -o /out/migrate ./cmd/migrate \
+    && CGO_ENABLED=0 GOOS=linux go build -o /out/seed-admin ./cmd/seed-admin
 
 FROM alpine:3.20
 
@@ -72,6 +73,9 @@ WORKDIR /app
 
 COPY --from=builder /out/platform-api /app/platform-api
 COPY --from=builder /out/migrate /app/migrate
+# Stage 9.4: the one-off seed-admin ECS task (first platform_admin for the
+# Back Office) runs this binary — see deploy/aws/modules/ecs.
+COPY --from=builder /out/seed-admin /app/seed-admin
 COPY migrations /app/migrations
 COPY deploy/aws/sql/init-runtime-role.rds.sql /app/sql/init-runtime-role.rds.sql
 

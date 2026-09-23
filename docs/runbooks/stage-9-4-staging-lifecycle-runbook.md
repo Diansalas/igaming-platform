@@ -7,15 +7,16 @@ Scripts: `deploy/aws/scripts/deploy.sh`, `deploy/aws/scripts/verify-teardown.sh`
 **Status when written: nothing in this runbook has been run against AWS.**
 The only AWS access so far is the read-only credential
 `arn:aws:iam::765578795051:user/claude-staging-readonly`, used only for
-identity checks, `terraform plan`, pricing lookups, IAM Access Analyzer
-policy validation, and a read-only `verify-teardown.sh` run (it found no
-staging resources). Every AWS-changing step below needs a separate,
+identity checks, `terraform plan` (staging: 74 to add; bootstrap: 8 to
+add), pricing lookups, IAM Access Analyzer policy validation, IAM policy
+simulation (`deploy/aws/tests/simulate-deployer-policies.py`, 25/25), and
+read-only `verify-teardown.sh` runs (no staging resources exist). Every AWS-changing step below needs a separate,
 human-authorized **deployment credential** (§1.1).
 
 Staging is an **ephemeral acceptance environment**, not a standing one:
 
 ```
-bootstrap (once) ─► up ─► acceptance ─► scale 2 / multi-replica test / scale 1 ─► human inspection ─► down ─► verify-teardown
+bootstrap (once) ─► up ─► seed-admin ─► acceptance ─► scale 2 / multi-replica test / scale 1 ─► human inspection ─► down ─► verify-teardown
                     ▲                                                                                        │
                     └──────────────────────────── next session ──────────────────────────────────────────────┘
 ```
@@ -25,7 +26,7 @@ bootstrap (once) ─► up ─► acceptance ─► scale 2 / multi-replica test
 | Input | Where it goes | Notes |
 |---|---|---|
 | Deployment credential for account 765578795051 | operator shell (`aws configure` / SSO) | **Not yet requested or authorized.** Policies: §1.1. Never root; never the read-only user. |
-| Your public IPv4 address(es) | `staging_access_cidrs` in `deploy/aws/environments/staging/terraform.tfvars` (git-ignored) | `curl -4 https://checkip.amazonaws.com` → `["x.x.x.x/32"]`. Also add wherever the acceptance suite runs from. Prefix ≥ /16; IPv4 only. |
+| Your public IPv4 address(es) | `staging_access_cidrs` in `deploy/aws/environments/staging/terraform.tfvars` (git-ignored) | `curl -4 https://checkip.amazonaws.com` → `["x.x.x.x/32"]`. Also add wherever the acceptance suite runs from. Prefix ≥ /24; IPv4 only. |
 | (Optional) alarm email | `alarm_email` in the same tfvars | Creates an SNS topic + subscription (confirm the email AWS sends). |
 | (Optional) budget email | `budget_alert_email` for `deploy/aws/bootstrap` | Account-wide monthly cost budget alerts (backstop for "left running"). |
 
@@ -38,21 +39,32 @@ buildx (`--platform linux/amd64`), `jq`, `git`, `curl`.
 
 Create an IAM principal in 765578795051 for deployments (preferably a
 role assumed via SSO, or an IAM user with MFA and short-lived keys) and
-attach these customer-managed policies from the repository (all three
-validated with IAM Access Analyzer `ValidatePolicy`: 0 findings):
+attach these customer-managed policies from the repository (all validated
+with IAM Access Analyzer `ValidatePolicy`: 0 findings; escalation paths
+checked with `python3 deploy/aws/tests/simulate-deployer-policies.py`,
+read-only, 25/25 — re-run it once the credential exists):
 
-- `deploy/aws/iam/staging-bootstrap-policy.json` — state bucket + budget
-  (only needed for §1.2; detach afterwards).
-- `deploy/aws/iam/staging-deployer-infra-policy.json` — VPC/EC2 networking,
-  RDS, ECS, ELB, CloudWatch Logs/alarms, optional SNS, all conditioned on
-  `aws:RequestedRegion = eu-central-1`.
+- `deploy/aws/iam/staging-bootstrap-policy.json` — state bucket, the
+  `igaming-staging-ecs-role-boundary` IAM policy, and the budget (only
+  needed for §1.2; detach afterwards).
+- `deploy/aws/iam/staging-deployer-infra-policy.json` — VPC/EC2 networking
+  (region-scoped create; delete/detach/route-replace only on resources
+  tagged `Project=igaming-platform, Environment=staging`; `CreateTags` only
+  as tag-on-create), RDS / ELB / CloudWatch Logs / alarms / SNS scoped to
+  `igaming-staging-*` ARNs, ECS region-scoped.
 - `deploy/aws/iam/staging-deployer-edge-iam-state-policy.json` — state
-  object + lock file only, Secrets Manager (`igaming-staging/*` and RDS's
-  `rds!*`), KMS only via RDS/Secrets Manager, ECR `igaming-staging/*` (incl.
-  push), CloudFront (distributions, VPC origins, functions), IAM roles
-  `igaming-staging-*` only, `iam:PassRole` only to `ecs-tasks.amazonaws.com`,
-  service-linked roles only for ECS/ELB/RDS/CloudFront VPC origin, and the
-  read-only calls `verify-teardown.sh` makes.
+  object + lock file only (the state object cannot be deleted), Secrets
+  Manager on `igaming-staging/*` (including `GetSecretValue`, which the AWS
+  provider needs to refresh secret versions; never on the RDS-managed
+  master secret), KMS only via RDS/Secrets Manager, ECR `igaming-staging/*`
+  (incl. push), CloudFront (distributions, VPC origins, functions), IAM
+  only on the three exact staging role names and only when they carry the
+  `igaming-staging-ecs-role-boundary` permissions boundary (explicit
+  denies on boundary removal, policy edits, `AttachRolePolicy`,
+  `UpdateAssumeRolePolicy`, users and access keys), `iam:PassRole` only to
+  `ecs-tasks.amazonaws.com`, service-linked roles only for
+  ECS/ELB/RDS/CloudFront VPC origin, and the read-only calls
+  `verify-teardown.sh` makes.
 
 Then re-run the §1 identity check of the verification runbook against the
 new credential and IAM's policy simulator (`aws iam simulate-principal-policy`)
@@ -67,9 +79,12 @@ terraform plan  -var 'budget_alert_email=you@example.com'   # omit the var for n
 terraform apply -var 'budget_alert_email=you@example.com'   # review, then type yes
 ```
 
-Creates `igaming-platform-staging-tfstate-765578795051` (eu-central-1,
-versioned, SSE-S3, public access blocked, TLS-only, `prevent_destroy`) and,
-if requested, the `igaming-platform-account-monthly` budget. Bootstrap state
+Creates (8 resources; read-only plan verified) the IAM policy
+`igaming-staging-ecs-role-boundary` and the bucket
+`igaming-platform-staging-tfstate-765578795051` (eu-central-1, versioned,
+SSE-S3, public access blocked, TLS-only, version/bucket deletion denied,
+`prevent_destroy`) and, if requested, the `igaming-platform-account-monthly`
+budget. Bootstrap state
 stays local in `deploy/aws/bootstrap/terraform.tfstate` (git-ignored, no
 secrets). Keep a copy somewhere safe. If it is lost, the bucket keeps
 working; re-adopt it with `terraform import aws_s3_bucket.state
@@ -100,7 +115,16 @@ deploy/aws/scripts/deploy.sh up
 ```
 
 Each `terraform apply` inside is interactive: review every plan and type
-`yes`. The script never passes `-auto-approve`. It runs these phases:
+`yes`. The script never passes `-auto-approve`.
+
+**One commit per environment lifetime.** `up` refuses to deploy a
+different commit onto a running environment: a full apply would start new
+code against the old schema before migrations run. To test a new commit,
+`deploy.sh down`, then `deploy.sh up`. Re-running `up` on the same commit
+(for example after changing `staging_access_cidrs` or `secret_version`) is
+fine.
+
+It runs these phases:
 
 1. `terraform apply -target=module.ecr`: the three ECR repositories only.
 2. Build and push `platform-api` as `<repo>:<full HEAD SHA>`
@@ -124,13 +148,23 @@ Outputs (`deploy.sh status`): `staging_url` (B2C), `backoffice_url`,
 
 ## 4. Acceptance
 
-- **Smoke**: `curl -fsS "$(terraform output -raw api_url)/readyz"` → 200.
+- **Smoke** (from `deploy/aws/environments/staging`): `curl -fsS "$(terraform output -raw api_url)/readyz"` → 200.
   From a non-allowlisted IP the same URL must return **403** (verify once
   from, e.g., a phone on mobile data).
+- **Back Office login**: create the first `platform_admin` once per
+  environment:
+
+  ```bash
+  deploy/aws/scripts/deploy.sh seed-admin you@example.com
+  ```
+
+  This runs `cmd/seed-admin` as a one-off Fargate task. Its password was
+  generated ephemerally by Terraform, never enters state, and is not
+  printed. Read it with the `aws secretsmanager get-secret-value ...`
+  command the script prints.
 - **Browser**: open `staging_url` and `backoffice_url` directly. The TLS
   certificate is CloudFront's own (`*.cloudfront.net`), so there is no
-  warning. Seed a staff user with `cmd/seed-admin` (run it as a one-off
-  task or through the documented seed path) before the Back Office login.
+  warning.
 - **Stage 9.3/9.4 acceptance flows** (registration → activation seam →
   deposit via `simulate-callback` → casino play simulation → withdrawal
   four-eyes → Back Office audit/ledger views) run against `api_url` from
@@ -163,6 +197,13 @@ deploy/aws/scripts/deploy.sh down     # interactive terraform destroy, then veri
   deletion, and the VPC origin must finish deleting before its subnets can
   go. If the destroy stops on a `DependencyViolation` for a subnet or
   security group, wait a few minutes and run `deploy.sh down` again.
+- If it keeps failing on the VPC, look for leftovers CloudFront created
+  itself (not Terraform-managed): `verify-teardown.sh` lists network
+  interfaces and non-default security groups in the staging VPC. A
+  lingering `CloudFront-VPCOrigins-Service-SG` with no network interfaces
+  can be deleted by hand (`aws ec2 delete-security-group --group-id ...`).
+  This AWS clean-up behaviour is **unverified until the first real
+  teardown**.
 - No manual cleanup should be needed:
   - Secrets are force-deleted (recovery window 0), so their names are
     reusable at once.
@@ -176,8 +217,11 @@ deploy/aws/scripts/deploy.sh down     # interactive terraform destroy, then veri
   balancers, NAT gateways, Elastic IPs, ECS clusters, CloudFront
   distributions/VPC origins/functions, secrets (including those scheduled
   for deletion), ECR repositories, log groups, KMS aliases, VPCs, alarms,
-  SNS topics, IAM roles, plus a tag sweep in eu-central-1 and us-east-1.
-  The tagging API can lag deletions by a few minutes, so re-run it if a
+  SNS topics, IAM roles, network interfaces and security groups in a
+  still-existing staging VPC, plus a tag sweep in eu-central-1 and
+  us-east-1. Deregistered (INACTIVE) ECS task definitions keep their tags
+  but are free; they are reported as `[info]`, not as leftovers. The
+  tagging API can lag deletions by a few minutes, so re-run it if a
   just-deleted ARN appears.
 
 **Remains after teardown (by design):**
@@ -187,6 +231,9 @@ deploy/aws/scripts/deploy.sh down     # interactive terraform destroy, then veri
 | S3 state bucket (+ ≤ 90 days of old state versions) | well under $0.01/month (state is ~100–500 KB; $0.0235–0.0245/GB-month) |
 | Optional cost budget (no actions) | $0 expected (budgets without actions are not charged under AWS Budgets pricing; one budget in any case) |
 | Service-linked roles (ECS, ELB, RDS, CloudFront VPC origin), created automatically on first use | free |
+| IAM policy `igaming-staging-ecs-role-boundary` | free |
+| AWS-managed keys `aws/rds`, `aws/secretsmanager` | free |
+| INACTIVE ECS task-definition revisions | free |
 | Bootstrap local state file, `terraform.tfvars` on the operator machine | local only |
 
 No NAT Gateway, Elastic IP, customer-managed KMS key, secret, image, log
@@ -206,10 +253,12 @@ data transfer uses the published list price (~$0.085/GB for Europe).
 | Fargate platform-api, on-demand, 0.25 vCPU / 0.5 GB ($0.04656/vCPU-h, $0.00511/GB-h) | 0.0142 |
 | Fargate b2c + backoffice, Spot (est.) | 0.0085 (on-demand worst case 0.0284) |
 | RDS db.t4g.micro single-AZ ($0.019/h) + 20 GB gp3 ($0.137/GB-month) | 0.0228 |
-| Secrets Manager ×3 (runtime, JWT, RDS-managed master; $0.40/month each, prorated) | 0.0016 |
+| Secrets Manager ×4 (runtime, JWT, seed-admin, RDS-managed master; $0.40/month each, prorated) | 0.0022 |
 | CloudWatch alarms ×9 ($0.10/alarm-month) | 0.0012 |
-| **Fixed subtotal** | **≈ 0.094** |
-| Usage: CloudWatch Logs ($0.63/GB ingested), CloudFront requests/transfer, ALB LCUs | ≈ 0.002 idle … 0.03 active testing |
+| **Fixed subtotal** (incl. ≤0.004 LCU, counted here once) | **≈ 0.095** |
+| Usage: CloudWatch Logs ($0.63/GB ingested; estimated 2–5 MB/h idle from health checks and stdout traces, re-measure from the first session's `IncomingBytes`), CloudFront requests/transfer | ≈ 0.002 idle … 0.03 active testing |
+| Brief extras: during each rollout ECS may run up to 2× the tasks and public IPs for a few minutes (`deployment_maximum_percent = 200`); one-off tasks (role-init, migrate, seed-admin) are ≈ $0.001 each; RDS T4g "Unlimited" surplus CPU credits only under sustained load | cents at most |
+| Not itemised (negligible at staging volume): ECR image storage (~0.2–0.5 GB × $0.10/GB-month), cross-AZ traffic ($0.01/GB each way), Secrets Manager/KMS API calls | — |
 | Removed vs Stage 9.3: NAT Gateway + EIP (0.057), 2nd API replica (0.014), Container Insights, SNS, ALB public IPs (0.010), 2 DATABASE_URL secrets, customer-managed KMS key | — |
 
 | Scenario | Estimated cost |
@@ -220,7 +269,13 @@ data transfer uses the published list price (~$0.085/GB for Europe).
 | **D. 24 hours** (mostly idle) | **≈ $2.30–2.60** |
 | **E. Accidentally left running 30 days** (730 h, idle) | **≈ $70–75** (up to ≈ $85 if Spot ran at on-demand prices), vs ≈ $135–155 for the Stage 9.3 design |
 | Multi-replica test | +≈ $0.009 per hour while 2 replicas run |
-| **F. After teardown** | **≈ $0.00–0.01/month** (state bucket; budget free) |
+| **F. After teardown** | **≈ $0.00–0.01/month** (state bucket; budget, IAM boundary policy and AWS-managed keys free) |
+
+These figures assume no account-level services that bill per resource or
+per image (GuardDuty ECS runtime monitoring, AWS Config recording,
+Security Hub, Inspector enhanced ECR scanning). If any are enabled on the
+account, each create/destroy cycle adds their charges. Basic ECR
+scan-on-push is free.
 
 The largest remaining line items are the ALB ($0.027/h), RDS ($0.023/h)
 and Fargate (≈$0.023/h). Short sessions are cheap because nothing
@@ -235,11 +290,16 @@ has other credits. Some services also have always-free or 12-month
 allowances that can cover this staging footprint:
 - CloudFront (1 TB and 10M requests/month always free)
 - CloudWatch (10 alarms, 5 GB logs)
-- Secrets Manager (30-day trial per new secret)
+- Secrets Manager (one 30-day trial per account)
 - RDS / ALB / public IPv4 free-hour allowances under the legacy 12-month
   Free Tier
 
-Whether any of these apply depends on the account's plan. Check **Billing
+The legacy 12-month allowances and the credit-based Free Tier are
+either/or, not additive: the legacy allowances apply only to accounts
+created before 15 July 2025, and newer accounts get credits instead. The
+Secrets Manager trial is one 30-day trial per account, starting at the
+first secret stored; it does not restart for each new secret. Whether any
+of this applies depends on the account's plan. Check **Billing
 → Credits** and **Billing → Free Tier** in the console. None of it was
 used to justify a design decision.
 
@@ -249,8 +309,9 @@ used to justify a design decision.
   `staging_access_cidrs` and run `deploy.sh up`, which re-applies the
   function; the image build steps skip because the tags already exist.
 - **Frontend down for ~1–2 minutes**: a Spot interruption. ECS replaces the
-  task automatically. If Spot capacity is unavailable for a long time,
-  temporarily set that service's strategy to `FARGATE` in `main.tf`.
+  task automatically. If Spot capacity stays unavailable, change that
+  service's strategy to `FARGATE` in `main.tf` and **commit** the change
+  (`up` refuses a dirty tree). A different commit means `down` then `up`.
 - **`Error acquiring the state lock`**: another apply is running, or a
   crashed run left `staging/terraform.tfstate.tflock`. Confirm that nobody
   else is applying, then `terraform force-unlock <ID>`.
@@ -261,10 +322,14 @@ used to justify a design decision.
 
 ## 10. Rotation
 
-- Runtime DB password / JWT signing secret: bump `secret_version` in
-  tfvars, run `deploy.sh up`, then `deploy.sh migrate`. That re-runs
-  role-init, which `ALTER ROLE`s the new runtime password, and the services
-  redeploy.
+- Runtime DB password / JWT signing secret / seed-admin password: bump
+  `secret_version` in `terraform.tfvars` (not tracked, so the tree stays
+  clean), then run `deploy.sh up`. Its full apply writes the new values,
+  phase 5 runs role-init (which `ALTER ROLE`s the new runtime password),
+  and the services are rolled. Until role-init finishes, a replacement
+  task can briefly fail DB authentication, so rotate outside a test run.
+  `deploy.sh migrate` alone also re-runs role-init and migrate and then
+  rolls the services.
 - RDS master password: rotated by RDS itself (RDS-managed secret). The
   one-off tasks read it fresh each run.
 
@@ -276,7 +341,7 @@ copy** with a local-backend override file (`*_override.tf` is git-ignored
 and must never be committed):
 
 ```bash
-cp -r deploy/aws /tmp/tfcheck && cd /tmp/tfcheck/aws/environments/staging
+mkdir -p /tmp/tfcheck && cp -r deploy/aws /tmp/tfcheck/ && cd /tmp/tfcheck/aws/environments/staging
 printf 'terraform {\n  backend "local" {}\n}\n' > backend_override.tf
 terraform init
 terraform plan -var "image_tag=$(git -C <repo> rev-parse HEAD)" -var 'staging_access_cidrs=["203.0.113.10/32"]'
@@ -284,3 +349,24 @@ terraform plan -var "image_tag=$(git -C <repo> rev-parse HEAD)" -var 'staging_ac
 
 Offline checks (no AWS at all): `deploy/aws/tests/run-static-checks.sh`
 (also the `infrastructure` CI job).
+
+## 12. First real apply — verifications that cannot be done offline
+
+Run these on the first authorized deployment and record the results:
+
+1. `python3 deploy/aws/tests/simulate-deployer-policies.py`, and
+   `aws iam simulate-principal-policy` against the actual deployment
+   principal.
+2. After the first full apply, run `terraform plan` again. It must show no
+   changes, which also confirms the provider can refresh the write-only
+   secret versions with the granted permissions.
+3. `terraform state pull | grep -cE '"(secret_string|password)": "[^"]'`
+   must print `0`.
+4. The `/ecs/igaming-staging/role-init` log stream must not contain the
+   runtime password.
+5. From a non-allowlisted network, every URL returns 403. From the
+   allowlisted one, the API's CORS preflight succeeds.
+6. After `down`, `verify-teardown.sh` exits 0. Record whether any
+   `CloudFront-VPCOrigins-Service-SG` or VPC-origin ENIs lingered, and
+   whether the RDS-managed secret was deleted outright or scheduled for
+   deletion.

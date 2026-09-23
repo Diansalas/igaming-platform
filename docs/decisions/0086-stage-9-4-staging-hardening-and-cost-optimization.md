@@ -1,9 +1,11 @@
 # ADR 0086 — Stage 9.4 Staging Infrastructure Hardening + Cost Optimization
 
 Status: Accepted (human-approved decision set, Stage 9.4, 2026-09-23).
-Owner: `devops` (orchestrator-implemented), independently reviewed by
-`architect`, `security`, FinOps, `backend`, `qa` and `code-reviewer` (see
-`docs/progress.md`). Amends ADR 0084 (Stage 9.3 staging architecture) for
+Owner: `devops` (orchestrator-implemented). Independent reviews by
+`architect`, `security`, FinOps, `backend`, `qa` and `code-reviewer`, and
+what each found, are recorded in `docs/progress.md` (Stage 9.4 staging
+hardening entry); this ADR describes the design as amended by those
+reviews. Amends ADR 0084 (Stage 9.3 staging architecture) for
 the **staging environment only**. Nothing here was applied to AWS: the
 only AWS access used was the human-authorized read-only credential
 (`arn:aws:iam::765578795051:user/claude-staging-readonly`).
@@ -70,8 +72,13 @@ version policy.
 - **Bucket** (`deploy/aws/bootstrap`, applied once by a future authorized
   credential): versioning; SSE-S3 (AES256, bucket key); all four public
   access blocks; `BucketOwnerEnforced` (ACLs off); bucket policy denying
-  non-TLS access; noncurrent versions expire after 90 days; incomplete
-  multipart uploads aborted after 7 days; `prevent_destroy`. SSE-S3 rather
+  non-TLS access and denying `s3:DeleteObjectVersion`/`s3:DeleteBucket` to
+  everyone (old versions expire only via the lifecycle rule); noncurrent
+  versions expire after 90 days; incomplete multipart uploads aborted after
+  7 days; `prevent_destroy`. The same one-time bootstrap also creates the
+  IAM permissions boundary every staging ECS role must carry (decision
+  18) — 8 resources in total (read-only plan, 2026-09-23), plus the
+  optional cost budget. SSE-S3 rather
   than a customer-managed KMS key: after decision 4 the state holds no
   secret values, and a CMK would add a standing $1/month plus key-policy
   management to a bucket that must outlive every teardown.
@@ -97,6 +104,7 @@ entirely where the platform allows it:
 | RDS master password | `random_password` → `aws_db_instance.password` | `manage_master_user_password = true`: RDS generates it and stores it in an RDS-managed Secrets Manager secret | **No** — only the secret ARN |
 | `igaming_runtime` password | `random_password` → `secret_string` | `ephemeral "random_password"` → `secret_string_wo` (write-only) | **No** — only `secret_string_wo_version` |
 | `JWT_SIGNING_SECRET` | same as above | same as above | **No** |
+| First `platform_admin` password (new) | — (no staging path existed) | `ephemeral "random_password"` → `secret_string_wo`, injected only into the one-off `seed-admin` task | **No** |
 | Runtime `DATABASE_URL` | Terraform-composed secret containing the password | plain env var **without** a password; the password arrives separately as `PGPASSWORD` | **No** secret (host/user/db only) |
 | Migration `DATABASE_URL` | same | same, master password as `PGPASSWORD` | **No** secret |
 
@@ -104,6 +112,18 @@ entirely where the platform allows it:
 environment fallback) and `psql` both use it when the connection string
 carries no password — verified empirically against the repo's pinned pgx,
 including RDS-style special characters. No Go code changed.
+
+**Logs, too (security review P1)**: the Stage 9.3 role-init script
+printed the runtime password to stdout — `SELECT set_config(...)` returns
+the value it sets — which the `awslogs` driver would have shipped to
+CloudWatch Logs on every run; a failing `CREATE/ALTER ROLE` would also
+have echoed it in the error context. Fixed in
+`deploy/aws/sql/init-runtime-role.rds.sql` (`\o /dev/null` around the
+`set_config`, failures re-raised with the SQLSTATE only, the session value
+cleared after use) and **verified against a real PostgreSQL 16**: the old
+script printed the password once; the fixed script prints it zero times on
+create, idempotent re-run and a forced permission failure, and zero times
+in the server log. A static guard pins it.
 
 **What remains in state**: secret ARNs/names, usernames, the RDS endpoint,
 resource IDs/ARNs, security-group rules, the CloudFront allowlist CIDRs
@@ -231,6 +251,22 @@ browser / acceptance suite (allowlisted IPv4 only)
   ($0.012 per 10k HTTPS requests, about $0.085/GB transfer, $0.10 per 1M
   function invocations). The internal ALB drops the ALB's public IPv4
   charges.
+- **`TRUSTED_PROXY_COUNT = 2` evidence**: AWS documents that for custom
+  origins CloudFront adds `X-Forwarded-For` with the viewer's TCP source IP
+  when absent and **appends** it when the viewer sent one ("Request and
+  response behavior for custom origins", Amazon CloudFront Developer
+  Guide); the ALB then appends its own peer (the VPC-origin ENI). The
+  application therefore sees `<anything the client sent>, <viewer>, <edge>`
+  and `trustedProxyClientIP` takes the 2nd entry from the right — the real
+  viewer, which a client cannot forge. (One review questioned this; the
+  primary AWS documentation was checked and it holds; the other reviews
+  concurred.)
+- **ALB ingress** is the two **private subnet CIDRs** only (where the
+  VPC-origin ENIs are created), not the whole VPC: the public-IP ECS tasks
+  cannot reach the ALB.
+- **Allowlist width**: prefixes shorter than **/24** are rejected (a /16
+  could be a whole carrier/CGNAT block, and the test-support endpoints sit
+  behind this allowlist).
 - **Rejected**: a self-signed certificate on a public ALB (browser warnings
   on three origins, a private key in state, public ALB IP charges); WAF IP
   sets (~$5/month per web ACL plus rules for the same effect as a free
@@ -249,20 +285,27 @@ kept. `image_tag` has **no default** and must be a full 40-character git
 SHA (validated; `latest` and short SHAs rejected). `deploy.sh` refuses a
 dirty working tree, tags every image with `git rev-parse HEAD`, skips
 already-pushed tags, and builds `--platform linux/amd64` to match Fargate's
-X86_64 default. The frontend images embed their environment's API URL. They
-are rebuilt on every create because ECR repositories are force-deleted
-with the environment.
+X86_64 default. The frontend images embed their environment's API URL, so
+they also carry it as the image label `igaming.api_url`; an existing tag
+is reused only if the label matches the current environment (otherwise
+`deploy.sh` stops and asks for a complete `down`).
 
 ### 14–15. Ephemeral lifecycle and cost
 
 Staging is an **ephemeral acceptance environment**: `deploy.sh up` →
-acceptance → `deploy.sh scale 2` / multi-replica test / `scale 1` → human
-inspection → `deploy.sh down` → `verify-teardown.sh` (read-only; exits
-non-zero if anything billable remains). The cost model is in the runbook
+`deploy.sh seed-admin <email>` → acceptance → `deploy.sh scale 2` /
+multi-replica test / `scale 1` → human inspection → `deploy.sh down` →
+`verify-teardown.sh` (read-only; exits non-zero if anything billable
+remains). **One commit per environment lifetime** (architecture review
+P1): `up` refuses to deploy a different commit onto a running
+environment, because a full apply would put the new code in front of the
+old schema before migrations run, breaking
+`docs/architecture/38-deployment-architecture.md` §2.3 — `down` then `up`
+instead, which ephemeral staging makes cheap. The cost model is in the runbook
 (`docs/runbooks/stage-9-4-staging-lifecycle-runbook.md` §7): about
 **$0.10/hour while running**, versus about $0.19–0.21/hour for the Stage 9.3
-design. After teardown only the state bucket (cents per month) and the
-optional budget remain. Free Tier and credits were **not** assumed in any
+design. After teardown only the state bucket (< $0.01/month), the free
+IAM boundary policy and the optional budget remain. Free Tier and credits were **not** assumed in any
 decision (§8 of the runbook lists where they might reduce the bill).
 
 ### 16. Test-support endpoints
@@ -281,6 +324,59 @@ read the RDS master credential) and a **one-off** role (migrate/role-init:
 master + runtime secrets only). Runtime-role separation
 (`docs/security/runtime-role-separation.md`) is therefore also enforced at
 the IAM layer, not only by task-definition wiring.
+
+### 18. Deployment credential least privilege (security review P1/P2)
+
+The deployer policies (`deploy/aws/iam/`) are written so a deployer
+credential **cannot escalate to account admin** and cannot touch
+non-staging resources:
+
+- **IAM**: role actions only on the three exact staging role names;
+  `CreateRole`/`PutRolePolicy`/`DeleteRolePolicy` only when the role
+  carries the permissions boundary `igaming-staging-ecs-role-boundary`
+  (created by the human-run bootstrap: ECR pull from `igaming-staging/*`,
+  staging log streams, staging secrets and the staging RDS-managed
+  secret, nothing else); explicit **Deny** on removing/replacing
+  boundaries, editing any policy, `AttachRolePolicy`,
+  `UpdateAssumeRolePolicy`, creating users or access keys; `PassRole`
+  only to `ecs-tasks.amazonaws.com`. The ECS trust policy also requires
+  `aws:SourceAccount` = this account.
+- **ELB/RDS/logs/alarms/SNS**: mutations scoped by name ARN
+  (`igaming-staging-*`); **EC2**: deletes/detaches/route replacement only
+  on resources tagged `Project=igaming-platform, Environment=staging`, and
+  `CreateTags` only as tag-on-create; `elasticloadbalancing:*` replaced by
+  an explicit list.
+- **Secrets**: `GetSecretValue` only on `igaming-staging/*` (needed by the
+  AWS provider to refresh `aws_secretsmanager_secret_version`), never on
+  the RDS-managed master secret; the state object cannot be deleted.
+- All four documents validate with IAM Access Analyzer (0 findings), and
+  `deploy/aws/tests/simulate-deployer-policies.py` (read-only
+  `SimulateCustomPolicy`) shows 25/25 expectations — every escalation path
+  the review described is denied, every operation the lifecycle needs is
+  allowed.
+- **Residual (accepted for synthetic staging, recorded)**: the deployer
+  can still create/modify staging-named resources in ways the Terraform
+  would not (e.g. an internet-facing ALB named `igaming-staging-*`, or
+  loosen a staging security group) — it is the staging operator. EC2
+  create/authorize actions are region-scoped rather than tag-scoped
+  because EC2 evaluates new sub-resources (e.g. security-group rules) that
+  carry no tag yet; tightening further needs a real-credential test.
+
+### Deferred (recorded, not built in this pass)
+
+- **Audit-record client IP** (security review P2): `internal/httpserver`'s
+  audit call sites use `RemoteAddr`, which behind CloudFront → ALB is the
+  ALB's private IP; only the rate limiter uses `TRUSTED_PROXY_COUNT`.
+  Application change for `backend`; a **production launch gate**, not a
+  staging blocker.
+- Join duplicate `X-Forwarded-For` header lines before counting hops
+  (defence in depth, application code).
+- CloudFront/ALB access logs and VPC flow logs (cost vs. forensics for
+  who called the test-support endpoints); RDS `sslmode=verify-full` with
+  the RDS CA bundle (production).
+- FinOps recommendation: serve the two SPAs from S3 behind their existing
+  distributions (removes 2 tasks, 2 public IPv4, 2 target groups, ~20% of
+  running cost) — an architecture change needing its own decision.
 
 ## What this decision does not do
 

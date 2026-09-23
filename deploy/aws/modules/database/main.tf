@@ -97,7 +97,9 @@ resource "aws_db_instance" "this" {
   # final_snapshot_identifier.
   skip_final_snapshot = true
 
-  auto_minor_version_upgrade = true
+  # With an exact engine_version pin, an AWS-applied minor upgrade would make
+  # the next apply attempt a (failing) downgrade; pinned roots set false.
+  auto_minor_version_upgrade = var.auto_minor_version_upgrade
   apply_immediately          = true
   copy_tags_to_snapshot      = true
 

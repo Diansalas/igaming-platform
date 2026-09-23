@@ -52,6 +52,7 @@ locals {
     "backoffice"   = null
     "migrate"      = null
     "role-init"    = null
+    "seed-admin"   = null
   }
 }
 
@@ -188,6 +189,12 @@ resource "aws_ecs_service" "platform_api" {
   health_check_grace_period_seconds  = 30
 
   tags = var.tags
+
+  # The capacity providers named in the strategy must be associated with
+  # the cluster BEFORE the service is created (CreateService rejects an
+  # unassociated provider) and must stay associated until the service is
+  # gone on destroy.
+  depends_on = [aws_ecs_cluster_capacity_providers.this]
 }
 
 # --- b2c ---
@@ -262,6 +269,12 @@ resource "aws_ecs_service" "b2c" {
   health_check_grace_period_seconds  = 30
 
   tags = var.tags
+
+  # The capacity providers named in the strategy must be associated with
+  # the cluster BEFORE the service is created (CreateService rejects an
+  # unassociated provider) and must stay associated until the service is
+  # gone on destroy.
+  depends_on = [aws_ecs_cluster_capacity_providers.this]
 }
 
 # --- backoffice ---
@@ -336,6 +349,12 @@ resource "aws_ecs_service" "backoffice" {
   health_check_grace_period_seconds  = 30
 
   tags = var.tags
+
+  # The capacity providers named in the strategy must be associated with
+  # the cluster BEFORE the service is created (CreateService rejects an
+  # unassociated provider) and must stay associated until the service is
+  # gone on destroy.
+  depends_on = [aws_ecs_cluster_capacity_providers.this]
 }
 
 # --- migrate (one-off; run via `aws ecs run-task`, never a service) ---
@@ -423,6 +442,54 @@ resource "aws_ecs_task_definition" "role_init" {
           "awslogs-group"         = aws_cloudwatch_log_group.this["role-init"].name
           "awslogs-region"        = var.aws_region
           "awslogs-stream-prefix" = "role-init"
+        }
+      }
+    }
+  ])
+
+  tags = var.tags
+}
+
+# --- seed-admin (one-off; run via `deploy.sh seed-admin <email>`) ---
+#
+# Creates the first platform_admin staff user (cmd/seed-admin) so the Back
+# Office can be used for acceptance. Connects as the master/migration-owner
+# role like migrate/role-init (same one-off execution role). The password
+# comes from Secrets Manager (SEED_ADMIN_PASSWORD, write-only, never in
+# state); the email is supplied at run time as a command override (it is
+# not a secret). Idempotency is cmd/seed-admin's own: a second run for the
+# same email fails on the unique staff email rather than duplicating.
+resource "aws_ecs_task_definition" "seed_admin" {
+  family                   = "${var.name_prefix}-seed-admin"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = var.one_off_task_cpu
+  memory                   = var.one_off_task_memory
+  execution_role_arn       = var.one_off_execution_role_arn
+  task_role_arn            = var.task_role_arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "seed-admin"
+      image     = var.platform_api_image
+      essential = true
+      # Placeholder; deploy.sh always overrides the command with the
+      # operator-supplied -email. Running this definition without an
+      # override fails fast (cmd/seed-admin requires -email).
+      command = ["/app/seed-admin"]
+      environment = [
+        { name = "DATABASE_URL", value = local.database_url_migration },
+      ]
+      secrets = [
+        { name = "PGPASSWORD", valueFrom = "${var.db_master_secret_arn}:password::" },
+        { name = "SEED_ADMIN_PASSWORD", valueFrom = var.seed_admin_password_secret_arn },
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.this["seed-admin"].name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "seed-admin"
         }
       }
     }

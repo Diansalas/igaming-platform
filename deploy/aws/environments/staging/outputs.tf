@@ -60,6 +60,10 @@ output "ecs_role_init_task_definition_arn" {
   value = module.ecs.task_definition_arns["role_init"]
 }
 
+output "ecs_seed_admin_task_definition_arn" {
+  value = module.ecs.task_definition_arns["seed_admin"]
+}
+
 output "ecs_task_subnet_ids" {
   description = "Subnets deploy.sh runs the one-off tasks in (same as the services)."
   value       = var.ecs_public_ip_mode ? module.network.public_subnet_ids : module.network.private_subnet_ids
@@ -84,6 +88,7 @@ output "secret_arns" {
     db_master_rds_managed = module.database.master_user_secret_arn
     db_runtime            = module.secrets.db_runtime_secret_arn
     jwt_signing           = module.secrets.jwt_signing_secret_arn
+    seed_admin_password   = module.secrets.seed_admin_password_secret_arn
   }
 }
 

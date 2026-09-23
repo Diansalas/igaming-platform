@@ -36,6 +36,12 @@ variable "one_off_log_group_arns" {
   type        = list(string)
 }
 
+variable "permissions_boundary_arn" {
+  description = "Optional IAM permissions boundary attached to every role this module creates. The staging root passes the boundary created by deploy/aws/bootstrap (ADR 0086); null = no boundary."
+  type        = string
+  default     = null
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

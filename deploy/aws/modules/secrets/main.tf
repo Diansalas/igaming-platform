@@ -1,8 +1,13 @@
 # Application secrets generated for this deployment, stored in Secrets
-# Manager. Two secrets:
+# Manager. Three secrets:
 #   1. The igaming_runtime app credential (non-owning runtime role, JSON
 #      {"username","password"} — docs/security/runtime-role-separation.md).
 #   2. JWT_SIGNING_SECRET.
+#   3. The password for the first platform_admin staff user, consumed only
+#      by the one-off seed-admin task (cmd/seed-admin reads
+#      SEED_ADMIN_PASSWORD). The operator reads it from Secrets Manager to
+#      log in to the Back Office; it never appears on a command line, in a
+#      task override or in state.
 #
 # The RDS master ("igaming", migration-owner) credential is NOT generated
 # here any more: RDS generates and stores it itself
@@ -40,6 +45,12 @@ ephemeral "random_password" "jwt_signing" {
   special = false
 }
 
+ephemeral "random_password" "seed_admin" {
+  # cmd/seed-admin requires at least 12 characters.
+  length  = 32
+  special = false
+}
+
 resource "aws_secretsmanager_secret" "db_runtime" {
   name                    = "${var.name_prefix}/db-runtime"
   description             = "Non-owning igaming_runtime application credential (PLAT-ROLESPLIT-1). Generated ephemerally by Terraform and written write-only (never in Terraform state). platform-api receives its password as PGPASSWORD."
@@ -68,5 +79,19 @@ resource "aws_secretsmanager_secret" "jwt_signing" {
 resource "aws_secretsmanager_secret_version" "jwt_signing" {
   secret_id                = aws_secretsmanager_secret.jwt_signing.id
   secret_string_wo         = ephemeral.random_password.jwt_signing.result
+  secret_string_wo_version = var.secret_version
+}
+
+resource "aws_secretsmanager_secret" "seed_admin" {
+  name                    = "${var.name_prefix}/seed-admin-password"
+  description             = "Password for the first platform_admin staff user (cmd/seed-admin, one-off task). Generated ephemerally by Terraform and written write-only (never in Terraform state)."
+  recovery_window_in_days = var.recovery_window_in_days
+
+  tags = merge(var.tags, { Name = "${var.name_prefix}-seed-admin-password" })
+}
+
+resource "aws_secretsmanager_secret_version" "seed_admin" {
+  secret_id                = aws_secretsmanager_secret.seed_admin.id
+  secret_string_wo         = ephemeral.random_password.seed_admin.result
   secret_string_wo_version = var.secret_version
 }

@@ -65,6 +65,12 @@ variable "deletion_protection" {
   default     = false
 }
 
+variable "auto_minor_version_upgrade" {
+  description = "Let RDS apply minor engine upgrades in the maintenance window. Default true; a root that pins an exact engine_version (staging) sets false so Terraform and RDS never disagree about the version."
+  type        = bool
+  default     = true
+}
+
 variable "create_kms_key" {
   description = "Create a dedicated customer-managed KMS key for storage encryption (default true). false uses the AWS-managed aws/rds key — storage is encrypted either way. The staging root sets false (ADR 0086)."
   type        = bool

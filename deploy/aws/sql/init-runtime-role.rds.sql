@@ -29,7 +29,8 @@
 -- IGAMING_RUNTIME_PASSWORD in Secrets Manager is the supported way to
 -- propagate that rotation into Postgres itself (platform-api's own
 -- running tasks still need a forced new deployment afterward to pick up
--- the new DATABASE_URL secret value — see the runbook).
+-- the new PGPASSWORD value — `deploy.sh up`/`migrate` do both; see the
+-- Stage 9.4 lifecycle runbook §10).
 --
 -- ORDERING (do not run this file's REVOKE block as the *only* narrowing
 -- step — read this before assuming this file alone is sufficient):
@@ -60,20 +61,39 @@
 -- password still never appears as a CLI argument and is never hardcoded
 -- — it flows psql-variable -> session GUC -> plpgsql variable, entirely
 -- within this one psql session.
+--
+-- NEVER ECHO THE PASSWORD (Stage 9.4 security review): psql prints the
+-- result row of a SELECT, and set_config() returns the value it sets — so
+-- this statement's output is redirected to /dev/null (\o), otherwise the
+-- runtime password would land in the role-init task's stdout, i.e. in
+-- CloudWatch Logs. Likewise, a failing CREATE/ALTER ROLE inside EXECUTE
+-- would print the full dynamic statement (password included) in the error
+-- CONTEXT; the DO block below catches any failure and re-raises with the
+-- SQLSTATE only. The password is also cleared from the session GUC as soon
+-- as it has been applied.
+\o /dev/null
 SELECT set_config('igaming.runtime_password', :'runtime_password', false);
+\o
 
 DO $$
 DECLARE
     runtime_password text := current_setting('igaming.runtime_password');
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
-        EXECUTE format(
-            'CREATE ROLE igaming_runtime LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS',
-            runtime_password
-        );
-    ELSE
-        EXECUTE format('ALTER ROLE igaming_runtime WITH PASSWORD %L', runtime_password);
-    END IF;
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'igaming_runtime') THEN
+            EXECUTE format(
+                'CREATE ROLE igaming_runtime LOGIN PASSWORD %L NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS',
+                runtime_password
+            );
+        ELSE
+            EXECUTE format('ALTER ROLE igaming_runtime WITH PASSWORD %L', runtime_password);
+        END IF;
+    EXCEPTION WHEN OTHERS THEN
+        -- Deliberately NOT including SQLERRM or the statement: either can
+        -- echo the password.
+        RAISE EXCEPTION 'igaming_runtime role create/alter failed (SQLSTATE %)', SQLSTATE;
+    END;
+    PERFORM set_config('igaming.runtime_password', '', false);
 END
 $$;
 

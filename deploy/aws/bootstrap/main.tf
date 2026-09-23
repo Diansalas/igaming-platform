@@ -4,6 +4,13 @@
 # of the create/destroy staging lifecycle and is never destroyed with it.
 #
 # Creates:
+#   - the IAM permissions boundary every staging ECS role must carry
+#     (igaming-staging-ecs-role-boundary). The staging deployer policy only
+#     allows creating/editing roles with exactly this boundary, which is what
+#     stops a deployer credential from minting an admin role (ADR 0086,
+#     security review P1). It is created here, by the human-run bootstrap,
+#     precisely so the deployer credential itself never needs permission to
+#     create or edit it.
 #   - the S3 state bucket: versioned, SSE-S3 encrypted at rest (bucket
 #     key), all public access blocked, ACLs disabled (BucketOwnerEnforced),
 #     TLS-only bucket policy, noncurrent-version expiry, prevent_destroy.
@@ -82,7 +89,29 @@ resource "aws_s3_bucket_lifecycle_configuration" "state" {
   depends_on = [aws_s3_bucket_versioning.state]
 }
 
+data "aws_caller_identity" "current" {}
+
 data "aws_iam_policy_document" "state_bucket" {
+  # Nobody (the deployer included) may delete state versions or the bucket
+  # itself: old versions age out only via the lifecycle rule above, which
+  # S3 applies itself and is not subject to this policy. An account admin
+  # who genuinely needs to must first edit this policy — a deliberate,
+  # CloudTrail-visible step.
+  statement {
+    sid     = "DenyStateVersionAndBucketDeletion"
+    effect  = "Deny"
+    actions = ["s3:DeleteObjectVersion", "s3:DeleteBucket"]
+    resources = [
+      aws_s3_bucket.state.arn,
+      "${aws_s3_bucket.state.arn}/*",
+    ]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+  }
+
   statement {
     sid     = "DenyInsecureTransport"
     effect  = "Deny"
@@ -139,4 +168,58 @@ resource "aws_budgets_budget" "account_monthly" {
     notification_type          = "FORECASTED"
     subscriber_email_addresses = [var.budget_alert_email]
   }
+}
+
+# --- Permissions boundary for every staging ECS role (see file header) ---
+#
+# Exactly what ECS execution roles need at task start — nothing else. Any
+# role the deployer creates is capped at this even if someone attaches a
+# broader inline policy to it.
+data "aws_iam_policy_document" "staging_ecs_role_boundary" {
+  statement {
+    sid       = "EcrAuthToken"
+    actions   = ["ecr:GetAuthorizationToken"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "EcrPullStagingRepos"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:BatchGetImage",
+    ]
+    resources = ["arn:aws:ecr:${var.aws_region}:${data.aws_caller_identity.current.account_id}:repository/igaming-staging/*"]
+  }
+
+  statement {
+    sid       = "StagingLogStreams"
+    actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+    resources = ["arn:aws:logs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:log-group:/ecs/igaming-staging/*"]
+  }
+
+  statement {
+    sid       = "StagingAppSecrets"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = ["arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:igaming-staging/*"]
+  }
+
+  # The RDS-managed master secret ("rds!db-<uuid>"), only for the staging DB.
+  statement {
+    sid       = "StagingRdsManagedMasterSecret"
+    actions   = ["secretsmanager:GetSecretValue"]
+    resources = ["arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:rds!*"]
+
+    condition {
+      test     = "StringLike"
+      variable = "secretsmanager:ResourceTag/aws:rds:primaryDBInstanceArn"
+      values   = ["arn:aws:rds:${var.aws_region}:${data.aws_caller_identity.current.account_id}:db:igaming-staging-*"]
+    }
+  }
+}
+
+resource "aws_iam_policy" "staging_ecs_role_boundary" {
+  name        = "igaming-staging-ecs-role-boundary"
+  description = "Permissions boundary for every igaming-staging ECS role (ADR 0086). Created by deploy/aws/bootstrap; the deployer cannot modify it."
+  policy      = data.aws_iam_policy_document.staging_ecs_role_boundary.json
 }

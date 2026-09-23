@@ -61,12 +61,12 @@ check "ECS clusters (active)" aws ecs list-clusters --region "${REGION}" \
   --query "clusterArns[?contains(@, ':cluster/${PREFIX}')]" --output text
 check "CloudFront distributions" aws cloudfront list-distributions \
   --query "DistributionList.Items[?starts_with(Comment, '${PREFIX}')].[Id,DomainName,Status]" --output text
-check "CloudFront VPC origins" bash -c "aws cloudfront list-vpc-origins --output json \
+check "CloudFront VPC origins" bash -o pipefail -c "aws cloudfront list-vpc-origins --output json \
   | jq -r '.VpcOriginList.Items // [] | .[] | select(.Name | startswith(\"${PREFIX}\")) | [.Id, .Name, .Status] | @tsv'"
 # Our secrets are named "<prefix>/..."; the RDS-managed master secret is
 # named "rds!db-<uuid>" and is identified by the aws:rds:primaryDBInstanceArn
 # tag RDS puts on it.
-check "Secrets (incl. scheduled for deletion)" bash -c "aws secretsmanager list-secrets --region ${REGION} \
+check "Secrets (incl. scheduled for deletion)" bash -o pipefail -c "aws secretsmanager list-secrets --region ${REGION} \
   --include-planned-deletion --output json \
   | jq -r '.SecretList[] | select((.Name | startswith(\"${PREFIX}/\")) or ((.Name | startswith(\"rds!\")) and ([.Tags[]? | select(.Key == \"aws:rds:primaryDBInstanceArn\" and (.Value | contains(\":db:${PREFIX}\")))] | length > 0))) | [.Name, (.DeletedDate // \"active\" | tostring)] | @tsv'"
 
@@ -92,13 +92,37 @@ check "CloudFront functions" aws cloudfront list-functions \
 check "IAM roles" aws iam list-roles \
   --query "Roles[?starts_with(RoleName, '${PREFIX}-')].RoleName" --output text
 
+# CloudFront VPC origins create AWS-managed ENIs and a service-managed
+# security group ("CloudFront-VPCOrigins-Service-SG") inside the VPC; they
+# are not Terraform-managed. If either lingers, VPC deletion fails with
+# DependencyViolation (runbook §6 troubleshooting).
+staging_vpcs="$(aws ec2 describe-vpcs --region "${REGION}" \
+  --filters "Name=tag:Project,Values=igaming-platform" "Name=tag:Environment,Values=staging" \
+  --query "Vpcs[].VpcId" --output text 2>/dev/null | tr '\t' ',')"
+if [[ -n "${staging_vpcs}" && "${staging_vpcs}" != "None" ]]; then
+  check "Network interfaces in staging VPC(s)" aws ec2 describe-network-interfaces --region "${REGION}" \
+    --filters "Name=vpc-id,Values=${staging_vpcs}" \
+    --query "NetworkInterfaces[].[NetworkInterfaceId,InterfaceType,Description]" --output text
+  check "Non-default security groups in staging VPC(s) (incl. CloudFront-VPCOrigins-Service-SG)" \
+    aws ec2 describe-security-groups --region "${REGION}" --filters "Name=vpc-id,Values=${staging_vpcs}" \
+    --query "SecurityGroups[?GroupName!='default'].[GroupId,GroupName]" --output text
+else
+  echo "  [ok]    Network interfaces / security groups in staging VPC(s): no staging VPC"
+fi
+
 echo
-echo "Tag sweep (Project=igaming-platform, Environment=staging; bootstrap Component excluded):"
+echo "Tag sweep (Project=igaming-platform, Environment=staging; bootstrap Component and ECS task definitions excluded):"
 for r in "${REGION}" us-east-1; do
-  check "Tagged resources in ${r}" bash -c "aws resourcegroupstaggingapi get-resources --region ${r} \
+  check "Tagged resources in ${r}" bash -o pipefail -c "aws resourcegroupstaggingapi get-resources --region ${r} \
     --tag-filters Key=Project,Values=igaming-platform Key=Environment,Values=staging --output json \
-    | jq -r '.ResourceTagMappingList[] | select(([.Tags[] | select(.Key==\"Component\" and .Value==\"bootstrap\")] | length) == 0) | .ResourceARN'"
+    | jq -r '.ResourceTagMappingList[] | select(([.Tags[] | select(.Key==\"Component\" and .Value==\"bootstrap\")] | length) == 0) | .ResourceARN | select(contains(\":task-definition/\") | not)'"
 done
+
+# Deregistered (INACTIVE) ECS task definitions are free and keep their tags;
+# they are reported for information only, never counted as leftovers.
+inactive_tds="$(aws ecs list-task-definitions --region "${REGION}" --status INACTIVE \
+  --family-prefix "${PREFIX}" --query "length(taskDefinitionArns)" --output text 2>/dev/null || echo "?")"
+echo "  [info]  INACTIVE ${PREFIX} task definitions (free, not billable): ${inactive_tds}"
 
 echo
 echo "Intentionally persistent (expected to remain; see runbook §6):"

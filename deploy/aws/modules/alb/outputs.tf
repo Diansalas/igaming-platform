@@ -33,3 +33,7 @@ output "target_group_arn_suffixes" {
     backoffice   = aws_lb_target_group.backoffice.arn_suffix
   }
 }
+
+output "internal" {
+  value = aws_lb.this.internal
+}

@@ -35,6 +35,8 @@ variables {
   db_master_secret_arn   = "arn:aws:secretsmanager:eu-central-1:765578795051:secret:rds!db-mock-AbCdEf"
   db_runtime_secret_arn  = "arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/db-runtime-AbCdEf"
   jwt_signing_secret_arn = "arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/jwt-signing-secret-AbCdEf"
+
+  seed_admin_password_secret_arn = "arn:aws:secretsmanager:eu-central-1:765578795051:secret:igaming-staging/seed-admin-password-AbCdEf"
 }
 
 run "database_url_never_carries_a_password" {
@@ -42,7 +44,7 @@ run "database_url_never_carries_a_password" {
 
   assert {
     condition = alltrue([
-      for td in [aws_ecs_task_definition.platform_api, aws_ecs_task_definition.migrate, aws_ecs_task_definition.role_init] :
+      for td in [aws_ecs_task_definition.platform_api, aws_ecs_task_definition.migrate, aws_ecs_task_definition.role_init, aws_ecs_task_definition.seed_admin] :
       alltrue([
         for e in lookup(jsondecode(td.container_definitions)[0], "environment", []) :
         can(regex("^postgres://[A-Za-z0-9_]+@[^/:@]+:[0-9]+/[A-Za-z0-9_]+\\?sslmode=require$", e.value)) if e.name == "DATABASE_URL"
@@ -53,7 +55,7 @@ run "database_url_never_carries_a_password" {
 
   assert {
     condition = alltrue([
-      for td in [aws_ecs_task_definition.platform_api, aws_ecs_task_definition.migrate, aws_ecs_task_definition.role_init] :
+      for td in [aws_ecs_task_definition.platform_api, aws_ecs_task_definition.migrate, aws_ecs_task_definition.role_init, aws_ecs_task_definition.seed_admin] :
       !contains([for s in lookup(jsondecode(td.container_definitions)[0], "secrets", []) : s.name], "DATABASE_URL")
     ])
     error_message = "DATABASE_URL must be a plain env var, never a secret composed with a password."
@@ -93,6 +95,16 @@ run "credentials_injected_from_the_right_secrets" {
   }
 
   assert {
+    condition = {
+      for s in jsondecode(aws_ecs_task_definition.seed_admin.container_definitions)[0].secrets : s.name => s.valueFrom
+      } == {
+      PGPASSWORD          = "${var.db_master_secret_arn}:password::"
+      SEED_ADMIN_PASSWORD = var.seed_admin_password_secret_arn
+    }
+    error_message = "seed-admin must receive only the master password and its own admin password secret."
+  }
+
+  assert {
     condition = anytrue([
       for e in jsondecode(aws_ecs_task_definition.platform_api.container_definitions)[0].environment :
       e.name == "DATABASE_URL" && startswith(e.value, "postgres://igaming_runtime@")
@@ -113,8 +125,8 @@ run "execution_role_separation" {
   }
 
   assert {
-    condition     = aws_ecs_task_definition.migrate.execution_role_arn == var.one_off_execution_role_arn && aws_ecs_task_definition.role_init.execution_role_arn == var.one_off_execution_role_arn
-    error_message = "migrate/role-init must use the one-off execution role."
+    condition     = alltrue([for td in [aws_ecs_task_definition.migrate, aws_ecs_task_definition.role_init, aws_ecs_task_definition.seed_admin] : td.execution_role_arn == var.one_off_execution_role_arn])
+    error_message = "migrate/role-init/seed-admin must use the one-off execution role."
   }
 }
 

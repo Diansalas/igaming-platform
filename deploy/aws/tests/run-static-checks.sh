@@ -13,6 +13,10 @@ TF="${TERRAFORM:-terraform}"
 NODE_BIN="${NODE:-node}"
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
+# One shared provider cache (symlinked into each module's data dir) instead
+# of a full ~600 MB provider copy per module, which exhausted disk space.
+export TF_PLUGIN_CACHE_DIR="${WORK}/plugin-cache"
+mkdir -p "${TF_PLUGIN_CACHE_DIR}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 step() { echo; echo "== $* =="; }
@@ -38,12 +42,22 @@ done
 step "terraform test: environments/staging"
 tf_in "${AWS_DIR}/environments/staging" test -no-color
 
+# Every module is validated, tested or not (an untested module — e.g. the
+# unwired dns module — must still at least be valid). Each module's data
+# dir is removed right after its step.
 for mod in "${AWS_DIR}"/modules/*/; do
   mod="${mod%/}"
-  compgen -G "${mod}/tests/*.tftest.hcl" >/dev/null || continue
-  step "terraform test: modules/$(basename "${mod}")"
+  name="$(basename "${mod}")"
   tf_in "${mod}" init -backend=false -input=false -no-color >/dev/null
-  tf_in "${mod}" test -no-color
+  if compgen -G "${mod}/tests/*.tftest.hcl" >/dev/null; then
+    step "terraform validate + test: modules/${name}"
+    tf_in "${mod}" validate -no-color
+    tf_in "${mod}" test -no-color
+  else
+    step "terraform validate (no tests): modules/${name}"
+    tf_in "${mod}" validate -no-color
+  fi
+  rm -rf "${WORK}/$(echo "${mod}" | tr '/' '_')"
 done
 
 step "CloudFront allowlist function unit tests"
@@ -73,6 +87,14 @@ if grep -rnE --include='*.tf' '^\s*(password|secret_string)\s*=' "${AWS_DIR}/mod
 fi
 if grep -rn --include='*.tf' 'resource "random_password"' "${AWS_DIR}" >/dev/null; then
   fail "a non-ephemeral random_password (value stored in state) was reintroduced"
+fi
+# role-init must never print the runtime password: set_config() returns the
+# value it sets, so its SELECT must stay wrapped in \o /dev/null ... \o.
+if ! awk '/^\\o \/dev\/null/{q=1;next} /^\\o$/{q=0} /set_config\(.igaming\.runtime_password., :/{ if(!q) bad=1 } END{exit bad}' "${AWS_DIR}/sql/init-runtime-role.rds.sql"; then
+  fail "init-runtime-role.rds.sql: SELECT set_config(...password...) is not inside \\o /dev/null (the password would be printed to CloudWatch Logs)"
+fi
+if ! grep -q 'RAISE EXCEPTION .igaming_runtime role create/alter failed' "${AWS_DIR}/sql/init-runtime-role.rds.sql"; then
+  fail "init-runtime-role.rds.sql: CREATE/ALTER ROLE failures must be re-raised without the statement text"
 fi
 
 echo

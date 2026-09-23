@@ -157,8 +157,68 @@ run "staging_defaults_are_hardened" {
 
   # --- secret ARNs exposed, never values ---
   assert {
-    condition     = length(output.secret_arns) == 3 && alltrue([for v in values(output.secret_arns) : startswith(v, "arn:aws:secretsmanager:")])
-    error_message = "secret_arns must list exactly the three secret ARNs."
+    condition     = length(output.secret_arns) == 4 && alltrue([for v in values(output.secret_arns) : startswith(v, "arn:aws:secretsmanager:")])
+    error_message = "secret_arns must list exactly the four secret ARNs."
+  }
+
+  # --- ADR 0086 root-level decisions (QA review: each must fail a test if
+  #     silently reverted at the call site) ---
+  assert {
+    condition     = module.alb.internal == true
+    error_message = "The staging ALB must be internal (reached only via CloudFront VPC origins)."
+  }
+
+  assert {
+    condition     = toset(module.security.alb_ingress_cidrs) == toset(["10.20.128.0/20", "10.20.144.0/20"])
+    error_message = "ALB ingress must be exactly the private subnet CIDRs (where the VPC-origin ENIs live) — never the VPC, the public subnets or 0.0.0.0/0."
+  }
+
+  assert {
+    condition     = module.ecs.platform_api_environment["TRUSTED_PROXY_COUNT"] == "2"
+    error_message = "TRUSTED_PROXY_COUNT must be 2 (CloudFront + ALB) so rate limiting keys on the real viewer IP."
+  }
+
+  assert {
+    condition     = module.ecs.platform_api_environment["APP_ENV"] == "staging" && module.ecs.platform_api_environment["TEST_SUPPORT_ENDPOINTS_ENABLED"] == "true"
+    error_message = "Staging runs APP_ENV=staging with test-support endpoints (behind the edge allowlist)."
+  }
+
+  assert {
+    # "user@" straight after the scheme: there is no ":password" part.
+    condition     = can(regex("^postgres://igaming_runtime@[^/:@]+:[0-9]+/", module.ecs.platform_api_environment["DATABASE_URL"]))
+    error_message = "platform-api's DATABASE_URL must be the password-free runtime-role URL."
+  }
+
+  assert {
+    # A set in the provider schema: compare content, not order.
+    condition = toset(module.ecs.service_capacity_provider_strategies["platform_api"]) == toset([
+      { capacity_provider = "FARGATE", base = 1, weight = 0 },
+      { capacity_provider = "FARGATE_SPOT", base = 0, weight = 1 },
+    ])
+    error_message = "platform-api must keep its on-demand base task (mixed FARGATE base 1 + FARGATE_SPOT)."
+  }
+
+  assert {
+    condition = alltrue([
+      for k in ["b2c", "backoffice"] :
+      toset(module.ecs.service_capacity_provider_strategies[k]) == toset([{ capacity_provider = "FARGATE_SPOT", base = 0, weight = 1 }])
+    ])
+    error_message = "Frontends run on FARGATE_SPOT only."
+  }
+
+  assert {
+    condition     = var.platform_api_desired_count == 1
+    error_message = "Staging runs ONE platform-api replica by default (2 only for the multi-replica test)."
+  }
+
+  assert {
+    condition     = var.db_engine_version == "16.15" && module.database.engine_version == "16.15"
+    error_message = "PostgreSQL must stay pinned to the verified 16.15 (16.4 is not offered in eu-central-1)."
+  }
+
+  assert {
+    condition     = module.database.publicly_accessible == false
+    error_message = "RDS must never be publicly accessible."
   }
 }
 

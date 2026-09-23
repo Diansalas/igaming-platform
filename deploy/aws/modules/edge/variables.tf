@@ -21,8 +21,9 @@ variable "allowed_viewer_cidrs" {
     IPv4 CIDRs allowed to reach the staging distributions (everyone else
     gets 403 at the edge). Must be supplied explicitly — there is no default
     — and must include every place a browser or the acceptance suite will
-    connect from. Prefixes shorter than /16 are rejected so this can never
-    silently become "the whole internet".
+    connect from. Prefixes shorter than /24 (256 addresses) are rejected so
+    this can never silently become a whole carrier/CGNAT block, let alone
+    "the whole internet" — the test-support endpoints sit behind it.
   EOT
   type        = list(string)
 
@@ -34,9 +35,9 @@ variable "allowed_viewer_cidrs" {
   validation {
     condition = alltrue([
       for c in var.allowed_viewer_cidrs :
-      can(cidrnetmask(c)) && can(regex("^[0-9.]+/[0-9]+$", c)) && tonumber(split("/", c)[1]) >= 16
+      can(regex("^[0-9]{1,3}(\\.[0-9]{1,3}){3}/[0-9]{1,2}$", c)) && can(cidrnetmask(c)) && try(tonumber(split("/", c)[1]) >= 24, false)
     ])
-    error_message = "Each allowed_viewer_cidrs entry must be an IPv4 CIDR (a.b.c.d/nn) with a prefix length of at least /16."
+    error_message = "Each allowed_viewer_cidrs entry must be an IPv4 CIDR (a.b.c.d/nn) with a prefix length of at least /24."
   }
 }
 

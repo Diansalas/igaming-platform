@@ -32,7 +32,7 @@ run "disposable_force_delete_opt_in" {
   }
 
   assert {
-    condition     = aws_secretsmanager_secret.db_runtime.recovery_window_in_days == 0 && aws_secretsmanager_secret.jwt_signing.recovery_window_in_days == 0
+    condition     = alltrue([for x in [aws_secretsmanager_secret.db_runtime, aws_secretsmanager_secret.jwt_signing, aws_secretsmanager_secret.seed_admin] : x.recovery_window_in_days == 0])
     error_message = "recovery_window_in_days = 0 must force-delete both secrets."
   }
 }
@@ -51,7 +51,7 @@ run "values_are_write_only" {
   command = apply
 
   assert {
-    condition     = aws_secretsmanager_secret_version.db_runtime.secret_string == null && aws_secretsmanager_secret_version.jwt_signing.secret_string == null
+    condition     = alltrue([for v in [aws_secretsmanager_secret_version.db_runtime, aws_secretsmanager_secret_version.jwt_signing, aws_secretsmanager_secret_version.seed_admin] : v.secret_string == null])
     error_message = "Secret values must be written write-only (secret_string_wo), never via secret_string (which is stored in state)."
   }
 

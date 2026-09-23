@@ -10,41 +10,10 @@
       "Resource": "*"
     },
     {
-      "Sid": "Ec2NetworkingRegional",
+      "Sid": "Ec2Describe",
       "Effect": "Allow",
       "Action": [
-        "ec2:Describe*",
-        "ec2:CreateVpc",
-        "ec2:DeleteVpc",
-        "ec2:ModifyVpcAttribute",
-        "ec2:CreateSubnet",
-        "ec2:DeleteSubnet",
-        "ec2:ModifySubnetAttribute",
-        "ec2:CreateInternetGateway",
-        "ec2:DeleteInternetGateway",
-        "ec2:AttachInternetGateway",
-        "ec2:DetachInternetGateway",
-        "ec2:CreateRouteTable",
-        "ec2:DeleteRouteTable",
-        "ec2:AssociateRouteTable",
-        "ec2:DisassociateRouteTable",
-        "ec2:CreateRoute",
-        "ec2:DeleteRoute",
-        "ec2:ReplaceRoute",
-        "ec2:AllocateAddress",
-        "ec2:ReleaseAddress",
-        "ec2:CreateNatGateway",
-        "ec2:DeleteNatGateway",
-        "ec2:CreateSecurityGroup",
-        "ec2:DeleteSecurityGroup",
-        "ec2:AuthorizeSecurityGroupIngress",
-        "ec2:AuthorizeSecurityGroupEgress",
-        "ec2:RevokeSecurityGroupIngress",
-        "ec2:RevokeSecurityGroupEgress",
-        "ec2:UpdateSecurityGroupRuleDescriptionsIngress",
-        "ec2:UpdateSecurityGroupRuleDescriptionsEgress",
-        "ec2:CreateTags",
-        "ec2:DeleteTags"
+        "ec2:Describe*"
       ],
       "Resource": "*",
       "Condition": {
@@ -54,11 +23,102 @@
       }
     },
     {
-      "Sid": "RdsRegional",
+      "Sid": "Ec2CreateAndWire",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateVpc",
+        "ec2:CreateSubnet",
+        "ec2:CreateInternetGateway",
+        "ec2:AttachInternetGateway",
+        "ec2:CreateRouteTable",
+        "ec2:AssociateRouteTable",
+        "ec2:CreateRoute",
+        "ec2:AllocateAddress",
+        "ec2:CreateNatGateway",
+        "ec2:CreateSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:UpdateSecurityGroupRuleDescriptionsIngress",
+        "ec2:UpdateSecurityGroupRuleDescriptionsEgress",
+        "ec2:ModifyVpcAttribute",
+        "ec2:ModifySubnetAttribute"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "eu-central-1"
+        }
+      }
+    },
+    {
+      "Sid": "Ec2TagOnCreateOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateTags"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "eu-central-1",
+          "ec2:CreateAction": [
+            "CreateVpc",
+            "CreateSubnet",
+            "CreateInternetGateway",
+            "CreateRouteTable",
+            "CreateSecurityGroup",
+            "AllocateAddress",
+            "CreateNatGateway"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "Ec2ChangeOrDeleteStagingTaggedOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateTags",
+        "ec2:DeleteTags",
+        "ec2:DeleteVpc",
+        "ec2:DeleteSubnet",
+        "ec2:DeleteInternetGateway",
+        "ec2:DetachInternetGateway",
+        "ec2:DeleteRouteTable",
+        "ec2:DisassociateRouteTable",
+        "ec2:DeleteRoute",
+        "ec2:ReplaceRoute",
+        "ec2:ReleaseAddress",
+        "ec2:DisassociateAddress",
+        "ec2:DeleteNatGateway",
+        "ec2:DeleteSecurityGroup"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "igaming-platform",
+          "aws:ResourceTag/Environment": "staging"
+        }
+      }
+    },
+    {
+      "Sid": "RdsDescribe",
       "Effect": "Allow",
       "Action": [
         "rds:Describe*",
-        "rds:ListTagsForResource",
+        "rds:ListTagsForResource"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "eu-central-1"
+        }
+      }
+    },
+    {
+      "Sid": "RdsStagingOnly",
+      "Effect": "Allow",
+      "Action": [
         "rds:CreateDBInstance",
         "rds:ModifyDBInstance",
         "rds:DeleteDBInstance",
@@ -72,12 +132,12 @@
         "rds:AddTagsToResource",
         "rds:RemoveTagsFromResource"
       ],
-      "Resource": "*",
-      "Condition": {
-        "StringEquals": {
-          "aws:RequestedRegion": "eu-central-1"
-        }
-      }
+      "Resource": [
+        "arn:aws:rds:eu-central-1:765578795051:db:igaming-staging-*",
+        "arn:aws:rds:eu-central-1:765578795051:subgrp:igaming-staging-*",
+        "arn:aws:rds:eu-central-1:765578795051:pg:igaming-staging-*",
+        "arn:aws:rds:eu-central-1:765578795051:og:default:*"
+      ]
     },
     {
       "Sid": "EcsRegional",
@@ -115,10 +175,10 @@
       }
     },
     {
-      "Sid": "ElbRegional",
+      "Sid": "ElbDescribe",
       "Effect": "Allow",
       "Action": [
-        "elasticloadbalancing:*"
+        "elasticloadbalancing:Describe*"
       ],
       "Resource": "*",
       "Condition": {
@@ -128,14 +188,57 @@
       }
     },
     {
-      "Sid": "LogsRegional",
+      "Sid": "ElbStagingOnly",
+      "Effect": "Allow",
+      "Action": [
+        "elasticloadbalancing:CreateLoadBalancer",
+        "elasticloadbalancing:DeleteLoadBalancer",
+        "elasticloadbalancing:ModifyLoadBalancerAttributes",
+        "elasticloadbalancing:SetSecurityGroups",
+        "elasticloadbalancing:SetSubnets",
+        "elasticloadbalancing:CreateTargetGroup",
+        "elasticloadbalancing:DeleteTargetGroup",
+        "elasticloadbalancing:ModifyTargetGroup",
+        "elasticloadbalancing:ModifyTargetGroupAttributes",
+        "elasticloadbalancing:CreateListener",
+        "elasticloadbalancing:DeleteListener",
+        "elasticloadbalancing:ModifyListener",
+        "elasticloadbalancing:ModifyListenerAttributes",
+        "elasticloadbalancing:CreateRule",
+        "elasticloadbalancing:DeleteRule",
+        "elasticloadbalancing:ModifyRule",
+        "elasticloadbalancing:SetRulePriorities",
+        "elasticloadbalancing:AddTags",
+        "elasticloadbalancing:RemoveTags"
+      ],
+      "Resource": [
+        "arn:aws:elasticloadbalancing:eu-central-1:765578795051:loadbalancer/app/igaming-staging-*/*",
+        "arn:aws:elasticloadbalancing:eu-central-1:765578795051:targetgroup/igaming-staging-*/*",
+        "arn:aws:elasticloadbalancing:eu-central-1:765578795051:listener/app/igaming-staging-*/*/*",
+        "arn:aws:elasticloadbalancing:eu-central-1:765578795051:listener-rule/app/igaming-staging-*/*/*/*"
+      ]
+    },
+    {
+      "Sid": "LogsDescribe",
+      "Effect": "Allow",
+      "Action": [
+        "logs:DescribeLogGroups"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "eu-central-1"
+        }
+      }
+    },
+    {
+      "Sid": "LogsStagingOnly",
       "Effect": "Allow",
       "Action": [
         "logs:CreateLogGroup",
         "logs:DeleteLogGroup",
         "logs:PutRetentionPolicy",
         "logs:DeleteRetentionPolicy",
-        "logs:DescribeLogGroups",
         "logs:ListTagsForResource",
         "logs:ListTagsLogGroup",
         "logs:TagResource",
@@ -145,23 +248,13 @@
         "logs:FilterLogEvents",
         "logs:DescribeLogStreams"
       ],
-      "Resource": "*",
-      "Condition": {
-        "StringEquals": {
-          "aws:RequestedRegion": "eu-central-1"
-        }
-      }
+      "Resource": "arn:aws:logs:eu-central-1:765578795051:log-group:/ecs/igaming-staging/*"
     },
     {
-      "Sid": "CloudWatchAlarmsRegional",
+      "Sid": "AlarmsDescribe",
       "Effect": "Allow",
       "Action": [
-        "cloudwatch:PutMetricAlarm",
-        "cloudwatch:DeleteAlarms",
         "cloudwatch:DescribeAlarms",
-        "cloudwatch:ListTagsForResource",
-        "cloudwatch:TagResource",
-        "cloudwatch:UntagResource",
         "cloudwatch:GetMetricData",
         "cloudwatch:GetMetricStatistics"
       ],
@@ -171,6 +264,18 @@
           "aws:RequestedRegion": "eu-central-1"
         }
       }
+    },
+    {
+      "Sid": "AlarmsStagingOnly",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DeleteAlarms",
+        "cloudwatch:ListTagsForResource",
+        "cloudwatch:TagResource",
+        "cloudwatch:UntagResource"
+      ],
+      "Resource": "arn:aws:cloudwatch:eu-central-1:765578795051:alarm:igaming-staging-*"
     },
     {
       "Sid": "SnsOptionalAlerts",

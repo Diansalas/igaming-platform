@@ -258,6 +258,11 @@ variable "jwt_signing_secret_arn" {
   type = string
 }
 
+variable "seed_admin_password_secret_arn" {
+  description = "Plain-string secret injected as SEED_ADMIN_PASSWORD into the one-off seed-admin task only."
+  type        = string
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

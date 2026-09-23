@@ -51,6 +51,22 @@
         "budgets:TagResource"
       ],
       "Resource": "arn:aws:budgets::765578795051:budget/igaming-platform-account-monthly"
+    },
+    {
+      "Sid": "StagingEcsRoleBoundaryPolicy",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreatePolicy",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicyVersions",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicyVersion",
+        "iam:DeletePolicy",
+        "iam:TagPolicy",
+        "iam:UntagPolicy"
+      ],
+      "Resource": "arn:aws:iam::765578795051:policy/igaming-staging-ecs-role-boundary"
     }
   ]
 }

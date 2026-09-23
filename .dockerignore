@@ -13,3 +13,17 @@
 !.env.example
 **/node_modules
 **/dist
+
+# Stage 9.4 (ADR 0086): Terraform working files never enter a build context
+# (platform-api.Dockerfile's builder stage does `COPY . .`). Local tfvars
+# hold the operator's IP allowlist; state/plan files hold infrastructure
+# metadata; .terraform/ holds provider binaries.
+**/.terraform
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+**/*.tfplan.json
+**/plan.json
+**/*.tfvars
+**/*.tfvars.json
+!**/*.tfvars.example
