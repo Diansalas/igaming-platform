@@ -7919,16 +7919,19 @@ Backend accepted this; architect and security concurred.
 **Independent review verdicts** (no specialist reviewed its own work):
 - **architect**: CHANGES REQUIRED → APPROVED WITH MINOR NOTES (its three
   P3 follow-ups are fixed in 5c4ac51).
-- **security**: CHANGES REQUIRED → APPROVED WITH MINOR NOTES. Its N-1/N-2
-  follow-ups and the SG-scoping change are in 09553fa/5c4ac51; final
-  sign-off on those two commits is recorded below.
+- **security**: CHANGES REQUIRED → APPROVED WITH MINOR NOTES, then a final
+  sign-off on the follow-up commits 09553fa/5c4ac51 (N-1 closed as a
+  detected, documented residual; N-2 closed; SG tag-scoping closed) →
+  **APPROVED WITH MINOR NOTES**. Remaining P3s: a session-end Access
+  Analyzer review step (added to the runbook), and tag-scoping of the
+  route/IGW actions after the first real apply (runbook §12).
 - **FinOps**: APPROVED WITH MINOR NOTES (corrections applied).
 - **backend**: CHANGES REQUIRED → APPROVED.
 - **qa**: CHANGES REQUIRED → APPROVED (no surviving mutations).
 - **code-reviewer**: CHANGES REQUIRED → APPROVED WITH MINOR NOTES.
 
 **Verification:** `terraform fmt -check` / `validate` clean (staging,
-bootstrap and all 11 modules); 43 `terraform test` runs with mock
+bootstrap and all 11 modules); 42 `terraform test` runs with mock
 providers + 7 CloudFront-function node tests; mutation checks; repository
 guards (no state/plan/tfvars tracked, no Stage 9.3 regressions, role-init
 password guard); new `infrastructure` CI job; Go build/vet/unit tests

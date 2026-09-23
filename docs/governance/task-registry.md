@@ -3689,7 +3689,7 @@ resource created, modified or deleted.
 
 | ID | Owner | Status | Files owned | Tests | Blockers | Integration |
 |---|---|---|---|---|---|---|
-| S94-H01 | Orchestrator (devops) | Done | `deploy/aws/**` (modules, staging root, bootstrap, iam policies, scripts, sql), `deploy/docker/platform-api.Dockerfile`, `.gitignore`, `.dockerignore`, `.github/workflows/ci.yml` | 43 `terraform test` runs (mock providers) + 7 node tests + mutation checks + repo guards; read-only plan (74 / bootstrap 9); Access Analyzer 0 findings; IAM simulation 28/28 | deployment credential + bootstrap not yet authorized | Integrated (repository) |
+| S94-H01 | Orchestrator (devops) | Done | `deploy/aws/**` (modules, staging root, bootstrap, iam policies, scripts, sql), `deploy/docker/platform-api.Dockerfile`, `.gitignore`, `.dockerignore`, `.github/workflows/ci.yml` | 42 `terraform test` runs (mock providers) + 7 node tests + mutation checks + repo guards; read-only plan (74 / bootstrap 9); Access Analyzer 0 findings; IAM simulation 28/28 | deployment credential + bootstrap not yet authorized | Integrated (repository) |
 | S94-H02 | Orchestrator | Done | `docs/decisions/0086-*.md` (new), `docs/runbooks/stage-9-4-staging-lifecycle-runbook.md` (new), amendments to ADR 0084 / Stage 9.3 runbook / Stage 9.4 verification runbook | n/a (documentation) | none | n/a |
 | S94-H03 | architect | Done | review only | CHANGES REQUIRED → APPROVED WITH MINOR NOTES | none | n/a |
 | S94-H04 | security | Done | review only | CHANGES REQUIRED → APPROVED WITH MINOR NOTES (2 P1 closed; audit client IP deferred as production launch gate) | none | n/a |

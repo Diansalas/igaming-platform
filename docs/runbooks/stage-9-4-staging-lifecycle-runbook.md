@@ -214,6 +214,12 @@ always re-applies `PLATFORM_API_DESIRED_COUNT` (default 1).
 
 ```bash
 deploy/aws/scripts/deploy.sh down     # interactive terraform destroy, then verify-teardown.sh
+# Session-end security check (ADR 0086 decision 18): no staging role may be
+# trusted from outside the account. Expect no ACTIVE findings.
+aws accessanalyzer list-findings-v2 --region eu-central-1 \
+  --analyzer-arn "$(aws accessanalyzer list-analyzers --region eu-central-1 \
+      --query "analyzers[?name=='igaming-platform-account'].arn" --output text)" \
+  --filter '{"status": {"eq": ["ACTIVE"]}}' --query 'findings[].[resourceType,resource]' --output table
 ```
 
 - Expect 15–30 minutes. CloudFront distributions are disabled before
@@ -406,7 +412,12 @@ Run these on the first authorized deployment and record the results:
    in `deploy/aws/bootstrap`, then re-apply the bootstrap.
 7. Traffic reaches the internal ALB through the VPC-origin ENIs placed in
    the ALB's private subnets (ALB ingress admits only those CIDRs).
-8. After `down`, `verify-teardown.sh` exits 0. Record whether any
+8. Access Analyzer shows no ACTIVE external-access findings (§6).
+9. Security follow-up once 1–8 pass: also tag-scope `ec2:CreateRoute`,
+   `ec2:AssociateRouteTable` and `ec2:AttachInternetGateway` in
+   `staging-deployer-network-policy.json` (security review note). They are
+   region-scoped today so the first apply cannot fail on them.
+10. After `down`, `verify-teardown.sh` exits 0. Record whether any
    `CloudFront-VPCOrigins-Service-SG` or VPC-origin ENIs lingered, and
    whether the RDS-managed secret was deleted outright or scheduled for
    deletion.
