@@ -76,9 +76,9 @@ version policy.
   everyone (old versions expire only via the lifecycle rule); noncurrent
   versions expire after 90 days; incomplete multipart uploads aborted after
   7 days; `prevent_destroy`. The same one-time bootstrap also creates the
-  IAM permissions boundary every staging ECS role must carry (decision
-  18) — 8 resources in total (read-only plan, 2026-09-23), plus the
-  optional cost budget. SSE-S3 rather
+  IAM permissions boundary every staging ECS role must carry and an IAM
+  Access Analyzer account analyzer (decision 18) — 9 resources in total,
+  plus the optional cost budget. SSE-S3 rather
   than a customer-managed KMS key: after decision 4 the state holds no
   secret values, and a CMK would add a standing $1/month plus key-policy
   management to a bucket that must outlive every teardown.
@@ -346,9 +346,12 @@ non-staging resources:
   on resources tagged `Project=igaming-platform, Environment=staging`, and
   `CreateTags` only as tag-on-create; `elasticloadbalancing:*` replaced by
   an explicit list.
-- **Secrets**: `GetSecretValue` only on `igaming-staging/*` (needed by the
-  AWS provider to refresh `aws_secretsmanager_secret_version`), never on
-  the RDS-managed master secret; the state object cannot be deleted.
+- **Secrets**: the deployer's own policy grants `GetSecretValue` only on
+  `igaming-staging/*` (needed by the AWS provider to refresh
+  `aws_secretsmanager_secret_version`), not on the RDS-managed master
+  secret, and the state object cannot be deleted. This is **not** a claim
+  that a deployer can never reach the master credential — see the residual
+  below.
 - All four documents validate with IAM Access Analyzer (0 findings), and
   `deploy/aws/tests/simulate-deployer-policies.py` (read-only
   `SimulateCustomPolicy`) shows 25/25 expectations — every escalation path
@@ -361,6 +364,16 @@ non-staging resources:
   create/authorize actions are region-scoped rather than tag-scoped
   because EC2 evaluates new sub-resources (e.g. security-group rules) that
   carry no tag yet; tightening further needs a real-credential test.
+- **Residual — role trust (security re-review N-1)**: IAM has no condition
+  key that restricts the trust-policy principals of `CreateRole`. A
+  deployer may `DeleteRole` + `CreateRole` one of the three staging role
+  names with a trust policy naming itself or another account; the role
+  still carries the boundary (no admin), but its holder could then read
+  the staging secrets, including the RDS-managed master secret (as could a
+  deployer running an ad-hoc one-off task). Accepted for a synthetic-data
+  staging operator; **detection**: the bootstrap creates an IAM Access
+  Analyzer account analyzer, which raises a finding for any role trusted
+  from outside the account. Review its findings after each session.
 
 ### Deferred (recorded, not built in this pass)
 

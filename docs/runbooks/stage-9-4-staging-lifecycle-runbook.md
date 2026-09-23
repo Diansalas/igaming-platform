@@ -7,7 +7,7 @@ Scripts: `deploy/aws/scripts/deploy.sh`, `deploy/aws/scripts/verify-teardown.sh`
 **Status when written: nothing in this runbook has been run against AWS.**
 The only AWS access so far is the read-only credential
 `arn:aws:iam::765578795051:user/claude-staging-readonly`, used only for
-identity checks, `terraform plan` (staging: 74 to add; bootstrap: 8 to
+identity checks, `terraform plan` (staging: 74 to add; bootstrap: 9 to
 add), pricing lookups, IAM Access Analyzer policy validation, IAM policy
 simulation (`deploy/aws/tests/simulate-deployer-policies.py`, 25/25), and
 read-only `verify-teardown.sh` runs (no staging resources exist). Every AWS-changing step below needs a separate,
@@ -45,8 +45,9 @@ checked with `python3 deploy/aws/tests/simulate-deployer-policies.py`,
 read-only, 25/25 — re-run it once the credential exists):
 
 - `deploy/aws/iam/staging-bootstrap-policy.json` — state bucket, the
-  `igaming-staging-ecs-role-boundary` IAM policy, and the budget (only
-  needed for §1.2; detach afterwards).
+  `igaming-staging-ecs-role-boundary` IAM policy, the Access Analyzer
+  account analyzer, and the budget (only needed for §1.2; detach
+  afterwards).
 - `deploy/aws/iam/staging-deployer-infra-policy.json` — VPC/EC2 networking
   (region-scoped create; delete/detach/route-replace only on resources
   tagged `Project=igaming-platform, Environment=staging`; `CreateTags` only
@@ -79,8 +80,11 @@ terraform plan  -var 'budget_alert_email=you@example.com'   # omit the var for n
 terraform apply -var 'budget_alert_email=you@example.com'   # review, then type yes
 ```
 
-Creates (8 resources; read-only plan verified) the IAM policy
-`igaming-staging-ecs-role-boundary` and the bucket
+Creates (9 resources; read-only plan verified) the IAM policy
+`igaming-staging-ecs-role-boundary`, an IAM Access Analyzer account
+analyzer `igaming-platform-account` (free external-access findings — it
+flags any role trusted from outside the account; review it after each
+session), and the bucket
 `igaming-platform-staging-tfstate-765578795051` (eu-central-1, versioned,
 SSE-S3, public access blocked, TLS-only, version/bucket deletion denied,
 `prevent_destroy`) and, if requested, the `igaming-platform-account-monthly`
@@ -232,6 +236,7 @@ deploy/aws/scripts/deploy.sh down     # interactive terraform destroy, then veri
 | Optional cost budget (no actions) | $0 expected (budgets without actions are not charged under AWS Budgets pricing; one budget in any case) |
 | Service-linked roles (ECS, ELB, RDS, CloudFront VPC origin), created automatically on first use | free |
 | IAM policy `igaming-staging-ecs-role-boundary` | free |
+| IAM Access Analyzer account analyzer (external access) | free |
 | AWS-managed keys `aws/rds`, `aws/secretsmanager` | free |
 | INACTIVE ECS task-definition revisions | free |
 | Bootstrap local state file, `terraform.tfvars` on the operator machine | local only |
@@ -330,6 +335,12 @@ used to justify a design decision.
   task can briefly fail DB authentication, so rotate outside a test run.
   `deploy.sh migrate` alone also re-runs role-init and migrate and then
   rolls the services.
+- The **seed-admin password** secret is rewritten by the same bump, but
+  the password hash already stored for the existing `platform_admin` is
+  **not** changed (`cmd/seed-admin` only creates users; a re-run for the
+  same email fails on the unique email). After a rotation, that login
+  keeps its old password. In practice, rotate by tearing staging down and
+  re-creating it, or seed a new admin email.
 - RDS master password: rotated by RDS itself (RDS-managed secret). The
   one-off tasks read it fresh each run.
 

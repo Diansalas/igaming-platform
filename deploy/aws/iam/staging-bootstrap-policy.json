@@ -67,6 +67,32 @@
         "iam:UntagPolicy"
       ],
       "Resource": "arn:aws:iam::765578795051:policy/igaming-staging-ecs-role-boundary"
+    },
+    {
+      "Sid": "AccessAnalyzerAccountAnalyzer",
+      "Effect": "Allow",
+      "Action": [
+        "access-analyzer:CreateAnalyzer",
+        "access-analyzer:GetAnalyzer",
+        "access-analyzer:ListAnalyzers",
+        "access-analyzer:DeleteAnalyzer",
+        "access-analyzer:TagResource",
+        "access-analyzer:ListTagsForResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "AccessAnalyzerServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateServiceLinkedRole"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:AWSServiceName": "access-analyzer.amazonaws.com"
+        }
+      }
     }
   ]
 }

@@ -16,6 +16,12 @@
 #     TLS-only bucket policy, noncurrent-version expiry, prevent_destroy.
 #     Locking uses the S3-native lock file (use_lockfile = true in the
 #     staging backend) — no DynamoDB table.
+#   - an IAM Access Analyzer ACCOUNT analyzer (external-access findings
+#     are free): it flags any role or resource trusted by a principal
+#     outside this account — the detection control for the residual that
+#     a deployer could delete and re-create a staging role with a foreign
+#     trust policy (ADR 0086 decision 18; IAM has no condition key that
+#     restricts trust-policy principals at CreateRole time).
 #   - optionally, a monthly account cost budget with email alerts.
 #
 # SSE-S3 (not a customer-managed KMS key): after ADR 0086 the staging state
@@ -222,4 +228,10 @@ resource "aws_iam_policy" "staging_ecs_role_boundary" {
   name        = "igaming-staging-ecs-role-boundary"
   description = "Permissions boundary for every igaming-staging ECS role (ADR 0086). Created by deploy/aws/bootstrap; the deployer cannot modify it."
   policy      = data.aws_iam_policy_document.staging_ecs_role_boundary.json
+}
+
+# --- External-access detection (see file header) ---
+resource "aws_accessanalyzer_analyzer" "account" {
+  analyzer_name = "igaming-platform-account"
+  type          = "ACCOUNT"
 }
