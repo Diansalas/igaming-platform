@@ -68,6 +68,8 @@ CASES = [
     ("Delete the state object", "s3:DeleteObject", STATE, None, False),
     ("Delete the state lock file", "s3:DeleteObject", STATE + ".tflock", None, True),
     ("sns:ListTopics (verify-teardown)", "sns:ListTopics", "*", None, True),
+    ("Read the AWS-managed CloudFront origin-facing prefix list", "ec2:GetManagedPrefixListEntries", f"arn:aws:ec2:{REGION}:aws:prefix-list/pl-a3a144ca", None, True),
+    ("Read a customer-managed prefix list", "ec2:GetManagedPrefixListEntries", f"arn:aws:ec2:{REGION}:{ACCOUNT}:prefix-list/pl-0123", None, False),
 ]
 
 

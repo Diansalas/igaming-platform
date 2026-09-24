@@ -16,6 +16,12 @@ mock_provider "aws" {
     }
   }
 
+  mock_data "aws_ec2_managed_prefix_list" {
+    defaults = {
+      id = "pl-a3a144ca"
+    }
+  }
+
   mock_data "aws_iam_policy_document" {
     defaults = {
       json = "{\"Version\":\"2012-10-17\",\"Statement\":[]}"
@@ -169,8 +175,8 @@ run "staging_defaults_are_hardened" {
   }
 
   assert {
-    condition     = toset(module.security.alb_ingress_cidrs) == toset(["10.20.128.0/20", "10.20.144.0/20"])
-    error_message = "ALB ingress must be exactly the private subnet CIDRs (where the VPC-origin ENIs live) — never the VPC, the public subnets or 0.0.0.0/0."
+    condition     = module.security.alb_ingress_prefix_list_id == "pl-a3a144ca"
+    error_message = "ALB ingress must be the CloudFront origin-facing managed prefix list (CloudFront VPC origin source) — subnet CIDRs do not admit VPC-origin traffic."
   }
 
   assert {

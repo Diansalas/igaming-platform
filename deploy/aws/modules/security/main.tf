@@ -6,29 +6,36 @@
 # public IPs (the staging root's public-IP task mode, ADR 0086): a task's
 # public address accepts nothing that did not come from the ALB.
 #
-# The staging root sets alb_ingress_cidrs to the VPC CIDR only: its ALB is
-# internal and is reached exclusively through CloudFront VPC origins,
-# whose elastic network interfaces live inside the VPC (ADR 0086).
+# The ALB is internal and reached exclusively through a CloudFront VPC
+# origin (ADR 0086), which connects over HTTP on port 80 (http-only). AWS
+# documents exactly two ways to admit that traffic: the CloudFront
+# origin-facing managed prefix list, or the service-managed
+# CloudFront-VPCOrigins-Service-SG. Admitting the VPC-origin ENIs' subnet
+# CIDRs is NOT one of them: with CIDR-only ingress the first staging
+# deployment got CloudFront 504s and the ALB received zero requests. The
+# prefix list is used because it exists before the VPC origin does, so a
+# single apply works (the service-managed SG is only created afterwards).
+# No 443 rule: nothing reaches this ALB over HTTPS, and each prefix-list
+# reference counts its list's weight against the per-SG rule quota.
+
+data "aws_ec2_managed_prefix_list" "cloudfront_origin_facing" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
 
 resource "aws_security_group" "alb" {
-  name        = "${var.name_prefix}-alb-sg"
+  name = "${var.name_prefix}-alb-sg"
+  # Stale wording kept on purpose: description is ForceNew, and replacing
+  # this SG would also replace the rules that reference it. The ingress
+  # below is authoritative.
   description = "Ingress on 80/443 from alb_ingress_cidrs only; egress to ECS tasks."
   vpc_id      = var.vpc_id
 
   ingress {
-    description = "HTTP"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = var.alb_ingress_cidrs
-  }
-
-  ingress {
-    description = "HTTPS"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = var.alb_ingress_cidrs
+    description     = "HTTP from CloudFront VPC origin (origin-facing prefix list)"
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    prefix_list_ids = [data.aws_ec2_managed_prefix_list.cloudfront_origin_facing.id]
   }
 
   egress {

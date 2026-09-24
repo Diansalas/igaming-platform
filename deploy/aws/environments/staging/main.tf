@@ -67,12 +67,10 @@ module "security" {
 
   name_prefix = local.name_prefix
   vpc_id      = module.network.vpc_id
-  # The ALB is internal and reached only via CloudFront VPC origins, whose
-  # network interfaces are created in the ALB's own (private) subnets. The
-  # public subnets — where the public-IP ECS tasks run — are deliberately
-  # NOT allowed to reach the ALB.
-  alb_ingress_cidrs = module.network.private_subnet_cidrs
-  tags              = var.tags
+  # ALB ingress is the CloudFront origin-facing managed prefix list, set
+  # inside the module (the only documented VPC-origin source besides the
+  # service-managed SG). No subnet — public or private — is admitted.
+  tags = var.tags
 }
 
 module "ecr" {

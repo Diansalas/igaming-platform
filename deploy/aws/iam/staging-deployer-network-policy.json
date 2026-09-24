@@ -15,6 +15,14 @@
       }
     },
     {
+      "Sid": "Ec2ReadCloudFrontOriginFacingPrefixList",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:GetManagedPrefixListEntries"
+      ],
+      "Resource": "arn:aws:ec2:eu-central-1:aws:prefix-list/*"
+    },
+    {
       "Sid": "Ec2CreateAndWire",
       "Effect": "Allow",
       "Action": [
