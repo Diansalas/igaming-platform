@@ -101,10 +101,17 @@ COPY deploy/docker/nginx-spa.conf /etc/nginx/conf.d/default.conf
 # (binding <1024, and the "user" directive's setuid from master to
 # worker - both irrelevant here since we bind 8080 and run everything,
 # master included, as "nginx" already). /tmp is used for the pid file
-# instead of the default /var/run/nginx.pid because a non-root process
-# cannot necessarily create files there, whereas /tmp is universally
-# world-writable in the base image.
-RUN sed -i 's#^pid \+/var/run/nginx.pid;#pid /tmp/nginx.pid;#' /etc/nginx/nginx.conf \
+# instead of the base image's root-owned default because a non-root
+# process cannot create files there, whereas /tmp is universally
+# world-writable in the base image. The default moved from
+# /var/run/nginx.pid to /run/nginx.pid in newer nginx images (1.27.5 uses
+# /run), and a sed that silently matched nothing made both frontends exit
+# at startup on ECS with `open() "/run/nginx.pid" failed (13: Permission
+# denied)` - so the rewrite accepts either path and the build FAILS if
+# the pid directive is not exactly /tmp/nginx.pid afterwards.
+# Regression check: deploy/docker/tests/frontend-image-smoke.sh.
+RUN sed -i 's#^pid[[:space:]]\+\(/var\)\?/run/nginx\.pid;#pid /tmp/nginx.pid;#' /etc/nginx/nginx.conf \
+    && grep -qx 'pid /tmp/nginx.pid;' /etc/nginx/nginx.conf \
     && chown -R nginx:nginx /usr/share/nginx/html /var/cache/nginx /etc/nginx/conf.d
 USER nginx
 

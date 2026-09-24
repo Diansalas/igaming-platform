@@ -170,6 +170,24 @@ jobs:
       - name: Unit tests
         run: npm test
 
+  frontend-image:
+    # Stage 9.4 staging regression: both frontend images built from
+    # deploy/docker/frontend.Dockerfile exited on ECS with
+    # `open() "/run/nginx.pid" failed (13: Permission denied)` because the
+    # non-root nginx could not write the base image's default pid path.
+    # Builds each image and proves nginx starts as the non-root user and
+    # serves HTTP on 8080. Uses NO cloud credentials.
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [b2c, backoffice]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image and smoke-test non-root nginx startup
+        run: deploy/docker/tests/frontend-image-smoke.sh ${{ matrix.app }}
+
   infrastructure:
     # Stage 9.4 (ADR 0086): offline Terraform checks for deploy/aws —
     # fmt, validate (-backend=false), `terraform test` with mock AWS

@@ -48,6 +48,15 @@ actually been run to completion here. What WAS done instead:
   but "not expected" is not the same as "confirmed"). Whoever runs the
   first real build (CI runner or a developer machine with Docker) should
   do so before trusting any of this beyond static review.
+- **Update (Stage 9.4 staging):** the first real ECS start proved the
+  `pid` rewrite was NOT sufficient — `nginx:1.27-alpine` now defaults to
+  `/run/nginx.pid` (not `/var/run/nginx.pid`), the old `sed` matched
+  nothing, and both frontends exited with `open() "/run/nginx.pid"
+  failed (13: Permission denied)`. The rewrite now accepts either path and
+  the build fails unless the result is exactly `pid /tmp/nginx.pid;`.
+  `deploy/docker/tests/frontend-image-smoke.sh <b2c|backoffice>` (CI job
+  `frontend-image`) builds the image and verifies nginx starts as the
+  non-root user and serves HTTP 200 on 8080.
 
 ## 1. `platform-api` (Go binary + migration tool, one image)
 
