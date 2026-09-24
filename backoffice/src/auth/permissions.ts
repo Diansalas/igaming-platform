@@ -27,6 +27,18 @@ export interface NavPermissions {
   sportsbook: boolean
   /** Stage 7: tenant-wide casino round visibility (PermCasinoTransactionRead). */
   casino: boolean
+  /** PermTenantWrite - create a tenant (POST /v1/admin/tenants). platform_admin only. */
+  tenantWrite: boolean
+  /** PermBrandWrite - create a brand (POST /v1/admin/tenants/{tid}/brands). */
+  brandWrite: boolean
+  /** PermStaffManage - create staff / link a staff person (POST /v1/admin/tenants/{tid}/staff...). */
+  staffAdmin: boolean
+  /** PermProviderConfigWrite - payment provider capability (tenant-scoped). */
+  providerConfig: boolean
+  /** PermCasinoConfigWrite - casino provider capability + game availability (tenant-scoped). */
+  casinoConfig: boolean
+  /** PermCasinoCatalogueManage - platform-wide casino catalogue upsert. platform_admin only. */
+  catalogue: boolean
 }
 
 const NONE: NavPermissions = {
@@ -41,8 +53,27 @@ const NONE: NavPermissions = {
   platformAudit: false,
   sportsbook: false,
   casino: false,
+  tenantWrite: false,
+  brandWrite: false,
+  staffAdmin: false,
+  providerConfig: false,
+  casinoConfig: false,
+  catalogue: false,
 }
 
+// The write flags (tenantWrite/brandWrite/staffAdmin/providerConfig/
+// casinoConfig/catalogue) mirror rolePermissions exactly:
+//   PermTenantWrite           -> platform_admin
+//   PermBrandWrite            -> platform_admin, tenant_admin
+//   PermStaffManage           -> platform_admin, tenant_admin
+//   PermProviderConfigWrite   -> tenant_admin (route also RequireTenantScope)
+//   PermCasinoConfigWrite     -> tenant_admin (route also RequireTenantScope)
+//   PermCasinoCatalogueManage -> platform_admin
+// Which staff ROLES a staffAdmin caller may create is a separate,
+// handler-level rule (finance/risk_manager/promotions_manager/
+// bonus_operations need a platform-scoped caller) - see
+// api/tenants.ts's TENANT_CREATABLE_STAFF_ROLES.
+//
 // Stage 6's sportsbook flag mirrors exactly which roles the backend grants
 // PermSportsbookBetRead to (internal/auth/permission.go): tenant_admin,
 // compliance, support, finance - never platform_admin, since platform_admin
@@ -53,7 +84,15 @@ const NONE: NavPermissions = {
 // explicit ownership checks, not RBAC, authorize that), and platform_admin
 // still has no tenant-scoped player_account to resolve.
 const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
-  platform_admin: { ...NONE, tenants: true, platformAudit: true },
+  platform_admin: {
+    ...NONE,
+    tenants: true,
+    platformAudit: true,
+    tenantWrite: true,
+    brandWrite: true,
+    staffAdmin: true,
+    catalogue: true,
+  },
   tenant_admin: {
     ...NONE,
     ownTenant: true,
@@ -64,6 +103,10 @@ const ROLE_NAV_PERMISSIONS: Record<string, NavPermissions> = {
     tenantAudit: true,
     sportsbook: true,
     casino: true,
+    brandWrite: true,
+    staffAdmin: true,
+    providerConfig: true,
+    casinoConfig: true,
   },
   support: { ...NONE, players: true, bonus: true, sportsbook: true, casino: true },
   compliance: { ...NONE, players: true, kyc: true, rg: true, bonus: true, tenantAudit: true, sportsbook: true, casino: true },

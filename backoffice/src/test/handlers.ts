@@ -47,6 +47,35 @@ export const handlers = [
     })
   }),
 
+  // Pending-review queue (bare array). Real backend also promotes
+  // requested -> pending_review as a side effect of this call.
+  http.get('/v1/admin/withdrawals', () => {
+    return HttpResponse.json([
+      {
+        id: 'wd-pending-1',
+        asset_code: 'EUR',
+        amount: 5000,
+        state: 'pending_review',
+        requested_at: '2026-01-02T00:00:00Z',
+        player_account_id: 'player-2',
+      },
+    ])
+  }),
+
+  // Must be registered before '/v1/admin/withdrawals/:id', which would otherwise match it.
+  http.get('/v1/admin/withdrawals/submitted', () => {
+    return HttpResponse.json([
+      {
+        id: 'wd-submitted-1',
+        asset_code: 'EUR',
+        amount: 7000,
+        state: 'submitted',
+        requested_at: '2026-01-03T00:00:00Z',
+        player_account_id: 'player-3',
+      },
+    ])
+  }),
+
   http.get('/v1/admin/withdrawals/:id', ({ params }) => {
     return HttpResponse.json({
       id: params.id,

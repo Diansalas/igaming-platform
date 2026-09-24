@@ -62,17 +62,20 @@ export interface CasinoPlayResult {
   decline_reason?: string
 }
 
-export function placeCasinoWager(sessionId: string, stakeAmount: number): Promise<CasinoPlayResult> {
+// Wager and win REQUIRE idempotency_key (casino_play_handlers.go:
+// RequireNonEmpty("idempotency_key")); without it the server answers 400.
+// The caller mints one key per attempt and reuses it on retry.
+export function placeCasinoWager(sessionId: string, stakeAmount: number, idempotencyKey: string): Promise<CasinoPlayResult> {
   return apiFetch<CasinoPlayResult>(`/v1/me/casino/sessions/${encodeURIComponent(sessionId)}/wager`, {
     method: 'POST',
-    body: JSON.stringify({ stake_amount: stakeAmount }),
+    body: JSON.stringify({ stake_amount: stakeAmount, idempotency_key: idempotencyKey }),
   })
 }
 
-export function settleCasinoWin(sessionId: string, winAmount: number): Promise<CasinoPlayResult> {
+export function settleCasinoWin(sessionId: string, winAmount: number, idempotencyKey: string): Promise<CasinoPlayResult> {
   return apiFetch<CasinoPlayResult>(`/v1/me/casino/sessions/${encodeURIComponent(sessionId)}/win`, {
     method: 'POST',
-    body: JSON.stringify({ win_amount: winAmount }),
+    body: JSON.stringify({ win_amount: winAmount, idempotency_key: idempotencyKey }),
   })
 }
 

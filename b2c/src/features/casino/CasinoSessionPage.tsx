@@ -19,6 +19,7 @@ import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { PageHeader } from '../../components/PageHeader'
 import { TextInput } from '../../components/TextInput'
 import { brandConfig } from '../../config/brand'
+import { newIdempotencyKey } from '../../lib/idempotencyKey'
 import { formatMoney, toMinorUnits } from '../../lib/money'
 
 interface SessionLocationState {
@@ -88,6 +89,12 @@ export function CasinoSessionPage() {
   const [winResult, setWinResult] = useState<CasinoPlayResult | null>(null)
   const [rollbackResult, setRollbackResult] = useState<CasinoPlayResult | null>(null)
 
+  // One idempotency key per wager/win ATTEMPT: reused if the request
+  // errors (it may have committed server-side), replaced once the server
+  // has answered - same pattern as DepositPage and the bet slip.
+  const [wagerKey, setWagerKey] = useState(() => newIdempotencyKey())
+  const [winKey, setWinKey] = useState(() => newIdempotencyKey())
+
   const [isWagering, setIsWagering] = useState(false)
   const [isSettling, setIsSettling] = useState(false)
   const [isRollingBack, setIsRollingBack] = useState(false)
@@ -105,7 +112,8 @@ export function CasinoSessionPage() {
     setIsWagering(true)
     setActionError(null)
     try {
-      const result = await placeCasinoWager(sessionId, wagerAmount)
+      const result = await placeCasinoWager(sessionId, wagerAmount, wagerKey)
+      setWagerKey(newIdempotencyKey())
       setWagerResult(result)
       if (result.outcome === 'succeeded') setRollbackTxId(result.provider_tx_id)
       refreshWallet()
@@ -121,7 +129,8 @@ export function CasinoSessionPage() {
     setIsSettling(true)
     setActionError(null)
     try {
-      const result = await settleCasinoWin(sessionId, winAmount)
+      const result = await settleCasinoWin(sessionId, winAmount, winKey)
+      setWinKey(newIdempotencyKey())
       setWinResult(result)
       if (result.outcome === 'succeeded') setRollbackTxId(result.provider_tx_id)
       refreshWallet()

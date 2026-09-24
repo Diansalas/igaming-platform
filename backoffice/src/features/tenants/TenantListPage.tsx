@@ -10,6 +10,9 @@ import { usePagination } from '../../components/usePagination'
 import { useDebouncedValue } from '../../lib/useDebouncedValue'
 import { useState } from 'react'
 import type { Tenant } from '../../api/tenants'
+import { useAuth } from '../../auth/AuthContext'
+import { getNavPermissions } from '../../auth/permissions'
+import { CreateTenantForm } from './CreateTenantForm'
 
 const STATUS_OPTIONS = [
   { value: 'active', label: 'Active' },
@@ -25,6 +28,8 @@ function statusTone(status: string): BadgeTone {
 
 export function TenantListPage() {
   const navigate = useNavigate()
+  const { claims } = useAuth()
+  const canCreateTenant = getNavPermissions(claims?.role).tenantWrite
   const [q, setQ] = useState('')
   const [status, setStatus] = useState('')
   const debouncedQ = useDebouncedValue(q, 300)
@@ -75,6 +80,11 @@ export function TenantListPage() {
         onRowClick={(t) => navigate(`/tenants/${t.id}`)}
         pagination={data ? { limit: data.limit, offset: data.offset, total: data.total, onPageChange: setOffset } : undefined}
       />
+      {canCreateTenant && (
+        <div className="mt-6">
+          <CreateTenantForm />
+        </div>
+      )}
     </div>
   )
 }

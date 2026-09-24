@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../../auth/AuthContext'
@@ -36,6 +37,20 @@ const REJECTION_COPY: Record<RejectionCategory, { title: string; hint: string }>
     title: 'This bet cannot be placed',
     hint: 'Please contact support if you believe this is a mistake.',
   },
+  jurisdiction_denied: {
+    title: 'This bet cannot be placed',
+    hint: 'Betting on this selection is not available in your location.',
+  },
+  exposure_limit: {
+    title: 'This bet cannot be placed',
+    hint: 'This selection is not accepting further bets right now. Try again later or choose a different selection.',
+  },
+}
+
+/** Copy for a rejection; an unrecognised category (a newer server) falls back to the server's own message. */
+function rejectionCopy(category: string | undefined, message: string): { title: string; hint: string } {
+  const known = category ? (REJECTION_COPY as Record<string, { title: string; hint: string } | undefined>)[category] : undefined
+  return known ?? { title: 'Bet not accepted', hint: message }
 }
 
 /**
@@ -51,6 +66,7 @@ const REJECTION_COPY: Record<RejectionCategory, { title: string; hint: string }>
 export function BetSlip() {
   const { selection, updateOdds, clear, isOpen, close } = useBetSlip()
   const { isAuthenticated } = useAuth()
+  const queryClient = useQueryClient()
   const [stakeInput, setStakeInput] = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [outcome, setOutcome] = useState<SubmitOutcome | null>(null)
@@ -107,6 +123,10 @@ export function BetSlip() {
       })
       if (result.accepted && result.bet) {
         setOutcome({ kind: 'accepted', bet: result.bet })
+        // The stake moved money server-side: re-read balances and history
+        // rather than adjusting anything client-side.
+        void queryClient.invalidateQueries({ queryKey: ['wallets'] })
+        void queryClient.invalidateQueries({ queryKey: ['bets'] })
       } else {
         const category = result.rejection_category
         const message = result.rejection_message || 'This bet was not accepted.'
@@ -184,8 +204,8 @@ export function BetSlip() {
               <div role="alert" className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
                 {outcome.kind === 'rejected' ? (
                   <>
-                    <p className="font-medium">{outcome.category ? REJECTION_COPY[outcome.category].title : 'Bet not accepted'}</p>
-                    <p className="mt-1 text-red-700">{outcome.category ? REJECTION_COPY[outcome.category].hint : outcome.message}</p>
+                    <p className="font-medium">{rejectionCopy(outcome.category, outcome.message).title}</p>
+                    <p className="mt-1 text-red-700">{rejectionCopy(outcome.category, outcome.message).hint}</p>
                     {outcome.category === 'odds_changed' && (
                       <p className="mt-2 text-xs text-red-700">
                         {isRefreshingOdds ? 'Refreshing price...' : `New price: ${decimalOdds}. Check it and try again if you still want this bet.`}

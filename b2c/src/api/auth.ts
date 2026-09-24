@@ -56,3 +56,31 @@ export interface MeResponse {
 export function getMe(): Promise<MeResponse> {
   return apiFetch<MeResponse>('/v1/me')
 }
+
+/**
+ * POST /v1/me/email-verification/request (internal/httpserver/
+ * credential_handlers.go). Issues a verification code and sends it through
+ * the platform's email provider. Normally 204 with no body. ONLY when the
+ * server runs with the non-production account-activation test support
+ * (APP_ENV!=production AND TEST_SUPPORT_ENDPOINTS_ENABLED=true) does it
+ * answer 200 {"token": ...} - that decision is the server's alone, so the
+ * UI shows a code only when one was actually returned and never has a
+ * staging switch of its own. A rate-limited request is also a 204.
+ */
+export function requestEmailVerification(): Promise<{ token?: string }> {
+  return apiFetch<{ token?: string } | undefined>('/v1/me/email-verification/request', { method: 'POST' }).then(
+    (body) => body ?? {},
+  )
+}
+
+/**
+ * POST /v1/auth/email-verification/confirm - consumes the code and moves
+ * the account from pending_verification to active. 204 on success; an
+ * invalid, expired or already-used code is a 400 validation_error.
+ */
+export function confirmEmailVerification(token: string): Promise<void> {
+  return apiFetch<void>('/v1/auth/email-verification/confirm', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  })
+}

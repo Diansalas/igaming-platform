@@ -19,11 +19,13 @@ export function buildNavItems(claims: StaffClaims | null): NavItem[] {
 
   if (isPlatformAdmin(claims)) {
     if (perms.tenants) items.push({ label: 'Tenants', to: '/tenants' })
+    if (perms.catalogue) items.push({ label: 'Casino Catalogue', to: '/casino-catalogue' })
     if (perms.platformAudit) items.push({ label: 'Platform Audit Log', to: '/platform-audit-log' })
     return items
   }
 
   if (perms.ownTenant) items.push({ label: 'My Tenant', to: '/my-tenant' })
+  if (perms.providerConfig || perms.casinoConfig) items.push({ label: 'Providers & Games', to: '/configuration' })
   if (perms.players) items.push({ label: 'Players', to: '/players' })
   if (perms.kyc) items.push({ label: 'KYC', to: '/kyc' })
   if (perms.rg) items.push({ label: 'Responsible Gaming', to: '/rg' })

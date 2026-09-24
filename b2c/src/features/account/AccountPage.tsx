@@ -11,6 +11,8 @@ import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { PageHeader } from '../../components/PageHeader'
 import { useAuth } from '../../auth/AuthContext'
 import { formatMoney } from '../../lib/money'
+import { ComplianceStatusCard } from './ComplianceStatusCard'
+import { EmailVerificationCard } from './EmailVerificationCard'
 
 /**
  * Renders exactly what GET /v1/me and GET /v1/me/wallets return - no
@@ -57,12 +59,19 @@ export function AccountPage() {
         )}
       </Card>
 
+      {meQuery.data?.status === 'pending_verification' && <EmailVerificationCard />}
+
       <Card
         title="Wallets"
         actions={
-          <Link to="/account/deposit">
-            <Button variant="secondary">Deposit</Button>
-          </Link>
+          <div className="flex gap-2">
+            <Link to="/account/deposit">
+              <Button variant="secondary">Deposit</Button>
+            </Link>
+            <Link to="/account/withdraw">
+              <Button variant="secondary">Withdraw</Button>
+            </Link>
+          </div>
         }
       >
         {walletsQuery.isLoading && <LoadingSpinner label="Loading wallets..." />}
@@ -73,7 +82,7 @@ export function AccountPage() {
         {walletsQuery.data && walletsQuery.data.length > 0 && (
           <div className="flex flex-col divide-y divide-border">
             {walletsQuery.data.map((w) => (
-              <div key={w.wallet_id} className="grid grid-cols-2 gap-2 py-3 text-sm sm:grid-cols-5">
+              <div key={w.wallet_id} className="grid grid-cols-2 gap-2 py-3 text-sm sm:grid-cols-6">
                 <div className="font-medium text-slate-900">{w.asset_code}</div>
                 <div>
                   <dt className="text-xs text-slate-500">Available</dt>
@@ -82,6 +91,10 @@ export function AccountPage() {
                 <div>
                   <dt className="text-xs text-slate-500">Cash</dt>
                   <dd>{formatMoney(w.cash_balance, w.asset_code)}</dd>
+                </div>
+                <div>
+                  <dt className="text-xs text-slate-500">Held</dt>
+                  <dd>{formatMoney(w.held_for_withdrawal, w.asset_code)}</dd>
                 </div>
                 <div>
                   <dt className="text-xs text-slate-500">Locked</dt>
@@ -96,6 +109,8 @@ export function AccountPage() {
           </div>
         )}
       </Card>
+
+      {meQuery.data && <ComplianceStatusCard kycTier={meQuery.data.kyc_tier} />}
 
       <Link to="/account/bets" className="text-sm text-brand-700 hover:underline">
         View my bet history &rarr;

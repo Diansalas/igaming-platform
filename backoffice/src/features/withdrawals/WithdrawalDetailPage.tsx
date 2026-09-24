@@ -1,20 +1,39 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { approveWithdrawal, getWithdrawal, rejectWithdrawal } from '../../api/withdrawals'
-import { ApiError } from '../../api/types'
+import {
+  approveWithdrawal,
+  getWithdrawal,
+  rejectWithdrawal,
+  resolveWithdrawal,
+  submitWithdrawal,
+  type SubmittedWithdrawal,
+} from '../../api/withdrawals'
+import { useAuth } from '../../auth/AuthContext'
+import { InfoNote } from '../../components/Alert'
 import { Badge } from '../../components/Badge'
 import { Button } from '../../components/Button'
 import { Card } from '../../components/Card'
 import { ConfirmDialog } from '../../components/ConfirmDialog'
 import { ErrorState } from '../../components/ErrorState'
+import { TextInput } from '../../components/FormField'
 import { LoadingSpinner } from '../../components/LoadingSpinner'
+import { Modal } from '../../components/Modal'
 import { PageHeader } from '../../components/PageHeader'
+import { describeError, formatError } from '../../lib/apiErrorMessage'
 import { formatMoney } from '../../lib/money'
 import { useOnceGuard } from '../../lib/useOnceGuard'
 import { withdrawalStatusTone } from './status'
 
-type DialogState = 'approve' | 'reject' | null
+type DialogState = 'approve' | 'reject' | 'submit' | 'resolve' | null
+
+export const SECOND_APPROVER_MESSAGE = 'Approval recorded — a second, different approver is still required.'
+
+function providerOutcomeMessage(verb: string, result: SubmittedWithdrawal): string {
+  const provider = result.provider_id ? ` to provider ${result.provider_id}` : ''
+  const reference = result.provider_reference ? ` (reference ${result.provider_reference})` : ''
+  return `Withdrawal ${verb}${provider}${reference}. Current state: ${result.state}.`
+}
 
 /**
  * This page moves real money: every action here requires an explicit
@@ -24,20 +43,31 @@ type DialogState = 'approve' | 'reject' | null
  * computes whether an approval "should" succeed, it only renders what the
  * server returns and surfaces exactly the error the server gives back if
  * it refuses (e.g. self-approval, duplicate decision, not-linked approver).
+ *
+ * Actions offered per state mirror the backend's own state checks:
+ *   pending_review -> approve / reject   (409 "not awaiting review" otherwise)
+ *   approved       -> submit             (409 "not approved and ready" otherwise)
+ *   submitted      -> resolve            (409 "not submitted" otherwise)
+ * A `requested` withdrawal is NOT decidable - it must first be promoted by
+ * opening the Pending review queue (GET /v1/admin/withdrawals).
  */
 export function WithdrawalDetailPage() {
   const { id = '' } = useParams()
   const queryClient = useQueryClient()
+  const { claims } = useAuth()
   const [dialog, setDialog] = useState<DialogState>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
+  const [paymentMethod, setPaymentMethod] = useState('card')
   // This page moves real money via a distinct-approver/four-eyes-enforced
   // endpoint - a stray double-submit (see useOnceGuard's doc comment) is a
   // genuinely serious operational risk here, not just a UX nuisance, so
-  // approve/reject each get their own synchronous once-guard on top of
-  // ConfirmDialog's own isSubmitting-disables-the-button behavior.
+  // every action gets its own synchronous once-guard on top of the
+  // dialogs' own isSubmitting-disables-the-button behavior.
   const approveGuard = useOnceGuard()
   const rejectGuard = useOnceGuard()
+  const submitGuard = useOnceGuard()
+  const resolveGuard = useOnceGuard()
 
   const query = useQuery({
     queryKey: ['withdrawal', id],
@@ -45,16 +75,25 @@ export function WithdrawalDetailPage() {
     enabled: !!id,
   })
 
+  async function invalidate() {
+    await queryClient.invalidateQueries({ queryKey: ['withdrawal', id] })
+    await queryClient.invalidateQueries({ queryKey: ['withdrawals'] })
+  }
+
+  function closeDialog() {
+    setDialog(null)
+    setActionError(null)
+  }
+
   const approveMutation = useMutation({
     mutationFn: () => approveWithdrawal(id),
     onSuccess: async (result) => {
       setDialog(null)
       setActionError(null)
-      setSuccessMessage(result.approved ? 'Withdrawal approved.' : 'Decision recorded; a second approval is still required.')
-      await queryClient.invalidateQueries({ queryKey: ['withdrawal', id] })
-      await queryClient.invalidateQueries({ queryKey: ['withdrawals'] })
+      setSuccessMessage(result.approved ? 'Withdrawal approved.' : SECOND_APPROVER_MESSAGE)
+      await invalidate()
     },
-    onError: (err) => setActionError(err instanceof ApiError ? err.message : 'Failed to approve this withdrawal.'),
+    onError: (err) => setActionError(formatError(describeError(err, 'Failed to approve this withdrawal.'))),
     onSettled: () => approveGuard.release(),
   })
 
@@ -64,11 +103,38 @@ export function WithdrawalDetailPage() {
       setDialog(null)
       setActionError(null)
       setSuccessMessage('Withdrawal rejected.')
-      await queryClient.invalidateQueries({ queryKey: ['withdrawal', id] })
-      await queryClient.invalidateQueries({ queryKey: ['withdrawals'] })
+      await invalidate()
     },
-    onError: (err) => setActionError(err instanceof ApiError ? err.message : 'Failed to reject this withdrawal.'),
+    onError: (err) => setActionError(formatError(describeError(err, 'Failed to reject this withdrawal.'))),
     onSettled: () => rejectGuard.release(),
+  })
+
+  const submitMutation = useMutation({
+    mutationFn: (method: string) => submitWithdrawal(id, method),
+    onSuccess: async (result) => {
+      setDialog(null)
+      setActionError(null)
+      setSuccessMessage(providerOutcomeMessage('submitted', result))
+      await invalidate()
+    },
+    onError: (err) => setActionError(formatError(describeError(err, 'Failed to submit this withdrawal.'))),
+    onSettled: () => submitGuard.release(),
+  })
+
+  const resolveMutation = useMutation({
+    mutationFn: () => resolveWithdrawal(id),
+    onSuccess: async (result) => {
+      setDialog(null)
+      setActionError(null)
+      setSuccessMessage(
+        result.state === 'submitted'
+          ? `The provider has not settled this withdrawal yet; it remains submitted. Try resolving again later.`
+          : providerOutcomeMessage('resolved', result),
+      )
+      await invalidate()
+    },
+    onError: (err) => setActionError(formatError(describeError(err, 'Failed to resolve this withdrawal.'))),
+    onSettled: () => resolveGuard.release(),
   })
 
   if (query.isLoading) return <LoadingSpinner label="Loading withdrawal..." />
@@ -76,7 +142,15 @@ export function WithdrawalDetailPage() {
   const withdrawal = query.data
   if (!withdrawal) return null
 
-  const canDecide = withdrawal.state === 'pending_review' || withdrawal.state === 'requested'
+  const canDecide = withdrawal.state === 'pending_review'
+  const canSubmit = withdrawal.state === 'approved'
+  const canResolve = withdrawal.state === 'submitted'
+  const amountLabel = formatMoney(withdrawal.amount, withdrawal.asset_code, withdrawal.decimal_exponent)
+
+  function open(next: DialogState) {
+    setActionError(null)
+    setDialog(next)
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -86,40 +160,53 @@ export function WithdrawalDetailPage() {
         actions={
           canDecide ? (
             <>
-              <Button
-                variant="danger"
-                onClick={() => {
-                  setActionError(null)
-                  setDialog('reject')
-                }}
-              >
+              <Button variant="danger" onClick={() => open('reject')}>
                 Reject
               </Button>
-              <Button
-                variant="primary"
-                onClick={() => {
-                  setActionError(null)
-                  setDialog('approve')
-                }}
-              >
+              <Button variant="primary" onClick={() => open('approve')}>
                 Approve
               </Button>
             </>
+          ) : canSubmit ? (
+            <Button variant="primary" onClick={() => open('submit')}>
+              Submit to provider
+            </Button>
+          ) : canResolve ? (
+            <Button variant="primary" onClick={() => open('resolve')}>
+              Resolve
+            </Button>
           ) : undefined
         }
       />
 
+      {(canDecide || canSubmit || canResolve) && claims && (
+        <p className="text-sm text-slate-600" data-testid="acting-as">
+          Acting as staff <span className="font-mono">{claims.sub}</span> ({claims.role}).
+          {canDecide && ' Each approval must come from a different person-linked finance user; you cannot approve twice.'}
+        </p>
+      )}
+
+      {withdrawal.state === 'requested' && (
+        <InfoNote>
+          This withdrawal has not entered review yet, so it cannot be approved or rejected. Open the{' '}
+          <Link to="/withdrawals?tab=pending" className="text-brand-700 underline">
+            Pending review queue
+          </Link>{' '}
+          to move it into review.
+        </InfoNote>
+      )}
+
       {successMessage && (
-        <div className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">{successMessage}</div>
+        <div role="status" className="rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+          {successMessage}
+        </div>
       )}
 
       <Card title="Details">
         <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
           <div>
             <dt className="text-slate-500">Amount</dt>
-            <dd className="mt-1 font-medium text-slate-900">
-              {formatMoney(withdrawal.amount, withdrawal.asset_code, withdrawal.decimal_exponent)}
-            </dd>
+            <dd className="mt-1 font-medium text-slate-900">{amountLabel}</dd>
           </div>
           <div>
             <dt className="text-slate-500">State</dt>
@@ -147,15 +234,12 @@ export function WithdrawalDetailPage() {
       {dialog === 'approve' && (
         <ConfirmDialog
           title="Approve withdrawal"
-          description={`Approve payout of ${formatMoney(withdrawal.amount, withdrawal.asset_code, withdrawal.decimal_exponent)} to this player? This moves real money. The server independently enforces four-eyes approval, distinct-approver, and beneficiary-separation rules - this confirmation does not bypass any of them.`}
+          description={`Approve payout of ${amountLabel} to this player? This moves real money. The server independently enforces four-eyes approval, distinct-approver, and beneficiary-separation rules - this confirmation does not bypass any of them.`}
           confirmLabel="Approve withdrawal"
           isSubmitting={approveMutation.isPending}
           errorMessage={actionError}
           onConfirm={() => approveGuard.run(() => approveMutation.mutate())}
-          onCancel={() => {
-            setDialog(null)
-            setActionError(null)
-          }}
+          onCancel={closeDialog}
         />
       )}
       {dialog === 'reject' && (
@@ -169,10 +253,47 @@ export function WithdrawalDetailPage() {
           isSubmitting={rejectMutation.isPending}
           errorMessage={actionError}
           onConfirm={(reason) => rejectGuard.run(() => rejectMutation.mutate(reason))}
-          onCancel={() => {
-            setDialog(null)
-            setActionError(null)
-          }}
+          onCancel={closeDialog}
+        />
+      )}
+      {dialog === 'submit' && (
+        <Modal title="Submit withdrawal" onClose={closeDialog}>
+          <form
+            className="flex flex-col gap-4"
+            noValidate
+            onSubmit={(e) => {
+              e.preventDefault()
+              const method = paymentMethod.trim()
+              if (!method) return
+              submitGuard.run(() => submitMutation.mutate(method))
+            }}
+          >
+            <p className="text-sm text-slate-600">
+              Send the approved payout of {amountLabel} to a payment provider. The provider is routed by the tenant&apos;s payment
+              capability configuration for this asset and payment method.
+            </p>
+            <TextInput label="Payment method" value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)} required />
+            {actionError && <p className="text-sm text-red-600">{actionError}</p>}
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="secondary" onClick={closeDialog} disabled={submitMutation.isPending}>
+                Cancel
+              </Button>
+              <Button type="submit" disabled={!paymentMethod.trim()} isLoading={submitMutation.isPending}>
+                Submit withdrawal
+              </Button>
+            </div>
+          </form>
+        </Modal>
+      )}
+      {dialog === 'resolve' && (
+        <ConfirmDialog
+          title="Resolve withdrawal"
+          description="Query the provider this withdrawal was submitted to and complete or fail it according to the provider's answer. This never resubmits the payout."
+          confirmLabel="Resolve withdrawal"
+          isSubmitting={resolveMutation.isPending}
+          errorMessage={actionError}
+          onConfirm={() => resolveGuard.run(() => resolveMutation.mutate())}
+          onCancel={closeDialog}
         />
       )}
     </div>

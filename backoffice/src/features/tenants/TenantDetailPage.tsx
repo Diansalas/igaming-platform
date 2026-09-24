@@ -9,11 +9,19 @@ import { LoadingSpinner } from '../../components/LoadingSpinner'
 import { PageHeader } from '../../components/PageHeader'
 import { Table, type Column } from '../../components/Table'
 import { usePagination } from '../../components/usePagination'
+import { useAuth } from '../../auth/AuthContext'
+import { isPlatformAdmin } from '../../auth/jwt'
+import { getNavPermissions } from '../../auth/permissions'
+import { CreateBrandForm } from './CreateBrandForm'
+import { CreateStaffForm } from './CreateStaffForm'
+import { LinkStaffPersonForm } from './LinkStaffPersonForm'
 
 export function TenantDetailPage() {
   const { tenantId = '' } = useParams()
   const navigate = useNavigate()
   const { limit, offset, setOffset } = usePagination()
+  const { claims } = useAuth()
+  const perms = getNavPermissions(claims?.role)
 
   const tenantQuery = useQuery({
     queryKey: ['tenant', tenantId],
@@ -78,8 +86,12 @@ export function TenantDetailPage() {
         />
       </Card>
 
-      <Link to="/tenants" className="text-sm text-brand-700 hover:underline">
-        &larr; Back to tenants
+      {perms.brandWrite && <CreateBrandForm tenantId={tenantId} />}
+      {perms.staffAdmin && <CreateStaffForm tenantId={tenantId} />}
+      {perms.staffAdmin && <LinkStaffPersonForm tenantId={tenantId} />}
+
+      <Link to={isPlatformAdmin(claims) ? '/tenants' : '/'} className="text-sm text-brand-700 hover:underline">
+        &larr; {isPlatformAdmin(claims) ? 'Back to tenants' : 'Back to home'}
       </Link>
     </div>
   )

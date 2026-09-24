@@ -33,7 +33,9 @@ export function RegisterPage() {
 
   if (isAuthenticated) {
     const from = (location.state as { from?: Location })?.from
-    return <Navigate to={from?.pathname ?? '/'} replace />
+    // A new account starts pending_verification; the account page is where
+    // the player verifies their email before any money flow.
+    return <Navigate to={from?.pathname ?? '/account'} replace />
   }
 
   async function onSubmit(e: FormEvent) {

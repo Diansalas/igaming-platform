@@ -1,5 +1,6 @@
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { Route, Routes } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
 import { renderWithProviders } from '../test/renderWithProviders'
 import { RegisterPage } from './RegisterPage'
@@ -14,6 +15,22 @@ describe('RegisterPage', () => {
     await user.click(screen.getByRole('button', { name: 'Create account' }))
 
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Create account' })).not.toBeInTheDocument())
+  })
+
+  it('sends a newly registered player to the account page, where email verification lives', async () => {
+    renderWithProviders(
+      <Routes>
+        <Route path="/register" element={<RegisterPage />} />
+        <Route path="/account" element={<p>account page</p>} />
+        <Route path="/" element={<p>home page</p>} />
+      </Routes>,
+      { route: '/register' },
+    )
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText('Email'), 'new-player@example.com')
+    await user.type(screen.getByLabelText('Password'), 'a-strong-password')
+    await user.click(screen.getByRole('button', { name: 'Create account' }))
+    expect(await screen.findByText('account page')).toBeInTheDocument()
   })
 
   it('shows the real server error when the email is already taken', async () => {

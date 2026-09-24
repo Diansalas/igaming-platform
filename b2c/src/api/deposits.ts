@@ -3,15 +3,12 @@ import { apiFetch } from './client'
 // Mirrors internal/httpserver/deposit_handlers.go's depositIntentResponse.
 // This is a real, existing, already-authorized development funding
 // mechanism (internal/payments' mock provider) - never a shortcut that
-// bypasses the ledger. See DepositPage.tsx's own doc comment for the one
-// disclosed gap this app cannot work around: the mock provider's webhook
-// callback is HMAC-signed with a secret generated server-side and never
-// exposed over HTTP, so a deposit that lands in `pending` status can only
-// be pushed to `succeeded` by something with backend access invoking the
-// callback directly (a Go test helper, or a future ops/QA tool) - there is
-// no browser-reachable way to complete it, by design (a real PSP webhook
-// isn't reachable from the browser either).
-export type DepositStatus = 'pending' | 'succeeded' | 'declined' | 'ambiguous' | 'reversed'
+// bypasses the ledger. A `pending` deposit is completed by the provider's
+// signed webhook; outside production the server also exposes
+// simulateDepositCallback below, which drives that same signed-webhook
+// pipeline for the mock provider.
+// Mirrors internal/payments DepositIntent* statuses.
+export type DepositStatus = 'pending' | 'succeeded' | 'declined' | 'ambiguous' | 'failed'
 
 export interface DepositIntent {
   id: string
@@ -48,4 +45,27 @@ export function listMyDeposits(): Promise<DepositIntent[]> {
 
 export function getMyDeposit(id: string): Promise<DepositIntent> {
   return apiFetch<DepositIntent>(`/v1/me/deposits/${id}`)
+}
+
+/**
+ * POST /v1/me/deposits/{id}/simulate-callback (internal/httpserver/
+ * payment_deposit_simulation_handlers.go). NON-PRODUCTION ONLY: the server
+ * registers this route only when mock settlement is enabled (never in
+ * production), and only for the player's own deposit routed to the mock
+ * provider. It asks the mock provider to sign a normal "succeeded"
+ * callback and feeds it through the same verify-and-post pipeline as the
+ * public webhook - the ledger credit happens server-side exactly as for a
+ * real PSP callback. When the route is not registered the server answers
+ * a plain 404, which callers surface as "not available on this deployment".
+ */
+export interface SimulatedDepositCallbackResult {
+  deposit_intent_id: string
+  status: DepositStatus
+  tombstoned: boolean
+}
+
+export function simulateDepositCallback(id: string): Promise<SimulatedDepositCallbackResult> {
+  return apiFetch<SimulatedDepositCallbackResult>(`/v1/me/deposits/${encodeURIComponent(id)}/simulate-callback`, {
+    method: 'POST',
+  })
 }

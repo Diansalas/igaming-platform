@@ -55,3 +55,44 @@ export function rejectWithdrawal(id: string, reasonCode: string): Promise<void> 
     body: JSON.stringify({ reason_code: reasonCode }),
   })
 }
+
+/**
+ * GET /v1/admin/withdrawals - the four-eyes PENDING-REVIEW queue (bare
+ * array, not paged). SIDE EFFECT: the backend first promotes every
+ * `requested` withdrawal in this tenant to `pending_review` (closing the
+ * player's cancellation window) before listing. Only call this from the
+ * explicit "Pending review" queue view.
+ */
+export function listPendingWithdrawals(): Promise<Withdrawal[]> {
+  return apiFetch('/v1/admin/withdrawals')
+}
+
+/** GET /v1/admin/withdrawals/submitted - withdrawals at `submitted` awaiting resolution (bare array). */
+export function listSubmittedWithdrawals(): Promise<Withdrawal[]> {
+  return apiFetch('/v1/admin/withdrawals/submitted')
+}
+
+/** submitWithdrawalResponse / resolve response: the withdrawal plus the provider it went to. */
+export interface SubmittedWithdrawal {
+  id: string
+  asset_code: string
+  amount: number
+  state: WithdrawalState
+  requested_at: string
+  hold_ledger_transaction_id?: string
+  provider_id?: string
+  provider_reference?: string
+}
+
+/** POST /v1/admin/withdrawals/{id}/submit {payment_method} - only valid on an `approved` withdrawal. */
+export function submitWithdrawal(id: string, paymentMethod: string): Promise<SubmittedWithdrawal> {
+  return apiFetch(`/v1/admin/withdrawals/${id}/submit`, {
+    method: 'POST',
+    body: JSON.stringify({ payment_method: paymentMethod }),
+  })
+}
+
+/** POST /v1/admin/withdrawals/{id}/resolve (no body) - queries the recorded provider for a `submitted` withdrawal. */
+export function resolveWithdrawal(id: string): Promise<SubmittedWithdrawal> {
+  return apiFetch(`/v1/admin/withdrawals/${id}/resolve`, { method: 'POST' })
+}

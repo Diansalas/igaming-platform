@@ -10,6 +10,7 @@ import { CasinoSessionPage } from '../features/casino/CasinoSessionPage'
 import { DepositPage } from '../features/deposit/DepositPage'
 import { EventDetailPage } from '../features/sportsbook/EventDetailPage'
 import { SportsListPage } from '../features/sportsbook/SportsListPage'
+import { WithdrawalPage } from '../features/withdrawal/WithdrawalPage'
 import { AppLayout } from '../layout/AppLayout'
 import { HomePage } from './HomePage'
 import { NotFoundPage } from './NotFoundPage'
@@ -40,6 +41,14 @@ export function AppRoutes() {
           element={
             <RequireAuth>
               <DepositPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="account/withdraw"
+          element={
+            <RequireAuth>
+              <WithdrawalPage />
             </RequireAuth>
           }
         />

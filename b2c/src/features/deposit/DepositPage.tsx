@@ -1,6 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { getMyDeposit, initiateDeposit, listMyDeposits, type DepositIntent, type DepositStatus } from '../../api/deposits'
+import { Link } from 'react-router-dom'
+import { getMe } from '../../api/auth'
+import {
+  getMyDeposit,
+  initiateDeposit,
+  listMyDeposits,
+  simulateDepositCallback,
+  type DepositIntent,
+  type DepositStatus,
+} from '../../api/deposits'
 import { ApiError } from '../../api/types'
 import { Badge, type BadgeTone } from '../../components/Badge'
 import { Button } from '../../components/Button'
@@ -20,7 +29,7 @@ function statusTone(status: DepositStatus): BadgeTone {
     case 'succeeded':
       return 'success'
     case 'declined':
-    case 'reversed':
+    case 'failed':
       return 'danger'
     case 'ambiguous':
       return 'warning'
@@ -29,23 +38,40 @@ function statusTone(status: DepositStatus): BadgeTone {
   }
 }
 
+/** Maps a failed simulate-callback call to an actionable message. */
+export function settleErrorMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    // The route is only registered outside production with mock settlement
+    // enabled; when absent the server answers a plain (non-JSON) 404.
+    if (err.status === 404 && err.code !== 'not_found') {
+      return 'Simulated provider confirmation is not available on this deployment.'
+    }
+    if (err.code === 'service_unavailable') return err.message
+    if (err.code === 'conflict') return 'This deposit is no longer awaiting provider confirmation.'
+    return err.message
+  }
+  return 'Could not confirm this deposit.'
+}
+
 /**
- * A controlled development funding mechanism, per the Stage 6 directive:
- * this calls the REAL POST /v1/me/deposits endpoint against the existing
- * internal/payments mock provider - never a shortcut that bypasses the
- * ledger. It initiates a deposit and shows exactly the intent status the
- * server returns; it never assumes success.
+ * Deposits through the REAL POST /v1/me/deposits endpoint and the tenant's
+ * configured payment provider - never a shortcut that bypasses the ledger.
+ * It shows exactly the intent status the server returns; it never assumes
+ * success.
  *
- * DISCLOSED GAP (not a client-side workaround - see the Stage 6 report):
- * a non-magic amount always comes back `pending`, and only a correctly
- * HMAC-signed provider webhook callback (POST
- * /v1/webhooks/payments/{tenantSlug}/{providerID}) moves it to
- * `succeeded`. The mock provider's signing secret is generated in-process
- * server-side and is never exposed over HTTP, so there is no
- * browser-reachable way to complete a deposit - by design, mirroring how
- * a real PSP's webhook is never reachable from the browser either. This
- * page is honest about that rather than inventing a fake "complete now"
- * button.
+ * A non-magic amount comes back `pending` until the provider's signed
+ * webhook arrives. Outside production (staging), the server also registers
+ * POST /v1/me/deposits/{id}/simulate-callback, which has the MOCK provider
+ * sign a normal "succeeded" callback for the player's own deposit and runs
+ * it through the same verify-and-post pipeline as the public webhook. The
+ * "Simulate provider confirmation" action calls exactly that; on a
+ * production deployment the route does not exist and the action reports
+ * so. The wallet balance shown afterwards is re-read from the server.
+ *
+ * A `declined` intent carries no reason in the player API (the reason -
+ * e.g. no_routable_provider, player not active - is recorded server-side
+ * in the audit log only), so the page lists the likely causes rather than
+ * guessing one.
  */
 export function DepositPage() {
   const queryClient = useQueryClient()
@@ -64,6 +90,24 @@ export function DepositPage() {
   const [idempotencyKey, setIdempotencyKey] = useState(() => newIdempotencyKey())
 
   const depositsQuery = useQuery({ queryKey: ['deposits'], queryFn: listMyDeposits })
+  const meQuery = useQuery({ queryKey: ['me'], queryFn: getMe })
+  const [settleError, setSettleError] = useState<string | null>(null)
+
+  const settleMutation = useMutation({
+    mutationFn: simulateDepositCallback,
+    onMutate: () => setSettleError(null),
+    onSuccess: async (result) => {
+      if (lastIntent && lastIntent.id === result.deposit_intent_id) {
+        setLastIntent({ ...lastIntent, status: result.status })
+      }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['deposits'] }),
+        queryClient.invalidateQueries({ queryKey: ['deposit'] }),
+        queryClient.invalidateQueries({ queryKey: ['wallets'] }),
+      ])
+    },
+    onError: (err) => setSettleError(settleErrorMessage(err)),
+  })
 
   // Polls the just-created intent's status - this is the same GET a page
   // reload would perform, not a shortcut: if a backend operator resolves
@@ -103,6 +147,18 @@ export function DepositPage() {
   return (
     <div className="flex flex-col gap-6">
       <PageHeader title="Deposit" description="Development funding via the sandbox payment provider." />
+
+      {meQuery.data && meQuery.data.status !== 'active' && (
+        <div role="status" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+          Your account status is <strong>{meQuery.data.status}</strong>. Deposits are declined until your account is
+          active.{' '}
+          {meQuery.data.status === 'pending_verification' && (
+            <Link to="/account" className="font-medium underline">
+              Verify your email
+            </Link>
+          )}
+        </div>
+      )}
 
       <Card title="New deposit">
         <div className="flex flex-col gap-4 sm:max-w-sm">
@@ -161,30 +217,78 @@ export function DepositPage() {
             </div>
             <p className="mt-1 text-slate-600">{formatMoney(effectiveIntent.amount, effectiveIntent.asset_code)}</p>
             {effectiveIntent.status === 'pending' && (
-              <p className="mt-2 text-xs text-slate-500">
-                Awaiting provider confirmation. In this sandbox environment the mock provider&apos;s webhook callback is
-                signed server-side and cannot be completed from the browser - a backend/QA operator must trigger it out
-                of band for this deposit to credit your wallet. This page will reflect the real balance the moment it
-                does.
+              <div className="mt-3 flex flex-col gap-2">
+                <p className="text-xs text-slate-500">
+                  Awaiting the payment provider&apos;s confirmation. Your wallet is credited only when it arrives.
+                </p>
+                <div>
+                  <Button
+                    variant="secondary"
+                    isLoading={settleMutation.isPending && settleMutation.variables === effectiveIntent.id}
+                    disabled={settleMutation.isPending}
+                    onClick={() => settleMutation.mutate(effectiveIntent.id)}
+                  >
+                    Simulate provider confirmation (staging)
+                  </Button>
+                </div>
+                <p className="text-xs text-slate-500">
+                  Staging only: asks the sandbox provider to send its normal signed confirmation. Not available in
+                  production.
+                </p>
+              </div>
+            )}
+            {effectiveIntent.status === 'succeeded' && (
+              <p className="mt-2 text-xs text-emerald-700">
+                Deposit confirmed and credited.{' '}
+                <Link to="/account" className="font-medium underline">
+                  View wallet balance
+                </Link>
               </p>
             )}
             {effectiveIntent.status === 'declined' && (
-              <p className="mt-2 text-xs text-red-600">This deposit was declined by the sandbox provider.</p>
+              <p className="mt-2 text-xs text-red-600">
+                This deposit was declined. Common causes: your account is not active yet, no payment provider is
+                configured for this asset and method, or the provider declined it. Support can see the exact reason.
+              </p>
+            )}
+            {settleError && (
+              <p role="alert" className="mt-2 text-xs text-red-600">
+                {settleError}
+              </p>
             )}
           </div>
         )}
       </Card>
 
       <Card title="Past deposits">
+        {settleError && !effectiveIntent && (
+          <p role="alert" className="mb-2 text-xs text-red-600">
+            {settleError}
+          </p>
+        )}
         {depositsQuery.isLoading && <LoadingSpinner label="Loading deposits..." />}
         {depositsQuery.error && <ErrorState error={depositsQuery.error} onRetry={() => void depositsQuery.refetch()} />}
         {depositsQuery.data && depositsQuery.data.length === 0 && <EmptyState message="No deposits yet." />}
         {depositsQuery.data && depositsQuery.data.length > 0 && (
           <ul className="divide-y divide-border">
             {depositsQuery.data.map((d) => (
-              <li key={d.id} className="flex items-center justify-between py-2 text-sm">
-                <span>{formatMoney(d.amount, d.asset_code)}</span>
-                <Badge tone={statusTone(d.status)}>{d.status}</Badge>
+              <li key={d.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
+                <span>
+                  {formatMoney(d.amount, d.asset_code)} <span className="text-xs text-slate-500">{d.payment_method}</span>
+                </span>
+                <span className="flex items-center gap-2">
+                  {d.status === 'pending' && (
+                    <Button
+                      variant="ghost"
+                      isLoading={settleMutation.isPending && settleMutation.variables === d.id}
+                      disabled={settleMutation.isPending}
+                      onClick={() => settleMutation.mutate(d.id)}
+                    >
+                      Simulate confirmation
+                    </Button>
+                  )}
+                  <Badge tone={statusTone(d.status)}>{d.status}</Badge>
+                </span>
               </li>
             ))}
           </ul>

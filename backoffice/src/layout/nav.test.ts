@@ -42,12 +42,31 @@ describe('buildNavItems', () => {
     expect(items).toEqual(['Withdrawals', 'Sportsbook', 'Casino'])
   })
 
-  it('gives a platform_admin (nil-tenant) principal Tenants + Platform Audit Log, never tenant-operational sections', () => {
+  it('gives a platform_admin (nil-tenant) principal Tenants + Casino Catalogue + Platform Audit Log, never tenant-operational sections', () => {
     const items = buildNavItems({
       ...baseClaims,
       role: 'platform_admin',
       tenant_id: '00000000-0000-0000-0000-000000000000',
     }).map((i) => i.label)
-    expect(items).toEqual(['Tenants', 'Platform Audit Log'])
+    // Casino Catalogue mirrors PermCasinoCatalogueManage (platform_admin only).
+    expect(items).toEqual(['Tenants', 'Casino Catalogue', 'Platform Audit Log'])
+  })
+
+  it('gives tenant_admin the Providers & Games configuration page but never the platform catalogue', () => {
+    const items = buildNavItems(baseClaims).map((i) => i.label)
+    expect(items).toContain('Providers & Games')
+    expect(items).toContain('My Tenant')
+    expect(items).not.toContain('Casino Catalogue')
+  })
+
+  it('gives compliance its review sections but no configuration, catalogue, or withdrawals', () => {
+    const items = buildNavItems({ ...baseClaims, role: 'compliance' }).map((i) => i.label)
+    expect(items).toEqual(['Players', 'KYC', 'Responsible Gaming', 'Bonus', 'Sportsbook', 'Casino', 'Audit Log'])
+  })
+
+  it('never gives finance configuration or catalogue pages', () => {
+    const items = buildNavItems({ ...baseClaims, role: 'finance' }).map((i) => i.label)
+    expect(items).not.toContain('Providers & Games')
+    expect(items).not.toContain('Casino Catalogue')
   })
 })

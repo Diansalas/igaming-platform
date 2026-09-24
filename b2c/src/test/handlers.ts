@@ -7,6 +7,11 @@ import { makeTestJwt } from './jwt'
  * for a specific scenario (rejected bet, invalid credentials, etc.).
  */
 export const handlers = [
+  // KYC / RG status and withdrawals: empty by default, overridden per test.
+  http.get('/v1/me/kyc/verifications', () => HttpResponse.json([])),
+  http.get('/v1/me/rg/status', () => HttpResponse.json([])),
+  http.get('/v1/me/withdrawals', () => HttpResponse.json([])),
+
   http.post('/v1/auth/login', async ({ request }) => {
     const body = (await request.json()) as { email: string; password: string; brand_slug?: string }
     if (body.email === 'player@example.com' && body.password === 'correct-password') {
@@ -171,7 +176,11 @@ export const handlers = [
     )
   }),
 
-  http.post('/v1/me/casino/sessions/:sessionId/wager', () => {
+  http.post('/v1/me/casino/sessions/:sessionId/wager', async ({ request }) => {
+    const body = (await request.json()) as { idempotency_key?: string }
+    if (!body.idempotency_key) {
+      return HttpResponse.json({ code: 'validation_error', message: 'idempotency_key: required' }, { status: 400 })
+    }
     return HttpResponse.json({
       outcome: 'succeeded',
       provider_tx_id: 'ptx-wager-1',
@@ -180,7 +189,11 @@ export const handlers = [
     })
   }),
 
-  http.post('/v1/me/casino/sessions/:sessionId/win', () => {
+  http.post('/v1/me/casino/sessions/:sessionId/win', async ({ request }) => {
+    const body = (await request.json()) as { idempotency_key?: string }
+    if (!body.idempotency_key) {
+      return HttpResponse.json({ code: 'validation_error', message: 'idempotency_key: required' }, { status: 400 })
+    }
     return HttpResponse.json({
       outcome: 'succeeded',
       provider_tx_id: 'ptx-win-1',

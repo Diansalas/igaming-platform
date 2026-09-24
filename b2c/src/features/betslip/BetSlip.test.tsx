@@ -131,6 +131,41 @@ describe('BetSlip', () => {
     expect(sidebar().getByRole('link', { name: 'Deposit funds' })).toBeInTheDocument()
   })
 
+  it.each([
+    ['jurisdiction_denied', 'Betting on this selection is not available in your location.'],
+    ['exposure_limit', 'This selection is not accepting further bets right now.'],
+  ])('renders the %s rejection instead of crashing', async (category, hint) => {
+    server.use(
+      http.post('/v1/me/sportsbook/bets', () =>
+        HttpResponse.json({ accepted: false, rejection_category: category, rejection_code: category, rejection_message: 'denied' }),
+      ),
+    )
+    renderWithProviders(<Harness />)
+    const user = userEvent.setup()
+    await user.type(sidebar().getByLabelText(/Stake/), '10')
+    await user.click(sidebar().getByRole('button', { name: 'Place bet' }))
+    expect(await sidebar().findByText(new RegExp(hint.replace('.', '\\.')))).toBeInTheDocument()
+  })
+
+  it('falls back to the server message for an unrecognised rejection category', async () => {
+    server.use(
+      http.post('/v1/me/sportsbook/bets', () =>
+        HttpResponse.json({
+          accepted: false,
+          rejection_category: 'some_future_category',
+          rejection_code: 'x',
+          rejection_message: 'Server says no for a new reason.',
+        }),
+      ),
+    )
+    renderWithProviders(<Harness />)
+    const user = userEvent.setup()
+    await user.type(sidebar().getByLabelText(/Stake/), '10')
+    await user.click(sidebar().getByRole('button', { name: 'Place bet' }))
+    expect(await sidebar().findByText('Bet not accepted')).toBeInTheDocument()
+    expect(sidebar().getByText('Server says no for a new reason.')).toBeInTheDocument()
+  })
+
   it('renders a genuine server error distinctly from a rejection, and never assumes success', async () => {
     server.use(
       http.post('/v1/me/sportsbook/bets', () =>

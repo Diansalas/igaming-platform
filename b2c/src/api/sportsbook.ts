@@ -61,7 +61,15 @@ export function getEvent(id: string): Promise<EventDetail> {
   return apiFetch<EventDetail>(`/v1/sportsbook/events/${id}`)
 }
 
-export type RejectionCategory = 'odds_changed' | 'event_not_open' | 'insufficient_funds' | 'rg_denied' | 'risk_denied'
+// Mirrors internal/sportsbook/types.go's Rejection* constants.
+export type RejectionCategory =
+  | 'odds_changed'
+  | 'event_not_open'
+  | 'insufficient_funds'
+  | 'rg_denied'
+  | 'risk_denied'
+  | 'jurisdiction_denied'
+  | 'exposure_limit'
 
 export interface Bet {
   id: string

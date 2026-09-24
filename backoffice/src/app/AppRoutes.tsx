@@ -20,6 +20,8 @@ import { SportsbookBetsPage } from '../features/sportsbook/SportsbookBetsPage'
 import { CasinoRoundsPage } from '../features/casino/CasinoRoundsPage'
 import { PlatformAuditLogPage } from '../features/audit/PlatformAuditLogPage'
 import { TenantAuditLogPage } from '../features/audit/TenantAuditLogPage'
+import { ConfigurationPage } from '../features/configuration/ConfigurationPage'
+import { CasinoCataloguePage } from '../features/catalogue/CasinoCataloguePage'
 import { HomePage } from './HomePage'
 import { NotFoundPage } from './NotFoundPage'
 
@@ -66,6 +68,23 @@ export function AppRoutes() {
           element={
             <RequireNavPermission permission="ownTenant">
               <MyTenantPage />
+            </RequireNavPermission>
+          }
+        />
+
+        <Route
+          path="configuration"
+          element={
+            <RequireNavPermission permission={['providerConfig', 'casinoConfig']}>
+              <ConfigurationPage />
+            </RequireNavPermission>
+          }
+        />
+        <Route
+          path="casino-catalogue"
+          element={
+            <RequireNavPermission permission="catalogue">
+              <CasinoCataloguePage />
             </RequireNavPermission>
           }
         />
