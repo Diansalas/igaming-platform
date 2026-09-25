@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-25 (Stage 10 complete; awaiting authorization for the next stage)
+Last updated: 2026-09-25 (Stage 10.1 planning gate complete; awaiting human approval)
 
-## Status: Stage 10 COMPLETE (W0 CI restoration + W1 sportsbook settlement, in-house MOCK mode); next stage awaiting human authorization (`docs/governance/stage-10-completion-report.md`)
+## Status: Stage 10 COMPLETE; Stage 10.1 planning gate complete — PLANNING ONLY, awaiting human approval (`docs/plans/stage-10.1-planning-gate-proposal.md`)
 
 ## Stage 0 — complete (approved)
 
@@ -8107,4 +8107,26 @@ permission probes.
 - Staging untouched; OB-1 and all prior human decisions OPEN. Completion
   report: `docs/governance/stage-10-completion-report.md`. **No automatic
   progression — the next stage requires explicit human authorization.**
+
+## Stage 10.1 Planning Gate — PAY-REV-1 + SB-T1-XMIN (+ future AI-agent architecture record)
+
+- Planning only, as authorized. Analyses by `payments` and `sportsbook`;
+  cross-reviews by `ledger-finance`, `security`, `architect`, `qa`,
+  `backend` (record: `docs/plans/stage-10.1-planning/`); seven Orchestrator
+  rulings (report §O).
+- **PAY-REV-1 plan:** ADR 0082 L2 `FOR UPDATE` on the original deposit +
+  re-check after lock; migration 0092 tenant-leading, `deposit_reversal`-
+  scoped partial unique index with an RLS-proof refusal; typed
+  `ErrReversalAlreadyExists`; 409 + alert + separately committed denial
+  audit. F-7 idempotency semantics re-audited: unchanged.
+- **SB-T1-XMIN plan:** migration 0093 body-only, fail-closed
+  `pg_xact_status` check (empirically verified on PostgreSQL 16.13).
+- **ADR 0089** (future AI-agent boundary) written and reviewed by
+  security/bonus-engine/identity-compliance/backend; NOT IMPLEMENTED.
+- **New pre-existing finding:** PAY-WH-TENANT-1 (security S-6, High) —
+  payments webhook tenant comes from the URL slug and the mock's global HMAC
+  secret does not bind the tenant; launch-blocking for a real PSP; outside
+  10.1 pending a human ruling.
+- ADR 0090 (Stage 10.1 definition) PROPOSED. No code, no implementation
+  migration, no AWS action. **Stop at gate G0.**
 

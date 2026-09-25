@@ -47,6 +47,7 @@ stage detail), and the ADRs cited below.
 | 9.4 Part 1 / 9.4 | APP_ENV fail-closed (ADR 0085); staging hardening (ADR 0086); **staging deployed and accepted on `9190d5d`** (human-executed, human-attested) | Complete |
 | 10 planning gate | State reconstruction + Stage 10 proposal (`docs/plans/stage-10-planning-gate-proposal.md`) | Complete; Stage 10 approved by the human |
 | 10 | CI evidence restoration (W0) + sportsbook settlement lifecycle, in-house MOCK mode (W1; ADRs 0087/0088); F-7 remediation | Complete (`docs/governance/stage-10-completion-report.md`) |
+| 10.1 planning gate | PAY-REV-1 + SB-T1-XMIN plan (`docs/plans/stage-10.1-planning-gate-proposal.md`, ADR 0090 PROPOSED); ADR 0089 future AI-agent boundary | Complete; awaiting human approval |
 
 ## Active stage
 

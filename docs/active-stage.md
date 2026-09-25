@@ -1480,7 +1480,18 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 10 — CI Evidence Restoration + Sportsbook Settlement Lifecycle — COMPLETE (awaiting authorization for the next stage)
+## Current stage: Stage 10.1 Planning Gate — PAY-REV-1 + SB-T1-XMIN — PLANNING ONLY, awaiting human approval
+
+Authorized 2026-09-25 as a planning gate only (no implementation).
+Report: `docs/plans/stage-10.1-planning-gate-proposal.md`; stage definition
+ADR 0090 (PROPOSED); specialist record `docs/plans/stage-10.1-planning/`.
+Future AI-agent boundary recorded as ADR 0089 (binding future requirement,
+NOT IMPLEMENTED). New pre-existing finding PAY-WH-TENANT-1 (payments
+webhook tenant not bound to the verifying credential) registered outside
+scope pending a human ruling. No code, no implementation migration, no AWS
+action. Stop point: gate G0 (human approval).
+
+## Prior stage: Stage 10 — CI Evidence Restoration + Sportsbook Settlement Lifecycle — COMPLETE (awaiting authorization for the next stage)
 
 Approved 2026-09-25 (ADR 0087). All seven gates passed; completion report:
 `docs/governance/stage-10-completion-report.md`. **W0** restored the CI Go
