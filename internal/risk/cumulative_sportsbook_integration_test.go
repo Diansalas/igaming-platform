@@ -14,6 +14,11 @@
 // internal/sportsbook: internal/risk owns the measurement, the posting
 // shape is the only fact it depends on, and a parallel Stage 9.2
 // workstream is editing that package concurrently.
+//
+// The full-lifecycle coverage (ADR 0088 §6.2 every row, §14 R1/R4) is in
+// cumulative_sportsbook_settlement_integration_test.go, which DOES drive
+// internal/sportsbook - from the external test package risk_test, since
+// sportsbook imports risk and this package-risk file therefore cannot.
 package risk
 
 import (
