@@ -1480,7 +1480,19 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 10 Planning Gate — proposal awaiting human approval (PLANNING ONLY)
+## Current stage: Stage 10 — CI Evidence Restoration + Sportsbook Settlement Lifecycle — W0 COMPLETE, W1 IN PROGRESS
+
+Approved 2026-09-25 (ADR 0087). **W0 complete**: CI Go gate restored;
+Gate 2 passed with five consecutive green runs #239–#243 (detail:
+`docs/governance/task-registry.md` "Stage 10", `docs/progress.md`).
+ADR 0088 (settlement contract) ACCEPTED. **W1** (sportsbook settlement,
+cash-funded singles, in-house mock mode) now proceeds under ADR 0088,
+starting with the F-7 audit. Isolated external dependency: `b22d5c4` live
+IAM re-validation needs a credential with `access-analyzer:ValidatePolicy`
+and `iam:SimulateCustomPolicy`. Staging kept running and untouched. OB-1
+open.
+
+## Prior stage: Stage 10 Planning Gate — proposal approved by the human (PLANNING ONLY)
 
 **Status: NOT AUTHORIZED — NOT STARTED.** Stage 9.4's AWS staging
 deployment was executed by the human and the staging MVP acceptance

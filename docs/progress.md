@@ -1,6 +1,6 @@
 # Project Progress
 
-Last updated: 2026-09-25 (Stage 10 planning gate)
+Last updated: 2026-09-25 (Stage 10 W0 complete; W1 in progress)
 
 ## Status: Stage 9.4 staging deployed and accepted (human-executed, human-attested); Stage 10 proposed — PLANNING ONLY, awaiting human approval (`docs/plans/stage-10-planning-gate-proposal.md`)
 
@@ -8035,4 +8035,47 @@ test-admin mechanism; name/supply the verification credential for the
 **No code, migration, Terraform, IAM or AWS change was made in this
 gate. Stage 10 is NOT authorized and was not started.** Full record:
 `docs/plans/stage-10-planning-gate-proposal.md` (draft `8797fcf`; consolidated record `1968b5938abf1d522b805ca357a519f5365f1fb2`).
+
+## Stage 10 — W0 CI Evidence Restoration — complete (Gates 1 and 2 passed)
+
+Approved by the human 2026-09-25 (ADR 0087). W0 restored the CI Go gate,
+which had never executed on this branch (F-1).
+
+- **Implemented** (`05e1990`, `77a9293`): correct lint action
+  (`golangci/golangci-lint-action@v9`, per the upstream compatibility
+  table) with the linter pinned to v2.5.0; CI/dev-only `igaming_test_admin`
+  role and one integration-tagged scratch-database helper
+  (`internal/testsupport/scratchdb`) — application roles unchanged; a CI
+  guard and a self-proving integration-evidence assertion step; the
+  root cause of an intermittent sportsbook concurrency test (database-wide
+  lock-wait counting across parallel packages) fixed in sportsbook and
+  casino; 19 lint findings fixed without behavior change; records
+  refreshed (project status, HR-15 status, ownership, change control,
+  testing strategy, runtime-role note).
+- **Gate 2 — five consecutive green CI runs:** #239–#243 (run ids in
+  `docs/governance/task-registry.md` "Stage 10"): each 32 packages ok,
+  2,202 tests passed, 5 expected skips (`BLOCKED on HDR-J-7`), 0 failed;
+  migrations, reversibility, lint, guard all green.
+- **Reviews:** security, devops, architect, qa, code-reviewer — all
+  findings addressed or recorded.
+- **Isolated external dependency (BLOCKED):** live re-validation of
+  `b22d5c4` (Access Analyzer `ValidatePolicy`, 30-case
+  `simulate-deployer-policies.py`). The deployer credential was probed and
+  denied `access-analyzer:ValidatePolicy` and `iam:SimulateCustomPolicy`;
+  a credential with those two read-only actions is required. Offline
+  checks PASS (42 terraform tests, 7 node tests).
+- **Deferred (P3):** stale ALB security-group description (a change would
+  replace the group in running staging); integration-tagged files not
+  linted in CI (467 findings); three statement-text-filtered lock-wait
+  helpers.
+- **Record correction:** only five of the six planning-gate integration
+  failures were `CREATEDB`; the sixth was the concurrency flake above.
+- **W1 preparation (documentation only, permitted during W0):** ADR 0088
+  (settlement implementation contract) drafted by `ledger-finance`,
+  reviewed by architect/sportsbook/security/risk/qa (all ACCEPT WITH
+  CHANGES, no P0/P1), revised and **ACCEPTED** (`1db27ec`); `qa`'s W1 test
+  plan recorded in `docs/testing/testing-strategy.md`.
+
+Staging was not touched. No AWS operation beyond two read-only
+permission probes.
 
