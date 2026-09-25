@@ -170,7 +170,27 @@ jobs:
         run: go test -race ./...
 
       - name: Integration tests (RLS, HTTP foundation, race detector)
-        run: go test -race -tags=integration -v ./...
+        run: |
+          set -o pipefail
+          go test -race -tags=integration -v ./... 2>&1 | tee integration-test.log
+
+      - name: Assert integration evidence (Stage 10 W0 gate)
+        run: |
+          # A skipped test is green, so a green step alone does not prove the
+          # scratch-database migration/RLS tests ran. Fail if any test
+          # skipped for a missing database URL, and require the scratch
+          # tests and the runtime-role probe to have actually passed.
+          if grep -E 'TEST_(ADMIN_|RUNTIME_)?DATABASE_URL not set' integration-test.log; then
+            echo "integration tests were skipped for a missing database URL"; exit 1
+          fi
+          for t in TestMigration0048_PreflightGuardFiresOnBarePlayerLocked TestMigrateUp_RecordsCorrectChecksum \
+                   TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip TestMigration0077_EnablesAndForcesRLSOnTenantsLicencesAndJurisdictions; do
+            grep -q -- "--- PASS: $t " integration-test.log || { echo "expected $t to PASS"; exit 1; }
+          done
+          echo "packages ok:  $(grep -cE '^ok[[:space:]]' integration-test.log)"
+          echo "tests passed: $(grep -c -- '--- PASS' integration-test.log)"
+          echo "tests skipped: $(grep -c -- '--- SKIP' integration-test.log)"
+          echo "tests failed: $(grep -c -- '--- FAIL' integration-test.log)"
 
       - name: Migration reversibility (down then up)
         run: |
