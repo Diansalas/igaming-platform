@@ -228,8 +228,13 @@ Whenever `ledger.Post`'s `ledger_transactions` insert conflicts on
 **exactly one** of the following, in this order:
 
 1. **`ErrIdempotencyKeyReused`** if the stored `transaction_type` differs
-   from the requested one. This check is unchanged and still runs first,
-   because ADR 0088 §4.5 maps this sentinel to `ErrSettlementTombstoned`.
+   from the requested one. This check is unchanged and still runs first.
+   **Implementation note 2026-09-25 (ADR 0088):** no `ErrSettlementTombstoned`
+   type exists. ADR 0088 §4.7's ledger backstop maps this sentinel (and
+   `ErrIdempotencyPayloadMismatch` below) to `ErrSettlementIntegrity`; the
+   sportsbook decision table's own `SETTLEMENT_TOMBSTONED` rejection code
+   (ADR 0088 §4.3) is a separate, earlier-evaluated result, not a mapping
+   of this error.
 2. **`ErrIdempotencyPayloadMismatch`** (new sentinel) if the type matches
    but any of the following differs between the stored transaction and
    the request:

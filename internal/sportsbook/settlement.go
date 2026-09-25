@@ -80,15 +80,22 @@ const (
 // Rejection codes (ADR 0088 §4.3-§4.7, §9.3). A rejection is a RESULT,
 // not a Go error, so its audit record commits with no ledger write.
 const (
-	SettlementRejectBetNotFound         = "NOT_FOUND"
-	SettlementRejectPayloadMismatch     = "SETTLEMENT_PAYLOAD_MISMATCH"
-	SettlementRejectTombstoned          = "SETTLEMENT_TOMBSTONED"
-	SettlementRejectBetVoided           = "BET_VOIDED"
-	SettlementRejectBetAlreadySettled   = "BET_ALREADY_SETTLED"
-	SettlementRejectGenerationSequence  = "GENERATION_OUT_OF_SEQUENCE"
-	SettlementRejectIntegrity           = "SETTLEMENT_INTEGRITY"
-	SettlementRejectPayoutInvalid       = "PAYOUT_INVALID"
-	SettlementRejectAssetMismatch       = "ASSET_MISMATCH"
+	SettlementRejectBetNotFound        = "NOT_FOUND"
+	SettlementRejectPayloadMismatch    = "SETTLEMENT_PAYLOAD_MISMATCH"
+	SettlementRejectTombstoned         = "SETTLEMENT_TOMBSTONED"
+	SettlementRejectBetVoided          = "BET_VOIDED"
+	SettlementRejectBetAlreadySettled  = "BET_ALREADY_SETTLED"
+	SettlementRejectGenerationSequence = "GENERATION_OUT_OF_SEQUENCE"
+	SettlementRejectIntegrity          = "SETTLEMENT_INTEGRITY"
+	SettlementRejectPayoutInvalid      = "PAYOUT_INVALID"
+	SettlementRejectAssetMismatch      = "ASSET_MISMATCH"
+	// SettlementRejectActorNotActive is not part of ADR 0088 §9.3's HTTP
+	// status table (the actor check still fails the request closed with
+	// 403, before any bet is touched) - it is only the rejection_code an
+	// audit record carries when the actor check itself fails (security
+	// review P3-2), so a deactivated/unknown staff principal presenting a
+	// still-valid token is a recorded, not merely logged, event.
+	SettlementRejectActorNotActive      = "ACTOR_NOT_ACTIVE"
 	settlementAuditReasonCode           = "test_support_simulation"
 	settlementDriver                    = "test_support_simulation"
 	settlementMode                      = "in_house_mock"
@@ -314,6 +321,16 @@ func SimulateSettlementEvent(ctx context.Context, tx pgx.Tx, ev SettlementEvent)
 		return SettlementResult{}, fmt.Errorf("sportsbook: resolve settlement actor: %w", err)
 	}
 	if staff.TenantID != ev.TenantID || staff.Status != "active" {
+		return SettlementResult{}, ErrSettlementActorNotActive
+	}
+	// Security review P3-3: the JWT role claim alone (checked by
+	// auth.RequirePermission before this handler is ever reached) is not
+	// re-verified against the database. A risk manager demoted after
+	// issuing a still-valid access token could otherwise keep simulating
+	// settlements until it expires. Re-checking the STORED role here,
+	// fail-closed as the same ErrSettlementActorNotActive, closes that
+	// window cheaply for this non-production route.
+	if staff.Role != identity.StaffRoleRiskManager {
 		return SettlementResult{}, ErrSettlementActorNotActive
 	}
 
@@ -651,7 +668,7 @@ func settleBet(ctx context.Context, tx pgx.Tx, ev SettlementEvent, st settlement
 		in.CausationID = &causation
 	}
 
-	txIDs, err := lockAndPost(ctx, tx, in)
+	txIDs, err := lockAndPost(ctx, tx, false, in)
 	if err != nil {
 		return SettlementResult{}, err
 	}
@@ -696,7 +713,7 @@ func rollbackBet(ctx context.Context, tx pgx.Tx, ev SettlementEvent, st settleme
 		if err != nil {
 			return SettlementResult{}, err
 		}
-		txIDs, err := lockAndPost(ctx, tx, rbIn)
+		txIDs, err := lockAndPost(ctx, tx, false, rbIn)
 		if err != nil {
 			return SettlementResult{}, err
 		}
@@ -718,7 +735,7 @@ func rollbackBet(ctx context.Context, tx pgx.Tx, ev SettlementEvent, st settleme
 			TenantID: bet.TenantID, TransactionType: ledger.TxTombstone,
 			IdempotencyKey: settlementIdempotencyKey(bet.ID, g), CorrelationID: bet.ID,
 		}
-		txIDs, err := lockAndPost(ctx, tx, in)
+		txIDs, err := lockAndPost(ctx, tx, false, in)
 		if err != nil {
 			return SettlementResult{}, err
 		}
@@ -766,7 +783,7 @@ func voidBet(ctx context.Context, tx pgx.Tx, ev SettlementEvent, st settlementSt
 	}
 
 	if bet.Status == BetStatusOpen {
-		txIDs, err := lockAndPost(ctx, tx, voidIn)
+		txIDs, err := lockAndPost(ctx, tx, false, voidIn)
 		if err != nil {
 			return SettlementResult{}, err
 		}
@@ -791,7 +808,7 @@ func voidBet(ctx context.Context, tx pgx.Tx, ev SettlementEvent, st settlementSt
 	if err != nil {
 		return SettlementResult{}, err
 	}
-	txIDs, err := lockAndPost(ctx, tx, rbIn, voidIn)
+	txIDs, err := lockAndPost(ctx, tx, true, rbIn, voidIn)
 	if err != nil {
 		return SettlementResult{}, err
 	}
@@ -895,20 +912,31 @@ func buildRollbackInput(ctx context.Context, tx pgx.Tx, st settlementState, sett
 	}, nil
 }
 
-// lockAndPost is L3 then L4 (ADR 0088 §5.1 steps 5-6): one pre-lock over
-// every input, then Post in order. When there are two inputs (void after
-// settlement) the second is the void, whose CausationID is the first's
-// transaction id - not an entry field, so the pre-locked entry set is
-// unchanged (§2.1). Every posting here was classified NEW by the decision
-// table; a ledger-level replay or key reuse is therefore an integrity
-// failure that aborts the transaction (§4.7).
-func lockAndPost(ctx context.Context, tx pgx.Tx, ins ...ledger.TransactionInput) ([]uuid.UUID, error) {
+// lockAndPost is L3 then L4 (ADR 0088 §5.1 steps 5-6): ONE pre-lock over
+// every input (R3: the set pre-locked is exactly the set posted), then
+// Post in order.
+//
+// chainCausation is explicit, not inferred from len(ins) (ledger-finance
+// P3-1.4): when true, the SECOND input's CausationID is set - after the
+// pre-lock, immediately before its own Post - to the transaction id
+// Post minted for the FIRST input. CausationID is not an entry field, so
+// this never changes the pre-locked entry set (§2.1). Today the only
+// chainCausation=true caller is voidBet's composed void (rollback's
+// transaction id becomes the void's causation, ADR 0088 §2.1's table).
+// Every other caller passes false, even for calls with more than one
+// input in the future, so a new multi-posting caller never has its own
+// CausationID silently overwritten by position alone - it must opt in.
+//
+// Every posting here was classified NEW by the decision table; a
+// ledger-level replay or key reuse is therefore an integrity failure that
+// aborts the transaction (§4.7).
+func lockAndPost(ctx context.Context, tx pgx.Tx, chainCausation bool, ins ...ledger.TransactionInput) ([]uuid.UUID, error) {
 	if _, err := ledger.LockProjectionsForPostings(ctx, tx, ins...); err != nil {
 		return nil, fmt.Errorf("sportsbook: lock settlement projections: %w", err)
 	}
 	ids := make([]uuid.UUID, 0, len(ins))
 	for i, in := range ins {
-		if i > 0 {
+		if chainCausation && i > 0 {
 			prev := ids[i-1]
 			in.CausationID = &prev
 		}
@@ -981,6 +1009,17 @@ func writeTransition(ctx context.Context, tx pgx.Tx, ev SettlementEvent, before,
 // (INV-LOCK-E4). T-1 (migration 0091) re-validates the row; a violation
 // here means the Go decision table and the database disagree, so it is an
 // integrity failure.
+//
+// PRECONDITION (ADR 0088 §3.3 implementation note, deferred item
+// SB-T1-XMIN): this INSERT must run as a plain statement on the top-level
+// transaction, never inside a SAVEPOINT. T-1's composed-void causation
+// check compares a candidate rollback row's xmin to the top-level xid, and
+// a row inserted under a released savepoint keeps its subtransaction xid,
+// which the check rejects (fail closed). Today this holds: tx is the
+// top-level pgx.Tx from db.Pool.WithTenant, and nothing in the W1 call
+// path opens a savepoint around this call. Any future driver that wraps
+// per-bet settlement in its own SAVEPOINT (e.g. a batch driver) must first
+// replace T-1's check with pg_xact_status via a new migration.
 func insertSettlementRecord(ctx context.Context, tx pgx.Tx, rec SettlementRecord) (uuid.UUID, error) {
 	var generation *int32
 	if rec.Generation != nil {

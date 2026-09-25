@@ -32,23 +32,31 @@ import (
 // field-matrix (which fields are required/forbidden per event_type) is
 // enforced explicitly below, since encoding/json alone cannot express it.
 //
-// PayoutAmount is decoded as json.Number, never int64/float64 directly:
-// ADR 0088 §2.4 V-5 requires "claim parsed as a JSON integer into int64;
-// non-integer, negative, or > math.MaxInt64 rejected AT DECODE" - a plain
-// int64 field would let encoding/json silently truncate a fractional
-// number's least significant digits is untrue (encoding/json actually
-// rejects a non-integer float into an int64 field with its own error), but
-// json.Number lets this handler produce ONE explicit, tested rejection
-// path (parseClaimPayoutAmount below) for every one of V-5's three failure
-// modes, including the explicitly-required overflow case, rather than
-// relying on encoding/json's own less specific error text.
+// Generation is *int, not int: §9.2 makes the field FORBIDDEN (not merely
+// unused) on void, and a plain int cannot distinguish an explicitly-sent
+// "generation": 0 from an absent field - both decode to the zero value.
+// The pointer's nilness is exactly "was this field present in the JSON
+// body", checked below in validateSimulateSettlementEventShape.
+//
+// PayoutAmount is decoded as json.RawMessage, not json.Number: a struct
+// field of type json.Number has Kind() == reflect.String, and
+// encoding/json's decoder accepts a quoted JSON STRING into any
+// string-kinded destination field - so a request body containing
+// `"payout_amount": "2500"` decodes successfully into a json.Number
+// without ever being validated as a JSON number token (verified: this is
+// standard encoding/json behaviour, not a bug in this package). Capturing
+// the raw token instead lets parseClaimPayoutAmount below reject anything
+// that is not literally a JSON number (a quoted string, null, a boolean,
+// an object or an array) by its first byte, before the claim is parsed at
+// all - only a genuine JSON integer then reaches ADR 0088 §2.4 V-5's
+// int64/overflow/negative checks.
 type simulateSettlementEventRequest struct {
-	EventType    string      `json:"event_type"`
-	Generation   int         `json:"generation"`
-	Outcome      string      `json:"outcome"`
-	PayoutAmount json.Number `json:"payout_amount"`
-	AssetCode    string      `json:"asset_code"`
-	VoidReason   string      `json:"void_reason"`
+	EventType    string          `json:"event_type"`
+	Generation   *int            `json:"generation"`
+	Outcome      string          `json:"outcome"`
+	PayoutAmount json.RawMessage `json:"payout_amount"`
+	AssetCode    string          `json:"asset_code"`
+	VoidReason   string          `json:"void_reason"`
 }
 
 // simulateSettlementEventResponse is ADR 0088 §9.3's 200 response body.
@@ -84,58 +92,69 @@ func toSimulateSettlementEventResponse(res sportsbook.SettlementResult) simulate
 // run again inside the transaction). Returns a client-safe message on the
 // first violation found; ok=false means the caller must respond 400
 // VALIDATION_FAILED.
-func validateSimulateSettlementEventShape(req simulateSettlementEventRequest) (sportsbook.SettlementEventType, string, bool) {
+func validateSimulateSettlementEventShape(req simulateSettlementEventRequest) (sportsbook.SettlementEventType, int, string, bool) {
 	switch sportsbook.SettlementEventType(req.EventType) {
 	case sportsbook.SettlementEventSettle:
-		if req.Generation < 1 {
-			return "", "generation is required and must be >= 1 for settle", false
+		if req.Generation == nil || *req.Generation < 1 {
+			return "", 0, "generation is required and must be >= 1 for settle", false
 		}
 		if req.Outcome != sportsbook.SettlementOutcomeWon && req.Outcome != sportsbook.SettlementOutcomeLost {
-			return "", "outcome is required and must be won or lost for settle", false
+			return "", 0, "outcome is required and must be won or lost for settle", false
 		}
 		if req.AssetCode == "" {
-			return "", "asset_code is required for settle", false
+			return "", 0, "asset_code is required for settle", false
 		}
-		if req.PayoutAmount == "" {
-			return "", "payout_amount is required for settle", false
+		if len(req.PayoutAmount) == 0 {
+			return "", 0, "payout_amount is required for settle", false
 		}
 		if req.VoidReason != "" {
-			return "", "void_reason is forbidden for settle", false
+			return "", 0, "void_reason is forbidden for settle", false
 		}
-		return sportsbook.SettlementEventSettle, "", true
+		return sportsbook.SettlementEventSettle, *req.Generation, "", true
 	case sportsbook.SettlementEventRollback:
-		if req.Generation < 1 {
-			return "", "generation is required and must be >= 1 for rollback", false
+		if req.Generation == nil || *req.Generation < 1 {
+			return "", 0, "generation is required and must be >= 1 for rollback", false
 		}
-		if req.Outcome != "" || req.PayoutAmount != "" || req.AssetCode != "" || req.VoidReason != "" {
-			return "", "rollback carries only a generation", false
+		if req.Outcome != "" || len(req.PayoutAmount) != 0 || req.AssetCode != "" || req.VoidReason != "" {
+			return "", 0, "rollback carries only a generation", false
 		}
-		return sportsbook.SettlementEventRollback, "", true
+		return sportsbook.SettlementEventRollback, *req.Generation, "", true
 	case sportsbook.SettlementEventVoid:
-		if req.Generation != 0 || req.Outcome != "" || req.PayoutAmount != "" || req.AssetCode != "" {
-			return "", "void carries only a void_reason", false
+		if req.Generation != nil || req.Outcome != "" || len(req.PayoutAmount) != 0 || req.AssetCode != "" {
+			return "", 0, "void carries only a void_reason", false
 		}
 		if req.VoidReason == "" {
-			return "", "void_reason is required for void", false
+			return "", 0, "void_reason is required for void", false
 		}
-		return sportsbook.SettlementEventVoid, "", true
+		return sportsbook.SettlementEventVoid, 0, "", true
 	default:
-		return "", "event_type must be settle, rollback or void", false
+		return "", 0, "event_type must be settle, rollback or void", false
 	}
 }
 
 // parseClaimPayoutAmount is ADR 0088 §2.4 V-5, enforced at decode time: the
-// claim must parse as a JSON INTEGER into int64 - non-integer (e.g. "10.5"),
-// negative, or overflowing math.MaxInt64/MinInt64 are all rejected here,
-// before the claim ever reaches internal/sportsbook. json.Number.Int64
+// claim must parse as a JSON INTEGER into int64 - non-integer (e.g.
+// "10.5"), negative, or overflowing math.MaxInt64/MinInt64 are all
+// rejected here, before the claim ever reaches internal/sportsbook.
+//
+// raw is the exact JSON value token (see the struct doc comment on
+// simulateSettlementEventRequest for why json.RawMessage is used instead
+// of json.Number). The first byte MUST be '-' or a digit: anything else -
+// a quoted string such as "2500", `null`, `true`/`false`, `{...}` or
+// `[...]` - is not a JSON number at all and is rejected here, before
+// json.Number ever sees it. Only then is json.Number.Int64 used, which
 // itself already rejects a fractional literal and anything wider than
-// int64 (strconv.ParseInt's own ErrRange) - only the explicit negative
-// check is added on top.
-func parseClaimPayoutAmount(n json.Number) (int64, bool) {
-	if n == "" {
+// int64 (strconv.ParseInt's own ErrRange); the explicit negative check is
+// added on top because a JSON number token CAN start with '-'.
+func parseClaimPayoutAmount(raw json.RawMessage) (int64, bool) {
+	if len(raw) == 0 {
 		return 0, true
 	}
-	v, err := n.Int64()
+	c := raw[0]
+	if c != '-' && (c < '0' || c > '9') {
+		return 0, false
+	}
+	v, err := json.Number(raw).Int64()
 	if err != nil {
 		return 0, false
 	}
@@ -175,12 +194,29 @@ func logSettlementIntegrityAlert(logger interface {
 	)
 }
 
+// settlementAlertReasonOverrides pins the alert reason name for a
+// rejection code whose ADR 0088 name is NOT a mechanical lower-casing of
+// the wire code. ADR 0088 §4.6 names the unknown-bet alert explicitly as
+// sportsbook_settlement_integrity_alert_bet_not_found, but the wire code
+// is NOT_FOUND (apierror.CodeNotFound's own literal, shared with every
+// other 404 in the platform) - lower-casing it alone would emit
+// ...alert_not_found (security review P2-1 / code review #6). Every other
+// §4.4-alert-eligible code already lower-cases to the ADR's own naming
+// convention (e.g. SETTLEMENT_PAYLOAD_MISMATCH ->
+// ...alert_settlement_payload_mismatch), so no other override is needed;
+// this map is reviewed against every rejection code alert-eligible under
+// §4.4/§4.6 each time a new one is added, rather than left implicit.
+var settlementAlertReasonOverrides = map[string]string{
+	sportsbook.SettlementRejectBetNotFound: "bet_not_found", // ADR 0088 §4.6
+}
+
 // alertReasonFromRejectionCode derives the sportsbook_settlement_integrity_
-// alert_<reason> suffix from a rejection code - the codes are already
-// SCREAMING_SNAKE_CASE (sportsbook.SettlementRejectPayloadMismatch etc.),
-// so lower-casing is the entire transform, mirroring
-// casino_play_integrity_alert_bet_not_found's own naming shape.
+// alert_<reason> suffix from a rejection code, applying
+// settlementAlertReasonOverrides first.
 func alertReasonFromRejectionCode(code string) string {
+	if reason, ok := settlementAlertReasonOverrides[code]; ok {
+		return reason
+	}
 	return strings.ToLower(code)
 }
 
@@ -219,7 +255,7 @@ func newSimulateSettlementEventHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeSettlementValidationFailed, "invalid request body")
 			return
 		}
-		eventType, msg, ok := validateSimulateSettlementEventShape(req)
+		eventType, generation, msg, ok := validateSimulateSettlementEventShape(req)
 		if !ok {
 			apierror.Write(w, requestID, apierror.CodeSettlementValidationFailed, msg)
 			return
@@ -233,7 +269,7 @@ func newSimulateSettlementEventHandler(deps Deps) http.HandlerFunc {
 
 		ev := sportsbook.SettlementEvent{
 			TenantID: tc.TenantID, BetID: betID, ActorStaffID: staffID, EventType: eventType,
-			Generation: req.Generation, Outcome: req.Outcome, ClaimPayoutAmount: payoutAmount,
+			Generation: generation, Outcome: req.Outcome, ClaimPayoutAmount: payoutAmount,
 			ClaimAssetCode: req.AssetCode, VoidReason: req.VoidReason,
 			RequestID: requestID,
 			// ADR 0088 §10 (security review S6): IPAddress is the
@@ -253,6 +289,20 @@ func newSimulateSettlementEventHandler(deps Deps) http.HandlerFunc {
 		})
 
 		if errors.Is(err, sportsbook.ErrSettlementActorNotActive) {
+			// Security review P3-2: a valid, unexpired staff token whose
+			// account has since been deactivated or moved tenants is a
+			// security-relevant event, not just a 403. Record it as its own
+			// rejection audit in a fresh tenant-scoped transaction - the
+			// failed one (identity.GetStaffUserByID ran, then
+			// SimulateSettlementEvent returned an error, rolling the tx
+			// back) cannot carry it - mirroring the §4.7 pattern below. A
+			// failure to audit never blocks the 403.
+			auditErr := deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+				return sportsbook.RecordSettlementRejection(ctx, tx, ev, "", sportsbook.SettlementRejectActorNotActive)
+			})
+			if auditErr != nil {
+				logger.Error("sportsbook_settlement_rejection_audit_failed", "error", auditErr, "bet_id", betID.String())
+			}
 			apierror.Write(w, requestID, apierror.CodeForbidden, "settlement actor is not an active staff user of this tenant")
 			return
 		}
@@ -267,6 +317,16 @@ func newSimulateSettlementEventHandler(deps Deps) http.HandlerFunc {
 			// audit is written in a SEPARATE tenant-scoped transaction -
 			// the failed one cannot carry it - then the integrity alert is
 			// logged and 409 SETTLEMENT_INTEGRITY is returned.
+			//
+			// Security review P3-1: the wrapped cause (which ledger
+			// sentinel fired, which field class differed, which T-1 RAISE
+			// text) is logged separately under a NON-alert event name - it
+			// is not on the §4.4 allow-list and is not paged on - so
+			// incident triage does not have to guess why an integrity
+			// abort happened. err's chain carries ids and field classes
+			// only (ledger/replay.go), never amounts, accounts or PII.
+			logger.Error("sportsbook_settlement_integrity_detail",
+				"bet_id", betID.String(), "request_id", requestID, "cause", err.Error())
 			logSettlementIntegrityAlert(logger, alertReasonFromRejectionCode(sportsbook.SettlementRejectIntegrity), ev, "")
 			auditErr := deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 				return sportsbook.RecordSettlementRejection(ctx, tx, ev, "", sportsbook.SettlementRejectIntegrity)

@@ -466,6 +466,25 @@ func sbLoadBetNets(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (map[uuid
 	return out, rows.Err()
 }
 
+// sbLedgerCashPayoutSubquery is the ONE way "the ledger CASH payout of a
+// settlement transaction" is computed anywhere in this stream
+// (code review #9 / ledger-finance): Σ credits, IN the settlement
+// transaction identified by ledgerTxCol, TO the account that the bet's OWN
+// placement transaction debited (ADR 0088 §2.2's CASH account) - never
+// "any player_cash account", which is stricter and cannot be confused with
+// an unrelated account of the same type. betIDCol is the bet id to scope
+// the placement join to. Both callers (§8.2's per-bet check and §8.4's
+// statement match) previously computed this with two DIFFERENT queries
+// that happened to agree only on well-formed data; this is the shared
+// helper that replaces both.
+func sbLedgerCashPayoutSubquery(ledgerTxCol, betIDCol string) string {
+	return fmt.Sprintf(`COALESCE((SELECT SUM(e.amount) FROM ledger_entries e
+		JOIN ledger_entries pe ON pe.ledger_account_id = e.ledger_account_id AND pe.direction = 'debit'
+		JOIN sportsbook_bets pb ON pb.ledger_transaction_id = pe.ledger_transaction_id
+		WHERE e.ledger_transaction_id = %s AND e.direction = 'credit' AND pb.id = %s), 0)::text`,
+		ledgerTxCol, betIDCol)
+}
+
 // sbCurrentSettlement is a bet's latest un-reversed settlement history row
 // and the CASH payout actually posted by its ledger transaction.
 type sbCurrentSettlement struct {
@@ -480,12 +499,7 @@ type sbCurrentSettlement struct {
 func sbLoadCurrentSettlements(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (map[uuid.UUID]*sbCurrentSettlement, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT s.bet_id, s.outcome, s.payout_amount::text, s.ledger_transaction_id,
-		       COALESCE((SELECT SUM(e.amount) FROM ledger_entries e
-		                  JOIN ledger_entries pe ON pe.ledger_account_id = e.ledger_account_id
-		                                        AND pe.direction = 'debit'
-		                  JOIN sportsbook_bets b ON b.ledger_transaction_id = pe.ledger_transaction_id
-		                 WHERE e.ledger_transaction_id = s.ledger_transaction_id
-		                   AND e.direction = 'credit' AND b.id = s.bet_id), 0)::text,
+		       `+sbLedgerCashPayoutSubquery("s.ledger_transaction_id", "s.bet_id")+`,
 		       EXISTS (SELECT 1 FROM ledger_transactions rt
 		                WHERE rt.reverses_transaction_id = s.ledger_transaction_id)
 		  FROM sportsbook_bet_settlements s
@@ -837,15 +851,22 @@ func sbStatementKey(betID uuid.UUID, void bool, generation *int) string {
 // sbLedgerStatementView is the platform side of the match, derived from
 // the LEDGER (not the history table the mock renders from): every
 // un-reversed sportsbook_settlement (generation from its server-composed
-// idempotency key, payout = Σ credits to player_cash) and every
-// sportsbook_void, per bet.
-func sbLedgerStatementView(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (map[string]sbStatementView, error) {
+// idempotency key, payout via sbLedgerCashPayoutSubquery - ADR 0088 §2.2's
+// CASH account, the same helper §8.2's per-bet check uses, not "any
+// player_cash account") and every sportsbook_void, per bet.
+//
+// r records a MismatchKindSBMockStatement when two ledger-side rows map to
+// the SAME statement key (ledger-finance P3-3.1) - e.g. a corrupted or
+// unparseable idempotency key that makes sbGenerationFromKey return the
+// same "<null>" generation for two distinct settlement transactions of one
+// bet. Previously the second row silently overwrote the first in the map,
+// which could hide a real divergence from the statement match entirely
+// instead of flagging it. The loser is dropped from the view (same
+// behaviour as before, now recorded rather than silent).
+func sbLedgerStatementView(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, r *sbRecorder) (map[string]sbStatementView, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT t.correlation_id, t.transaction_type, t.idempotency_key, COALESCE(b.asset_code, ''),
-		       COALESCE((SELECT SUM(e.amount) FROM ledger_entries e
-		                   JOIN ledger_accounts la ON la.id = e.ledger_account_id
-		                  WHERE e.ledger_transaction_id = t.id AND e.direction = 'credit'
-		                    AND la.account_type = 'player_cash'), 0)::text
+		       `+sbLedgerCashPayoutSubquery("t.id", "t.correlation_id")+`
 		  FROM ledger_transactions t
 		  LEFT JOIN sportsbook_bets b ON b.id = t.correlation_id
 		 WHERE t.tenant_id = $1
@@ -868,19 +889,29 @@ func sbLedgerStatementView(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (
 		if err != nil {
 			return nil, err
 		}
+		var key string
+		var view sbStatementView
 		if txType == string(ledger.TxSportsbookVoid) {
-			out[sbStatementKey(betID, true, nil)] = sbStatementView{payout: new(big.Int), asset: asset}
+			key = sbStatementKey(betID, true, nil)
+			view = sbStatementView{payout: new(big.Int), asset: asset}
+		} else {
+			var gen *int
+			if g, ok := sbGenerationFromKey(idemKey, betID); ok {
+				gen = &g
+			}
+			outcome := "lost"
+			if payout.Sign() > 0 {
+				outcome = "won"
+			}
+			key = sbStatementKey(betID, false, gen)
+			view = sbStatementView{outcome: outcome, payout: payout, asset: asset}
+		}
+		if _, dup := out[key]; dup {
+			r.add(MismatchKindSBMockStatement, "ledger: "+key, "one ledger posting per statement key",
+				"duplicate ledger-side settlement/void posting (ambiguous generation parse)")
 			continue
 		}
-		var gen *int
-		if g, ok := sbGenerationFromKey(idemKey, betID); ok {
-			gen = &g
-		}
-		outcome := "lost"
-		if payout.Sign() > 0 {
-			outcome = "won"
-		}
-		out[sbStatementKey(betID, false, gen)] = sbStatementView{outcome: outcome, payout: payout, asset: asset}
+		out[key] = view
 	}
 	return out, rows.Err()
 }
@@ -900,7 +931,7 @@ func sbGenerationFromKey(key string, betID uuid.UUID) (int, bool) {
 }
 
 func sbCheckStatement(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, sourceLabel string, lines []statement.SportsbookSettlementLine, r *sbRecorder) error {
-	ledgerView, err := sbLedgerStatementView(ctx, tx, tenantID)
+	ledgerView, err := sbLedgerStatementView(ctx, tx, tenantID, r)
 	if err != nil {
 		return err
 	}

@@ -119,6 +119,13 @@ Legend:
 | 19 | `payments/orchestrator.go:730` (postDepositSuccess) | payments / `deposit` | `providerID + ":" + providerReference` | provider: ref, amount, asset | No. The ref maps to exactly one intent (`idx_deposit_intents_tenant_provider_ref`, mig 0025). Amount and asset are compared to the intent (`:708`). There is a succeeded short-circuit (`:705`). Correlation = `intent.ID` | intent compare | No | B (+A via unique ref) |
 | 20 | `payments/orchestrator.go:1000` (deposit reversal) | `deposit_reversal` | `providerID + ":" + reversalRef` (`:1003`) | provider: reversal ref, original ref, amount | **Yes.** A reversal ref R1 redelivered naming a *different*, unreversed deposit D2 passes the `EXISTS` check (`:978`, D2 only), reaches `Post`, returns R1's reversal of D1, and reports D2 reversed | Amount/asset vs D2 (`:959-966`) and already-reversed(D2) | No | **C** |
 | 21 | `payments/orchestrator.go:1038` (reversal tombstone) | `tombstone` | `"tombstone:" + providerID + ":" + originalRef` | provider ref | No. `CorrelationID: uuid.New()` (`:1042`) differs on every call | n/a | No | A |
+| 22 | `sportsbook/settlement.go` `lockAndPost` (W1, ADR 0088; added post-audit, recorded here per §5.2(a)) | sportsbook / `sportsbook_settlement`, `sportsbook_void`, `sportsbook_rollback`, `tombstone` | `sportsbook_settlement:<bet_id>#<g>`, `sportsbook_rollback:<bet_id>#<g>`, `sportsbook_void:<bet_id>` (ADR 0088 §4.2) | staff-driven test-support route only (§9); every effect-bearing field (accounts, stake, payout) is re-derived server-side from the bet's own placement posting and frozen `potential_return` under the bet's L1 lock, never taken from the request | No. Every replay is detected at ADR 0088 §4.3 before any `Post` call (payload compare against `sportsbook_bet_settlements`, under L1). A `Post`-detected replay for an operation §4.3 already classified as new is therefore an integrity failure, not a legitimate retry | The whole §4.3 decision table, under L1, before L3 | No (fixed prefixes; §4 confirms no existing caller can produce them) | **A**, plus the §4.7 backstop (`AlreadyPosted`, `ErrIdempotencyKeyReused` or `ErrIdempotencyPayloadMismatch` all map to `ErrSettlementIntegrity`) |
+
+Evidence for #22: `TestSettlementFaultInjection_LedgerKeyBackstop`
+(`internal/sportsbook/settlement_fault_injection_integration_test.go`),
+plus the §4.3 decision-table replay tests
+(`settlement_scenarios_integration_test.go`,
+`settlement_decision_table_integration_test.go`).
 
 ### Evidence excerpts (HEAD)
 
@@ -271,8 +278,11 @@ At least one site is class C. Therefore:
 
 This is defense in depth. It makes every caller at least B and closes #7, #9 and #20 (and
 #10-13) with no per-caller logic. On `conflict`, after the existing type check, add the
-following. The type check stays first and keeps returning `ErrIdempotencyKeyReused`,
-because ADR 0088 §4.5 maps it to `ErrSettlementTombstoned`.
+following. The type check stays first and keeps returning `ErrIdempotencyKeyReused`.
+(**Implementation note 2026-09-25:** as actually implemented in §7, no
+`ErrSettlementTombstoned` type exists; ADR 0088 §4.7 maps this sentinel, and the new
+`ErrIdempotencyPayloadMismatch` below, to sportsbook's `ErrSettlementIntegrity`. This
+section is preserved as the original, read-only recommendation text.)
 
 1. Load the original row's `correlation_id, causation_id, reverses_transaction_id,
    provider_id, provider_tx_id, reason_code`. Load its entries
@@ -403,7 +413,7 @@ they are not made by this audit.
 | Field | Value |
 |---|---|
 | Owner | `ledger-finance` |
-| Remediation commit | _to be filled by the orchestrator_ |
+| Remediation commit | `36616f1` |
 | Record | ADR 0020, "Amendment 2026-09-25: Stage 10 F-7 remediation" (ACCEPTED pending `ledger-finance` + `code-reviewer` sign-off, which the orchestrator records) |
 | Status | Ledger fix IMPLEMENTED. Class-C caller mappings IMPLEMENTED. Casino `postBet` caller-level compare IMPLEMENTED. Withdrawal `Complete` equality assertion NOT IMPLEMENTED by design (see 7.4). Remaining record and caller items DEFERRED (see 7.4). |
 
@@ -509,4 +519,8 @@ Not edited here (the orchestrator or architect applies these):
    - the ledger now rejects cross-request reuse, pinned by `TestF7Withdrawal_CompleteWithAnotherRequestsConfirmationRejected`.
 3. **Pre-L3 reversal-link pre-check (§6.2, optional).** Not implemented. The ledger compare already rejects the case before anything is written; the only cost is that the rejection happens after the L3 locks.
 4. **Reserved provider-id guard (§4, optional).** Not implemented. It is not part of F-7.
+   Carried forward as a requirement for the real-provider stage (security review P3-5):
+   until a registry-side check exists, no provider adapter may be registered with id
+   `sportsbook_settlement`, `sportsbook_rollback` or `sportsbook_void`, which would open
+   ADR 0088 §4.2's reserved key namespace.
 5. **New finding, not F-7 (P1 candidate, reported to the orchestrator).** Payments `receiveDepositReversalCallback` takes no lock on the original deposit before its already-reversed `EXISTS` check. Concurrent reversal callbacks under **distinct** references for one deposit therefore each post a reversal. A temporary probe was run and then removed: 6 concurrent distinct-reference reversals of one 1,000 deposit posted 4-6 reversals, leaving `player_cash` at -3,000 to -5,000. Casino `postRollback` avoids this with `FOR UPDATE` on the original. The analogous payments fix is an L2 `FOR UPDATE` on the original deposit's ledger row before the check. It needs its own item, with ledger-finance and ADR 0082 lock-order review.

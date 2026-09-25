@@ -11,6 +11,7 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -77,6 +78,29 @@ func mustPlaceBetHTTP(t *testing.T, srv *httptest.Server, pool *db.Pool, tenant 
 
 func simulatePath(betID string) string {
 	return "/v1/admin/sportsbook/bets/" + betID + "/simulate-settlement-event"
+}
+
+// mustSimulateRequest posts a raw JSON body against the simulate-settlement
+// route with an explicit X-Request-Id, so a caller can force two otherwise-
+// identical requests to echo the same request_id back (P3-7's
+// byte-identical-404-body assertion needs this - postJSON alone lets the
+// server mint a fresh, differing id per call).
+func mustSimulateRequest(t *testing.T, srv *httptest.Server, betID, bearerToken, requestID, rawBody string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+simulatePath(betID), strings.NewReader(rawBody))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-Id", requestID)
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	return resp
 }
 
 // --- Registration gate ---
@@ -175,13 +199,25 @@ func TestSettlementSimulate_CrossTenantBetID_404NoRowsWritten(t *testing.T) {
 	riskManagerB := mustCreateStaff(t, pool, tenantB.ID, identity.StaffRoleRiskManager, "risk-password-1")
 	tokensB := mustLoginStaff(t, srv, tenantB.Slug, riskManagerB.Email, "risk-password-1")
 
-	resp := postJSON(t, srv, simulatePath(bet.ID), tokensB.AccessToken,
-		map[string]any{"event_type": "void", "void_reason": "market_cancelled"})
+	// Both requests below carry the SAME X-Request-Id, so the response
+	// body's echoed request_id cannot itself make an otherwise-identical
+	// body differ (P3-7's "byte-identical" requirement is about the error
+	// shape, not a coincidentally-matching random request id).
+	const fixedRequestID = "settlement-cross-tenant-p3-7-fixed-request-id"
+	resp := mustSimulateRequest(t, srv, bet.ID, tokensB.AccessToken, fixedRequestID,
+		`{"event_type":"void","void_reason":"market_cancelled"}`)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 for another tenant's bet id, got %d", resp.StatusCode)
 	}
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	resp.Body.Close()
 	var body apierror.Error
-	decodeBody(t, resp, &body)
+	if err := json.Unmarshal(bodyBytes, &body); err != nil {
+		t.Fatalf("failed to decode response body: %v", err)
+	}
 	if body.Code != apierror.CodeSettlementNotFound {
 		t.Errorf("expected code %q, got %q", apierror.CodeSettlementNotFound, body.Code)
 	}
@@ -189,7 +225,7 @@ func TestSettlementSimulate_CrossTenantBetID_404NoRowsWritten(t *testing.T) {
 	// No settlement history row exists for tenant B's own bets (there are
 	// none), and tenant A's bet is untouched.
 	var count int
-	err := pool.WithTenant(context.Background(), tenantA.ID, func(ctx context.Context, tx pgx.Tx) error {
+	err = pool.WithTenant(context.Background(), tenantA.ID, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT count(*) FROM sportsbook_bet_settlements WHERE bet_id = $1`, uuid.MustParse(bet.ID)).Scan(&count)
 	})
 	if err != nil {
@@ -197,6 +233,56 @@ func TestSettlementSimulate_CrossTenantBetID_404NoRowsWritten(t *testing.T) {
 	}
 	if count != 0 {
 		t.Errorf("expected no settlement rows written for the cross-tenant request, got %d", count)
+	}
+
+	// Security review P3-7: the OWNING tenant's ledger is untouched - only
+	// the one placement transaction for this bet exists, no
+	// sportsbook_settlement/_void/_rollback/tombstone posting was made.
+	var ledgerTxCount int
+	err = pool.WithTenant(context.Background(), tenantA.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE correlation_id = $1`, uuid.MustParse(bet.ID)).Scan(&ledgerTxCount)
+	})
+	if err != nil {
+		t.Fatalf("failed to count ledger transactions: %v", err)
+	}
+	if ledgerTxCount != 1 {
+		t.Errorf("expected exactly the one placement ledger transaction for bet %s, got %d", bet.ID, ledgerTxCount)
+	}
+
+	// P3-7: no rejection/lifecycle audit row lands in the OWNING tenant
+	// either - the request never reached tenant A's own scope at all.
+	var ownerAuditCount int
+	err = pool.WithTenant(context.Background(), tenantA.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT count(*) FROM audit_log WHERE target_type = 'sportsbook_bet' AND target_id = $1
+			   AND action IN ('sportsbook_bet.settled', 'sportsbook_bet.rolled_back', 'sportsbook_bet.voided',
+			                   'sportsbook_bet.rollback_tombstoned', 'sportsbook_bet.settlement_rejected')`,
+			bet.ID).Scan(&ownerAuditCount)
+	})
+	if err != nil {
+		t.Fatalf("failed to count owning-tenant audit rows: %v", err)
+	}
+	if ownerAuditCount != 0 {
+		t.Errorf("expected no settlement-lifecycle audit row in the OWNING tenant, got %d", ownerAuditCount)
+	}
+
+	// P3-7: the 404 body for a cross-tenant bet id must be byte-identical
+	// to the 404 body for a bet id that does not exist at all - otherwise
+	// the response itself would let a caller distinguish "exists in another
+	// tenant" from "never existed" (a cross-tenant enumeration oracle).
+	respNonexistent := mustSimulateRequest(t, srv, uuid.NewString(), tokensB.AccessToken, fixedRequestID,
+		`{"event_type":"void","void_reason":"market_cancelled"}`)
+	if respNonexistent.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for a nonexistent bet id, got %d", respNonexistent.StatusCode)
+	}
+	nonexistentBytes, err := io.ReadAll(respNonexistent.Body)
+	if err != nil {
+		t.Fatalf("failed to read response body: %v", err)
+	}
+	respNonexistent.Body.Close()
+	if string(bodyBytes) != string(nonexistentBytes) {
+		t.Errorf("cross-tenant 404 body differs from nonexistent-id 404 body:\ncross-tenant: %s\nnonexistent:  %s",
+			bodyBytes, nonexistentBytes)
 	}
 }
 
@@ -629,4 +715,165 @@ func TestListAdminBets_LifecycleFieldsPresent(t *testing.T) {
 	if entry.EventKind != "settlement" || entry.LedgerTransactionID == "" || entry.CreatedAt == "" {
 		t.Errorf("expected a populated settlement lifecycle entry, got %+v", entry)
 	}
+}
+
+// --- Decoder strictness (code review #8) ---
+
+// TestSettlementSimulate_ValidationFailed_QuotedPayoutAmountRejected pins
+// code review #8: encoding/json's json.Number accepts a QUOTED JSON string
+// into a json.Number-typed field with no validation at all (verified: a
+// struct field of type json.Number has Kind() == reflect.String, so the
+// decoder's string-literal path stores it directly). PayoutAmount is
+// json.RawMessage precisely so a quoted "2500" is rejected as not being a
+// JSON number token, never silently accepted as a claim.
+func TestSettlementSimulate_ValidationFailed_QuotedPayoutAmountRejected(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newSettlementTestServer(t, pool, issuer, true)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	bet := mustPlaceBetHTTP(t, srv, pool, tenant, brand, player.Tokens.AccessToken, player.ID, 1000)
+	token := mustRiskManagerToken(t, pool, srv, tenant)
+
+	body := fmt.Sprintf(`{"event_type":"settle","generation":1,"outcome":"won","asset_code":"EUR","payout_amount":"%d"}`,
+		bet.PotentialReturn)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+simulatePath(bet.ID), strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a QUOTED payout_amount, got %d", resp.StatusCode)
+	}
+	var respBody apierror.Error
+	decodeBody(t, resp, &respBody)
+	if respBody.Code != apierror.CodeSettlementValidationFailed {
+		t.Errorf("expected code %q, got %q", apierror.CodeSettlementValidationFailed, respBody.Code)
+	}
+
+	// Nothing was posted: the bet is still open.
+	status := betStatusHTTP(t, pool, tenant.ID, uuid.MustParse(bet.ID))
+	if status != "open" {
+		t.Errorf("expected the bet to remain open, got %q", status)
+	}
+}
+
+// TestSettlementSimulate_ValidationFailed_VoidWithExplicitZeroGeneration
+// pins code review #8: ADR 0088 §9.2 makes "generation" FORBIDDEN on void
+// - not merely ignored - and an explicit "generation": 0 must be
+// distinguished from the field being absent (both are the zero value of a
+// plain int). Generation is *int precisely so presence, not just value,
+// can be checked.
+func TestSettlementSimulate_ValidationFailed_VoidWithExplicitZeroGeneration(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newSettlementTestServer(t, pool, issuer, true)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	bet := mustPlaceBetHTTP(t, srv, pool, tenant, brand, player.Tokens.AccessToken, player.ID, 1000)
+	token := mustRiskManagerToken(t, pool, srv, tenant)
+
+	body := `{"event_type":"void","void_reason":"market_cancelled","generation":0}`
+	req, err := http.NewRequest(http.MethodPost, srv.URL+simulatePath(bet.ID), strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for void with an explicit generation:0, got %d", resp.StatusCode)
+	}
+
+	status := betStatusHTTP(t, pool, tenant.ID, uuid.MustParse(bet.ID))
+	if status != "open" {
+		t.Errorf("expected the bet to remain open, got %q", status)
+	}
+}
+
+// TestSettlementSimulate_DeactivatedActor_403AndAuditRecorded pins security
+// review P3-2: a still-valid access token for a staff account that has
+// since been deactivated must not just 403 silently - it is a
+// security-relevant event and must leave its own rejection audit row
+// (rejection_code = ACTOR_NOT_ACTIVE), in its own transaction (the failed
+// SimulateSettlementEvent transaction rolled back and cannot carry it).
+func TestSettlementSimulate_DeactivatedActor_403AndAuditRecorded(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv := newSettlementTestServer(t, pool, issuer, true)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	bet := mustPlaceBetHTTP(t, srv, pool, tenant, brand, player.Tokens.AccessToken, player.ID, 1000)
+
+	staff := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleRiskManager, "risk-deactivate-pw-1")
+	tokens := mustLoginStaff(t, srv, tenant.Slug, staff.Email, "risk-deactivate-pw-1")
+
+	// Deactivate AFTER the token was issued - the token itself is still
+	// valid and carries the risk_manager role claim, so it clears
+	// auth.RequirePermission; only the in-transaction staff-active check
+	// (identity.GetStaffUserByID) can catch this.
+	err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE staff_users SET status = 'suspended' WHERE id = $1`, staff.ID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("failed to suspend staff user: %v", err)
+	}
+
+	resp := postJSON(t, srv, simulatePath(bet.ID), tokens.AccessToken,
+		map[string]any{"event_type": "void", "void_reason": "market_cancelled"})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for a deactivated staff actor, got %d", resp.StatusCode)
+	}
+
+	var count int
+	var rejectionCode string
+	err = pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT count(*), COALESCE(MAX(metadata->>'rejection_code'), '')
+			   FROM audit_log
+			  WHERE tenant_id = $1 AND target_type = 'sportsbook_bet' AND target_id = $2
+			    AND action = 'sportsbook_bet.settlement_rejected'`,
+			tenant.ID, bet.ID).Scan(&count, &rejectionCode)
+	})
+	if err != nil {
+		t.Fatalf("failed to read rejection audit row: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected exactly one settlement_rejected audit row, got %d", count)
+	}
+	if rejectionCode != "ACTOR_NOT_ACTIVE" {
+		t.Errorf("expected rejection_code=ACTOR_NOT_ACTIVE, got %q", rejectionCode)
+	}
+
+	// Nothing was posted: the bet is still open.
+	status := betStatusHTTP(t, pool, tenant.ID, uuid.MustParse(bet.ID))
+	if status != "open" {
+		t.Errorf("expected the bet to remain open, got %q", status)
+	}
+}
+
+// betStatusHTTP reads a bet's status straight from the database under
+// staff tenant scope, for tests in this package that do not want to depend
+// on internal/sportsbook's own test helpers.
+func betStatusHTTP(t *testing.T, pool *db.Pool, tenantID, betID uuid.UUID) string {
+	t.Helper()
+	var status string
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT status FROM sportsbook_bets WHERE id = $1`, betID).Scan(&status)
+	})
+	if err != nil {
+		t.Fatalf("read bet status for %s: %v", betID, err)
+	}
+	return status
 }

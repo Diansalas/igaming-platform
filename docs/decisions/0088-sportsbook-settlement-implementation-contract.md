@@ -150,6 +150,19 @@ Void-after-settlement is two postings (amends ADR 0038 §8.1/Flow 10,
 settlement's exact inverse returns the stake to `player_locked_cash`, not
 `player_cash` — Flow 10's current text is wrong without the trailing void.
 
+> **Implementation note 2026-09-25 (ledger-finance P3-1.1).** The
+> rollback row's "same order" above is not literally an insertion-order
+> replay: `ledger_entries` carries no ordinal column (`id` is a random
+> UUID, migration 0022), so the original insertion order cannot be
+> recovered. The implementation loads the settlement's entries
+> `ORDER BY ledger_account_id, direction` — a deterministic account order,
+> not the original insertion order — flips each direction, and posts that.
+> This is the same pattern casino `loadEntries` already uses. There is no
+> financial effect: the inverse is exact as a multiset (which is all
+> double-entry balancing and reconciliation require), and lock order is
+> owned by L3 (§5.2), not by entry insertion order. Read "same order" as
+> "exact inverse, deterministic account order".
+
 End states (net credit − debit over the bet's `correlation_id`, incl.
 placement; the per-bet reconciliation targets, §8.2):
 
@@ -287,6 +300,36 @@ the tenant's RLS, reading the parent bet and its existing history rows:
   transaction id) — i.e. only the composed void carries it, never a
   rollback-then-void whose rollback committed earlier; for every other
   kind it is NULL.
+
+> **Implementation note 2026-09-25 (code review B-1 decision; migration
+> 0091 is not changed).** Migration 0091 is applied in CI/test databases
+> and the migration checksum guard treats an applied migration as
+> immutable, so this note documents the check's exact scope rather than
+> replacing the xmin comparison. T-1's composed-void causation check
+> compares the candidate rollback row's `xmin` to
+> `pg_current_xact_id()`'s low 32 bits — the **top-level** transaction id.
+> A rollback row inserted under a `SAVEPOINT` carries the **subtransaction**
+> id as its `xmin`, which differs from the top-level xid even after
+> `RELEASE SAVEPOINT`, so a same-transaction composed void whose rollback
+> went through a savepoint is rejected (fail closed: `ErrSettlementIntegrity`,
+> 409, no money moves — never a silent wrong causation).
+>
+> **Precondition (true today).** The W1 settlement path never inserts a
+> `sportsbook_bet_settlements` row inside a savepoint: `insertSettlementRecord`
+> issues a plain `INSERT` directly on the top-level `pgx.Tx` that
+> `db.Pool.WithTenant` hands to `SimulateSettlementEvent`, and nothing in
+> the W1 call path opens a savepoint around it. A code comment at
+> `insertSettlementRecord` states this precondition.
+>
+> **Deferred item `SB-T1-XMIN`.** Any future driver that settles per-bet
+> under its own `SAVEPOINT` (for example, a batch driver processing many
+> bets in one outer transaction) must first replace this check with
+> `pg_xact_status(<epoch-qualified xmin>::xid8) = 'in progress'`, which
+> classifies any xid in the current transaction's own tree (top-level or
+> subtransaction) as "in progress" under the current snapshot — verified
+> on PostgreSQL 16, including the epoch-boundary case. That replacement
+> requires its own migration and is carried forward as `SB-T1-XMIN`, not
+> undertaken here.
 
 **T-2 `sportsbook_bets_status_transition` (BEFORE INSERT OR UPDATE OF
 status, row).** INSERT requires `status = 'open'`. UPDATE requires
@@ -435,6 +478,15 @@ if none); "current settlement" = the latest un-reversed settlement row.
 A void request carries no `generation`. A later standalone `rollback(g)`
 redelivery after a composed void resolves as **replayed** (same key).
 
+> **Implementation note 2026-09-25 (code review #5 / ledger-finance
+> P3-1.2).** `SETTLEMENT_TOMBSTONED` above is this table's own result
+> code, evaluated at §4.3 before any ledger call. There is no typed Go
+> error `ErrSettlementTombstoned` and none is added: the §4.7 ledger
+> backstop (a `Post`-detected replay for an operation this table already
+> classified as new) maps `ErrIdempotencyKeyReused` and
+> `ErrIdempotencyPayloadMismatch` alike to `ErrSettlementIntegrity`, per
+> §4.7. See also the §4.5 note below and ADR 0020's 2026-09-25 amendment.
+
 ### 4.4 Payload comparison, rejection and alerting
 
 - Compared fields: settlement — `outcome`, claim `payout_amount`, claim
@@ -470,6 +522,16 @@ tombstone row. Audit action `sportsbook_bet.rollback_tombstoned`.
 Tombstones are permitted only for `g = G + 1` on an `open` bet (bounds the
 ADR 0048 "forged reference writes a permanent tombstone" DoS to one
 generation of one bet in the caller's own tenant).
+
+> **Implementation note 2026-09-25 (code review #5 / ledger-finance
+> P3-1.2).** "Mapped to `ErrSettlementTombstoned`" above describes the
+> intent, not the implemented type name: no such Go error exists. As
+> implemented, a `Post`-detected key reuse for a posting §4.3 already
+> classified as new (including this tombstone backstop) is
+> `ErrIdempotencyKeyReused`, mapped by §4.7 to `ErrSettlementIntegrity`.
+> The effect described here — a late `settle(g)` rejected twice over — is
+> unchanged; only the sentinel's name differs from this section's original
+> text.
 
 ### 4.6 Settlement/rollback/void for an unknown bet
 
@@ -513,6 +575,17 @@ settlement/void/rollback are not Risk checkpoints; §5.4 for L0.6). Settling
 several bets in one transaction is not built; any future batch driver must
 lock them in one `ORDER BY id FOR UPDATE` statement (INV-LOCK-E3's
 ascending-id rule).
+
+> **Implementation note 2026-09-25 (ledger-finance P3-1.3 / code review
+> #7).** `HOUSE` account resolution (step 4) is implemented inside state
+> load, i.e. it runs before step 3's L2 lock (and on rejection paths that
+> never reach step 3 at all), not strictly after it as the table above
+> orders them. This is harmless: `GetOrCreateAccounts` takes no L0–L3 lock
+> that could close a cycle, it is idempotent, and L2 (a settlement's own
+> `ledger_transactions` row `FOR UPDATE`) is only ever taken by a holder of
+> that same bet's L1 lock — so a transaction blocked materialising a
+> `ledger_accounts` row can never itself be holding L2 for this bet. Step
+> 4 may precede step 3 in the implementation.
 
 ### 5.2 Multi-posting pre-lock (new `internal/ledger` API)
 

@@ -171,8 +171,12 @@ const (
 // provider reference, reason code, causation, correlation) is
 // ErrIdempotencyPayloadMismatch (ADR 0020 amendment 2026-09-25, Stage 10
 // F-7). The type check runs first and keeps this sentinel, because
-// callers map it specifically - ADR 0088 §4.5 maps it to
-// ErrSettlementTombstoned for a sportsbook tombstone backstop. The two
+// callers map it specifically - ADR 0088 §4.7 maps it (and
+// ErrIdempotencyPayloadMismatch) to sportsbook's own ErrSettlementIntegrity
+// as the ledger-level backstop for the settlement lifecycle; there is no
+// ErrSettlementTombstoned type. The sportsbook decision table's
+// SETTLEMENT_TOMBSTONED rejection code (ADR 0088 §4.3) is a separate,
+// earlier-evaluated result, not a mapping of this error. The two ledger
 // sentinels are deliberately distinct and must not be merged.
 var ErrIdempotencyKeyReused = errors.New("ledger: idempotency key reused with a different transaction type")
 
