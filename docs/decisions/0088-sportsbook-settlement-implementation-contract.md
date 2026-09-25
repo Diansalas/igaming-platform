@@ -1,8 +1,14 @@
 # ADR 0088 — Sportsbook Settlement Implementation Contract (Stage 10 W1)
 
-- **Status:** PROPOSED — pending `architect` / `sportsbook` / `security` /
-  `risk` / `qa` review; **no code before acceptance** (ADR 0087; proposal
-  §8 H W1 item 1).
+- **Status:** **ACCEPTED** — 2026-09-25 by the Master Orchestrator after
+  the acceptance check of the revision applying the consolidated
+  specialist review (`architect`, `sportsbook`, `security`, `risk`, `qa`:
+  all ACCEPT WITH CHANGES, no P0/P1; §15). Implementation may begin only
+  after the Stage 10 W0 five-consecutive-green-run gate (ADR 0087).
+  Acceptance note: the T-1 `xmin`-based same-transaction check added in
+  §3.3 while applying finding A3 was not in any reviewer's list; it is
+  accepted as a consequence of A3 and is flagged for explicit scrutiny in
+  the W1 `code-reviewer` and `security` implementation reviews.
 - **Authors:** `ledger-finance` (drafting owner of §2, §4, §5, §8, §11,
   §12); `sportsbook` co-author for §3 and §9 on review.
 - **Decision type:** implementation contract. It narrows already-accepted
@@ -271,10 +277,13 @@ the tenant's RLS, reading the parent bet and its existing history rows:
   (`settlement→sportsbook_settlement`, `rollback→sportsbook_rollback`,
   `void→sportsbook_void`, `tombstone→tombstone`) and its
   `correlation_id = bet_id`.
-- `causation_record_id` follows §2.1's rule: NOT NULL (the generation
-  g − 1 rollback/tombstone row) for a settlement with g > 1, NOT NULL (a
-  rollback row of this bet) for a void inserted while that rollback is the
-  bet's latest event, else NULL.
+- `causation_record_id` follows §2.1's rule: for a settlement with g > 1
+  it is NOT NULL and is this bet's generation g − 1 rollback or tombstone
+  row; for a void it is either NULL or a rollback row of this bet inserted
+  **by the same transaction** (`xmin` of that row = the current
+  transaction id) — i.e. only the composed void carries it, never a
+  rollback-then-void whose rollback committed earlier; for every other
+  kind it is NULL.
 
 **T-2 `sportsbook_bets_status_transition` (BEFORE INSERT OR UPDATE OF
 status, row).** INSERT requires `status = 'open'`. UPDATE requires
@@ -565,7 +574,7 @@ ADR 0082 A3's and ADR 0083 §7.3/§10's "exactly one writer" statements are
 reworded to this (§5.5, §13). INV-LOCK-E3's forward condition ("a second
 writer … must take its row lock at L1 before `LockProjectionsForPosting`")
 is met. `PlaceBet` inserts only **new** rows and never locks an existing
-bet row; E-3 itself is not closed by W1 (review A-OI-4, §15).
+bet row; E-3 itself is not closed by W1 (OI-4, §15).
 
 ### 5.4 L0.6 — not taken (decision)
 
@@ -936,7 +945,8 @@ Contents (one migration, one commit with §6.1's spec change —
 INV-SB-CUM-1): transaction-type CHECK widening; `UNIQUE (id, tenant_id)`
 on `sportsbook_bets`; `sportsbook_bet_settlements` with RLS, deny
 triggers, T-1; T-2 on `sportsbook_bets`; `mismatch_kind` widening; the
-§3.5 guarded REVOKE.
+§3.5 guarded REVOKE. The same commit carries the `internal/risk` spec,
+test and comment changes of §6.1.
 
 **Down migration refuses** (single transaction; checks run **before** any
 drop). FORCE RLS applies to the owner, so a `count(*)` in a migration
@@ -957,6 +967,11 @@ uses **constraint validation, which RLS cannot filter** (the migration
 5. Only then drop T-2, T-1, the table, the unique constraint, and restore
    the `mismatch_kind` CHECK (which itself refuses if a new-kind mismatch
    row exists).
+
+Each validating `ADD CONSTRAINT` takes an `ACCESS EXCLUSIVE` lock and
+scans the whole table (`ledger_transactions` included). That is
+acceptable because the down migration is only ever run in dev/scratch
+databases before any posting; it is never an operational path.
 
 Refusal message: "migration 0091 (down): sportsbook settlement evidence
 exists … irreversible once any settlement, void, rollback or sportsbook
@@ -979,10 +994,13 @@ non-open bets (read paths tolerate all four statuses; tested).
 | ADR 0038 §15 | Status: the `player_locked` origin split is **IMPLEMENTED** by migration 0048 |
 | `financial-transaction-flows.md` Flow 10 | "Accounts (void after settlement)" → the §8.1 composite above; Flow 9 idempotency line gains the in-house key |
 | ADR 0019 actor matrix | New row: "**In-house sportsbook engine (mock mode)** — `sportsbook_bet` from an authenticated player session via `PlaceBet` (stake debit only). `sportsbook_settlement`, `sportsbook_void`, `sportsbook_rollback` and sportsbook `tombstone`: **non-production only**, originated solely by a tenant-scoped staff principal holding `sportsbook_settlement:simulate` through the test-support route (ADR 0088 §9); never a player, never platform-admin. In production no originator exists until a real-provider stage uses the verified-provider-callback row." |
-| ADR 0083 §6.1.2 | Status note: "Superseded in part by ADR 0088 §6.1: `ReversalTypes = ["sportsbook_void"]` from migration 0091; INV-SB-CUM-1 satisfied in that commit." §6.2.2: "`'open'` is no longer the only status written." §6.2.5: rollback re-opening residual (ADR 0088 §5.4) |
+| ADR 0083 §6.1.2 | Status note: "Superseded in part by ADR 0088 §6.1: `ReversalTypes = ["sportsbook_void"]` from migration 0091; INV-SB-CUM-1 satisfied in that commit. **Named debt (ruling R-3):** cumulative limits measure net outflow by posting time, not gross stakes placed in the window — a void inside the window of a bet placed before it contributes −S (same as `casino_rollback`); pinned by an integration test; becomes P1 for casino and sportsbook if product/compliance rules limits are gross-by-placement." |
+| ADR 0083 §6.2.2 | "`'open'` is no longer the only status written (ADR 0088)." |
+| ADR 0083 §6.2.5 | Next to the arming under-count note: "**Rollback re-opening residual (ADR 0088 §5.4).** Settlement, void and rollback take no L0.6: `sportsbook_bets` has no `event_id`, and deriving the key would read the catalogue before L1. A standalone rollback re-opening a bet concurrently with a `PlaceBet` on the same event can let that bet through an armed ceiling. **This decision must be revisited before any exposure limit is armed (HDR-SB-1).**" |
+| ADR 0083 §7.3 and §10 (INV-LOCK-E3) | "`sportsbook_bets` has exactly one writer" → "writers are `insertBet` (E-3) and the W1 settlement functions, which take L1 first (INV-LOCK-E4)" |
 | ADR 0034 §14.7 | Dependency note: the `VOID_ON_SELF_EXCLUSION` consumer, when authorized, reuses ADR 0088's void operation (both timing variants), adds `player_self_exclusion` to `void_reason` by its own migration, and needs its own ADR 0019 actor row (platform/compliance-initiated) and the ADR 0038 §8.1 "always provider/event-initiated" amendment; it never uses the test-support route |
 | ADR 0047 §5(c) | Unaffected: settlement never reads or locks `sb_selections` (INV-SB-SETTLE-6) |
-| ADR 0082 | Amendment A4 (§5.5) |
+| ADR 0082 | Amendment A4 (§5.5), including the A3 "exactly one writer" rewording |
 | `ledger-accounting-model.md` | OB-1 cross-reference: ADR 0088 §2.5 builds the correct posting; OB-1 remains OPEN |
 
 ## 14. Test obligations (for `qa`'s W1 plan; proposal §R is binding)
@@ -1001,24 +1019,100 @@ backstop by fault injection; route absent (flag off; production config);
 and no rows; negative `player_cash` after won rollback posts (OB-1);
 drift injection per mismatch kind; INV-SB-SETTLE-6 static check.
 
-## 15. Open items for reviewers (not decided by this draft)
+Added by the review (§15):
 
-- **OI-1 (`architect`, `risk`)** — accept §5.4: rollback may raise
-  exposure above an armed ceiling irrespective of locking; no L0.6.
-- **OI-2 (`ledger-finance`, `qa`)** — proposal W1 item 7(a)'s
-  "`player_locked_bonus` == 0" is read here as scoped to sportsbook
-  transaction types (§8.1), since casino bonus bets hold
-  `player_locked_bonus` legitimately.
-- **OI-3 (`devops`, `security`)** — runtime-role INSERT/SELECT-only on the
-  new table: the migration REVOKE is new precedent and is re-granted by
-  `init-app-role.sql`'s backfill; decide whether the init script
-  re-applies the REVOKE or the triggers alone are accepted as the control.
-- **OI-4 (`architect`)** — confirm INV-LOCK-E3 is satisfied by the L1-first
-  settlement path and that E-3 (in `PlaceBet`) may remain open.
-- **OI-5 (`risk`)** — window-boundary netting under-count (§6.2),
-  inherited from `casino_rollback`.
-- **OI-6 (`security`)** — grantee of `sportsbook_settlement:simulate`
-  (proposed `RoleFinance`); the client-IP choice (§10).
+- **Deny triggers vs privileges (S3):** a separate test proves the deny
+  triggers reject UPDATE, DELETE and TRUNCATE on
+  `sportsbook_bet_settlements` for a role that still holds those
+  privileges (the owner), independent of the §3.5 REVOKE probe.
+- **RLS (S4):** an INSERT under a player-scoped connection is rejected.
+- **Principal (S5):** `RequireStaffPrincipal` unit tests with player,
+  service and staff tokens; a non-UUID `tc.Subject` fails closed.
+- **RBAC (S1, Q4):** the permission-table test asserts
+  `PermSportsbookSettlementSimulate` has exactly one grantee
+  (`RoleRiskManager`). All RBAC tests assert by **permission constant**,
+  not role name.
+- **Player read surface (S8):** `/v1/me/sportsbook/bets` responses contain
+  neither `actor_staff_account_id` nor `request_id`.
+- **Risk (R1):** `internal/risk/cumulative_sportsbook_integration_test.go`
+  asserts usage for every §6.2 row, including the **won**
+  void-after-settlement (the rollback's Dr `player_cash` P is excluded)
+  and a standalone rollback staying +S.
+- **Risk (R4):** a pinning integration test: bet placed before the window,
+  voided inside it ⇒ window usage −S and a new stake S is admitted.
+- **Sole writer (Q1):** static test `sportsbook_settlement_sole_writer_test.go`
+  asserts that only the named W1 functions contain
+  `INSERT INTO sportsbook_bet_settlements` or
+  `UPDATE sportsbook_bets SET status` (INV-LOCK-E4).
+- **Test seams (Q3):** (a) an injectable mock statement source for §8.4
+  drift injection; (b) a test-only hook between `ledger.Post` and the
+  history insert for the §4.7 / partial-failure fault-injection test,
+  compiled only under the `integration` build tag.
+- **Mutation pass (Q2):** Go code through a mutation tool over payout
+  validation (V-1…V-5), the §4.3 decision tables, `NetLocked` derivation,
+  `LockProjectionsForPostings`, and lock call order. SQL CHECKs and
+  triggers are **not** covered by a Go mutation tool; they are covered
+  instead by a recorded manual branch-coverage checklist (every CHECK and
+  every trigger IF branch exercised both true and false). This
+  substitution is explicit, not a gap to be discovered later.
+- **Snapshots (B1):** exact-JSON/snapshot tests of bet-history responses
+  are updated in the same change as the read-surface additions (§3.4).
+
+## 15. Review record
+
+Reviewed against commit `6c9b9f3`. Every reviewer: **ACCEPT WITH
+CHANGES**, no P0, no P1. All findings below are **APPLIED** in this
+revision unless stated otherwise.
+
+| Reviewer | Verdict |
+|---|---|
+| `architect` | ACCEPT WITH CHANGES (A1–A8) |
+| `security` | ACCEPT WITH CHANGES (S1–S10) |
+| `risk` | ACCEPT WITH CHANGES (R1–R5) |
+| `qa` | ACCEPT WITH CHANGES (Q1–Q4) |
+| `sportsbook` | ACCEPT WITH CHANGES (B1) |
+
+| # | Finding | Disposition |
+|---|---|---|
+| A1 | L0.6 rationale ("no invariant gain") was wrong | Applied: §5.4 now gives the real reason (no `event_id` on `sportsbook_bets`; deriving it would read the catalogue before L1, contradicting INV-SB-SETTLE-6 / ADR 0047 §5(c)); binding condition to revisit before any limit is armed (HDR-SB-1); ADR 0083 §6.2.5 amendment text in §13; A4(5) limited to settle/void/rollback, partial/cashout still bound by A2 |
+| A2 | "Exactly one writer" statements stale | Applied: §5.3, §5.5 A4(6), §13 rows for ADR 0082 A3 and ADR 0083 §7.3/§10 |
+| A3 | `CausationID` under-specified | Applied: §2.1 exhaustive table; T-1 check (§3.3); §8.3 causation consistency check |
+| A4 | Trigger security context; check-then-insert | Applied: §3.3 — `SECURITY INVOKER`, RAISE on invisible parent bet; soundness via INV-LOCK-E4, unique indexes as backstop |
+| A5 | E-4 cycle argument incorrect (non-HOT status UPDATE; unique check can wait on an in-progress updater) | Applied: §5.3 corrected argument; INV-LOCK-E4 clause (ii) "writes only after all L3 locks are held" |
+| A6 | No removal condition for the route | Applied: §9.1 removal condition (ADR 0048 pattern) |
+| A7 | Line references may drift | Applied: §0 note |
+| A8 | Down-migration lock/scan cost unstated | Applied: §12 (`ACCESS EXCLUSIVE`, full scan; dev-only path) |
+| S1 | Grantee: `RoleRiskManager` only; `RoleFinance` rejected (ADR 0024) | Applied: §9.1; exactly-one-grantee test (§14); not in `backoffice/src/auth/permissions.ts` |
+| S2 | Runtime-role re-grant gap | Applied, **OI-3 CLOSED**: §3.5 — deny triggers binding; migration REVOKE kept; guarded REVOKE added to `deploy/init-app-role.sql` (mirroring :99–107) and `docs/security/runtime-role-separation.md` §6; CI step note; `devops` owns the script change as W1 work |
+| S3 | Trigger-only denial not separately proven | Applied: §14 |
+| S4 | `FOR ALL` policy on an append-only table | Applied: §3.2 split into `FOR SELECT` + `FOR INSERT … WITH CHECK`; player-scope INSERT test |
+| S5 | `RequireStaffPrincipal` precision | Applied: §9.1 exactly `PrincipalStaff`, 403, unit tests, `tc.Subject` UUID parse; staff-active check recommended |
+| S6 | Client-IP wording | Applied: §10 — no raw `X-Forwarded-For`; neither affects nor partially closes ADR 0086's gate; staging best-effort |
+| S7 | Alert field allow-list | Applied: §4.4 |
+| S8 | Player surface must not expose staff/request ids | Applied: §3.4 + §14 test |
+| S9 | Audit `reason_code` | Applied: §10 (`test_support_simulation` for settle/rollback; void uses `void_reason`); rejection metadata key renamed `rejection_code` (§4.4) to avoid collision |
+| S10 | F-7 audit completeness | Applied: §11.1 — indirect callers, per-site reserved-prefix check, recorded against a commit SHA |
+| R1 | Cumulative integration test coverage | Applied: §14 |
+| R2 | Same-commit risk test/comment updates | Applied: §6.1, §12 |
+| R3 | L0.5 not taken — state why | Applied: §6.1 |
+| R4 | Window netting semantics (ruling R-3, accepted as named debt) | Applied, **OI-5 CLOSED as named debt**: §6.2, ADR 0083 §6.1.2 amendment text (§13), pinning test (§14); shared query unchanged; P1 trigger condition recorded |
+| R5 | INV-SB-SETTLE-5 restated INV-SB-CUM-1 | Applied: §7 now cites it |
+| Q1 | Sole-writer static test | Applied: §5.3, §14 |
+| Q2 | Mutation pass scope for SQL | Applied: §14 — Go mutation tool; SQL/triggers by a recorded manual branch-coverage checklist (explicit substitution) |
+| Q3 | Named test seams | Applied: §14 (injectable statement source; integration-tag-only Post→history hook) |
+| Q4 | RBAC tests by permission constant | Applied: §14 |
+| B1 | Bet-history snapshot tests | Applied: §3.4, §14 |
+
+Disposition of the draft's open items:
+
+| Item | Disposition |
+|---|---|
+| OI-1 (no L0.6) | **CLOSED** by A1: decision kept with corrected rationale and a binding revisit-before-arming condition |
+| OI-2 (`player_locked_bonus` scoping in §8.1) | **CLOSED**: no reviewer objected; scoped to sportsbook transaction types as written |
+| OI-3 (runtime-role REVOKE) | **CLOSED** by S2 |
+| OI-4 (INV-LOCK-E3 / E-3) | **CLOSED** by A2: settlement writers take L1 first; E-3 in `PlaceBet` remains a named, open exception (not in W1 scope) |
+| OI-5 (window netting) | **CLOSED as named debt** by R4 / ruling R-3 |
+| OI-6 (grantee; client IP) | **CLOSED** by S1 (`RoleRiskManager`) and S6 |
 
 ## Consequences
 

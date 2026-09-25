@@ -3580,3 +3580,81 @@ is green on **five consecutive CI runs** (run ids recorded in
 root-caused and fixed; rerun-until-green is not acceptance.
 `workflow_dispatch` was added to `ci.yml` so the gate can be re-run on
 the same commit.
+
+## Stage 10 W1 — Sportsbook settlement test plan (`qa`, from the ADR 0088 review)
+
+Binding sources: ADR 0088 §14 (test obligations) and the Stage 10
+proposal §R/§S. This is `qa`'s named plan; each item is a real-PostgreSQL
+integration test unless marked static or frontend. Concurrency tests use a
+blocker transaction and wait on waiters of **that blocker's pid** (Stage 10
+W0 rule), never sleeps. RBAC tests assert by permission constant, not role
+name.
+
+- **internal/ledger:** `LockProjectionsForPostings` locks the union of all
+  inputs' accounts in canonical order and rejects mixed tenants; postings
+  for settle won (two balanced pairs), settle lost, void-before, rollback
+  (exact inverse), void-after-settlement (rollback + void in one DB
+  transaction), tombstone (no entries); net-locked derivation.
+- **internal/sportsbook (service):** settle won/lost; void before/after
+  (won and lost variants, end balances); standalone rollback returns the bet
+  to open and exposure re-counts it; re-settlement at the next generation;
+  rollback-then-void nets once; tombstone → late original rejected →
+  re-settlement succeeds; replay with same payload returns the original with
+  no posting; replay with different payout/outcome/asset/void reason
+  rejected with an integrity alert; delayed settle after rollback and
+  re-settle is a replay, not a double post; generation gap and stale
+  generation rejected; second settlement without rollback rejected;
+  settlement after void rejected; payout validation V-1…V-5; unknown bet and
+  cross-tenant bet → 404 with no posting and no tombstone; concurrent settle
+  vs void on one bet (exactly one wins); two concurrent settlement attempts
+  on one bet; deterministic lock-order/deadlock tests (settle vs PlaceBet on
+  one wallet; settle vs void on one bet; two bets on one wallet; settlement
+  vs casino bet sharing `house_gaming`); exposure released on settle/void (a
+  previously blocked bet is admitted); OB-1 posting (negative `player_cash`
+  after a won rollback) succeeds and is recorded; `player_locked_cash` never
+  negative across all transitions; fault injection through the
+  integration-tagged Post→history hook rolls the whole transaction back.
+- **Static:** sole-writer check (`sportsbook_settlement_sole_writer_test.go`,
+  INV-LOCK-E4); settlement never reads or locks `sb_selections`
+  (INV-SB-SETTLE-6).
+- **Schema / migration 0091:** T-1 rules (void exists, unreversed
+  settlement exists, generation sequence, payout mismatch even as owner,
+  won-zero/lost-nonzero, rollback target mismatch, ledger type mismatch,
+  fail closed with no tenant context and under player scope); T-2 transition
+  table (allowed and rejected edges; status equals history-derived status);
+  deny triggers reject UPDATE/DELETE/TRUNCATE for the owner; immutable-fields
+  regression through every transition; RLS (tenant staff SELECT/INSERT only,
+  player self-scope read via bet join, player INSERT rejected, cross-tenant
+  adversarial); runtime-role probe; unique indexes (one settlement per
+  generation, one rollback per settlement, one void per bet); HR-15 trigger
+  present; migration up/down/up on a scratch database; down refuses when new
+  transaction types, sportsbook tombstones, history rows or non-open bets
+  exist; a code revert with the migration kept still renders all four
+  statuses.
+- **internal/reconciliation:** sportsbook stream at zero drift, scoped to
+  sportsbook transaction types (not wallet-wide); per-bet netting for all
+  end states; two-way orphan checks; status mismatch; MOCK statement match;
+  injected drift detected for every mismatch kind through the injectable
+  statement source.
+- **internal/risk:** `ReversalTypes` exactly `["sportsbook_void"]`;
+  `sportsbook_rollback`/`sportsbook_settlement` in no cumulative spec; every
+  ADR 0088 §6.2 netting row including won void-after-settlement; the OI-5
+  pinning test (bet before the window, void inside it → usage −S).
+- **internal/httpserver:** route absent when the flag is off and under
+  production config; 403 for player, service and platform-admin tokens and
+  for staff without the permission; exactly one grantee in the permission
+  table; 200 for settle/void/rollback with the permission; 404 cross-tenant;
+  unknown fields and field-matrix violations rejected; response shape for
+  applied/replayed/tombstoned; one audit record per transition with
+  `reason_code`/`void_reason`; replay audit; trusted-proxy client IP;
+  `/v1/me/sportsbook/bets` never exposes `actor_staff_account_id` or
+  `request_id`; F-7 regression tests.
+- **Frontend:** B2C history renders won/lost/void and payout; Back Office
+  detail renders status, payout, ledger transaction id and correlation id;
+  no settlement controls rendered.
+- **Mutation pass:** a Go mutation tool over payout validation, the settle/
+  void/rollback decision tables, net-locked derivation,
+  `LockProjectionsForPostings` and the lock call order; for SQL CHECKs and
+  triggers (no mutation tool applies) a recorded manual branch-coverage
+  checklist (each branch exercised true and false). This substitution is
+  stated explicitly in the stage report.
