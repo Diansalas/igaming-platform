@@ -251,6 +251,92 @@ func TestRuntimeRole_OrdinaryDMLIsGenuinelyRLSScoped(t *testing.T) {
 	}
 }
 
+// TestRuntimeRole_SportsbookBetSettlementsPrivileges is the devops-owned
+// probe ADR 0088 §3.5 calls for: it proves the guarded REVOKE in
+// migration 0091 (and its mirrors in deploy/init-app-role.sql and
+// .github/workflows/ci.yml) actually took effect against the real runtime
+// role, while confirming the role still holds the SELECT/INSERT
+// privileges it needs for ordinary application traffic against this
+// append-only history table. This is deliberately a *privilege-level*
+// probe, not a re-run of the deny-trigger suite: ADR 0088 §3.5 is explicit
+// that the deny triggers (BEFORE UPDATE OR DELETE / BEFORE TRUNCATE,
+// exercised for every role including the owner by
+// TestSportsbookBetSettlements_DenyTriggers-style tests owned by
+// code-reviewer/qa, §14) are the BINDING control; this REVOKE is defence
+// in depth only, so it is verified here as a privilege check
+// (has_table_privilege / a real denied statement), not as a re-statement
+// of trigger behaviour.
+func TestRuntimeRole_SportsbookBetSettlementsPrivileges(t *testing.T) {
+	runtime := runtimeTestPool(t)
+	ctx := context.Background()
+
+	var exists bool
+	err := runtime.pool.QueryRow(ctx,
+		`SELECT EXISTS (
+			SELECT 1 FROM information_schema.tables
+			WHERE table_schema = 'public' AND table_name = 'sportsbook_bet_settlements'
+		)`,
+	).Scan(&exists)
+	if err != nil {
+		t.Fatalf("failed to check sportsbook_bet_settlements existence: %v", err)
+	}
+	if !exists {
+		t.Skip("sportsbook_bet_settlements does not exist yet (migration 0091 not applied); skipping ADR 0088 §3.5 probe")
+	}
+
+	// Privileges that must remain GRANTED (ordinary application traffic:
+	// reading history and inserting new settlement/rollback/void/tombstone
+	// rows through the append-only table).
+	for _, priv := range []string{"SELECT", "INSERT"} {
+		var granted bool
+		err := runtime.pool.QueryRow(ctx,
+			`SELECT has_table_privilege('igaming_runtime', 'sportsbook_bet_settlements', $1)`, priv,
+		).Scan(&granted)
+		if err != nil {
+			t.Fatalf("failed to check %s privilege on sportsbook_bet_settlements: %v", priv, err)
+		}
+		if !granted {
+			t.Errorf("expected igaming_runtime to hold %s on sportsbook_bet_settlements (ordinary application traffic), it does not", priv)
+		}
+	}
+
+	// Privileges the ADR 0088 §3.5 REVOKE must have stripped.
+	for _, priv := range []string{"UPDATE", "DELETE", "TRUNCATE"} {
+		var granted bool
+		err := runtime.pool.QueryRow(ctx,
+			`SELECT has_table_privilege('igaming_runtime', 'sportsbook_bet_settlements', $1)`, priv,
+		).Scan(&granted)
+		if err != nil {
+			t.Fatalf("failed to check %s privilege on sportsbook_bet_settlements: %v", priv, err)
+		}
+		if granted {
+			t.Errorf("expected igaming_runtime to NOT hold %s on sportsbook_bet_settlements (ADR 0088 §3.5 REVOKE), but it does", priv)
+		}
+	}
+
+	// Belt-and-braces: attempt real UPDATE/DELETE/TRUNCATE statements and
+	// confirm they fail with insufficient_privilege (42501) - not merely
+	// that has_table_privilege reports them absent, but that the
+	// privilege-level denial is what Postgres actually enforces for this
+	// role at the SQL level (independent of, and layered under, the deny
+	// triggers themselves).
+	probes := []struct {
+		name string
+		stmt string
+	}{
+		{"UPDATE", `UPDATE sportsbook_bet_settlements SET request_id = 'plat-rolesplit-1-probe' WHERE false`},
+		{"DELETE", `DELETE FROM sportsbook_bet_settlements WHERE false`},
+		{"TRUNCATE", `TRUNCATE sportsbook_bet_settlements`},
+	}
+	for _, p := range probes {
+		p := p
+		t.Run(p.name, func(t *testing.T) {
+			_, err := runtime.Raw().Exec(ctx, p.stmt)
+			assertDenied(t, p.name, err, "permission denied for table sportsbook_bet_settlements")
+		})
+	}
+}
+
 // platformCatalogueTables is the six platform-wide catalogue tables
 // migration 0084 (ADR 0081, ARCH-DB-2) hardened, and their expected
 // policy names (ADR 0081 §3.3) - casino_games gets a platform_admin-scoped

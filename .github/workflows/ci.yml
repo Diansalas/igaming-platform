@@ -166,6 +166,23 @@ jobs:
           REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM igaming_runtime;
           SQL
 
+      - name: Narrow igaming_runtime's sportsbook_bet_settlements access (ADR 0088 §3.5)
+        env:
+          PGPASSWORD: igaming_ci_superuser_password
+        run: |
+          # Mirrors deploy/init-app-role.sql's guarded REVOKE and migration
+          # 0091's own copy: the blanket "ALL TABLES IN SCHEMA public"
+          # grant above also covers sportsbook_bet_settlements (the
+          # append-only settlement history table), only meaningful once
+          # that table exists, i.e. after the migrations step above. The
+          # deny triggers on that table are the BINDING control (they bind
+          # the table owner too) - this REVOKE is defence in depth only,
+          # so CI's runtime role mirrors the deployed posture ADR 0088
+          # §3.5 requires.
+          psql -h localhost -U postgres -d igaming_platform_test -v ON_ERROR_STOP=1 <<'SQL'
+          REVOKE UPDATE, DELETE, TRUNCATE ON sportsbook_bet_settlements FROM igaming_runtime;
+          SQL
+
       - name: Unit tests (race detector)
         run: go test -race ./...
 

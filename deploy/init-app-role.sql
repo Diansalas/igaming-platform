@@ -106,3 +106,26 @@ BEGIN
     END IF;
 END
 $$;
+
+-- ADR 0088 §3.5 (Stage 10 W1, sportsbook settlement): the deny triggers on
+-- sportsbook_bet_settlements (migration 0091) are the BINDING control -
+-- they bind the table owner too, so this REVOKE is defence in depth only,
+-- not the mechanism that actually prevents mutation. It exists because the
+-- blanket backfill GRANT above (:85, "ALL TABLES IN SCHEMA public") would
+-- otherwise silently re-grant UPDATE/DELETE/TRUNCATE on this table to
+-- igaming_runtime every time this idempotent script is re-run against an
+-- already-migrated database - migration 0091 itself only runs once, so it
+-- cannot re-assert this narrowing on every subsequent run of this file the
+-- way this block can. Guarded exactly like the schema_migrations
+-- narrowing above because the table does not exist yet on a fresh
+-- docker-entrypoint-initdb.d run (migrations run after this script).
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'sportsbook_bet_settlements'
+    ) THEN
+        EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON sportsbook_bet_settlements FROM igaming_runtime';
+    END IF;
+END
+$$;

@@ -357,6 +357,24 @@ ALTER DEFAULT PRIVILEGES FOR ROLE igaming IN SCHEMA public
 --     owns) - narrow it back to read-only for that one table.
 REVOKE INSERT, UPDATE, DELETE ON schema_migrations FROM igaming_runtime;
 
+-- 3c. ADR 0088 §3.5 (Stage 10 W1, sportsbook settlement): the same
+--     blanket grant also hands the runtime role UPDATE/DELETE/TRUNCATE on
+--     sportsbook_bet_settlements, the append-only settlement history
+--     table (migration 0091). The deny triggers on that table
+--     (BEFORE UPDATE OR DELETE / BEFORE TRUNCATE, executing
+--     ledger_deny_mutation()) are the BINDING control - they bind the
+--     table owner too, so no role, however privileged, can actually
+--     mutate or truncate a history row through them. This REVOKE is
+--     defence in depth only: it exists so that re-running this
+--     provisioning script's step 2 (e.g. after a later migration adds a
+--     new table) cannot silently re-grant these three privileges and
+--     leave only the triggers standing between the runtime role and a
+--     write the triggers already refuse. Migration 0091 applies the
+--     identical REVOKE itself at migration time; this script's copy is
+--     what keeps that narrowing in force across every later re-run of
+--     this idempotent bootstrap.
+REVOKE UPDATE, DELETE, TRUNCATE ON sportsbook_bet_settlements FROM igaming_runtime;
+
 -- 4. Confirm no unwanted attribute or grant is present:
 --    (run as a check, expect the runtime role to show no attributes)
 \du+ igaming_runtime
