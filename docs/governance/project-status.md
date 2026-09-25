@@ -46,16 +46,17 @@ stage detail), and the ADRs cited below.
 | 9.3 | Staging package + local end-to-end acceptance (ADR 0084) | Complete |
 | 9.4 Part 1 / 9.4 | APP_ENV fail-closed (ADR 0085); staging hardening (ADR 0086); **staging deployed and accepted on `9190d5d`** (human-executed, human-attested) | Complete |
 | 10 planning gate | State reconstruction + Stage 10 proposal (`docs/plans/stage-10-planning-gate-proposal.md`) | Complete; Stage 10 approved by the human |
+| 10 | CI evidence restoration (W0) + sportsbook settlement lifecycle, in-house MOCK mode (W1; ADRs 0087/0088); F-7 remediation | Complete (`docs/governance/stage-10-completion-report.md`) |
 
 ## Active stage
 
 **Stage 10 — CI Evidence Restoration + Sportsbook Settlement Lifecycle —
-IN PROGRESS** (approved by the human on 2026-09-25 against planning-gate
-commit `2355ab7`). W0 (CI evidence restoration) first; W1 (sportsbook
-settlement for cash-funded singles, in-house mock mode) only after five
-consecutive green CI runs. Live detail: `docs/active-stage.md` and
-`docs/governance/task-registry.md` "Stage 10". Staging (`9190d5d`) is
-kept running and is not modified by Stage 10.
+COMPLETE**; the next stage awaits explicit human authorization. See
+`docs/governance/stage-10-completion-report.md`. Named debts added: OI-5
+(cumulative limits = net outflow by posting time), SB-T1-XMIN, L0.6
+rollback residual (revisit before arming exposure limits). Out-of-scope
+P1 recorded: **PAY-REV-1** (payments deposit-reversal race). Staging
+(`9190d5d`) was kept running and not modified.
 
 > Refresh note (Stage 10 W0, finding F-4): the per-stage sections below
 > this table end at Stage 4H-B0-R7 and are kept as the historical record;

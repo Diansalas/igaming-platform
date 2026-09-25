@@ -1480,17 +1480,24 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 10 — CI Evidence Restoration + Sportsbook Settlement Lifecycle — W0 COMPLETE, W1 IN PROGRESS
+## Current stage: Stage 10 — CI Evidence Restoration + Sportsbook Settlement Lifecycle — COMPLETE (awaiting authorization for the next stage)
 
-Approved 2026-09-25 (ADR 0087). **W0 complete**: CI Go gate restored;
-Gate 2 passed with five consecutive green runs #239–#243 (detail:
-`docs/governance/task-registry.md` "Stage 10", `docs/progress.md`).
-ADR 0088 (settlement contract) ACCEPTED. **W1** (sportsbook settlement,
-cash-funded singles, in-house mock mode) now proceeds under ADR 0088,
-starting with the F-7 audit. Isolated external dependency: `b22d5c4` live
-IAM re-validation needs a credential with `access-analyzer:ValidatePolicy`
-and `iam:SimulateCustomPolicy`. Staging kept running and untouched. OB-1
-open.
+Approved 2026-09-25 (ADR 0087). All seven gates passed; completion report:
+`docs/governance/stage-10-completion-report.md`. **W0** restored the CI Go
+gate (five consecutive green runs #239–#243). **W1** implemented
+cash-funded single-bet sportsbook settlement in **in-house MOCK mode**
+(ADR 0088; driven only by the non-production test-support staff route —
+not a real provider integration): migration 0091, settlement service,
+ledger multi-posting pre-lock, risk netting, reconciliation stream (MOCK
+statement), route/permission/read surfaces. **F-7** remediated as its own
+item (`36616f1`). Reviews: security (no P0/P1), code-review (B-1..B-3
+closed), ledger-finance (approved). W1 code head `312db16`, CI #259 green.
+
+Open/blocked: `b22d5c4` live IAM re-validation (external credential);
+**PAY-REV-1** (P1, pre-existing payments deposit-reversal race, outside
+scope, needs its own authorized stage); OB-1 and all prior human decisions
+remain OPEN. Staging untouched. **Next stage NOT started** — recommended:
+Stage 10.1 PAY-REV-1 remediation + residual hardening (report §15).
 
 ## Prior stage: Stage 10 Planning Gate — proposal approved by the human (PLANNING ONLY)
 

@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-25 (Stage 10 W0 complete; W1 in progress)
+Last updated: 2026-09-25 (Stage 10 complete; awaiting authorization for the next stage)
 
-## Status: Stage 9.4 staging deployed and accepted (human-executed, human-attested); Stage 10 proposed — PLANNING ONLY, awaiting human approval (`docs/plans/stage-10-planning-gate-proposal.md`)
+## Status: Stage 10 COMPLETE (W0 CI restoration + W1 sportsbook settlement, in-house MOCK mode); next stage awaiting human authorization (`docs/governance/stage-10-completion-report.md`)
 
 ## Stage 0 — complete (approved)
 
@@ -8078,4 +8078,33 @@ which had never executed on this branch (F-1).
 
 Staging was not touched. No AWS operation beyond two read-only
 permission probes.
+
+## Stage 10 — W1 Sportsbook Settlement Lifecycle — complete (Gates 3–7 passed); Stage 10 COMPLETE
+
+- **Scope delivered (ADR 0088, in-house MOCK mode):** settle won/lost,
+  void before/after settlement, rollback, re-settlement, rollback-then-void,
+  tombstone — on the canonical ledger with DB-enforced idempotency, audit,
+  staff authorization (sole grantee `risk_manager`), RLS, and a
+  multi-posting canonical pre-lock. Migration 0091 (append-only history,
+  T-1/T-2, deny triggers, guarded runtime REVOKE, refusing down migration).
+  Reconciliation `sportsbook_settlement` stream (statement match MOCK).
+  Read-only b2c/back-office surfaces. Not a real provider integration.
+- **F-7:** audit found class C; remediated as its own item (`36616f1`,
+  ADR 0020 amendment) — `ledger.Post` rejects same-key different-payload
+  replays with `ErrIdempotencyPayloadMismatch`.
+- **Reviews:** security APPROVE WITH FINDINGS (fixed), code-review APPROVE
+  WITH CONDITIONS (B-1..B-3 closed), ledger-finance APPROVED; mutation pass
+  sportsbook 92.44% / ledger 92.00% with no unjustified in-scope survivor;
+  SQL branch checklist complete.
+- **Evidence:** CI green on every W1 commit (#247–#259); local fresh-DB CI
+  replay 3/3.
+- **New out-of-scope finding:** PAY-REV-1 (P1, pre-existing since Stage
+  3B) — concurrent payments deposit reversals under different references
+  each post. Recorded; needs its own authorized stage.
+- **Deferred:** SB-T1-XMIN, OI-5 named debt, L0.6 residual (before arming
+  exposure limits), money width, reconciliation scale, route removal at the
+  real-provider stage.
+- Staging untouched; OB-1 and all prior human decisions OPEN. Completion
+  report: `docs/governance/stage-10-completion-report.md`. **No automatic
+  progression — the next stage requires explicit human authorization.**
 

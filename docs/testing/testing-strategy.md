@@ -3658,3 +3658,24 @@ name.
   triggers (no mutation tool applies) a recorded manual branch-coverage
   checklist (each branch exercised true and false). This substitution is
   stated explicitly in the stage report.
+
+## Stage 10 W1 — Results (`qa`)
+
+The plan above is implemented: `internal/sportsbook/settlement_*_integration_test.go`
+(scenarios, decision tables, OB-1, concurrency, fault injection, DB
+constraints, 0091 migration, rejection audit, read paths, SQL branches),
+`sportsbook_settlement_sole_writer_test.go` (static INV-LOCK-E4 and
+INV-SB-SETTLE-6), `internal/ledger/lockorder_*_integration_test.go`,
+`internal/risk/cumulative_sportsbook_settlement_integration_test.go`,
+`internal/reconciliation/sportsbook_settlement*_test.go`,
+`internal/httpserver/sportsbook_settlement_*_test.go`, and the F-7 replay
+suites. ADR 0088 §14 Q2 mutation pass and SQL branch checklist:
+`docs/governance/stage-10-w1-mutation-and-sql-branch-coverage.md`
+(sportsbook 92.44%, ledger 92.00%; handler PARTIALLY IMPLEMENTED — tool
+limitation). New rules: the migration-reversibility CI step runs on a
+fresh database (0091's down refuses on a database holding settlement
+evidence); settlement history rows are never inserted inside a savepoint
+(SB-T1-XMIN, pinned by tests). Note: platform-wide catalogue read tests
+slow down on heavily seeded local databases; run them on a fresh database
+(CI always does).
+

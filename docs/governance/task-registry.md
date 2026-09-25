@@ -3776,6 +3776,28 @@ the W0 five-consecutive-green-run gate.
 
 **W0 gate: PASSED — five consecutive green `build-test-lint` runs (#239–#243), 2026-09-25.** Each row's integration counts and reversibility output come from that run's own CI log (the "Assert integration evidence" step's printed totals), not from local runs. The 5 skips are the sportsbook rung-2 placeholders `BLOCKED on HDR-J-7`. "Security checks" in the approved row definition = the test-admin guard step, the runtime-role narrowing + probe, and the RLS/adversarial suites inside the integration step. Later runs on documentation commits continue to be monitored.
 
+### W1 — Sportsbook settlement lifecycle (in-house MOCK mode, ADR 0088)
+
+| ID | Owner | Status | Files owned | Tests | Blockers | Integration |
+|---|---|---|---|---|---|---|
+| S10-W1-00 | ledger-finance | Done | F-7 audit `docs/governance/stage-10-f7-ledger-replay-audit.md` (class C found); remediation `36616f1` (`internal/ledger/replay.go`, casino/payments/sportsbook callers, ADR 0020 amendment) | ledger L1–L11 + a replay test per caller | none | Integrated |
+| S10-W1-01 | ledger-finance (Orchestrator implemented) | Done | `migrations/0091_sportsbook_settlement.{up,down}.sql` | T-1/T-2/deny/RLS/down-refusal + 24 SQL-branch tests | none | Integrated (`eb3912f`) |
+| S10-W1-02 | ledger-finance | Done | `internal/ledger/{ledger,lockorder}.go` (types, `LockProjectionsForPostings`) | lockorder multipost/canonical-order tests | none | Integrated |
+| S10-W1-03 | sportsbook (Orchestrator implemented) | Done | `internal/sportsbook/settlement*.go` | scenario/decision/OB-1/concurrency/fault/readpath/sole-writer suites | none | Integrated |
+| S10-W1-04 | risk | Done | `internal/risk/cumulative.go` (INV-SB-CUM-1), netting + OI-5 pin tests | `TestSportsbookCumulative_EveryADR0088NettingRow` | none | Integrated (`49d6fda`) |
+| S10-W1-05 | ledger-finance | Done | `internal/reconciliation/sportsbook_settlement.go`, `statement/`, `sportsbook/mock.go` (MOCK statement) | clean flows, drift per kind, divergent statement | none | Integrated (`f72d864`) |
+| S10-W1-06 | backend + security | Done | auth permission/principal, route + handler, apierror codes, config/main, OpenAPI, read surfaces | HTTP flow/alert/audit/integrity tests | none | Integrated (`f72d864`, `dac94be`) |
+| S10-W1-07 | frontend + backoffice | Done | b2c bet history, back office bet grid (read-only) | vitest suites + builds | none | Integrated (`38e4875`) |
+| S10-W1-08 | devops | Done | `deploy/init-app-role.sql`, CI narrowing step, runtime-role doc §6 | runtime-role probe | none | Integrated (`d26b3b9`) |
+| S10-W1-09 | architect | Done | ADR 0088 §13 amendments + ADR 0082 A4 | n/a | none | Integrated (`0d943fd`) |
+| S10-W1-R | security, code-reviewer, ledger-finance, qa | Done | reviews + fixes | mutation pass (sportsbook 92.44%, ledger 92.00%), SQL branch checklist | none | Integrated (`dac94be`, `a318c10`, `312db16`) |
+| PAY-REV-1 | payments (review: ledger-finance, architect) | **Not started — outside Stage 10 scope (P1)** | `internal/payments/orchestrator.go` deposit reversal; migration (partial unique index) | regression per probe shape | needs human-authorized stage | n/a |
+| SB-T1-XMIN | ledger-finance | Deferred | T-1 composed-void causation → `pg_xact_status` (new migration) before any savepoint-using driver | pinned by `TestDBConstraints_T1_ComposedVoidCausation_*` | none | n/a |
+
+**W1 CI evidence:** every W1 commit green — #247 `eb3912f`, #251 `0d943fd`, #252 `36616f1`, #253 `f72d864`, #254–#256 (docs), #257 `a318c10`, #258 `dac94be`, #259 `312db16` (run 36162444009: all 20 `build-test-lint` steps incl. "Assert integration evidence" and reversibility; other jobs green). Local replay of the full CI on a fresh database: lint 0 issues, 3/3 integration runs 32 packages, reversibility PASS.
+
+**Stage 10: COMPLETE** — see `docs/governance/stage-10-completion-report.md`.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

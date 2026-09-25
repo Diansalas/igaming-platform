@@ -35,7 +35,7 @@ line is retained as the historical record): cash-funded **singles**
 settlement (won/lost), void (before and after settlement), rollback
 (seen, and never-seen ⇒ tombstone), re-settlement and rollback-then-void
 in **in-house mode** (§14.6) are **`IMPLEMENTED` by Stage 10 (ADR 0088)
-once W1 lands**. The W1 core is at commit `eb3912f` (migration
+(W1 landed; Stage 10 complete, `docs/governance/stage-10-completion-report.md`)**. The W1 core is at commit `eb3912f` (migration
 `0091_sportsbook_settlement`, `internal/sportsbook/settlement.go`,
 `ledger.LockProjectionsForPostings`); W1 completion (reviews, CI
 evidence, the test-support route) is recorded in `docs/progress.md`, not
@@ -403,7 +403,7 @@ bonus-funded stakes are unblocked).
 
 Status: **RESOLVED (cash-funded) — `NOT IMPLEMENTED`.** Bonus-funded case
 **BLOCKED**, see §9. *(Amended 2026-09-25 (ADR 0088): cash-funded singles
-in in-house mode — `IMPLEMENTED` by Stage 10 (ADR 0088) once W1 lands,
+in in-house mode — `IMPLEMENTED` by Stage 10 (ADR 0088) (W1 landed; Stage 10 complete, `docs/governance/stage-10-completion-report.md`),
 `MOCK`-driven via the non-production test-support route; provider mode
 still `NOT IMPLEMENTED`; bonus-funded still `BLOCKED`.)*
 
@@ -918,7 +918,7 @@ unblocked).
 
 Status: **RESOLVED — `NOT IMPLEMENTED`.** *(Amended 2026-09-25 (ADR 0088): rollback, never-seen tombstone,
 re-settlement and rollback-then-void for cash-funded singles in in-house
-mode — `IMPLEMENTED` by Stage 10 (ADR 0088) once W1 lands, `MOCK`-driven
+mode — `IMPLEMENTED` by Stage 10 (ADR 0088) (W1 landed; Stage 10 complete, `docs/governance/stage-10-completion-report.md`), `MOCK`-driven
 via the non-production test-support route; provider mode and
 partial-settlement/cashout corrections still `NOT IMPLEMENTED`.)*
 
@@ -1031,7 +1031,7 @@ sportsbook engine (mock mode)" — is now in ADR 0019's matrix; the
 provider-callback rows remain for the real-provider stage.)*
 
 Status: **RESOLVED — `NOT IMPLEMENTED`.** *(Amended 2026-09-25 (ADR 0088): the in-house-mode key
-strategy is `IMPLEMENTED` for the Stage 10 W1 scope once W1 lands — ADR
+strategy is `IMPLEMENTED` for the Stage 10 W1 scope (W1 landed; Stage 10 complete, `docs/governance/stage-10-completion-report.md`) — ADR
 0088 §4; provider-mode keys still `NOT IMPLEMENTED`.)*
 
 ### 12. Reconciliation — recomputing the posted amount from stored inputs
