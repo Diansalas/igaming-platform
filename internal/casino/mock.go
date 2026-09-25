@@ -305,7 +305,8 @@ type mockCasinoCallbackBody struct {
 // review finding).
 func (m *MockCasinoProvider) sign(body mockCasinoCallbackBody) string {
 	mac := hmac.New(sha256.New, m.signingSecret)
-	fmt.Fprintf(mac, "%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%s",
+	// hash.Hash.Write never returns an error.
+	_, _ = fmt.Fprintf(mac, "%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%s",
 		body.EventType, body.ProviderTxID, body.OriginalProviderTxID, body.RoundID, body.ProviderGameID,
 		body.Amount, body.AssetCode, body.Outcome, body.DeclineReason, body.PlayerAccountID, body.SessionID)
 	return hex.EncodeToString(mac.Sum(nil))

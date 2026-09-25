@@ -3473,3 +3473,110 @@ CURRENT migration files' actual content. Dropping and fully re-creating
 the scratch database (not merely trusting its recorded migration version)
 resolved it; the full suite is clean against a genuinely fresh database
 (see this stage's completion report for the full test run).
+
+## Stage 10 W0 — CI evidence restoration: pinned lint, scratch databases, lock-wait scoping (`qa` + `security` + `devops`)
+
+### CI gate status before this stage
+
+`.github/workflows/ci.yml`'s `build-test-lint` job referenced
+`golangci-lint/golangci-lint-action@v6`, which does not exist, so the job
+aborted at "Set up job" on every run since the file entered the branch
+history (`4790de0`). No Go step (gofmt, vet, lint, build, migrations,
+unit or integration tests, reversibility) had ever run in CI; all
+earlier Go evidence was local (Stage 10 planning gate, finding F-1).
+
+### Linter
+
+- Action: `golangci/golangci-lint-action@v9`. Source: the upstream
+  README "Compatibility" section — v7.0.0 supports golangci-lint v2
+  only, v8.0.0 works with golangci-lint ≥ v2.1.0, v9.0.0 needs the
+  node24 runtime. `.golangci.yml` is `version: "2"`, so any action
+  below v7 cannot run it.
+- Linter version pinned to `v2.5.0` (the version verified locally), not
+  `latest`, so results are reproducible. Bump deliberately, in its own
+  change, and fix any new findings in the same change.
+- CI lints without build tags. Integration-tagged test files are **not**
+  linted (with `--build-tags=integration`, v2.5.0 reports 467
+  errcheck/unused findings in them) — recorded as deferred debt, not
+  fixed in W0.
+
+### Scratch databases (migration and RLS tests)
+
+Some integration tests need an empty database (migration round-trips,
+pre-flight guards, RLS posture before/after a migration). The
+application roles are deliberately `NOCREATEDB`
+(`deploy/init-app-role.sql`, `docs/security/runtime-role-separation.md`
+§2), and they stay that way.
+
+- **Role:** `igaming_test_admin` — `LOGIN NOSUPERUSER CREATEDB
+  NOCREATEROLE NOBYPASSRLS`, member of `igaming`. Created **only** in CI
+  (`ci.yml` step "Create CI-only test admin role…") and in local dev
+  (`deploy/init-test-admin-role.dev.sql`, `make dev-db-init-test-admin`,
+  mounted by `deploy/docker-compose.dev.yml`). Never in
+  `deploy/init-app-role.sql` or any staging/production path. Never the
+  `postgres` superuser.
+- **Variable:** `TEST_ADMIN_DATABASE_URL` — CI and local development
+  only; never set in staging or production.
+- **Code:** one helper, `internal/testsupport/scratchdb` (every file
+  `//go:build integration`, so it is never compiled into an application
+  binary). `scratchdb.New(t, prefix)`:
+  1. skips the test if `TEST_DATABASE_URL` or `TEST_ADMIN_DATABASE_URL`
+     is unset (never falls back to creating through
+     `TEST_DATABASE_URL`);
+  2. `CREATE DATABASE <prefix+random> OWNER <TEST_DATABASE_URL's role>`
+     through the admin URL — used for CREATE and DROP only;
+  3. connects to the scratch database as `TEST_DATABASE_URL`'s role and
+     fails the test unless `current_user` is that role, it owns the
+     database, and it is neither superuser nor `BYPASSRLS` (otherwise
+     RLS assertions would pass for the wrong reason);
+  4. drops the database `WITH (FORCE)` on cleanup (logs if left
+     behind).
+- **Guard (a tripwire; code review is the real control):** the CI step
+  "Guard - test admin URL is only read by test support code" fails if `TEST_ADMIN_DATABASE_URL` appears in any `.go`
+  file other than `_test.go` files and `internal/testsupport/scratchdb`,
+  if `internal/config/` mentions any `TEST_ADMIN` setting, or if a
+  scratchdb file lacks the `integration` build tag. It matches the
+  literal name only, so a constructed name would evade it.
+- `scratchdb.New` also fails the test if the admin URL's role is a
+  superuser or `BYPASSRLS` (the role model must not be silently replaced
+  by the `postgres` superuser).
+- Callers: `internal/{db,ledger,bonus,jurisdiction,operatingmarket}`
+  migration tests (formerly five copied helpers).
+- Verified locally: with the variable unset these tests skip with a
+  pointer to this section; with `igaming` temporarily given `BYPASSRLS`
+  the owner check fails the test.
+- Ownership: `qa` and `security` co-own this mechanism (it is a
+  privilege boundary, not only a test convenience).
+
+### Lock-wait polling must be scoped to the test's own blocker
+
+`go test ./...` runs packages in parallel against the same test
+database. A helper that counts **all** backends in `wait_event_type =
+'Lock'` also sees other packages' lock waits and can return before the
+test's own call has reached its lock. This made
+`TestSportsbookJurisdiction_ConcurrentConfigurationReadIsConsistent`
+fail intermittently (it armed a restriction before `PlaceBet`'s
+jurisdiction gate had run). Rule: wait for backends blocked, directly or
+transitively, by the test's own blocker (`pg_backend_pid()` read inside
+the blocker; recursive walk over `pg_blocking_pids`, which also covers
+advisory locks). Applied in W0 to `internal/sportsbook`
+(`waitForBlockedCount`) and `internal/casino` (`fmWaitForLockWaiters`,
+`s9Blocker`); the ledger/withdrawal/casino/payments lock-order harnesses
+already used precise matching; the jurisdiction/operatingmarket helpers
+filter on their own statement text.
+
+### Ordering note
+
+CI steps stop at the first failure, so the migration-reversibility step
+only gets CI coverage once the integration-test step is green. Fixing
+the action alone (without the scratch-database role) would still have
+left reversibility unverified in CI.
+
+### W0 gate
+
+W1 (sportsbook settlement) code may not merge until `build-test-lint`
+is green on **five consecutive CI runs** (run ids recorded in
+`docs/governance/task-registry.md`). A failure in those runs is
+root-caused and fixed; rerun-until-green is not acceptance.
+`workflow_dispatch` was added to `ci.yml` so the gate can be re-run on
+the same commit.

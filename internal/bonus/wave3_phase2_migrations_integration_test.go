@@ -14,17 +14,14 @@ package bonus
 
 import (
 	"context"
-	"fmt"
-	"net/url"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
 const (
@@ -184,44 +181,12 @@ func wave3MigrationsDir(t *testing.T) string {
 	return dir
 }
 
-// wave3ScratchDatabase creates an empty database next to TEST_DATABASE_URL
-// and returns its URL, dropping it on cleanup - the same pattern internal/
-// ledger's migration tests use, duplicated here (not imported) since the
-// ledger package's helpers are unexported.
+// wave3ScratchDatabase creates an empty scratch database and returns its
+// URL, dropping it on cleanup - delegates to the shared
+// internal/testsupport/scratchdb helper (Stage 10 W0).
 func wave3ScratchDatabase(t *testing.T) string {
 	t.Helper()
-	baseURL := os.Getenv("TEST_DATABASE_URL")
-	if baseURL == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping integration test")
-	}
-	name := "bonus_w3p2_" + strings.ReplaceAll(uuid.New().String(), "-", "")[:16]
-
-	admin, err := pgx.Connect(context.Background(), baseURL)
-	if err != nil {
-		t.Fatalf("connect to base database: %v", err)
-	}
-	defer func() { _ = admin.Close(context.Background()) }()
-	if _, err := admin.Exec(context.Background(), fmt.Sprintf(`CREATE DATABASE %s`, name)); err != nil {
-		t.Fatalf("create scratch database %s: %v", name, err)
-	}
-	t.Cleanup(func() {
-		conn, err := pgx.Connect(context.Background(), baseURL)
-		if err != nil {
-			t.Logf("scratch database %s left behind (connect failed: %v)", name, err)
-			return
-		}
-		defer func() { _ = conn.Close(context.Background()) }()
-		if _, err := conn.Exec(context.Background(), fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, name)); err != nil {
-			t.Logf("scratch database %s left behind (drop failed: %v)", name, err)
-		}
-	})
-
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatalf("parse TEST_DATABASE_URL: %v", err)
-	}
-	u.Path = "/" + name
-	return u.String()
+	return scratchdb.New(t, "bonus_w3p2_")
 }
 
 func wave3ScratchPool(t *testing.T, databaseURL string) *db.Pool {

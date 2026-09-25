@@ -172,20 +172,34 @@ func fmWalletCashBalance(t *testing.T, pool *db.Pool, tenantID, walletID uuid.UU
 }
 
 // fmWaitForLockWaiters polls pg_stat_activity until at least want backends
-// are genuinely blocked on a lock - this codebase's own established
-// deterministic concurrency technique (see internal/sportsbook's
-// waitForBlockedCount and internal/casino/adversarial_lock_stress_test.go),
-// used here so the mid-flight cancellation in item A fires at a KNOWN
-// point inside postBet rather than at a sleep-guessed one.
-func fmWaitForLockWaiters(t *testing.T, pool *db.Pool, want int) bool {
+// are genuinely blocked, directly or transitively, by the test's OWN
+// blocker session (blockerPID) - this codebase's established deterministic
+// concurrency technique, used here so the mid-flight cancellation in item
+// A fires at a KNOWN point inside postBet rather than at a sleep-guessed
+// one.
+//
+// Scoped to the blocker rather than a database-wide Lock-wait count:
+// `go test ./...` runs packages in parallel against one test database, so
+// a bare count also sees other packages' lock waits and can return before
+// this test's own delivery has reached the lock (Stage 10 W0; the same
+// trap is documented in internal/ledger/lockorder_harness_test.go).
+// pg_blocking_pids covers advisory locks; the recursive walk also counts a
+// racer queued behind another racer that is itself waiting on the blocker.
+func fmWaitForLockWaiters(t *testing.T, pool *db.Pool, blockerPID int32, want int) bool {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		var count int
 		err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-			return tx.QueryRow(ctx,
-				`SELECT count(*) FROM pg_stat_activity
-				  WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&count)
+			return tx.QueryRow(ctx, `
+				WITH RECURSIVE waiters(pid) AS (
+					SELECT a.pid FROM pg_stat_activity a
+					 WHERE $1::int = ANY(pg_blocking_pids(a.pid))
+					UNION
+					SELECT a.pid FROM pg_stat_activity a
+					  JOIN waiters w ON w.pid = ANY(pg_blocking_pids(a.pid))
+				)
+				SELECT count(*) FROM waiters`, blockerPID).Scan(&count)
 		})
 		if err != nil {
 			t.Fatalf("poll pg_stat_activity: %v", err)
@@ -352,6 +366,10 @@ func TestFailureModeMatrix_A_ContextCancelledMidCallback_NoPartialLedgerWrite(t 
 	if holderResult.Outcome != OutcomeSucceeded {
 		t.Fatalf("expected the holder delivery to post, got %+v", holderResult)
 	}
+	var holderPID int32
+	if err := holderTx.QueryRow(holderCtx, `SELECT pg_backend_pid()`).Scan(&holderPID); err != nil {
+		t.Fatalf("read holder pg_backend_pid: %v", err)
+	}
 
 	// Delivery 2: the same callback again (the provider retrying because
 	// the platform has not acknowledged yet). It blocks inside postBet.
@@ -364,7 +382,7 @@ func TestFailureModeMatrix_A_ContextCancelledMidCallback_NoPartialLedgerWrite(t 
 		})
 	}()
 
-	if !fmWaitForLockWaiters(t, pool, 1) {
+	if !fmWaitForLockWaiters(t, pool, holderPID, 1) {
 		cancel()
 		<-deliveryErr
 		t.Fatal("second delivery never blocked on postBet's advisory lock; cannot cancel it mid-flight deterministically")

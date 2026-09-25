@@ -15,14 +15,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
 func writeMigrationPair(t *testing.T, dir string, version int, name, upSQL, downSQL string) {
@@ -42,44 +42,12 @@ func sha256Hex(t *testing.T, content string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// checksumScratchDatabase mirrors internal/ledger's scratchDatabase
-// helper exactly (own copy to avoid an inter-package test dependency):
-// creates a throwaway database next to TEST_DATABASE_URL, dropped on
-// cleanup.
+// checksumScratchDatabase creates a throwaway database, dropped on
+// cleanup - delegates to the shared internal/testsupport/scratchdb helper
+// (Stage 10 W0), which imports nothing from this package.
 func checksumScratchDatabase(t *testing.T) string {
 	t.Helper()
-	baseURL := os.Getenv("TEST_DATABASE_URL")
-	if baseURL == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping integration test")
-	}
-	name := "dbchecksum_" + strings.ReplaceAll(uuid.New().String(), "-", "")[:16]
-
-	admin, err := pgx.Connect(context.Background(), baseURL)
-	if err != nil {
-		t.Fatalf("connect to base database: %v", err)
-	}
-	defer func() { _ = admin.Close(context.Background()) }()
-	if _, err := admin.Exec(context.Background(), fmt.Sprintf(`CREATE DATABASE %s`, name)); err != nil {
-		t.Fatalf("create scratch database %s: %v", name, err)
-	}
-	t.Cleanup(func() {
-		conn, err := pgx.Connect(context.Background(), baseURL)
-		if err != nil {
-			t.Logf("scratch database %s left behind (connect failed: %v)", name, err)
-			return
-		}
-		defer func() { _ = conn.Close(context.Background()) }()
-		if _, err := conn.Exec(context.Background(), fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, name)); err != nil {
-			t.Logf("scratch database %s left behind (drop failed: %v)", name, err)
-		}
-	})
-
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatalf("parse TEST_DATABASE_URL: %v", err)
-	}
-	u.Path = "/" + name
-	return u.String()
+	return scratchdb.New(t, "dbchecksum_")
 }
 
 func checksumScratchPool(t *testing.T, databaseURL string) *Pool {

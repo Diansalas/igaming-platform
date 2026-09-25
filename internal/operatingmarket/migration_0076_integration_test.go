@@ -14,7 +14,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
 const migration0076Version = int64(76)
@@ -162,38 +162,7 @@ func migration0076MigrationsDir(t *testing.T) string {
 
 func migration0076ScratchDatabase(t *testing.T) string {
 	t.Helper()
-	baseURL := os.Getenv("TEST_DATABASE_URL")
-	if baseURL == "" {
-		t.Skip("TEST_DATABASE_URL not set; skipping integration test")
-	}
-	name := "om0076_" + strings.ReplaceAll(uuid.New().String(), "-", "")[:16]
-
-	admin, err := pgx.Connect(context.Background(), baseURL)
-	if err != nil {
-		t.Fatalf("connect to base database: %v", err)
-	}
-	defer func() { _ = admin.Close(context.Background()) }()
-	if _, err := admin.Exec(context.Background(), fmt.Sprintf(`CREATE DATABASE %s`, name)); err != nil {
-		t.Fatalf("create scratch database %s: %v", name, err)
-	}
-	t.Cleanup(func() {
-		conn, err := pgx.Connect(context.Background(), baseURL)
-		if err != nil {
-			t.Logf("scratch database %s left behind (connect failed: %v)", name, err)
-			return
-		}
-		defer func() { _ = conn.Close(context.Background()) }()
-		if _, err := conn.Exec(context.Background(), fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, name)); err != nil {
-			t.Logf("scratch database %s left behind (drop failed: %v)", name, err)
-		}
-	})
-
-	u, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatalf("parse TEST_DATABASE_URL: %v", err)
-	}
-	u.Path = "/" + name
-	return u.String()
+	return scratchdb.New(t, "om0076_")
 }
 
 func migration0076ScratchPool(t *testing.T, databaseURL string) *db.Pool {

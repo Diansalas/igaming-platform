@@ -235,6 +235,10 @@ func TestFailureModeMatrix_SB_A_ContextCancelledMidPlacementLeavesNoPartialWrite
 		cashAccountID).Scan(&ignored); err != nil {
 		t.Fatalf("blocker lock on wallet_balance_projection: %v", err)
 	}
+	blockerPIDValue, err := backendPID(blockerCtx, blockerTx)
+	if err != nil {
+		t.Fatalf("read blocker pg_backend_pid: %v", err)
+	}
 
 	cancelCtx, cancel := context.WithCancel(context.Background())
 	placeErr := make(chan error, 1)
@@ -250,7 +254,7 @@ func TestFailureModeMatrix_SB_A_ContextCancelledMidPlacementLeavesNoPartialWrite
 		})
 	}()
 
-	if !waitForBlockedCount(t, pool, 1) {
+	if !waitForBlockedCount(t, pool, blockerPIDValue, 1) {
 		cancel()
 		<-placeErr
 		t.Fatal("placement never blocked on the balance row lock; cannot cancel it mid-flight deterministically")

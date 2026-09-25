@@ -460,7 +460,7 @@ func (c *Client) attempt(ctx context.Context, req Request) (resp *Response, err 
 		}
 		return nil, &UnavailableError{Err: doErr, Sent: sent}, true
 	}
-	defer httpResp.Body.Close()
+	defer func() { _ = httpResp.Body.Close() }()
 
 	body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, maxResponseBodyBytes))
 	if readErr != nil {

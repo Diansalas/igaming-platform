@@ -34,39 +34,34 @@ stage detail), and the ADRs cited below.
 | 4H-B0-R3 | Bonus rounding decision validation and financial gate closure (no code) | Complete |
 | 4H-B0-R4 | Asset/Currency Registry, FX/Conversion, and dual-mode Sportsbook architecture closure (no code) | Complete |
 | 4H-B0-R5 | Implementation readiness and final P1 closure — five R4 P1s architecturally resolved, residual findings catalogued (no code) | Complete |
-| 4H-B0-R6 | Foundational implementation hardening — first authorized implementation stage; Asset Registry, idempotency, Risk fail-closed/exponent-awareness, RG self-exclusion hardening implemented and independently verified (real code + migrations) | Complete (this stage) |
+| 4H-B0-R6 | Foundational implementation hardening — first authorized implementation stage; Asset Registry, idempotency, Risk fail-closed/exponent-awareness, RG self-exclusion hardening implemented and independently verified (real code + migrations) | Complete |
+| 4H-B0-R7 | Final financial/bonus implementation gate (`player_locked` split, migration 0048) | Complete |
+| 4H-B1 | Bonus Engine Waves 1–3 (migrations 0050–0070) | Complete |
+| 4I | Jurisdiction foundation, Phases A–E, E-SECURITY, Exit Triage (migrations 0071–0077; operating market mechanism only) | Complete |
+| 5 | Operator Back Office MVP | Complete |
+| 6 / 6.1 | B2C + first sportsbook slice (singles, placement only, mock provider) + hardening | Complete |
+| 7 | B2C casino slice (play simulation, ADR 0048) | Complete |
+| 8 | Provider integration readiness without external contracts (ADR 0080) | Complete |
+| 9 / 9.1 / 9.2 | Production readiness, blocker closure, sportsbook risk + jurisdiction enforcement (ADRs 0081–0083) | Complete |
+| 9.3 | Staging package + local end-to-end acceptance (ADR 0084) | Complete |
+| 9.4 Part 1 / 9.4 | APP_ENV fail-closed (ADR 0085); staging hardening (ADR 0086); **staging deployed and accepted on `9190d5d`** (human-executed, human-attested) | Complete |
+| 10 planning gate | State reconstruction + Stage 10 proposal (`docs/plans/stage-10-planning-gate-proposal.md`) | Complete; Stage 10 approved by the human |
 
 ## Active stage
 
-> **Status update 2026-09-25 (Stage 10 planning gate).** This document's
-> detailed sections below stop at Stage 4I and are known to be stale
-> (finding F-4); a full refresh is proposed as Stage 10 W0 item 6. Until
-> then, the authoritative current state is: Stages 5 → 9.4 complete
-> (`docs/progress.md`); Stage 9.4 staging deployed and accepted on
-> `9190d5d` (human-executed, human-attested); Stage 10 proposed and
-> awaiting human approval — `docs/plans/stage-10-planning-gate-proposal.md`
-> (§7 is the current open-human-decision list; ADR 0042 has answered
-> "Open decisions" items 8–11 below).
+**Stage 10 — CI Evidence Restoration + Sportsbook Settlement Lifecycle —
+IN PROGRESS** (approved by the human on 2026-09-25 against planning-gate
+commit `2355ab7`). W0 (CI evidence restoration) first; W1 (sportsbook
+settlement for cash-funded singles, in-house mock mode) only after five
+consecutive green CI runs. Live detail: `docs/active-stage.md` and
+`docs/governance/task-registry.md` "Stage 10". Staging (`9190d5d`) is
+kept running and is not modified by Stage 10.
 
-
-Stage 4H-B0-R6 — see `docs/active-stage.md` for full detail. **Six
-foundational-hardening workstreams implemented with real production
-code and migrations, each independently reviewed, with a fix wave
-closing every confirmed defect (including one live, exploited P1) and a
-final independent re-verification pass confirming the fixes hold.
-Labels at close: Asset Registry (Workstream A) and Risk fail-closed
-hardening (Workstream D) IMPLEMENTED; idempotency hardening (Workstream
-B) IMPLEMENTED as a shared primitive with no production call sites yet;
-RG self-exclusion hardening (Workstream E) PARTIALLY IMPLEMENTED (one
-non-launch-blocking scheduler-wiring gap); `player_locked` origin-split
-(Workstream C) phase 1 (implementation ADR) DONE, phase 2 (migration +
-code) NOT STARTED pending a human decision and a not-yet-built
-wagering-progress-netting design; Bonus dependency contract freeze
-(Workstream F) DONE. No implementation stage is authorized to begin
-without explicit human confirmation — Stage 4H-B1 (Bonus Engine) remains
-READY FOR HUMAN AUTHORIZATION after the `bonus_conversion` Risk
-dependency (still NOT STARTED), unaffected by this stage. Stage 4H-B2
-(Retail Architecture Hardening) awaits the Retail-Legal/Business gate.**
+> Refresh note (Stage 10 W0, finding F-4): the per-stage sections below
+> this table end at Stage 4H-B0-R7 and are kept as the historical record;
+> `docs/progress.md` is the authoritative per-stage narrative for Stages
+> 4H-B1 → 10. The current open-human-decision list is
+> `docs/plans/stage-10-planning-gate-proposal.md` §7.
 
 ## Blocked stages
 
@@ -244,7 +239,7 @@ dependency (still NOT STARTED), unaffected by this stage. Stage 4H-B2
    legal ceiling that must be tenant-proof requires a future
    platform-scoped write path (ADR 0031 §8), not built as of Stage
    4G-FINAL.
-8. Platform-wide default value for `OpenBetSelfExclusionPolicy`
+8. **ANSWERED — ADR 0042: `VOID_ON_SELF_EXCLUSION` (platform-wide fallback; legal review before production use).** Original question: platform-wide default value for `OpenBetSelfExclusionPolicy`
    (`SETTLE_NORMALLY` vs. `VOID_ON_SELF_EXCLUSION`), and whether either
    specific targeted jurisdiction (Anjouan, or any Europe/LATAM
    jurisdiction under consideration) has an existing legal requirement
@@ -254,13 +249,13 @@ dependency (still NOT STARTED), unaffected by this stage. Stage 4H-B2
    default is a launch-authorization item a human should see before
    sportsbook is enabled in any jurisdiction lacking an explicit
    configured value.
-9. What happens when a settlement or self-exclusion-triggered void credit
+9. **ANSWERED — ADR 0042 (G-2): all three treatments configurable per brand, default (b) route to `player_cash`; configurability not yet built.** Original question: what happens when a settlement or self-exclusion-triggered void credit
    arrives against a bonus Grant that has already gone terminal
    (expired/cancelled/forfeited) — re-forfeit the credit, route it to
    `player_cash` as a mechanical entitlement settlement, or hold it for
    manual review (doc10 §5, ADR 0032 §5, Stage 4H-B0-R5). A genuine
    bonus-terms/product judgment call, not an architecture decision.
-10. Mixed cash/bonus-funded sportsbook bet cashout (`C-cashout`,
+10. **ANSWERED — ADR 0042: not cashout-eligible.** Original question: mixed cash/bonus-funded sportsbook bet cashout (`C-cashout`,
     `ledger-accounting-model.md` §6.3.3.2, Stage 4H-B0-R5): proportional
     split vs. all-to-cash vs. simply not cashout-eligible. All three are
     ledger-mechanically valid (balanced, B1-safe) — the deciding factor is
@@ -268,7 +263,7 @@ dependency (still NOT STARTED), unaffected by this stage. Stage 4H-B2
     `product-owner-proxy`, and `sportsbook` all independently recommend
     "not cashout-eligible" as the lowest-risk, most easily reversible
     starting point, but this has not been formally decided.
-11. Whether a settlement or void credit landing against a bonus-funded
+11. **ANSWERED — ADR 0042 (same answer as item 9).** Original question: whether a settlement or void credit landing against a bonus-funded
     locked stake whose Grant has already gone terminal should re-forfeit,
     route to `player_cash`, or hold for manual review — the same
     question as item 9, now confirmed (Stage 4H-B0-R6) to gate

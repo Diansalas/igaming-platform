@@ -62,7 +62,7 @@ func s9CashAccountID(t *testing.T, pool *db.Pool, f casinoFixture) uuid.UUID {
 
 // s9Blocker holds a FOR UPDATE lock on ledgerAccountID's projection row
 // until release() is called. Returns once the lock is genuinely held.
-func s9Blocker(t *testing.T, pool *db.Pool, tenantID, ledgerAccountID uuid.UUID) (release func()) {
+func s9Blocker(t *testing.T, pool *db.Pool, tenantID, ledgerAccountID uuid.UUID) (release func(), blockerPID int32) {
 	t.Helper()
 	ready := make(chan struct{})
 	proceed := make(chan struct{})
@@ -73,6 +73,9 @@ func s9Blocker(t *testing.T, pool *db.Pool, tenantID, ledgerAccountID uuid.UUID)
 			if err := tx.QueryRow(ctx,
 				`SELECT debit_total, credit_total FROM wallet_balance_projection WHERE ledger_account_id = $1 FOR UPDATE`,
 				ledgerAccountID).Scan(&d, &c); err != nil {
+				return err
+			}
+			if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&blockerPID); err != nil {
 				return err
 			}
 			close(ready)
@@ -93,7 +96,7 @@ func s9Blocker(t *testing.T, pool *db.Pool, tenantID, ledgerAccountID uuid.UUID)
 				t.Errorf("blocker transaction: %v", err)
 			}
 		})
-	}
+	}, blockerPID
 }
 
 // s9LockedBalance reads the wallet's player_locked_cash net balance.
@@ -198,7 +201,7 @@ func TestStage9_ConcurrentDistinctBetsOneWallet_ExactlyOneAccepted(t *testing.T)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
 
-	release := s9Blocker(t, pool, f.tenantID, s9CashAccountID(t, pool, f))
+	release, blockerPID := s9Blocker(t, pool, f.tenantID, s9CashAccountID(t, pool, f))
 
 	const n = 2
 	results := make([]ReceiveCallbackResult, n)
@@ -219,7 +222,7 @@ func TestStage9_ConcurrentDistinctBetsOneWallet_ExactlyOneAccepted(t *testing.T)
 		}(i)
 	}
 
-	if !fmWaitForLockWaiters(t, pool, n) {
+	if !fmWaitForLockWaiters(t, pool, blockerPID, n) {
 		release()
 		wg.Wait()
 		t.Fatal("timed out waiting for both concurrent bet deliveries to block on the uncommitted blocker row")
@@ -300,7 +303,7 @@ func TestStage9_ConcurrentWinAndRollbackSameRound_SerializesToALegalOrder(t *tes
 	winPayload := provider.CallbackPayload(CallbackEventWin, "s9-win-wvr", "", round, "game-1", win, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
 	rollbackPayload := provider.CallbackPayload(CallbackEventRollback, "s9-rb-wvr", "s9-bet-wvr", round, "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
 
-	release := s9Blocker(t, pool, f.tenantID, s9CashAccountID(t, pool, f))
+	release, blockerPID := s9Blocker(t, pool, f.tenantID, s9CashAccountID(t, pool, f))
 
 	var wg sync.WaitGroup
 	var winErr, rollbackErr error
@@ -320,7 +323,7 @@ func TestStage9_ConcurrentWinAndRollbackSameRound_SerializesToALegalOrder(t *tes
 		})
 	}()
 
-	if !fmWaitForLockWaiters(t, pool, 2) {
+	if !fmWaitForLockWaiters(t, pool, blockerPID, 2) {
 		release()
 		wg.Wait()
 		t.Fatal("timed out waiting for the win and the rollback to both block")
@@ -399,7 +402,7 @@ func TestStage9_ConcurrentDistinctWinsOnLockedRound_ReleasesLockExactlyOnce(t *t
 		t.Fatalf("fixture: expected %d locked, got %d", stake, got)
 	}
 
-	release := s9Blocker(t, pool, f.tenantID, s9CashAccountID(t, pool, f))
+	release, blockerPID := s9Blocker(t, pool, f.tenantID, s9CashAccountID(t, pool, f))
 
 	const n = 2
 	errs := make([]error, n)
@@ -418,7 +421,7 @@ func TestStage9_ConcurrentDistinctWinsOnLockedRound_ReleasesLockExactlyOnce(t *t
 		}(i)
 	}
 
-	if !fmWaitForLockWaiters(t, pool, n) {
+	if !fmWaitForLockWaiters(t, pool, blockerPID, n) {
 		release()
 		wg.Wait()
 		t.Fatal("timed out waiting for both concurrent win deliveries to block on the uncommitted blocker row")
@@ -510,7 +513,7 @@ func TestStage9_ConcurrentBetAndWithdrawalOneWallet_ExactlyOneReservesTheBalance
 	// Both want the whole 1000. Only one can have it.
 	const amount = int64(1_000)
 
-	release := s9Blocker(t, pool, f.tenantID, s9CashAccountID(t, pool, f))
+	release, blockerPID := s9Blocker(t, pool, f.tenantID, s9CashAccountID(t, pool, f))
 
 	var wg sync.WaitGroup
 	var betResult ReceiveCallbackResult
@@ -537,7 +540,7 @@ func TestStage9_ConcurrentBetAndWithdrawalOneWallet_ExactlyOneReservesTheBalance
 		})
 	}()
 
-	if !fmWaitForLockWaiters(t, pool, 2) {
+	if !fmWaitForLockWaiters(t, pool, blockerPID, 2) {
 		release()
 		wg.Wait()
 		t.Fatal("timed out waiting for the bet and the withdrawal request to both block on the uncommitted blocker row")

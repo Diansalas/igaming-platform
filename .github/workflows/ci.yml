@@ -5,6 +5,9 @@ on:
     branches: ["**"]
   pull_request:
     branches: ["**"]
+  # Stage 10 W0: lets the gate be re-run on the same commit (the
+  # five-consecutive-green-runs acceptance, docs/testing/testing-strategy.md).
+  workflow_dispatch:
 
 jobs:
   build-test-lint:
@@ -45,6 +48,12 @@ jobs:
       # test t.Skip()s cleanly if this var is unset, so it is harmless to
       # set unconditionally.
       TEST_RUNTIME_DATABASE_URL: postgres://igaming_runtime:igaming_runtime_ci_password@localhost:5432/igaming_platform_test?sslmode=disable
+      # Stage 10 W0 (docs/testing/testing-strategy.md "Scratch databases"):
+      # CI/dev-only role used ONLY by internal/testsupport/scratchdb to
+      # CREATE/DROP throwaway databases for migration and RLS tests. The
+      # application roles above stay NOCREATEDB; scratch databases are
+      # created OWNER igaming and every assertion still runs as igaming.
+      TEST_ADMIN_DATABASE_URL: postgres://igaming_test_admin:igaming_test_admin_ci_password@localhost:5432/igaming_platform_test?sslmode=disable
       JWT_SIGNING_SECRET: ci-signing-secret-at-least-32-characters-long
 
     steps:
@@ -88,6 +97,33 @@ jobs:
             GRANT USAGE, SELECT ON SEQUENCES TO igaming_runtime;
           SQL
 
+      - name: Create CI-only test admin role for scratch databases (Stage 10 W0)
+        env:
+          PGPASSWORD: igaming_ci_superuser_password
+        run: |
+          # Mirrors deploy/init-test-admin-role.dev.sql. CREATEDB but
+          # never SUPERUSER or BYPASSRLS; membership in igaming lets it
+          # create databases OWNER igaming and drop them again. Never
+          # created by deploy/init-app-role.sql (deployment path).
+          psql -h localhost -U postgres -d igaming_platform_test -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE igaming_test_admin LOGIN PASSWORD 'igaming_test_admin_ci_password' NOSUPERUSER CREATEDB NOCREATEROLE NOBYPASSRLS;
+          GRANT igaming TO igaming_test_admin;
+          SQL
+
+      - name: Guard - test admin URL is only read by test support code (Stage 10 W0)
+        run: |
+          # TEST_ADMIN_DATABASE_URL may appear only in _test.go files and in
+          # the integration-tagged internal/testsupport/scratchdb package -
+          # never in application code or internal/config.
+          offenders="$(grep -rl --include='*.go' 'TEST_ADMIN_DATABASE_URL' . | grep -v '_test\.go$' | grep -v '^\./internal/testsupport/scratchdb/' || true)"
+          if [ -n "$offenders" ]; then echo "TEST_ADMIN_DATABASE_URL referenced outside test support code:"; echo "$offenders"; exit 1; fi
+          if grep -rn 'TEST_ADMIN' internal/config/; then echo "internal/config must never read a TEST_ADMIN setting"; exit 1; fi
+          # Every scratchdb file must carry the integration build tag so it
+          # is never compiled into an application binary.
+          for f in internal/testsupport/scratchdb/*.go; do
+            head -1 "$f" | grep -qx '//go:build integration' || { echo "$f lacks //go:build integration"; exit 1; }
+          done
+
       - name: Verify gofmt
         run: |
           test -z "$(gofmt -l .)" || (echo "gofmt needs to be run on:"; gofmt -l .; exit 1)
@@ -96,9 +132,17 @@ jobs:
         run: go vet ./...
 
       - name: golangci-lint
-        uses: golangci-lint/golangci-lint-action@v6
+        # Stage 10 W0: the previous reference (golangci-lint/golangci-lint-action)
+        # does not exist, so this job never ran. Per the upstream README
+        # "Compatibility" section, action v7+ is required for golangci-lint
+        # v2 configuration (.golangci.yml is `version: "2"`); v9 is current
+        # and requires the node24 Actions runtime (upstream README), so a
+        # runner image without node24 fails this step at setup.
+        # The linter version is pinned (not `latest`) so results are
+        # reproducible; bump it deliberately.
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: v2.5.0
 
       - name: Build
         run: go build ./...

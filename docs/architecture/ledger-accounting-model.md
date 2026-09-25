@@ -3766,6 +3766,13 @@ migration-sequencing recommendation, now realizable literally.
 
 #### 6.5.7 HR-9 … HR-15 — hard requirements added by this design
 
+> **Status update (Stage 10 W0, 2026-09-25):** HR-15 is **IMPLEMENTED** —
+> migration `0082_stage9_db_hardening` creates the `BEFORE UPDATE`
+> trigger `ledger_accounts_immutable_fields` (tenant_id, wallet_id,
+> player_account_id, account_type, asset_code and created_at immutable;
+> only status mutable) plus `ledger_accounts_no_truncate`. The text below
+> is the original design record and is kept unchanged.
+
 Extending §6.4.7's HR-1 … HR-8, of which HR-1 … HR-6 and HR-8 are
 unchanged and still binding, and **HR-7 gained a second clause** at Stage
 4H-B0-R7 (write-path `account_type` enumerations in `internal/risk`, per
@@ -8391,7 +8398,7 @@ LF-16) — added Stage 4H-B1, Wave 1.5:**
 | **`0050`** | `bonus_expense` account type (§7.2) | **IMPLEMENTED** — Stage 4H-B1 Wave 2 |
 | **`0051`** | `bonus_grant`/`bonus_conversion`/`bonus_forfeiture`/`bonus_reversal` transaction types **+** the `reason_code` constraint widening (§7.3) | **IMPLEMENTED** — Stage 4H-B1 Wave 2 |
 | *(unassigned)* | `rounding_rules` table + `ledger_transactions.rounding_rule_id` (§7.8) | **REQUESTED** — `ledger-finance`-owned, not on `bonus_expense`'s critical path; number to be assigned by the Orchestrator after Wave-1 reconciliation. Still not built as of Stage 4H-B1 Wave 2: `money.RoundToMinorUnits` (§7.8) is implemented in `internal/money`, but it takes `ruleID` as an opaque, caller-validated parameter — it does not itself look up a `rounding_rules` table, because that table does not exist yet (see `internal/money`'s own package doc comment) |
-| *(unassigned)* | HR-15/HR-16's `ledger_accounts` identity-immutability trigger, reconciled with ADR 0035 §1.3.1's `ledger_accounts_owner_family` CHECK (§7.14) | **REQUESTED** — `ledger-finance`-owned, **hard gate** on the first `bonus_*` posting. **Still not built as of Stage 4H-B1 Wave 2** — HR-16's gate is on the first `bonus_*` POSTING, and this dispatch's own postings are exercised only by its own test suite, not by a live `bonus_grant` call site (`internal/bonus` does not exist yet), so the gate is not yet reachable in production traffic. This is flagged, not resolved, as a required item before `internal/bonus`'s Phase 2/3 call sites go live |
+| *(unassigned)* | HR-15/HR-16's `ledger_accounts` identity-immutability trigger, reconciled with ADR 0035 §1.3.1's `ledger_accounts_owner_family` CHECK (§7.14) | **IMPLEMENTED by migration `0082`** (`ledger_accounts_immutable_fields`; Stage 10 W0 status correction — the remainder of this cell is the historical record). Originally: **REQUESTED** — `ledger-finance`-owned, **hard gate** on the first `bonus_*` posting. **Still not built as of Stage 4H-B1 Wave 2** — HR-16's gate is on the first `bonus_*` POSTING, and this dispatch's own postings are exercised only by its own test suite, not by a live `bonus_grant` call site (`internal/bonus` does not exist yet), so the gate is not yet reachable in production traffic. This is flagged, not resolved, as a required item before `internal/bonus`'s Phase 2/3 call sites go live |
 | **`0052`** *(renumbered from this section's own earlier speculative `0055` claim — see §7.7.2.4's own updated note)* | `player_bonus_held` account type — `ledger_accounts_account_type_check` widening (§7.7.2.4) | **IMPLEMENTED** — Stage 4H-B1 Wave 2. HR-9/HR-23 (its own gate) are themselves now satisfied (§7.4.4) |
 
 Verified at `HEAD` `7e1656f`: `migrations/` ran `0001`…`0049`

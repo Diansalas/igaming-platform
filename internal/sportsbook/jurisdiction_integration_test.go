@@ -526,6 +526,7 @@ func TestSportsbookJurisdiction_ConcurrentConfigurationReadIsConsistent(t *testi
 		t.Fatalf("resolve cash account: %v", err)
 	}
 
+	var blockerPIDValue int32
 	blockerReady := make(chan struct{})
 	proceed := make(chan struct{})
 	blockerErr := make(chan error, 1)
@@ -537,12 +538,20 @@ func TestSportsbookJurisdiction_ConcurrentConfigurationReadIsConsistent(t *testi
 				cashAccountID).Scan(&d, &c); err != nil {
 				return err
 			}
+			var err error
+			if blockerPIDValue, err = backendPID(ctx, tx); err != nil {
+				return err
+			}
 			close(blockerReady)
 			<-proceed
 			return nil
 		})
 	}()
-	<-blockerReady
+	select {
+	case <-blockerReady:
+	case err := <-blockerErr:
+		t.Fatalf("blocker transaction failed before acquiring its lock: %v", err)
+	}
 
 	resultCh := make(chan PlaceBetResult, 1)
 	errCh := make(chan error, 1)
@@ -557,7 +566,7 @@ func TestSportsbookJurisdiction_ConcurrentConfigurationReadIsConsistent(t *testi
 	// PlaceBet call against this file's own manual blocker transaction -
 	// the blocker itself HOLDS the lock rather than waiting on it, so only
 	// PlaceBet's own goroutine ever shows as blocked.
-	if !waitForBlockedCount(t, pool, 1) {
+	if !waitForBlockedCount(t, pool, blockerPIDValue, 1) {
 		close(proceed)
 		t.Fatal("timed out waiting for PlaceBet to block on the uncommitted blocker row")
 	}

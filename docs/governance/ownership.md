@@ -48,6 +48,7 @@ before any edit occurs, and records the decision in `task-registry.md`.
 | OpenAPI | the domain adding endpoints, reviewed by backend | `docs/api/openapi/platform-api.yaml` |
 | CI/CD, observability, infra | devops | `.github/workflows`, `Makefile`, `docker-compose.dev.yml`, `internal/observability` |
 | Testing strategy | qa | Cross-cutting test conventions; each domain owns its own `*_test.go`/`*_integration_test.go` files |
+| Test support — scratch databases (Stage 10 W0) | qa + security (co-owned: a privilege boundary, not only a test convenience) | `internal/testsupport/**` (integration build tag only; never imported by application code). The CI role step and `deploy/init-test-admin-role.dev.sql` are devops-owned, but any change to `igaming_test_admin` or `TEST_ADMIN_DATABASE_URL` needs `security` sign-off; extending either beyond CI/local development requires an ADR |
 
 ## Rules
 

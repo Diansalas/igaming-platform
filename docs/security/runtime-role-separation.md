@@ -51,6 +51,15 @@ Required privileges (already held, no change needed):
   (all owner-implicit; no explicit grant needed or possible to remove
   while it remains the owner).
 
+> **Stage 10 W0 note — test-only admin role.** CI and local development
+> additionally create `igaming_test_admin` (`CREATEDB`, `NOSUPERUSER`,
+> `NOBYPASSRLS`, member of the migration-owner role) solely so
+> `internal/testsupport/scratchdb` can create and drop scratch databases
+> for migration/RLS tests. It is **not** part of this document's
+> deployment model, is never created by `deploy/init-app-role.sql`, and
+> does not change either application role (both stay `NOCREATEDB`). See
+> `docs/testing/testing-strategy.md` "Scratch databases".
+
 ## 3. Required runtime application role
 
 Create a new role — this document uses `igaming_runtime` as the example

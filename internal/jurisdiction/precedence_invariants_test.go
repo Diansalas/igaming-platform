@@ -272,9 +272,9 @@ func TestPlayerJurisdictionResult_FormattingAndJSONNeverLeakACountryCode(t *test
 	}
 	check("%v(result)", fmt.Sprintf("%v", res))
 	check("%+v(result)", fmt.Sprintf("%+v", res))
-	check("%s(result)", fmt.Sprintf("%s", res))
+	check("%s(result)", fmt.Sprintf("%s", res)) //nolint:staticcheck // S1025: %s is the verb under test
 
-	jb, jerr := json.Marshal(res)
+	jb, jerr := json.Marshal(res) //nolint:staticcheck // SA9005: marshaling a type with no exported fields is the point
 	if jerr != nil {
 		t.Fatalf("json.Marshal(result): %v", jerr)
 	}
@@ -289,8 +289,8 @@ func TestPlayerJurisdictionResult_FormattingAndJSONNeverLeakACountryCode(t *test
 	}
 	check("%v(candidate)", fmt.Sprintf("%v", primary))
 	check("%+v(candidate)", fmt.Sprintf("%+v", primary))
-	check("%s(candidate)", fmt.Sprintf("%s", primary))
-	cjb, cjerr := json.Marshal(primary)
+	check("%s(candidate)", fmt.Sprintf("%s", primary)) //nolint:staticcheck // S1025: %s is the verb under test
+	cjb, cjerr := json.Marshal(primary)                //nolint:staticcheck // SA9005: marshaling a type with no exported fields is the point
 	if cjerr != nil {
 		t.Fatalf("json.Marshal(candidate): %v", cjerr)
 	}

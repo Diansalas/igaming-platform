@@ -738,39 +738,42 @@ func TestPlaceBet_LedgerIdempotencyKeyIsNamespacedByTypeAndPlayer(t *testing.T) 
 }
 
 // waitForBlockedCount polls pg_stat_activity - fully deterministic, no
-// timing assumption - for at least `want` backends genuinely blocked
-// (wait_event_type = 'Lock') in the current database. This is the
-// codebase's own established deterministic concurrency-test technique
-// (internal/operatingmarket/concurrency_integration_test.go's identical
-// helper, itself following internal/jurisdiction's original precedent) -
-// directive requirement: NEVER a bare sync.WaitGroup/time.Sleep barrier.
-// Note: internal/casino's and internal/withdrawal's OWN concurrency tests
-// predate this precedent and still use a bare WaitGroup over a real row
-// lock (e.g. TestRequestWithdrawal_ConcurrentRequestsOnlyOneSucceeds) -
-// this test follows the newer, stricter, actually-cited-by-this-stage's-
-// directive technique instead.
+// timing assumption - for at least `want` backends genuinely blocked,
+// directly or transitively, by the test's OWN blocker session
+// (blockerPID, read with pg_backend_pid() inside the blocker
+// transaction). Directive requirement: NEVER a bare sync.WaitGroup/
+// time.Sleep barrier.
 //
-// Deliberately NOT filtered to one specific query-text fragment (unlike
-// operatingmarket's own helper): rg.EvaluateEligibility takes its own
-// transaction-scoped advisory lock (pg_advisory_xact_lock keyed on
-// person_id, not a row lock on player_accounts - Stage 6.1 security
-// review correction of this comment's own earlier claim) for the
-// remainder of its caller's transaction (see that function's own doc
-// comment), so of the two concurrent
-// PlaceBet calls this test races, only the FIRST to reach it is actually
-// blocked on the wallet_balance_projection row (behind the blocker
-// transaction below) - the SECOND is blocked earlier, on the player_
-// accounts row the first is still holding. Both are genuine, deterministic
-// lock waits; counting either query text alone would under-count.
-func waitForBlockedCount(t *testing.T, pool *db.Pool, want int) bool {
+// Scoped to the blocker, not a database-wide count: `go test ./...` runs
+// packages in parallel against the same test database, so a bare
+// "wait_event_type = 'Lock'" count also sees OTHER packages' lock waits
+// and can return before this test's own PlaceBet has reached the lock
+// (Stage 10 W0: TestSportsbookJurisdiction_ConcurrentConfigurationRead
+// IsConsistent then armed its restriction before PlaceBet's jurisdiction
+// gate ran and failed intermittently). The same trap is documented in
+// internal/ledger/lockorder_harness_test.go.
+//
+// Transitive on purpose: rg.EvaluateEligibility takes a transaction-
+// scoped advisory lock (pg_advisory_xact_lock keyed on person_id), so of
+// two concurrent PlaceBet calls only the FIRST to reach it waits on the
+// blocker's wallet_balance_projection row lock - the SECOND waits on the
+// first's advisory lock. pg_blocking_pids covers advisory locks, and the
+// recursive walk counts both genuine waits.
+func waitForBlockedCount(t *testing.T, pool *db.Pool, blockerPID int32, want int) bool {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		var count int
 		err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 			return tx.QueryRow(ctx, `
-				SELECT count(*) FROM pg_stat_activity
-				 WHERE wait_event_type = 'Lock' AND datname = current_database()`).Scan(&count)
+				WITH RECURSIVE waiters(pid) AS (
+					SELECT a.pid FROM pg_stat_activity a
+					 WHERE $1::int = ANY(pg_blocking_pids(a.pid))
+					UNION
+					SELECT a.pid FROM pg_stat_activity a
+					  JOIN waiters w ON w.pid = ANY(pg_blocking_pids(a.pid))
+				)
+				SELECT count(*) FROM waiters`, blockerPID).Scan(&count)
 		})
 		if err != nil {
 			t.Fatalf("poll pg_stat_activity: %v", err)
@@ -781,6 +784,16 @@ func waitForBlockedCount(t *testing.T, pool *db.Pool, want int) bool {
 		time.Sleep(20 * time.Millisecond)
 	}
 	return false
+}
+
+// backendPID returns the backend pid of the connection running tx, so a
+// test can wait for sessions blocked by exactly that blocker. It returns
+// an error rather than calling t.Fatalf because blockers usually run in
+// their own goroutine.
+func backendPID(ctx context.Context, tx pgx.Tx) (int32, error) {
+	var pid int32
+	err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&pid)
+	return pid, err
 }
 
 // TestPlaceBet_ConcurrentPlacementsOnlyOneSucceeds proves two concurrent
@@ -806,6 +819,7 @@ func TestPlaceBet_ConcurrentPlacementsOnlyOneSucceeds(t *testing.T) {
 		t.Fatalf("resolve cash account: %v", err)
 	}
 
+	var blockerPIDValue int32
 	blockerReady := make(chan struct{})
 	proceed := make(chan struct{})
 	blockerErr := make(chan error, 1)
@@ -817,12 +831,20 @@ func TestPlaceBet_ConcurrentPlacementsOnlyOneSucceeds(t *testing.T) {
 				cashAccountID).Scan(&d, &c); err != nil {
 				return err
 			}
+			var err error
+			if blockerPIDValue, err = backendPID(ctx, tx); err != nil {
+				return err
+			}
 			close(blockerReady)
 			<-proceed
 			return nil
 		})
 	}()
-	<-blockerReady
+	select {
+	case <-blockerReady:
+	case err := <-blockerErr:
+		t.Fatalf("blocker transaction failed before acquiring its lock: %v", err)
+	}
 
 	const n = 2
 	results := make([]PlaceBetResult, n)
@@ -836,7 +858,7 @@ func TestPlaceBet_ConcurrentPlacementsOnlyOneSucceeds(t *testing.T) {
 		}(i)
 	}
 
-	if !waitForBlockedCount(t, pool, 2) {
+	if !waitForBlockedCount(t, pool, blockerPIDValue, 2) {
 		close(proceed)
 		wg.Wait()
 		t.Fatal("timed out waiting for both concurrent PlaceBet calls to block on the uncommitted blocker row (pg_stat_activity never reported 2 backends in a Lock wait)")

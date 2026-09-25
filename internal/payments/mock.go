@@ -206,7 +206,8 @@ func (m *MockProvider) CallbackPayload(eventType CallbackEventType, providerRefe
 // values can be reinterpreted as a different set of fields.
 func (m *MockProvider) sign(body mockCallbackBody) string {
 	mac := hmac.New(sha256.New, m.signingSecret)
-	fmt.Fprintf(mac, "%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s\x00%t",
+	// hash.Hash.Write never returns an error.
+	_, _ = fmt.Fprintf(mac, "%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s\x00%t",
 		body.EventType, body.ProviderReference, body.OriginalProviderReference,
 		body.Outcome, body.Amount, body.AssetCode, body.DeclineReason, body.Cascadable)
 	return hex.EncodeToString(mac.Sum(nil))

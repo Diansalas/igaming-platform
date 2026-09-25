@@ -89,7 +89,10 @@ func CreateVerification(ctx context.Context, tx pgx.Tx, provider KYCProvider, pa
 		return Verification{}, fmt.Errorf("%w: tenant_id, brand_id, player_account_id, and person_id are all required", ErrInvalidTransition)
 	}
 
-	result, err := provider.CreateVerification(ctx, CreateVerificationInput{
+	// An explicit field-by-field literal, not a type conversion, so a field
+	// later added to CreateVerificationParams is never passed to the
+	// provider interface by accident.
+	result, err := provider.CreateVerification(ctx, CreateVerificationInput{ //nolint:staticcheck // S1016: see comment above
 		TenantID: params.TenantID, BrandID: params.BrandID,
 		PlayerAccountID: params.PlayerAccountID, PersonID: params.PersonID,
 	})

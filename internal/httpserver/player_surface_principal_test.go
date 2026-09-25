@@ -124,7 +124,7 @@ func TestPlayerSelfServiceRoutes_RejectStaffPrincipal(t *testing.T) {
 			if err != nil {
 				t.Fatalf("request failed: %v", err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != http.StatusForbidden {
 				t.Errorf("a staff token reached a player-only route: expected 403, got %d", resp.StatusCode)
 			}
@@ -149,7 +149,7 @@ func TestPlayerSelfServiceRoutes_RejectAnonymous(t *testing.T) {
 			if err != nil {
 				t.Fatalf("request failed: %v", err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode != http.StatusUnauthorized {
 				t.Errorf("expected 401 with no bearer token, got %d", resp.StatusCode)
 			}
@@ -190,7 +190,7 @@ func TestSessionRoutes_RemainOpenToStaffPrincipals(t *testing.T) {
 			if err != nil {
 				t.Fatalf("request failed: %v", err)
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if resp.StatusCode == http.StatusForbidden {
 				t.Errorf("a staff principal must retain access to its OWN sessions; got 403")
 			}

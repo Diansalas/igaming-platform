@@ -415,7 +415,7 @@ Wave 1 was design-only):
 - `0050` — `bonus_expense` account-type CHECK widening (`ledger-finance`, §7.2)
 - `0051` — `bonus_grant`/`bonus_conversion`/`bonus_forfeiture`/`bonus_reversal` transaction types + `reason_code` constraint widening (`ledger-finance`, §7.3)
 - `0052` — `rounding_rules` table + `ledger_transactions.rounding_rule_id` (`ledger-finance`, §7.8 — requested, now assigned)
-- `0053` — `ledger_accounts` identity-immutability trigger, HR-15/HR-16 (`ledger-finance`, §7.14 — requested, now assigned; **hard gate: must land before the first `player_bonus` posting**, not merely before the first locked-account posting)
+- *(Stage 10 W0 correction: this trigger was ultimately built as `ledger_accounts_immutable_fields` in migration `0082_stage9_db_hardening`; migration `0053` became `economic_operations`.)* `0053` — `ledger_accounts` identity-immutability trigger, HR-15/HR-16 (`ledger-finance`, §7.14 — requested, now assigned; **hard gate: must land before the first `player_bonus` posting**, not merely before the first locked-account posting)
 - `0054`+ — reserved for `bonus-engine`'s own domain tables (`bonus_campaigns`, `bonus_offers`, `bonus_grants`, `bonus_progress`, and any others Wave 2's schema design determines are needed); `bonus-engine` claims sequentially and self-resolves any collision with `0052`/`0053` per the standing protocol (check `git log`/`ls migrations/` before writing)
 - ADR `0040` reserved for `architect` to formally ratify the activity-consumption transport decision (ledger-derived + in-process adapter, no broker) made in `docs/architecture/29-bonus-implementation-contract.md` §2 — to be written by `architect` as part of its Wave 2 role, not minted speculatively now
 

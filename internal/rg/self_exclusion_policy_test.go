@@ -21,7 +21,7 @@ func TestOpenBetSelfExclusionPolicyStrictness_Ordering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !(void > settle) {
+	if void <= settle {
 		t.Fatalf("expected VOID_ON_SELF_EXCLUSION (%d) strictly greater than SETTLE_NORMALLY (%d)", void, settle)
 	}
 }

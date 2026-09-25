@@ -39,10 +39,12 @@ services:
       POSTGRES_PASSWORD: igaming_dev_superuser_password
       POSTGRES_DB: igaming_platform_dev
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - igaming_postgres_data:/var/lib/postgresql/data
       - ./init-app-role.sql:/docker-entrypoint-initdb.d/01-init-app-role.sql:ro
+      # DEV-only igaming_test_admin for scratch-database tests (Stage 10 W0).
+      - ./init-test-admin-role.dev.sql:/docker-entrypoint-initdb.d/02-init-test-admin-role.dev.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d igaming_platform_dev"]
       interval: 5s

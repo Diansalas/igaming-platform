@@ -76,13 +76,13 @@ func TestUnauthenticatedCredentialRoutes_AreRateLimited(t *testing.T) {
 			srv := newRateLimitedTestServer(t)
 
 			first := postRaw(t, srv, path)
-			first.Body.Close()
+			_ = first.Body.Close()
 			if first.StatusCode == http.StatusTooManyRequests {
 				t.Fatalf("the FIRST request must be allowed through, got 429")
 			}
 
 			second := postRaw(t, srv, path)
-			defer second.Body.Close()
+			defer func() { _ = second.Body.Close() }()
 			if second.StatusCode != http.StatusTooManyRequests {
 				t.Errorf("%s is not rate limited: expected 429 on the second request, got %d", path, second.StatusCode)
 			}
@@ -102,7 +102,7 @@ func TestLogoutRoute_IsNotRateLimited(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		resp := postRaw(t, srv, "/v1/auth/logout")
 		status := resp.StatusCode
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if status == http.StatusTooManyRequests {
 			t.Fatalf("logout must not be rate limited; request %d got 429", i+1)
 		}
@@ -119,7 +119,7 @@ func TestAuthenticatedEmailVerificationRequest_StillRequiresAuth(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		resp := postRaw(t, srv, "/v1/me/email-verification/request")
 		status := resp.StatusCode
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if status != http.StatusUnauthorized {
 			t.Fatalf("request %d: expected 401, got %d", i+1, status)
 		}
@@ -147,7 +147,7 @@ func TestAuthRateLimitPerMinute_NegativeDisablesTheLimiter(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		resp := postRaw(t, srv, "/v1/auth/login")
 		status := resp.StatusCode
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if status == http.StatusTooManyRequests {
 			t.Fatalf("a negative override must disable the limiter; request %d got 429", i+1)
 		}
@@ -172,7 +172,7 @@ func TestAuthenticatedPlayerRoutes_AreNotPerIPRateLimited(t *testing.T) {
 			t.Fatalf("request failed: %v", err)
 		}
 		status := resp.StatusCode
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if status == http.StatusTooManyRequests {
 			t.Fatalf("request %d: authenticated routes must not share the credential limiter", i+1)
 		}

@@ -221,7 +221,7 @@ func newUploadMyDocumentHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeValidation, "file is required")
 			return
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		content, err := io.ReadAll(io.LimitReader(file, kyc.MaxDocumentSizeBytes+1))
 		if err != nil {
 			apierror.Write(w, requestID, apierror.CodeValidation, "failed to read uploaded file")

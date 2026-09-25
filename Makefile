@@ -1,4 +1,4 @@
-.PHONY: build run test test-integration test-integration-runtime-role lint fmt fmt-check vet migrate-up migrate-down migrate-status dev-db-up dev-db-down dev-db-init-roles ci
+.PHONY: build run test test-integration test-integration-runtime-role lint fmt fmt-check vet migrate-up migrate-down migrate-status dev-db-up dev-db-down dev-db-init-roles dev-db-init-test-admin ci
 
 GO ?= go
 DATABASE_URL ?= postgres://igaming:igaming_dev_password@127.0.0.1:5432/igaming_platform_dev?sslmode=disable
@@ -9,6 +9,12 @@ DEV_DB ?= igaming_platform_dev
 # below for why) - only by test-integration-runtime-role's dedicated
 # regression test.
 RUNTIME_DATABASE_URL ?= postgres://igaming_runtime:igaming_runtime_dev_password@127.0.0.1:5432/igaming_platform_dev?sslmode=disable
+# igaming_test_admin (Stage 10 W0) is a DEV/CI-only role used solely by
+# internal/testsupport/scratchdb to create/drop scratch databases for the
+# migration and RLS tests; see dev-db-init-test-admin below and
+# docs/testing/testing-strategy.md "Scratch databases". Without it those
+# tests skip.
+TEST_ADMIN_DATABASE_URL ?= postgres://igaming_test_admin:igaming_test_admin_dev_password@127.0.0.1:5432/igaming_platform_dev?sslmode=disable
 
 build:
 	$(GO) build ./...
@@ -20,7 +26,7 @@ test:
 	$(GO) test ./...
 
 test-integration:
-	TEST_DATABASE_URL=$(DATABASE_URL) $(GO) test -tags=integration -v ./...
+	TEST_DATABASE_URL=$(DATABASE_URL) TEST_ADMIN_DATABASE_URL=$(TEST_ADMIN_DATABASE_URL) $(GO) test -tags=integration -v ./...
 
 # test-integration-runtime-role additionally sets TEST_RUNTIME_DATABASE_URL
 # so internal/db/runtime_role_separation_test.go's adversarial-probe suite
@@ -76,6 +82,13 @@ dev-db-down:
 # re-run: every statement in init-app-role.sql is idempotent.
 dev-db-init-roles:
 	sudo -u postgres psql -d $(DEV_DB) -v ON_ERROR_STOP=1 -f deploy/init-app-role.sql
+
+# dev-db-init-test-admin provisions the DEV-only igaming_test_admin role
+# (deploy/init-test-admin-role.dev.sql) that scratch-database integration
+# tests use to CREATE/DROP throwaway databases. Never run in staging or
+# production. Requires dev-db-init-roles first (igaming must exist).
+dev-db-init-test-admin:
+	sudo -u postgres psql -d $(DEV_DB) -v ON_ERROR_STOP=1 -f deploy/init-test-admin-role.dev.sql
 
 # ci runs the same checks CI runs, so failures are caught locally first.
 ci: fmt-check vet lint build test
