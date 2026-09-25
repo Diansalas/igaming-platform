@@ -106,18 +106,16 @@ type cumulativeSpec struct {
 // which player-side leg measures the usage, which player-side legs exist
 // but must not be counted, and which direction consumes capacity.
 //
-// sportsbook_bet was described in this comment block as a not-yet-wired
-// reference shape, and that description named a `sportsbook_void`
-// reversal type. THAT TYPE DOES NOT EXIST: it is not an admitted
-// ledger_transactions.transaction_type in migration 0078 (which widened
-// the CHECK to seventeen values, `sportsbook_bet` being the seventeenth)
-// nor in any later migration, and internal/ledger declares no
-// TxSportsbookVoid constant. The operation is a real production entry
-// below as of Stage 9.2, with ReversalTypes deliberately EMPTY - see ADR
-// 0083 §6.1.1/§6.1.2 for the per-field rationale, and INV-SB-CUM-1
-// (§10) for the binding requirement that whoever widens the
-// transaction_type CHECK with a sportsbook reversal type updates this
-// spec in the SAME change.
+// sportsbook_bet is a real production entry below as of Stage 9.2 (ADR
+// 0083 §6.1.1). Its reversal type `sportsbook_void` became an admitted
+// ledger_transactions.transaction_type in migration 0091 (Stage 10 W1,
+// ADR 0088 §2.1), and - per INV-SB-CUM-1 (ADR 0083 §10), which binds
+// whoever widens the CHECK with a sportsbook reversal type to update this
+// spec in the SAME change - ReversalTypes is now exactly
+// ["sportsbook_void"] (ADR 0088 §6.1). sportsbook_settlement and
+// sportsbook_rollback are deliberately in NEITHER list: a settlement
+// payout is not a stake reversal, and a rollback is never netted (ADR
+// 0038 §13), so both are invisible to the measure.
 //
 // One reference shape is still written down here, so the next author does
 // not have to re-derive it from the flows document:
@@ -234,7 +232,7 @@ var operationCumulativeSpecs = map[Operation]cumulativeSpec{
 	// correct order of events (ADR 0031 §33).
 	OperationSportsbookBet: {
 		TransactionTypes:     []string{"sportsbook_bet"},
-		ReversalTypes:        nil, // sportsbook_void does not exist - see ADR 0083 §6.1.2
+		ReversalTypes:        []string{"sportsbook_void"}, // exactly; never sportsbook_rollback (ADR 0038 §13, ADR 0088 §6.1)
 		MeasuredAccountTypes: []string{"player_cash"},
 		IgnoredAccountTypes:  []string{"player_locked_cash"},
 		ConsumingDirection:   directionDebit,

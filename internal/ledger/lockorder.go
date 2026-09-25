@@ -123,6 +123,43 @@ func LockProjectionsForPosting(ctx context.Context, tx pgx.Tx, in TransactionInp
 	return LockedProjections{AccountIDs: ordered, balances: balances}, nil
 }
 
+// ErrPreLockTenantMismatch is returned by LockProjectionsForPostings when
+// the inputs do not all belong to one tenant.
+var ErrPreLockTenantMismatch = errors.New("ledger: pre-locked postings must all belong to one tenant")
+
+// LockProjectionsForPostings is LockProjectionsForPosting over the union of
+// several postings the caller will Post, in order, in this same
+// transaction (ADR 0088 §5.2, ADR 0082 Amendment A4). An operation that
+// posts more than one transaction - sportsbook void-after-settlement posts
+// a rollback then a void, whose account sets differ - must take every L3
+// lock it will ever need in ONE canonical-order step; locking per Post
+// would acquire later accounts while holding earlier ones, the subset
+// pre-lock R3 forbids. R3 generalises to: the set of inputs pre-locked is
+// exactly the set subsequently posted, with identical Entries and
+// BonusCost. Each later Post re-locks rows already held (a no-op).
+func LockProjectionsForPostings(ctx context.Context, tx pgx.Tx, ins ...TransactionInput) (LockedProjections, error) {
+	if len(ins) == 0 {
+		return LockedProjections{}, fmt.Errorf("%w: no postings to pre-lock", ErrInvalidEntry)
+	}
+	var ids []uuid.UUID
+	for _, in := range ins {
+		if in.TenantID != ins[0].TenantID {
+			return LockedProjections{}, ErrPreLockTenantMismatch
+		}
+		entries, err := prepareEntries(ctx, tx, in)
+		if err != nil {
+			return LockedProjections{}, err
+		}
+		ids = append(ids, entryAccountIDs(entries)...)
+	}
+	ordered := canonicalAccountOrder(ids)
+	balances, err := ensureAndLockProjectionsInOrder(ctx, tx, ins[0].TenantID, ordered)
+	if err != nil {
+		return LockedProjections{}, err
+	}
+	return LockedProjections{AccountIDs: ordered, balances: balances}, nil
+}
+
 // entryAccountIDs projects an entry slice onto its ledger_account_ids, in
 // slice order (deduplication and sorting are canonicalAccountOrder's job).
 func entryAccountIDs(entries []EntryInput) []uuid.UUID {

@@ -194,8 +194,20 @@ jobs:
 
       - name: Migration reversibility (down then up)
         run: |
+          # Stage 10 W1: runs on a FRESH database created by the CI-only test
+          # admin role, not the shared test database. Migration 0091's down
+          # script (like 0078's) refuses once settlement evidence exists, and
+          # the integration tests above leave such evidence behind, so the
+          # shared database would always (correctly) refuse. Reversibility is
+          # a property of the schema; the data-bearing refusals are covered
+          # by migration tests. The database is owned by igaming, so every
+          # step still runs as the non-superuser owner.
+          psql "$TEST_ADMIN_DATABASE_URL" -v ON_ERROR_STOP=1 -c "CREATE DATABASE igaming_reversibility OWNER igaming"
+          export DATABASE_URL="postgres://igaming:igaming_ci_password@localhost:5432/igaming_reversibility?sslmode=disable"
+          go run ./cmd/migrate up
           go run ./cmd/migrate -steps=4 down
           go run ./cmd/migrate up
+          go run ./cmd/migrate verify
 
   frontend:
     # Stage 9 (§23 CI/CD coverage audit): the b2c and backoffice SPAs

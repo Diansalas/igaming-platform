@@ -16,16 +16,16 @@ package risk
 import "testing"
 
 // TestSportsbookBetCumulativeSpecShapeIsExactlyAsSpecified pins every
-// field of ADR 0083 §6.1.1's map literal, including the two fields whose
-// EMPTINESS is a deliberate, reasoned decision rather than an omission:
+// field of ADR 0083 §6.1.1's map literal as amended by ADR 0088 §6.1,
+// including the two fields whose contents are deliberate, reasoned
+// decisions rather than omissions:
 //
-//   - ReversalTypes is empty because `sportsbook_void` does not exist as
-//     a ledger_transactions.transaction_type (migration 0078 admits
-//     seventeen values, `sportsbook_bet` being the seventeenth; no later
-//     migration widens it with a sportsbook reversal, and internal/ledger
-//     declares no TxSportsbookVoid). ADR 0083 §6.1.2 + INV-SB-CUM-1: the
-//     change that adds such a type must update the spec in the same
-//     change, and this assertion is what makes that omission loud.
+//   - ReversalTypes is exactly ["sportsbook_void"] (ADR 0088 §6.1):
+//     migration 0091 admitted the sportsbook reversal type, and
+//     INV-SB-CUM-1 required this spec to change in the same commit.
+//     sportsbook_rollback and sportsbook_settlement must never appear in
+//     it: a rollback is never netted (ADR 0038 §13) and a settlement
+//     payout is not a stake reversal.
 //   - player_locked_bonus is absent from BOTH MeasuredAccountTypes and
 //     IgnoredAccountTypes, so an (impossible today) bonus-funded
 //     sportsbook stake trips ErrUnrecognizedCumulativeLeg instead of
@@ -39,8 +39,11 @@ func TestSportsbookBetCumulativeSpecShapeIsExactlyAsSpecified(t *testing.T) {
 		t.Fatalf("sportsbook_bet spec is incomplete: %v", err)
 	}
 	assertStringSet(t, "TransactionTypes", spec.TransactionTypes, []string{"sportsbook_bet"})
-	if len(spec.ReversalTypes) != 0 {
-		t.Fatalf("ReversalTypes must stay EMPTY until a sportsbook reversal transaction_type actually exists (ADR 0083 §6.1.2 / INV-SB-CUM-1); got %v - if a widening migration landed, this spec must be updated in the SAME change and this assertion rewritten, not deleted", spec.ReversalTypes)
+	assertStringSet(t, "ReversalTypes", spec.ReversalTypes, []string{"sportsbook_void"})
+	for _, never := range []string{"sportsbook_rollback", "sportsbook_settlement"} {
+		if containsAccountType(spec.ReversalTypes, never) || containsAccountType(spec.TransactionTypes, never) {
+			t.Fatalf("%s must never be counted by the sportsbook cumulative measure (ADR 0038 §13, ADR 0088 §6.1 / INV-SB-CUM-1); got TransactionTypes=%v ReversalTypes=%v", never, spec.TransactionTypes, spec.ReversalTypes)
+		}
 	}
 	assertStringSet(t, "MeasuredAccountTypes", spec.MeasuredAccountTypes, []string{"player_cash"})
 	assertStringSet(t, "IgnoredAccountTypes", spec.IgnoredAccountTypes, []string{"player_locked_cash"})

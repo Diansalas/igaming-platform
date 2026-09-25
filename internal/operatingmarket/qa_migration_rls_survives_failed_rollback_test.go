@@ -66,17 +66,19 @@ func TestQAAdversarial_FailedDirtyRollbackLeavesRLSEnabledAndForced(t *testing.T
 		t.Fatalf("seed a ceiling row: %v", err)
 	}
 
-	// The down-migration must fail (dirty database). Roll back 15 steps:
-	// migrations 0090 (Stage 9.2 fix round), 0089 (Stage 9.2 fix round),
-	// 0088 (Stage 9.2), 0087 (Stage 9.2), 0086 (Stage 9.2), 0085 (Stage
-	// 9.1), 0084 (Stage 9.1), 0083 (Stage 9.1), 0082 (Stage 9), 0081
-	// (Stage 8), 0080 (Stage 8), 0079 (Stage 7), 0078 (Stage 6), and 0077
-	// (Stage 4I Phase E-SECURITY) now sit on top of 0076 in the chain and
-	// are all unconditionally reversible in this scenario, so they
-	// succeed on their own before the overall call fails once it reaches
-	// 0076's own guard - mirrors migration_0076_integration_test.go's own
-	// migration0077Version through migration0090Version precedent.
-	if _, err := pool.MigrateDown(context.Background(), dir, 15); err == nil {
+	// The down-migration must fail (dirty database). Roll back 16 steps:
+	// migrations 0091 (Stage 10 W1), 0090 (Stage 9.2 fix round), 0089
+	// (Stage 9.2 fix round), 0088 (Stage 9.2), 0087 (Stage 9.2), 0086
+	// (Stage 9.2), 0085 (Stage 9.1), 0084 (Stage 9.1), 0083 (Stage 9.1),
+	// 0082 (Stage 9), 0081 (Stage 8), 0080 (Stage 8), 0079 (Stage 7), 0078
+	// (Stage 6), and 0077 (Stage 4I Phase E-SECURITY) now sit on top of
+	// 0076 in the chain and are all reversible in this scenario (0091
+	// refuses only once sportsbook settlement evidence exists, which this
+	// test never creates), so they succeed on their own before the overall
+	// call fails once it reaches 0076's own guard - mirrors
+	// migration_0076_integration_test.go's own migration0077Version
+	// through migration0091Version precedent.
+	if _, err := pool.MigrateDown(context.Background(), dir, 16); err == nil {
 		t.Fatal("expected migration 0076's down migration to fail on a dirty database")
 	}
 
@@ -214,18 +216,19 @@ func TestQAAdversarial_PartialRollbackLeavesRegistryRLSDisabledButReapplyRestore
 		t.Fatalf("seed a ceiling row: %v", err)
 	}
 
-	// `-steps=15 down`: migrations 0090, 0089, 0088, 0087, 0086, 0085,
-	// 0084, 0083, 0082, 0081, 0080, 0079, 0078, and 0077 all roll back
-	// successfully on their own (none carries a "refuse if rows exist"
-	// guard - tenants/licences/jurisdictions are core tables that will
+	// `-steps=16 down`: migrations 0091, 0090, 0089, 0088, 0087, 0086,
+	// 0085, 0084, 0083, 0082, 0081, 0080, 0079, 0078, and 0077 all roll
+	// back successfully on their own (none carries a "refuse if rows
+	// exist" guard that this scenario trips - 0091 refuses only once
+	// sportsbook settlement evidence exists - tenants/licences/jurisdictions are core tables that will
 	// always hold rows), and the OVERALL call only THEN fails once it
 	// reaches migration 0076's own dirty-database guard.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 15)
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 16)
 	if err == nil {
-		t.Fatal("expected the -steps=15 down to fail on a dirty database")
+		t.Fatal("expected the -steps=16 down to fail on a dirty database")
 	}
 	wantDown := []int64{
-		migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
+		migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
 		migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version,
 	}
 	if len(rolledBack) != len(wantDown) {
@@ -240,13 +243,13 @@ func TestQAAdversarial_PartialRollbackLeavesRegistryRLSDisabledButReapplyRestore
 	// THE UNDOCUMENTED STATE THIS FIX MAKES EXPLICIT: migration 0077's own
 	// rollback succeeded, so tenants/licences/jurisdictions are now WITHOUT
 	// row-level security, with zero policies and zero deny-truncate
-	// triggers - even though the overall `-steps=3 down` command reported
+	// triggers - even though the overall `-steps=16 down` command reported
 	// failure. An operator reading only "refusing to roll back migration
 	// 0076" would have no way to know this.
 	for _, table := range registryTables {
 		enabled, forced := readRLSPosture(table)
 		if enabled || forced {
-			t.Fatalf("expected %s to have RLS DISABLED after migration 0077's own successful partial rollback (even though the overall -steps=2 command failed), got enabled=%v forced=%v", table, enabled, forced)
+			t.Fatalf("expected %s to have RLS DISABLED after migration 0077's own successful partial rollback (even though the overall -steps=16 command failed), got enabled=%v forced=%v", table, enabled, forced)
 		}
 		if n := countPolicies(table); n != 0 {
 			t.Fatalf("expected %s to have 0 policies after migration 0077's own successful partial rollback, found %d", table, n)

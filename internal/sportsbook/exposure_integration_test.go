@@ -603,24 +603,26 @@ func TestSportsbookCumulative_RollbackOfTheWholeTransactionReleasesEveryLock(t *
 
 // --- item 28 ---------------------------------------------------------------
 
-// TestSportsbookCumulative_VoidedBetStillConsumesCapacityUntilReversalTypeExists
-// pins ADR 0083 §6.1.2's disclosed, conservative over-count: because
-// ReversalTypes is empty (sportsbook_void does not exist as a
-// transaction_type), a bet's stake continues to consume the player's
-// rolling-window cumulative cap even after the underlying sportsbook_bets
-// row is (hypothetically, directly) marked void - there is no code path
-// that reverses the player_cash debit, so risk.Evaluate's own
-// cumulativeUsage query (ledger-entries-based) still counts it. This test
-// must be UPDATED, not deleted, when a reversal type lands.
-func TestSportsbookCumulative_VoidedBetStillConsumesCapacityUntilReversalTypeExists(t *testing.T) {
+// TestSportsbookCumulative_VoidedBetReleasesCapacity replaces this item's
+// Stage 9.2 pin (TestSportsbookCumulative_VoidedBetStillConsumesCapacity-
+// UntilReversalTypeExists), UPDATED rather than deleted as that test
+// required: migration 0091 admitted sportsbook_void, and ADR 0088 §6.1 /
+// INV-SB-CUM-1 set ReversalTypes = ["sportsbook_void"] in the same
+// commit. A real void (Dr player_locked_cash / Cr player_cash, ADR 0088
+// §2.3) now nets the stake out of risk.Evaluate's cumulativeUsage, so a
+// second bet in the same window is admitted (§6.2 row "place ->
+// void-before": consumed 0). The status is driven through the real
+// settlement path; a raw status UPDATE is rejected by T-2.
+func TestSportsbookCumulative_VoidedBetReleasesCapacity(t *testing.T) {
 	pool := testPool(t)
 	f := seedFixture(t, pool)
 	fundWallet(t, pool, f, 100_000)
 	sel := seedSelection(t, pool, seedSelectionParams{})
+	actor := seedRiskManager(t, pool, f.tenantID)
 	// A cumulative cap that admits exactly ONE 1_000 stake.
 	seedCumulativeRule(t, pool, f.tenantID, 1_000)
 
-	first, err := placeBet(t, pool, f, sel, 1_000, "exp-void-still-counts-1")
+	first, err := placeBet(t, pool, f, sel, 1_000, "exp-void-releases-1")
 	if err != nil {
 		t.Fatalf("place first bet: %v", err)
 	}
@@ -628,61 +630,49 @@ func TestSportsbookCumulative_VoidedBetStillConsumesCapacityUntilReversalTypeExi
 		t.Fatalf("expected the first bet to be accepted, got rejection %q/%q", first.RejectionCategory, first.RejectionCode)
 	}
 
-	// Directly mark the bet 'void' - status is mutable (only identity/
-	// stake/odds/idempotency/jurisdiction columns are frozen, migration
-	// 0082/0087) - simulating what a future settlement/void path would set,
-	// WITHOUT any corresponding reversal ledger posting (none exists).
-	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE sportsbook_bets SET status = 'void' WHERE id = $1`, first.Bet.ID)
-		return err
-	})
+	// Before the void the cap is exhausted.
+	blocked, err := placeBet(t, pool, f, sel, 1_000, "exp-void-releases-blocked")
 	if err != nil {
-		t.Fatalf("mark bet void: %v", err)
+		t.Fatalf("place blocked bet: %v", err)
+	}
+	if blocked.Accepted || blocked.RejectionCategory != RejectionRiskDenied {
+		t.Fatalf("expected a risk denial before the void, got %+v", blocked)
 	}
 
-	// A second bet, same player, same rolling window: still denied - the
-	// "voided" bet's stake was never reversed at the LEDGER level (the
-	// only place risk.Evaluate's cumulativeUsage measures from), so it
-	// still counts.
-	second, err := placeBet(t, pool, f, sel, 1_000, "exp-void-still-counts-2")
+	mustSimulate(t, pool, f.tenantID, voidEvent(first.Bet.ID, actor, "market_cancelled"))
+
+	second, err := placeBet(t, pool, f, sel, 1_000, "exp-void-releases-2")
 	if err != nil {
 		t.Fatalf("place second bet: %v", err)
 	}
-	if second.Accepted {
-		t.Fatal("expected the second bet to be denied - the voided first bet's stake still consumes cumulative capacity (no reversal type exists, ADR 0083 §6.1.2)")
-	}
-	if second.RejectionCategory != RejectionRiskDenied {
-		t.Fatalf("expected rejection category %q, got %q", RejectionRiskDenied, second.RejectionCategory)
+	if !second.Accepted {
+		t.Fatalf("expected the second bet to be accepted - the void nets the first stake out of cumulative usage (ADR 0088 §6.2), got rejection %q/%q", second.RejectionCategory, second.RejectionCode)
 	}
 }
 
 // --- item 29 ---------------------------------------------------------------
 
-// TestSportsbookExposure_SettlementInteractionIsSpecifiedNotImplemented
-// asserts status values OTHER than 'open' are excluded from the exposure
-// aggregate, using directly-inserted rows (no settlement path exists to
-// produce them today).
-func TestSportsbookExposure_SettlementInteractionIsSpecifiedNotImplemented(t *testing.T) {
+// TestSportsbookExposure_SettledBetLeavesOpenExposure asserts a bet
+// settled through the real Stage 10 settlement path (ADR 0088 §6.3) is
+// excluded from the open-exposure aggregate. Formerly
+// TestSportsbookExposure_SettlementInteractionIsSpecifiedNotImplemented,
+// which set the status with a raw UPDATE that migration 0091's T-2 now
+// rejects.
+func TestSportsbookExposure_SettledBetLeavesOpenExposure(t *testing.T) {
 	pool := testPool(t)
 	f := seedFixture(t, pool)
 	fundWallet(t, pool, f, 100_000)
 	sel := seedSelection(t, pool, seedSelectionParams{})
 	seedExposureLimit(t, pool, f.tenantID, nil, "selection", "EUR", 3_000)
+	actor := seedRiskManager(t, pool, f.tenantID)
 
-	// A first bet consumes 2_000 of the 3_000 ceiling and is immediately
-	// (directly) marked settled_won - simulating a status this stage never
-	// produces through PlaceBet itself.
+	// A first bet consumes 2_000 of the 3_000 ceiling and is then settled
+	// won through the real settlement path.
 	first, err := placeBet(t, pool, f, sel, 1_000, "exp-settlement-1")
 	if err != nil || !first.Accepted {
 		t.Fatalf("place first bet: result=%+v err=%v", first, err)
 	}
-	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE sportsbook_bets SET status = 'settled_won' WHERE id = $1`, first.Bet.ID)
-		return err
-	})
-	if err != nil {
-		t.Fatalf("mark bet settled: %v", err)
-	}
+	mustSimulate(t, pool, f.tenantID, settleEvent(first.Bet.ID, actor, 1, SettlementOutcomeWon, first.Bet.PotentialReturn))
 
 	// A second bet for the SAME 2_000 potential_return must now be
 	// accepted - the settled bet no longer counts as OPEN exposure, so the

@@ -140,15 +140,19 @@ const (
 	// placement posting (Stage 6, migration 0078's additive CHECK-
 	// constraint value): Dr player_cash / Cr player_locked_cash, no
 	// house_gaming leg at placement time (the stake is not recognized as
-	// revenue until settlement, which this stage does not build - see
-	// internal/sportsbook's own package doc comment). Settlement/void/
-	// partial-settlement/cashout/rollback transaction types
-	// (sportsbook_settlement/_void/_partial_settlement/_cashout/_rollback,
-	// ADR 0038 §5/§8/§10) remain NOT IMPLEMENTED this stage - no code path
-	// writes them, and they are deliberately absent from migration 0078's
-	// CHECK-constraint widening until a future stage actually builds
-	// settlement.
+	// revenue until settlement).
 	TxSportsbookBet TransactionType = "sportsbook_bet"
+	// TxSportsbookSettlement/Void/Rollback implement ADR 0038 §5/§8.1/§10
+	// for cash-funded singles in in-house mode (Stage 10 W1, ADR 0088,
+	// migration 0091): settlement Dr player_locked_cash S / Cr house_gaming
+	// S (+ Dr house_gaming P / Cr player_cash P when won); void Dr
+	// player_locked_cash S / Cr player_cash S; rollback the exact inverse of
+	// a settlement. Written only by internal/sportsbook's settlement
+	// functions under the bet's L1 row lock (INV-LOCK-E4). Partial
+	// settlement and cashout remain NOT IMPLEMENTED.
+	TxSportsbookSettlement TransactionType = "sportsbook_settlement"
+	TxSportsbookVoid       TransactionType = "sportsbook_void"
+	TxSportsbookRollback   TransactionType = "sportsbook_rollback"
 )
 
 // Direction is a ledger entry's debit/credit side. Never a signed amount

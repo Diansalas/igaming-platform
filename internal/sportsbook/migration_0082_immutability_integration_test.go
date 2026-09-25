@@ -120,23 +120,30 @@ func TestMigration0082_SportsbookBetsImmutableFields(t *testing.T) {
 	}
 }
 
-// TestMigration0082_SportsbookBetsStatusStaysMutable asserts the one
-// column migration 0082 deliberately leaves writable. Migration 0078's
-// own CHECK already declares the full future settlement lifecycle
-// ('open' -> settled_won/settled_lost/void); a trigger that froze status
-// would block the settlement stage outright, so the allowance is tested
-// rather than assumed. status carries no money - the stake and odds that
-// determine the money are the frozen columns above.
-func TestMigration0082_SportsbookBetsStatusStaysMutable(t *testing.T) {
+// TestMigration0082_SportsbookBetsStatusMovesOnlyThroughSettlement
+// replaces TestMigration0082_SportsbookBetsStatusStaysMutable. Migration
+// 0082 deliberately left status writable so a settlement stage could
+// exist; migration 0091 (Stage 10 W1, ADR 0088 §3.3) then made status a
+// derived cache of sportsbook_bet_settlements, guarded by T-2. So: a raw
+// status UPDATE with no history behind it is rejected, and the same
+// transition succeeds through the settlement path.
+func TestMigration0082_SportsbookBetsStatusMovesOnlyThroughSettlement(t *testing.T) {
 	pool := testPool(t)
 	f := seedFixture(t, pool)
-	betID := seedPlacedBet(t, pool, f, "mig0082-status-mutable")
+	betID := seedPlacedBet(t, pool, f, "mig0082-status-derived")
 
-	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE sportsbook_bets SET status = 'settled_won' WHERE id = $1`, betID)
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE sportsbook_bets SET status = 'settled_lost' WHERE id = $1`, betID)
 		return err
-	}); err != nil {
-		t.Fatalf("expected a status transition to remain permitted, got: %v", err)
+	})
+	if err == nil {
+		t.Fatal("expected T-2 to reject a status UPDATE with no settlement history behind it")
+	}
+
+	actor := seedRiskManager(t, pool, f.tenantID)
+	res := mustSimulate(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeLost, 0))
+	if res.BetStatus != BetStatusSettledLost {
+		t.Fatalf("expected settled_lost through the settlement path, got %q", res.BetStatus)
 	}
 }
 
@@ -190,12 +197,23 @@ func TestMigration0082_SportsbookBetsDenyTruncate(t *testing.T) {
 	f := seedFixture(t, pool)
 	seedPlacedBet(t, pool, f, "mig0082-truncate")
 
+	// Since migration 0091, sportsbook_bet_settlements references
+	// sportsbook_bets, so a plain TRUNCATE is refused by PostgreSQL's FK
+	// check before any trigger runs. CASCADE gets past that check and
+	// proves the deny trigger itself still fires.
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `TRUNCATE sportsbook_bets`)
 		return err
 	})
 	if err == nil {
-		t.Fatal("expected sportsbook_bets_no_truncate to reject TRUNCATE, got nil error")
+		t.Fatal("expected a plain TRUNCATE of sportsbook_bets to be refused, got nil error")
+	}
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `TRUNCATE sportsbook_bets CASCADE`)
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected sportsbook_bets_no_truncate to reject TRUNCATE ... CASCADE, got nil error")
 	}
 	if !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("expected ledger_deny_mutation's own append-only message, got: %v", err)
