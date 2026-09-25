@@ -3736,6 +3736,40 @@ human. Record: `docs/plans/stage-10-planning-gate-proposal.md`.
 Stage 10 — CI Evidence Restoration + Sportsbook Settlement Lifecycle
 (proposal §8). Requires the five human approvals in proposal §V.
 
+## Stage 10 — CI Evidence Restoration + Sportsbook Settlement Lifecycle
+
+Approved by the human on 2026-09-25 (ADR 0087; planning-gate commit
+`2355ab7`). Staging kept running and untouched. W1 may not start before
+the W0 five-consecutive-green-run gate.
+
+### W0 — CI evidence restoration
+
+| ID | Owner | Status | Files owned | Tests | Blockers | Integration |
+|---|---|---|---|---|---|---|
+| S10-W0-01 | devops (Orchestrator implemented) | Done | `.github/workflows/ci.yml` (action `golangci/golangci-lint-action@v9`, linter pinned `v2.5.0`, `workflow_dispatch`, test-admin role step, guard step, integration-evidence assertion step) | CI runs below | none | Integrated |
+| S10-W0-02 | qa + security (Orchestrator implemented) | Done | `internal/testsupport/scratchdb/scratchdb.go` (new), five migration-test callers, `deploy/init-test-admin-role.dev.sql` (new), `Makefile`, `deploy/docker-compose.dev.yml` | local: 3/3 full integration runs, 32 packages, 0 DB-URL skips; negative: admin URL unset → skip; owner `BYPASSRLS` → fail | none | Integrated |
+| S10-W0-03 | qa (Orchestrator implemented) | Done | `internal/sportsbook/{orchestrator,jurisdiction,failure_mode_matrix}_integration_test.go`, `internal/casino/{failure_mode_matrix,stage9_concurrency}_integration_test.go` — lock-wait polling scoped to the test's own blocker (flake root cause) | as above | none | Integrated |
+| S10-W0-04 | code-reviewer scope (Orchestrator implemented) | Done | 19 lint findings: `internal/{casino,payments}/mock.go`, `internal/httpserver/{kyc_handlers.go,player_surface_principal_test.go,ratelimit_routes_test.go}`, `internal/providers/httpclient/client.go`, `internal/kyc/verification_service.go`, `internal/jurisdiction/precedence_invariants_test.go`, `internal/rg/self_exclusion_policy_test.go` | `golangci-lint run ./...` v2.5.0: 0 issues | none | Integrated |
+| S10-W0-05 | security + devops | **BLOCKED (isolated external dependency)** — offline part Done | `b22d5c4` re-validation | offline `deploy/aws/tests/run-static-checks.sh`: 42/42 terraform tests + 7 node tests + guards PASS; network policy parses, 3,545 bytes; static security/devops review: no material risk | live Access Analyzer `ValidatePolicy` + 30-case `simulate-deployer-policies.py`: deployer credential probed and **denied** `access-analyzer:ValidatePolicy` and `iam:SimulateCustomPolicy`; needs a credential holding those two read-only actions (the Stage 9.4 read-only verification user ran both before) | n/a |
+| S10-W0-06 | Orchestrator | Done | `docs/governance/{project-status,change-control,ownership}.md`, `docs/architecture/ledger-accounting-model.md` (HR-15 implemented by migration 0082), `docs/testing/testing-strategy.md`, `docs/security/runtime-role-separation.md`, `docs/decisions/0087-*.md` | n/a (documentation) | none | n/a |
+| S10-W0-R | security, devops, architect, qa, code-reviewer | Done | review only | security APPROVED WITH CHANGES (3 P3, adopted); devops APPROVED (earlier "v6" claim withdrawn); architect APPROVED WITH CONDITIONS (deferral record, ownership row, lint-debt registration — done); qa PARTIALLY IMPLEMENTED pending CI gate (P2 below tracked); code-reviewer CHANGES REQUIRED → P1 (docs claimed two controls) resolved by the security-P3 implementation, P3s fixed | none | n/a |
+
+**W0 findings, decisions, deferrals**
+- F-1 root cause confirmed: the action repository `golangci-lint/golangci-lint-action` does not exist. Upstream README "Compatibility": action v7+ required for golangci-lint v2 config; v9 requires node24. The `devops` planning-review claim that v6 sufficed was wrong and is withdrawn.
+- **Record correction:** the planning gate attributed all six failing integration packages to `CREATEDB`. Five were; the sixth (`internal/sportsbook`) was an intermittent failure of `TestSportsbookJurisdiction_ConcurrentConfigurationReadIsConsistent`, root-caused to a database-wide lock-wait count seeing other packages' waits. Fixed (S10-W0-03).
+- Orchestrator ruling: the scratch helper lives in a non-`_test` package (`internal/testsupport/scratchdb`) because Go cannot share `_test.go` code across packages; every file carries `//go:build integration` (never compiled into an application binary) and the CI guard enforces it.
+- DEFERRED (P3, text only, no security effect): stale ALB security-group description from `b22d5c4`. Changing an `aws_security_group` `description` forces replacement, which would modify the running staging environment the human ordered untouched. Do it in the next human-authorized staging change window.
+- DEFERRED (P3): integration-tagged test files are not linted in CI (`--build-tags=integration` reports 467 errcheck/unused findings).
+- DEFERRED (P3, `qa` P2 downgraded by the Orchestrator with reason): `internal/jurisdiction/{evaluation_policy,tenant_licence_admin}_integration_test.go` and `internal/operatingmarket/concurrency_integration_test.go` filter lock waits by their own statement text rather than blocker pid. Those statements are unique to their packages, so parallel packages cannot produce matching waits; convert when those files are next touched.
+- Expected CI skips: exactly five sportsbook rung-2 placeholder tests, `BLOCKED on HDR-J-7` (ADR 0083 §5.3.3).
+- Pre-gate: run 238 (`36141525827`, commit `05e1990`) — first green `build-test-lint` in this branch's history. Not counted: the next commit changed the workflow.
+
+**W0 gate — five consecutive green CI runs** (GitHub Actions `CI`, job `build-test-lint`; every step green; "Assert integration evidence" step fails the job on any database-URL skip and requires the scratch migration/RLS tests to PASS)
+
+| # | Run id | Run no. | Event | Commit | gofmt / vet / lint v2.5.0 | Build | Migrations up + verify | Runtime-role narrowing | Unit (race) | Integration (race) + evidence assertion | Reversibility | Test-admin guard | Other jobs | Result |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| — | pending | — | — | — | — | — | — | — | — | — | — | — | — | runs in progress; rows are added as each run completes |
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and
