@@ -81,6 +81,17 @@ export interface Bet {
   potential_return: number
   status: string
   placed_at: string
+  /**
+   * Stage 10 W1 (docs/decisions/0088 §3.4): read-only settlement fields.
+   * `outcome`/`settled_at` are null while `status` is `open`; `outcome` is
+   * also null for a `void` bet (a void has no won/lost outcome).
+   * `payout_amount` is null unless the bet's current outcome is `won`.
+   * Absent entirely on older cached/snapshot data, so every reader must
+   * treat these as optional as well as nullable.
+   */
+  outcome?: 'won' | 'lost' | null
+  payout_amount?: number | null
+  settled_at?: string | null
 }
 
 /**
