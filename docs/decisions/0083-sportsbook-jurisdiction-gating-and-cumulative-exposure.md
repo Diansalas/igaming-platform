@@ -22,6 +22,13 @@ Part B (§6) is cumulative risk and exposure. Part C (§5) is
 jurisdiction/market gating. They are separable at implementation time
 (§9.4 gives the wave split) but not at design time.
 
+**Amended 2026-09-25 — Stage 10 W1 (ADR 0088 §13).** Inline-marked
+amendments at §6.1.2 (status note, named debt R-3 / ADR 0088 OI-5),
+§6.2.2 (`'open'` no longer the only status), §6.2.5 (rollback re-opening
+residual, revisit before arming — HDR-SB-1) and §7.3/§10 (INV-LOCK-E3
+writer wording). No human decision (HDR-SB-1, HDR-J-*) is answered by
+these amendments.
+
 ## Relationship to ADR 0047 — PARTIALLY superseded
 
 `docs/decisions/0047-sportsbook-catalogue-jurisdiction-boundary-and-cumulative-risk-deferral.md`
@@ -710,6 +717,19 @@ Verification of each field against HEAD:
 
 ### 6.1.2 `ReversalTypes` must be empty — correcting ADR 0047 §4
 
+> **Status note — amended 2026-09-25 (ADR 0088 §13, Stage 10 W1).**
+> Superseded in part by ADR 0088 §6.1: `ReversalTypes = ["sportsbook_void"]`
+> from migration 0091; INV-SB-CUM-1 satisfied in that commit. **Named debt
+> (ruling R-3):** cumulative limits measure net outflow by posting time,
+> not gross stakes placed in the window — a void inside the window of a
+> bet placed before it contributes −S (same as `casino_rollback`); pinned
+> by an integration test; becomes P1 for casino and sportsbook if
+> product/compliance rules limits are gross-by-placement. *(This is the
+> item tracked as OI-5 in ADR 0088 §15, closed there as named debt by
+> review finding R4 / Orchestrator ruling R-3 — not resolved.)* The
+> "must be empty" reasoning below is retained as the Stage 9.2 record; it
+> was correct while no void posting path existed.
+
 `sportsbook_void` is not an admitted `ledger_transactions.transaction_type`
 value and no void/settlement posting path exists (ADR 0082 §5.3:
 "NOT IMPLEMENTED — no `ledger.Post` call site exists"). Declaring a
@@ -839,7 +859,11 @@ Exposure(T, B, A, S) = SUM(sportsbook_bets.potential_return)
 - **Per asset, never netted across assets** — doc 09's own rule.
 - **`status = 'open'` only.** Settled and void bets carry no forward
   liability. Today `'open'` is the only status ever written, so this
-  predicate is future-proofing, not filtering.
+  predicate is future-proofing, not filtering. *(Amended 2026-09-25, ADR
+  0088 §13: `'open'` is no longer the only status written (ADR 0088) —
+  Stage 10 W1 settlement/void/rollback write `settled_won`/`settled_lost`/
+  `void` and return rolled-back bets to `'open'`, so the predicate now
+  filters. Code unchanged, ADR 0088 §6.3.)*
 
 ### 6.2.3 The configuration table (third migration change)
 
@@ -994,6 +1018,14 @@ provider or in-house engine ever makes same-event concurrency a
 throughput problem, the refinement is finer-grained keys plus an explicit
 within-class ordering rule — a future amendment to this ADR and to ADR
 0082 §2.1, not a silent change.
+
+**Rollback re-opening residual (ADR 0088 §5.4).** *(Amended 2026-09-25,
+ADR 0088 §13, Stage 10 W1.)* Settlement, void and rollback take no L0.6:
+`sportsbook_bets` has no `event_id`, and deriving the key would read the
+catalogue before L1. A standalone rollback re-opening a bet concurrently
+with a `PlaceBet` on the same event can let that bet through an armed
+ceiling. **This decision must be revisited before any exposure limit is
+armed (HDR-SB-1).**
 
 ### 6.2.6 Tenant isolation is structural, not a policy choice
 
@@ -1177,10 +1209,15 @@ L0.6 before any L1/L2/L3 lock.
 > transactions take L3 then L1 in the *same* order as each other, which is
 > consistent and therefore deadlock-free even though it is not canonical.
 >
-> **INV-LOCK-E3:** `sportsbook_bets` has exactly one writer
-> (`sportsbook.insertBet`, from `PlaceBet`). Any second writer — in
-> particular the settlement/void path — must resolve E-3 first, by taking
-> its `sportsbook_bets` row lock at L1, *before* `LockProjectionsForPosting`.
+> **INV-LOCK-E3:** `sportsbook_bets` ~~has exactly one writer
+> (`sportsbook.insertBet`, from `PlaceBet`)~~ — **amended 2026-09-25 (ADR
+> 0088 §5.3/§13, Stage 10 W1):** writers are `insertBet` (E-3) and the W1
+> settlement functions, which take L1 first (INV-LOCK-E4). Any second
+> writer — in particular the settlement/void path — must resolve E-3 first,
+> by taking its `sportsbook_bets` row lock at L1, *before*
+> `LockProjectionsForPosting`. *(That forward condition is met by the W1
+> settlement functions, ADR 0088 §5.1/§5.3. E-3 itself, in `PlaceBet`,
+> remains a named open exception — ADR 0088 §15 OI-4.)*
 
 ### 7.4 Financial-invariant preservation
 
@@ -1373,7 +1410,11 @@ landing them concurrently is not.
 - **INV-SB-EXP-2** — Exposure is never treated as a balance, never
   written to the ledger, and never surfaced to a player. No amount or
   threshold from `evaluateExposureLimits` reaches an HTTP response body.
-- **INV-LOCK-E3** — see §7.3.
+- **INV-LOCK-E3** — see §7.3. *(Amended 2026-09-25, ADR 0088 §13:
+  "`sportsbook_bets` has exactly one writer" → "writers are `insertBet`
+  (E-3) and the W1 settlement functions, which take L1 first
+  (INV-LOCK-E4)"; INV-LOCK-E4 is defined in ADR 0082 Amendment A4 / ADR
+  0088 §5.3.)*
 - **INV-SB-ORDER-1** — Every decision gate in `PlaceBet` runs before
   `ledger.LockProjectionsForPosting`. A gate added after it is a defect,
   whatever it checks.

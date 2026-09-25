@@ -13,6 +13,14 @@ This ADR supersedes the Stage 9 proposal "sort the entries inside
 **LOCK-1**. It does not change any financial invariant: nothing about
 what gets posted changes, only the sequence in which rows are locked.
 
+**Amended 2026-09-25 — Amendment A4 (Stage 10 W1, ADR 0088 §5/§5.5).**
+Sportsbook settlement, void and rollback are brought under the canonical
+order (§1.5 row, §2.1 exception list, §2.2 R1/R3, new §5.1c E-4 /
+INV-LOCK-E4, Amendment A2's prospective binding, Amendment A3/INV-LOCK-E3
+wording, §4.4/§5.3 pointers); see "Amendment A4" at the end of this file.
+Partial settlement and cashout remain `NOT IMPLEMENTED` and bound by
+Amendment A2.
+
 ## Context
 
 ### The reported defect
@@ -135,7 +143,8 @@ not work.**
 | Site | Locks, in order | Outside `Post`? |
 | --- | --- | --- |
 | `PlaceBet` (`orchestrator.go`, lock helper at :465, used at :235) | RG/Risk advisory locks; **`player_cash` projection `FOR UPDATE`**; `ledger_transactions` key insert; implicit projections `player_cash` → `player_locked_cash` (:288) | yes |
-| settlement / void / partial settlement / cashout | **NOT IMPLEMENTED** — no `ledger.Post` call site exists (ADR 0038 §5/§8/§10; the transaction types are deliberately absent from migration `0078`) | n/a |
+| settlement / void / rollback *(row amended 2026-09-25, Amendment A4 (1), ADR 0088 §5.1)* | L1 `sportsbook_bets` row `FOR UPDATE` → (rollback/void-after-settlement) L2 settlement `ledger_transactions` `FOR UPDATE` → L3 `LockProjectionsForPostings` over every posting → L4 `Post` (one or two) → E-4 (§5.1c) | yes (L1/L2 and the E-4 history insert/status UPDATE) |
+| partial settlement / cashout | **NOT IMPLEMENTED** — no `ledger.Post` call site exists (ADR 0038 §8.2/§8.3). *(Original row, before Amendment A4, read "settlement / void / partial settlement / cashout — NOT IMPLEMENTED — no `ledger.Post` call site exists (ADR 0038 §5/§8/§10; the transaction types are deliberately absent from migration `0078`)"; settlement/void/rollback types were added by migration `0091`.)* | n/a |
 
 ### 1.6 `internal/payments`
 
@@ -208,11 +217,12 @@ This ADR subsumes them; none is contradicted.
 
 Every transaction that writes to the ledger acquires locks in strictly
 non-decreasing class order. Within a class, the stated key breaks ties.
-**No exceptions except E-1 (§5.1), E-2 (§5.1a) and E-3 (Amendment A3),
-each of which is named, bounded and guarded.** *(E-3 was added by
-Amendment A3 in Stage 9.2; this sentence was updated by the Stage 9.2
-`ledger-finance` review — see the addendum at the end of this file — so
-that the rule and its own exception list cannot drift apart.)*
+**No exceptions except E-1 (§5.1), E-2 (§5.1a), E-3 (Amendment A3) and
+E-4 (§5.1c, Amendment A4), each of which is named, bounded and guarded.**
+*(E-3 was added by Amendment A3 in Stage 9.2; this sentence was updated by
+the Stage 9.2 `ledger-finance` review — see the addendum at the end of
+this file — so that the rule and its own exception list cannot drift
+apart. E-4 added 2026-09-25 by Amendment A4 (3), ADR 0088 §5.3.)*
 
 | Class | What | Within-class order |
 | --- | --- | --- |
@@ -237,6 +247,10 @@ and is ordered by its own canonical key (§3.2).
   acquires **all** of its L3 locks in **one** step, through
   `ledger.LockProjectionsForPosting` (§3.1), before it takes any L4 lock
   and before it reads any balance for a decision.
+  *(Amended 2026-09-25, Amendment A4 (2), ADR 0088 §5.2: an operation
+  posting more than one transaction pre-locks the union once via
+  `ledger.LockProjectionsForPostings`; the pre-locked inputs are exactly
+  those posted.)*
 - **R2 — ascending `ledger_account_id`, always.** The L3 order is
   ascending `ledger_accounts.id`. It is arbitrary but *stable*, requires
   no domain knowledge, needs no central registry of account types, and
@@ -247,6 +261,11 @@ and is ordered by its own canonical key (§3.2).
   a *prefix* of the ascending order, which no caller can know. This is
   the precise generalisation of the LOCK-1 bug: `postBet` pre-locked the
   subset `{player_cash}` of `{player_cash, house_gaming}`.
+  *(Amended 2026-09-25, Amendment A4 (2), ADR 0088 §5.2: for a
+  multi-posting operation R3 reads "the set of inputs pre-locked is
+  exactly the set subsequently posted, with identical `Entries` and
+  `BonusCost`" — pre-locking one posting's accounts and then posting a
+  second is a subset pre-lock and violates R3.)*
 - **R4 — `wallet_balance_projection` is locked only by `internal/ledger`.**
   No `FOR UPDATE` on that table may appear in any other package. The
   three `lockCashBalance*` helpers are deleted, not kept as wrappers.
@@ -565,6 +584,11 @@ ADR 0082 L3").
   (NOT IMPLEMENTED). This ADR binds them prospectively: when built, they
   must use `LockProjectionsForPosting` and must not introduce a
   projection `FOR UPDATE` of their own.
+  *(Amended 2026-09-25, Amendment A4 (7): settlement, void and rollback
+  are no longer NOT IMPLEMENTED — see Amendment A4 and ADR 0088 §5 (they
+  use `LockProjectionsForPostings` and take no projection `FOR UPDATE` of
+  their own). Partial settlement and cashout remain NOT IMPLEMENTED and
+  bound as stated.)*
 
 ### 4.5 `internal/payments/orchestrator.go`
 
@@ -718,6 +742,49 @@ above — after which `BindProviderRound` sits at L1, ahead of L2/L3, and
 this exception is deleted. Until then, a `code-reviewer`-owned grep for
 new writers of `casino_provider_rounds` is the control.
 
+### 5.1c Exception E-4 — sportsbook settlement history insert and status UPDATE after L4 (Amendment A4, 2026-09-25)
+
+*(Added by Amendment A4 (4); text of ADR 0088 §5.3. There is no §5.1b —
+E-3 is recorded in Amendment A3, not in §5.)*
+
+History rows in `sportsbook_bet_settlements` cannot be inserted before
+`Post`: `ledger_transaction_id` is `NOT NULL` with an FK, `Post` mints the
+id internally, and the table is append-only (no reserve-then-update). So
+the history insert and the `sportsbook_bets.status` UPDATE follow L4, as
+`PlaceBet`'s `insertBet` does (E-3 precedent).
+
+**Safety argument.** The status UPDATE is **not HOT**: `status` is in the
+predicate of `idx_sportsbook_bets_open_exposure` (migration 0088:124), so
+the UPDATE writes new entries into every index on `sportsbook_bets`,
+including `UNIQUE (tenant_id, player_account_id, idempotency_key)`, and
+another transaction's unique check on that key may **wait on this
+in-progress updater**. That wait cannot close a cycle, for one reason:
+**the E-4 writes begin only after the L3 step already holds every L3
+lock this transaction will ever take**. From that point onward this
+transaction acquires nothing a `PlaceBet` (or any L3-holding transaction)
+could hold: the history unique-index entries and the FK `KEY SHARE` are
+keyed by this bet (every other writer of this bet is queued behind the
+same L1 lock before it reaches L3), the bet row is already locked by this
+transaction, and `UNIQUE (ledger_transaction_id)` keys a row this
+transaction just created. So anything waiting on the E-4 writes waits on
+a transaction that will finish without waiting on it.
+
+> **INV-LOCK-E4:** every INSERT into `sportsbook_bet_settlements` and every
+> UPDATE of `sportsbook_bets.status` happens in a transaction that (i)
+> took the bet's `FOR UPDATE` row lock at L1, before any L2/L3 lock, and
+> (ii) performs the INSERT/UPDATE only **after** all of its L3 locks are
+> held (after `LockProjectionsForPostings`). Sole writers: the named W1
+> settlement functions in `internal/sportsbook`, verified by the static
+> test `sportsbook_settlement_sole_writer_test.go` (ADR 0088 §14; owned by
+> `code-reviewer` and `qa`).
+
+**`sportsbook_bets` writers.** They are `insertBet` (E-3, from `PlaceBet`)
+and the W1 settlement functions, which take L1 first (INV-LOCK-E4).
+INV-LOCK-E3's forward condition ("a second writer … must take its row lock
+at L1 before `LockProjectionsForPosting`") is met. `PlaceBet` inserts only
+**new** rows and never locks an existing bet row; E-3 itself is not closed
+by W1 (ADR 0088 §15, OI-4).
+
 ### 5.2 LOCK-1d residual — a grant that becomes active mid-bet
 
 `postBet`'s L0.2 player-scope lock (§3.3) closes the cycle for every
@@ -735,6 +802,11 @@ would silently reopen LOCK-1d. **Not deferred; documented.**
 **NOT IMPLEMENTED** — cannot be brought under the canonical order this
 stage because the code does not exist. §4.4 binds them prospectively.
 This is a scope fact, not a deferral of known-broken code.
+
+*(Amended 2026-09-25, Amendment A4 (7): settlement, void and rollback are
+now brought under the canonical order by Amendment A4 (below) and ADR 0088
+§5, with the named exception E-4 (§5.1c). Partial settlement and cashout
+remain NOT IMPLEMENTED under this section.)*
 
 ### 5.4 What is explicitly out of scope
 
@@ -993,15 +1065,20 @@ bounded exception, not a new violation of that rule.
 > `GET /v1/me/sportsbook/bets` and the admin list are all unlocked reads,
 > and settlement/void are NOT IMPLEMENTED (§5.3, unchanged by ADR 0083's
 > own Part C/Part B — neither adds a settlement/void ledger-posting code
-> path). Two concurrent `PlaceBet` transactions take L3 then L1 in the
+> path). *(Amended 2026-09-25: Stage 10 W1 adds settlement/void/rollback
+> writers; they take the bet row lock at L1 before any L3 lock, so they
+> are not such a counterpart — Amendment A4, §5.1c.)* Two concurrent `PlaceBet` transactions take L3 then L1 in the
 > *same* order as each other, which is consistent and therefore
 > deadlock-free even though it is not canonical.
 >
-> **INV-LOCK-E3:** `sportsbook_bets` has exactly one writer
-> (`sportsbook.insertBet`, from `PlaceBet`). Any second writer — in
+> **INV-LOCK-E3:** `sportsbook_bets` ~~has exactly one writer
+> (`sportsbook.insertBet`, from `PlaceBet`)~~ — **reworded 2026-09-25 by
+> Amendment A4 (6):** writers are `insertBet` (E-3) and the W1 settlement
+> functions, which take L1 first (INV-LOCK-E4). Any second writer — in
 > particular a future settlement/void path — must resolve E-3 first, by
 > taking its `sportsbook_bets` row lock at L1, *before*
-> `LockProjectionsForPosting`.
+> `LockProjectionsForPosting`. *(Met by the W1 settlement functions,
+> §5.1c.)*
 
 This amendment names a pre-existing inversion; it does not introduce one.
 ADR 0083 Part C's own new jurisdiction gate (steps 5-7 of that ADR's §7.1)
@@ -1011,6 +1088,10 @@ lock-acquisition sequence in any other respect. Amendment A2 (new lock
 class L0.6, ADR 0083 Part B / §6.2.5) is deliberately NOT made here — it
 belongs to the separate wave implementing ADR 0083's cross-player exposure
 gate, per that ADR's own §9.4 wave split.
+
+*(Note, 2026-09-25, applying `ledger-finance` review finding P3-2 via
+Amendment A4 (8): Amendment A2 was subsequently made — see the A2 block
+below.)*
 
 ---
 
@@ -1065,6 +1146,13 @@ alongside Amendment A1 (R6) and Amendment A3 (E-3, Wave 2/Part C).
 > and cashout, when built (NOT IMPLEMENTED today), must take L0.6 before
 > any L1/L2/L3 lock on the same event, exactly like every other L0
 > sub-class's own prospective binding.
+>
+> **Amended 2026-09-25 by Amendment A4 (5), ADR 0088 §5.4:** settlement,
+> void and rollback do **not** take L0.6, because `sportsbook_bets`
+> carries no `event_id` and deriving the key would read the catalogue
+> before L1 (ADR 0088 §5.4); this must be revisited before any exposure
+> limit is armed (HDR-SB-1). Partial settlement and cashout remain bound
+> by A2 until their own ADR.
 
 This amendment adds a new lock class; it does not alter any existing
 class's position, and it does not touch Amendment A3/E-3, which is a
@@ -1212,3 +1300,53 @@ operating-market tests, correctly skipped as BLOCKED on HDR-J-7);
 
 None of P2-1 or P3-1..4 blocks Stage 9.2. No part of ADR 0083 §6.2 is
 rejected under ADR 0082 §7.4 / CLAUDE.md's financial-invariant authority.
+
+---
+
+## Amendment A4 — 2026-09-25 — Stage 10 W1 — sportsbook settlement, void and rollback (`ledger-finance`, per `docs/decisions/0088-sportsbook-settlement-implementation-contract.md` §5/§5.5)
+
+Applied on acceptance of ADR 0088 (ACCEPTED 2026-09-25). Text of ADR 0088
+§5.5, verbatim; each numbered item is also marked inline at its target
+location in this file. The settlement driver this amendment orders is
+in-house **`MOCK`** mode, driven by a non-production test-support staff
+route (ADR 0088 §9) — not a provider integration.
+
+> **Amendment A4 — Stage 10 W1 — sportsbook settlement, void and rollback
+> (ADR 0088 §5).** (1) §1.5 row "settlement / void …" now reads: L1
+> `sportsbook_bets` row `FOR UPDATE` → (rollback/void-after-settlement) L2
+> settlement `ledger_transactions` `FOR UPDATE` → L3
+> `LockProjectionsForPostings` over every posting → L4 `Post` (one or
+> two) → E-4. (2) §2.2 R1/R3: an operation posting more than one
+> transaction pre-locks the union once via `LockProjectionsForPostings`;
+> the pre-locked inputs are exactly those posted. (3) §2.1 exception list
+> becomes "E-1, E-2, E-3 and E-4". (4) New §5.1c **E-4** with
+> INV-LOCK-E4 (text of ADR 0088 §5.3, including the "writes only after
+> all L3 locks are held" clause). (5) Amendment A2's "Prospective
+> binding" paragraph: settlement, void and rollback do **not** take L0.6,
+> because `sportsbook_bets` carries no `event_id` and deriving the key
+> would read the catalogue before L1 (ADR 0088 §5.4); this must be
+> revisited before any exposure limit is armed (HDR-SB-1). Partial
+> settlement and cashout remain bound by A2 until their own ADR. (6)
+> Amendment A3's "`sportsbook_bets` has exactly one writer" and
+> INV-LOCK-E3's text become: "writers are `insertBet` (E-3) and the W1
+> settlement functions, which take L1 first (INV-LOCK-E4)". (7)
+> §4.4/§5.3 "NOT IMPLEMENTED" updated to point here. (8) Also apply the
+> pending P3-2 note ("A2 subsequently made — see below").
+
+Where applied:
+
+| Item | Location in this file |
+|---|---|
+| (1) | §1.5 — row split into "settlement / void / rollback" (new order) and "partial settlement / cashout" (still NOT IMPLEMENTED; original row text preserved inline) |
+| (2) | §2.2 — inline notes under R1 and R3 |
+| (3) | §2.1 — exception-list sentence |
+| (4) | new §5.1c (between §5.1a and §5.2) |
+| (5) | Amendment A2 — note appended to the "Prospective binding" paragraph |
+| (6) | Amendment A3 — INV-LOCK-E3 reworded (original wording struck through, not deleted); ADR 0083 §7.3/§10 carry the same rewording |
+| (7) | §4.4 and §5.3 — pointer notes |
+| (8) | Amendment A3 — closing-paragraph note after "per that ADR's own §9.4 wave split" |
+
+What this amendment does not do: it does not close E-3 in `PlaceBet`
+(ADR 0088 §15 OI-4), does not answer HDR-SB-1, and does not change R2, R4,
+R5, R6, R7 or R8. R4 is preserved — `LockProjectionsForPostings` lives in
+`internal/ledger/lockorder.go`.

@@ -295,7 +295,15 @@ found no single statement of that boundary anywhere in the Stage 3A set.
   does **not** balance — do not debit `house_gaming` for winnings alone in
   this leg.
 - **Idempotency key**: `(provider_id, provider_tx_id)` = settlement's own
-  reference, distinct from the original lock's reference.
+  reference, distinct from the original lock's reference (provider mode).
+  **In-house mode (amended 2026-09-25, ADR 0088 §4.2/§13, Stage 10 W1):**
+  `provider_id`/`provider_tx_id` are NULL and the key is
+  `(tenant_id, idempotency_key)` with the server-composed
+  `idempotency_key = sportsbook_settlement:<bet_id>#<g>` (`g` = settlement
+  generation, caller-supplied and server-validated; a never-seen-settlement
+  tombstone occupies the same slot). In-house settlement is driven only by
+  the non-production test-support staff route (ADR 0088 §9) — a `MOCK`,
+  not a provider integration.
 - **Failure behavior**: settlement references a bet slip with no matching
   locked entry in either locked account (already settled, or never locked)
   → rejected, integrity alert. The lookup must name **both**
@@ -324,10 +332,15 @@ found no single statement of that boundary anywhere in the Stage 3A set.
   split: an undifferentiated locked account would leave this flow either
   leaking real cash to the player or wrongly re-restricting cash as bonus
   funds.
-- **Accounts (void after settlement)**: full reversal chain — reverse the
-  settlement transaction (Flow 9's entries inverted, `reverses_
-  transaction_id` set), landing the stake back in `player_cash`/
-  `player_bonus`.
+- **Accounts (void after settlement)**: `sportsbook_rollback` (exact
+  inverse, `reverses_transaction_id` = settlement) + before-settlement-shape
+  `sportsbook_void`, one DB transaction (ADR 0088 §2.3). *(Amended
+  2026-09-25, ADR 0088 §13 / ADR 0038 §8.1, Stage 10 W1. Replaces "full
+  reversal chain — reverse the settlement transaction (Flow 9's entries
+  inverted, `reverses_transaction_id` set), landing the stake back in
+  `player_cash`/`player_bonus`", which was wrong: the settlement's exact
+  inverse returns the stake to `player_locked_cash`, not `player_cash`;
+  only the trailing void returns it to the player.)*
 - **Idempotency key**: void's own provider reference.
 - **Audit event**: `sportsbook_bet.voided`.
 - **Invariants engaged**: #1, #2, #3, #4, #5, #10, #12, #13, #14.

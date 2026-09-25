@@ -1244,6 +1244,20 @@ need an idempotency key derived from the triggering restriction/bet pair
 (e.g. `(tenant_id, bet_id, self_exclusion_event_id)`) instead — again,
 `ledger-finance`'s to formalize, flagged here only so it is not missed.
 
+> **Dependency note — amended 2026-09-25 (ADR 0088 §13, Stage 10 W1).**
+> The `VOID_ON_SELF_EXCLUSION` consumer, when authorized, reuses ADR
+> 0088's void operation (both timing variants), adds
+> `player_self_exclusion` to `void_reason` by its own migration, and needs
+> its own ADR 0019 actor row (platform/compliance-initiated) and the ADR
+> 0038 §8.1 "always provider/event-initiated" amendment; it never uses the
+> test-support route. *(The consumer itself is out of Stage 10 W1 scope —
+> ADR 0088 §1.2, ruling R-2 — and remains `NOT IMPLEMENTED`; ADR 0042's
+> default is not re-asked. ADR 0088's void operation is itself
+> `MOCK`-driven in-house mode. Note also that ADR 0088's
+> void-after-settlement is a `sportsbook_rollback` + `sportsbook_void`
+> composite, not the single "reversal-chain" posting the paragraph above
+> cites from ADR 0038 §8.1's superseded second row.)*
+
 > **Finding flagged by `bonus-engine`'s independent review (Stage 4H-B0-R5,
 > Wave 3), from the wagering-requirement-integrity angle, not decided
 > here.** `VOID_ON_SELF_EXCLUSION` reuses ADR 0038 §8.1's void posting

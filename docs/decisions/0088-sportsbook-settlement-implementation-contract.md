@@ -9,6 +9,9 @@
   §3.3 while applying finding A3 was not in any reviewer's list; it is
   accepted as a consequence of A3 and is flagged for explicit scrutiny in
   the W1 `code-reviewer` and `security` implementation reviews.
+- **§13 amendments APPLIED 2026-09-25 (Stage 10 W1)** — including ADR
+  0082 Amendment A4 (§5.5); each target record carries an inline
+  "Amended 2026-09-25 (ADR 0088)" marker.
 - **Authors:** `ledger-finance` (drafting owner of §2, §4, §5, §8, §11,
   §12); `sportsbook` co-author for §3 and §9 on review.
 - **Decision type:** implementation contract. It narrows already-accepted

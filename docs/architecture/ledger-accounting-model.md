@@ -2656,6 +2656,11 @@ invented here:
    write-off and any threshold for four-eyes approval on writing it off
    are a business/collections policy question, **flagged to the
    orchestrator as an open business decision (OB-1)**, not decided here.
+   *(Cross-reference added 2026-09-25 — ADR 0088 §13, Stage 10 W1: ADR
+   0088 §2.5 builds the correct posting for sportsbook — rolling back a
+   won settlement debits `player_cash` by the payout with no balance or
+   RG/eligibility gate, and may leave it negative. **OB-1 remains OPEN**;
+   the receivable's business treatment is not decided by ADR 0088.)*
 
 ---
 

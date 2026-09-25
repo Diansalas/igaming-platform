@@ -271,6 +271,14 @@ API that accepts an arbitrary `transaction_type`. The binding rule:
 | Verified provider callback (signature-verified adapter) | `deposit`, casino/sportsbook bet/win/settlement/void/rollback, `psp_*`, custodian events — scoped to the tenant resolved from the *credential the callback authenticated with*, never from a tenant/player identifier in the payload, **and further scoped to the originating provider** (see below). |
 | Internal service (bonus engine, settlement job, gamification, reward orchestrator) | `bonus_grant`, `bonus_conversion`, `bonus_forfeiture`, `bonus_reversal` (added Stage 4H-A by `docs/decisions/0032-bonus-accounting.md` §7/§8 — a compensating transaction with `reverses_transaction_id` set, or a tombstone for a never-seen grant; `NOT IMPLEMENTED`, the type does not exist in the `transaction_type` `CHECK` constraint yet), `provider_settlement` — under a service identity (ADR 0014), not a player or staff identity. Gamification and the Reward Orchestrator inherit this row unchanged; they are internal services, **not** a new actor class. |
 | Staff principal with explicit RBAC permission | `manual_adjustment` only, four-eyes-gated above the configured threshold, `reason_code` mandatory. |
+| **In-house sportsbook engine (mock mode)** | `sportsbook_bet` from an authenticated player session via `PlaceBet` (stake debit only). `sportsbook_settlement`, `sportsbook_void`, `sportsbook_rollback` and sportsbook `tombstone`: **non-production only**, originated solely by a tenant-scoped staff principal holding `sportsbook_settlement:simulate` through the test-support route (ADR 0088 §9); never a player, never platform-admin. In production no originator exists until a real-provider stage uses the verified-provider-callback row. |
+
+*Amended 2026-09-25 (ADR 0088 §13, Stage 10 W1): the "In-house sportsbook
+engine (mock mode)" row is new, text as specified by ADR 0088 §13. The
+settlement/void/rollback/tombstone originator it names is a `MOCK` driver
+(test tooling), not a provider integration; the "Verified provider
+callback" row's sportsbook settlement/void/rollback entitlement is
+unchanged and still has no implementation.*
 
 Enforcement is server-side at the posting API boundary (a per-
 `transaction_type` permitted-originator check), not in the UI and not

@@ -163,7 +163,11 @@ the shape already specified in ADR 0038 §13, not a new design.
   `SyncCatalogue`, run once at server startup, with no live odds-update
   admin endpoint. **Disposition: SAFE DEFERMENT, required before any
   live-odds/real-provider feed** that could update a selection's odds
-  concurrently with an in-flight bet placement.
+  concurrently with an in-flight bet placement. *(Amended 2026-09-25 —
+  ADR 0088 §13, Stage 10 W1: **unaffected** by sportsbook settlement —
+  settlement, void and rollback never read or lock `sb_selections` (or
+  `sb_markets`/`sb_events`), INV-SB-SETTLE-6. This item's later
+  disposition is ADR 0083 §5.6, unchanged.)*
 
 ## 6. What this ADR does NOT do
 
