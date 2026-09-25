@@ -134,6 +134,16 @@ var (
 	// declared facts (amount/asset) do not match the deposit intent it
 	// claims to resolve.
 	ErrCallbackProviderMismatch = errors.New("payments: callback event does not match the resolved deposit intent")
+	// ErrCallbackPayloadMismatch is returned when a callback reuses a
+	// provider reference that is already posted to the ledger, but the
+	// posting it would make differs from the stored one (Stage 10 F-7
+	// remediation, ADR 0020 amendment 2026-09-25; wraps
+	// ledger.ErrIdempotencyPayloadMismatch). The motivating case (audit
+	// site #20): a reversal reference R1, already used to reverse deposit
+	// D1, redelivered naming a different deposit D2 - which used to return
+	// success reporting D2 reversed while D2 was never debited. Nothing is
+	// posted; it is an integrity alert, never a retry signal.
+	ErrCallbackPayloadMismatch = errors.New("payments: provider reference already posted with a different payload")
 	// ErrOriginalTransactionNotFound is returned when a deposit-reversal
 	// callback's original reference matches a deposit_intents row that
 	// was never actually posted to the ledger.

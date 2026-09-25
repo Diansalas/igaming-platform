@@ -237,6 +237,15 @@ func writeCasinoCallbackError(w http.ResponseWriter, requestID string, logger in
 		apierror.Write(w, requestID, apierror.CodeConflict, "request rejected")
 		return
 	}
+	if errors.Is(err, casino.ErrProviderTxPayloadMismatch) {
+		// Mirrors newCasinoWebhookHandler's own identical branch (Stage 10
+		// F-7): on this simulation route it is reached by a player reusing
+		// an idempotency_key with a different stake - rejected, not
+		// silently answered with the original result.
+		logger.Error("casino_play_integrity_alert_payload_mismatch", "error", err, "action", action)
+		apierror.Write(w, requestID, apierror.CodeConflict, "request rejected")
+		return
+	}
 	if errors.Is(err, casino.ErrAlreadyRolledBack) {
 		apierror.Write(w, requestID, apierror.CodeConflict, "original transaction already rolled back")
 		return

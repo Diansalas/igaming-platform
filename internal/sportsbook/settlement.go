@@ -916,6 +916,18 @@ func lockAndPost(ctx context.Context, tx pgx.Tx, ins ...ledger.TransactionInput)
 		if errors.Is(err, ledger.ErrIdempotencyKeyReused) {
 			return nil, fmt.Errorf("%w: ledger key %s already holds another transaction type: %w", ErrSettlementIntegrity, in.IdempotencyKey, err)
 		}
+		// BUGFIX (qa, found while writing the W1 acceptance suite):
+		// ledger.ErrIdempotencyPayloadMismatch (the F-7 ledger-level fix,
+		// ADR 0020 amendment 2026-09-25) is a THIRD replay-shaped outcome
+		// Post can now return, alongside ErrIdempotencyKeyReused and
+		// AlreadyPosted=true - same key and type, different canonical
+		// entries. ADR 0088 §4.7 requires every Post-detected replay for a
+		// posting §4.3 classified as NEW to abort as ErrSettlementIntegrity;
+		// before this fix it fell through to the generic wrap below and was
+		// never classified as an integrity failure at all.
+		if errors.Is(err, ledger.ErrIdempotencyPayloadMismatch) {
+			return nil, fmt.Errorf("%w: ledger key %s already holds a transaction with different entries: %w", ErrSettlementIntegrity, in.IdempotencyKey, err)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("sportsbook: post %s: %w", in.TransactionType, err)
 		}

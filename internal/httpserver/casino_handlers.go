@@ -390,6 +390,18 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
 			return
 		}
+		if errors.Is(err, casino.ErrProviderTxPayloadMismatch) {
+			// Stage 10 F-7 remediation: a provider_tx_id already posted,
+			// redelivered with a different payload (amount, round, session,
+			// or - for a rollback - a different original). Before F-7 this
+			// was silently answered with the ORIGINAL result as success.
+			// Nothing was posted; an integrity alert (provider protocol
+			// violation or compromised signing key), and a 409 with a
+			// generic body that never echoes the reference or amounts.
+			logger.Error("casino_webhook_integrity_alert_payload_mismatch", "error", err, "provider_id", providerID, "tenant_id", t.ID.String())
+			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
+			return
+		}
 		if errors.Is(err, casino.ErrAlreadyRolledBack) {
 			apierror.Write(w, requestID, apierror.CodeConflict, "original transaction already rolled back")
 			return

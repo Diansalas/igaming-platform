@@ -204,6 +204,18 @@ var (
 	// naming an already-reversed original, mirroring
 	// payments.ErrDepositAlreadyReversed exactly).
 	ErrAlreadyRolledBack = errors.New("casino: original transaction already has a rollback posted against it")
+	// ErrProviderTxPayloadMismatch is returned when a callback reuses a
+	// provider_tx_id that is already posted, but with a payload that
+	// differs from the posted fact (Stage 10 F-7 remediation, ADR 0020
+	// amendment 2026-09-25): a bet whose amount, asset, round or session
+	// wallet differs from the posted bet (checked by postBet before its
+	// short-circuit), or a win/rollback whose ledger posting would differ
+	// from the one already stored under the same key
+	// (ledger.ErrIdempotencyPayloadMismatch, wrapped). Before F-7 these
+	// silently returned the ORIGINAL result as success. It is an
+	// integrity alert (a provider protocol violation or a compromised
+	// signing key), never a retry signal; nothing is posted.
+	ErrProviderTxPayloadMismatch = errors.New("casino: provider transaction reference already posted with a different payload")
 
 	// ErrInvalidInput is returned for a structurally invalid call (missing
 	// required id, non-positive amount, empty reference) caught before

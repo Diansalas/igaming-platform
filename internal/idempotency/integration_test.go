@@ -4,6 +4,7 @@ package idempotency
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -355,24 +356,27 @@ func TestIntegration_ReplayWithChangedProviderDoesNotCollapse(t *testing.T) {
 }
 
 // TestIntegration_ReplayWithChangedAmountAssetOrPlayerIsWhyTheContractMatters
-// documents the REAL, pre-existing behavior of internal/ledger.Post
-// (unchanged by this package - it is not internal/idempotency's to
-// change, per this stage's explicit scope) when an adapter INCORRECTLY
-// reuses the identical composed occurrence key for a genuinely different
-// financial fact: the redelivery is silently treated as an idempotent
-// no-op of the ORIGINAL fact, and the new fact's own amount/entries are
-// never posted. Required test cases "replay with changed amount,"
+// pins how internal/ledger.Post treats an adapter that INCORRECTLY reuses
+// the identical composed occurrence key for a genuinely different
+// financial fact. Required test cases "replay with changed amount,"
 // "replay with changed asset," and "replay with changed player."
 //
-// This is precisely why fix #1 (S-5: never let the occurrence
-// discriminator come from anything other than an authenticated payload
-// field) and fix #2 (S-6: lossless composition) exist: a CORRECT adapter
-// following this package's contract derives a DIFFERENT composed key for
-// a genuinely different occurrence (see
-// TestIntegration_LegitimateSecondOccurrenceDoesNotCollapse above), so
-// this absorption path is only ever reachable through an adapter defect
-// (reusing a reference across two distinct occurrences) - never through
-// this package's own logic.
+// BEHAVIOUR CHANGE (Stage 10 F-7 remediation, ADR 0020 amendment
+// 2026-09-25, docs/governance/stage-10-f7-ledger-replay-audit.md): this
+// test used to pin the OLD behaviour, in which each such "replay" was
+// silently absorbed - Post returned AlreadyPosted with the ORIGINAL
+// transaction id, so the caller believed the new fact was recorded when
+// it never was (audit finding F-7). Post now compares the canonical
+// payload on replay and REJECTS each of these with
+// ledger.ErrIdempotencyPayloadMismatch. What is unchanged: the new fact
+// is still never posted, the original is untouched, and nothing is
+// double-posted - only the silent success is gone.
+//
+// Fix #1 (S-5) and fix #2 (S-6) of this package remain the first line of
+// defence: a CORRECT adapter derives a DIFFERENT composed key for a
+// genuinely different occurrence (see
+// TestIntegration_LegitimateSecondOccurrenceDoesNotCollapse above). The
+// ledger comparison is the backstop for an adapter defect.
 func TestIntegration_ReplayWithChangedAmountAssetOrPlayerIsWhyTheContractMatters(t *testing.T) {
 	pool := testPool(t)
 	f := seedFixture(t, pool)
@@ -385,50 +389,39 @@ func TestIntegration_ReplayWithChangedAmountAssetOrPlayerIsWhyTheContractMatters
 
 	original := mustPost(t, pool, f.tenantID, externalVehicleInput(f, f.tenantID, "mock-provider", f.cashAccountID, composed, corr, 100))
 
-	// "Replay" with a changed amount, SAME composed key (an adapter
-	// defect scenario, not this package's own behavior).
-	changedAmount := mustPost(t, pool, f.tenantID, externalVehicleInput(f, f.tenantID, "mock-provider", f.cashAccountID, composed, corr, 999))
-	if !changedAmount.AlreadyPosted || changedAmount.TransactionID != original.TransactionID {
-		t.Fatalf("expected the ledger's own exact-retry path to short-circuit to the ORIGINAL transaction for a reused key, got AlreadyPosted=%v id=%s (original=%s)",
-			changedAmount.AlreadyPosted, changedAmount.TransactionID, original.TransactionID)
+	// A genuine exact redelivery (same key, same payload) is still the
+	// idempotent no-op returning the original.
+	exact := mustPost(t, pool, f.tenantID, externalVehicleInput(f, f.tenantID, "mock-provider", f.cashAccountID, composed, corr, 100))
+	if !exact.AlreadyPosted || exact.TransactionID != original.TransactionID {
+		t.Fatalf("exact redelivery: AlreadyPosted=%v id=%s, want true/%s", exact.AlreadyPosted, exact.TransactionID, original.TransactionID)
 	}
-	// The original amount (100), not the "replayed" 999, is what's
-	// posted - proving the changed amount was never applied.
+
+	// "Replay" with a changed amount, SAME composed key: rejected.
+	if _, err := tryPost(pool, f.tenantID, externalVehicleInput(f, f.tenantID, "mock-provider", f.cashAccountID, composed, corr, 999)); !errors.Is(err, ledger.ErrIdempotencyPayloadMismatch) {
+		t.Fatalf("changed-amount replay: want ErrIdempotencyPayloadMismatch, got %v", err)
+	}
+	// The original amount (100), not the "replayed" 999, is what's posted.
 	assertBalance(t, pool, f.tenantID, f.cashAccountID, 100)
 
-	// "Replay" with a changed player (a different wallet's cash
-	// account), SAME composed key.
-	changedPlayer, err := tryPost(pool, f.tenantID, externalVehicleInput(f, f.tenantID, "mock-provider", f.cashAccountID2, composed, corr, 100))
-	if err != nil {
-		t.Fatalf("changed-player replay: %v", err)
+	// "Replay" with a changed player (a different wallet's cash account),
+	// SAME composed key: rejected; player 2 receives nothing.
+	if _, err := tryPost(pool, f.tenantID, externalVehicleInput(f, f.tenantID, "mock-provider", f.cashAccountID2, composed, corr, 100)); !errors.Is(err, ledger.ErrIdempotencyPayloadMismatch) {
+		t.Fatalf("changed-player replay: want ErrIdempotencyPayloadMismatch, got %v", err)
 	}
-	if !changedPlayer.AlreadyPosted || changedPlayer.TransactionID != original.TransactionID {
-		t.Fatal("expected the reused key to short-circuit regardless of which wallet's account the new entries named")
-	}
-	// player 2's cash account received NOTHING - the "replay" was fully
-	// absorbed into player 1's original transaction.
 	assertBalance(t, pool, f.tenantID, f.cashAccountID2, 0)
 
-	// "Replay" with a changed ASSET - a genuinely different currency
-	// (USD, not the original EUR), on a second wallet belonging to the
-	// SAME player (f.playerAccountID, per ADR 0007's multi-wallet-
-	// per-player model - this is deliberately NOT the changed-player case
-	// above), SAME composed key. Both legs of this "replayed" input are
-	// internally USD-consistent (so it would post as a perfectly valid,
-	// independently balanced transaction if the key were NOT reused) -
-	// the only defect is the adapter incorrectly reusing the original
-	// EUR occurrence's key for a distinct USD fact.
-	changedAsset, err := tryPost(pool, f.tenantID, externalVehicleInputWithClearing(f, f.tenantID, "mock-provider", f.clearingAccountIDUSD, f.cashAccountIDUSD, composed, corr, 100))
-	if err != nil {
-		t.Fatalf("changed-asset replay: %v", err)
+	// "Replay" with a changed ASSET - USD instead of the original EUR, on
+	// a second wallet of the SAME player (ADR 0007 multi-wallet model;
+	// deliberately NOT the changed-player case above), SAME composed key.
+	// Both legs are internally USD-consistent, so this would post as a
+	// valid transaction if the key were not reused: rejected; the USD
+	// cash account receives nothing.
+	if _, err := tryPost(pool, f.tenantID, externalVehicleInputWithClearing(f, f.tenantID, "mock-provider", f.clearingAccountIDUSD, f.cashAccountIDUSD, composed, corr, 100)); !errors.Is(err, ledger.ErrIdempotencyPayloadMismatch) {
+		t.Fatalf("changed-asset replay: want ErrIdempotencyPayloadMismatch, got %v", err)
 	}
-	if !changedAsset.AlreadyPosted || changedAsset.TransactionID != original.TransactionID {
-		t.Fatal("expected the reused key to short-circuit regardless of which asset's account the new entries named")
-	}
-	// The USD cash account received NOTHING - the "replay" was fully
-	// absorbed into the original EUR transaction, exactly like the
-	// changed-amount and changed-player cases above.
 	assertBalance(t, pool, f.tenantID, f.cashAccountIDUSD, 0)
+	// And the original's own balance is unchanged by all three rejections.
+	assertBalance(t, pool, f.tenantID, f.cashAccountID, 100)
 }
 
 // TestIntegration_CallbackAndSettlementRedelivery proves an ordinary

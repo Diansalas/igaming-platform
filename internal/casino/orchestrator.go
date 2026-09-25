@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -588,20 +590,122 @@ func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID 
 		if !capability.SupportsBet {
 			return ReceiveCallbackResult{}, ErrProviderUnavailable
 		}
-		return o.postBet(ctx, tx, tenantID, providerID, event)
+		return mapReplayPayloadMismatch(o.postBet(ctx, tx, tenantID, providerID, event))
 	case CallbackEventWin:
 		if !capability.SupportsWin {
 			return ReceiveCallbackResult{}, ErrProviderUnavailable
 		}
-		return o.postWin(ctx, tx, tenantID, providerID, event)
+		return mapReplayPayloadMismatch(o.postWin(ctx, tx, tenantID, providerID, event))
 	case CallbackEventRollback:
 		if !capability.SupportsRollback {
 			return ReceiveCallbackResult{}, ErrProviderUnavailable
 		}
-		return o.postRollback(ctx, tx, tenantID, providerID, event)
+		return mapReplayPayloadMismatch(o.postRollback(ctx, tx, tenantID, providerID, event))
 	default:
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: unsupported callback event type %q", event.EventType)
 	}
+}
+
+// mapReplayPayloadMismatch turns ledger.ErrIdempotencyPayloadMismatch from
+// any casino posting (a win or rollback whose provider_tx_id is already
+// posted with a different entry set, reversal link or round - audit sites
+// #7, #9-#13) into this package's ErrProviderTxPayloadMismatch, so the HTTP
+// layer maps every such case to one integrity alert and a 409. The ledger
+// error stays wrapped for logs; nothing was posted.
+func mapReplayPayloadMismatch(result ReceiveCallbackResult, err error) (ReceiveCallbackResult, error) {
+	if errors.Is(err, ledger.ErrIdempotencyPayloadMismatch) && !errors.Is(err, ErrProviderTxPayloadMismatch) {
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: %w", ErrProviderTxPayloadMismatch, err)
+	}
+	return result, err
+}
+
+// verifyPostedBetMatchesEvent is postBet's caller-level replay comparison
+// (Stage 10 F-7 remediation, audit site #6): the idempotency short-circuit
+// never reaches ledger.Post, so ledger.Post's own payload comparison
+// cannot protect it. A redelivery is accepted as a replay only if it
+// describes the posted bet: the same stake (the sum of the posting's
+// debit legs on player-owned accounts), the same asset on every player-
+// owned leg, the same round (correlation_id) and the same wallet (the one
+// event.SessionID resolves to). Anything else is
+// ErrProviderTxPayloadMismatch, naming only the differing field classes.
+// Plain SELECTs; takes no lock.
+func verifyPostedBetMatchesEvent(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, postedID uuid.UUID, event CallbackEvent) error {
+	var diffs []string
+
+	var correlationID uuid.UUID
+	if err := tx.QueryRow(ctx,
+		`SELECT correlation_id FROM ledger_transactions WHERE tenant_id = $1 AND id = $2`, tenantID, postedID,
+	).Scan(&correlationID); err != nil {
+		return fmt.Errorf("casino: load posted bet for replay comparison: %w", err)
+	}
+	if correlationID != roundCorrelationID(tenantID, providerID, event.RoundID) {
+		diffs = append(diffs, "round")
+	}
+
+	rows, err := tx.Query(ctx,
+		`SELECT la.wallet_id, la.asset_code, le.direction, le.amount::text
+		   FROM ledger_entries le JOIN ledger_accounts la ON la.id = le.ledger_account_id
+		  WHERE le.ledger_transaction_id = $1 AND la.wallet_id IS NOT NULL`, postedID)
+	if err != nil {
+		return fmt.Errorf("casino: load posted bet entries for replay comparison: %w", err)
+	}
+	defer rows.Close()
+	var postedWallet uuid.UUID
+	walletConsistent, assetMatches := true, true
+	stake := new(big.Int)
+	for rows.Next() {
+		var walletID uuid.UUID
+		var asset, amountText string
+		var direction ledger.Direction
+		if err := rows.Scan(&walletID, &asset, &direction, &amountText); err != nil {
+			return fmt.Errorf("casino: scan posted bet entry for replay comparison: %w", err)
+		}
+		if postedWallet == uuid.Nil {
+			postedWallet = walletID
+		} else if walletID != postedWallet {
+			walletConsistent = false
+		}
+		if asset != event.AssetCode {
+			assetMatches = false
+		}
+		if direction == ledger.Debit {
+			amount, ok := new(big.Int).SetString(amountText, 10)
+			if !ok {
+				return fmt.Errorf("casino: unparseable posted bet amount for replay comparison")
+			}
+			stake.Add(stake, amount)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("casino: read posted bet entries for replay comparison: %w", err)
+	}
+	if stake.Cmp(big.NewInt(event.Amount)) != 0 {
+		diffs = append(diffs, "amount")
+	}
+	if !assetMatches {
+		diffs = append(diffs, "asset")
+	}
+
+	sessionMatches := walletConsistent && postedWallet != uuid.Nil && event.SessionID != uuid.Nil
+	if sessionMatches {
+		session, err := GetLaunchSessionByID(ctx, tx, event.SessionID)
+		switch {
+		case errors.Is(err, ErrLaunchSessionNotFound):
+			sessionMatches = false
+		case err != nil:
+			return err
+		default:
+			sessionMatches = session.ProviderID == providerID && session.WalletID == postedWallet
+		}
+	}
+	if !sessionMatches {
+		diffs = append(diffs, "session")
+	}
+
+	if len(diffs) > 0 {
+		return fmt.Errorf("%w: posted bet %s differs in [%s]", ErrProviderTxPayloadMismatch, postedID, strings.Join(diffs, ","))
+	}
+	return nil
 }
 
 // validateCallbackEvent is shared by postBet/postWin (postRollback has its
@@ -745,6 +849,12 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	if existingID, found, err := findPostedBetTransaction(ctx, tx, tenantID, providerID, event.ProviderTxID); err != nil {
 		return ReceiveCallbackResult{}, err
 	} else if found {
+		// Stage 10 F-7 (audit site #6): a redelivery is only a replay if
+		// it describes the bet already posted - see
+		// verifyPostedBetMatchesEvent.
+		if err := verifyPostedBetMatchesEvent(ctx, tx, tenantID, providerID, existingID, event); err != nil {
+			return ReceiveCallbackResult{}, err
+		}
 		return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &existingID}, nil
 	}
 

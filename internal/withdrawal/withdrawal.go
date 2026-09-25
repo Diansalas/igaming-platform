@@ -1048,6 +1048,15 @@ func MarkSubmitted(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, provider
 // custodian's own send-confirmation reference, which is Step B's ledger
 // idempotency key (financial-transaction-flows.md Flow 3) - distinct from
 // MarkSubmitted's providerReference (the outbound instruction reference).
+//
+// Invariant (Stage 10 F-7 remediation): one confirmation reference
+// completes exactly one request. Complete does not assert that
+// providerTxID equals the request's own provider_reference, because Flow 3
+// allows the two to differ; a confirmation reference already used by a
+// DIFFERENT request is rejected by ledger.Post as
+// ErrIdempotencyPayloadMismatch (its correlation_id and entries are that
+// other request's), posting nothing - never silently linked to the other
+// request's ledger transaction.
 func Complete(ctx context.Context, tx pgx.Tx, requestID uuid.UUID, providerID, providerTxID string) error {
 	if providerID == "" || providerTxID == "" {
 		return fmt.Errorf("%w: provider id and provider tx id are required", ErrInvalidInput)

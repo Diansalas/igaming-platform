@@ -746,6 +746,11 @@ func (o *Orchestrator) postDepositSuccess(ctx context.Context, tx pgx.Tx, intent
 			{LedgerAccountID: cashAccountID, Direction: ledger.Credit, Amount: amount},
 		},
 	})
+	if errors.Is(err, ledger.ErrIdempotencyPayloadMismatch) {
+		// Unreachable through the intent compare above today (audit
+		// site #19 is class B), kept as the typed backstop.
+		return intent, fmt.Errorf("%w: post deposit: %w", ErrCallbackPayloadMismatch, err)
+	}
 	if err != nil {
 		return intent, fmt.Errorf("payments: post deposit: %w", err)
 	}
@@ -969,14 +974,19 @@ func (o *Orchestrator) receiveDepositReversalCallback(ctx context.Context, tx pg
 	// Reject a second reversal of the same original deposit under a NEW
 	// provider_reference of its own - see ErrDepositAlreadyReversed's doc
 	// comment. A REDELIVERY of the same reversal (same provider_reference)
-	// is still caught downstream by ledger.Post's own idempotency check on
-	// (tenant_id, provider_id, provider_tx_id), exactly as intended; this
-	// check is only for a distinct reference naming an already-reversed
-	// original.
+	// is excluded here and falls through to ledger.Post, whose idempotency
+	// check returns the original reversal (AlreadyPosted) - this check is
+	// only for a distinct reference naming an already-reversed original.
+	// Stage 10 F-7 remediation: the exclusion of this reversal's OWN
+	// reference is new. Before it, a sequential same-reference redelivery
+	// was rejected here with ErrDepositAlreadyReversed, contradicting this
+	// very comment (audit §6.2 observation); IS DISTINCT FROM so a
+	// reversal row with a NULL provider reference is still counted.
 	var alreadyReversed bool
 	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM ledger_transactions WHERE reverses_transaction_id = $1)`,
-		original.LedgerTransactionID,
+		`SELECT EXISTS (SELECT 1 FROM ledger_transactions WHERE reverses_transaction_id = $1
+		                  AND (provider_id IS DISTINCT FROM $2 OR provider_tx_id IS DISTINCT FROM $3))`,
+		original.LedgerTransactionID, providerID, event.ProviderReference,
 	).Scan(&alreadyReversed); err != nil {
 		return ReceiveCallbackResult{}, fmt.Errorf("payments: check existing reversal: %w", err)
 	}
@@ -1008,6 +1018,14 @@ func (o *Orchestrator) receiveDepositReversalCallback(ctx context.Context, tx pg
 			{LedgerAccountID: clearingAccountID, Direction: ledger.Credit, Amount: amount},
 		},
 	})
+	if errors.Is(err, ledger.ErrIdempotencyPayloadMismatch) {
+		// Audit site #20: this reversal reference is already posted with a
+		// different payload (typically: it reversed a DIFFERENT deposit).
+		// Before F-7 this returned the other reversal as success and
+		// reported THIS deposit reversed; now nothing is posted and the
+		// caller gets an integrity failure.
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: post deposit reversal: %w", ErrCallbackPayloadMismatch, err)
+	}
 	if err != nil {
 		return ReceiveCallbackResult{}, fmt.Errorf("payments: post deposit reversal: %w", err)
 	}

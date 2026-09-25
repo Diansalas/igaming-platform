@@ -337,6 +337,16 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "no matching deposit for this reference")
 			return
 		}
+		if errors.Is(err, payments.ErrCallbackPayloadMismatch) {
+			// Stage 10 F-7 remediation: a provider reference already posted,
+			// redelivered with a different payload (e.g. a reversal
+			// reference naming a different deposit). Nothing was posted.
+			// Integrity alert + 409; the body never echoes references or
+			// amounts.
+			logger.Error("payment_webhook_integrity_alert_payload_mismatch", "error", err, "provider_id", providerID, "tenant_id", t.ID.String())
+			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
+			return
+		}
 		if err != nil {
 			logger.Error("payment_webhook_failed", "error", err, "provider_id", providerID)
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to process callback")

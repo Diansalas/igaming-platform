@@ -193,3 +193,150 @@ never bypassed even if the cache layer is disabled/cleared/misses).
 ## Owner
 
 `ledger-finance`, concurrency mechanics co-reviewed by `backend`.
+
+## Amendment 2026-09-25 — Stage 10 F-7 remediation: ledger replay compares the canonical payload
+
+Status: **ACCEPTED**, pending `ledger-finance` and `code-reviewer`
+sign-off, which the orchestrator records. Owner: `ledger-finance`.
+Origin: the F-7 audit (`docs/governance/stage-10-f7-ledger-replay-audit.md`)
+and ADR 0088 §11.2. That rule permits a ledger-level fix only with
+`ledger-finance` review, a replay-regression test per existing caller and
+this amendment.
+
+### Why
+
+The "Same-key-different-payload behavior" section above requires that a
+mismatched replay be **rejected**, never silently answered with the old
+result. As implemented, `ledger.Post` compared only `transaction_type` on
+an idempotency-key conflict. Every other difference silently returned the
+original transaction with `AlreadyPosted = true` (F-7). The audit found
+this reachable (class C) at three production sites:
+
+- casino win;
+- casino rollback;
+- payments deposit reversal.
+
+It found a caller-level analogue at casino `postBet`, and C-latent sites
+in the locked/held casino win paths. No value could be extracted, because
+the first posting always stands. But the caller reported success for a
+fact that was never recorded.
+
+### Decision (the exact semantics now implemented)
+
+Whenever `ledger.Post`'s `ledger_transactions` insert conflicts on
+`(tenant_id, idempotency_key)`, Post writes nothing new and returns
+**exactly one** of the following, in this order:
+
+1. **`ErrIdempotencyKeyReused`** if the stored `transaction_type` differs
+   from the requested one. This check is unchanged and still runs first,
+   because ADR 0088 §4.5 maps this sentinel to `ErrSettlementTombstoned`.
+2. **`ErrIdempotencyPayloadMismatch`** (new sentinel) if the type matches
+   but any of the following differs between the stored transaction and
+   the request:
+   - **entries.** The final entry multiset: the caller's entries plus the
+     Rule B2 mirror/recognition legs Post generates, i.e. exactly the set
+     it would have inserted. The set is compared as a multiset of
+     `(ledger_account_id, direction, amount)`:
+     - order-insensitive;
+     - never netted;
+     - asset implied by the account;
+     - amounts compared as decimal text, so a stored value is never
+       truncated to match.
+   - **reversal link.** `reverses_transaction_id`, where nil equals only
+     nil.
+   - **provider reference.** `provider_id` and `provider_tx_id`.
+   - **reason code.** `reason_code`.
+   - **causation.** `causation_id`.
+   - **correlation.** `correlation_id`. **Exception:** this is not
+     compared for `tombstone` transactions (see below).
+
+   The wrapped error names the existing transaction id and the differing
+   *field classes* (`entries`, `reversal_link`, `provider_ref`,
+   `reason_code`, `causation`, `correlation`). It never includes amounts,
+   account ids or references.
+3. **`PostResult{TransactionID: <original>, AlreadyPosted: true}`** only
+   when every field above is equal. `AlreadyPosted` therefore now proves
+   that the request describes the fact already on the ledger.
+
+No new lock is taken. The comparison reads the stored row and its
+entries after Post already holds the L3 projection locks of the
+requested entry set, and ledger rows are immutable (migration 0082).
+There is no schema change: this amendment resolves this ADR's original
+`OPEN DECISION` ("the exact set of fields included in that comparison
+hash") by comparing the immutable stored rows themselves rather than a
+stored hash. The field set is the list above, uniform across every
+transaction type.
+
+**Rule B2 legs are safe to compare.** `applyBonusMirror` reads no
+balance. Its output is a pure function of:
+
+- the caller's entries;
+- the resolved account types;
+- `BonusCost.Funding`.
+
+So a legitimate retry with identical entries and `BonusCost` regenerates
+identical legs. A retry with a different `Funding` hits a different
+recognition account (`bonus_expense` vs `provider_payable`) and is
+rejected. `BonusCost.ProviderID` is not persisted on the ledger and is
+therefore not compared.
+
+**Why tombstones are exempt from the correlation compare.** A tombstone
+moves no value and has no entries. Its entire meaning is that the key and
+its `(provider_id, provider_tx_id)` are occupied, and both of those are
+still compared.
+
+The existing writers mint `CorrelationID = uuid.New()` on every call:
+
+- casino `postRollbackTombstone`;
+- payments `postDepositReversalTombstone`.
+
+Rows written that way already exist, so the mint cannot be made
+deterministic retroactively. Comparing correlation would therefore turn
+the legitimate concurrent (casino) or sequential (payments) re-tombstone
+into a spurious rejection.
+
+**Not a replay.** A new key whose `(provider_id, provider_tx_id)`
+collides with another transaction still returns an untyped, wrapped
+error and posts nothing. This is unchanged and now pinned by a test.
+
+### Caller obligations and changes made with this amendment
+
+- A caller whose *legitimate* retries could reach Post with a differing
+  compared field must either make that field deterministic or resolve the
+  retry before Post. `PlaceBet` (sportsbook) mints its correlation
+  (`betID`) per attempt. Its concurrent-duplicate race now resolves
+  `ErrIdempotencyPayloadMismatch` by re-reading the committed bet:
+  - equal parameters return the existing bet (and verify that the
+    ledger key belongs to it);
+  - different parameters return `ErrBetIdempotencyKeyReused`;
+  - no bet row owns the key: an integrity error.
+- A caller for which the new error means "provider reused a reference
+  with a different payload" maps it to its domain integrity error, with an
+  alert and an HTTP 409:
+  - casino: `ErrProviderTxPayloadMismatch`, which also covers `postBet`'s
+    new caller-level compare of amount, asset, round and session wallet
+    before its short-circuit;
+  - payments: `ErrCallbackPayloadMismatch`.
+- Payments deposit reversal: the already-reversed check now excludes the
+  reversal's own reference. A sequential same-reference redelivery
+  therefore returns the original reversal (idempotent success) instead of
+  `ErrDepositAlreadyReversed`. That is what this ADR's exact-retry rule
+  requires.
+- The W1 sportsbook settlement path (ADR 0088 §4.7) must treat
+  `ErrIdempotencyPayloadMismatch` exactly like `AlreadyPosted` /
+  `ErrIdempotencyKeyReused`, i.e. as `ErrSettlementIntegrity`. That
+  one-line mapping belongs to the `internal/sportsbook/settlement.go`
+  owner. It has been added in the W1 working tree and must land no later
+  than this remediation. Without it, the path still fails closed (the
+  transaction rolls back), but as an unmapped error.
+
+### Consequences
+
+- Behaviour change, intended and tested: a same-key replay with any
+  difference in the fields above used to succeed silently and is now
+  rejected. `TestIntegration_ReplayWithChangedAmountAssetOrPlayerIsWhyTheContractMatters`,
+  which pinned the old behaviour, now asserts the rejection.
+- Test fixtures that replayed a key with a fresh `uuid.New()` correlation
+  no longer model a legitimate retry. They were corrected to reuse the
+  correlation.
+- The regression tests are listed in the F-7 audit's Outcome section.

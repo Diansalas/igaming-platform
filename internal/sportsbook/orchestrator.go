@@ -149,8 +149,7 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 	if existing, found, err := findBetByIdempotencyKey(ctx, tx, params.TenantID, params.PlayerAccountID, params.IdempotencyKey); err != nil {
 		return PlaceBetResult{}, err
 	} else if found {
-		if existing.SelectionID != params.SelectionID || existing.StakeAmount != params.StakeAmount || existing.AssetCode != params.AssetCode ||
-			existing.OddsNumerator != params.ExpectedOddsNumerator || existing.OddsDenominator != params.ExpectedOddsDenominator {
+		if !betMatchesParams(existing, params) {
 			return PlaceBetResult{}, fmt.Errorf("%w: existing bet %s", ErrBetIdempotencyKeyReused, existing.ID)
 		}
 		return PlaceBetResult{Bet: existing, Accepted: true}, nil
@@ -426,6 +425,17 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 	// The SAME betInput the pre-lock above was computed from - never a
 	// rebuilt one (ADR 0082 R3).
 	postResult, err := ledger.Post(ctx, tx, betInput)
+	if errors.Is(err, ledger.ErrIdempotencyPayloadMismatch) {
+		// Stage 10 F-7 remediation (ADR 0020 amendment 2026-09-25). The
+		// only way here is the concurrent-duplicate race: two calls with
+		// one idempotency key both missed findBetByIdempotencyKey above,
+		// serialized at L3, and the other call committed first. Its
+		// posting carries ITS OWN betID as correlation_id (minted per
+		// attempt), so ledger.Post now reports a payload mismatch even for
+		// a legitimate duplicate where it used to report AlreadyPosted.
+		// Resolve it exactly like the sequential short-circuit above.
+		return resolveConcurrentDuplicateBet(ctx, tx, params, ledgerIdempotencyKey, err)
+	}
 	if err != nil {
 		return PlaceBetResult{}, fmt.Errorf("sportsbook: post bet: %w", err)
 	}
@@ -489,6 +499,55 @@ func PlaceBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams) (PlaceBetRe
 	}
 
 	return PlaceBetResult{Bet: bet, Accepted: true}, nil
+}
+
+// betMatchesParams is the PlaceBet idempotency payload comparison: a
+// stored bet is the same logical bet as params only if selection, stake,
+// asset and the odds the player accepted all match.
+func betMatchesParams(existing Bet, params PlaceBetParams) bool {
+	return existing.SelectionID == params.SelectionID && existing.StakeAmount == params.StakeAmount &&
+		existing.AssetCode == params.AssetCode && existing.OddsNumerator == params.ExpectedOddsNumerator &&
+		existing.OddsDenominator == params.ExpectedOddsDenominator
+}
+
+// resolveConcurrentDuplicateBet handles ledger.ErrIdempotencyPayloadMismatch
+// from PlaceBet's own ledger.Post (Stage 10 F-7 remediation): another
+// PlaceBet with the same idempotency key committed between this call's
+// findBetByIdempotencyKey and its Post. Plain SELECTs only - no lock is
+// taken after L3 (ADR 0082 R8).
+//
+//   - The committed bet matches params: a legitimate duplicate. Return it,
+//     exactly as the sequential short-circuit does, provided the ledger
+//     transaction occupying the key is the bet's own (the orphan guard's
+//     invariant, checked here because this path never reaches it).
+//   - It differs: ErrBetIdempotencyKeyReused, as for a sequential retry.
+//   - No bet holds the key: the ledger key is occupied by something
+//     PlaceBet did not write - an integrity failure, returned as an error
+//     wrapping the ledger mismatch so the transaction rolls back.
+func resolveConcurrentDuplicateBet(ctx context.Context, tx pgx.Tx, params PlaceBetParams, ledgerIdempotencyKey string, mismatch error) (PlaceBetResult, error) {
+	existing, found, err := findBetByIdempotencyKey(ctx, tx, params.TenantID, params.PlayerAccountID, params.IdempotencyKey)
+	if err != nil {
+		return PlaceBetResult{}, err
+	}
+	if !found {
+		return PlaceBetResult{}, fmt.Errorf("sportsbook: ledger key already holds a different sportsbook_bet posting but no bet row owns it: %w", mismatch)
+	}
+	if !betMatchesParams(existing, params) {
+		return PlaceBetResult{}, fmt.Errorf("%w: existing bet %s", ErrBetIdempotencyKeyReused, existing.ID)
+	}
+	var keyOwner uuid.UUID
+	if err := tx.QueryRow(ctx,
+		`SELECT id FROM ledger_transactions WHERE tenant_id = $1 AND idempotency_key = $2`,
+		params.TenantID, ledgerIdempotencyKey,
+	).Scan(&keyOwner); err != nil {
+		return PlaceBetResult{}, fmt.Errorf("sportsbook: resolve ledger key owner for concurrent duplicate bet: %w", err)
+	}
+	if keyOwner != existing.LedgerTransactionID {
+		return PlaceBetResult{}, fmt.Errorf(
+			"sportsbook: idempotency key resolved to bet %s (ledger transaction %s) but the ledger key is held by transaction %s: %w",
+			existing.ID, existing.LedgerTransactionID, keyOwner, mismatch)
+	}
+	return PlaceBetResult{Bet: existing, Accepted: true}, nil
 }
 
 // computePotentialReturn computes stake * decimal_odds in the asset's

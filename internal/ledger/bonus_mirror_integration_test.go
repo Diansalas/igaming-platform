@@ -946,12 +946,17 @@ func TestBonusMirror_ConcurrentGrantsSameKeyOnlyOnePosts(t *testing.T) {
 	f := seedFixture(t, pool)
 	a := seedBonusAccounts(t, pool, f, f.walletID, "EUR")
 
+	// One logical grant retried concurrently: every attempt carries the
+	// SAME correlation id, as a real retry of one operation does. Since
+	// the Stage 10 F-7 remediation a differing correlation under one key
+	// is ErrIdempotencyPayloadMismatch, not a replay (ADR 0020 amendment).
+	correlationID := uuid.New()
 	in := func() TransactionInput {
 		return TransactionInput{
 			TenantID:        f.tenantID,
 			TransactionType: TxBonusGrant,
 			IdempotencyKey:  "concurrent-grant-same-key",
-			CorrelationID:   uuid.New(),
+			CorrelationID:   correlationID,
 			Entries:         []EntryInput{{LedgerAccountID: a.playerBonus, Direction: Credit, Amount: 250}},
 			BonusCost:       &BonusCostAttribution{Funding: FundingOperator},
 		}

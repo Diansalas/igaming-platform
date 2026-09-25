@@ -120,6 +120,12 @@ func mustPost(t *testing.T, pool *db.Pool, f fixture, in TransactionInput) PostR
 	return res
 }
 
+// depositInput builds one deposit posting. CorrelationID is derived
+// deterministically from the tenant and key, so two calls with the same
+// key model a legitimate retry of ONE logical operation (which reuses its
+// correlation id) - since the Stage 10 F-7 remediation, a differing
+// correlation under one key is ErrIdempotencyPayloadMismatch, not a
+// replay (ADR 0020 amendment 2026-09-25).
 func depositInput(f fixture, idempotencyKey string, amount int64) TransactionInput {
 	provider := "mockpsp"
 	providerTx := idempotencyKey
@@ -129,7 +135,7 @@ func depositInput(f fixture, idempotencyKey string, amount int64) TransactionInp
 		IdempotencyKey:  idempotencyKey,
 		ProviderID:      &provider,
 		ProviderTxID:    &providerTx,
-		CorrelationID:   uuid.New(),
+		CorrelationID:   uuid.NewSHA1(f.tenantID, []byte(idempotencyKey)),
 		Entries: []EntryInput{
 			{LedgerAccountID: f.clearingID, Direction: Debit, Amount: amount},
 			{LedgerAccountID: f.cashAccountID, Direction: Credit, Amount: amount},
@@ -223,7 +229,11 @@ func TestPost_ExactRetryIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestPost_SameKeyDifferentPayloadRejected(t *testing.T) {
+// TestPost_SameKeyDifferentTypeRejected (renamed from
+// ...DifferentPayloadRejected by the Stage 10 F-7 remediation: it only
+// ever varied the TYPE; payload differences under one type are covered by
+// replay_integration_test.go).
+func TestPost_SameKeyDifferentTypeRejected(t *testing.T) {
 	pool := testPool(t)
 	f := seedFixture(t, pool)
 

@@ -164,12 +164,35 @@ const (
 	Credit Direction = "credit"
 )
 
-// ErrIdempotencyKeyReused is returned when a retried Post call's
-// idempotency_key matches an existing transaction whose transaction_type
-// differs from the one now requested - a same-key-different-payload
-// replay (ADR 0020), rejected rather than silently applied or silently
-// treated as a match.
+// ErrIdempotencyKeyReused is returned when a Post call's idempotency_key
+// matches an existing transaction whose transaction_type differs from the
+// one now requested. It covers a differing TYPE only; every other
+// payload difference under the same key (entries, reversal link,
+// provider reference, reason code, causation, correlation) is
+// ErrIdempotencyPayloadMismatch (ADR 0020 amendment 2026-09-25, Stage 10
+// F-7). The type check runs first and keeps this sentinel, because
+// callers map it specifically - ADR 0088 §4.5 maps it to
+// ErrSettlementTombstoned for a sportsbook tombstone backstop. The two
+// sentinels are deliberately distinct and must not be merged.
 var ErrIdempotencyKeyReused = errors.New("ledger: idempotency key reused with a different transaction type")
+
+// ErrIdempotencyPayloadMismatch is returned when a Post call's
+// idempotency_key matches an existing transaction of the SAME
+// transaction_type whose canonical payload differs from the request: the
+// final entry multiset (caller entries plus Rule B2 mirror/recognition
+// legs, compared order-insensitively as (ledger_account_id, direction,
+// amount)), reverses_transaction_id, provider_id/provider_tx_id,
+// reason_code, causation_id, or correlation_id (correlation is not
+// compared for TxTombstone - see replay.go). Nothing new is posted. The
+// wrapped detail names the existing transaction id and the differing
+// field classes only - never amounts, accounts or references.
+//
+// Before Stage 10 F-7 such a call silently returned the ORIGINAL
+// transaction with AlreadyPosted = true (docs/governance/
+// stage-10-f7-ledger-replay-audit.md §1). It is an integrity failure,
+// never a retry signal: a caller that receives it must not treat the
+// operation as done, and must not retry with the same key.
+var ErrIdempotencyPayloadMismatch = errors.New("ledger: idempotency key reused with a different payload")
 
 // ErrInvalidEntry is returned for a structurally invalid entry (e.g. a
 // non-positive amount) caught before ever reaching the database.
@@ -215,7 +238,9 @@ type PostResult struct {
 	// AlreadyPosted is true when this call was an idempotent no-op: a
 	// transaction with the same (tenant_id, idempotency_key) already
 	// existed, so nothing new was posted and TransactionID identifies the
-	// ORIGINAL transaction.
+	// ORIGINAL transaction. Since the Stage 10 F-7 remediation it is only
+	// ever true when the original's canonical payload equals this
+	// request's (see Post and ErrIdempotencyPayloadMismatch).
 	AlreadyPosted bool
 }
 
@@ -225,12 +250,28 @@ type PostResult struct {
 // Record function. Post never opens its own top-level transaction and
 // never commits tx itself.
 //
-// Idempotency (ADR 0020): a retried call with the same
-// (tenant_id, idempotency_key) returns the original result rather than
-// erroring or double-posting, via the SAVEPOINT pattern in
-// db.IdempotentInsert. A retried call whose transaction_type differs from
-// the original's returns ErrIdempotencyKeyReused rather than silently
-// preferring either payload.
+// Idempotency (ADR 0020, as amended 2026-09-25 by Stage 10 F-7): a call
+// whose (tenant_id, idempotency_key) already exists is resolved via the
+// SAVEPOINT pattern in db.IdempotentInsert and never double-posts. It
+// then returns exactly one of:
+//
+//   - ErrIdempotencyKeyReused if the stored transaction_type differs
+//     (checked first; ADR 0088 §4.5 depends on this sentinel);
+//   - ErrIdempotencyPayloadMismatch if the type matches but the canonical
+//     payload differs - the final entry multiset (after Rule B2 legs,
+//     order-insensitive), reverses_transaction_id, provider_id/
+//     provider_tx_id, reason_code, causation_id or correlation_id
+//     (correlation exempt for TxTombstone; replay.go);
+//   - PostResult{TransactionID: original, AlreadyPosted: true} only when
+//     every one of those is equal - so AlreadyPosted now proves the
+//     request describes the very fact already on the ledger.
+//
+// A caller whose legitimate retries can differ in any compared field
+// (e.g. a per-attempt correlation id) must make it deterministic or
+// resolve the retry before calling Post. A unique violation on the
+// (tenant_id, provider_id, provider_tx_id) index alone (a NEW key whose
+// provider reference is already taken, e.g. by a tombstone) is not a
+// replay: it returns an untyped wrapped error and posts nothing.
 //
 // Rule B2 (extended) mirror generator (ledger-accounting-model.md §7.4,
 // bonus_mirror.go): a posting any of whose entries resolves to a
@@ -318,15 +359,27 @@ func Post(ctx context.Context, tx pgx.Tx, in TransactionInput) (PostResult, erro
 	}
 
 	if conflict {
-		existingID, existingType, lookupErr := lookupByIdempotencyKey(ctx, tx, in.TenantID, in.IdempotencyKey)
+		// No new lock is needed for the comparison below: this call
+		// already holds every L3 projection lock of ITS entry set, and
+		// ledger rows are immutable (migration 0082), so the stored
+		// transaction read here cannot change underneath it.
+		existing, lookupErr := lookupByIdempotencyKey(ctx, tx, in.TenantID, in.IdempotencyKey)
 		if lookupErr != nil {
 			return PostResult{}, fmt.Errorf("ledger: look up existing transaction for idempotency key: %w", lookupErr)
 		}
-		if existingType != in.TransactionType {
+		if existing.TransactionType != in.TransactionType {
 			return PostResult{}, fmt.Errorf("%w: existing transaction %s has type %q, requested %q",
-				ErrIdempotencyKeyReused, existingID, existingType, in.TransactionType)
+				ErrIdempotencyKeyReused, existing.ID, existing.TransactionType, in.TransactionType)
 		}
-		return PostResult{TransactionID: existingID, AlreadyPosted: true}, nil
+		diffs, cmpErr := replayPayloadDifferences(ctx, tx, existing, in, entriesToPost)
+		if cmpErr != nil {
+			return PostResult{}, cmpErr
+		}
+		if len(diffs) > 0 {
+			return PostResult{}, fmt.Errorf("%w: existing transaction %s differs in [%s]",
+				ErrIdempotencyPayloadMismatch, existing.ID, formatReplayDiffs(diffs))
+		}
+		return PostResult{TransactionID: existing.ID, AlreadyPosted: true}, nil
 	}
 
 	for _, e := range entriesToPost {
@@ -356,16 +409,6 @@ func Post(ctx context.Context, tx pgx.Tx, in TransactionInput) (PostResult, erro
 	}
 
 	return PostResult{TransactionID: transactionID}, nil
-}
-
-func lookupByIdempotencyKey(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, key string) (uuid.UUID, TransactionType, error) {
-	var id uuid.UUID
-	var txType TransactionType
-	err := tx.QueryRow(ctx,
-		`SELECT id, transaction_type FROM ledger_transactions WHERE tenant_id = $1 AND idempotency_key = $2`,
-		tenantID, key,
-	).Scan(&id, &txType)
-	return id, txType, err
 }
 
 // GetOrCreateAccount returns the id of the LedgerAccount for

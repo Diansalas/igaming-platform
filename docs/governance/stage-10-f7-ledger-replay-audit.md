@@ -5,7 +5,7 @@
 | Owner | `ledger-finance` |
 | Audited commit | `94bc863b8ae461eaa3f56410efe5b3c01effc570` (HEAD, "Stage 10 W0 complete") |
 | Method | ADR 0088 §11.1 / §11.2 (ACCEPTED) |
-| Status of this record | Audit IMPLEMENTED (read-only). No code was changed. The fix recommended in §6 is NOT IMPLEMENTED. |
+| Status of this record | Audit IMPLEMENTED (read-only; §1-§6 describe HEAD 94bc863 and are unchanged). The §6 fix was subsequently implemented as the separate F-7 remediation item - see §7 Outcome. |
 | Date | 2026-09-25 |
 
 **Scope note.** When this audit ran, the working tree had uncommitted W1 changes:
@@ -395,3 +395,118 @@ is correctly rejected.
 
 These are architecture/record changes. They go through `architect` and the Orchestrator;
 they are not made by this audit.
+
+---
+
+## 7. Outcome: F-7 remediation (2026-09-25)
+
+| Field | Value |
+|---|---|
+| Owner | `ledger-finance` |
+| Remediation commit | _to be filled by the orchestrator_ |
+| Record | ADR 0020, "Amendment 2026-09-25: Stage 10 F-7 remediation" (ACCEPTED pending `ledger-finance` + `code-reviewer` sign-off, which the orchestrator records) |
+| Status | Ledger fix IMPLEMENTED. Class-C caller mappings IMPLEMENTED. Casino `postBet` caller-level compare IMPLEMENTED. Withdrawal `Complete` equality assertion NOT IMPLEMENTED by design (see 7.4). Remaining record and caller items DEFERRED (see 7.4). |
+
+### 7.1 What changed
+
+**`ledger.Post` (§6.1, implemented as recommended).** On a key conflict:
+
+1. The type check runs first and still returns `ErrIdempotencyKeyReused`.
+2. If the type matches, Post then compares the canonical payload:
+   - the final entry multiset after Rule B2 legs, as `(account, direction, amount)`, order-insensitive and not netted;
+   - `reverses_transaction_id`;
+   - `provider_id`/`provider_tx_id`;
+   - `reason_code`;
+   - `causation_id`;
+   - `correlation_id`, except for `tombstone`.
+3. Any difference returns the new `ErrIdempotencyPayloadMismatch`, which names only the field classes. Nothing is posted.
+4. `AlreadyPosted` is returned only for an equal payload.
+
+Implementation: `internal/ledger/replay.go` and the conflict branch in `internal/ledger/ledger.go`. The doc comments on `Post`, `PostResult.AlreadyPosted` and `ErrIdempotencyKeyReused` were corrected.
+
+The tombstone correlation exemption is verified. Both existing tombstone writers mint `uuid.New()` per call (casino `orchestrator.go` `postRollbackTombstone`, payments `postDepositReversalTombstone`). Historical rows carry those random ids. A tombstone's meaning is fully carried by its key and its provider reference, and both are still compared.
+
+**Callers:**
+
+| # | Site | Change |
+|---|---|---|
+| 6 | casino `postBet` | New caller-level compare before the short-circuit (`verifyPostedBetMatchesEvent`) → `casino.ErrProviderTxPayloadMismatch`. It compares: stake (sum of player-owned debit legs), asset, round (correlation), session wallet. A different session of the *same* wallet is the same fact and is accepted. |
+| 7, 9-13 | casino win / rollback / held-win rollback | `ReceiveCallback` maps `ledger.ErrIdempotencyPayloadMismatch` → `casino.ErrProviderTxPayloadMismatch`. The `casino_win.posted` audit can no longer record a new amount with `already_posted: true`, because `AlreadyPosted` now implies equal entries. |
+| 6-13 HTTP | `casino_handlers.go`, `casino_play_handlers.go` | 409 with a generic body. Alerts: `casino_webhook_integrity_alert_payload_mismatch`, `casino_play_integrity_alert_payload_mismatch`. |
+| 19, 20 | payments deposit success / reversal | Map to the new `payments.ErrCallbackPayloadMismatch`. Webhook: 409 with alert `payment_webhook_integrity_alert_payload_mismatch`. Simulation route: 409 with alert `payment_simulation_integrity_alert_payload_mismatch`. |
+| 20 (obs.) | payments already-reversed check | Now excludes the reversal's own reference (`IS DISTINCT FROM`). A sequential same-reference redelivery is idempotent success. A distinct reference is still `ErrDepositAlreadyReversed`. |
+| 18 | sportsbook `PlaceBet` | The concurrent-duplicate loser now gets the mismatch, because correlation is the per-attempt `betID`. `resolveConcurrentDuplicateBet` re-reads the committed bet with plain SELECTs, so R8 still holds: equal params return that bet (after checking that the ledger key's owner is the bet's own transaction); different params return `ErrBetIdempotencyKeyReused`; no owning bet is an integrity error. |
+| 3 | withdrawal `Complete` | Doc invariant only (see 7.4). A confirmation reference reused across requests is now rejected by the ledger, which a test pins. |
+| 1, 2, 4, 5, 8, 14-17, 21 | none | A / A-sg: state gates prevent a second `Post`. The ledger compare is a backstop. Tombstones rely on the exemption, which a test pins. |
+
+### 7.2 Tests (all PASS, `go test -race -tags=integration`)
+
+**Ledger** (`internal/ledger/replay_integration_test.go`), L1-L11 of §6.4:
+
+- `TestReplay_IdenticalAndPermutedEntriesAreAlreadyPosted` (L1, L4)
+- `TestReplay_DifferentAmountRejected` (L2)
+- `TestReplay_DifferentAccountRejected` (L3, plus a direction flip and a non-netted superset)
+- `TestReplay_DifferentReversalLinkRejected` (L5)
+- `TestReplay_ProviderRefAndCausationCompared`
+- `TestReplay_CorrelationComparedExceptTombstone` (L6)
+- `TestReplay_DifferentReasonCodeRejected` (L7)
+- `TestReplay_BonusMirrorLegsCompared` (L8, uses a conversion because a grant has no Funding-dependent leg)
+- `TestReplay_TypeMismatchStillErrIdempotencyKeyReused` (L9)
+- `TestReplay_ConcurrentMixedPayloadsOneEffect` (L10)
+- `TestReplay_ProviderIndexOnlyConflictIsUntypedAndPostsNothing` (L11, pins the untyped error)
+
+Every rejection test asserts: zero new ledger rows, unchanged balances, and not `ErrIdempotencyKeyReused`.
+
+**Updated tests that pinned the old behaviour:**
+
+- `TestIntegration_ReplayWithChangedAmountAssetOrPlayerIsWhyTheContractMatters` now asserts rejection for changed amount, player and asset. The exact replay is still `AlreadyPosted`. The behaviour change is documented in the test.
+- `TestPost_SameKeyDifferentPayloadRejected` was renamed to `TestPost_SameKeyDifferentTypeRejected`.
+- `depositInput` (ledger tests) and `TestBonusMirror_ConcurrentGrantsSameKeyOnlyOnePosts` used a fresh `uuid.New()` correlation per retry. That no longer models a legitimate retry, so they now reuse one correlation.
+
+**Per caller:**
+
+- casino (`internal/casino/replay_f7_integration_test.go`):
+  - `TestF7Casino_LegitimateRedeliveriesStillResolveToOriginal` (bet, win, rollback)
+  - `TestF7Casino_ConcurrentTombstoneRedeliveryIsIdempotent` (#8)
+  - `TestF7Casino_BetReplayWithDifferentPayloadRejected` (#6: amount, round, missing session, unknown session)
+  - `TestF7Casino_WinReplayWithDifferentAmountRejected` (#9)
+  - `TestF7Casino_RollbackRefReusedForDifferentOriginalRejected` (#7)
+  - #13 is covered by the existing `TestPostRollback_HeldWinRollback_DuplicateIsIdempotent`.
+- casino HTTP: `TestCasinoPlay_F7_SameIdempotencyKeyDifferentAmountIs409` checks that the wager and win replays with changed amounts return 409, and that an identical retry returns 200 with the same transaction.
+- payments (`internal/payments/replay_f7_integration_test.go`):
+  - `TestF7Payments_SequentialReversalRedeliveryIsIdempotent`
+  - `TestF7Payments_ConcurrentIdenticalReversalRedelivery`
+  - `TestF7Payments_ConcurrentTombstoneRedeliveryIsIdempotent` (#21)
+  - `TestF7Payments_ReversalRefReusedForDifferentDepositRejected` (#20)
+- sportsbook (`internal/sportsbook/placebet_replay_f7_integration_test.go`):
+  - `TestPlaceBet_F7_ConcurrentIdenticalDuplicateReturnsOneBet` (deterministic L3 race; verified to FAIL without the `PlaceBet` change)
+  - `TestPlaceBet_F7_ConcurrentSameKeyDifferentStakeRejected`
+  - `TestPlaceBet_F7_SequentialSameKeyDifferentStakeRejected` (closes the §3 evidence gap)
+- withdrawal (`internal/withdrawal/replay_f7_integration_test.go`):
+  - `TestF7Withdrawal_RequestRetryWithDifferentAmountRejected`
+  - `TestF7Withdrawal_TerminalTransitionsDoubleInvokeOnePosting` (Reject, Complete, Fail, Cancel)
+  - `TestF7Withdrawal_CompleteWithAnotherRequestsConfirmationRejected` (#3, closes the §3 cross-request evidence gap)
+- bonus (`internal/bonus/replay_f7_integration_test.go`):
+  - `TestF7Bonus_ActivateAndConvertTwiceOnePostingEach`
+  - `TestF7Bonus_TerminateTwiceOnePosting`
+  - #16 is covered by the existing `TestHeldDisposition_ResolveReforfeit_WithFourEyesAndSEP1`.
+- The existing `internal/sportsbook/exposure_integration_test.go` type-collision test still expects `ErrIdempotencyKeyReused` and is unaffected.
+
+### 7.3 Records
+
+ADR 0020 amendment: written.
+
+Not edited here (the orchestrator or architect applies these):
+
+- ADR 0038 §11 wording (ADR 0088 §13);
+- `docs/architecture/ledger-accounting-model.md`, which should gain the replay rule (§6.5).
+
+### 7.4 Deferred / open
+
+1. **W1 settlement mapping.** Owner: sportsbook / W1. `internal/sportsbook/settlement.go` `lockAndPost` must map `ledger.ErrIdempotencyPayloadMismatch` to `ErrSettlementIntegrity` (§6.3, last row). The W1 owner has added this mapping in the working tree, but it is not committed as of this writing, and it was not written by this item. With it in place, `TestSettlementFaultInjection_LedgerKeyBackstop` passes. The orchestrator must make sure the mapping lands in the same merge as this remediation, or before it.
+2. **Withdrawal `Complete` equality assertion (§6.2).** Not implemented, by design. `Complete`'s own contract (Flow 3) says the send-confirmation reference is *distinct* from `MarkSubmitted`'s instruction reference, so asserting equality would contradict the documented design. Instead:
+   - a doc invariant was added;
+   - the ledger now rejects cross-request reuse, pinned by `TestF7Withdrawal_CompleteWithAnotherRequestsConfirmationRejected`.
+3. **Pre-L3 reversal-link pre-check (§6.2, optional).** Not implemented. The ledger compare already rejects the case before anything is written; the only cost is that the rejection happens after the L3 locks.
+4. **Reserved provider-id guard (§4, optional).** Not implemented. It is not part of F-7.
+5. **New finding, not F-7 (P1 candidate, reported to the orchestrator).** Payments `receiveDepositReversalCallback` takes no lock on the original deposit before its already-reversed `EXISTS` check. Concurrent reversal callbacks under **distinct** references for one deposit therefore each post a reversal. A temporary probe was run and then removed: 6 concurrent distinct-reference reversals of one 1,000 deposit posted 4-6 reversals, leaving `player_cash` at -3,000 to -5,000. Casino `postRollback` avoids this with `FOR UPDATE` on the original. The analogous payments fix is an L2 `FOR UPDATE` on the original deposit's ledger row before the check. It needs its own item, with ledger-finance and ADR 0082 lock-order review.

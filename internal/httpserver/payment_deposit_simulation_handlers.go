@@ -234,6 +234,11 @@ func writeDepositCallbackError(w http.ResponseWriter, requestID string, logger i
 		apierror.Write(w, requestID, apierror.CodeNotFound, "deposit not found")
 		return
 	}
+	if errors.Is(err, payments.ErrCallbackPayloadMismatch) {
+		logger.Error("payment_simulation_integrity_alert_payload_mismatch", "error", err)
+		apierror.Write(w, requestID, apierror.CodeConflict, "deposit could not be settled")
+		return
+	}
 	if errors.Is(err, payments.ErrCallbackProviderMismatch) {
 		logger.Error("payment_simulation_provider_mismatch", "error", err)
 		apierror.Write(w, requestID, apierror.CodeConflict, "deposit could not be settled")

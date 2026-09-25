@@ -1,0 +1,432 @@
+//go:build integration
+
+// DB-level enforcement (ADR 0088 §3.2, §3.3, §3.5): trigger T-1
+// (sportsbook_bet_settlements_validate), trigger T-2
+// (sportsbook_bets_status_transition), the deny triggers (append-only),
+// and RLS (staff insert/select, player self-scope). All run against the
+// SHARED already-migrated TEST_DATABASE_URL database, connected as its
+// owning role - the same role every other integration test uses, which
+// still holds UPDATE/DELETE/TRUNCATE privileges before any REVOKE, so a
+// pass here proves the TRIGGERS bind regardless of privilege (§3.5's
+// "deny triggers are the binding control").
+package sportsbook
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/ledger"
+)
+
+// postRawLedgerTx posts an arbitrary, balanced ledger transaction directly
+// (bypassing the settlement service) - a raw fixture builder for trigger
+// tests that need a ledger_transactions row of a SPECIFIC type/correlation
+// to hand to a raw INSERT into sportsbook_bet_settlements.
+func postRawLedgerTx(t *testing.T, pool *db.Pool, f sbFixture, txType ledger.TransactionType, correlationID uuid.UUID, key string) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		house, err := ledger.GetOrCreateAccounts(ctx, tx, f.tenantID,
+			ledger.AccountSpec{WalletID: nil, AccountType: ledger.AccountHouseGaming, AssetCode: "EUR"})
+		if err != nil {
+			return err
+		}
+		cash, err := ledger.GetOrCreateAccount(ctx, tx, f.tenantID, &f.walletID, ledger.AccountPlayerCash, "EUR")
+		if err != nil {
+			return err
+		}
+		res, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: f.tenantID, TransactionType: txType, IdempotencyKey: key, CorrelationID: correlationID,
+			Entries: []ledger.EntryInput{
+				{LedgerAccountID: house[0], Direction: ledger.Debit, Amount: 1},
+				{LedgerAccountID: cash, Direction: ledger.Credit, Amount: 1},
+			},
+		})
+		id = res.TransactionID
+		return err
+	})
+	if err != nil {
+		t.Fatalf("post raw ledger transaction: %v", err)
+	}
+	return id
+}
+
+// rawInsertSettlement issues the raw INSERT statement T-1 validates,
+// returning the Postgres error (nil on success) so tests can assert on its
+// message.
+func rawInsertSettlement(t *testing.T, pool *db.Pool, tenantID uuid.UUID, sql string, args ...any) error {
+	t.Helper()
+	return pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, sql, args...)
+		return err
+	})
+}
+
+const insertSettlementSQL = `INSERT INTO sportsbook_bet_settlements
+	(tenant_id, bet_id, event_kind, generation, outcome, payout_amount, asset_code, ledger_transaction_id)
+	VALUES ($1, $2, 'settlement', $3, $4, $5, 'EUR', $6)`
+
+// TestDBConstraints_T1_RejectsPayoutMismatch: T-1 rejects payout_amount !=
+// bet.potential_return for a 'won' row, even though the caller is the
+// table owner (not merely the runtime role).
+func TestDBConstraints_T1_RejectsPayoutMismatch(t *testing.T) {
+	pool := testPool(t)
+	f, _, betID := newStdBet(t, pool)
+	ltxID := postRawLedgerTx(t, pool, f, ledger.TxSportsbookSettlement, betID, "t1-payout-mismatch-"+uuid.NewString())
+
+	err := rawInsertSettlement(t, pool, f.tenantID, insertSettlementSQL, f.tenantID, betID, 1, "won", stdPayout+1, ltxID)
+	if err == nil {
+		t.Fatalf("expected T-1 to reject payout_amount != potential_return")
+	}
+	if !strings.Contains(err.Error(), "won payout must equal") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestDBConstraints_T1_RejectsWonPayoutZero: a 'won' row with
+// payout_amount = 0 is rejected too (V-3: a zero-payout win cannot post).
+func TestDBConstraints_T1_RejectsWonPayoutZero(t *testing.T) {
+	pool := testPool(t)
+	f, _, betID := newStdBet(t, pool)
+	ltxID := postRawLedgerTx(t, pool, f, ledger.TxSportsbookSettlement, betID, "t1-won-zero-"+uuid.NewString())
+
+	err := rawInsertSettlement(t, pool, f.tenantID, insertSettlementSQL, f.tenantID, betID, 1, "won", 0, ltxID)
+	if err == nil {
+		t.Fatalf("expected T-1 to reject a zero-payout won row")
+	}
+}
+
+// TestDBConstraints_T1_RejectsLostPayoutNonzero: a 'lost' row must carry
+// payout_amount = 0.
+func TestDBConstraints_T1_RejectsLostPayoutNonzero(t *testing.T) {
+	pool := testPool(t)
+	f, _, betID := newStdBet(t, pool)
+	ltxID := postRawLedgerTx(t, pool, f, ledger.TxSportsbookSettlement, betID, "t1-lost-nonzero-"+uuid.NewString())
+
+	err := rawInsertSettlement(t, pool, f.tenantID, insertSettlementSQL, f.tenantID, betID, 1, "lost", 1, ltxID)
+	if err == nil {
+		t.Fatalf("expected T-1 to reject a nonzero-payout lost row")
+	}
+}
+
+// TestDBConstraints_T1_RejectsWrongGeneration: generation must be
+// max(generation)+1 over settlement/tombstone rows.
+func TestDBConstraints_T1_RejectsWrongGeneration(t *testing.T) {
+	pool := testPool(t)
+	f, _, betID := newStdBet(t, pool)
+	ltxID := postRawLedgerTx(t, pool, f, ledger.TxSportsbookSettlement, betID, "t1-gen-"+uuid.NewString())
+
+	err := rawInsertSettlement(t, pool, f.tenantID, insertSettlementSQL, f.tenantID, betID, 2, "won", stdPayout, ltxID)
+	if err == nil {
+		t.Fatalf("expected T-1 to reject generation 2 with no generation 1 row")
+	}
+	if !strings.Contains(err.Error(), "generation") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestDBConstraints_T1_RejectsWrongLedgerTransactionType: the ledger
+// transaction's type must match the event_kind (settlement ->
+// sportsbook_settlement).
+func TestDBConstraints_T1_RejectsWrongLedgerTransactionType(t *testing.T) {
+	pool := testPool(t)
+	f, _, betID := newStdBet(t, pool)
+	// Wrong type: this is a sportsbook_void transaction, not a settlement.
+	ltxID := postRawLedgerTx(t, pool, f, ledger.TxSportsbookVoid, betID, "t1-wrongtype-"+uuid.NewString())
+
+	err := rawInsertSettlement(t, pool, f.tenantID, insertSettlementSQL, f.tenantID, betID, 1, "won", stdPayout, ltxID)
+	if err == nil {
+		t.Fatalf("expected T-1 to reject a ledger transaction of the wrong type")
+	}
+	if !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestDBConstraints_T1_RejectsWrongCorrelation: the ledger transaction's
+// correlation_id must equal bet_id.
+func TestDBConstraints_T1_RejectsWrongCorrelation(t *testing.T) {
+	pool := testPool(t)
+	f, _, betID := newStdBet(t, pool)
+	ltxID := postRawLedgerTx(t, pool, f, ledger.TxSportsbookSettlement, uuid.New(), "t1-wrongcorr-"+uuid.NewString())
+
+	err := rawInsertSettlement(t, pool, f.tenantID, insertSettlementSQL, f.tenantID, betID, 1, "won", stdPayout, ltxID)
+	if err == nil {
+		t.Fatalf("expected T-1 to reject a ledger transaction correlated to a different bet")
+	}
+}
+
+// TestDBConstraints_T1_CausationRules: a re-settlement (generation 2) must
+// cite this bet's generation-1 rollback/tombstone row; an arbitrary or
+// missing causation_record_id is rejected.
+func TestDBConstraints_T1_CausationRules(t *testing.T) {
+	pool := testPool(t)
+	f, actor, betID := newStdBet(t, pool)
+	mustSimulate(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeLost, 0))
+	mustSimulate(t, pool, f.tenantID, rollbackEvent(betID, actor, 1))
+
+	ltxID := postRawLedgerTx(t, pool, f, ledger.TxSportsbookSettlement, betID, "t1-causation-"+uuid.NewString())
+
+	// No causation_record_id at all for generation 2: rejected.
+	err := rawInsertSettlement(t, pool, f.tenantID, insertSettlementSQL, f.tenantID, betID, 2, "won", stdPayout, ltxID)
+	if err == nil {
+		t.Fatalf("expected T-1 to reject a generation-2 settlement with no causation_record_id")
+	}
+
+	// A causation_record_id pointing at an unrelated row: rejected.
+	otherLtxID := postRawLedgerTx(t, pool, f, ledger.TxSportsbookSettlement, betID, "t1-causation-2-"+uuid.NewString())
+	err = rawInsertSettlement(t, pool, f.tenantID,
+		`INSERT INTO sportsbook_bet_settlements
+			(tenant_id, bet_id, event_kind, generation, outcome, payout_amount, asset_code, ledger_transaction_id, causation_record_id)
+		 VALUES ($1, $2, 'settlement', 2, 'won', $3, 'EUR', $4, $5)`,
+		f.tenantID, betID, stdPayout, otherLtxID, uuid.New())
+	if err == nil {
+		t.Fatalf("expected T-1 to reject a causation_record_id that doesn't reference this bet's generation-1 rollback")
+	}
+}
+
+// TestDBConstraints_T2_RejectsDisallowedTransition: a direct UPDATE to a
+// status pair outside §3.1's allowed set is rejected (e.g. settled_won ->
+// void directly, or void -> anything).
+func TestDBConstraints_T2_RejectsDisallowedTransition(t *testing.T) {
+	pool := testPool(t)
+	f, actor, betID := newStdBet(t, pool)
+	mustSimulate(t, pool, f.tenantID, voidEvent(betID, actor, "market_cancelled"))
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE sportsbook_bets SET status = 'open' WHERE id = $1`, betID)
+		return err
+	})
+	if err == nil {
+		t.Fatalf("expected T-2 to reject void -> open (void is terminal)")
+	}
+	if !strings.Contains(err.Error(), "not permitted") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestDBConstraints_T2_RejectsHistoryInconsistentStatus: even an allowed
+// transition pair is rejected if it disagrees with the history-derived
+// status (status is a cache, never an independent fact).
+func TestDBConstraints_T2_RejectsHistoryInconsistentStatus(t *testing.T) {
+	pool := testPool(t)
+	f, actor, betID := newStdBet(t, pool)
+	// History says settled_won (via the real service); try to force the
+	// status to settled_lost directly - an allowed-shape UPDATE(open-
+	// looking pair is not even reachable since OLD=open here) so use a bet
+	// that is open in the DB but manufacture history disagreement by
+	// settling then attempting an UPDATE mismatched with the actual outcome.
+	mustSimulate(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
+	mustSimulate(t, pool, f.tenantID, rollbackEvent(betID, actor, 1))
+	// Bet is 'open' again with a rolled-back settlement in history. Try to
+	// jump straight to settled_lost with NO settlement-outcome-lost history
+	// row to back it (the (open, settled_lost) pair is allowed in §3.1, but
+	// history disagrees since there is no un-reversed 'lost' settlement).
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE sportsbook_bets SET status = 'settled_lost' WHERE id = $1`, betID)
+		return err
+	})
+	if err == nil {
+		t.Fatalf("expected T-2 to reject a status update unsupported by history")
+	}
+	if !strings.Contains(err.Error(), "does not match the settlement history") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestDBConstraints_ImmutableFieldsFrozenThroughLifecycle regression-tests
+// that stake/odds/potential_return/references stay frozen through every
+// settlement transition (sportsbook_bets_enforce_immutable_fields,
+// migration 0087, unchanged by W1).
+func TestDBConstraints_ImmutableFieldsFrozenThroughLifecycle(t *testing.T) {
+	pool := testPool(t)
+	f, actor, betID := newStdBet(t, pool)
+	mustSimulate(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
+	mustSimulate(t, pool, f.tenantID, rollbackEvent(betID, actor, 1))
+	mustSimulate(t, pool, f.tenantID, voidEvent(betID, actor, "market_cancelled"))
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE sportsbook_bets SET stake_amount = stake_amount + 1 WHERE id = $1`, betID)
+		return err
+	})
+	if err == nil {
+		t.Fatalf("expected the immutable-fields trigger to reject a stake_amount change after settlement lifecycle activity")
+	}
+}
+
+// TestDBConstraints_RLS_UpdateAndDeleteAreNoOpsUnderNormalScope documents
+// (rather than merely asserts) an important precondition for the deny-
+// trigger test below: this migration defines ONLY tenant_staff_select,
+// tenant_staff_insert and player_self_scope (all FOR SELECT/INSERT) - no
+// UPDATE or DELETE policy exists at all. Under FORCE ROW LEVEL SECURITY
+// with no applicable policy for a command, Postgres treats every row as
+// invisible to THAT command, so an UPDATE/DELETE against an
+// otherwise-real, tenant-scoped row silently affects ZERO rows and never
+// even reaches the deny trigger (a per-ROW trigger only fires for rows
+// that were actually matched). This is stronger than the trigger for the
+// UPDATE/DELETE case in the current schema, but it also means a raw
+// "owner still holds UPDATE/DELETE privilege" probe under ordinary tenant
+// scope proves RLS, not the trigger - see
+// TestDBConstraints_DenyTriggers_BlockMutationEvenWithAPermissiveRLSPolicy
+// for the isolated proof the trigger itself independently blocks
+// UPDATE/DELETE/TRUNCATE, exactly as ADR 0088 §14 (finding S3) asks for.
+func TestDBConstraints_RLS_UpdateAndDeleteAreNoOpsUnderNormalScope(t *testing.T) {
+	pool := testPool(t)
+	f, actor, betID := newStdBet(t, pool)
+	mustSimulate(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
+	hist := settlementHistory(t, pool, f.tenantID, betID)
+	rowID := hist[0].ID
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE sportsbook_bet_settlements SET outcome = 'lost' WHERE id = $1`, rowID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() != 0 {
+			t.Fatalf("expected 0 rows affected under RLS (no UPDATE policy exists), got %d", tag.RowsAffected())
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error (RLS should silently affect 0 rows, not error): %v", err)
+	}
+
+	// The row must still be exactly as it was: RLS's silent no-op is not a
+	// silent success at bypassing anything.
+	after := settlementHistory(t, pool, f.tenantID, betID)
+	if len(after) != 1 || after[0].Outcome == nil || *after[0].Outcome != SettlementOutcomeWon {
+		t.Fatalf("row was mutated despite 0 RowsAffected being reported: %+v", after)
+	}
+}
+
+// TestDBConstraints_DenyTriggers_BlockMutationEvenWithAPermissiveRLSPolicy
+// is ADR 0088 §14's finding S3, proven on a scratch database: even if a
+// future migration mistakenly added a permissive UPDATE/DELETE RLS policy
+// on sportsbook_bet_settlements (making rows genuinely visible/writable to
+// RLS), the deny triggers independently reject UPDATE, DELETE and
+// TRUNCATE - for the table OWNER, a role that still holds those raw SQL
+// privileges. This is deliberately run against a throwaway scratch
+// database: adding a real (if temporary) permissive policy to the shared
+// TEST_DATABASE_URL database would leave a dangerous policy behind for
+// every other test in the suite if cleanup were ever skipped.
+func TestDBConstraints_DenyTriggers_BlockMutationEvenWithAPermissiveRLSPolicy(t *testing.T) {
+	pool := scratchPoolMigratedUp(t, "sb0091denytrig_")
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `CREATE POLICY qa_test_permit_write ON sportsbook_bet_settlements
+			FOR UPDATE USING (true) WITH CHECK (true)`)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `CREATE POLICY qa_test_permit_delete ON sportsbook_bet_settlements FOR DELETE USING (true)`)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("add temporary permissive UPDATE/DELETE policies: %v", err)
+	}
+
+	f, actor, betID := newStdBet(t, pool)
+	mustSimulate(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
+	hist := settlementHistory(t, pool, f.tenantID, betID)
+	rowID := hist[0].ID
+
+	t.Run("UPDATE", func(t *testing.T) {
+		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE sportsbook_bet_settlements SET outcome = 'lost' WHERE id = $1`, rowID)
+			return err
+		})
+		if err == nil {
+			t.Fatalf("expected the deny trigger to reject UPDATE even though RLS now permits it")
+		}
+	})
+	t.Run("DELETE", func(t *testing.T) {
+		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `DELETE FROM sportsbook_bet_settlements WHERE id = $1`, rowID)
+			return err
+		})
+		if err == nil {
+			t.Fatalf("expected the deny trigger to reject DELETE even though RLS now permits it")
+		}
+	})
+	t.Run("TRUNCATE", func(t *testing.T) {
+		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `TRUNCATE sportsbook_bet_settlements`)
+			return err
+		})
+		if err == nil {
+			t.Fatalf("expected the deny trigger to reject TRUNCATE")
+		}
+	})
+}
+
+// TestDBConstraints_RLS_PlayerScopedInsertRejected: an INSERT under a
+// player-scoped connection is rejected (T-1's own player-scope RAISE, plus
+// the tenant_staff_insert policy's WITH CHECK).
+func TestDBConstraints_RLS_PlayerScopedInsertRejected(t *testing.T) {
+	pool := testPool(t)
+	f, _, betID := newStdBet(t, pool)
+	ltxID := postRawLedgerTx(t, pool, f, ledger.TxSportsbookSettlement, betID, "rls-player-insert-"+uuid.NewString())
+
+	err := pool.WithPlayerScope(context.Background(), f.tenantID, f.playerAccountID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, insertSettlementSQL, f.tenantID, betID, 1, "won", stdPayout, ltxID)
+		return err
+	})
+	if err == nil {
+		t.Fatalf("expected a player-scoped INSERT into sportsbook_bet_settlements to be rejected")
+	}
+}
+
+// TestDBConstraints_RLS_PlayerSelfScope_SeesOnlyOwnBets: a player-scoped
+// SELECT returns only rows belonging to that player's own bets, even
+// though both players' history rows exist in the same tenant.
+func TestDBConstraints_RLS_PlayerSelfScope_SeesOnlyOwnBets(t *testing.T) {
+	pool := testPool(t)
+	f, actor, betID := newStdBet(t, pool)
+	mustSimulate(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
+
+	second := seedSecondPlayer(t, pool, f)
+	fundWallet(t, pool, second, funded)
+	sel2 := seedSelection(t, pool, seedSelectionParams{})
+	res2, err := placeBet(t, pool, second, sel2, stdStake, "second-player-bet-"+uuid.NewString())
+	if err != nil || !res2.Accepted {
+		t.Fatalf("place second player's bet: accepted=%v err=%v", res2.Accepted, err)
+	}
+	mustSimulate(t, pool, f.tenantID, settleEvent(res2.Bet.ID, actor, 1, SettlementOutcomeLost, 0))
+
+	err = pool.WithPlayerScope(context.Background(), f.tenantID, f.playerAccountID, func(ctx context.Context, tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT bet_id FROM sportsbook_bet_settlements`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		seenOther := false
+		count := 0
+		for rows.Next() {
+			var id uuid.UUID
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			count++
+			if id == res2.Bet.ID {
+				seenOther = true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		if seenOther {
+			t.Fatalf("player-scoped SELECT leaked another player's settlement row")
+		}
+		if count != 1 {
+			t.Fatalf("expected exactly 1 own row visible, got %d", count)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("player-scoped select: %v", err)
+	}
+}
