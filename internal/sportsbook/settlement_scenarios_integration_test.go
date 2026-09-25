@@ -377,7 +377,22 @@ func TestSettlementScenario_RollbackThenVoid(t *testing.T) {
 		t.Fatalf("expected the last row to be a void, got %q", voidRec.EventKind)
 	}
 	if voidRec.CausationRecordID != nil {
-		t.Fatalf("rollback-then-void's void must NOT cite the earlier, separately-committed rollback (T-1's xmin rule)")
+		// NOTE: this assertion pins the Go decision table (voidBet never
+		// attempts to set causation_record_id for a standalone
+		// rollback-then-void, because the rollback here is a separate,
+		// already-committed operation, not part of a composed
+		// void-after-settlement). It does NOT exercise T-1's own reject
+		// branch: no causation_record_id is ever submitted for T-1 to
+		// evaluate here, so a bug that made T-1 accept an earlier-
+		// committed rollback's id would NOT be caught by this test. T-1's
+		// reject branch (an earlier-committed rollback cited as causation)
+		// and its accept branch (a same-transaction one) are pinned
+		// directly, at the DB level, by
+		// TestDBConstraints_T1_ComposedVoidCausation_RejectsEarlierTransactionRollback
+		// and TestDBConstraints_T1_ComposedVoidCausation_AcceptsSameTransaction
+		// in settlement_db_constraints_integration_test.go (code review
+		// finding 1 / B-1).
+		t.Fatalf("rollback-then-void's void must NOT cite the earlier, separately-committed rollback (voidBet never sets causation_record_id here)")
 	}
 	voidTx := getLedgerTx(t, pool, f.tenantID, voidRec.LedgerTransactionID)
 	if voidTx.CausationID != nil {

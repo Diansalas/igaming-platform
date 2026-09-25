@@ -13,8 +13,10 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 )
 
@@ -93,11 +95,24 @@ func TestSettlementFaultInjection_HookErrorRollsBackVoidAfterSettlement(t *testi
 // considers open/un-settled - no sportsbook_bet_settlements row backs it,
 // so §4.3 classifies the incoming settle(1) as NEW. Its entries touch only
 // HOUSE/CASH (never LOCKED), so §2.2's NetLocked pre-posting assertion
-// still passes and the call reaches lockAndPost, where ledger.Post reports
-// AlreadyPosted (F-7: replay compares only transaction_type, and both are
-// sportsbook_settlement) for a transaction §4.3 never produced. This must
-// abort as ErrSettlementIntegrity and commit NOTHING - no history row, no
-// status change, no second ledger row under the same key.
+// still passes and the call reaches lockAndPost, where ledger.Post is
+// asked to post the SAME key and type (sportsbook_settlement) with
+// DIFFERENT entries (the fixture's Dr HOUSE 1 / Cr CASH 1 versus the real
+// settle-won shape). STALE COMMENT FIXED (code review finding 4,
+// docs/governance/stage-10-w1-code-review.md): before the F-7 remediation
+// (36616f1) this returned AlreadyPosted because Post's replay compared
+// only transaction_type; after F-7, Post also compares the canonical
+// entry set and returns ErrIdempotencyPayloadMismatch here instead - a
+// DIFFERENT one of the three replay-shaped outcomes lockAndPost must
+// classify as an integrity failure (§4.7), exercised via the
+// errors.Is(err, ledger.ErrIdempotencyPayloadMismatch) branch
+// (settlement.go's lockAndPost). This must abort as ErrSettlementIntegrity
+// and commit NOTHING - no history row, no status change, no second ledger
+// row under the same key. lockAndPost's other two replay-shaped branches -
+// a full match (res.AlreadyPosted) and a differing TYPE
+// (ErrIdempotencyKeyReused) - are exercised by
+// TestSettlementFaultInjection_TombstoneBackstop_AlreadyPosted and
+// TestSettlementFaultInjection_TombstoneBackstop_KeyReused below.
 func TestSettlementFaultInjection_LedgerKeyBackstop(t *testing.T) {
 	pool := testPool(t)
 	f, actor, betID := newStdBet(t, pool)
@@ -142,5 +157,93 @@ func TestSettlementFaultInjection_LedgerKeyBackstop(t *testing.T) {
 	// the call itself must not have added a second one under the same key.
 	if got := countLedgerTransactionsByType(t, pool, f, string(ledger.TxSportsbookSettlement)); got != 1 {
 		t.Fatalf("expected exactly 1 sportsbook_settlement ledger transaction (the fixture), got %d", got)
+	}
+}
+
+// fabricateReservedTombstoneFixture posts a bare TxTombstone directly under
+// generation g's reserved settlement key, WITH NO backing
+// sportsbook_bet_settlements row - the fixture code review finding 4
+// (docs/governance/stage-10-w1-code-review.md) prescribes to exercise
+// lockAndPost's two remaining untested replay-shaped branches. Its
+// CorrelationID is a fresh uuid.New(), never betID: F-7's replay comparison
+// (internal/ledger/replay.go) deliberately EXEMPTS correlation_id for
+// TxTombstone, so this is still a legitimate "same fact" as far as Post's
+// replay check is concerned, exactly like the historical tombstone writers
+// (casino/payments) it documents.
+func fabricateReservedTombstoneFixture(t *testing.T, pool *db.Pool, f sbFixture, betID uuid.UUID, generation int) {
+	t.Helper()
+	reservedKey := settlementIdempotencyKey(betID, generation)
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+			TenantID: f.tenantID, TransactionType: ledger.TxTombstone,
+			IdempotencyKey: reservedKey, CorrelationID: uuid.New(),
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("fabricate the reserved tombstone fixture: %v", err)
+	}
+}
+
+// TestSettlementFaultInjection_TombstoneBackstop_AlreadyPosted exercises
+// lockAndPost's res.AlreadyPosted branch (settlement.go:934, code review
+// finding 4): a bare tombstone already occupies generation 1's reserved
+// key with no history row. rollback(1) on a never-settled bet is §4.3's
+// "bet open, g = G+1, no row for g" case, which itself tries to post a
+// TxTombstone under that SAME key with the SAME (empty) entries -
+// correlation is exempt for tombstones, so Post reports a FULL replay
+// match (res.AlreadyPosted = true) for a posting §4.3 classified as NEW.
+// This must abort as ErrSettlementIntegrity and commit nothing.
+func TestSettlementFaultInjection_TombstoneBackstop_AlreadyPosted(t *testing.T) {
+	pool := testPool(t)
+	f, actor, betID := newStdBet(t, pool)
+	fabricateReservedTombstoneFixture(t, pool, f, betID, 1)
+
+	_, callErr := simulateSettlement(t, pool, f.tenantID, rollbackEvent(betID, actor, 1))
+	if !errors.Is(callErr, ErrSettlementIntegrity) {
+		t.Fatalf("expected ErrSettlementIntegrity, got %v", callErr)
+	}
+
+	if got := len(settlementHistory(t, pool, f.tenantID, betID)); got != 0 {
+		t.Fatalf("expected 0 history rows, got %d", got)
+	}
+	if got := betStatus(t, pool, f.tenantID, betID); got != BetStatusOpen {
+		t.Fatalf("bet status = %q, want open (unchanged)", got)
+	}
+	if got := countLedgerTransactionsByType(t, pool, f, string(ledger.TxTombstone)); got != 1 {
+		t.Fatalf("expected exactly 1 tombstone ledger transaction (the fixture; the call must not add a second), got %d", got)
+	}
+}
+
+// TestSettlementFaultInjection_TombstoneBackstop_KeyReused exercises
+// lockAndPost's ErrIdempotencyKeyReused branch (settlement.go:916, code
+// review finding 4): the SAME bare-tombstone fixture as above, but this
+// time settle(1) is attempted. §4.3 sees no history row for generation 1
+// (the fixture has none), so it classifies settle(1) as NEW and tries to
+// post a sportsbook_settlement transaction under the SAME reserved key a
+// tombstone already occupies - a TYPE mismatch, which Post rejects as
+// ErrIdempotencyKeyReused before any payload comparison even runs. This
+// must abort as ErrSettlementIntegrity and commit nothing.
+func TestSettlementFaultInjection_TombstoneBackstop_KeyReused(t *testing.T) {
+	pool := testPool(t)
+	f, actor, betID := newStdBet(t, pool)
+	fabricateReservedTombstoneFixture(t, pool, f, betID, 1)
+
+	_, callErr := simulateSettlement(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
+	if !errors.Is(callErr, ErrSettlementIntegrity) {
+		t.Fatalf("expected ErrSettlementIntegrity, got %v", callErr)
+	}
+
+	if got := len(settlementHistory(t, pool, f.tenantID, betID)); got != 0 {
+		t.Fatalf("expected 0 history rows, got %d", got)
+	}
+	if got := betStatus(t, pool, f.tenantID, betID); got != BetStatusOpen {
+		t.Fatalf("bet status = %q, want open (unchanged)", got)
+	}
+	if got := countLedgerTransactionsByType(t, pool, f, string(ledger.TxSportsbookSettlement)); got != 0 {
+		t.Fatalf("expected 0 sportsbook_settlement ledger transactions, got %d", got)
+	}
+	if got := countLedgerTransactionsByType(t, pool, f, string(ledger.TxTombstone)); got != 1 {
+		t.Fatalf("expected exactly 1 tombstone ledger transaction (the fixture), got %d", got)
 	}
 }

@@ -65,6 +65,74 @@ func TestMigration0091_DownSucceedsOnCleanDatabase(t *testing.T) {
 	}
 }
 
+// assertMigration0091StillApplied is code-review finding #10: a refused
+// down-migration must leave the schema EXACTLY as a successful up-migration
+// left it, not merely fail with the right error text. It checks the three
+// things §12's refusal path could otherwise leave half-done if any of its
+// five checks were not atomic with the rest of the migration file: (a)
+// schema_migrations still records version 91 as applied; (b) the 20-value
+// transaction_type CHECK (added by §12 step 1's ALTER) is still the one in
+// force, evidenced by both an original value and one of the three new
+// values still being admitted by it; (c) sportsbook_bet_settlements still
+// exists as a table. Run with pool.WithoutTenant: schema_migrations and
+// information_schema are not tenant-scoped, and FORCE RLS on
+// sportsbook_bet_settlements must not make its own existence unobservable.
+func assertMigration0091StillApplied(t *testing.T, pool *db.Pool) {
+	t.Helper()
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		var applied bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = 91)`).Scan(&applied); err != nil {
+			return err
+		}
+		if !applied {
+			t.Errorf("schema_migrations no longer records migration 91 as applied after a refused down-migration")
+		}
+
+		var constraintDef string
+		if err := tx.QueryRow(ctx,
+			`SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'ledger_transactions_transaction_type_check'`,
+		).Scan(&constraintDef); err != nil {
+			return err
+		}
+		for _, want := range []string{"deposit", "sportsbook_settlement", "sportsbook_void", "sportsbook_rollback"} {
+			if !strings.Contains(constraintDef, want) {
+				t.Errorf("transaction_type CHECK no longer admits %q after a refused down-migration: %s", want, constraintDef)
+			}
+		}
+
+		var tableExists bool
+		if err := tx.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'sportsbook_bet_settlements')`,
+		).Scan(&tableExists); err != nil {
+			return err
+		}
+		if !tableExists {
+			t.Errorf("sportsbook_bet_settlements no longer exists after a refused down-migration")
+		}
+
+		for _, trig := range []string{
+			"sportsbook_bet_settlements_validate",    // T-1
+			"sportsbook_bets_status_transition",      // T-2
+			"sportsbook_bet_settlements_immutable",   // deny trigger (UPDATE/DELETE)
+			"sportsbook_bet_settlements_no_truncate", // deny trigger (TRUNCATE)
+		} {
+			var triggerExists bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = $1 AND NOT tgisinternal)`, trig,
+			).Scan(&triggerExists); err != nil {
+				return err
+			}
+			if !triggerExists {
+				t.Errorf("trigger %q no longer exists after a refused down-migration", trig)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("check post-refusal schema state: %v", err)
+	}
+}
+
 // TestMigration0091_DownRefuses_AfterSettlementPosted covers §12 checks 1
 // (new transaction type exists), 3 (history table non-empty) and 4 (a bet
 // is no longer open) together - the realistic evidence-exists case.
@@ -80,6 +148,7 @@ func TestMigration0091_DownRefuses_AfterSettlementPosted(t *testing.T) {
 	if !strings.Contains(err.Error(), "irreversible") {
 		t.Fatalf("expected the ADR 0088 §12 refusal message, got: %v", err)
 	}
+	assertMigration0091StillApplied(t, pool)
 }
 
 // TestMigration0091_DownRefuses_TombstoneOnly isolates §12 check 2: a
@@ -102,6 +171,7 @@ func TestMigration0091_DownRefuses_TombstoneOnly(t *testing.T) {
 	if !strings.Contains(err.Error(), "tombstone") {
 		t.Fatalf("expected the check-2 refusal message naming the tombstone, got: %v", err)
 	}
+	assertMigration0091StillApplied(t, pool)
 }
 
 // TestMigration0091_DownRefuses_MismatchKindOnly isolates §12 check 5: a
@@ -147,4 +217,5 @@ func TestMigration0091_DownRefuses_MismatchKindOnly(t *testing.T) {
 	if !strings.Contains(err.Error(), "mismatch") {
 		t.Fatalf("expected the check-5 refusal message, got: %v", err)
 	}
+	assertMigration0091StillApplied(t, pool)
 }

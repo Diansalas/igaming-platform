@@ -13,6 +13,7 @@ package sportsbook
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -365,7 +366,10 @@ func TestDBConstraints_DenyTriggers_BlockMutationEvenWithAPermissiveRLSPolicy(t 
 
 // TestDBConstraints_RLS_PlayerScopedInsertRejected: an INSERT under a
 // player-scoped connection is rejected (T-1's own player-scope RAISE, plus
-// the tenant_staff_insert policy's WITH CHECK).
+// the tenant_staff_insert policy's WITH CHECK). Security review finding
+// P3-6 (docs/governance/stage-10-w1-security-review.md): the test must
+// identify WHICH control rejected it, by asserting T-1's specific message
+// substring, not merely "err != nil".
 func TestDBConstraints_RLS_PlayerScopedInsertRejected(t *testing.T) {
 	pool := testPool(t)
 	f, _, betID := newStdBet(t, pool)
@@ -377,6 +381,35 @@ func TestDBConstraints_RLS_PlayerScopedInsertRejected(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected a player-scoped INSERT into sportsbook_bet_settlements to be rejected")
+	}
+	if !strings.Contains(err.Error(), "history rows are never written under a player-scoped connection") {
+		t.Fatalf("expected T-1's player-scope RAISE message, got: %v", err)
+	}
+}
+
+// TestDBConstraints_RLS_NoTenantContextInsertRejected: an INSERT with NO
+// tenant context set at all (pool.WithoutTenant) is rejected by T-1's
+// "parent bet is not visible" RAISE - distinct from the player-scoped
+// case above, which fires T-1's FIRST check before the bet is even read.
+// With no tenant context the player-scope check passes trivially (the
+// setting is empty, not "player-scoped"), so this pins the SECOND
+// failure mode: the parent bet lookup itself finds nothing, because
+// sportsbook_bets' own RLS denies visibility with no tenant set (security
+// review finding P3-6).
+func TestDBConstraints_RLS_NoTenantContextInsertRejected(t *testing.T) {
+	pool := testPool(t)
+	f, _, betID := newStdBet(t, pool)
+	ltxID := postRawLedgerTx(t, pool, f, ledger.TxSportsbookSettlement, betID, "rls-no-tenant-insert-"+uuid.NewString())
+
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, insertSettlementSQL, f.tenantID, betID, 1, "won", stdPayout, ltxID)
+		return err
+	})
+	if err == nil {
+		t.Fatalf("expected an INSERT with no tenant context to be rejected")
+	}
+	if !strings.Contains(err.Error(), "is not visible") {
+		t.Fatalf("expected T-1's \"parent bet ... is not visible\" RAISE message, got: %v", err)
 	}
 }
 
@@ -428,5 +461,186 @@ func TestDBConstraints_RLS_PlayerSelfScope_SeesOnlyOwnBets(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("player-scoped select: %v", err)
+	}
+}
+
+// --- T-1 composed-void causation (code review finding 1 / B-1) -------------
+//
+// docs/governance/stage-10-w1-code-review.md finding 1: T-1's "only the
+// composed void of a void-after-settlement may cite a rollback, and only
+// one inserted by THIS SAME TRANSACTION" rule (migrations/0091…up.sql
+// :244-255) is checked by comparing the candidate rollback row's xmin
+// against pg_current_xact_id() - which is always the TOP-LEVEL
+// transaction id. These three tests pin both directions plus the
+// documented failure mode of that mechanism.
+
+const insertRollbackSQL = `INSERT INTO sportsbook_bet_settlements
+	(tenant_id, bet_id, event_kind, generation, asset_code, reverses_settlement_id, ledger_transaction_id)
+	VALUES ($1, $2, 'rollback', $3, 'EUR', $4, $5) RETURNING id`
+
+const insertVoidWithCausationSQL = `INSERT INTO sportsbook_bet_settlements
+	(tenant_id, bet_id, event_kind, void_reason, asset_code, causation_record_id, ledger_transaction_id)
+	VALUES ($1, $2, 'void', $3, 'EUR', $4, $5)`
+
+// postRawLedgerTxOnTx is postRawLedgerTx's same balanced-fixture-posting
+// shape (Dr HOUSE 1 / Cr CASH 1), except it runs on a tx the CALLER already
+// holds open, rather than opening its own WithTenant transaction - required
+// here because the whole point of these tests is to control exactly which
+// statements land in which database transaction (and, for the savepoint
+// case, which sub-transaction).
+func postRawLedgerTxOnTx(ctx context.Context, tx pgx.Tx, tenantID, walletID uuid.UUID, txType ledger.TransactionType, correlationID uuid.UUID, key string) (uuid.UUID, error) {
+	house, err := ledger.GetOrCreateAccounts(ctx, tx, tenantID,
+		ledger.AccountSpec{WalletID: nil, AccountType: ledger.AccountHouseGaming, AssetCode: "EUR"})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	cash, err := ledger.GetOrCreateAccount(ctx, tx, tenantID, &walletID, ledger.AccountPlayerCash, "EUR")
+	if err != nil {
+		return uuid.Nil, err
+	}
+	res, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+		TenantID: tenantID, TransactionType: txType, IdempotencyKey: key, CorrelationID: correlationID,
+		Entries: []ledger.EntryInput{
+			{LedgerAccountID: house[0], Direction: ledger.Debit, Amount: 1},
+			{LedgerAccountID: cash, Direction: ledger.Credit, Amount: 1},
+		},
+	})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return res.TransactionID, nil
+}
+
+// TestDBConstraints_T1_ComposedVoidCausation_RejectsEarlierTransactionRollback
+// is B-1(a): a void row whose causation_record_id points at a rollback row
+// that a DIFFERENT, EARLIER, already-committed transaction inserted (the
+// real "rollback-then-void" shape TestSettlementScenario_RollbackThenVoid
+// exercises through the service, which never even attempts to set
+// causation_record_id there) must be rejected if something DOES try to set
+// it - proving the reject branch is not merely "the Go code never asks for
+// this", but that T-1 itself actively refuses it.
+func TestDBConstraints_T1_ComposedVoidCausation_RejectsEarlierTransactionRollback(t *testing.T) {
+	pool := testPool(t)
+	f, actor, betID := newStdBet(t, pool)
+	mustSimulate(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
+	// Committed in ITS OWN transaction, well before the void attempt below.
+	mustSimulate(t, pool, f.tenantID, rollbackEvent(betID, actor, 1))
+
+	hist := settlementHistory(t, pool, f.tenantID, betID)
+	rollbackRow := hist[len(hist)-1]
+	if rollbackRow.EventKind != settlementHistoryKindRollback {
+		t.Fatalf("fixture precondition: expected the last history row to be the rollback, got %q", rollbackRow.EventKind)
+	}
+
+	voidLtxID := postRawLedgerTx(t, pool, f, ledger.TxSportsbookVoid, betID, "t1-composedvoid-early-"+uuid.NewString())
+	err := rawInsertSettlement(t, pool, f.tenantID, insertVoidWithCausationSQL,
+		f.tenantID, betID, "market_cancelled", rollbackRow.ID, voidLtxID)
+	if err == nil {
+		t.Fatalf("expected T-1 to reject a void citing a rollback committed by an earlier, separate transaction")
+	}
+	if !strings.Contains(err.Error(), "may cite only a rollback of this bet inserted by the same transaction") {
+		t.Fatalf("unexpected error (expected T-1's same-transaction causation message): %v", err)
+	}
+}
+
+// TestDBConstraints_T1_ComposedVoidCausation_AcceptsSameTransaction is
+// B-1(b): a rollback row and a void row citing it, both inserted by ONE
+// database transaction (the composed-void shape
+// TestSettlementScenario_VoidAfterSettlement_Won exercises end-to-end
+// through the service), must be ACCEPTED by T-1's xmin check - the direct,
+// DB-level positive-branch pin the code review found missing.
+func TestDBConstraints_T1_ComposedVoidCausation_AcceptsSameTransaction(t *testing.T) {
+	pool := testPool(t)
+	f, actor, betID := newStdBet(t, pool)
+	mustSimulate(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
+	settlementRowID := settlementHistory(t, pool, f.tenantID, betID)[0].ID
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rollbackTxID, err := postRawLedgerTxOnTx(ctx, tx, f.tenantID, f.walletID, ledger.TxSportsbookRollback, betID,
+			"t1-composed-same-rollback-"+uuid.NewString())
+		if err != nil {
+			return fmt.Errorf("post rollback ledger tx: %w", err)
+		}
+		var rollbackRowID uuid.UUID
+		if err := tx.QueryRow(ctx, insertRollbackSQL, f.tenantID, betID, 1, settlementRowID, rollbackTxID).Scan(&rollbackRowID); err != nil {
+			return fmt.Errorf("insert rollback row: %w", err)
+		}
+
+		voidTxID, err := postRawLedgerTxOnTx(ctx, tx, f.tenantID, f.walletID, ledger.TxSportsbookVoid, betID,
+			"t1-composed-same-void-"+uuid.NewString())
+		if err != nil {
+			return fmt.Errorf("post void ledger tx: %w", err)
+		}
+		_, err = tx.Exec(ctx, insertVoidWithCausationSQL, f.tenantID, betID, "data_error", rollbackRowID, voidTxID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("expected T-1 to accept a same-transaction rollback+composed-void, got: %v", err)
+	}
+}
+
+// TestDBConstraints_T1_ComposedVoidCausation_SavepointRollbackIsRejected is
+// B-1(c): PINS the documented precondition SB-T1-XMIN (code review
+// finding 1, docs/governance/stage-10-w1-code-review.md): T-1 compares a
+// candidate causation row's xmin against pg_current_xact_id(), which is
+// ALWAYS the top-level transaction id. A row inserted under a SAVEPOINT
+// (even after RELEASE SAVEPOINT) keeps the subtransaction's own xid as its
+// stored xmin, which never equals the top-level xid. So a rollback row
+// inserted inside a savepoint, followed by a void citing it in the SAME
+// top-level transaction, is REJECTED by T-1 even though it is exactly the
+// legitimate composed-void shape.
+//
+// This is deliberately pinned as REJECTED, not fixed here: it fails
+// CLOSED (no money moves - both postings' ledger rows are rolled back with
+// the whole transaction), so it is an availability defect, not a
+// correctness one. It is NOT reachable in production today, because
+// SimulateSettlementEvent's insertSettlementRecord (settlement.go) issues
+// a plain INSERT on the top-level pgx.Tx and never opens a savepoint
+// around it - the precondition holds by construction, today. It WOULD
+// break the first caller that wraps the operation in a savepoint (a future
+// batch driver taking one savepoint per bet, a provider-webhook driver, or
+// a test harness - the code review's own examples). The recommended fix,
+// left for a future change once a second settlement driver exists, is
+// `pg_xact_status(<epoch-qualified xmin>::xid8) = 'in progress'`, which
+// classifies a released-savepoint row as belonging to the current
+// transaction tree (verified by the reviewer on PostgreSQL 16).
+func TestDBConstraints_T1_ComposedVoidCausation_SavepointRollbackIsRejected(t *testing.T) {
+	pool := testPool(t)
+	f, actor, betID := newStdBet(t, pool)
+	mustSimulate(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
+	settlementRowID := settlementHistory(t, pool, f.tenantID, betID)[0].ID
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rollbackTxID, err := postRawLedgerTxOnTx(ctx, tx, f.tenantID, f.walletID, ledger.TxSportsbookRollback, betID,
+			"t1-composed-savepoint-rollback-"+uuid.NewString())
+		if err != nil {
+			return fmt.Errorf("post rollback ledger tx: %w", err)
+		}
+
+		if _, err := tx.Exec(ctx, "SAVEPOINT sb_t1_xmin_probe"); err != nil {
+			return fmt.Errorf("open savepoint: %w", err)
+		}
+		var rollbackRowID uuid.UUID
+		if err := tx.QueryRow(ctx, insertRollbackSQL, f.tenantID, betID, 1, settlementRowID, rollbackTxID).Scan(&rollbackRowID); err != nil {
+			return fmt.Errorf("insert rollback row under savepoint: %w", err)
+		}
+		if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT sb_t1_xmin_probe"); err != nil {
+			return fmt.Errorf("release savepoint: %w", err)
+		}
+
+		voidTxID, err := postRawLedgerTxOnTx(ctx, tx, f.tenantID, f.walletID, ledger.TxSportsbookVoid, betID,
+			"t1-composed-savepoint-void-"+uuid.NewString())
+		if err != nil {
+			return fmt.Errorf("post void ledger tx: %w", err)
+		}
+		_, err = tx.Exec(ctx, insertVoidWithCausationSQL, f.tenantID, betID, "data_error", rollbackRowID, voidTxID)
+		return err
+	})
+	if err == nil {
+		t.Fatalf("SB-T1-XMIN: expected T-1 to reject a composed void whose rollback row was inserted under a " +
+			"released savepoint - this pins the documented precondition/failure mode, not a desired outcome")
+	}
+	if !strings.Contains(err.Error(), "may cite only a rollback of this bet inserted by the same transaction") {
+		t.Fatalf("unexpected error (expected T-1's same-transaction causation/xmin-mismatch message): %v", err)
 	}
 }
