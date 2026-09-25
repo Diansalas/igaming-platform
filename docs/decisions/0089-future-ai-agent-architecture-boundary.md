@@ -12,7 +12,12 @@
   implementation: `security` (agent identity, tool permissions, prompt
   injection, PII), `ledger-finance` (anything that could reach a
   balance-affecting flow), `identity-compliance` (RG/KYC/jurisdiction),
-  `risk`, `bonus-engine`, `qa`.
+  `risk`, `bonus-engine`, `qa`. `identity-compliance` co-review is
+  additionally required for any segmentation or reward-history tool
+  (§6, §12).
+- **Review:** revised 2026-09-25 after `bonus-engine`, `security` and
+  `identity-compliance` review of commit `56f5135`; all findings APPLIED
+  (§12). Status and scope unchanged.
 - **Inputs (verified at HEAD `20c72e4`):** the human directive quoted in
   §1; `CLAUDE.md`; `docs/governance/change-control.md`; docs 10, 17, 21,
   23, 25, 29, 30 under `docs/architecture/`; ADRs 0014, 0017, 0019, 0024,
@@ -103,8 +108,27 @@ EXECUTE.** Concretely, for any future agent capability:
    `bonus_held_disposition:resolve`, `bonus_campaign:activate`,
    `bonus_approval_policy:write`, every `withdrawal:*` permission,
    `rg_restriction:write`, `staff:manage`, and any permission that changes
-   RBAC, jurisdiction or licence registries. The EXECUTE stage is always
-   performed by a principal that is not the agent (§5.3).
+   RBAC, jurisdiction or licence registries. It also covers
+   `bonus_suggestion:review`, `bonus_grant:review`, `bonus_grant:cancel`,
+   `bonus_campaign:create`, `bonus_campaign:update`,
+   `bonus_campaign:suspend`, `bonus_offer:manage`, `bonus_segment:manage`,
+   `withdrawal_policy:write`, `rg_restriction:read`, `risk_config:manage`,
+   `provider_config:write`, `asset_registry:manage`,
+   `asset_authorization:write`, every `casino_*`, `jurisdiction_*` and
+   `operating_market_*` permission, `tenant_licence:assign`,
+   `sportsbook_*:manage`, `player:suspend`, `tenant:write`, `brand:write`,
+   `identity_review:manage` and `verification:review`. The EXECUTE stage
+   is always performed by a principal that is not the agent (§5.3).
+
+   Grants are **allow-list only**. An agent may hold only permissions on
+   an explicit, `security`-reviewed agent-grantable list. Initial
+   candidate list: `bonus:read`, `bonus_config:read`, `bonus_report:read`,
+   `bonus_suggestion:create`. Every other existing or future permission is
+   non-grantable by default. `bonus_suggestion:review` and every
+   campaign/offer/segment/grant mutation permission are never grantable,
+   because agents propose only through inert proposal objects (§5.2). The
+   enumerated list above is the never-grantable set that tests assert
+   against (I-1). It is not the mechanism: the allow-list is.
 4. **Agents never touch storage.** No agent credential is a database
    credential, and no agent tool issues SQL. Agents call the canonical
    Bonus Engine, Gamification Engine and Reward Orchestrator APIs (§4),
@@ -120,20 +144,20 @@ may not replace any of these with an agent-specific parallel mechanism.
 
 | Control | Binding rule | Reuse / current state |
 |---|---|---|
-| **Agent identity** | An agent is a distinct, non-human principal. It is never a staff token, never a player token, and never a shared service credential. | `PrincipalType` today is `player`/`staff`/`service` (`internal/auth/jwt.go`). `audit.ActorType` is `player`/`staff`/`service`/`system`. **RECOMMENDATION (not implemented):** a future `PrincipalAgent` (and a matching `audit.ActorAgent`), or at minimum a service-principal subtype with a distinguishable `agent_id`. An agent must never be indistinguishable in audit from a deterministic rule runner. The choice belongs to the future stage and is `security`-reviewed. |
-| **RBAC** | Agents get permissions only through the existing `Permission` model, with no role wildcard and no inheritance from a staff role. | `internal/auth/permission.go`. Adding a principal type or a permission falls under `change-control.md` ("New StaffRole / new RBAC permission": `security` review plus over-/under-grant tests). |
+| **Agent identity** | An agent is a distinct, non-human principal. It is never a staff token, never a player token, and never a shared service credential. | `PrincipalType` today is `player`/`staff`/`service` (`internal/auth/jwt.go`). `audit.ActorType` is `player`/`staff`/`service`/`system`. **RECOMMENDATION (not implemented):** a distinct `PrincipalType` and `audit.ActorType` (working name `ai_agent`, not `agent`, to avoid collision with the retail agent network). The distinction must be carried in the token and in the audit actor type, never only in `Metadata`. Amending §W15.4.3 so that `bonus_suggestion:create` names this principal type is part of that future `security` review. A service-principal subtype is **not** an acceptable substitute: rule runners share `PrincipalService`/`ActorService`, so model-driven and deterministic actors would be distinguishable only by `Metadata`. |
+| **RBAC** | Agents get permissions only from a dedicated agent grant set that is disjoint from every staff role. It never comes from a staff role, a wildcard or inheritance. Today RBAC is single-role-per-token (`RoleHasPermission`), so no mechanism exists yet for per-agent grants or for intersecting with a delegating principal. This is a **future prerequisite** that needs `security` design. | `internal/auth/permission.go`. Adding a principal type or a permission falls under `change-control.md` ("New StaffRole / new RBAC permission": `security` review plus over-/under-grant tests). |
 | **Tenant scoping** | `tenant_id` comes from the agent's authenticated credential, never from the prompt, a tool argument or model output. It is enforced by RLS on every canonical call. | `CLAUDE.md` Multi-tenancy; `auth.RequireTenantScope`; ADR 0011 (platform-scoped tokens). A platform-scoped (nil-tenant) agent is **not permitted** for tenant data. |
-| **Brand scoping** | An agent credential may be further restricted to a brand set. A brand never widens tenant scope. | Brand-scoped RLS/predicates already used by bonus tables (doc 29 §5.4). |
+| **Brand scoping** | An agent credential may be further restricted to a brand set. A brand never widens tenant scope. | Brand is a column and query predicate (doc 29 §5.4). RLS enforces tenant only. There is no brand claim in `Claims` and no brand RLS setting. Agent brand restriction is a **future prerequisite** and must be enforced server-side on every tool. Until brand-level RLS exists, it is an application-layer control and must be tested as such. |
 | **Explicit tool permissions** | Each tool is an allow-listed, typed operation that maps 1:1 onto a canonical API and its existing permission. There is no generic "call any endpoint" or free-form query tool. | New. Registry-as-configuration, versioned (`CLAUDE.md` configuration-row rule). |
 | **Read/write separation** | Read tools and propose tools are separate grants. A read-only agent cannot propose, and no agent holds an execute grant (§2.3). | Mirrors `PermBonusRead`/`PermBonusReportRead` vs. mutation permissions. |
 | **Approval workflows** | A proposal becomes an action only through the existing approval primitives, and agent origin never counts as an approval. | `BonusSuggestion` review (doc 10 §W6/§N3; security §W15.4.3); bonus four-eyes change requests (`internal/bonus/change_governance.go`, `four_eyes_ops.go`; routes `POST /v1/admin/bonus/change-requests[/{id}/decide]`); withdrawal distinct-approver (ADR 0024); catalogue dual control (ADR 0081 §5); `SEP-1` actor ≠ beneficiary (security §W15.1). Step-up for approvers (ADR 0017): `RequireStepUp` is `NOT IMPLEMENTED`. |
 | **Audit logging** | Every agent tool call, including reads of player-level data, writes an audit record in the same transaction as any effect. | `internal/audit.Record` (same-tx). Doc 12 §Audit. |
-| **Actor/subject separation** | When an agent acts for a staff principal, **both** are recorded: the agent as acting principal and the staff member as delegating principal. The affected player or population is recorded separately as the subject/beneficiary. The delegating staff member's permissions bound the agent (intersection, never union), and `SEP-1` is evaluated against the delegating human. | `audit.Entry` today carries one `ActorType`/`ActorID`. **Gap (future prerequisite):** a first-class delegating-principal field. `Metadata` is not an acceptable substitute for an authorization-relevant fact. |
+| **Actor/subject separation** | When an agent acts for a staff principal, **both** are recorded: the agent as acting principal and the staff member as delegating principal. The affected player or population is recorded separately as the subject/beneficiary. For READ tools, the effective grant is the agent grant intersected with the delegating principal's read permissions. For PROPOSE, `bonus_suggestion:create` is agent-only and never granted to a human role, and the delegating principal must hold `bonus_suggestion:review` in the same tenant. Delegation never outlives, and is revoked together with, the delegating staff session or account. `SEP-1` is evaluated against the delegating human. | `audit.Entry` today carries one `ActorType`/`ActorID`. **Gap (future prerequisite):** a first-class delegating-principal field. `Metadata` is not an acceptable substitute for an authorization-relevant fact. |
 | **Idempotency** | Every propose/execute call carries a caller idempotency key. Execution inherits the canonical API's own database-enforced idempotency. | ADR 0020; `EconomicOperationIdentity` (doc 10 §N2.4a); `(provider_id, provider_tx_id)` pattern. |
 | **Deterministic validation** | All validation that decides anything is performed by the canonical service. Agent-side checks are advisory only. | T.1 gate order (doc 10 §T.1): `AssetAuthorization` → `rg.EvaluateEligibility` → `risk.Evaluate`. |
 | **Simulation / dry-run** | Every SIMULATE result is produced by a deterministic, side-effect-free canonical endpoint, never computed by the model. Results are labelled non-binding. | See §4 (mostly missing). |
-| **Rate limits** | Enforced per agent identity, per tenant and per tool, server-side. | No general API rate limiter exists (only auth failed-attempt limiting). **Future prerequisite.** |
-| **Execution limits** | Hard caps per agent: proposals per window, population size per proposal, and monetary ceiling per proposed campaign. These are configuration rows, and exceeding them fails closed. | Existing threshold resolution (`ResolveApprovalPolicy`) is the model to follow. |
+| **Rate limits** | Enforced per agent identity, per tenant and per tool, server-side. | Only a per-IP, per-replica, in-memory limiter exists, on unauthenticated auth endpoints (`internal/httpserver/ratelimit.go`, Stage 9), plus per-identifier login lockout. It is not reusable for agents. Agent rate limits must be keyed on principal, tenant and tool and must not multiply with replica count. **Future prerequisite.** |
+| **Execution limits** | Hard caps per agent: proposals per window, population size per proposal, and monetary ceiling per proposed campaign. These are configuration rows, and exceeding them fails closed. | Execution limits (proposal count, population size, monetary ceiling) must be enforced inside the canonical transaction, not in memory. Existing threshold resolution (`ResolveApprovalPolicy`) is the model to follow. **Future prerequisite.** |
 | **Model/provider version recording** | Every agent-originated artifact records the model identifier, provider and version, plus the agent/tool-registry version. | `bonus_suggestions.originating_model_version` exists (`OriginatingModel` kind, migration 0056): a precedent, not a full solution. |
 | **Reproducibility** | Store hashes of the inputs (the read-set, pinned to snapshot identifiers), the prompt/template, the tool-call log and the outputs, with the configuration versions used. | New. Raw prompts containing PII follow the §6 minimisation rules. |
 | **Complete action history** | Each agent session can be reconstructed end to end: reads → proposals → simulations → reviews → resulting canonical operations. Linkage is bidirectional. | `SuggestionReviewEvent` (append-only) plus `originating_suggestion_id` on `Grant`/`BulkGrantJob` is the existing pattern to extend. |
@@ -170,7 +194,7 @@ principal.
 | READ bonus reports / campaign performance | `PermBonusReportRead` is defined, but no route uses it. Doc 12 §Reporting: never against the transactional ledger; via CDC → ClickHouse | **Missing**: reporting read models |
 | READ bonus liability | ADR 0032 §2 `promo_liability` + mirror invariant; ledger projections | **Missing**: a liability read model. The agent may read it and never compute it |
 | READ redemption / expiry | Grant states (doc 10 §1.2); expiry sweep (`internal/bonus/expiry_sweep.go`) | Partial: grant list only. **Missing**: aggregated view |
-| READ player segmentation | Doc 30 (`Segment`, `SegmentEvaluation`, `Resolve`) | **Missing**: doc 30 is `NOT IMPLEMENTED` |
+| READ player segmentation | Doc 30 (`Segment`, `SegmentEvaluation`, `Resolve`) | **Missing**: doc 30 is `NOT IMPLEMENTED`. Any population size or count an agent reads is post-RG-filter; pre-filter counts that would let self-exclusion/RG-restriction rates be inferred are never exposed to an agent |
 | READ reward history | Doc 21 (`RewardDecision`), doc 23 | **Missing**: Reward Orchestrator is `NOT IMPLEMENTED` |
 | READ gamification reports / metrics | Doc 17 | **Missing**: Gamification is `NOT IMPLEMENTED` |
 | PROPOSE campaigns / rewards / wagering / eligibility / configurations | `BonusSuggestion` (`internal/bonus/suggestion.go`, migration 0056): `originating_kind = model`, `proposed_config` inert, `bonus_suggestion:create` held by no human role (security §W15.4.3) | Object and review lifecycle exist; review routes `POST /v1/admin/bonus/suggestions/{id}/{claim,decide}`. **Missing**: an authenticated non-human route for `CreateSuggestion`, and agent identity |
@@ -190,9 +214,10 @@ principal.
   evaluated later by deterministic eligibility (doc 10 §T.1/§T.4;
   doc 30 §1.1). A proposal that names a self-excluded player is not an
   error in the agent. It is denied at the gate like any other attempt.
-  However, agents **must not be designed to target self-excluded
-  players**, and read tools must not expose self-exclusion status as a
-  targeting input. RG-restricted players are removed from any population
+  However, agents **must not be designed to target self-excluded,
+  timed-out, or cooling-off players**, and read tools must not expose
+  self-exclusion, time-out, cooling-off, or RG-limit-restriction status
+  as a targeting input or population filter. RG-restricted players are removed from any population
   the agent sees, by the canonical service rather than by the agent.
 - **Mid-lifecycle self-exclusion** follows ADR 0034 §2 unchanged. The
   fact that a grant was originally proposed by an agent does not affect
@@ -226,6 +251,12 @@ object with the same three properties:
   an agent acting for staff member S may not be reviewed or approved by
   S (maker ≠ checker, extending security §W15.4.3 constraint 2 and the
   four-eyes self-approval refusal already enforced for change requests).
+  **Not enforced today:** `DecideSuggestion` has no maker ≠ checker
+  check, and `bonus_suggestions` has no delegating-principal column.
+  Future prerequisite: a `delegating_principal_id` on agent-origin
+  proposals, plus a database-enforced `decided_by <>
+  delegating_principal_id` rule (the pattern from migration 0063), with an
+  adversarial test.
 - `SEP-1` (security §W15.1) is evaluated against every human in the
   chain, including the delegating principal.
 - An agent may never mutate the policy that gates its own proposals.
@@ -247,7 +278,12 @@ object with the same three properties:
 - **Data minimisation / PII.** Agents receive aggregated or
   pseudonymised data by default. Player-level PII (name, email, document
   data, IP, payment details) is excluded unless a specific tool is
-  justified, `security`-reviewed and audited per read. PAN never exists
+  justified, `security`-reviewed and audited per read. AML case data
+  (sanctions/PEP match status, SAR-related flags, case notes) and RG
+  behavioural signals (self-exclusion/time-out/limit history, deposit or
+  loss-chasing indicators) are excluded by default under the same rule,
+  and `identity-compliance` review is required in addition to `security`
+  before any such tool is authorized. PAN never exists
   in the platform. KYC document content is out of scope. Data residency
   and transfer rules per jurisdiction apply to any model provider (§8).
 - **Cross-tenant leakage.** One agent session has exactly one tenant
@@ -262,6 +298,19 @@ object with the same three properties:
 - **Secrets never in prompts.** Credentials, tokens, provider keys and
   signing material never enter model context, logs or reproducibility
   hashes' pre-images. The same rule already applies to `audit.Entry.Metadata`.
+  Agent credentials are short-lived, issued under the ADR 0014
+  service-identity pattern with secrets held in Vault/KMS (ADR 0003), per
+  tenant, and individually revocable. A per-tenant and a platform-wide
+  kill switch (configuration row, audited, `security`-owned) disables all
+  agent tool calls fail-closed without a deploy. Model-provider API keys
+  are platform secrets and are never visible to the agent.
+- **Outbound injection / exfiltration.** Agent-authored free text is
+  untrusted. It is length-bounded, rendered escaped, and labelled
+  model-generated. The reviewer decides on the structured
+  `proposed_config` and deterministic SIMULATE output, never on the
+  model's narrative. Agent free text must not contain player-level PII.
+  Anything sent to model context is a cross-border data transfer (§8.2).
+  Pseudonymisation keys and mapping tables never leave the platform.
 - **Denial of wallet/cost.** Rate and execution limits (§3) also bound
   model spend and approver fatigue: a flood of proposals is itself an
   attack on four-eyes review.
@@ -273,11 +322,13 @@ object with the same three properties:
   during Stage 10.1.
 - No new dependency, SDK, model provider, or infrastructure (Terraform,
   IAM, network egress) is authorized.
-- No `PrincipalAgent`, `ActorAgent`, permission, role, route, migration
+- No `ai_agent` principal or actor type, permission, role, route, migration
   or OpenAPI change is made by this ADR.
 - The missing prerequisites in §4.1 (reporting read models, liability
   read model, simulation endpoints, suggestion-create route, delegating
-  principal in audit, rate limiter) are **not** scheduled by this ADR.
+  principal in audit, rate limiter, agent grant set and delegation
+  model, suggestion maker ≠ checker enforcement, brand-level scoping,
+  kill switches) are **not** scheduled by this ADR.
   Each needs its own justification under `CLAUDE.md`'s scope test.
 - No agent authority in any never-authoritative domain, ever. This is
   not a "later phase" item.
@@ -297,7 +348,18 @@ object with the same three properties:
    licence (Anjouan; later BYOL tenants, ADR 0006) restricts automated
    marketing/targeting decisions or requires disclosure. Legal
    interpretation is escalated, not assumed.
-4. **Prerequisites in place first.** The canonical READ/SIMULATE
+4. **FUTURE HUMAN / COMPLIANCE DECISION:** whether the platform should
+   define a "vulnerable player" status/flag (distinct from
+   self-exclusion/cooling-off) and a rule banning inducement/targeting of
+   such players, and if so, which jurisdiction(s) require it. No such
+   status exists in `internal/rg` today, and none is inferred from
+   silence. To be raised at the next planning gate that touches
+   CRM/segmentation (docs 30/31).
+5. **identity-compliance co-review:** "READ player segmentation" and
+   "READ reward history" tool designs, when built, are reviewed by
+   `identity-compliance` (not only `security`) before any agent access is
+   granted, since both sit on RG/KYC-adjacent data.
+6. **Prerequisites in place first.** The canonical READ/SIMULATE
    surfaces named in §4.1 must exist as deterministic, non-AI endpoints
    with their own value to human staff before any agent may call them.
    Agents consume platform capabilities; they never justify building
@@ -305,18 +367,22 @@ object with the same three properties:
 
 ## 9. Architectural invariants (for `qa` / `code-reviewer`, at implementation time)
 
-- I-1: No agent credential holds any permission listed in §2.3. A test
-  enumerates the agent grant set against a deny-list.
+- I-1: The agent grant set is a subset of the agent-grantable
+  allow-list, and a test asserts that it is disjoint from the §2.3
+  deny-list. A new permission is non-grantable unless it is explicitly
+  added to the allow-list.
 - I-2: No code path reachable from the Agent/Tool API calls
   `internal/ledger`, `internal/wallet`, `rg` write functions, or issues
   SQL against Bonus/Gamification/Reward tables directly.
 - I-3: Tenant scope is derived from the credential only. Tool arguments
-  carrying `tenant_id`/`brand_id` are ignored or rejected.
+  carrying `tenant_id`/`brand_id` are **rejected** (fail closed).
 - I-4: Every agent tool call produces an audit row that records the
   acting agent, the delegating principal (if any), the model version
-  and the input hash.
+  and the input hash. This applies equally to `suggestion_review_events`
+  and any domain history table, not only `audit_log`.
 - I-5: Agent origin never satisfies or counts toward an approval. The
-  delegating principal cannot approve their agent's proposal.
+  delegating principal cannot approve their agent's proposal, enforced
+  by the database, not by application code.
 - I-6: Every SIMULATE response comes from a side-effect-free canonical
   endpoint and is labelled non-binding. The real execution re-runs the
   full gate.
@@ -368,3 +434,31 @@ object with the same three properties:
   `internal/audit/audit.go`, `internal/bonus/suggestion.go`,
   `internal/bonus/suggestion_lifecycle.go`,
   `internal/bonus/change_governance.go`, `internal/bonus/four_eyes_ops.go`
+
+## 12. Review record
+
+Review of commit `56f5135` (2026-09-25). Reviewer reports:
+`p101-rev-ai-security.md`, `p101-rev-ai-compliance.md` (session
+scratchpad). Proposed text was applied verbatim where given.
+
+| Reviewer | Verdict | Findings | Disposition |
+|---|---|---|---|
+| `bonus-engine` | PASS | None | n/a |
+| `security` | ACCEPT WITH CHANGES | S-1 (HIGH) single-role RBAC cannot express grant intersection: dedicated agent grant set, intersect for READ only, delegation ends with the staff session | APPLIED (§3 RBAC, Actor/subject rows) |
+| `security` | | S-2 (HIGH) deny-list incomplete and fails open: allow-list, expanded never-grantable set, I-1 rewritten | APPLIED (§2.3, §9 I-1) |
+| `security` | | S-3 (HIGH) suggestion maker ≠ checker not enforced: recorded as a DB-enforced future prerequisite | APPLIED (§5.3, §9 I-5, §7) |
+| `security` | | S-4 (MEDIUM) working name `ai_agent`; service-subtype fallback dropped | APPLIED (§3 Agent identity, §7) |
+| `security` | | S-5 (MEDIUM) brand scoping is app-side, not RLS; I-3 "rejected" | APPLIED (§3 Brand scoping, §9 I-3) |
+| `security` | | S-6 (MEDIUM) rate-limiter claim corrected; execution limits in-transaction | APPLIED (§3 Rate/Execution limits) |
+| `security` | | S-7 (MEDIUM) outbound injection; model context is an external transfer | APPLIED (§6) |
+| `security` | | S-8 (MEDIUM) credential lifecycle and kill switches | APPLIED (§6). Wording note: Vault/KMS is attributed to ADR 0003, where the repo records it. ADR 0014 does not mention it |
+| `security` | | S-9 (LOW) I-4 covers `suggestion_review_events` | APPLIED (§9 I-4) |
+| `identity-compliance` | NO BLOCKING ISSUE | F1 broaden to time-out, cooling-off, RG-limit restrictions | APPLIED (§5.1) |
+| `identity-compliance` | | F2 vulnerable-player/inducement FUTURE decision | APPLIED (§8.4) |
+| `identity-compliance` | | F3 segmentation counts are post-RG-filter | APPLIED (§4.1) |
+| `identity-compliance` | | F4 AML case data and RG behavioural signals excluded by default; `identity-compliance` review | APPLIED (§6) |
+| `identity-compliance` | | Co-review for segmentation/reward-history tools | APPLIED (§8.5, header) |
+
+Security's launch note stands: nothing here is implemented, so nothing
+blocks launch today. S-1 to S-3 must be implemented and tested before
+any agent credential is issued.
