@@ -1,6 +1,15 @@
 package sportsbook
 
-import "time"
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
+)
 
 // MockSportsbookProvider is a Provider implementation with a small,
 // realistic, deterministic-in-SHAPE catalogue (a handful of sports,
@@ -111,4 +120,79 @@ func mockTwoWayEvent(externalRef, name string, startTime time.Time, homeNum, hom
 			},
 		},
 	}
+}
+
+// SettlementStatementLine and SettlementStatementSource are the
+// reconciliation statement contract (internal/reconciliation/statement,
+// a dependency-free leaf so neither package imports the other), aliased
+// here for the sportsbook domain's own use.
+type (
+	SettlementStatementLine   = statement.SportsbookSettlementLine
+	SettlementStatementSource = statement.SportsbookSettlementSource
+)
+
+// MockSettlementStatementLabel is the label every record, audit entry and
+// log line of the mock statement match carries.
+const MockSettlementStatementLabel = "MOCK in-house settlement statement (rendered from sportsbook_bet_settlements; real provider statement matching is PROVIDER DEPENDENT, ADR 0038 §12)"
+
+// MockSettlementStatementSource is the ADR 0088 §8.4 statement source,
+// injected into the reconciliation sweep by cmd/platform-api.
+//
+// MOCK: in-house mode has no provider and therefore no provider statement.
+// This source renders a statement from the platform's OWN settlement
+// history table (sportsbook_bet_settlements), so on uncorrupted data it
+// is tautological by construction and needs no new storage. What it
+// proves is the matching path: the stream compares these lines against
+// the ledger-derived view of every bet, exactly as it will compare a real
+// provider's statement. Real statement ingestion and matching are
+// PROVIDER DEPENDENT (ADR 0038 §12) and NOT IMPLEMENTED.
+//
+// Rendering rule: one line per un-reversed settlement row (generation,
+// outcome, payout, asset) and one line per void row (void flag, asset).
+type MockSettlementStatementSource struct{}
+
+var _ SettlementStatementSource = MockSettlementStatementSource{}
+
+// Label implements SettlementStatementSource.
+func (MockSettlementStatementSource) Label() string { return MockSettlementStatementLabel }
+
+// StatementLines implements SettlementStatementSource. Read-only.
+func (MockSettlementStatementSource) StatementLines(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]SettlementStatementLine, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT s.bet_id, s.generation, s.outcome, s.payout_amount, s.asset_code, false
+		  FROM sportsbook_bet_settlements s
+		 WHERE s.tenant_id = $1 AND s.event_kind = 'settlement'
+		   AND NOT EXISTS (SELECT 1 FROM sportsbook_bet_settlements r
+		                    WHERE r.event_kind = 'rollback' AND r.reverses_settlement_id = s.id)
+		UNION ALL
+		SELECT v.bet_id, NULL, NULL, 0, v.asset_code, true
+		  FROM sportsbook_bet_settlements v
+		 WHERE v.tenant_id = $1 AND v.event_kind = 'void'
+		 ORDER BY 1, 2 NULLS LAST`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("sportsbook: MOCK settlement statement: %w", err)
+	}
+	defer rows.Close()
+	var out []SettlementStatementLine
+	for rows.Next() {
+		var l SettlementStatementLine
+		var generation *int32
+		var outcome *string
+		var payout *int64
+		if err := rows.Scan(&l.BetID, &generation, &outcome, &payout, &l.AssetCode, &l.Void); err != nil {
+			return nil, fmt.Errorf("sportsbook: MOCK settlement statement: scan: %w", err)
+		}
+		if generation != nil {
+			g := int(*generation)
+			l.Generation = &g
+		}
+		if outcome != nil {
+			l.Outcome = *outcome
+		}
+		if payout != nil {
+			l.PayoutAmount = *payout
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
 }

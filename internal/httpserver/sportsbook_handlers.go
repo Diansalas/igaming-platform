@@ -226,23 +226,79 @@ func newGetEventHandler(deps Deps) http.HandlerFunc {
 
 // --- Bet placement / history (player-authenticated) ---
 
+// betResponse is shared by the player self-service and Back Office bet
+// history endpoints. Outcome/PayoutAmount/SettledAt (ADR 0088 §3.4, Stage
+// 10 W1) are read-only additions derived from the bet's own settlement
+// history, never written by any request this file handles:
+//
+//   - Outcome ("won"/"lost", nil when open) and PayoutAmount (nil when
+//     open or lost) come from the CURRENT un-reversed settlement row, if
+//     any - the same "current" concept internal/sportsbook.CurrentSettlement
+//     uses, re-derived here from a plain history slice.
+//   - SettledAt is the created_at of the history row that set the bet's
+//     CURRENT non-open status: the current settlement row for
+//     settled_won/settled_lost, the void row for void; nil when open
+//     (including a bet that was settled and then rolled back - it is
+//     open again, so SettledAt reverts to nil, matching the bet's own
+//     current status exactly).
+//
+// This struct carries NO staff/request identifiers (ActorStaffAccountID,
+// RequestID) - see toBetResponse's own doc comment for why that must never
+// change, and TestListMyBets_PlayerSurfaceOmitsStaffAndRequestFields (ADR
+// 0088 §14 S8) for the pinning test.
 type betResponse struct {
-	ID              string `json:"id"`
-	SelectionID     string `json:"selection_id"`
-	AssetCode       string `json:"asset_code"`
-	StakeAmount     int64  `json:"stake_amount"`
-	OddsNumerator   int64  `json:"odds_numerator"`
-	OddsDenominator int64  `json:"odds_denominator"`
-	PotentialReturn int64  `json:"potential_return"`
-	Status          string `json:"status"`
-	PlacedAt        string `json:"placed_at"`
+	ID              string  `json:"id"`
+	SelectionID     string  `json:"selection_id"`
+	AssetCode       string  `json:"asset_code"`
+	StakeAmount     int64   `json:"stake_amount"`
+	OddsNumerator   int64   `json:"odds_numerator"`
+	OddsDenominator int64   `json:"odds_denominator"`
+	PotentialReturn int64   `json:"potential_return"`
+	Status          string  `json:"status"`
+	PlacedAt        string  `json:"placed_at"`
+	Outcome         *string `json:"outcome"`
+	PayoutAmount    *int64  `json:"payout_amount"`
+	SettledAt       *string `json:"settled_at"`
 }
 
+// toBetResponse builds the base response with no settlement-history
+// annotation (Outcome/PayoutAmount/SettledAt all nil) - callers that have
+// batch-loaded a page's history call applySettlementHistory afterward.
+// Deliberately never given an implicit "look up history itself" path: that
+// would silently reintroduce the N+1 query pattern ADR 0088 §3.4 requires
+// batch-loading to avoid.
 func toBetResponse(b sportsbook.Bet) betResponse {
 	return betResponse{
 		ID: b.ID.String(), SelectionID: b.SelectionID.String(), AssetCode: b.AssetCode, StakeAmount: b.StakeAmount,
 		OddsNumerator: b.OddsNumerator, OddsDenominator: b.OddsDenominator, PotentialReturn: b.PotentialReturn,
 		Status: string(b.Status), PlacedAt: b.PlacedAt.UTC().Format(rfc3339),
+	}
+}
+
+// applySettlementHistory fills in Outcome/PayoutAmount/SettledAt (ADR 0088
+// §3.4) from a bet's own settlement history entries (already batch-loaded
+// by the caller via internal/sportsbook.ListSettlementRecordsForBets - a
+// missing/empty slice for a still-open bet is the normal, expected case,
+// not an error).
+func applySettlementHistory(resp *betResponse, history []sportsbook.SettlementHistoryEntry) {
+	if current := sportsbook.CurrentSettlement(history); current != nil {
+		outcome := ""
+		if current.Outcome != nil {
+			outcome = *current.Outcome
+		}
+		resp.Outcome = &outcome
+		payout := int64(0)
+		if current.PayoutAmount != nil {
+			payout = *current.PayoutAmount
+		}
+		resp.PayoutAmount = &payout
+		settledAt := current.CreatedAt.UTC().Format(rfc3339)
+		resp.SettledAt = &settledAt
+		return
+	}
+	if void := sportsbook.VoidEntry(history); void != nil {
+		settledAt := void.CreatedAt.UTC().Format(rfc3339)
+		resp.SettledAt = &settledAt
 	}
 }
 
@@ -508,9 +564,21 @@ func newListMyBetsHandler(deps Deps) http.HandlerFunc {
 				return err
 			}
 			total = count
+			// ADR 0088 §3.4: one batch query for this page's settlement
+			// history, never one query per bet.
+			betIDs := make([]uuid.UUID, len(bets))
+			for i, b := range bets {
+				betIDs[i] = b.ID
+			}
+			history, err := sportsbook.ListSettlementRecordsForBets(ctx, tx, betIDs)
+			if err != nil {
+				return err
+			}
 			items = make([]betResponse, 0, len(bets))
 			for _, b := range bets {
-				items = append(items, toBetResponse(b))
+				resp := toBetResponse(b)
+				applySettlementHistory(&resp, history[b.ID])
+				items = append(items, resp)
 			}
 			return nil
 		})
@@ -543,6 +611,46 @@ type adminBetResponse struct {
 	// placed via the existing PlaceBet flow has both NULL.
 	ProviderID           string `json:"provider_id"`
 	ProviderBetReference string `json:"provider_bet_reference"`
+	// CorrelationID (ADR 0088 §3.4) is the bet id itself - every W1 ledger
+	// posting for this bet carries it as ledger_transactions.correlation_id
+	// (ADR 0088 §2.1/§2.2), so surfacing it lets Back Office staff pivot
+	// straight from a bet to its ledger transactions without a separate
+	// lookup. Deliberately just b.ID.String() again under a different,
+	// ledger-shaped name - not a new fact, a named alias for an existing
+	// one.
+	CorrelationID string `json:"correlation_id"`
+	// Lifecycle (ADR 0088 §3.4) is this bet's full settlement history in
+	// insertion order - staff-only (never on betResponse/the player
+	// surface). Deliberately the exact field set §3.4 names (id,
+	// event_kind, generation, outcome, payout_amount, void_reason,
+	// ledger_transaction_id, created_at) - NEITHER this nor betResponse
+	// ever surfaces actor_staff_account_id/request_id (the underlying
+	// sportsbook.SettlementHistoryEntry/SettlementRecord carry both, but
+	// settlementLifecycleEntryResponse below deliberately omits them), so
+	// TestListMyBets_PlayerSurfaceOmitsStaffAndRequestFields (§14 S8)
+	// pins their absence from the player response specifically.
+	Lifecycle []settlementLifecycleEntryResponse `json:"lifecycle"`
+}
+
+// settlementLifecycleEntryResponse is one sportsbook_bet_settlements row,
+// staff-only (ADR 0088 §3.4).
+type settlementLifecycleEntryResponse struct {
+	ID                  string  `json:"id"`
+	EventKind           string  `json:"event_kind"`
+	Generation          *int    `json:"generation"`
+	Outcome             *string `json:"outcome"`
+	PayoutAmount        *int64  `json:"payout_amount"`
+	VoidReason          *string `json:"void_reason"`
+	LedgerTransactionID string  `json:"ledger_transaction_id"`
+	CreatedAt           string  `json:"created_at"`
+}
+
+func toSettlementLifecycleEntryResponse(e sportsbook.SettlementHistoryEntry) settlementLifecycleEntryResponse {
+	return settlementLifecycleEntryResponse{
+		ID: e.ID.String(), EventKind: e.EventKind, Generation: e.Generation, Outcome: e.Outcome,
+		PayoutAmount: e.PayoutAmount, VoidReason: e.VoidReason,
+		LedgerTransactionID: e.LedgerTransactionID.String(), CreatedAt: e.CreatedAt.UTC().Format(rfc3339),
+	}
 }
 
 // stringOrEmpty dereferences an optional *string, returning "" for nil -
@@ -586,6 +694,16 @@ func newListAdminBetsHandler(deps Deps) http.HandlerFunc {
 				return err
 			}
 			total = count
+			// ADR 0088 §3.4: one batch query for this page's settlement
+			// history, never one query per bet.
+			betIDs := make([]uuid.UUID, len(bets))
+			for i, b := range bets {
+				betIDs[i] = b.ID
+			}
+			history, err := sportsbook.ListSettlementRecordsForBets(ctx, tx, betIDs)
+			if err != nil {
+				return err
+			}
 			items = make([]adminBetResponse, 0, len(bets))
 			// One asset-registry lookup per distinct asset code in this page,
 			// not per row - mirrors newListAdminWithdrawalsHandler's identical
@@ -601,9 +719,17 @@ func newListAdminBetsHandler(deps Deps) http.HandlerFunc {
 					exp = a.DecimalExponent
 					exponents[b.AssetCode] = exp
 				}
+				base := toBetResponse(b)
+				betHistory := history[b.ID]
+				applySettlementHistory(&base, betHistory)
+				lifecycle := make([]settlementLifecycleEntryResponse, 0, len(betHistory))
+				for _, e := range betHistory {
+					lifecycle = append(lifecycle, toSettlementLifecycleEntryResponse(e))
+				}
 				items = append(items, adminBetResponse{
-					betResponse: toBetResponse(b), PlayerAccountID: b.PlayerAccountID.String(), BrandID: b.BrandID.String(), DecimalExponent: exp,
+					betResponse: base, PlayerAccountID: b.PlayerAccountID.String(), BrandID: b.BrandID.String(), DecimalExponent: exp,
 					ProviderID: stringOrEmpty(b.ProviderID), ProviderBetReference: stringOrEmpty(b.ProviderBetReference),
+					CorrelationID: b.ID.String(), Lifecycle: lifecycle,
 				})
 			}
 			return nil

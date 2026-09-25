@@ -237,6 +237,11 @@ func run() error {
 		// Same gate, same Stage 9.4 two-layer guarantee as above.
 		AccountActivationTestSupportEnabled: cfg.TestSupportRoutesEnabled(),
 		SportsbookEnabled:                   true,
+		// Stage 10 W1 (ADR 0088 §9): the sportsbook-domain twin of the
+		// three flags above - see Deps.SportsbookSettlementSimulationEnabled's
+		// own doc comment (internal/httpserver/server.go) for the full
+		// rationale. Same gate, same Stage 9.4 two-layer guarantee as above.
+		SportsbookSettlementSimulationEnabled: cfg.TestSupportRoutesEnabled(),
 		// Stage 4E: no real identity-resolution vendor is contracted yet
 		// (docs/decisions/0027 §3) - MockPersonResolver's honest default
 		// (NoMatch for every registration, since none carries verified
@@ -284,7 +289,10 @@ func run() error {
 	reconcilerWG.Add(1)
 	go func() {
 		defer reconcilerWG.Done()
-		reconciliation.RunSchedulerLoop(ctx, pool, logger, cfg.ReconciliationInterval)
+		// The sportsbook_settlement stream's statement source is the
+		// MOCK in-house source (ADR 0088 §8.4); real provider statement
+		// matching is PROVIDER DEPENDENT (ADR 0038 §12).
+		reconciliation.RunSchedulerLoop(ctx, pool, logger, cfg.ReconciliationInterval, sportsbook.MockSettlementStatementSource{})
 	}()
 
 	// Stage 4H-B0-R7 directive item 4: operationalize the self-exclusion

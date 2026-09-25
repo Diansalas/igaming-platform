@@ -1093,6 +1093,74 @@ paths:
         "503":
           description: Sportsbook is not enabled on this deployment
 
+  # --- Stage 10 W1 (ADR 0088 §9): non-production test-support sportsbook
+  # settlement simulation. IN-HOUSE MOCK MODE ONLY - see x-test-support and
+  # the summary/description below. ---
+  /v1/admin/sportsbook/bets/{id}/simulate-settlement-event:
+    post:
+      x-test-support: true
+      summary: >-
+        NON-PRODUCTION TEST SUPPORT ONLY - simulate an in-house settlement
+        event (settle/void/rollback) for a cash-funded single bet
+      description: >
+        Absent unless test-support routes are enabled; never present when
+        `APP_ENV=production`; simulates an in-house provider event; not an
+        operator settlement feature. This is the ONLY driver of the
+        in-house MOCK sportsbook settlement lifecycle (docs/decisions/0088)
+        - there is no real sportsbook settlement provider or webhook.
+        Gated by BOTH `Deps.SportsbookSettlementSimulationEnabled`
+        (`cfg.TestSupportRoutesEnabled()`, ADR 0085's two-layer opt-in) AND
+        `Deps.SportsbookEnabled`; when either is false this path is never
+        registered at all (a request against it 404s exactly like any
+        other unregistered path). Requires the staff-only
+        `sportsbook_settlement:simulate` permission, held solely by the
+        risk_manager role - never finance, tenant_admin, compliance,
+        support, platform_admin, or any bonus role (ADR 0024 separation of
+        duties). Every effect-bearing amount is derived server-side from
+        the bet's own frozen placement/potential_return; payout_amount in
+        the request is only the simulated provider's CLAIM, validated
+        against the derived value and never posted directly (anti-minting,
+        ADR 0088 §2.4). Removed once a real sportsbook settlement provider
+        is registered for any tenant (ADR 0088 §9.1).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SimulateSettlementEventRequest"
+      responses:
+        "200":
+          description: The settlement event's outcome (applied, replayed, or tombstoned)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SimulateSettlementEventResponse"
+        "400":
+          description: VALIDATION_FAILED - shape/field-matrix violation, or payout_amount is not a non-negative in-range JSON integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: >
+            No token; a player, service, or platform_admin principal; or a
+            staff principal lacking sportsbook_settlement:simulate; or the
+            staff actor is not an active user of this tenant.
+        "404":
+          description: Route absent (test-support disabled or production), or the bet does not exist in the caller's own tenant (NOT_FOUND)
+        "409":
+          description: >
+            SETTLEMENT_PAYLOAD_MISMATCH, SETTLEMENT_TOMBSTONED, BET_VOIDED,
+            BET_ALREADY_SETTLED, GENERATION_OUT_OF_SEQUENCE, or
+            SETTLEMENT_INTEGRITY
+        "422":
+          description: PAYOUT_INVALID or ASSET_MISMATCH (anti-minting / claim-vs-derived-value validation)
+
   # --- Stage 9.2 (ADR 0083 §5.2/§9.2): sportsbook jurisdiction/market
   # gating governance - platform-admin only, mirrors PUT
   # /v1/admin/casino/games's identical platform-scope shape ---
@@ -4608,7 +4676,13 @@ components:
       required: [selection_id, stake_amount, asset_code, expected_odds_numerator, expected_odds_denominator, idempotency_key]
     Bet:
       type: object
-      description: A placed bet (internal/sportsbook.Bet), player-owned view.
+      description: >
+        A placed bet (internal/sportsbook.Bet), player-owned view.
+        outcome/payout_amount/settled_at (Stage 10 W1, ADR 0088 §3.4) are
+        read-only, derived from the bet's own settlement history - never
+        writable by any request. This response NEVER carries a staff
+        actor id or request id, even for a settled bet (see
+        docs/decisions/0088 §3.4/§14 S8).
       properties:
         id: { type: string, format: uuid }
         selection_id: { type: string, format: uuid }
@@ -4619,7 +4693,42 @@ components:
         potential_return: { type: integer, format: int64 }
         status: { type: string, enum: [open, settled_won, settled_lost, void] }
         placed_at: { type: string, format: date-time }
-      required: [id, selection_id, asset_code, stake_amount, odds_numerator, odds_denominator, potential_return, status, placed_at]
+        outcome:
+          type: string
+          nullable: true
+          enum: [won, lost]
+          description: "From the bet's current un-reversed settlement row; null when open or void."
+        payout_amount:
+          type: integer
+          format: int64
+          nullable: true
+          description: "From the bet's current un-reversed settlement row; null when open, void, or lost."
+        settled_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            created_at of the history row that set the bet's CURRENT
+            non-open status: the current settlement row for
+            settled_won/settled_lost, the void row for void; null when
+            open (including a settled-then-rolled-back bet, which is open
+            again).
+      required: [id, selection_id, asset_code, stake_amount, odds_numerator, odds_denominator, potential_return, status, placed_at, outcome, payout_amount, settled_at]
+    BetSettlementLifecycleEntry:
+      type: object
+      description: >
+        One sportsbook_bet_settlements row (Stage 10 W1, ADR 0088 §3.2/§3.4).
+        Staff-only - never on the player-facing Bet schema.
+      properties:
+        id: { type: string, format: uuid }
+        event_kind: { type: string, enum: [settlement, rollback, void, tombstone] }
+        generation: { type: integer, nullable: true }
+        outcome: { type: string, nullable: true, enum: [won, lost] }
+        payout_amount: { type: integer, format: int64, nullable: true }
+        void_reason: { type: string, nullable: true, enum: [market_cancelled, push, data_error] }
+        ledger_transaction_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+      required: [id, event_kind, generation, outcome, payout_amount, void_reason, ledger_transaction_id, created_at]
     AdminBet:
       allOf:
         - $ref: "#/components/schemas/Bet"
@@ -4633,14 +4742,56 @@ components:
             provider_id/provider_bet_reference, passed through from
             internal/sportsbook.Bet's identical nullable columns as empty
             strings when unset - always empty today, since no real
-            sportsbook provider adapter exists yet.
+            sportsbook provider adapter exists yet. Stage 10 W1 (ADR 0088
+            §3.4) additionally surfaces correlation_id (the bet id itself
+            - every W1 ledger posting for this bet carries it) and the
+            full settlement lifecycle, staff-only.
           properties:
             player_account_id: { type: string, format: uuid }
             brand_id: { type: string, format: uuid }
             decimal_exponent: { type: integer }
             provider_id: { type: string, description: "Empty when this bet has no provider-acceptance reference recorded (always empty until a real adapter exists)." }
             provider_bet_reference: { type: string, description: "Empty when this bet has no provider-acceptance reference recorded (always empty until a real adapter exists)." }
-          required: [player_account_id, brand_id, decimal_exponent, provider_id, provider_bet_reference]
+            correlation_id: { type: string, format: uuid, description: "The bet id itself - the ledger correlation_id every W1 posting for this bet carries." }
+            lifecycle:
+              type: array
+              items: { $ref: "#/components/schemas/BetSettlementLifecycleEntry" }
+          required: [player_account_id, brand_id, decimal_exponent, provider_id, provider_bet_reference, correlation_id, lifecycle]
+    SimulateSettlementEventRequest:
+      type: object
+      description: >
+        ADR 0088 §9.2's exact request shape for the non-production
+        test-support settlement-simulation route. Unknown fields are
+        rejected. Field requirements vary by event_type: settle requires
+        generation/outcome/payout_amount/asset_code and forbids
+        void_reason; rollback requires only generation; void requires only
+        void_reason. payout_amount must be a JSON integer (non-integer,
+        negative, or overflowing int64 is rejected at decode, 400
+        VALIDATION_FAILED) - it is a CLAIM validated against the bet's own
+        frozen potential_return, never posted directly.
+      properties:
+        event_type: { type: string, enum: [settle, void, rollback] }
+        generation: { type: integer, description: "Required for settle/rollback; forbidden for void." }
+        outcome: { type: string, enum: [won, lost], description: "Required for settle; forbidden otherwise." }
+        payout_amount: { type: integer, format: int64, description: "Required for settle (a claim, not posted directly); forbidden otherwise." }
+        asset_code: { type: string, description: "Required for settle; forbidden otherwise." }
+        void_reason: { type: string, enum: [market_cancelled, push, data_error], description: "Required for void; forbidden otherwise." }
+      required: [event_type]
+    SimulateSettlementEventResponse:
+      type: object
+      properties:
+        bet_id: { type: string, format: uuid }
+        event_type: { type: string, enum: [settle, void, rollback] }
+        result: { type: string, enum: [applied, replayed, tombstoned] }
+        bet_status: { type: string, enum: [open, settled_won, settled_lost, void] }
+        generation: { type: integer }
+        ledger_transaction_ids:
+          type: array
+          items: { type: string, format: uuid }
+        settlement_record_ids:
+          type: array
+          items: { type: string, format: uuid }
+      required: [bet_id, event_type, result, bet_status, generation, ledger_transaction_ids, settlement_record_ids]
     PlaceBetResponse:
       type: object
       description: >

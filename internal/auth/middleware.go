@@ -97,3 +97,37 @@ func RequirePlayerPrincipal(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// RequireStaffPrincipal is RequirePlayerPrincipal's structural mirror for
+// the opposite surface: it admits EXACTLY PrincipalStaff, denying
+// PrincipalPlayer and PrincipalService alike with 403, in
+// RequirePlayerPrincipal's own style (same "valid, authenticated
+// credential presented to an endpoint it has no authority over" reasoning,
+// same 403-not-404 rationale - no enumeration concern, the response is
+// identical for every non-staff caller).
+//
+// Introduced for ADR 0088 §9.1's non-production test-support sportsbook
+// settlement-simulation route: RequirePermission alone is not enough there,
+// because a permission check only asks "does this role hold the
+// permission" - it says nothing about what KIND of principal is
+// presenting the token. A permission-bearing role is only ever meant to be
+// held by a staff principal, but nothing before this middleware existed
+// stopped a differently-typed token from being minted with that role
+// string and reaching the handler anyway. This is the same "assert the
+// principal type a route is written for, once, rather than re-derive it by
+// accident" argument RequirePlayerPrincipal's own doc comment makes.
+func RequireStaffPrincipal(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestID := observability.RequestIDFromContext(r.Context())
+		tc, err := tenant.FromContext(r.Context())
+		if err != nil {
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
+			return
+		}
+		if tc.PrincipalType != string(PrincipalStaff) {
+			apierror.Write(w, requestID, apierror.CodeForbidden, "this endpoint is for staff accounts only")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}

@@ -16,6 +16,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/audit"
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/reconciliation/statement"
 )
 
 // TryRunLedgerVsProjectionForTenant wraps RunLedgerVsProjection with a
@@ -49,11 +50,42 @@ func TryRunLedgerVsProjectionForTenant(ctx context.Context, tx pgx.Tx, tenantID 
 	return run, mismatches, true, err
 }
 
+// TryRunSportsbookSettlementForTenant is TryRunLedgerVsProjectionForTenant
+// for the sportsbook_settlement stream (ADR 0088 §8): same
+// transaction-scoped advisory-lock discipline, under a stream-specific
+// key so the two streams never contend with each other, only with a
+// concurrent sweep of the SAME stream for the same tenant.
+func TryRunSportsbookSettlementForTenant(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, periodStart, periodEnd time.Time, source statement.SportsbookSettlementSource) (run Run, mismatches []Mismatch, acquired bool, err error) {
+	if err := tx.QueryRow(ctx,
+		`SELECT pg_try_advisory_xact_lock(hashtextextended('reconciliation:sportsbook_settlement:' || $1::text, 0))`,
+		tenantID,
+	).Scan(&acquired); err != nil {
+		return Run{}, nil, false, fmt.Errorf("reconciliation: acquire tenant sportsbook advisory lock: %w", err)
+	}
+	if !acquired {
+		return Run{}, nil, false, nil
+	}
+	run, mismatches, err = RunSportsbookSettlement(ctx, tx, tenantID, periodStart, periodEnd, source)
+	return run, mismatches, true, err
+}
+
 // SweepOutcome is one tenant's result from a single RunSweep tick.
 type SweepOutcome struct {
 	TenantID uuid.UUID
 	// Skipped is true when another sweep already held this tenant's
 	// advisory lock - not a failure, just lock contention.
+	Skipped bool
+	Run     Run
+	Err     error
+	// Sportsbook is the same tenant's sportsbook_settlement stream result
+	// (ADR 0088 §8), run after ledger_vs_projection in its OWN
+	// tenant-scoped transaction so one stream's failure never discards the
+	// other's recorded evidence.
+	Sportsbook StreamOutcome
+}
+
+// StreamOutcome is one additional stream's per-tenant result.
+type StreamOutcome struct {
 	Skipped bool
 	Run     Run
 	Err     error
@@ -91,7 +123,8 @@ func allTenantIDs(ctx context.Context, pool *db.Pool) ([]uuid.UUID, error) {
 	return ids, err
 }
 
-// RunSweep executes one ledger-vs-projection reconciliation attempt for
+// RunSweep executes one ledger-vs-projection reconciliation attempt (and,
+// after it, one sportsbook_settlement attempt - ADR 0088 §8) for
 // every tenant, isolating each tenant's outcome from every other
 // tenant's - directive item 4's "failure-safe... tenant-aware... safe to
 // retry". One tenant's error (a DB error mid-run, an unexpected
@@ -104,7 +137,7 @@ func allTenantIDs(ctx context.Context, pool *db.Pool) ([]uuid.UUID, error) {
 // failed) is recorded to audit_log with ActorSystem, so a sweep that ran
 // but found nothing to do is exactly as observable as one that found
 // mismatches.
-func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodStart, periodEnd time.Time) ([]SweepOutcome, error) {
+func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodStart, periodEnd time.Time, sbSource statement.SportsbookSettlementSource) ([]SweepOutcome, error) {
 	tenantIDs, err := allTenantIDs(ctx, pool)
 	if err != nil {
 		return nil, fmt.Errorf("reconciliation: list tenants for sweep: %w", err)
@@ -139,7 +172,6 @@ func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodSta
 			})
 		})
 		outcome.Err = txErr
-		outcomes = append(outcomes, outcome)
 
 		switch {
 		case txErr != nil:
@@ -177,8 +209,75 @@ func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodSta
 			logger.Info("reconciliation sweep: tenant run complete",
 				"tenant_id", tenantID, "skipped_lock_contention", outcome.Skipped, "status", string(outcome.Run.Status))
 		}
+
+		// ADR 0088 §8: the sportsbook stream runs after
+		// ledger_vs_projection, regardless of its outcome.
+		outcome.Sportsbook = runSportsbookStreamForTenant(ctx, pool, logger, tenantID, periodStart, periodEnd, sbSource)
+		outcomes = append(outcomes, outcome)
 	}
 	return outcomes, nil
+}
+
+// runSportsbookStreamForTenant runs the sportsbook_settlement stream for
+// one tenant against source (the MOCK statement source in production
+// today), with exactly the audit/log
+// discipline RunSweep applies to ledger_vs_projection: every attempt is
+// audited, a failure is audited in a fresh transaction, a mismatch is
+// logged at Error level. The statement source label (which says MOCK) is
+// carried in the audit metadata and log fields (ADR 0088 §8.4).
+func runSportsbookStreamForTenant(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantID uuid.UUID, periodStart, periodEnd time.Time, source statement.SportsbookSettlementSource) StreamOutcome {
+	var out StreamOutcome
+	stream := string(StreamSportsbookSettlement)
+	label := "<none>"
+	if source != nil {
+		label = source.Label()
+	}
+
+	txErr := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		run, _, acquired, err := TryRunSportsbookSettlementForTenant(ctx, tx, tenantID, periodStart, periodEnd, source)
+		out.Run, out.Skipped = run, !acquired
+		if err != nil {
+			return err
+		}
+		status := string(run.Status)
+		if !acquired {
+			status = "skipped"
+		}
+		return audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run",
+			TargetType: "reconciliation_run", TargetID: run.ID.String(), Outcome: audit.OutcomeSuccess,
+			Metadata: map[string]any{
+				"stream": stream, "skipped_lock_contention": !acquired,
+				"status": status, "statement_source": label,
+			},
+		})
+	})
+	out.Err = txErr
+
+	switch {
+	case txErr != nil:
+		if logger != nil {
+			logger.Error("reconciliation sweep: tenant run failed", "tenant_id", tenantID, "stream", stream, "error", txErr)
+		}
+		if auditErr := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run_failed",
+				TargetType: "tenant", TargetID: tenantID.String(), Outcome: audit.OutcomeFailure,
+				Metadata: map[string]any{"stream": stream, "error": txErr.Error()},
+			})
+		}); auditErr != nil && logger != nil {
+			logger.Error("reconciliation sweep: failed to audit tenant failure", "tenant_id", tenantID, "stream", stream, "error", auditErr)
+		}
+	case out.Run.Status == StatusMismatchesFound:
+		if logger != nil {
+			logger.Error("reconciliation sweep: MISMATCH FOUND", "tenant_id", tenantID, "stream", stream,
+				"run_id", out.Run.ID, "statement_source", label)
+		}
+	case logger != nil:
+		logger.Info("reconciliation sweep: tenant run complete", "tenant_id", tenantID, "stream", stream,
+			"skipped_lock_contention", out.Skipped, "status", string(out.Run.Status), "statement_source", label)
+	}
+	return out
 }
 
 // RunSchedulerLoop invokes RunSweep on a fixed interval until ctx is
@@ -194,7 +293,7 @@ func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodSta
 // errors are logged and audited per-tenant inside RunSweep and never
 // crash this loop or the calling process - reconciliation failing must
 // never take down the platform it exists to protect.
-func RunSchedulerLoop(ctx context.Context, pool *db.Pool, logger *slog.Logger, interval time.Duration) {
+func RunSchedulerLoop(ctx context.Context, pool *db.Pool, logger *slog.Logger, interval time.Duration, sbSource statement.SportsbookSettlementSource) {
 	runOnce := func() {
 		// Specialist review (backend, P0): this loop runs in a bare `go`
 		// statement (cmd/platform-api/main.go) with no equivalent of the
@@ -210,7 +309,7 @@ func RunSchedulerLoop(ctx context.Context, pool *db.Pool, logger *slog.Logger, i
 			}
 		}()
 		now := time.Now().UTC()
-		if _, err := RunSweep(ctx, pool, logger, now.Add(-interval), now); err != nil && logger != nil {
+		if _, err := RunSweep(ctx, pool, logger, now.Add(-interval), now, sbSource); err != nil && logger != nil {
 			logger.Error("reconciliation sweep: failed to list tenants", "error", err)
 		}
 	}

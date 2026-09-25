@@ -37,15 +37,20 @@ type Config struct {
 	//  2. httpserver.Deps.CasinoPlaySimulationEnabled (Stage 7).
 	//  3. httpserver.Deps.PaymentsMockSettlementEnabled (Stage 9.3).
 	//  4. httpserver.Deps.AccountActivationTestSupportEnabled (Stage 9.3).
+	//  5. httpserver.Deps.SportsbookSettlementSimulationEnabled (Stage 10
+	//     W1, ADR 0088 §9) - gates the non-production test-support
+	//     `POST /v1/admin/sportsbook/bets/{id}/simulate-settlement-event`
+	//     route the same way, added to the existing gate rather than a
+	//     new one.
 	//
 	// (1) fails CLOSED on a mis-set value (a typo just re-enables a check
-	// production should pass anyway). (2), (3), and (4) used to fail OPEN
-	// on a typo or an unset variable, per two independent Stage 9.3
-	// security reviews - Load() computed Environment from an unvalidated,
-	// open string, and cmd/platform-api/main.go gated all three simulation
-	// flags purely on `cfg.Environment != "production"`, so
-	// "Production"/"prod"/"production " (trailing space) or an unset
-	// APP_ENV all silently REGISTERED the three test-support routes on
+	// production should pass anyway). (2), (3), (4) and (5) used to (or, for
+	// (5), would have) fail OPEN on a typo or an unset variable, per two
+	// independent Stage 9.3 security reviews - Load() computed Environment
+	// from an unvalidated, open string, and cmd/platform-api/main.go gated
+	// all of these simulation flags purely on `cfg.Environment !=
+	// "production"`, so "Production"/"prod"/"production " (trailing space)
+	// or an unset APP_ENV all silently REGISTERED the test-support routes on
 	// what the operator believed was a production deployment. Stage 9.4
 	// closed this with a two-layer, fail-closed design (both layers are
 	// independently required - a single mistake in either one can never
@@ -234,10 +239,11 @@ type Config struct {
 	// TestSupportEndpointsEnabled is Stage 9.4's Layer 2 gate (see
 	// Environment's own doc comment above for the full two-layer design).
 	// It must be explicitly set to "true" (TEST_SUPPORT_ENDPOINTS_ENABLED)
-	// for any of the three non-production simulation flags -
+	// for any of the four non-production simulation flags -
 	// CasinoPlaySimulationEnabled, PaymentsMockSettlementEnabled,
-	// AccountActivationTestSupportEnabled - to actually register their
-	// routes; cmd/platform-api/main.go requires this field AND
+	// AccountActivationTestSupportEnabled, SportsbookSettlementSimulationEnabled
+	// (ADR 0088 §9) - to actually register their routes; cmd/platform-api/main.go
+	// requires this field AND
 	// `Environment != "production"` together. Defaults to false: an
 	// unconfigured deployment (including one that also gets Environment
 	// wrong) never exposes any test-support route. Only a genuine
@@ -446,10 +452,11 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// TestSupportRoutesEnabled reports whether the three Stage 7/9.3
+// TestSupportRoutesEnabled reports whether the four Stage 7/9.3/10
 // non-production simulation routes (CasinoPlaySimulationEnabled,
-// PaymentsMockSettlementEnabled, AccountActivationTestSupportEnabled in
-// internal/httpserver.Deps) should register - the single, shared
+// PaymentsMockSettlementEnabled, AccountActivationTestSupportEnabled,
+// SportsbookSettlementSimulationEnabled in internal/httpserver.Deps) should
+// register - the single, shared
 // Stage 9.4 two-layer gate: never true in production (Load() has
 // already refused to start if TestSupportEndpointsEnabled were true
 // there), and never true unless TestSupportEndpointsEnabled was also

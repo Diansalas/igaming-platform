@@ -10,6 +10,8 @@
 // package's Run/Mismatch model is designed so those streams slot into
 // the same ReconciliationRun/ReconciliationMismatch tables later without
 // a schema change - see docs/decisions/0019's enumerated table list.
+// Stage 10 W1 adds the sportsbook_settlement stream (ADR 0088 §8,
+// sportsbook_settlement.go) on exactly those tables.
 //
 // Per reconciliation-model.md §1: no financial tolerance is introduced
 // where the Blueprint expects drift to be zero. Every mismatch found here
@@ -31,7 +33,8 @@ import (
 // Stream identifies which reconciliation stream a Run belongs to.
 type Stream string
 
-// StreamLedgerVsProjection is the only stream Stage 3B implements.
+// StreamLedgerVsProjection is the stream Stage 3B implemented. Stage 10
+// W1 adds StreamSportsbookSettlement (sportsbook_settlement.go).
 const StreamLedgerVsProjection Stream = "ledger_vs_projection"
 
 // Status is a ReconciliationRun's outcome.
@@ -180,12 +183,21 @@ func RunLedgerVsProjection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p
 		run.Status = StatusClean
 	}
 
+	if err := persistRun(ctx, tx, run, mismatches); err != nil {
+		return Run{}, nil, err
+	}
+	return run, mismatches, nil
+}
+
+// persistRun inserts run and its mismatches (setting each mismatch's
+// RunID) inside tx - the only writes any reconciliation stream makes.
+func persistRun(ctx context.Context, tx pgx.Tx, run Run, mismatches []Mismatch) error {
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO reconciliation_runs (id, tenant_id, stream, period_start, period_end, run_at, status)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		run.ID, run.TenantID, run.Stream, run.PeriodStart, run.PeriodEnd, run.RunAt, run.Status,
 	); err != nil {
-		return Run{}, nil, fmt.Errorf("reconciliation: insert run: %w", err)
+		return fmt.Errorf("reconciliation: insert run: %w", err)
 	}
 
 	for i := range mismatches {
@@ -197,11 +209,10 @@ func RunLedgerVsProjection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 			m.ID, m.TenantID, m.RunID, m.ReconciliationKey, m.ExpectedValue, m.ActualValue, m.MismatchKind, m.InvestigationStatus,
 		); err != nil {
-			return Run{}, nil, fmt.Errorf("reconciliation: insert mismatch: %w", err)
+			return fmt.Errorf("reconciliation: insert mismatch: %w", err)
 		}
 	}
-
-	return run, mismatches, nil
+	return nil
 }
 
 func ledgerAccountIDsForTenant(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]uuid.UUID, error) {

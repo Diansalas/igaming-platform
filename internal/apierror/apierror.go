@@ -23,6 +23,26 @@ const (
 	CodeUnavailable    Code = "service_unavailable"
 	CodeTenantMismatch Code = "tenant_mismatch"
 	CodeRateLimited    Code = "rate_limited"
+
+	// The codes below deliberately break this package's lowercase-snake
+	// convention: they are ADR 0088 §9.3's exact, pinned literal codes for
+	// the Stage 10 W1 sportsbook settlement test-support route
+	// (POST /v1/admin/sportsbook/bets/{id}/simulate-settlement-event), and
+	// several are reused byte-for-byte as internal/sportsbook's own
+	// rejection-code constants (SettlementRejectPayloadMismatch etc.) - one
+	// literal string, never two different spellings of the same failure
+	// between the service layer and the wire response. Not used by any
+	// other route.
+	CodeSettlementValidationFailed        Code = "VALIDATION_FAILED"
+	CodeSettlementNotFound                Code = "NOT_FOUND"
+	CodeSettlementPayloadMismatch         Code = "SETTLEMENT_PAYLOAD_MISMATCH"
+	CodeSettlementTombstoned              Code = "SETTLEMENT_TOMBSTONED"
+	CodeSettlementBetVoided               Code = "BET_VOIDED"
+	CodeSettlementBetAlreadySettled       Code = "BET_ALREADY_SETTLED"
+	CodeSettlementGenerationOutOfSequence Code = "GENERATION_OUT_OF_SEQUENCE"
+	CodeSettlementIntegrity               Code = "SETTLEMENT_INTEGRITY"
+	CodeSettlementPayoutInvalid           Code = "PAYOUT_INVALID"
+	CodeSettlementAssetMismatch           Code = "ASSET_MISMATCH"
 )
 
 // Error is the wire format for an API error response.
@@ -40,16 +60,19 @@ func (e *Error) Error() string { return string(e.Code) + ": " + e.Message }
 // every handler produces a consistent status for the same error kind.
 func httpStatus(c Code) int {
 	switch c {
-	case CodeValidation:
+	case CodeValidation, CodeSettlementValidationFailed:
 		return http.StatusBadRequest
 	case CodeUnauthorized:
 		return http.StatusUnauthorized
 	case CodeForbidden, CodeTenantMismatch:
 		return http.StatusForbidden
-	case CodeNotFound:
+	case CodeNotFound, CodeSettlementNotFound:
 		return http.StatusNotFound
-	case CodeConflict:
+	case CodeConflict, CodeSettlementPayloadMismatch, CodeSettlementTombstoned, CodeSettlementBetVoided,
+		CodeSettlementBetAlreadySettled, CodeSettlementGenerationOutOfSequence, CodeSettlementIntegrity:
 		return http.StatusConflict
+	case CodeSettlementPayoutInvalid, CodeSettlementAssetMismatch:
+		return http.StatusUnprocessableEntity
 	case CodeUnavailable:
 		return http.StatusServiceUnavailable
 	case CodeRateLimited:

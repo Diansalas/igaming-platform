@@ -115,6 +115,27 @@ type Deps struct {
 	// CasinoOrchestrator's identical nil-means-disabled convention).
 	SportsbookEnabled bool
 
+	// SportsbookSettlementSimulationEnabled gates the Stage 10 W1
+	// (docs/decisions/0088 §9) non-production test-support staff route
+	// (POST /v1/admin/sportsbook/bets/{id}/simulate-settlement-event -
+	// sportsbook_settlement_handlers.go). This is IN-HOUSE MOCK MODE only:
+	// there is no real sportsbook settlement provider or webhook, so this
+	// route is the only way to drive a bet through settle/void/rollback
+	// end to end, simulating what a real provider would eventually tell
+	// the platform. It is registered only when this AND SportsbookEnabled
+	// are both true (registerSportsbookRoutes) - otherwise the pattern is
+	// never added to the mux at all, mirroring CasinoPlaySimulationEnabled/
+	// PaymentsMockSettlementEnabled/AccountActivationTestSupportEnabled's
+	// identical Stage 9.4 two-layer, fail-closed gate exactly. Defaults to
+	// the zero value (false, disabled); cmd/platform-api/main.go sets it
+	// only outside production, from cfg.TestSupportRoutesEnabled(). Never
+	// a player capability (auth.RequireStaffPrincipal), never reachable
+	// without auth.PermSportsbookSettlementSimulate (sole grantee:
+	// RoleRiskManager). Removal condition (ADR 0088 §9.1): once a real
+	// sportsbook settlement provider is registered for any tenant, this
+	// route is removed or permanently disabled in the same change.
+	SportsbookSettlementSimulationEnabled bool
+
 	// PersonResolver is Stage 4E's identity-resolution boundary, consulted
 	// by newRegisterHandler BEFORE a Person is ever created - unlike
 	// PaymentOrchestrator/CasinoOrchestrator, this is NOT "nil means the

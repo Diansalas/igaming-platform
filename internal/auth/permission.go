@@ -494,6 +494,24 @@ const (
 	// at all (unlike risk_rules), and platform_admin has no tenant scope
 	// to read it in.
 	PermSportsbookExposureLimitRead Permission = "sportsbook_exposure_limit:read"
+
+	// PermSportsbookSettlementSimulate gates the Stage 10 W1 (ADR 0088 §9)
+	// non-production test-support staff route (POST /v1/admin/sportsbook/
+	// bets/{id}/simulate-settlement-event), which is the ONLY driver of
+	// the in-house mock settlement lifecycle (settle/void/rollback) -
+	// there is no real sportsbook settlement provider or webhook. Sole
+	// grantee: RoleRiskManager (security review S1) - deliberately NEVER
+	// RoleFinance (it already holds withdrawal-approval authority; a role
+	// that can both approve withdrawals AND drive settlement payouts
+	// breaks ADR 0024's separation of duties, the exact same reasoning
+	// Stage 3D applied to RoleTenantAdmin/PermStaffManage), and never
+	// RoleTenantAdmin, RoleCompliance, RoleSupport, RolePlatformAdmin, or
+	// any bonus role. Holding this permission is inert in production:
+	// the route itself is never registered there
+	// (httpserver.Deps.SportsbookSettlementSimulationEnabled, ADR 0085's
+	// two-layer gate). Not added to backoffice/src/auth/permissions.ts -
+	// no UI control exists for a non-production test-support route.
+	PermSportsbookSettlementSimulate Permission = "sportsbook_settlement:simulate"
 )
 
 // rolePermissions is a static, in-code role -> permission-set mapping.
@@ -718,6 +736,11 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// shape, ADR 0083 §6.1.3) - RoleRiskManager is the sole grantee of
 		// the MANAGE half, exactly like PermRiskConfigManage above.
 		PermSportsbookExposureLimitManage, PermSportsbookExposureLimitRead,
+		// Stage 10 W1 (ADR 0088 §9.1, security review S1): the sole
+		// grantee of PermSportsbookSettlementSimulate. See that
+		// permission's own doc comment for why RoleFinance is deliberately
+		// excluded despite otherwise being the "financial" role.
+		PermSportsbookSettlementSimulate,
 	),
 	RolePlayer: permSet(),
 

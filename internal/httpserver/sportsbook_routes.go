@@ -54,4 +54,20 @@ func registerSportsbookRoutes(mux *http.ServeMux, deps Deps) {
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermSportsbookExposureLimitManage)(newDisableSportsbookExposureLimitHandler(deps)))))
 	mux.Handle("GET /v1/admin/sportsbook/exposure-limits",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermSportsbookExposureLimitRead)(newListSportsbookExposureLimitsHandler(deps)))))
+
+	// Stage 10 W1 (ADR 0088 §9): the non-production test-support
+	// settlement-simulation route. Registered ONLY when BOTH flags are
+	// true - unlike every other route in this file, which is always
+	// registered and checks Deps.SportsbookEnabled internally, this one is
+	// never added to the mux at all otherwise, so a request against it
+	// gets Go's own unregistered-path 404, never a 503 from inside a
+	// handler (ADR 0088 §9.1's "the route does not exist there" claim must
+	// be literally true, not just behaviorally true). Chain order matches
+	// ADR 0088 §9.1 exactly: auth.Middleware -> auth.RequireTenantScope ->
+	// auth.RequireStaffPrincipal -> auth.RequirePermission(...).
+	if deps.SportsbookSettlementSimulationEnabled && deps.SportsbookEnabled {
+		mux.Handle("POST /v1/admin/sportsbook/bets/{id}/simulate-settlement-event",
+			auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequireStaffPrincipal(
+				auth.RequirePermission(auth.PermSportsbookSettlementSimulate)(newSimulateSettlementEventHandler(deps))))))
+	}
 }
