@@ -8034,5 +8034,5 @@ test-admin mechanism; name/supply the verification credential for the
 
 **No code, migration, Terraform, IAM or AWS change was made in this
 gate. Stage 10 is NOT authorized and was not started.** Full record:
-`docs/plans/stage-10-planning-gate-proposal.md`.
+`docs/plans/stage-10-planning-gate-proposal.md` (draft `8797fcf`; consolidated record `1968b5938abf1d522b805ca357a519f5365f1fb2`).
 
