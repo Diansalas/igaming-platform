@@ -116,8 +116,9 @@ export const handlers = [
           name: 'Match Winner',
           status: 'open',
           selections: [
-            { id: 'sel-1', name: 'Home FC', odds_numerator: 3, odds_denominator: 2, status: 'open' },
-            { id: 'sel-2', name: 'Away FC', odds_numerator: 5, odds_denominator: 2, status: 'open' },
+            // Selection statuses are active/suspended (markets are the ones that are `open`).
+            { id: 'sel-1', name: 'Home FC', odds_numerator: 3, odds_denominator: 2, status: 'active' },
+            { id: 'sel-2', name: 'Away FC', odds_numerator: 5, odds_denominator: 2, status: 'active' },
           ],
         },
       ],

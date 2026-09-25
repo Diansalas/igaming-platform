@@ -57,7 +57,9 @@ function MarketCard({ eventId, eventName, market }: { eventId: string; eventName
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           {market.selections.map((sel) => {
             const isSelected = current?.selectionId === sel.id
-            const isPickable = market.status === 'open' && sel.status === 'open'
+            // Markets are `open`/`suspended`/`closed`, but a selection's status is
+            // `active`/`suspended` (internal/sportsbook/types.go SelectionStatus).
+            const isPickable = market.status === 'open' && sel.status === 'active'
             return (
               <button
                 key={sel.id}
