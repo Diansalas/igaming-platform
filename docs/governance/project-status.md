@@ -38,6 +38,17 @@ stage detail), and the ADRs cited below.
 
 ## Active stage
 
+> **Status update 2026-09-25 (Stage 10 planning gate).** This document's
+> detailed sections below stop at Stage 4I and are known to be stale
+> (finding F-4); a full refresh is proposed as Stage 10 W0 item 6. Until
+> then, the authoritative current state is: Stages 5 → 9.4 complete
+> (`docs/progress.md`); Stage 9.4 staging deployed and accepted on
+> `9190d5d` (human-executed, human-attested); Stage 10 proposed and
+> awaiting human approval — `docs/plans/stage-10-planning-gate-proposal.md`
+> (§7 is the current open-human-decision list; ADR 0042 has answered
+> "Open decisions" items 8–11 below).
+
+
 Stage 4H-B0-R6 — see `docs/active-stage.md` for full detail. **Six
 foundational-hardening workstreams implemented with real production
 code and migrations, each independently reviewed, with a fix wave

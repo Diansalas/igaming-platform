@@ -3699,6 +3699,43 @@ resource created, modified or deleted.
 | S94-H08 | code-reviewer | Done | review only | CHANGES REQUIRED → APPROVED WITH MINOR NOTES | none | n/a |
 | S94-H09 | Orchestrator | Done | `docs/progress.md`, `docs/active-stage.md`, this registry | n/a | none | n/a |
 
+## Stage 10 Planning Gate — state reconstruction and next-stage proposal
+
+Directive: "MASTER ORCHESTRATOR — RESUME DEVELOPMENT AFTER FINAL STAGING
+ACCEPTANCE" (planning only; no implementation authorized). Staging
+deployment and acceptance of `9190d5d` were executed and attested by the
+human. Record: `docs/plans/stage-10-planning-gate-proposal.md`.
+
+| ID | Owner | Status | Files owned | Tests | Blockers | Integration |
+|---|---|---|---|---|---|---|
+| S10P-01 | Orchestrator (Explore ×4) | Done | read-only reconstruction (governance, HDR/deferred, stage history, code reality) | n/a | none | n/a |
+| S10P-02 | Orchestrator | Done | local verification at `9190d5d` (no files) | build/vet/gofmt/unit PASS; migrations up/verify/round-trip PASS; integration PASS except 6 scratch-DB packages (PASS with `CREATEDB`); lint 19 issues; CI 60/60 runs failed at "Set up job" | none | n/a |
+| S10P-03 | architect | Done | review only | CHANGES REQUIRED — all findings adopted | none | n/a |
+| S10P-04 | ledger-finance | Done | review only | APPROVED WITH CHANGES — all findings adopted; F-7 raised | none | n/a |
+| S10P-05 | sportsbook | Done | review only | APPROVED WITH CHANGES — adopted except webhook driver (overruled, R-1) | none | n/a |
+| S10P-06 | security | Done | review only | APPROVED WITH CHANGES — all adopted; `b22d5c4` static review: no material risk | none | n/a |
+| S10P-07 | qa | Done | review only | CHANGES REQUIRED — all adopted | none | n/a |
+| S10P-08 | devops | Done | review only | APPROVED WITH CHANGES — adopted; action-major claim contested, to verify in W0 | none | n/a |
+| S10P-09 | product-owner-proxy | Done | review only | APPROVED WITH CHANGES — adopted | none | n/a |
+| S10P-10 | Orchestrator | Done | `docs/plans/stage-10-planning-gate-proposal.md` (new), `docs/progress.md`, `docs/active-stage.md`, `docs/governance/project-status.md` (pointer), this registry | n/a (documentation) | none | n/a |
+
+### Findings recorded (not fixed this gate)
+
+| ID | Severity | Finding | Proposed disposition |
+|---|---|---|---|
+| F-1 | P1 | CI `build-test-lint` never executed: `.github/workflows/ci.yml:99` action `golangci-lint/golangci-lint-action` does not exist | Stage 10 W0 item 1 |
+| F-2 | P1 | Scratch-database tests need `CREATEDB`; CI/dev roles are `NOCREATEDB` | W0 item 2 (`igaming_test_admin`) |
+| F-3 | P3 | 19 golangci-lint issues; linter version unpinned | W0 items 1, 3 |
+| F-4 | P2 | Stale records (project-status, task rows, HR-15 status) | W0 item 6 (the two misleading "Current stage" headers corrected this gate) |
+| F-5 | P2 | `b22d5c4` Terraform/IAM change had no recorded review | Static reviews done this gate (no material risk); live checks W0 item 4 |
+| F-6 | info | Staging acceptance human-attested only | W0 item 7 |
+| F-7 | P2 | `ledger.Post` replay compares transaction type only, not amounts (`internal/ledger/ledger.go:316-326`) | W1 item 0 (`ledger-finance` audit of existing callers) |
+
+### Next stage recommended, not authorized
+
+Stage 10 — CI Evidence Restoration + Sportsbook Settlement Lifecycle
+(proposal §8). Requires the five human approvals in proposal §V.
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and

@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-20 (Stage 8)
+Last updated: 2026-09-25 (Stage 10 planning gate)
 
-## Status: Stage 8 (Provider Integration Readiness Without External Contracts) — complete, pending human approval to start the next stage
+## Status: Stage 9.4 staging deployed and accepted (human-executed, human-attested); Stage 10 proposed — PLANNING ONLY, awaiting human approval (`docs/plans/stage-10-planning-gate-proposal.md`)
 
 ## Stage 0 — complete (approved)
 
@@ -7951,3 +7951,88 @@ principal with the four `deploy/aws/iam/*.json` policies; run the
 bootstrap; supply `staging_access_cidrs`. First-apply verification items
 are listed in the lifecycle runbook §12. No B2B/Partner/Retail/Stage 10
 work was performed. **Stage 10 is NOT authorized and was not started.**
+
+## Stage 9.4 — AWS staging deployment + acceptance (human-executed) — recorded
+
+The AWS staging deployment authorized after Stage 9.4 was executed by
+the **human** from the allowlisted workstation. Agent-sandbox attempts
+were stopped before any AWS change: the sandbox's egress IP was not in
+the approved `staging_access_cidrs`, and its TLS interception prevented
+`docker build` package downloads without a Dockerfile change the human
+had prohibited. Before deployment the agent verified, read-only: deployer
+identity, bootstrap permissions absent, 42 offline `terraform test`
+runs, `verify-teardown.sh` exit 0, and a real S3-backend `terraform
+plan` of 74 to add / 0 / 0 using a signature-verified provider mirror
+with the committed lock file unchanged.
+
+Commits made during deployment and acceptance (previously unrecorded):
+`221b6ef` (frontend nginx pid path for the non-root image + smoke test +
+CI job `frontend-image`), `b22d5c4` (ALB ingress from the CloudFront
+origin-facing prefix list only; deployer network policy adds read-only
+`ec2:GetManagedPrefixListEntries`), `8ec3dc7` (B2C and Back Office
+workflows for the acceptance run; UI only), `9190d5d` (B2C selection
+pickability fix).
+
+**Deployed commit: `9190d5d01da076141a1f70d7e5897a573d3b18f4`.** The
+human reports the real B2C browser acceptance **PASSED** (including the
+previously failing sportsbook selection flow) and the Back Office was
+manually verified. This is **human-attested**; no acceptance evidence
+artifact is in the repository and the Orchestrator could not re-verify
+it from the agent environment. Staging remains running (≈ $0.10/hour);
+its disposition is a pending human decision.
+
+## Stage 10 planning gate — state reconstruction and proposal — PLANNING ONLY, awaiting human approval
+
+The Master Orchestrator reconstructed project state from the repository
+(four read-only passes: governance, human-decision/deferred registers,
+stage history, code reality) and verified the deployed commit locally
+against a fresh PostgreSQL 16 database set up exactly as CI does.
+Results at `9190d5d`: build, vet, gofmt, unit tests, migrations
+up/verify/round-trip PASS; the integration suite PASSES except six
+packages whose scratch-database tests need `CREATE DATABASE` (PASS when
+the local throwaway role is given `CREATEDB`); `golangci-lint` v2.5.0
+reports 19 low-severity issues.
+
+**Findings (recorded, not fixed):**
+- **F-1 (P1)** — CI's `build-test-lint` job has never executed on this
+  branch: `.github/workflows/ci.yml:99` references the non-existent
+  action `golangci-lint/golangci-lint-action` (present since `4790de0`);
+  all 60 most recent runs failed at "Set up job". All Go evidence in the
+  Stage 4I–9.4 records is local, not CI.
+- **F-2 (P1)** — scratch-database tests need `CREATEDB`, which neither CI
+  nor `deploy/init-app-role.sql` grants.
+- **F-3 (P3)** — 19 lint issues (unpinned `version: latest`).
+- **F-4 (P2)** — stale project memory (`project-status.md` stops at 4I;
+  stale headers; HR-15 recorded as not implemented although migration
+  0082 implements it).
+- **F-5 (P2)** — `b22d5c4` (Terraform + IAM policy) had no recorded
+  review; static `security`/`devops` reviews this round found no material
+  risk; live Access Analyzer + 30-case simulation still owed.
+- **F-6** — staging acceptance human-attested only.
+- **F-7 (P2)** — `ledger.Post` idempotent replay compares only the
+  transaction type, not amounts (`internal/ledger/ledger.go:316-326`);
+  caller exposure not yet audited.
+
+**Proposal:** Stage 10 — CI Evidence Restoration (W0, hard gate: ≥5
+consecutive green CI runs) + Sportsbook Settlement Lifecycle (W1:
+cash-funded singles in in-house mock mode — settle won/lost, void before
+and after settlement, rollback/re-settlement, rollback-then-void;
+append-only DB-enforced history; payload-compared idempotency; tombstones;
+sportsbook reconciliation stream; staff-only test-support settlement
+route; no webhook, no cashout, no manual operator settlement, no
+self-exclusion auto-void consumer). Seven independent specialist reviews
+(architect CHANGES REQUIRED, qa CHANGES REQUIRED, ledger-finance /
+sportsbook / security / devops / product-owner-proxy APPROVED WITH
+CHANGES) were consolidated; every P1 is incorporated. Two conflicts were
+resolved by the Orchestrator on evidence (R-1 webhook → staff route,
+because bets are in-house mode; R-2 self-exclusion seeding not re-asked,
+because ADR 0042 decided it).
+
+**Human approvals required:** approve Stage 10; approve the W0
+test-admin mechanism; name/supply the verification credential for the
+`b22d5c4` live checks; decide staging disposition; acknowledge OB-1.
+
+**No code, migration, Terraform, IAM or AWS change was made in this
+gate. Stage 10 is NOT authorized and was not started.** Full record:
+`docs/plans/stage-10-planning-gate-proposal.md`.
+

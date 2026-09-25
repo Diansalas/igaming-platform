@@ -1441,7 +1441,7 @@ standard).
 3. All other already-open, non-blocking items from Stages 0-4G remain
    open (see `docs/governance/project-status.md`).
 
-## Current stage: Stage 4H-B1 Wave 1.5 Fix Round 2 — CONCLUDED, awaiting human authorization for Wave 2
+## Prior stage (historical, superseded): Stage 4H-B1 Wave 1.5 Fix Round 2 — CONCLUDED
 
 **Status: READY** for Wave 2 authorization, subject to two routed,
 non-blocking P1s. Full detail:
@@ -1480,7 +1480,41 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 9.4 — Staging Infrastructure Hardening + Cost Optimization — COMPLETE (repository-side), awaiting AWS deployment authorization
+## Current stage: Stage 10 Planning Gate — proposal awaiting human approval (PLANNING ONLY)
+
+**Status: NOT AUTHORIZED — NOT STARTED.** Stage 9.4's AWS staging
+deployment was executed by the human and the staging MVP acceptance
+**PASSED (human-attested)** on deployed commit
+`9190d5d01da076141a1f70d7e5897a573d3b18f4`. The Orchestrator
+reconstructed project state from the repository and produced a
+decision-ready proposal, reviewed by seven specialists:
+`docs/plans/stage-10-planning-gate-proposal.md`.
+
+**Proposed Stage 10:** W0 CI evidence restoration (hard gate: ≥5
+consecutive green CI runs) then W1 sportsbook settlement lifecycle
+(cash-funded singles, in-house mock mode: settle, void, correction).
+
+**Findings recorded this gate:** F-1 CI Go gate never executed (broken
+action reference); F-2 scratch-database tests need `CREATEDB`; F-3 19
+lint issues; F-4 stale records; F-5 `b22d5c4` unreviewed (static review
+clean, live checks owed); F-6 acceptance human-attested only; F-7
+`ledger.Post` replay does not compare amounts (caller exposure
+unaudited). Details in the proposal §2.4.
+
+### Decisions/input needed from the human before any further work
+
+1. Approve Stage 10 as proposed (or choose an alternative, proposal §G).
+2. Approve the W0 test-admin mechanism (`igaming_test_admin`, CI and
+   dev init only).
+3. Name or supply the verification credential for the `b22d5c4` live
+   checks, or accept that item as BLOCKED.
+4. Staging disposition during Stage 10: keep running or tear down.
+5. Acknowledge OB-1 remains an open pre-production decision.
+
+No code, migration, Terraform, IAM or AWS change was made. Staging was
+not redeployed or destroyed.
+
+## Prior stage: Stage 9.4 — Staging Infrastructure Hardening + Cost Optimization — COMPLETE; deployed and accepted (human-executed, see Stage 10 Planning Gate above)
 
 **Purpose.** After the human configured a READ-ONLY AWS credential
 (`arn:aws:iam::765578795051:user/claude-staging-readonly`, account
