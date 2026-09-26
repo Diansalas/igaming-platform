@@ -129,3 +129,47 @@ BEGIN
     END IF;
 END
 $$;
+
+-- Stage 10.3 W2a (ADR 0093 §1; migration 0096, provider credentials): the
+-- runtime role's least-privilege grants on the three provider-credential
+-- tables, re-asserted on every run. The blanket backfill GRANT above
+-- ("ALL TABLES IN SCHEMA public") would otherwise silently re-grant
+-- table-level UPDATE/DELETE on them every time this idempotent script is
+-- re-run against an already-migrated database; migration 0096 itself runs
+-- only once. The statements are EXACTLY migration 0096's own block: REVOKE
+-- ALL (which also drops any column privileges), then SELECT/INSERT, then
+-- UPDATE on the listed columns only - never DELETE or TRUNCATE, and never
+-- activation_request_id. The DB triggers remain the binding control; this
+-- is defence in depth. Guarded per table because the tables do not exist
+-- yet on a fresh docker-entrypoint-initdb.d run (migrations run after this
+-- script). Re-running leaves the privileges unchanged
+-- (TestInitAppRole_RerunKeepsProviderCredentialGrants).
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'provider_credential_handles'
+    ) THEN
+        EXECUTE 'REVOKE ALL ON provider_credential_handles FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON provider_credential_handles TO igaming_runtime';
+        EXECUTE 'GRANT UPDATE (status, status_changed_at, not_after, revoked_at, revoked_by, revoke_reason) '
+             || 'ON provider_credential_handles TO igaming_runtime';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'provider_credential_change_requests'
+    ) THEN
+        EXECUTE 'REVOKE ALL ON provider_credential_change_requests FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON provider_credential_change_requests TO igaming_runtime';
+        EXECUTE 'GRANT UPDATE (state, applied_at, applied_by_principal_id, applied_handle_id) '
+             || 'ON provider_credential_change_requests TO igaming_runtime';
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'provider_credential_change_approvals'
+    ) THEN
+        EXECUTE 'REVOKE ALL ON provider_credential_change_approvals FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON provider_credential_change_approvals TO igaming_runtime';
+    END IF;
+END
+$$;
