@@ -137,9 +137,19 @@ func run() error {
 	// identical provider_id in the first place; this is that same
 	// uniqueness requirement, just not yet enforced by a doc convention
 	// before this stage found it the hard way.
-	orchestrator := payments.NewOrchestrator(map[string]payments.PaymentProvider{
-		"mock-payments": payments.NewMockProvider("mock-payments", "EUR", "USD", "GBP", "BRL", "MXN"),
-	})
+	// PAY-WH-TENANT-1 (ADR 0090; docs/decisions/0022 §3 amendment
+	// 2026-09-26): bind the mock adapter to a variable so its own
+	// MockWebhookCredentials resolver can be wired into the same
+	// Orchestrator - the ONLY component that ever sees inbound-webhook
+	// credential secret material. This is a MOCK resolver; the real
+	// resolver (a FORCE-RLS handle table plus an external secret store) is
+	// NOT IMPLEMENTED, and any provider without a resolver entry fails
+	// closed on every callback.
+	mockPaymentsProvider := payments.NewMockProvider("mock-payments", "EUR", "USD", "GBP", "BRL", "MXN")
+	orchestrator := payments.NewOrchestrator(
+		map[string]payments.PaymentProvider{"mock-payments": mockPaymentsProvider},
+		payments.MultiWebhookCredentialResolver{"mock-payments": payments.NewMockWebhookCredentials(mockPaymentsProvider)},
+	)
 
 	// Stage 4A ships a mock casino adapter only (CLAUDE.md's Stage 4A
 	// scope gate) - registered exactly like a future real aggregator

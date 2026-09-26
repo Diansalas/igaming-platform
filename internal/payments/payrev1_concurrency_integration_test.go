@@ -43,7 +43,7 @@ func pr1ConfirmedDeposit(t *testing.T, pool *db.Pool, f orchFixture, orch *Orche
 		t.Fatal("intent has no provider reference")
 	}
 	ref = *intent.ProviderReference
-	payload := provider.CallbackPayload(CallbackEventDeposit, ref, "", OutcomeSucceeded, amount, "EUR", "", false)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, amount, "EUR", "", false)
 	var res ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -86,14 +86,14 @@ func TestPayRev1_ConcurrentDistinctReferenceReversals_ExactlyOnePosts(t *testing
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})
 
 	const amount = int64(7_500)
 	depositRef, ledgerTxID := pr1ConfirmedDeposit(t, pool, f, orch, provider, amount)
 
 	blocker := loHoldLedgerTransactionRow(t, pool, f.tenantID, ledgerTxID, "original-deposit-row")
 
-	reversalPayload := provider.CallbackPayload(CallbackEventDepositReversal,
+	reversalPayload := provider.CallbackPayload(f.tenantID, CallbackEventDepositReversal,
 		"payrev1-race-reversal-ref", depositRef, OutcomeSucceeded, amount, "EUR", "", false)
 
 	racer := loStartRacer(t, pool, f.tenantID, "depositReversal", func(ctx context.Context, tx pgx.Tx) error {

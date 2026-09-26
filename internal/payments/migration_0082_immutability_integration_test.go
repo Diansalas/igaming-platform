@@ -32,7 +32,7 @@ func seedDepositIntent(t *testing.T, pool *db.Pool, f orchFixture, key string) u
 	t.Helper()
 	provider := NewMockProvider("mock-psp", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})
 
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

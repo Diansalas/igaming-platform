@@ -24,6 +24,9 @@ package payments
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/google/uuid"
@@ -178,7 +181,124 @@ var (
 	// retried call is rejected, never silently accepted against the new
 	// payload.
 	ErrIdempotencyKeyReused = errors.New("payments: idempotency key reused with different deposit parameters")
+
+	// ErrCallbackAuthFailed is the single sentinel every pre-verification
+	// inbound-callback rejection wraps (PAY-WH-TENANT-1, ADR 0090 item 3;
+	// docs/decisions/0022 §3 amendment 2026-09-26). Every reason gets the
+	// SAME HTTP response on the public webhook route - a uniform 401
+	// "callback rejected" - so an unauthenticated caller can never
+	// distinguish "unknown tenant" from "bad signature" from "provider not
+	// configured for this tenant" by status code or body alone. Callers
+	// that need the specific reason (for allow-listed structured logging
+	// only - never in the HTTP response) use errors.As to a
+	// *CallbackAuthError.
+	ErrCallbackAuthFailed = errors.New("payments: callback authentication failed")
+
+	// ErrWebhookCredentialUnavailable is returned by a
+	// WebhookCredentialResolver when it has no credential for the given
+	// (tenantID, providerID, keyID) - folded into ErrCallbackAuthFailed's
+	// "credential_unavailable" reason by the orchestrator, never surfaced
+	// on its own.
+	ErrWebhookCredentialUnavailable = errors.New("payments: no webhook credential available for this tenant/provider/key")
 )
+
+// CallbackAuthReason is the closed, allow-listed reason enum behind
+// ErrCallbackAuthFailed (design §3.2). Logged (never returned to an
+// unauthenticated caller) so operators can distinguish failure modes
+// without the public response doing so.
+type CallbackAuthReason string
+
+const (
+	ReasonTenantUnknown         CallbackAuthReason = "tenant_unknown"
+	ReasonTenantInactive        CallbackAuthReason = "tenant_inactive"
+	ReasonProviderInvalid       CallbackAuthReason = "provider_invalid"
+	ReasonProviderUnregistered  CallbackAuthReason = "provider_unregistered"
+	ReasonProviderNotConfigured CallbackAuthReason = "provider_not_configured"
+	ReasonNoResolver            CallbackAuthReason = "no_resolver"
+	ReasonCredentialUnavailable CallbackAuthReason = "credential_unavailable"
+	ReasonSignatureMissing      CallbackAuthReason = "signature_missing"
+	ReasonSignatureInvalid      CallbackAuthReason = "signature_invalid"
+	ReasonKeyMaterial           CallbackAuthReason = "key_material"
+)
+
+// CallbackAuthError is ErrCallbackAuthFailed's concrete carrier, with the
+// extra, still allow-listed context (§3.3) a caller needs to log a
+// payment_webhook_auth_failed line: KeyID only once it has passed the
+// charset check, CredentialFingerprint only for ReasonSignatureInvalid
+// (never the secret itself - WebhookCredential.Fingerprint is the only
+// loggable form).
+type CallbackAuthError struct {
+	Reason                CallbackAuthReason
+	KeyID                 string
+	CredentialFingerprint string
+}
+
+func (e *CallbackAuthError) Error() string {
+	return fmt.Sprintf("payments: callback authentication failed: %s", e.Reason)
+}
+
+// Is lets errors.Is(err, ErrCallbackAuthFailed) succeed for any
+// *CallbackAuthError regardless of its specific Reason.
+func (e *CallbackAuthError) Is(target error) bool {
+	return target == ErrCallbackAuthFailed
+}
+
+// WebhookCredential is a resolved, per-(tenant, provider, key) inbound
+// webhook signing credential (docs/decisions/0022 §3 amendment). Secret is
+// never logged, errored, or audited - String()/LogValue() redact it, and
+// Fingerprint (hex(sha256(Secret))[:16]) is the only loggable form.
+type WebhookCredential struct {
+	TenantID    uuid.UUID
+	ProviderID  string
+	KeyID       string
+	Secret      []byte
+	Fingerprint string
+}
+
+// String implements fmt.Stringer so %v/%+v/Println of a WebhookCredential
+// (including inside a larger struct) never renders Secret's raw bytes.
+func (c WebhookCredential) String() string {
+	return fmt.Sprintf("WebhookCredential{TenantID:%s ProviderID:%s KeyID:%s Fingerprint:%s}",
+		c.TenantID, c.ProviderID, c.KeyID, c.Fingerprint)
+}
+
+// LogValue implements slog.LogValuer for the identical reason as String.
+func (c WebhookCredential) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("tenant_id", c.TenantID.String()),
+		slog.String("provider_id", c.ProviderID),
+		slog.String("key_id", c.KeyID),
+		slog.String("fingerprint", c.Fingerprint),
+	)
+}
+
+// WebhookCredentialResolver resolves the single candidate credential for
+// (tenantID, providerID, keyID) - never a cross-tenant trial (ADR 0022 §3
+// amendment: "exactly one credential is tried"). One resolver is injected
+// into the Orchestrator (C2: not a per-provider map) and is the ONLY
+// component in the platform that ever sees credential secret material for
+// inbound callbacks. A provider with no resolver configured fails closed
+// (ReasonNoResolver) - there is no fallback to unauthenticated
+// verification.
+type WebhookCredentialResolver interface {
+	Resolve(ctx context.Context, tenantID uuid.UUID, providerID, keyID string) (WebhookCredential, error)
+}
+
+// InboundCallback is the platform-wide inbound-provider-callback shape
+// (docs/decisions/0022 §3 amendment's "binding contract", carried by
+// HandleCallback in place of a bare rawPayload []byte). Header carries the
+// raw request headers (including X-Payments-Signature/X-Payments-Key-Id)
+// and Body the raw wire bytes - both are input only, never persisted or
+// logged verbatim (ADR 0022 §4.1(3) does not apply: this is not a
+// canonical output shape). TenantID/ProviderID are always the
+// ROUTE-resolved values the orchestrator is verifying against, never a
+// value read from Body.
+type InboundCallback struct {
+	TenantID   uuid.UUID
+	ProviderID string
+	Header     http.Header
+	Body       []byte
+}
 
 // AmountLimit is one (asset_code, min_amount, max_amount) row - a
 // provider declaring several assets carries one limit pair per asset,
@@ -420,14 +540,22 @@ type PaymentProvider interface {
 	// QueryStatus looks up the current status of a previously-initiated
 	// deposit or withdrawal by this adapter's own provider reference.
 	QueryStatus(ctx context.Context, providerReference string) (StatusResult, error)
-	// HandleCallback verifies an inbound provider callback's signature
-	// and parses it into a canonical CallbackEvent. rawPayload is the
-	// provider's raw wire body; an adapter needing headers/signature
-	// material beyond the body itself carries its own transport concern -
-	// no adapter needs more than this to satisfy Stage 3B's mock, and a
-	// real adapter's own HTTP-layer wiring is outside this interface's
-	// concern (payment-orchestration.md §2).
-	HandleCallback(ctx context.Context, rawPayload []byte) (CallbackEvent, error)
+	// HandleCallback verifies an inbound provider callback's signature and
+	// parses it into a canonical CallbackEvent. req carries the raw wire
+	// body plus headers and the caller-verified (route-resolved) tenant/
+	// provider id; cred is the single credential the Orchestrator already
+	// resolved and equality-checked for (req.TenantID, req.ProviderID)
+	// BEFORE calling this method (docs/decisions/0022 §3 amendment) - an
+	// adapter never resolves its own credential and never tries more than
+	// the one it is given. A real adapter's own signature scheme maps onto
+	// this contract per the amendment's §9 requirements (per-merchant keys
+	// or a signed account id equal to cred bound account); the mock's
+	// scheme (mock.go) is documented there as the reference
+	// implementation. Returns ErrInboundKeyMaterial or
+	// ErrCallbackSignatureInvalid for an authentication failure - never any
+	// other error for that case (docs/decisions/0022 §3 amendment point on
+	// real-adapter errors).
+	HandleCallback(ctx context.Context, req InboundCallback, cred WebhookCredential) (CallbackEvent, error)
 	// Capabilities returns this adapter's own declared, static layer only
 	// - never tenant/brand/priority/status (docs/decisions/0022 §2).
 	Capabilities() AdapterCapability

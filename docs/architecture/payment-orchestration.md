@@ -65,8 +65,8 @@ review.
 PaymentOrchestrator
   InitiateDeposit(ctx, tenant_id, brand_id, player_account_id, wallet_id, amount, asset_code, method) (DepositIntent, error)
   RouteProvider(RoutingRequest) (PaymentProvider, error)
-  ReceiveCallback(ctx, provider_id, rawPayload) error       -- dispatches to the right adapter's HandleCallback, then to ledger-finance's posting API
-                                                            -- tenant/player/wallet are resolved OUTSIDE the payload — never from identifiers in rawPayload
+  ReceiveCallback(ctx, tenant_id, provider_id, InboundCallback) error  -- verifies the tenant-bound credential/signature (docs/decisions/0022 §3 as amended), then dispatches to the adapter's HandleCallback and ledger-finance's posting API
+                                                            -- tenant/player/wallet are resolved OUTSIDE the payload — never from identifiers in the body, and the route tenant is only a lookup hint until the credential verifies
 ```
 
 **No `InitiateWithdrawalRequest` orchestrator method was built** (Stage 3B
@@ -81,19 +81,51 @@ still distinct from `CryptoCustodyProvider.InitiateWithdrawal`
 (`crypto-custody-boundary.md` §2), which is out of scope entirely this
 stage.
 
-**`ReceiveCallback`'s implemented signature** is
-`ReceiveCallback(ctx, tx, tenant_id, provider_id, rawPayload)`: it takes an
+**`ReceiveCallback`'s implemented signature** is now (Stage 10.1,
+PAY-WH-TENANT-1, ADR 0090; `docs/decisions/0022` §3 as amended
+2026-09-26) `ReceiveCallback(ctx, tx, tenant_id, provider_id,
+InboundCallback)`, where `InboundCallback{TenantID, ProviderID, Header,
+Body}` carries the raw request headers and body — it takes an
 already-tenant-scoped `pgx.Tx` like every other DB-touching function in
 this codebase. The tenant is resolved by the HTTP layer from a **per-tenant
 URL path slug** (`POST /v1/webhooks/payments/{tenantSlug}/{providerID}`),
-which is `docs/decisions/0022` §3's own first candidate resolution for that
-open question, and the payload is authenticated inside the named adapter's
-`HandleCallback` signature verification. There is no stored "verified
-callback credential" concept backing this — no per-tenant provider
-credential table exists this stage, and the mock adapter has no per-tenant
-credential at all. §10's binding rule is still satisfied (the tenant never
-comes from the body), but the mechanism is the URL plus the adapter's own
-verification, not a credential lookup.
+which `docs/decisions/0022` §3 (as amended) confirms is only a lookup
+hint — a payload field never asserts the tenant.
+
+**Verification order**, strictly before any ledger/intent/wallet read,
+lock, write, tombstone, or audit row:
+
+1. the adapter must be registered for `provider_id` (`ReasonProviderUnregistered`);
+2. the provider must be configured for this tenant to accept webhooks —
+   `payments.ProviderAcceptsWebhook`, a read-only `EXISTS`
+   (`ReasonProviderNotConfigured`) — a `'disabled'` capability row still
+   counts, since disabling is a routing decision, not a callback-acceptance
+   revocation (a compromised provider is revoked by removing its
+   credential from the resolver instead);
+3. resolve the single candidate credential for `(tenant_id, provider_id,
+   key_id)` via the injected `WebhookCredentialResolver`, then re-check
+   `cred.TenantID`/`cred.ProviderID` equal what was just resolved for — a
+   mismatch, or a nil resolver, fails closed (`ReasonNoResolver` /
+   `ReasonCredentialUnavailable`), never falling back to unauthenticated
+   verification;
+4. key-material scan, then HMAC verification, both inside the adapter's
+   own `HandleCallback(ctx, InboundCallback, WebhookCredential)` — the
+   platform-defined (MOCK) signing input is
+   `"igaming.payments.webhook.v1" \0 tenant_id \0 provider_id \0 key_id \0
+   <raw body bytes>`, so the tenant is bound into what is verified, not
+   merely which key was used.
+
+Every failure above returns `payments.ErrCallbackAuthFailed` (a
+`*CallbackAuthError` carrying a closed, allow-listed reason) — the HTTP
+layer maps EVERY reason to the identical 401 `"callback rejected"`
+response, so an unauthenticated caller can never distinguish which is
+true. There is still no stored "verified callback credential" TABLE this
+stage — `payments.MockWebhookCredentials` derives every tenant's key from
+one process-local master via HMAC (`MOCK`, labelled as such); the real
+per-tenant credential store (a FORCE-RLS handle table plus a secret store)
+is `NOT IMPLEMENTED`, and S-6 (a callback signed for tenant A verifying for
+tenant B) is closed for the MOCK only and remains launch-blocking for any
+real PSP until that store exists.
 
 The orchestrator never posts ledger entries itself — it resolves *which
 provider* handles a request and translates provider callbacks into calls
@@ -295,9 +327,15 @@ credentials being *per-tenant configuration* and are binding on Stage 3B
   append-only store that by design cannot be redacted afterwards.
 - Webhook signature verification happens inside `HandleCallback` **before**
   any payload field is used to resolve tenant, player, or wallet. An
-  unverified payload never reaches the ledger posting API, and the tenant
-  comes from the key that verified the signature, not from the body — a
-  callback must never be able to name the tenant it credits.
+  unverified payload never reaches the ledger posting API. Per
+  `docs/decisions/0022` §3 as amended 2026-09-26 (PAY-WH-TENANT-1): the
+  route (a per-tenant URL slug) is a lookup hint ONLY, never the source of
+  authorization; the tenant is established by verifying a signature whose
+  input includes the route-resolved tenant_id, and a payload field never
+  asserts the tenant. Exactly one credential is tried — never a trial
+  across tenants — and every write after verification uses that same
+  tenant id as both the RLS context and the binding. A callback must never
+  be able to name the tenant it credits.
 - Rotation is per-tenant and supports an overlap window (old and new
   signing key both accepted) so rotating one tenant's PSP key cannot drop
   another tenant's in-flight callbacks. `OPEN DECISION`: rotation cadence

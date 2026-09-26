@@ -263,7 +263,7 @@ func TestSimulateDepositCallback_DisabledWhenFlagOff(t *testing.T) {
 func TestSimulateDepositCallback_RejectedForNonMockProvider(t *testing.T) {
 	pool, issuer := testEnv(t)
 	otherProvider := &nonMockPaymentProvider{MockProvider: payments.NewMockProvider("other-psp", "EUR")}
-	orchestrator := payments.NewOrchestrator(map[string]payments.PaymentProvider{"other-psp": otherProvider})
+	orchestrator := payments.NewOrchestrator(map[string]payments.PaymentProvider{"other-psp": otherProvider}, payments.MultiWebhookCredentialResolver{"other-psp": payments.NewMockWebhookCredentials(otherProvider.MockProvider)})
 	srv := newFinancialTestServerWithMockSettlement(t, pool, issuer, orchestrator)
 	tenant := mustCreateTenant(t, pool)
 	brand := mustCreateBrand(t, pool, tenant)
@@ -588,7 +588,7 @@ func TestSimulateDepositCallback_RacesRealWebhookWithoutDoubleCredit(t *testing.
 	decodeBody(t, resp, &intent)
 	providerRef := providerReferenceFromRedirectURL(intent.RedirectURL)
 
-	payload := mockProvider.CallbackPayload(payments.CallbackEventDeposit, providerRef, "",
+	payload := mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, providerRef, "",
 		payments.OutcomeSucceeded, depositAmount, "EUR", "", false)
 
 	var wg sync.WaitGroup
@@ -601,7 +601,18 @@ func TestSimulateDepositCallback_RacesRealWebhookWithoutDoubleCredit(t *testing.
 				r.Body.Close()
 				return
 			}
-			r, err := http.Post(srv.URL+"/v1/webhooks/payments/"+tenant.Slug+"/mock", "application/json", bytes.NewReader(payload))
+			req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/webhooks/payments/"+tenant.Slug+"/mock", bytes.NewReader(payload.Body))
+			if err != nil {
+				t.Errorf("build webhook request: %v", err)
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			for k, vs := range payload.Header {
+				for _, v := range vs {
+					req.Header.Add(k, v)
+				}
+			}
+			r, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Errorf("webhook delivery: %v", err)
 				return

@@ -86,7 +86,7 @@ func TestInitiateDeposit_ConcurrentSameIdempotencyKey_OnlyOneProviderCall(t *tes
 	f := seedOrchFixture(t, pool)
 	spy := newSpyProvider(NewMockProvider("mock-psp", "EUR"))
 	registerCapability(t, pool, f, spy, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": spy})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": spy}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(spy.MockProvider)})
 
 	params := InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
@@ -135,7 +135,7 @@ func TestReceiveCallback_ConcurrentDuplicateCallbacksOnlyOnePosts(t *testing.T) 
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})
 
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -150,7 +150,7 @@ func TestReceiveCallback_ConcurrentDuplicateCallbacksOnlyOnePosts(t *testing.T) 
 		t.Fatalf("InitiateDeposit: %v", err)
 	}
 
-	payload := provider.CallbackPayload(CallbackEventDeposit, *intent.ProviderReference, "", OutcomeSucceeded, 9000, "EUR", "", false)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, *intent.ProviderReference, "", OutcomeSucceeded, 9000, "EUR", "", false)
 
 	const n = 8
 	var wg sync.WaitGroup
@@ -195,7 +195,7 @@ func TestInitiateDeposit_RetryWithDifferentAmountRejected(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})
 
 	original := InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
@@ -269,7 +269,7 @@ func TestInitiateDeposit_ProviderTransportError_AmbiguousNotCascadedThenRetryNoS
 	accepting := newSpyProvider(NewMockProvider("mock-b", "EUR"))
 	registerCapability(t, pool, f, failing, 10)
 	registerCapability(t, pool, f, accepting, 20)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-a": failing, "mock-b": accepting})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-a": failing, "mock-b": accepting}, MultiWebhookCredentialResolver{"mock-a": NewMockWebhookCredentials(failing.MockProvider), "mock-b": NewMockWebhookCredentials(accepting.MockProvider)})
 
 	params := InitiateDepositParams{
 		Scope:     DepositScope{TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerAccountID, WalletID: f.walletID},
@@ -335,7 +335,7 @@ func TestInitiateDeposit_AmbiguousOutcomeCallsQueryStatusBeforeNotCascading(t *t
 	b.AcceptAllAmounts = true
 	registerCapability(t, pool, f, a, 10)
 	registerCapability(t, pool, f, b, 20)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-a": a, "mock-b": b})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-a": a, "mock-b": b}, MultiWebhookCredentialResolver{"mock-a": NewMockWebhookCredentials(a.MockProvider), "mock-b": NewMockWebhookCredentials(b.MockProvider)})
 
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -374,7 +374,7 @@ func TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_NotCascaded(t *
 	b.AcceptAllAmounts = true
 	registerCapability(t, pool, f, a, 10)
 	registerCapability(t, pool, f, b, 20)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-a": a, "mock-b": b})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-a": a, "mock-b": b}, MultiWebhookCredentialResolver{"mock-a": NewMockWebhookCredentials(a.MockProvider), "mock-b": NewMockWebhookCredentials(b.MockProvider)})
 
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -392,7 +392,7 @@ func TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_NotCascaded(t *
 		t.Fatalf("expected a normal pending deposit awaiting callback, got %v", intent.Status)
 	}
 
-	ambiguousPayload := a.CallbackPayload(CallbackEventDeposit, *intent.ProviderReference, "", OutcomeAmbiguous, 4700, "EUR", "", false)
+	ambiguousPayload := a.CallbackPayload(f.tenantID, CallbackEventDeposit, *intent.ProviderReference, "", OutcomeAmbiguous, 4700, "EUR", "", false)
 	var result ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -434,7 +434,7 @@ func TestInitiateDeposit_ProviderSwapDoesNotRequireWalletOrLedgerCodeChange(t *t
 	f := seedOrchFixture(t, pool)
 	providerA := NewMockProvider("mock-a", "EUR")
 	registerCapability(t, pool, f, providerA, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-a": providerA})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-a": providerA}, MultiWebhookCredentialResolver{"mock-a": NewMockWebhookCredentials(providerA)})
 
 	var intentA DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -448,7 +448,7 @@ func TestInitiateDeposit_ProviderSwapDoesNotRequireWalletOrLedgerCodeChange(t *t
 	if err != nil {
 		t.Fatalf("InitiateDeposit against mock-a: %v", err)
 	}
-	payloadA := providerA.CallbackPayload(CallbackEventDeposit, *intentA.ProviderReference, "", OutcomeSucceeded, 3300, "EUR", "", false)
+	payloadA := providerA.CallbackPayload(f.tenantID, CallbackEventDeposit, *intentA.ProviderReference, "", OutcomeSucceeded, 3300, "EUR", "", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-a", payloadA)
 		return err
@@ -479,7 +479,7 @@ func TestInitiateDeposit_ProviderSwapDoesNotRequireWalletOrLedgerCodeChange(t *t
 	}
 	providerB := NewMockProvider("mock-b", "EUR")
 	registerCapability(t, pool, f, providerB, 100)
-	orch = NewOrchestrator(map[string]PaymentProvider{"mock-a": providerA, "mock-b": providerB})
+	orch = NewOrchestrator(map[string]PaymentProvider{"mock-a": providerA, "mock-b": providerB}, MultiWebhookCredentialResolver{"mock-a": NewMockWebhookCredentials(providerA), "mock-b": NewMockWebhookCredentials(providerB)})
 
 	var intentB DepositIntent
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -496,7 +496,7 @@ func TestInitiateDeposit_ProviderSwapDoesNotRequireWalletOrLedgerCodeChange(t *t
 	if intentB.ProviderID == nil || *intentB.ProviderID != "mock-b" {
 		t.Fatalf("expected the swapped-in provider mock-b to be selected once mock-a is disabled, got %v", intentB.ProviderID)
 	}
-	payloadB := providerB.CallbackPayload(CallbackEventDeposit, *intentB.ProviderReference, "", OutcomeSucceeded, 2200, "EUR", "", false)
+	payloadB := providerB.CallbackPayload(f.tenantID, CallbackEventDeposit, *intentB.ProviderReference, "", OutcomeSucceeded, 2200, "EUR", "", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-b", payloadB)
 		return err
@@ -519,7 +519,7 @@ func TestRouteProvider_RefusesUnsupportedPaymentMethod(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp", "EUR") // declares only "card", "bank_transfer"
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, _, err := orch.RouteProvider(ctx, tx, RoutingRequest{
@@ -540,7 +540,7 @@ func TestRouteProvider_RefusesAmountOutsideCapabilityLimits(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp", "EUR") // declares 100 - 100,000,000 for EUR
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, _, err := orch.RouteProvider(ctx, tx, RoutingRequest{
@@ -563,7 +563,7 @@ func TestInitiateDeposit_CapabilityMethodMismatch_NeverCallsProvider(t *testing.
 	f := seedOrchFixture(t, pool)
 	provider := newSpyProvider(NewMockProvider("mock-psp", "EUR"))
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider.MockProvider)})
 
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -613,7 +613,7 @@ func TestRouteProvider_CapabilityWithoutDepositSupportNeverRoutesForDeposit(t *t
 	if err != nil {
 		t.Fatalf("WriteCapability: %v", err)
 	}
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})
 
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, _, err := orch.RouteProvider(ctx, tx, RoutingRequest{
@@ -710,7 +710,8 @@ func TestMockProvider_HandleCallback_RejectsKeyMaterialInReversalEvent(t *testin
 		"decline_reason": "chargeback",
 		"gateway_metadata": {"signing_key": "zpriv1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"}
 	}`)
-	_, err := provider.HandleCallback(ctx, poisoned)
+	inbound := InboundCallback{TenantID: uuid.New(), ProviderID: provider.Capabilities().ProviderID, Body: poisoned}
+	_, err := provider.HandleCallback(ctx, inbound, WebhookCredential{})
 	if !errors.Is(err, ErrInboundKeyMaterial) {
 		t.Fatalf("expected ErrInboundKeyMaterial for key material nested in a deposit_reversal callback, got %v", err)
 	}

@@ -253,6 +253,63 @@ must then still verify) are a Stage 3B design decision this ADR does not
 make. Binding regardless: exactly one key is tried, and a payload field
 never *asserts* the tenant.
 
+> **Amendment 2026-09-26 (Stage 10.1, PAY-WH-TENANT-1, ADR 0090 item 3) —
+> §3 OPEN DECISION CLOSED (`security`/`payments`, recorded by `architect`;
+> not a human decision, no HDR reopened).**
+>
+> **Candidate 1 is adopted.** The per-tenant webhook route selects exactly
+> one candidate tenant. The platform resolves at most one credential for
+> (that tenant, the route `provider_id`, the vendor-supplied key id), and
+> that credential must verify.
+>
+> **Candidate 2 is not adopted.** A provider-supplied account id selecting
+> the tenant is not permitted. Adopting it later requires a further
+> amendment.
+>
+> **Binding contract** (the reference contract for every inbound provider
+> callback, platform-wide):
+> 1. The route is a lookup hint only. The tenant is established by
+>    successful verification with a credential bound to that tenant, and a
+>    payload field never asserts it.
+> 2. Exactly one credential is tried. There is no trial across tenants,
+>    and adapters receive only that one credential.
+> 3. The verified tenant is bound into what is verified:
+>    - **Platform-defined schemes** (MOCK) put `tenant_id` and
+>      `provider_id` in the signing input.
+>    - **Vendor schemes** must use per-merchant keys and, where the vendor
+>      signs a merchant or account id, require it to equal the
+>      credential's bound account.
+>    - A vendor offering neither is not integrable without a further ADR.
+>    - Real adapters enforce the vendor's signed-timestamp tolerance
+>      (PAYWH-TS-1).
+> 4. Verification completes before any tenant-scoped financial or state
+>    read, lock or write. Before it, only read-only, tenant-scoped
+>    configuration or credential-handle lookups are allowed.
+> 5. Every pre-verification failure is one indistinguishable response
+>    (401). Unauthenticated failures write no `audit_log` row and are
+>    logged with allow-listed fields only.
+> 6. All writes use the verified tenant as both the RLS context and the
+>    binding. `(provider_id, provider_tx_id)` is keyed on the route
+>    `provider_id` that the credential verified.
+>
+> **Provider status.** `ProviderCapability.status` governs routing only.
+> Callback acceptance is revoked by revoking the tenant's credential, so
+> in-flight funds are not stranded.
+>
+> **Status.**
+> - `MOCK` resolver only (`payments.MockWebhookCredentials`,
+>   `internal/payments/mock.go`).
+> - The real credential resolver (FORCE-RLS handle table + secret store,
+>   §2.2) is `NOT IMPLEMENTED`. It is blocked on the secret-store ADR and
+>   on human-authorized provisioning.
+> - S-6 is closed for the MOCK only and stays launch-blocking for any real
+>   PSP.
+> - Casino (CAS-WH-TENANT-1) and KYC (KYC-WH-1) callbacks do not yet
+>   conform. They are registered, not in scope.
+>
+> The Consequences clause "§3 leaves open *how* the right key is
+> selected" is superseded by this amendment.
+
 ### 4. Crypto Payment Provider is not the same object as Crypto Custodian
 
 The business owner's instruction is explicit and is adopted verbatim as
@@ -603,8 +660,10 @@ agnosticism specifically.
   bound to, and never a posting attributed to another provider's or the
   custodian's leg. That refinement is recorded in ADR 0019 itself, not
   duplicated here. Unchanged either way: tenant comes from the verified
-  credential, never from the payload — though §3 leaves open *how* the
-  right key is selected when one adapter serves many tenants.
+  credential, never from the payload — §3's "leaves open *how* the right
+  key is selected" is CLOSED by the 2026-09-26 amendment above
+  (PAY-WH-TENANT-1): the route selects one candidate, a single resolved
+  credential must verify, MOCK only, real resolver NOT IMPLEMENTED.
 - `financial-domain-model.md` is updated so `ProviderCapability` appears
   in the object-scoping table and is named as the second permitted
   `brand_id`-carrying table under that document's brand-denormalization

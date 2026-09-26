@@ -19,9 +19,10 @@
 package payments
 
 import (
+	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -113,10 +114,10 @@ func TestStage9_ConcurrentDistinctDepositsSameWallet_NoLostUpdate(t *testing.T) 
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})
 
 	amounts := []int64{7_000, 3_000}
-	payloads := make([][]byte, len(amounts))
+	payloads := make([]InboundCallback, len(amounts))
 	for i, amount := range amounts {
 		var intent DepositIntent
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -134,7 +135,7 @@ func TestStage9_ConcurrentDistinctDepositsSameWallet_NoLostUpdate(t *testing.T) 
 		if intent.ProviderReference == nil {
 			t.Fatalf("intent %d has no provider reference", i)
 		}
-		payloads[i] = provider.CallbackPayload(CallbackEventDeposit, *intent.ProviderReference, "", OutcomeSucceeded, amount, "EUR", "", false)
+		payloads[i] = provider.CallbackPayload(f.tenantID, CallbackEventDeposit, *intent.ProviderReference, "", OutcomeSucceeded, amount, "EUR", "", false)
 	}
 
 	errs := make([]error, len(payloads))
@@ -205,7 +206,7 @@ func TestStage9_TamperedWebhookNeverReachesTheLedger(t *testing.T) {
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})
 
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -223,51 +224,40 @@ func TestStage9_TamperedWebhookNeverReachesTheLedger(t *testing.T) {
 		t.Fatal("intent has no provider reference")
 	}
 
-	genuine := provider.CallbackPayload(CallbackEventDeposit, *intent.ProviderReference, "", OutcomeSucceeded, 5_000, "EUR", "", false)
+	genuine := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, *intent.ProviderReference, "", OutcomeSucceeded, 5_000, "EUR", "", false)
 
-	var unsigned map[string]any
-	if err := json.Unmarshal(genuine, &unsigned); err != nil {
-		t.Fatalf("unmarshal genuine payload: %v", err)
-	}
-	delete(unsigned, "signature")
-	unsignedBytes, err := json.Marshal(unsigned)
-	if err != nil {
-		t.Fatalf("marshal unsigned payload: %v", err)
-	}
+	unsigned := genuine
+	unsigned.Header = genuine.Header.Clone()
+	unsigned.Header.Del(HeaderSignature)
 
-	var wrongSig map[string]any
-	if err := json.Unmarshal(genuine, &wrongSig); err != nil {
-		t.Fatalf("unmarshal genuine payload: %v", err)
-	}
-	wrongSig["signature"] = "deadbeef"
-	wrongSigBytes, err := json.Marshal(wrongSig)
-	if err != nil {
-		t.Fatalf("marshal wrong-signature payload: %v", err)
-	}
+	wrongSig := genuine
+	wrongSig.Header = genuine.Header.Clone()
+	wrongSig.Header.Set(HeaderSignature, "v1="+strings.Repeat("a", 64))
 
 	// A genuinely-signed callback whose amount was raised afterwards -
 	// the signature is real, but no longer covers what the body now says.
-	var inflated map[string]any
-	if err := json.Unmarshal(genuine, &inflated); err != nil {
-		t.Fatalf("unmarshal genuine payload: %v", err)
-	}
-	inflated["amount"] = 500_000
-	inflatedBytes, err := json.Marshal(inflated)
-	if err != nil {
-		t.Fatalf("marshal inflated payload: %v", err)
+	inflated := genuine
+	inflated.Body = bytes.Replace(genuine.Body, []byte(`"amount":5000`), []byte(`"amount":500000`), 1)
+	if bytes.Equal(inflated.Body, genuine.Body) {
+		t.Fatal("test setup bug: tampering did not change the payload")
 	}
 
-	for name, payload := range map[string][]byte{
-		"unsigned":                unsignedBytes,
-		"wrong_signature":         wrongSigBytes,
-		"amount_edited_after_sig": inflatedBytes,
-	} {
+	cases := map[string]struct {
+		payload InboundCallback
+		reason  CallbackAuthReason
+	}{
+		"unsigned":                {unsigned, ReasonSignatureMissing},
+		"wrong_signature":         {wrongSig, ReasonSignatureInvalid},
+		"amount_edited_after_sig": {inflated, ReasonSignatureInvalid},
+	}
+	for name, tc := range cases {
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", payload)
+			_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", tc.payload)
 			return err
 		})
-		if !errors.Is(err, ErrCallbackSignatureInvalid) {
-			t.Fatalf("%s: expected ErrCallbackSignatureInvalid from ReceiveCallback, got %v", name, err)
+		var authErr *CallbackAuthError
+		if !errors.As(err, &authErr) || authErr.Reason != tc.reason {
+			t.Fatalf("%s: expected a *CallbackAuthError{Reason: %s} from ReceiveCallback, got %v", name, tc.reason, err)
 		}
 	}
 

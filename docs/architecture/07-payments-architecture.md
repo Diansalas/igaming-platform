@@ -103,9 +103,12 @@ and the withdrawal approval/submission workflow (`internal/payments`,
 `internal/withdrawal`, migrations `0024`–`0026`). What it deliberately did
 **not** build: **no real PSP is integrated** — the only adapter is a
 `MOCK` fiat adapter — and **no production provider credential storage
-exists**; the callback path is authenticated by the mock adapter's own
-signature check, and the tenant comes from a per-tenant webhook URL slug,
-not from a stored per-tenant credential. Withdrawal-direction
+exists**; callbacks are tenant-bound (docs/decisions/0022 §3 as amended
+2026-09-26, PAY-WH-TENANT-1). The per-tenant URL selects one (tenant,
+provider, key id) credential, and the signature covers the tenant and
+provider. Only a `MOCK` resolver exists. The real per-tenant credential
+store is `NOT IMPLEMENTED`, and no real PSP may be connected until it
+exists. Withdrawal-direction
 orchestration beyond the staff-triggered submit handler, PSP settlement
 reconciliation, and crypto rails are all still unbuilt and mature through
 Stage 4, against the custodian abstraction decided here. See

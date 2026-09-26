@@ -4,7 +4,24 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/google/uuid"
 )
+
+// mockCredentialFor resolves the mock's own tenant-bound webhook
+// credential for tenantID - the conformance suite's stand-in for "the
+// credential the Orchestrator would have already resolved and equality-
+// checked before calling HandleCallback" (docs/decisions/0022 §3
+// amendment), since this suite deliberately exercises HandleCallback
+// directly, without an Orchestrator/DB in the loop.
+func mockCredentialFor(t *testing.T, mock *MockProvider, tenantID uuid.UUID) WebhookCredential {
+	t.Helper()
+	cred, err := NewMockWebhookCredentials(mock).Resolve(context.Background(), tenantID, mock.Capabilities().ProviderID, mockWebhookKeyID)
+	if err != nil {
+		t.Fatalf("resolve mock webhook credential: %v", err)
+	}
+	return cred
+}
 
 // RunProviderConformanceSuite is the parameterized test suite
 // docs/decisions/0022 §6 requires: "a single test suite, parameterized
@@ -68,9 +85,11 @@ func RunProviderConformanceSuite(t *testing.T, factory func() PaymentProvider) {
 			t.Skip("callback payload construction is mock-specific; a real adapter's own test supplies its own wire fixtures")
 		}
 		ctx := context.Background()
+		tenantID := uuid.New()
+		cred := mockCredentialFor(t, mock, tenantID)
 
-		declinePayload := mock.CallbackPayload(CallbackEventDeposit, "ref-decline-1", "", OutcomeDeclined, 1000, "EUR", "issuer_declined", false)
-		declineEvent, err := provider.HandleCallback(ctx, declinePayload)
+		declinePayload := mock.CallbackPayload(tenantID, CallbackEventDeposit, "ref-decline-1", "", OutcomeDeclined, 1000, "EUR", "issuer_declined", false)
+		declineEvent, err := provider.HandleCallback(ctx, declinePayload, cred)
 		if err != nil {
 			t.Fatalf("handle decline callback: %v", err)
 		}
@@ -78,8 +97,8 @@ func RunProviderConformanceSuite(t *testing.T, factory func() PaymentProvider) {
 			t.Fatalf("expected OutcomeDeclined, got %v", declineEvent.Outcome)
 		}
 
-		ambiguousPayload := mock.CallbackPayload(CallbackEventDeposit, "ref-ambiguous-1", "", OutcomeAmbiguous, 1000, "EUR", "", false)
-		ambiguousEvent, err := provider.HandleCallback(ctx, ambiguousPayload)
+		ambiguousPayload := mock.CallbackPayload(tenantID, CallbackEventDeposit, "ref-ambiguous-1", "", OutcomeAmbiguous, 1000, "EUR", "", false)
+		ambiguousEvent, err := provider.HandleCallback(ctx, ambiguousPayload, cred)
 		if err != nil {
 			t.Fatalf("handle ambiguous callback: %v", err)
 		}
@@ -95,18 +114,46 @@ func RunProviderConformanceSuite(t *testing.T, factory func() PaymentProvider) {
 			t.Skip("callback payload construction is mock-specific")
 		}
 		ctx := context.Background()
+		tenantID := uuid.New()
+		cred := mockCredentialFor(t, mock, tenantID)
 
-		payload := mock.CallbackPayload(CallbackEventDeposit, "ref-redelivered-1", "", OutcomeSucceeded, 5000, "EUR", "", false)
-		first, err := provider.HandleCallback(ctx, payload)
+		payload := mock.CallbackPayload(tenantID, CallbackEventDeposit, "ref-redelivered-1", "", OutcomeSucceeded, 5000, "EUR", "", false)
+		first, err := provider.HandleCallback(ctx, payload, cred)
 		if err != nil {
 			t.Fatalf("first delivery: %v", err)
 		}
-		second, err := provider.HandleCallback(ctx, payload)
+		second, err := provider.HandleCallback(ctx, payload, cred)
 		if err != nil {
 			t.Fatalf("redelivered: %v", err)
 		}
 		if first != second {
 			t.Fatalf("redelivered callback parsed differently: %+v vs %+v", first, second)
+		}
+	})
+
+	// PAY-WH-TENANT-1 / ADR 0022 §3 amendment, ruling C4: the tenant-binding
+	// tests are ADR 0022 §6 conformance tests, so any FUTURE real adapter
+	// must pass them too - not mock-only tests. T5 (same secret, still
+	// tenant-bound) is the one exception left mock-only, since a real
+	// vendor cannot MAC our tenant id at all.
+	t.Run("a credential resolved for one tenant is rejected for another (conformance)", func(t *testing.T) {
+		provider := factory()
+		mock, ok := provider.(*MockProvider)
+		if !ok {
+			t.Skip("credential/signature construction is mock-specific; a real adapter's own conformance fixture supplies its own per-tenant credentials")
+		}
+		ctx := context.Background()
+		tenantA, tenantB := uuid.New(), uuid.New()
+		credA := mockCredentialFor(t, mock, tenantA)
+
+		// A payload signed (via credA) FOR tenantA, delivered as if it were
+		// tenantB's InboundCallback (TenantID overwritten to tenantB,
+		// mirroring what an Orchestrator would do when it verifies against
+		// the ROUTE tenant, never a payload-asserted one).
+		inbound := mock.CallbackPayload(tenantA, CallbackEventDeposit, "conformance-cross-tenant-1", "", OutcomeSucceeded, 1000, "EUR", "", false)
+		inbound.TenantID = tenantB
+		if _, err := provider.HandleCallback(ctx, inbound, credA); !errors.Is(err, ErrCallbackSignatureInvalid) {
+			t.Fatalf("expected ErrCallbackSignatureInvalid for a tenant-A-signed callback delivered as tenant B, got %v", err)
 		}
 	})
 
@@ -154,7 +201,12 @@ func RunProviderConformanceSuite(t *testing.T, factory func() PaymentProvider) {
 		ctx := context.Background()
 
 		poisoned := []byte(`{"event_type":"deposit","provider_reference":"ref-poison-1","outcome":"succeeded","amount":1000,"asset_code":"EUR","private_key":"L1aW4thKtHz9GcpB4rMPvz3gK6yD7f9j5Kf2vSvB3wKz9c2CJ2f"}`)
-		_, err := provider.HandleCallback(ctx, poisoned)
+		// Key-material scanning runs BEFORE signature verification (§3.1
+		// step (d), before (e)), so this is rejected even with no
+		// credential/headers at all - true for any adapter, not just the
+		// mock.
+		inbound := InboundCallback{TenantID: uuid.New(), ProviderID: provider.Capabilities().ProviderID, Body: poisoned}
+		_, err := provider.HandleCallback(ctx, inbound, WebhookCredential{})
 		if err == nil {
 			t.Fatal("expected an error for a payload carrying apparent key material")
 		}

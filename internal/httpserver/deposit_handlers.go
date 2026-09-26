@@ -244,16 +244,16 @@ func newListDepositsHandler(deps Deps) http.HandlerFunc {
 // newPaymentWebhookHandler receives a provider callback and dispatches it
 // via PaymentOrchestrator.ReceiveCallback. There is no bearer-token
 // middleware on this route - a provider webhook is not an authenticated
-// platform principal - so tenant resolution and payload-signature
-// verification are this handler's own responsibility, per
-// docs/decisions/0022 §3's own still-open question on exactly how a
-// webhook selects its verification key: this implementation uses a
-// per-tenant path segment (the tenant's slug), the first candidate
-// resolution that ADR names, so the URL itself - never any field inside
-// rawPayload - determines which tenant's scope this callback runs under.
-// Signature verification of rawPayload itself happens inside the named
-// adapter's own HandleCallback, before any payload field is used
-// (payment-orchestration.md §10) - this handler never inspects the body.
+// platform principal. Tenant binding is per docs/decisions/0022 §3 as
+// amended 2026-09-26 (PAY-WH-TENANT-1, ADR 0090 item 3): the tenant slug in
+// the URL is only a LOOKUP HINT, selecting one candidate credential, which
+// must then verify a signature whose input includes the route-resolved
+// tenant_id/provider_id - never any field inside the body. Every
+// pre-verification failure (unknown tenant, inactive tenant, bad
+// provider_id, unregistered/unconfigured provider, no resolver, no
+// credential, bad signature, key material) gets the IDENTICAL 401
+// "callback rejected" response, so an unauthenticated caller can never
+// enumerate which of those is true (design §3.2).
 func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -271,13 +271,23 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		// Step 1: provider_id charset, BEFORE any tenant/DB work (ruling 5).
+		if !payments.ValidProviderIDFormat(providerID) {
+			logCallbackAuthFailure(logger, r, requestID, payments.ReasonProviderInvalid, nil, providerID, false, "", "", 0)
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")
+			return
+		}
+
+		// Step 2/3: tenant lookup and active check. A bad slug and a
+		// suspended tenant now get the SAME uniform 401 as every other
+		// auth failure (folded into ErrCallbackAuthFailed's reason set),
+		// not a distinguishable 404 - closing the residual enumeration gap
+		// the earlier NotFound-shaped response still had relative to the
+		// rest of this contract.
 		t, err := identity.GetTenantBySlug(r.Context(), deps.DB, tenantSlug)
 		if errors.Is(err, identity.ErrNotFound) {
-			// Deliberately the SAME response as "we don't recognize this
-			// tenant slug" for any other reason - a webhook endpoint must
-			// not let an unauthenticated caller enumerate valid tenant
-			// slugs by observing a different status code.
-			apierror.Write(w, requestID, apierror.CodeNotFound, "not found")
+			logCallbackAuthFailure(logger, r, requestID, payments.ReasonTenantUnknown, nil, providerID, true, "", "", 0)
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")
 			return
 		}
 		if err != nil {
@@ -286,14 +296,15 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if t.Status != "active" {
-			// Same not-found response as an unknown slug, for the same
-			// enumeration-resistance reason - a suspended tenant must not
-			// keep accepting financial callbacks just because its slug is
-			// still routable.
-			apierror.Write(w, requestID, apierror.CodeNotFound, "not found")
+			logCallbackAuthFailure(logger, r, requestID, payments.ReasonTenantInactive, &t.ID, providerID, true, "", "", 0)
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")
 			return
 		}
 
+		// Step 4: body size limit - a flat constant applied identically
+		// regardless of tenant/provider, so this is not an enumeration
+		// oracle; a too-large/unreadable body is a plain validation error,
+		// not part of the auth-failure contract.
 		body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBodyBytes+1))
 		if err != nil {
 			apierror.Write(w, requestID, apierror.CodeValidation, "failed to read request body")
@@ -304,37 +315,30 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		// Step 5: header format validation, BEFORE any tenant-scoped DB
+		// work (ruling 5) - ReceiveCallback re-validates this itself too
+		// (it must be self-sufficient for tests that call it directly),
+		// but failing here first avoids an unnecessary WithTenant round
+		// trip for the common "no headers at all" case.
+		_, _, reason, ok := payments.ParseWebhookAuthHeaders(r.Header)
+		if !ok {
+			logCallbackAuthFailure(logger, r, requestID, reason, &t.ID, providerID, true, "", "", len(body))
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")
+			return
+		}
+
 		var result payments.ReceiveCallbackResult
 		err = deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			result, err = deps.PaymentOrchestrator.ReceiveCallback(ctx, tx, t.ID, providerID, body)
+			result, err = deps.PaymentOrchestrator.ReceiveCallback(ctx, tx, t.ID, providerID, payments.InboundCallback{Header: r.Header, Body: body})
 			return err
 		})
-		if errors.Is(err, payments.ErrInboundKeyMaterial) {
-			// Never echo err's own text or the payload back to the caller -
-			// docs/decisions/0022 §4.1's rejection is silent from the
-			// provider's point of view beyond a generic failure; the
-			// security alert this ADR requires is the logger.Error call
-			// below, which itself never includes body's bytes.
-			logger.Error("payment_webhook_rejected_key_material", "provider_id", providerID, "tenant_id", t.ID.String())
-			apierror.Write(w, requestID, apierror.CodeValidation, "callback rejected")
-			return
-		}
-		if errors.Is(err, payments.ErrCallbackSignatureInvalid) {
-			// A 4xx here, not a 500 - an unsigned/mis-signed callback is a
-			// caller/authentication error, not a platform failure, and a
-			// real PSP retrying a 500 forever would otherwise never learn
-			// its signature is wrong.
-			logger.Error("payment_webhook_signature_invalid", "provider_id", providerID, "tenant_id", t.ID.String())
-			apierror.Write(w, requestID, apierror.CodeValidation, "callback rejected")
-			return
-		}
-		if errors.Is(err, payments.ErrUnknownProvider) {
-			apierror.Write(w, requestID, apierror.CodeNotFound, "not found")
-			return
-		}
-		if errors.Is(err, payments.ErrDepositIntentNotFound) {
-			apierror.Write(w, requestID, apierror.CodeNotFound, "no matching deposit for this reference")
+
+		var authErr *payments.CallbackAuthError
+		if errors.As(err, &authErr) {
+			logCallbackAuthFailure(logger, r, requestID, authErr.Reason, &t.ID, providerID, true, authErr.KeyID, authErr.CredentialFingerprint, len(body))
+			code, msg := mapReceiveCallbackError(err, callbackRoutePublicWebhook)
+			apierror.Write(w, requestID, code, msg)
 			return
 		}
 		if errors.Is(err, payments.ErrCallbackPayloadMismatch) {
@@ -342,9 +346,12 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			// redelivered with a different payload (e.g. a reversal
 			// reference naming a different deposit). Nothing was posted.
 			// Integrity alert + 409; the body never echoes references or
-			// amounts.
+			// amounts. This is a VERIFIED-caller outcome (S-3), so it keeps
+			// its own audit trail and is not part of the pre-verification
+			// auth-failure contract above.
 			logger.Error("payment_webhook_integrity_alert_payload_mismatch", "error", err, "provider_id", providerID, "tenant_id", t.ID.String())
-			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
+			code, msg := mapReceiveCallbackError(err, callbackRoutePublicWebhook)
+			apierror.Write(w, requestID, code, msg)
 			return
 		}
 		if errors.Is(err, payments.ErrDepositAlreadyReversed) {
@@ -371,18 +378,26 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			}); auditErr != nil {
 				logger.Error("payment_webhook_reversal_rejection_audit_failed", "error", auditErr, "provider_id", providerID)
 			}
-			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
+			code, msg := mapReceiveCallbackError(err, callbackRoutePublicWebhook)
+			apierror.Write(w, requestID, code, msg)
 			return
 		}
 		if errors.Is(err, payments.ErrCallbackProviderMismatch) {
 			// Security review P3 (S-5, optional): err's own text embeds the
 			// callback's claimed amount/asset and the deposit's real ones
 			// (see receiveDepositReversalCallback/postDepositSuccess's own
-			// comments) - never pass it to the logger. Response shape
-			// (500/CodeInternal, generic message) is UNCHANGED from the
-			// generic branch below; only the logged detail is narrowed.
+			// comments) - never pass it to the logger.
 			logger.Error("payment_webhook_provider_mismatch", "provider_id", providerID, "tenant_id", t.ID.String())
-			apierror.Write(w, requestID, apierror.CodeInternal, "failed to process callback")
+			code, msg := mapReceiveCallbackError(err, callbackRoutePublicWebhook)
+			apierror.Write(w, requestID, code, msg)
+			return
+		}
+		if errors.Is(err, payments.ErrDepositIntentNotFound) {
+			// Only reachable by a caller who already passed verification -
+			// see this handler's own doc comment: NOT another enumeration
+			// oracle.
+			code, msg := mapReceiveCallbackError(err, callbackRoutePublicWebhook)
+			apierror.Write(w, requestID, code, msg)
 			return
 		}
 		if err != nil {

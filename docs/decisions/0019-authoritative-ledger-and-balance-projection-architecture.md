@@ -268,7 +268,7 @@ API that accepts an arbitrary `transaction_type`. The binding rule:
 | Actor class | May originate |
 |---|---|
 | Player session (brand frontend) | Only `deposit` *initiation* (no posting — the posting is the PSP callback), `withdrawal_requested` (hold), and withdrawal cancellation. A player action never directly produces a credit to `player_cash`/`player_bonus`. |
-| Verified provider callback (signature-verified adapter) | `deposit`, casino/sportsbook bet/win/settlement/void/rollback, `psp_*`, custodian events — scoped to the tenant resolved from the *credential the callback authenticated with*, never from a tenant/player identifier in the payload, **and further scoped to the originating provider** (see below). |
+| Verified provider callback (signature-verified adapter) | `deposit`, casino/sportsbook bet/win/settlement/void/rollback, `psp_*`, custodian events — scoped to the tenant **that the callback route resolves and that the callback's single per-(tenant, provider) credential then verifies, with the tenant bound into the verification (ADR 0022 §3 as amended 2026-09-26)**. The route alone never establishes the tenant, and a tenant/player identifier in the payload never does; the scope is **further narrowed to the originating provider** (see below). |
 | Internal service (bonus engine, settlement job, gamification, reward orchestrator) | `bonus_grant`, `bonus_conversion`, `bonus_forfeiture`, `bonus_reversal` (added Stage 4H-A by `docs/decisions/0032-bonus-accounting.md` §7/§8 — a compensating transaction with `reverses_transaction_id` set, or a tombstone for a never-seen grant; `NOT IMPLEMENTED`, the type does not exist in the `transaction_type` `CHECK` constraint yet), `provider_settlement` — under a service identity (ADR 0014), not a player or staff identity. Gamification and the Reward Orchestrator inherit this row unchanged; they are internal services, **not** a new actor class. |
 | Staff principal with explicit RBAC permission | `manual_adjustment` only, four-eyes-gated above the configured threshold, `reason_code` mandatory. |
 | **In-house sportsbook engine (mock mode)** | `sportsbook_bet` from an authenticated player session via `PlaceBet` (stake debit only). `sportsbook_settlement`, `sportsbook_void`, `sportsbook_rollback` and sportsbook `tombstone`: **non-production only**, originated solely by a tenant-scoped staff principal holding `sportsbook_settlement:simulate` through the test-support route (ADR 0088 §9); never a player, never platform-admin. In production no originator exists until a real-provider stage uses the verified-provider-callback row. |
@@ -279,6 +279,17 @@ settlement/void/rollback/tombstone originator it names is a `MOCK` driver
 (test tooling), not a provider integration; the "Verified provider
 callback" row's sportsbook settlement/void/rollback entitlement is
 unchanged and still has no implementation.*
+
+*Amended 2026-09-26 (Stage 10.1, PAY-WH-TENANT-1; `ledger-finance`
+concurrence pending final review). The earlier wording ("tenant resolved
+from the credential the callback authenticated with") was not true of any
+implemented webhook: every route took the tenant from its URL slug under a
+tenant-agnostic key (S-6). Status after 10.1:*
+- *payments conforms with a `MOCK` credential only (docs/decisions/0022 §3
+  as amended);*
+- *casino does not conform (CAS-WH-TENANT-1), and this row's entitlement
+  for casino callbacks rests on that follow-up;*
+- *the sportsbook provider-callback entitlement remains unimplemented.*
 
 Enforcement is server-side at the posting API boundary (a per-
 `transaction_type` permitted-originator check), not in the UI and not

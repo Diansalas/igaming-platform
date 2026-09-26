@@ -8,11 +8,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 
 	"github.com/google/uuid"
 )
+
+// mockWebhookKeyID is the only KeyID the mock resolver/adapter ever uses.
+// Stage 10.1 (PAY-WH-TENANT-1) ships exactly one generation; a future key
+// rotation would add a second, coexisting id, never replace this one
+// in-place.
+const mockWebhookKeyID = "mock-v1"
 
 // MockProvider is a PaymentProvider implementation with synthetic,
 // test-controllable success/decline/ambiguous behavior - Stage 3B's only
@@ -51,25 +58,84 @@ type MockProvider struct {
 	attempts map[string]*mockAttempt
 	seq      int
 
-	// signingSecret is this adapter instance's HMAC key, generated at
-	// construction. A real adapter authenticates its webhook via whatever
-	// mechanism its vendor actually uses (signature header, mTLS,
-	// account-specific shared secret, ...) - HandleCallback existing only
-	// to parse an already-trusted payload is not itself a security defect,
-	// but this mock previously did NOT enforce any check at all, and it is
-	// the one adapter cmd/platform-api/main.go actually registers. That
-	// made POST /v1/webhooks/payments/{tenantSlug}/{providerID} - which
-	// has no bearer-auth middleware by design, since a provider webhook
-	// isn't an authenticated platform principal - trivially forgeable:
-	// provider_reference values were originally sequential per-instance
-	// counters ("mock-1", "mock-2", ...) and are even returned to the
-	// player in InitiateDeposit's redirect_url, so anyone could post a
-	// synthetic "succeeded" callback for any reference and mint an
-	// arbitrary ledger credit. This closes that hole for the mock exactly
-	// as payment-orchestration.md §3 requires of every adapter: "webhook
-	// signature verification happens inside HandleCallback before any
-	// payload field is used."
-	signingSecret []byte
+	// masterSecret is this adapter INSTANCE's own process-local secret,
+	// generated at construction (never config, never the repo, never
+	// recoverable from outside this process). It is used ONLY to DERIVE
+	// per-(tenant, provider) webhook signing keys (deriveKey below) - it is
+	// never itself used to sign or verify a callback directly. Renamed
+	// from Stage 3B's "signingSecret" for PAY-WH-TENANT-1 (ADR 0090; ADR
+	// 0022 §3 amendment 2026-09-25/26): that earlier single key was shared
+	// by every tenant, so a callback correctly signed for tenant A also
+	// verified for tenant B (S-6) - closing this required moving the
+	// tenant into WHAT is verified (deriveKey + the signing_input's own
+	// tenant_id/provider_id prefix), not merely adding a tenant CHECK
+	// after the fact.
+	//
+	// MOCK ONLY: deriving every tenant's key from one process-local master
+	// via HMAC is acceptable ONLY because this is a synthetic development
+	// double with no real money or real vendor relationship behind it. A
+	// real adapter's per-tenant credentials come from an independent,
+	// tenant-scoped secret store (docs/decisions/0022 §2.2,
+	// WebhookCredentialResolver's real - NOT IMPLEMENTED - resolver), never
+	// derived from a single shared platform-side secret.
+	masterSecret []byte
+}
+
+// deriveKey computes this instance's per-(tenantID, providerID) webhook
+// signing key: HMAC-SHA256(masterSecret, "igaming/payments-mock-webhook/v1"
+// 0x00 tenant_id 0x00 provider_id). NUL-separated so no ambiguity exists
+// between e.g. tenant "ab" + provider "c" and tenant "a" + provider "bc" -
+// UUIDs never contain 0x00 or the literal hyphen-string collision this
+// would otherwise risk, and provider_id is charset-restricted
+// (ProviderIDPattern) to exclude it too.
+func (m *MockProvider) deriveKey(tenantID uuid.UUID, providerID string) []byte {
+	mac := hmac.New(sha256.New, m.masterSecret)
+	_, _ = mac.Write([]byte("igaming/payments-mock-webhook/v1"))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(tenantID.String()))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(providerID))
+	return mac.Sum(nil)
+}
+
+// MockWebhookCredentials is the MOCK WebhookCredentialResolver
+// (docs/decisions/0022 §3 amendment; design §6). It resolves ONLY
+// KeyID=="mock-v1" for its own bound provider id - any other providerID or
+// keyID is ErrWebhookCredentialUnavailable, which the Orchestrator folds
+// into ReasonCredentialUnavailable (fail closed, never a fallback to
+// unauthenticated verification). Labeled MOCK per CLAUDE.md: the real
+// resolver (a FORCE-RLS handle table plus an external secret store) is NOT
+// IMPLEMENTED.
+type MockWebhookCredentials struct {
+	provider *MockProvider
+}
+
+// NewMockWebhookCredentials constructs the resolver bound to provider -
+// cmd/platform-api/main.go wires exactly one of these per registered mock
+// adapter instance into the Orchestrator's single injected
+// WebhookCredentialResolver map (keyed by provider_id, since the mock is
+// the only adapter that exists this stage).
+func NewMockWebhookCredentials(provider *MockProvider) MockWebhookCredentials {
+	return MockWebhookCredentials{provider: provider}
+}
+
+// Resolve implements WebhookCredentialResolver.
+func (r MockWebhookCredentials) Resolve(_ context.Context, tenantID uuid.UUID, providerID, keyID string) (WebhookCredential, error) {
+	if r.provider == nil || providerID != r.provider.providerID {
+		return WebhookCredential{}, ErrWebhookCredentialUnavailable
+	}
+	if keyID != mockWebhookKeyID {
+		return WebhookCredential{}, ErrWebhookCredentialUnavailable
+	}
+	secret := r.provider.deriveKey(tenantID, providerID)
+	fingerprint := sha256.Sum256(secret)
+	return WebhookCredential{
+		TenantID:    tenantID,
+		ProviderID:  providerID,
+		KeyID:       mockWebhookKeyID,
+		Secret:      secret,
+		Fingerprint: hex.EncodeToString(fingerprint[:])[:16],
+	}, nil
 }
 
 // Magic amounts (minor units) driving MockProvider.Deposit's synthetic
@@ -106,11 +172,11 @@ func NewMockProvider(providerID string, fiatCurrencies ...string) *MockProvider 
 	if _, err := rand.Read(secret); err != nil {
 		// crypto/rand failing is a fatal platform problem, not a
 		// recoverable one - never fall back to a predictable secret.
-		panic(fmt.Sprintf("payments/mock: failed to generate signing secret: %v", err))
+		panic(fmt.Sprintf("payments/mock: failed to generate master secret: %v", err))
 	}
 	return &MockProvider{
-		signingSecret: secret,
-		providerID:    providerID,
+		masterSecret: secret,
+		providerID:   providerID,
 		capability: AdapterCapability{
 			ProviderID:              providerID,
 			ProviderKind:            ProviderKindFiat,
@@ -175,13 +241,20 @@ func (m *MockProvider) SetConfirmedAmount(providerReference string, amount int64
 	}
 }
 
-// CallbackPayload builds a synthetic webhook body for providerReference,
-// as JSON, in the shape MockProvider.HandleCallback parses - test helper
-// standing in for "the provider's real webhook delivery", since Stage 3B
-// has no real PSP to deliver one. Signs the body with this instance's own
-// signingSecret so it passes HandleCallback's verification exactly as a
-// real, correctly-authenticated provider delivery would.
-func (m *MockProvider) CallbackPayload(eventType CallbackEventType, providerReference, originalProviderReference string, outcome Outcome, amount int64, assetCode, declineReason string, cascadable bool) []byte {
+// CallbackPayload builds a synthetic, TENANT-BOUND webhook delivery for
+// providerReference: the raw JSON body (with no body-embedded signature
+// field - PAY-WH-TENANT-1 removes that Stage 3B shape) plus the
+// X-Payments-Signature/X-Payments-Key-Id headers, in the exact
+// InboundCallback shape MockProvider.HandleCallback verifies - test/
+// simulation-route helper standing in for "the provider's real webhook
+// delivery", since Stage 3B/10.1 have no real PSP to deliver one.
+//
+// tenantID is ALWAYS the caller's own route/JWT-resolved tenant (never
+// accepted from anywhere a caller could name a different one) - it is
+// bound into the signature via deriveKey/signingInput exactly as a real
+// verification would rebuild it, so this helper cannot itself mint a
+// payload that verifies for any tenant other than the one named here.
+func (m *MockProvider) CallbackPayload(tenantID uuid.UUID, eventType CallbackEventType, providerReference, originalProviderReference string, outcome Outcome, amount int64, assetCode, declineReason string, cascadable bool) InboundCallback {
 	body := mockCallbackBody{
 		EventType:                 string(eventType),
 		ProviderReference:         providerReference,
@@ -192,24 +265,47 @@ func (m *MockProvider) CallbackPayload(eventType CallbackEventType, providerRefe
 		DeclineReason:             declineReason,
 		Cascadable:                cascadable,
 	}
-	body.Signature = m.sign(body)
-	marshalled, _ := json.Marshal(body)
-	return marshalled
+	raw, _ := json.Marshal(body)
+
+	key := m.deriveKey(tenantID, m.providerID)
+	sig := signWithKey(key, tenantID, m.providerID, mockWebhookKeyID, raw)
+
+	header := make(http.Header)
+	header.Set(HeaderSignature, "v1="+sig)
+	header.Set(HeaderKeyID, mockWebhookKeyID)
+
+	return InboundCallback{TenantID: tenantID, ProviderID: m.providerID, Header: header, Body: raw}
 }
 
-// sign computes this instance's HMAC-SHA256 over the callback's own
-// identifying/effect-bearing fields (never including Signature itself,
-// which would make verification vacuous). Field values are joined with a
-// separator absent from any of them (provider_reference/asset_code are
-// adapter-controlled identifiers, outcome/event_type are closed enums,
-// decline_reason is adapter-controlled text) so no combination of field
-// values can be reinterpreted as a different set of fields.
-func (m *MockProvider) sign(body mockCallbackBody) string {
-	mac := hmac.New(sha256.New, m.signingSecret)
+// signingInput builds the platform-defined webhook signing scheme's input
+// (docs/decisions/0022 §3 amendment §2.2):
+// SigningInputPrefix 0x00 tenant_id 0x00 provider_id 0x00 key_id 0x00 <raw
+// body bytes>. None of the prefix values can contain 0x00 (a canonical
+// lowercase UUID string, and provider_id/key_id are both charset-
+// restricted to exclude it), so body is an unambiguous tail - this is what
+// removes Stage 3B's field-shift weakness (NUL-joining typed FIELD VALUES,
+// which themselves could contain the separator) entirely: the new scheme
+// signs the raw body bytes directly, never a re-serialization of parsed
+// fields.
+func signingInput(tenantID uuid.UUID, providerID, keyID string, body []byte) []byte {
+	buf := make([]byte, 0, len(SigningInputPrefix)+36+len(providerID)+len(keyID)+len(body)+8)
+	buf = append(buf, SigningInputPrefix...)
+	buf = append(buf, 0)
+	buf = append(buf, tenantID.String()...)
+	buf = append(buf, 0)
+	buf = append(buf, providerID...)
+	buf = append(buf, 0)
+	buf = append(buf, keyID...)
+	buf = append(buf, 0)
+	buf = append(buf, body...)
+	return buf
+}
+
+// signWithKey returns hex(HMAC-SHA256(key, signingInput(...))).
+func signWithKey(key []byte, tenantID uuid.UUID, providerID, keyID string, body []byte) string {
+	mac := hmac.New(sha256.New, key)
 	// hash.Hash.Write never returns an error.
-	_, _ = fmt.Fprintf(mac, "%s\x00%s\x00%s\x00%s\x00%d\x00%s\x00%s\x00%t",
-		body.EventType, body.ProviderReference, body.OriginalProviderReference,
-		body.Outcome, body.Amount, body.AssetCode, body.DeclineReason, body.Cascadable)
+	_, _ = mac.Write(signingInput(tenantID, providerID, keyID, body))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
@@ -316,11 +412,22 @@ type mockCallbackBody struct {
 	AssetCode                 string `json:"asset_code"`
 	DeclineReason             string `json:"decline_reason,omitempty"`
 	Cascadable                bool   `json:"cascadable,omitempty"`
-	// Signature is this instance's HMAC-SHA256 (hex-encoded) over the
-	// other fields via MockProvider.sign - HandleCallback verifies it
-	// before acting on anything else. A real adapter's equivalent field
-	// (or header) would carry the vendor's own signature scheme instead.
-	Signature string `json:"signature,omitempty"`
+}
+
+// hasLegacySignatureField reports whether the top-level JSON object still
+// carries a "signature" field - PAY-WH-TENANT-1 moves the signature into
+// the X-Payments-Signature header exclusively (design §2.2); a body that
+// still embeds one (e.g. a caller replaying a Stage-3B-shaped payload) is
+// rejected rather than silently ignored, mirroring the same "silently
+// dropping an unexpected field is not sufficient" principle
+// containsKeyMaterialField already applies (docs/decisions/0022 §4.1).
+func hasLegacySignatureField(generic any) bool {
+	obj, ok := generic.(map[string]any)
+	if !ok {
+		return false
+	}
+	_, present := obj["signature"]
+	return present
 }
 
 // keyMaterialFieldNames is the deny-list HandleCallback scans every
@@ -336,24 +443,32 @@ var keyMaterialFieldNames = []string{
 	"seed", "mnemonic", "xprv", "wif", "signing_key", "signingkey",
 }
 
-// HandleCallback implements PaymentProvider. It first scans the raw
-// payload generically (before any typed parsing) for field names that
-// look like key material and rejects the whole operation without ever
-// logging or persisting the offending value (docs/decisions/0022 §4.1
-// point 2) - a typed json.Unmarshal into mockCallbackBody alone would
-// silently DROP an unrecognized field like "seed_phrase" rather than
-// reject it, which is exactly the "silently ignoring the field is not
-// sufficient" failure mode that ADR warns against. It then verifies the
-// embedded HMAC signature (see sign) before acting on any other field -
-// the property the security review demanded: a caller who does not know
-// this instance's signingSecret cannot post a payload HandleCallback will
-// accept, regardless of how it reaches the process (the HTTP webhook
-// route has no bearer-auth middleware by design, since a provider webhook
-// isn't an authenticated platform principal - this is what authenticates
-// it instead).
-func (m *MockProvider) HandleCallback(_ context.Context, rawPayload []byte) (CallbackEvent, error) {
+// HandleCallback implements PaymentProvider. Verification order (§3.1
+// steps (d)-(f), run only after the Orchestrator has already completed
+// (a)-(c) - provider registered, ProviderAcceptsWebhook, and credential
+// resolution/equality against req.TenantID/req.ProviderID):
+//
+//  1. scan the raw body generically (before any typed parsing) for field
+//     names that look like key material and reject without ever logging
+//     or persisting the offending value (docs/decisions/0022 §4.1 point
+//  2. - still BEFORE signature verification, per ADR 0022 §4.1 and
+//     ruling 8/C5 (a key-material rejection still raises the security
+//     alert, via the caller's allow-listed log line);
+//  2. extract and re-validate the X-Payments-Signature/X-Payments-Key-Id
+//     headers (redundant with the Orchestrator's own check, but this
+//     method must be self-sufficient for direct unit/conformance tests
+//     that bypass the HTTP layer);
+//  3. verify the HMAC over signingInput(req.TenantID, req.ProviderID,
+//     keyID, req.Body) using cred.Secret - the credential the Orchestrator
+//     already resolved and equality-checked, never re-resolved here.
+//     hmac.Equal is constant-time; a plain == comparison would leak timing
+//     information about how many leading bytes matched;
+//  4. only THEN parse the typed fields and reject a body that still
+//     carries a legacy "signature" field (hasLegacySignatureField) -
+//     Stage 3B's now-removed wire shape.
+func (m *MockProvider) HandleCallback(_ context.Context, req InboundCallback, cred WebhookCredential) (CallbackEvent, error) {
 	var generic any
-	if err := json.Unmarshal(rawPayload, &generic); err != nil {
+	if err := json.Unmarshal(req.Body, &generic); err != nil {
 		return CallbackEvent{}, fmt.Errorf("payments/mock: parse callback: %w", err)
 	}
 	if containsKeyMaterialField(generic) {
@@ -362,23 +477,25 @@ func (m *MockProvider) HandleCallback(_ context.Context, rawPayload []byte) (Cal
 		return CallbackEvent{}, ErrInboundKeyMaterial
 	}
 
+	keyID, sigHex, _, ok := ParseWebhookAuthHeaders(req.Header)
+	if !ok || keyID != cred.KeyID {
+		return CallbackEvent{}, ErrCallbackSignatureInvalid
+	}
+	expectedHex := signWithKey(cred.Secret, req.TenantID, req.ProviderID, keyID, req.Body)
+	if !hmac.Equal([]byte(expectedHex), []byte(sigHex)) {
+		return CallbackEvent{}, ErrCallbackSignatureInvalid
+	}
+
+	if hasLegacySignatureField(generic) {
+		return CallbackEvent{}, ErrCallbackSignatureInvalid
+	}
+
 	var body mockCallbackBody
-	if err := json.Unmarshal(rawPayload, &body); err != nil {
+	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return CallbackEvent{}, fmt.Errorf("payments/mock: parse callback: %w", err)
 	}
 	if body.ProviderReference == "" {
 		return CallbackEvent{}, fmt.Errorf("payments/mock: callback missing provider_reference")
-	}
-
-	// Authenticate before acting on a single other field - payment-
-	// orchestration.md §3: "webhook signature verification happens inside
-	// HandleCallback before any payload field is used... An unverified
-	// payload never reaches the ledger posting API." hmac.Equal is
-	// constant-time; a plain == comparison here would leak timing
-	// information about how many leading bytes matched.
-	expected := m.sign(body)
-	if body.Signature == "" || !hmac.Equal([]byte(expected), []byte(body.Signature)) {
-		return CallbackEvent{}, ErrCallbackSignatureInvalid
 	}
 
 	var eventType CallbackEventType

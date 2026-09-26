@@ -290,7 +290,7 @@ func TestProviderCapabilityAmountLimits_CrossTenantRoutingIsolation(t *testing.T
 		t.Fatalf("write tenant B capability (wide limit): %v", err)
 	}
 
-	orch := NewOrchestrator(map[string]PaymentProvider{"shared-psp": providerB})
+	orch := NewOrchestrator(map[string]PaymentProvider{"shared-psp": providerB}, MultiWebhookCredentialResolver{"shared-psp": NewMockWebhookCredentials(providerB)})
 	const amountAboveTenantALimitButWithinTenantB = 50000
 
 	// Under tenant B's own scope, an amount tenant A's limit would reject
@@ -316,7 +316,7 @@ func TestProviderCapabilityAmountLimits_CrossTenantRoutingIsolation(t *testing.T
 	// Under tenant A's own scope, the SAME amount must be refused -
 	// proving tenant A's routing decision is still governed by its own
 	// narrow limit and was never widened by tenant B's row existing.
-	orchA := NewOrchestrator(map[string]PaymentProvider{"shared-psp": providerA})
+	orchA := NewOrchestrator(map[string]PaymentProvider{"shared-psp": providerA}, MultiWebhookCredentialResolver{"shared-psp": NewMockWebhookCredentials(providerA)})
 	err = pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, _, err := orchA.RouteProvider(ctx, tx, RoutingRequest{
 			TenantID: fA.tenantID, BrandID: fA.brandID, AssetCode: "EUR", PaymentMethod: "card",

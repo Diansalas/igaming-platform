@@ -104,8 +104,8 @@ func TestStage6_B2CPlayerRegisterToBackOfficeVisibility_DefiningAcceptanceTest(t
 	decodeBody(t, resp, &intent)
 	providerRef := strings.TrimPrefix(intent.RedirectURL, "https://mock-psp.invalid/pay/")
 
-	payload := mockProvider.CallbackPayload(payments.CallbackEventDeposit, providerRef, "", payments.OutcomeSucceeded, depositAmount, "EUR", "", false)
-	resp = rawPostJSON(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", payload)
+	payload := mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, providerRef, "", payments.OutcomeSucceeded, depositAmount, "EUR", "", false)
+	resp = rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", payload)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("step 3 (deposit webhook): expected 200, got %d", resp.StatusCode)
 	}

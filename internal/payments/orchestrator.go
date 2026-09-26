@@ -36,15 +36,32 @@ type Orchestrator struct {
 	// is a data/deploy mismatch, defensively skipped by RouteProvider
 	// rather than treated as a routable candidate.
 	providers map[string]PaymentProvider
+	// webhookCredentialResolver is the SINGLE injected
+	// WebhookCredentialResolver for every registered adapter (ruling C2/C3:
+	// "a single injected WebhookCredentialResolver, not a per-provider
+	// map" - architect review paper 15, R2). Its Resolve method itself
+	// takes providerID, so one resolver component may internally dispatch
+	// across adapters (the platform's future real resolver is exactly one
+	// such component: a handle table plus secret store keyed by (tenant,
+	// provider, key_id), never one per vendor). A nil resolver, or one
+	// that returns ErrWebhookCredentialUnavailable for a given provider,
+	// fails closed (ReasonNoResolver/ReasonCredentialUnavailable) - there
+	// is no fallback to unauthenticated verification.
+	webhookCredentialResolver WebhookCredentialResolver
 	// MaxCascadeDepth bounds cascade-on-decline (payment-orchestration.md
 	// §5). Defaults to defaultMaxCascadeDepth when <= 0.
 	MaxCascadeDepth int
 }
 
 // NewOrchestrator constructs an Orchestrator over the given adapter
-// registry (provider_id -> PaymentProvider implementation).
-func NewOrchestrator(providers map[string]PaymentProvider) *Orchestrator {
-	return &Orchestrator{providers: providers, MaxCascadeDepth: defaultMaxCascadeDepth}
+// registry (provider_id -> PaymentProvider implementation) and the single
+// inbound webhook credential resolver every adapter's callbacks are
+// verified through (PAY-WH-TENANT-1, docs/decisions/0022 §3 amendment).
+// resolver may be nil - every provider then fails closed on every callback
+// (ReasonNoResolver, the T14 conformance case), never falling back to
+// unauthenticated verification.
+func NewOrchestrator(providers map[string]PaymentProvider, resolver WebhookCredentialResolver) *Orchestrator {
+	return &Orchestrator{providers: providers, webhookCredentialResolver: resolver, MaxCascadeDepth: defaultMaxCascadeDepth}
 }
 
 // Provider returns the registered adapter for providerID, per
@@ -790,53 +807,111 @@ type ReceiveCallbackResult struct {
 	Tombstoned          bool
 }
 
-// ReceiveCallback dispatches a verified provider callback: parses it via
-// the named adapter's HandleCallback, resolves the deposit_intents row it
-// refers to, and posts Flow 1 (deposit) or Flow 2 (deposit reversal) via
-// ledger.Post.
+// ReceiveCallback dispatches a verified provider callback: verifies its
+// tenant-bound authentication (docs/decisions/0022 §3 amendment,
+// PAY-WH-TENANT-1), parses it via the named adapter's HandleCallback,
+// resolves the deposit_intents row it refers to, and posts Flow 1
+// (deposit) or Flow 2 (deposit reversal) via ledger.Post.
 //
-// Signature note - a deliberate, documented deviation from
-// payment-orchestration.md §3's abstract pseudocode
-// "ReceiveCallback(ctx, provider_id, rawPayload) error", which omits both
-// tx and tenantID:
+// tenantID is the ROUTE-resolved tenant (an HTTP handler's per-tenant
+// webhook path segment, resolved and its active status checked BEFORE
+// calling this function, and BEFORE opening tx via db.Pool.WithTenant) -
+// never a value read from in.Body. It is simultaneously (a) the RLS GUC
+// tx already runs under, (b) the tenant ProviderAcceptsWebhook checks
+// against, and (c) the tenant bound into the signature this function
+// verifies (invariant I3) - a callback whose credential/signature does not
+// verify for exactly this tenantID is rejected, even if it would verify
+// for some OTHER tenant (S-6, closed).
 //
-//   - tx: every other DB-touching function in this codebase
-//     (ledger.Post, wallet.GetOrCreate, audit.Record) takes an
-//     already-scoped pgx.Tx rather than owning its own transaction -
-//     this function follows that established convention, and the task's
-//     own InitiateDeposit/RouteProvider signatures already do the same.
-//   - tenantID: docs/decisions/0022 §3 records as an OPEN DECISION *how*
-//     a webhook selects the right tenant/verification key before any
-//     tenant is known from the payload alone, and names a per-tenant
-//     webhook endpoint/path as one candidate resolution. deposit_intents'
-//     RLS (migration 0025) has no platform-wide/dual-scope read policy -
-//     only tenant_staff_scope, which requires app.tenant_id to already be
-//     set - so looking up a row by (provider_id, provider_reference) is
-//     structurally impossible without tenantID already being known. This
-//     function therefore accepts tenantID as a parameter, sourced by the
-//     caller (an HTTP handler, resolving it from a per-tenant webhook
-//     path/credential) BEFORE opening tx via db.Pool.WithTenant and
-//     BEFORE calling this function - never from rawPayload. This is the
-//     most conservative choice consistent with both that OPEN DECISION's
-//     own first candidate and the existing RLS shape, and it still
-//     satisfies payment-orchestration.md §10's binding rule that "the
-//     tenant comes from the key that verified the signature, never from
-//     the body." The narrower question §3 leaves open - exactly how a
-//     real adapter picks its per-tenant verification key when one
-//     provider_id serves many tenants - remains unresolved by this
-//     function and is out of scope for the mock, which has no per-tenant
-//     credential concept at all.
-func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, rawPayload []byte) (ReceiveCallbackResult, error) {
-	provider, ok := o.providers[providerID]
+// Verification order (docs/decisions/0022 §3 amendment; design §3.1),
+// strictly BEFORE any ledger/intent/wallet read, lock, write, tombstone,
+// or audit row (invariant I1 - the only read permitted before step (e)
+// succeeds is ProviderAcceptsWebhook's own read-only EXISTS):
+//
+//	(a) the adapter must be registered;
+//	(b) the provider must be configured for this tenant to accept
+//	    webhooks (ProviderAcceptsWebhook) - a 'disabled' capability row
+//	    still counts (I4: disabling is a routing decision, not a
+//	    callback-acceptance revocation - a compromised provider is
+//	    revoked by removing its credential from the resolver instead);
+//	(c) resolve the single candidate credential for
+//	    (tenantID, providerID, keyID), then re-check cred.TenantID/
+//	    cred.ProviderID equal what was just resolved for - a mismatch
+//	    fails closed, never falling back to any other credential;
+//	(d) key-material scan (still before signature verification, per ADR
+//	    0022 §4.1) and (e) HMAC verification, both inside the adapter's
+//	    own HandleCallback, over content that includes tenantID/
+//	    providerID - never trusted from the payload.
+//
+// Every failure before (e) succeeds returns a *CallbackAuthError wrapping
+// ErrCallbackAuthFailed with a closed, allow-listed reason - the caller
+// (an HTTP handler) maps every one of them to the SAME response, so an
+// unauthenticated caller can never distinguish "unknown provider" from
+// "bad signature" by status code or body.
+func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, in InboundCallback) (ReceiveCallbackResult, error) {
+	in.TenantID = tenantID
+	in.ProviderID = providerID
+
+	// Header format validation is redundant with the HTTP handler's own
+	// pre-tenant-lookup check (ruling 5), but this method must be
+	// self-sufficient: payments-package tests call it directly, bypassing
+	// the HTTP layer entirely.
+	keyID, _, reason, ok := ParseWebhookAuthHeaders(in.Header)
 	if !ok {
-		return ReceiveCallbackResult{}, fmt.Errorf("%w: %s", ErrUnknownProvider, providerID)
+		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: reason}
 	}
 
-	event, err := provider.HandleCallback(ctx, rawPayload)
+	// (a) the adapter must be registered.
+	provider, ok := o.providers[providerID]
+	if !ok {
+		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonProviderUnregistered, KeyID: keyID}
+	}
+
+	// (b) the provider must be configured for this tenant to accept
+	// webhooks. Read-only EXISTS, no lock, no write - the only statement
+	// permitted before (e) succeeds (invariant I1).
+	accepts, err := ProviderAcceptsWebhook(ctx, tx, tenantID, providerID)
 	if err != nil {
-		// Never wrap rawPayload's bytes into this error - ErrInboundKeyMaterial
-		// and any parse error must carry no payload content
-		// (docs/decisions/0022 §4.1).
+		return ReceiveCallbackResult{}, err
+	}
+	if !accepts {
+		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonProviderNotConfigured, KeyID: keyID}
+	}
+
+	// (c) resolve the single candidate credential and re-check its
+	// binding. A nil resolver fails closed (the T14 conformance case) -
+	// never a fallback to unauthenticated verification.
+	if o.webhookCredentialResolver == nil {
+		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonNoResolver, KeyID: keyID}
+	}
+	cred, err := o.webhookCredentialResolver.Resolve(ctx, tenantID, providerID, keyID)
+	if err != nil {
+		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonCredentialUnavailable, KeyID: keyID}
+	}
+	if cred.TenantID != tenantID || cred.ProviderID != providerID {
+		// Defense in depth only: no conforming resolver should ever return
+		// a credential bound to a different tenant/provider than it was
+		// asked to resolve for - fail closed if one somehow does (I3).
+		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonCredentialUnavailable, KeyID: keyID}
+	}
+
+	// (d)+(e): key-material scan and HMAC verification, both inside the
+	// adapter's own HandleCallback, over content that includes tenantID/
+	// providerID (never trusted from in.Body).
+	event, err := provider.HandleCallback(ctx, in, cred)
+	if errors.Is(err, ErrInboundKeyMaterial) {
+		// C5: a key-material rejection still raises the ADR 0022 §4.1
+		// security alert - the caller's allow-listed
+		// payment_webhook_auth_failed log line IS that alert, keyed on
+		// reason=key_material.
+		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonKeyMaterial, KeyID: keyID}
+	}
+	if errors.Is(err, ErrCallbackSignatureInvalid) {
+		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonSignatureInvalid, KeyID: keyID, CredentialFingerprint: cred.Fingerprint}
+	}
+	if err != nil {
+		// Never wrap in.Body's bytes into this error - any other parse
+		// error must carry no payload content (docs/decisions/0022 §4.1).
 		return ReceiveCallbackResult{}, fmt.Errorf("payments: handle callback: %w", err)
 	}
 

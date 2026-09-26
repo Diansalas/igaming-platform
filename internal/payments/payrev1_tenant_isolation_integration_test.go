@@ -29,8 +29,8 @@ func TestPayRev1_TenantIsolation_CannotLockOrObserveAnotherTenantsOriginal(t *te
 	providerB := NewMockProvider("mock-psp", "EUR")
 	registerCapability(t, pool, tenantA, providerA, 100)
 	registerCapability(t, pool, tenantB, providerB, 100)
-	orchA := NewOrchestrator(map[string]PaymentProvider{"mock-psp": providerA})
-	orchB := NewOrchestrator(map[string]PaymentProvider{"mock-psp": providerB})
+	orchA := NewOrchestrator(map[string]PaymentProvider{"mock-psp": providerA}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(providerA)})
+	orchB := NewOrchestrator(map[string]PaymentProvider{"mock-psp": providerB}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(providerB)})
 
 	// Tenant B: a genuine, confirmed deposit - the target of the attempted
 	// cross-tenant reach.
@@ -69,7 +69,7 @@ func TestPayRev1_TenantIsolation_CannotLockOrObserveAnotherTenantsOriginal(t *te
 	// Deliver, under TENANT A's own scope, a reversal callback naming
 	// tenant A's own deposit reference - which now (only through the
 	// corrupted row) resolves to tenant B's ledger transaction id.
-	reversalPayload := providerA.CallbackPayload(CallbackEventDepositReversal,
+	reversalPayload := providerA.CallbackPayload(tenantA.tenantID, CallbackEventDepositReversal,
 		"payrev1-tenant-iso-rev", depositRefA, OutcomeSucceeded, amountA, "EUR", "", false)
 	err = pool.WithTenant(context.Background(), tenantA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orchA.ReceiveCallback(ctx, tx, tenantA.tenantID, "mock-psp", reversalPayload)

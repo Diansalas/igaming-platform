@@ -34,10 +34,10 @@ func newF7PaymentsEnv(t *testing.T) f7PaymentsEnv {
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	return f7PaymentsEnv{pool: pool, f: f, provider: provider, orch: NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider})}
+	return f7PaymentsEnv{pool: pool, f: f, provider: provider, orch: NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})}
 }
 
-func (e f7PaymentsEnv) deliver(payload []byte) (ReceiveCallbackResult, error) {
+func (e f7PaymentsEnv) deliver(payload InboundCallback) (ReceiveCallbackResult, error) {
 	var res ReceiveCallbackResult
 	err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -63,14 +63,14 @@ func (e f7PaymentsEnv) succeededDeposit(t *testing.T, key string, amount int64) 
 		t.Fatalf("InitiateDeposit: %v", err)
 	}
 	ref := *intent.ProviderReference
-	if _, err := e.deliver(e.provider.CallbackPayload(CallbackEventDeposit, ref, "", OutcomeSucceeded, amount, "EUR", "", false)); err != nil {
+	if _, err := e.deliver(e.provider.CallbackPayload(e.f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, amount, "EUR", "", false)); err != nil {
 		t.Fatalf("deposit success callback: %v", err)
 	}
 	return ref
 }
 
-func (e f7PaymentsEnv) reversal(ref, originalRef string, amount int64) []byte {
-	return e.provider.CallbackPayload(CallbackEventDepositReversal, ref, originalRef, OutcomeDeclined, amount, "EUR", "chargeback", false)
+func (e f7PaymentsEnv) reversal(ref, originalRef string, amount int64) InboundCallback {
+	return e.provider.CallbackPayload(e.f.tenantID, CallbackEventDepositReversal, ref, originalRef, OutcomeDeclined, amount, "EUR", "chargeback", false)
 }
 
 func (e f7PaymentsEnv) ledgerTxCount(t *testing.T) int {

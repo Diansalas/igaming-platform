@@ -2452,6 +2452,113 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /v1/webhooks/payments/{tenantSlug}/{providerID}:
+    post:
+      summary: Payments provider callback (deposit / deposit reversal)
+      security: []
+      description: >
+        No bearer-token middleware - a PSP webhook is not an authenticated
+        platform principal. PAY-WH-TENANT-1 (ADR 0090; docs/decisions/0022
+        §3 amendment 2026-09-26): {tenantSlug} is a LOOKUP HINT only, never
+        the source of authorization - the tenant is established by
+        verifying a signature whose input includes the ROUTE-resolved
+        tenant_id, and the tenant is NEVER read from the request body. The
+        platform-defined (MOCK-only; a real adapter uses its own vendor
+        scheme) signing_input is exactly:
+        `"igaming.payments.webhook.v1" 0x00 tenant_id 0x00 provider_id 0x00
+        key_id 0x00 <raw request body bytes>`, HMAC-SHA256'd with the
+        credential resolved for (tenant_id, provider_id, key_id) and hex-
+        encoded into X-Payments-Signature. The wire body shape below
+        (`PaymentsMockCallback`) is platform-invented for the MOCK adapter
+        only - it models no real vendor's webhook format; a real PSP
+        integration maps that vendor's own callback shape onto the
+        canonical `CallbackEvent` inside its own adapter, per
+        docs/decisions/0022 §3's amendment. Every pre-verification failure
+        (unknown/inactive tenant, invalid/unregistered/unconfigured
+        provider, no credential resolver, missing/malformed/invalid
+        signature, apparent key material in the payload) returns the
+        IDENTICAL 401 response below, so an unauthenticated caller can
+        never distinguish which is true. 404 is reachable ONLY after
+        verification succeeds (an unknown provider_reference for an
+        otherwise-authenticated callback) - it is not a second enumeration
+        oracle. 409 covers two distinct, generically-reported causes
+        (a provider reference already posted with a different payload, or
+        a distinct-reference reversal naming an already-reversed deposit) -
+        intentionally collapsed to one generic body. 503 means webhooks are
+        not enabled on this deployment.
+      parameters:
+        - name: tenantSlug
+          in: path
+          required: true
+          schema: { type: string }
+        - name: providerID
+          in: path
+          required: true
+          description: "Charset: ^[a-z0-9][a-z0-9-]{0,62}$"
+          schema: { type: string, pattern: "^[a-z0-9][a-z0-9-]{0,62}$" }
+        - name: X-Payments-Signature
+          in: header
+          required: true
+          description: "hex(HMAC-SHA256(credential_secret, signing_input)), lowercase"
+          schema: { type: string, pattern: "^v1=[0-9a-f]{64}$" }
+        - name: X-Payments-Key-Id
+          in: header
+          required: true
+          schema: { type: string, pattern: "^[a-z0-9-]{1,32}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentsMockCallback"
+      responses:
+        "200":
+          description: Callback processed (or safely absorbed as an idempotent replay/no-op)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deposit_intent_id: { type: string, format: uuid }
+                  status: { type: string }
+                  tombstoned: { type: boolean }
+        "400":
+          description: Malformed body (after signature verification), or body exceeds 1 MiB
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: >
+            Callback rejected - EVERY pre-verification failure reason
+            (unknown/inactive tenant, invalid/unregistered/unconfigured
+            provider, no resolver, no credential, missing/malformed/invalid
+            signature, apparent key material) maps to this SAME generic
+            body, deliberately indistinguishable from any other.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            No matching deposit intent for this provider reference - only
+            observable AFTER signature verification succeeds; not a second
+            enumeration oracle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: Payment webhooks are not enabled on this deployment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /v1/webhooks/kyc/{tenantSlug}/{providerID}:
     post:
       summary: KYC provider callback (verification status update)
@@ -4207,6 +4314,31 @@ components:
         This remains PROVIDER DEPENDENT / foundation-only for Stage 2 -
         see docs/architecture/05-identity-architecture.md.
   schemas:
+    PaymentsMockCallback:
+      type: object
+      description: >
+        The MOCK payments adapter's own wire shape (platform-invented, not
+        modeled on any real vendor - PAY-WH-TENANT-1). The signature
+        covers these RAW BODY BYTES, never a re-serialization, so field
+        order/whitespace are significant to verification even though not
+        semantically. There is deliberately no "signature" field in the
+        body (moved to the X-Payments-Signature header) - a body that
+        still carries one is rejected.
+      properties:
+        event_type: { type: string, enum: [deposit, deposit_reversal] }
+        provider_reference: { type: string }
+        original_provider_reference:
+          type: string
+          description: Set only for event_type=deposit_reversal - the reference of the deposit being reversed.
+        outcome: { type: string, enum: [succeeded, declined, ambiguous, pending] }
+        amount:
+          type: integer
+          format: int64
+          description: Minor units at the asset's own exponent - never a float.
+        asset_code: { type: string }
+        decline_reason: { type: string }
+        cascadable: { type: boolean }
+      required: [event_type, provider_reference, outcome, amount, asset_code]
     Asset:
       type: object
       description: >

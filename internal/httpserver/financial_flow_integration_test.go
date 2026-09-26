@@ -47,7 +47,7 @@ import (
 // to build a signed webhook payload via its own CallbackPayload method.
 func newMockOrchestrator() (*payments.Orchestrator, *payments.MockProvider) {
 	mock := payments.NewMockProvider("mock", "EUR", "USD")
-	return payments.NewOrchestrator(map[string]payments.PaymentProvider{"mock": mock}), mock
+	return payments.NewOrchestrator(map[string]payments.PaymentProvider{"mock": mock}, payments.MultiWebhookCredentialResolver{"mock": payments.NewMockWebhookCredentials(mock)}), mock
 }
 
 // newFinancialTestServer is newTestServer (server_integration_test.go)
@@ -260,6 +260,31 @@ func rawPostJSON(t *testing.T, srv *httptest.Server, path string, body []byte) *
 		t.Fatalf("failed to build request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	return resp
+}
+
+// rawPostCallback posts a payments.InboundCallback's body to the public
+// webhook route with its own headers (X-Payments-Signature/X-Payments-
+// Key-Id) - PAY-WH-TENANT-1 moved the signature out of the JSON body and
+// into these headers, so every webhook test that used to post a bare
+// signed []byte via rawPostJSON now posts an InboundCallback via this
+// helper instead.
+func rawPostCallback(t *testing.T, srv *httptest.Server, path string, inbound payments.InboundCallback) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+path, bytes.NewReader(inbound.Body))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, vs := range inbound.Header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
@@ -610,8 +635,8 @@ func TestFinancialHappyPath_EndToEnd(t *testing.T) {
 	// Simulate the provider's webhook callback - signed, as a real
 	// delivery would be; HandleCallback rejects anything else (see
 	// scenario 10 below).
-	payload := mockProvider.CallbackPayload(payments.CallbackEventDeposit, providerRef, "", payments.OutcomeSucceeded, depositAmount, "EUR", "", false)
-	resp = rawPostJSON(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", payload)
+	payload := mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, providerRef, "", payments.OutcomeSucceeded, depositAmount, "EUR", "", false)
+	resp = rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", payload)
 	if resp.StatusCode != http.StatusOK {
 		body := decodeAPIError(t, resp)
 		t.Fatalf("expected 200 processing the signed deposit callback, got %d (%s)", resp.StatusCode, body.Message)
@@ -745,12 +770,16 @@ func TestPaymentWebhook_ForgedCrossTenantProviderReferenceDenied(t *testing.T) {
 	}
 
 	// A caller who somehow learned tenant A's own provider_reference (they
-	// are sequential and not secret - see mock.go's own comment) posts it
-	// to TENANT B's webhook endpoint instead.
-	forgedPayload := mockProvider.CallbackPayload(payments.CallbackEventDeposit, *intentA.ProviderReference, "", payments.OutcomeSucceeded, 7500, "EUR", "", false)
-	resp := rawPostJSON(t, srv, "/v1/webhooks/payments/"+tenantB.Slug+"/mock", forgedPayload)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("expected 404 for a cross-tenant forged provider_reference, got %d", resp.StatusCode)
+	// are sequential and not secret - see mock.go's own comment) posts it,
+	// signed FOR TENANT A, to TENANT B's webhook endpoint instead.
+	// PAY-WH-TENANT-1 (ADR 0090): this now fails at signature verification
+	// (401), never even reaching a "not found" lookup under B's scope -
+	// the tenant is bound into what is verified, not just an RLS-scoped
+	// read after the fact.
+	forgedPayload := mockProvider.CallbackPayload(tenantA.ID, payments.CallbackEventDeposit, *intentA.ProviderReference, "", payments.OutcomeSucceeded, 7500, "EUR", "", false)
+	resp := rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenantB.Slug+"/mock", forgedPayload)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for a cross-tenant forged provider_reference (tenant-bound signature verification fails), got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 
@@ -783,31 +812,35 @@ func TestPaymentWebhook_UnsignedPayloadRejected(t *testing.T) {
 	mustCreateBrand(t, pool, tenant)
 	mustRegisterCapability(t, pool, tenant.ID, mockProvider)
 
-	// Entirely unsigned: no "signature" field at all.
-	unsigned := []byte(`{"event_type":"deposit","provider_reference":"mock-does-not-matter","outcome":"succeeded","amount":1000,"asset_code":"EUR"}`)
-	resp := rawPostJSON(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", unsigned)
-	if resp.StatusCode < 400 || resp.StatusCode >= 500 {
-		t.Errorf("expected a 4xx rejecting an unsigned webhook payload, got %d", resp.StatusCode)
+	// Entirely unsigned: no X-Payments-Signature/X-Payments-Key-Id headers
+	// at all (PAY-WH-TENANT-1 moved the signature out of the JSON body).
+	unsignedBody := []byte(`{"event_type":"deposit","provider_reference":"mock-does-not-matter","outcome":"succeeded","amount":1000,"asset_code":"EUR"}`)
+	resp := rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", payments.InboundCallback{Body: unsignedBody})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 rejecting an unsigned webhook payload, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 
 	// A garbage/incorrect signature is rejected identically - not merely
-	// "missing field" handling.
-	garbage := []byte(`{"event_type":"deposit","provider_reference":"mock-does-not-matter","outcome":"succeeded","amount":1000,"asset_code":"EUR","signature":"deadbeef"}`)
-	resp = rawPostJSON(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", garbage)
-	if resp.StatusCode < 400 || resp.StatusCode >= 500 {
-		t.Errorf("expected a 4xx rejecting a garbage-signature webhook payload, got %d", resp.StatusCode)
+	// "missing header" handling.
+	garbageHeader := make(http.Header)
+	garbageHeader.Set("X-Payments-Signature", "v1="+strings.Repeat("a", 64))
+	garbageHeader.Set("X-Payments-Key-Id", "mock-v1")
+	resp = rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", payments.InboundCallback{Header: garbageHeader, Body: unsignedBody})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 rejecting a garbage-signature webhook payload, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 
 	// Confirm this genuinely reached the signature check rather than
 	// failing earlier for an unrelated reason (e.g. tenant lookup) - the
-	// SAME provider_reference, correctly signed, is accepted (well, hits
-	// ErrDepositIntentNotFound since it names no real intent, which is a
-	// DIFFERENT, later failure mode than signature rejection - proving the
-	// signature gate itself is not what's blocking a well-formed request).
-	signedButUnknown := mockProvider.CallbackPayload(payments.CallbackEventDeposit, "mock-does-not-matter", "", payments.OutcomeSucceeded, 1000, "EUR", "", false)
-	resp = rawPostJSON(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", signedButUnknown)
+	// SAME provider_reference, correctly signed, is accepted past
+	// authentication (it then hits ErrDepositIntentNotFound since it names
+	// no real intent, which is a DIFFERENT, later, 404 failure mode -
+	// proving the signature gate itself is not what's blocking a
+	// well-formed request).
+	signedButUnknown := mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, "mock-does-not-matter", "", payments.OutcomeSucceeded, 1000, "EUR", "", false)
+	resp = rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", signedButUnknown)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("expected a correctly-signed callback for an unknown reference to fail at 'not found', not signature verification; got %d", resp.StatusCode)
 	}

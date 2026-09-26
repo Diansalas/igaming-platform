@@ -50,7 +50,7 @@ func loConfirmedDeposit(t *testing.T, pool *db.Pool, f orchFixture, orch *Orches
 		t.Fatal("intent has no provider reference")
 	}
 	ref := *intent.ProviderReference
-	payload := provider.CallbackPayload(CallbackEventDeposit, ref, "", OutcomeSucceeded, amount, "EUR", "", false)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, amount, "EUR", "", false)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", payload)
 		return err
@@ -62,7 +62,7 @@ func loConfirmedDeposit(t *testing.T, pool *db.Pool, f orchFixture, orch *Orches
 
 // loPendingDeposit initiates a deposit WITHOUT confirming it, returning
 // the success-callback payload to be delivered later.
-func loPendingDeposit(t *testing.T, pool *db.Pool, f orchFixture, orch *Orchestrator, provider *MockProvider, amount int64) []byte {
+func loPendingDeposit(t *testing.T, pool *db.Pool, f orchFixture, orch *Orchestrator, provider *MockProvider, amount int64) InboundCallback {
 	t.Helper()
 	var intent DepositIntent
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -80,7 +80,7 @@ func loPendingDeposit(t *testing.T, pool *db.Pool, f orchFixture, orch *Orchestr
 	if intent.ProviderReference == nil {
 		t.Fatal("intent has no provider reference")
 	}
-	return provider.CallbackPayload(CallbackEventDeposit, *intent.ProviderReference, "", OutcomeSucceeded, amount, "EUR", "", false)
+	return provider.CallbackPayload(f.tenantID, CallbackEventDeposit, *intent.ProviderReference, "", OutcomeSucceeded, amount, "EUR", "", false)
 }
 
 // TestLockOrder_ConcurrentDepositAndDepositReversal_NoDeadlock is finding
@@ -108,7 +108,7 @@ func TestLockOrder_ConcurrentDepositAndDepositReversal_NoDeadlock(t *testing.T) 
 	f := seedOrchFixture(t, pool)
 	provider := NewMockProvider("mock-psp", "EUR")
 	registerCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider})
+	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, MultiWebhookCredentialResolver{"mock-psp": NewMockWebhookCredentials(provider)})
 
 	// Deposit #1: already confirmed, and the one that will be reversed.
 	const reversedAmount = int64(4_000)
@@ -118,7 +118,7 @@ func TestLockOrder_ConcurrentDepositAndDepositReversal_NoDeadlock(t *testing.T) 
 	const newAmount = int64(2_500)
 	newDepositPayload := loPendingDeposit(t, pool, f, orch, provider, newAmount)
 
-	reversalPayload := provider.CallbackPayload(CallbackEventDepositReversal,
+	reversalPayload := provider.CallbackPayload(f.tenantID, CallbackEventDepositReversal,
 		"lockorder-reversal-ref", reversedRef, OutcomeSucceeded, reversedAmount, "EUR", "", false)
 
 	cashID := loPaymentsAccount(t, pool, f, &f.walletID, ledger.AccountPlayerCash)

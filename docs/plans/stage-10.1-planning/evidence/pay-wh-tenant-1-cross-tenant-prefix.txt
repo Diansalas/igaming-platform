@@ -1,0 +1,7 @@
+=== RUN   TestPayWH_S6_CrossTenant_PreFix_AttackSucceeds
+    prefix_evidence_s6_test.go:65: PRE-FIX EVIDENCE: payload signed by the shared adapter is accepted under tenant A (control case) - no error
+    prefix_evidence_s6_test.go:81: PRE-FIX EVIDENCE: S-6 CONFIRMED - a callback signed by the shared adapter for reference "prefix-s6-reversal-ref", never seen by tenant B, was ACCEPTED under tenant B's scope with no error (tombstoned=true). This is the cross-tenant financial effect S-6 describes: an attacker who can obtain any one tenant's correctly-signed callback bytes (e.g. by triggering their own deposit) can replay them against ANY other tenant's webhook URL and have them accepted, because the current signature scheme authenticates only 'this adapter minted it', never 'for this tenant'.
+    prefix_evidence_s6_test.go:106: PRE-FIX EVIDENCE: confirmed 1 tombstone row written into tenant B's own ledger_transactions for a provider reference tenant B never saw. S-6 cross-tenant attack succeeds against current/unfixed code.
+--- PASS: TestPayWH_S6_CrossTenant_PreFix_AttackSucceeds (0.05s)
+PASS
+ok  	github.com/Diansalas/igaming-platform/internal/payments	0.053s

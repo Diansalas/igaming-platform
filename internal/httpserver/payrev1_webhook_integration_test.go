@@ -52,17 +52,17 @@ func TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409(t *testing
 	decodeBody(t, resp, &intent)
 	providerRef := strings.TrimPrefix(intent.RedirectURL, "https://mock-psp.invalid/pay/")
 
-	successPayload := mockProvider.CallbackPayload(payments.CallbackEventDeposit, providerRef, "", payments.OutcomeSucceeded, depositAmount, "EUR", "", false)
-	resp = rawPostJSON(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", successPayload)
+	successPayload := mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDeposit, providerRef, "", payments.OutcomeSucceeded, depositAmount, "EUR", "", false)
+	resp = rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", successPayload)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 confirming the deposit, got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 
 	// First reversal: genuine, must succeed.
-	firstReversal := mockProvider.CallbackPayload(payments.CallbackEventDepositReversal,
+	firstReversal := mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDepositReversal,
 		"payrev1-http-rev-1", providerRef, payments.OutcomeSucceeded, depositAmount, "EUR", "", false)
-	resp = rawPostJSON(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", firstReversal)
+	resp = rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", firstReversal)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 for the first (genuine) reversal, got %d", resp.StatusCode)
 	}
@@ -70,9 +70,9 @@ func TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409(t *testing
 
 	// Second reversal: a DISTINCT provider reference naming the SAME
 	// already-reversed original. Must be rejected, not posted.
-	secondReversal := mockProvider.CallbackPayload(payments.CallbackEventDepositReversal,
+	secondReversal := mockProvider.CallbackPayload(tenant.ID, payments.CallbackEventDepositReversal,
 		"payrev1-http-rev-2", providerRef, payments.OutcomeSucceeded, depositAmount, "EUR", "", false)
-	resp = rawPostJSON(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", secondReversal)
+	resp = rawPostCallback(t, srv, "/v1/webhooks/payments/"+tenant.Slug+"/mock", secondReversal)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("expected 409 for the second, distinct-reference reversal, got %d", resp.StatusCode)
 	}

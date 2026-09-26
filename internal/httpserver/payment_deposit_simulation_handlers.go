@@ -208,44 +208,50 @@ func recordDepositSimulationAudit(ctx context.Context, tx pgx.Tx, r *http.Reques
 }
 
 // writeDepositCallbackError maps ReceiveCallback's sentinel errors to
-// their player-facing HTTP response, mirroring newPaymentWebhookHandler's
-// own error mapping (deposit_handlers.go) - this is the SAME pipeline, so
-// the SAME error set can occur, even though every field this handler
-// feeds it is drawn from the intent's own row and should not normally
-// trigger any of them.
+// their player-facing HTTP response via the SAME shared mapper
+// newPaymentWebhookHandler uses (deposit_handlers.go/
+// payment_callback_errors.go, backend review finding 1) - this is the SAME
+// pipeline, so the SAME error set can occur, even though every field this
+// handler feeds it is drawn from the intent's own row and should not
+// normally trigger any of them. A *payments.CallbackAuthError here means
+// the mock/resolver wiring is itself broken (502/503, never 401 - the
+// caller is an already-authenticated player, not an unauthenticated third
+// party).
 func writeDepositCallbackError(w http.ResponseWriter, requestID string, logger interface {
 	Error(string, ...any)
 }, err error) {
-	if errors.Is(err, payments.ErrInboundKeyMaterial) {
-		logger.Error("payment_simulation_rejected_key_material")
-		apierror.Write(w, requestID, apierror.CodeValidation, "callback rejected")
-		return
-	}
-	if errors.Is(err, payments.ErrCallbackSignatureInvalid) {
-		logger.Error("payment_simulation_signature_invalid", "error", err)
-		apierror.Write(w, requestID, apierror.CodeValidation, "callback rejected")
-		return
-	}
-	if errors.Is(err, payments.ErrUnknownProvider) {
-		apierror.Write(w, requestID, apierror.CodeUnavailable, "simulated settlement is only available for the mock provider")
+	var authErr *payments.CallbackAuthError
+	if errors.As(err, &authErr) {
+		logger.Error("payment_simulation_auth_failed", "reason", string(authErr.Reason))
+		code, msg := mapReceiveCallbackError(err, callbackRouteSimulate)
+		apierror.Write(w, requestID, code, msg)
 		return
 	}
 	if errors.Is(err, payments.ErrDepositIntentNotFound) {
-		apierror.Write(w, requestID, apierror.CodeNotFound, "deposit not found")
+		code, msg := mapReceiveCallbackError(err, callbackRouteSimulate)
+		apierror.Write(w, requestID, code, msg)
 		return
 	}
 	if errors.Is(err, payments.ErrCallbackPayloadMismatch) {
 		logger.Error("payment_simulation_integrity_alert_payload_mismatch", "error", err)
-		apierror.Write(w, requestID, apierror.CodeConflict, "deposit could not be settled")
+		code, msg := mapReceiveCallbackError(err, callbackRouteSimulate)
+		apierror.Write(w, requestID, code, msg)
+		return
+	}
+	if errors.Is(err, payments.ErrDepositAlreadyReversed) {
+		code, msg := mapReceiveCallbackError(err, callbackRouteSimulate)
+		apierror.Write(w, requestID, code, msg)
 		return
 	}
 	if errors.Is(err, payments.ErrCallbackProviderMismatch) {
 		logger.Error("payment_simulation_provider_mismatch", "error", err)
-		apierror.Write(w, requestID, apierror.CodeConflict, "deposit could not be settled")
+		code, msg := mapReceiveCallbackError(err, callbackRouteSimulate)
+		apierror.Write(w, requestID, code, msg)
 		return
 	}
 	logger.Error("payment_simulation_failed", "error", err)
-	apierror.Write(w, requestID, apierror.CodeInternal, "failed to simulate deposit callback")
+	code, msg := mapReceiveCallbackError(err, callbackRouteSimulate)
+	apierror.Write(w, requestID, code, msg)
 }
 
 // newSimulateDepositCallbackHandler simulates the provider-side webhook
@@ -293,9 +299,15 @@ func newSimulateDepositCallbackHandler(deps Deps) http.HandlerFunc {
 				return &apierror.Error{Code: apierror.CodeUnavailable, Message: "simulated settlement is only available for the mock provider"}
 			}
 
-			payload := mock.CallbackPayload(payments.CallbackEventDeposit, providerReference, "",
+			// The tenant signed for is ALWAYS tc.TenantID - the authenticated
+			// JWT's own tenant, resolved before this point, and never a
+			// request-body field (design §6: "no request field can name
+			// one"). The signed bytes/headers never leave this process; the
+			// response below carries status only, so this route cannot mint
+			// a callback replayable at another tenant's webhook URL.
+			inbound := mock.CallbackPayload(tc.TenantID, payments.CallbackEventDeposit, providerReference, "",
 				payments.OutcomeSucceeded, intent.Amount, intent.AssetCode, "", false)
-			result, err = deps.PaymentOrchestrator.ReceiveCallback(ctx, tx, tc.TenantID, providerID, payload)
+			result, err = deps.PaymentOrchestrator.ReceiveCallback(ctx, tx, tc.TenantID, providerID, inbound)
 			if err != nil {
 				return err
 			}

@@ -93,6 +93,37 @@ func ListRoutingCandidates(ctx context.Context, tx pgx.Tx, tenantID, brandID uui
 	return caps, nil
 }
 
+// ProviderAcceptsWebhook reports whether providerID has a capability row
+// configured for tenantID whose callback_capabilities is 'webhook' or
+// 'both' (PAY-WH-TENANT-1 step (b), docs/decisions/0022 §3 amendment). This
+// is an explicit tenant predicate layered ON TOP of RLS (tx must already
+// be tenant-scoped via db.Pool.WithTenant) - defense in depth, not the
+// sole isolation mechanism. Deliberately does NOT filter on brand_id (a
+// row for ANY brand under the tenant counts - PAYWH-BRAND-1, a registered,
+// deferred limitation: a callback carries no brand identity today) and
+// deliberately does NOT filter on status: 'disabled' is a ROUTING
+// kill-switch only (I4/ruling 7) - rejecting callbacks for a disabled
+// provider would strand money already in flight. A compromised provider is
+// revoked by removing its credential from the WebhookCredentialResolver,
+// not by disabling the capability row. This is a read-only EXISTS with no
+// FOR UPDATE - the only statement PAY-WH-TENANT-1's verification order
+// permits before signature verification succeeds (invariant I1).
+func ProviderAcceptsWebhook(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string) (bool, error) {
+	var exists bool
+	err := tx.QueryRow(ctx,
+		`SELECT EXISTS(
+			SELECT 1 FROM provider_capabilities
+			WHERE tenant_id = $1 AND provider_id = $2
+			  AND callback_capabilities IN ('webhook', 'both')
+		 )`,
+		tenantID, providerID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("payments: check provider webhook acceptance: %w", err)
+	}
+	return exists, nil
+}
+
 // rowScanner is the subset of pgx.Row/pgx.Rows this package needs to scan
 // a capability row from either QueryRow or Query.
 type rowScanner interface {
