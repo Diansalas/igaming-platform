@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/noeffect"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -117,6 +118,10 @@ func TestKYCWebhook_CrossTenant_Rejected(t *testing.T) {
 		t.Fatalf("seed tenant B row with A's reference: %v", err)
 	}
 
+	before := noeffect.Capture(t, pool, []uuid.UUID{fA.tenantID, fB.tenantID}, []noeffect.Verification{
+		{TenantID: fA.tenantID, ID: verificationIDA}, {TenantID: fB.tenantID, ID: verificationIDB},
+	})
+
 	in := provider.CallbackPayload(fA.tenantID, refA, ProviderApproved, "auto_approved")
 	var captured *recordingTx
 	err = pool.WithTenant(context.Background(), fB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -136,6 +141,12 @@ func TestKYCWebhook_CrossTenant_Rejected(t *testing.T) {
 	if got := mustGetStatus(t, pool, fB.tenantID, verificationIDB); got != StatusPending {
 		t.Fatalf("expected tenant B's row unchanged, got %s", got)
 	}
+	// Six-point checklist, BOTH tenants (design §H): A's own row/audit
+	// state, and B's, are both untouched by an A-signed callback rejected
+	// at B's slug.
+	noeffect.AssertNoEffect(t, pool, []uuid.UUID{fA.tenantID, fB.tenantID}, []noeffect.Verification{
+		{TenantID: fA.tenantID, ID: verificationIDA}, {TenantID: fB.tenantID, ID: verificationIDB},
+	}, before)
 }
 
 // equalSecretResolver returns the SAME credential secret regardless of
@@ -178,6 +189,10 @@ func TestKYCWebhook_EqualSecretResolver_CrossTenantRejected(t *testing.T) {
 	inA := webhookauth.Inbound{TenantID: fA.tenantID, ProviderID: "mock", Body: body, Header: map[string][]string{}}
 	scheme.SetHeaders(headerOf(inA), webhookauth.MockKeyID, sigForA)
 
+	before := noeffect.Capture(t, pool, []uuid.UUID{fA.tenantID, fB.tenantID}, []noeffect.Verification{
+		{TenantID: fA.tenantID, ID: verificationIDA},
+	})
+
 	// Delivered to B: the header/body bytes are byte-identical to what
 	// verified for A, but B's own tenant id gets substituted into the
 	// signing input the orchestrator recomputes - it will not match.
@@ -189,6 +204,11 @@ func TestKYCWebhook_EqualSecretResolver_CrossTenantRejected(t *testing.T) {
 	if !errors.As(err, &authErr) || authErr.Reason != webhookauth.ReasonSignatureInvalid {
 		t.Fatalf("expected a signature_invalid auth error under an equal-secret resolver, got %v", err)
 	}
+	// Six-point checklist, BOTH tenants: neither A's row nor B's (empty)
+	// state moved, and no audit row appeared for either tenant.
+	noeffect.AssertNoEffect(t, pool, []uuid.UUID{fA.tenantID, fB.tenantID}, []noeffect.Verification{
+		{TenantID: fA.tenantID, ID: verificationIDA},
+	}, before)
 }
 
 func headerOf(in webhookauth.Inbound) map[string][]string { return in.Header }
@@ -202,6 +222,17 @@ func TestKYCWebhook_TamperMatrix_Rejected(t *testing.T) {
 		return tx.QueryRow(ctx, `SELECT provider_reference FROM kyc_verifications WHERE id = $1`, verificationID).Scan(&ref)
 	})
 
+	// A second, unrelated verification in the SAME tenant, so the
+	// cross-verification provider_reference substitution case below has a
+	// real second reference to substitute in - J13 names this case
+	// explicitly, distinct from K3/K4's cross-TENANT scenario.
+	verificationID2 := seedVerification(t, pool, f)
+	var ref2 string
+	_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT provider_reference FROM kyc_verifications WHERE id = $1`, verificationID2).Scan(&ref2)
+	})
+	provider.created[ref2] = true
+
 	base := func() webhookauth.Inbound { return provider.CallbackPayload(f.tenantID, ref, ProviderApproved, "x") }
 
 	cases := map[string]func() webhookauth.Inbound{
@@ -212,9 +243,24 @@ func TestKYCWebhook_TamperMatrix_Rejected(t *testing.T) {
 			in.Body = b
 			return in
 		},
-		"whitespace appended to body": func() webhookauth.Inbound {
+		"whitespace appended to body (one byte)": func() webhookauth.Inbound {
 			in := base()
 			in.Body = append(append([]byte{}, in.Body...), ' ')
+			return in
+		},
+		"provider_reference field value tampered": func() webhookauth.Inbound {
+			in := base()
+			in.Body = []byte(`{"provider_reference":"tampered-` + ref + `","outcome":"approved","reason":"x"}`)
+			return in
+		},
+		"outcome field value tampered": func() webhookauth.Inbound {
+			in := base()
+			in.Body = []byte(`{"provider_reference":"` + ref + `","outcome":"rejected","reason":"x"}`)
+			return in
+		},
+		"reason field value tampered": func() webhookauth.Inbound {
+			in := base()
+			in.Body = []byte(`{"provider_reference":"` + ref + `","outcome":"approved","reason":"tampered"}`)
 			return in
 		},
 		"63 hex chars": func() webhookauth.Inbound {
@@ -235,6 +281,11 @@ func TestKYCWebhook_TamperMatrix_Rejected(t *testing.T) {
 			in.Header.Set(webhookauth.KYCSignatureHeader, strings.ToUpper(sig))
 			return in
 		},
+		"missing signature header": func() webhookauth.Inbound {
+			in := base()
+			in.Header.Del(webhookauth.KYCSignatureHeader)
+			return in
+		},
 		"missing key id header": func() webhookauth.Inbound {
 			in := base()
 			in.Header.Del(webhookauth.KYCKeyIDHeader)
@@ -250,7 +301,27 @@ func TestKYCWebhook_TamperMatrix_Rejected(t *testing.T) {
 			in.Body = []byte(`{"provider_reference":"` + ref + `","outcome":"approved","signature":"deadbeef"}`)
 			return in
 		},
+		"legacy trailing-newline signature format": func() webhookauth.Inbound {
+			in := base()
+			// Pre-Stage-10.2 wire shape (design §B1, since deleted:
+			// sign/MockSignedCallbackBody/splitSignedPayload): the
+			// signature trailed the RAW BODY itself after a newline,
+			// rather than living exclusively in a header. The headers
+			// here are still the CURRENT, validly-formatted ones - they
+			// simply no longer match this longer, legacy-shaped body.
+			sig := in.Header.Get(webhookauth.KYCSignatureHeader)
+			in.Body = append(append([]byte{}, in.Body...), []byte("\n"+strings.TrimPrefix(sig, "v1="))...)
+			return in
+		},
+		"cross-verification provider_reference substitution, same tenant (J13)": func() webhookauth.Inbound {
+			in := base() // genuinely signed for verificationID's own reference
+			in.Body = []byte(`{"provider_reference":"` + ref2 + `","outcome":"approved","reason":"x"}`)
+			return in
+		},
 	}
+	before := noeffect.Capture(t, pool, []uuid.UUID{f.tenantID}, []noeffect.Verification{
+		{TenantID: f.tenantID, ID: verificationID}, {TenantID: f.tenantID, ID: verificationID2},
+	})
 	for name, build := range cases {
 		t.Run(name, func(t *testing.T) {
 			in := build()
@@ -267,6 +338,66 @@ func TestKYCWebhook_TamperMatrix_Rejected(t *testing.T) {
 	if got := mustGetStatus(t, pool, f.tenantID, verificationID); got != StatusPending {
 		t.Fatalf("expected the verification untouched by every tampered attempt, got %s", got)
 	}
+	if got := mustGetStatus(t, pool, f.tenantID, verificationID2); got != StatusPending {
+		t.Fatalf("expected the SECOND verification (substitution target) untouched too, got %s", got)
+	}
+	noeffect.AssertNoEffect(t, pool, []uuid.UUID{f.tenantID}, []noeffect.Verification{
+		{TenantID: f.tenantID, ID: verificationID}, {TenantID: f.tenantID, ID: verificationID2},
+	}, before)
+}
+
+// K5 "provider id" tamper case: a genuinely-signed callback for one
+// REGISTERED provider is replayed against a DIFFERENT registered provider
+// (same tenant). Both providers are registered and both resolve a
+// credential (so this is not merely ReasonProviderUnregistered/
+// ReasonCredentialUnavailable) - the substitution is only caught because
+// provider_id is bound into the signing input itself (webhookauth.Scheme.
+// SigningInput), exactly like tenant_id is for K3/K4.
+func TestKYCWebhook_ProviderIDSubstitution_Rejected(t *testing.T) {
+	pool := testPool(t)
+	f := seedFixture(t, pool)
+
+	providerA := NewMockKYCProvider() // registered as "mock"
+	providerB := NewMockKYCProvider() // registered as "mock2" - a DIFFERENT adapter instance/master, standing in for a second real vendor sharing this tenant.
+	orch := NewOrchestrator(
+		map[string]KYCProvider{"mock": providerA, "mock2": providerB},
+		webhookauth.MultiResolver{
+			"mock": NewMockWebhookCredentials(providerA),
+			// NewMockWebhookCredentials(providerB) would resolve under
+			// providerB.ID() (always "mock" - MockKYCProvider.ID() is not
+			// configurable), which would make "mock2" itself fail closed
+			// with credential_unavailable rather than exercising the
+			// substitution this test targets. Build the "mock2" credential
+			// directly, bound to its OWN provider id, from providerB's own
+			// master - exactly what a second, distinctly-configured real
+			// adapter's resolver entry would look like.
+			"mock2": webhookauth.MockResolver{Master: providerB.master, Label: webhookauth.KYCMockKeyLabel, ProviderID: "mock2"},
+		},
+	)
+
+	verificationID := seedVerification(t, pool, f)
+	var ref string
+	_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT provider_reference FROM kyc_verifications WHERE id = $1`, verificationID).Scan(&ref)
+	})
+	providerA.created[ref] = true
+
+	// Genuinely signed for tenant f, provider "mock".
+	in := providerA.CallbackPayload(f.tenantID, ref, ProviderApproved, "auto_approved")
+
+	before := noeffect.Capture(t, pool, []uuid.UUID{f.tenantID}, []noeffect.Verification{{TenantID: f.tenantID, ID: verificationID}})
+
+	// Delivered to provider "mock2" under the SAME tenant: registered,
+	// resolvable, but signed for the WRONG provider id.
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock2", in)
+		return err
+	})
+	var authErr *CallbackAuthError
+	if !errors.As(err, &authErr) || authErr.Reason != webhookauth.ReasonSignatureInvalid {
+		t.Fatalf("expected a signature_invalid auth error for a provider-id-substituted callback, got %v", err)
+	}
+	noeffect.AssertNoEffect(t, pool, []uuid.UUID{f.tenantID}, []noeffect.Verification{{TenantID: f.tenantID, ID: verificationID}}, before)
 }
 
 // K7: a bad signature runs NO tenant-scoped statement at all (strict I1 -
@@ -450,6 +581,7 @@ func TestKYCWebhook_VerifiedBadOutcome_MalformedBody_NoAudit(t *testing.T) {
 	in := webhookauth.Inbound{TenantID: f.tenantID, ProviderID: "mock", Body: body, Header: map[string][]string{}}
 	scheme.SetHeaders(headerOf(in), webhookauth.MockKeyID, sig)
 
+	before := noeffect.Capture(t, pool, []uuid.UUID{f.tenantID}, []noeffect.Verification{{TenantID: f.tenantID, ID: verificationID}})
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
 		return err
@@ -460,6 +592,60 @@ func TestKYCWebhook_VerifiedBadOutcome_MalformedBody_NoAudit(t *testing.T) {
 	if n := mustCountAudit(t, pool, f.tenantID, verificationID); n != 0 {
 		t.Fatalf("expected no audit row for a malformed (but verified) callback, got %d", n)
 	}
+	noeffect.AssertNoEffect(t, pool, []uuid.UUID{f.tenantID}, []noeffect.Verification{{TenantID: f.tenantID, ID: verificationID}}, before)
+}
+
+// K8: anything arriving after a STAFF decision (ReviewVerification, not a
+// provider callback) is also a no-op - J11's "never resurrects a terminal
+// verification" applies identically whether the prior terminal transition
+// came from a callback (already covered by TestKYCWebhook_Replay_NoOp) or
+// from a human reviewer.
+func TestKYCWebhook_AfterStaffDecision_NoOp(t *testing.T) {
+	pool := testPool(t)
+	f, provider, orch, verificationID := newWebhookFixture(t, pool)
+	var ref string
+	_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT provider_reference FROM kyc_verifications WHERE id = $1`, verificationID).Scan(&ref)
+	})
+
+	staffID := seedComplianceStaff(t, pool, f)
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := ReviewVerification(ctx, tx, ReviewVerificationParams{
+			VerificationID: verificationID, StaffID: staffID, NewStatus: StatusRejected, Reason: "staff_decision",
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("staff review: %v", err)
+	}
+	if got := mustGetStatus(t, pool, f.tenantID, verificationID); got != StatusRejected {
+		t.Fatalf("expected staff decision to apply, got %s", got)
+	}
+
+	before := noeffect.Capture(t, pool, []uuid.UUID{f.tenantID}, []noeffect.Verification{{TenantID: f.tenantID, ID: verificationID}})
+
+	// A later, genuinely-signed provider callback (even "approved", a
+	// HIGHER rank than the staff's "rejected") must never overturn the
+	// staff's terminal decision.
+	in := provider.CallbackPayload(f.tenantID, ref, ProviderApproved, "auto_approved")
+	v, err := func() (Verification, error) {
+		var v Verification
+		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			v, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+			return err
+		})
+		return v, err
+	}()
+	if err != nil {
+		t.Fatalf("unexpected error applying a post-staff-decision callback: %v", err)
+	}
+	if v.Status != StatusRejected {
+		t.Fatalf("expected the staff's rejected decision to survive a later provider callback, got %s", v.Status)
+	}
+	// No new audit row: the callback is a no-op (rank(approved)==rank
+	// (rejected)==terminal==3, so it never re-enters the compare-and-set).
+	noeffect.AssertNoEffect(t, pool, []uuid.UUID{f.tenantID}, []noeffect.Verification{{TenantID: f.tenantID, ID: verificationID}}, before)
 }
 
 func TestKYCWebhook_OutcomeError_NoStateChange_OneFailureAudit(t *testing.T) {

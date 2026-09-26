@@ -163,4 +163,33 @@ func TestKYCWebhook_AuthFailureLogging_AllowListOnly(t *testing.T) {
 		runKYCAuthFailureLogCase(t, pool, issuer, activeTenant.ID.String(), orch,
 			"/v1/webhooks/kyc/"+activeTenant.Slug+"/mock", genuine, webhookauth.ReasonSignatureInvalid)
 	})
+
+	// K5/K6/K12 full-list closure: the three preamble-only reasons
+	// (provider_id charset, oversized body, missing headers entirely) that
+	// were previously exercised only by K6's byte-identical-response
+	// assertion, not paired with their own K12 allow-listed-log assertion.
+	t.Run("provider_invalid", func(t *testing.T) {
+		mock := kyc.NewMockKYCProvider()
+		orch := kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mock}, kyc.NewMockWebhookCredentials(mock))
+		genuine := mock.CallbackPayload(activeTenant.ID, "k12-ref", kyc.ProviderApproved, "x")
+		runKYCAuthFailureLogCase(t, pool, issuer, activeTenant.ID.String(), orch,
+			"/v1/webhooks/kyc/"+activeTenant.Slug+"/BAD_ID!", genuine, webhookauth.ReasonProviderInvalid)
+	})
+
+	t.Run("body_too_large", func(t *testing.T) {
+		mock := kyc.NewMockKYCProvider()
+		orch := kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mock}, kyc.NewMockWebhookCredentials(mock))
+		oversized := webhookauth.Inbound{Header: map[string][]string{}, Body: make([]byte, maxKYCWebhookBodyBytes+1)}
+		runKYCAuthFailureLogCase(t, pool, issuer, activeTenant.ID.String(), orch,
+			"/v1/webhooks/kyc/"+activeTenant.Slug+"/mock", oversized, webhookauth.ReasonBodyTooLarge)
+	})
+
+	t.Run("signature_missing", func(t *testing.T) {
+		mock := kyc.NewMockKYCProvider()
+		orch := kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mock}, kyc.NewMockWebhookCredentials(mock))
+		genuine := mock.CallbackPayload(activeTenant.ID, "k12-ref", kyc.ProviderApproved, "x")
+		noHeaders := webhookauth.Inbound{Header: map[string][]string{}, Body: genuine.Body}
+		runKYCAuthFailureLogCase(t, pool, issuer, activeTenant.ID.String(), orch,
+			"/v1/webhooks/kyc/"+activeTenant.Slug+"/mock", noHeaders, webhookauth.ReasonSignatureMissing)
+	})
 }

@@ -752,6 +752,53 @@ func TestKYC_CrossTenantAccessDenied(t *testing.T) {
 	}
 }
 
+// K10 (staff leg): unlike the player-facing response (playerVerification
+// Response, asserted absent in TestKYC_WebhookCallbackAuthentication and
+// TestKYCWebhook_PlayerComputedSignature_Rejected), the STAFF-facing
+// verificationResponse/kycCaseResponse shapes still carry
+// provider_reference - design §B5: safe once the webhook is tenant-bound
+// and signature-verified, and operationally needed for staff to correlate
+// with a real vendor's own case/reference. Checked on BOTH staff-facing
+// routes (the per-account list and the tenant-wide case queue), since
+// they are two independently-maintained response types.
+func TestKYC_StaffResponses_IncludeProviderReference(t *testing.T) {
+	pool, issuer := testEnv(t)
+	srv, _, _ := newKYCTestServer(t, pool, issuer)
+	tenant := mustCreateTenant(t, pool)
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+
+	verResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
+	var created map[string]any
+	decodeBody(t, verResp, &created)
+	verificationID := created["id"].(string)
+	providerReference := mustGetKYCProviderReference(t, pool, tenant.ID, verificationID)
+	if providerReference == "" {
+		t.Fatal("test setup: expected a non-empty provider_reference to have been minted")
+	}
+
+	compliance := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleCompliance, "compliance-kyc-k10-pw-1")
+	complianceTokens := mustLoginStaff(t, srv, tenant.Slug, compliance.Email, "compliance-kyc-k10-pw-1")
+
+	listResp := getJSON(t, srv, "/v1/admin/kyc/verifications?player_account_id="+player.ID.String(), complianceTokens.AccessToken)
+	defer listResp.Body.Close()
+	var list []map[string]any
+	decodeBody(t, listResp, &list)
+	if len(list) != 1 || list[0]["provider_reference"] != providerReference {
+		t.Fatalf("K10: expected the staff per-account list to carry provider_reference=%q, got %+v", providerReference, list)
+	}
+
+	queueResp := getJSON(t, srv, "/v1/admin/kyc/cases", complianceTokens.AccessToken)
+	defer queueResp.Body.Close()
+	var page struct {
+		Items []map[string]any `json:"items"`
+	}
+	decodeBody(t, queueResp, &page)
+	if len(page.Items) != 1 || page.Items[0]["provider_reference"] != providerReference {
+		t.Fatalf("K10: expected the staff tenant-wide queue to carry provider_reference=%q, got %+v", providerReference, page.Items)
+	}
+}
+
 // --- 14. Provider callback: valid signature applies the outcome,
 // invalid signature is rejected, unknown provider_reference 404s ---
 
