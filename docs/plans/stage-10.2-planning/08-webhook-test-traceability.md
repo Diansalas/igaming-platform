@@ -32,7 +32,7 @@
 | K2 | Valid in-process signature, A→A `approved`, 1 audit row | `TestKYCWebhook_ValidSameTenant_Approves` | `internal/kyc/orchestrator_webhook_integration_test.go` |
 | K3 | A-signed → B (same reference string), 401, no read of B's row | `TestKYCWebhook_CrossTenant_Rejected` (statement capture + `noeffect.AssertNoEffect` on both tenants) | `internal/kyc/orchestrator_webhook_integration_test.go` |
 | K4 | Equal-secret resolver, A-signed → B, 401 | `TestKYCWebhook_EqualSecretResolver_CrossTenantRejected` (+ `noeffect.AssertNoEffect` both tenants) | `internal/kyc/orchestrator_webhook_integration_test.go` |
-| K5 | Tamper: each field / whitespace / 63/65 hex / uppercase / missing headers / unknown key id / provider id / legacy `signature` field / legacy trailing-newline / cross-verification reference substitution | `TestKYCWebhook_TamperMatrix_Rejected` subtests: `flipped_body_byte`, `whitespace_appended_to_body_(one_byte)`, `provider_reference_field_value_tampered`, `outcome_field_value_tampered`, `reason_field_value_tampered`, `63_hex_chars`, `65_hex_chars`, `uppercase_hex`, `missing_signature_header`, `missing_key_id_header`, `unknown_key_id`, `legacy_signature_field_in_body`, `legacy_trailing-newline_signature_format`, `cross-verification_provider_reference_substitution,_same_tenant_(J13)`; provider-id case is its own test `TestKYCWebhook_ProviderIDSubstitution_Rejected` | `internal/kyc/orchestrator_webhook_integration_test.go` |
+| K5 | Tamper: each field / whitespace / 63/65 hex / uppercase / missing headers / unknown key id / provider id / legacy `signature` field / legacy trailing-newline / cross-verification reference substitution — **and, per K1 (Stage 10.2 final review), the EXACT `webhookauth.Reason` asserted in every subtest, and the legacy `signature`-field body now genuinely signed so it reaches the guard** | `TestKYCWebhook_TamperMatrix_Rejected` subtests: `flipped_body_byte`, `whitespace_appended_to_body_(one_byte)`, `provider_reference_field_value_tampered`, `outcome_field_value_tampered`, `reason_field_value_tampered`, `63_hex_chars`, `65_hex_chars`, `uppercase_hex`, `missing_signature_header`, `missing_key_id_header`, `unknown_key_id`, `legacy_signature_field_in_body`, `legacy_trailing-newline_signature_format`, `cross-verification_provider_reference_substitution,_same_tenant_(J13)` (each now asserts `authErr.Reason` against an exact expected value); provider-id case is its own test `TestKYCWebhook_ProviderIDSubstitution_Rejected` (already asserted `Reason`) | `internal/kyc/orchestrator_webhook_integration_test.go` |
 | K6 | Unknown slug / suspended / unregistered provider / bad charset / oversized / no headers / bad signature / non-JSON with valid headers → byte-identical 401 (minus `request_id`) | `TestKYCWebhook_EnumerationOracle_IndistinguishableResponses` subtests: `unknown_slug`, `suspended_tenant`, `unregistered_provider`, `bad_signature`, `no_headers`, `non_json_body_active_tenant`, `oversized_body_active_tenant`, `bad_provider_id_charset` | `internal/httpserver/kyc_webhook_indistinguishable_401_test.go` |
 | K7 | Bad signature under statement capture: no tenant-scoped statement, no audit row | `TestKYCWebhook_BadSignature_NoStatementBeforeVerification` | `internal/kyc/orchestrator_webhook_integration_test.go` |
 | K7 (R4/J6 companion) | Explicit `tenant_id` predicate proven present independently of RLS; shown red when removed (mutation, reverted) | `TestGetVerificationByProviderReference_CarriesExplicitTenantIDPredicate` | `internal/kyc/reference_lookup_tenant_predicate_test.go` |
@@ -43,6 +43,8 @@
 | K9 | Verified, unknown reference → 404 | `TestKYCWebhook_VerifiedUnknownReference_NotFound` | `internal/kyc/orchestrator_webhook_integration_test.go` |
 | K9 | Verified, bad outcome/non-JSON → 400, no audit row | `TestKYCWebhook_VerifiedBadOutcome_MalformedBody_NoAudit` (+ `noeffect.AssertNoEffect`) | `internal/kyc/orchestrator_webhook_integration_test.go` |
 | K9 | Outcome `error` → 204, status unchanged, 1 failure audit row | `TestKYCWebhook_OutcomeError_NoStateChange_OneFailureAudit` | `internal/kyc/orchestrator_webhook_integration_test.go` |
+| K9 (final-review K5) | Outcome `error`, NON-terminal verification, redelivered → one failure audit row PER delivery | `TestKYCWebhook_OutcomeErrorNonTerminal_RedeliveredWritesOneAuditRowPerDelivery` | `internal/kyc/orchestrator_webhook_integration_test.go` |
+| K9 (final-review K5) | Outcome `error` against an ALREADY-TERMINAL verification → NO audit row, no state change | `TestKYCWebhook_OutcomeErrorAgainstTerminal_NoAuditRow` (+ `noeffect.AssertNoEffect`) | `internal/kyc/orchestrator_webhook_integration_test.go` |
 | K10 | Player response never carries `provider_reference` | `TestKYC_WebhookCallbackAuthentication`, `TestKYCWebhook_PlayerComputedSignature_Rejected` | `internal/httpserver/kyc_flow_integration_test.go`, `internal/httpserver/kyc_prefix_e1_defect_test.go` |
 | K10 | Staff responses still carry `provider_reference` (both staff-facing shapes) | `TestKYC_StaffResponses_IncludeProviderReference` | `internal/httpserver/kyc_flow_integration_test.go` |
 | K11 | `KYCWebhookEnabled=false` → 404 (route absent) | `TestKYCWebhook_TestSupportOff_404`, `TestKYCWebhook_TestSupportOff_NilOrchestrator_404` | `internal/httpserver/kyc_prefix_e3_ungated_test.go` |
@@ -79,26 +81,71 @@ further with a full statement-capture proof, which is strictly stronger
 than the checklist for the "no effect" claim on the pre-verification
 path).
 
-## R4/J6 mutation-kill record
+## R4/J6 mutation-kill record (superseded below — see K2, 2026-09-26)
 
-`TestGetVerificationByProviderReference_CarriesExplicitTenantIDPredicate`
-(`internal/kyc/reference_lookup_tenant_predicate_test.go`) was run
-against a manual, uncommitted mutation of
-`internal/kyc/verification_service.go`'s `getVerificationByProviderReference`
-query (dropping `tenant_id = $1 AND` from the `WHERE` clause, keeping the
-call site's arguments unchanged):
+> **Superseded.** The original record below (recorded against the
+> `provider_id = $2`-literal version of the test) was itself flagged by
+> code review (`11-review-code.md` M2) as killed for the WRONG reason - a
+> SQL type-inference error, not the tenant-predicate assertion the test
+> exists to prove. It is kept here, struck through in spirit, purely as a
+> record of what happened; the REPLACEMENT record immediately below this
+> one (K2, Stage 10.2 final-review fix round A) is the current, correct
+> mutation-kill evidence.
+>
+> Original (2026-09-26, pre-K2): `TestGetVerificationByProviderReference_
+> CarriesExplicitTenantIDPredicate` was run against a manual, uncommitted
+> mutation of `internal/kyc/verification_service.go`'s
+> `getVerificationByProviderReference` query (dropping `tenant_id = $1 AND`
+> from the `WHERE` clause, keeping the call site's THREE arguments and
+> their original placeholder numbers unchanged - so `$3` in the mutated
+> query text was left with no matching placeholder in the SQL, producing a
+> Postgres type-inference error rather than exercising the test's own
+> assertion):
+>
+> ```
+> === RUN   TestGetVerificationByProviderReference_CarriesExplicitTenantIDPredicate
+>     reference_lookup_tenant_predicate_test.go:110: unexpected error: kyc: scan verification: ERROR: could not determine data type of parameter $1 (SQLSTATE 42P18)
+> --- FAIL: TestGetVerificationByProviderReference_CarriesExplicitTenantIDPredicate (0.02s)
+> ```
+
+## K2 mutation-kill record (2026-09-26, replaces the record above)
+
+Fixed per K2 (Stage 10.2 final review): the test now matches the
+reference-lookup statement STRUCTURALLY - `strings.Contains(call.sql, "FROM
+kyc_verifications")` (a SELECT; the UPDATE...kyc_verifications statement in
+the same callback never contains this substring) plus
+`strings.Contains(call.sql, "provider_reference = $")` (a WHERE-clause
+EQUALITY on that column - `verificationColumns` also SELECTs
+`provider_reference` by name in every one of this package's queries
+including `GetVerificationByID`, so the bare substring "provider_reference"
+alone is not enough; "provider_reference = $" only ever appears in a WHERE
+clause, and survives any renumbering of which placeholder index it binds
+to) - never by the literal placeholder number `provider_id = $2`.
+
+The mutation was rerun with BOTH the predicate removed AND the query's own
+placeholders renumbered (`WHERE provider_id = $1 AND provider_reference =
+$2`, call site passing only `providerID, providerReference` - `tenantID`
+dropped entirely, never merely reordered):
 
 ```
 === RUN   TestGetVerificationByProviderReference_CarriesExplicitTenantIDPredicate
-    reference_lookup_tenant_predicate_test.go:110: unexpected error: kyc: scan verification: ERROR: could not determine data type of parameter $1 (SQLSTATE 42P18)
+    reference_lookup_tenant_predicate_test.go:145: R4/J6: the reference-lookup statement text has no explicit tenant_id = $1 predicate: "SELECT id, tenant_id, brand_id, player_account_id, person_id, status,
+	provider_id, provider_reference, reason, submitted_at, reviewed_at, reviewed_by, expires_at, created_at, updated_at,
+	(verified_residence_country IS NOT NULL), verified_residence_set_at, verified_residence_set_by FROM kyc_verifications WHERE provider_id = $1 AND provider_reference = $2"
 --- FAIL: TestGetVerificationByProviderReference_CarriesExplicitTenantIDPredicate (0.02s)
 ```
 
-The mutation was reverted immediately after capturing this failure
-(`git status --porcelain internal/kyc/verification_service.go` empty
-afterward; `go test` green again). This demonstrates the test is killed by
+This fails on the test's OWN tenant-predicate assertion - a Go test
+failure asserting the specific missing predicate text - never a SQL error,
+closing the M2 finding. The mutation was reverted immediately after
+capturing this failure (`git diff --stat internal/kyc/verification_
+service.go` empty afterward; `go test -tags=integration
+./internal/kyc/... -run TestGetVerificationByProviderReference_
+CarriesExplicitTenantIDPredicate` green again, both before applying the
+mutation and after reverting it). This demonstrates the test is killed by
 removing the very predicate it exists to prove, independent of whatever
-RLS would or would not have enforced behaviourally for the same mutation.
+RLS would or would not have enforced behaviourally for the same mutation,
+and independent of which placeholder numbers the query happens to use.
 
 ## Mutation-kill record: K5/K6/K7 guards
 
@@ -119,6 +166,142 @@ each iterated once against an initially-wrong test harness that produced
 the WRONG failure reason, `credential_unavailable` and a foreign-key
 error respectively, before being corrected — see the two `go test -v`
 transcripts in this task's completion report).
+
+## Stage 10.2 final-review fix round A (KYC), 2026-09-26
+
+Closes `01-webhook-trust-design.md` §K rulings K1 (KYC half), K2, K3, K4,
+K5, K9 (`kyc.ErrUnknownProvider` only), K11 (KYC/wiring parts), K16.
+
+### K1 mutation-kill record (legacy `signature`-field guard)
+
+`internal/kyc/mock_provider.go`'s post-verification rejection of a legacy
+top-level `"signature"` field (`HandleCallback`, the
+`if _, present := generic["signature"]; present` guard) was temporarily
+removed:
+
+```
+=== RUN   TestKYCWebhook_TamperMatrix_Rejected/legacy_signature_field_in_body
+    orchestrator_webhook_integration_test.go:367: legacy signature field in body: expected a CallbackAuthError, got <nil>
+=== NAME  TestKYCWebhook_TamperMatrix_Rejected
+    orchestrator_webhook_integration_test.go:375: expected the verification untouched by every tampered attempt, got approved
+--- FAIL: TestKYCWebhook_TamperMatrix_Rejected (0.03s)
+    --- FAIL: TestKYCWebhook_TamperMatrix_Rejected/legacy_signature_field_in_body (0.00s)
+```
+
+The guard was restored immediately after capturing this failure (`git diff
+internal/kyc/mock_provider.go` empty afterward). This is the fix for M1:
+the subtest's body is now signed with the REAL derived key
+(`provider.deriveKey`/`webhookauth.KYCScheme().Sign`), so it passes
+`Scheme.Verify` and genuinely reaches this guard - before the fix, the
+subtest mutated the body AFTER using the original signature, so it was
+rejected by `Scheme.Verify` itself and never exercised the guard at all
+(the mutation above would previously have left the subtest green).
+
+### K4 mutation-kill record (`kyc_webhook_noop` allow-listed line)
+
+The handler's `if !applied { logger.Info("kyc_webhook_noop", ...) }` branch
+in `internal/httpserver/kyc_admin_handlers.go` was temporarily replaced
+with `_ = applied` (no logging call at all):
+
+```
+=== RUN   TestKYCWebhook_NoopLogging_ReplayLogsAllowListedLine_AppliedDoesNot
+    kyc_webhook_noop_logging_integration_test.go:111: expected exactly 1 kyc_webhook_noop line for the replay, got 0: []
+--- FAIL: TestKYCWebhook_NoopLogging_ReplayLogsAllowListedLine_AppliedDoesNot (0.22s)
+```
+
+Restored immediately after capturing this failure (`git diff
+internal/httpserver/kyc_admin_handlers.go` empty afterward). Closes M4:
+`kyc.Orchestrator.ReceiveCallback` now returns `(Verification, applied
+bool, error)`; `applyCallbackOutcome` reports `applied` for every branch
+(a forward transition or a non-terminal `outcome=error` audit write is
+`true`; every no-op, including the new K5 terminal-`error` case, is
+`false`). The handler's `_ = result` is gone - the verification value is
+discarded (never echoed, per design §G) but `applied` drives the new log
+line. `TestKYCWebhook_NoopLogging_ReplayLogsAllowListedLine_AppliedDoesNot`
+(`internal/httpserver/kyc_webhook_noop_logging_integration_test.go`)
+asserts BOTH halves: the FIRST, genuinely-applied delivery logs no
+`kyc_webhook_noop` line at all, and a REPLAY of that same delivery logs
+exactly one, carrying only `request_id`/`tenant_id`/`provider_id`.
+
+### K5 mutation-kill record (no audit row for `error` against a terminal verification)
+
+`applyCallbackOutcome`'s new `if isTerminal(v.Status) { return v, false,
+nil }` branch (checked before writing the failure audit row for
+`outcome=error`) was temporarily removed:
+
+```
+=== RUN   TestKYCWebhook_OutcomeErrorAgainstTerminal_NoAuditRow
+    orchestrator_webhook_integration_test.go:790: expected STILL exactly 1 audit row (no new one for outcome=error against a terminal verification), got 2
+--- FAIL: TestKYCWebhook_OutcomeErrorAgainstTerminal_NoAuditRow (0.04s)
+```
+
+Restored immediately after capturing this failure (`git diff
+internal/kyc/provider.go` empty afterward, confirmed by rerunning the full
+`TestKYCWebhook_OutcomeError*` group green). Closes L2/F-5:
+`TestKYCWebhook_OutcomeErrorAgainstTerminal_NoAuditRow` proves the fix
+(reach terminal via a normal approval, then a later `outcome=error`
+callback writes no second audit row and never disturbs the terminal
+status); `TestKYCWebhook_OutcomeErrorNonTerminal_RedeliveredWritesOneAuditRowPerDelivery`
+proves the narrower, still-disclosed exception survives unchanged (a
+NON-terminal verification still gets one failure audit row per delivery,
+including an exact replay - both in `internal/kyc/orchestrator_webhook_
+integration_test.go`).
+
+### K3: KYC conformance suite
+
+`internal/kyc/conformance_test.go` (new) adds
+`RunProviderConformanceSuite`/`TestMockKYCProvider_ConformsToKYCProvider`,
+mirroring `internal/casino/conformance_test.go`'s tenant-binding
+conformance case exactly, including its MAC-level sub-case (a credential
+re-bound to claim tenant B's identity while still carrying tenant A's own
+derived secret, forcing the assertion past `webhookauth.Scheme.Verify`'s
+early `TenantID` metadata check and into the actual HMAC comparison). Per
+K3/F-9, the case `t.Fatalf`s (never `t.Skip`s) for any provider that is not
+`*MockKYCProvider` - closes ADR 0022 §3's "mandatory, skip-to-fail" claim,
+which previously had no KYC suite to back it at all.
+
+### K9: dead code removed
+
+`kyc.ErrUnknownProvider` (unreferenced anywhere in the codebase) and its
+doc comment were deleted from `internal/kyc/provider.go`.
+
+### K11: KYC mock-wiring duplication/staleness removed
+
+- `kyc.NewMockWebhookCredentials` now returns `webhookauth.MockResolver`
+  directly (design §B2) instead of a KYC-local `MockWebhookCredentials`
+  wrapper type that duplicated `MockResolver`'s own `Resolve` logic for no
+  reason. No caller needed to change (all of them already only use the
+  return value as a `webhookauth.Resolver`).
+- `cmd/platform-api/main.go` now constructs `mockKYCProvider` ONLY when
+  `wiring.KYCWebhookEnabled` (ADR 0085 amendment: "absent" in
+  production/test-support-off, not merely constructed-but-unwired) -
+  `kycOrchestrator`/`kycWebhookResolver` already guarded against a nil
+  provider, so this is a real behavioural tightening, not just a comment
+  fix.
+- Removed the stale `mockWiring` doc comment ("Later Stage 10.2 steps
+  extend this struct...") and the `kycOrchestrator` "for other purposes"
+  justification, both no longer true (`cmd/platform-api/wiring.go`).
+
+### K16: hard-coded fixture key replaced
+
+`internal/kyc/orchestrator_webhook_integration_test.go`'s
+`TestKYCWebhook_EqualSecretResolver_CrossTenantRejected` (K4/§H) now
+derives its equal-secret fixture via `webhookauth.NewMockMaster()` (a
+fresh per-process `crypto/rand` value) instead of the literal
+`[]byte("equal-secret-shared-by-every-tenant-32bytes!!")`.
+
+### Test run for this fix round (2026-09-26, branch `claude/focused-wright-jw88w9`, HEAD `eb91060` at task start)
+
+```
+gofmt -l internal/kyc internal/httpserver cmd/platform-api                          (empty)
+go vet ./...                                                                        (clean)
+go vet -tags=integration ./...                                                      (clean)
+golangci-lint run ./...                                                             0 issues
+go test ./...                                                                       ok (all packages)
+go test -tags=integration ./internal/kyc/...        ok  1.481s
+go test -tags=integration ./internal/httpserver/...  ok  63.589s
+go test -tags=integration ./cmd/platform-api/...     ok  0.009s
+```
 
 ## Full test run (2026-09-26, HEAD `c520e76`)
 
