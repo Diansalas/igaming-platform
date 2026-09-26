@@ -14,7 +14,7 @@ Labels follow CLAUDE.md. The payments provider in this repository is a **MOCK**;
 |---|---|
 | G1 — three workstreams complete | PASSED |
 | G2 — required tests, including concurrency and negative security tests | PASSED |
-| G3 — full Go/CI suite | PASSED: CI #268–#279 green; the local fresh-database replay passed 3/3 integration runs plus reversibility |
+| G3 — full Go/CI suite | PASSED, with one open item: CI #268–#280 and #282 green; #281 (documentation only) failed intermittently and is not yet root-caused (§8, CI-FLAKE-281); two local fresh-database replays passed 3/3 integration runs plus reversibility |
 | G4 — security, RLS and financial reviews | PASSED: every P2 closed and re-verified; residual P3s recorded (§10) |
 | G5 — OpenAPI, documentation and ADR records | PASSED |
 | G6 — no prohibited scope expansion | PASSED: KYC and casino webhook code untouched; no AI code; no AWS action |
@@ -131,8 +131,16 @@ The binding plans are papers 06 and 16. Tests added:
 |---|---|---|---|
 | #268 | `e9e0ad8` | PAY-REV-1 and SB-T1-XMIN | green |
 | #273–#279 | `909d75b` → `2ec3026` | review fixes, test fixes, records | all green |
-| #280 | `516bc0b` | P3 tests | see hand-off message |
-| — | the commit carrying this report | report | see hand-off message |
+| #280 | `516bc0b` | P3 tests | green |
+| #281 | `a2a0981` | documentation only | **FAILED** — integration step; see below |
+| #282 | `444e6e1` | CI failure annotations | green (identical application code to #281) |
+
+**Run #281 — unidentified intermittent integration failure, NOT root-caused (CI-FLAKE-281).**
+- The commit changed only documentation. The same code passed in #280 and #282, and in three further local fresh-database runs.
+- The failing test could not be identified. Job logs are retrievable only as their last 5,000 lines, the Postgres container log printed at shutdown fills that window, and the direct log download was blocked by the environment's proxy.
+- The Postgres log showed no deadlock, no fatal error, and no errors other than the ones tests produce on purpose.
+- The job was not re-run, and no test was skipped or quarantined. CI now emits every `--- FAIL`, panic and data-race line, with its `_test.go` location, as a check-run annotation (`444e6e1`). The next occurrence will name the test.
+- This is recorded as open work and is **not** described as a flake.
 
 **Local replay** (`scratchpad/ci-local.sh`, fresh database, at `009c6d0`): gofmt, vet and lint clean (0 issues); migrate up to 93 and verify clean; unit tests with the race detector; integration tests 3/3 with 32/32 packages each; reversibility 93→90→93 clean.
 
@@ -173,6 +181,7 @@ All reviews, papers and rulings are recorded in the repository.
   - one error branch bypasses the shared mapper;
   - the C4 conformance case skips for non-mock adapters until the first real adapter;
   - other items listed in the code-review re-verification.
+- **CI-FLAKE-281:** the unidentified intermittent integration failure in run #281 (§8). Diagnose on the next occurrence using the new CI annotations.
 - **Carried from Stage 10:** OI-5 named debt, the L0.6 residual, money width, reconciliation scale, the ALB security-group description, and integration-tagged lint.
 
 ## 11. Remaining human decisions
