@@ -119,3 +119,57 @@ func TestInitAppRole_RerunKeepsProviderCredentialGrants(t *testing.T) {
 		}
 	}
 }
+
+// TestInitAppRole_RerunKeepsCasinoCallbackRejectionsGrants: the same proof
+// as TestInitAppRole_RerunKeepsProviderCredentialGrants, but for migration
+// 0097's casino_callback_rejections (Stage 10.3 W2b). Re-running the
+// idempotent deploy/init-app-role.sql backfill against an already-migrated
+// database must leave the table at migration 0097's own least-privilege
+// grant - SELECT and INSERT only, since the table is pure append-only
+// history with no mutable column at all (its blanket "GRANT ... ON ALL
+// TABLES" would otherwise silently re-grant UPDATE/DELETE) - and a second
+// run changes nothing at all.
+func TestInitAppRole_RerunKeepsCasinoCallbackRejectionsGrants(t *testing.T) {
+	w := newScratchWorld(t, "ccr_initrole_", "")
+	isCCR := func(k string) bool { return strings.Contains(k, ":casino_callback_rejections:") }
+	afterMigration := runtimePrivileges(t, w)
+
+	runInitAppRoleTail(t, w)
+	afterFirst := runtimePrivileges(t, w)
+	for k := range afterFirst {
+		if isCCR(k) && !afterMigration[k] {
+			t.Errorf("init-app-role.sql widened %s", k)
+		}
+	}
+	for k := range afterMigration {
+		if isCCR(k) && !afterFirst[k] {
+			t.Errorf("init-app-role.sql removed %s", k)
+		}
+	}
+	for _, must := range []string{
+		"table:casino_callback_rejections:SELECT", "table:casino_callback_rejections:INSERT",
+	} {
+		if !afterFirst[must] {
+			t.Errorf("missing expected grant %s", must)
+		}
+	}
+	for _, mustNot := range []string{
+		"table:casino_callback_rejections:UPDATE", "table:casino_callback_rejections:DELETE",
+		"table:casino_callback_rejections:TRUNCATE",
+	} {
+		if afterFirst[mustNot] {
+			t.Errorf("unexpected grant %s", mustNot)
+		}
+	}
+
+	runInitAppRoleTail(t, w)
+	afterSecond := runtimePrivileges(t, w)
+	if len(afterSecond) != len(afterFirst) {
+		t.Fatalf("a second run changed the privilege count %d -> %d", len(afterFirst), len(afterSecond))
+	}
+	for k := range afterFirst {
+		if !afterSecond[k] {
+			t.Fatalf("a second run removed %s", k)
+		}
+	}
+}

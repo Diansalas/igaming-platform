@@ -173,3 +173,28 @@ BEGIN
     END IF;
 END
 $$;
+
+-- Stage 10.3 W2b (migration 0097, casino_callback_rejections): the same
+-- treatment as the provider-credential tables above, re-asserted on every
+-- run. The blanket backfill GRANT above ("ALL TABLES IN SCHEMA public")
+-- would otherwise silently re-grant table-level UPDATE/DELETE on this
+-- append-only table every time this idempotent script is re-run against
+-- an already-migrated database; migration 0097 itself runs only once. The
+-- statements are EXACTLY migration 0097's own grant: REVOKE ALL, then
+-- SELECT/INSERT only - never UPDATE, DELETE or TRUNCATE (there is no
+-- mutable column at all; the table is pure append-only history). The
+-- deny triggers created by migration 0097 remain the binding control;
+-- this is defence in depth. Guarded because the table does not exist yet
+-- on a fresh docker-entrypoint-initdb.d run (migrations run after this
+-- script).
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = 'casino_callback_rejections'
+    ) THEN
+        EXECUTE 'REVOKE ALL ON casino_callback_rejections FROM igaming_runtime';
+        EXECUTE 'GRANT SELECT, INSERT ON casino_callback_rejections TO igaming_runtime';
+    END IF;
+END
+$$;

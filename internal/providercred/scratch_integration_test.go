@@ -11,6 +11,8 @@ import (
 	"context"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +36,45 @@ type scratchWorld struct {
 }
 
 func migrationsDir() string { return "../../migrations" }
+
+// providerCredMigrationsThrough96 copies every migration up to and
+// including 0096 into a temp directory, so a scratch database built from
+// it treats migration 0096 as the chain's tip no matter what lands after
+// it in the real migrations directory (Stage 10.3 W2b's 0097, W3a's 0098,
+// and anything later) - mirroring internal/kyc/
+// migration_0095_integration_test.go's own migration0095DirThroughSelf
+// precedent. TestPCMigration_RoundTripOnCleanDatabase and
+// TestPCMigration_DownRefusesWithRows both assert MigrateDown(dir, 1)
+// targets 0096 itself; without this, MigrateDown(dir, 1) would instead
+// target whichever migration is actually most recent, silently changing
+// what each test proves.
+func providerCredMigrationsThrough96(t *testing.T) string {
+	t.Helper()
+	src := migrationsDir()
+	dir := t.TempDir()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		if len(e.Name()) >= 4 {
+			if v, err := strconv.Atoi(e.Name()[:4]); err == nil && v > 96 {
+				continue
+			}
+		}
+		content, err := os.ReadFile(filepath.Join(src, e.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, e.Name()), content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
 
 func newScratchWorld(t *testing.T, prefix string, stagedDir string) *scratchWorld {
 	t.Helper()
@@ -219,11 +260,12 @@ func TestPCHandleTransition_DeleteRefusedAsOwner(t *testing.T) {
 // down migration refuses (validated CHECK (false) guard, never count(*)
 // under FORCE RLS), and the schema is left intact.
 func TestPCMigration_DownRefusesWithRows(t *testing.T) {
-	w := newScratchWorld(t, "pc_down_", "")
+	dir := providerCredMigrationsThrough96(t)
+	w := newScratchWorld(t, "pc_down_", dir)
 	f := scratchFx(t, w)
 	f.register(f.spec(f.tenant(), "acme", "k1"))
 
-	_, err := w.owner.MigrateDown(context.Background(), migrationsDir(), 1)
+	_, err := w.owner.MigrateDown(context.Background(), dir, 1)
 	if err == nil || !strings.Contains(err.Error(), "roll forward") {
 		t.Fatalf("down must refuse with a roll-forward message, got %v", err)
 	}
@@ -235,11 +277,15 @@ func TestPCMigration_DownRefusesWithRows(t *testing.T) {
 }
 
 // TestPCMigration_RoundTripOnCleanDatabase: up, down, up on a clean
-// database; the down drops every object 0096 created.
+// database; the down drops every object 0096 created. Built from a
+// migrations directory held back at 0096 (providerCredMigrationsThrough96)
+// so MigrateDown(dir, 1) always targets 0096 itself, regardless of what
+// later migrations (0097, 0098, ...) exist in the real chain.
 func TestPCMigration_RoundTripOnCleanDatabase(t *testing.T) {
-	w := newScratchWorld(t, "pc_rt_", "")
+	dir := providerCredMigrationsThrough96(t)
+	w := newScratchWorld(t, "pc_rt_", dir)
 	ctx := context.Background()
-	down, err := w.owner.MigrateDown(ctx, migrationsDir(), 1)
+	down, err := w.owner.MigrateDown(ctx, dir, 1)
 	if err != nil || len(down) != 1 || down[0] != 96 {
 		t.Fatalf("down: %v %v", down, err)
 	}
@@ -252,11 +298,11 @@ func TestPCMigration_RoundTripOnCleanDatabase(t *testing.T) {
 	if tables != 0 || funcs != 0 {
 		t.Fatalf("down left %d tables and %d functions behind", tables, funcs)
 	}
-	up, err := w.owner.MigrateUp(ctx, migrationsDir())
+	up, err := w.owner.MigrateUp(ctx, dir)
 	if err != nil || len(up) != 1 || up[0] != 96 {
 		t.Fatalf("up again: %v %v", up, err)
 	}
-	report, err := w.owner.VerifyMigrations(ctx, migrationsDir())
+	report, err := w.owner.VerifyMigrations(ctx, dir)
 	if err != nil || !report.OK() {
 		t.Fatalf("verify: %v %+v", err, report)
 	}
