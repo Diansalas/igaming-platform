@@ -196,7 +196,7 @@ jobs:
         # whole module, not just that package, since a vulnerable
         # transitive dependency anywhere is worth knowing about.
         #
-        # GO-TOOLCHAIN-VULN-1 (docs/security/vulnerability-registry.md):
+        # GO-TOOLCHAIN-VULN-1 (docs/governance/task-registry.md):
         # pinned to an exact version (not @latest) so results are
         # reproducible and a bump is a deliberate, reviewable diff -
         # govulncheck v1.8.0 requires go >= 1.26, which matches the
