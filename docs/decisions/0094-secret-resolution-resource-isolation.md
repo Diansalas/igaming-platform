@@ -621,3 +621,285 @@ Stage 10.3 scope. The following are not human decisions but still have to happen
   adding the [T] tests to the isolated CI lane;
 - `qa` confirmation of §9;
 - the orchestrator's sequencing of F-POOL-2.
+
+## Security design review
+
+Reviewer: `security`. Date: 2026-09-26. Reviewed against the ADR text as committed in `55dde0f`,
+with the §11 QA review from `2720b5f`, and against the code at HEAD `4be9ce2`, which does not
+change the cited code since `662aaae`. Code read: `internal/secretstore/fetcher.go`; `internal/providercred/resolver.go`
+(including `service.go` `GetDirect` call sites); `internal/webhookauth/{scheme,resolver}.go`;
+`internal/{payments,casino}/webhook_verify.go`; `ReceiveCallback` in all three orchestrators;
+`internal/db/tenant_rls.go`; the three public webhook handlers; and the `payments`/`casino`/`kyc`
+outbound adapter call sites. This is a design review. I ran no code and changed none.
+
+### Verdict: CO-SIGN WITH CONDITIONS
+
+The design fixes F-POOL-1 at its root: no pooled connection is held across secret-store I/O. It
+also removes the tenant coupling through the backend-wide breaker. The chosen option is correct.
+The rejected options were rightly rejected. With the conditions below, the design meets every
+constraint the human set.
+
+**F-POOL-1 stays OPEN and launch-blocking** until three things are done:
+- the implementation lands;
+- every §9 test passes, including the additions below, with M1–M13 recorded;
+- `security` has reviewed the implementing diff.
+
+This co-signature approves the design only. It does not close the finding.
+
+### (1) Split verification vs webhook I1: preserved and strengthened
+
+- Before verification, the statements that run are unchanged: payments EXISTS plus
+  `HandleReadSQL`; KYC and casino `HandleReadSQL` only.
+- They now run in a `READ ONLY` transaction, so PostgreSQL itself refuses writes, `nextval`, and
+  `SELECT … FOR UPDATE/SHARE`.
+- The domain transaction, including its ledger locks, is opened only after verification
+  succeeds. Today it is open during verification. That is a real strengthening: an
+  unauthenticated caller can no longer cause a read-write transaction to be opened.
+- `READ ONLY` does **not** refuse advisory locks (`pg_advisory_xact_lock`) or read-only function
+  calls. So the statement-capture tests (test 9) remain the **primary** I1 control, and
+  `READ ONLY` is defence in depth. That is how the ADR words it in §2.2; it must stay worded that
+  way.
+- Accepted residual: payments' `ProviderAcceptsWebhook` is not re-checked in the domain
+  transaction. Its time-of-check to time-of-use window grows by at most the fetch and verify time
+  (≤ 2 s).
+  - This is acceptable because I4 already defines revocation as removing the *credential*, which
+    the re-check covers, and not disabling the capability.
+  - Today's check is also only READ COMMITTED, so it is not linearizable either.
+- Unauthenticated cost rises from one transaction to two per payments callback (two read-only
+  transactions), and from one to one for KYC/casino. Both are short and independent of the store.
+  This is generic request overload and belongs to the already-registered `PAYWH-RL-1` (webhook
+  rate limiting). See the residuals below.
+
+### (2) Revocation re-check: accepted; the `FOR SHARE` rejection is accepted
+
+- The exposure window moves from [handle read, commit] to [re-check, commit]. The new window is a
+  subset of the old one, and fetch and verify are outside it. The stated semantics of ADR 0093 §4
+  are kept.
+- The re-check binds `fingerprint`, so it pins the exact secret version that verified the
+  callback. It also re-evaluates `not_after` on the database clock at a strictly later time, so it
+  is at least as strict as the verify-time check.
+- Rejecting `FOR SHARE` is **accepted**. A lock would make the revoke `UPDATE` queue behind
+  in-flight bet and settlement transactions. It would also add lock traffic to the bet path. All
+  of that would close a window that ADR 0093 already accepts and that is now narrower.
+- Useful side effect: `Recheck` runs inside a transaction marked by `txscope`. The §4.1 guard
+  therefore makes it **structurally unable** to reach the store.
+- Useful side effect: running under the transaction's RLS with `tenant_id = $1` means a
+  `VerifiedCallback` for tenant A presented inside a `WithTenant(B)` transaction gets 0 rows. So
+  the re-check also binds the token to the transaction's tenant, not only to the parameter.
+- **Gap (condition C4):** under `KeyImplicit` the credential that verified may be the
+  verify_only *predecessor*. The re-check must use the handle of the credential that
+  `VerifyInbound` **returned**, not `CredentialSet.Active`.
+
+### (3) Opaque `VerifiedCallback`: sound in shape, not yet replay-tight
+
+Forgery from outside the package is prevented:
+- The fields are unexported.
+- The zero value is rejected.
+- Each domain has its own type, so a casino token cannot be passed to payments.
+
+Tenant and provider mismatch is rejected. It is also caught by the RLS-bound re-check (see (2)).
+
+Remaining gaps, fixed by conditions C1–C3:
+- **Reuse / late use.** It is a value type, so a copy can be passed to `ReceiveVerifiedCallback`
+  any number of times and at any later time. After the split, the signed-timestamp window is
+  checked in phase 1 only. A retained token (retry loop, queue, a future async path) would be
+  processed after `MaxSkew` without re-verification. Idempotency on `provider_tx_id` limits the
+  financial effect, but the replay property of ADR 0022 §3 point 10 would silently stop holding.
+- **Byte aliasing.** If the token keeps the handler's `body` slice, which is also used after the
+  call, then any mutation between the phases makes phase 2 parse bytes that were never verified.
+  No code does this today. It must be impossible by construction.
+- **Secret lifetime.** The token carries `Credential.Secret`, which `HandleCallback` needs for its
+  defence-in-depth re-verify. It must therefore redact in every formatting path, as `Credential`
+  does (C15).
+
+### (4) `txscope` marking and fail-closed guard: accepted as defence in depth
+
+The guard can be bypassed in these ways:
+- (a) A `context.Background()`/`TODO()` or a detached goroutine inside a `With*` callback. The ADR
+  discloses this.
+- (b) A new `With*` scope function that forgets `Mark`.
+- (c) A transaction or connection obtained through `db.Pool.Raw()`. It has no non-test callers
+  today.
+- (d) A `TenantReader` implementation that runs `fn` on an *outer* transaction and hands back an
+  unmarked context. Only `*db.Pool` does this in production.
+
+Why this is acceptable:
+- None of these can be reached from request input.
+- The guard fails in the safe direction: a false positive gives a 401. A marked context cannot be
+  unmarked.
+- The API shape (no store-reaching method takes a `pgx.Tx`) and the kept test's criteria (4)–(5)
+  are the primary controls.
+
+Condition C6 closes (b) and (c) mechanically.
+
+### (5) Fetcher fairness
+
+- **Per-(scheme, tenant) breaker: ACCEPTED.**
+  - The breaker map is reachable only after a handle row matched for a route-resolved active
+    tenant. An unauthenticated caller therefore cannot create entries for arbitrary tenants.
+  - An attacker can now degrade only the targeted tenant, not every tenant on the backend. That is
+    strictly better.
+- **Protection of the store itself is weakened in *rate*, not in *concurrency*.**
+  - The ADR's §6 claim that global-outage load is "lower than today's 4" is **misleading**. Today
+    one backend breaker drives load to about one probe per 15–60 s once it trips.
+  - Afterwards, a global outage costs about N × 3 counting calls (× 2 attempts with the retry) to
+    trip every tenant's breaker, plus about N probes per cooldown. That is linear in the number of
+    tenants.
+  - Concurrency stays ≤ S = 4 at onset and ≤ D = 2 afterwards, so the process and the store are
+    still protected against a stampede.
+  - Against a fast-failing store with N = 1000 tenants, the steady probe rate is about 17–33 req/s
+    at the 60 s cooldown. That is acceptable for a managed secret store.
+  - A backend-wide breaker gated on a quorum of distinct failing tenants is **not required**. It
+    would bring back some cross-tenant coupling, and the rate is already bounded. The claim must
+    be corrected and the bound pinned (C9).
+- **P = 1: CONDITIONALLY ACCEPTED.**
+  - A tenant whose three or more distinct refs are cold at the same time (after a deploy or a
+    rotation) serializes them.
+  - With about 150 ms store latency, the third ref waits more than `SlotWait` and gets a 401 with
+    no stale fallback.
+  - A synchronous casino bet then fails in a way the player sees, under **healthy** conditions.
+  - C8 settles this by test, with P = 2 pre-approved as the fallback.
+- **D = 2, degraded fail-fast, followers fail-fast, aborted probe not counted: ACCEPTED.**
+- **No negative-cache entry on admission loss: ACCEPTED.** After the split a retry costs no
+  connection, and a negative entry would turn contention into denial.
+- **Onset residual (k ≥ 4 simultaneous unobserved outages leave 0 healthy slots for ≤ 2 s):
+  ACCEPTED as disclosed.**
+  - It affects cold fetches only and holds no connection.
+  - Closing it would require pre-empting in-flight calls.
+- **`GetDirect` outside S/P/D: ACCEPTED.**
+  - It is used only by `PermProviderCredentialRequest`, which is platform-admin-only
+    (`auth/permission.go:540`).
+  - It runs under four-eyes and holds no connection once the guard is in place.
+
+### (6) Test plan and isolated CI lane: per-test ruling (ruling B, condition 3)
+
+Ruling B's conditions 1, 4 and 5 apply to every test admitted to the lane:
+- blocking;
+- no retry or rerun and no `-count` with any-pass logic;
+- one `grep -- '--- PASS: <name>'` guard per test;
+- a single failure is investigated, never rerun until green.
+
+In addition, no [T] test may call `t.Parallel()`.
+
+| Test | Ruling |
+|---|---|
+| `TestStoreOutage_DoesNotPinPool` | **Lane: stays.** The new shape is not a weakening. It is valid only together with M1, which must fail it at pool 10 (criteria 3–4), and with `…ResolveInsideTenantTxRefused`, which covers the old shape. Pool stays 20 (ruling A). |
+| `…_ProductionPoolSize` | **Lane: ACCEPTED.** Same geometry and the same wall-clock proxy. |
+| `…ResolveInsideTenantTxRefused` | **Main lane, not [T].** Replace "< 5 ms" with structural assertions (0 store calls, no slot or flight taken) plus a wall-clock bound of < 100 ms. A 5 ms bound under `-race` in a parallel `./...` run is a flake generator. |
+| 9.2 Fetcher unit tests | **Main lane.** Same rule: assert outcome, store-call counts and "no wait started". Every wall-clock bound must be ≥ 2× the gap it discriminates, e.g. "fail-fast" means < `SlotWait`/2, not < 5 ms. `…PerTenantCap` may keep "≤ `SlotWait` + 50 ms" only as an upper bound, with a lower bound ≥ `SlotWait` − 25 ms, so that a healthy waiter is shown to have waited. |
+| #1 `NormalOperation` | **Lane: ACCEPTED**, because of its p100 bound. |
+| #2 `OneTenantStoreOutage` | **Lane: ACCEPTED.** |
+| #3 `MultipleTenantsOutage` | **Lane: ACCEPTED.** |
+| #3b `SimultaneousOnset_Bounded` | **Lane: ACCEPTED.** Its real 2.3 s wait is part of what it pins. |
+| #4 `Recovery` | **Main lane.** Fake clock; no wall-clock bound allowed. |
+| #5 `ConnectionExhaustion` | **Lane: ACCEPTED.** |
+| #6 `CrossTenant` | **Main lane.** Must not be moved into the lane: its assertions are not timing-based. |
+| #7 `FinancialDuringOutage` | **Lane: ACCEPTED.** It must also assert the ledger post-conditions, which it does. |
+| #8–#12 | **Main lane.** |
+| New tests from C1–C9 | **Main lane**, except C9's rate test, which uses a fake clock and so also runs in the main lane. |
+
+This ruling is consistent with QA §11 item 3. That item may create a *separate* timed step
+for the main-lane resolution-isolation file to manage the time budget. It must not use the
+isolated lane for that purpose. `security` endorses QA items 4–6, in particular the re-check
+DB-error test.
+
+The literals 500 ms, `longSlack` 400 ms and ≤ 4 store calls are reviewed values and must never be
+widened. The "< 500 ms" bounds in tests #2, #3, #5 and #7 are admitted to the lane **only** because
+they measure pool admission. Adding any other test to the lane still needs its own ruling.
+
+### (7) F-POOL-2: severity Medium; the scope is wider than stated; hard sequencing gate
+
+- **Severity: Medium.** It has the same mechanism and the same cross-tenant impact as F-POOL-1.
+  It is not reachable today because every adapter is an in-process MOCK.
+- **The scope is a pattern, not one call.** The same "external I/O inside the tenant transaction"
+  pattern exists at:
+  - `payments.attemptDeposit` (`provider.Deposit`, plus `QueryStatus` in `resolveAmbiguous`, and
+    repeated up to `MaxCascadeDepth`);
+  - `casino` launch (`provider.Launch` after `CreateLaunchSession(ctx, tx, …)`,
+    `casino/orchestrator.go:320–333`);
+  - `kyc.CreateVerification` and `SubmitVerification` (both take `tx`);
+  - `HealthStatus` in payments and casino.
+- **The ADR's claim that the guard makes F-POOL-2 "fail closed … cannot ship silently" is
+  conditional.** It holds only if a real adapter resolves its outbound credential per call through
+  `OutboundResolver` *inside* that transaction. An adapter that resolves before the transaction,
+  or that keeps a client with credentials already loaded, bypasses it completely.
+- **There is also a financial-correctness aspect, for `ledger-finance`.**
+  - If the domain transaction rolls back after the PSP accepted `Deposit`, the PSP holds a request
+    whose `MerchantReference` intent row was never committed.
+  - This is a dual-write hazard, separate from pool pinning.
+- **Sequencing (binding):**
+  - F-POOL-2 must be designed (an ADR under the same INV-POOL rule) and fixed **per domain before
+    that domain's first non-MOCK adapter is wired**.
+  - It is a launch-blocking entry in the next real-provider integration gate.
+  - It does not need to ship in the same change as this ADR.
+  - Register it in `docs/governance/task-registry.md` with this wider scope.
+
+### Conditions
+
+- **C1.** Make `VerifiedCallback` a pointer to an unexported struct that is **single-use**. The
+  first `ReceiveVerifiedCallback` consumes it atomically, and every later use fails closed with
+  `credential_unavailable`.
+- **C2.** Make `VerifiedCallback` **age-bounded**. It records a monotonic `verifiedAt`, and
+  `ReceiveVerifiedCallback` rejects it after 30 s. That keeps the phase-2 start well inside
+  `MaxSkew`, so the replay window of ADR 0022 §3 point 10 still holds end to end.
+- **C3.** On entry, `VerifyCallback` copies the body and clones the headers. It verifies the
+  copy, stores the copy, and passes exactly that copy to `HandleCallback`.
+  `ReceiveVerifiedCallback` takes no `Inbound` parameter. `VerifiedCallback` implements redacting
+  `String`, `GoString`, `Format`, `LogValue` and `MarshalJSON`, and has no exported serialization.
+- **C4.** `HandleID` is set per handle row in `credentialFor`. `Recheck` uses the handle of the
+  credential that `VerifyInbound` **returned** (Active or Previous).
+  - A real `Recheck` fails closed on a zero `HandleID`.
+  - `KindSplitResolver.Recheck` fails closed for an unregistered provider id.
+  - The MOCK `Recheck` is reachable only through the synthetic branch.
+- **C5.** Add the following tests:
+  - test 8 variant: a `KeyImplicit` callback verified by the verify_only predecessor, whose handle
+    is then revoked between the phases, is rejected with 0 rows;
+  - test 10 variants: reuse (C1), age > 30 s (C2), and a `WithTenant(B)` transaction given a valid
+    `VerifiedCallback` for A with `tenantID = A` (0 rows, 0 statements after the re-check);
+  - a body-mutation-between-phases test (C3);
+  - a formatting and redaction test (C3).
+- **C6.** Add a table-driven test that runs every `db.Pool` method whose name starts with `With`,
+  found by reflection so that a new scope function is covered automatically, and asserts
+  `txscope.Held(ctx)` inside `fn`. Add a source guard test that fails on any non-test use of
+  `(*db.Pool).Raw()` outside `internal/db`. `txscope` exposes no unmark function, and its context
+  key type is unexported.
+- **C7.** §2.2 and the ADR 0022 §3 point 9 amendment keep the capture tests as the primary I1
+  control. They must state that `READ ONLY` does not stop advisory locks.
+- **C8.** Extend test #1 with a tenant that has 4 distinct cold refs requested concurrently, with
+  150 ms injected store latency. The pass criterion is 0 rejections.
+  - If P = 1 cannot pass it, **P = 2 is pre-approved** without re-review, provided that
+    P ≤ D = 2 < S = 4 still holds.
+  - In that case §6 must be updated to "one tenant's outage onset leaves ≥ 2 healthy slots" and M3
+    must be re-targeted.
+  - Widening `SlotWait` is **not** permitted as an alternative.
+- **C9.** Correct §6 "Global outage" to state the rate bound (see (5)) instead of "lower than
+  today". Add a fake-clock unit test: N = 50 tenants and a store that fails fast, run over 120 s,
+  with total store attempts ≤ N × 3 × (1 + `StoreMaxRetries`) + (probes allowed by each tenant's
+  cooldown schedule). Add a metric or `warn` log when ≥ 3 distinct tenants on one scheme are
+  degraded at once, so that a real backend outage is visible as one event.
+- **C10.** Record mutations M1–M10 and these new ones in the implementing review:
+  - **M11:** allow `VerifiedCallback` reuse → the C1 test must fail;
+  - **M12:** make `Recheck` use `Active` → the C4/C5 predecessor test must fail;
+  - **M13:** drop `Mark` from one `With*` → the C6 test must fail.
+
+  M1 failing the kept test's production-size variant is **mandatory evidence** that the new call
+  shape is not vacuous.
+- **C11.** Register F-POOL-2 with the wider scope from (7), as launch-blocking for any non-MOCK
+  adapter in payments, casino or KYC. Refer the dual-write aspect to `ledger-finance`.
+
+### Residuals and scope
+
+**Residuals (not F-POOL-1; recorded so they are not lost):**
+- Public webhook routes have no rate limiting (`PAYWH-RL-1`, registered and deferred). After this
+  fix it is the dominant remaining way for one tenant's traffic to affect another's pool share.
+  It should be scheduled no later than the first real provider.
+- The disclosed onset residual in §6.
+
+**Not in scope:**
+- the AWS Secrets Manager adapter and its failure classification;
+- whether the pool-level behaviour of the MOCK-backed simulation handlers matches production;
+- runtime verification (nothing was executed);
+- implementation code, which does not exist yet.
+
+Co-signing this design does not make the resolver path "secure" in general. The implementing diff
+needs its own `security` review against C1–C11.
