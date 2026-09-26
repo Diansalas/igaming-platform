@@ -1,7 +1,9 @@
 # ADR 0090 — Stage 10.1 Definition: PAY-REV-1 and SB-T1-XMIN Remediation
 
-- **Status:** **PROPOSED** — becomes ACCEPTED only on explicit human approval of
-  `docs/plans/stage-10.1-planning-gate-proposal.md` (planning gate G0).
+- **Status:** **ACCEPTED** — approved by the human on 2026-09-26 against
+  planning-gate commit `8561ac2d531995625fc9450c628eaa1a1c2347dd`, **with one
+  scope change: PAY-WH-TENANT-1 is ADDED to Stage 10.1** (see "Human
+  approval and scope amendment" below).
 - **Decision type:** stage definition + short implementation contract
   (precedent: ADR 0087; the stage is small enough not to need a separate
   contract ADR — architect ruling).
@@ -48,11 +50,34 @@ Stage 10.1 implements exactly the scope of the planning report §T:
    reject). Down restores 0091's body verbatim.
 3. Tests, records and gates per report §J, §T.4, §V, §W.
 
+## Human approval and scope amendment (2026-09-26)
+
+The human approved Stage 10.1 exactly as defined in the planning report and
+accepted this ADR, and **added PAY-WH-TENANT-1** (planning report §K/§R.2;
+security finding S-6) as a third, independent workstream. Stage 10.1 is
+therefore:
+
+1. PAY-REV-1 (as above);
+2. SB-T1-XMIN (as above);
+3. **PAY-WH-TENANT-1** — the payments webhook must cryptographically bind
+   the callback to its tenant: the tenant must not be selectable solely
+   from the untrusted URL path; provider and tenant identity are resolved
+   consistently from the verified credential; the signed payload covers the
+   tenant binding; cross-tenant callbacks fail closed without leaking
+   tenant/provider information; replay protection, idempotency and RLS stay
+   intact; the mock provider signs under the same rule (it remains a MOCK,
+   not a real PSP integration); the payments webhook contract is added to
+   OpenAPI (API-DOC-PAYWH). Its design is reviewed by `payments`,
+   `security`, `backend`, `architect`, database/RLS and `qa` before
+   implementation and recorded in
+   `docs/plans/stage-10.1-planning/11-pay-wh-tenant-1-design.md`.
+
+Acceptance gates G1–G8 and the stop point before any AWS/staging deployment
+are as stated in the human's approval.
+
 ## Out of scope
 
-Report §U, notably **PAY-WH-TENANT-1** (payments webhook tenant not bound
-to the verifying credential; launch-blocking for a real PSP; pending the
-human ruling in report §R.2), LEDGER-REV-UNIQ, REV-UNIQ-CASINO, any AI
+Report §U except PAY-WH-TENANT-1 and API-DOC-PAYWH (now in scope): LEDGER-REV-UNIQ, REV-UNIQ-CASINO, any AI
 implementation (ADR 0089), any AWS/staging change, OB-1.
 
 ## Consequences

@@ -3798,18 +3798,18 @@ the W0 five-consecutive-green-run gate.
 
 **Stage 10: COMPLETE** — see `docs/governance/stage-10-completion-report.md`.
 
-## Stage 10.1 — PAY-REV-1 + SB-T1-XMIN remediation — PLANNING GATE (awaiting human approval)
+## Stage 10.1 — PAY-REV-1 + SB-T1-XMIN + PAY-WH-TENANT-1 — APPROVED 2026-09-26 (ADR 0090 ACCEPTED; PAY-WH-TENANT-1 added by the human) — IN PROGRESS
 
 Planning report: `docs/plans/stage-10.1-planning-gate-proposal.md`; stage definition ADR 0090 (PROPOSED); specialist record `docs/plans/stage-10.1-planning/`. Nothing below is started.
 
 | ID | Owner | Status | Scope | Tests | Blockers | Integration |
 |---|---|---|---|---|---|---|
-| PAY-REV-1 | payments (+ ledger-finance for `ledger.Post` routing) | Planned — awaiting G0 | L2 lock + re-check; migration 0092 tenant-leading `deposit_reversal` partial unique index; `ErrReversalAlreadyExists`; 409 + alert + separately committed denial audit | plan §J #1–#12 | human approval | n/a |
-| SB-T1-XMIN | sportsbook (+ ledger-finance review) | Planned — awaiting G0 | migration 0093 body-only fail-closed `pg_xact_status` check | plan §J #13–#19 + NULL/error cases | human approval | n/a |
-| PAY-WH-TENANT-1 | payments + security | **Registered — P1, launch-blocking for any real PSP; outside 10.1 unless the human widens scope** | bind webhook tenant to a per-tenant verifying credential; tenant in the signed payload (ADR 0022 §3) | — | human scope ruling (plan §R.2) | n/a |
+| PAY-REV-1 | payments (+ ledger-finance for `ledger.Post` routing) | In progress | L2 lock + re-check; migration 0092 tenant-leading `deposit_reversal` partial unique index; `ErrReversalAlreadyExists`; 409 + alert + separately committed denial audit | plan §J #1–#12 | human approval | n/a |
+| SB-T1-XMIN | sportsbook (+ ledger-finance review) | In progress | migration 0093 body-only fail-closed `pg_xact_status` check | plan §J #13–#19 + NULL/error cases | human approval | n/a |
+| PAY-WH-TENANT-1 | payments + security | **In scope (added by the human 2026-09-26) — design review in progress** | bind webhook tenant to a per-tenant verifying credential; tenant in the signed payload (ADR 0022 §3) | — | human scope ruling (plan §R.2) | n/a |
 | LEDGER-REV-UNIQ | ledger-finance | Deferred | cross-type, amount-aware "one reversal per original" | — | — | n/a |
 | REV-UNIQ-CASINO | casino + ledger-finance | Deferred (P3) | unique index for `casino_rollback` (lock already exists) | — | data check | n/a |
-| API-DOC-PAYWH | backend | Deferred (docs) | document the payments webhook contract in OpenAPI | — | — | n/a |
+| API-DOC-PAYWH | backend | In scope (with PAY-WH-TENANT-1) | document the payments webhook contract in OpenAPI | — | — | n/a |
 | AI-ARCH-FUTURE | architect (+ security, identity-compliance, bonus-engine, ledger-finance, risk, qa) | **Future requirement — NOT IMPLEMENTED** | ADR 0089 boundary: agents read/propose/simulate; deterministic core validates and executes | ADR 0089 §9 invariants I-1..I-6 when built | future human-authorized stage; future human decisions in ADR 0089 §8 | n/a |
 
 ## How to use this registry (for future stages)

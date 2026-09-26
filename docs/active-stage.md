@@ -1480,7 +1480,11 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 10.1 Planning Gate — PAY-REV-1 + SB-T1-XMIN — PLANNING ONLY, awaiting human approval
+## Current stage: Stage 10.1 — PAY-REV-1 + SB-T1-XMIN + PAY-WH-TENANT-1 — APPROVED 2026-09-26, IN PROGRESS
+
+Approved by the human against `8561ac2` (ADR 0090 ACCEPTED) with PAY-WH-TENANT-1 added. Stop point: before any AWS/staging deployment (human gate).
+
+### Planning gate record (below)
 
 Authorized 2026-09-25 as a planning gate only (no implementation).
 Report: `docs/plans/stage-10.1-planning-gate-proposal.md`; stage definition
