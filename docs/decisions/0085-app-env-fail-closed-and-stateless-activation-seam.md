@@ -116,6 +116,89 @@ new gate and no new use of `Environment`. It is one more consumer of the
 same two-layer gate. See docs/decisions/0022 §3 (Stage 10.2 amendment)
 and docs/decisions/0028 (Stage 10.2 amendment).
 
+#### Amendment (Stage 10.3, ADR 0092) — synthetic-component production guard
+
+*Amended 2026-09-26 (Stage 10.3, ADR 0092; MOCK-ADAPTER-PROD-1, wave W1b).
+Recorded by `architect`. Sources: paper
+`docs/plans/stage-10.3-planning/01-provider-trust-analysis.md` §3 and
+security condition C13, adopted by ruling R8.*
+
+**The gap.** Verified at `c90e591`. `cmd/platform-api/main.go` registers
+these synthetic components in every environment:
+
+- `mock-payments` and `mock-casino`;
+- the sportsbook mock, whose catalogue is synced into the database at
+  startup;
+- `MockPersonResolver`;
+- `MockDocumentStorageProvider`;
+- `MockMalwareScanner`;
+- the email mock;
+- `sportsbook.MockSettlementStatementSource`, for the reconciliation
+  scheduler.
+
+Only the KYC mock is gated.
+
+**The guard.** This is a new reviewed exception to the rule that
+`Environment` never gates a security control. It belongs to a closed set,
+together with `TestSupportRoutesEnabled()`, `mockProviderWiring` and
+`VerifyRuntimeRoleInProduction`.
+
+1. **Markers.** A leaf package declares two markers:
+   - `Synthetic` (`SyntheticComponent()`), implemented by every mock or
+     fake;
+   - a positive `ProductionEligible` marker.
+2. **Production eligibility.** In production, every registered component
+   must implement `ProductionEligible` **and must not** implement
+   `Synthetic`. A new component with no marker is therefore refused by
+   default. Today no component is production-eligible, so this costs
+   nothing now.
+3. **The guard function.** `syntheticGuard(cfg, regs)` is pure. It runs
+   **immediately after `config.Load()`**, before tracing, `db.Connect` and
+   `SyncCatalogue`. If any registered component fails the rule, it returns
+   a named error listing those components, and the process **refuses to
+   start** (exit 1). Components are never silently omitted.
+4. **When the guard applies.**
+   - The guard applies when `APP_ENV=production` **or when `APP_ENV` is
+     missing** (R8).
+   - For this guard, and for the secret-store backend allow-list in
+     ADR 0093 §6, a missing `APP_ENV` is treated as production.
+   - Synthetic components and `devfile://` require `APP_ENV` to be
+     **explicitly present** and in {`development`, `staging`}.
+   - `Config` records whether the value was set explicitly.
+   - Layer 1's handling of explicit values is unchanged. The general
+     `"development"` default for an absent `APP_ENV` also remains for
+     every other consumer.
+5. **No flag bypass.** The guard's only configuration input is the
+   environment. A test runs it with every boolean in `Config` set to true,
+   and again with every one set to false, and it still refuses in
+   production. The only way past it is to remove the synthetic
+   component.
+6. **Coverage.**
+   - `buildRegistrations(cfg)` enumerates everything that `main` wires. A
+     completeness test fails if a component is wired without passing
+     through it.
+   - The AST scan is not based on type names.
+   - `cmd/seed-admin` and `cmd/migrate` wire no mock or provider
+     component, and a test keeps it that way. Verified at `c90e591`:
+     their only internal imports are `audit`, `auth`, `db` and `identity`,
+     and `db` respectively.
+7. **`memory://` is test-only.** The `memory://` secret-store backend can
+   be constructed only from test code (ADR 0093 §6).
+8. **Tests.**
+   - An ordering test in a subprocess: with `APP_ENV=production` and an
+     unreachable `DATABASE_URL`, the process fails with the guard's error,
+     not with a DB error. It is tagged `//go:build integration`.
+   - A matrix covering {production, missing, staging, development} ×
+     {synthetic, eligible, unmarked}.
+   - A negative control proving that the marker scan goes red.
+
+**Consequence (disclosed).** A production binary cannot start until every
+registered domain has a real, production-eligible implementation or is not
+registered at all. Which verticals launch without a real provider is a
+human launch decision. The guard only makes that decision explicit.
+
+**Status.** `NOT IMPLEMENTED` at acceptance. Target: `IMPLEMENTED` in W1b.
+
 ### 2. Stateless-by-construction activation seam (no shared infrastructure)
 
 Rather than replacing the in-memory map with a shared store (Redis, a new

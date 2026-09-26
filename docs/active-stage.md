@@ -1,6 +1,6 @@
 # Active Stage
 
-> **Current stage:** see ["## Current stage"](#current-stage-stage-103--real-provider-trust--casino-financial-readiness--planning-gate-awaiting-human-approval-not-started) section (Stage 10.3 planning gate; staging OFF). Sections below are kept in their historical order.
+> **Current stage:** see ["## Current stage"](#current-stage-stage-103--authorized-2026-09-26-adr-0092--w0-in-progress) section (Stage 10.3 authorized, W0 in progress; staging OFF). Sections below are kept in their historical order.
 
 ## Stage 4H-B0-R7 — Final Financial/Bonus Implementation Gate — Complete
 
@@ -1486,11 +1486,40 @@ none authorized for implementation yet.
 
 *Status note 2026-09-26: all four items were answered by the human in `docs/decisions/0042-human-decision-response.md` Part 2 — G-2: configurable per brand, default (b) route to `player_cash`; `OpenBetSelfExclusionPolicy` default: `VOID_ON_SELF_EXCLUSION`; mixed/bonus-funded cashout: "Not cashout-eligible"; FD-1: "Nullifying" (inactive while bonus-funded bets are not cashout-eligible). Implementation of G-2 brand configurability and of the self-exclusion default/auto-void consumer remains outstanding (ADR 0042 G-2 notes; `docs/plans/stage-10-planning-gate-proposal.md` §5).*
 
-## Current stage: Stage 10.3 — Real Provider Trust & Casino Financial Readiness — PLANNING GATE (awaiting human approval; NOT started)
+## Current stage: Stage 10.3 — AUTHORIZED 2026-09-26 (ADR 0092) — W0 in progress
 
-- Planning gate: `docs/plans/stage-10.3-planning-gate-proposal.md` (specialist papers and
-  reviews in `docs/plans/stage-10.3-planning/`; rulings R1–R15 in §19). Implementation does
-  not start until the human approves HD-10.3-1 (and rules on HD-10.3-2..4 or accepts defaults).
+Real Provider Trust & Casino Financial Readiness. The human authorized the full scope against
+baseline `207c922`. The authorization is recorded in
+`docs/plans/stage-10.3-planning-gate-proposal.md` §22 and supersedes conflicting text in that
+proposal.
+
+- **Stage definition:** `docs/decisions/0092-stage-10-3-definition-real-provider-trust-and-casino-financial-readiness.md`
+  (scope, waves W0 → W1a–d → W2a/b → W3a/b, gates 10.3-W0..W3, status labels).
+- **Credential model:** `docs/decisions/0093-provider-credential-model-and-secret-store.md`,
+  binding for W2a and W3b.
+- **Human rulings:**
+  - HD-10.3-1: full scope approved.
+  - HD-10.3-2: AWS IAM code **excluded**; W3b is backend code plus a local fake only.
+  - HD-10.3-3: KYC players see **status only**.
+  - HD-10.3-4: suspended-tenant casino settlement **unchanged**. The existing behaviour is
+    documented in the ADR 0025 Stage 10.3 amendment.
+- **Deferred:** PAYWH-TS-1, PAYWH-BRAND-1 and PAYWH-RL-1 remain deferred. Timestamp rules for real
+  schemes land in W1a.
+- **W0 (docs only), in progress:**
+  - ADR 0092 and ADR 0093;
+  - "Amendment (Stage 10.3, ADR 0092)" sections in ADR 0022 §3, ADR 0085 §1, ADR 0025,
+    ADR 0082 (A6) and ADR 0028;
+  - a pointer in `docs/architecture/08-casino-integration-architecture.md` §9a;
+  - the task registry "Stage 10.3" section.
+- **Nothing is implemented yet.** Every Stage 10.3 deliverable is `NOT IMPLEMENTED`, except
+  KYC-REASON-BOUND-1, which is `PARTIALLY IMPLEMENTED`: the model exists, the bound does not.
+- **Specialist inputs:**
+  - the planning papers and reviews are in `docs/plans/stage-10.3-planning/`;
+  - rulings R1–R15 are in the proposal's §19;
+  - the binding per-wave test plan is in `04-review-qa.md` §4;
+  - red-before-green evidence goes in `docs/plans/stage-10.3-planning/evidence/`.
+- **Stop point:** the Stage 10.3 completion gate (after W3). The next stage needs explicit human
+  authorization.
 - Roadmap reconciliation: `docs/plans/stage-10.3-planning/00-roadmap-reconciliation.md`.
 - **AWS staging: OFF.** Torn down 2026-09-26 by the governed `deploy.sh down`
   (`docs/governance/staging-teardown-2026-09-26.md`). Development continues locally; items

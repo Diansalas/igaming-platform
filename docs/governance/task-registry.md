@@ -3862,26 +3862,31 @@ Records-only entries from the Stage 10.3 planning reconciliation (`docs/plans/st
    remain as the historical record; a new stage adds a new `## Stage NN`
    section below the most recent one.
 
-## Stage 10.3 — Real Provider Trust & Casino Financial Readiness — PLANNING GATE (not approved; nothing started)
+## Stage 10.3 — Real Provider Trust & Casino Financial Readiness — AUTHORIZED 2026-09-26 (ADR 0092) — IN PROGRESS
 
-Proposal: `docs/plans/stage-10.3-planning-gate-proposal.md`. All rows are **Proposed** until the human
-approves HD-10.3-1.
+Proposal: `docs/plans/stage-10.3-planning-gate-proposal.md`. The human authorization and rulings
+HD-10.3-1..4 are recorded in its §22 and in
+`docs/decisions/0092-stage-10-3-definition-real-provider-trust-and-casino-financial-readiness.md`.
+The credential model is in ADR 0093. W0 (documents only) is in progress.
+"Approved — W<n> pending" means authorized, with implementation not yet started.
 
 | ID | Owner | Status | Scope | Wave |
 |---|---|---|---|---|
-| WH-VENDOR-SCHEME-1 | architect + security (+ payments, casino, identity-compliance) | Proposed (Stage 10.3) | per-adapter VerificationScheme, orchestrator-enforced verify, conformance suite SC1–SC13 | W1a |
-| MOCK-ADAPTER-PROD-1 | architect + devops + security | Proposed (Stage 10.3) | synthetic marker + production startup guard (missing APP_ENV = production) | W1b |
-| CAS-CAP-ROLLBACK-1 | casino + ledger-finance | Proposed (Stage 10.3) | capability gates new bets only; tombstone always; late-original named rejection; CHECK migration | W1c |
-| CAS-MULTIBET-WIN-1 (G-1) | casino + ledger-finance | Proposed (Stage 10.3) — new finding | two-cash-bet round returns 500 on any win; characterise then fix | W1c |
-| KYC-REASON-BOUND-1 | identity-compliance | Proposed (Stage 10.3) | bounded staff-only raw reason; player reason_code (wording = HD-10.3-3) | W1d |
-| PROV-CRED-RESOLVER-1 | architect + security + payments | Proposed (Stage 10.3) | provider_credential_handles (FORCE RLS, tenant-namespaced refs), resolver, four-eyes activation, admin API | W2a |
-| PROV-OUTBOUND-CRED-1 | payments + security | Proposed (Stage 10.3) — new finding | outbound calls carry tenant + resolved credential; per-call resolution | W2a |
-| KYC-PROVIDER-SELECT-1 (O4) | identity-compliance | Proposed (Stage 10.3) | remove hard-coded Provider("mock") in kyc_handlers.go | W2a |
-| CAS-RECON-1 | ledger-finance + casino | Proposed (Stage 10.3) | casino_consistency C1–C7 + rejection record | W2b |
-| CAS-RECON-STMT-1 | ledger-finance + casino | Proposed (Stage 10.3) — first to cut | casino_statement with MOCK source; real source PROVIDER DEPENDENT | W3a |
-| SECRETSTORE-AWS-1 | devops + security | Proposed (Stage 10.3) | awssm backend code + local fake; IAM/apply = HD-10.3-2 + STAGING REQUIRED | W3b |
-| CI-FLAKE-281 | devops + qa | Proposed fix in 10.3 (ruling R12) | raise/scale Stage 9 concurrent-login ceiling as a reviewed test change | W1 |
-| PAYWH-TS-1 | payments + security | To close as superseded when the W0 ADR 0022 point-10 amendment is recorded (R4) | — | W0 |
+| STAGE-10.3-W0 | architect (+ orchestrator) | In progress — docs only | ADR 0092 (stage definition), ADR 0093 (provider credential model and secret store); Stage 10.3 amendments to ADR 0022 §3, ADR 0085 §1, ADR 0025, ADR 0082 (A6), ADR 0028; pointer in `08-casino-integration-architecture.md` §9a; this registry; `docs/active-stage.md` | W0 |
+| WH-VENDOR-SCHEME-1 | architect + security (+ payments, casino, identity-compliance) | Approved — W1a pending | per-adapter VerificationScheme, orchestrator-enforced verify, conformance suite SC1–SC13 incl. provider-specific timestamp/replay rules (ADR 0022 §3 Stage 10.3 amendment, point 10) | W1a |
+| MOCK-ADAPTER-PROD-1 | architect + devops + security | Approved — W1b pending | synthetic marker + production startup guard (missing APP_ENV = production) | W1b |
+| CAS-CAP-ROLLBACK-1 | casino + ledger-finance | Approved — W1c pending | capability gates new bets only; tombstone always; late-original named rejection; CHECK migration | W1c |
+| CAS-MULTIBET-WIN-1 (G-1) | casino + ledger-finance | Approved — W1c pending (new finding) | two-cash-bet round returns 500 on any win; characterise then fix | W1c |
+| KYC-REASON-BOUND-1 | identity-compliance | Approved — W1d pending | bounded (512 B, sanitised) staff-only raw reason; status-only for players (HD-10.3-3: no reason_code, no provider text on any player surface) | W1d |
+| PROV-CRED-RESOLVER-1 | architect + security + payments | Approved — W2a pending (ADR 0093) | provider_credential_handles (FORCE RLS, tenant-namespaced refs), resolver, four-eyes activation, admin API | W2a |
+| PROV-OUTBOUND-CRED-1 | payments + security | Approved — W2a pending (new finding) | outbound calls carry tenant + resolved credential; per-call resolution | W2a |
+| KYC-PROVIDER-SELECT-1 (O4) | identity-compliance | Approved — W2a pending | remove hard-coded Provider("mock") in kyc_handlers.go | W2a |
+| CAS-RECON-1 | ledger-finance + casino | Approved — W2b pending | casino_consistency C1–C7 + rejection record | W2b |
+| CAS-RECON-STMT-1 | ledger-finance + casino | Approved — W3a pending (first to cut) | casino_statement with MOCK source; real source PROVIDER DEPENDENT | W3a |
+| SECRETSTORE-AWS-1 | devops + security | Approved — W3b pending | awssm backend code + local fake only; IAM code EXCLUDED (HD-10.3-2 — future human decision); apply/drills STAGING REQUIRED | W3b |
+| CI-FLAKE-281 | devops + qa | Approved — W1 pending (ruling R12; resolve if reproducible, never weaken thresholds) | raise/scale Stage 9 concurrent-login ceiling as a reviewed test change | W1 |
+| PAYWH-TS-1 | payments + security | Deferred (remains open per §22; timestamp rules for real schemes land in W1a) | closure decided at the 10.3 completion gate on evidence; R4 "superseded" withdrawn | — |
+| SUSP-TENANT-SETTLE-1 | architect + casino + ledger-finance | Decided UNCHANGED (HD-10.3-4) — existing behaviour documented in ADR 0025 amendment | suspended/closed tenant: shared webhook preamble returns uniform 401 (`tenant_inactive`) before verification for every event type; no posting/tombstone/audit; exposure may strand; change needs a new human decision | — |
 | PAYWH-BRAND-1 | payments | Deferred (trigger: tenant with per-brand merchant accounts at one provider) | — | — |
 | PAYWH-RL-1 | payments + devops | Deferred (pre-launch) | — | — |
 | LEDGER-MANUAL-ADJ-4EYES-1 | ledger-finance + security | Registered — blocks real-money go-live; own later stage | four-eyes manual adjustment / mismatch resolution API | — |

@@ -234,6 +234,93 @@ become) a real vendor's contract before one exists.
 > tolerance). Implementation status is tracked in
 > `docs/governance/task-registry.md` (Stage 10.2).
 
+### Amendment (Stage 10.3, ADR 0092) — provider reason bound
+
+> **Amendment 2026-09-26 (Stage 10.3, ADR 0092; KYC-REASON-BOUND-1, wave
+> W1d). Recorded by `architect`.** Sources:
+> - paper `docs/plans/stage-10.3-planning/03-kyc-reason-bound-analysis.md`
+>   (`identity-compliance`), as **narrowed by HD-10.3-3**;
+> - security condition C16, adopted by ruling R10;
+> - QA condition 2.
+>
+> The paper's player-facing `reason_code` enum and column are
+> **superseded** and not built.
+>
+> **Current state, verified at `c90e591`.** `ProviderResult.Reason`
+> flows unbounded into three places:
+> - `kyc_verifications.reason`, a plain `TEXT` column (migration `0040`);
+> - the `audit_log.metadata` key `"reason"` (`internal/kyc/provider.go:388, 428`);
+> - the **player** response `playerVerificationResponse.Reason`
+>   (`internal/httpserver/kyc_handlers.go:75, 83`) and the OpenAPI schema
+>   `PlayerVerification.reason`.
+>
+> §5's "short, non-sensitive, machine-readable code" was a convention
+> only, never an enforced bound.
+>
+> **Decision.**
+> 1. **Bound at ingestion.** The provider reason is normalised once, at
+>    the adapter/normalisation boundary, by a `kyc` helper that every
+>    adapter's `HandleCallback` must call. The helper:
+>    - validates UTF-8, replacing invalid sequences;
+>    - strips C0/C1 control characters, bidi controls
+>      (U+202A–U+202E, U+2066–U+2069) and format or zero-width characters
+>      (U+200B–U+200F);
+>    - truncates to at most **512 bytes** without splitting a rune;
+>    - records any truncation as a flag in the audit metadata.
+> 2. **DB backstop.** Migration 0095 adds
+>    `CHECK (reason IS NULL OR octet_length(reason) <= 512)` to
+>    `kyc_verifications.reason`, after an in-migration normalisation of
+>    existing rows. Those rows are synthetic mock data only, and the
+>    migration comment says so. The migration adds **no `reason_code`
+>    column** (HD-10.3-3).
+> 3. **The CHECK binds every writer**, including the staff review path
+>    (`internal/kyc/verification_service.go`, which also writes `reason`).
+>    - The staff path must validate its input at the API boundary, so that
+>      the CHECK never surfaces as a 500.
+>    - Whether an oversize staff reason is rejected or normalised is
+>      `identity-compliance`'s decision in W1d.
+> 4. **Players see status only (HD-10.3-3).**
+>    - Remove `reason` from `playerVerificationResponse` and from the
+>      `PlayerVerification` OpenAPI schema.
+>    - Add no `reason_code`.
+>    - Put no provider text on any player surface, under any field name.
+>    - This follows the Stage 10.2 `provider_reference` removal precedent.
+> 5. **Staff and compliance get the bounded text.**
+>    - `verificationResponse.Reason` and the `Verification` schema keep
+>      it, documented as "bounded to 512 bytes, sanitised".
+>    - Staff UIs must HTML-escape it, and a test must prove they do.
+>    - Access stays behind the existing staff KYC permissions and tenant
+>    RLS.
+> 6. **Logs are redacted.**
+>    - The reason text never appears in application or HTTP logs.
+>    - Only the bounded value reaches `audit_log`, which is itself
+>      staff-only.
+>    - Residual, disclosed: JSONB audit metadata is unbounded in
+>      principle, as it is for every other audit field.
+> 7. **Tests** (`04-review-qa.md` §4 W1d, as narrowed by HD-10.3-3):
+>    - boundary cases at 511, 512 and 513 bytes, including multi-byte
+>      characters;
+>    - stripping of control and bidi characters;
+>    - the stored value, not only the in-memory one;
+>    - the player response never contains the raw text;
+>    - tenant isolation, run as the NOBYPASSRLS role;
+>    - a conformance case that fails rather than skips, together with a
+>      broken fixture that proves it goes red;
+>    - red-before-green evidence of today's unbounded behaviour.
+>
+> **Not in scope, flagged.** The following are separate items, not W1d:
+> - `kyc_documents.rejection_reason` is also unbounded `TEXT` and is
+>   returned on **player** document routes
+>   (`kyc_handlers.go:102, 306, 337`). It is staff-entered, not provider
+>   text, so HD-10.3-3 does not strictly cover it. It is recorded for
+>   `identity-compliance` and the human.
+> - Hosted-KYC session token (KYC-HOSTED-SESSION-1).
+> - Sanctions/PEP interface (KYC-SANCTIONS-IF-1).
+> - F-5 `error`-callback audit dedupe, with the first real KYC adapter.
+>
+> **Status.** `PARTIALLY IMPLEMENTED` today: the model exists but no bound
+> is enforced. Target: `IMPLEMENTED` in W1d.
+
 ### 7. Cross-tenant reuse and Person-resolution integration — OPEN DECISIONS
 
 Recorded explicitly, not resolved here:

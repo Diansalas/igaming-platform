@@ -316,6 +316,48 @@ gaming stake limits are out of scope this stage (ADR 0025 §4).
 (never persisted) — identical shape and rationale to
 `payment-orchestration.md` §6's circuit breaker.
 
+### 9a. Capability contract and casino reconciliation (Stage 10.3 pointer)
+
+*Added 2026-09-26 (Stage 10.3, ADR 0092).* Status: `NOT IMPLEMENTED` until
+W1c and W2b land. The binding text lives in the ADRs and papers below and
+is not repeated here.
+
+- **Capability contract.** Source: ADR 0025, "Amendment (Stage 10.3,
+  ADR 0092)".
+  - The capability gates **new bets only**. The gate is in `postBet` and
+    uses the session's `BrandID`.
+  - Win, rollback, replay and tombstone are never gated.
+  - A rollback of an unseen original always writes a tombstone.
+  - A late original after its tombstone gets a named rejection.
+  - A CHECK enforces
+    `NOT supports_bet OR (supports_win AND supports_rollback)`.
+  - The emergency stop is credential revocation. There is no settlement
+    freeze.
+  - Suspended-tenant behaviour is unchanged (HD-10.3-4): the shared
+    webhook preamble rejects the callback before verification.
+  - Lock order: L0.1 in `postRollback` (ADR 0082 Amendment A6).
+- **Casino reconciliation.** Source:
+  `docs/plans/stage-10.3-planning/02-casino-financial-analysis.md` §2.
+  - The **`casino_consistency`** stream runs checks C1–C7:
+    - C1 round binding;
+    - C2 posting shape;
+    - C3 orphan win;
+    - C4 rollback linkage;
+    - C5 tombstone backstop;
+    - C6 unposted provider-asserted event;
+    - C7 tombstone later matched by an original.
+  - The stream runs on the existing `reconciliation_runs` and
+    `reconciliation_mismatches` tables.
+  - Its input is the verified-only, append-only
+    **`casino_callback_rejections`** record.
+  - It detects only and never auto-corrects. Ageing cash rounds are a
+    metric, not a P1.
+  - The **`casino_statement`** stream matches against a provider-neutral
+    `CasinoStatementSource`. Its only source today is **MOCK** (W3a,
+    first to cut). A real source is `PROVIDER DEPENDENT`.
+  - Compensation depends on LEDGER-MANUAL-ADJ-4EYES-1, which is not
+    built.
+
 ## 10. Provider routing
 
 `Orchestrator.LaunchGame` resolves a game's provider from `casino_games.

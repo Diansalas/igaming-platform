@@ -332,6 +332,195 @@ already performs, reused verbatim), never asserted by the payload.
 > Implementation status is tracked in `docs/governance/task-registry.md`
 > (Stage 10.2).
 
+### Amendment (Stage 10.3, ADR 0092) — casino capability contract
+
+> **Amendment 2026-09-26 (Stage 10.3, ADR 0092; CAS-CAP-ROLLBACK-1 and
+> CAS-MULTIBET-WIN-1, wave W1c; CAS-RECON-1 pointer, wave W2b). Recorded
+> by `architect`.**
+>
+> - **Sources.** The contract is `ledger-finance`'s (paper
+>   `docs/plans/stage-10.3-planning/02-casino-financial-analysis.md`
+>   §1.3–§1.10, §3 G-1). Security §5 ruled on it, and rulings R9 and C14
+>   adopt it.
+> - **Concurrence required.** `casino` must concur on the domain parts:
+>   the E1/E3 response shape and the launch-coherence rule.
+>
+> **Supersedes:**
+> - the Stage 10.2 amendment's "the casino capability therefore stays a
+>   money-path kill switch for callbacks";
+> - the Stage 4A review fix that checks the tenant-wide capability "for
+>   every event type" in `ReceiveCallback`.
+>
+> The Stage 10.2 divergence from ADR 0022 §3's "`ProviderCapability.status`
+> governs routing only" is **closed**.
+>
+> **Current behaviour being replaced** (verified at `c90e591`):
+> - `ReceiveCallback` loads the **tenant-wide** capability after
+>   verification (`LoadCapability(…, uuid.Nil, …)`, `orchestrator.go:662`).
+> - It returns 503 for **every** event type when that capability is
+>   missing or disabled, and for each event type whose `supports_*` flag
+>   is off (`:670-686`).
+> - As a result, a verified win or rollback can be refused, and the
+>   rollback of an unseen original writes no tombstone.
+>
+> **Contract (binding).**
+> 1. **Capability gates new bets only.** Settlement of existing exposure
+>    is never blocked by capability status, a flag, or a missing row.
+>    This covers win, rollback, replay and tombstone.
+>    - The pre-dispatch capability check and the win/rollback flag checks
+>      in `ReceiveCallback` are removed.
+>    - Win and rollback no longer read the capability at all.
+> 2. **Where the gate sits: `postBet`.** The gate runs after these steps:
+>    - the L0.1 delivery lock;
+>    - the idempotency short-circuit, so a replayed bet returns its
+>      original result;
+>    - the tombstone check (item 4);
+>    - session resolution.
+>
+>    The gate resolves `LoadCapability(ctx, tx, tenantID,
+>    session.BrandID, providerID)` using **the session's `BrandID`**, the
+>    same way `LaunchGame` resolves it (`orchestrator.go:284`). This
+>    closes the tenant-wide/brand-row mismatch.
+>
+>    A bet passes only if all of these hold: `found`, `status = active`,
+>    `supports_bet`, and the session asset is in `supported_assets`.
+>
+>    The gate is a plain, lock-free read that runs before L0.2, so a
+>    rejected bet never takes the player lock.
+>
+>    A rejected new bet posts nothing and keeps its existing 503. `casino`
+>    may change that to a definitive `declined`.
+> 3. **An unseen-original rollback always writes its tombstone**, whatever
+>    the capability state.
+>    - The tombstone `CorrelationID` becomes deterministic: the round
+>      correlation when a `RoundID` is present, otherwise a v5 UUID of the
+>      tombstone key. Today it is random (`uuid.New()`,
+>      `postRollbackTombstone`).
+>    - Tombstones are exempt from the correlation comparison on replay.
+> 4. **A late original after its tombstone gets a named rejection**,
+>    `ErrOriginalTombstoned`, not the current untyped unique-violation 500.
+>    - For a bet (E3), the check runs before RG, Risk and round binding, so
+>      it has no side effects.
+>    - A win whose own `provider_tx_id` is tombstoned (E10) is rejected
+>      the same way.
+>    - Nothing posts, and the result is deterministic and not retryable.
+>    - It is durably recorded in one of two ways:
+>      - a `declined` result with `decline_reason = "original_rolled_back"`
+>        and a `casino_bet.rejected_tombstoned` audit row in the committing
+>        transaction; or
+>      - a 409 plus the W2b rejection record.
+>
+>      `casino` chooses which.
+> 5. **Schema invariant.** Migration 0094 adds
+>    `CHECK (NOT supports_bet OR (supports_win AND supports_rollback))` on
+>    `casino_provider_capabilities`.
+>    - Building the constraint *is* the pre-flight. A `count(*)` under
+>      FORCE RLS would see zero rows.
+>    - The migration refuses rather than editing configuration.
+>    - `WriteCapability` rejects a bet capability without win and rollback
+>      (`ErrCapabilitySettlementIncomplete`, 400).
+>    - A conformance case fails any adapter that declares `SupportsBet`
+>      without `SupportsWin` and `SupportsRollback`.
+>    - `supports_win` and `supports_rollback` become configuration
+>      assertions, no longer runtime gates.
+>    - Capability-write audit rows record the before and after values of
+>      every `supports_*` flag, `status` and `supported_assets`.
+> 6. **Lock order.** `postRollback` takes L0.1 on the **original**
+>    reference before its L2 `FOR UPDATE`. A late original and its
+>    rollback therefore serialize deterministically. See ADR 0082,
+>    Amendment A6 (`ledger-finance`-owned).
+> 7. **G-1: multi-bet cash rounds.**
+>    - When every un-reversed origin row is `player_cash` on one wallet and
+>      one asset, `resolveWinOrigin` resolves to that wallet instead of
+>      returning `ErrAmbiguousMultiOriginRound`.
+>    - The following remain unchanged: `ErrCorrelationWalletCollision`,
+>      `ErrMixedFundingUnsupported`, and every locked or bonus outcome.
+>    - These errors map to a 409 integrity alert instead of a 500:
+>      `ErrAmbiguousMultiOriginRound`, `ErrCorrelationWalletCollision`,
+>      `ErrLockAlreadyReleased`, `ErrMixedFundingUnsupported` and
+>      `ErrBonusBetNotLocked`.
+>    - A characterization test comes first.
+> 8. **Free rounds and jackpots.** A real adapter must not map a free-round
+>    or jackpot payout that has no platform bet to a win. The conformance
+>    rule enforces this until a design exists (ADR 0092 out of scope).
+>
+> **Emergency stop: credential revocation, not a settlement freeze
+> (R9/C14).**
+> - **Disabling the capability stops new bets.**
+> - **Revoking the credential** stops every callback from that key, bets
+>   included. It takes effect immediately, per request (ADR 0093 §4). It
+>   strands open exposure.
+> - Revocation is single-actor and reason-coded. Tenant admins and
+>   platform admins can both do it (ADR 0093 §3). It never requires
+>   four-eyes.
+> - **No four-eyes "settlement freeze" is built.**
+> - **No real casino resolver or adapter is wired in any environment**
+>   until W2a revocation is implemented and its immediacy is tested,
+>   including revocation racing an in-flight request. W1c lands before W2a
+>   only because casino is MOCK-only until then.
+> - **Runbook.** Revocation after a compromise triggers a mandatory
+>   `casino_consistency` run over the compromise window before a
+>   replacement key is activated. Once a real source exists, a
+>   `casino_statement` run is also required.
+> - Forged wins are corrected only by compensating entries. That depends
+>   on LEDGER-MANUAL-ADJ-4EYES-1, which is not built and is a go-live
+>   blocker.
+> - Registered, not built:
+>   - CAS-WIN-ANOMALY-1, a detection-only alert before real-money casino
+>     go-live;
+>   - PROV-REVOKE-ALL-1, a cross-tenant revoke, triggered when a second
+>     tenant shares a provider.
+>
+> **Suspended tenant: UNCHANGED (HD-10.3-4).** No new policy. The existing
+> behaviour, verified in `internal/httpserver/webhook_preamble.go` at
+> `c90e591`, is:
+> - The shared `webhookPreamble` runs these steps in order:
+>   1. the provider-id charset check;
+>   2. the bounded body read;
+>   3. the MOCK header format check (`Scheme.CheckPreamble`);
+>   4. the platform-scoped `identity.GetTenantBySlug`;
+>   5. `if t.Status != "active"`.
+>
+>   `tenants.status` is one of `active`, `suspended` or `closed` (migration
+>   `0001`).
+> - For a `suspended` or `closed` tenant, step 5 writes the **uniform 401
+>   "callback rejected"** and logs one allow-listed auth-failure line with
+>   reason `tenant_inactive`.
+> - This happens **before** `WithTenant`, before credential resolution
+>   and before verification. The event type lives inside the unverified
+>   body and is never read.
+> - The rejection is therefore identical for bet, win and rollback. It is
+>   also identical for the payments and KYC routes, which share the
+>   preamble.
+> - Nothing is written: no ledger posting, no tombstone, no audit row. W2b
+>   adds no rejection record either, because that record is written only
+>   for verified callbacks.
+> - **Consequences, disclosed:**
+>   - While a tenant is suspended, its open rounds cannot settle.
+>   - An unseen-original rollback delivered during the suspension leaves
+>     no tombstone. If the provider gives up, a late original that arrives
+>     after reactivation is not blocked. Detection relies on casino
+>     reconciliation: C-stream metrics now, and the statement once a real
+>     source exists.
+>   - After reactivation, redelivered callbacks follow the normal contract.
+> - W1a moves the scheme lookup and `Extract` ahead of the tenant lookup.
+>   The tenant-status check stays a pre-verification uniform 401, so this
+>   behaviour is unchanged.
+> - Changing it, for example to let a suspended tenant's verified
+>   settlement through, needs a new human decision. It may carry licensing
+>   weight.
+>
+> **Reconciliation pointer (W2b/W3a).** Three pieces are specified in
+> paper 02 §2 and follow the `sportsbook_settlement` pattern (advisory
+> lock, append-only evidence, a P1 log line, never auto-correcting):
+> - the `casino_consistency` stream, checks C1–C7;
+> - the verified-only, append-only `casino_callback_rejections` record;
+> - the `casino_statement` stream, with a MOCK `CasinoStatementSource`.
+>
+> **Status.** `NOT IMPLEMENTED` at acceptance. Target:
+> `IMPLEMENTED — MOCK provider only` (W1c). A real aggregator resolver
+> remains `NOT IMPLEMENTED`.
+
 ### 6. Bet / Win / Rollback — no second balance system, existing ledger only
 
 `financial-transaction-flows.md` §5-7 (already `BLUEPRINT`-status, not

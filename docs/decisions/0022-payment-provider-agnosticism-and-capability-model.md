@@ -466,6 +466,173 @@ never *asserts* the tenant.
 >   completion report. This amendment records the binding contract, not
 >   completion.
 
+#### Amendment (Stage 10.3, ADR 0092)
+
+> **Amendment 2026-09-26 (Stage 10.3, ADR 0092; WH-VENDOR-SCHEME-1).
+> Recorded by `architect`.** Sources: paper
+> `docs/plans/stage-10.3-planning/01-provider-trust-analysis.md` §1–§2 and
+> the security review `04-review-security.md` (C3, C4, C5, C9, C10, C11),
+> as adopted by rulings R3, R4 and R6. `security` concurrence on points 2,
+> 9 and 10 is given in §1.4 of that review. Points 1–9 remain binding
+> except where changed below. The credential and secret-store model is in
+> ADR 0093.
+>
+> **Per-adapter `VerificationScheme` (removes the Stage 10.2 "known
+> constraint").**
+> - Header parsing and verification move from the shared, hard-coded MOCK
+>   `Scheme.ParseHeaders` into a per-adapter capability. Each domain's
+>   provider interface gains `WebhookScheme() webhookauth.VerificationScheme`.
+> - The interface has three methods:
+>   - `Extract(in) (AuthMaterial, Reason, bool)`. It is pure: no DB, no
+>     secret, no clock and no body parsing. On failure it returns only
+>     `signature_missing` or `signature_invalid`.
+>   - `Verify(creds CredentialSet, in, m, now)`. It verifies the raw bytes
+>     in constant time and returns a closed `Reason` alongside the single
+>     sentinel `ErrSignatureInvalid`.
+>   - `Properties() SchemeProperties`, which declares `Binding`,
+>     `KeySelection`, `SignedTimestamp` and `MaxSkew`.
+> - **The key-selection mode comes only from `Properties().KeySelection`,
+>   never from the request (R3/C3).**
+>   - A `KeyFromHeader` scheme whose key id is absent yields
+>     `signature_missing`. The resolver is never called in multi-row mode
+>     for it.
+>   - A `KeyFromHeader` scheme never receives a `Previous` credential.
+> - **Properties are validated at registration.** For a non-synthetic
+>   scheme, any of the following makes the process refuse to start:
+>   `SignedTimestamp = false`, `MaxSkew <= 0`, `MaxSkew` above the cap, or
+>   an unknown `Binding` or `KeySelection`. The conformance suite proves a
+>   declaration is truthful; the startup check proves it is permitted.
+> - The MOCK `Scheme` implements `VerificationScheme` unchanged
+>   (`SignedTenant`, `KeyFromHeader`, `SignedTimestamp = false`). Its bytes
+>   stay identical (`TestPaymentsParameters_ByteIdentical`).
+> - The preamble looks up the scheme by provider id before looking up the
+>   tenant (`provider_unregistered`). It gives the same uniform 401.
+> - **The MOCK scheme is not the protocol of any real provider.** A real
+>   provider is declared supported only after its actual
+>   documentation/contract is implemented and tested, including its
+>   known-answer vectors (ADR 0092).
+>
+> **Verify is enforced by the orchestrator (points 7/8).**
+> - Each domain's `ReceiveCallback` calls `scheme.Verify` itself, after
+>   resolution and before `HandleCallback`. An adapter therefore cannot
+>   skip verification.
+> - `HandleCallback` may re-verify as defence in depth. It parses only
+>   bytes that have already been verified.
+> - Point 7's error contract is unchanged.
+> - Each domain has a mutation test ("delete the orchestrator's `Verify`
+>   call" must go red). A compile-time `Verified` token is recommended
+>   (security R-1) but not required.
+>
+> **Distinct reason `timestamp_out_of_window` (R3/C10).**
+> - It is a new closed `Reason`. It is reported only when the MAC over
+>   the same bytes is otherwise valid; otherwise the reason is
+>   `signature_invalid`.
+> - The HTTP response stays the uniform 401.
+> - The enum and the allow-list log tests are updated.
+>
+> **Point 2, clarified: key-id overlap (R4/C4).**
+> - "Exactly one credential" means exactly one (tenant, domain, provider,
+>   purpose) credential binding.
+> - For `KeyImplicit` schemes only, the `active` key and **at most one**
+>   `verify_only` predecessor of that same binding may be tried, and only
+>   before its `not_after`.
+> - Both are evaluated without short-circuiting. The log records which
+>   `key_id` verified.
+> - The overlap window is capped at 7 days, `not_after` can only shrink,
+>   and the DB enforces a limit of one `verify_only` (ADR 0093 §1).
+> - A trial across tenants, domains, providers or purposes stays
+>   forbidden.
+>
+> **Point 9, allowance: one handle read before verification (R4/C5).**
+> - Before KYC or casino verification, exactly **one** further statement
+>   is allowed: the resolver's plain, lock-free, read-only `SELECT` on
+>   `provider_credential_handles`, pinned to that shape, with an explicit
+>   `tenant_id = $1` predicate in addition to RLS.
+> - That statement takes no `FOR UPDATE`/`SHARE`, no advisory lock, and
+>   writes nothing, including audit rows.
+> - The K7/C7 statement-capture tests pin its exact SQL. Any other
+>   pre-verification statement still fails them.
+> - Payments keeps its point-4 read `ProviderAcceptsWebhook`, plus this
+>   read, and nothing else.
+> - A DB error on this read gives a response that does not depend on
+>   whether a handle exists.
+> - This resolves the conflict for a DB-backed resolver between point 4
+>   ("credential-handle lookups") and point 9.
+>
+> **New point 10: timestamp and replay rules.**
+> - Every real (non-synthetic) scheme declares its provider-specific
+>   signed-timestamp and replay rules, taken from the vendor's own
+>   documentation: `SignedTimestamp = true` and `0 < MaxSkew ≤ 10 minutes`.
+> - A larger vendor tolerance needs a recorded `security` sign-off in that
+>   adapter's review.
+> - The timestamp must be inside the signed input. The platform clock is
+>   the only `now`.
+> - A vendor without signed timestamps cannot be integrated without a
+>   further ADR (as with point 3's "neither" clause).
+> - The MOCK is exempt only because it can never run in production
+>   (ADR 0085 §1, Stage 10.3 amendment), its bytes are frozen, and replay
+>   has no effect because of idempotency.
+> - **PAYWH-TS-1 stays DEFERRED/open (ADR 0092; proposal §22).** R4's
+>   "closes as superseded" is withdrawn. Closure is decided at the 10.3
+>   completion gate, on evidence. F-5, which dedupes the KYC `error` audit
+>   on replay, is carried to the first real KYC adapter.
+>
+> **Conformance suite `internal/webhookauth/webhookauthtest`
+> (`RunSchemeConformance`), cases SC1–SC13** (paper 01 §1.2):
+> - SC1: a genuine signature verifies.
+> - SC2: tampering is rejected.
+> - SC3: tenant binding.
+> - SC4: provider binding.
+> - SC5: `Extract` rejects missing or malformed headers and is fuzzed for
+>   panics.
+> - SC6: a key-id mismatch is rejected.
+> - SC7: the replay window. It is **mandatory and fails rather than skips
+>   for every real scheme**.
+> - SC8: the signed account id must equal the bound account.
+> - SC9: rotation overlap.
+> - SC10: an empty or short secret is rejected.
+> - SC11: the error value is `ErrSignatureInvalid` and contains no body,
+>   secret or fingerprint.
+> - SC12: duplicate headers behave deterministically.
+> - SC13: the MOCK cross-domain check.
+>
+> The following are mandatory (R6/C9):
+> 1. **Vendor known-answer vectors.** Each real scheme has at least one
+>    vector from the vendor's documentation or a recorded sandbox
+>    delivery. The vector is committed with its provenance and contains no
+>    real credential. This stops `Sign` and `Verify` from sharing a bug.
+> 2. **One broken reference scheme per mandatory case**, each killed only
+>    by that case:
+>    - ignores the tenant → SC3;
+>    - ignores the provider → SC4;
+>    - ignores the timestamp → SC7;
+>    - prefix compare → SC2;
+>    - ignores the bound account → SC8;
+>    - honours `Previous` after `not_after` → SC9;
+>    - accepts an empty secret → SC10;
+>    - secret in the error text → SC11;
+>    - panics on a malformed header → SC5;
+>    - multi-key trial on an absent key id under `KeyFromHeader` → the C3
+>      case.
+> 3. **Tampering is generated by the suite.** It mutates every byte of the
+>    body and of every header the fixture declares as authentication
+>    material.
+> 4. **A registry-driven run.** A test iterates the adapter registrations
+>    (the same `buildRegistrations` used by the synthetic guard) and fails
+>    for any non-synthetic scheme without a registered fixture.
+> 5. **A constant-time lint/AST rule.** In scheme packages, signature and
+>    MAC comparison uses `hmac.Equal` or `subtle.ConstantTimeCompare`,
+>    never `==` or `bytes.Equal`. This is also a `code-reviewer` checklist
+>    item.
+>
+> The domain suites' remaining skips for non-mock adapters (payments and
+> casino, paper 01 §0) become failures through a `CallbackFixture` hook
+> that uses the same `Sign`.
+>
+> **Status.** `NOT IMPLEMENTED` at acceptance. Target:
+> `IMPLEMENTED` in W1a (contract, suite, MOCK schemes). Every real vendor
+> scheme is `PROVIDER DEPENDENT`.
+
 ### 4. Crypto Payment Provider is not the same object as Crypto Custodian
 
 The business owner's instruction is explicit and is adopted verbatim as

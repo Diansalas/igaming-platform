@@ -23,6 +23,11 @@ wording, §4.4/§5.3 pointers); see "Amendment A4" at the end of this file.
 Partial settlement and cashout remain `NOT IMPLEMENTED` and bound by
 Amendment A2.
 
+**Amended 2026-09-26 — Amendment A6 (Stage 10.3, ADR 0092).** L0.1 is
+also taken by casino `postRollback`, keyed on the original reference.
+There is no new class and no new exception. See "Amendment A6" at the end
+of this file; the §2.1 L0.1 row is to be read with it.
+
 ## Context
 
 ### The reported defect
@@ -1444,3 +1449,56 @@ deposit-reversal callback and every casino rollback would return a plain
 never a silent bypass of the lock. Recorded here as a dependency to check
 before any future privilege-tightening migration touches
 `ledger_transactions`, not as an open action item.
+
+## Amendment A6 — 2026-09-26 — Stage 10.3 CAS-CAP-ROLLBACK-1 (ADR 0092): L0.1 also taken by `postRollback`
+
+### Amendment (Stage 10.3, ADR 0092)
+
+**Owner: `ledger-finance`.** Recorded by `architect` from `ledger-finance`'s own design
+(`docs/plans/stage-10.3-planning/02-casino-financial-analysis.md` §1.4 step 4). The contract it
+serves is the ADR 0025 Stage 10.3 amendment.
+
+**This amendment does not:**
+- add a lock class;
+- add a named exception (there is no "E-5");
+- change R1–R8.
+
+**What changes.**
+- `postRollback` now takes the **L0.1** casino bet-delivery advisory lock as its **first** lock.
+- The key is the **original** reference:
+  `pg_advisory_xact_lock(hashtextextended('casino_bet_delivery:' || tenant || ':' || provider || ':' || original_provider_tx_id, 0))`.
+  This is the same key string that `postBet` takes on its own reference
+  (`internal/casino/orchestrator.go:914` at `c90e591`).
+- L0.1 is taken before the L2 `ledger_transactions` original-row `FOR UPDATE`.
+- It is therefore also taken before any L0.3 grant advisory that the bonus-funded rollback path
+  takes afterwards under the existing E-1 (§5.1).
+
+**The ordering rules still hold.**
+- L0.1 is still taken **exactly once per transaction** and first.
+- R8 (advisory locks precede row locks) holds.
+- The §2.1 row for L0.1 now reads: "taken once per transaction by `postBet` (own reference) and
+  `postRollback` (original reference)". It still raises no ordering question within the class.
+
+**Why.**
+- A concurrent late original bet and its rollback now serialize on the same key.
+- Either the bet posts first and the rollback reverses it, or the tombstone is written first and
+  the bet is rejected with the named `ErrOriginalTombstoned`.
+- Today the loser of that race gets an untyped unique-violation error, which surfaces as a 500.
+
+**Deadlock analysis.**
+- Two transactions contend on L0.1 only for the same (tenant, provider, reference).
+- Neither holds any other lock when it requests L0.1, so no cycle through L0.1 is possible.
+- After L0.1, each follows the unchanged canonical order: L0.2/L0.4/L0.5 → L3 for `postBet`, and
+  L2 → (E-1 L0.3) → L3 for `postRollback`.
+
+**Permitted extension for W1c.** If `ledger-finance` rules that E10 needs the same serialization,
+`postWin` may take L0.1 on its **own** reference as its first lock. E10 is a late win racing the
+rollback of that win, which keys L0.1 on the win's reference. That shape is within this amendment:
+one L0.1 per transaction, taken first. When implemented, it must be recorded in the §1.3 inventory.
+
+**Tests** (`qa` binding plan, `04-review-qa.md` §4 W1c):
+- The late-original-versus-rollback race runs 50 iterations. The test asserts where the waiter
+  blocks (L0.1), not only the outcome.
+- Concurrent identical rollback callbacks produce exactly one tombstone.
+
+**Status.** `NOT IMPLEMENTED` at acceptance. Target: `IMPLEMENTED` in W1c.
