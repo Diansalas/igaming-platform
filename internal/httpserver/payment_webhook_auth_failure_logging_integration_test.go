@@ -266,9 +266,15 @@ func TestWebhook_AuthFailureLogging_AllowListOnly(t *testing.T) {
 	t.Run("signature_missing", func(t *testing.T) {
 		orch, mock := newMockOrchestrator()
 		mustRegisterCapability(t, pool, activeTenant.ID, mock)
+		// Stage 10.1 security review P2-1/code review F1/architect PW-1
+		// (ruling 5): header format validation now runs BEFORE the tenant
+		// lookup in deposit_handlers.go, so a missing signature header is
+		// rejected with NO tenant yet resolved - tenant_id is correctly
+		// absent here, unlike every reason below that is only reachable
+		// after the tenant lookup succeeds.
 		runAuthFailureLogCase(t, pool, issuer, activeTenant.ID, orch,
 			"/v1/webhooks/payments/"+activeTenant.Slug+"/mock", http.Header{}, genuineBody,
-			payments.ReasonSignatureMissing, true, true, false, false)
+			payments.ReasonSignatureMissing, false, true, false, false)
 	})
 
 	t.Run("signature_invalid", func(t *testing.T) {
@@ -290,7 +296,14 @@ func TestWebhook_AuthFailureLogging_AllowListOnly(t *testing.T) {
 	t.Run("key_material", func(t *testing.T) {
 		orch, mock := newMockOrchestrator()
 		mustRegisterCapability(t, pool, activeTenant.ID, mock)
-		genuine := mock.CallbackPayload(activeTenant.ID, payments.CallbackEventDeposit, "t12-ref", "", payments.OutcomeSucceeded, 1000, "EUR", "", false)
+		// Stage 10.1 security review P2-1/code review F1/architect PW-1:
+		// HandleCallback now verifies the signature BEFORE parsing the body
+		// at all, so the key-material scan is only ever reached for a body
+		// that genuinely matches its own signature - SignRawBody (not
+		// CallbackPayload, whose fixed mockCallbackBody shape has no room
+		// for a bogus "private_key" field) signs keyMaterialBody's own
+		// exact bytes.
+		genuine := mock.SignRawBody(activeTenant.ID, keyMaterialBody)
 		runAuthFailureLogCase(t, pool, issuer, activeTenant.ID, orch,
 			"/v1/webhooks/payments/"+activeTenant.Slug+"/mock", genuine.Header, keyMaterialBody,
 			payments.ReasonKeyMaterial, true, true, true, false)

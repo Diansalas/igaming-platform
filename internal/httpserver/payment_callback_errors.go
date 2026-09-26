@@ -73,7 +73,26 @@ func mapReceiveCallbackError(err error, kind callbackRouteKind) (code apierror.C
 		if kind == callbackRouteSimulate {
 			return apierror.CodeConflict, "deposit could not be settled"
 		}
-		return apierror.CodeInternal, "failed to process callback"
+		// Security review PW-2/P3-5 (Stage 10.1): a VERIFIED callback
+		// whose own declared facts (amount/asset) contradict the deposit
+		// it claims to resolve is a validation failure, not a server
+		// error - a real PSP would otherwise retry a 500 indefinitely.
+		// Generic body only: no amount, asset, or reference (those live in
+		// err's text, which is logged, never returned to the caller).
+		return apierror.CodeValidation, "callback rejected"
+	}
+	if errors.Is(err, payments.ErrCallbackMalformedBody) {
+		if kind == callbackRouteSimulate {
+			return apierror.CodeInternal, "failed to simulate deposit callback"
+		}
+		// A VERIFIED callback (the sender proved knowledge of the shared
+		// credential) whose body is structurally malformed - unparseable
+		// JSON, a missing required field, or an unrecognized event_type/
+		// outcome. This is a real 4xx, not the uniform pre-verification
+		// 401: the sender is authenticated, just wrong. Generic body only
+		// (matches OpenAPI's documented "malformed body (after signature
+		// verification)" 400 - PW-2/P3-5).
+		return apierror.CodeValidation, "callback rejected"
 	}
 	if kind == callbackRouteSimulate {
 		return apierror.CodeInternal, "failed to simulate deposit callback"

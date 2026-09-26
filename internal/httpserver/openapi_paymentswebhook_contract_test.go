@@ -69,6 +69,36 @@ func TestOpenAPI_PaymentsWebhook_ContractMatchesHandler(t *testing.T) {
 		}
 	}
 
+	// Stage 10.1 security review PW-2/P3-5: the 400/401 split must
+	// document the ACTUAL post-fix behavior - an oversized/unparseable
+	// body is part of the uniform 401 family (pre-verification), never a
+	// distinguishable 400, and 400 is reachable only after verification
+	// succeeds. This is a structural substring check (no YAML/JSON-Schema
+	// library - see this file's own top-of-file rationale), so it proves
+	// the WORDING was updated alongside the code, not full semantic
+	// conformance.
+	const (
+		responses400Marker = `"400":`
+		responses401Marker = `"401":`
+	)
+	idx400 := strings.Index(block, responses400Marker)
+	idx401 := strings.Index(block, responses401Marker)
+	if idx400 < 0 || idx401 < 0 {
+		t.Fatalf("expected both %q and %q response blocks to be present", responses400Marker, responses401Marker)
+	}
+	// The 400 block runs from its own marker up to the 401 marker (they
+	// are adjacent, in ascending numeric order, in this spec).
+	block400 := block[idx400:idx401]
+	if !strings.Contains(block400, "verification succeeds") {
+		t.Error(`the "400" response must document that it is reachable ONLY after signature verification succeeds`)
+	}
+	if strings.Contains(block400, "1 MiB") {
+		t.Error(`the "400" response must NOT claim an oversized body - that is part of the uniform 401 family, not a distinguishable 400 (PW-2)`)
+	}
+	if !strings.Contains(block, `oversized`) {
+		t.Error(`the "401" response must document that an oversized (>1 MiB) body is part of the uniform pre-verification 401 family`)
+	}
+
 	// The schema referenced by the requestBody must itself exist and
 	// declare the mock's own event_type/outcome enums, provider_reference
 	// and amount - the load-bearing fields HandleCallback actually parses.

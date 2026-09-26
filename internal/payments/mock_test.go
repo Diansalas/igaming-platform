@@ -3,8 +3,10 @@ package payments
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -104,11 +106,17 @@ func TestMockProvider_HandleCallback_RejectsNestedKeyMaterial(t *testing.T) {
 		"asset_code": "EUR",
 		"wallet_details": {"mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"}
 	}`)
-	// Key-material scanning runs BEFORE header/signature verification
-	// (design §3.1 step (d), before (e)) - so this is rejected even with no
-	// credential/headers at all.
-	inbound := InboundCallback{TenantID: tenantID, ProviderID: provider.Capabilities().ProviderID, Header: http.Header{}, Body: nested}
-	_, err := provider.HandleCallback(ctx, inbound, WebhookCredential{})
+	// Stage 10.1 security review P2-1/code review F1/architect PW-1:
+	// HandleCallback now verifies the signature BEFORE parsing the body at
+	// all (any pre-verification parse failure must be indistinguishable
+	// from a bad signature - see HandleCallback's own doc comment), so the
+	// key-material scan is only reached once verification has ALREADY
+	// succeeded. This body must therefore be genuinely, correctly signed -
+	// SignRawBody (not CallbackPayload, whose fixed mockCallbackBody shape
+	// has no room for a "wallet_details" field) signs these exact bytes.
+	cred := mockCredentialFor(t, provider, tenantID)
+	inbound := provider.SignRawBody(tenantID, nested)
+	_, err := provider.HandleCallback(ctx, inbound, cred)
 	if !errors.Is(err, ErrInboundKeyMaterial) {
 		t.Fatalf("expected ErrInboundKeyMaterial for nested key material, got %v", err)
 	}
@@ -365,11 +373,46 @@ func TestMockWebhookCredentials_KeyDerivation(t *testing.T) {
 
 	// The secret must never leak through any of a WebhookCredential's
 	// loggable representations.
-	rendered := fmt.Sprintf("%+v", credA1)
-	if strings.Contains(rendered, string(credA1.Secret)) {
-		t.Fatal("fmt formatting of a WebhookCredential must never render its raw Secret bytes")
+	//
+	// Security review P3-1 (Stage 10.1): the ORIGINAL version of this
+	// check compared against string(credA1.Secret) - the raw byte string -
+	// which %+v never renders literally even WITHOUT redaction (Go's
+	// default struct formatting prints a byte slice as a decimal-element
+	// list, e.g. "[18 52 ...]", never as the raw byte string), so the
+	// assertion could never fail regardless of whether redaction worked.
+	// This version instead checks for the hex encoding of the secret -
+	// the actual substring a byte-slice-aware or "%x"-style rendering
+	// WOULD produce - across every loggable representation, including
+	// %#v (GoString, which bypasses Stringer entirely and is the one
+	// representation the original test suite never exercised at all -
+	// P3-1's GoString gap).
+	secretHex := hex.EncodeToString(credA1.Secret)
+	representations := map[string]string{
+		"%+v":             fmt.Sprintf("%+v", credA1),
+		"%v":              fmt.Sprintf("%v", credA1),
+		"%#v":             fmt.Sprintf("%#v", credA1),
+		"String()":        credA1.String(),
+		"GoString()":      credA1.GoString(),
+		"LogValue() slog": slogRenderAttrs(credA1),
 	}
-	if strings.Contains(credA1.String(), string(credA1.Secret)) {
-		t.Fatal("WebhookCredential.String() must never render its raw Secret bytes")
+	for label, rendered := range representations {
+		if strings.Contains(rendered, secretHex) {
+			t.Fatalf("%s must never render the Secret bytes (hex), got %q", label, rendered)
+		}
+		if strings.Contains(rendered, string(credA1.Secret)) {
+			t.Fatalf("%s must never render the raw Secret bytes, got %q", label, rendered)
+		}
 	}
+}
+
+// slogRenderAttrs renders a slog.LogValuer's group the way a real
+// structured-logging handler would - a plain text.Handler capturing into
+// a buffer - so the redaction check above exercises the ACTUAL logging
+// path (LogValue -> slog.Handler), not just the Value's own String().
+func slogRenderAttrs(v slog.LogValuer) string {
+	var buf bytes.Buffer
+	handler := slog.NewTextHandler(&buf, nil)
+	logger := slog.New(handler)
+	logger.Info("test", "credential", v)
+	return buf.String()
 }

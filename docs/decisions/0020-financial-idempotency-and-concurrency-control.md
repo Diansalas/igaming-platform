@@ -414,6 +414,50 @@ it is deferred as `REV-UNIQ-CASINO` (P3), not required by this amendment.
   otherwise look up the wrong row, or no row at all, and report a
   misleading error) — see ADR 0090 and `internal/ledger/ledger.go`'s own
   doc comment on `Post`.
-- No existing idempotency semantics changed: a legitimate same-reference
-  redelivery of a reversal is still resolved exactly as this ADR (as
-  amended by F-7) already specifies.
+- **Amendment (2026-09-26, `ledger-finance` Stage 10.1 review P2-A):** the
+  constraint NAME `pgconn.PgError.ConstraintName` reports is **not**
+  reliable evidence on its own that a genuinely new `deposit_reversal` was
+  attempted. A same-key retry violates the ordinary `(tenant_id,
+  idempotency_key)` index and migration 0092's `(tenant_id,
+  reverses_transaction_id)` partial index simultaneously, and Postgres
+  reports whichever index it checks first — in index-OID order, which an
+  ordinary `REINDEX INDEX CONCURRENTLY` (routine bloat maintenance, no
+  schema change) or a constraint-recreating migration can silently flip.
+  The first implementation trusted the reported name directly and, once
+  the OID order flipped, misclassified a legitimate retry as
+  `ErrReversalAlreadyExists` (a false HTTP 409, a false integrity alert,
+  a false denial audit — never a double post, but a broken idempotency
+  contract). `ledger.Post` now ALWAYS looks up the idempotency key first
+  on any conflict; only when NO row exists for that key does a 0092-index
+  conflict return `ErrReversalAlreadyExists`. If a row exists, the
+  ordinary `AlreadyPosted`/`ErrIdempotencyPayloadMismatch` replay path
+  runs regardless of which constraint name was reported. So the bullet
+  below now reads: **idempotency semantics changed to stop depending on
+  Postgres's index-check order** — the observable behavior for every
+  existing legitimate caller (same-reference redelivery, distinct-payload
+  reuse) is unchanged, but the classification mechanism itself was fixed
+  to be index-order-independent. See
+  `docs/governance/stage-10.1-ledger-finance-signoff.md` (P2-A) and
+  `internal/ledger/ledger.go`'s `Post` doc comment.
+- A legitimate same-reference redelivery of a reversal is still resolved
+  exactly as this ADR (as amended by F-7) already specifies, now proven
+  index-order-independent by a test that forces the flipped index order.
+
+**Deferred (2026-09-26, `ledger-finance` Stage 10.1 review P3-1; DO NOT
+FIX by editing migration 0092):** the operator-facing message migration
+0092's own up-migration raises on refusal (`DO ... EXCEPTION WHEN
+unique_violation`) intentionally omits the underlying Postgres `DETAIL`
+text (which would otherwise echo the specific `(tenant_id,
+reverses_transaction_id)` pair, per ruling R-5's "escalate, never leak a
+key" requirement) - an operator who hits this refusal must instead run the
+planning report's own §L census query
+(`BEGIN; CREATE UNIQUE INDEX ...; ROLLBACK;`) to find the offending pair.
+Migration 0092 is **already applied in every dev/test database this
+codebase's test suites use**, and this codebase treats a migration file as
+checksum-immutable once applied - editing it in place (even to improve an
+error message with no schema-shape change) is out of scope for this fix
+and is not done. If a future stage revisits duplicate-reversal cleanup
+tooling, consider a NEW, additive migration or a separate operational
+runbook entry that surfaces the Postgres `DETAIL` through a safer channel
+(e.g. a `RAISE ... USING HINT` naming the census procedure by name,
+without echoing the key itself) rather than editing 0092.

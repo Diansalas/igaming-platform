@@ -291,6 +291,28 @@ never *asserts* the tenant.
 > 6. All writes use the verified tenant as both the RLS context and the
 >    binding. `(provider_id, provider_tx_id)` is keyed on the route
 >    `provider_id` that the credential verified.
+> 7. **Adapter error contract (added 2026-09-26, Stage 10.1 post-
+>    implementation review: security P2-1, code review F1, architect
+>    PW-1).** Any `HandleCallback` failure that occurs BEFORE that
+>    adapter's own signature/MAC verification has succeeded — including an
+>    unparseable body, a header that fails format validation, or any other
+>    structural problem the adapter would otherwise notice while preparing
+>    to verify — MUST be reported as one of the two closed authentication
+>    sentinels (`ErrCallbackSignatureInvalid` or, once verification has
+>    succeeded and a key-material scan then rejects the payload,
+>    `ErrInboundKeyMaterial`), never any other error type. Concretely: an
+>    adapter verifies the raw wire bytes first (its MAC/signature check
+>    needs no parsing at all) and only parses the body — generically for
+>    the key-material scan, then into typed fields — AFTER verification
+>    succeeds. A structural failure discovered only after successful
+>    verification (a verified-but-malformed body) is a DIFFERENT, distinct
+>    error (the mock's `ErrCallbackMalformedBody`), mapped to a 4xx
+>    validation response, never to the uniform pre-verification 401 and
+>    never logged with body content. This closes the specific defect where
+>    an unauthenticated non-JSON body with well-formed headers returned a
+>    distinguishable 500 instead of the same 401 every other
+>    pre-verification failure gets — reintroducing exactly the tenant/
+>    provider enumeration oracle point 5 exists to remove.
 >
 > **Provider status.** `ProviderCapability.status` governs routing only.
 > Callback acceptance is revoked by revoking the tenant's credential, so
@@ -306,6 +328,23 @@ never *asserts* the tenant.
 >   PSP.
 > - Casino (CAS-WH-TENANT-1) and KYC (KYC-WH-1) callbacks do not yet
 >   conform. They are registered, not in scope.
+> - **`MultiWebhookCredentialResolver` (`internal/payments/webhook_auth.go`)
+>   is MOCK/test wiring only** (Stage 10.1 review PW-6/P3-1): it composes
+>   several `WebhookCredentialResolver`s keyed by `provider_id` so tests
+>   can stand up more than one mock provider in the same process. It is
+>   NOT a template for the real resolver: the real resolver is a single
+>   platform component, backed by one FORCE-RLS handle table plus a secret
+>   store, keyed by `(tenant_id, provider_id, key_id)` — never a
+>   per-provider-vendor map composed at the Orchestrator boundary. A nil
+>   entry in the composite fails closed
+>   (`ErrWebhookCredentialUnavailable`), it never panics.
+> - **The C4 tenant-binding conformance case
+>   (`internal/payments/conformance_test.go`) is mandatory for the first
+>   real adapter** (Stage 10.1 review PW-4): today it `t.Skip`s for any
+>   non-mock adapter, because none exists yet. Once a real adapter is
+>   added, this case must supply that adapter's own per-tenant
+>   signed-fixture hook and become a hard failure, not a skip, if tenant
+>   binding cannot be proven the same way the mock's is.
 >
 > The Consequences clause "§3 leaves open *how* the right key is
 > selected" is superseded by this amendment.

@@ -281,8 +281,10 @@ callback" row's sportsbook settlement/void/rollback entitlement is
 unchanged and still has no implementation.*
 
 *Amended 2026-09-26 (Stage 10.1, PAY-WH-TENANT-1; `ledger-finance`
-concurrence pending final review). The earlier wording ("tenant resolved
-from the credential the callback authenticated with") was not true of any
+concurrence GIVEN — see
+`docs/governance/stage-10.1-ledger-finance-signoff.md`, "ADR 0019 matrix
+change: `ledger-finance` concurrence given"). The earlier wording ("tenant
+resolved from the credential the callback authenticated with") was not true of any
 implemented webhook: every route took the tenant from its URL slug under a
 tenant-agnostic key (S-6). Status after 10.1:*
 - *payments conforms with a `MOCK` credential only (docs/decisions/0022 §3

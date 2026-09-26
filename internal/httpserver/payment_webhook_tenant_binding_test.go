@@ -124,14 +124,17 @@ func TestWebhook_EnumerationOracle_IndistinguishableResponses(t *testing.T) {
 	keyMaterialBody := []byte(`{"event_type":"deposit","provider_reference":"enum-ref","outcome":"succeeded","amount":1000,"asset_code":"EUR","private_key":"deadbeef"}`)
 	genuineSigned := mockProvider.CallbackPayload(activeTenant.ID, payments.CallbackEventDeposit, "enum-ref", "", payments.OutcomeSucceeded, 1000, "EUR", "", false)
 
-	// A genuinely-signed key-material body would never verify (the
-	// signature was computed over genuineBody, not keyMaterialBody), but
-	// the key-material scan runs BEFORE signature verification (design
-	// §3.1 step (d) before (e)), so it is still rejected for reason
-	// key_material specifically, not signature_invalid - this is what the
-	// probe below actually exercises; a syntactically well-formed but
-	// numerically wrong signature (flip one hex character) is its own,
-	// separate probe.
+	// keyMaterialBody's header below is genuineSigned's - signed over
+	// genuineBody, NOT keyMaterialBody - so this probe's signature does
+	// not verify at all (Stage 10.1 security review P2-1/code review
+	// F1/architect PW-1: signature verification now runs BEFORE any body
+	// parsing, including the key-material scan, so this probe is rejected
+	// for reason signature_invalid, not key_material). It still belongs in
+	// this table: the point of T9 is that the RESPONSE is identical either
+	// way, regardless of which specific reason produced it - a genuinely-
+	// signed key-material rejection is covered separately, at the reason-
+	// specific level, by T12
+	// (TestWebhook_AuthFailureLogging_AllowListOnly/key_material).
 	badSigHeader := genuineSigned.Header.Clone()
 	sig := badSigHeader.Get("X-Payments-Signature")
 	flipped := strings.Replace(sig, "0", "f", 1)
@@ -139,6 +142,28 @@ func TestWebhook_EnumerationOracle_IndistinguishableResponses(t *testing.T) {
 		flipped = strings.Replace(sig, "1", "e", 1)
 	}
 	badSigHeader.Set("X-Payments-Signature", flipped)
+
+	// Security review P2-1 / code review F1 / architect PW-1 (Stage 10.1
+	// post-implementation review): a non-JSON body used to reach
+	// HandleCallback's generic json.Unmarshal BEFORE signature
+	// verification, returning a distinguishable 500 (with an error-level
+	// log carrying a body fragment) instead of the SAME 401 every other
+	// pre-verification failure got here - to an ACTIVE, CONFIGURED tenant
+	// specifically, which is exactly the tenant/provider enumeration this
+	// whole contract exists to prevent. The header is well-formed
+	// (genuineSigned's own, syntactically valid v1=<64 hex>/key id), but
+	// does not need to numerically verify against this body - the pre-fix
+	// bug reached json.Unmarshal regardless of whether the signature would
+	// ultimately have matched.
+	nonJSONBody := []byte("this is deliberately not valid JSON at all {{{")
+
+	// The same enumeration gap existed for an oversized body being
+	// checked AFTER the tenant lookup (ruling 5 violation): an active,
+	// resolvable tenant slug got a distinguishable 400 "request body too
+	// large" while an unknown/suspended slug with the identical oversized
+	// body got the uniform 401. Body size alone (never its content)
+	// matters here, so genuineSigned's header is reused as-is.
+	oversizedBody := make([]byte, maxWebhookBodyBytes+1)
 
 	type probe struct {
 		name   string
@@ -154,6 +179,8 @@ func TestWebhook_EnumerationOracle_IndistinguishableResponses(t *testing.T) {
 		{"polling_only", "/v1/webhooks/payments/" + pollingOnlyTenant.Slug + "/mock", genuineSigned.Header, genuineBody},
 		{"bad_signature", "/v1/webhooks/payments/" + activeTenant.Slug + "/mock", badSigHeader, genuineBody},
 		{"key_material", "/v1/webhooks/payments/" + activeTenant.Slug + "/mock", genuineSigned.Header, keyMaterialBody},
+		{"non_json_body_active_tenant", "/v1/webhooks/payments/" + activeTenant.Slug + "/mock", genuineSigned.Header, nonJSONBody},
+		{"oversized_body_active_tenant", "/v1/webhooks/payments/" + activeTenant.Slug + "/mock", genuineSigned.Header, oversizedBody},
 	}
 
 	var referenceBody string

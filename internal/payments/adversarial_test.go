@@ -699,6 +699,7 @@ func TestProviderCapabilities_ProviderKindRejectsNonPaymentValueAtDatabaseLevel(
 func TestMockProvider_HandleCallback_RejectsKeyMaterialInReversalEvent(t *testing.T) {
 	provider := NewMockProvider("mock-psp")
 	ctx := context.Background()
+	tenantID := uuid.New()
 
 	poisoned := []byte(`{
 		"event_type": "deposit_reversal",
@@ -710,8 +711,13 @@ func TestMockProvider_HandleCallback_RejectsKeyMaterialInReversalEvent(t *testin
 		"decline_reason": "chargeback",
 		"gateway_metadata": {"signing_key": "zpriv1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"}
 	}`)
-	inbound := InboundCallback{TenantID: uuid.New(), ProviderID: provider.Capabilities().ProviderID, Body: poisoned}
-	_, err := provider.HandleCallback(ctx, inbound, WebhookCredential{})
+	// Stage 10.1 security review P2-1/code review F1/architect PW-1:
+	// HandleCallback verifies the signature BEFORE any body parsing, so
+	// the key-material scan is only reached for a genuinely, correctly
+	// signed body - SignRawBody signs these exact bytes for tenantID.
+	cred := mockCredentialFor(t, provider, tenantID)
+	inbound := provider.SignRawBody(tenantID, poisoned)
+	_, err := provider.HandleCallback(ctx, inbound, cred)
 	if !errors.Is(err, ErrInboundKeyMaterial) {
 		t.Fatalf("expected ErrInboundKeyMaterial for key material nested in a deposit_reversal callback, got %v", err)
 	}

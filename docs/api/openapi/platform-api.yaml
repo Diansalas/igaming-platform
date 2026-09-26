@@ -2476,16 +2476,27 @@ paths:
         docs/decisions/0022 §3's amendment. Every pre-verification failure
         (unknown/inactive tenant, invalid/unregistered/unconfigured
         provider, no credential resolver, missing/malformed/invalid
-        signature, apparent key material in the payload) returns the
-        IDENTICAL 401 response below, so an unauthenticated caller can
-        never distinguish which is true. 404 is reachable ONLY after
-        verification succeeds (an unknown provider_reference for an
-        otherwise-authenticated callback) - it is not a second enumeration
-        oracle. 409 covers two distinct, generically-reported causes
-        (a provider reference already posted with a different payload, or
-        a distinct-reference reversal naming an already-reversed deposit) -
-        intentionally collapsed to one generic body. 503 means webhooks are
-        not enabled on this deployment.
+        signature, an UNPARSEABLE body, an oversized (>1 MiB) body,
+        apparent key material in the payload) returns the IDENTICAL 401
+        response below, so an unauthenticated caller can never distinguish
+        which is true (Stage 10.1 security review P2-1/code review
+        F1/architect PW-1: the adapter verifies the raw signature BEFORE
+        ever parsing the body, and the HTTP handler checks body size and
+        header format BEFORE the tenant lookup, so neither an unparseable
+        nor an oversized body can be used to distinguish a live tenant/
+        provider pair from an unknown one). 400 is reachable ONLY after
+        verification succeeds: a verified body that is still structurally
+        malformed (a required field missing, or an unrecognized
+        event_type/outcome value), or whose declared facts (amount/asset)
+        contradict the deposit intent it claims to resolve. 404 is
+        reachable ONLY after verification succeeds (an unknown
+        provider_reference for an otherwise-authenticated callback) - it is
+        not a second enumeration oracle. 409 covers two distinct,
+        generically-reported causes (a provider reference already posted
+        with a different payload, or a distinct-reference reversal naming
+        an already-reversed deposit) - intentionally collapsed to one
+        generic body. 503 means webhooks are not enabled on this
+        deployment.
       parameters:
         - name: tenantSlug
           in: path
@@ -2523,7 +2534,13 @@ paths:
                   status: { type: string }
                   tombstoned: { type: boolean }
         "400":
-          description: Malformed body (after signature verification), or body exceeds 1 MiB
+          description: >
+            Reachable ONLY after signature verification succeeds: a
+            verified body that is structurally malformed (unparseable
+            JSON, a missing required field, or an unrecognized event_type/
+            outcome value), or whose declared amount/asset contradict the
+            deposit intent it claims to resolve. Generic body only - never
+            the specific field or value that failed.
           content:
             application/json:
               schema:
@@ -2533,8 +2550,11 @@ paths:
             Callback rejected - EVERY pre-verification failure reason
             (unknown/inactive tenant, invalid/unregistered/unconfigured
             provider, no resolver, no credential, missing/malformed/invalid
-            signature, apparent key material) maps to this SAME generic
-            body, deliberately indistinguishable from any other.
+            signature, an unparseable body, an oversized (>1 MiB) body,
+            apparent key material) maps to this SAME generic body,
+            deliberately indistinguishable from any other, with the SAME
+            status code regardless of whether the tenant/provider named in
+            the path actually exist or are configured.
           content:
             application/json:
               schema:

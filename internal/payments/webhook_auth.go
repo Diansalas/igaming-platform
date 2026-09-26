@@ -43,13 +43,28 @@ var (
 // ever holding a provider-keyed map. A providerID absent from the map
 // fails closed (ErrWebhookCredentialUnavailable), never falling back to
 // any other entry.
+//
+// MOCK/TEST WIRING ONLY (Stage 10.1 architect review PW-6, ADR 0022 §3
+// amendment Status): this type exists so a test fixture can stand up more
+// than one mock provider in the same process. It is NOT a template for
+// the real resolver. The real resolver is a single platform component -
+// one FORCE-RLS handle table plus a secret store, keyed by (tenant_id,
+// provider_id, key_id) - never a per-vendor map composed at the
+// Orchestrator boundary, which would reintroduce exactly the per-provider-
+// map shape ruling C2 removed.
 type MultiWebhookCredentialResolver map[string]WebhookCredentialResolver
 
 // Resolve implements WebhookCredentialResolver by dispatching to the
-// resolver registered for providerID.
+// resolver registered for providerID. A nil entry (e.g.
+// MultiWebhookCredentialResolver{"x": nil}, a construction mistake no
+// conforming caller should make but which must not be allowed to panic)
+// fails closed with the SAME ErrWebhookCredentialUnavailable a genuinely
+// absent entry returns (architect review PW-6.1) - never a nil-pointer
+// dereference reaching the caller as an unhandled panic on an
+// unauthenticated request path.
 func (m MultiWebhookCredentialResolver) Resolve(ctx context.Context, tenantID uuid.UUID, providerID, keyID string) (WebhookCredential, error) {
 	r, ok := m[providerID]
-	if !ok {
+	if !ok || r == nil {
 		return WebhookCredential{}, ErrWebhookCredentialUnavailable
 	}
 	return r.Resolve(ctx, tenantID, providerID, keyID)

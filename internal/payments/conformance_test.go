@@ -199,14 +199,24 @@ func RunProviderConformanceSuite(t *testing.T, factory func() PaymentProvider) {
 	t.Run("inbound key material is rejected, not stored or logged", func(t *testing.T) {
 		provider := factory()
 		ctx := context.Background()
+		tenantID := uuid.New()
 
 		poisoned := []byte(`{"event_type":"deposit","provider_reference":"ref-poison-1","outcome":"succeeded","amount":1000,"asset_code":"EUR","private_key":"L1aW4thKtHz9GcpB4rMPvz3gK6yD7f9j5Kf2vSvB3wKz9c2CJ2f"}`)
-		// Key-material scanning runs BEFORE signature verification (§3.1
-		// step (d), before (e)), so this is rejected even with no
-		// credential/headers at all - true for any adapter, not just the
-		// mock.
-		inbound := InboundCallback{TenantID: uuid.New(), ProviderID: provider.Capabilities().ProviderID, Body: poisoned}
-		_, err := provider.HandleCallback(ctx, inbound, WebhookCredential{})
+		// Stage 10.1 security review P2-1/code review F1/architect PW-1:
+		// signature verification now runs BEFORE any body parsing
+		// (§3 amendment point 7), so the key-material scan is only ever
+		// reached for a body that genuinely, correctly verifies. Signing
+		// it is mock-specific (a real adapter's own conformance fixture
+		// supplies its own per-tenant credential/signature), mirroring
+		// this suite's existing pattern for the other mock-specific cases
+		// above.
+		mock, ok := provider.(*MockProvider)
+		if !ok {
+			t.Skip("credential/signature construction is mock-specific; a real adapter's own conformance fixture supplies its own per-tenant credentials")
+		}
+		cred := mockCredentialFor(t, mock, tenantID)
+		inbound := mock.SignRawBody(tenantID, poisoned)
+		_, err := provider.HandleCallback(ctx, inbound, cred)
 		if err == nil {
 			t.Fatal("expected an error for a payload carrying apparent key material")
 		}

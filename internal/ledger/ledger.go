@@ -392,23 +392,50 @@ func Post(ctx context.Context, tx pgx.Tx, in TransactionInput) (PostResult, erro
 		return PostResult{}, fmt.Errorf("ledger: insert transaction: %w", err)
 	}
 
-	// Stage 10.1 PAY-REV-1: a violation of the migration-0092 backstop
-	// index is NOT an idempotency-key conflict - this INSERT's
-	// idempotency_key was never written, so looking it up below would
-	// either find nothing (a confusing internal error) or, worse, find an
-	// unrelated row that happens to share a key. Route on the constraint
-	// name before falling into the ordinary idempotency-key replay path.
-	if conflict && conflictConstraint == reversalOneDepositReversalConstraint {
-		return PostResult{}, fmt.Errorf("%w: reverses_transaction_id=%v", ErrReversalAlreadyExists, in.ReversesTransactionID)
-	}
-
 	if conflict {
 		// No new lock is needed for the comparison below: this call
 		// already holds every L3 projection lock of ITS entry set, and
 		// ledger rows are immutable (migration 0082), so the stored
 		// transaction read here cannot change underneath it.
+		//
+		// ledger-finance P2-A (Stage 10.1 review): Postgres reports
+		// whichever violated unique index it happens to check FIRST when
+		// an INSERT violates more than one at once, and it checks in
+		// INDEX-OID order - not a fixed, semantically meaningful order.
+		// A same-key `deposit_reversal` retry violates BOTH the ordinary
+		// (tenant_id, idempotency_key) index AND migration 0092's
+		// (tenant_id, reverses_transaction_id) partial index simultaneously.
+		// Today the idempotency index happens to be older (lower OID), so
+		// conflictConstraint reports it and this call already takes the
+		// idempotency-key replay path below. But a routine
+		// `REINDEX INDEX CONCURRENTLY` (or any migration that recreates
+		// either constraint) can flip which index Postgres reports FIRST,
+		// which used to make conflictConstraint report the 0092 index
+		// instead - and the OLD code below trusted that name blindly,
+		// returning ErrReversalAlreadyExists (-> HTTP 409, a false
+		// integrity alert, a false denial audit) for a retry that in fact
+		// posted successfully the first time. Fail-closed in the sense
+		// that nothing double-posts either way, but it silently broke the
+		// idempotency contract for a legitimate retry under an ordinary
+		// DBA action.
+		//
+		// The fix does not trust conflictConstraint's identity at all for
+		// classification: it ALWAYS looks up the idempotency key first,
+		// regardless of which constraint Postgres happened to name. If a
+		// transaction already exists under this exact key, this is
+		// unconditionally a retry/replay (whether the reported constraint
+		// was the idempotency index, the 0092 index, or both at once), and
+		// falls through to the ordinary AlreadyPosted / payload-mismatch
+		// comparison unchanged. ErrReversalAlreadyExists is returned only
+		// when the 0092 index fired AND no row exists for this
+		// idempotency key at all - i.e. this INSERT's own idempotency_key
+		// was genuinely never written, so the conflict can only be a
+		// distinct, second reversal of the same original deposit.
 		existing, lookupErr := lookupByIdempotencyKey(ctx, tx, in.TenantID, in.IdempotencyKey)
 		if lookupErr != nil {
+			if errors.Is(lookupErr, pgx.ErrNoRows) && conflictConstraint == reversalOneDepositReversalConstraint {
+				return PostResult{}, fmt.Errorf("%w: reverses_transaction_id=%v", ErrReversalAlreadyExists, in.ReversesTransactionID)
+			}
 			return PostResult{}, fmt.Errorf("ledger: look up existing transaction for idempotency key: %w", lookupErr)
 		}
 		if existing.TransactionType != in.TransactionType {

@@ -277,6 +277,28 @@ func (m *MockProvider) CallbackPayload(tenantID uuid.UUID, eventType CallbackEve
 	return InboundCallback{TenantID: tenantID, ProviderID: m.providerID, Header: header, Body: raw}
 }
 
+// SignRawBody is CallbackPayload's counterpart for tests that need a
+// correctly-signed callback whose body carries something outside
+// mockCallbackBody's fixed shape - e.g. a bogus extra field the key-
+// material scan or a legacy-shape rejection test needs to exercise AFTER
+// signature verification succeeds (Stage 10.1 security review P2-1/code
+// review F1/architect PW-1's HandleCallback reorder means a body and its
+// signature must now genuinely match for anything past verification to
+// ever run). Like CallbackPayload, tenantID is always the caller's own
+// route/JWT-resolved tenant; this cannot mint a payload that verifies for
+// any tenant other than the one named here. MOCK/TEST-ONLY, exactly like
+// CallbackPayload - no production code path calls this.
+func (m *MockProvider) SignRawBody(tenantID uuid.UUID, body []byte) InboundCallback {
+	key := m.deriveKey(tenantID, m.providerID)
+	sig := signWithKey(key, tenantID, m.providerID, mockWebhookKeyID, body)
+
+	header := make(http.Header)
+	header.Set(HeaderSignature, "v1="+sig)
+	header.Set(HeaderKeyID, mockWebhookKeyID)
+
+	return InboundCallback{TenantID: tenantID, ProviderID: m.providerID, Header: header, Body: body}
+}
+
 // signingInput builds the platform-defined webhook signing scheme's input
 // (docs/decisions/0022 §3 amendment §2.2):
 // SigningInputPrefix 0x00 tenant_id 0x00 provider_id 0x00 key_id 0x00 <raw
@@ -448,35 +470,41 @@ var keyMaterialFieldNames = []string{
 // (a)-(c) - provider registered, ProviderAcceptsWebhook, and credential
 // resolution/equality against req.TenantID/req.ProviderID):
 //
-//  1. scan the raw body generically (before any typed parsing) for field
-//     names that look like key material and reject without ever logging
-//     or persisting the offending value (docs/decisions/0022 §4.1 point
-//  2. - still BEFORE signature verification, per ADR 0022 §4.1 and
-//     ruling 8/C5 (a key-material rejection still raises the security
-//     alert, via the caller's allow-listed log line);
-//  2. extract and re-validate the X-Payments-Signature/X-Payments-Key-Id
+//  1. extract and re-validate the X-Payments-Signature/X-Payments-Key-Id
 //     headers (redundant with the Orchestrator's own check, but this
 //     method must be self-sufficient for direct unit/conformance tests
 //     that bypass the HTTP layer);
-//  3. verify the HMAC over signingInput(req.TenantID, req.ProviderID,
+//  2. verify the HMAC over signingInput(req.TenantID, req.ProviderID,
 //     keyID, req.Body) using cred.Secret - the credential the Orchestrator
 //     already resolved and equality-checked, never re-resolved here.
 //     hmac.Equal is constant-time; a plain == comparison would leak timing
-//     information about how many leading bytes matched;
-//  4. only THEN parse the typed fields and reject a body that still
-//     carries a legacy "signature" field (hasLegacySignatureField) -
-//     Stage 3B's now-removed wire shape.
+//     information about how many leading bytes matched. This step runs
+//     over the RAW body bytes and needs no parsing at all, which is
+//     exactly why steps 1-2 can, and must, run before any JSON parsing
+//     happens (see the note below);
+//  3. only once (2) has SUCCEEDED: parse the raw body generically and scan
+//     it for field names that look like key material, rejecting without
+//     ever logging or persisting the offending value
+//     (docs/decisions/0022 §4.1);
+//  4. reject a body that still carries a legacy "signature" field
+//     (hasLegacySignatureField) - Stage 3B's now-removed wire shape;
+//  5. parse the typed fields.
+//
+// Security review P2-1 / code review F1 / architect PW-1 (Stage 10.1): the
+// generic JSON parse (needed only for the key-material scan and the
+// legacy-field check) used to run BEFORE step 2, so a non-JSON body with
+// well-formed headers returned a bare, un-typed parse error instead of an
+// auth failure - breaking the uniform-401 contract with a distinguishable
+// 500 (and logging a fragment of the unauthenticated body). Every failure
+// before HMAC verification succeeds must be indistinguishable from every
+// other one, so the parse now happens strictly AFTER (2): an unparseable
+// body can only be reached once the caller has already proven it knows the
+// shared secret, at which point it is a genuine (if malformed) delivery
+// from an authenticated source, never an unauthenticated attacker's probe.
+// A parse failure at that point is reported as ErrCallbackMalformedBody -
+// a DIFFERENT sentinel from the pre-verification auth failures - which the
+// Orchestrator/HTTP layer maps to a 400, not the uniform 401 (PW-2).
 func (m *MockProvider) HandleCallback(_ context.Context, req InboundCallback, cred WebhookCredential) (CallbackEvent, error) {
-	var generic any
-	if err := json.Unmarshal(req.Body, &generic); err != nil {
-		return CallbackEvent{}, fmt.Errorf("payments/mock: parse callback: %w", err)
-	}
-	if containsKeyMaterialField(generic) {
-		// Deliberately no field value, no raw payload, in this error or
-		// anywhere else - see ErrInboundKeyMaterial's doc comment.
-		return CallbackEvent{}, ErrInboundKeyMaterial
-	}
-
 	keyID, sigHex, _, ok := ParseWebhookAuthHeaders(req.Header)
 	if !ok || keyID != cred.KeyID {
 		return CallbackEvent{}, ErrCallbackSignatureInvalid
@@ -486,16 +514,35 @@ func (m *MockProvider) HandleCallback(_ context.Context, req InboundCallback, cr
 		return CallbackEvent{}, ErrCallbackSignatureInvalid
 	}
 
+	// From here on, the caller has proven knowledge of the shared secret -
+	// every subsequent rejection is a POST-verification, structural
+	// failure (ErrCallbackMalformedBody or ErrInboundKeyMaterial), never
+	// one of the auth sentinels above.
+	var generic any
+	if err := json.Unmarshal(req.Body, &generic); err != nil {
+		return CallbackEvent{}, fmt.Errorf("%w: parse callback: %v", ErrCallbackMalformedBody, err)
+	}
+	if containsKeyMaterialField(generic) {
+		// Deliberately no field value, no raw payload, in this error or
+		// anywhere else - see ErrInboundKeyMaterial's doc comment. Still
+		// reported as a security event (ReasonKeyMaterial via
+		// ErrInboundKeyMaterial), not a generic malformed-body 400, since a
+		// VERIFIED sender emitting apparent key material is exactly the
+		// ADR 0022 §4.1 scenario, independent of where in this function it
+		// is detected.
+		return CallbackEvent{}, ErrInboundKeyMaterial
+	}
+
 	if hasLegacySignatureField(generic) {
 		return CallbackEvent{}, ErrCallbackSignatureInvalid
 	}
 
 	var body mockCallbackBody
 	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return CallbackEvent{}, fmt.Errorf("payments/mock: parse callback: %w", err)
+		return CallbackEvent{}, fmt.Errorf("%w: parse callback: %v", ErrCallbackMalformedBody, err)
 	}
 	if body.ProviderReference == "" {
-		return CallbackEvent{}, fmt.Errorf("payments/mock: callback missing provider_reference")
+		return CallbackEvent{}, fmt.Errorf("%w: callback missing provider_reference", ErrCallbackMalformedBody)
 	}
 
 	var eventType CallbackEventType
@@ -505,7 +552,7 @@ func (m *MockProvider) HandleCallback(_ context.Context, req InboundCallback, cr
 	case string(CallbackEventDepositReversal):
 		eventType = CallbackEventDepositReversal
 	default:
-		return CallbackEvent{}, fmt.Errorf("payments/mock: unknown callback event_type %q", body.EventType)
+		return CallbackEvent{}, fmt.Errorf("%w: unknown callback event_type %q", ErrCallbackMalformedBody, body.EventType)
 	}
 
 	var outcome Outcome
@@ -519,7 +566,7 @@ func (m *MockProvider) HandleCallback(_ context.Context, req InboundCallback, cr
 	case string(OutcomePending):
 		outcome = OutcomePending
 	default:
-		return CallbackEvent{}, fmt.Errorf("payments/mock: unknown callback outcome %q", body.Outcome)
+		return CallbackEvent{}, fmt.Errorf("%w: unknown callback outcome %q", ErrCallbackMalformedBody, body.Outcome)
 	}
 
 	return CallbackEvent{

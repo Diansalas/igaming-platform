@@ -1,3 +1,22 @@
+# Stage 10.1 PAY-WH-TENANT-1 (ADR 0090 item 3, S-6) pre-fix attack
+# reproduction - added retroactively (code review P3-11 / Stage 10.1
+# post-implementation review) because the captured run below (unlike the
+# other three Stage 10.1 evidence files) originally carried no command or
+# commit provenance header. Its source test,
+# TestPayWH_S6_CrossTenant_PreFix_AttackSucceeds, was RETIRED per ruling 9
+# once the fix landed (a shared-adapter, tenant-unbound signature scheme
+# no longer exists to reproduce against), so this header is now the ONLY
+# provenance for the run - it is reconstructed from this file's own git
+# history and the commit sequence recorded in the four Stage 10.1
+# governance reviews, not re-run. The captured output below this line is
+# UNCHANGED from the original capture.
+# Test: TestPayWH_S6_CrossTenant_PreFix_AttackSucceeds (retired; formerly
+#       internal/payments/prefix_evidence_s6_test.go)
+# Command: go test -tags=integration -count=1 -run TestPayWH_S6_CrossTenant_PreFix_AttackSucceeds -v ./internal/payments/...
+# Run against: the pre-fix commit preceding 250828b (PAY-WH-TENANT-1's own
+#              fix commit) - the shared-secret-per-adapter signature scheme
+#              this test exercises was removed by that commit, which is why
+#              the test itself is retired rather than kept and re-run.
 === RUN   TestPayWH_S6_CrossTenant_PreFix_AttackSucceeds
     prefix_evidence_s6_test.go:65: PRE-FIX EVIDENCE: payload signed by the shared adapter is accepted under tenant A (control case) - no error
     prefix_evidence_s6_test.go:81: PRE-FIX EVIDENCE: S-6 CONFIRMED - a callback signed by the shared adapter for reference "prefix-s6-reversal-ref", never seen by tenant B, was ACCEPTED under tenant B's scope with no error (tombstoned=true). This is the cross-tenant financial effect S-6 describes: an attacker who can obtain any one tenant's correctly-signed callback bytes (e.g. by triggering their own deposit) can replay them against ANY other tenant's webhook URL and have them accepted, because the current signature scheme authenticates only 'this adapter minted it', never 'for this tenant'.

@@ -3679,3 +3679,43 @@ evidence); settlement history rows are never inserted inside a savepoint
 slow down on heavily seeded local databases; run them on a fresh database
 (CI always does).
 
+
+## Stage 10.1 — known limitation: the payments-webhook OpenAPI contract test is structural only
+
+`internal/httpserver/openapi_paymentswebhook_contract_test.go`
+(`TestOpenAPI_PaymentsWebhook_ContractMatchesHandler`, API-DOC-PAYWH)
+verifies that `docs/api/openapi/platform-api.yaml`'s
+`/v1/webhooks/payments/{tenantSlug}/{providerID}` entry documents the
+right headers, response codes, and (after the Stage 10.1 post-
+implementation review's PW-2/P3-5 fix) the right 400-vs-401 wording, by
+parsing the spec file as **plain text** and asserting on substrings and
+block boundaries - never by loading it through an OpenAPI/JSON-Schema
+validation library.
+
+**Why:** no such library is a verified dependency of this module.
+`gopkg.in/yaml.v3` and `go.yaml.in/yaml/v3` appear only as transitive,
+go.mod-only entries with no package-content hash recorded in `go.sum`, so
+importing either to parse the spec for real would pull in a genuinely new
+dependency - something this task (and CLAUDE.md's "no uncontrolled scope
+expansion") says not to do without it being required by the Blueprint, the
+current stage's scope, or to avoid material technical debt. The QA test
+plan's own §4 anticipates this and names the fallback used here: "if none
+available, use a minimal structural check with the standard library."
+
+**What this gap means in practice:** the test would catch the spec
+forgetting a response code, a header, or (now) specific required wording,
+but it does NOT validate that the spec's schemas are internally
+consistent OpenAPI/JSON-Schema, and it does NOT run a live request/
+response pair through the spec to confirm the ACTUAL wire shape conforms
+(the QA plan's other suggested check, a live-request conformance test,
+also is **NOT IMPLEMENTED**). A response body that satisfies this
+package's own `apierror.Error` type but silently drifts from the spec's
+declared schema in some other way (e.g. an added field) would not be
+caught by either test in this codebase today.
+
+**Status:** recorded as a known, accepted limitation, not silently
+skipped - `internal/httpserver/openapi_paymentswebhook_contract_test.go`'s
+own top-of-file comment states it, and this section is `qa`'s side of that
+same decision (Stage 10.1 post-implementation review, code review P3-7).
+Revisit if/when a schema-validation library becomes a verified dependency
+for another reason - this alone does not justify adding one.

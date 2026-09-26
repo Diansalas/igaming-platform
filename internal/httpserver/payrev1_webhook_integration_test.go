@@ -102,13 +102,37 @@ func TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409(t *testing
 		t.Fatalf("expected exactly 1 deposit_reversal transaction, got %d", reversalCount)
 	}
 
+	// The one genuine reversal's own ledger transaction id, read
+	// independently of the audit row, so the assertions below prove the
+	// audit's existing_reversal_ledger_transaction_id names the REAL row
+	// rather than merely being present.
+	var firstReversalTxID, depositTxID string
+	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx,
+			`SELECT id::text FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'deposit_reversal'`,
+			tenant.ID).Scan(&firstReversalTxID); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx,
+			`SELECT id::text FROM ledger_transactions WHERE tenant_id = $1 AND transaction_type = 'deposit'`,
+			tenant.ID).Scan(&depositTxID)
+	}); err != nil {
+		t.Fatalf("read the genuine reversal/deposit transaction ids: %v", err)
+	}
+
 	// The denial audit DID commit, in a transaction separate from the
 	// failed one (which rolled back) - read from a genuinely fresh
 	// transaction, exactly like the sportsbook settlement integrity
 	// backstop's own audit test.
+	//
+	// ledger-finance P2-B / security P2-2 / code review F2 (Stage 10.1
+	// post-implementation review): the audit record must now name the
+	// ORIGINAL deposit_intent (never a bare provider_id) and carry enough
+	// detail for PSP reconciliation - asserted here from THIS fresh
+	// transaction, not merely constructed and discarded in-process.
 	var auditCount int
-	var outcome string
-	var metadataProviderID string
+	var outcome, targetType, targetID, ipAddress string
+	var metadataProviderID, metadataDepositIntentID, metadataOriginalTxID, metadataRejectedRef, metadataExistingReversalTxID string
 	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
 		if err := tx.QueryRow(ctx,
 			`SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = 'deposit.reversal_rejected'`,
@@ -116,10 +140,15 @@ func TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409(t *testing
 			return err
 		}
 		return tx.QueryRow(ctx,
-			`SELECT outcome, metadata->>'provider_id' FROM audit_log
+			`SELECT outcome, target_type, target_id, host(ip_address),
+			        metadata->>'provider_id', metadata->>'deposit_intent_id',
+			        metadata->>'original_ledger_transaction_id', metadata->>'rejected_reversal_reference',
+			        metadata->>'existing_reversal_ledger_transaction_id'
+			   FROM audit_log
 			  WHERE tenant_id = $1 AND action = 'deposit.reversal_rejected'
 			  ORDER BY created_at DESC LIMIT 1`,
-			tenant.ID).Scan(&outcome, &metadataProviderID)
+			tenant.ID).Scan(&outcome, &targetType, &targetID, &ipAddress,
+			&metadataProviderID, &metadataDepositIntentID, &metadataOriginalTxID, &metadataRejectedRef, &metadataExistingReversalTxID)
 	}); err != nil {
 		t.Fatalf("read denial audit row: %v", err)
 	}
@@ -131,5 +160,26 @@ func TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409(t *testing
 	}
 	if metadataProviderID != "mock" {
 		t.Fatalf("denial audit metadata.provider_id = %q, want mock", metadataProviderID)
+	}
+	if targetType != "deposit_intent" {
+		t.Fatalf("denial audit target_type = %q, want deposit_intent", targetType)
+	}
+	if targetID != intent.ID {
+		t.Fatalf("denial audit target_id = %q, want the original deposit_intent id %q", targetID, intent.ID)
+	}
+	if metadataDepositIntentID != intent.ID {
+		t.Fatalf("denial audit metadata.deposit_intent_id = %q, want %q", metadataDepositIntentID, intent.ID)
+	}
+	if metadataOriginalTxID != depositTxID {
+		t.Fatalf("denial audit metadata.original_ledger_transaction_id = %q, want the original deposit's own transaction id %q", metadataOriginalTxID, depositTxID)
+	}
+	if metadataRejectedRef != "payrev1-http-rev-2" {
+		t.Fatalf("denial audit metadata.rejected_reversal_reference = %q, want the REJECTED reversal's own reference %q", metadataRejectedRef, "payrev1-http-rev-2")
+	}
+	if metadataExistingReversalTxID != firstReversalTxID {
+		t.Fatalf("denial audit metadata.existing_reversal_ledger_transaction_id = %q, want the genuinely posted first reversal's id %q", metadataExistingReversalTxID, firstReversalTxID)
+	}
+	if ipAddress == "" {
+		t.Fatal("denial audit ip_address must be populated (CLAUDE.md's mutating/denial audit rule)")
 	}
 }

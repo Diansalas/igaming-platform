@@ -838,10 +838,15 @@ type ReceiveCallbackResult struct {
 //	    (tenantID, providerID, keyID), then re-check cred.TenantID/
 //	    cred.ProviderID equal what was just resolved for - a mismatch
 //	    fails closed, never falling back to any other credential;
-//	(d) key-material scan (still before signature verification, per ADR
-//	    0022 §4.1) and (e) HMAC verification, both inside the adapter's
-//	    own HandleCallback, over content that includes tenantID/
-//	    providerID - never trusted from the payload.
+//	(d) HMAC/signature verification, inside the adapter's own
+//	    HandleCallback, over content that includes tenantID/providerID -
+//	    never trusted from the payload - followed by (e) a key-material
+//	    scan of the now-parsed body, run only once (d) has succeeded
+//	    (docs/decisions/0022 §3 amendment point 7, added Stage 10.1
+//	    security review P2-1/code review F1/architect PW-1: any body
+//	    parsing needed for the scan must happen AFTER verification, so an
+//	    unauthenticated non-JSON body can never be distinguished from any
+//	    other pre-verification failure).
 //
 // Every failure before (e) succeeds returns a *CallbackAuthError wrapping
 // ErrCallbackAuthFailed with a closed, allow-listed reason - the caller
@@ -895,23 +900,38 @@ func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID 
 		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonCredentialUnavailable, KeyID: keyID}
 	}
 
-	// (d)+(e): key-material scan and HMAC verification, both inside the
+	// (d)+(e): HMAC verification then key-material scan, both inside the
 	// adapter's own HandleCallback, over content that includes tenantID/
-	// providerID (never trusted from in.Body).
+	// providerID (never trusted from in.Body). Every failure BEFORE (d)
+	// succeeds is one of the two auth sentinels below (docs/decisions/0022
+	// §3 amendment point 7) - never any other error type - so this switch
+	// is exhaustive for pre-verification failures. ErrCallbackMalformedBody
+	// (checked last, falling into the generic branch) is a POST-
+	// verification, distinct error class the HTTP layer maps to a 4xx, not
+	// the uniform 401.
 	event, err := provider.HandleCallback(ctx, in, cred)
+	if errors.Is(err, ErrCallbackSignatureInvalid) {
+		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonSignatureInvalid, KeyID: keyID, CredentialFingerprint: cred.Fingerprint}
+	}
 	if errors.Is(err, ErrInboundKeyMaterial) {
 		// C5: a key-material rejection still raises the ADR 0022 §4.1
 		// security alert - the caller's allow-listed
 		// payment_webhook_auth_failed log line IS that alert, keyed on
-		// reason=key_material.
+		// reason=key_material. Reached only once verification has already
+		// succeeded (the scan itself now runs after (d)), so this is a
+		// VERIFIED sender emitting apparent key material, not an
+		// unauthenticated probe - still folded into the same uniform-401
+		// auth-failure family, since ADR 0022 §4.1 treats it as a boundary
+		// violation regardless of authentication state.
 		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonKeyMaterial, KeyID: keyID}
 	}
-	if errors.Is(err, ErrCallbackSignatureInvalid) {
-		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonSignatureInvalid, KeyID: keyID, CredentialFingerprint: cred.Fingerprint}
-	}
 	if err != nil {
-		// Never wrap in.Body's bytes into this error - any other parse
-		// error must carry no payload content (docs/decisions/0022 §4.1).
+		// Covers ErrCallbackMalformedBody and any other post-verification
+		// structural failure. Never wrap in.Body's bytes into THIS error -
+		// any payload fragment the adapter's own error text carries is
+		// already bounded to what a VERIFIED sender sent (docs/decisions/
+		// 0022 §4.1 applies to the pre-verification, unauthenticated case;
+		// this branch is unreachable before verification succeeds).
 		return ReceiveCallbackResult{}, fmt.Errorf("payments: handle callback: %w", err)
 	}
 
@@ -1111,16 +1131,31 @@ func (o *Orchestrator) receiveDepositReversalCallback(ctx context.Context, tx pg
 	// re-check" race-free where the old single unlocked check was not: two
 	// concurrent callers can no longer both observe "not yet reversed"
 	// before either one's write is visible to the other.
-	var alreadyReversed bool
-	if err := tx.QueryRow(ctx,
-		`SELECT EXISTS (SELECT 1 FROM ledger_transactions WHERE reverses_transaction_id = $1
-		                  AND (provider_id IS DISTINCT FROM $2 OR provider_tx_id IS DISTINCT FROM $3))`,
+	// ledger-finance P2-B / security P2-2 / code review F2: this now
+	// selects the EXISTING reversal's own ledger_transactions id (rather
+	// than a bare EXISTS), so a denial can be recorded with enough detail
+	// for PSP reconciliation - see DepositAlreadyReversedError's doc
+	// comment. IS DISTINCT FROM (unchanged) still counts a reversal row
+	// with a NULL provider reference; LIMIT 1 is sufficient because
+	// INV-PAY-REV-1 (migration 0092) guarantees at most one exists.
+	var existingReversalID uuid.UUID
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM ledger_transactions WHERE reverses_transaction_id = $1
+		           AND (provider_id IS DISTINCT FROM $2 OR provider_tx_id IS DISTINCT FROM $3)
+		 LIMIT 1`,
 		original.LedgerTransactionID, providerID, event.ProviderReference,
-	).Scan(&alreadyReversed); err != nil {
+	).Scan(&existingReversalID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return ReceiveCallbackResult{}, fmt.Errorf("payments: check existing reversal: %w", err)
 	}
-	if alreadyReversed {
-		return ReceiveCallbackResult{}, ErrDepositAlreadyReversed
+	if err == nil {
+		existingID := existingReversalID
+		return ReceiveCallbackResult{}, &DepositAlreadyReversedError{
+			DepositIntentID:               original.ID,
+			OriginalLedgerTransactionID:   *original.LedgerTransactionID,
+			RejectedReversalReference:     event.ProviderReference,
+			ExistingReversalTransactionID: &existingID,
+		}
 	}
 
 	// ADR 0082 §4.5: account resolution only - see the identical comment
@@ -1160,9 +1195,29 @@ func (o *Orchestrator) receiveDepositReversalCallback(ctx context.Context, tx pg
 		// catch this (so a writer must have bypassed the S2 lock, or a
 		// vanishingly unlikely timing gap this codebase's own review did
 		// not otherwise find), but migration 0092's index still refused
-		// the INSERT. Mapped to the SAME sentinel S4 uses, so the HTTP
-		// layer and every caller need exactly one denial code path.
-		return ReceiveCallbackResult{}, fmt.Errorf("%w: %w", ErrDepositAlreadyReversed, err)
+		// the INSERT. Mapped to the SAME typed sentinel S4 uses (ledger-
+		// finance P2-B / security P2-2 / code review F2), so the HTTP
+		// layer and every caller need exactly one denial code path with
+		// exactly one shape. A best-effort lookup fills in the existing
+		// reversal's own transaction id for the audit record; if it fails
+		// (should not happen - INV-PAY-REV-1 guarantees the row exists),
+		// the field is simply left nil rather than blocking the denial.
+		var existingID *uuid.UUID
+		var id uuid.UUID
+		if lookupErr := tx.QueryRow(ctx,
+			`SELECT id FROM ledger_transactions
+			  WHERE reverses_transaction_id = $1 AND transaction_type = 'deposit_reversal'
+			  LIMIT 1`,
+			original.LedgerTransactionID,
+		).Scan(&id); lookupErr == nil {
+			existingID = &id
+		}
+		return ReceiveCallbackResult{}, &DepositAlreadyReversedError{
+			DepositIntentID:               original.ID,
+			OriginalLedgerTransactionID:   *original.LedgerTransactionID,
+			RejectedReversalReference:     reversalRef,
+			ExistingReversalTransactionID: existingID,
+		}
 	}
 	if err != nil {
 		return ReceiveCallbackResult{}, fmt.Errorf("payments: post deposit reversal: %w", err)
@@ -1191,12 +1246,36 @@ func (o *Orchestrator) receiveDepositReversalCallback(ctx context.Context, tx pg
 // transaction that ran receiveDepositReversalCallback has already been
 // rolled back by db.Pool.WithTenant because it returned a non-nil error,
 // so nothing recorded on tx itself would ever be committed.
-func RecordDepositReversalRejection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, requestID string) error {
+//
+// ledger-finance P2-B / security P2-2 / code review F2 (Stage 10.1
+// review): the record now names the ORIGINAL deposit_intent as its
+// target and carries the full DepositAlreadyReversedError detail in
+// Metadata - the previous version named only the provider_id, which left
+// operations and PSP reconciliation unable to identify which deposit was
+// affected by a genuine second PSP reversal (e.g. a refund followed by a
+// chargeback). clientIPAddr is threaded through from the caller's own
+// trusted-proxy-aware helper (never derived here) so this audit record
+// carries an IP exactly like every other mutating/denial audit record
+// CLAUDE.md requires one for. The alert LOG line and the HTTP response
+// body are UNCHANGED by this - both stay allow-listed/generic (S-5); only
+// this append-only, tenant-scoped audit record gets the detail, because
+// the reversal reference was already authenticated (signature-verified)
+// by the time this function is ever called.
+func RecordDepositReversalRejection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, requestID, clientIPAddr string, detail *DepositAlreadyReversedError) error {
+	metadata := map[string]any{
+		"provider_id":                    providerID,
+		"rejected_reversal_reference":    detail.RejectedReversalReference,
+		"original_ledger_transaction_id": detail.OriginalLedgerTransactionID.String(),
+		"deposit_intent_id":              detail.DepositIntentID.String(),
+	}
+	if detail.ExistingReversalTransactionID != nil {
+		metadata["existing_reversal_ledger_transaction_id"] = detail.ExistingReversalTransactionID.String()
+	}
 	if err := audit.Record(ctx, tx, audit.Entry{
 		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "deposit.reversal_rejected",
-		TargetType: "payment_webhook", TargetID: providerID, Outcome: audit.OutcomeDenied,
-		RequestID: requestID,
-		Metadata:  map[string]any{"provider_id": providerID},
+		TargetType: "deposit_intent", TargetID: detail.DepositIntentID.String(), Outcome: audit.OutcomeDenied,
+		RequestID: requestID, IPAddress: clientIPAddr,
+		Metadata: metadata,
 	}); err != nil {
 		return fmt.Errorf("payments: audit deposit reversal rejection: %w", err)
 	}

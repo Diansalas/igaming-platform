@@ -120,9 +120,22 @@ deposit could both post, over-debiting `player_cash`): an ADR 0082
 class-L2 lock plus a database backstop index (migration 0092). See ADR
 0090, financial-transaction-flows.md Flow 2 and the ADR 0020 amendment
 (2026-09-26) for the fix and the general doctrine it establishes.
-PAY-WH-TENANT-1 (the payments webhook's tenant resolution from a URL slug
-rather than a verified per-tenant credential, ADR 0022 §3) remains open
-and launch-blocking for any real PSP; it is a separate, later workstream.
+
+**Stage 10.1 (PAY-WH-TENANT-1, ADR 0090 item 3)** was also implemented in
+this same stage, with a `MOCK` resolver only (architecture review R-4:
+this paragraph previously and incorrectly said PAY-WH-TENANT-1 "remains
+open... a separate, later workstream", contradicting the paragraph above
+under "Stage 3B built the orchestration layer", which already states the
+correct, current status). The payments webhook's tenant is now resolved
+by verifying a signature bound to the ROUTE-resolved tenant (never trusted
+from the payload) against a single per-(tenant, provider, key id)
+credential (docs/decisions/0022 §3 as amended 2026-09-26). The real
+per-tenant credential resolver (a FORCE-RLS handle table plus a secret
+store) is `NOT IMPLEMENTED` and blocked on the secret-store ADR plus
+human-authorized provisioning, so this remains `PROVIDER DEPENDENT` and
+launch-blocking for any real PSP. Casino (`CAS-WH-TENANT-1`) and KYC
+(`KYC-WH-1`) callbacks do not yet conform to the same contract and are
+registered separately, not in scope of this item.
 
 ## Retail cash rail — architecture (Stage 4H-B0)
 

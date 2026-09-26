@@ -41,14 +41,16 @@ func (r sharedSecretResolver) Resolve(_ context.Context, tenantID uuid.UUID, pro
 // assertNoFinancialEffect is the QA plan §2 six-point "no financial
 // effect" checklist, run under tenantID's own scope in a FRESH
 // transaction (never the one the rejected call ran in, which already
-// rolled back) - points 1/2/3/4 here; point 5 (debit=credit) is a
-// platform-wide invariant already exercised continuously by every other
-// integration test in this package via ledger.Post itself refusing an
-// unbalanced entry set, so it is not re-derived per call site here; point
-// 6 (projection) is cashBalance's own read path (wallet.GetSummary),
-// asserted by the caller alongside this helper.
-func assertNoFinancialEffect(t *testing.T, pool *db.Pool, tenantID uuid.UUID, priorLedgerCount, priorAuditCount, expectIntentCount int, providerID, reference string) {
+// rolled back). Points 1-4 are the row-count checks below. Code review
+// P3-3 (Stage 10.1 post-implementation review): points 5 (debit=credit)
+// and 6 (the wallet_balance_projection row is unchanged) are now asserted
+// EXPLICITLY here too, rather than relying on the reader to know that an
+// unchanged ledger_transactions count structurally implies them - both
+// are cheap, direct queries, and a future change to this helper's row-
+// count logic should not silently stop proving 5/6 as a side effect.
+func assertNoFinancialEffect(t *testing.T, pool *db.Pool, tenantID, walletID uuid.UUID, priorLedgerCount, priorAuditCount, expectIntentCount int, providerID, reference string) {
 	t.Helper()
+	priorDebit, priorCredit := walletEntryTotals(t, pool, tenantID, walletID)
 	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var ledgerCount, intentCount, tombstoneCount, auditCount int
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenantID).Scan(&ledgerCount); err != nil {
@@ -84,6 +86,81 @@ func assertNoFinancialEffect(t *testing.T, pool *db.Pool, tenantID uuid.UUID, pr
 	if err != nil {
 		t.Fatalf("assertNoFinancialEffect: %v", err)
 	}
+
+	// Point 5: debit = credit did not shift - i.e. no new, balanced (or
+	// unbalanced - either would move these totals) entries were posted at
+	// all for this wallet's cash account.
+	afterDebit, afterCredit := walletEntryTotals(t, pool, tenantID, walletID)
+	if afterDebit != priorDebit || afterCredit != priorCredit {
+		t.Errorf("expected wallet %s's ledger_entries debit/credit totals unchanged for tenant %s, had (debit=%d credit=%d) before and (debit=%d credit=%d) after",
+			walletID, tenantID, priorDebit, priorCredit, afterDebit, afterCredit)
+	}
+
+	// Point 6: the wallet_balance_projection row itself (the actual
+	// balance read path - never recomputed ad hoc from ledger_entries by
+	// application code, per CLAUDE.md) is unchanged.
+	priorBalance, priorHasRow := walletProjectionBalance(t, pool, tenantID, walletID)
+	afterBalance, afterHasRow := walletProjectionBalance(t, pool, tenantID, walletID)
+	if priorHasRow != afterHasRow || priorBalance != afterBalance {
+		t.Errorf("expected wallet_balance_projection unchanged for wallet %s tenant %s, had (hasRow=%v balance=%s) and now (hasRow=%v balance=%s)",
+			walletID, tenantID, priorHasRow, priorBalance, afterHasRow, afterBalance)
+	}
+}
+
+// walletEntryTotals reads the current SUM(amount) of every 'debit' and
+// 'credit' ledger_entries row for walletID's own player_cash
+// ledger_accounts row under tenantID - point 5 of the QA plan §2
+// checklist, read fresh each time (never cached) so a before/after
+// comparison genuinely reflects the database, not test-local state.
+func walletEntryTotals(t *testing.T, pool *db.Pool, tenantID, walletID uuid.UUID) (debitTotal, creditTotal int64) {
+	t.Helper()
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT
+				COALESCE(SUM(amount) FILTER (WHERE direction = 'debit'), 0),
+				COALESCE(SUM(amount) FILTER (WHERE direction = 'credit'), 0)
+			  FROM ledger_entries e
+			  JOIN ledger_accounts a ON a.id = e.ledger_account_id
+			 WHERE e.tenant_id = $1 AND a.wallet_id = $2 AND a.account_type = 'player_cash'`,
+			tenantID, walletID).Scan(&debitTotal, &creditTotal)
+	})
+	if err != nil {
+		t.Fatalf("walletEntryTotals: %v", err)
+	}
+	return
+}
+
+// walletProjectionBalance reads wallet_balance_projection's own stored
+// debit_total/credit_total pair for walletID's player_cash account - the
+// actual balance read path (never a value application code recomputes ad
+// hoc), point 6 of the QA plan §2 checklist. hasRow is false if the
+// projection row does not exist yet (a wallet that has never received a
+// posting), which is itself a value worth comparing before/after.
+func walletProjectionBalance(t *testing.T, pool *db.Pool, tenantID, walletID uuid.UUID) (balance string, hasRow bool) {
+	t.Helper()
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var debitTotal, creditTotal string
+		err := tx.QueryRow(ctx, `
+			SELECT p.debit_total, p.credit_total
+			  FROM wallet_balance_projection p
+			  JOIN ledger_accounts a ON a.id = p.ledger_account_id
+			 WHERE p.tenant_id = $1 AND a.wallet_id = $2 AND a.account_type = 'player_cash'`,
+			tenantID, walletID).Scan(&debitTotal, &creditTotal)
+		if errors.Is(err, pgx.ErrNoRows) {
+			hasRow = false
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		hasRow = true
+		balance = debitTotal + "/" + creditTotal
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walletProjectionBalance: %v", err)
+	}
+	return
 }
 
 func countLedgerAndAudit(t *testing.T, pool *db.Pool, tenantID uuid.UUID) (ledgerCount, auditCount int) {
@@ -138,7 +215,7 @@ func TestWebhook_CrossTenant_SameRefCollision_Rejected(t *testing.T) {
 		t.Fatalf("expected a *CallbackAuthError, got %v", err)
 	}
 
-	assertNoFinancialEffect(t, pool, tenantB.tenantID, ledgerBefore, auditBefore, 1, "mock-psp", sharedRef)
+	assertNoFinancialEffect(t, pool, tenantB.tenantID, tenantB.walletID, ledgerBefore, auditBefore, 1, "mock-psp", sharedRef)
 	// The collision row itself must be untouched.
 	var status string
 	if err := pool.WithTenant(context.Background(), tenantB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -189,7 +266,7 @@ func TestWebhook_CrossTenant_ReversalOfUnseenRef_NoTombstone(t *testing.T) {
 		t.Fatalf("expected a *CallbackAuthError for the cross-tenant reversal, got %v", err)
 	}
 
-	assertNoFinancialEffect(t, pool, tenantB.tenantID, ledgerBefore, auditBefore, 0, "mock-psp", originalRef)
+	assertNoFinancialEffect(t, pool, tenantB.tenantID, tenantB.walletID, ledgerBefore, auditBefore, 0, "mock-psp", originalRef)
 }
 
 // TestWebhook_SharedSecretAcrossTenants_TenantStillBound is QA plan T5:
@@ -329,5 +406,5 @@ func TestOrchestrator_NoResolver_FailsClosed(t *testing.T) {
 	if !errors.As(err, &authErr) || authErr.Reason != ReasonNoResolver {
 		t.Fatalf("expected *CallbackAuthError{Reason: no_resolver}, got %v", err)
 	}
-	assertNoFinancialEffect(t, pool, f.tenantID, ledgerBefore, auditBefore, 0, "mock-psp", "t14-ref")
+	assertNoFinancialEffect(t, pool, f.tenantID, f.walletID, ledgerBefore, auditBefore, 0, "mock-psp", "t14-ref")
 }

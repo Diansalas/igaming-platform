@@ -117,6 +117,20 @@ var (
 	// never reaches the ledger posting API." Never wrap this with the raw
 	// payload or any field from it.
 	ErrCallbackSignatureInvalid = errors.New("payments: callback signature verification failed")
+	// ErrCallbackMalformedBody is returned by a PaymentProvider adapter's
+	// HandleCallback for a structural parsing failure discovered AFTER
+	// signature verification has already succeeded (docs/decisions/0022
+	// §3 amendment point 7, added Stage 10.1 security review P2-1/code
+	// review F1/architect PW-1): an unparseable JSON body, a missing
+	// required field, or an unrecognized event_type/outcome value, from a
+	// caller who has already proven knowledge of the shared credential. It
+	// is deliberately a DIFFERENT sentinel from ErrCallbackSignatureInvalid
+	// - a verified-but-malformed body maps to a 4xx validation response,
+	// never to the uniform pre-verification 401, and is safe to describe
+	// more specifically in logs/responses since the sender is
+	// authenticated. Never returned for a failure that occurs BEFORE
+	// verification succeeds - see HandleCallback's own doc comment.
+	ErrCallbackMalformedBody = errors.New("payments: verified callback body is malformed")
 	// ErrUnknownProvider is returned when a capability row or routing
 	// decision names a provider_id the orchestrator has no adapter
 	// registered for.
@@ -219,6 +233,14 @@ const (
 	ReasonSignatureMissing      CallbackAuthReason = "signature_missing"
 	ReasonSignatureInvalid      CallbackAuthReason = "signature_invalid"
 	ReasonKeyMaterial           CallbackAuthReason = "key_material"
+	// ReasonBodyTooLarge is used by the HTTP handler only (never by an
+	// adapter's HandleCallback) for an oversized/unreadable body, checked
+	// BEFORE the tenant lookup (Stage 10.1 security review P2-1/code
+	// review F1/architect PW-1, ruling 5): an oversized body must get the
+	// SAME uniform 401 as every other pre-verification failure, tenant-
+	// independent, rather than a distinguishable 400 that only an active,
+	// resolvable tenant slug would reach.
+	ReasonBodyTooLarge CallbackAuthReason = "body_too_large"
 )
 
 // CallbackAuthError is ErrCallbackAuthFailed's concrete carrier, with the
@@ -241,6 +263,55 @@ func (e *CallbackAuthError) Error() string {
 // *CallbackAuthError regardless of its specific Reason.
 func (e *CallbackAuthError) Is(target error) bool {
 	return target == ErrCallbackAuthFailed
+}
+
+// DepositAlreadyReversedError is ErrDepositAlreadyReversed's typed carrier
+// (Stage 10.1 review: ledger-finance P2-B, security P2-2, code review F2).
+// A bare ErrDepositAlreadyReversed left the HTTP layer with no way to
+// identify WHICH deposit was affected, so the deposit.reversal_rejected
+// audit record - the only durable trace of a rejected reversal, since the
+// alert log line is deliberately allow-listed/generic (S-5) and the
+// failed posting transaction itself was rolled back - named no deposit,
+// no ledger transaction, and no PSP reference at all. Operations and PSP
+// reconciliation need this to identify which real-world event (e.g. a
+// refund followed by a chargeback) the rejected reversal corresponds to.
+//
+// Every field here has already been authenticated by the time this error
+// is constructed (the callback's signature verified), so recording them
+// in the tenant-scoped, append-only audit store is not an unauthenticated-
+// input write - it is exactly the same trust boundary the success-path
+// deposit.reversed audit record already crosses. The HTTP response body
+// and the alert log line remain generic/allow-listed regardless; only the
+// audit record gets this detail.
+type DepositAlreadyReversedError struct {
+	// DepositIntentID is the ORIGINAL deposit's deposit_intents id - the
+	// audit record's TargetID.
+	DepositIntentID uuid.UUID
+	// OriginalLedgerTransactionID is the original deposit's posted
+	// ledger_transactions id.
+	OriginalLedgerTransactionID uuid.UUID
+	// RejectedReversalReference is the VERIFIED (signature already
+	// checked) provider_reference of the reversal callback that was
+	// rejected - never the original deposit's own reference.
+	RejectedReversalReference string
+	// ExistingReversalTransactionID is the ALREADY-POSTED reversal's
+	// ledger_transactions id, when it could be determined. Nil only if a
+	// concurrent lookup could not resolve it (never expected in practice,
+	// since invariant INV-PAY-REV-1 guarantees at most one exists).
+	ExistingReversalTransactionID *uuid.UUID
+}
+
+func (e *DepositAlreadyReversedError) Error() string {
+	return fmt.Sprintf("%s: deposit_intent=%s reversal_reference=%q",
+		ErrDepositAlreadyReversed.Error(), e.DepositIntentID, e.RejectedReversalReference)
+}
+
+// Unwrap lets errors.Is(err, ErrDepositAlreadyReversed) and
+// errors.As(err, &mapReceiveCallbackError's own checks) keep working
+// unchanged for every existing caller that only cares about the sentinel,
+// never the detail.
+func (e *DepositAlreadyReversedError) Unwrap() error {
+	return ErrDepositAlreadyReversed
 }
 
 // WebhookCredential is a resolved, per-(tenant, provider, key) inbound
@@ -270,6 +341,15 @@ func (c WebhookCredential) LogValue() slog.Value {
 		slog.String("key_id", c.KeyID),
 		slog.String("fingerprint", c.Fingerprint),
 	)
+}
+
+// GoString implements fmt.GoStringer so `%#v` (which bypasses Stringer
+// entirely, unlike %v/%+v) also never renders Secret's raw bytes -
+// security review P3-1. Any struct that embeds a WebhookCredential and is
+// itself %#v-formatted inherits this redaction automatically, since Go's
+// fmt package calls GoString on an embedded field that implements it.
+func (c WebhookCredential) GoString() string {
+	return c.String()
 }
 
 // WebhookCredentialResolver resolves the single candidate credential for
@@ -548,13 +628,18 @@ type PaymentProvider interface {
 	// BEFORE calling this method (docs/decisions/0022 §3 amendment) - an
 	// adapter never resolves its own credential and never tries more than
 	// the one it is given. A real adapter's own signature scheme maps onto
-	// this contract per the amendment's §9 requirements (per-merchant keys
-	// or a signed account id equal to cred bound account); the mock's
-	// scheme (mock.go) is documented there as the reference
-	// implementation. Returns ErrInboundKeyMaterial or
-	// ErrCallbackSignatureInvalid for an authentication failure - never any
-	// other error for that case (docs/decisions/0022 §3 amendment point on
-	// real-adapter errors).
+	// this contract per the amendment's point 3 (per-merchant keys, or a
+	// signed account id equal to cred's bound account); the mock's scheme
+	// (mock.go) is documented there as the reference implementation. Any
+	// failure BEFORE verification succeeds - including an unparseable body
+	// - returns ErrCallbackSignatureInvalid, or ErrInboundKeyMaterial once
+	// verification has succeeded and a key-material scan then rejects the
+	// payload; never any other error for a pre-verification failure
+	// (docs/decisions/0022 §3 amendment point 7, the adapter error
+	// contract). A verified-but-structurally-malformed body returns a
+	// DIFFERENT, adapter-specific sentinel (the mock's
+	// ErrCallbackMalformedBody) that a caller maps to a 4xx, never to the
+	// uniform pre-verification 401.
 	HandleCallback(ctx context.Context, req InboundCallback, cred WebhookCredential) (CallbackEvent, error)
 	// Capabilities returns this adapter's own declared, static layer only
 	// - never tenant/brand/priority/status (docs/decisions/0022 §2).

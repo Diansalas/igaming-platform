@@ -148,7 +148,7 @@ not work.**
 
 ### 1.6 `internal/payments`
 
-*(Row amended 2026-09-25, Amendment A5, Stage 10.1 PAY-REV-1, ADR 0090: the
+*(Row amended 2026-09-26, Amendment A5, Stage 10.1 PAY-REV-1, ADR 0090: the
 deposit-reversal row now takes an explicit L2 lock before Post; the
 original row text — "implicit projections only, no explicit locks" — is
 struck through, not deleted, below.)*
@@ -604,7 +604,7 @@ ADR 0082 L3").
   switch to `ledger.GetOrCreateAccounts` (both resolve `player_cash` and
   `psp_clearing`, currently in the same order — the change is
   defensive/uniform, not a fix).
-- **Pointer (Amendment A5, 2026-09-25, Stage 10.1 PAY-REV-1, ADR 0090):**
+- **Pointer (Amendment A5, 2026-09-26, Stage 10.1 PAY-REV-1, ADR 0090):**
   unrelated to LOCK-1b, `receiveDepositReversalCallback` was subsequently
   given its own explicit **L2** lock (a plain instance, no new exception)
   on the original deposit's `ledger_transactions` row, taken before
@@ -1421,4 +1421,24 @@ strikethrough), does not change R1–R8, and does not touch anything in
 `internal/casino`, `internal/sportsbook`, `internal/bonus` or
 `internal/withdrawal`. The full S0–S7 sequence, the migration 0092
 backstop index, and the HTTP-layer denial handling are recorded in ADR
-0090, not repeated here.
+0090 → `docs/plans/stage-10.1-planning-gate-proposal.md` §E (ADR 0090
+itself only references the sequence by name; §E of that report is where
+it is actually spelled out step by step), not repeated here.
+
+**S-4d (added 2026-09-26, Stage 10.1 post-implementation architecture/
+security review):** the new `FOR UPDATE` this amendment records requires
+the runtime database role to retain `UPDATE` privilege on
+`ledger_transactions` — `SELECT ... FOR UPDATE` needs `UPDATE`, not merely
+`SELECT`, on the target table/row, per PostgreSQL's own row-locking
+privilege model. This codebase already REVOKEs `UPDATE` on
+`sportsbook_bet_settlements` (Amendment A4's E-4 precedent) for a
+different table, so the pattern of tightening privileges after a
+migration is a live one here. If `UPDATE` on `ledger_transactions` is ever
+REVOKEd from the runtime role for any reason, this lock — and
+`internal/casino`'s `postRollback` precedent it mirrors, which takes the
+identical `FOR UPDATE` shape on the same table — both fail CLOSED: every
+deposit-reversal callback and every casino rollback would return a plain
+500 (a permission-denied error surfacing through the generic error path),
+never a silent bypass of the lock. Recorded here as a dependency to check
+before any future privilege-tightening migration touches
+`ledger_transactions`, not as an open action item.
