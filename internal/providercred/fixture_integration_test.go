@@ -10,6 +10,7 @@ package providercred
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -366,3 +367,23 @@ type (
 )
 
 func hexOf(b []byte) string { return hex.EncodeToString(b) }
+
+// signFor is the test-only KeyImplicit reference scheme's MAC.
+func signFor(secret, body []byte) string {
+	mac := hmac.New(sha256.New, secret)
+	_, _ = mac.Write(body)
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func hmacEqualString(a, b string) bool { return hmac.Equal([]byte(a), []byte(b)) }
+
+type pgxTx = pgx.Tx
+
+func runtimeURL(t testing.TB) string {
+	t.Helper()
+	url := os.Getenv("TEST_RUNTIME_DATABASE_URL")
+	if url == "" {
+		t.Skip("TEST_RUNTIME_DATABASE_URL not set; skipping provider credential runtime-role test")
+	}
+	return url
+}
