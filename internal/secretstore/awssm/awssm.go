@@ -35,6 +35,18 @@
 // Secrets Manager client itself, and whether IRSA/web identity is ever an
 // authorized source.
 //
+// Ambient SDK tuning is also refused and pinned (security gate W2/W3
+// finding N-1): AWS_DEFAULTS_MODE=auto makes the SDK's config loader dial
+// EC2 IMDS (169.254.169.254) during LoadDefaultConfig to classify the
+// environment for timeouts, which is network I/O at init, forbidden by ADR
+// 0093 §6. AWS_MAX_ATTEMPTS and AWS_RETRY_MODE would let the ambient
+// environment change SDK retry behaviour underneath the secretstore
+// circuit breaker's fixed StoreCallTimeout/BreakerTripThreshold budget. New
+// refuses all three env vars outright, and also pins DefaultsModeStandard
+// and a fixed retryer (standard mode, pinnedRetryMaxAttempts) explicitly in
+// loadOpts as defence in depth, so even a future refusal regression cannot
+// silently reintroduce ambient tuning.
+//
 // Reads always pin an exact Secrets Manager VersionId. GetSecretValueInput
 // never carries VersionStage, so a stage label ("AWSCURRENT" etc.) can
 // never be requested through this backend, matching the ADR 0093 ref CHECK
@@ -76,6 +88,20 @@ import (
 // MaxSecretBytes is the largest accepted secret value, consistent with the
 // devfile backend's MaxFileBytes.
 const MaxSecretBytes = 64 << 10
+
+// pinnedRetryMaxAttempts is the fixed SDK retry budget for the Secrets
+// Manager client (security gate W2/W3 finding N-1). secretstore.Fetcher
+// bounds one store call, INCLUDING its retries, to StoreCallTimeout (2s;
+// internal/secretstore/fetcher.go), and opens the circuit breaker after
+// BreakerTripThreshold (3) consecutive failures. A larger attempt count
+// (the SDK standard-mode default is 3, and AWS_MAX_ATTEMPTS could set it far
+// higher) risks a single call's backoff alone consuming the whole
+// StoreCallTimeout budget, which would starve the breaker of the fast
+// failures it needs to trip promptly. 2 attempts (one retry) leaves retry
+// headroom without materially eating into the 2s budget at standard-mode
+// backoff, and is small enough that ambient tuning cannot make one call's
+// retries dominate the breaker's window.
+const pinnedRetryMaxAttempts = 2
 
 // client is the narrow slice of the Secrets Manager SDK client this
 // package depends on. Production uses the real *secretsmanager.Client;
@@ -129,17 +155,7 @@ func New(ctx context.Context, cfg config.Config, region string) (*Store, error) 
 		o.HTTPClient = credHTTP
 	})})
 
-	loadOpts := []func(*awsconfig.LoadOptions) error{
-		awsconfig.WithRegion(region),
-		// SDK logging off (ADR 0093 §6; C12.6). The zero value already
-		// means "no logging"; this is explicit so a later default change
-		// upstream cannot silently turn logging on.
-		awsconfig.WithClientLogMode(aws.ClientLogMode(0)),
-		// No shared config/credentials file is ever read (S-1).
-		awsconfig.WithSharedConfigFiles([]string{}),
-		awsconfig.WithSharedCredentialsFiles([]string{}),
-		awsconfig.WithCredentialsProvider(creds),
-	}
+	loadOpts := pinnedLoadOptions(region, creds)
 	if httpClientOverride != nil {
 		loadOpts = append(loadOpts, awsconfig.WithHTTPClient(httpClientOverride))
 	}
@@ -160,6 +176,37 @@ func New(ctx context.Context, cfg config.Config, region string) (*Store, error) 
 		// could be redirected is the env vars refused above.
 	})
 	return newStore(sm), nil
+}
+
+// pinnedLoadOptions is every awsconfig.LoadOptions setting New applies,
+// factored out so a test can call awsconfig.LoadDefaultConfig with exactly
+// these options and inspect the resulting aws.Config directly (security
+// gate W2/W3 finding N-1: proving the pin, not just the refusal, since
+// defence in depth means these must hold even if the ambientTuningOverride/
+// endpointOverride refusals above ever regressed).
+func pinnedLoadOptions(region string, creds aws.CredentialsProvider) []func(*awsconfig.LoadOptions) error {
+	return []func(*awsconfig.LoadOptions) error{
+		awsconfig.WithRegion(region),
+		// SDK logging off (ADR 0093 §6; C12.6). The zero value already
+		// means "no logging"; this is explicit so a later default change
+		// upstream cannot silently turn logging on.
+		awsconfig.WithClientLogMode(aws.ClientLogMode(0)),
+		// No shared config/credentials file is ever read (S-1).
+		awsconfig.WithSharedConfigFiles([]string{}),
+		awsconfig.WithSharedCredentialsFiles([]string{}),
+		awsconfig.WithCredentialsProvider(creds),
+		// Defaults mode and retry behaviour are pinned explicitly (N-1), as
+		// defence in depth on top of the ambientTuningOverrideSignal
+		// refusal above: AWS_DEFAULTS_MODE=auto would otherwise make
+		// LoadDefaultConfig dial EC2 IMDS during New (network at init,
+		// forbidden by ADR 0093 §6), and AWS_MAX_ATTEMPTS/AWS_RETRY_MODE
+		// would let the environment change retry behaviour underneath the
+		// secretstore circuit breaker's fixed StoreCallTimeout budget. See
+		// pinnedRetryMaxAttempts for why 2.
+		awsconfig.WithDefaultsMode(aws.DefaultsModeStandard),
+		awsconfig.WithRetryMode(aws.RetryModeStandard),
+		awsconfig.WithRetryMaxAttempts(pinnedRetryMaxAttempts),
+	}
 }
 
 // preflight is every refusal New applies before it touches the SDK: the
@@ -184,6 +231,10 @@ func preflight(cfg config.Config, region string) (string, error) {
 	if reason, found := credentialSourceOverrideSignal(); found {
 		return "", fmt.Errorf("awssm: refusing to start: credential-source override present (%s); "+
 			"only the ECS container task-role endpoint is authorized", reason)
+	}
+	if reason, found := ambientTuningOverrideSignal(); found {
+		return "", fmt.Errorf("awssm: refusing to start: ambient SDK tuning override present (%s); "+
+			"defaults mode and retry behaviour are pinned explicitly, never taken from the environment", reason)
 	}
 	return containerCredentialsEndpoint()
 }
@@ -303,6 +354,32 @@ var credentialSourceOverrideEnvVars = []string{
 	"AWS_EC2_METADATA_SERVICE_ENDPOINT",
 	"AWS_WEB_IDENTITY_TOKEN_FILE",
 	"AWS_ROLE_ARN",
+}
+
+// ambientTuningOverrideEnvVars are refused in every environment (security
+// gate W2/W3 finding N-1): AWS_DEFAULTS_MODE=auto makes LoadDefaultConfig
+// dial EC2 IMDS during New (network at init, forbidden by ADR 0093 §6);
+// AWS_MAX_ATTEMPTS and AWS_RETRY_MODE would let the environment change SDK
+// retry behaviour underneath the secretstore circuit breaker's fixed
+// budget. New pins DefaultsModeStandard and a fixed retryer explicitly
+// regardless, so these are refused for the same reason the other
+// environment overrides above are: an operator must see the
+// misconfiguration at startup, not have it silently overridden.
+var ambientTuningOverrideEnvVars = []string{
+	"AWS_DEFAULTS_MODE",
+	"AWS_MAX_ATTEMPTS",
+	"AWS_RETRY_MODE",
+}
+
+// ambientTuningOverrideSignal reports the first ambient SDK tuning env var
+// found, if any.
+func ambientTuningOverrideSignal() (string, bool) {
+	for _, k := range ambientTuningOverrideEnvVars {
+		if v, ok := lookupEnv(k); ok && v != "" {
+			return k, true
+		}
+	}
+	return "", false
 }
 
 // lookupEnv/statPath are indirections so tests can simulate a shared

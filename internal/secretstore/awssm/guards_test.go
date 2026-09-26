@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/endpointcreds"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/google/uuid"
@@ -216,6 +217,66 @@ func TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused(t *testin
 				t.Fatalf("NewWithSDKFake must apply the same refusal for %s", k)
 			}
 		})
+	}
+}
+
+// TestAWSSM_N1_AmbientTuningOverridesRefused (security gate W2/W3 finding
+// N-1): AWS_DEFAULTS_MODE, AWS_MAX_ATTEMPTS and AWS_RETRY_MODE each refuse
+// startup, naming themselves, and — since the failure mode this finding is
+// about is IMDS network I/O during New — the refusal happens BEFORE any
+// network call: the tripwire sees no new request at all.
+func TestAWSSM_N1_AmbientTuningOverridesRefused(t *testing.T) {
+	for _, tc := range []struct {
+		key   string
+		value string
+	}{
+		{"AWS_DEFAULTS_MODE", "auto"},
+		{"AWS_MAX_ATTEMPTS", "50"},
+		{"AWS_RETRY_MODE", "adaptive"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			cfg := permittedEnv(t)
+			t.Setenv(tc.key, tc.value)
+			before := len(testTripwire.snapshot())
+			_, err := New(context.Background(), cfg, "eu-west-1")
+			if err == nil || !strings.Contains(err.Error(), "("+tc.key+")") {
+				t.Fatalf("%s must refuse startup naming itself, got %v", tc.key, err)
+			}
+			if got := testTripwire.snapshot(); len(got) != before {
+				t.Fatalf("%s: New made a network request before refusing: %v", tc.key, got[before:])
+			}
+			if _, err := NewWithSDKFake(context.Background(), cfg, "eu-west-1"); err == nil {
+				t.Fatalf("NewWithSDKFake must apply the same refusal for %s", tc.key)
+			}
+		})
+	}
+}
+
+// TestAWSSM_N1_DefaultsModeAndRetryPinnedRegardlessOfEnv (security gate
+// W2/W3 finding N-1, defence in depth): even setting aside the refusal
+// above, the awsconfig.LoadOptions New builds (pinnedLoadOptions) pin
+// DefaultsModeStandard and a fixed retry budget, so AWS_DEFAULTS_MODE=auto,
+// AWS_MAX_ATTEMPTS and AWS_RETRY_MODE set in the ambient environment have no
+// effect on the resulting aws.Config. This proves the pin itself, not just
+// that New currently also refuses to start with these set.
+func TestAWSSM_N1_DefaultsModeAndRetryPinnedRegardlessOfEnv(t *testing.T) {
+	t.Setenv("AWS_DEFAULTS_MODE", "auto")
+	t.Setenv("AWS_MAX_ATTEMPTS", "50")
+	t.Setenv("AWS_RETRY_MODE", "adaptive")
+
+	creds := aws.AnonymousCredentials{}
+	loadedCfg, err := awsconfig.LoadDefaultConfig(context.Background(), pinnedLoadOptions("eu-west-1", creds)...)
+	if err != nil {
+		t.Fatalf("LoadDefaultConfig with pinnedLoadOptions: %v", err)
+	}
+	if loadedCfg.DefaultsMode != aws.DefaultsModeStandard {
+		t.Fatalf("DefaultsMode = %q, want %q (AWS_DEFAULTS_MODE=auto must not override the pin)", loadedCfg.DefaultsMode, aws.DefaultsModeStandard)
+	}
+	if loadedCfg.RetryMode != aws.RetryModeStandard {
+		t.Fatalf("RetryMode = %q, want %q (AWS_RETRY_MODE=adaptive must not override the pin)", loadedCfg.RetryMode, aws.RetryModeStandard)
+	}
+	if loadedCfg.RetryMaxAttempts != pinnedRetryMaxAttempts {
+		t.Fatalf("RetryMaxAttempts = %d, want %d (AWS_MAX_ATTEMPTS=50 must not override the pin)", loadedCfg.RetryMaxAttempts, pinnedRetryMaxAttempts)
 	}
 }
 

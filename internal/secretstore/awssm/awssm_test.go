@@ -468,6 +468,7 @@ func clearAWSEnv(t *testing.T) {
 	keys = append(keys, staticCredentialViolationEnvVars...)
 	keys = append(keys, endpointOverrideEnvVars...)
 	keys = append(keys, credentialSourceOverrideEnvVars...)
+	keys = append(keys, ambientTuningOverrideEnvVars...)
 	for _, kv := range os.Environ() {
 		if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, endpointOverridePrefix) {
 			keys = append(keys, k)

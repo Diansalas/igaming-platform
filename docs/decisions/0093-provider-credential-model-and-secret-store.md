@@ -613,10 +613,10 @@ Labels per CLAUDE.md.
 - **Open, not decided here (HD-10.3-2):**
   - `HTTPS_PROXY` handling for the Secrets Manager client (the recommendation on record is the
     VPC endpoint, with the proxy not honoured for this client);
-  - whether IRSA/web identity is ever an authorized source (refused until decided);
-  - the SDK's own retry policy (3 attempts) underneath the `secretstore` breaker. The whole call
-    is bounded by `StoreCallTimeout`
-    (`TestAWSSM_HangingStoreBoundedThroughFetcher`).
+  - whether IRSA/web identity is ever an authorized source (refused until decided).
+  - (The SDK's retry policy underneath the `secretstore` breaker is no longer open: it is pinned,
+    see N-1 below. The whole call remains bounded by `StoreCallTimeout`
+    (`TestAWSSM_HangingStoreBoundedThroughFetcher`).)
 - **Matched `key_id` log (W2A-SEC-2): `IMPLEMENTED`.** After a successful verification, the
   payments, KYC and casino orchestrators call `webhookauth.LogVerifiedKey`. For a `KeyImplicit`
   scheme it logs one Info line, `webhook_key_verified`, with only `request_id`, `tenant_id`,
@@ -627,3 +627,37 @@ Labels per CLAUDE.md.
 - Mutation-kill record: `docs/plans/stage-10.3-planning/evidence/w2w3-closeout-mutation-kill.txt`.
 - `awssm` must be reviewed again by `security` now that it is wired. This entry is not that
   review.
+
+### N-1 closed (2026-09-26 re-verification, `docs/plans/stage-10.3-planning/11-gate-w2w3-reverify-security.md`)
+
+`security`'s re-verification of the wiring above found one new Low finding, N-1: ambient SDK
+tuning env vars could still make `New` do network I/O and change retry behaviour, contradicting
+the "`New` makes no network call" claim above and this ADR's §6 no-network-at-init rule.
+
+- `AWS_DEFAULTS_MODE=auto` made `LoadDefaultConfig`'s `resolveDefaultsModeOptions` dial EC2 IMDS
+  (`169.254.169.254`) during `New` to classify the environment for timeouts (probe: 6 requests,
+  about 4s, on the reviewer's tripwire).
+- `AWS_MAX_ATTEMPTS`/`AWS_RETRY_MODE` let the ambient environment change SDK retry behaviour
+  underneath the `secretstore` circuit breaker's fixed `StoreCallTimeout`/`BreakerTripThreshold`
+  budget.
+
+**Fix, `IMPLEMENTED`:** `AWS_DEFAULTS_MODE`, `AWS_MAX_ATTEMPTS` and `AWS_RETRY_MODE` are refused at
+startup (`ambientTuningOverrideEnvVars`/`ambientTuningOverrideSignal` in `awssm.go`, called from
+`preflight`), the same refuse-and-name-the-variable pattern as S-2's endpoint/credential-source
+refusals. As defence in depth on top of the refusal, `New`'s `awsconfig.LoadOptions`
+(`pinnedLoadOptions`) also pin `awsconfig.WithDefaultsMode(aws.DefaultsModeStandard)`,
+`awsconfig.WithRetryMode(aws.RetryModeStandard)` and `awsconfig.WithRetryMaxAttempts(2)`
+explicitly (`pinnedRetryMaxAttempts`; 2 attempts, chosen so one call's retries cannot alone
+consume the 2s `StoreCallTimeout` budget and starve the breaker of fast failures), so a future
+regression of the refusal alone cannot silently reintroduce ambient tuning.
+
+New tests: `TestAWSSM_N1_AmbientTuningOverridesRefused` (refusal, zero tripwire requests before
+refusing, and the same refusal from `NewWithSDKFake`) and
+`TestAWSSM_N1_DefaultsModeAndRetryPinnedRegardlessOfEnv` (the pin holds in the resulting
+`aws.Config` even with all three env vars set). Mutation-kill record appended to
+`docs/plans/stage-10.3-planning/evidence/w2w3-closeout-mutation-kill.txt` (7/7 killed); one mutant
+(removing the `WithDefaultsMode` pin) reproduced the original defect live, logging an attempted
+real EC2 IMDS call.
+
+N-2 (Secrets Manager client honours `HTTPS_PROXY`) and N-3 (ARN account not pinned against
+platform configuration) remain open, tracked under HD-10.3-2 as before; this closes only N-1.

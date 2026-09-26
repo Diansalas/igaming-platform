@@ -75,3 +75,58 @@ M35 | #6: Secrets Manager client override not applied | KILLED | TestAWSSM_New_S
 M36 | #6: Fetcher store-call budget widened (StoreCallTimeout 2s -> 20s) | KILLED | TestAWSSM_HangingStoreBoundedThroughFetcher
 M37 | #6: production wiring uses the SDK-fake constructor | KILLED | TestNewWithSDKFake_OnlyFromTests
 M38 | #6: a cmd/platform-api test builds a real AWS client via awssm.New | KILLED | TestAWSSM_NewNeverCalledFromTestsOutsideThisPackage
+
+## Addendum: N-1 fix (ambient SDK tuning: AWS_DEFAULTS_MODE/AWS_MAX_ATTEMPTS/AWS_RETRY_MODE)
+
+Date: 2026-09-26. Scope: security gate W2/W3 finding N-1
+(`11-gate-w2w3-reverify-security.md`) - `AWS_DEFAULTS_MODE=auto` making
+`awssm.New` dial EC2 IMDS during `LoadDefaultConfig` (network at init,
+forbidding ADR 0093 §6), and `AWS_MAX_ATTEMPTS`/`AWS_RETRY_MODE` letting the
+ambient environment change SDK retry behaviour under the secretstore
+circuit breaker's fixed `StoreCallTimeout`/`BreakerTripThreshold` budget.
+
+Fix: `AWS_DEFAULTS_MODE`, `AWS_MAX_ATTEMPTS` and `AWS_RETRY_MODE` are now
+refused at startup (`ambientTuningOverrideEnvVars` /
+`ambientTuningOverrideSignal`, called from `preflight`), same pattern as
+the existing endpoint/credential-source refusals. As defence in depth,
+`New`'s `awsconfig.LoadOptions` (factored into `pinnedLoadOptions`) also
+pin `awsconfig.WithDefaultsMode(aws.DefaultsModeStandard)`,
+`awsconfig.WithRetryMode(aws.RetryModeStandard)` and
+`awsconfig.WithRetryMaxAttempts(pinnedRetryMaxAttempts)` (pinned to 2,
+documented in the `pinnedRetryMaxAttempts` doc comment against the 2s
+`StoreCallTimeout` / 3-failure `BreakerTripThreshold` budget) explicitly,
+so even a future regression of the refusal cannot silently reintroduce
+ambient tuning.
+
+New tests: `TestAWSSM_N1_AmbientTuningOverridesRefused` (table over
+`AWS_DEFAULTS_MODE`, `AWS_MAX_ATTEMPTS`, `AWS_RETRY_MODE`; asserts the
+named refusal, that `New` makes zero tripwire requests before refusing, and
+that `NewWithSDKFake` applies the same refusal) and
+`TestAWSSM_N1_DefaultsModeAndRetryPinnedRegardlessOfEnv` (calls
+`awsconfig.LoadDefaultConfig` directly with `pinnedLoadOptions`, all three
+env vars set in the ambient environment, and asserts the resulting
+`aws.Config`'s `DefaultsMode`/`RetryMode`/`RetryMaxAttempts` still read the
+pinned values, proving the pin itself, not just the refusal).
+
+Method: same as above - one source mutation at a time, `git diff --stat`
+confirmed clean before and after each mutation via a saved-and-restored
+copy of `awssm.go` (`cp` to a scratchpad backup, mutate with `perl -0pi`,
+run the named tests, `cp` the backup back), verdict recorded, no mutation
+left applied.
+
+Result: 7 mutations, 7 KILLED, 0 SURVIVED.
+
+Id | Mutation | Verdict | Failing tests
+---|----------|---------|--------------
+M39 | preflight: ambientTuningOverrideSignal check removed entirely | KILLED | TestAWSSM_N1_AmbientTuningOverridesRefused, TestAWSSM_N1_AmbientTuningOverridesRefused/AWS_DEFAULTS_MODE, TestAWSSM_N1_AmbientTuningOverridesRefused/AWS_MAX_ATTEMPTS, TestAWSSM_N1_AmbientTuningOverridesRefused/AWS_RETRY_MODE
+M40 | ambientTuningOverrideEnvVars: AWS_DEFAULTS_MODE removed from the list | KILLED | TestAWSSM_N1_AmbientTuningOverridesRefused/AWS_DEFAULTS_MODE
+M41 | ambientTuningOverrideEnvVars: AWS_MAX_ATTEMPTS removed from the list | KILLED | TestAWSSM_N1_AmbientTuningOverridesRefused/AWS_MAX_ATTEMPTS
+M42 | ambientTuningOverrideEnvVars: AWS_RETRY_MODE removed from the list | KILLED | TestAWSSM_N1_AmbientTuningOverridesRefused/AWS_RETRY_MODE
+M43 | pinnedLoadOptions: awsconfig.WithDefaultsMode(standard) removed | KILLED | TestAWSSM_N1_DefaultsModeAndRetryPinnedRegardlessOfEnv (this mutant also reproduced the underlying N-1 defect live: the test run logged `SDK ... WARN falling back to IMDSv1: ... request to EC2 IMDS failed`, i.e. a real attempted EC2 IMDS network call from LoadDefaultConfig, confirming both the original finding and that this test would have caught it)
+M44 | pinnedLoadOptions: awsconfig.WithRetryMode(standard) removed | KILLED | TestAWSSM_N1_DefaultsModeAndRetryPinnedRegardlessOfEnv
+M45 | pinnedLoadOptions: awsconfig.WithRetryMaxAttempts(pinnedRetryMaxAttempts) removed | KILLED | TestAWSSM_N1_DefaultsModeAndRetryPinnedRegardlessOfEnv
+
+Not separately mutation-tested, with the reason:
+- NewWithSDKFake's own preflight call: it delegates to the same
+  `preflight` function already covered by M39-M42 (see `sdkfake.go`); a
+  distinct mutant would be redundant with those four.
