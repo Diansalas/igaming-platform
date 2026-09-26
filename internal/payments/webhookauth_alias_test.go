@@ -84,8 +84,20 @@ func TestWebhookAuthAliases_ErrorsIsAs(t *testing.T) {
 		s := WebhookScheme()
 		if s.Prefix != SigningInputPrefix || s.SignatureHeader != HeaderSignature || s.KeyIDHeader != HeaderKeyID ||
 			SigningInputPrefix != "igaming.payments.webhook.v1" || HeaderSignature != "X-Payments-Signature" || HeaderKeyID != "X-Payments-Key-Id" ||
-			mockWebhookKeyID != "mock-v1" || ProviderIDPattern != webhookauth.ProviderIDPattern {
+			mockWebhookKeyID != "mock-v1" {
 			t.Fatal("payments webhook scheme parameters changed")
+		}
+		// Stage 10.2 final review (K9/L5): payments.ProviderIDPattern was
+		// deleted as dead code (zero callers besides this assertion); the
+		// provider_id charset itself is webhookauth's, unexported, and
+		// exercised here through the public ValidProviderID function so the
+		// charset boundary stays pinned without reaching into an internal
+		// package-level regexp.
+		if !webhookauth.ValidProviderID("mock-casino-1") {
+			t.Fatal("payments webhook provider_id charset changed: expected a lowercase alphanumeric-with-hyphens id to remain valid")
+		}
+		if webhookauth.ValidProviderID("Mock_Casino") {
+			t.Fatal("payments webhook provider_id charset changed: expected an uppercase/underscore id to remain invalid")
 		}
 	})
 }

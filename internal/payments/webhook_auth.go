@@ -34,11 +34,6 @@ func WebhookScheme() webhookauth.Scheme {
 	return paymentsScheme
 }
 
-// ProviderIDPattern is the path-segment charset a provider_id must satisfy
-// before any tenant/DB work runs (design §2.2) - the same *regexp.Regexp
-// as webhookauth.ProviderIDPattern.
-var ProviderIDPattern = webhookauth.ProviderIDPattern
-
 // MultiWebhookCredentialResolver composes several per-provider resolvers
 // behind the single WebhookCredentialResolver the Orchestrator is
 // constructed with (ruling C2/C3). An alias of webhookauth.MultiResolver
@@ -52,13 +47,6 @@ var ProviderIDPattern = webhookauth.ProviderIDPattern
 // single platform component - one FORCE-RLS handle table plus a secret
 // store, keyed by (tenant_id, provider_id, key_id).
 type MultiWebhookCredentialResolver = webhookauth.MultiResolver
-
-// ValidProviderIDFormat reports whether providerID satisfies the webhook
-// path-segment charset, checked BEFORE any tenant lookup or DB work
-// (design §3.1 step 1, ruling 5).
-func ValidProviderIDFormat(providerID string) bool {
-	return webhookauth.ValidProviderID(providerID)
-}
 
 // ParseWebhookAuthHeaders extracts and format-validates the payments
 // domain's two inbound-callback authentication headers. It never touches

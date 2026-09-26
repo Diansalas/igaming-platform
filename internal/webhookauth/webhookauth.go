@@ -197,15 +197,18 @@ var (
 	// signatureHeaderPattern matches the WHOLE signature header value:
 	// "v1=" plus exactly 64 lowercase hex characters (32 bytes).
 	signatureHeaderPattern = regexp.MustCompile(`^v1=[0-9a-f]{64}$`)
-	// ProviderIDPattern is the path-segment charset a provider_id must
-	// satisfy before any tenant/DB work runs.
-	ProviderIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+	// providerIDPattern is the path-segment charset a provider_id must
+	// satisfy before any tenant/DB work runs. Unexported (Stage 10.2 final
+	// review, K9/L5): an exported *regexp.Regexp is a package-level
+	// variable a caller could reassign, weakening the charset for the
+	// whole process. Callers use ValidProviderID.
+	providerIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 )
 
 // ValidProviderID reports whether providerID satisfies the webhook
 // path-segment charset, checked BEFORE any tenant lookup or DB work.
 func ValidProviderID(providerID string) bool {
-	return ProviderIDPattern.MatchString(providerID)
+	return providerIDPattern.MatchString(providerID)
 }
 
 // Scheme is the platform-defined MOCK webhook wire scheme for one domain.
