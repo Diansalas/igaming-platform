@@ -100,16 +100,6 @@ func (r *Router) Schemes() []string {
 	return out
 }
 
-// Backends lists the routed backends, sorted by scheme (for the ADR 0085
-// production guard's registration list).
-func (r *Router) Backends() []Store {
-	var out []Store
-	for _, s := range r.Schemes() {
-		out = append(out, r.stores[s])
-	}
-	return out
-}
-
 // GetDirect fetches ref from its backend WITHOUT the Fetcher's cache,
 // breaker or negative cache - for registration and apply only, where the
 // secret must be read fresh (and never cached before it is approved). It

@@ -53,13 +53,8 @@ type StoredMismatch struct {
 	ResolvedAt *time.Time
 }
 
-// ListRunsForStream reads one page of the tenant's runs of stream, newest
-// first, plus the total count.
-func ListRunsForStream(ctx context.Context, tx pgx.Tx, stream Stream, limit, offset int) ([]Run, int, error) {
-	return ListRunsForStreams(ctx, tx, []Stream{stream}, limit, offset)
-}
-
-// ListRunsForStreams is ListRunsForStream over several streams at once.
+// ListRunsForStreams reads one page of the tenant's runs of the given
+// streams, newest first, plus the total count.
 func ListRunsForStreams(ctx context.Context, tx pgx.Tx, streams []Stream, limit, offset int) ([]Run, int, error) {
 	s := make([]string, len(streams))
 	for i, v := range streams {
