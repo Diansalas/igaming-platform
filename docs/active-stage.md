@@ -1480,12 +1480,15 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 10.2 — Webhook trust hardening — APPROVED 2026-09-26 (ADR 0091), IN PROGRESS
+## Current stage: Stage 10.2 — Webhook trust hardening — IMPLEMENTED (MOCK providers); STOPPED at the Stage 10.2 deployment gate
 
-Workstreams: KYC-WH-1 (High), CAS-WH-TENANT-1 (Medium), CI-FLAKE-281
-investigation. No AWS action; staging stays on `9190d5d` until the human
-authorizes the governed `deploy.sh down` / `up` refresh. Stop point: the
-Stage 10.2 deployment gate.
+KYC-WH-1 and CAS-WH-TENANT-1 implemented for the MOCK providers on the shared
+`internal/webhookauth` contract; PAYWH-GATE-1 included; CI-FLAKE-281 investigated
+(not reproduced, diagnostics added). All specialist reviews complete, conditions
+met. Completion report: `docs/governance/stage-10.2-completion-report.md`.
+No AWS action; staging stays on `9190d5d` (still exposed to KYC-WH-1) until the
+human authorizes the governed `deploy.sh down` / `deploy.sh up` refresh (report
+§16). No next-stage work started.
 
 ## Prior stage: Stage 10.1 — PAY-REV-1 + SB-T1-XMIN + PAY-WH-TENANT-1 — IMPLEMENTED; STOPPED at the staging-deployment gate
 

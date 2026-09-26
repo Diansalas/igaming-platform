@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-26 (Stage 10.1 implemented; stopped at the staging-deployment gate)
+Last updated: 2026-09-26 (Stage 10.2 implemented; stopped at the deployment gate)
 
-## Status: Stage 10.1 IMPLEMENTED (PAY-REV-1, SB-T1-XMIN, PAY-WH-TENANT-1 with MOCK resolver); stopped at the staging-deployment gate (`docs/governance/stage-10.1-completion-report.md`)
+## Status: Stage 10.2 IMPLEMENTED (KYC-WH-1, CAS-WH-TENANT-1, PAYWH-GATE-1 — MOCK providers only); stopped at the deployment gate (`docs/governance/stage-10.2-completion-report.md`). Stage 10.1 also awaits the same staging refresh.
 
 ## Stage 0 — complete (approved)
 
@@ -8153,3 +8153,26 @@ permission probes.
 - AWS/staging untouched. **Stop: staging deployment requires separate
   human authorization.**
 
+## Stage 10.2 — Webhook trust hardening — implemented; stopped at the deployment gate
+
+- Approved 2026-09-26 (ADR 0091 ACCEPTED).
+- **Shared contract:** provider-neutral `internal/webhookauth` extracted from
+  payments (aliases, behaviour-identical; payments tests unedited); per-domain
+  signing prefixes, headers and mock key labels; shared HTTP preamble.
+- **KYC-WH-1 (IMPLEMENTED — MOCK only):** committed secret removed; mock KYC,
+  resolver and route only with test support; `provider_reference` staff-only;
+  tenant-bound verify-first; forward-only status with same-transaction audit;
+  204. Pre-fix forge reproduced (evidence E1–E3).
+- **CAS-WH-TENANT-1 (IMPLEMENTED — MOCK only):** per-(tenant, provider) credential
+  in the signing input; zero statements before verification; mock resolver only
+  with test support; money path unchanged. Pre-fix cross-tenant tombstone
+  reproduced (E4).
+- **PAYWH-GATE-1 (IMPLEMENTED):** payments mock resolver gated the same way.
+- **CI-FLAKE-281:** not reproduced; most likely a fixed-timeout margin in the
+  Argon2-heavy Stage 9 tests; failure-log artifact added.
+- Reviews: QA, backend, identity-compliance, casino, architect/DB, security,
+  ledger-finance, code review + re-verification; all conditions met.
+- New registry items: MOCK-ADAPTER-PROD-1, CAS-CAP-ROLLBACK-1 (hard pre-condition
+  for real casino resolvers), WH-VENDOR-SCHEME-1, KYC-REASON-BOUND-1.
+- AWS/staging untouched; staging `9190d5d` stays exposed to KYC-WH-1 until the
+  human-authorized refresh. **Stop: deployment gate.**

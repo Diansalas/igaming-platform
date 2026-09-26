@@ -3752,3 +3752,25 @@ failing output is kept in `docs/plans/stage-10.1-planning/evidence/`:
   before verification.
 - Tests touching migrations use scratch databases, never the shared test
   database. The chain-tip-pin tests move with every new migration (now 0093).
+
+## Stage 10.2 — Results (`qa`)
+
+Full case-by-case record: `docs/plans/stage-10.2-planning/08-webhook-test-traceability.md`
+(K1–K16 KYC, C1–C14 casino, call-site sample log, mutation-kill transcripts).
+
+**Evidence:** local CI replay at `d032a03` — race unit (29 packages) and 3× race integration runs,
+34 packages ok, 0 skips each; reversibility on a fresh DB; GitHub CI green on every pushed commit.
+Pre-fix defects reproduced before fixing (E1–E4, `docs/plans/stage-10.2-planning/evidence/`).
+
+**Rules added by this stage:**
+- A tamper/rejection test must reach the guard it names. A test that modifies the body *after*
+  signing only exercises the signature check; to test a post-verification guard, sign the offending
+  body with the real derived key. Assert the exact rejection `Reason` where it is observable.
+- A mutation-kill must fail on the test's own assertion, not on an incidental error (SQL error,
+  fixture lookup). Record the actual failure line.
+- A statement-capture matcher must match the statement structurally (table plus predicate), not a
+  literal placeholder number, so a renumbered mutation is still found.
+- Webhook no-effect checks use `internal/testsupport/noeffect`: `AssertNoEffect` (KYC/payments) and
+  `AssertNoCasinoEffect` (adds casino rounds, launch sessions and projection totals), on both tenants
+  from a fresh transaction.
+- Tenant-binding conformance cases fail — never skip — for any non-mock adapter.
