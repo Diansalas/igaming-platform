@@ -166,3 +166,31 @@ func TestVerifyCallback_BodyMutationBetweenPhases(t *testing.T) {
 		t.Fatalf("balance %d, want the verified 5000", b)
 	}
 }
+
+// TestVerifyCallback_InsideTxRefused (ADR 0094 §4.1 guard): phase 1 called
+// while the caller holds a pooled transaction fails closed as
+// credential_unavailable before any read or store call - the pre-ADR-0094
+// shape can no longer pin a connection.
+func TestVerifyCallback_InsideTxRefused(t *testing.T) {
+	w := newPayRecheckWorld(t)
+	in := w.deposit(t, "guard-1", 100)
+	var err error
+	var nested int64
+	_ = w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, _ pgx.Tx) error {
+		acq := w.pool.Raw().Stat().AcquireCount()
+		_, err = w.orch.VerifyCallback(ctx, w.pool, w.f.tenantID, "mock-psp", in)
+		nested = w.pool.Raw().Stat().AcquireCount() - acq
+		return nil
+	})
+	var authErr *CallbackAuthError
+	if !errors.As(err, &authErr) || authErr.Reason != ReasonCredentialUnavailable {
+		t.Fatalf("VerifyCallback inside a held transaction must fail closed as credential_unavailable, got %v", err)
+	}
+	if nested != 0 {
+		t.Fatalf("a refused VerifyCallback acquired %d nested connections", nested)
+	}
+	// Outside a transaction the same callback verifies.
+	if _, err := w.orch.VerifyCallback(context.Background(), w.pool, w.f.tenantID, "mock-psp", in); err != nil {
+		t.Fatalf("VerifyCallback with no transaction held: %v", err)
+	}
+}
