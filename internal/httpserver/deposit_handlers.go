@@ -3,7 +3,6 @@ package httpserver
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -25,6 +24,16 @@ import (
 // authenticated JSON request already isn't (decodeJSON's
 // maxRequestBodyBytes covers those).
 const maxWebhookBodyBytes = 1 << 20 // 1 MiB
+
+// paymentWebhookRoute is the payments domain's parameter set for the shared
+// webhook preamble (webhook_preamble.go). The scheme, event names and body
+// limit are exactly Stage 10.1's.
+var paymentWebhookRoute = webhookRoute{
+	scheme:                  payments.WebhookScheme(),
+	maxBody:                 maxWebhookBodyBytes,
+	authFailedEvent:         "payment_webhook_auth_failed",
+	tenantLookupFailedEvent: "payment_webhook_tenant_lookup_failed",
+}
 
 type initiateDepositRequest struct {
 	AssetCode      string `json:"asset_code"`
@@ -264,79 +273,21 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		tenantSlug := r.PathValue("tenantSlug")
-		providerID := r.PathValue("providerID")
-		if tenantSlug == "" || providerID == "" {
-			apierror.Write(w, requestID, apierror.CodeValidation, "tenant slug and provider id are required")
-			return
-		}
-
-		// Step 1: provider_id charset, BEFORE any tenant/DB work (ruling 5).
-		if !payments.ValidProviderIDFormat(providerID) {
-			logCallbackAuthFailure(logger, r, requestID, payments.ReasonProviderInvalid, nil, providerID, false, "", "", 0)
-			apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")
-			return
-		}
-
-		// Step 2: body size limit, STILL before any tenant/DB work
-		// (security review P2-1/code review F1/architect PW-1, ruling 5).
-		// A too-large or unreadable body used to be checked AFTER the
-		// tenant lookup below, which made it a distinguishable 400 for an
-		// active, resolvable tenant slug versus the uniform 401 an
-		// unknown/suspended slug got for the identical oversized body -
-		// exactly the tenant-enumeration oracle this contract exists to
-		// remove. It is now folded into the SAME uniform 401 family, with
-		// no tenant lookup performed first: the response is now byte-
-		// identical whether the tenant slug is known or not (T9).
-		body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBodyBytes+1))
-		if err != nil {
-			logCallbackAuthFailure(logger, r, requestID, payments.ReasonBodyTooLarge, nil, providerID, true, "", "", 0)
-			apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")
-			return
-		}
-		if len(body) > maxWebhookBodyBytes {
-			logCallbackAuthFailure(logger, r, requestID, payments.ReasonBodyTooLarge, nil, providerID, true, "", "", len(body))
-			apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")
-			return
-		}
-
-		// Step 3: header format validation, STILL before any tenant/DB
-		// work (ruling 5) - ReceiveCallback re-validates this itself too
-		// (it must be self-sufficient for tests that call it directly),
-		// but failing here first avoids an unnecessary tenant lookup and
-		// WithTenant round trip for the common "no headers at all" case.
-		_, _, reason, ok := payments.ParseWebhookAuthHeaders(r.Header)
+		// Steps 1-5 (provider_id charset, bounded body read, header format
+		// - all before any tenant/DB work, ruling 5 / security review
+		// P2-1 - then the platform-wide tenant lookup and active check) are
+		// the shared webhook preamble every webhook domain uses (Stage
+		// 10.2, ADR 0091, architect R2 / ruling J4). Every rejection there
+		// is the IDENTICAL 401 "callback rejected" with one allow-listed
+		// payment_webhook_auth_failed line - an oversized body or a bad
+		// slug is never a distinguishable 400/404 (T9).
+		t, providerID, body, ok := webhookPreamble(w, r, deps, paymentWebhookRoute)
 		if !ok {
-			logCallbackAuthFailure(logger, r, requestID, reason, nil, providerID, true, "", "", len(body))
-			apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")
-			return
-		}
-
-		// Step 4/5: tenant lookup and active check. A bad slug and a
-		// suspended tenant get the SAME uniform 401 as every other auth
-		// failure (folded into ErrCallbackAuthFailed's reason set), not a
-		// distinguishable 404 - closing the residual enumeration gap the
-		// earlier NotFound-shaped response still had relative to the rest
-		// of this contract.
-		t, err := identity.GetTenantBySlug(r.Context(), deps.DB, tenantSlug)
-		if errors.Is(err, identity.ErrNotFound) {
-			logCallbackAuthFailure(logger, r, requestID, payments.ReasonTenantUnknown, nil, providerID, true, "", "", len(body))
-			apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")
-			return
-		}
-		if err != nil {
-			logger.Error("payment_webhook_tenant_lookup_failed", "error", err)
-			apierror.Write(w, requestID, apierror.CodeInternal, "failed to process callback")
-			return
-		}
-		if t.Status != "active" {
-			logCallbackAuthFailure(logger, r, requestID, payments.ReasonTenantInactive, &t.ID, providerID, true, "", "", len(body))
-			apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")
 			return
 		}
 
 		var result payments.ReceiveCallbackResult
-		err = deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
+		err := deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
 			result, err = deps.PaymentOrchestrator.ReceiveCallback(ctx, tx, t.ID, providerID, payments.InboundCallback{Header: r.Header, Body: body})
 			return err

@@ -8,6 +8,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // callbackRouteKind distinguishes the public, unauthenticated webhook
@@ -133,6 +134,18 @@ func callbackAuthFailureAllowlistFields(requestID string, reason payments.Callba
 func logCallbackAuthFailure(logger interface {
 	Warn(string, ...any)
 }, r *http.Request, requestID string, reason payments.CallbackAuthReason, tenantID *uuid.UUID, providerID string, providerIDValid bool, keyID, fingerprint string, bodyLen int) {
-	logger.Warn("payment_webhook_auth_failed",
+	logWebhookAuthFailure(logger, paymentWebhookRoute.authFailedEvent, r, requestID, reason, tenantID, providerID, providerIDValid, keyID, fingerprint, bodyLen)
+}
+
+// logWebhookAuthFailure is logCallbackAuthFailure generalised to any
+// webhook domain (Stage 10.2, design §A): the SAME allow-list
+// (callbackAuthFailureAllowlistFields) under a domain-specific event name
+// (payment_webhook_auth_failed, kyc_webhook_auth_failed,
+// casino_webhook_auth_failed). Never the body, header values, signature,
+// raw slug, or err text.
+func logWebhookAuthFailure(logger interface {
+	Warn(string, ...any)
+}, event string, r *http.Request, requestID string, reason webhookauth.Reason, tenantID *uuid.UUID, providerID string, providerIDValid bool, keyID, fingerprint string, bodyLen int) {
+	logger.Warn(event,
 		callbackAuthFailureAllowlistFields(requestID, reason, tenantID, providerID, providerIDValid, keyID, fingerprint, clientIP(r), bodyLen)...)
 }

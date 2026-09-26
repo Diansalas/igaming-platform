@@ -25,11 +25,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
-	"net/http"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // Outcome is the canonical result state shared by DepositResult,
@@ -116,7 +116,11 @@ var (
 	// the ledger - see payment-orchestration.md §3: "An unverified payload
 	// never reaches the ledger posting API." Never wrap this with the raw
 	// payload or any field from it.
-	ErrCallbackSignatureInvalid = errors.New("payments: callback signature verification failed")
+	//
+	// Stage 10.2 (ADR 0091): the SAME sentinel value as
+	// webhookauth.ErrSignatureInvalid (moved there, not copied), so
+	// errors.Is matches across the package boundary in both directions.
+	ErrCallbackSignatureInvalid = webhookauth.ErrSignatureInvalid
 	// ErrCallbackMalformedBody is returned by a PaymentProvider adapter's
 	// HandleCallback for a structural parsing failure discovered AFTER
 	// signature verification has already succeeded (docs/decisions/0022
@@ -200,70 +204,48 @@ var (
 	// inbound-callback rejection wraps (PAY-WH-TENANT-1, ADR 0090 item 3;
 	// docs/decisions/0022 §3 amendment 2026-09-26). Every reason gets the
 	// SAME HTTP response on the public webhook route - a uniform 401
-	// "callback rejected" - so an unauthenticated caller can never
-	// distinguish "unknown tenant" from "bad signature" from "provider not
-	// configured for this tenant" by status code or body alone. Callers
-	// that need the specific reason (for allow-listed structured logging
-	// only - never in the HTTP response) use errors.As to a
-	// *CallbackAuthError.
-	ErrCallbackAuthFailed = errors.New("payments: callback authentication failed")
+	// "callback rejected". Callers that need the specific reason (for
+	// allow-listed structured logging only - never in the HTTP response)
+	// use errors.As to a *CallbackAuthError. Stage 10.2: the same value as
+	// webhookauth.ErrAuthFailed.
+	ErrCallbackAuthFailed = webhookauth.ErrAuthFailed
 
 	// ErrWebhookCredentialUnavailable is returned by a
 	// WebhookCredentialResolver when it has no credential for the given
 	// (tenantID, providerID, keyID) - folded into ErrCallbackAuthFailed's
 	// "credential_unavailable" reason by the orchestrator, never surfaced
-	// on its own.
-	ErrWebhookCredentialUnavailable = errors.New("payments: no webhook credential available for this tenant/provider/key")
+	// on its own. Stage 10.2: the same value as
+	// webhookauth.ErrCredentialUnavailable.
+	ErrWebhookCredentialUnavailable = webhookauth.ErrCredentialUnavailable
 )
 
 // CallbackAuthReason is the closed, allow-listed reason enum behind
-// ErrCallbackAuthFailed (design §3.2). Logged (never returned to an
-// unauthenticated caller) so operators can distinguish failure modes
-// without the public response doing so.
-type CallbackAuthReason string
+// ErrCallbackAuthFailed - an alias of the single shared
+// webhookauth.Reason (Stage 10.2, ADR 0091: moved, not copied). Payments
+// emits every value, including the payments-only
+// ReasonProviderNotConfigured and ReasonKeyMaterial (ADR 0022 §4.1).
+type CallbackAuthReason = webhookauth.Reason
 
 const (
-	ReasonTenantUnknown         CallbackAuthReason = "tenant_unknown"
-	ReasonTenantInactive        CallbackAuthReason = "tenant_inactive"
-	ReasonProviderInvalid       CallbackAuthReason = "provider_invalid"
-	ReasonProviderUnregistered  CallbackAuthReason = "provider_unregistered"
-	ReasonProviderNotConfigured CallbackAuthReason = "provider_not_configured"
-	ReasonNoResolver            CallbackAuthReason = "no_resolver"
-	ReasonCredentialUnavailable CallbackAuthReason = "credential_unavailable"
-	ReasonSignatureMissing      CallbackAuthReason = "signature_missing"
-	ReasonSignatureInvalid      CallbackAuthReason = "signature_invalid"
-	ReasonKeyMaterial           CallbackAuthReason = "key_material"
-	// ReasonBodyTooLarge is used by the HTTP handler only (never by an
-	// adapter's HandleCallback) for an oversized/unreadable body, checked
-	// BEFORE the tenant lookup (Stage 10.1 security review P2-1/code
-	// review F1/architect PW-1, ruling 5): an oversized body must get the
-	// SAME uniform 401 as every other pre-verification failure, tenant-
-	// independent, rather than a distinguishable 400 that only an active,
-	// resolvable tenant slug would reach.
-	ReasonBodyTooLarge CallbackAuthReason = "body_too_large"
+	ReasonTenantUnknown         = webhookauth.ReasonTenantUnknown
+	ReasonTenantInactive        = webhookauth.ReasonTenantInactive
+	ReasonProviderInvalid       = webhookauth.ReasonProviderInvalid
+	ReasonProviderUnregistered  = webhookauth.ReasonProviderUnregistered
+	ReasonProviderNotConfigured = webhookauth.ReasonProviderNotConfigured
+	ReasonNoResolver            = webhookauth.ReasonNoResolver
+	ReasonCredentialUnavailable = webhookauth.ReasonCredentialUnavailable
+	ReasonSignatureMissing      = webhookauth.ReasonSignatureMissing
+	ReasonSignatureInvalid      = webhookauth.ReasonSignatureInvalid
+	ReasonKeyMaterial           = webhookauth.ReasonKeyMaterial
+	ReasonBodyTooLarge          = webhookauth.ReasonBodyTooLarge
 )
 
-// CallbackAuthError is ErrCallbackAuthFailed's concrete carrier, with the
-// extra, still allow-listed context (§3.3) a caller needs to log a
-// payment_webhook_auth_failed line: KeyID only once it has passed the
-// charset check, CredentialFingerprint only for ReasonSignatureInvalid
-// (never the secret itself - WebhookCredential.Fingerprint is the only
-// loggable form).
-type CallbackAuthError struct {
-	Reason                CallbackAuthReason
-	KeyID                 string
-	CredentialFingerprint string
-}
-
-func (e *CallbackAuthError) Error() string {
-	return fmt.Sprintf("payments: callback authentication failed: %s", e.Reason)
-}
-
-// Is lets errors.Is(err, ErrCallbackAuthFailed) succeed for any
-// *CallbackAuthError regardless of its specific Reason.
-func (e *CallbackAuthError) Is(target error) bool {
-	return target == ErrCallbackAuthFailed
-}
+// CallbackAuthError is ErrCallbackAuthFailed's concrete carrier - an alias
+// of webhookauth.AuthError, so errors.As to *CallbackAuthError and to
+// *webhookauth.AuthError are the same operation. KeyID only once it has
+// passed the charset check, CredentialFingerprint only for
+// ReasonSignatureInvalid (never the secret itself).
+type CallbackAuthError = webhookauth.AuthError
 
 // DepositAlreadyReversedError is ErrDepositAlreadyReversed's typed carrier
 // (Stage 10.1 review: ledger-finance P2-B, security P2-2, code review F2).
@@ -315,42 +297,11 @@ func (e *DepositAlreadyReversedError) Unwrap() error {
 }
 
 // WebhookCredential is a resolved, per-(tenant, provider, key) inbound
-// webhook signing credential (docs/decisions/0022 §3 amendment). Secret is
-// never logged, errored, or audited - String()/LogValue() redact it, and
-// Fingerprint (hex(sha256(Secret))[:16]) is the only loggable form.
-type WebhookCredential struct {
-	TenantID    uuid.UUID
-	ProviderID  string
-	KeyID       string
-	Secret      []byte
-	Fingerprint string
-}
-
-// String implements fmt.Stringer so %v/%+v/Println of a WebhookCredential
-// (including inside a larger struct) never renders Secret's raw bytes.
-func (c WebhookCredential) String() string {
-	return fmt.Sprintf("WebhookCredential{TenantID:%s ProviderID:%s KeyID:%s Fingerprint:%s}",
-		c.TenantID, c.ProviderID, c.KeyID, c.Fingerprint)
-}
-
-// LogValue implements slog.LogValuer for the identical reason as String.
-func (c WebhookCredential) LogValue() slog.Value {
-	return slog.GroupValue(
-		slog.String("tenant_id", c.TenantID.String()),
-		slog.String("provider_id", c.ProviderID),
-		slog.String("key_id", c.KeyID),
-		slog.String("fingerprint", c.Fingerprint),
-	)
-}
-
-// GoString implements fmt.GoStringer so `%#v` (which bypasses Stringer
-// entirely, unlike %v/%+v) also never renders Secret's raw bytes -
-// security review P3-1. Any struct that embeds a WebhookCredential and is
-// itself %#v-formatted inherits this redaction automatically, since Go's
-// fmt package calls GoString on an embedded field that implements it.
-func (c WebhookCredential) GoString() string {
-	return c.String()
-}
+// webhook signing credential (docs/decisions/0022 §3 amendment) - an alias
+// of webhookauth.Credential (Stage 10.2, ADR 0091). Secret is never
+// logged, errored, or audited - String()/GoString()/LogValue() redact it,
+// and Fingerprint (hex(sha256(Secret))[:16]) is the only loggable form.
+type WebhookCredential = webhookauth.Credential
 
 // WebhookCredentialResolver resolves the single candidate credential for
 // (tenantID, providerID, keyID) - never a cross-tenant trial (ADR 0022 §3
@@ -358,27 +309,17 @@ func (c WebhookCredential) GoString() string {
 // into the Orchestrator (C2: not a per-provider map) and is the ONLY
 // component in the platform that ever sees credential secret material for
 // inbound callbacks. A provider with no resolver configured fails closed
-// (ReasonNoResolver) - there is no fallback to unauthenticated
-// verification.
-type WebhookCredentialResolver interface {
-	Resolve(ctx context.Context, tenantID uuid.UUID, providerID, keyID string) (WebhookCredential, error)
-}
+// (ReasonNoResolver). Alias of webhookauth.Resolver.
+type WebhookCredentialResolver = webhookauth.Resolver
 
 // InboundCallback is the platform-wide inbound-provider-callback shape
-// (docs/decisions/0022 §3 amendment's "binding contract", carried by
-// HandleCallback in place of a bare rawPayload []byte). Header carries the
-// raw request headers (including X-Payments-Signature/X-Payments-Key-Id)
-// and Body the raw wire bytes - both are input only, never persisted or
-// logged verbatim (ADR 0022 §4.1(3) does not apply: this is not a
-// canonical output shape). TenantID/ProviderID are always the
-// ROUTE-resolved values the orchestrator is verifying against, never a
-// value read from Body.
-type InboundCallback struct {
-	TenantID   uuid.UUID
-	ProviderID string
-	Header     http.Header
-	Body       []byte
-}
+// (docs/decisions/0022 §3 amendment's "binding contract") - an alias of
+// webhookauth.Inbound. Header carries the raw request headers (including
+// X-Payments-Signature/X-Payments-Key-Id) and Body the raw wire bytes -
+// both input only, never persisted or logged verbatim. TenantID/ProviderID
+// are always the ROUTE-resolved values the orchestrator is verifying
+// against, never a value read from Body.
+type InboundCallback = webhookauth.Inbound
 
 // AmountLimit is one (asset_code, min_amount, max_amount) row - a
 // provider declaring several assets carries one limit pair per asset,

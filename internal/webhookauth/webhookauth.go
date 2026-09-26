@@ -1,0 +1,343 @@
+// Package webhookauth holds the provider-neutral inbound-webhook
+// authentication contract shared by every provider-facing callback route
+// (payments, KYC, casino): docs/decisions/0022 §3 as amended by Stage 10.1
+// (points 1-7) and extracted by Stage 10.2 (ADR 0091; design
+// docs/plans/stage-10.2-planning/01-webhook-trust-design.md §A).
+//
+// The code here was MOVED out of internal/payments, not rewritten:
+// Credential, Resolver, Inbound, the single closed Reason enum, AuthError,
+// the auth sentinels, the platform-defined MOCK wire Scheme, the
+// verify-before-parse preamble checks, and the MOCK key-derivation/resolver
+// helpers (mock.go). internal/payments keeps type aliases and sentinel
+// variables pointing here, so errors.Is/errors.As behave identically across
+// the package boundary.
+//
+// # Scheme is the platform-defined MOCK wire format only (architect R1)
+//
+// Scheme (Prefix‖0x00‖tenant_id‖0x00‖provider_id‖0x00‖key_id‖0x00‖raw
+// body, HMAC-SHA256, header "v1=<64 lowercase hex>") is the wire format the
+// platform's own MOCK adapters and in-process test-support signers use. It
+// is NEVER a vendor wire format and must not be offered to, or imposed on,
+// a real vendor: the platform never invents a generic signature scheme for
+// third parties. A real adapter verifies with its vendor's own scheme, but
+// still consumes Credential and Inbound and still obeys ADR 0022 §3 points
+// 1-7:
+//
+//  1. the route tenant slug is only a lookup hint;
+//  2. exactly one candidate credential, resolved per (tenant, provider,
+//     key id), is tried - never a cross-tenant trial;
+//  3. the tenant (and provider) is bound into what is verified, or the
+//     credential is tenant-unique, and a timestamp tolerance applies;
+//  4. no tenant-scoped write (and only the permitted configuration read)
+//     happens before verification succeeds;
+//  5. every pre-verification failure is one uniform response, the reason
+//     going only to an allow-listed log line;
+//  6. every posting/effect uses the route-resolved tenant and provider the
+//     credential verified, never a payload-asserted value;
+//  7. verification runs over the raw bytes before any parsing.
+//
+// # Domain separation (ADR 0022 §3 point 8)
+//
+// Each domain (payments, KYC, casino) has its own Prefix, its own header
+// names and its own mock key label (domains.go), so a signature valid in
+// one domain never verifies in another, even under an equal key.
+//
+// This package deliberately has no orchestrator, provider registry, or
+// vendor plug-in model, and imports no domain package.
+package webhookauth
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"regexp"
+	"strings"
+
+	"github.com/google/uuid"
+)
+
+var (
+	// ErrSignatureInvalid is returned by an adapter's callback handling
+	// (and by Scheme.Verify) when the inbound callback's authentication
+	// does not verify. Never wrap it with the raw payload or any field
+	// from it.
+	ErrSignatureInvalid = errors.New("webhookauth: callback signature verification failed")
+
+	// ErrAuthFailed is the single sentinel every pre-verification
+	// inbound-callback rejection wraps (ADR 0022 §3 point 5). Every
+	// reason gets the SAME response on a public webhook route; callers
+	// needing the specific reason (for allow-listed structured logging
+	// only, never the HTTP response) use errors.As to *AuthError.
+	ErrAuthFailed = errors.New("webhookauth: callback authentication failed")
+
+	// ErrCredentialUnavailable is returned by a Resolver when it has no
+	// credential for the given (tenantID, providerID, keyID). Callers fold
+	// it into ReasonCredentialUnavailable, never surfacing it on its own.
+	ErrCredentialUnavailable = errors.New("webhookauth: no webhook credential available for this tenant/provider/key")
+)
+
+// Reason is the single, closed, allow-listed reason enum behind
+// ErrAuthFailed. Logged (never returned to an unauthenticated caller).
+// Each domain documents the subset it emits; ReasonProviderNotConfigured
+// and ReasonKeyMaterial are payments-only (ADR 0022 §4.1). Do not split
+// this enum per domain (architect review, Stage 10.2).
+type Reason string
+
+const (
+	ReasonTenantUnknown         Reason = "tenant_unknown"
+	ReasonTenantInactive        Reason = "tenant_inactive"
+	ReasonProviderInvalid       Reason = "provider_invalid"
+	ReasonProviderUnregistered  Reason = "provider_unregistered"
+	ReasonProviderNotConfigured Reason = "provider_not_configured"
+	ReasonNoResolver            Reason = "no_resolver"
+	ReasonCredentialUnavailable Reason = "credential_unavailable"
+	ReasonSignatureMissing      Reason = "signature_missing"
+	ReasonSignatureInvalid      Reason = "signature_invalid"
+	ReasonKeyMaterial           Reason = "key_material"
+	// ReasonBodyTooLarge is used by the HTTP preamble only (never by an
+	// adapter) for an oversized/unreadable body, checked BEFORE any tenant
+	// lookup, so it gets the same uniform rejection as every other
+	// pre-verification failure, tenant-independent.
+	ReasonBodyTooLarge Reason = "body_too_large"
+)
+
+// AuthError is ErrAuthFailed's concrete carrier, with the extra, still
+// allow-listed context a caller needs for its auth-failure log line: KeyID
+// only once it has passed the charset check, CredentialFingerprint only for
+// ReasonSignatureInvalid (never the secret itself).
+type AuthError struct {
+	Reason                Reason
+	KeyID                 string
+	CredentialFingerprint string
+}
+
+func (e *AuthError) Error() string {
+	return fmt.Sprintf("webhookauth: callback authentication failed: %s", e.Reason)
+}
+
+// Is lets errors.Is(err, ErrAuthFailed) succeed for any *AuthError
+// regardless of its specific Reason.
+func (e *AuthError) Is(target error) bool {
+	return target == ErrAuthFailed
+}
+
+// Credential is a resolved, per-(tenant, provider, key) inbound webhook
+// verification credential. Secret is never logged, errored, or audited -
+// String()/GoString()/LogValue() redact it, and Fingerprint
+// (hex(sha256(Secret))[:16], see Fingerprint) is the only loggable form.
+type Credential struct {
+	TenantID    uuid.UUID
+	ProviderID  string
+	KeyID       string
+	Secret      []byte
+	Fingerprint string
+}
+
+// String implements fmt.Stringer so %v/%+v/Println of a Credential
+// (including inside a larger struct) never renders Secret's raw bytes.
+func (c Credential) String() string {
+	return fmt.Sprintf("WebhookCredential{TenantID:%s ProviderID:%s KeyID:%s Fingerprint:%s}",
+		c.TenantID, c.ProviderID, c.KeyID, c.Fingerprint)
+}
+
+// LogValue implements slog.LogValuer for the identical reason as String.
+func (c Credential) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("tenant_id", c.TenantID.String()),
+		slog.String("provider_id", c.ProviderID),
+		slog.String("key_id", c.KeyID),
+		slog.String("fingerprint", c.Fingerprint),
+	)
+}
+
+// GoString implements fmt.GoStringer so `%#v` (which bypasses Stringer)
+// also never renders Secret's raw bytes.
+func (c Credential) GoString() string {
+	return c.String()
+}
+
+// Fingerprint returns the only loggable form of a secret:
+// hex(sha256(secret))[:16].
+func Fingerprint(secret []byte) string {
+	sum := sha256.Sum256(secret)
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// Resolver resolves the single candidate credential for (tenantID,
+// providerID, keyID) - never a cross-tenant trial (ADR 0022 §3 point 2).
+// It is the only component that ever sees inbound-callback secret
+// material. A route with no resolver fails closed (ReasonNoResolver) -
+// there is no fallback to unauthenticated verification.
+type Resolver interface {
+	Resolve(ctx context.Context, tenantID uuid.UUID, providerID, keyID string) (Credential, error)
+}
+
+// Inbound is the platform-wide inbound-provider-callback shape. Header
+// carries the raw request headers and Body the raw wire bytes - both input
+// only, never persisted or logged verbatim. TenantID/ProviderID are always
+// the ROUTE-resolved values being verified against, never a value read
+// from Body.
+type Inbound struct {
+	TenantID   uuid.UUID
+	ProviderID string
+	Header     http.Header
+	Body       []byte
+}
+
+var (
+	// keyIDPattern is the key id charset every scheme's key-id header and
+	// every resolver's key ids must satisfy.
+	keyIDPattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+	// signatureHeaderPattern matches the WHOLE signature header value:
+	// "v1=" plus exactly 64 lowercase hex characters (32 bytes).
+	signatureHeaderPattern = regexp.MustCompile(`^v1=[0-9a-f]{64}$`)
+	// ProviderIDPattern is the path-segment charset a provider_id must
+	// satisfy before any tenant/DB work runs.
+	ProviderIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+)
+
+// ValidProviderID reports whether providerID satisfies the webhook
+// path-segment charset, checked BEFORE any tenant lookup or DB work.
+func ValidProviderID(providerID string) bool {
+	return ProviderIDPattern.MatchString(providerID)
+}
+
+// Scheme is the platform-defined MOCK webhook wire scheme for one domain.
+// See the package doc: it is never a vendor wire format.
+type Scheme struct {
+	// Prefix is the domain-separation prefix at the head of the signing
+	// input, e.g. "igaming.payments.webhook.v1".
+	Prefix string
+	// SignatureHeader carries "v1=<64 lowercase hex>".
+	SignatureHeader string
+	// KeyIDHeader carries the key id (^[a-z0-9-]{1,32}$).
+	KeyIDHeader string
+}
+
+// ParseHeaders extracts and format-validates the scheme's two
+// authentication headers. It never touches the database or any
+// tenant-scoped state. ok is false for every malformed/missing case;
+// reason is ReasonSignatureMissing for an absent header and
+// ReasonSignatureInvalid for a present-but-malformed one.
+func (s Scheme) ParseHeaders(h http.Header) (keyID, sigHex string, reason Reason, ok bool) {
+	sigHeader := h.Get(s.SignatureHeader)
+	keyID = h.Get(s.KeyIDHeader)
+	if sigHeader == "" || keyID == "" {
+		return "", "", ReasonSignatureMissing, false
+	}
+	if !keyIDPattern.MatchString(keyID) {
+		return "", "", ReasonSignatureInvalid, false
+	}
+	if !signatureHeaderPattern.MatchString(sigHeader) {
+		return "", "", ReasonSignatureInvalid, false
+	}
+	return keyID, strings.TrimPrefix(sigHeader, "v1="), "", true
+}
+
+// SigningInput builds Prefix 0x00 tenant_id 0x00 provider_id 0x00 key_id
+// 0x00 <raw body bytes>. None of the leading values can contain 0x00 (a
+// canonical lowercase UUID string; provider_id and key_id are
+// charset-restricted), so body is an unambiguous tail - the raw bytes are
+// signed directly, never a re-serialization of parsed fields.
+func (s Scheme) SigningInput(tenantID uuid.UUID, providerID, keyID string, body []byte) []byte {
+	buf := make([]byte, 0, len(s.Prefix)+36+len(providerID)+len(keyID)+len(body)+8)
+	buf = append(buf, s.Prefix...)
+	buf = append(buf, 0)
+	buf = append(buf, tenantID.String()...)
+	buf = append(buf, 0)
+	buf = append(buf, providerID...)
+	buf = append(buf, 0)
+	buf = append(buf, keyID...)
+	buf = append(buf, 0)
+	buf = append(buf, body...)
+	return buf
+}
+
+// Sign returns hex(HMAC-SHA256(key, SigningInput(...))). For MOCK
+// adapters and in-process test-support signers only.
+func (s Scheme) Sign(key []byte, tenantID uuid.UUID, providerID, keyID string, body []byte) string {
+	mac := hmac.New(sha256.New, key)
+	// hash.Hash.Write never returns an error.
+	_, _ = mac.Write(s.SigningInput(tenantID, providerID, keyID, body))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// SetHeaders writes the scheme's two authentication headers.
+func (s Scheme) SetHeaders(h http.Header, keyID, sigHex string) {
+	h.Set(s.SignatureHeader, "v1="+sigHex)
+	h.Set(s.KeyIDHeader, keyID)
+}
+
+// Verify checks in's signature against cred over the raw body, BEFORE any
+// parsing (ADR 0022 §3 point 7). The header key id must equal cred.KeyID,
+// and cred must be bound to the same (TenantID, ProviderID) as in - the
+// signing input is rebuilt from in.TenantID/in.ProviderID (the route-
+// resolved values), never from the body. The comparison is constant-time
+// (hmac.Equal). Every failure returns exactly ErrSignatureInvalid.
+func (s Scheme) Verify(cred Credential, in Inbound) error {
+	if s.Prefix == "" || len(cred.Secret) == 0 {
+		return ErrSignatureInvalid
+	}
+	keyID, sigHex, _, ok := s.ParseHeaders(in.Header)
+	if !ok || keyID != cred.KeyID {
+		return ErrSignatureInvalid
+	}
+	if cred.TenantID != in.TenantID || cred.ProviderID != in.ProviderID {
+		return ErrSignatureInvalid
+	}
+	expectedHex := s.Sign(cred.Secret, in.TenantID, in.ProviderID, keyID, in.Body)
+	if !hmac.Equal([]byte(expectedHex), []byte(sigHex)) {
+		return ErrSignatureInvalid
+	}
+	return nil
+}
+
+// PreambleResult is the outcome of Scheme.CheckPreamble. On failure,
+// Reason is set and ProviderIDValid/BodyLen carry exactly the allow-listed
+// context the caller's auth-failure log line may include.
+type PreambleResult struct {
+	// Body is the raw request body (only when ok).
+	Body []byte
+	// BodyLen is the number of body bytes read (0 if the body was never
+	// read, or reading failed).
+	BodyLen int
+	// ProviderIDValid reports whether providerID passed the charset check
+	// (only then may it be logged).
+	ProviderIDValid bool
+	// Reason is the rejection reason (only when !ok).
+	Reason Reason
+}
+
+// CheckPreamble runs the shared, tenant-independent verify-before-parse
+// preamble every webhook route runs BEFORE any tenant lookup or DB work,
+// in this fixed order:
+//
+//  1. provider_id charset (ReasonProviderInvalid);
+//  2. body read bounded to maxBody bytes - an unreadable or oversized body
+//     is ReasonBodyTooLarge, folded into the same uniform rejection as
+//     every other pre-verification failure;
+//  3. authentication header format (ParseHeaders's reasons).
+//
+// It never parses the body.
+func (s Scheme) CheckPreamble(providerID string, h http.Header, body io.Reader, maxBody int) (PreambleResult, bool) {
+	if !ValidProviderID(providerID) {
+		return PreambleResult{Reason: ReasonProviderInvalid}, false
+	}
+	raw, err := io.ReadAll(io.LimitReader(body, int64(maxBody)+1))
+	if err != nil {
+		return PreambleResult{ProviderIDValid: true, Reason: ReasonBodyTooLarge}, false
+	}
+	if len(raw) > maxBody {
+		return PreambleResult{ProviderIDValid: true, BodyLen: len(raw), Reason: ReasonBodyTooLarge}, false
+	}
+	if _, _, reason, ok := s.ParseHeaders(h); !ok {
+		return PreambleResult{ProviderIDValid: true, BodyLen: len(raw), Reason: reason}, false
+	}
+	return PreambleResult{Body: raw, BodyLen: len(raw), ProviderIDValid: true}, true
+}

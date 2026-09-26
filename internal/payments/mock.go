@@ -2,10 +2,6 @@ package payments
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,13 +9,15 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // mockWebhookKeyID is the only KeyID the mock resolver/adapter ever uses.
 // Stage 10.1 (PAY-WH-TENANT-1) ships exactly one generation; a future key
 // rotation would add a second, coexisting id, never replace this one
 // in-place.
-const mockWebhookKeyID = "mock-v1"
+const mockWebhookKeyID = webhookauth.MockKeyID
 
 // MockProvider is a PaymentProvider implementation with synthetic,
 // test-controllable success/decline/ambiguous behavior - Stage 3B's only
@@ -83,19 +81,14 @@ type MockProvider struct {
 
 // deriveKey computes this instance's per-(tenantID, providerID) webhook
 // signing key: HMAC-SHA256(masterSecret, "igaming/payments-mock-webhook/v1"
-// 0x00 tenant_id 0x00 provider_id). NUL-separated so no ambiguity exists
-// between e.g. tenant "ab" + provider "c" and tenant "a" + provider "bc" -
-// UUIDs never contain 0x00 or the literal hyphen-string collision this
-// would otherwise risk, and provider_id is charset-restricted
-// (ProviderIDPattern) to exclude it too.
+// 0x00 tenant_id 0x00 provider_id) - delegated, byte-identically, to
+// webhookauth.DeriveMockKey with the payments mock key label (Stage 10.2,
+// ADR 0091). NUL-separated so no ambiguity exists between e.g. tenant "ab"
+// + provider "c" and tenant "a" + provider "bc" - UUIDs never contain 0x00
+// and provider_id is charset-restricted (ProviderIDPattern) to exclude it
+// too.
 func (m *MockProvider) deriveKey(tenantID uuid.UUID, providerID string) []byte {
-	mac := hmac.New(sha256.New, m.masterSecret)
-	_, _ = mac.Write([]byte("igaming/payments-mock-webhook/v1"))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write([]byte(tenantID.String()))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write([]byte(providerID))
-	return mac.Sum(nil)
+	return webhookauth.DeriveMockKey(m.masterSecret, webhookauth.PaymentsMockKeyLabel, tenantID, providerID)
 }
 
 // MockWebhookCredentials is the MOCK WebhookCredentialResolver
@@ -105,7 +98,8 @@ func (m *MockProvider) deriveKey(tenantID uuid.UUID, providerID string) []byte {
 // into ReasonCredentialUnavailable (fail closed, never a fallback to
 // unauthenticated verification). Labeled MOCK per CLAUDE.md: the real
 // resolver (a FORCE-RLS handle table plus an external secret store) is NOT
-// IMPLEMENTED.
+// IMPLEMENTED. Stage 10.2: a thin wrapper over webhookauth.MockResolver
+// that keeps this API.
 type MockWebhookCredentials struct {
 	provider *MockProvider
 }
@@ -120,22 +114,15 @@ func NewMockWebhookCredentials(provider *MockProvider) MockWebhookCredentials {
 }
 
 // Resolve implements WebhookCredentialResolver.
-func (r MockWebhookCredentials) Resolve(_ context.Context, tenantID uuid.UUID, providerID, keyID string) (WebhookCredential, error) {
-	if r.provider == nil || providerID != r.provider.providerID {
+func (r MockWebhookCredentials) Resolve(ctx context.Context, tenantID uuid.UUID, providerID, keyID string) (WebhookCredential, error) {
+	if r.provider == nil {
 		return WebhookCredential{}, ErrWebhookCredentialUnavailable
 	}
-	if keyID != mockWebhookKeyID {
-		return WebhookCredential{}, ErrWebhookCredentialUnavailable
-	}
-	secret := r.provider.deriveKey(tenantID, providerID)
-	fingerprint := sha256.Sum256(secret)
-	return WebhookCredential{
-		TenantID:    tenantID,
-		ProviderID:  providerID,
-		KeyID:       mockWebhookKeyID,
-		Secret:      secret,
-		Fingerprint: hex.EncodeToString(fingerprint[:])[:16],
-	}, nil
+	return webhookauth.MockResolver{
+		Master:     r.provider.masterSecret,
+		Label:      webhookauth.PaymentsMockKeyLabel,
+		ProviderID: r.provider.providerID,
+	}.Resolve(ctx, tenantID, providerID, keyID)
 }
 
 // Magic amounts (minor units) driving MockProvider.Deposit's synthetic
@@ -168,12 +155,10 @@ func NewMockProvider(providerID string, fiatCurrencies ...string) *MockProvider 
 	for _, cur := range fiatCurrencies {
 		limits = append(limits, AmountLimit{AssetCode: cur, MinAmount: 100, MaxAmount: 1_000_000_00})
 	}
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		// crypto/rand failing is a fatal platform problem, not a
-		// recoverable one - never fall back to a predictable secret.
-		panic(fmt.Sprintf("payments/mock: failed to generate master secret: %v", err))
-	}
+	// crypto/rand failing is a fatal platform problem, not a recoverable
+	// one - NewMockMaster panics rather than ever falling back to a
+	// predictable secret.
+	secret := webhookauth.NewMockMaster()
 	return &MockProvider{
 		masterSecret: secret,
 		providerID:   providerID,
@@ -271,8 +256,7 @@ func (m *MockProvider) CallbackPayload(tenantID uuid.UUID, eventType CallbackEve
 	sig := signWithKey(key, tenantID, m.providerID, mockWebhookKeyID, raw)
 
 	header := make(http.Header)
-	header.Set(HeaderSignature, "v1="+sig)
-	header.Set(HeaderKeyID, mockWebhookKeyID)
+	paymentsScheme.SetHeaders(header, mockWebhookKeyID, sig)
 
 	return InboundCallback{TenantID: tenantID, ProviderID: m.providerID, Header: header, Body: raw}
 }
@@ -293,42 +277,19 @@ func (m *MockProvider) SignRawBody(tenantID uuid.UUID, body []byte) InboundCallb
 	sig := signWithKey(key, tenantID, m.providerID, mockWebhookKeyID, body)
 
 	header := make(http.Header)
-	header.Set(HeaderSignature, "v1="+sig)
-	header.Set(HeaderKeyID, mockWebhookKeyID)
+	paymentsScheme.SetHeaders(header, mockWebhookKeyID, sig)
 
 	return InboundCallback{TenantID: tenantID, ProviderID: m.providerID, Header: header, Body: body}
 }
 
-// signingInput builds the platform-defined webhook signing scheme's input
-// (docs/decisions/0022 §3 amendment §2.2):
-// SigningInputPrefix 0x00 tenant_id 0x00 provider_id 0x00 key_id 0x00 <raw
-// body bytes>. None of the prefix values can contain 0x00 (a canonical
-// lowercase UUID string, and provider_id/key_id are both charset-
-// restricted to exclude it), so body is an unambiguous tail - this is what
-// removes Stage 3B's field-shift weakness (NUL-joining typed FIELD VALUES,
-// which themselves could contain the separator) entirely: the new scheme
-// signs the raw body bytes directly, never a re-serialization of parsed
-// fields.
-func signingInput(tenantID uuid.UUID, providerID, keyID string, body []byte) []byte {
-	buf := make([]byte, 0, len(SigningInputPrefix)+36+len(providerID)+len(keyID)+len(body)+8)
-	buf = append(buf, SigningInputPrefix...)
-	buf = append(buf, 0)
-	buf = append(buf, tenantID.String()...)
-	buf = append(buf, 0)
-	buf = append(buf, providerID...)
-	buf = append(buf, 0)
-	buf = append(buf, keyID...)
-	buf = append(buf, 0)
-	buf = append(buf, body...)
-	return buf
-}
-
-// signWithKey returns hex(HMAC-SHA256(key, signingInput(...))).
+// signWithKey returns hex(HMAC-SHA256(key, signing_input)) over the
+// payments domain's platform-defined MOCK scheme (docs/decisions/0022 §3
+// amendment §2.2): SigningInputPrefix 0x00 tenant_id 0x00 provider_id 0x00
+// key_id 0x00 <raw body bytes>. Stage 10.2: delegated, byte-identically, to
+// webhookauth.Scheme.Sign - the raw body bytes are signed directly, never a
+// re-serialization of parsed fields.
 func signWithKey(key []byte, tenantID uuid.UUID, providerID, keyID string, body []byte) string {
-	mac := hmac.New(sha256.New, key)
-	// hash.Hash.Write never returns an error.
-	_, _ = mac.Write(signingInput(tenantID, providerID, keyID, body))
-	return hex.EncodeToString(mac.Sum(nil))
+	return paymentsScheme.Sign(key, tenantID, providerID, keyID, body)
 }
 
 // nextReference mints a provider_reference unique across every replica of
@@ -505,12 +466,11 @@ var keyMaterialFieldNames = []string{
 // a DIFFERENT sentinel from the pre-verification auth failures - which the
 // Orchestrator/HTTP layer maps to a 400, not the uniform 401 (PW-2).
 func (m *MockProvider) HandleCallback(_ context.Context, req InboundCallback, cred WebhookCredential) (CallbackEvent, error) {
-	keyID, sigHex, _, ok := ParseWebhookAuthHeaders(req.Header)
-	if !ok || keyID != cred.KeyID {
-		return CallbackEvent{}, ErrCallbackSignatureInvalid
-	}
-	expectedHex := signWithKey(cred.Secret, req.TenantID, req.ProviderID, keyID, req.Body)
-	if !hmac.Equal([]byte(expectedHex), []byte(sigHex)) {
+	// Steps 1-2 (header re-validation, key id == cred.KeyID, cred bound to
+	// req's route tenant/provider, constant-time HMAC over the raw bytes)
+	// are the shared webhookauth.Scheme.Verify (Stage 10.2, ADR 0091), whose
+	// only failure value IS ErrCallbackSignatureInvalid.
+	if err := paymentsScheme.Verify(cred, req); err != nil {
 		return CallbackEvent{}, ErrCallbackSignatureInvalid
 	}
 
