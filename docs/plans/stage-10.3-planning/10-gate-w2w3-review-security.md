@@ -426,6 +426,16 @@ the Go toolchain pin, and a likely failure on the first govulncheck run.**
   in August 2026, **Go 1.25 is now out of upstream security support**. Moving
   to a supported major should then be registered as a platform task before
   launch.
+- **Resolved (GO-TOOLCHAIN-VULN-1, `docs/governance/task-registry.md`):** CI
+  run #337's first `govulncheck` run confirmed the predicted stdlib findings
+  (11 symbols across net/url, crypto/tls, net/http, encoding/xml,
+  encoding/asn1, net/textproto, crypto/x509, x/net/idna, net, os) plus two
+  module findings (`golang.org/x/text`, `go.opentelemetry.io/otel/sdk`). Go
+  1.27 was confirmed to exist (`golang.org/toolchain` module list), so Go 1.25
+  is out of support per this inference; moved to **go1.26.8** (not the latest
+  1.25.x), pinned via `go.mod`'s `toolchain` line, and the same exact tag in
+  `platform-api.Dockerfile`, closing the "different toolchain than the one
+  that ships" gap this finding raised.
 
 **S-4 (Low): govulncheck is installed unpinned.**
 - Location: `ci.yml:192`.
@@ -434,6 +444,9 @@ the Go toolchain pin, and a likely failure on the first govulncheck run.**
   golangci-lint "so results are reproducible; bump it deliberately"; this step
   does not follow the same rule.
 - Checksum-DB verification limits the supply-chain risk. Pin a version anyway.
+- **Resolved (GO-TOOLCHAIN-VULN-1):** `ci.yml` now installs
+  `golang.org/x/vuln/cmd/govulncheck@v1.8.0` (exact version, requires go
+  >= 1.26, satisfied by the go1.26.8 toolchain pin above).
 
 **S-5 (Low): the import guard has small gaps.**
 - Location: `import_boundary_test.go:18`, `ci.yml:137`.
