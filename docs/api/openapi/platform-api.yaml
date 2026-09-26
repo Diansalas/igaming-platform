@@ -1945,11 +1945,16 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Verification"
+                $ref: "#/components/schemas/PlayerVerification"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "503":
-          description: Identity verification is not configured
+          description: >
+            Identity verification is not configured - includes the KYC-WH-1
+            (Stage 10.2, ADR 0091) production/test-support-off case: the
+            platform ships no real KYC vendor, so with the MOCK provider
+            gated off (cfg.TestSupportRoutesEnabled() == false), player
+            self-service KYC is itself unavailable.
         "500":
           $ref: "#/components/responses/InternalError"
     get:
@@ -1964,7 +1969,7 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: "#/components/schemas/Verification"
+                  $ref: "#/components/schemas/PlayerVerification"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "500":
@@ -2582,14 +2587,29 @@ paths:
   /v1/webhooks/kyc/{tenantSlug}/{providerID}:
     post:
       summary: KYC provider callback (verification status update)
+      security: []
       description: >
-        No bearer-token middleware - a provider is not an authenticated
-        platform principal. Tenant is resolved from the URL slug only,
-        never trusted from the payload. Payload signature verification is
-        the adapter's own responsibility (MockKYCProvider: HMAC, a
-        platform-invented format never modeled on any real vendor).
-        Idempotent - a callback for an already-terminal verification is a
-        no-op. A provider error never corrupts stored verification state.
+        Stage 10.2 (KYC-WH-1, ADR 0091): registered ONLY when this
+        deployment has test support enabled
+        (cfg.TestSupportRoutesEnabled()) - the platform ships no real KYC
+        vendor this stage, so the route is entirely ABSENT (a genuine 404,
+        not a 503 from inside a registered handler) with test support off,
+        including in production. No bearer-token middleware - a provider
+        is not an authenticated platform principal. The tenant slug in the
+        URL is only a LOOKUP HINT selecting one candidate credential;
+        tenant/provider binding is enforced by the signature itself, whose
+        signing input is exactly
+        `igaming.kyc.webhook.v1 0x00 tenant_id 0x00 provider_id 0x00
+        key_id 0x00 <raw body bytes>` (internal/webhookauth's shared
+        platform-defined MOCK wire scheme - never a real vendor's format,
+        and never trusted from anything inside the body). Idempotent and
+        forward-only: unverified(0) < pending(1) < review_required(2) <
+        approved|rejected|expired(3, terminal) - a callback only ever
+        moves a verification's status FORWARD in this order via a
+        compare-and-set update; an equal-or-backward transition, a replay,
+        or anything arriving after a terminal status or after a staff
+        decision is a no-op (204, no state change, no audit row). A
+        provider `outcome: error` never changes verification state.
       parameters:
         - name: tenantSlug
           in: path
@@ -2598,19 +2618,63 @@ paths:
         - name: providerID
           in: path
           required: true
-          schema: { type: string }
+          description: "Charset: ^[a-z0-9][a-z0-9-]{0,62}$"
+          schema: { type: string, pattern: "^[a-z0-9][a-z0-9-]{0,62}$" }
+        - name: X-KYC-Signature
+          in: header
+          required: true
+          description: "hex(HMAC-SHA256(credential_secret, signing_input)), lowercase"
+          schema: { type: string, pattern: "^v1=[0-9a-f]{64}$" }
+        - name: X-KYC-Key-Id
+          in: header
+          required: true
+          schema: { type: string, pattern: "^[a-z0-9-]{1,32}$" }
       requestBody:
         required: true
         content:
           application/json:
-            schema: { type: object }
+            schema:
+              $ref: "#/components/schemas/KYCMockCallback"
       responses:
         "204":
-          description: Callback processed
+          description: >
+            Callback processed - EITHER a forward status transition was
+            applied, OR the callback was a no-op (an equal/backward-rank
+            replay, a callback after a terminal status, or a provider
+            `outcome: error`). No response body, so no identifier is ever
+            echoed to the external caller.
         "400":
-          description: Invalid signature or payload
+          description: >
+            Reachable ONLY after signature verification succeeds: a
+            verified body that is structurally malformed (unparseable
+            JSON, a missing provider_reference, or an outcome outside the
+            closed enum). Generic body only.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: >
+            Callback rejected - EVERY pre-verification failure reason
+            (unknown/inactive tenant, invalid/unregistered provider, no
+            resolver, no credential, missing/malformed/invalid signature,
+            an unparseable body, an oversized (>256 KiB) body) maps to this
+            SAME generic body, deliberately indistinguishable from any
+            other, with the SAME status code regardless of whether the
+            tenant/provider named in the path actually exist.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "404":
-          description: Unknown tenant or provider
+          description: >
+            No matching verification for this (tenant, provider,
+            provider_reference) - only observable AFTER signature
+            verification succeeds; not a second enumeration oracle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -4359,6 +4423,23 @@ components:
         decline_reason: { type: string }
         cascadable: { type: boolean }
       required: [event_type, provider_reference, outcome, amount, asset_code]
+    KYCMockCallback:
+      type: object
+      description: >
+        The MOCK KYC adapter's own wire shape (platform-invented, not
+        modeled on any real vendor - KYC-WH-1, Stage 10.2, ADR 0091). The
+        signature covers these RAW BODY BYTES, never a re-serialization.
+        At most 256 KiB. There is deliberately no "signature" field in the
+        body (the signature lives in the X-KYC-Signature header) - a body
+        that still carries one is rejected as an invalid signature, not a
+        malformed body.
+      properties:
+        provider_reference: { type: string }
+        outcome:
+          type: string
+          enum: [approved, rejected, pending, review_required, expired, error]
+        reason: { type: string }
+      required: [provider_reference, outcome]
     Asset:
       type: object
       description: >
@@ -4633,6 +4714,27 @@ components:
         expires_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
         has_verified_residence: { type: boolean }
+      required: [id, player_account_id, status, provider_id, created_at]
+    PlayerVerification:
+      type: object
+      description: >
+        The PLAYER-facing shape of a verification (Stage 10.2, ADR 0091,
+        KYC-WH-1 design §B5) - used ONLY by
+        /v1/me/kyc/verifications (POST/GET). Deliberately omits the
+        provider reference field - a player has no legitimate need to see
+        or echo it, and a player-supplied provider reference is never
+        trusted anywhere in this API. The staff-facing Verification schema
+        (used by every /v1/admin/kyc/* route) keeps that field.
+      properties:
+        id: { type: string, format: uuid }
+        player_account_id: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [unverified, pending, review_required, approved, rejected, expired]
+        provider_id: { type: string, example: mock }
+        reason: { type: string }
+        reviewed_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
       required: [id, player_account_id, status, provider_id, created_at]
     PageMeta:
       type: object

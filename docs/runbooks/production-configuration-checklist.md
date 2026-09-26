@@ -100,14 +100,23 @@ investigating an incident).
 
 ## Fields intentionally NOT in `internal/config.Config` — do not add them here casually
 
-- **Mock provider credentials/webhook secrets** (`kycMockWebhookSecret`
-  in `cmd/platform-api/main.go`, the mock casino/payment/email/KYC
-  provider registrations) are hardcoded dev/test-only values, clearly
-  labeled as such, and are never read from the environment. They must
-  never be used in production — a real provider integration would add
-  its own per-tenant credential fields (see `docs/decisions/` for the
-  relevant provider-integration decisions), not repurpose these mock
-  constants.
+- **Mock provider webhook credentials** (payments/KYC/casino) are Stage
+  10.2 (ADR 0091) per-process `crypto/rand` values
+  (`internal/webhookauth.NewMockMaster`), never a compile-time constant,
+  never config, and never recoverable from outside the process that
+  generated them. `cmd/platform-api/wiring.go`'s `mockProviderWiring`
+  (derived solely from `cfg.TestSupportRoutesEnabled()`, ADR 0085) decides
+  whether each mock provider's resolver — and, for KYC specifically, the
+  webhook ROUTE and the Orchestrator itself — is ever wired into anything
+  reachable. In production (or any deployment with test support off): the
+  payments/casino webhook routes stay registered but every callback fails
+  closed 401 `no_resolver` (no real vendor exists); the KYC webhook route
+  is entirely ABSENT (404), and `POST /v1/me/kyc/verifications` is 503,
+  since there is no real KYC vendor to fall back to. A real provider
+  integration would add its own per-tenant credential fields (see
+  `docs/decisions/` for the relevant provider-integration decisions), not
+  repurpose these mock values — see KYC-WH-1 and CAS-WH-TENANT-1
+  (`docs/plans/stage-10.2-planning/01-webhook-trust-design.md`).
 - **CI-only values** (`JWT_SIGNING_SECRET`'s CI value, the
   `TEST_DATABASE_URL`/`TEST_RUNTIME_DATABASE_URL` pair used only by the
   integration test suite — see `docs/security/runtime-role-
