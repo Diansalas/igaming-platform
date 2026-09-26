@@ -336,6 +336,15 @@ credentials being *per-tenant configuration* and are binding on Stage 3B
   across tenants — and every write after verification uses that same
   tenant id as both the RLS context and the binding. A callback must never
   be able to name the tenant it credits.
+  *Pointer (2026-09-26, Stage 10.2, ADR 0091):* the contract primitives
+  now live in the provider-neutral `internal/webhookauth`, with
+  `internal/payments` keeping aliases and unchanged behaviour. The same
+  contract binds KYC and casino callbacks, with per-domain signing
+  prefixes (point 8) and strict I1 for KYC and casino (point 9). The
+  payments MOCK resolver is now wired only under
+  `TestSupportRoutesEnabled()` (PAYWH-GATE-1,
+  `cmd/platform-api/wiring.go` `mockProviderWiring`). See
+  `docs/decisions/0022` §3, Stage 10.2 amendment.
 - Rotation is per-tenant and supports an overlap window (old and new
   signing key both accepted) so rotating one tenant's PSP key cannot drop
   another tenant's in-flight callbacks. `OPEN DECISION`: rotation cadence

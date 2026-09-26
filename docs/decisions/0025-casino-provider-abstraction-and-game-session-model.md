@@ -254,6 +254,84 @@ from the URL's tenant slug (resolved, authenticated-tenant lookup — same
 `identity.GetTenantBySlug` + active-status check `newPaymentWebhookHandler`
 already performs, reused verbatim), never asserted by the payload.
 
+### Amendment (Stage 10.2)
+
+> **Amendment 2026-09-26 (Stage 10.2, ADR 0091, CAS-WH-TENANT-1). Recorded by
+> `architect` from design
+> `docs/plans/stage-10.2-planning/01-webhook-trust-design.md` §C and
+> rulings §J (J5, J8, J14), plus review `07-review-architect-db.md` §5 C.
+> The `casino` review (`06-review-casino.md`) approved without change.**
+>
+> **Tenant (§5).** "The tenant comes from the URL's tenant slug" is
+> **superseded** by ADR 0022 §3 as amended (points 1–9). The slug selects
+> one candidate tenant. The tenant is established only by a
+> per-(tenant, provider) credential bound into the signing input (MOCK
+> scheme: prefix `igaming.casino.webhook.v1`, headers
+> `X-Casino-Signature`/`X-Casino-Key-Id`). Casino has strict I1 (point 9):
+> before verification, no tenant-scoped statement runs. Every
+> pre-verification failure is the uniform 401. That replaces the earlier
+> 404 for an unknown or suspended tenant and the earlier pre-verification
+> 400s.
+>
+> **Interface (§1).**
+> - `HandleCallback` takes
+>   `(ctx, in webhookauth.Inbound, cred webhookauth.Credential)`.
+> - `NewOrchestrator` takes a `webhookauth.Resolver`, matching payments.
+>   A nil resolver fails closed.
+> - `ReceiveCallback(ctx, tx, tenantID, providerID, in)` first overwrites
+>   `in.TenantID`/`in.ProviderID` from its parameters.
+> - The adapter MACs the raw bytes, then parses. A verified-but-malformed
+>   body is the distinct `casino.ErrCallbackMalformedBody`, mapped to 400.
+> - `casino.ErrCallbackSignatureInvalid` becomes an alias of
+>   `webhookauth.ErrSignatureInvalid`.
+>
+> **Mock (§7).** The mock's per-process `signingSecret` and its
+> NUL-joined field MAC are replaced. The mock now uses a key derived per
+> tenant from a per-process random master (label
+> `igaming/casino-mock-webhook/v1`, key id `mock-v1`), computed over the
+> raw bytes, which removes field shifting. The body carries no signature
+> field. A legacy `signature` field is rejected as `ErrSignatureInvalid`.
+>
+> **Capability check.** The tenant capability check (`LoadCapability`,
+> `status == active`; ADR 0025 review P1) runs **only after
+> verification**. A verified caller whose capability is disabled gets 503.
+> An unverified caller never observes capability state. The casino
+> capability therefore stays a money-path kill switch for callbacks. This
+> knowingly differs from ADR 0022 §3's "`ProviderCapability.status`
+> governs routing only": a disabled capability 503s a verified rollback,
+> and that can strand a debited stake. The behaviour is pre-existing and
+> not changed in 10.2. It is registered as follow-up
+> **CAS-CAP-ROLLBACK-1** (`casino` + `ledger-finance`,
+> `docs/governance/task-registry.md`).
+>
+> **Money path unchanged.** Idempotency is still the ledger
+> `(tenant, provider_id, provider_tx_id)` key, now keyed on the route
+> `provider_id` the credential verified (point 6). F-7 still gives 409,
+> `ErrAlreadyRolledBack` still gives 409, and per-tenant tombstones
+> remain. A cross-tenant callback, including a rollback, is rejected with
+> 401 before any tenant-scoped read. It writes no tombstone, ledger,
+> projection, round or audit row in either tenant.
+>
+> **Resolver gating (ADR 0085).** The casino webhook route stays
+> registered everywhere, because it is the real provider-facing route.
+> `cmd/platform-api/wiring.go` `mockProviderWiring` wires the mock
+> resolver only when `TestSupportRoutesEnabled()` is true. Otherwise the
+> resolver is nil, every callback returns 401 (`no_resolver`), and no
+> casino money moves. The mock adapter itself stays registered for
+> catalogue and launch (**MOCK-ADAPTER-PROD-1**, pre-launch checklist).
+>
+> **Play simulation (ADR 0085/0048).** Play simulation signs in-process
+> for `tc.TenantID`, the tenant from the JWT, and calls `ReceiveCallback`
+> with that same tenant. An `AuthError` on this route is 503 ("simulated
+> play is misconfigured"). The signed bytes are never returned. The same
+> gate controls both the routes and the resolver.
+>
+> **Status.** CAS-WH-TENANT-1 closes for the **MOCK only**. A real
+> aggregator resolver is `NOT IMPLEMENTED`. The casino tenant-binding
+> conformance case is mandatory for the first real adapter.
+> Implementation status is tracked in `docs/governance/task-registry.md`
+> (Stage 10.2).
+
 ### 6. Bet / Win / Rollback — no second balance system, existing ledger only
 
 `financial-transaction-flows.md` §5-7 (already `BLUEPRINT`-status, not

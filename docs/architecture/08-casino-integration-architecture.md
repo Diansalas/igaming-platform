@@ -177,22 +177,50 @@ A provider callback is **not** an authenticated platform principal — there
 is deliberately no bearer-token middleware on
 `POST /v1/webhooks/casino/{tenantSlug}/{providerID}`
 (`internal/httpserver/casino_handlers.go`), identical to the payments
-webhook's own reasoning. Two things establish trust instead, in order:
+webhook's own reasoning. Trust is established instead by the shared
+inbound-callback contract, `docs/decisions/0022` §3 as amended (points 1–7
+from Stage 10.1, points 8–9 from Stage 10.2; primitives in
+`internal/webhookauth`). The steps, in order:
 
-1. **Tenant resolution from the URL only.** The handler resolves tenant
-   scope from the path's `tenantSlug` segment *before* opening a
-   transaction and before any payload byte is inspected — an unknown slug
-   and a suspended tenant return the identical not-found response
-   (enumeration resistance), mirroring `newPaymentWebhookHandler` exactly.
-2. **Adapter-specific signature verification inside `HandleCallback`.**
-   The platform never invents a generic signature scheme; each adapter
-   authenticates its own payload however its real vendor requires.
-   `MockCasinoProvider` verifies an HMAC-SHA256 over the payload's
-   identifying fields (`mock.go`'s `sign`/`HandleCallback`) using
-   `hmac.Equal` (constant-time) — a caller who does not know the mock
-   instance's `signingSecret` cannot construct a payload `HandleCallback`
-   will accept, and a malformed/unsigned payload is rejected before any
-   field is used to construct a `CallbackEvent`.
+*(Steps 1 and 2 rewritten 2026-09-26, Stage 10.2, ADR 0091,
+CAS-WH-TENANT-1; see `docs/decisions/0025` "Amendment (Stage 10.2)". The
+earlier text described the superseded model: tenant from the URL slug,
+plus a per-process key with no tenant in the MAC.)*
+
+1. **The route slug is a lookup hint only.** The shared preamble checks
+   the provider id charset, the signature and key-id headers, and the body
+   size (1 MiB). The handler then resolves exactly one *candidate* tenant
+   with the platform-scoped `GetTenantBySlug` and opens `WithTenant` for
+   it. Before verification succeeds, no other statement runs, and in
+   particular no tenant-scoped one (strict I1, ADR 0022 §3 point 9). An
+   unknown slug, an inactive tenant, an unregistered provider, a nil
+   resolver, a missing credential and a bad signature all get the same
+   uniform 401. Unauthenticated failures write no audit row.
+2. **One credential; the tenant is bound into what is verified.** The
+   orchestrator resolves one credential for (candidate tenant, route
+   `provider_id`, key id) through its injected `webhookauth.Resolver`, and
+   checks that the credential's tenant and provider equal the route's.
+   The adapter's `HandleCallback(ctx, in, cred)` then verifies the **raw
+   bytes** before it parses anything. A real adapter uses its vendor's own
+   scheme; the platform never invents a generic signature scheme for
+   vendors. `MockCasinoProvider` uses the platform-defined MOCK scheme:
+   HMAC-SHA256 over
+   `igaming.casino.webhook.v1‖0x00‖tenant_id‖0x00‖provider_id‖0x00‖key_id‖0x00‖raw body`,
+   with headers `X-Casino-Signature`/`X-Casino-Key-Id`, key id `mock-v1`,
+   and a key derived per tenant (label `igaming/casino-mock-webhook/v1`)
+   from a per-process random master. So bytes signed for tenant A never
+   verify when posted to tenant B's route. A verified-but-malformed body
+   is a distinct 400.
+3. **Only after verification:** the tenant capability check
+   (`status == active`, otherwise 503; see CAS-CAP-ROLLBACK-1), then
+   dispatch and posting. Every write uses the verified tenant as both the
+   RLS context and the binding.
+
+**Gating (ADR 0085).** The mock resolver is wired only when
+`TestSupportRoutesEnabled()` is true (`cmd/platform-api/wiring.go`
+`mockProviderWiring`). Otherwise the route still exists, but every
+callback returns 401 `no_resolver` and no casino money moves. A real
+aggregator resolver is `NOT IMPLEMENTED`.
 
 The orchestrator itself (`ReceiveCallback`) only ever consumes
 `HandleCallback`'s already-verified `CallbackEvent` output — it never

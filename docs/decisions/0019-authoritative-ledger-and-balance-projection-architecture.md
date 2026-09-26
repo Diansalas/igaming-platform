@@ -289,10 +289,25 @@ implemented webhook: every route took the tenant from its URL slug under a
 tenant-agnostic key (S-6). Status after 10.1:*
 - *payments conforms with a `MOCK` credential only (docs/decisions/0022 §3
   as amended);*
-- *casino does not conform (CAS-WH-TENANT-1), and this row's entitlement
-  for casino callbacks rests on that follow-up;*
+- *casino conforms with a `MOCK` credential only (bullet replaced
+  2026-09-26 by Stage 10.2, see the note below; the 10.1 text read "casino
+  does not conform (CAS-WH-TENANT-1), and this row's entitlement for
+  casino callbacks rests on that follow-up");*
 - *the sportsbook provider-callback entitlement remains unimplemented.*
 
+*Amended 2026-09-26 (Stage 10.2, ADR 0091, CAS-WH-TENANT-1; `ledger-finance`
+concurrence: **PENDING — recorded at Stage 10.2 final review**). The
+casino entitlement in this row no longer depends on a follow-up. Casino
+callbacks now originate postings only for the tenant bound into the
+verified signature (docs/decisions/0022 §3 as amended, points 1–9; ADR
+0025 Stage 10.2 amendment). A cross-tenant casino callback is rejected
+before any tenant-scoped read, so it writes no tombstone, ledger,
+projection or audit row in either tenant. The casino real-aggregator
+resolver is `NOT IMPLEMENTED`. In production, or with test support off,
+no casino resolver is wired, so no casino callback originates any
+posting. No KYC row is added to this matrix: the matrix governs who may
+originate postings, and KYC callbacks post nothing (per-provider point 4
+below).*
 Enforcement is server-side at the posting API boundary (a per-
 `transaction_type` permitted-originator check), not in the UI and not
 inferred from which HTTP handler happened to call it. `OPEN DECISION`: the
@@ -328,6 +343,16 @@ The binding refinement, enforced at the posting API boundary:
 4. Game-provider callbacks (casino/sportsbook bet/win/settlement) and
    payment-provider callbacks are disjoint originator sets; a payments
    credential never originates gaming postings and vice versa.
+   *Added 2026-09-26 (Stage 10.2, ADR 0091; `ledger-finance` concurrence:
+   PENDING — recorded at Stage 10.2 final review):* KYC-provider callbacks
+   originate **no** `LedgerTransaction` of any type. Each platform-defined
+   (MOCK) scheme carries a domain-unique signing prefix, domain-unique
+   headers and a domain-unique mock key label (docs/decisions/0022 §3
+   point 8: `igaming.payments.webhook.v1`, `igaming.kyc.webhook.v1`,
+   `igaming.casino.webhook.v1`). As a result, payments, casino and KYC
+   credentials cannot verify each other's callbacks, even under an equal
+   key. For these schemes, the disjointness in this point is
+   cryptographic, not just a matter of routing.
 
 ## Consequences
 

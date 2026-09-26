@@ -90,6 +90,21 @@ logs/traces) and must never gate a security control outside these three
 named, reviewed exceptions — see `internal/config.Config`'s own doc
 comment on the `Environment` field for the exhaustive list.
 
+*Amended 2026-09-26 (Stage 10.2, ADR 0091; PAYWH-GATE-1, KYC-WH-1,
+CAS-WH-TENANT-1):* Stage 10.2 also derives mock-provider **wiring** from
+`cfg.TestSupportRoutesEnabled()`. It does this in one place,
+`cmd/platform-api/wiring.go` `mockProviderWiring(cfg)`. That function is
+pure (no I/O, no globals) and is unit-tested for {production,
+non-production} × {flag on, flag off}. It covers the KYC mock provider,
+its resolver and its webhook route, and the casino and payments mock
+webhook resolvers. Route registration and resolver wiring for the same
+domain come from the same result, so they cannot diverge. When the gate
+is off, payments and casino get a nil resolver (every callback 401
+`no_resolver`) and the KYC mock and route are absent. This introduces no
+new gate and no new use of `Environment`. It is one more consumer of the
+same two-layer gate. See docs/decisions/0022 §3 (Stage 10.2 amendment)
+and docs/decisions/0028 (Stage 10.2 amendment).
+
 ### 2. Stateless-by-construction activation seam (no shared infrastructure)
 
 Rather than replacing the in-memory map with a shared store (Redis, a new

@@ -142,6 +142,94 @@ dev-only secret - explicitly NOT modeled on any real vendor's actual
 webhook format, so it never has to be reconciled with (or accidentally
 become) a real vendor's contract before one exists.
 
+### Amendment (Stage 10.2)
+
+> **Amendment 2026-09-26 (Stage 10.2, ADR 0091, KYC-WH-1). Callback trust
+> model replaced. Recorded by `architect`, from design
+> `docs/plans/stage-10.2-planning/01-webhook-trust-design.md` §B and
+> rulings §J (J6, J7, J11, J12, J13), and review
+> `07-review-architect-db.md` §5 B. `identity-compliance` concurrence:
+> GIVEN, see `docs/plans/stage-10.2-planning/05-review-identity-compliance.md`
+> (verdict CONCUR). Its one required clarification, no resurrection of a
+> terminal verification, is incorporated below as ruling J11.**
+>
+> **Interface (§4).** `HandleCallback(ctx, rawPayload []byte)` becomes
+> `HandleCallback(ctx, in webhookauth.Inbound, cred webhookauth.Credential)`.
+> The adapter verifies the raw bytes before parsing anything (ADR 0022 §3
+> point 7). After verification it checks `outcome` against §5's closed
+> enum. A verified-but-malformed body is `kyc.ErrCallbackMalformedBody`,
+> which returns 400 and writes no audit row.
+>
+> **Tenant (§6).** Two §6 statements are **superseded**: "the HTTP layer
+> resolves tenant from the URL's tenant slug only" and "HMAC-signed with
+> a dev-only secret". Under ADR 0022 §3 as amended (points 1–9), the slug
+> is only a lookup hint. The tenant is established by the one
+> per-(tenant, provider) credential, whose tenant id is part of the
+> signing input (MOCK scheme: prefix `igaming.kyc.webhook.v1`, headers
+> `X-KYC-Signature`/`X-KYC-Key-Id`). The mock key is derived per tenant
+> (label `igaming/kyc-mock-webhook/v1`, key id `mock-v1`) from a
+> per-process random master. No secret exists in source, configuration,
+> tests or documentation. The KYC path follows strict I1 (ADR 0022 §3
+> point 9): before verification, no tenant-scoped statement runs.
+> After verification, the verification is looked up by
+> `tenant_id AND provider_id AND provider_reference`, which matches the
+> unique index exactly.
+>
+> **Gate (ADR 0085).**
+> - The mock KYC provider, its resolver and the KYC webhook route exist
+>   only when `TestSupportRoutesEnabled()` is true.
+> - Route registration and resolver wiring both come from one
+>   `cmd/platform-api/wiring.go` `mockProviderWiring` result, so they
+>   cannot diverge.
+> - Otherwise the route is absent (404), and player self-service
+>   `POST /v1/me/kyc/verifications` returns **503** (not 404), because the
+>   orchestrator is nil. Staff KYC routes remain. ADR 0091 already accepted
+>   this loss of production self-service KYC.
+> - **Future real vendor:** its route follows the casino pattern. It is
+>   always registered, it is not gated by test support, and it fails
+>   closed (uniform 401, `no_resolver`) until a real resolver exists. The
+>   real resolver is `NOT IMPLEMENTED`.
+> - **No simulate route exists.** Acceptance reaches `approved` through the
+>   staff review route (`PermVerificationReview`). Adding a simulate route
+>   later needs a further amendment. That route must be gated by test
+>   support and require `PermVerificationReview`. It must take the tenant
+>   from the JWT only, sign in-process, and never return the signed bytes.
+>
+> **Provider-driven transitions are monotonic over §2:**
+> `unverified 0 < pending 1 < review_required 2 < approved | rejected | expired 3 (terminal)`.
+> - Only a rank-increasing callback changes state. It uses a compare-and-set
+>   (`UPDATE … WHERE id = $ AND tenant_id = $ AND status = $current`). A
+>   lost race gets at most 3 re-reads, then an error. The success audit
+>   row is written in the same transaction.
+> - A callback of equal or lower rank is a no-op, and so is any callback
+>   after a terminal state or after a staff decision. A no-op returns 204
+>   and writes **no** audit row.
+> - **A callback never resurrects a terminal verification.** Only a new
+>   `CreateVerification` row starts a new attempt (J11). No code path may
+>   "reopen" a terminal row from a provider callback.
+> - `error` still never changes state, as in §5. It writes one failure
+>   audit row, for a verified sender only.
+> - Replay is idempotent through the existing unique
+>   `(tenant_id, provider_id, provider_reference)` plus the rank. No event
+>   id is added.
+>
+> **Response and exposure.**
+> - The webhook success response is **204** with no body.
+> - `provider_reference` is **staff-only**. Player-facing verification
+>   responses omit it, and staff/case responses keep it. It is no longer
+>   a capability.
+> - **Forward note for hosted KYC (J12):** a future hosted-KYC vendor
+>   that needs a player redirect must issue its own short-lived session
+>   token for it. It must not repurpose `provider_reference` for this, and
+>   the reference must not be returned to the player.
+>
+> **Status.** KYC-WH-1 closes for the **MOCK only**. A real KYC vendor
+> stays launch-blocking until it has a real resolver and a passing
+> tenant-binding conformance case (ADR 0022 §3 as amended, point 3
+> applies: per-merchant keys or a signed account id, plus a timestamp
+> tolerance). Implementation status is tracked in
+> `docs/governance/task-registry.md` (Stage 10.2).
+
 ### 7. Cross-tenant reuse and Person-resolution integration — OPEN DECISIONS
 
 Recorded explicitly, not resolved here:

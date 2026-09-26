@@ -349,6 +349,94 @@ never *asserts* the tenant.
 > The Consequences clause "§3 leaves open *how* the right key is
 > selected" is superseded by this amendment.
 
+> **Amendment 2026-09-26 (Stage 10.2, ADR 0091; KYC-WH-1, CAS-WH-TENANT-1,
+> PAYWH-GATE-1) — contract extracted and extended (recorded by
+> `architect`; design `docs/plans/stage-10.2-planning/01-webhook-trust-design.md`,
+> rulings §J; review `07-review-architect-db.md` §5 A).**
+>
+> **Extraction.** The contract primitives now live in the provider-neutral
+> package `internal/webhookauth`: `Credential`, `Resolver`, `Inbound`, the
+> single closed `Reason` enum, `AuthError`, the auth sentinels
+> (`ErrSignatureInvalid`, `ErrAuthFailed`, `ErrCredentialUnavailable`),
+> the platform-defined MOCK wire `Scheme` and its verify-before-parse
+> preamble, and the MOCK helpers in `internal/webhookauth/mock.go`
+> (`NewMockMaster`, `DeriveMockKey`, `MockResolver`, key id `mock-v1`).
+> The code was moved, not copied. `internal/payments` keeps type aliases and
+> sentinel variables pointing at it (`WebhookCredential`,
+> `WebhookCredentialResolver`, `InboundCallback`, `CallbackAuthReason`,
+> `CallbackAuthError`, `ErrCallbackSignatureInvalid`,
+> `ErrCallbackAuthFailed`, `ErrWebhookCredentialUnavailable`), so payments
+> behaviour and `errors.Is`/`errors.As` results are unchanged. There is one
+> preamble and one `Reason` enum. Each domain documents the subset of
+> reasons it emits. `provider_not_configured` and `key_material` stay
+> payments-only (§4.1).
+>
+> **Scope.** Points 1–7 bind KYC callbacks
+> (`POST /v1/webhooks/kyc/{tenantSlug}/{providerID}`) and casino callbacks
+> (`POST /v1/webhooks/casino/{tenantSlug}/{providerID}`) exactly as they
+> bind payments. For point 7 in those domains, the pre-verification
+> sentinel is `webhookauth.ErrSignatureInvalid` (the casino alias is
+> `casino.ErrCallbackSignatureInvalid`). The key-material sentinel is
+> payments-only. A verified-but-malformed body is the domain's own
+> `ErrCallbackMalformedBody` and maps to 400, never to the uniform 401.
+>
+> 8. **Domain separation.** Each platform-defined (MOCK) scheme is
+>    HMAC-SHA256 over
+>    `Prefix‖0x00‖tenant_id‖0x00‖provider_id‖0x00‖key_id‖0x00‖raw body`.
+>    Each domain has three independent separators:
+>
+>    | Domain | Signing prefix | Signature header | Key-id header | Mock key label |
+>    |---|---|---|---|---|
+>    | payments | `igaming.payments.webhook.v1` | `X-Payments-Signature` | `X-Payments-Key-Id` | `igaming/payments-mock-webhook/v1` |
+>    | KYC | `igaming.kyc.webhook.v1` | `X-KYC-Signature` | `X-KYC-Key-Id` | `igaming/kyc-mock-webhook/v1` |
+>    | casino | `igaming.casino.webhook.v1` | `X-Casino-Signature` | `X-Casino-Key-Id` | `igaming/casino-mock-webhook/v1` |
+>
+>    (Source of truth: `internal/webhookauth/domains.go`. The payments
+>    values are byte-identical to Stage 10.1's and must never change.)
+>    A signature valid in one domain never verifies in another, even under
+>    an equal key. The cross-scheme test (equal key, different domain, so
+>    reject) is mandatory. **`Scheme` is not a vendor wire format.** The
+>    platform never invents a generic signature scheme for third parties.
+>    A real adapter verifies with its vendor's own scheme, still consumes
+>    `Credential` and `Inbound`, and still obeys points 1–7.
+> 9. **KYC and casino I1 is strict.** Before the adapter's verification
+>    succeeds, the only statements allowed are the platform-scoped
+>    `GetTenantBySlug` and the `set_config` inside `WithTenant`. No
+>    tenant-scoped statement runs, not even a configuration read. That is
+>    stricter than point 4's configuration-lookup allowance, which only
+>    payments uses (`ProviderAcceptsWebhook`). The casino capability check
+>    (`LoadCapability`) runs only after verification (ADR 0025, Stage 10.2
+>    amendment). Tenant id has one source: each domain's
+>    `ReceiveCallback(…, tenantID, providerID, in)` first overwrites
+>    `in.TenantID` and `in.ProviderID` from its parameters, as payments
+>    does. So the route slug resolves one tenant id, and that same id is
+>    the RLS context, the resolver key, part of the signing input, the
+>    `cred.TenantID` check, and the scope of every write.
+>
+> **Status update.**
+> - KYC-WH-1 and CAS-WH-TENANT-1 conform for the **MOCK only**.
+> - Mock resolvers are wired only when `TestSupportRoutesEnabled()` is
+>   true (ADR 0085 §1). The decision is made in one place,
+>   `cmd/platform-api/wiring.go` `mockProviderWiring`, and this now
+>   includes the payments mock resolver (PAYWH-GATE-1). In production, or
+>   with test support off, payments and casino have a nil resolver: every
+>   callback fails closed with the uniform 401 (`no_resolver`). The KYC
+>   mock and its webhook route are absent (ADR 0028, Stage 10.2
+>   amendment).
+> - Real KYC and casino resolvers are `NOT IMPLEMENTED`. They are blocked
+>   in the same way as the payments resolver (secret-store ADR plus
+>   human-authorized provisioning).
+> - The KYC and casino tenant-binding conformance cases are mandatory for
+>   the first real adapter in each domain. They start as skips and must
+>   become hard failures, exactly as the payments C4 case does.
+> - The Stage 10.1 status bullet "Casino (CAS-WH-TENANT-1) and KYC
+>   (KYC-WH-1) callbacks do not yet conform" is **superseded** by this
+>   amendment.
+> - Implementation and completion status is tracked in
+>   `docs/governance/task-registry.md` (Stage 10.2) and the Stage 10.2
+>   completion report. This amendment records the binding contract, not
+>   completion.
+
 ### 4. Crypto Payment Provider is not the same object as Crypto Custodian
 
 The business owner's instruction is explicit and is adopted verbatim as
