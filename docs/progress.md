@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-26 (staging torn down; Stage 10.3 planning gate prepared)
+Last updated: 2026-09-26 (Stage 10.3 W0–W3 delivered; completion gate pending CI-342)
 
-## Status: Stage 10.2 COMPLETE (MOCK providers). AWS staging OFF (torn down 2026-09-26, `docs/governance/staging-teardown-2026-09-26.md`). Stage 10.3 planning gate prepared (`docs/plans/stage-10.3-planning-gate-proposal.md`) — awaiting human approval; not started.
+## Status: Stage 10.3 COMPLETE-PENDING-GATE (MOCK providers / local backends only). Gate 10.3-W2/W3 [PENDING CI-342]; completion report draft `docs/governance/stage-10.3-completion-report.md`. AWS staging OFF (torn down 2026-09-26, `docs/governance/staging-teardown-2026-09-26.md`). Next stage NOT started — awaiting human authorization.
 
 *Status note 2026-09-26: the "(approved-pending)" labels on the Stage 3C, 3D, 4A, 4D-RG, 4E, 4F, 4G, 4G-FINAL, 4H-B0-R7 and Stage 7 headers below are historical, recorded at the time each stage stopped for review. Later stages proceeded on explicit human authorization recorded in the subsequent stage sections (for example Stage 4H-B1 Wave 2 "human-authorized", Stage 9.1 "authorized by the human", and ADRs 0087/0090/0091 for Stages 10, 10.1 and 10.2). The headers are left unedited. Source: `docs/plans/stage-10.3-planning/00-roadmap-reconciliation.md` "Discrepancies" item 12.*
 
@@ -8205,3 +8205,39 @@ permission probes.
 - Human decisions: HD-10.3-1 (scope), HD-10.3-2 (deploy/ IAM code), HD-10.3-3 (player KYC reason
   wording), HD-10.3-4 (suspended-tenant casino settlement). Carried HDRs unchanged.
 - **Stop: Stage 10.3 implementation gate.** Nothing implemented.
+
+## Stage 10.3 — Real Provider Trust & Casino Financial Readiness — implemented (MOCK / local); completion gate [PENDING CI-342]
+
+- Authorized 2026-09-26 (ADR 0092 ACCEPTED; credential model ADR 0093). Rulings: HD-10.3-1 full
+  scope; HD-10.3-2 AWS IAM code excluded (`awssm` behind existing boundaries, local SDK fake only);
+  HD-10.3-3 players see status only; HD-10.3-4 suspended-tenant casino settlement unchanged
+  (documented in the ADR 0025 amendment).
+- Gates: 10.3-W0 PASSED; 10.3-W1 PASSED; **10.3-W2/W3 [PENDING CI-342]**
+  (`docs/plans/stage-10.3-planning/05-gate-log.md`).
+- **W1 (IMPLEMENTED, MOCK providers):** WH-VENDOR-SCHEME-1, MOCK-ADAPTER-PROD-1 (all-mock
+  production binary refuses to start, by design), CAS-CAP-ROLLBACK-1 + CAS-MULTIBET-WIN-1 (MOCK
+  provider only), KYC-REASON-BOUND-1.
+- **W2a:** PROV-CRED-RESOLVER-1 `IMPLEMENTED` (migration 0096, four-eyes activation, admin API;
+  `memory`/`devfile` backends); PROV-OUTBOUND-CRED-1 `PARTIALLY IMPLEMENTED` (launch-blocking
+  precondition: no non-synthetic adapter until outbound calls leave the DB transaction; tripwire
+  test); KYC-PROVIDER-SELECT-1 `IMPLEMENTED`.
+- **W2b:** CAS-RECON-1 `IMPLEMENTED` (migration 0097, `casino_consistency` C1–C7 with the C6 class
+  ruling, verified-only rejection record; no money writes).
+- **W3a:** CAS-RECON-STMT-1 `MOCK` (migration 0098; tautological against the MOCK source; real
+  statement `PROVIDER DEPENDENT`).
+- **W3b:** SECRETSTORE-AWS-1 `PARTIALLY IMPLEMENTED` (code, wiring, fake tests; IAM `NOT
+  IMPLEMENTED`; drills `STAGING REQUIRED`).
+- **CI-FLAKE-281:** `IMPLEMENTED` (calibrated hang guard; no recurrence #331–#342).
+  **GO-TOOLCHAIN-VULN-1:** resolved (go1.26.8, x/text v0.42.0, otel v1.46.0, govulncheck@v1.8.0,
+  golangci-lint v2.9.0).
+- Reviews: security W2a and W2b/W3a/W3b APPROVE WITH CONDITIONS → re-verification APPROVE WITH
+  CONDITIONS (all prior conditions closed; N-1 fixed in `e80114b`; N-2/N-3 Info open under
+  HD-10.3-2); code-reviewer NOT READY → READY WITH FOLLOW-UPS (CODE-HYGIENE-10.3-1). Mutation
+  evidence: 24/24, 25/25, 34/34, 38/38 + 7/7, 15/15 killed.
+- CI: #341 green incl. govulncheck; **#342 FAILED `TestStoreOutage_DoesNotPinPool`
+  (CI-342-STOREOUTAGE) — [PENDING: CI-342 root cause + fix]**; #343, #344 green.
+- New registered items: CAS-RECON-SCALE-1, PROVIDER-REF-BOUND-1, CODE-HYGIENE-10.3-1,
+  CAS-WIN-IDEMP-1, PAY-SB-REPLAY-AUDIT-1, CR-CHECKLIST-HMAC-1 (human), DEPLOY-FPKEY-1.
+- AWS/staging untouched; staging OFF. No real provider supported; no production or provider
+  readiness claimed. **Stop: Stage 10.3 completion gate — next stage requires explicit human
+  authorization** (decisions listed in the completion report).

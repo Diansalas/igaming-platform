@@ -167,3 +167,163 @@ status and Tests text. ADR 0092 status.
 **CR-CHECKLIST-HMAC-1**: adding the "`hmac.Equal` only" item to `.claude/agents/code-reviewer.md`
 is an edit to agent configuration, which needs the human. It does not block W2 (the lint is the
 enforcing control).
+
+## GATE 10.3-W2/W3 — [PENDING CI-342] (DRAFT 2026-09-26)
+
+Branch `claude/focused-wright-jw88w9`; gate range `6e3d74c..00f02ef` (W2a merged at `3ef18f2`; W2b
+`a41acdf`; W3a `8a69412`; W3b `becc5c2`; close-out and fix rounds `cf775ef`..`00f02ef`). Close-out
+drafted by the orchestrator's documentation agent (docs only). **Verdict withheld: this gate is not
+recorded as PASSED until CI-342-STOREOUTAGE has a root cause, a fix and a green CI run on the fixed
+head.** W2 and W3 are recorded together because the W2 security condition closure and the W3
+reviews landed in the same close-out.
+
+**Waves (merged).**
+- W2a PROV-CRED-RESOLVER-1 / PROV-OUTBOUND-CRED-1 / KYC-PROVIDER-SELECT-1: `8ce70ec`..`3ef18f2`
+  (migration 0096, `internal/{secretstore,providercred}`, resolver, four-eyes activation, admin API,
+  O4 selection; mutation record `96fc567`, 24/24 killed).
+- W2b CAS-RECON-1: `a41acdf` (migration 0097 `casino_callback_rejections`, `casino_consistency`
+  C1–C7, verified-only rejection record, read-only admin views; 25/25 killed); merge fix `a01f9b3`
+  (init-app-role grants for 0097); `03f5ba6` (pre-existing rollback-count bug in an
+  operating-market test); `7054e6e` (sweep tests scoped to their own tenants; CAS-RECON-SCALE-1
+  registered).
+- W3a CAS-RECON-STMT-1: `8a69412` (migration 0098, `casino_statement` stream, MOCK source,
+  `db.Pool.WithTenantSnapshot`; 34/34 killed).
+- W3b SECRETSTORE-AWS-1: `becc5c2` (`awssm` backend, local SDK fake only).
+- W3 CI-FLAKE-281: `00f02ef` (`13-ci-flake-281-disposition.md`).
+
+**Reviews and verdicts.**
+- `security`, W2a code (`09-gate-w2-review-security-w2a.md`, at `3ef18f2`): APPROVE WITH
+  CONDITIONS — W2A-SEC-1 (Medium; register the PROV-OUTBOUND-CRED-1 launch-blocking precondition)
+  and W2A-SEC-2 (Low; log the matched `key_id` for `KeyImplicit` verification). Observations
+  O-1..O-7, no action required. Accepted PROV-OUTBOUND-CRED-1 as `PARTIALLY IMPLEMENTED`
+  conditional on W2A-SEC-1; approved the three tightenings (PC031, tenant-binding composite FKs,
+  stricter ref regexes).
+- `security`, W2b/W3a/W3b (`10-gate-w2w3-review-security.md`, at `becc5c2`): APPROVE WITH
+  CONDITIONS. W2b, W3a, `a01f9b3`, `7054e6e` approved with no blocking finding (R-1 Low, R-2 Low,
+  R-3 Info). W3b approved as delivered (unwired) with S-1 and S-2 (Medium) blocking any wiring of
+  `awssm`; S-3 (Medium; Go toolchain), S-4 (Low; govulncheck unpinned), S-5 (Low; import-guard
+  gaps). SDK version ruling: no security-driven bump required.
+- `code-reviewer` (`10-gate-w2w3-review-code.md`, at `becc5c2`, committed in `3f77254`): NOT READY
+  — small fixes; 10 findings (#1 High = W2A-SEC-1/-2 still open; #2–#5 Medium; #6 Low–Medium;
+  #7–#10 Low). No money-writing bug; merge integration, permission union and tenant isolation
+  verified.
+- `security` re-verification (`11-gate-w2w3-reverify-security.md`, at `e5b6e17`, committed in
+  `1138062`): **APPROVE WITH CONDITIONS.** W2A-SEC-1, W2A-SEC-2, S-1, S-2, S-4, S-5 CLOSED; S-3
+  CLOSED in code with CI govulncheck evidence required (supplied by CI #341, below). Wiring `awssm`
+  into `cmd/platform-api` approved. New: N-1 (Low; ambient `AWS_DEFAULTS_MODE`/`AWS_MAX_ATTEMPTS`/
+  `AWS_RETRY_MODE` — IMDS calls at `New`, retries under the breaker), N-2 (Info; Secrets Manager
+  client honours `HTTPS_PROXY`), N-3 (Info; ARN account not pinned against platform
+  configuration). **N-1 fixed in `e80114b`** (refused at startup plus pinned defaults mode, retry
+  mode and 2 attempts; 7/7 mutants killed). The N-1 fix has **not** had a separate `security`
+  re-verification; `code-reviewer` checked only that its tests exist and pass. **N-2 and N-3
+  remain open under HD-10.3-2.**
+- `code-reviewer` re-verification (`12-gate-w2w3-reverify-code.md`, at `e80114b`, committed in
+  `302433d`): **READY WITH FOLLOW-UPS.** #1–#9 CLOSED (two mutants run by the reviewer, both
+  killed); #10 OPEN, accepted as one Low follow-up **CODE-HYGIENE-10.3-1**; of its items,
+  `secretstore.Router.Backends()` and `reconciliation.ListRunsForStream` were removed in
+  `302433d`. New Low observations N-A (`awssm.NewWithSDKFake` in a non-test file, AST-guarded,
+  fails closed) and N-B (C6 partition test finds the 0097 CHECK by `LIKE`), both folded into
+  CODE-HYGIENE-10.3-1. Financial sign-off of the C2 deviation and C6 ruling is `ledger-finance`'s
+  (paper 02 §2.19), not the reviewer's.
+- `qa`, CI-FLAKE-281 (`13-ci-flake-281-disposition.md`): `IMPLEMENTED` — the 30 s value is a
+  hang/deadlock guard; replaced by a calibrated ceiling (floor 30 s, cap 3 min), counts and
+  assertions unchanged; 3× green local race-integration runs; injected-hang mutation still fails
+  at ~2m17s; no recurrence in CI #331–#342. *(Discrepancy in that paper's §3 table: it lists
+  #340 as a `govulncheck` failure. The GitHub job record shows #340 failed at the `golangci-lint`
+  step, with govulncheck and every later step skipped. The registry row GO-TOOLCHAIN-VULN-1 is
+  correct. Paper 13's §3 row was corrected by the orchestrator at close-out.)*
+
+**Fix rounds.**
+- **Close-out `040329a` (merged `c3bc313`):** W2A-SEC-1 (registry precondition + tripwire
+  `TestOutboundPrecondition_EveryWiredAdapterIsSynthetic`), W2A-SEC-2 (`webhookauth.LogVerifiedKey`,
+  per-domain log-capture tests), S-1 (credentials by allow-list: explicit ECS container provider,
+  empty shared-file lists, source checked per retrieval, SDK aliases refused), S-2 (trust-root,
+  endpoint and credential-source overrides refused; `awssm://` refs must be full ARNs in
+  `ParseRef`), S-5 (guards widened to `github.com/aws/`), code review #5 and #6, W3b wiring. 38/38
+  mutants killed (`evidence/w2w3-closeout-mutation-kill.txt`).
+- **Toolchain `cf775ef`, `e5b6e17`, `0fbd0dc` (S-3, S-4, GO-TOOLCHAIN-VULN-1):** CI #337's first
+  govulncheck run found reachable stdlib findings against go1.25.0 plus `golang.org/x/text` and
+  `go.opentelemetry.io/otel/sdk`. Moved to **go1.26.8** (`go.mod` `toolchain` line, CI via
+  `go-version-file`, Dockerfile `golang:1.26.8-alpine`); `golang.org/x/text` **v0.42.0**; otel
+  **v1.46.0** (otelhttp v0.71.0); **govulncheck@v1.8.0**. golangci-lint was first bumped to
+  v2.6.2, whose release binary is built with go1.25 and fails against the go1.26 module (CI #340);
+  **v2.9.0** (first release built with go1.26) pinned in `0fbd0dc`.
+- **Reconciliation fix round `dd30350` (merged `4fe39c6`; `ledger-finance`):** code review #2 (C4
+  exemption decided by the original only), #3 (positive `house_gaming` rules for bets and wins;
+  BONUS_SET bets a recorded deviation, G-6 unshipped), #4 (**C6 class ruling, paper 02 §2.19**: 6
+  finding classes, 5 evidence-only; E9 different-reference is evidence only, removing the conflict
+  with `casino_statement`), #7 (tombstone pairing disclosed), security R-1 (rejection write on
+  `context.WithoutCancel` bounded by 2 s), R-2 registered as PROVIDER-REF-BOUND-1. 15/15 killed
+  (`evidence/w2w3-fixround-recon-mutation-kill.txt`). Reconciliation still writes no money.
+- **`294e0a0`:** code review #8 (`RequireAnyPermission` unit tests) and #9 (0092 hold-back derived
+  from migration version). Mutation-tested per the commit message (all-of rewrite, empty-list
+  allow, disabled cutoff: each fails a test); no separate evidence file.
+- **`e80114b`:** N-1 (above). **`302433d`:** dead code removed; CODE-HYGIENE-10.3-1 registered.
+
+**Mutation evidence (all `docs/plans/stage-10.3-planning/evidence/`).** `w2a-mutation-kill.txt`
+24/24 (M22 first NOT KILLED, test corrected, re-run killed); `w2b-mutation-kill.txt` 25/25 (M-C4a
+first SURVIVED, test strengthened, disclosed); `w3a-mutation-kill.txt` 34/34;
+`w2w3-closeout-mutation-kill.txt` 38/38 plus 7/7 for N-1 (M34 first did not compile, M36 first
+SURVIVED, both corrected and disclosed; two defence-in-depth lines not mutated, with reasons);
+`w2w3-fixround-recon-mutation-kill.txt` 15/15. Every survivor was fixed by strengthening a test,
+never by weakening the mutant.
+
+**Process notes (recorded as they happened).**
+- The W2a `security` review file (`09-gate-w2-review-security-w2a.md`) was not committed on its
+  own: it was swept into the W3a feature commit `8a69412` because it was in the working tree when
+  that commit was made. Its content is unchanged; the record is only less tidy.
+- A `code-reviewer`-side agent closing findings #8/#9 committed `5dc8abb`, which also swept in the
+  untracked `11-gate-w2w3-reverify-security.md`. The agent then soft-reset (`reset: moving to
+  HEAD~1`) and recommitted without it as `294e0a0` (visible in the reflog). The security
+  re-verification report was then committed separately and unchanged in `1138062`. `5dc8abb` is
+  not on the branch.
+- `12-gate-w2w3-reverify-code.md` notes an uncommitted modification to
+  `internal/httpserver/stage9_concurrency_integration_test.go` at its review time; that was the
+  CI-FLAKE-281 change, later committed in `00f02ef`.
+
+**CI (GitHub Actions, branch `claude/focused-wright-jw88w9`).**
+- #337–#339: failure — first `govulncheck` findings (GO-TOOLCHAIN-VULN-1).
+- #340 (`e5b6e17`): **failure** at the `golangci-lint` step (v2.6.2 binary built with go1.25);
+  fixed in `0fbd0dc`.
+- #341 (`0fbd0dc`): **green**, including govulncheck (the S-3 CI evidence the security
+  re-verification asked for).
+- #342 (`1138062`, docs-only commit on top of `294e0a0`): **FAILED** —
+  `TestStoreOutage_DoesNotPinPool` in `internal/providercred` (the 4-slot store-outage bound that
+  security W2a O-7 relies on). Under investigation as **CI-342-STOREOUTAGE**.
+  **[PENDING: CI-342 root cause + fix]**
+- #343 (`e80114b`): green. #344 (`302433d`): green. #345 (`00f02ef`): in progress when this entry
+  was drafted.
+- Green runs after #342 do not dispose of it: it is an unexplained failure of a security-relevant
+  test until the root cause is recorded.
+- No local 3× CI replay is recorded for this gate range (gate W1 had one). Evidence is the per-wave
+  and per-fix test runs recorded in the reviews and mutation files, plus the GitHub runs above.
+
+**Labels at this gate** (registry Stage 10.3 section; ADRs 0092/0093):
+- PROV-CRED-RESOLVER-1: `IMPLEMENTED` (`memory` tests only, `devfile` development only; `awssm`
+  see SECRETSTORE-AWS-1).
+- PROV-OUTBOUND-CRED-1: `PARTIALLY IMPLEMENTED` — launch-blocking precondition registered and
+  enforced by the tripwire. (ADR 0092's target was `IMPLEMENTED`; not met.)
+- KYC-PROVIDER-SELECT-1 (O4): `IMPLEMENTED`.
+- CAS-RECON-1: `IMPLEMENTED` (code + tests; C3 order sub-check `NOT IMPLEMENTED`; compensation
+  LEDGER-MANUAL-ADJ-4EYES-1 `NOT IMPLEMENTED`).
+- CAS-RECON-STMT-1: `MOCK` — the match against the MOCK source is tautological; detection is
+  proven by test-only divergent sources; the real statement source is `PROVIDER DEPENDENT`.
+- SECRETSTORE-AWS-1: `PARTIALLY IMPLEMENTED` — code, wiring and fake tests `IMPLEMENTED`;
+  IAM/KMS/`deploy/` `NOT IMPLEMENTED` (HD-10.3-2); real-AWS use and drills `STAGING REQUIRED`.
+- CI-FLAKE-281: `IMPLEMENTED` (disposition).
+
+**Open items carried forward.** CI-342-STOREOUTAGE (gate-blocking);
+CODE-HYGIENE-10.3-1 (Low; includes the `DerivedTokenCache` bound, which is a precondition for its
+first production caller); PROVIDER-REF-BOUND-1 (Low, before real-provider go-live);
+CAS-RECON-SCALE-1 (Medium, before real-money multi-tenant load); N-2/N-3 and the IAM/KMS,
+`HTTPS_PROXY` and IRSA questions (HD-10.3-2); DEPLOY-FPKEY-1; R-3 (Info, future Back Office
+rendering); W2A-SEC-2 residual (`matched_predecessor` bool, Info); branch protection + CODEOWNERS
+on `.github/` (security S-4 "CI step integrity"; not verifiable from the repository); all W1
+carry-forwards not closed here (CAS-WIN-IDEMP-1, PAY-SB-REPLAY-AUDIT-1, CR-CHECKLIST-HMAC-1).
+Stale record to refresh: the SECRETSTORE-AWS-1 registry row still says "`awssm` must be
+re-reviewed by `security` now that it is wired"; `11-gate-w2w3-reverify-security.md` reviewed the
+wiring (`040329a`) and approved it — only the N-1 fix postdates that review.
+
+**Gate verdict: [PENDING CI-342].** On a recorded root cause and fix for CI-342-STOREOUTAGE and a
+green GitHub CI run on the fixed head, this entry may be amended to PASSED. Stage 10.3 completion
+report: `docs/governance/stage-10.3-completion-report.md` (draft).

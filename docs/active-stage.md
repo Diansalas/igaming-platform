@@ -1,6 +1,6 @@
 # Active Stage
 
-> **Current stage:** see ["## Current stage"](#current-stage-stage-103--w1-complete-gate-103-w1-passed-w2-next) section (Stage 10.3 authorized; W1 complete, gate 10.3-W1 passed; W2 next; staging OFF). Sections below are kept in their historical order.
+> **Current stage:** see ["## Current stage"](#current-stage-stage-103--complete-pending-gate-gate-103-w2w3-pending-ci-342) section (Stage 10.3 W0–W3 delivered, MOCK/local only; gate 10.3-W2/W3 pending CI-342; stopped for human authorization; staging OFF). Sections below are kept in their historical order.
 
 ## Stage 4H-B0-R7 — Final Financial/Bonus Implementation Gate — Complete
 
@@ -1486,62 +1486,59 @@ none authorized for implementation yet.
 
 *Status note 2026-09-26: all four items were answered by the human in `docs/decisions/0042-human-decision-response.md` Part 2 — G-2: configurable per brand, default (b) route to `player_cash`; `OpenBetSelfExclusionPolicy` default: `VOID_ON_SELF_EXCLUSION`; mixed/bonus-funded cashout: "Not cashout-eligible"; FD-1: "Nullifying" (inactive while bonus-funded bets are not cashout-eligible). Implementation of G-2 brand configurability and of the self-exclusion default/auto-void consumer remains outstanding (ADR 0042 G-2 notes; `docs/plans/stage-10-planning-gate-proposal.md` §5).*
 
-## Current stage: Stage 10.3 — W1 complete (gate 10.3-W1 passed); W2 next
+## Current stage: Stage 10.3 — complete-pending-gate (gate 10.3-W2/W3 pending CI-342)
 
 Real Provider Trust & Casino Financial Readiness, AUTHORIZED 2026-09-26 (ADR 0092). The human
-authorized the full scope against baseline `207c922`. The authorization is recorded in
-`docs/plans/stage-10.3-planning-gate-proposal.md` §22 and supersedes conflicting text in that
-proposal.
+authorized the full scope against baseline `207c922` (proposal §22). W0–W3 are delivered for MOCK
+providers and local backends only. **The stage is stopped at its completion gate**; gate
+10.3-W2/W3 is **[PENDING CI-342]** and the completion report is a draft:
+`docs/governance/stage-10.3-completion-report.md`.
 
-- **Stage definition:** `docs/decisions/0092-stage-10-3-definition-real-provider-trust-and-casino-financial-readiness.md`
-  (scope, waves W0 → W1a–d → W2a/b → W3a/b, gates 10.3-W0..W3, status labels).
-- **Credential model:** `docs/decisions/0093-provider-credential-model-and-secret-store.md`,
-  binding for W2a and W3b.
+- **Stage definition:** `docs/decisions/0092-stage-10-3-definition-real-provider-trust-and-casino-financial-readiness.md`.
+  **Credential model:** `docs/decisions/0093-provider-credential-model-and-secret-store.md`.
 - **Human rulings:**
   - HD-10.3-1: full scope approved.
-  - HD-10.3-2: AWS IAM code **excluded**; W3b is backend code plus a local fake only.
-  - HD-10.3-3: KYC players see **status only**.
-  - HD-10.3-4: suspended-tenant casino settlement **unchanged**. The existing behaviour is
-    documented in the ADR 0025 Stage 10.3 amendment.
-- **Deferred:** PAYWH-TS-1, PAYWH-BRAND-1 and PAYWH-RL-1 remain deferred. Timestamp rules for real
-  schemes land in W1a.
-- **W0 (docs only): done.** Gate 10.3-W0 PASSED (`docs/plans/stage-10.3-planning/05-gate-log.md`):
-  - ADR 0092 and ADR 0093;
-  - "Amendment (Stage 10.3, ADR 0092)" sections in ADR 0022 §3, ADR 0085 §1, ADR 0025,
-    ADR 0082 (A6) and ADR 0028;
-  - a pointer in `docs/architecture/08-casino-integration-architecture.md` §9a;
-  - the task registry "Stage 10.3" section.
-- **W1 (W1a–W1d): done.** Gate 10.3-W1 PASSED (`05-gate-log.md`; reviews in
-  `docs/plans/stage-10.3-planning/06-gate-w1-review-*.md`). Labels:
-  - WH-VENDOR-SCHEME-1 (W1a): `IMPLEMENTED` — MOCK schemes plus the real-scheme contract. Real
-    vendor schemes `PROVIDER DEPENDENT`; `KeyImplicit` resolution `NOT IMPLEMENTED` until W2a;
-    domain callback-fixture hook `NOT IMPLEMENTED`.
-  - MOCK-ADAPTER-PROD-1 (W1b): `IMPLEMENTED`. By design, today's all-mock production binary
-    refuses to start.
-  - CAS-CAP-ROLLBACK-1 and CAS-MULTIBET-WIN-1 (W1c): `IMPLEMENTED — MOCK provider only`. ADR 0082
-    A6 `IMPLEMENTED`.
-  - KYC-REASON-BOUND-1 (W1d): `IMPLEMENTED`.
-  - Carried forward: CAS-WIN-IDEMP-1 (Medium, before G-6), PAY-SB-REPLAY-AUDIT-1 (Low),
-    CR-CHECKLIST-HMAC-1 (**needs the human**: an edit to agent configuration), CI-FLAKE-281
-    (proposed for W3), the C9 rejection-record scope in CAS-RECON-1 (W2b).
-- **Next: W2** (W2a credential resolver / outbound credentials / KYC provider select, design
-  already reviewed in `07-w2a-design-review-security.md` and the ADR 0093 amendment; W2b
-  CAS-RECON-1), then gate 10.3-W2. W2 is inside the authorized Stage 10.3 scope.
-- **Still `NOT IMPLEMENTED`:** every W2/W3 deliverable (PROV-CRED-RESOLVER-1,
-  PROV-OUTBOUND-CRED-1, KYC-PROVIDER-SELECT-1, CAS-RECON-1, CAS-RECON-STMT-1, SECRETSTORE-AWS-1)
-  and every real PSP, KYC or casino adapter (`PROVIDER DEPENDENT`).
-- **Specialist inputs:**
-  - the planning papers and reviews are in `docs/plans/stage-10.3-planning/`;
-  - rulings R1–R15 are in the proposal's §19;
-  - the binding per-wave test plan is in `04-review-qa.md` §4;
-  - red-before-green evidence goes in `docs/plans/stage-10.3-planning/evidence/`.
-- **Stop point:** the Stage 10.3 completion gate (after W3). The next stage needs explicit human
-  authorization.
-- Roadmap reconciliation: `docs/plans/stage-10.3-planning/00-roadmap-reconciliation.md`.
-- **AWS staging: OFF.** Torn down 2026-09-26 by the governed `deploy.sh down`
-  (`docs/governance/staging-teardown-2026-09-26.md`). Development continues locally; items
-  needing AWS are marked STAGING REQUIRED and deferred to the single future governed staging
-  deployment from the final approved commit.
+  - HD-10.3-2: AWS IAM code **excluded**; `awssm` is backend code behind the existing boundaries,
+    tested with a local fake only.
+  - HD-10.3-3: KYC players see **status only**; bounded provider reason for authorized staff only.
+  - HD-10.3-4: suspended-tenant casino settlement **unchanged**, documented in the ADR 0025
+    Stage 10.3 amendment.
+- **Gates** (`docs/plans/stage-10.3-planning/05-gate-log.md`): 10.3-W0 PASSED; 10.3-W1 PASSED;
+  **10.3-W2/W3 [PENDING CI-342]**.
+- **Labels** (registry "Stage 10.3" section):
+  - WH-VENDOR-SCHEME-1, MOCK-ADAPTER-PROD-1, KYC-REASON-BOUND-1: `IMPLEMENTED`.
+  - CAS-CAP-ROLLBACK-1, CAS-MULTIBET-WIN-1: `IMPLEMENTED — MOCK provider only`.
+  - PROV-CRED-RESOLVER-1, KYC-PROVIDER-SELECT-1, CAS-RECON-1, CI-FLAKE-281: `IMPLEMENTED`.
+  - PROV-OUTBOUND-CRED-1: `PARTIALLY IMPLEMENTED` — **launch-blocking precondition**: no
+    non-synthetic adapter until outbound calls run outside any domain DB transaction.
+  - CAS-RECON-STMT-1: `MOCK` (real statement `PROVIDER DEPENDENT`).
+  - SECRETSTORE-AWS-1: `PARTIALLY IMPLEMENTED` (IAM `NOT IMPLEMENTED`; drills `STAGING REQUIRED`).
+  - Every real PSP, KYC or casino adapter: `NOT IMPLEMENTED` (`PROVIDER DEPENDENT`).
+- **Reviews:** security re-verification APPROVE WITH CONDITIONS (all prior conditions closed; N-1
+  fixed in `e80114b`; N-2/N-3 Info open under HD-10.3-2); code-reviewer re-verification READY WITH
+  FOLLOW-UPS (CODE-HYGIENE-10.3-1).
+- **Open before the gate can pass:** CI-342-STOREOUTAGE (`TestStoreOutage_DoesNotPinPool`,
+  `internal/providercred`, failed in CI #342). **[PENDING: CI-342 root cause + fix]**
+- **Launch-blocking preconditions carried:** PROV-OUTBOUND-CRED-1, PROVIDER-REF-BOUND-1,
+  `DerivedTokenCache` bound (CODE-HYGIENE-10.3-1), DEPLOY-FPKEY-1.
+- **Still deferred / not authorized:** PAYWH-BRAND-1, PAYWH-RL-1, PAYWH-TS-1; Bonus Engine Wave 4;
+  any AI/agent implementation (ADR 0089 architecture only).
+- **Needs the human** (full list in the completion report §11 and its STOP section): ADR 0009/AUP;
+  HDR-J-6/7/8/9; HDR-M-1/2; HDR-SB-1; OB-1; licensing/legal/vendor/retail;
+  LEDGER-MANUAL-ADJ-4EYES-1; sportsbook jurisdiction Rung 2; HD-10.3-2 follow-ups (IAM/KMS,
+  `HTTPS_PROXY`, IRSA); CR-CHECKLIST-HMAC-1 (edit of `.claude/agents/code-reviewer.md`); branch
+  protection + CODEOWNERS on `.github/`; the Access Analyzer check left open by the teardown.
+- **AWS staging: OFF.** No AWS action in Stage 10.3. Items needing AWS are STAGING REQUIRED and
+  deferred to the single future governed staging deployment. No production or provider readiness
+  is claimed; no real provider is declared supported.
+- **Stop point: now.** The next stage requires explicit human authorization; nothing has been
+  started.
+
+### Stage 10.3 W1-era record (historical)
+
+At gate 10.3-W1 the W1 labels above were recorded and W2 was next; carried items were
+CAS-WIN-IDEMP-1, PAY-SB-REPLAY-AUDIT-1, CR-CHECKLIST-HMAC-1, CI-FLAKE-281 (then proposed for W3) and
+the C9 rejection-record scope (delivered in W2b). Details: `05-gate-log.md` "GATE 10.3-W1".
 
 ## Prior stage: Stage 10.2 — Webhook trust hardening — COMPLETE (IMPLEMENTED for MOCK providers)
 

@@ -61,7 +61,7 @@ Checked via the GitHub REST API (`GET .../actions/runs?branch=...` then
 | #337 | failure | `govulncheck` findings (`awssm`/xml decoder, `conformance`/httptest, `platform.run`/TLS chains) — unrelated dependency-vuln gate |
 | #338 | failure | same `govulncheck` findings |
 | #339 | failure | same `govulncheck` findings |
-| #340 | failure | same `govulncheck` findings |
+| #340 | failure | `golangci-lint` step only (v2.6.2 release binary built with go1.25 refused the go1.26.8 module; fixed by pinning v2.9.0 in `0fbd0dc`) — not govulncheck, not Stage 9 |
 | #341 | success | — |
 | #342 | in progress at check time | — |
 
