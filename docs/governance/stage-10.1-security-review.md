@@ -220,3 +220,111 @@ ADR 0082 A5 does not note that the new `FOR UPDATE` on `ledger_transactions` req
 - Penetration testing. This is a code- and design-level review, not an external audit.
 
 Passing this review does not make the webhook "secure" for production. For any real PSP, the launch blockers listed under **Verdict** still stand.
+
+## Re-verification (2026-09-26, 3f67ac5)
+
+- **Reviewer:** `security`. This is a re-verification only; no code was edited.
+- **Diff reviewed:** `git diff 250828b..HEAD`. It contains `505a311` (QA tests), `2cb3600` (SB-T1-XMIN test fixes) and `3f67ac5` (code fixes).
+- **Tests run** (local CI Postgres, NOBYPASSRLS runtime role, while a concurrent CI replay was running):
+  - `go vet` is clean on `payments`, `httpserver`, `ledger` and `sportsbook`.
+  - Unit tests pass for `payments` and `httpserver`.
+  - `go test -tags integration -p 1` passes for `payments`, `httpserver`, `ledger` and `sportsbook`.
+  - Every test named below was run with `-v` and confirmed to PASS, not SKIP.
+- **Throwaway probe:** I repeated the original oracle probe as a temporary `httpserver` integration test with a capturing logger, then deleted it. `git status` confirms it is gone. The results follow.
+
+| Request (well-formed headers, signature not valid for the body unless stated) | Response | Log |
+|---|---|---|
+| active and configured tenant, non-JSON body | 401 `unauthorized` / `callback rejected` | `payment_webhook_auth_failed reason=signature_invalid` (allow-listed keys only) |
+| unknown slug, non-JSON body | 401, identical body | `reason=tenant_unknown` |
+| active tenant, body > 1 MiB | 401, identical body | `reason=body_too_large`, no tenant_id (no lookup was made) |
+| unknown slug, body > 1 MiB | 401, identical body | `reason=body_too_large` |
+| active tenant, body > 1 MiB, no auth headers | 401, identical body | `reason=body_too_large` |
+| active tenant, non-JSON body with a **valid** signature (post-verification) | 400 `validation_error` / `callback rejected` | WARN `payment_webhook_malformed_body_after_verification` (provider_id, tenant_id and request_id only; no err, no body) |
+
+- The Content-Type is the same in every case. The bodies differ only in `request_id`.
+- No ERROR line and no body fragment was emitted for any unauthenticated request.
+- Timing differences are still out of scope, as in the original review.
+
+### Per-finding status
+
+| Finding | Status | Evidence |
+|---|---|---|
+| **P2-1** uniform-401 oracle (non-JSON, > 1 MiB) | **CLOSED** | See the four sub-items below this table. |
+| **P2-2** denial audit content | **CLOSED** | See the sub-items below. |
+| **P2-3** missing binding security tests | **PARTIALLY CLOSED.** T11a, T12 and T13 are closed. The PAY-REV-1 alert allow-list test is **NOT CLOSED**. | See the sub-items below. |
+| **P3-1** `GoString` | **CLOSED (code).** The test does not discriminate; see P3-6. | `types.go` `WebhookCredential.GoString()` returns `c.String()`, which renders TenantID, ProviderID, KeyID and Fingerprint only. |
+| P3-2 XMIN residual | Unchanged. It was informational and needs no action. | The security acceptance of the anchoring deviation stands. |
+| P3-3 X-2 "NULL" test | **CLOSED (comment option)** | `settlement_migration_0093_integration_test.go:352-358` now states that the raw=3 case does not reach the NULL path. |
+| P3-4 S-4d not recorded | **CLOSED** | ADR 0082 now carries an S-4d paragraph (around line 1428). |
+| P3-5 status-code inaccuracies | **CLOSED** | See the sub-items below. |
+
+**P2-1 evidence:**
+1. **Parse ordering.** `mock.go` `HandleCallback` now checks the headers and the HMAC over the raw bytes **before** any `json.Unmarshal`. Every parse, field and enum failure after verification wraps the new `ErrCallbackMalformedBody` sentinel. `ReceiveCallback` maps `ErrCallbackSignatureInvalid` and `ErrInboundKeyMaterial` to `*CallbackAuthError`. The adapter contract is written into the `PaymentProvider.HandleCallback` doc and ADR 0022 §3 amendment point 7.
+2. **Handler ordering.** `deposit_handlers.go` now runs, in order: provider_id charset, body read with the 1 MiB limit, then `ParseWebhookAuthHeaders`. All three run **before** `GetTenantBySlug`, which satisfies ruling 5. An oversized or unreadable body maps to the new `ReasonBodyTooLarge` and gets the uniform 401.
+3. **Tests.** `TestWebhook_EnumerationOracle_IndistinguishableResponses` gained `non_json_body_active_tenant` and `oversized_body_active_tenant`. Both PASS with the same code and message as every other probe.
+4. **OpenAPI.** The 400 description is corrected to "post-verification only".
+5. **Probe.** The probe above confirms the fix empirically.
+
+**P2-2 evidence:**
+- `ErrDepositAlreadyReversed` is now carried by `*DepositAlreadyReversedError`, which has an `Unwrap` to the sentinel. Both denial paths build it: the S4 pre-check and the ledger-backstop path.
+- `RecordDepositReversalRejection` writes `TargetType: "deposit_intent"` and `TargetID: <original intent id>`, and now also records the client IP.
+- The metadata holds `provider_id`, `deposit_intent_id`, `original_ledger_transaction_id`, `rejected_reversal_reference` and `existing_reversal_ledger_transaction_id`.
+- The alert log is still limited to provider_id, tenant_id and request_id. The HTTP body is still the generic 409.
+- `payrev1_webhook_integration_test.go` asserts every one of those fields from a fresh transaction, including against the independently read ledger ids and a non-empty `ip_address`. It PASSES.
+
+**P2-3 evidence:**
+- **T11a:** `TestWebhook_BadSignature_NoWriteBeforeVerification` (`internal/payments/webhook_no_write_before_verification_integration_test.go`).
+  - A `recordingTx` wrapper captures every Exec, Query and QueryRow call.
+  - The test asserts that no statement is INSERT, UPDATE, DELETE or `FOR [NO KEY] UPDATE`.
+  - It also asserts that **exactly one** statement ran: the `provider_capabilities` `EXISTS`. This is stronger than the plan required. PASS.
+- **T12:** `TestWebhook_AuthFailureLogging_AllowListOnly` covers all ten route-reachable reasons.
+  - It asserts that the captured keys are a subset of an allow-list restated in the test.
+  - It asserts that no `err`, `error`, `body`, `header`, `signature`, `slug` or `raw` key appears, and that no value contains the body or key-material marker.
+  - It asserts that the `audit_log` row count does not change. PASS.
+- **T13:** `TestSimulationRoute_CannotNameOtherTenant` sends `tenant_id` and `tenant_slug` for tenant B in the body. It asserts that the deposit settles under tenant A (the JWT tenant) and that tenant B's ledger and audit counts do not change. PASS.
+- **PAY-REV-1 alert allow-list:** NOT CLOSED. No test anywhere references `payment_webhook_integrity_alert_deposit_already_reversed`. `grep` over `internal/**/*_test.go` returns nothing, and `payrev1_webhook_integration_test.go` does not capture logs.
+
+**P3-5 evidence:**
+- `ErrCallbackProviderMismatch` on the public webhook now returns 400 `callback rejected` instead of 500.
+- A verified but malformed body returns 400.
+- The OpenAPI entry is aligned with both.
+- A verified body that still carries a legacy `signature` field still returns 401. That is acceptable because it is a signature-scheme violation.
+
+### Why the open P2-3 sub-item matters more now
+
+`DepositAlreadyReversedError.Error()` now embeds the deposit_intent id and the rejected PSP reversal reference. The handler's alert line is correct today: its fields are fixed and it does not log `err`. However, a future edit that adds `"error", err` to that line, which is the pattern of the neighbouring `payload_mismatch` and `reversal_link` alerts, would put the reference into ERROR logs. Nothing would catch it.
+
+**Required:** add a capturing-logger assertion to `TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409`, following the precedent of `sportsbook_settlement_alert_audit_test.go:128-160`:
+- exactly one `payment_webhook_integrity_alert_deposit_already_reversed` line;
+- its keys ⊆ {provider_id, tenant_id, request_id};
+- no value contains `payrev1-http-rev-2` or the intent id.
+
+This is a test-only change. The code needs no change.
+
+### New observations (non-blocking)
+
+- **P3-6 (Low): the new `%#v` redaction assertion cannot fail.** `TestMockWebhookCredentials_KeyDerivation` checks that `%#v` output contains neither `hex(secret)` nor `string(secret)`. Without `GoString`, Go renders a byte slice as `[]uint8{0x8c, 0xc4, …}`, which matches neither.
+  - I confirmed this with a standalone program: both checks report "no leak" for an unredacted struct.
+  - The `GoString` fix itself is correct. Only its regression guard is vacuous.
+  - **Fix:** assert that the `%#v` output does not contain `"Secret"` or `"[]uint8{"`, or assert that it equals `credA1.String()`.
+- **P3-7 (Low / informational): accepted deviation from ruling 8 / C5 ordering.** The key-material scan now runs **after** signature verification, where C5 required "before".
+  - Consequence: an *unsigned* body carrying key material is now logged as `reason=signature_invalid`, not `key_material`, so it raises no key-material alert.
+  - I accept this. The ADR 0022 §4.1 scenario is a vendor that hands the platform key material, and a vendor signs its callbacks, so the scan still catches that case with the alert.
+  - An unauthenticated body is still rejected with the uniform 401 and is never parsed, persisted or logged.
+  - Scanning before verification would require parsing unauthenticated input, which is exactly what created the P2-1 oracle.
+  - The deviation is recorded in ADR 0022 §3 amendment point 7.
+- **Out of scope:** commit `009c6d0` (ledger P2-A test and ledger-finance re-verification) was made by another agent while this re-verification ran. It touches no security-reviewed code and was not reviewed here.
+
+### Final verdict per workstream (at 3f67ac5)
+
+| Workstream | Security position |
+|---|---|
+| **SB-T1-XMIN** (0093) | **CLEARED.** Unchanged from the original review. P3-3 is closed by correcting the comment. |
+| **PAY-REV-1** (0092, L2 lock, 409) | **CLEARED, with one remaining condition before it is labelled `IMPLEMENTED`:** the PAY-REV-1 alert allow-list test (the open P2-3 sub-item, re-homed to PAY-REV-1 because it protects that workstream's S-5 control). P2-2 is CLOSED. No code change is required. |
+| **PAY-WH-TENANT-1** | **CLEARED for `IMPLEMENTED`, scoped to the MOCK adapter.** P2-1 is CLOSED (verified by code, by the extended T9 test and by the repeated probe). All of P2-3's PAY-WH-TENANT-1 tests (T11a, T12, T13) are present and pass. P3-1 is closed in code; P3-6 is a non-blocking test-quality follow-up. |
+
+**Launch position is unchanged.** Passing this re-verification does not make the webhook production-ready.
+- S-6 / PAY-WH-TENANT-1 remains **launch-blocking for any real PSP**. The real `WebhookCredentialResolver` and secret store are `NOT IMPLEMENTED`, and PAYWH-TS-1 (signed-timestamp replay window) is not built.
+- **KYC-WH-1 (High)** remains open and launch-blocking.
+- CAS-WH-TENANT-1 (Medium) and PAYWH-RL-1 remain open.
+- This re-verification covered only the diff `250828b..3f67ac5` against the findings above. It is not a fresh full review, and the "Not covered" list in the original review still applies.

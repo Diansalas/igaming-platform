@@ -12,21 +12,31 @@ package httpserver
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 )
 
 func TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409(t *testing.T) {
 	pool, issuer := testEnv(t)
 	orchestrator, mockProvider := newMockOrchestrator()
-	srv := newFinancialTestServer(t, pool, issuer, orchestrator)
+	logger, capturedLines := newCapturingLogger()
+	srv := httptest.NewServer(New(Deps{
+		Logger: logger, DB: pool, AuthIssuer: issuer, ServiceName: "platform-api-test",
+		AccessTokenTTL: 5 * time.Minute, RefreshTokenTTL: time.Hour,
+		PaymentOrchestrator: orchestrator, PersonResolver: identityresolution.NewMockPersonResolver(),
+	}))
+	t.Cleanup(srv.Close)
 	tenant := mustCreateTenant(t, pool)
 	brand := mustCreateBrand(t, pool, tenant)
 
@@ -82,6 +92,33 @@ func TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409(t *testing
 	// account/ledger id.
 	if body.Message != "callback rejected" {
 		t.Fatalf("expected the generic body %q, got %q", "callback rejected", body.Message)
+	}
+	// The integrity alert (security re-verification P2-3): exactly one line,
+	// keys limited to the allow-list, and no value carrying the rejected
+	// reference, the deposit's provider reference or the amount. The typed
+	// DepositAlreadyReversedError's own message contains the PSP reference,
+	// so an "error" attribute added to this line would leak it - this
+	// assertion is what catches that.
+	allowedAlertKeys := map[string]bool{"provider_id": true, "tenant_id": true, "request_id": true}
+	var alerts []capturedLogLine
+	for _, line := range capturedLines() {
+		if line.msg == "payment_webhook_integrity_alert_deposit_already_reversed" {
+			alerts = append(alerts, line)
+		}
+	}
+	if len(alerts) != 1 {
+		t.Fatalf("expected exactly 1 deposit_already_reversed alert line, got %d", len(alerts))
+	}
+	for key, value := range alerts[0].attrs {
+		if !allowedAlertKeys[key] {
+			t.Fatalf("alert line carries non-allow-listed key %q", key)
+		}
+		rendered := fmt.Sprint(value)
+		for _, leaked := range []string{providerRef, "payrev1-http-rev-1", "payrev1-http-rev-2", "9000"} {
+			if strings.Contains(rendered, leaked) {
+				t.Fatalf("alert attribute %q leaks %q", key, leaked)
+			}
+		}
 	}
 	for _, leaked := range []string{providerRef, "payrev1-http-rev-1", "payrev1-http-rev-2", "9000", "9_000"} {
 		if strings.Contains(body.Message, leaked) {
