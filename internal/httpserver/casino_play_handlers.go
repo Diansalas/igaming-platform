@@ -354,33 +354,12 @@ func newWagerCasinoRoundHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		var result casino.ReceiveCallbackResult
-		var providerTxID string
-		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			session, err := resolvePlayerOwnedSession(ctx, tx, sessionID, playerAccountID)
-			if err != nil {
-				return err
-			}
-			if err := requireRealMode(session); err != nil {
-				return err
-			}
-			if err := requireActiveUnexpiredSession(session); err != nil {
-				return err
-			}
-			mock, ok := requireMockCasinoProvider(deps, session.ProviderID)
-			if !ok {
-				return &apierror.Error{Code: apierror.CodeUnavailable, Message: "simulated play is only available for the mock provider"}
-			}
-			providerTxID = deterministicSimulatedProviderTxID(session.ID, "wager", req.IdempotencyKey)
-			payload := mock.CallbackPayload(tc.TenantID, casino.CallbackEventBet, providerTxID, "", session.ID.String(), session.ProviderGameID,
-				req.StakeAmount, session.AssetCode, casino.OutcomeSucceeded, "", session.PlayerAccountID, session.ID)
-			result, err = deps.CasinoOrchestrator.ReceiveCallback(ctx, tx, tc.TenantID, session.ProviderID, payload)
-			if err != nil {
-				return err
-			}
-			recordCasinoPlaySimulationAudit(ctx, tx, tc.TenantID, playerAccountID, session.ID, "casino_play_simulation.wager", providerTxID, result)
-			return nil
-		})
+		result, providerTxID, err := runCasinoPlaySimulation(r.Context(), deps, tc.TenantID, playerAccountID, sessionID, nil,
+			func(session casino.LaunchSession, mock casinoSimulationMock) (string, webhookauth.Inbound) {
+				providerTxID := deterministicSimulatedProviderTxID(session.ID, "wager", req.IdempotencyKey)
+				return providerTxID, mock.CallbackPayload(tc.TenantID, casino.CallbackEventBet, providerTxID, "", session.ID.String(), session.ProviderGameID,
+					req.StakeAmount, session.AssetCode, casino.OutcomeSucceeded, "", session.PlayerAccountID, session.ID)
+			}, "casino_play_simulation.wager")
 		if errors.Is(err, casino.ErrLaunchSessionNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "session not found")
 			return
@@ -451,33 +430,12 @@ func newWinCasinoRoundHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		var result casino.ReceiveCallbackResult
-		var providerTxID string
-		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			session, err := resolvePlayerOwnedSession(ctx, tx, sessionID, playerAccountID)
-			if err != nil {
-				return err
-			}
-			if err := requireRealMode(session); err != nil {
-				return err
-			}
-			if err := requireActiveUnexpiredSession(session); err != nil {
-				return err
-			}
-			mock, ok := requireMockCasinoProvider(deps, session.ProviderID)
-			if !ok {
-				return &apierror.Error{Code: apierror.CodeUnavailable, Message: "simulated play is only available for the mock provider"}
-			}
-			providerTxID = deterministicSimulatedProviderTxID(session.ID, "win", req.IdempotencyKey)
-			payload := mock.CallbackPayload(tc.TenantID, casino.CallbackEventWin, providerTxID, "", session.ID.String(), session.ProviderGameID,
-				req.WinAmount, session.AssetCode, casino.OutcomeSucceeded, "", session.PlayerAccountID, uuid.Nil)
-			result, err = deps.CasinoOrchestrator.ReceiveCallback(ctx, tx, tc.TenantID, session.ProviderID, payload)
-			if err != nil {
-				return err
-			}
-			recordCasinoPlaySimulationAudit(ctx, tx, tc.TenantID, playerAccountID, session.ID, "casino_play_simulation.win", providerTxID, result)
-			return nil
-		})
+		result, providerTxID, err := runCasinoPlaySimulation(r.Context(), deps, tc.TenantID, playerAccountID, sessionID, nil,
+			func(session casino.LaunchSession, mock casinoSimulationMock) (string, webhookauth.Inbound) {
+				providerTxID := deterministicSimulatedProviderTxID(session.ID, "win", req.IdempotencyKey)
+				return providerTxID, mock.CallbackPayload(tc.TenantID, casino.CallbackEventWin, providerTxID, "", session.ID.String(), session.ProviderGameID,
+					req.WinAmount, session.AssetCode, casino.OutcomeSucceeded, "", session.PlayerAccountID, uuid.Nil)
+			}, "casino_play_simulation.win")
 		if errors.Is(err, casino.ErrLaunchSessionNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "session not found")
 			return
@@ -592,36 +550,15 @@ func newRollbackCasinoRoundHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		var result casino.ReceiveCallbackResult
-		var providerTxID string
-		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			session, err := resolvePlayerOwnedSession(ctx, tx, sessionID, playerAccountID)
-			if err != nil {
-				return err
-			}
-			if err := requireRealMode(session); err != nil {
-				return err
-			}
-			if err := requireActiveUnexpiredSession(session); err != nil {
-				return err
-			}
-			if err := requireRollbackTargetOwnedByRound(ctx, tx, tc.TenantID, session, req.OriginalProviderTxID); err != nil {
-				return err
-			}
-			mock, ok := requireMockCasinoProvider(deps, session.ProviderID)
-			if !ok {
-				return &apierror.Error{Code: apierror.CodeUnavailable, Message: "simulated play is only available for the mock provider"}
-			}
-			providerTxID = mock.NextProviderTxID()
-			payload := mock.CallbackPayload(tc.TenantID, casino.CallbackEventRollback, providerTxID, req.OriginalProviderTxID, session.ID.String(),
-				session.ProviderGameID, 0, session.AssetCode, "", "", session.PlayerAccountID, uuid.Nil)
-			result, err = deps.CasinoOrchestrator.ReceiveCallback(ctx, tx, tc.TenantID, session.ProviderID, payload)
-			if err != nil {
-				return err
-			}
-			recordCasinoPlaySimulationAudit(ctx, tx, tc.TenantID, playerAccountID, session.ID, "casino_play_simulation.rollback", providerTxID, result)
-			return nil
-		})
+		result, providerTxID, err := runCasinoPlaySimulation(r.Context(), deps, tc.TenantID, playerAccountID, sessionID,
+			func(ctx context.Context, tx pgx.Tx, session casino.LaunchSession) error {
+				return requireRollbackTargetOwnedByRound(ctx, tx, tc.TenantID, session, req.OriginalProviderTxID)
+			},
+			func(session casino.LaunchSession, mock casinoSimulationMock) (string, webhookauth.Inbound) {
+				providerTxID := mock.NextProviderTxID()
+				return providerTxID, mock.CallbackPayload(tc.TenantID, casino.CallbackEventRollback, providerTxID, req.OriginalProviderTxID, session.ID.String(),
+					session.ProviderGameID, 0, session.AssetCode, "", "", session.PlayerAccountID, uuid.Nil)
+			}, "casino_play_simulation.rollback")
 		if errors.Is(err, casino.ErrLaunchSessionNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "session not found")
 			return
@@ -641,4 +578,97 @@ func newRollbackCasinoRoundHandler(deps Deps) http.HandlerFunc {
 		}
 		writeCasinoCallbackResult(w, http.StatusOK, providerTxID, result)
 	}
+}
+
+// simulationBetweenPhasesHook is a TEST SEAM (nil in production; set only
+// by this package's own tests): it runs between step 2 (VerifyCallback)
+// and step 3 (the domain transaction) of runCasinoPlaySimulation, so a
+// test can change the session in the gap step 3 must re-validate
+// (TestSimulationHandlers_SessionRevalidatedInDomainTx).
+var simulationBetweenPhasesHook func(sessionID uuid.UUID)
+
+// casinoSimulationMock is what a simulation step needs from the MOCK
+// casino adapter.
+type casinoSimulationMock = *casino.MockCasinoProvider
+
+// runCasinoPlaySimulation runs one simulated casino callback in the three
+// steps ADR 0094 §4.1 requires, so verification never holds a pooled
+// connection:
+//
+//  1. a READ ONLY transaction validates the caller's own session (real
+//     mode, active, unexpired, plus extra) and builds the signed payload;
+//  2. VerifyCallback runs with NO transaction held;
+//  3. the domain transaction RE-VALIDATES the session with the same checks
+//     (without it a session ending between steps 1 and 3 would be a TOCTOU
+//     gap), then redeems the verified callback and writes the simulation
+//     audit record in the same transaction.
+func runCasinoPlaySimulation(ctx context.Context, deps Deps, tenantID, playerAccountID, sessionID uuid.UUID,
+	extra func(ctx context.Context, tx pgx.Tx, session casino.LaunchSession) error,
+	build func(session casino.LaunchSession, mock casinoSimulationMock) (string, webhookauth.Inbound),
+	auditAction string,
+) (casino.ReceiveCallbackResult, string, error) {
+	validate := func(ctx context.Context, tx pgx.Tx) (casino.LaunchSession, error) {
+		session, err := resolvePlayerOwnedSession(ctx, tx, sessionID, playerAccountID)
+		if err != nil {
+			return casino.LaunchSession{}, err
+		}
+		if err := requireRealMode(session); err != nil {
+			return casino.LaunchSession{}, err
+		}
+		if err := requireActiveUnexpiredSession(session); err != nil {
+			return casino.LaunchSession{}, err
+		}
+		if extra != nil {
+			if err := extra(ctx, tx, session); err != nil {
+				return casino.LaunchSession{}, err
+			}
+		}
+		return session, nil
+	}
+
+	var (
+		providerTxID string
+		providerID   string
+		payload      webhookauth.Inbound
+	)
+	err := deps.DB.WithTenantReadOnly(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		session, err := validate(ctx, tx)
+		if err != nil {
+			return err
+		}
+		mock, ok := requireMockCasinoProvider(deps, session.ProviderID)
+		if !ok {
+			return &apierror.Error{Code: apierror.CodeUnavailable, Message: "simulated play is only available for the mock provider"}
+		}
+		providerID = session.ProviderID
+		providerTxID, payload = build(session, mock)
+		return nil
+	})
+	if err != nil {
+		return casino.ReceiveCallbackResult{}, providerTxID, err
+	}
+	verified, err := deps.CasinoOrchestrator.VerifyCallback(ctx, deps.DB, tenantID, providerID, payload)
+	if err != nil {
+		return casino.ReceiveCallbackResult{}, providerTxID, err
+	}
+	if simulationBetweenPhasesHook != nil {
+		simulationBetweenPhasesHook(sessionID)
+	}
+	var result casino.ReceiveCallbackResult
+	err = deps.DB.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		session, err := validate(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if session.ProviderID != providerID {
+			return &apierror.Error{Code: apierror.CodeConflict, Message: "session changed during simulation"}
+		}
+		result, err = deps.CasinoOrchestrator.ReceiveVerifiedCallback(ctx, tx, tenantID, providerID, verified)
+		if err != nil {
+			return err
+		}
+		recordCasinoPlaySimulationAudit(ctx, tx, tenantID, playerAccountID, session.ID, auditAction, providerTxID, result)
+		return nil
+	})
+	return result, providerTxID, err
 }

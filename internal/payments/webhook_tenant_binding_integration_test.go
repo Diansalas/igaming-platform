@@ -41,8 +41,18 @@ func (r sharedSecretResolver) ResolveKey(_ context.Context, tenantID uuid.UUID, 
 
 // Resolve adapts ResolveKey to the ADR 0093 §4 resolver signature (a
 // single-key test double ignores tx; KeyImplicit fails closed).
-func (r sharedSecretResolver) Resolve(ctx context.Context, _ pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
+func (r sharedSecretResolver) Resolve(ctx context.Context, _ webhookauth.TenantReader, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
 	return webhookauth.ResolveSingleKey(ctx, r, tenantID, providerID, keyID, sel)
+}
+
+// Recheck implements webhookauth.Resolver for this test double (ADR 0094
+// §4.1): it has no handle rows, so it accepts only a handle-less
+// credential bound to tenantID.
+func (r sharedSecretResolver) Recheck(_ context.Context, _ pgx.Tx, tenantID uuid.UUID, c webhookauth.Credential) error {
+	if c.HandleID != uuid.Nil || c.TenantID != tenantID {
+		return webhookauth.ErrCredentialUnavailable
+	}
+	return nil
 }
 
 // assertNoFinancialEffect is the QA plan §2 six-point "no financial
@@ -214,7 +224,7 @@ func TestWebhook_CrossTenant_SameRefCollision_Rejected(t *testing.T) {
 	// A-signed payload naming the SAME reference string, delivered to B.
 	payload := provider.CallbackPayload(tenantA.tenantID, CallbackEventDeposit, sharedRef, "", OutcomeSucceeded, 1000, "EUR", "", false)
 	err = pool.WithTenant(context.Background(), tenantB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, tenantB.tenantID, "mock-psp", payload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, tenantB.tenantID, "mock-psp", payload)
 		return err
 	})
 	var authErr *CallbackAuthError
@@ -254,7 +264,7 @@ func TestWebhook_CrossTenant_ReversalOfUnseenRef_NoTombstone(t *testing.T) {
 	// since the original is unseen there too - the payload itself is valid).
 	payload := provider.CallbackPayload(tenantA.tenantID, CallbackEventDepositReversal, reversalRef, originalRef, OutcomeSucceeded, 1000, "EUR", "", false)
 	err := pool.WithTenant(context.Background(), tenantA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orchA.ReceiveCallback(ctx, tx, tenantA.tenantID, "mock-psp", payload)
+		_, err := orchA.receiveCallbackInTx(ctx, tx, tenantA.tenantID, "mock-psp", payload)
 		return err
 	})
 	if err != nil {
@@ -265,7 +275,7 @@ func TestWebhook_CrossTenant_ReversalOfUnseenRef_NoTombstone(t *testing.T) {
 
 	// The attack: same bytes, delivered under tenant B's scope.
 	err = pool.WithTenant(context.Background(), tenantB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orchB.ReceiveCallback(ctx, tx, tenantB.tenantID, "mock-psp", payload)
+		_, err := orchB.receiveCallbackInTx(ctx, tx, tenantB.tenantID, "mock-psp", payload)
 		return err
 	})
 	var authErr *CallbackAuthError
@@ -302,7 +312,7 @@ func TestWebhook_SharedSecretAcrossTenants_TenantStillBound(t *testing.T) {
 	inbound := InboundCallback{Header: header, Body: body}
 
 	err := pool.WithTenant(context.Background(), tenantB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, tenantB.tenantID, "mock-psp", inbound)
+		_, err := orch.receiveCallbackInTx(ctx, tx, tenantB.tenantID, "mock-psp", inbound)
 		return err
 	})
 	var authErr *CallbackAuthError
@@ -363,7 +373,7 @@ func TestWebhook_DisabledCapability_StillAccepted(t *testing.T) {
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, *intent.ProviderReference, "", OutcomeSucceeded, 4321, "EUR", "", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", payload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
 		return err
 	})
 	if err != nil {
@@ -406,7 +416,7 @@ func TestOrchestrator_NoResolver_FailsClosed(t *testing.T) {
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, "t14-ref", "", OutcomeSucceeded, 1000, "EUR", "", false)
 	ledgerBefore, auditBefore := countLedgerAndAudit(t, pool, f.tenantID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", payload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
 		return err
 	})
 	var authErr *CallbackAuthError

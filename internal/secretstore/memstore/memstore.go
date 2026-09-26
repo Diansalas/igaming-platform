@@ -13,8 +13,10 @@ package memstore
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Diansalas/igaming-platform/internal/secretstore"
 )
@@ -31,6 +33,18 @@ type Store struct {
 	active  atomic.Int64
 	maxSeen atomic.Int64
 	onCall  func(ref string)
+	// ADR 0094 test support: per-substring blocking (one tenant's outage),
+	// a context-observing hook, injected latency, and per-substring
+	// concurrency high-water marks.
+	blockMatch map[string]chan struct{}
+	onCallCtx  func(ctx context.Context, ref string)
+	latency    time.Duration
+	matchers   map[string]*matchCounter
+}
+
+type matchCounter struct {
+	active  atomic.Int64
+	maxSeen atomic.Int64
 }
 
 // New returns an empty memory store.
@@ -90,6 +104,78 @@ func (s *Store) Unblock() {
 	}
 }
 
+// BlockMatching makes every Get whose ref contains substr wait until
+// UnblockMatching (or its context ends) - one tenant's store outage when
+// substr is that tenant's Namespace.
+func (s *Store) BlockMatching(substr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.blockMatch == nil {
+		s.blockMatch = map[string]chan struct{}{}
+	}
+	if _, ok := s.blockMatch[substr]; !ok {
+		s.blockMatch[substr] = make(chan struct{})
+	}
+}
+
+// UnblockMatching releases every Get blocked by BlockMatching(substr).
+func (s *Store) UnblockMatching(substr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ch, ok := s.blockMatch[substr]; ok {
+		close(ch)
+		delete(s.blockMatch, substr)
+	}
+}
+
+// Namespace is the ref substring that every one of tenantID's secrets in
+// the provider-credential namespace contains (every domain and provider),
+// for BlockMatching / TrackMatching.
+func Namespace(tenantID string) string {
+	return "/provider-creds/" + tenantID + "/"
+}
+
+// SetLatency makes every Get take at least d (0 clears it).
+func (s *Store) SetLatency(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.latency = d
+}
+
+// TrackMatching starts counting concurrent Gets for refs containing substr;
+// MaxConcurrentMatching reports the high-water mark.
+func (s *Store) TrackMatching(substr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.matchers == nil {
+		s.matchers = map[string]*matchCounter{}
+	}
+	if _, ok := s.matchers[substr]; !ok {
+		s.matchers[substr] = &matchCounter{}
+	}
+}
+
+// MaxConcurrentMatching is the highest number of concurrent Gets observed for
+// refs containing a substring registered with TrackMatching (0 if not
+// tracked).
+func (s *Store) MaxConcurrentMatching(substr string) int64 {
+	s.mu.Lock()
+	c := s.matchers[substr]
+	s.mu.Unlock()
+	if c == nil {
+		return 0
+	}
+	return c.maxSeen.Load()
+}
+
+// OnCallCtx registers a hook invoked at the start of every Get with its
+// context (e.g. to assert txscope.Held(ctx) is false).
+func (s *Store) OnCallCtx(fn func(ctx context.Context, ref string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onCallCtx = fn
+}
+
 // OnCall registers a hook invoked at the start of every Get.
 func (s *Store) OnCall(fn func(ref string)) {
 	s.mu.Lock()
@@ -115,17 +201,58 @@ func (s *Store) Get(ctx context.Context, ref secretstore.Ref) (secretstore.Secre
 		}
 	}
 	s.mu.Lock()
-	block, onCall := s.block, s.onCall
+	block, onCall, onCallCtx, latency := s.block, s.onCall, s.onCallCtx, s.latency
 	global, refErr := s.global, s.errs[ref.String()]
 	secret, ok := s.secrets[ref.String()]
+	var matchBlocks []chan struct{}
+	for p, ch := range s.blockMatch {
+		if strings.Contains(ref.String(), p) {
+			matchBlocks = append(matchBlocks, ch)
+		}
+	}
+	var counters []*matchCounter
+	for p, c := range s.matchers {
+		if strings.Contains(ref.String(), p) {
+			counters = append(counters, c)
+		}
+	}
 	s.mu.Unlock()
+	for _, c := range counters {
+		n := c.active.Add(1)
+		defer c.active.Add(-1)
+		for {
+			m := c.maxSeen.Load()
+			if n <= m || c.maxSeen.CompareAndSwap(m, n) {
+				break
+			}
+		}
+	}
 	if onCall != nil {
 		onCall(ref.String())
+	}
+	if onCallCtx != nil {
+		onCallCtx(ctx, ref.String())
 	}
 	if block != nil {
 		select {
 		case <-block:
 		case <-ctx.Done():
+			return secretstore.Secret{}, secretstore.NewError(secretstore.ClassUnavailable)
+		}
+	}
+	for _, ch := range matchBlocks {
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return secretstore.Secret{}, secretstore.NewError(secretstore.ClassUnavailable)
+		}
+	}
+	if latency > 0 {
+		t := time.NewTimer(latency)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
 			return secretstore.Secret{}, secretstore.NewError(secretstore.ClassUnavailable)
 		}
 	}

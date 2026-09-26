@@ -122,7 +122,7 @@ func (w *casWorld) mintSession(t *testing.T, playerID, walletID uuid.UUID) uuid.
 }
 
 // deliver sends one signed MOCK callback through the real
-// Orchestrator.ReceiveCallback path; a verified rejection is recorded in a
+// Orchestrator.VerifyCallback + ReceiveVerifiedCallback path; a verified rejection is recorded in a
 // separate transaction exactly as the HTTP layer does.
 func (w *casWorld) deliver(t *testing.T, ev casino.CallbackEventType, ref, original, round string, amount int64) (casino.ReceiveCallbackResult, error) {
 	t.Helper()
@@ -132,11 +132,16 @@ func (w *casWorld) deliver(t *testing.T, ev casino.CallbackEventType, ref, origi
 	}
 	payload := w.mock.CallbackPayload(w.f.tenantID, ev, ref, original, round, w.game.ProviderGameID, amount, "EUR", outcome, "", w.f.playerAccountID, w.sessionID)
 	var res casino.ReceiveCallbackResult
-	err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		res, err = w.orch.ReceiveCallback(ctx, tx, w.f.tenantID, casProvider, payload)
-		return err
-	})
+	// ADR 0094 §4.1 two-phase shape: verify with no transaction held, then
+	// the domain transaction.
+	verified, err := w.orch.VerifyCallback(context.Background(), w.pool, w.f.tenantID, casProvider, payload)
+	if err == nil {
+		err = w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			var err error
+			res, err = w.orch.ReceiveVerifiedCallback(ctx, tx, w.f.tenantID, casProvider, verified)
+			return err
+		})
+	}
 	var rej *casino.CallbackRejectedError
 	if asRejected(err, &rej) {
 		if werr := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

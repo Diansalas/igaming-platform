@@ -52,7 +52,7 @@ func loConfirmedDeposit(t *testing.T, pool *db.Pool, f orchFixture, orch *Orches
 	ref := *intent.ProviderReference
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, amount, "EUR", "", false)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", payload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
 		return err
 	}); err != nil {
 		t.Fatalf("confirm deposit: %v", err)
@@ -129,13 +129,13 @@ func TestLockOrder_ConcurrentDepositAndDepositReversal_NoDeadlock(t *testing.T) 
 
 	startDeposit := func() *loRacer {
 		return loStartRacer(t, pool, f.tenantID, "postDepositSuccess(clearing,cash)", func(ctx context.Context, tx pgx.Tx) error {
-			_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", newDepositPayload)
+			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", newDepositPayload)
 			return err
 		})
 	}
 	startReversal := func() *loRacer {
 		return loStartRacer(t, pool, f.tenantID, "depositReversal(cash,clearing)", func(ctx context.Context, tx pgx.Tx) error {
-			_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", reversalPayload)
+			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", reversalPayload)
 			return err
 		})
 	}

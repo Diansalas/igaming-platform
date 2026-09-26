@@ -67,7 +67,7 @@ func TestOrchestratorVerify_Casino_EnforcedEvenIfAdapterSkipsIt(t *testing.T) {
 
 	before := noeffect.CaptureCasino(t, pool, []uuid.UUID{f.tenantID})
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", forged)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", forged)
 		return err
 	})
 	var authErr *webhookauth.AuthError
@@ -82,7 +82,7 @@ func TestOrchestratorVerify_Casino_EnforcedEvenIfAdapterSkipsIt(t *testing.T) {
 	// The genuinely-signed equivalent passes verification and reaches the
 	// adapter (its posting outcome is casino's concern, not this test's).
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload())
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload())
 		return err
 	})
 	if errors.As(err, &authErr) {

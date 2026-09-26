@@ -127,7 +127,7 @@ func TestReceiveCallback_BetDeniedByJurisdictionScopedRiskRuleViaLaunchSession(t
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
 	})
 	if err != nil {
@@ -202,7 +202,7 @@ func TestReceiveCallback_BetDeniedByRiskMaxAmountHardLimit(t *testing.T) {
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
 	})
 	if err != nil {
@@ -248,7 +248,7 @@ func TestReceiveCallback_PlayerRiskOverrideBeatsBrandDefault(t *testing.T) {
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
 	})
 	if err != nil {
@@ -293,7 +293,7 @@ func TestReceiveCallback_ConcurrentBetsRespectCumulativeLimit(t *testing.T) {
 			defer wg.Done()
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 				var err error
-				results[i], err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+				results[i], err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 				return err
 			})
 		}(i, payload)

@@ -74,7 +74,7 @@ func TestLockOrder_ConcurrentBetAndWinOnSameWallet_NoDeadlock(t *testing.T) {
 	seedBet := provider.CallbackPayload(f.tenantID, CallbackEventBet, "lockorder-seed-bet", "", settledRound, "game-1",
 		1_000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", seedBet)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", seedBet)
 		return err
 	}); err != nil {
 		t.Fatalf("seed bet: %v", err)
@@ -95,13 +95,13 @@ func TestLockOrder_ConcurrentBetAndWinOnSameWallet_NoDeadlock(t *testing.T) {
 	startBet := func() *loRacer {
 		return loStartRacer(t, pool, f.tenantID, "postBet(cash,house)", func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			betResult, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", betPayload)
+			betResult, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 			return err
 		})
 	}
 	startWin := func() *loRacer {
 		return loStartRacer(t, pool, f.tenantID, "postWinDirectCash(house,cash)", func(ctx context.Context, tx pgx.Tx) error {
-			_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", winPayload)
+			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
 			return err
 		})
 	}
@@ -219,7 +219,7 @@ func TestLockOrder_ConcurrentBetAndGrantConversion_NoDeadlock(t *testing.T) {
 		// grant advisory lock for its wagering contribution.
 		startBet := func() *loRacer {
 			return loStartRacer(t, pool, f.tenantID, "postBet(cash -> grant advisory)", func(ctx context.Context, tx pgx.Tx) error {
-				_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", betPayload)
+				_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 				return err
 			})
 		}
@@ -283,7 +283,7 @@ func TestLockOrder_ConcurrentBetAndGrantConversion_NoDeadlock(t *testing.T) {
 		seedBet := provider.CallbackPayload(f.tenantID, CallbackEventBet, "lockorder-1d-prod-seed", "", "lockorder-1d-prod-seed-round",
 			"game-1", 100, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 		if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", seedBet)
+			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", seedBet)
 			return err
 		}); err != nil {
 			t.Fatalf("seed bet: %v", err)
@@ -314,7 +314,7 @@ func TestLockOrder_ConcurrentBetAndGrantConversion_NoDeadlock(t *testing.T) {
 
 		startBet := func() *loRacer {
 			return loStartRacer(t, pool, f.tenantID, "postBet", func(ctx context.Context, tx pgx.Tx) error {
-				_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", betPayload)
+				_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 				return err
 			})
 		}

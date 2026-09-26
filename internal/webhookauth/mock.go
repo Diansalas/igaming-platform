@@ -74,10 +74,28 @@ type MockResolver struct {
 	ProviderID string
 }
 
-// Resolve implements Resolver (ADR 0093 §4 signature). A MOCK resolver
-// ignores tx, and resolves KeyFromHeader only (ResolveSingleKey).
-func (r MockResolver) Resolve(ctx context.Context, _ pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel KeySelection) (CredentialSet, error) {
+// Resolve implements Resolver (ADR 0094 §4.1 signature). A MOCK resolver
+// ignores the reader, and resolves KeyFromHeader only (ResolveSingleKey).
+func (r MockResolver) Resolve(ctx context.Context, _ TenantReader, tenantID uuid.UUID, providerID, keyID string, sel KeySelection) (CredentialSet, error) {
 	return ResolveSingleKey(ctx, r, tenantID, providerID, keyID, sel)
+}
+
+// Recheck implements Resolver. A MOCK credential has no handle row, so
+// there is nothing to re-read: it accepts exactly its own handle-less
+// credential for this tenant and provider, and nothing else.
+func (r MockResolver) Recheck(_ context.Context, _ pgx.Tx, tenantID uuid.UUID, c Credential) error {
+	return MockRecheck(tenantID, r.ProviderID, c)
+}
+
+// MockRecheck is the shared MOCK Recheck rule: a handle-less credential,
+// bound to tenantID and providerID, for MockKeyID. Anything else - in
+// particular a credential carrying a real handle id - fails closed.
+func MockRecheck(tenantID uuid.UUID, providerID string, c Credential) error {
+	if c.HandleID != uuid.Nil || tenantID == uuid.Nil || c.TenantID != tenantID ||
+		providerID == "" || c.ProviderID != providerID || c.KeyID != MockKeyID {
+		return ErrCredentialUnavailable
+	}
+	return nil
 }
 
 // ResolveKey implements KeyResolver: the MOCK single-key lookup.
@@ -122,12 +140,22 @@ type MultiResolver map[string]Resolver
 
 // Resolve implements Resolver by dispatching to the resolver registered
 // for providerID.
-func (m MultiResolver) Resolve(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel KeySelection) (CredentialSet, error) {
+func (m MultiResolver) Resolve(ctx context.Context, rd TenantReader, tenantID uuid.UUID, providerID, keyID string, sel KeySelection) (CredentialSet, error) {
 	r, ok := m[providerID]
 	if !ok || r == nil {
 		return CredentialSet{}, ErrCredentialUnavailable
 	}
-	return r.Resolve(ctx, tx, tenantID, providerID, keyID, sel)
+	return r.Resolve(ctx, rd, tenantID, providerID, keyID, sel)
+}
+
+// Recheck implements Resolver by dispatching to the resolver registered
+// for the credential's provider id (absent fails closed).
+func (m MultiResolver) Recheck(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, c Credential) error {
+	r, ok := m[c.ProviderID]
+	if !ok || r == nil {
+		return ErrCredentialUnavailable
+	}
+	return r.Recheck(ctx, tx, tenantID, c)
 }
 
 // ResolveKey implements KeyResolver by dispatching to the resolver

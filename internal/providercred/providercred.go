@@ -29,6 +29,8 @@ import (
 	"errors"
 	"log/slog"
 
+	"github.com/google/uuid"
+
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/secretstore"
 )
@@ -134,3 +136,13 @@ func validDomain(d string) bool {
 
 // errNilSubsystem is returned by methods called on a nil Subsystem.
 var errNilSubsystem = errors.New("providercred: subsystem not constructed")
+
+// logTxHeld is the ADR 0094 INV-POOL guard's single log line: the entry
+// point and the tenant id only.
+func (s *Subsystem) logTxHeld(entryPoint string, tenantID uuid.UUID) {
+	logger := slog.Default()
+	if s != nil && s.logger != nil {
+		logger = s.logger
+	}
+	logger.Error("secret_fetch_with_tx_held", "entry_point", entryPoint, "tenant_id", tenantID.String())
+}

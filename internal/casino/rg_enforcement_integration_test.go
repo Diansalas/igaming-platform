@@ -206,7 +206,7 @@ func TestReceiveCallback_BetDeclinedWhenSelfExcluded_NoLedgerEffect(t *testing.T
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
 	})
 	if err != nil {
@@ -247,7 +247,7 @@ func TestReceiveCallback_BetDeclinedWhenWalletFrozen_NoLedgerEffect(t *testing.T
 	var result ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
 	})
 	if err != nil {
@@ -284,7 +284,7 @@ func TestReceiveCallback_RedeliveredBetAfterSelfExclusionStillReportsOriginalSuc
 	var first ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		first, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		first, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
 	})
 	if err != nil {
@@ -299,7 +299,7 @@ func TestReceiveCallback_RedeliveredBetAfterSelfExclusionStillReportsOriginalSuc
 	var second ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		second, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		second, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
 	})
 	if err != nil {
@@ -432,7 +432,7 @@ func TestConcurrent_SelfExclusionDuringBet_Deterministic(t *testing.T) {
 			defer wg.Done()
 			betErr = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 				var err error
-				betResult, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+				betResult, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 				return err
 			})
 		}()
@@ -496,7 +496,7 @@ func TestConcurrent_DuplicateBetDeliveryDuringSelfExclusion(t *testing.T) {
 			defer wg.Done()
 			err1 = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 				var err error
-				result1, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+				result1, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 				return err
 			})
 		}()
@@ -504,7 +504,7 @@ func TestConcurrent_DuplicateBetDeliveryDuringSelfExclusion(t *testing.T) {
 			defer wg.Done()
 			err2 = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 				var err error
-				result2, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+				result2, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 				return err
 			})
 		}()

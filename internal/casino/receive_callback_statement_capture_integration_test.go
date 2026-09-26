@@ -86,8 +86,18 @@ func (r foreignCredentialResolver) ResolveKey(_ context.Context, _ uuid.UUID, pr
 
 // Resolve adapts ResolveKey to the ADR 0093 §4 resolver signature (a
 // single-key test double ignores tx; KeyImplicit fails closed).
-func (r foreignCredentialResolver) Resolve(ctx context.Context, _ pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
+func (r foreignCredentialResolver) Resolve(ctx context.Context, _ webhookauth.TenantReader, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
 	return webhookauth.ResolveSingleKey(ctx, r, tenantID, providerID, keyID, sel)
+}
+
+// Recheck implements webhookauth.Resolver for this test double (ADR 0094
+// §4.1): it has no handle rows, so it accepts only a handle-less
+// credential bound to tenantID.
+func (r foreignCredentialResolver) Recheck(_ context.Context, _ pgx.Tx, tenantID uuid.UUID, c webhookauth.Credential) error {
+	if c.HandleID != uuid.Nil || c.TenantID != tenantID {
+		return webhookauth.ErrCredentialUnavailable
+	}
+	return nil
 }
 
 // assertZeroStatementsBeforeVerification is this file's shared negative
@@ -129,7 +139,7 @@ func TestCasinoWebhook_BadSignature_NoStatementBeforeVerification(t *testing.T) 
 	var captured *recordingTx
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		captured = newRecordingTx(tx)
-		_, err := orch.ReceiveCallback(ctx, captured, f.tenantID, "mock-casino", payload)
+		_, err := orch.receiveCallbackInTx(ctx, captured, f.tenantID, "mock-casino", payload)
 		return err
 	})
 	assertZeroStatementsBeforeVerification(t, captured, err, webhookauth.ReasonSignatureInvalid)
@@ -156,7 +166,7 @@ func TestCasinoWebhook_MissingCredential_NoStatementBeforeVerification(t *testin
 	var captured *recordingTx
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		captured = newRecordingTx(tx)
-		_, err := orch.ReceiveCallback(ctx, captured, f.tenantID, "mock-casino", payload)
+		_, err := orch.receiveCallbackInTx(ctx, captured, f.tenantID, "mock-casino", payload)
 		return err
 	})
 	assertZeroStatementsBeforeVerification(t, captured, err, webhookauth.ReasonCredentialUnavailable)
@@ -185,7 +195,7 @@ func TestCasinoWebhook_ForeignCredential_NoStatementBeforeVerification(t *testin
 	var captured *recordingTx
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		captured = newRecordingTx(tx)
-		_, err := orch.ReceiveCallback(ctx, captured, f.tenantID, "mock-casino", payload)
+		_, err := orch.receiveCallbackInTx(ctx, captured, f.tenantID, "mock-casino", payload)
 		return err
 	})
 	assertZeroStatementsBeforeVerification(t, captured, err, webhookauth.ReasonCredentialUnavailable)
@@ -209,7 +219,7 @@ func TestCasinoWebhook_NilResolver_NoStatementBeforeVerification(t *testing.T) {
 	var captured *recordingTx
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		captured = newRecordingTx(tx)
-		_, err := orch.ReceiveCallback(ctx, captured, f.tenantID, "mock-casino", payload)
+		_, err := orch.receiveCallbackInTx(ctx, captured, f.tenantID, "mock-casino", payload)
 		return err
 	})
 	assertZeroStatementsBeforeVerification(t, captured, err, webhookauth.ReasonNoResolver)
@@ -234,7 +244,7 @@ func TestCasinoWebhook_VerifiedCallback_AdvisoryLockIsFirstStatement(t *testing.
 	var captured *recordingTx
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		captured = newRecordingTx(tx)
-		_, err := orch.ReceiveCallback(ctx, captured, f.tenantID, "mock-casino", payload)
+		_, err := orch.receiveCallbackInTx(ctx, captured, f.tenantID, "mock-casino", payload)
 		return err
 	})
 	// This callback's session_id is a fresh uuid.New(), never a real launch

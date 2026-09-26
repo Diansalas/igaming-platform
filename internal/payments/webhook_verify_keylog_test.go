@@ -38,7 +38,7 @@ func TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit(t *testing.T) {
 		if !ok {
 			t.Fatalf("extract: %s", reason)
 		}
-		cred, authErr := o.resolveAndVerify(ctx, nil, f.Scheme, in, m)
+		_, cred, authErr := o.resolveAndVerify(ctx, nil, f.Scheme, in, m)
 		return cred, authErr, buf.Bytes()
 	}
 

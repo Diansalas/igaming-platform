@@ -129,8 +129,18 @@ func (r equalSecretCasinoResolver) ResolveKey(_ context.Context, tenantID uuid.U
 
 // Resolve adapts ResolveKey to the ADR 0093 §4 resolver signature (a
 // single-key test double ignores tx; KeyImplicit fails closed).
-func (r equalSecretCasinoResolver) Resolve(ctx context.Context, _ pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
+func (r equalSecretCasinoResolver) Resolve(ctx context.Context, _ webhookauth.TenantReader, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
 	return webhookauth.ResolveSingleKey(ctx, r, tenantID, providerID, keyID, sel)
+}
+
+// Recheck implements webhookauth.Resolver for this test double (ADR 0094
+// §4.1): it has no handle rows, so it accepts only a handle-less
+// credential bound to tenantID.
+func (r equalSecretCasinoResolver) Recheck(_ context.Context, _ pgx.Tx, tenantID uuid.UUID, c webhookauth.Credential) error {
+	if c.HandleID != uuid.Nil || c.TenantID != tenantID {
+		return webhookauth.ErrCredentialUnavailable
+	}
+	return nil
 }
 
 // TestCasinoWebhook_EqualSecretResolver_StillTenantBound is C4: even with

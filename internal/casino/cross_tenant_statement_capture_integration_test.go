@@ -35,7 +35,7 @@ func TestCasinoWebhook_CrossTenantSignature_NoStatementBeforeVerification(t *tes
 	var captured *recordingTx
 	err := pool.WithTenant(context.Background(), fB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		captured = newRecordingTx(tx)
-		_, err := orch.ReceiveCallback(ctx, captured, fB.tenantID, "mock-casino", signedForA)
+		_, err := orch.receiveCallbackInTx(ctx, captured, fB.tenantID, "mock-casino", signedForA)
 		return err
 	})
 	assertZeroStatementsBeforeVerification(t, captured, err, webhookauth.ReasonSignatureInvalid)

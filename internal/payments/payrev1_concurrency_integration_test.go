@@ -47,7 +47,7 @@ func pr1ConfirmedDeposit(t *testing.T, pool *db.Pool, f orchFixture, orch *Orche
 	var res ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		res, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", payload)
+		res, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
 		return err
 	})
 	if err != nil {
@@ -97,7 +97,7 @@ func TestPayRev1_ConcurrentDistinctReferenceReversals_ExactlyOnePosts(t *testing
 		"payrev1-race-reversal-ref", depositRef, OutcomeSucceeded, amount, "EUR", "", false)
 
 	racer := loStartRacer(t, pool, f.tenantID, "depositReversal", func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", reversalPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", reversalPayload)
 		return err
 	})
 

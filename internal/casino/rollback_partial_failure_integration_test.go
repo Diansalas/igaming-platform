@@ -48,7 +48,7 @@ func TestPostRollback_C5_FailureBetweenTombstoneAndAudit_FullRollbackThenOneTomb
 	errBoom := errors.New("simulated platform failure between the tombstone write and its audit record")
 	var tombstoned bool
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		result, callErr := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		result, callErr := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		if callErr != nil {
 			return callErr
 		}
@@ -82,7 +82,7 @@ func TestPostRollback_C5_FailureBetweenTombstoneAndAudit_FullRollbackThenOneTomb
 	// Redelivery: the provider retries the identical rollback - it must
 	// tombstone exactly once, cleanly, with its own audit row this time.
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		result, callErr := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		result, callErr := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		if callErr != nil {
 			return callErr
 		}

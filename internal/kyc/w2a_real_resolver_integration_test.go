@@ -26,6 +26,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/providercred/providercredtest"
 	"github.com/Diansalas/igaming-platform/internal/secretstore/memstore"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/phasecapture"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -49,7 +50,7 @@ func realKYCSubsystem(t *testing.T) (*providercred.Subsystem, *memstore.Store) {
 }
 
 func TestPointNineCapture_KYC_AllowsExactlyOneHandleRead(t *testing.T) {
-	pool := testPool(t)
+	pool := phasecapture.Pool10(t, "TEST_DATABASE_URL")
 	f, provider, _, verificationID := newWebhookFixture(t, pool)
 	sub, mem := realKYCSubsystem(t)
 	principals := providercredtest.SeedPrincipals(t, pool)
@@ -67,14 +68,28 @@ func TestPointNineCapture_KYC_AllowsExactlyOneHandleRead(t *testing.T) {
 		webhookauth.KYCScheme().SetHeaders(in.Header, keyID, webhookauth.KYCScheme().Sign(key, f.tenantID, "mock", keyID, in.Body))
 		return in
 	}
-	run := func(in webhookauth.Inbound) ([]string, error) {
-		var captured *recordingTx
-		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			captured = newRecordingTx(tx)
-			_, _, err := orch.ReceiveCallback(ctx, captured, f.tenantID, "mock", in)
+	// ADR 0094 §4.1/§9.3 test 9: phase 1 (VerifyCallback, no transaction
+	// held) runs exactly the handle read in one READ ONLY transaction;
+	// phase 2's domain transaction starts with HandleRecheckSQL.
+	run := func(in webhookauth.Inbound) ([]phasecapture.Transaction, []string, error) {
+		reader := phasecapture.NewReader(pool)
+		v, err := orch.VerifyCallback(context.Background(), reader, f.tenantID, "mock", in)
+		if err != nil {
+			return reader.Transactions(), nil, err
+		}
+		var captured *phasecapture.Tx
+		err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			captured = phasecapture.NewTx(tx)
+			_, _, err := orch.ReceiveVerifiedCallback(ctx, captured, f.tenantID, "mock", v)
 			return err
 		})
-		return captured.Statements(), err
+		return reader.Transactions(), captured.Statements(), err
+	}
+	assertPreVerification := func(t *testing.T, pre []phasecapture.Transaction) {
+		t.Helper()
+		if len(pre) != 1 || len(pre[0].Statements) != 1 || pre[0].Statements[0] != providercred.HandleReadSQL || !pre[0].ReadOnly {
+			t.Fatalf("pre-verification transactions = %+v, want exactly one READ ONLY [HandleReadSQL]", pre)
+		}
 	}
 	wrong := make([]byte, 32)
 	_, _ = rand.Read(wrong)
@@ -83,27 +98,29 @@ func TestPointNineCapture_KYC_AllowsExactlyOneHandleRead(t *testing.T) {
 		"unknown key id": signed("mock-v9", secret),
 	} {
 		t.Run(name, func(t *testing.T) {
-			stmts, err := run(in)
+			pre, domain, err := run(in)
 			var authErr *webhookauth.AuthError
 			if !errors.As(err, &authErr) {
 				t.Fatalf("want an auth error, got %v", err)
 			}
-			if len(stmts) != 1 || stmts[0] != providercred.HandleReadSQL {
-				t.Fatalf("pre-verification statements = %q, want exactly [HandleReadSQL]", stmts)
+			assertPreVerification(t, pre)
+			if domain != nil {
+				t.Fatalf("a failed verification must not open the domain transaction, ran %q", domain)
 			}
 		})
 	}
 	t.Run("verified", func(t *testing.T) {
-		stmts, err := run(signed(webhookauth.MockKeyID, secret))
+		pre, domain, err := run(signed(webhookauth.MockKeyID, secret))
 		if err != nil {
 			t.Fatalf("verification must succeed with the real resolver: %v", err)
 		}
-		if len(stmts) < 2 || stmts[0] != providercred.HandleReadSQL {
-			t.Fatalf("statements = %q, want HandleReadSQL first", stmts)
+		assertPreVerification(t, pre)
+		if len(domain) < 2 || domain[0] != providercred.HandleRecheckSQL {
+			t.Fatalf("domain statements = %q, want HandleRecheckSQL first", domain)
 		}
-		for _, s := range stmts[1:] {
+		for _, s := range domain {
 			if s == providercred.HandleReadSQL {
-				t.Fatal("the handle read must run exactly once")
+				t.Fatal("the handle read must not run in the domain transaction")
 			}
 		}
 	})

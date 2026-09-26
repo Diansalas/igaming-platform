@@ -32,7 +32,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 // MaxSkewCap is the platform cap on a scheme's timestamp tolerance (ADR
@@ -605,22 +604,24 @@ func ExtractInbound(scheme VerificationScheme, in Inbound) (m AuthMaterial, auth
 // in.ProviderID). The mode comes from scheme.Properties().KeySelection ONLY
 // (security C3), never from whether m.KeyID is empty:
 //
-//   - KeyFromHeader: exactly Resolve(tx, tenant, provider, m.KeyID,
+//   - KeyFromHeader: exactly Resolve(r, tenant, provider, m.KeyID,
 //     KeyFromHeader); an empty key id is ReasonSignatureMissing (defence in
 //     depth over ExtractInbound) with NO resolver call; the set must hold
 //     exactly one credential (a Previous is refused, never passed on).
-//   - KeyImplicit: Resolve(tx, tenant, provider, "", KeyImplicit) returns the
+//   - KeyImplicit: Resolve(r, tenant, provider, "", KeyImplicit) returns the
 //     active credential plus at most one verify_only predecessor of the same
 //     binding (ADR 0093 §4, Stage 10.3 W2a); the predecessor must carry a
 //     non-zero NotAfter and a different key id.
 //
-// tx is the caller's tenant-scoped transaction; the real resolver's single
-// handle read runs in it (ADR 0022 §3 point 9, as amended). A nil resolver
+// r is the pool: the real resolver's single handle read runs in its own
+// READ ONLY transaction, committed before any secret fetch (ADR 0022 §3
+// point 9 as amended by ADR 0094 §4.1). The caller must hold no
+// transaction (the domain VerifyCallback enforces it). A nil resolver
 // is ReasonNoResolver. A resolver error folds into a closed reason
 // (no_resolver, credential_store_unavailable, credential_integrity or
 // credential_unavailable). A resolved credential bound to a different
 // tenant, provider or key id is ReasonCredentialUnavailable.
-func ResolveCredentials(ctx context.Context, tx pgx.Tx, scheme VerificationScheme, resolver Resolver, in Inbound, m AuthMaterial) (CredentialSet, *AuthError) {
+func ResolveCredentials(ctx context.Context, r TenantReader, scheme VerificationScheme, resolver Resolver, in Inbound, m AuthMaterial) (CredentialSet, *AuthError) {
 	sel := scheme.Properties().KeySelection
 	switch sel {
 	case KeyFromHeader:
@@ -630,7 +631,7 @@ func ResolveCredentials(ctx context.Context, tx pgx.Tx, scheme VerificationSchem
 		if resolver == nil {
 			return CredentialSet{}, &AuthError{Reason: ReasonNoResolver, KeyID: m.KeyID}
 		}
-		set, err := resolver.Resolve(ctx, tx, in.TenantID, in.ProviderID, m.KeyID, KeyFromHeader)
+		set, err := resolver.Resolve(ctx, r, in.TenantID, in.ProviderID, m.KeyID, KeyFromHeader)
 		if err != nil {
 			return CredentialSet{}, &AuthError{Reason: reasonForResolveError(err), KeyID: m.KeyID}
 		}
@@ -644,7 +645,7 @@ func ResolveCredentials(ctx context.Context, tx pgx.Tx, scheme VerificationSchem
 		if resolver == nil {
 			return CredentialSet{}, &AuthError{Reason: ReasonNoResolver}
 		}
-		set, err := resolver.Resolve(ctx, tx, in.TenantID, in.ProviderID, "", KeyImplicit)
+		set, err := resolver.Resolve(ctx, r, in.TenantID, in.ProviderID, "", KeyImplicit)
 		if err != nil {
 			return CredentialSet{}, &AuthError{Reason: reasonForResolveError(err)}
 		}

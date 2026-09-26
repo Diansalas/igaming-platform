@@ -42,7 +42,7 @@ func TestWebhookAuthAliases_ErrorsIsAs(t *testing.T) {
 		// at all - an unregistered provider has no scheme and is now
 		// provider_unregistered before any header is examined.
 		orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": NewMockProvider("mock-psp")}, nil)
-		_, err := orch.ReceiveCallback(context.Background(), nil, uuid.New(), "mock-psp", InboundCallback{Header: http.Header{}})
+		_, err := orch.receiveCallbackInTx(context.Background(), nil, uuid.New(), "mock-psp", InboundCallback{Header: http.Header{}})
 		if !errors.Is(err, webhookauth.ErrAuthFailed) {
 			t.Fatalf("errors.Is(payments error, webhookauth.ErrAuthFailed) failed: %v", err)
 		}

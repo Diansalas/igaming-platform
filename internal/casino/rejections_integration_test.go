@@ -98,7 +98,7 @@ func (e rejEnv) deliver(t *testing.T, eventType CallbackEventType, ref, original
 	var result ReceiveCallbackResult
 	err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = e.orch.ReceiveCallback(ctx, tx, e.f.tenantID, "mock-casino", payload)
+		result, err = e.orch.receiveCallbackInTx(ctx, tx, e.f.tenantID, "mock-casino", payload)
 		return err
 	})
 	return result, err
@@ -361,7 +361,7 @@ func TestCallbackRejection_UnverifiedCallbackNeverWrappedNorRecorded(t *testing.
 	tampered := webhookauth.Inbound{Header: payload.Header, Body: append([]byte(nil), payload.Body...)}
 	tampered.Body[len(tampered.Body)-2] ^= 0x01
 	err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := e.orch.ReceiveCallback(ctx, tx, e.f.tenantID, "mock-casino", tampered)
+		_, err := e.orch.receiveCallbackInTx(ctx, tx, e.f.tenantID, "mock-casino", tampered)
 		return err
 	})
 	var authErr *webhookauth.AuthError

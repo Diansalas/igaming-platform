@@ -443,7 +443,7 @@ func TestAWSSM_FetcherIntegration_BreakerAndCache(t *testing.T) {
 			t.Fatalf("call %d: expected ClassUnavailable, got %v", i, err)
 		}
 	}
-	if state := fetcher.BreakerState(secretstore.SchemeAWSSecretsManager); state != "open" {
+	if state := fetcher.BreakerState(secretstore.SchemeAWSSecretsManager, tenant); state != "open" {
 		t.Fatalf("breaker state = %q, want open", state)
 	}
 	callsBeforeOpen := fc.calls

@@ -109,7 +109,7 @@ func TestGetVerificationByProviderReference_CarriesExplicitTenantIDPredicate(t *
 	var captured *argRecordingTx
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		captured = newArgRecordingTx(tx)
-		_, _, err := orch.ReceiveCallback(ctx, captured, f.tenantID, "mock", in)
+		_, _, err := orch.receiveCallbackInTx(ctx, captured, f.tenantID, "mock", in)
 		return err
 	})
 	if err != nil {

@@ -24,6 +24,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/providercred/providercredtest"
 	"github.com/Diansalas/igaming-platform/internal/secretstore/memstore"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/phasecapture"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -47,7 +48,7 @@ func realCredentialSubsystem(t *testing.T) (*providercred.Subsystem, *memstore.S
 }
 
 func TestPointNineCapture_Casino_AllowsExactlyOneHandleRead(t *testing.T) {
-	pool := testPool(t)
+	pool := phasecapture.Pool10(t, "TEST_DATABASE_URL")
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
@@ -65,47 +66,64 @@ func TestPointNineCapture_Casino_AllowsExactlyOneHandleRead(t *testing.T) {
 		webhookauth.CasinoScheme().SetHeaders(in.Header, keyID, webhookauth.CasinoScheme().Sign(key, f.tenantID, "mock-casino", keyID, in.Body))
 		return in
 	}
-	run := func(in webhookauth.Inbound) ([]string, error) {
-		var captured *recordingTx
-		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			captured = newRecordingTx(tx)
-			_, err := orch.ReceiveCallback(ctx, captured, f.tenantID, "mock-casino", in)
+	// ADR 0094 §4.1/§9.3 test 9: phase 1 (VerifyCallback, no transaction
+	// held) runs exactly the handle read in one READ ONLY transaction;
+	// phase 2's domain transaction starts with HandleRecheckSQL.
+	run := func(in webhookauth.Inbound) ([]phasecapture.Transaction, []string, error) {
+		reader := phasecapture.NewReader(pool)
+		v, err := orch.VerifyCallback(context.Background(), reader, f.tenantID, "mock-casino", in)
+		if err != nil {
+			return reader.Transactions(), nil, err
+		}
+		var captured *phasecapture.Tx
+		err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			captured = phasecapture.NewTx(tx)
+			_, err := orch.ReceiveVerifiedCallback(ctx, captured, f.tenantID, "mock-casino", v)
 			return err
 		})
-		return captured.Statements(), err
+		return reader.Transactions(), captured.Statements(), err
+	}
+	assertPreVerification := func(t *testing.T, pre []phasecapture.Transaction) {
+		t.Helper()
+		if len(pre) != 1 || len(pre[0].Statements) != 1 || pre[0].Statements[0] != providercred.HandleReadSQL || !pre[0].ReadOnly {
+			t.Fatalf("pre-verification transactions = %+v, want exactly one READ ONLY [HandleReadSQL]", pre)
+		}
 	}
 
 	t.Run("bad signature: exactly the handle read", func(t *testing.T) {
 		wrong := make([]byte, 32)
 		_, _ = rand.Read(wrong)
-		stmts, err := run(signed(webhookauth.MockKeyID, wrong))
+		pre, domain, err := run(signed(webhookauth.MockKeyID, wrong))
 		var authErr *webhookauth.AuthError
 		if !errors.As(err, &authErr) || authErr.Reason != webhookauth.ReasonSignatureInvalid {
 			t.Fatalf("want signature_invalid, got %v", err)
 		}
-		if len(stmts) != 1 || stmts[0] != providercred.HandleReadSQL {
-			t.Fatalf("pre-verification statements = %q, want exactly [HandleReadSQL]", stmts)
+		assertPreVerification(t, pre)
+		if domain != nil {
+			t.Fatalf("a failed verification must not open the domain transaction, ran %q", domain)
 		}
 	})
 	t.Run("unknown key id: exactly the handle read", func(t *testing.T) {
-		stmts, err := run(signed("mock-v9", secret))
+		pre, domain, err := run(signed("mock-v9", secret))
 		var authErr *webhookauth.AuthError
 		if !errors.As(err, &authErr) || authErr.Reason != webhookauth.ReasonCredentialUnavailable {
 			t.Fatalf("want credential_unavailable, got %v", err)
 		}
-		if len(stmts) != 1 || stmts[0] != providercred.HandleReadSQL {
-			t.Fatalf("pre-verification statements = %q, want exactly [HandleReadSQL]", stmts)
+		assertPreVerification(t, pre)
+		if domain != nil {
+			t.Fatalf("a failed verification must not open the domain transaction, ran %q", domain)
 		}
 	})
-	t.Run("verified: the handle read, then dispatch", func(t *testing.T) {
-		stmts, err := run(signed(webhookauth.MockKeyID, secret))
+	t.Run("verified: the handle read, then the re-check, then dispatch", func(t *testing.T) {
+		pre, stmts, err := run(signed(webhookauth.MockKeyID, secret))
 		var authErr *webhookauth.AuthError
 		if errors.As(err, &authErr) {
 			t.Fatalf("verification must succeed with the real resolver, got %v", err)
 		}
-		if len(stmts) < 2 || stmts[0] != providercred.HandleReadSQL ||
+		assertPreVerification(t, pre)
+		if len(stmts) < 2 || stmts[0] != providercred.HandleRecheckSQL ||
 			!strings.Contains(stmts[1], "pg_advisory_xact_lock") || !strings.Contains(stmts[1], "casino_bet_delivery") {
-			t.Fatalf("statements = %q, want [HandleReadSQL, L0.1 lock, ...]", stmts)
+			t.Fatalf("domain statements = %q, want [HandleRecheckSQL, L0.1 lock, ...]", stmts)
 		}
 	})
 }
@@ -131,8 +149,12 @@ func TestReceiveCallback_RealResolver_RevocationImmediate(t *testing.T) {
 		in.Header = in.Header.Clone()
 		webhookauth.CasinoScheme().SetHeaders(in.Header, webhookauth.MockKeyID,
 			webhookauth.CasinoScheme().Sign(secret, f.tenantID, "mock-casino", webhookauth.MockKeyID, in.Body))
+		v, err := orch.VerifyCallback(context.Background(), pool, f.tenantID, "mock-casino", in)
+		if err != nil {
+			return err
+		}
 		return pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", in)
+			_, err := orch.ReceiveVerifiedCallback(ctx, tx, f.tenantID, "mock-casino", v)
 			return err
 		})
 	}

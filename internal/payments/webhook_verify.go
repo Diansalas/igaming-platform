@@ -5,9 +5,11 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/observability"
+	"github.com/Diansalas/igaming-platform/internal/txscope"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -26,70 +28,107 @@ func (o *Orchestrator) WebhookScheme(providerID string) (webhookauth.Verificatio
 	return o.webhookSchemes.Lookup(providerID)
 }
 
-// verifyCallback is ReceiveCallback's pre-verification half, in the fixed
-// ADR 0022 §3 order, entirely before any tenant-scoped read other than the
-// one permitted EXISTS (invariant I1):
+// WebhookDomain is the domain tag a payments VerifiedCallback is sealed
+// for; ReceiveVerifiedCallback refuses a token sealed for any other domain.
+const WebhookDomain = "payments"
+
+// VerifiedCallback is phase 1's opaque, single-use, age-bounded proof that
+// a payments callback verified (ADR 0094 §4.1; webhookauth.VerifiedCallback).
+type VerifiedCallback = webhookauth.VerifiedCallback
+
+// VerifyCallback is phase 1 of a payments callback (ADR 0094 §4.1), in the
+// fixed ADR 0022 §3 order, entirely before any tenant-scoped read other
+// than the permitted ones (invariant I1). It must be called with NO
+// transaction held - a txscope-marked ctx fails closed - and every
+// tenant-scoped statement it runs is in its own short READ ONLY
+// transaction on r that commits before any secret-store fetch
+// (INV-POOL):
 //
+//	(0) clone the inbound (security C3) and overwrite TenantID/ProviderID
+//	    from the route values - the single source of the tenant;
 //	(a) the adapter (and its validated scheme) must be registered, else
 //	    ReasonProviderUnregistered;
 //	(a') scheme.Extract (signature_missing / signature_invalid);
-//	(b) ProviderAcceptsWebhook - the only statement before verification
-//	    (I4: a disabled capability still accepts; revocation is by removing
-//	    the credential);
+//	(b) ProviderAcceptsWebhook (I4: a disabled capability still accepts;
+//	    revocation is by removing the credential), READ ONLY transaction;
 //	(c) resolve the single credential binding - key selection from the
 //	    scheme's Properties() only (security C3), re-checked against
-//	    (tenant, provider, key id);
+//	    (tenant, provider, key id); its handle read runs in the resolver's
+//	    own READ ONLY transaction;
 //	(d) the ORCHESTRATOR-ENFORCED scheme.Verify over the raw bytes
-//	    (webhookauth.VerifyInbound) - the adapter's HandleCallback is only
-//	    reached once this succeeds, so an adapter cannot skip verification.
+//	    (webhookauth.VerifyInbound), sealed into a VerifiedCallback.
 //
-// in.TenantID/in.ProviderID are already the route-resolved values. Every
-// failure is a *CallbackAuthError (or a DB error from (b)).
-func (o *Orchestrator) verifyCallback(ctx context.Context, tx pgx.Tx, in InboundCallback) (PaymentProvider, WebhookCredential, error) {
+// Every failure is a *CallbackAuthError (or a DB error from (b)).
+func (o *Orchestrator) VerifyCallback(ctx context.Context, r webhookauth.TenantReader, tenantID uuid.UUID, providerID string, in InboundCallback) (*VerifiedCallback, error) {
+	if txscope.Held(ctx) {
+		logVerifyWithTxHeld(o.webhookLogger, tenantID)
+		return nil, &CallbackAuthError{Reason: ReasonCredentialUnavailable}
+	}
+	if r == nil || tenantID == uuid.Nil {
+		return nil, &CallbackAuthError{Reason: ReasonCredentialUnavailable}
+	}
+	in = webhookauth.CloneInbound(in)
+	in.TenantID = tenantID
+	in.ProviderID = providerID
+
 	provider, registered := o.providers[in.ProviderID]
 	scheme, hasScheme := o.webhookSchemes.Lookup(in.ProviderID)
 	if !registered || provider == nil || !hasScheme {
-		return nil, WebhookCredential{}, &CallbackAuthError{Reason: ReasonProviderUnregistered}
+		return nil, &CallbackAuthError{Reason: ReasonProviderUnregistered}
 	}
 	m, authErr := webhookauth.ExtractInbound(scheme, in)
 	if authErr != nil {
-		return nil, WebhookCredential{}, authErr
+		return nil, authErr
 	}
 
-	accepts, err := ProviderAcceptsWebhook(ctx, tx, in.TenantID, in.ProviderID)
-	if err != nil {
-		return nil, WebhookCredential{}, err
+	var accepts bool
+	if err := r.WithTenantReadOnly(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		accepts, err = ProviderAcceptsWebhook(ctx, tx, in.TenantID, in.ProviderID)
+		return err
+	}); err != nil {
+		return nil, err
 	}
 	if !accepts {
-		return nil, WebhookCredential{}, &CallbackAuthError{Reason: ReasonProviderNotConfigured, KeyID: m.KeyID}
+		return nil, &CallbackAuthError{Reason: ReasonProviderNotConfigured, KeyID: m.KeyID}
 	}
 
-	cred, authErr := o.resolveAndVerify(ctx, tx, scheme, in, m)
+	v, _, authErr := o.resolveAndVerify(ctx, r, scheme, in, m)
 	if authErr != nil {
-		return nil, WebhookCredential{}, authErr
+		return nil, authErr
 	}
-	return provider, cred, nil
+	return v, nil
 }
 
-// resolveAndVerify is verifyCallback's credential half, split out only so
+// resolveAndVerify is VerifyCallback's credential half, split out only so
 // the matched-key log can be tested with a KeyImplicit test scheme that is
 // never registered (security gate W2 condition W2A-SEC-2): resolve the
-// single credential binding, run the ORCHESTRATOR-ENFORCED VerifyInbound,
-// and on success log which key_id verified (webhookauth.LogVerifiedKey:
-// KeyImplicit schemes only; request_id, tenant_id, provider_id and key_id
-// only - never the secret or its fingerprint). verifyCallback is its only
-// production caller, after the registration lookup and Extract.
-func (o *Orchestrator) resolveAndVerify(ctx context.Context, tx pgx.Tx, scheme webhookauth.VerificationScheme, in webhookauth.Inbound, m webhookauth.AuthMaterial) (webhookauth.Credential, *webhookauth.AuthError) {
-	creds, authErr := webhookauth.ResolveCredentials(ctx, tx, scheme, o.webhookCredentialResolver, in, m)
+// single credential binding, run the ORCHESTRATOR-ENFORCED VerifyInbound
+// (sealing the result), and on success log which key_id verified
+// (webhookauth.LogVerifiedKey: KeyImplicit schemes only; request_id,
+// tenant_id, provider_id and key_id only - never the secret or its
+// fingerprint). VerifyCallback is its only production caller, after the
+// registration lookup and Extract.
+func (o *Orchestrator) resolveAndVerify(ctx context.Context, r webhookauth.TenantReader, scheme webhookauth.VerificationScheme, in webhookauth.Inbound, m webhookauth.AuthMaterial) (*VerifiedCallback, webhookauth.Credential, *webhookauth.AuthError) {
+	creds, authErr := webhookauth.ResolveCredentials(ctx, r, scheme, o.webhookCredentialResolver, in, m)
 	if authErr != nil {
-		return webhookauth.Credential{}, authErr
+		return nil, webhookauth.Credential{}, authErr
 	}
-	cred, authErr := webhookauth.VerifyInbound(scheme, creds, in, m, time.Now())
+	v, cred, authErr := webhookauth.VerifyAndSeal(WebhookDomain, scheme, creds, in, m, time.Now())
 	if authErr != nil {
-		return webhookauth.Credential{}, authErr
+		return nil, webhookauth.Credential{}, authErr
 	}
 	webhookauth.LogVerifiedKey(ctx, o.webhookLogger, observability.RequestIDFromContext(ctx), scheme, in, cred)
-	return cred, nil
+	return v, cred, nil
+}
+
+// logVerifyWithTxHeld is the INV-POOL guard's log line for a VerifyCallback
+// called inside a transaction (a wiring bug, never request-driven).
+func logVerifyWithTxHeld(l *slog.Logger, tenantID uuid.UUID) {
+	if l == nil {
+		l = slog.Default()
+	}
+	l.Error("secret_fetch_with_tx_held", "entry_point", "payments.Orchestrator.VerifyCallback", "tenant_id", tenantID.String())
 }
 
 // SetWebhookLogger sets the logger for the matched-key_id line

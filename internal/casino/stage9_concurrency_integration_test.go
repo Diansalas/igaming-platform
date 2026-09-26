@@ -216,7 +216,7 @@ func TestStage9_ConcurrentDistinctBetsOneWallet_ExactlyOneAccepted(t *testing.T)
 				1_000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 				var err error
-				results[i], err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+				results[i], err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 				return err
 			})
 		}(i)
@@ -294,7 +294,7 @@ func TestStage9_ConcurrentWinAndRollbackSameRound_SerializesToALegalOrder(t *tes
 	)
 	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "s9-bet-wvr", "", round, "game-1", stake, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", betPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 		return err
 	}); err != nil {
 		t.Fatalf("seed bet: %v", err)
@@ -311,14 +311,14 @@ func TestStage9_ConcurrentWinAndRollbackSameRound_SerializesToALegalOrder(t *tes
 	go func() {
 		defer wg.Done()
 		winErr = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", winPayload)
+			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
 			return err
 		})
 	}()
 	go func() {
 		defer wg.Done()
 		rollbackErr = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
+			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
 			return err
 		})
 	}()
@@ -415,7 +415,7 @@ func TestStage9_ConcurrentDistinctWinsOnLockedRound_ReleasesLockExactlyOnce(t *t
 				"s9-win-locked-"+string(rune('a'+i)), "", round, "game-1",
 				win, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+				_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 				return err
 			})
 		}(i)
@@ -525,7 +525,7 @@ func TestStage9_ConcurrentBetAndWithdrawalOneWallet_ExactlyOneReservesTheBalance
 			amount, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 		betErr = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			betResult, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+			betResult, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 			return err
 		})
 	}()

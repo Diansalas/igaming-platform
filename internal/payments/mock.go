@@ -124,10 +124,19 @@ func NewMockWebhookCredentials(provider *MockProvider) MockWebhookCredentials {
 // package importing internal/providerkind.
 func (r MockWebhookCredentials) SyntheticComponent() {}
 
-// Resolve implements WebhookCredentialResolver (ADR 0093 §4 signature).
-// A MOCK resolver ignores tx and resolves KeyFromHeader only.
-func (r MockWebhookCredentials) Resolve(ctx context.Context, _ pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
+// Resolve implements WebhookCredentialResolver (ADR 0094 §4.1 signature).
+// A MOCK resolver ignores the reader and resolves KeyFromHeader only.
+func (r MockWebhookCredentials) Resolve(ctx context.Context, _ webhookauth.TenantReader, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
 	return webhookauth.ResolveSingleKey(ctx, r, tenantID, providerID, keyID, sel)
+}
+
+// Recheck implements WebhookCredentialResolver: the shared MOCK rule
+// (webhookauth.MockRecheck) - only this adapter's handle-less credential.
+func (r MockWebhookCredentials) Recheck(_ context.Context, _ pgx.Tx, tenantID uuid.UUID, c webhookauth.Credential) error {
+	if r.provider == nil {
+		return ErrWebhookCredentialUnavailable
+	}
+	return webhookauth.MockRecheck(tenantID, r.provider.providerID, c)
 }
 
 // ResolveKey implements webhookauth.KeyResolver: the MOCK single-key lookup.

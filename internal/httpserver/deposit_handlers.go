@@ -293,12 +293,19 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		// ADR 0094 §4.1: phase 1 (verification) holds NO transaction - its
+		// reads run in short READ ONLY transactions that commit before any
+		// secret-store fetch; the domain transaction opens only after it
+		// succeeded, and re-checks the verified handle first.
 		var result payments.ReceiveCallbackResult
-		err := deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
-			var err error
-			result, err = deps.PaymentOrchestrator.ReceiveCallback(ctx, tx, t.ID, providerID, payments.InboundCallback{Header: r.Header, Body: body})
-			return err
-		})
+		verified, err := deps.PaymentOrchestrator.VerifyCallback(r.Context(), deps.DB, t.ID, providerID, payments.InboundCallback{Header: r.Header, Body: body})
+		if err == nil {
+			err = deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
+				var err error
+				result, err = deps.PaymentOrchestrator.ReceiveVerifiedCallback(ctx, tx, t.ID, providerID, verified)
+				return err
+			})
+		}
 
 		var authErr *payments.CallbackAuthError
 		if errors.As(err, &authErr) {

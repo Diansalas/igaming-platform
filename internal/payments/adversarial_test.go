@@ -160,7 +160,7 @@ func TestReceiveCallback_ConcurrentDuplicateCallbacksOnlyOnePosts(t *testing.T) 
 		go func(i int) {
 			defer wg.Done()
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", payload)
+				_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
 				return err
 			})
 		}(i)
@@ -396,7 +396,7 @@ func TestReceiveCallback_AmbiguousCallbackResolvedViaQueryStatus_NotCascaded(t *
 	var result ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-a", ambiguousPayload)
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-a", ambiguousPayload)
 		return err
 	})
 	if err != nil {
@@ -450,7 +450,7 @@ func TestInitiateDeposit_ProviderSwapDoesNotRequireWalletOrLedgerCodeChange(t *t
 	}
 	payloadA := providerA.CallbackPayload(f.tenantID, CallbackEventDeposit, *intentA.ProviderReference, "", OutcomeSucceeded, 3300, "EUR", "", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-a", payloadA)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-a", payloadA)
 		return err
 	})
 	if err != nil {
@@ -498,7 +498,7 @@ func TestInitiateDeposit_ProviderSwapDoesNotRequireWalletOrLedgerCodeChange(t *t
 	}
 	payloadB := providerB.CallbackPayload(f.tenantID, CallbackEventDeposit, *intentB.ProviderReference, "", OutcomeSucceeded, 2200, "EUR", "", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-b", payloadB)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-b", payloadB)
 		return err
 	})
 	if err != nil {

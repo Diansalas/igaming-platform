@@ -87,7 +87,7 @@ func TestCasinoWebhook_TamperMatrix_ExactReason(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", c.build())
+				_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", c.build())
 				return err
 			})
 			var authErr *webhookauth.AuthError

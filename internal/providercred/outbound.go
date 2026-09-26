@@ -15,6 +15,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/secretstore"
+	"github.com/Diansalas/igaming-platform/internal/txscope"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -129,6 +130,12 @@ func (o *OutboundResolver) MarkProductionEligible() {}
 // failure are all ErrOutboundCredentialUnavailable.
 func (o *OutboundResolver) Resolve(ctx context.Context, pool TenantTxRunner, tenantID uuid.UUID, providerID string) (OutboundCredential, error) {
 	if o == nil || o.sub == nil || pool == nil || tenantID == uuid.Nil || !webhookauth.ValidProviderID(providerID) {
+		return OutboundCredential{}, ErrOutboundCredentialUnavailable
+	}
+	if txscope.Held(ctx) {
+		// ADR 0094 INV-POOL: resolving inside a caller's transaction would
+		// hold that connection across a nested acquisition and the store.
+		o.sub.logTxHeld("providercred.OutboundResolver.Resolve", tenantID)
 		return OutboundCredential{}, ErrOutboundCredentialUnavailable
 	}
 	var rows []handleRow

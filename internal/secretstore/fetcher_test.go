@@ -142,7 +142,7 @@ func TestStoreBreaker_OpensAfterThreeConsecutiveFailures(t *testing.T) {
 	for i := 0; i < secretstore.BreakerTripThreshold-1; i++ {
 		ref, fp, _ := h.put(h.tenant)
 		_, _ = h.fetch(ref, fp)
-		if s := h.f.BreakerState("memory"); s != "closed" {
+		if s := h.f.BreakerState("memory", h.tenant); s != "closed" {
 			t.Fatalf("after %d failures the breaker must still be closed, got %s", i+1, s)
 		}
 	}
@@ -153,7 +153,7 @@ func TestStoreBreaker_OpensAfterThreeConsecutiveFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.tripBreaker()
-	if s := h.f.BreakerState("memory"); s != "open" {
+	if s := h.f.BreakerState("memory", h.tenant); s != "open" {
 		t.Fatalf("three consecutive counting failures must open the breaker, got %s", s)
 	}
 }
@@ -214,7 +214,7 @@ func TestStoreBreaker_HalfOpenSingleProbe(t *testing.T) {
 	if probeErr != nil {
 		t.Fatalf("probe: %v", probeErr)
 	}
-	if s := h.f.BreakerState("memory"); s != "closed" {
+	if s := h.f.BreakerState("memory", h.tenant); s != "closed" {
 		t.Fatalf("a successful probe must close the breaker, got %s", s)
 	}
 }
@@ -225,7 +225,7 @@ func TestStoreBreaker_CooldownBackoffCapped(t *testing.T) {
 	probeFails := func(wait time.Duration) {
 		t.Helper()
 		h.clk.Advance(wait - time.Second)
-		if s := h.f.BreakerState("memory"); s != "open" {
+		if s := h.f.BreakerState("memory", h.tenant); s != "open" {
 			t.Fatalf("1s before the %s cooldown ends the breaker must be open, got %s", wait, s)
 		}
 		h.clk.Advance(time.Second)
@@ -247,7 +247,7 @@ func TestStoreBreaker_CooldownBackoffCapped(t *testing.T) {
 	}
 	h.tripBreaker()
 	h.clk.Advance(15 * time.Second)
-	if s := h.f.BreakerState("memory"); s != "half_open" {
+	if s := h.f.BreakerState("memory", h.tenant); s != "half_open" {
 		t.Fatalf("after a successful probe the cooldown must reset to 15s, got %s", s)
 	}
 }
@@ -271,7 +271,7 @@ func TestStoreBreaker_PerRefErrorsDoNotTrip(t *testing.T) {
 			t.Fatalf("got %v", err)
 		}
 	}
-	if s := h.f.BreakerState("memory"); s != "closed" {
+	if s := h.f.BreakerState("memory", h.tenant); s != "closed" {
 		t.Fatalf("per-ref errors must not trip the breaker, got %s", s)
 	}
 }
@@ -409,12 +409,15 @@ func TestStoreFetch_ConcurrencyBoundedAtFour(t *testing.T) {
 	var wg sync.WaitGroup
 	var failedFast atomic.Int64
 	for i := 0; i < n; i++ {
-		ref, fp, _ := h.put(h.tenant)
+		// One tenant per ref: the per-tenant cap (ADR 0094 §4.2) must not
+		// be what bounds this; the process-wide S = 4 must.
+		tenant := uuid.New()
+		ref, fp, _ := h.put(tenant)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			start := time.Now()
-			_, err := h.fetch(ref, fp)
+			_, err := h.f.Fetch(context.Background(), tenant, ref, fp)
 			if err != nil && time.Since(start) < time.Second {
 				failedFast.Add(1)
 			}
@@ -518,6 +521,10 @@ func TestStoreConstants_PinnedToSecurityReview(t *testing.T) {
 		"MaxConcurrentStoreCalls": {secretstore.MaxConcurrentStoreCalls, 4},
 		"BreakerTripThreshold":    {secretstore.BreakerTripThreshold, 3},
 		"CacheMaxEntries":         {secretstore.CacheMaxEntries, 1024},
+		// ADR 0094 §4.2 (security co-sign C8: P = 2 pre-approved).
+		"MaxConcurrentStoreCallsPerTenant": {secretstore.MaxConcurrentStoreCallsPerTenant, 2},
+		"MaxDegradedStoreCalls":            {secretstore.MaxDegradedStoreCalls, 2},
+		"MultiTenantDegradedWarnThreshold": {secretstore.MultiTenantDegradedWarnThreshold, 3},
 	} {
 		if pair[0] != pair[1] {
 			t.Errorf("%s = %d, security review §5 says %d", name, pair[0], pair[1])

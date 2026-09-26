@@ -172,7 +172,7 @@ func TestPostBet_CashFundedWageringContribution_CrossAssetGrantIsNeverCredited(t
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-cross-asset", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		result, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		result, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		if err != nil {
 			return err
 		}
@@ -256,7 +256,7 @@ func TestPostBet_CashFundedWageringContribution_UnmeasurableTargetNeverCompletes
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-unmeasurable", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		result, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		result, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		if err != nil {
 			return err
 		}
@@ -293,7 +293,7 @@ func TestPostBet_CashFundedWageringContribution_RecordsAndCompletesGrant(t *test
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-wager-1", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		result, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		result, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		if err != nil {
 			return err
 		}
@@ -349,7 +349,7 @@ func TestPostBet_CashFundedWageringContribution_ExcludedGameTypeContributesNothi
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-excluded", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		result, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		result, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		if err != nil {
 			return err
 		}
@@ -400,7 +400,7 @@ func TestPostBet_CashFundedWageringContribution_AmbiguousMultiGrantSkipsBoth(t *
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-ambiguous", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		result, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		result, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		if err != nil {
 			return err
 		}
@@ -446,7 +446,7 @@ func TestPostBet_CashFundedWageringContribution_RedeliveredBetIsIdempotent(t *te
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-redeliver", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	for i := 0; i < 2; i++ {
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			result, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+			result, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 			if err != nil {
 				return err
 			}
@@ -532,7 +532,7 @@ func TestConcurrentStress_DuplicateBetDeliveryWithActiveWageringGrantIsIdempoten
 			defer wg.Done()
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 				var err error
-				results[i], err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+				results[i], err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 				return err
 			})
 		}()

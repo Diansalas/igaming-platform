@@ -151,7 +151,7 @@ func TestInitiateDeposit_SuccessThenCallbackPostsFlow1(t *testing.T) {
 	var result ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", payload)
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
 		return err
 	})
 	if err != nil {
@@ -192,7 +192,7 @@ func TestReceiveCallback_RedeliveredSuccessIsIdempotent(t *testing.T) {
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, *intent.ProviderReference, "", OutcomeSucceeded, 4200, "EUR", "", false)
 	for i := 0; i < 2; i++ {
 		err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", payload)
+			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
 			return err
 		})
 		if err != nil {
@@ -334,7 +334,7 @@ func TestInitiateDeposit_AmbiguousOutcomeIsNotCascaded(t *testing.T) {
 	var result ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-a", payload)
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-a", payload)
 		return err
 	})
 	if err != nil {
@@ -395,7 +395,7 @@ func TestReceiveCallback_UnknownProviderReferenceRejected(t *testing.T) {
 
 	payload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, "never-initiated-ref", "", OutcomeSucceeded, 1000, "EUR", "", false)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", payload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
 		return err
 	})
 	if !errors.Is(err, ErrDepositIntentNotFound) {
@@ -443,7 +443,7 @@ func TestReceiveCallback_CrossTenantProviderReferenceIsInvisible(t *testing.T) {
 	// though it names the exact same provider_id and provider_reference.
 	payload := provider.CallbackPayload(f1.tenantID, CallbackEventDeposit, *intent.ProviderReference, "", OutcomeSucceeded, 2500, "EUR", "", false)
 	err = pool.WithTenant(context.Background(), f2.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f2.tenantID, "mock-psp", payload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f2.tenantID, "mock-psp", payload)
 		return err
 	})
 	var authErr *CallbackAuthError
@@ -480,7 +480,7 @@ func TestReceiveCallback_DepositReversalPostsFlow2(t *testing.T) {
 
 	successPayload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, depositRef, "", OutcomeSucceeded, 8000, "EUR", "", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", successPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", successPayload)
 		return err
 	})
 	if err != nil {
@@ -494,7 +494,7 @@ func TestReceiveCallback_DepositReversalPostsFlow2(t *testing.T) {
 	var reversalResult ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		reversalResult, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", reversalPayload)
+		reversalResult, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", reversalPayload)
 		return err
 	})
 	if err != nil {
@@ -555,7 +555,7 @@ func TestReceiveCallback_ReversalAmountCannotExceedOriginal(t *testing.T) {
 
 	successPayload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, depositRef, "", OutcomeSucceeded, 5000, "EUR", "", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", successPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", successPayload)
 		return err
 	})
 	if err != nil {
@@ -566,7 +566,7 @@ func TestReceiveCallback_ReversalAmountCannotExceedOriginal(t *testing.T) {
 	// ever actually deposited.
 	oversizedReversal := provider.CallbackPayload(f.tenantID, CallbackEventDepositReversal, "reversal-oversized", depositRef, OutcomeDeclined, 500000000, "EUR", "chargeback", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", oversizedReversal)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", oversizedReversal)
 		return err
 	})
 	if !errors.Is(err, ErrCallbackProviderMismatch) {
@@ -580,7 +580,7 @@ func TestReceiveCallback_ReversalAmountCannotExceedOriginal(t *testing.T) {
 	// rejected, never silently posted against the original's asset.
 	wrongAsset := provider.CallbackPayload(f.tenantID, CallbackEventDepositReversal, "reversal-wrong-asset", depositRef, OutcomeDeclined, 5000, "USD", "chargeback", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", wrongAsset)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", wrongAsset)
 		return err
 	})
 	if !errors.Is(err, ErrCallbackProviderMismatch) {
@@ -595,7 +595,7 @@ func TestReceiveCallback_ReversalAmountCannotExceedOriginal(t *testing.T) {
 	// block on reversing this deposit at all.
 	correct := provider.CallbackPayload(f.tenantID, CallbackEventDepositReversal, "reversal-correct", depositRef, OutcomeDeclined, 5000, "EUR", "chargeback", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", correct)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", correct)
 		return err
 	})
 	if err != nil {
@@ -635,7 +635,7 @@ func TestReceiveCallback_SecondReversalOfSameDepositRejected(t *testing.T) {
 
 	successPayload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, depositRef, "", OutcomeSucceeded, 4000, "EUR", "", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", successPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", successPayload)
 		return err
 	})
 	if err != nil {
@@ -644,7 +644,7 @@ func TestReceiveCallback_SecondReversalOfSameDepositRejected(t *testing.T) {
 
 	firstReversal := provider.CallbackPayload(f.tenantID, CallbackEventDepositReversal, "reversal-first", depositRef, OutcomeDeclined, 4000, "EUR", "chargeback", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", firstReversal)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", firstReversal)
 		return err
 	})
 	if err != nil {
@@ -659,7 +659,7 @@ func TestReceiveCallback_SecondReversalOfSameDepositRejected(t *testing.T) {
 	// further debit driving the balance negative.
 	secondReversal := provider.CallbackPayload(f.tenantID, CallbackEventDepositReversal, "reversal-second-distinct-ref", depositRef, OutcomeDeclined, 4000, "EUR", "chargeback", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", secondReversal)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", secondReversal)
 		return err
 	})
 	if !errors.Is(err, ErrDepositAlreadyReversed) {
@@ -705,7 +705,7 @@ func TestReceiveCallback_LateDeclineAfterSuccessIsNoOp(t *testing.T) {
 	var succeeded ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		succeeded, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", successPayload)
+		succeeded, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", successPayload)
 		return err
 	})
 	if err != nil {
@@ -722,7 +722,7 @@ func TestReceiveCallback_LateDeclineAfterSuccessIsNoOp(t *testing.T) {
 	var late ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		late, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", latePayload)
+		late, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", latePayload)
 		return err
 	})
 	if err != nil {
@@ -785,7 +785,7 @@ func TestReceiveCallback_ReversalOfNeverPostedDepositWritesTombstone(t *testing.
 	var result ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", reversalPayload)
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", reversalPayload)
 		return err
 	})
 	if err != nil {
@@ -800,7 +800,7 @@ func TestReceiveCallback_ReversalOfNeverPostedDepositWritesTombstone(t *testing.
 	// provider_tx_id) uniqueness collides with the tombstone.
 	latePayload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, depositRef, "", OutcomeSucceeded, 6000, "EUR", "", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", latePayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", latePayload)
 		return err
 	})
 	if err == nil {

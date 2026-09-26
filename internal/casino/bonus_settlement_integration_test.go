@@ -484,7 +484,7 @@ func TestPostWin_LockAlreadyReleased(t *testing.T) {
 
 	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-lf18", "", "round-lf18", "game-1", 300, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", winPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
 		return err
 	})
 	if !errors.Is(err, ErrLockAlreadyReleased) {
@@ -521,7 +521,7 @@ func TestPostWin_LockedBonusOrdinary_GrantNonTerminal(t *testing.T) {
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", winPayload)
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
 		return err
 	})
 	if err != nil {
@@ -605,7 +605,7 @@ func TestPostWin_LockedBonusTerminalGrant_CapturesUnconditionally(t *testing.T) 
 			var result ReceiveCallbackResult
 			err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 				var err error
-				result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", winPayload)
+				result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
 				return err
 			})
 			if err != nil {
@@ -689,7 +689,7 @@ func TestPostRollback_PlainLockRollback_RecomputesExposure(t *testing.T) {
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
 		return err
 	})
 	if err != nil {
@@ -744,7 +744,7 @@ func TestPostRollback_HeldWinRollback_VoidsDispositionAndFinalizesGrant(t *testi
 	var winResult ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		winResult, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", winPayload)
+		winResult, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
 		return err
 	})
 	if err != nil {
@@ -758,7 +758,7 @@ func TestPostRollback_HeldWinRollback_VoidsDispositionAndFinalizesGrant(t *testi
 	var rbResult ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		rbResult, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
+		rbResult, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
 		return err
 	})
 	if err != nil {
@@ -814,7 +814,7 @@ func TestPostRollback_HeldWinRollback_DuplicateIsIdempotent(t *testing.T) {
 
 	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-dup-1", "", "round-dup-1", "game-1", 250, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", winPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
 		return err
 	})
 	if err != nil {
@@ -825,7 +825,7 @@ func TestPostRollback_HeldWinRollback_DuplicateIsIdempotent(t *testing.T) {
 	var first, second ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		first, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
+		first, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
 		return err
 	})
 	if err != nil {
@@ -833,7 +833,7 @@ func TestPostRollback_HeldWinRollback_DuplicateIsIdempotent(t *testing.T) {
 	}
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		second, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
+		second, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
 		return err
 	})
 	if err != nil {
@@ -896,7 +896,7 @@ func TestPostRollback_HeldWinRollback_ConcurrentDistinctRollbacks(t *testing.T) 
 
 	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-race-1", "", "round-race-1", "game-1", 250, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", winPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
 		return err
 	})
 	if err != nil {
@@ -913,7 +913,7 @@ func TestPostRollback_HeldWinRollback_ConcurrentDistinctRollbacks(t *testing.T) 
 			rbTxID := fmt.Sprintf("rollback-race-%d", i)
 			payload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, rbTxID, "win-race-1", "round-race-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
 			results[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+				_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 				return err
 			})
 		}(i)
@@ -980,7 +980,7 @@ func TestPostRollback_HeldWinRollback_RollbackRacesDirectResolution(t *testing.T
 	var winResult ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		winResult, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", winPayload)
+		winResult, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
 		return err
 	})
 	if err != nil {
@@ -996,7 +996,7 @@ func TestPostRollback_HeldWinRollback_RollbackRacesDirectResolution(t *testing.T
 		defer wg.Done()
 		rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-race2-1", "win-race2-1", "round-race2-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
 		rollbackErr = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
+			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
 			return err
 		})
 	}()
@@ -1073,7 +1073,7 @@ func TestPostRollback_HeldWinRollback_AlreadyResolved_FailsClosed(t *testing.T) 
 	var winResult ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		winResult, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", winPayload)
+		winResult, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
 		return err
 	})
 	if err != nil {
@@ -1099,7 +1099,7 @@ func TestPostRollback_HeldWinRollback_AlreadyResolved_FailsClosed(t *testing.T) 
 
 	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-lf10-1", "win-lf10-1", "round-lf10-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
 		return err
 	})
 	if !errors.Is(err, ErrHeldDispositionRollbackUnsupported) {
@@ -1140,7 +1140,7 @@ func TestPostWin_PlainCashWin_NeverTouchesBonusMachinery(t *testing.T) {
 
 	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-native-1", "", "round-native-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", betPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", betPayload)
 		return err
 	})
 	if err != nil {
@@ -1154,7 +1154,7 @@ func TestPostWin_PlainCashWin_NeverTouchesBonusMachinery(t *testing.T) {
 	var result ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", winPayload)
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", winPayload)
 		return err
 	})
 	if err != nil {

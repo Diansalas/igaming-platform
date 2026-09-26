@@ -101,7 +101,7 @@ func TestPostBet_BindsProviderRound_IdempotentAcrossTwoBetsOnSameRound(t *testin
 
 	firstPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-idempotent-bind-1", "", roundID, "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		result, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", firstPayload)
+		result, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", firstPayload)
 		if err != nil {
 			return err
 		}
@@ -127,7 +127,7 @@ func TestPostBet_BindsProviderRound_IdempotentAcrossTwoBetsOnSameRound(t *testin
 
 	secondPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-idempotent-bind-2", "", roundID, "game-1", 500, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		result, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", secondPayload)
+		result, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", secondPayload)
 		if err != nil {
 			return err
 		}
@@ -179,7 +179,7 @@ func TestPostBet_SecondPlayerSameProviderRound_RejectedAndNoLedgerEffect(t *test
 
 	betAPayload := provider.CallbackPayload(fA.tenantID, CallbackEventBet, "bet-player-a", "", sharedRoundID, "game-1", 1000, "EUR", OutcomeSucceeded, "", fA.playerAccountID, sessionA)
 	err := pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		result, err := orch.ReceiveCallback(ctx, tx, fA.tenantID, "mock-casino", betAPayload)
+		result, err := orch.receiveCallbackInTx(ctx, tx, fA.tenantID, "mock-casino", betAPayload)
 		if err != nil {
 			return err
 		}
@@ -196,7 +196,7 @@ func TestPostBet_SecondPlayerSameProviderRound_RejectedAndNoLedgerEffect(t *test
 
 	betBPayload := provider.CallbackPayload(fB.tenantID, CallbackEventBet, "bet-player-b", "", sharedRoundID, "game-1", 750, "EUR", OutcomeSucceeded, "", fB.playerAccountID, sessionB)
 	err = pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, fA.tenantID, "mock-casino", betBPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, fA.tenantID, "mock-casino", betBPayload)
 		return err
 	})
 	if !errors.Is(err, ErrProviderRoundOwnershipConflict) {
@@ -258,7 +258,7 @@ func TestPostBet_SameProviderRoundIDDifferentTenant_IndependentRows(t *testing.T
 
 	betAPayload := provider.CallbackPayload(fA.tenantID, CallbackEventBet, "bet-tenant-a", "", sharedRoundID, "game-1", 1000, "EUR", OutcomeSucceeded, "", fA.playerAccountID, sessionA)
 	err := pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		result, err := orch.ReceiveCallback(ctx, tx, fA.tenantID, "mock-casino", betAPayload)
+		result, err := orch.receiveCallbackInTx(ctx, tx, fA.tenantID, "mock-casino", betAPayload)
 		if err != nil {
 			return err
 		}
@@ -273,7 +273,7 @@ func TestPostBet_SameProviderRoundIDDifferentTenant_IndependentRows(t *testing.T
 
 	betBPayload := provider.CallbackPayload(fB.tenantID, CallbackEventBet, "bet-tenant-b", "", sharedRoundID, "game-1", 1000, "EUR", OutcomeSucceeded, "", fB.playerAccountID, sessionB)
 	err = pool.WithTenant(context.Background(), fB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		result, err := orch.ReceiveCallback(ctx, tx, fB.tenantID, "mock-casino", betBPayload)
+		result, err := orch.receiveCallbackInTx(ctx, tx, fB.tenantID, "mock-casino", betBPayload)
 		if err != nil {
 			return err
 		}
@@ -317,7 +317,7 @@ func TestPostBet_DifferentBrandSameTenant_RejectedAndNoLedgerEffect(t *testing.T
 
 	betAPayload := provider.CallbackPayload(fA.tenantID, CallbackEventBet, "bet-brand-a", "", sharedRoundID, "game-1", 1000, "EUR", OutcomeSucceeded, "", fA.playerAccountID, sessionA)
 	err := pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		result, err := orch.ReceiveCallback(ctx, tx, fA.tenantID, "mock-casino", betAPayload)
+		result, err := orch.receiveCallbackInTx(ctx, tx, fA.tenantID, "mock-casino", betAPayload)
 		if err != nil {
 			return err
 		}
@@ -334,7 +334,7 @@ func TestPostBet_DifferentBrandSameTenant_RejectedAndNoLedgerEffect(t *testing.T
 
 	betSiblingPayload := provider.CallbackPayload(sibling.tenantID, CallbackEventBet, "bet-brand-sibling", "", sharedRoundID, "game-1", 750, "EUR", OutcomeSucceeded, "", sibling.playerAccountID, sessionSibling)
 	err = pool.WithTenant(context.Background(), fA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, fA.tenantID, "mock-casino", betSiblingPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, fA.tenantID, "mock-casino", betSiblingPayload)
 		return err
 	})
 	if !errors.Is(err, ErrProviderRoundOwnershipConflict) {
@@ -376,7 +376,7 @@ func TestPostBet_DeclinedByRG_BindsNoProviderRound(t *testing.T) {
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
 	})
 	if err != nil {

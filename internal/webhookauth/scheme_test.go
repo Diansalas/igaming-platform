@@ -271,15 +271,23 @@ type countingResolver struct {
 	err     error
 	lastKey string
 	lastSel KeySelection
+
+	recheckErr error
+	rechecks   []Credential
 }
 
-func (r *countingResolver) Resolve(_ context.Context, _ pgx.Tx, _ uuid.UUID, _, keyID string, sel KeySelection) (CredentialSet, error) {
+func (r *countingResolver) Resolve(_ context.Context, _ TenantReader, _ uuid.UUID, _, keyID string, sel KeySelection) (CredentialSet, error) {
 	r.calls++
 	r.lastKey, r.lastSel = keyID, sel
 	if r.err != nil {
 		return CredentialSet{}, r.err
 	}
 	return CredentialSet{Active: r.cred, Previous: r.prev}, nil
+}
+
+func (r *countingResolver) Recheck(_ context.Context, _ pgx.Tx, _ uuid.UUID, c Credential) error {
+	r.rechecks = append(r.rechecks, c)
+	return r.recheckErr
 }
 
 // TestResolveCredentials_KeySelectionFromPropertiesOnly is security C3: the

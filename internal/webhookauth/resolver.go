@@ -12,12 +12,22 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/db"
 )
 
+// TenantReader is what a Resolver needs from the pool: a tenant-scoped
+// READ ONLY transaction that commits before WithTenantReadOnly returns
+// (ADR 0094 §4.1). *db.Pool satisfies it.
+type TenantReader interface {
+	WithTenantReadOnly(ctx context.Context, tenantID uuid.UUID, fn db.TxFunc) error
+}
+
 // Resolver resolves the single (tenant, provider) credential binding for
-// one inbound callback (ADR 0093 §4):
+// one inbound callback (ADR 0093 §4 as amended by ADR 0094 §4.1):
 //
-//		Resolve(ctx, tx, tenantID, providerID, keyID, sel) (CredentialSet, error)
+//	Resolve(ctx, r, tenantID, providerID, keyID, sel) (CredentialSet, error)
+//	Recheck(ctx, tx, tenantID, cred) error
 //
 //	  - The domain is fixed when the resolver is constructed.
 //	  - sel always comes from the scheme's Properties().KeySelection, never
@@ -26,11 +36,18 @@ import (
 //	    one credential (Active; Previous nil). For KeyImplicit keyID is ""
 //	    and the set holds the active credential plus at most one verify_only
 //	    predecessor inside its not_after window.
-//	  - tx is the caller's tenant-scoped transaction. The real resolver
+//	  - Resolve takes NO transaction. The real resolver
 //	    (internal/providercred) runs exactly one plain, lock-free, read-only
-//	    SELECT on provider_credential_handles in it - the one
-//	    pre-verification statement ADR 0022 §3 point 9 allows. MOCK
-//	    resolvers ignore tx (it may be nil for them).
+//	    SELECT on provider_credential_handles in its OWN r.WithTenantReadOnly
+//	    transaction - the one pre-verification statement ADR 0022 §3 point
+//	    9 allows - which COMMITS before any secret-store fetch, so no pooled
+//	    connection is ever held while waiting on the store (INV-POOL). It
+//	    must be called with no transaction held (txscope); MOCK resolvers
+//	    ignore r (it may be nil for them).
+//	  - Recheck runs in the DOMAIN transaction, after verification, and
+//	    fails closed unless the handle of the credential that VERIFIED
+//	    (Credential.HandleID) is still usable (ADR 0094 §5). A MOCK Recheck
+//	    accepts only its own handle-less credential.
 //
 // A route with no resolver fails closed (ReasonNoResolver) - there is no
 // fallback to unauthenticated verification. Errors fold into closed
@@ -38,7 +55,8 @@ import (
 // ErrCredentialIntegrity -> credential_integrity, ErrNoResolver ->
 // no_resolver, anything else -> credential_unavailable.
 type Resolver interface {
-	Resolve(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel KeySelection) (CredentialSet, error)
+	Resolve(ctx context.Context, r TenantReader, tenantID uuid.UUID, providerID, keyID string, sel KeySelection) (CredentialSet, error)
+	Recheck(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, c Credential) error
 }
 
 // KeyResolver is the single-key, transaction-free lookup the platform MOCK
@@ -135,19 +153,38 @@ func NewKindSplitResolver[A any](adapters map[string]A, mock, real Resolver) Res
 }
 
 // Resolve implements Resolver.
-func (s *KindSplitResolver) Resolve(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel KeySelection) (CredentialSet, error) {
+func (s *KindSplitResolver) Resolve(ctx context.Context, r TenantReader, tenantID uuid.UUID, providerID, keyID string, sel KeySelection) (CredentialSet, error) {
+	target, err := s.target(providerID)
+	if err != nil {
+		return CredentialSet{}, err
+	}
+	return target.Resolve(ctx, r, tenantID, providerID, keyID, sel)
+}
+
+// Recheck implements Resolver: the same two-way split by adapter kind as
+// Resolve, so the MOCK Recheck is reachable only for a synthetic adapter
+// and an unregistered provider id fails closed (security condition C4).
+func (s *KindSplitResolver) Recheck(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, c Credential) error {
+	target, err := s.target(c.ProviderID)
+	if err != nil {
+		return err
+	}
+	return target.Recheck(ctx, tx, tenantID, c)
+}
+
+func (s *KindSplitResolver) target(providerID string) (Resolver, error) {
 	isSynthetic, registered := s.synthetic[providerID]
 	if !registered {
-		return CredentialSet{}, ErrCredentialUnavailable
+		return nil, ErrCredentialUnavailable
 	}
 	target := s.real
 	if isSynthetic {
 		target = s.mock
 	}
 	if target == nil {
-		return CredentialSet{}, ErrNoResolver
+		return nil, ErrNoResolver
 	}
-	return target.Resolve(ctx, tx, tenantID, providerID, keyID, sel)
+	return target, nil
 }
 
 // MarshalJSON implements json.Marshaler for Credential (security C15): the

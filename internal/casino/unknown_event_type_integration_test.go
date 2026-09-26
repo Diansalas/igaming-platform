@@ -65,7 +65,7 @@ func TestCasinoWebhook_UnknownVerifiedEventType_MalformedBody(t *testing.T) {
 
 	before := noeffect.CaptureCasino(t, pool, []uuid.UUID{f.tenantID})
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", in)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", in)
 		return err
 	})
 	if !errors.Is(err, ErrCallbackMalformedBody) {

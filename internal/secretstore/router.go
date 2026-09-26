@@ -3,9 +3,13 @@ package secretstore
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 
+	"github.com/google/uuid"
+
 	"github.com/Diansalas/igaming-platform/internal/config"
+	"github.com/Diansalas/igaming-platform/internal/txscope"
 )
 
 // Store is one secret-store backend. Get returns the exact bytes of ref's
@@ -104,7 +108,15 @@ func (r *Router) Schemes() []string {
 // breaker or negative cache - for registration and apply only, where the
 // secret must be read fresh (and never cached before it is approved). It
 // is bounded by StoreCallTimeout and panic-safe; every failure is a *Error.
+//
+// Like Fetcher.Fetch it must never run while the caller holds a pooled DB
+// transaction (ADR 0094 INV-POOL): a txscope-marked ctx fails closed with
+// ClassStoreConfig and no store call.
 func (r *Router) GetDirect(ctx context.Context, ref Ref) (Secret, error) {
+	if txscope.Held(ctx) {
+		logTxHeld(slog.Default(), "secretstore.Router.GetDirect", uuid.Nil)
+		return Secret{}, classError(ClassStoreConfig)
+	}
 	store, ok := r.Backend(ref.Scheme())
 	if !ok {
 		return Secret{}, classError(ClassNoBackend)

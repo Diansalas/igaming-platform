@@ -275,17 +275,14 @@ func (o *Orchestrator) Provider(id string) (KYCProvider, bool) {
 // caller (an HTTP handler) uses applied==false to log a single allow-listed
 // kyc_webhook_noop info line - never to change the response itself, which
 // stays 204 either way.
-func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, in webhookauth.Inbound) (result Verification, applied bool, err error) {
-	in.TenantID = tenantID
-	in.ProviderID = providerID
-
-	// (a)+(b)+verify: adapter registered, its scheme's Extract, single-
-	// credential resolution, and the ORCHESTRATOR-ENFORCED scheme.Verify
-	// over the raw bytes (Stage 10.3 W1a, WH-VENDOR-SCHEME-1;
-	// webhook_verify.go) - no statement of any kind runs before it
-	// succeeds (strict I1). Self-sufficient: kyc-package tests call this
-	// method directly, bypassing the HTTP preamble.
-	provider, cred, err := o.verifyCallback(ctx, tx, in)
+func (o *Orchestrator) ReceiveVerifiedCallback(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, v *VerifiedCallback) (result Verification, applied bool, err error) {
+	// (a)+(b)+verify ran in phase 1 (VerifyCallback, no transaction held;
+	// ADR 0094 §4.1) - no statement of any kind ran in THIS transaction
+	// before it. Redeem + Recheck is the first statement here (ADR 0094
+	// §5): a revoked/expired/rotated-away handle, a reused or stale token,
+	// or a tenant/provider/domain mismatch is the uniform
+	// credential_unavailable with nothing read or written.
+	provider, in, cred, err := o.redeemVerified(ctx, tx, tenantID, providerID, v)
 	if err != nil {
 		return Verification{}, false, err
 	}
@@ -310,14 +307,14 @@ func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID 
 
 	// (d) explicit tenant-scoped lookup (architect R4/J6) - reachable only
 	// by a VERIFIED caller.
-	v, err := getVerificationByProviderReference(ctx, tx, tenantID, providerID, providerResult.ProviderReference)
+	verification, err := getVerificationByProviderReference(ctx, tx, tenantID, providerID, providerResult.ProviderReference)
 	if err != nil {
 		return Verification{}, false, err
 	}
 
 	// (e) forward-only rank transition + audit, all in this same
 	// transaction (B7/J6/J11).
-	return applyCallbackOutcome(ctx, tx, tenantID, v, providerResult)
+	return applyCallbackOutcome(ctx, tx, tenantID, verification, providerResult)
 }
 
 // statusRank is the forward-only monotonic order B7/J11 require:

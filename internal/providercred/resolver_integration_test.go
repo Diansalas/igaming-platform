@@ -23,8 +23,10 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Diansalas/igaming-platform/internal/config"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/secretstore"
 	"github.com/Diansalas/igaming-platform/internal/secretstore/devfile"
+	"github.com/Diansalas/igaming-platform/internal/txscope"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -178,12 +180,13 @@ func TestResolver_KeyImplicit_VerifiesThroughPlatform(t *testing.T) {
 	scheme := implicitTestScheme{}
 	in := webhookauth.Inbound{TenantID: tenant, ProviderID: "acme", Body: []byte(`{"e":1}`)}
 	in.Header = map[string][]string{"X-Sig": {signFor(s1, in.Body)}}
-	err := f.rt.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
+	err := func() error {
+		ctx := context.Background()
 		m, authErr := webhookauth.ExtractInbound(scheme, in)
 		if authErr != nil {
 			return authErr
 		}
-		set, authErr := webhookauth.ResolveCredentials(ctx, tx, scheme, f.sub.Resolver("casino"), in, m)
+		set, authErr := webhookauth.ResolveCredentials(ctx, f.rt, scheme, f.sub.Resolver("casino"), in, m)
 		if authErr != nil {
 			return authErr
 		}
@@ -194,8 +197,11 @@ func TestResolver_KeyImplicit_VerifiesThroughPlatform(t *testing.T) {
 		if cred.KeyID != "k1" {
 			return fmt.Errorf("verified key id %q, want the predecessor k1", cred.KeyID)
 		}
+		if cred.HandleID != h1.ID {
+			return fmt.Errorf("verified credential carries handle %s, want the predecessor's %s (security C4)", cred.HandleID, h1.ID)
+		}
 		return nil
-	})
+	}()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,23 +248,23 @@ func TestResolver_RevocationImmediate(t *testing.T) {
 	}
 }
 
-// tripStoreBreaker opens the memory backend's breaker by failing three
-// fresh refs of an unrelated binding.
-func (f *fx) tripStoreBreaker(t *testing.T) {
+// tripStoreBreaker opens tenant's (memory backend, tenant) breaker (ADR
+// 0094 §4.2: breakers are per tenant) by failing three fresh refs of other
+// bindings of the same tenant.
+func (f *fx) tripStoreBreaker(t *testing.T, tenant uuid.UUID) {
 	t.Helper()
-	other := f.tenant()
 	var handles []Handle
 	for i := 0; i < secretstore.BreakerTripThreshold; i++ {
-		h, _ := f.register(f.spec(other, fmt.Sprintf("trip%d", i), "k1"))
+		h, _ := f.register(f.spec(tenant, fmt.Sprintf("trip%d", i), "k1"))
 		handles = append(handles, h)
 	}
 	for _, h := range handles {
 		f.mem.FailRef(h.SecretRef, secretstore.ClassUnavailable)
-		if _, err := f.resolve("casino", other, h.ProviderID, "k1", webhookauth.KeyFromHeader); !errors.Is(err, webhookauth.ErrCredentialStoreUnavailable) {
+		if _, err := f.resolve("casino", tenant, h.ProviderID, "k1", webhookauth.KeyFromHeader); !errors.Is(err, webhookauth.ErrCredentialStoreUnavailable) {
 			t.Fatalf("expected a store failure, got %v", err)
 		}
 	}
-	if s := f.sub.Fetcher().BreakerState("memory"); s != "open" {
+	if s := f.sub.Fetcher().BreakerState("memory", tenant); s != "open" {
 		t.Fatalf("breaker = %s, want open", s)
 	}
 }
@@ -270,7 +276,7 @@ func TestResolver_RevokeImmediateWhileBreakerOpen(t *testing.T) {
 	if _, err := f.resolve("casino", tenant, "acme", "k1", webhookauth.KeyFromHeader); err != nil {
 		t.Fatal(err)
 	}
-	f.tripStoreBreaker(t)
+	f.tripStoreBreaker(t, tenant)
 	// Cached, breaker open: still served (fingerprint compared)...
 	set, err := f.resolve("casino", tenant, "acme", "k1", webhookauth.KeyFromHeader)
 	if err != nil || !bytes.Equal(set.Active.Secret, secret) {
@@ -380,34 +386,69 @@ func TestResolver_MemoryRefRowFailsClosedOutsideTests(t *testing.T) {
 	if err != nil || real == nil {
 		t.Fatalf("subsystem: %v", err)
 	}
-	err = f.rt.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := real.Resolver("casino").Resolve(ctx, tx, tenant, "acme", "k1", webhookauth.KeyFromHeader)
-		return err
-	})
+	_, err = real.Resolver("casino").Resolve(context.Background(), f.rt, tenant, "acme", "k1", webhookauth.KeyFromHeader)
 	if !errors.Is(err, webhookauth.ErrCredentialUnavailable) {
 		t.Fatalf("a memory:// row must never resolve outside tests, got %v", err)
 	}
 }
 
+// recordingReader is the TenantReader a resolver gets in phase 1, wrapping
+// the pool: it records every statement run through the transaction it
+// hands out, whether that transaction was READ ONLY (checked on the raw
+// transaction, not recorded), and how long each fn held it.
+type recordingReader struct {
+	pool interface {
+		WithTenantReadOnly(ctx context.Context, tenantID uuid.UUID, fn db.TxFunc) error
+	}
+	mu        sync.Mutex
+	stmts     []string
+	readOnly  []bool
+	durations []time.Duration
+}
+
+func (r *recordingReader) WithTenantReadOnly(ctx context.Context, tenantID uuid.UUID, fn db.TxFunc) error {
+	return r.pool.WithTenantReadOnly(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var ro string
+		if err := tx.QueryRow(ctx, `SELECT current_setting('transaction_read_only')`).Scan(&ro); err != nil {
+			return err
+		}
+		rec := &recordingTx{Tx: tx}
+		start := time.Now()
+		err := fn(ctx, rec)
+		d := time.Since(start)
+		r.mu.Lock()
+		r.stmts = append(r.stmts, rec.Statements()...)
+		r.readOnly = append(r.readOnly, ro == "on")
+		r.durations = append(r.durations, d)
+		r.mu.Unlock()
+		return err
+	})
+}
+
+func (r *recordingReader) snapshot() (stmts []string, readOnly []bool, durations []time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.stmts...), append([]bool(nil), r.readOnly...), append([]time.Duration(nil), r.durations...)
+}
+
 // TestResolver_HandleReadIsTheOnlyStatement pins the one pre-verification
-// statement (ADR 0022 §3 point 9 as amended): exactly HandleReadSQL, with
-// its explicit tenant predicate, no lock, no write - also when resolution
-// fails.
+// statement (ADR 0022 §3 point 9 as amended; ADR 0094 §4.1): exactly
+// HandleReadSQL, with its explicit tenant predicate, no lock, no write,
+// in its own READ ONLY transaction - also when resolution fails.
 func TestResolver_HandleReadIsTheOnlyStatement(t *testing.T) {
 	f := newFx(t)
 	tenant := f.tenant()
 	f.register(f.spec(tenant, "acme", "k1"))
 	for name, keyID := range map[string]string{"found": "k1", "not found": "nope"} {
 		t.Run(name, func(t *testing.T) {
-			var rec *recordingTx
-			_ = f.rt.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
-				rec = &recordingTx{Tx: tx}
-				_, err := f.sub.Resolver("casino").Resolve(ctx, rec, tenant, "acme", keyID, webhookauth.KeyFromHeader)
-				return err
-			})
-			got := rec.Statements()
+			rec := &recordingReader{pool: f.rt}
+			_, _ = f.sub.Resolver("casino").Resolve(context.Background(), rec, tenant, "acme", keyID, webhookauth.KeyFromHeader)
+			got, ro, _ := rec.snapshot()
 			if len(got) != 1 || got[0] != HandleReadSQL {
 				t.Fatalf("statements = %q, want exactly [HandleReadSQL]", got)
+			}
+			if len(ro) != 1 || !ro[0] {
+				t.Fatalf("the handle read must run in exactly one READ ONLY transaction, got %v", ro)
 			}
 		})
 	}
@@ -415,10 +456,21 @@ func TestResolver_HandleReadIsTheOnlyStatement(t *testing.T) {
 		if !strings.Contains(HandleReadSQL, must) {
 			t.Fatalf("HandleReadSQL lost %q", must)
 		}
+		if !strings.Contains(HandleRecheckSQL, must) {
+			t.Fatalf("HandleRecheckSQL lost %q", must)
+		}
 	}
-	for _, mustNot := range []string{"FOR UPDATE", "FOR SHARE", "pg_advisory", "INSERT", "UPDATE ", "DELETE"} {
+	for _, must := range []string{"id = $2", "fingerprint = $3", "domain = $4", "provider_id = $5", "purpose = $6"} {
+		if !strings.Contains(HandleRecheckSQL, must) {
+			t.Fatalf("HandleRecheckSQL lost %q", must)
+		}
+	}
+	for _, mustNot := range []string{"FOR UPDATE", "FOR SHARE", "PG_ADVISORY", "INSERT", "UPDATE ", "DELETE"} {
 		if strings.Contains(strings.ToUpper(HandleReadSQL), mustNot) {
 			t.Fatalf("HandleReadSQL must not contain %q", mustNot)
+		}
+		if strings.Contains(strings.ToUpper(HandleRecheckSQL), mustNot) {
+			t.Fatalf("HandleRecheckSQL must not contain %q", mustNot)
 		}
 	}
 }
@@ -495,10 +547,18 @@ func TestResolver_CacheRevokeRace(t *testing.T) {
 	}
 }
 
-// TestStoreOutage_DoesNotPinPool (security review §5): a blocking store,
-// 50 concurrent callbacks over 8 refs. At most 4 store calls are in
-// flight, at most 4 transactions are held for more than 250 ms, and an
-// unrelated tenant query still completes in under 500 ms.
+// TestStoreOutage_DoesNotPinPool (security review §5; ADR 0094 §9.1): a
+// blocking store, 50 concurrent callbacks over 8 tenants/refs. At most 4
+// store calls are in flight, at most 4 resolves wait on the store for more
+// than 250 ms, and an unrelated tenant query still completes in under
+// 500 ms. ADR 0094 adds two stricter criteria: no pre-verification
+// (READ ONLY) transaction is held for more than 250 ms, and no store call
+// ever runs with a transaction held (txscope).
+//
+// The callers use the production call shape after ADR 0094 §4.1: phase 1
+// holds NO transaction (it is handed the pool), exactly as the webhook
+// handlers do. The old shape (Resolve inside WithTenant) is now refused -
+// TestStoreOutage_ResolveInsideTenantTxRefused.
 //
 // longSlack is this test's own measurement tolerance around the reviewed
 // 250 ms slot-wait bound (not itself a security-reviewed number - §5's
@@ -518,7 +578,21 @@ func TestStoreOutage_DoesNotPinPool(t *testing.T) {
 	// scarce. A pool larger than the caller count was rejected by security
 	// (15-ci-342-security-ruling.md, ruling A). CI runs this test alone
 	// (ruling B) so sibling test binaries' CPU load is not measured.
-	f := newFx(t)
+	runStoreOutageDoesNotPinPool(t, newFx(t))
+}
+
+// TestStoreOutage_DoesNotPinPool_ProductionPoolSize (ADR 0094 §9.1) is the
+// same test at the production default pool size, 10 connections - the
+// geometry at which F-POOL-1 failed 3/3 before ADR 0094.
+func TestStoreOutage_DoesNotPinPool_ProductionPoolSize(t *testing.T) {
+	if config.DefaultDatabaseMaxConns != 10 {
+		t.Fatalf("config.DefaultDatabaseMaxConns = %d: ADR 0094's resource-allocation rationale assumes 10 - revisit the ADR", config.DefaultDatabaseMaxConns)
+	}
+	runStoreOutageDoesNotPinPool(t, newFxOn(t, connect(t, runtimeURL(t), 10)))
+}
+
+func runStoreOutageDoesNotPinPool(t *testing.T, f *fx) {
+	t.Helper()
 	var tenants []uuid.UUID
 	for i := 0; i < 8; i++ {
 		tenant := f.tenant()
@@ -526,8 +600,15 @@ func TestStoreOutage_DoesNotPinPool(t *testing.T) {
 		tenants = append(tenants, tenant)
 	}
 	unrelated := f.tenant()
+	var storeCallsWithTx atomic.Int64
+	f.mem.OnCallCtx(func(ctx context.Context, _ string) {
+		if txscope.Held(ctx) {
+			storeCallsWithTx.Add(1)
+		}
+	})
 	f.mem.Block()
 	defer f.mem.Unblock()
+	reader := &recordingReader{pool: f.rt}
 
 	// The review's literal bound (4), never the constant itself: a changed
 	// constant must fail here (mutation check (b) in the doc above).
@@ -535,11 +616,7 @@ func TestStoreOutage_DoesNotPinPool(t *testing.T) {
 
 	var wg sync.WaitGroup
 	durations := make([]time.Duration, 50)
-	// launch/acquireDone are extra diagnostics only (not asserted on): if
-	// a future failure needs to distinguish "queued for a pool connection"
-	// from "held the tx while waiting on the store", these show it.
 	launch := make([]time.Duration, 50)
-	acquireDone := make([]time.Duration, 50)
 	t0 := time.Now()
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
@@ -547,13 +624,9 @@ func TestStoreOutage_DoesNotPinPool(t *testing.T) {
 			defer wg.Done()
 			tenant := tenants[i%len(tenants)]
 			launch[i] = time.Since(t0)
-			_ = f.rt.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
-				acquireDone[i] = time.Since(t0)
-				start := time.Now()
-				_, _ = f.sub.Resolver("casino").Resolve(ctx, tx, tenant, "acme", "k1", webhookauth.KeyFromHeader)
-				durations[i] = time.Since(start)
-				return nil
-			})
+			start := time.Now()
+			_, _ = f.sub.Resolver("casino").Resolve(context.Background(), reader, tenant, "acme", "k1", webhookauth.KeyFromHeader)
+			durations[i] = time.Since(start)
 		}(i)
 	}
 	time.Sleep(400 * time.Millisecond)
@@ -571,14 +644,14 @@ func TestStoreOutage_DoesNotPinPool(t *testing.T) {
 	// it is never widened.
 	if d := time.Since(qStart); d > 500*time.Millisecond {
 		wg.Wait()
+		_, _, txd := reader.snapshot()
 		t.Fatalf("an unrelated tenant query took %s (connection acquire took %s) during the store outage, want < 500ms; "+
-			"maxConcurrent=%d longSlack=%s durations=%v launch=%v acquireDone=%v",
-			d, qAcquire, f.mem.MaxConcurrent(), longSlack, durations, launch, acquireDone)
+			"maxConcurrent=%d longSlack=%s durations=%v launch=%v txDurations=%v",
+			d, qAcquire, f.mem.MaxConcurrent(), longSlack, durations, launch, txd)
 	}
 	wg.Wait()
 	if m := f.mem.MaxConcurrent(); m > reviewBound {
-		t.Fatalf("%d concurrent store calls, want <= %d; durations=%v launch=%v acquireDone=%v",
-			m, reviewBound, durations, launch, acquireDone)
+		t.Fatalf("%d concurrent store calls, want <= %d; durations=%v launch=%v", m, reviewBound, durations, launch)
 	}
 	long := 0
 	var longDurations []time.Duration
@@ -589,10 +662,92 @@ func TestStoreOutage_DoesNotPinPool(t *testing.T) {
 		}
 	}
 	if long > reviewBound {
-		t.Fatalf("%d transactions were held on the store for > 250 ms (longSlack=%s), want <= %d; "+
-			"over-bound durations=%v; maxConcurrent=%d; all durations=%v launch=%v acquireDone=%v",
-			long, longSlack, reviewBound, longDurations, f.mem.MaxConcurrent(), durations, launch, acquireDone)
+		t.Fatalf("%d resolves waited on the store for > 250 ms (longSlack=%s), want <= %d; "+
+			"over-bound durations=%v; maxConcurrent=%d; all durations=%v launch=%v",
+			long, longSlack, reviewBound, longDurations, f.mem.MaxConcurrent(), durations, launch)
 	}
+	// ADR 0094 criterion (4): no pre-verification transaction - the only
+	// connection a resolve holds - is held beyond longSlack.
+	_, ro, txd := reader.snapshot()
+	if len(txd) != 50 {
+		t.Fatalf("%d pre-verification transactions, want exactly one per caller (50)", len(txd))
+	}
+	for i, d := range txd {
+		if d > longSlack {
+			t.Fatalf("a pre-verification transaction was held for %s (> longSlack %s) during the store outage: "+
+				"a connection is held across the store wait (INV-POOL); all=%v", d, longSlack, txd)
+		}
+		if !ro[i] {
+			t.Fatal("a pre-verification transaction was not READ ONLY")
+		}
+	}
+	// ADR 0094 criterion (5): no store call ever ran with a transaction held.
+	if n := storeCallsWithTx.Load(); n != 0 {
+		t.Fatalf("%d store calls ran with a pooled transaction held (INV-POOL)", n)
+	}
+}
+
+// TestStoreOutage_ResolveInsideTenantTxRefused (ADR 0094 §9.1; security
+// ruling (6): main lane, structural assertions plus a < 100 ms bound): the
+// pre-ADR-0094 call shape - Resolve inside the caller's WithTenant - is
+// refused before any read, slot, flight or store call.
+func TestStoreOutage_ResolveInsideTenantTxRefused(t *testing.T) {
+	f := newFx(t)
+	tenant := f.tenant()
+	f.register(f.spec(tenant, "acme", "k1"))
+	f.mem.Block()
+	defer f.mem.Unblock()
+	calls := f.mem.Calls()
+	before := strings.Count(f.logs.String(), `"entry_point":"providercred.Resolver.Resolve"`)
+	for i := 0; i < 5; i++ {
+		start := time.Now()
+		var nestedAcquires int64
+		err := f.rt.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
+			acq := f.rt.Raw().Stat().AcquireCount()
+			_, err := f.sub.Resolver("casino").Resolve(ctx, f.rt, tenant, "acme", "k1", webhookauth.KeyFromHeader)
+			nestedAcquires = f.rt.Raw().Stat().AcquireCount() - acq
+			return err
+		})
+		if nestedAcquires != 0 {
+			t.Fatalf("a refused Resolve acquired %d nested connections (no read may start)", nestedAcquires)
+		}
+		if d := time.Since(start); d >= 100*time.Millisecond {
+			t.Fatalf("the refused call took %s, want < 100ms (no wait may start)", d)
+		}
+		if !errors.Is(err, webhookauth.ErrCredentialUnavailable) {
+			t.Fatalf("Resolve inside a held transaction must fail closed as credential_unavailable, got %v", err)
+		}
+		if inFlight, _ := f.sub.Fetcher().AdmissionSnapshot(); inFlight != 0 {
+			t.Fatalf("a refused call took a store slot (in flight %d)", inFlight)
+		}
+	}
+	if f.mem.Calls() != calls {
+		t.Fatalf("a refused call reached the store (%d calls)", f.mem.Calls()-calls)
+	}
+	if got := strings.Count(f.logs.String(), `"entry_point":"providercred.Resolver.Resolve"`) - before; got != 5 {
+		t.Fatalf("want one secret_fetch_with_tx_held line from the resolver's own guard per refused call (5), got %d", got)
+	}
+	// The direct Fetcher entry point refuses the same way.
+	ref, _ := secretstore.ParseRef(mustHandleRef(t, f, tenant))
+	err := f.rt.WithTenant(context.Background(), tenant, func(ctx context.Context, _ pgx.Tx) error {
+		_, err := f.sub.Fetcher().Fetch(ctx, tenant, ref, "fp1:"+hexOf(randBytes(t, 32)))
+		return err
+	})
+	if secretstore.ClassOf(err) != secretstore.ClassStoreConfig || f.mem.Calls() != calls {
+		t.Fatalf("Fetch inside a held transaction must fail closed with no store call, got %v", err)
+	}
+}
+
+// mustHandleRef returns the secret_ref of tenant's single acme/k1 handle.
+func mustHandleRef(t *testing.T, f *fx, tenant uuid.UUID) string {
+	t.Helper()
+	var ref string
+	if err := f.rt.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT secret_ref FROM provider_credential_handles WHERE tenant_id = $1 AND provider_id = 'acme' AND key_id = 'k1'`, tenant).Scan(&ref)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return ref
 }
 
 // --- a KeyImplicit reference scheme (test-only; HMAC over the body) ------

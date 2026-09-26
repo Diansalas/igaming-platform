@@ -59,7 +59,7 @@ func TestConcurrentStress_ManyDuplicateBetDeliveries(t *testing.T) {
 			start := time.Now()
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 				var err error
-				results[i], err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+				results[i], err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 				return err
 			})
 			durations[i] = time.Since(start)
@@ -160,7 +160,7 @@ func TestConcurrentStress_ManyDuplicateBetDeliveriesDuringSelfExclusion(t *testi
 				defer wg.Done()
 				errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 					var err error
-					results[i], err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+					results[i], err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 					return err
 				})
 			}()

@@ -166,7 +166,7 @@ func TestPlatformNormalizesReason_CallbackStatusUpdate(t *testing.T) {
 	var applied bool
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		_, applied, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+		_, applied, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 		return err
 	})
 	if err != nil || !applied {
@@ -193,7 +193,7 @@ func TestPlatformNormalizesReason_CallbackProviderError(t *testing.T) {
 	var applied bool
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		_, applied, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+		_, applied, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 		return err
 	})
 	if err != nil || !applied {
@@ -224,7 +224,7 @@ func TestPlatformNormalizesReason_MockTruncationFlagSurvives(t *testing.T) {
 	}
 	in := provider.CallbackPayload(f.tenantID, ref, ProviderRejected, rawReason)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -246,7 +246,7 @@ func TestPlatformNormalizesReason_ShortCleanReasonNotFlagged(t *testing.T) {
 	}
 	in := provider.CallbackPayload(f.tenantID, ref, ProviderApproved, "document_ok")
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 		return err
 	}); err != nil {
 		t.Fatal(err)

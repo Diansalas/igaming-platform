@@ -823,16 +823,19 @@ type ReceiveCallbackResult struct {
 	Tombstoned          bool
 }
 
-// ReceiveCallback dispatches a verified provider callback: verifies its
-// tenant-bound authentication (docs/decisions/0022 §3 amendment,
-// PAY-WH-TENANT-1), parses it via the named adapter's HandleCallback,
+// ReceiveVerifiedCallback is phase 2 of a provider callback (ADR 0094
+// §4.1): it runs inside the DOMAIN transaction on a VerifiedCallback that
+// phase 1 (VerifyCallback, which verified its tenant-bound authentication
+// per docs/decisions/0022 §3 amendment, PAY-WH-TENANT-1) produced, re-checks
+// the verified credential handle, parses it via the named adapter's HandleCallback,
 // resolves the deposit_intents row it refers to, and posts Flow 1
 // (deposit) or Flow 2 (deposit reversal) via ledger.Post.
 //
 // tenantID is the ROUTE-resolved tenant (an HTTP handler's per-tenant
 // webhook path segment, resolved and its active status checked BEFORE
-// calling this function, and BEFORE opening tx via db.Pool.WithTenant) -
-// never a value read from in.Body. It is simultaneously (a) the RLS GUC
+// VerifyCallback, and BEFORE opening tx via db.Pool.WithTenant) - never a
+// value read from the body. It must equal the tenant the VerifiedCallback
+// was sealed for. It is simultaneously (a) the RLS GUC
 // tx already runs under, (b) the tenant ProviderAcceptsWebhook checks
 // against, and (c) the tenant bound into the signature this function
 // verifies (invariant I3) - a callback whose credential/signature does not
@@ -871,21 +874,21 @@ type ReceiveCallbackResult struct {
 // (an HTTP handler) maps every one of them to the SAME response, so an
 // unauthenticated caller can never distinguish "unknown provider" from
 // "bad signature" by status code or body.
-func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, in InboundCallback) (ReceiveCallbackResult, error) {
-	in.TenantID = tenantID
-	in.ProviderID = providerID
-
-	// (a)-(d): adapter registered, its scheme's Extract, the read-only
-	// ProviderAcceptsWebhook EXISTS (the only statement before
-	// verification, I1), single-credential resolution, and the
-	// ORCHESTRATOR-ENFORCED scheme.Verify (Stage 10.3 W1a,
-	// WH-VENDOR-SCHEME-1; webhook_verify.go). Every failure is a
-	// *CallbackAuthError with a closed reason. Self-sufficient: payments-
-	// package tests call ReceiveCallback directly, bypassing the HTTP
-	// preamble.
-	provider, cred, err := o.verifyCallback(ctx, tx, in)
-	if err != nil {
-		return ReceiveCallbackResult{}, err
+func (o *Orchestrator) ReceiveVerifiedCallback(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, v *VerifiedCallback) (ReceiveCallbackResult, error) {
+	// (a)-(d) ran in phase 1 (VerifyCallback, no transaction held; ADR
+	// 0094 §4.1). Redeem is the FIRST thing in this domain transaction:
+	// the single-use, age-bounded token must be for exactly this
+	// (domain, tenant, provider), and HandleRecheckSQL must confirm, in
+	// tx, that the handle that verified is still usable (ADR 0094 §5).
+	// Any failure is the uniform credential_unavailable and nothing is
+	// read or written.
+	in, cred, authErr := v.Redeem(ctx, tx, WebhookDomain, tenantID, providerID, o.webhookCredentialResolver)
+	if authErr != nil {
+		return ReceiveCallbackResult{}, authErr
+	}
+	provider, registered := o.providers[providerID]
+	if !registered || provider == nil {
+		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonCredentialUnavailable, KeyID: cred.KeyID}
 	}
 	keyID := cred.KeyID
 

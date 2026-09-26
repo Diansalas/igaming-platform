@@ -147,7 +147,7 @@ func TestStage9_ConcurrentDistinctDepositsSameWallet_NoLostUpdate(t *testing.T) 
 			defer wg.Done()
 			<-start
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", payloads[i])
+				_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payloads[i])
 				return err
 			})
 		}(i)
@@ -252,7 +252,7 @@ func TestStage9_TamperedWebhookNeverReachesTheLedger(t *testing.T) {
 	}
 	for name, tc := range cases {
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", tc.payload)
+			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", tc.payload)
 			return err
 		})
 		var authErr *CallbackAuthError
@@ -281,7 +281,7 @@ func TestStage9_TamperedWebhookNeverReachesTheLedger(t *testing.T) {
 	// the three refusals above were signature checks and not some
 	// unrelated blanket rejection of this intent.
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", genuine)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", genuine)
 		return err
 	}); err != nil {
 		t.Fatalf("the genuine callback must post: %v", err)

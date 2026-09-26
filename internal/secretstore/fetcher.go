@@ -4,11 +4,14 @@ import (
 	"container/list"
 	"context"
 	"crypto/hmac"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/Diansalas/igaming-platform/internal/txscope"
 )
 
 // Platform constants (security review 07-w2a-design-review-security.md §5;
@@ -21,14 +24,36 @@ const (
 	StoreMaxRetries = 1
 	// StoreRetryBackoff is the pause before the retry.
 	StoreRetryBackoff = 50 * time.Millisecond
-	// MaxConcurrentStoreCalls bounds concurrent store calls per process,
-	// and so the pooled DB connections that can be held waiting on the
-	// store.
+	// MaxConcurrentStoreCalls (S) bounds concurrent store calls per
+	// process. It protects the store and the process; it no longer has
+	// anything to do with pooled DB connections, because no connection is
+	// ever held across a store call (ADR 0094 INV-POOL).
 	MaxConcurrentStoreCalls = 4
-	// SlotWait is how long a caller waits for a store-call slot (and how
-	// long a caller joining another caller's in-flight fetch waits for its
-	// result) before failing fast.
+	// MaxConcurrentStoreCallsPerTenant (P) bounds one tenant's concurrent
+	// store calls on one backend (ADR 0094 §4.2), so one tenant's outage
+	// holds at most P of the S slots. 2, not 1: security condition C8's
+	// cold-start test (4 distinct cold refs of one tenant at 150 ms store
+	// latency, 0 rejections) fails at 1 and passes at 2
+	// (TestFetcher_ColdStartFourRefs_NoRejection).
+	MaxConcurrentStoreCallsPerTenant = 2
+	// MaxDegradedStoreCalls (D) bounds the store calls held by ALL
+	// degraded tenants together (a tenant is degraded while its
+	// (scheme, tenant) breaker is not closed or has >= 1 consecutive
+	// counting failure), so S - D slots always stay available to healthy
+	// tenants once failures have been observed (ADR 0094 §6).
+	MaxDegradedStoreCalls = 2
+	// SlotWait is how long a HEALTHY caller waits for a store-call
+	// admission (and how long a healthy caller joining another caller's
+	// in-flight fetch waits for its result) before failing fast. A
+	// degraded tenant's callers never wait.
 	SlotWait = 250 * time.Millisecond
+	// MultiTenantDegradedWarnThreshold distinct degraded tenants on one
+	// backend at once raise one rate-limited warn line
+	// (secret_store_multi_tenant_degraded), so a real backend-wide outage
+	// is visible as one event (security condition C9).
+	MultiTenantDegradedWarnThreshold = 3
+	// MultiTenantDegradedWarnInterval rate-limits that line per backend.
+	MultiTenantDegradedWarnInterval = time.Minute
 	// BreakerTripThreshold consecutive counting failures open a breaker.
 	BreakerTripThreshold = 3
 	// BreakerInitialCooldown is the first open period; it doubles on each
@@ -56,14 +81,17 @@ const (
 type Fingerprinter func(secret []byte) string
 
 // Fetcher is the process-wide guarded path from a handle row to its secret
-// bytes (security review §5): a positive cache keyed on (tenant, ref,
-// fingerprint) with the fingerprint compared on EVERY hit, a per-key
-// negative cache, a per-backend circuit breaker, a process-wide bound on
-// concurrent store calls, and single-flight per key.
+// bytes (security review §5 as amended by ADR 0094 §4.2): a positive cache
+// keyed on (tenant, ref, fingerprint) with the fingerprint compared on
+// EVERY hit, a per-key negative cache, a circuit breaker per (backend,
+// tenant), a process-wide bound on concurrent store calls with a
+// per-tenant cap and a budget for degraded tenants, and single-flight per
+// key.
 //
 // The Fetcher never decides whether a credential may be used. Its caller
 // has already read the handle row in the same request (so a revoked
-// handle never reaches Fetch, in any breaker state).
+// handle never reaches Fetch, in any breaker state). Fetch refuses to run
+// while its caller holds a pooled DB transaction (txscope.Held).
 type Fetcher struct {
 	router      *Router
 	fingerprint Fingerprinter
@@ -72,14 +100,27 @@ type Fetcher struct {
 	sleep       func(context.Context, time.Duration)
 	slotWait    time.Duration
 
-	slots chan struct{}
-
 	mu        sync.Mutex
 	positive  *lru
 	negative  *lru
 	flights   map[cacheKey]*flight
-	breakers  map[string]*breaker
+	breakers  map[breakerKey]*breaker
 	lastAlert map[string]time.Time
+	lastWarn  map[string]time.Time
+
+	// Admission accounting (guarded by mu). changed is closed and replaced
+	// on every release so waiting healthy owners re-check.
+	inFlight         int
+	inFlightTenant   map[breakerKey]int
+	degradedInFlight int
+	changed          chan struct{}
+}
+
+// breakerKey scopes a breaker and the per-tenant admission count to one
+// tenant on one backend.
+type breakerKey struct {
+	scheme string
+	tenant uuid.UUID
 }
 
 // FetcherOption configures a Fetcher (tests inject a clock and a logger).
@@ -107,20 +148,31 @@ func NewFetcher(router *Router, fp Fingerprinter, opts ...FetcherOption) *Fetche
 		now:         time.Now,
 		sleep:       sleepCtx,
 		slotWait:    SlotWait,
-		slots:       make(chan struct{}, MaxConcurrentStoreCalls),
 		positive:    newLRU(CacheMaxEntries),
 		negative:    newLRU(CacheMaxEntries),
 		flights:     map[cacheKey]*flight{},
-		breakers:    map[string]*breaker{},
+		breakers:    map[breakerKey]*breaker{},
 		lastAlert:   map[string]time.Time{},
+		lastWarn:    map[string]time.Time{},
+
+		inFlightTenant: map[breakerKey]int{},
+		changed:        make(chan struct{}),
 	}
 	for _, o := range opts {
 		o(f)
 	}
-	for _, s := range router.Schemes() {
-		f.breakers[s] = newBreaker()
-	}
 	return f
+}
+
+// The admission constants must keep 0 < P <= D < S (ADR 0094 §4.2), so a
+// degraded tenant can always probe and healthy tenants always keep S - D
+// slots.
+func init() {
+	if MaxConcurrentStoreCallsPerTenant <= 0 || MaxConcurrentStoreCallsPerTenant > MaxDegradedStoreCalls ||
+		MaxDegradedStoreCalls >= MaxConcurrentStoreCalls {
+		panic(fmt.Sprintf("secretstore: admission constants violate 0 < P <= D < S (P=%d D=%d S=%d)",
+			MaxConcurrentStoreCallsPerTenant, MaxDegradedStoreCalls, MaxConcurrentStoreCalls))
+	}
 }
 
 // Router returns the Fetcher's router.
@@ -160,7 +212,20 @@ type flight struct {
 // Fetch returns ref's secret for tenantID if - and only if - its keyed
 // fingerprint equals fingerprint. Errors are *Error: ClassNoBackend,
 // ClassIntegrity (P1, never served), or a store class.
+//
+// Fetch must never be called while the caller holds a pooled DB
+// transaction (ADR 0094 INV-POOL): a ctx marked by txscope fails closed
+// with ClassStoreConfig, before any cache, breaker or store access, and
+// logs secret_fetch_with_tx_held.
 func (f *Fetcher) Fetch(ctx context.Context, tenantID uuid.UUID, ref Ref, fingerprint string) (Secret, error) {
+	if txscope.Held(ctx) {
+		logger := slog.Default()
+		if f != nil && f.logger != nil {
+			logger = f.logger
+		}
+		logTxHeld(logger, "secretstore.Fetcher.Fetch", tenantID)
+		return Secret{}, classError(ClassStoreConfig)
+	}
 	if f == nil || f.fingerprint == nil || f.router == nil {
 		return Secret{}, classError(ClassNoBackend)
 	}
@@ -204,12 +269,18 @@ func (f *Fetcher) Fetch(ctx context.Context, tenantID uuid.UUID, ref Ref, finger
 		f.negative.remove(key)
 	}
 
-	// 3. Join an in-flight fetch of the same key, or start one.
+	// 3. Join an in-flight fetch of the same key, or start one. A
+	// degraded tenant's followers never wait (ADR 0094 §4.2 point 4).
+	bk := breakerKey{scheme: ref.Scheme(), tenant: tenantID}
 	if fl, inFlight := f.flights[key]; inFlight {
+		wait := f.slotWait
+		if f.degradedLocked(bk) {
+			wait = -1
+		}
 		f.mu.Unlock()
-		return f.await(ctx, fl, stale, f.slotWait)
+		return f.await(ctx, fl, stale, wait)
 	}
-	br := f.breakers[ref.Scheme()]
+	br := f.breakerLocked(bk)
 	permitted, probe := br.allow(now)
 	if !permitted {
 		f.mu.Unlock()
@@ -219,15 +290,42 @@ func (f *Fetcher) Fetch(ctx context.Context, tenantID uuid.UUID, ref Ref, finger
 	f.flights[key] = fl
 	f.mu.Unlock()
 
-	f.own(ctx, fl, key, store, ref, br, probe)
+	f.own(ctx, fl, key, bk, store, ref, br, probe)
 	return f.await(ctx, fl, stale, 0)
+}
+
+// logTxHeld is the INV-POOL guard's single log line: the entry point and
+// the tenant id only.
+func logTxHeld(logger *slog.Logger, entryPoint string, tenantID uuid.UUID) {
+	logger.Error("secret_fetch_with_tx_held",
+		"entry_point", entryPoint,
+		"tenant_id", tenantID.String())
+}
+
+// breakerLocked returns bk's breaker, creating a closed one. Guarded by
+// f.mu.
+func (f *Fetcher) breakerLocked(bk breakerKey) *breaker {
+	b, ok := f.breakers[bk]
+	if !ok {
+		b = newBreaker()
+		f.breakers[bk] = b
+	}
+	return b
+}
+
+// degradedLocked reports whether bk is degraded: its breaker is not
+// closed, or it has at least one consecutive counting failure. Guarded by
+// f.mu.
+func (f *Fetcher) degradedLocked(bk breakerKey) bool {
+	b, ok := f.breakers[bk]
+	return ok && (b.state != breakerClosed || b.consecutive > 0)
 }
 
 // own performs the single store call for key: take a slot (waiting at most
 // SlotWait), call the store under a context detached from the caller's
 // cancellation but bounded by StoreCallTimeout, record the outcome, and
 // publish the result to every waiter.
-func (f *Fetcher) own(ctx context.Context, fl *flight, key cacheKey, store Store, ref Ref, br *breaker, probe bool) {
+func (f *Fetcher) own(ctx context.Context, fl *flight, key cacheKey, bk breakerKey, store Store, ref Ref, br *breaker, probe bool) {
 	defer func() {
 		f.mu.Lock()
 		delete(f.flights, key)
@@ -235,7 +333,11 @@ func (f *Fetcher) own(ctx context.Context, fl *flight, key cacheKey, store Store
 		close(fl.done)
 	}()
 
-	if !f.acquireSlot(ctx) {
+	release, ok := f.admit(ctx, bk)
+	if !ok {
+		// Admission lost: never negative-cached (ADR 0094 §4.2 point 3 -
+		// that would turn contention into denial), and an aborted probe is
+		// not counted.
 		if probe {
 			f.mu.Lock()
 			br.abortProbe()
@@ -244,7 +346,7 @@ func (f *Fetcher) own(ctx context.Context, fl *flight, key cacheKey, store Store
 		fl.err = classError(ClassUnavailable)
 		return
 	}
-	defer func() { <-f.slots }()
+	defer release()
 
 	callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), StoreCallTimeout)
 	defer cancel()
@@ -253,10 +355,17 @@ func (f *Fetcher) own(ctx context.Context, fl *flight, key cacheKey, store Store
 	now := f.now()
 	integrity := false
 	f.mu.Lock()
+	// Re-resolve the breaker: another flight may have pruned the object
+	// this call started with (a probe's breaker is never pruned while the
+	// probe is in flight, so a probe records on the same object).
+	br = f.breakerLocked(bk)
 	switch {
 	case err != nil:
 		class := ClassOf(err)
 		br.record(now, probe, class.CountsTowardBreaker())
+		if class.CountsTowardBreaker() {
+			f.warnMultiTenantDegradedLocked(bk.scheme, now)
+		}
 		ttl := NegativeTTLPerRef
 		if class.CountsTowardBreaker() {
 			ttl = NegativeTTLCounting
@@ -276,6 +385,7 @@ func (f *Fetcher) own(ctx context.Context, fl *flight, key cacheKey, store Store
 		f.positive.put(key, positiveEntry{secret: secret, fetchedAt: now})
 		fl.secret = secret
 	}
+	f.pruneBreakerLocked(bk)
 	f.mu.Unlock()
 	if integrity {
 		f.integrityFailure(key.tenant, ref)
@@ -322,28 +432,106 @@ func callStore(ctx context.Context, store Store, ref Ref) (s Secret, err error) 
 	return s, nil
 }
 
-func (f *Fetcher) acquireSlot(ctx context.Context) bool {
-	select {
-	case f.slots <- struct{}{}:
-		return true
-	default:
-	}
-	t := time.NewTimer(f.slotWait)
-	defer t.Stop()
-	select {
-	case f.slots <- struct{}{}:
-		return true
-	case <-t.C:
-		return false
-	case <-ctx.Done():
-		return false
+// admit takes one store-call admission for bk (ADR 0094 §4.2): a global
+// slot (at most S), a per-tenant token (at most P for bk), and - when bk is
+// degraded - a degraded token (at most D across all degraded tenants). A
+// healthy owner waits up to slotWait; a degraded owner never waits. It
+// returns the release func on success.
+func (f *Fetcher) admit(ctx context.Context, bk breakerKey) (func(), bool) {
+	var timeout <-chan time.Time
+	for {
+		f.mu.Lock()
+		degraded := f.degradedLocked(bk)
+		if f.inFlight < MaxConcurrentStoreCalls && f.inFlightTenant[bk] < MaxConcurrentStoreCallsPerTenant &&
+			(!degraded || f.degradedInFlight < MaxDegradedStoreCalls) {
+			f.inFlight++
+			f.inFlightTenant[bk]++
+			if degraded {
+				f.degradedInFlight++
+			}
+			f.mu.Unlock()
+			return func() { f.release(bk, degraded) }, true
+		}
+		if degraded {
+			f.mu.Unlock()
+			return nil, false
+		}
+		changed := f.changed
+		f.mu.Unlock()
+		if timeout == nil {
+			t := time.NewTimer(f.slotWait)
+			defer t.Stop()
+			timeout = t.C
+		}
+		select {
+		case <-changed:
+		case <-timeout:
+			return nil, false
+		case <-ctx.Done():
+			return nil, false
+		}
 	}
 }
 
+// release returns an admission taken by admit and wakes waiting owners.
+func (f *Fetcher) release(bk breakerKey, degraded bool) {
+	f.mu.Lock()
+	f.inFlight--
+	if n := f.inFlightTenant[bk] - 1; n > 0 {
+		f.inFlightTenant[bk] = n
+	} else {
+		delete(f.inFlightTenant, bk)
+	}
+	if degraded {
+		f.degradedInFlight--
+	}
+	close(f.changed)
+	f.changed = make(chan struct{})
+	f.mu.Unlock()
+}
+
+// pruneBreakerLocked deletes bk's breaker once it is closed with no
+// counting failure (equivalent to absent), so the map is bounded by the
+// tenants with recent failures. Guarded by f.mu.
+func (f *Fetcher) pruneBreakerLocked(bk breakerKey) {
+	if b, ok := f.breakers[bk]; ok && b.state == breakerClosed && b.consecutive == 0 && !b.probeInFlight {
+		delete(f.breakers, bk)
+	}
+}
+
+// warnMultiTenantDegradedLocked logs secret_store_multi_tenant_degraded,
+// at most once per MultiTenantDegradedWarnInterval per backend, when at
+// least MultiTenantDegradedWarnThreshold distinct tenants on scheme are
+// degraded at once (security condition C9). Guarded by f.mu.
+func (f *Fetcher) warnMultiTenantDegradedLocked(scheme string, now time.Time) {
+	n := 0
+	for bk := range f.breakers {
+		if bk.scheme == scheme && f.degradedLocked(bk) {
+			n++
+		}
+	}
+	if n < MultiTenantDegradedWarnThreshold {
+		return
+	}
+	if last, seen := f.lastWarn[scheme]; seen && now.Sub(last) < MultiTenantDegradedWarnInterval {
+		return
+	}
+	f.lastWarn[scheme] = now
+	f.logger.Warn("secret_store_multi_tenant_degraded", "scheme", scheme, "degraded_tenants", n)
+}
+
 // await waits for fl. wait 0 means "until done" (the owner, whose own call
-// is already bounded); a follower waits at most SlotWait and then fails
-// fast (serving a stale entry if one is within max-stale).
+// is already bounded); a healthy follower waits at most SlotWait and then
+// fails fast (serving a stale entry if one is within max-stale); wait < 0
+// (a degraded tenant's follower) does not wait at all.
 func (f *Fetcher) await(ctx context.Context, fl *flight, stale *positiveEntry, wait time.Duration) (Secret, error) {
+	if wait < 0 {
+		select {
+		case <-fl.done:
+		default:
+			return serveStaleOr(stale, ClassUnavailable)
+		}
+	}
 	var timeout <-chan time.Time
 	if wait > 0 {
 		t := time.NewTimer(wait)
@@ -407,15 +595,28 @@ func (f *Fetcher) integrityFailure(tenantID uuid.UUID, ref Ref) {
 		"secret_ref", ref.String())
 }
 
-// BreakerState reports the breaker state for scheme (tests and metrics).
-func (f *Fetcher) BreakerState(scheme string) string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	b, ok := f.breakers[scheme]
-	if !ok {
+// BreakerState reports the breaker state for tenant on scheme (tests and
+// metrics): "none" if the scheme has no backend, "closed" for a tenant
+// with no breaker entry.
+func (f *Fetcher) BreakerState(scheme string, tenant uuid.UUID) string {
+	if _, routed := f.router.Backend(scheme); !routed {
 		return "none"
 	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, ok := f.breakers[breakerKey{scheme: scheme, tenant: tenant}]
+	if !ok {
+		return "closed"
+	}
 	return b.stateAt(f.now())
+}
+
+// AdmissionSnapshot reports the admission counters (tests and metrics):
+// total store calls in flight, and those held by degraded tenants.
+func (f *Fetcher) AdmissionSnapshot() (inFlight, degradedInFlight int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inFlight, f.degradedInFlight
 }
 
 // --- circuit breaker --------------------------------------------------------

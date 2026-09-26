@@ -76,7 +76,7 @@ func TestKYCWebhook_ValidSameTenant_Approves(t *testing.T) {
 	var v Verification
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		v, _, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+		v, _, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 		return err
 	})
 	if err != nil {
@@ -126,7 +126,7 @@ func TestKYCWebhook_CrossTenant_Rejected(t *testing.T) {
 	var captured *recordingTx
 	err = pool.WithTenant(context.Background(), fB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		captured = newRecordingTx(tx)
-		_, _, err := orch.ReceiveCallback(ctx, captured, fB.tenantID, "mock", in)
+		_, _, err := orch.receiveCallbackInTx(ctx, captured, fB.tenantID, "mock", in)
 		return err
 	})
 	var authErr *CallbackAuthError
@@ -166,8 +166,18 @@ func (r equalSecretResolver) ResolveKey(_ context.Context, tenantID uuid.UUID, p
 
 // Resolve adapts ResolveKey to the ADR 0093 §4 resolver signature (a
 // single-key test double ignores tx; KeyImplicit fails closed).
-func (r equalSecretResolver) Resolve(ctx context.Context, _ pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
+func (r equalSecretResolver) Resolve(ctx context.Context, _ webhookauth.TenantReader, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
 	return webhookauth.ResolveSingleKey(ctx, r, tenantID, providerID, keyID, sel)
+}
+
+// Recheck implements webhookauth.Resolver for this test double (ADR 0094
+// §4.1): it has no handle rows, so it accepts only a handle-less
+// credential bound to tenantID.
+func (r equalSecretResolver) Recheck(_ context.Context, _ pgx.Tx, tenantID uuid.UUID, c webhookauth.Credential) error {
+	if c.HandleID != uuid.Nil || c.TenantID != tenantID {
+		return webhookauth.ErrCredentialUnavailable
+	}
+	return nil
 }
 
 // K4: even with a resolver that hands out an EQUAL secret for every
@@ -207,7 +217,7 @@ func TestKYCWebhook_EqualSecretResolver_CrossTenantRejected(t *testing.T) {
 	// verified for A, but B's own tenant id gets substituted into the
 	// signing input the orchestrator recomputes - it will not match.
 	err := pool.WithTenant(context.Background(), fB.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := orch.ReceiveCallback(ctx, tx, fB.tenantID, "mock", inA)
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, fB.tenantID, "mock", inA)
 		return err
 	})
 	var authErr *CallbackAuthError
@@ -365,7 +375,7 @@ func TestKYCWebhook_TamperMatrix_Rejected(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			in := tc.build()
 			err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				_, _, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+				_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 				return err
 			})
 			var authErr *CallbackAuthError
@@ -432,7 +442,7 @@ func TestKYCWebhook_ProviderIDSubstitution_Rejected(t *testing.T) {
 	// Delivered to provider "mock2" under the SAME tenant: registered,
 	// resolvable, but signed for the WRONG provider id.
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock2", in)
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock2", in)
 		return err
 	})
 	var authErr *CallbackAuthError
@@ -462,7 +472,7 @@ func TestKYCWebhook_BadSignature_NoStatementBeforeVerification(t *testing.T) {
 	var captured *recordingTx
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		captured = newRecordingTx(tx)
-		_, _, err := orch.ReceiveCallback(ctx, captured, f.tenantID, "mock", in)
+		_, _, err := orch.receiveCallbackInTx(ctx, captured, f.tenantID, "mock", in)
 		return err
 	})
 	var authErr *CallbackAuthError
@@ -494,7 +504,7 @@ func TestKYCWebhook_Replay_NoOp(t *testing.T) {
 		var v Verification
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			v, _, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+			v, _, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 			return err
 		})
 		if err != nil {
@@ -534,7 +544,7 @@ func TestKYCWebhook_PendingAfterReviewRequired_NoOp(t *testing.T) {
 		var v Verification
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			v, _, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+			v, _, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 			return err
 		})
 		if err != nil {
@@ -572,7 +582,7 @@ func TestKYCWebhook_8ConcurrentTerminalCallbacks_ExactlyOneWins(t *testing.T) {
 			defer wg.Done()
 			in := provider.CallbackPayload(f.tenantID, ref, outcome, "concurrent")
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				_, _, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+				_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 				return err
 			})
 		}(i, outcome)
@@ -600,7 +610,7 @@ func TestKYCWebhook_VerifiedUnknownReference_NotFound(t *testing.T) {
 	f, provider, orch, _ := newWebhookFixture(t, pool)
 	in := provider.CallbackPayload(f.tenantID, "no-such-reference", ProviderApproved, "x")
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 		return err
 	})
 	if !errors.Is(err, ErrNotFound) {
@@ -625,7 +635,7 @@ func TestKYCWebhook_VerifiedBadOutcome_MalformedBody_NoAudit(t *testing.T) {
 
 	before := noeffect.Capture(t, pool, []uuid.UUID{f.tenantID}, []noeffect.Verification{{TenantID: f.tenantID, ID: verificationID}})
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 		return err
 	})
 	if !errors.Is(err, ErrCallbackMalformedBody) {
@@ -674,7 +684,7 @@ func TestKYCWebhook_AfterStaffDecision_NoOp(t *testing.T) {
 		var v Verification
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			v, _, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+			v, _, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 			return err
 		})
 		return v, err
@@ -701,7 +711,7 @@ func TestKYCWebhook_OutcomeError_NoStateChange_OneFailureAudit(t *testing.T) {
 
 	in := provider.CallbackPayload(f.tenantID, ref, ProviderError, "vendor_outage")
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 		return err
 	})
 	if err != nil {
@@ -734,7 +744,7 @@ func TestKYCWebhook_OutcomeErrorNonTerminal_RedeliveredWritesOneAuditRowPerDeliv
 	in := provider.CallbackPayload(f.tenantID, ref, ProviderError, "vendor_outage")
 	for i := 0; i < 2; i++ {
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, _, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+			_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 			return err
 		})
 		if err != nil {
@@ -766,7 +776,7 @@ func TestKYCWebhook_OutcomeErrorAgainstTerminal_NoAuditRow(t *testing.T) {
 	// Reach a terminal status first (a normal approval).
 	approve := provider.CallbackPayload(f.tenantID, ref, ProviderApproved, "auto_approved")
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", approve)
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", approve)
 		return err
 	})
 	if err != nil {
@@ -783,7 +793,7 @@ func TestKYCWebhook_OutcomeErrorAgainstTerminal_NoAuditRow(t *testing.T) {
 	// audit row, and must never change the (already terminal) status.
 	in := provider.CallbackPayload(f.tenantID, ref, ProviderError, "vendor_outage")
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 		return err
 	})
 	if err != nil {
@@ -817,7 +827,7 @@ func TestKYCWebhook_OversizedControlCharacterReason_NormalizedInDBAndAudit(t *te
 
 	in := provider.CallbackPayload(f.tenantID, ref, ProviderRejected, hugeReason)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", in)
 		return err
 	})
 	if err != nil {

@@ -122,12 +122,25 @@ type twoKeyImplicitResolver struct {
 	active, previous webhookauth.Credential
 }
 
-func (r twoKeyImplicitResolver) Resolve(_ context.Context, _ pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
+func (r twoKeyImplicitResolver) Resolve(_ context.Context, _ webhookauth.TenantReader, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
 	if sel != webhookauth.KeyImplicit || keyID != "" || tenantID != r.active.TenantID || providerID != r.active.ProviderID {
 		return webhookauth.CredentialSet{}, webhookauth.ErrCredentialUnavailable
 	}
 	p := r.previous
 	return webhookauth.CredentialSet{Active: r.active, Previous: &p}, nil
+}
+
+// Recheck implements webhookauth.Resolver: a test double has no handle
+// rows, so it accepts exactly its own two credentials (by key id and
+// fingerprint) for its tenant and provider.
+func (r twoKeyImplicitResolver) Recheck(_ context.Context, _ pgx.Tx, tenantID uuid.UUID, c webhookauth.Credential) error {
+	for _, k := range []webhookauth.Credential{r.active, r.previous} {
+		if tenantID == k.TenantID && c.TenantID == k.TenantID && c.ProviderID == k.ProviderID &&
+			c.KeyID == k.KeyID && c.Fingerprint == k.Fingerprint {
+			return nil
+		}
+	}
+	return webhookauth.ErrCredentialUnavailable
 }
 
 // AssertVerifiedKeyLog checks out (JSON slog output) holds exactly one

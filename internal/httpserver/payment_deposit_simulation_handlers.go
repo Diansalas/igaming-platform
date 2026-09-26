@@ -282,8 +282,19 @@ func newSimulateDepositCallbackHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		var result payments.ReceiveCallbackResult
-		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+		// ADR 0094 §4.1, three steps: (1) a READ ONLY transaction reads the
+		// caller's own intent and builds the payload; (2) VerifyCallback
+		// runs with NO transaction held; (3) the domain transaction
+		// RE-VALIDATES the intent (a TOCTOU gap otherwise: it could have
+		// settled between (1) and (3)), then redeems the verified callback
+		// and writes the simulation audit record.
+		var (
+			result            payments.ReceiveCallbackResult
+			providerID        string
+			providerReference string
+			inbound           payments.InboundCallback
+		)
+		err = deps.DB.WithTenantReadOnly(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
 			intent, err := resolveOwnDepositIntent(ctx, tx, depositID, playerAccountID)
 			if err != nil {
 				return err
@@ -291,8 +302,8 @@ func newSimulateDepositCallbackHandler(deps Deps) http.HandlerFunc {
 			if err := requireDepositAwaitingCallback(intent); err != nil {
 				return err
 			}
-			providerID := *intent.ProviderID
-			providerReference := *intent.ProviderReference
+			providerID = *intent.ProviderID
+			providerReference = *intent.ProviderReference
 
 			mock, ok := requireMockPaymentProvider(deps, providerID)
 			if !ok {
@@ -305,15 +316,35 @@ func newSimulateDepositCallbackHandler(deps Deps) http.HandlerFunc {
 			// one"). The signed bytes/headers never leave this process; the
 			// response below carries status only, so this route cannot mint
 			// a callback replayable at another tenant's webhook URL.
-			inbound := mock.CallbackPayload(tc.TenantID, payments.CallbackEventDeposit, providerReference, "",
+			inbound = mock.CallbackPayload(tc.TenantID, payments.CallbackEventDeposit, providerReference, "",
 				payments.OutcomeSucceeded, intent.Amount, intent.AssetCode, "", false)
-			result, err = deps.PaymentOrchestrator.ReceiveCallback(ctx, tx, tc.TenantID, providerID, inbound)
-			if err != nil {
-				return err
-			}
-			recordDepositSimulationAudit(ctx, tx, r, tc.TenantID, playerAccountID, intent.ID, providerID, providerReference, result)
 			return nil
 		})
+		var verified *payments.VerifiedCallback
+		if err == nil {
+			verified, err = deps.PaymentOrchestrator.VerifyCallback(r.Context(), deps.DB, tc.TenantID, providerID, inbound)
+		}
+		if err == nil {
+			err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
+				intent, err := resolveOwnDepositIntent(ctx, tx, depositID, playerAccountID)
+				if err != nil {
+					return err
+				}
+				if err := requireDepositAwaitingCallback(intent); err != nil {
+					return err
+				}
+				if intent.ProviderID == nil || *intent.ProviderID != providerID ||
+					intent.ProviderReference == nil || *intent.ProviderReference != providerReference {
+					return &apierror.Error{Code: apierror.CodeConflict, Message: "deposit changed during simulation"}
+				}
+				result, err = deps.PaymentOrchestrator.ReceiveVerifiedCallback(ctx, tx, tc.TenantID, providerID, verified)
+				if err != nil {
+					return err
+				}
+				recordDepositSimulationAudit(ctx, tx, r, tc.TenantID, playerAccountID, intent.ID, providerID, providerReference, result)
+				return nil
+			})
+		}
 		if errors.Is(err, payments.ErrDepositIntentNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "deposit not found")
 			return

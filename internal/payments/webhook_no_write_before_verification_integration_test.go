@@ -167,7 +167,7 @@ func TestWebhook_BadSignature_NoWriteBeforeVerification(t *testing.T) {
 	var captured *recordingTx
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		captured = newRecordingTx(tx)
-		_, err := orch.ReceiveCallback(ctx, captured, f.tenantID, "mock-psp", payload)
+		_, err := orch.receiveCallbackInTx(ctx, captured, f.tenantID, "mock-psp", payload)
 		return err
 	})
 	var authErr *CallbackAuthError

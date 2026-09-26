@@ -41,7 +41,7 @@ func (e f7PaymentsEnv) deliver(payload InboundCallback) (ReceiveCallbackResult, 
 	var res ReceiveCallbackResult
 	err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		res, err = e.orch.ReceiveCallback(ctx, tx, e.f.tenantID, "mock-psp", payload)
+		res, err = e.orch.receiveCallbackInTx(ctx, tx, e.f.tenantID, "mock-psp", payload)
 		return err
 	})
 	return res, err

@@ -61,7 +61,7 @@ func pr1DefectDeposit(t *testing.T, pool *db.Pool, f orchFixture, orch *Orchestr
 	var res ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		res, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", payload)
+		res, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
 		return err
 	})
 	if err != nil {
@@ -120,7 +120,7 @@ func TestPayRev1_DefectRepro_DistinctReferenceRaceNeverDoublePosts(t *testing.T)
 				aPidCh <- 0
 				return err
 			}
-			out.res, out.err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", reversalAPayload)
+			out.res, out.err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", reversalAPayload)
 			aPidCh <- pid
 			<-aProceed
 			return out.err
@@ -156,7 +156,7 @@ func TestPayRev1_DefectRepro_DistinctReferenceRaceNeverDoublePosts(t *testing.T)
 				return err
 			}
 			bPidCh <- pid
-			out.res, out.err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", reversalBPayload)
+			out.res, out.err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", reversalBPayload)
 			return out.err
 		})
 		bDone <- out

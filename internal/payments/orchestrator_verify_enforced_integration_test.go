@@ -75,7 +75,7 @@ func TestOrchestratorVerify_Payments_EnforcedEvenIfAdapterSkipsIt(t *testing.T) 
 
 	ledgerBefore, auditBefore := countLedgerAndAudit(t, pool, f.tenantID)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", forged)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", forged)
 		return err
 	})
 	var authErr *CallbackAuthError
@@ -91,7 +91,7 @@ func TestOrchestratorVerify_Payments_EnforcedEvenIfAdapterSkipsIt(t *testing.T) 
 	// adapter (the orchestrator's verification is not over-rejecting).
 	genuine := mock.CallbackPayload(f.tenantID, CallbackEventDeposit, ref, "", OutcomeSucceeded, 1000, "EUR", "", false)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", genuine)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", genuine)
 		return err
 	}); err != nil {
 		t.Fatalf("genuine callback rejected: %v", err)

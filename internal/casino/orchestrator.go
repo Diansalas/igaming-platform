@@ -695,17 +695,14 @@ type ReceiveCallbackResult struct {
 // the caller (an HTTP handler) maps every one of them to the SAME uniform
 // 401 response, so an unauthenticated caller can never distinguish
 // "unknown provider" from "bad signature" by status code or body.
-func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, in webhookauth.Inbound) (ReceiveCallbackResult, error) {
-	in.TenantID = tenantID
-	in.ProviderID = providerID
-
-	// (a)+(b)+verify: adapter registered, its scheme's Extract, single-
-	// credential resolution, and the ORCHESTRATOR-ENFORCED scheme.Verify
-	// over the raw bytes (Stage 10.3 W1a, WH-VENDOR-SCHEME-1;
-	// webhook_verify.go) - no statement of any kind runs before it
-	// succeeds (strict I1). Self-sufficient: casino-package tests call
-	// this method directly, bypassing the HTTP preamble.
-	provider, cred, err := o.verifyCallback(ctx, tx, in)
+func (o *Orchestrator) ReceiveVerifiedCallback(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, v *VerifiedCallback) (ReceiveCallbackResult, error) {
+	// (a)+(b)+verify ran in phase 1 (VerifyCallback, no transaction held;
+	// ADR 0094 §4.1) - no statement of any kind ran in THIS transaction
+	// before it. Redeem + Recheck is the first statement here (ADR 0094
+	// §5): a revoked/expired/rotated-away handle, a reused or stale token,
+	// or a tenant/provider/domain mismatch is the uniform
+	// credential_unavailable with nothing read or written.
+	provider, in, cred, err := o.redeemVerified(ctx, tx, tenantID, providerID, v)
 	if err != nil {
 		return ReceiveCallbackResult{}, err
 	}

@@ -172,6 +172,12 @@ type Credential struct {
 	// window (security C4; conformance SC9). Zero for an active credential;
 	// a Previous credential with a zero NotAfter is never used.
 	NotAfter time.Time
+	// HandleID is the provider_credential_handles row this credential was
+	// resolved from (ADR 0094 §4.1, security condition C4): the domain
+	// transaction re-checks exactly this handle after verification
+	// (Resolver.Recheck). uuid.Nil for a MOCK credential, which has no
+	// handle; a real Recheck fails closed on uuid.Nil. Not secret.
+	HandleID uuid.UUID
 }
 
 // String implements fmt.Stringer so %v/%+v/Println of a Credential

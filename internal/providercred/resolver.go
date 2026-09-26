@@ -9,14 +9,17 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/secretstore"
+	"github.com/Diansalas/igaming-platform/internal/txscope"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // HandleReadSQL is THE handle read (ADR 0022 §3 point 9 as amended; ADR
-// 0093 §4): one plain, lock-free, read-only SELECT with an explicit
-// tenant_id = $1 predicate in addition to RLS. No FOR UPDATE/SHARE, no
-// advisory lock, no write. It is the only pre-verification statement a
-// KYC or casino callback may run, and the statement-capture tests
+// 0093 §4; ADR 0094 §4.1): one plain, lock-free, read-only SELECT with an
+// explicit tenant_id = $1 predicate in addition to RLS. No FOR
+// UPDATE/SHARE, no advisory lock, no write. It is the only
+// pre-verification statement a KYC or casino callback may run; it runs in
+// its own READ ONLY transaction that commits before any secret fetch, and
+// the statement-capture tests
 // (TestPointNineCapture_<Domain>_AllowsExactlyOneHandleRead) pin this exact
 // text. The not_before/not_after window is evaluated by the database
 // clock. $5 = ” selects every usable row of the binding (KeyImplicit and
@@ -28,6 +31,19 @@ const HandleReadSQL = `SELECT id, key_id, secret_ref, fingerprint, vendor_accoun
 	`AND not_before <= now() AND (not_after IS NULL OR not_after > now()) ` +
 	`AND ($5::text = '' OR key_id = $5::text) ` +
 	`ORDER BY status, key_id LIMIT 3`
+
+// HandleRecheckSQL is the post-verification re-check (ADR 0094 §5): the
+// FIRST statement of the domain transaction after set_config. It is
+// lock-free (no FOR SHARE: security accepted the narrower [re-check,
+// commit] window over lock traffic on the bet path) and tenant-predicated,
+// and binds the exact handle, fingerprint, domain, provider and purpose of
+// the credential that VERIFIED. Zero rows (revoked, expired, rotated away)
+// fails the callback closed; the statement-capture tests pin this text.
+const HandleRecheckSQL = `SELECT 1 FROM provider_credential_handles ` +
+	`WHERE tenant_id = $1 AND id = $2 AND fingerprint = $3 ` +
+	`AND domain = $4 AND provider_id = $5 AND purpose = $6 ` +
+	`AND status IN ('active', 'verify_only') ` +
+	`AND not_before <= now() AND (not_after IS NULL OR not_after > now())`
 
 type handleRow struct {
 	id              uuid.UUID
@@ -64,8 +80,10 @@ func readHandles(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, domain, pro
 
 // Resolver is the real inbound webhook credential resolver for one domain
 // (webhookauth.Resolver). It holds no credential: every call reads the
-// handle rows in the caller's transaction, then fetches the pinned secret
-// through the process-wide Fetcher.
+// handle rows in its OWN short READ ONLY transaction, which commits, and
+// only then fetches the pinned secret through the process-wide Fetcher -
+// no pooled connection is ever held while waiting on the store (ADR 0094
+// INV-POOL).
 type Resolver struct {
 	sub    *Subsystem
 	domain string
@@ -84,7 +102,10 @@ func (s *Subsystem) Resolver(domain string) webhookauth.Resolver {
 // MarkProductionEligible implements providerkind.ProductionEligible.
 func (r *Resolver) MarkProductionEligible() {}
 
-// Resolve implements webhookauth.Resolver (ADR 0093 §4).
+// Resolve implements webhookauth.Resolver (ADR 0093 §4 as amended by ADR
+// 0094 §4.1). It must be called with NO transaction held: a ctx marked by
+// txscope fails closed (credential_unavailable, no read, no store call,
+// one secret_fetch_with_tx_held log line).
 //
 // Row counts: KeyFromHeader needs exactly one usable row for the named key
 // id; KeyImplicit needs exactly one active row plus at most one
@@ -94,8 +115,12 @@ func (r *Resolver) MarkProductionEligible() {}
 // tenant namespace or a fingerprint mismatch is credential_integrity (P1);
 // a store failure without a cached value within max-stale is
 // credential_store_unavailable.
-func (r *Resolver) Resolve(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
-	if r == nil || r.sub == nil || tx == nil || tenantID == uuid.Nil || !webhookauth.ValidProviderID(providerID) {
+func (r *Resolver) Resolve(ctx context.Context, reader webhookauth.TenantReader, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
+	if r == nil || r.sub == nil || reader == nil || tenantID == uuid.Nil || !webhookauth.ValidProviderID(providerID) {
+		return webhookauth.CredentialSet{}, webhookauth.ErrCredentialUnavailable
+	}
+	if txscope.Held(ctx) {
+		r.sub.logTxHeld("providercred.Resolver.Resolve", tenantID)
 		return webhookauth.CredentialSet{}, webhookauth.ErrCredentialUnavailable
 	}
 	switch sel {
@@ -111,10 +136,17 @@ func (r *Resolver) Resolve(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p
 		return webhookauth.CredentialSet{}, webhookauth.ErrCredentialUnavailable
 	}
 
-	rows, err := readHandles(ctx, tx, tenantID, r.domain, providerID, PurposeWebhookVerify, keyID)
+	var rows []handleRow
+	err := reader.WithTenantReadOnly(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		rows, err = readHandles(ctx, tx, tenantID, r.domain, providerID, PurposeWebhookVerify, keyID)
+		return err
+	})
 	if err != nil {
 		return webhookauth.CredentialSet{}, webhookauth.ErrCredentialUnavailable
 	}
+	// The read-only transaction has committed: from here on no pooled
+	// connection is held, and ctx is the caller's unmarked context.
 
 	var active, previous *handleRow
 	switch sel {
@@ -167,6 +199,27 @@ func (r *Resolver) Resolve(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p
 	return set, nil
 }
 
+// Recheck implements webhookauth.Resolver (ADR 0094 §5; security
+// condition C4): inside the DOMAIN transaction tx, after verification, the
+// handle of the credential that VERIFIED (Active or the verify_only
+// predecessor - c.HandleID) must still be usable, with the same
+// fingerprint, for this domain, provider and purpose, on the database
+// clock. Zero rows, a zero HandleID, a tenant mismatch or any DB error is
+// ErrCredentialUnavailable. It runs under tx's RLS as well as its explicit
+// tenant predicate, so a credential for tenant A re-checked inside a
+// tenant-B transaction finds nothing.
+func (r *Resolver) Recheck(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, c webhookauth.Credential) error {
+	if r == nil || tx == nil || tenantID == uuid.Nil || c.HandleID == uuid.Nil || c.TenantID != tenantID ||
+		!webhookauth.ValidProviderID(c.ProviderID) || !ValidFingerprint(c.Fingerprint) {
+		return webhookauth.ErrCredentialUnavailable
+	}
+	var one int
+	if err := tx.QueryRow(ctx, HandleRecheckSQL, tenantID, c.HandleID, c.Fingerprint, r.domain, c.ProviderID, PurposeWebhookVerify).Scan(&one); err != nil {
+		return webhookauth.ErrCredentialUnavailable
+	}
+	return nil
+}
+
 // credentialFor turns a handle row into a verified Credential: the ref
 // must parse and sit inside the row's own tenant namespace (C1, resolver
 // side), its scheme must have a backend in this process, and the fetched
@@ -183,6 +236,7 @@ func (s *Subsystem) credentialFor(ctx context.Context, tenantID uuid.UUID, domai
 		KeyID:       h.keyID,
 		Secret:      secret.Bytes(),
 		Fingerprint: h.fingerprint,
+		HandleID:    h.id,
 	}
 	if h.vendorAccountID != nil {
 		c.BoundAccountID = *h.vendorAccountID

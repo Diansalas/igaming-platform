@@ -458,12 +458,19 @@ func newKYCWebhookHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		// ADR 0094 §4.1: phase 1 (verification) holds NO transaction - its
+		// handle read runs in a short READ ONLY transaction that commits
+		// before any secret-store fetch; the domain transaction opens only
+		// after it succeeded, and re-checks the verified handle first.
 		var applied bool
-		err := deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
-			var err error
-			_, applied, err = deps.KYCOrchestrator.ReceiveCallback(ctx, tx, t.ID, providerID, webhookauth.Inbound{Header: r.Header, Body: body})
-			return err
-		})
+		verified, err := deps.KYCOrchestrator.VerifyCallback(r.Context(), deps.DB, t.ID, providerID, webhookauth.Inbound{Header: r.Header, Body: body})
+		if err == nil {
+			err = deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
+				var err error
+				_, applied, err = deps.KYCOrchestrator.ReceiveVerifiedCallback(ctx, tx, t.ID, providerID, verified)
+				return err
+			})
+		}
 
 		var authErr *kyc.CallbackAuthError
 		if errors.As(err, &authErr) {

@@ -72,7 +72,7 @@ func TestPayRev1_TenantIsolation_CannotLockOrObserveAnotherTenantsOriginal(t *te
 	reversalPayload := providerA.CallbackPayload(tenantA.tenantID, CallbackEventDepositReversal,
 		"payrev1-tenant-iso-rev", depositRefA, OutcomeSucceeded, amountA, "EUR", "", false)
 	err = pool.WithTenant(context.Background(), tenantA.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orchA.ReceiveCallback(ctx, tx, tenantA.tenantID, "mock-psp", reversalPayload)
+		_, err := orchA.receiveCallbackInTx(ctx, tx, tenantA.tenantID, "mock-psp", reversalPayload)
 		return err
 	})
 

@@ -148,7 +148,14 @@ func testConfig(t testing.TB) config.Config {
 
 func newFx(t testing.TB) *fx {
 	t.Helper()
-	f := &fx{t: t, rt: runtimePool(t), mem: memstore.New(), logs: &logBuffer{}, clock: &fakeClock{}}
+	return newFxOn(t, runtimePool(t))
+}
+
+// newFxOn is newFx over a caller-supplied runtime-role pool (ADR 0094's
+// production-pool-size tests use a 10-connection pool).
+func newFxOn(t testing.TB, pool *db.Pool) *fx {
+	t.Helper()
+	f := &fx{t: t, rt: pool, mem: memstore.New(), logs: &logBuffer{}, clock: &fakeClock{}}
 	router, err := memstore.NewRouter(f.mem)
 	if err != nil {
 		t.Fatal(err)
@@ -329,16 +336,12 @@ func (f *fx) revoke(tenantID, handleID uuid.UUID) {
 	}
 }
 
-// resolve runs the real resolver in a tenant-scoped transaction, the way
-// a domain orchestrator does.
+// resolve runs the real resolver the way a domain orchestrator's phase 1
+// does (ADR 0094 §4.1): with NO transaction held, handing it the pool, so
+// its handle read runs in its own READ ONLY transaction that commits
+// before any secret fetch.
 func (f *fx) resolve(domain string, tenantID uuid.UUID, provider, keyID string, sel keySel) (credSet, error) {
-	var set credSet
-	err := f.rt.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		var err error
-		set, err = f.sub.Resolver(domain).Resolve(ctx, tx, tenantID, provider, keyID, sel)
-		return err
-	})
-	return set, err
+	return f.sub.Resolver(domain).Resolve(context.Background(), f.rt, tenantID, provider, keyID, sel)
 }
 
 func pgCode(err error) string {

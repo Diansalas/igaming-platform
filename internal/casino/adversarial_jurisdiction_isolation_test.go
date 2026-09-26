@@ -65,7 +65,7 @@ func TestReceiveCallback_JurisdictionScopedRiskRuleDoesNotDenyADifferentJurisdic
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
 	})
 	if err != nil {
@@ -120,7 +120,7 @@ func TestReceiveCallback_SessionWithNoJurisdictionFailsClosedAgainstJurisdiction
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
-		result, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
+		result, err = orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
 	})
 	if !errors.Is(err, risk.ErrMissingJurisdiction) {

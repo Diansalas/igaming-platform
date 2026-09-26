@@ -69,7 +69,7 @@ func TestOrchestratorVerify_KYC_EnforcedEvenIfAdapterSkipsIt(t *testing.T) {
 
 	before := noeffect.Capture(t, pool, []uuid.UUID{f.tenantID}, []noeffect.Verification{{TenantID: f.tenantID, ID: verificationID}})
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", forged)
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", forged)
 		return err
 	})
 	var authErr *CallbackAuthError
@@ -86,7 +86,7 @@ func TestOrchestratorVerify_KYC_EnforcedEvenIfAdapterSkipsIt(t *testing.T) {
 
 	genuine := mock.CallbackPayload(f.tenantID, ref, ProviderApproved, "auto_approved")
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, _, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", genuine)
+		_, _, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock", genuine)
 		return err
 	}); err != nil {
 		t.Fatalf("genuine callback rejected: %v", err)

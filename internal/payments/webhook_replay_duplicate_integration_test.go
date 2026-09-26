@@ -67,7 +67,7 @@ func TestWebhook_Replay_SameSuccess_NoSecondCredit(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", payload)
+			_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
 			return err
 		})
 		if err != nil {
@@ -107,7 +107,7 @@ func TestWebhook_Replay_ReversalReplayed_Conflict(t *testing.T) {
 
 	depositPayload := provider.CallbackPayload(f.tenantID, CallbackEventDeposit, originalRef, "", OutcomeSucceeded, 6000, "EUR", "", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", depositPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", depositPayload)
 		return err
 	})
 	if err != nil {
@@ -119,7 +119,7 @@ func TestWebhook_Replay_ReversalReplayed_Conflict(t *testing.T) {
 
 	// First reversal delivery: accepted.
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", reversalPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", reversalPayload)
 		return err
 	})
 	if err != nil {
@@ -135,7 +135,7 @@ func TestWebhook_Replay_ReversalReplayed_Conflict(t *testing.T) {
 	// posting) - distinct from a DIFFERENT reversal reference naming an
 	// already-reversed original, which is ErrDepositAlreadyReversed.
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", reversalPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", reversalPayload)
 		return err
 	})
 	if err != nil {
@@ -151,7 +151,7 @@ func TestWebhook_Replay_ReversalReplayed_Conflict(t *testing.T) {
 	const secondReversalRef = "t8b-second-reversal-ref"
 	secondReversalPayload := provider.CallbackPayload(f.tenantID, CallbackEventDepositReversal, secondReversalRef, originalRef, OutcomeSucceeded, 6000, "EUR", "", false)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", secondReversalPayload)
+		_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", secondReversalPayload)
 		return err
 	})
 	if !errors.Is(err, ErrDepositAlreadyReversed) {
@@ -203,7 +203,7 @@ func TestWebhook_ConcurrentDuplicates_ExactlyOnePosting(t *testing.T) {
 			defer wg.Done()
 			<-start
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-				_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-psp", payload)
+				_, err := orch.receiveCallbackInTx(ctx, tx, f.tenantID, "mock-psp", payload)
 				return err
 			})
 		}(i)
