@@ -1,0 +1,10 @@
+HEAD: c90e591519f73d386114d3e5b60fe8aa80c47af5
+Test: TestCasCapRollback1_PreFix_LateOriginalAfterTombstoneIs500
+Command: go test -tags=integration ./internal/httpserver/... -run '^TestCasCapRollback1_PreFix_LateOriginalAfterTombstoneIs500$' -v
+---
+=== RUN   TestCasCapRollback1_PreFix_LateOriginalAfterTombstoneIs500
+time=2026-09-26T14:05:50.575Z level=ERROR msg=casino_webhook_failed request_id=ce8e2445-c735-46a8-9d47-6cbe2de0d212 error="casino: post bet: ledger: look up existing transaction for idempotency key: no rows in result set" provider_id=mock-casino
+    casino_cap_rollback1_prefix_test.go:233: PRE-FIX EVIDENCE: late original after tombstone -> HTTP 500
+--- PASS: TestCasCapRollback1_PreFix_LateOriginalAfterTombstoneIs500 (0.51s)
+PASS
+ok  	github.com/Diansalas/igaming-platform/internal/httpserver	0.530s

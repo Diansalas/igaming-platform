@@ -1,0 +1,9 @@
+HEAD: c90e591519f73d386114d3e5b60fe8aa80c47af5
+Test: TestKYCReasonBound_PreFix_UnboundedReasonStoredAndShownToPlayer
+Command: go test -tags=integration ./internal/httpserver/... -run '^TestKYCReasonBound_PreFix_UnboundedReasonStoredAndShownToPlayer$' -v
+---
+=== RUN   TestKYCReasonBound_PreFix_UnboundedReasonStoredAndShownToPlayer
+    kyc_reason_bound_prefix_test.go:111: PRE-FIX EVIDENCE: the player-facing GET /v1/me/kyc/verifications response DOES expose the raw, unbounded, control-character-laden reason string verbatim in its 'reason' field (kyc_handlers.go playerVerificationResponse.Reason) - the analysis's finding is confirmed as observed.
+--- PASS: TestKYCReasonBound_PreFix_UnboundedReasonStoredAndShownToPlayer (0.25s)
+PASS
+ok  	github.com/Diansalas/igaming-platform/internal/httpserver	0.264s

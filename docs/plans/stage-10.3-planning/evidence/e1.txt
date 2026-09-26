@@ -1,0 +1,8 @@
+HEAD: c90e591519f73d386114d3e5b60fe8aa80c47af5
+Test: TestCasCapRollback1_PreFix_DisabledCapabilityBlocksWinForPostedBet
+Command: go test -tags=integration ./internal/httpserver/... -run '^TestCasCapRollback1_PreFix_DisabledCapabilityBlocksWinForPostedBet$' -v
+---
+=== RUN   TestCasCapRollback1_PreFix_DisabledCapabilityBlocksWinForPostedBet
+--- PASS: TestCasCapRollback1_PreFix_DisabledCapabilityBlocksWinForPostedBet (0.52s)
+PASS
+ok  	github.com/Diansalas/igaming-platform/internal/httpserver	0.533s
