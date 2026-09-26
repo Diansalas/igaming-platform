@@ -1,0 +1,17 @@
+# Stage 10.1 PAY-REV-1 defect-reproduction test - pre-fix failure evidence
+# Test: TestPayRev1_DefectRepro_DistinctReferenceRaceNeverDoublePosts (internal/payments/payrev1_defect_repro_integration_test.go)
+# Command: go test -tags=integration -race -count=1 -run TestPayRev1_DefectRepro_DistinctReferenceRaceNeverDoublePosts -v ./internal/payments/...
+# Run against: a disposable git worktree checked out at 50d94af (the pre-fix commit - internal/payments/orchestrator.go carries no S2 lock;
+#              migrations/0092_* does not exist at this commit), against a scratch database migrated to exactly migration 0091
+#              (no PAY-REV-1 backstop index), created and dropped for this evidence capture only. No DB URLs are included below.
+# Result: two reversal callbacks with DISTINCT provider references for the SAME original deposit both returned success (err=<nil>)
+#         and both posted a deposit_reversal ledger transaction (the test's own count assertion fires here, before the
+#         cash-balance assertion below it is ever reached) - two full reversals of a 1,000-minor-unit deposit necessarily
+#         drives player_cash to -1,000, the exact PAY-REV-1 defect ledger-finance reproduced during Stage 10.1 planning.
+
+=== RUN   TestPayRev1_DefectRepro_DistinctReferenceRaceNeverDoublePosts
+    payrev1_defect_repro_integration_test.go:207: PAY-REV-1 defect reproduced: expected exactly 1 deposit_reversal transaction for this original, got 2 (reversal A err=<nil>, reversal B err=<nil>)
+--- FAIL: TestPayRev1_DefectRepro_DistinctReferenceRaceNeverDoublePosts (0.11s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/payments	0.129s
+FAIL

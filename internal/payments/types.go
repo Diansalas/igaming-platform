@@ -158,6 +158,17 @@ var (
 	// itself catch - must be rejected rather than posted as a second,
 	// independent debit.
 	ErrDepositAlreadyReversed = errors.New("payments: deposit already has a reversal posted against it")
+	// ErrDepositReversalIntegrity is returned by a deposit-reversal
+	// callback's Stage 10.1 PAY-REV-1 S2 step (docs/plans/
+	// stage-10.1-planning-gate-proposal.md §E) when the deposit_intents
+	// row it resolved names a ledger_transactions id (via
+	// LedgerTransactionID) that either does not exist for this tenant, or
+	// exists but is not itself a 'deposit' transaction. This is data
+	// corruption, never a legitimate late/duplicate reversal - it must
+	// NEVER be routed to the tombstone branch (which is for "no ledger
+	// transaction was ever posted for this reference" at all, a different
+	// and legitimate case) and never posts anything.
+	ErrDepositReversalIntegrity = errors.New("payments: original deposit reference does not resolve to a valid deposit ledger transaction")
 	// ErrIdempotencyKeyReused is returned by InitiateDeposit when a
 	// retried call reuses (tenant_id, player_account_id, idempotency_key)
 	// but with different deposit parameters (brand, wallet, asset, amount,

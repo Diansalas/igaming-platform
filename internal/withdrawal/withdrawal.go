@@ -303,7 +303,7 @@ func RequestWithdrawal(ctx context.Context, tx pgx.Tx, params RequestParams) (Wi
 	}
 
 	requestID := uuid.New()
-	conflict, err := db.IdempotentInsert(ctx, tx, func(spTx pgx.Tx) error {
+	conflict, _, err := db.IdempotentInsert(ctx, tx, func(spTx pgx.Tx) error {
 		_, err := spTx.Exec(ctx,
 			`INSERT INTO withdrawal_requests
 				(id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, idempotency_key)

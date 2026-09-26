@@ -212,7 +212,10 @@ func TestMigration0077_RestoresPreMigrationRLSPostureOnDownThenFailsOnDirtyDatab
 		t.Fatalf("migrate up the full chain: %v", err)
 	}
 
-	// (a) Roll back 0091 (Stage 10 W1's sportsbook settlement lifecycle,
+	// (a) Roll back 0093 (Stage 10.1's settlement causation trigger-body
+	// fix, whose down only restores the prior body) then 0092 (Stage
+	// 10.1's deposit-reversal partial unique index, whose down only drops
+	// the index) then 0091 (Stage 10 W1's sportsbook settlement lifecycle,
 	// whose down migration refuses only once sportsbook settlement
 	// evidence exists, which this scenario never creates) then 0090
 	// (Stage 9.2 fix round's sb_jurisdiction_restrictions
@@ -230,12 +233,12 @@ func TestMigration0077_RestoresPreMigrationRLSPostureOnDownThenFailsOnDirtyDatab
 	// brand-pinning fix) then 0078 (Stage 6's sportsbook foundation), all
 	// now sitting on the chain's tip and reversible in this scenario, then 0077, and confirm 0077's own EXACT pre-migration
 	// posture is restored.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 15)
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 17)
 	if err != nil {
-		t.Fatalf("down migrations 0091/0090/0089/0088/0087/0086/0085/0084/0083/0082/0081/0080/0079/0078/0077 on a clean database: %v", err)
+		t.Fatalf("down migrations 0093/0092/0091/0090/0089/0088/0087/0086/0085/0084/0083/0082/0081/0080/0079/0078/0077 on a clean database: %v", err)
 	}
 	wantDown := []int64{
-		migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
+		migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
 		migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version,
 	}
 	if len(rolledBack) != len(wantDown) {

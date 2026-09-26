@@ -31,22 +31,32 @@ import (
 // transaction, not the now-rolled-back savepoint). On conflict==false
 // and err==nil, insert's effects are committed into the outer
 // transaction as normal.
-func IdempotentInsert(ctx context.Context, tx pgx.Tx, insert func(pgx.Tx) error) (conflict bool, err error) {
+//
+// constraintName is set (from pgconn.PgError.ConstraintName) whenever
+// conflict is true, and is the ONLY thing that survives the rollback of
+// insert's own error - insert may target a table with more than one
+// unique constraint/index, and a caller that must react differently
+// depending on which one fired (Stage 10.1 PAY-REV-1: internal/ledger.Post
+// routes a violation of the new one-deposit-reversal index to a distinct
+// typed error, never confusing it with an ordinary idempotency-key
+// replay) needs it. Callers that only ever insert against a single unique
+// constraint may ignore it.
+func IdempotentInsert(ctx context.Context, tx pgx.Tx, insert func(pgx.Tx) error) (conflict bool, constraintName string, err error) {
 	savepoint, err := tx.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("db: open savepoint: %w", err)
+		return false, "", fmt.Errorf("db: open savepoint: %w", err)
 	}
 
 	if insertErr := insert(savepoint); insertErr != nil {
 		_ = savepoint.Rollback(ctx)
-		if IsUniqueViolation(insertErr) {
-			return true, nil
+		if name, ok := UniqueViolationConstraintName(insertErr); ok {
+			return true, name, nil
 		}
-		return false, insertErr
+		return false, "", insertErr
 	}
 
 	if err := savepoint.Commit(ctx); err != nil {
-		return false, fmt.Errorf("db: release savepoint: %w", err)
+		return false, "", fmt.Errorf("db: release savepoint: %w", err)
 	}
-	return false, nil
+	return false, "", nil
 }

@@ -579,32 +579,25 @@ func TestDBConstraints_T1_ComposedVoidCausation_AcceptsSameTransaction(t *testin
 	}
 }
 
-// TestDBConstraints_T1_ComposedVoidCausation_SavepointRollbackIsRejected is
-// B-1(c): PINS the documented precondition SB-T1-XMIN (code review
-// finding 1, docs/governance/stage-10-w1-code-review.md): T-1 compares a
-// candidate causation row's xmin against pg_current_xact_id(), which is
-// ALWAYS the top-level transaction id. A row inserted under a SAVEPOINT
-// (even after RELEASE SAVEPOINT) keeps the subtransaction's own xid as its
-// stored xmin, which never equals the top-level xid. So a rollback row
-// inserted inside a savepoint, followed by a void citing it in the SAME
-// top-level transaction, is REJECTED by T-1 even though it is exactly the
-// legitimate composed-void shape.
+// TestDBConstraints_T1_ComposedVoidCausation_SavepointRollbackIsAccepted is
+// B-1(c), SB-T1-XMIN RESOLVED (migration 0093, ADR 0088 §3.3 follow-up):
+// before 0093, T-1 compared a candidate causation row's xmin against
+// pg_current_xact_id(), which is ALWAYS the top-level transaction id. A
+// row inserted under a SAVEPOINT (even after RELEASE SAVEPOINT) keeps the
+// subtransaction's own xid as its stored xmin, which never equals the
+// top-level xid, so a rollback row inserted inside a savepoint, followed
+// by a void citing it in the SAME top-level transaction, was wrongly
+// rejected even though it is exactly the legitimate composed-void shape.
 //
-// This is deliberately pinned as REJECTED, not fixed here: it fails
-// CLOSED (no money moves - both postings' ledger rows are rolled back with
-// the whole transaction), so it is an availability defect, not a
-// correctness one. It is NOT reachable in production today, because
-// SimulateSettlementEvent's insertSettlementRecord (settlement.go) issues
-// a plain INSERT on the top-level pgx.Tx and never opens a savepoint
-// around it - the precondition holds by construction, today. It WOULD
-// break the first caller that wraps the operation in a savepoint (a future
-// batch driver taking one savepoint per bet, a provider-webhook driver, or
-// a test harness - the code review's own examples). The recommended fix,
-// left for a future change once a second settlement driver exists, is
-// `pg_xact_status(<epoch-qualified xmin>::xid8) = 'in progress'`, which
-// classifies a released-savepoint row as belonging to the current
-// transaction tree (verified by the reviewer on PostgreSQL 16).
-func TestDBConstraints_T1_ComposedVoidCausation_SavepointRollbackIsRejected(t *testing.T) {
+// Migration 0093 replaces the check with
+// pg_xact_status(<reconstructed xid8>) IS NOT DISTINCT FROM 'in progress',
+// which classifies a released-savepoint row (however nested) as belonging
+// to the current transaction's own tree, and now ACCEPTS this shape. This
+// test name and assertion were flipped accordingly; the previous
+// "deliberately pinned as REJECTED" framing described a fail-closed
+// availability defect (no money moved, HTTP 409 SETTLEMENT_INTEGRITY), not
+// a desired outcome, and that defect is now fixed.
+func TestDBConstraints_T1_ComposedVoidCausation_SavepointRollbackIsAccepted(t *testing.T) {
 	pool := testPool(t)
 	f, actor, betID := newStdBet(t, pool)
 	mustSimulate(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
@@ -636,11 +629,114 @@ func TestDBConstraints_T1_ComposedVoidCausation_SavepointRollbackIsRejected(t *t
 		_, err = tx.Exec(ctx, insertVoidWithCausationSQL, f.tenantID, betID, "data_error", rollbackRowID, voidTxID)
 		return err
 	})
-	if err == nil {
-		t.Fatalf("SB-T1-XMIN: expected T-1 to reject a composed void whose rollback row was inserted under a " +
-			"released savepoint - this pins the documented precondition/failure mode, not a desired outcome")
+	if err != nil {
+		t.Fatalf("SB-T1-XMIN: expected T-1 to accept a composed void whose rollback row was inserted under a "+
+			"released savepoint (migration 0093), got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "may cite only a rollback of this bet inserted by the same transaction") {
-		t.Fatalf("unexpected error (expected T-1's same-transaction causation/xmin-mismatch message): %v", err)
+}
+
+// TestDBConstraints_T1_ComposedVoidCausation_NestedSavepointIsAccepted
+// pins the "however nested" part of the pg_xact_status fix: the rollback
+// row is inserted under an INNER savepoint nested inside an OUTER
+// savepoint, both released, before the composed void cites it on the
+// outer (top-level) transaction. pg_xact_status classifies every xid in
+// the current transaction's own tree - however deeply nested - as
+// 'in progress', so this must also be accepted.
+func TestDBConstraints_T1_ComposedVoidCausation_NestedSavepointIsAccepted(t *testing.T) {
+	pool := testPool(t)
+	f, actor, betID := newStdBet(t, pool)
+	mustSimulate(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
+	settlementRowID := settlementHistory(t, pool, f.tenantID, betID)[0].ID
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rollbackTxID, err := postRawLedgerTxOnTx(ctx, tx, f.tenantID, f.walletID, ledger.TxSportsbookRollback, betID,
+			"t1-composed-nested-savepoint-rollback-"+uuid.NewString())
+		if err != nil {
+			return fmt.Errorf("post rollback ledger tx: %w", err)
+		}
+
+		if _, err := tx.Exec(ctx, "SAVEPOINT sb_t1_xmin_outer"); err != nil {
+			return fmt.Errorf("open outer savepoint: %w", err)
+		}
+		if _, err := tx.Exec(ctx, "SAVEPOINT sb_t1_xmin_inner"); err != nil {
+			return fmt.Errorf("open inner savepoint: %w", err)
+		}
+		var rollbackRowID uuid.UUID
+		if err := tx.QueryRow(ctx, insertRollbackSQL, f.tenantID, betID, 1, settlementRowID, rollbackTxID).Scan(&rollbackRowID); err != nil {
+			return fmt.Errorf("insert rollback row under nested savepoint: %w", err)
+		}
+		if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT sb_t1_xmin_inner"); err != nil {
+			return fmt.Errorf("release inner savepoint: %w", err)
+		}
+		if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT sb_t1_xmin_outer"); err != nil {
+			return fmt.Errorf("release outer savepoint: %w", err)
+		}
+
+		voidTxID, err := postRawLedgerTxOnTx(ctx, tx, f.tenantID, f.walletID, ledger.TxSportsbookVoid, betID,
+			"t1-composed-nested-savepoint-void-"+uuid.NewString())
+		if err != nil {
+			return fmt.Errorf("post void ledger tx: %w", err)
+		}
+		_, err = tx.Exec(ctx, insertVoidWithCausationSQL, f.tenantID, betID, "data_error", rollbackRowID, voidTxID)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("SB-T1-XMIN: expected T-1 to accept a composed void whose rollback row was inserted under a "+
+			"released, nested savepoint (migration 0093), got: %v", err)
+	}
+}
+
+// TestDBConstraints_T1_ComposedVoidCausation_RollbackToSavepointFailsFK: a
+// rollback row inserted under a savepoint that is then rolled back with
+// ROLLBACK TO SAVEPOINT (not RELEASE) genuinely ceases to exist in the
+// current transaction - Postgres discards it. Confirmed empirically at
+// implementation time: because the rollback row is gone, the bet's
+// settlement is once again "unreversed" from T-1's own point of view, so
+// T-1's void-precondition check (event_kind = 'void' -> has_unreversed)
+// fires FIRST and rejects the void before the causation branch's own
+// `SELECT ... INTO cause` (which would otherwise hit the pre-existing
+// `cause.id IS NULL` not-found branch) is ever reached. This asserts that
+// actual, empirically-confirmed rejection shape - not the xmin-specific
+// message - so this test cannot silently start asserting the wrong branch
+// if T-1's check ordering changes in the future.
+func TestDBConstraints_T1_ComposedVoidCausation_RollbackToSavepointFailsFK(t *testing.T) {
+	pool := testPool(t)
+	f, actor, betID := newStdBet(t, pool)
+	mustSimulate(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
+	settlementRowID := settlementHistory(t, pool, f.tenantID, betID)[0].ID
+
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rollbackTxID, err := postRawLedgerTxOnTx(ctx, tx, f.tenantID, f.walletID, ledger.TxSportsbookRollback, betID,
+			"t1-composed-rollbacktosp-rollback-"+uuid.NewString())
+		if err != nil {
+			return fmt.Errorf("post rollback ledger tx: %w", err)
+		}
+
+		if _, err := tx.Exec(ctx, "SAVEPOINT sb_t1_xmin_rb"); err != nil {
+			return fmt.Errorf("open savepoint: %w", err)
+		}
+		var rollbackRowID uuid.UUID
+		if err := tx.QueryRow(ctx, insertRollbackSQL, f.tenantID, betID, 1, settlementRowID, rollbackTxID).Scan(&rollbackRowID); err != nil {
+			return fmt.Errorf("insert rollback row under savepoint: %w", err)
+		}
+		if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT sb_t1_xmin_rb"); err != nil {
+			return fmt.Errorf("roll back to savepoint: %w", err)
+		}
+
+		voidTxID, err := postRawLedgerTxOnTx(ctx, tx, f.tenantID, f.walletID, ledger.TxSportsbookVoid, betID,
+			"t1-composed-rollbacktosp-void-"+uuid.NewString())
+		if err != nil {
+			return fmt.Errorf("post void ledger tx: %w", err)
+		}
+		_, err = tx.Exec(ctx, insertVoidWithCausationSQL, f.tenantID, betID, "data_error", rollbackRowID, voidTxID)
+		return err
+	})
+	if err == nil {
+		t.Fatalf("expected T-1 to reject a void citing a rollback row that no longer exists " +
+			"(ROLLBACK TO SAVEPOINT discarded it)")
+	}
+	if !strings.Contains(err.Error(), "void requires no un-reversed settlement") {
+		t.Fatalf("unexpected error (expected T-1's has_unreversed void-precondition message, since the "+
+			"discarded rollback leaves the settlement unreversed again): %v", err)
 	}
 }

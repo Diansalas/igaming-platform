@@ -345,3 +345,75 @@ error and posts nothing. This is unchanged and now pinned by a test.
   no longer model a legitimate retry. They were corrected to reuse the
   correlation.
 - The regression tests are listed in the F-7 audit's Outcome section.
+
+## Amendment 2026-09-26 — Stage 10.1 PAY-REV-1: idempotency keys do not resolve semantic-duplicate callbacks
+
+Origin: Stage 10.1 (ADR 0090), the PAY-REV-1 remediation
+(`docs/plans/stage-10.1-planning-gate-proposal.md` §D–§G).
+
+### Why
+
+This ADR's "Callback deduplication" section, and the F-7 amendment above
+it, describe how a REDELIVERY of the SAME provider reference is resolved:
+by the `(tenant_id, idempotency_key)` uniqueness `ledger.Post` enforces.
+PAY-REV-1 was a different failure that this ADR did not previously name: a
+**semantic duplicate** — two DIFFERENT, distinct provider references that
+both describe the same real-world fact ("this deposit was reversed") —
+does not collide on any idempotency key at all, so `db.IdempotentInsert`'s
+mechanism never even runs for the second one. Before this amendment,
+`internal/payments`' deposit-reversal callback path decided "already
+reversed?" with a single unlocked `SELECT ... EXISTS` before either
+posting was visible to the other — a check-then-insert race CLAUDE.md
+already forbids, but one this ADR's own idempotency-key doctrine could be
+misread as already covering. It does not: idempotency-key uniqueness
+dedupes *deliveries of one reference*, never *distinct references that
+happen to describe one economic fact*.
+
+### Decision (the doctrine, stated for future posters)
+
+**Idempotency-key uniqueness resolves DELIVERY duplicates. It never
+resolves SEMANTIC duplicates.** Any "at most one X per original" rule —
+where X is a distinct, separately-idempotency-keyed transaction that
+reverses, cancels or otherwise concludes some other already-posted
+transaction — requires BOTH of the following, together, never either
+alone:
+
+1. An **ADR 0082 class-L2 row lock** on the ORIGINAL transaction's
+   `ledger_transactions` row, taken BEFORE the "has this already
+   happened?" decision, with the decision re-checked as a fresh statement
+   after the lock is held (relying on READ COMMITTED to see a concurrent
+   winner's commit); AND
+2. A **type-scoped, tenant-leading partial unique index** in the
+   database as the backstop against a future writer that skips the lock -
+   never a global index (a global "one reversal per anything" rule is
+   wrong today: `withdrawal_rejected` and `withdrawal_failed` both
+   legitimately reference the same withdrawal hold transaction) and never
+   `tenant_id`-trailing (the referenced-transaction FK is single-column
+   and does not respect RLS, so a tenant-less key makes cross-tenant
+   collision an existence oracle).
+
+Check-then-insert without both is forbidden, exactly like every other
+financial write CLAUDE.md already governs.
+
+**Applies today to:** `deposit_reversal` (migration 0092,
+`ledger_transactions_one_deposit_reversal`, resolved by ADR 0090).
+
+**Binds future work:** the migration and stage that first build a
+production poster of `withdrawal_reversed` or `bonus_reversal` (both
+currently have NO poster - NOT IMPLEMENTED) MUST add both the L2 lock and
+a type-scoped unique index in the SAME change that introduces the first
+posting, not as a follow-up. `casino_rollback` already has the L2 lock
+(the `postRollback` precedent this fix mirrors); a type-scoped index for
+it is deferred as `REV-UNIQ-CASINO` (P3), not required by this amendment.
+
+### Consequences
+
+- `ledger.Post` gained a new, distinct error path:
+  `ErrReversalAlreadyExists`, routed by `pgconn.PgError.ConstraintName`
+  rather than treated as an ordinary idempotency-key conflict (which would
+  otherwise look up the wrong row, or no row at all, and report a
+  misleading error) — see ADR 0090 and `internal/ledger/ledger.go`'s own
+  doc comment on `Post`.
+- No existing idempotency semantics changed: a legitimate same-reference
+  redelivery of a reversal is still resolved exactly as this ADR (as
+  amended by F-7) already specifies.

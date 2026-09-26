@@ -47,3 +47,20 @@ func IsUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolationCode
 }
+
+// UniqueViolationConstraintName returns the name of the unique constraint
+// or index a unique-constraint violation fired against, and true, if err
+// is (or wraps) a Postgres unique_violation (SQLSTATE 23505) that carries
+// one - Postgres always sets pgconn.PgError.ConstraintName for this
+// SQLSTATE. Callers that must react differently depending on WHICH unique
+// constraint fired (Stage 10.1 PAY-REV-1: a caller cannot tell "this is a
+// retried idempotency key" from "this is a second reversal of an
+// already-reversed deposit" from IsUniqueViolation alone) use this
+// instead of re-deriving the *pgconn.PgError themselves.
+func UniqueViolationConstraintName(err error) (string, bool) {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != pgUniqueViolationCode {
+		return "", false
+	}
+	return pgErr.ConstraintName, true
+}

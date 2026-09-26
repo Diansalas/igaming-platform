@@ -148,10 +148,15 @@ not work.**
 
 ### 1.6 `internal/payments`
 
+*(Row amended 2026-09-25, Amendment A5, Stage 10.1 PAY-REV-1, ADR 0090: the
+deposit-reversal row now takes an explicit L2 lock before Post; the
+original row text — "implicit projections only, no explicit locks" — is
+struck through, not deleted, below.)*
+
 | Site | Locks, in order | Outside `Post`? |
 | --- | --- | --- |
 | `postDepositSuccess` (`orchestrator.go:722`) | `ledger_transactions` key insert; implicit projections **`psp_clearing` → `player_cash`** | no explicit locks anywhere in this package |
-| deposit reversal (`orchestrator.go:989`) | implicit projections **`player_cash` → `psp_clearing`** | no |
+| deposit reversal (`orchestrator.go:989`) | ~~implicit projections **`player_cash` → `psp_clearing`**~~ **L2** `ledger_transactions` row `FOR UPDATE` on the ORIGINAL deposit (`receiveDepositReversalCallback`'s S2 step) → implicit projections **`player_cash` → `psp_clearing`** | ~~no~~ **yes — the new S2 lock, taken before `GetOrCreateAccounts`/L3/`Post`** |
 | `postDepositReversalTombstone` (`orchestrator.go:1027`) | no entries — no projection locks | — |
 
 **Finding LOCK-1b (new, this inventory):** a deposit and a reversal of a
@@ -592,13 +597,21 @@ ADR 0082 L3").
 
 ### 4.5 `internal/payments/orchestrator.go`
 
-- **No code change required.** LOCK-1b is closed entirely by `Post`'s
-  internal L3 step, because neither the deposit nor the reversal path
-  takes any lock outside `Post`.
+- **No code change required (for LOCK-1b).** LOCK-1b is closed entirely by
+  `Post`'s internal L3 step, because neither the deposit nor the reversal
+  path takes any lock outside `Post`.
 - Account resolution in `postDepositSuccess` and the reversal path:
   switch to `ledger.GetOrCreateAccounts` (both resolve `player_cash` and
   `psp_clearing`, currently in the same order — the change is
   defensive/uniform, not a fix).
+- **Pointer (Amendment A5, 2026-09-25, Stage 10.1 PAY-REV-1, ADR 0090):**
+  unrelated to LOCK-1b, `receiveDepositReversalCallback` was subsequently
+  given its own explicit **L2** lock (a plain instance, no new exception)
+  on the original deposit's `ledger_transactions` row, taken before
+  account resolution/L3/`Post` — see §1.6's amended row and ADR 0090 for
+  the full S0–S7 sequence and rationale (a check-then-insert race, not a
+  lock-ordering defect this ADR's R1–R8 previously covered). R1–R8 are
+  unchanged; no new class or exception was added.
 
 ### 4.6 `internal/withdrawal/withdrawal.go`
 
@@ -1350,3 +1363,62 @@ What this amendment does not do: it does not close E-3 in `PlaceBet`
 (ADR 0088 §15 OI-4), does not answer HDR-SB-1, and does not change R2, R4,
 R5, R6, R7 or R8. R4 is preserved — `LockProjectionsForPostings` lives in
 `internal/ledger/lockorder.go`.
+
+---
+
+## Amendment A5 — 2026-09-26 — Stage 10.1 PAY-REV-1 (ADR 0090): inventory update only, no new class or exception
+
+**Scope: inventory and pointer only, per the planning gate's architect
+ruling (`docs/plans/stage-10.1-planning/05-review-architect.md` §(1)).
+This amendment adds no new lock class and no new named exception; R1–R8
+are unchanged.**
+
+Stage 10.1 fixed PAY-REV-1 (a check-then-insert race in
+`internal/payments`' deposit-reversal callback: two concurrent,
+distinct-provider-reference reversal callbacks for the SAME original
+deposit could both observe "not yet reversed" before either posting was
+visible to the other, and both post, over-debiting `player_cash`) by
+giving `receiveDepositReversalCallback` its own explicit lock:
+
+```
+SELECT transaction_type FROM ledger_transactions WHERE id = $orig AND tenant_id = $tenant FOR UPDATE
+```
+
+taken before `GetOrCreateAccounts`/L3/`Post`, then a fresh, post-lock
+re-check of "already reversed?" (relying on READ COMMITTED to see a
+concurrent winner's commit). This is why this ADR needs updating at all:
+§1.6's "deposit reversal" row previously read "implicit projections only"
+and §4.5 previously said "No code change required … neither path takes
+any lock outside `Post`" — both became stale the moment this lock was
+added, even though the fix itself needed no new rule.
+
+**Why this is a PLAIN L2 instance, not a new exception:**
+- It is a single row lock, taken on `ledger_transactions` — the same
+  table and the same lock strength (`FOR UPDATE`) as `internal/casino`'s
+  `postRollback` precedent (§1.3), which this fix mirrors exactly.
+- It is taken strictly before this call's own `GetOrCreateAccounts`, L3
+  pre-lock and `Post` (L4) — the canonical §2.1 order, satisfied with no
+  reordering needed.
+- No L0 (advisory) or L1 (domain state row) lock exists on this path
+  before or after the change; `deposit_intents` is read, never locked or
+  mutated, by a reversal.
+- Deadlock analysis: a concurrent deposit success, or a withdrawal, on the
+  same wallet takes no lock on the ORIGINAL deposit's `ledger_transactions`
+  row, so no new cycle is introduced (payments' own analysis, confirmed by
+  `ledger-finance`).
+
+**What this amendment does:**
+1. §1.6's "deposit reversal" row is updated (struck-through original text
+   preserved inline, not deleted) to show the new **L2** step.
+2. §4.5 gets a pointer note recording the change and why it needed no new
+   rule.
+3. This section states, explicitly: no rule/class change; no new named
+   exception (there is no "E-5").
+
+**What this amendment does not do:** it does not touch LOCK-1b or its own
+closure (§1.6/§4.5's ORIGINAL content, both preserved above the
+strikethrough), does not change R1–R8, and does not touch anything in
+`internal/casino`, `internal/sportsbook`, `internal/bonus` or
+`internal/withdrawal`. The full S0–S7 sequence, the migration 0092
+backstop index, and the HTTP-layer denial handling are recorded in ADR
+0090, not repeated here.

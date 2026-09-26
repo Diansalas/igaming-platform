@@ -111,6 +111,16 @@ reconciliation, and crypto rails are all still unbuilt and mature through
 Stage 4, against the custodian abstraction decided here. See
 `payment-orchestration.md` for the implemented-versus-designed breakdown.
 
+**Stage 10.1 (PAY-REV-1, ADR 0090)** fixed a check-then-insert race in the
+deposit-reversal callback path (two distinct-reference reversals of one
+deposit could both post, over-debiting `player_cash`): an ADR 0082
+class-L2 lock plus a database backstop index (migration 0092). See ADR
+0090, financial-transaction-flows.md Flow 2 and the ADR 0020 amendment
+(2026-09-26) for the fix and the general doctrine it establishes.
+PAY-WH-TENANT-1 (the payments webhook's tenant resolution from a URL slug
+rather than a verified per-tenant credential, ADR 0022 §3) remains open
+and launch-blocking for any real PSP; it is a separate, later workstream.
+
 ## Retail cash rail — architecture (Stage 4H-B0)
 
 Status: `NOT IMPLEMENTED` — architecture/design only, no code, no

@@ -203,7 +203,7 @@ func IssueGrant(ctx context.Context, tx pgx.Tx, p IssueGrantParams) (Grant, Gate
 	// wants to look up the existing Grant and continue in the SAME
 	// transaction (types.go's issueIdempotent).
 	var created Grant
-	conflict, err := db.IdempotentInsert(ctx, tx, func(spTx pgx.Tx) error {
+	conflict, _, err := db.IdempotentInsert(ctx, tx, func(spTx pgx.Tx) error {
 		var insertErr error
 		created, insertErr = CreateGrant(ctx, spTx, g)
 		return insertErr

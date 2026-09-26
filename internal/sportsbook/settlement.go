@@ -1006,20 +1006,25 @@ func writeTransition(ctx context.Context, tx pgx.Tx, ev SettlementEvent, before,
 }
 
 // insertSettlementRecord is the sole writer of sportsbook_bet_settlements
-// (INV-LOCK-E4). T-1 (migration 0091) re-validates the row; a violation
-// here means the Go decision table and the database disagree, so it is an
-// integrity failure.
+// (INV-LOCK-E4). T-1 (migration 0091, amended by 0093) re-validates the
+// row; a violation here means the Go decision table and the database
+// disagree, so it is an integrity failure.
 //
-// PRECONDITION (ADR 0088 §3.3 implementation note, deferred item
-// SB-T1-XMIN): this INSERT must run as a plain statement on the top-level
-// transaction, never inside a SAVEPOINT. T-1's composed-void causation
-// check compares a candidate rollback row's xmin to the top-level xid, and
-// a row inserted under a released savepoint keeps its subtransaction xid,
-// which the check rejects (fail closed). Today this holds: tx is the
-// top-level pgx.Tx from db.Pool.WithTenant, and nothing in the W1 call
-// path opens a savepoint around this call. Any future driver that wraps
-// per-bet settlement in its own SAVEPOINT (e.g. a batch driver) must first
-// replace T-1's check with pg_xact_status via a new migration.
+// PRECONDITION LIFTED (SB-T1-XMIN, migration 0093, ADR 0088 §3.3
+// follow-up): this INSERT no longer needs to run as a plain statement on
+// the top-level transaction. T-1's composed-void causation check used to
+// compare a candidate rollback row's xmin to the top-level xid only, which
+// rejected a row inserted under a released SAVEPOINT (its xmin is the
+// subtransaction's own xid). Migration 0093 replaced that comparison with
+// pg_xact_status(<reconstructed xid8>) IS NOT DISTINCT FROM 'in progress',
+// which accepts any xid belonging to the caller's own transaction tree -
+// top-level or any subtransaction/savepoint, released or not, however
+// nested - while still rejecting a genuinely earlier, already-committed
+// transaction's rollback. So a future batch or provider-webhook driver
+// MAY now wrap this call (or the whole SimulateSettlementEvent call) in
+// its own SAVEPOINT per bet without tripping T-1; see
+// TestSettlementScenario_ComposedVoid_InsideOuterSavepoint_ServiceLevel
+// for the exact shape this now supports end-to-end.
 func insertSettlementRecord(ctx context.Context, tx pgx.Tx, rec SettlementRecord) (uuid.UUID, error) {
 	var generation *int32
 	if rec.Generation != nil {

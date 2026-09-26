@@ -347,6 +347,44 @@ func newPaymentWebhookHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
 			return
 		}
+		if errors.Is(err, payments.ErrDepositAlreadyReversed) {
+			// Stage 10.1 PAY-REV-1 (ADR 0090): a distinct-reference
+			// reversal callback naming an already-reversed deposit. Nothing
+			// was posted. The alert's fields are DELIBERATELY restricted to
+			// provider_id/tenant_id/request_id (security review) - never
+			// amounts, references or account ids: a second PSP reversal can
+			// be a genuine real-world event (e.g. a refund plus a later
+			// chargeback) that operations and PSP reconciliation must see,
+			// but this log line itself carries no financial detail.
+			logger.Error("payment_webhook_integrity_alert_deposit_already_reversed",
+				"provider_id", providerID, "tenant_id", t.ID.String(), "request_id", requestID)
+			// The denial audit is written in a SEPARATE, freshly-opened
+			// tenant-scoped transaction: WithTenant above already rolled the
+			// failed one back because ReceiveCallback returned a non-nil
+			// error, so nothing recorded on that transaction would ever
+			// commit (ADR 0088 §4.7's pattern, mirrored from the sportsbook
+			// settlement handler's identical ErrSettlementIntegrity
+			// treatment). A failure to write this audit record never blocks
+			// the 409 - the alert log above already fired.
+			if auditErr := deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
+				return payments.RecordDepositReversalRejection(ctx, tx, t.ID, providerID, requestID)
+			}); auditErr != nil {
+				logger.Error("payment_webhook_reversal_rejection_audit_failed", "error", auditErr, "provider_id", providerID)
+			}
+			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
+			return
+		}
+		if errors.Is(err, payments.ErrCallbackProviderMismatch) {
+			// Security review P3 (S-5, optional): err's own text embeds the
+			// callback's claimed amount/asset and the deposit's real ones
+			// (see receiveDepositReversalCallback/postDepositSuccess's own
+			// comments) - never pass it to the logger. Response shape
+			// (500/CodeInternal, generic message) is UNCHANGED from the
+			// generic branch below; only the logged detail is narrowed.
+			logger.Error("payment_webhook_provider_mismatch", "provider_id", providerID, "tenant_id", t.ID.String())
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to process callback")
+			return
+		}
 		if err != nil {
 			logger.Error("payment_webhook_failed", "error", err, "provider_id", providerID)
 			apierror.Write(w, requestID, apierror.CodeInternal, "failed to process callback")

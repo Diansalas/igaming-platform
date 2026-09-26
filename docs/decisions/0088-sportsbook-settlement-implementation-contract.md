@@ -330,6 +330,54 @@ the tenant's RLS, reading the parent bet and its existing history rows:
 > on PostgreSQL 16, including the epoch-boundary case. That replacement
 > requires its own migration and is carried forward as `SB-T1-XMIN`, not
 > undertaken here.
+>
+> **Follow-up note (Stage 10.1, ADR 0090) — `SB-T1-XMIN` RESOLVED by
+> migration 0093.** T-1's composed-void causation check now requires
+> `pg_xact_status(<cause xmin reconstructed as a full xid8>) IS NOT
+> DISTINCT FROM 'in progress'` in place of the xmin-equality-to-top-level-xid
+> comparison. Any xid in the current transaction's tree (top-level or
+> released savepoint, however nested) is accepted; a committed, aborted,
+> unknown (NULL-status) or unconstructible xid is rejected (fail closed).
+> The precondition note above no longer constrains callers — see the
+> updated doc comment on `insertSettlementRecord`
+> (`internal/sportsbook/settlement.go`). Migration 0091 is unchanged. Bet
+> match and `event_kind = 'rollback'` are unchanged.
+>
+> **Deviation from the Stage 10.1 planning-gate text (recorded for the
+> record; full technical explanation is inline in migration 0093's own
+> comment on the causation branch).** The planning gate
+> (`docs/plans/stage-10.1-planning-gate-proposal.md` §O ruling R-2;
+> ledger-finance review 03, P2-2) specified reconstructing the full xid8
+> relative to `pg_snapshot_xmax(pg_current_snapshot())`. That construction
+> was found, during implementation, to be empirically incorrect for
+> exactly the released-savepoint case this migration exists to fix:
+> `pg_snapshot_xmax`'s `xmax` reflects the highest **completed** xid at
+> snapshot time, not the highest **assigned** one, so a still-open
+> savepoint of the current transaction routinely has an `xmin` numerically
+> greater than it — the "largest candidate not exceeding it" arithmetic
+> then reconstructs an id one whole epoch too low, reproducing the exact
+> `SB-T1-XMIN` rejection. The implementing agent instead anchored the
+> reconstruction to the current top-level transaction's own epoch
+> (`pg_current_xact_id()`'s high bits), verified empirically on PostgreSQL
+> 16 for every required case (plain insert, savepoint, nested savepoint,
+> earlier-committed transaction) — see
+> `TestSBT1XMIN_ReconstructionGuard_NullAndErrorCasesRejectClosed` and the
+> service-level `TestSettlementScenario_ComposedVoid_InsideOuterSavepoint_ServiceLevel`
+> (`internal/sportsbook`). This deviation from R-2's literal construction
+> requires architect and ledger-finance re-review before SB-T1-XMIN is
+> closed in the task registry as fully reviewed; the fail-closed guards
+> (G1 NULL-safety, G2 error-safety, G3 immutability dependency) and every
+> other property R-2/P2-2 required (accept the current transaction's own
+> tree, reject an earlier committed transaction, reject NULL/error) are
+> unchanged and independently verified.
+>
+> Tests: `SavepointRollbackIsAccepted`, `NestedSavepointIsAccepted`,
+> `RollbackToSavepointFailsFK` (rejected via the void's own `has_unreversed`
+> precondition, not the xmin-specific message — the discarded row makes the
+> settlement unreversed again before the causation branch is reached),
+> `RejectsEarlierTransactionRollback`, `AcceptsSameTransaction`, the NULL/
+> error-path reconstruction-guard test, and the service-level savepoint
+> test (all `internal/sportsbook`).
 
 **T-2 `sportsbook_bets_status_transition` (BEFORE INSERT OR UPDATE OF
 status, row).** INSERT requires `status = 'open'`. UPDATE requires

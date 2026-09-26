@@ -198,6 +198,31 @@ var ErrIdempotencyKeyReused = errors.New("ledger: idempotency key reused with a 
 // operation as done, and must not retry with the same key.
 var ErrIdempotencyPayloadMismatch = errors.New("ledger: idempotency key reused with a different payload")
 
+// reversalOneDepositReversalConstraint is the name of migration 0092's
+// partial unique index (tenant_id, reverses_transaction_id) WHERE
+// transaction_type = 'deposit_reversal' - INV-PAY-REV-1
+// (docs/plans/stage-10.1-planning-gate-proposal.md §F): at most one
+// deposit_reversal transaction per original deposit per tenant.
+const reversalOneDepositReversalConstraint = "ledger_transactions_one_deposit_reversal"
+
+// ErrReversalAlreadyExists is returned by Post when the INSERT into
+// ledger_transactions violates the migration-0092 partial unique index
+// rather than the ordinary (tenant_id, idempotency_key) idempotency
+// constraint. Stage 10.1 PAY-REV-1 (ADR 0090): internal/payments'
+// deposit-reversal callback path takes an ADR 0082 class-L2 lock on the
+// original deposit's ledger_transactions row and re-checks "already
+// reversed?" AFTER acquiring it (the primary control, docs/plans/
+// stage-10.1-planning-gate-proposal.md §E); this index is the BACKSTOP
+// against a future writer that skips that lock. Routing on the
+// constraint name (rather than treating this like any other unique
+// violation) matters because db.IdempotentInsert's ordinary conflict path
+// would otherwise look this INSERT up by idempotency_key and find NO
+// ROW - the reversal's own idempotency key was never actually written -
+// which used to surface as a confusing "conflict but nothing found"
+// internal error instead of the true cause. ledger-finance pre-approved
+// exactly this change (Stage 10.1 review P2-1).
+var ErrReversalAlreadyExists = errors.New("ledger: a deposit_reversal transaction already exists for this original deposit")
+
 // ErrInvalidEntry is returned for a structurally invalid entry (e.g. a
 // non-positive amount) caught before ever reaching the database.
 var ErrInvalidEntry = errors.New("ledger: invalid entry")
@@ -277,6 +302,11 @@ type PostResult struct {
 // provider reference is already taken, e.g. by a tombstone) is not a
 // replay: it returns an untyped wrapped error and posts nothing.
 //
+// A violation of migration 0092's partial unique index
+// (ledger_transactions_one_deposit_reversal) is a THIRD, distinct case,
+// never confused with an idempotency-key replay: it returns
+// ErrReversalAlreadyExists and posts nothing (Stage 10.1 PAY-REV-1).
+//
 // Rule B2 (extended) mirror generator (ledger-accounting-model.md §7.4,
 // bonus_mirror.go): a posting any of whose entries resolves to a
 // BONUS_SET account (player_bonus, player_locked_bonus, player_bonus_held)
@@ -347,7 +377,7 @@ func Post(ctx context.Context, tx pgx.Tx, in TransactionInput) (PostResult, erro
 	}
 
 	transactionID := uuid.New()
-	conflict, err := db.IdempotentInsert(ctx, tx, func(spTx pgx.Tx) error {
+	conflict, conflictConstraint, err := db.IdempotentInsert(ctx, tx, func(spTx pgx.Tx) error {
 		_, err := spTx.Exec(ctx,
 			`INSERT INTO ledger_transactions
 				(id, tenant_id, transaction_type, idempotency_key, provider_id, provider_tx_id,
@@ -360,6 +390,16 @@ func Post(ctx context.Context, tx pgx.Tx, in TransactionInput) (PostResult, erro
 	})
 	if err != nil {
 		return PostResult{}, fmt.Errorf("ledger: insert transaction: %w", err)
+	}
+
+	// Stage 10.1 PAY-REV-1: a violation of the migration-0092 backstop
+	// index is NOT an idempotency-key conflict - this INSERT's
+	// idempotency_key was never written, so looking it up below would
+	// either find nothing (a confusing internal error) or, worse, find an
+	// unrelated row that happens to share a key. Route on the constraint
+	// name before falling into the ordinary idempotency-key replay path.
+	if conflict && conflictConstraint == reversalOneDepositReversalConstraint {
+		return PostResult{}, fmt.Errorf("%w: reverses_transaction_id=%v", ErrReversalAlreadyExists, in.ReversesTransactionID)
 	}
 
 	if conflict {

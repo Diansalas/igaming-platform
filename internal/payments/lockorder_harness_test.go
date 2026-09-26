@@ -145,6 +145,68 @@ func loHoldProjectionRow(t *testing.T, pool *db.Pool, tenantID, ledgerAccountID 
 	})
 }
 
+// loHoldLedgerTransactionRow holds a FOR UPDATE row lock on
+// ledgerTransactionID's ledger_transactions row until release() is
+// called - Stage 10.1 PAY-REV-1's own S2 lock (docs/plans/
+// stage-10.1-planning-gate-proposal.md §E), taken here from OUTSIDE the
+// production code path so a test can force a racer to queue at a known
+// point: either at S2 itself (post-fix), or - pre-fix, since no S2
+// exists - at the implicit FOR KEY SHARE lock Postgres takes on the
+// referenced row when the racer's own INSERT into ledger_transactions
+// sets reverses_transaction_id to this same row (the
+// ledger_transactions_reverses_transaction_id_fkey foreign key,
+// migration 0021), which conflicts with this blocker's FOR UPDATE.
+func loHoldLedgerTransactionRow(t *testing.T, pool *db.Pool, tenantID, ledgerTransactionID uuid.UUID, name string) *loBlocker {
+	t.Helper()
+	return loHoldWith(t, pool, tenantID, name, func(ctx context.Context, tx pgx.Tx) error {
+		var typ string
+		err := tx.QueryRow(ctx,
+			`SELECT transaction_type FROM ledger_transactions WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+			ledgerTransactionID, tenantID).Scan(&typ)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("blocker %s: no ledger_transactions row %s to lock", name, ledgerTransactionID)
+		}
+		return err
+	})
+}
+
+// loBackendQuery returns the currently-executing (or most recently
+// completed, if none is active) query text for pid, per
+// pg_stat_activity.query - used to prove WHICH statement a waiting racer
+// is blocked on, not merely that it is blocked on some lock at all.
+func loBackendQuery(t *testing.T, pool *db.Pool, pid int) string {
+	t.Helper()
+	var query string
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT COALESCE(query, '') FROM pg_stat_activity WHERE pid = $1`, pid).Scan(&query)
+	})
+	if err != nil {
+		t.Fatalf("read pg_stat_activity.query for pid %d: %v", pid, err)
+	}
+	return query
+}
+
+// loBackendHoldsProjectionLock reports whether pid currently holds (not
+// merely waits for) any lock on the wallet_balance_projection table -
+// used by TestPayRev1_ConcurrentDistinctReferenceReversals_ExactlyOnePosts
+// to prove the waiting racer has not yet reached ledger.Post's L3
+// pre-lock step.
+func loBackendHoldsProjectionLock(t *testing.T, pool *db.Pool, pid int) bool {
+	t.Helper()
+	var held bool
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT EXISTS (
+			   SELECT 1 FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
+			   WHERE l.pid = $1 AND l.granted AND c.relname = 'wallet_balance_projection'
+			 )`, pid).Scan(&held)
+	})
+	if err != nil {
+		t.Fatalf("read pg_locks for pid %d: %v", pid, err)
+	}
+	return held
+}
+
 // loHoldWith opens a tenant-scoped transaction, runs acquire, and holds
 // every lock acquire took until the returned release() is called.
 func loHoldWith(t *testing.T, pool *db.Pool, tenantID uuid.UUID, name string,

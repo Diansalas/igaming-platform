@@ -1,0 +1,15 @@
+# Stage 10.1 PAY-REV-1 test #1 - pre-fix failure evidence
+# Command: go test -tags=integration -race -count=1 -run TestPayRev1_ConcurrentDistinctReferenceReversals_ExactlyOnePosts -v ./internal/payments/...
+# Repo HEAD at capture time: 50d94af (internal/payments/orchestrator.go NOT yet carrying the S2 lock)
+# Expected: FAIL, because no S2 lock exists yet; the racer instead blocks deep inside ledger.Post's own INSERT.
+
+=== RUN   TestPayRev1_ConcurrentDistinctReferenceReversals_ExactlyOnePosts
+    payrev1_concurrency_integration_test.go:126: PAY-REV-1 not fixed: the reversal callback must queue on its own S2 `FOR UPDATE` statement, not on an incidental lock reached deeper in the call (e.g. the implicit foreign-key KEY SHARE lock inside ledger.Post's INSERT). Waiting backend's query was:
+        INSERT INTO ledger_transactions
+        				(id, tenant_id, transaction_type, idempotency_key, provider_id, provider_tx_id,
+        				 correlation_id, causation_id, reverses_transaction_id, reason_code)
+        			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+--- FAIL: TestPayRev1_ConcurrentDistinctReferenceReversals_ExactlyOnePosts (0.12s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/payments	0.133s
+FAIL

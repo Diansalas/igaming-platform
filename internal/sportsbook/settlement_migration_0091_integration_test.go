@@ -56,11 +56,36 @@ func scratchPoolMigratedUp(t *testing.T, prefix string) *db.Pool {
 	return pool
 }
 
+// stepsFromTipThrough91 computes how many MigrateDown steps are needed to
+// reach (and attempt) migration 91's own down migration, regardless of how
+// many migrations now sit on top of it (0092/PAY-REV-1, 0093/SB-T1-XMIN,
+// or any later one) - this file tests 0091's OWN down-migration refusal
+// behavior specifically, not "the tip", so it must not assume 0091 is
+// still the last-applied migration. Every migration landing on top of
+// 0091 in this stage is unconditionally reversible in every scenario this
+// file exercises (0092 only drops an index; 0093 is a pure function-body
+// swap), so reverting through them first never masks or interferes with
+// 0091's own guard.
+func stepsFromTipThrough91(t *testing.T, pool *db.Pool) int {
+	t.Helper()
+	var maxVersion int64
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&maxVersion)
+	})
+	if err != nil {
+		t.Fatalf("read max applied migration version: %v", err)
+	}
+	if maxVersion < 91 {
+		t.Fatalf("expected migration 91 to be applied, but max applied version is %d", maxVersion)
+	}
+	return int(maxVersion - 90)
+}
+
 // TestMigration0091_DownSucceedsOnCleanDatabase: the down migration must
 // succeed when nothing has ever been posted.
 func TestMigration0091_DownSucceedsOnCleanDatabase(t *testing.T) {
 	pool := scratchPoolMigratedUp(t, "sb0091clean_")
-	if _, err := pool.MigrateDown(context.Background(), migration0091Dir(t), 1); err != nil {
+	if _, err := pool.MigrateDown(context.Background(), migration0091Dir(t), stepsFromTipThrough91(t, pool)); err != nil {
 		t.Fatalf("expected the down migration to succeed on a clean database: %v", err)
 	}
 }
@@ -141,7 +166,7 @@ func TestMigration0091_DownRefuses_AfterSettlementPosted(t *testing.T) {
 	f, actor, betID := newStdBet(t, pool)
 	mustSimulate(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
 
-	_, err := pool.MigrateDown(context.Background(), migration0091Dir(t), 1)
+	_, err := pool.MigrateDown(context.Background(), migration0091Dir(t), stepsFromTipThrough91(t, pool))
 	if err == nil {
 		t.Fatalf("expected the down migration to refuse once a settlement has been posted")
 	}
@@ -164,7 +189,7 @@ func TestMigration0091_DownRefuses_TombstoneOnly(t *testing.T) {
 		t.Fatalf("expected a tombstone, got %q", res.Result)
 	}
 
-	_, err := pool.MigrateDown(context.Background(), migration0091Dir(t), 1)
+	_, err := pool.MigrateDown(context.Background(), migration0091Dir(t), stepsFromTipThrough91(t, pool))
 	if err == nil {
 		t.Fatalf("expected the down migration to refuse once a sportsbook tombstone has been posted")
 	}
@@ -210,7 +235,7 @@ func TestMigration0091_DownRefuses_MismatchKindOnly(t *testing.T) {
 		t.Fatalf("seed sb_status_mismatch row: %v", err)
 	}
 
-	_, err = pool.MigrateDown(context.Background(), migration0091Dir(t), 1)
+	_, err = pool.MigrateDown(context.Background(), migration0091Dir(t), stepsFromTipThrough91(t, pool))
 	if err == nil {
 		t.Fatalf("expected the down migration to refuse with a recorded sportsbook reconciliation mismatch")
 	}

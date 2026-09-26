@@ -97,7 +97,7 @@ type insertBetParams struct {
 // either a raw constraint-violation error or silently returning the
 // wrong bet.
 func insertBet(ctx context.Context, tx pgx.Tx, p insertBetParams) (Bet, error) {
-	conflict, err := db.IdempotentInsert(ctx, tx, func(spTx pgx.Tx) error {
+	conflict, _, err := db.IdempotentInsert(ctx, tx, func(spTx pgx.Tx) error {
 		_, err := spTx.Exec(ctx,
 			`INSERT INTO sportsbook_bets
 				(id, tenant_id, brand_id, player_account_id, wallet_id, selection_id, asset_code,

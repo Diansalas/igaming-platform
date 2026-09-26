@@ -444,7 +444,7 @@ func (o *Orchestrator) InitiateDeposit(ctx context.Context, tx pgx.Tx, params In
 	}
 
 	intentID := uuid.New()
-	conflict, err := db.IdempotentInsert(ctx, tx, func(spTx pgx.Tx) error {
+	conflict, _, err := db.IdempotentInsert(ctx, tx, func(spTx pgx.Tx) error {
 		_, err := spTx.Exec(ctx,
 			`INSERT INTO deposit_intents (id, tenant_id, brand_id, player_account_id, wallet_id, asset_code, amount, payment_method, idempotency_key)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -952,6 +952,46 @@ func (o *Orchestrator) receiveDepositReversalCallback(ctx context.Context, tx pg
 		return ReceiveCallbackResult{LedgerTransactionID: &txID, Tombstoned: true}, nil
 	}
 
+	// Stage 10.1 PAY-REV-1 (ADR 0090; docs/plans/stage-10.1-planning-gate-
+	// proposal.md §E, sequence step S2): lock the ORIGINAL deposit's
+	// ledger_transactions row before anything else decides whether a
+	// reversal may post. This is a plain ADR 0082 class-L2 instance - no
+	// new exception - mirroring internal/casino's postRollback precedent
+	// exactly. It closes a real, reproduced defect: two distinct-
+	// provider-reference reversal callbacks for the SAME original deposit
+	// could both run the (unlocked) "already reversed?" check before
+	// either one's posting was visible to the other, and both post,
+	// over-debiting player_cash. Permitted on this append-only table - a
+	// row lock is not itself a mutation and does not trigger
+	// ledger_deny_mutation().
+	//
+	// A missing row, or a row whose transaction_type is not 'deposit', is
+	// an INTEGRITY failure, never routed to the tombstone branch above:
+	// the tombstone branch is for "no ledger transaction was ever posted
+	// for this provider reference" (a deposit_intents-level fact, decided
+	// before this point). Reaching here at all means deposit_intents
+	// already POINTS AT a specific ledger_transactions id via
+	// original.LedgerTransactionID - if that row does not exist, or is not
+	// a deposit, the data is corrupted, not merely a late/duplicate
+	// reversal, and posting anything against it would be worse than
+	// failing closed.
+	var lockedType ledger.TransactionType
+	err = tx.QueryRow(ctx,
+		`SELECT transaction_type FROM ledger_transactions WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+		*original.LedgerTransactionID, tenantID,
+	).Scan(&lockedType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: deposit intent %s names ledger transaction %s, which does not exist for tenant %s",
+			ErrDepositReversalIntegrity, original.ID, *original.LedgerTransactionID, tenantID)
+	}
+	if err != nil {
+		return ReceiveCallbackResult{}, fmt.Errorf("payments: lock original deposit transaction: %w", err)
+	}
+	if lockedType != ledger.TxDeposit {
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: ledger transaction %s has type %q, expected %q",
+			ErrDepositReversalIntegrity, *original.LedgerTransactionID, lockedType, ledger.TxDeposit)
+	}
+
 	// A reversal callback's amount/asset are payload-controlled facts
 	// about a debit the platform is about to post - CLAUDE.md's
 	// authorization rule ("never trusted from the client") applies here
@@ -982,6 +1022,20 @@ func (o *Orchestrator) receiveDepositReversalCallback(ctx context.Context, tx pg
 	// was rejected here with ErrDepositAlreadyReversed, contradicting this
 	// very comment (audit §6.2 observation); IS DISTINCT FROM so a
 	// reversal row with a NULL provider reference is still counted.
+	//
+	// Stage 10.1 PAY-REV-1 (S4, §E): this is now a NEW statement, run
+	// AFTER the S2 lock above is held, not the same query that used to run
+	// before any lock existed at all. It relies on READ COMMITTED
+	// isolation (the default and the only isolation level this codebase
+	// runs financial transactions under): each statement in a READ
+	// COMMITTED transaction takes its own fresh snapshot, so if a
+	// concurrent distinct-reference reversal for this SAME original
+	// committed while this call was queued waiting on S2's row lock, that
+	// commit is visible here even though this query's TEXT is unchanged
+	// from before the lock existed. This is what makes "S2 lock, then S4
+	// re-check" race-free where the old single unlocked check was not: two
+	// concurrent callers can no longer both observe "not yet reversed"
+	// before either one's write is visible to the other.
 	var alreadyReversed bool
 	if err := tx.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM ledger_transactions WHERE reverses_transaction_id = $1
@@ -1026,6 +1080,15 @@ func (o *Orchestrator) receiveDepositReversalCallback(ctx context.Context, tx pg
 		// caller gets an integrity failure.
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: post deposit reversal: %w", ErrCallbackPayloadMismatch, err)
 	}
+	if errors.Is(err, ledger.ErrReversalAlreadyExists) {
+		// Stage 10.1 PAY-REV-1 backstop: the S4 re-check above did not
+		// catch this (so a writer must have bypassed the S2 lock, or a
+		// vanishingly unlikely timing gap this codebase's own review did
+		// not otherwise find), but migration 0092's index still refused
+		// the INSERT. Mapped to the SAME sentinel S4 uses, so the HTTP
+		// layer and every caller need exactly one denial code path.
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: %w", ErrDepositAlreadyReversed, err)
+	}
 	if err != nil {
 		return ReceiveCallbackResult{}, fmt.Errorf("payments: post deposit reversal: %w", err)
 	}
@@ -1043,6 +1106,26 @@ func (o *Orchestrator) receiveDepositReversalCallback(ctx context.Context, tx pg
 	}
 
 	return ReceiveCallbackResult{DepositIntentID: original.ID, Status: original.Status, LedgerTransactionID: &postResult.TransactionID}, nil
+}
+
+// RecordDepositReversalRejection writes the deposit.reversal_rejected
+// audit record for an ErrDepositAlreadyReversed denial. Exported so the
+// HTTP layer can record it in a SEPARATE, freshly-opened tenant-scoped
+// transaction (Stage 10.1 PAY-REV-1, ADR 0090; ADR 0088 §4.7's pattern,
+// mirrored exactly, per sportsbook's own RecordSettlementRejection): the
+// transaction that ran receiveDepositReversalCallback has already been
+// rolled back by db.Pool.WithTenant because it returned a non-nil error,
+// so nothing recorded on tx itself would ever be committed.
+func RecordDepositReversalRejection(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, requestID string) error {
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "deposit.reversal_rejected",
+		TargetType: "payment_webhook", TargetID: providerID, Outcome: audit.OutcomeDenied,
+		RequestID: requestID,
+		Metadata:  map[string]any{"provider_id": providerID},
+	}); err != nil {
+		return fmt.Errorf("payments: audit deposit reversal rejection: %w", err)
+	}
+	return nil
 }
 
 func postDepositReversalTombstone(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, event CallbackEvent) (uuid.UUID, error) {

@@ -75,6 +75,19 @@ found no single statement of that boundary anywhere in the Stage 3A set.
 - **Failure behavior / idempotency**: the reversal itself has its own
   `(provider_id, provider_tx_id)` (the chargeback/return's own reference),
   so a redelivered reversal callback is equally idempotent.
+- **One reversal per original (Stage 10.1 PAY-REV-1, ADR 0090)**: a
+  DIFFERENT provider reference naming an already-reversed original is
+  rejected, never posted as a second, independent debit. The callback
+  handler takes an ADR 0082 class-L2 `FOR UPDATE` lock on the original
+  deposit's `ledger_transactions` row before deciding whether a reversal
+  may post, then re-checks "already reversed?" as a fresh statement under
+  that lock; a partial unique index
+  (`ledger_transactions_one_deposit_reversal`, migration 0092) backstops
+  any writer that skips the lock. A rejected distinct-reference reversal
+  returns HTTP 409 with a generic body, never a partial or duplicate
+  posting; see ADR 0090 and the ADR 0020 amendment (2026-09-26) for the
+  full contract and the general doctrine this establishes for future
+  reversal-type posters.
 - **Tombstone case**: if the *original* deposit was never seen by the
   ledger (e.g. lost callback) and a reversal for it arrives, the reversal
   handler writes a tombstone row keyed by the original's
