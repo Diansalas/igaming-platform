@@ -70,6 +70,7 @@ deferred to the single future governed staging deployment.
 - Free rounds, jackpots, bonus-funded casino stakes — not required; a conformance rule forbids mapping
   them to wins.
 - Hosted-KYC session token (J12), sanctions/PEP vendor interface — registered, not in 10.3.
+- A four-eyes "settlement freeze" for casino — explicitly not built (security ruling, §19 R9).
 - Any AI implementation (ADR 0089 stays architecture only). B2B, retail, cashout — out.
 
 ## 4. Current architecture (verified at `957a3e8`)
@@ -118,7 +119,7 @@ W0  paper: ADR 0092 (Stage 10.3 definition) · ADR 0093 provider credential mode
 |---|---|---|---|---|
 | 0094 | W1c | casino capability CHECK `NOT supports_bet OR (supports_win AND supports_rollback)` | the constraint build itself (a `count(*)` pre-check sees zero rows under FORCE RLS); refuses rather than auto-editing config | drop constraint |
 | 0095 | W1d | `kyc_verifications.reason` length CHECK (512) + `reason_code` column with CHECK over the approved enum | normalise existing rows (synthetic data only) inside the migration | drop both |
-| 0096 | W2a | `provider_credential_handles` (tenant_id, domain, provider_id, key_id, secret_ref, pinned version, fingerprint, status `active|verify_only|revoked`, not_after), FORCE RLS, composite FKs, no platform read policy | n/a (new table) | drop table (refuses if rows exist unless explicitly forced by runbook) |
+| 0096 | W2a | `provider_credential_handles` (tenant_id, domain, provider_id, purpose, key_id, secret_ref, pinned version, fingerprint, status `active|verify_only|revoked`, not_after), FORCE RLS, composite FKs, no platform read policy | n/a (new table) | drop table (refuses if rows exist unless explicitly forced by runbook) |
 | 0097 | W2b | append-only `casino_callback_rejections` + new reconciliation mismatch kinds | n/a | refuses once evidence exists (as 0091) |
 
 No migration edits history; every migration is reversible on a fresh DB and covered by the
@@ -275,7 +276,44 @@ default and mixed/bonus-funded cashout were answered in ADR 0042 (implementation
 
 ## 19. Review record and Orchestrator rulings
 
-(Filled after the §17 reviews.)
+| Review | Verdict | Record |
+|---|---|---|
+| `product-owner-proxy` | APPROVE WITH CONDITIONS | `stage-10.3-planning/04-review-product-owner-proxy.md` |
+| `qa` | APPROVE WITH CONDITIONS (8 wave-level conditions; binding per-wave test plan) | `stage-10.3-planning/04-review-qa.md` |
+| `security` | APPROVE WITH CONDITIONS (C1–C17; no new human decision) | `stage-10.3-planning/04-review-security.md` |
+
+**Disagreement and ruling.** `product-owner-proxy` held four-eyes on credential changes out of 10.3;
+`security` (C2, High) requires it in W2a with the admin handle API. **Ruling R1: security's C2 governs**
+(CLAUDE.md gives `security` review authority platform-wide, and an active provider credential authorises
+money movement). Shape per security: *enable = two people, disable = one* — registering any handle that
+can become active needs a DB-enforced, content-bound, expiring approval by a different platform admin
+(0044/0086 trigger pattern); `verify_only`, window-shortening and revocation are single-actor with a
+reason code; four distinct permissions (read / request / approve / revoke), none bundled into existing
+write permissions.
+
+| # | Ruling |
+|---|---|
+| R1 | Four-eyes on credential activation ships in W2a (above). |
+| R2 | Security C1 (High) adopted: `secret_ref` namespaced by tenant, checked in API and resolver; global unique `(domain, provider_id, purpose, fingerprint)` (also blocks re-registering a revoked secret). |
+| R3 | Security C3/C10/C11 adopted: key-selection mode comes only from `Properties().KeySelection`, never from an absent key-id header; `timestamp_out_of_window` is a distinct Reason; `Properties()` validated at registration and a bad declaration fails startup. |
+| R4 | Security C4/C5 adopted into the W0 ADR 0022 amendments: capped overlap window, `not_after` may only shrink (no extending grant), at most one `verify_only` key, matching `key_id` logged; point 9 allowance is exactly one pinned, lock-free, read-only SELECT with explicit tenant predicate; point 10 `MaxSkew` ≤ 10 minutes. **PAYWH-TS-1 closes as superseded** when the W0 amendment is recorded in the registry (product-owner-proxy condition). |
+| R5 | Security C6/C7/C8 adopted: fingerprint = HMAC with a platform key; store calls behind a circuit breaker with a cache keyed on (tenant, ref, fingerprint) and a fingerprint check on every resolve, so a store outage cannot hold pooled DB connections; outbound credentials resolved per call, never cached. |
+| R6 | Security C9 adopted: vendor known-answer vector per real scheme; one broken scheme per mandatory case; suite-generated tampering; registry-driven test that every non-synthetic scheme runs the suite; lint/AST rule for constant-time compare. |
+| R7 | Security C12 adopted for W3b: Secrets Manager modules only, confined to one package (import-boundary test); `govulncheck` added to CI; task-role credentials only (static keys and endpoint overrides refused); SDK logging off; pinned `VersionId`. |
+| R8 | Security C13 adopted: a **missing** `APP_ENV` is treated as production by the synthetic guard and the secret-backend allow-list; positive `ProductionEligible` marker preferred over name-based scan; all-flags test; `cmd/seed-admin`/`cmd/migrate` wire no mocks; `memory://` backend test-only. |
+| R9 | Security C14 adopted: credential revocation is the casino emergency stop; no real casino resolver wired until W2a revocation is built and tested; runbook requires reconciliation before a replacement key goes live. **No four-eyes "settlement freeze" is built.** |
+| R10 | Security C16/C17: KYC reason also gets UTF-8 validation, bidi-control stripping and staff-UI escaping; the per-wave "secrets scan" gate becomes a real CI step (added in W0/W1 alongside `govulncheck`). |
+| R11 | QA conditions adopted as binding (per-wave plan in `04-review-qa.md`), including concurrent same-`provider_tx_id` idempotency tests for W1c, KYC reason authorization/isolation tests, migration evidence wired into the CI evidence gate, and a dependency-drift check before W3b. |
+| R12 | **CI-FLAKE-281 is addressed in 10.3** (QA condition 6): raise/scale the Stage 9 concurrent-login ceiling as a reviewed test change, and keep new admin-API tests out of the heaviest `internal/httpserver` files. |
+| R13 | Product-owner-proxy: `casino_statement` (W3a) is first to cut under schedule pressure; admin handle API scope stays create/rotate/revoke + approval + audit (no self-service secret writing, no per-tenant IAM/KMS). The casino rejection record stays in scope. |
+| R14 | Register (not 10.3 scope): cross-tenant "revoke all handles for provider P" (needed once two tenants share a provider); **CAS-WIN-ANOMALY-1** detection-only large-win alert before real-money casino go-live; LEDGER-MANUAL-ADJ-4EYES-1; PROV-OUTBOUND-CRED-1 (in 10.3 W2a). |
+| R15 | §6 migration 0096 adds the `purpose` column (inbound verify / outbound call) omitted from the draft table. |
+
+**Disclosures for the human (not decisions now):** (a) ADR 0022 points 3 and 10 and §4.2 constrain which
+vendors can be integrated (vendors without signatures or timestamps would need an explicit exception);
+(b) a B2B or bring-your-own-licence tenant's contract or regulator may require per-tenant isolation of
+credential material (separate KMS keys/roles) beyond this design; (c) recovering from a casino key
+compromise (correcting forged wins) depends on LEDGER-MANUAL-ADJ-4EYES-1, which is not built.
 
 ## 20. Staging requirements
 
