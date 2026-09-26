@@ -161,7 +161,9 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 		provider := factory()
 		mock, ok := provider.(*MockCasinoProvider)
 		if !ok {
-			t.Skip("FailNextCall is mock-specific; a real adapter's own test supplies its own failure fixture")
+			// Stage 10.3 W1a: fail, never skip - a real adapter must supply
+			// its own transport-failure fixture hook.
+			t.Fatalf("provider-failure conformance is mandatory (ADR 0025 §8): %T must supply its own failure fixture hook for this case; a real adapter cannot skip it", provider)
 		}
 		ctx := context.Background()
 
@@ -184,7 +186,8 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 		provider := factory()
 		mock, ok := provider.(*MockCasinoProvider)
 		if !ok {
-			t.Skip("callback payload construction is mock-specific")
+			// Stage 10.3 W1a (WH-VENDOR-SCHEME-1): fail, never skip.
+			t.Fatalf("callback conformance is mandatory (ADR 0025 §8): %T must supply its own signed-callback fixture hook for this case; a real adapter cannot skip it", provider)
 		}
 		ctx := context.Background()
 		tenantID := uuid.New()
@@ -267,7 +270,8 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 		provider := factory()
 		mock, ok := provider.(*MockCasinoProvider)
 		if !ok {
-			t.Skip("credential/signature construction is mock-specific")
+			// Stage 10.3 W1a (WH-VENDOR-SCHEME-1): fail, never skip.
+			t.Fatalf("callback conformance is mandatory (ADR 0025 §8): %T must supply its own signed-callback fixture hook for this case; a real adapter cannot skip it", provider)
 		}
 		ctx := context.Background()
 		tenantID := uuid.New()
@@ -289,7 +293,8 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 		provider := factory()
 		mock, ok := provider.(*MockCasinoProvider)
 		if !ok {
-			t.Skip("callback payload construction is mock-specific")
+			// Stage 10.3 W1a (WH-VENDOR-SCHEME-1): fail, never skip.
+			t.Fatalf("callback conformance is mandatory (ADR 0025 §8): %T must supply its own signed-callback fixture hook for this case; a real adapter cannot skip it", provider)
 		}
 		ctx := context.Background()
 		tenantID := uuid.New()

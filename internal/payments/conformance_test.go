@@ -82,7 +82,9 @@ func RunProviderConformanceSuite(t *testing.T, factory func() PaymentProvider) {
 		provider := factory()
 		mock, ok := provider.(*MockProvider)
 		if !ok {
-			t.Skip("callback payload construction is mock-specific; a real adapter's own test supplies its own wire fixtures")
+			// Stage 10.3 W1a (WH-VENDOR-SCHEME-1): fail, never skip - a real
+			// adapter must supply its own signed-callback fixture hook.
+			t.Fatalf("callback conformance is mandatory (ADR 0022 §6): %T must supply its own signed-callback fixture hook for this case; a real adapter cannot skip it", provider)
 		}
 		ctx := context.Background()
 		tenantID := uuid.New()
@@ -111,7 +113,8 @@ func RunProviderConformanceSuite(t *testing.T, factory func() PaymentProvider) {
 		provider := factory()
 		mock, ok := provider.(*MockProvider)
 		if !ok {
-			t.Skip("callback payload construction is mock-specific")
+			// Stage 10.3 W1a (WH-VENDOR-SCHEME-1): fail, never skip.
+			t.Fatalf("callback conformance is mandatory (ADR 0022 §6): %T must supply its own signed-callback fixture hook for this case; a real adapter cannot skip it", provider)
 		}
 		ctx := context.Background()
 		tenantID := uuid.New()
@@ -218,7 +221,8 @@ func RunProviderConformanceSuite(t *testing.T, factory func() PaymentProvider) {
 		// above.
 		mock, ok := provider.(*MockProvider)
 		if !ok {
-			t.Skip("credential/signature construction is mock-specific; a real adapter's own conformance fixture supplies its own per-tenant credentials")
+			// Stage 10.3 W1a (WH-VENDOR-SCHEME-1): fail, never skip.
+			t.Fatalf("key-material conformance is mandatory (ADR 0022 §4.1/§6): %T must supply its own per-tenant signed-callback fixture hook for this case; a real adapter cannot skip it", provider)
 		}
 		cred := mockCredentialFor(t, mock, tenantID)
 		inbound := mock.SignRawBody(tenantID, poisoned)

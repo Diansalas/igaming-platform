@@ -1,0 +1,38 @@
+W1a (WH-VENDOR-SCHEME-1) pre-conversion evidence: conformance skips for non-mock adapters (04-review-qa.md §3)
+HEAD: 4a2a97807dfc5121f6afaeb456de31ea3ae56913 plus only the two new, uncommitted evidence tests
+      (internal/payments/conformance_skip_to_fail_test.go, internal/casino/conformance_skip_to_fail_test.go);
+      the conformance suites themselves are unmodified.
+Command: go test -count=1 ./internal/payments ./internal/casino -run 'SkipToFail' -v
+Expected: RED. Each of the 7 converted cases still SKIPs for a non-mock adapter (only the K3 tenant-binding case FAILs).
+---
+Child process (non-mock adapter run through RunProviderConformanceSuite):
+            --- SKIP: TestPaymentsConformance_W1a_NonMockAdapterChild/HandleCallback_surfaces_decline_and_ambiguous_distinguishably (0.00s)
+            --- SKIP: TestPaymentsConformance_W1a_NonMockAdapterChild/redelivered_callback_is_idempotent (0.00s)
+            --- FAIL: TestPaymentsConformance_W1a_NonMockAdapterChild/a_credential_resolved_for_one_tenant_is_rejected_for_another_(conformance) (0.00s)
+            --- SKIP: TestPaymentsConformance_W1a_NonMockAdapterChild/inbound_key_material_is_rejected,_not_stored_or_logged (0.00s)
+            --- SKIP: TestCasinoConformance_W1a_NonMockAdapterChild/a_simulated_transport_failure_surfaces_as_an_error,_not_a_result (0.00s)
+            --- SKIP: TestCasinoConformance_W1a_NonMockAdapterChild/HandleCallback_rejects_a_missing_or_invalid_signature (0.00s)
+            --- FAIL: TestCasinoConformance_W1a_NonMockAdapterChild/a_credential_resolved_for_one_tenant_is_rejected_for_another_(conformance) (0.00s)
+            --- SKIP: TestCasinoConformance_W1a_NonMockAdapterChild/HandleCallback_rejects_a_malformed_payload (0.00s)
+            --- SKIP: TestCasinoConformance_W1a_NonMockAdapterChild/HandleCallback_parses_a_redelivered_payload_identically (0.00s)
+Parent assertions:
+=== RUN   TestPaymentsConformance_W1a_SkipToFail_NonMockAdapterFailsNotSkips
+    conformance_skip_to_fail_test.go:62: conformance case "HandleCallback_surfaces_decline_and_ambiguous_distinguishably" still SKIPs for a non-mock adapter; it must fail (ADR 0022 §6)
+    conformance_skip_to_fail_test.go:65: conformance case "HandleCallback_surfaces_decline_and_ambiguous_distinguishably" did not FAIL for a non-mock adapter
+    conformance_skip_to_fail_test.go:62: conformance case "redelivered_callback_is_idempotent" still SKIPs for a non-mock adapter; it must fail (ADR 0022 §6)
+    conformance_skip_to_fail_test.go:65: conformance case "redelivered_callback_is_idempotent" did not FAIL for a non-mock adapter
+    conformance_skip_to_fail_test.go:62: conformance case "inbound_key_material_is_rejected,_not_stored_or_logged" still SKIPs for a non-mock adapter; it must fail (ADR 0022 §6)
+    conformance_skip_to_fail_test.go:65: conformance case "inbound_key_material_is_rejected,_not_stored_or_logged" did not FAIL for a non-mock adapter
+--- FAIL: TestPaymentsConformance_W1a_SkipToFail_NonMockAdapterFailsNotSkips (0.02s)
+FAIL	github.com/Diansalas/igaming-platform/internal/payments	0.022s
+=== RUN   TestCasinoConformance_W1a_SkipToFail_NonMockAdapterFailsNotSkips
+    conformance_skip_to_fail_test.go:62: conformance case "a_simulated_transport_failure_surfaces_as_an_error,_not_a_result" still SKIPs for a non-mock adapter; it must fail (ADR 0022 §6)
+    conformance_skip_to_fail_test.go:65: conformance case "a_simulated_transport_failure_surfaces_as_an_error,_not_a_result" did not FAIL for a non-mock adapter
+    conformance_skip_to_fail_test.go:62: conformance case "HandleCallback_rejects_a_missing_or_invalid_signature" still SKIPs for a non-mock adapter; it must fail (ADR 0022 §6)
+    conformance_skip_to_fail_test.go:65: conformance case "HandleCallback_rejects_a_missing_or_invalid_signature" did not FAIL for a non-mock adapter
+    conformance_skip_to_fail_test.go:62: conformance case "HandleCallback_rejects_a_malformed_payload" still SKIPs for a non-mock adapter; it must fail (ADR 0022 §6)
+    conformance_skip_to_fail_test.go:65: conformance case "HandleCallback_rejects_a_malformed_payload" did not FAIL for a non-mock adapter
+    conformance_skip_to_fail_test.go:62: conformance case "HandleCallback_parses_a_redelivered_payload_identically" still SKIPs for a non-mock adapter; it must fail (ADR 0022 §6)
+    conformance_skip_to_fail_test.go:65: conformance case "HandleCallback_parses_a_redelivered_payload_identically" did not FAIL for a non-mock adapter
+--- FAIL: TestCasinoConformance_W1a_SkipToFail_NonMockAdapterFailsNotSkips (0.01s)
+FAIL	github.com/Diansalas/igaming-platform/internal/casino	0.015s
