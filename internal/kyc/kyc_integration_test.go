@@ -89,7 +89,7 @@ func seedVerification(t *testing.T, pool *db.Pool, f fixture) uuid.UUID {
 	t.Helper()
 	var verificationID uuid.UUID
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		v, err := CreateVerification(ctx, tx, NewMockKYCProvider("secret"), CreateVerificationParams{
+		v, err := CreateVerification(ctx, tx, NewMockKYCProvider(), CreateVerificationParams{
 			TenantID: f.tenantID, BrandID: f.brandID, PlayerAccountID: f.playerID, PersonID: f.personID,
 		})
 		verificationID = v.ID

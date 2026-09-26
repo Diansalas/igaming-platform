@@ -252,11 +252,17 @@ func ListVerificationsForTenant(ctx context.Context, tx pgx.Tx, params ListVerif
 // callback dispatch - unexported, since a caller outside this package
 // should never look a verification up by provider reference (only the
 // orchestrator, which just received that exact reference FROM the
-// provider, has legitimate reason to).
-func getVerificationByProviderReference(ctx context.Context, tx pgx.Tx, providerID, providerReference string) (Verification, error) {
+// provider, has legitimate reason to). tenantID is an EXPLICIT predicate
+// (architect R4/J6), on top of - never instead of - kyc_verifications' own
+// tenant_isolation RLS/FORCE ROW LEVEL SECURITY and migration 0040's
+// identically-shaped UNIQUE (tenant_id, provider_id, provider_reference)
+// index: a callback reachable only via a tenant-bound verified signature
+// must never resolve to a DIFFERENT tenant's row even if RLS were somehow
+// misconfigured for this connection.
+func getVerificationByProviderReference(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, providerReference string) (Verification, error) {
 	return scanVerification(tx.QueryRow(ctx,
-		`SELECT `+verificationColumns+` FROM kyc_verifications WHERE provider_id = $1 AND provider_reference = $2`,
-		providerID, providerReference,
+		`SELECT `+verificationColumns+` FROM kyc_verifications WHERE tenant_id = $1 AND provider_id = $2 AND provider_reference = $3`,
+		tenantID, providerID, providerReference,
 	))
 }
 

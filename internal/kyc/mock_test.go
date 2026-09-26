@@ -3,6 +3,10 @@ package kyc
 import (
 	"context"
 	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 func TestMockMalwareScanner_CleanContentReportsClean(t *testing.T) {
@@ -56,7 +60,7 @@ func TestMockDocumentStorageProvider_UnknownReferenceReturnsNotFound(t *testing.
 }
 
 func TestMockKYCProvider_CreateVerification_ReturnsUniqueReferences(t *testing.T) {
-	p := NewMockKYCProvider("secret")
+	p := NewMockKYCProvider()
 	seen := make(map[string]bool)
 	for i := 0; i < 20; i++ {
 		result, err := p.CreateVerification(context.Background(), CreateVerificationInput{})
@@ -71,19 +75,30 @@ func TestMockKYCProvider_CreateVerification_ReturnsUniqueReferences(t *testing.T
 }
 
 func TestMockKYCProvider_HandleCallback_RejectsInvalidSignature(t *testing.T) {
-	p := NewMockKYCProvider("secret")
-	body, _ := p.MockCallbackPayload("ref-1", ProviderApproved, "ok")
-	tampered := MockSignedCallbackBody(body, "not-the-real-signature")
-	if _, err := p.HandleCallback(context.Background(), tampered); err == nil {
+	p := NewMockKYCProvider()
+	tenantID := uuid.New()
+	in := p.CallbackPayload(tenantID, "ref-1", ProviderApproved, "ok")
+	in.Header.Set(webhookauth.KYCSignatureHeader, "v1="+"00000000000000000000000000000000000000000000000000000000000000")
+	resolver := NewMockWebhookCredentials(p)
+	cred, err := resolver.Resolve(context.Background(), tenantID, p.ID(), webhookauth.MockKeyID)
+	if err != nil {
+		t.Fatalf("unexpected resolver error: %v", err)
+	}
+	if _, err := p.HandleCallback(context.Background(), in, cred); err == nil {
 		t.Fatal("expected an error for an invalid signature")
 	}
 }
 
 func TestMockKYCProvider_HandleCallback_AcceptsValidSignature(t *testing.T) {
-	p := NewMockKYCProvider("secret")
-	body, sig := p.MockCallbackPayload("ref-1", ProviderApproved, "ok")
-	signed := MockSignedCallbackBody(body, sig)
-	result, err := p.HandleCallback(context.Background(), signed)
+	p := NewMockKYCProvider()
+	tenantID := uuid.New()
+	in := p.CallbackPayload(tenantID, "ref-1", ProviderApproved, "ok")
+	resolver := NewMockWebhookCredentials(p)
+	cred, err := resolver.Resolve(context.Background(), tenantID, p.ID(), webhookauth.MockKeyID)
+	if err != nil {
+		t.Fatalf("unexpected resolver error: %v", err)
+	}
+	result, err := p.HandleCallback(context.Background(), in, cred)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -93,7 +108,7 @@ func TestMockKYCProvider_HandleCallback_AcceptsValidSignature(t *testing.T) {
 }
 
 func TestMockKYCProvider_SetUnavailable(t *testing.T) {
-	p := NewMockKYCProvider("secret")
+	p := NewMockKYCProvider()
 	p.SetUnavailable(true)
 	if err := p.HealthStatus(context.Background()); err == nil {
 		t.Fatal("expected HealthStatus to report an error while unavailable")

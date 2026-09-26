@@ -2,14 +2,14 @@ package kyc
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"sync"
 
 	"github.com/google/uuid"
+
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // MockKYCProvider is the only KYCProvider implementation this stage
@@ -22,33 +22,47 @@ import (
 //
 // Its callback payload is the platform's OWN minimal JSON shape
 // ({"provider_reference": "...", "outcome": "...", "reason": "..."}),
-// HMAC-signed with webhookSecret - standing in for whatever
-// signature/shared-secret scheme a real vendor would use. This is NOT a
-// real vendor's webhook format; it exists solely so this stage can test
-// "callback authentication" end to end (directive §21/§23) without
-// inventing and then having to maintain a fictional but
-// vendor-shaped API.
+// authenticated via the shared internal/webhookauth MOCK scheme (Stage
+// 10.2, ADR 0091) - standing in for whatever signature/shared-secret
+// scheme a real vendor would use. This is NOT a real vendor's webhook
+// format; it exists solely so this stage can test "callback
+// authentication" end to end without inventing and then having to
+// maintain a fictional but vendor-shaped API.
+//
+// MOCK ONLY (CLAUDE.md "No fake completion"): master is a per-process
+// crypto/rand secret, NEVER config, NEVER the repository, and NEVER
+// recoverable from outside this process (webhookauth.NewMockMaster). A
+// caller CANNOT construct this type with an injected/literal secret -
+// NewMockKYCProvider takes no argument - which is what actually closes
+// KYC-WH-1's "committed constant" finding: there is no parameter through
+// which a compile-time literal could ever reach this type again.
 type MockKYCProvider struct {
-	mu            sync.Mutex
-	webhookSecret string
-	outcomes      map[string]ProviderResult // providerReference -> configured GetVerification/callback result
-	created       map[string]bool
-	unavailable   bool
+	mu          sync.Mutex
+	master      []byte
+	outcomes    map[string]ProviderResult // providerReference -> configured GetVerification/callback result
+	created     map[string]bool
+	unavailable bool
 }
 
-// NewMockKYCProvider returns a mock with a fixed webhookSecret used to
-// HMAC-sign/verify callback payloads (MockCallbackPayload/HandleCallback).
-func NewMockKYCProvider(webhookSecret string) *MockKYCProvider {
+// kycMockScheme is the KYC domain's platform-defined MOCK wire scheme
+// (webhookauth package doc: never a vendor format).
+var kycMockScheme = webhookauth.KYCScheme()
+
+// NewMockKYCProvider returns a mock whose webhook signing/verification key
+// is a fresh per-process crypto/rand master (webhookauth.NewMockMaster) -
+// structurally impossible to inject a literal, since this constructor
+// takes no argument (KYC-WH-1, Stage 10.2, ADR 0091).
+func NewMockKYCProvider() *MockKYCProvider {
 	return &MockKYCProvider{
-		webhookSecret: webhookSecret,
-		outcomes:      make(map[string]ProviderResult),
-		created:       make(map[string]bool),
+		master:   webhookauth.NewMockMaster(),
+		outcomes: make(map[string]ProviderResult),
+		created:  make(map[string]bool),
 	}
 }
 
 func (m *MockKYCProvider) ID() string { return "mock" }
 
-// SetOutcome configures GetVerification and MockCallbackPayload to
+// SetOutcome configures GetVerification and CallbackPayload to
 // report result for providerReference - a test-only configuration hook,
 // mirroring MockCasinoProvider's SetGameConfig/MockPersonResolver's
 // SetMatch conventions exactly.
@@ -74,16 +88,12 @@ func (m *MockKYCProvider) CreateVerification(ctx context.Context, input CreateVe
 		return ProviderResult{}, fmt.Errorf("kyc: mock provider unavailable")
 	}
 	// A real vendor's own reference is globally unique across every one
-	// of its customers - kyc_verifications' own UNIQUE(provider_id,
-	// provider_reference) index (migration 0040) assumes exactly that.
-	// Generating one from a real random UUID (rather than a simple
-	// per-instance sequential counter) is what actually keeps that
+	// of its customers - kyc_verifications' own UNIQUE(tenant_id,
+	// provider_id, provider_reference) index (migration 0040) assumes
+	// exactly that. Generating one from a real random UUID (rather than a
+	// simple per-instance sequential counter) is what actually keeps that
 	// promise true across multiple independent MockKYCProvider instances
-	// sharing one database (e.g. two different test runs) - a sequential
-	// counter reset to 0 in each instance would collide (adversarial
-	// testing specialist review finding, Stage 4F, caught by
-	// TestKYC_ReuploadCreatesNewVersion failing with a genuine unique-
-	// constraint violation across test runs).
+	// sharing one database (e.g. two different test runs).
 	ref := "mock-ref-" + uuid.NewString()
 	m.created[ref] = true
 	return ProviderResult{ProviderReference: ref, Outcome: ProviderPending, Reason: "created"}, nil
@@ -122,8 +132,7 @@ func (m *MockKYCProvider) SubmitVerification(ctx context.Context, providerRefere
 	// Default, honest behavior with no test configuration: a real vendor
 	// would actually inspect the documents; this mock has none to
 	// inspect, so it reports review_required rather than fabricating an
-	// approval - mirrors identityresolution.MockPersonResolver's own
-	// "cannot decide, so report the safe uncertain outcome" default.
+	// approval.
 	return ProviderResult{ProviderReference: providerReference, Outcome: ProviderReviewRequired, Reason: "manual_review_default"}, nil
 }
 
@@ -135,41 +144,74 @@ type mockCallbackPayload struct {
 	Reason            string `json:"reason"`
 }
 
-func (m *MockKYCProvider) sign(body []byte) string {
-	mac := hmac.New(sha256.New, []byte(m.webhookSecret))
-	mac.Write(body)
-	return hex.EncodeToString(mac.Sum(nil))
+// closedOutcomeEnum is the closed set B6(d) requires: any other "outcome"
+// value is a malformed body, not a silently-accepted new status.
+var closedOutcomeEnum = map[string]bool{
+	string(ProviderApproved): true, string(ProviderRejected): true, string(ProviderPending): true,
+	string(ProviderReviewRequired): true, string(ProviderExpired): true, string(ProviderError): true,
 }
 
-// MockCallbackPayload builds a signed callback body a test can POST to
-// the platform's webhook endpoint - the mock's own stand-in for
-// whatever a real vendor's webhook request would look like.
-func (m *MockKYCProvider) MockCallbackPayload(providerReference string, outcome ProviderOutcome, reason string) (body []byte, signatureHeader string) {
-	body, _ = json.Marshal(mockCallbackPayload{ProviderReference: providerReference, Outcome: string(outcome), Reason: reason})
-	return body, m.sign(body)
+// deriveKey computes this instance's per-(tenantID, providerID) webhook
+// signing key via the shared MOCK derivation (Stage 10.2, ADR 0091).
+func (m *MockKYCProvider) deriveKey(tenantID uuid.UUID, providerID string) []byte {
+	return webhookauth.DeriveMockKey(m.master, webhookauth.KYCMockKeyLabel, tenantID, providerID)
 }
 
-// HandleCallback verifies the payload's signature (passed via a
-// convention this mock defines for itself: the LAST line of rawPayload,
-// after a newline, is the hex HMAC signature of everything before it -
-// see MockSignedCallbackBody) before trusting anything else in it -
-// mirrors casino.MockCasinoProvider.HandleCallback's identical
-// "authenticate before parsing" discipline (ADR 0025 §7).
-func (m *MockKYCProvider) HandleCallback(ctx context.Context, rawPayload []byte) (ProviderResult, error) {
-	body, signature, ok := splitSignedPayload(rawPayload)
-	if !ok {
-		return ProviderResult{}, fmt.Errorf("kyc: mock callback missing signature")
+// CallbackPayload builds a signed webhookauth.Inbound a test/in-process
+// caller can POST to the platform's webhook endpoint - the mock's own
+// stand-in for whatever a real vendor's webhook request would look like.
+// tenantID/providerID are bound into the signature (never trusted from
+// the body) - a payload built for one tenant never verifies for another.
+func (m *MockKYCProvider) CallbackPayload(tenantID uuid.UUID, providerReference string, outcome ProviderOutcome, reason string) webhookauth.Inbound {
+	body, _ := json.Marshal(mockCallbackPayload{ProviderReference: providerReference, Outcome: string(outcome), Reason: reason})
+	key := m.deriveKey(tenantID, m.ID())
+	sigHex := kycMockScheme.Sign(key, tenantID, m.ID(), webhookauth.MockKeyID, body)
+	in := webhookauth.Inbound{TenantID: tenantID, ProviderID: m.ID(), Header: http.Header{}, Body: body}
+	kycMockScheme.SetHeaders(in.Header, webhookauth.MockKeyID, sigHex)
+	return in
+}
+
+// HandleCallback implements KYCProvider. Verification order (design §B6
+// (c)-(d), run only after the Orchestrator has already completed (a)-(b) -
+// provider registered, credential resolved and equality-checked against
+// req.TenantID/req.ProviderID):
+//
+//  1. verify the raw bytes against cred via the shared webhookauth.Scheme.
+//     Verify (constant-time, over content that includes tenantID/
+//     providerID - never trusted from the body). The ONLY failure value
+//     is ErrCallbackSignatureInvalid.
+//  2. only once (1) has succeeded: parse the body, reject a legacy
+//     top-level "signature" field (the pre-Stage-10.2 wire shape moved the
+//     signature into the header exclusively) as ErrCallbackSignatureInvalid,
+//     then require provider_reference and a closed-enum outcome - any
+//     failure here is ErrCallbackMalformedBody, a DIFFERENT, POST-
+//     verification sentinel the Orchestrator/HTTP layer maps to 400, never
+//     to the uniform 401.
+func (m *MockKYCProvider) HandleCallback(ctx context.Context, in webhookauth.Inbound, cred webhookauth.Credential) (ProviderResult, error) {
+	if err := kycMockScheme.Verify(cred, in); err != nil {
+		return ProviderResult{}, ErrCallbackSignatureInvalid
 	}
-	if !hmac.Equal([]byte(m.sign(body)), []byte(signature)) {
-		return ProviderResult{}, fmt.Errorf("kyc: mock callback signature invalid")
+
+	// From here on the caller has proven knowledge of the resolved
+	// credential - every subsequent rejection is a POST-verification,
+	// structural failure, never one of the auth sentinels above.
+	var generic map[string]any
+	if err := json.Unmarshal(in.Body, &generic); err != nil {
+		return ProviderResult{}, fmt.Errorf("%w: parse callback: %v", ErrCallbackMalformedBody, err)
+	}
+	if _, present := generic["signature"]; present {
+		return ProviderResult{}, ErrCallbackSignatureInvalid
 	}
 
 	var payload mockCallbackPayload
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return ProviderResult{}, fmt.Errorf("kyc: mock callback malformed payload")
+	if err := json.Unmarshal(in.Body, &payload); err != nil {
+		return ProviderResult{}, fmt.Errorf("%w: parse callback: %v", ErrCallbackMalformedBody, err)
 	}
 	if payload.ProviderReference == "" {
-		return ProviderResult{}, fmt.Errorf("kyc: mock callback missing provider_reference")
+		return ProviderResult{}, fmt.Errorf("%w: callback missing provider_reference", ErrCallbackMalformedBody)
+	}
+	if !closedOutcomeEnum[payload.Outcome] {
+		return ProviderResult{}, fmt.Errorf("%w: unrecognized outcome %q", ErrCallbackMalformedBody, payload.Outcome)
 	}
 	return ProviderResult{ProviderReference: payload.ProviderReference, Outcome: ProviderOutcome(payload.Outcome), Reason: payload.Reason}, nil
 }
@@ -190,18 +232,32 @@ func (m *MockKYCProvider) HealthStatus(ctx context.Context) error {
 	return nil
 }
 
-// MockSignedCallbackBody wraps body with MockKYCProvider's own
-// signature-append convention (see HandleCallback) - the exact bytes an
-// HTTP test posts to the webhook endpoint.
-func MockSignedCallbackBody(body []byte, signature string) []byte {
-	return append(append([]byte{}, body...), append([]byte("\n"), []byte(signature)...)...)
+// MockWebhookCredentials is the MOCK webhookauth.Resolver for the KYC
+// domain (design §B2). It resolves ONLY KeyID=="mock-v1" for provider
+// "mock" - any other providerID or keyID is
+// webhookauth.ErrCredentialUnavailable, which the Orchestrator folds into
+// ReasonCredentialUnavailable (fail closed, never a fallback to
+// unauthenticated verification).
+//
+// MOCK ONLY: the real resolver (a FORCE-RLS handle table plus an external,
+// tenant-scoped secret store) is NOT IMPLEMENTED.
+type MockWebhookCredentials struct {
+	provider *MockKYCProvider
 }
 
-func splitSignedPayload(raw []byte) (body []byte, signature string, ok bool) {
-	for i := len(raw) - 1; i >= 0; i-- {
-		if raw[i] == '\n' {
-			return raw[:i], string(raw[i+1:]), true
-		}
+// NewMockWebhookCredentials constructs the resolver bound to p.
+func NewMockWebhookCredentials(p *MockKYCProvider) MockWebhookCredentials {
+	return MockWebhookCredentials{provider: p}
+}
+
+// Resolve implements webhookauth.Resolver.
+func (r MockWebhookCredentials) Resolve(ctx context.Context, tenantID uuid.UUID, providerID, keyID string) (webhookauth.Credential, error) {
+	if r.provider == nil {
+		return webhookauth.Credential{}, webhookauth.ErrCredentialUnavailable
 	}
-	return nil, "", false
+	return webhookauth.MockResolver{
+		Master:     r.provider.master,
+		Label:      webhookauth.KYCMockKeyLabel,
+		ProviderID: r.provider.ID(),
+	}.Resolve(ctx, tenantID, providerID, keyID)
 }
