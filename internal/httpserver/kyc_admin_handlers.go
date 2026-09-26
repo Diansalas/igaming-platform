@@ -453,10 +453,10 @@ func newKYCWebhookHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		var result kyc.Verification
+		var applied bool
 		err := deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			result, err = deps.KYCOrchestrator.ReceiveCallback(ctx, tx, t.ID, providerID, webhookauth.Inbound{Header: r.Header, Body: body})
+			_, applied, err = deps.KYCOrchestrator.ReceiveCallback(ctx, tx, t.ID, providerID, webhookauth.Inbound{Header: r.Header, Body: body})
 			return err
 		})
 
@@ -492,7 +492,17 @@ func newKYCWebhookHandler(deps Deps) http.HandlerFunc {
 		// 204: never echo the verification (id, player_account_id,
 		// provider_reference) back to the external caller - design §G
 		// fixes the pre-fix 200-with-full-body leak.
-		_ = result
+		if !applied {
+			// K4 (Stage 10.2 final review, M4): a single allow-listed
+			// informational line for a verified callback that changed
+			// nothing - a replay, anything at or behind the
+			// verification's current rank, or an outcome=error against an
+			// already-terminal verification (K5). request_id/tenant_id/
+			// provider_id only - never the body, headers, signature, or
+			// which specific no-op case this was (that detail lives only
+			// in the verified provider's own delivery log, never ours).
+			logger.Info("kyc_webhook_noop", "request_id", requestID, "tenant_id", t.ID.String(), "provider_id", providerID)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
