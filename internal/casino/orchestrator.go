@@ -44,9 +44,8 @@ type Orchestrator struct {
 	// api/wiring.go) rather than an accidental always-on mock.
 	webhookCredentialResolver webhookauth.Resolver
 	// webhookSchemes: every adapter's validated WebhookScheme() (Stage
-	// 10.3 W1a; webhook_verify.go). now: platform clock (nil = time.Now).
+	// 10.3 W1a; webhook_verify.go).
 	webhookSchemes *webhookauth.SchemeSet
-	now            func() time.Time
 }
 
 // NewOrchestrator constructs an Orchestrator over the given adapter

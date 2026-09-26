@@ -32,13 +32,6 @@ func (o *Orchestrator) WebhookScheme(providerID string) (webhookauth.Verificatio
 	return o.webhookSchemes.Lookup(providerID)
 }
 
-func (o *Orchestrator) clock() time.Time {
-	if o.now != nil {
-		return o.now()
-	}
-	return time.Now()
-}
-
 // verifyCallback is ReceiveCallback's pre-verification half (strict I1: it
 // issues NO database statement at all):
 //
@@ -65,7 +58,7 @@ func (o *Orchestrator) verifyCallback(ctx context.Context, in webhookauth.Inboun
 	if authErr != nil {
 		return nil, webhookauth.Credential{}, authErr
 	}
-	cred, authErr := webhookauth.VerifyInbound(scheme, creds, in, m, o.clock())
+	cred, authErr := webhookauth.VerifyInbound(scheme, creds, in, m, time.Now())
 	if authErr != nil {
 		return nil, webhookauth.Credential{}, authErr
 	}

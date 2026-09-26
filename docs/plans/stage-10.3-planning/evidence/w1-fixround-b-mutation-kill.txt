@@ -166,3 +166,19 @@ Note on S-2 (M15/M16): SC2 also goes red for the timestampBeforeMAC scheme (SC2 
 and any tampered value outside the window hits the same window-before-MAC defect). Within SC7, only the stale-and-
 tampered assertion fails for it (TestSchemeConformanceSelfTest_TimestampBeforeMAC_OnlySC7StaleAndTampered). Because the
 self-test pins the red set exactly ([SC2, SC7]), deleting or weakening that assertion changes the set and fails it.
+---
+M34 KILLED: gate-10.3-W1 follow-up: mustCasinoSchemeSet reverts to scheme-only MustSchemeSet (casino S-1 rule 2, symmetry with M5/M6)
+    Date: 2026-09-26. Code under test: branch claude/focused-wright-jw88w9 at e45831c (this follow-up commit on top).
+    file: internal/casino/webhook_verify.go
+    mutation: mustCasinoSchemeSet(providers) reverted from `webhookauth.MustAdapterSchemeSet("casino", providers)` to the
+    pre-a94e610 shape (build a map[string]webhookauth.VerificationScheme by calling each adapter's own WebhookScheme(),
+    then webhookauth.MustSchemeSet("casino", schemes)) - i.e. exactly a94e610's diff applied in reverse.
+    test: -count=1 ./internal/casino/ -run TestNewOrchestrator_MockSchemeOnlyFromSyntheticAdapter
+    evidence: --- FAIL: TestNewOrchestrator_MockSchemeOnlyFromSyntheticAdapter (0.00s) |     --- FAIL: TestNewOrchestrator_MockSchemeOnlyFromSyntheticAdapter/casino_MOCK_scheme_on_an_unmarked_adapter (0.00s) |         webhook_scheme_test.go:92: NewOrchestrator must refuse (panic) so startup fails | PASS: payments_MOCK_scheme_on_a_synthetic_adapter subtest (cross-domain rule is still enforced by NewSchemeSet's own validateSyntheticForDomain, which does not depend on adapter type - only the adapter-marker sub-case regresses under this specific mutation, exactly mirroring M5/M6's payments/KYC results)
+    restored: yes (byte-identical to pre-mutation internal/casino/webhook_verify.go, confirmed via git diff showing only the
+    unrelated, already-committed-in-this-follow-up Orchestrator.now removal).
+    Covers: original task item 1 (this follow-up round) - a new casino-package test proving mustCasinoSchemeSet refuses
+    (a) a Synthetic scheme from an adapter not implementing SyntheticComponent(), and (b) a non-canonical (cross-domain)
+    MOCK scheme. (b) is additionally covered, at HEAD (no mutation needed to demonstrate it), by the passing
+    "payments MOCK scheme on a synthetic adapter" subtest of the same test, which exercises NewSchemeSet's
+    validateSyntheticForDomain directly - already provably enforced (see M1-M3 above, same underlying guard).
