@@ -3889,3 +3889,4 @@ approves HD-10.3-1.
 | PROV-REVOKE-ALL-1 | security + architect | Registered — needed once two tenants share a provider | cross-tenant "revoke all handles for provider P" | — |
 | KYC-HOSTED-SESSION-1 | identity-compliance | Registered (J12) | vendor short-lived hosted-KYC session token | — |
 | KYC-SANCTIONS-IF-1 | identity-compliance | Registered | sanctions/PEP vendor interface (does not exist) | — |
+| VERIFY-TEARDOWN-ECS-1 | devops | Registered — small follow-up (not 10.3 scope unless approved) | `verify-teardown.sh` tag sweep reports INACTIVE (deleted, non-billable) ECS cluster/services as leftovers after a successful destroy; exclude them as INACTIVE task definitions already are (`docs/governance/staging-teardown-2026-09-26.md`) | — |

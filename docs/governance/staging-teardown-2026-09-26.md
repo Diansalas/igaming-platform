@@ -55,7 +55,27 @@ lags deletions. Re-run result: see "Final verification" below.
 
 ## Final verification
 
-(recorded below by the orchestrator after the re-run)
+`verify-teardown.sh` was re-run every minute for 30 attempts (last run 2026-09-26T13:23:17Z). **It still
+exits 1**, for one reason only: the eu-central-1 tag sweep (Resource Groups Tagging API) keeps indexing
+the ECS cluster `igaming-staging-cluster` and its three services. All 20 other categories report
+`none`, and the us-east-1 sweep is clean.
+
+Direct ECS evidence (read-only), same time:
+
+| Object | Status | Running / pending tasks | Desired |
+|---|---|---|---|
+| cluster `igaming-staging-cluster` | `INACTIVE` (absent from `list-clusters`) | 0 / 0, 0 active services | — |
+| service `igaming-staging-platform-api` | `INACTIVE` | 0 | 0 |
+| service `igaming-staging-b2c` | `INACTIVE` | 0 | 0 |
+| service `igaming-staging-backoffice` | `INACTIVE` | 0 | 0 |
+
+`INACTIVE` is ECS's deleted state; ECS keeps the records (and the tagging index keeps their ARNs) for a
+while, and neither is billable — the same reason the script already treats INACTIVE task definitions as
+`[info]`, not leftovers. **Disposition: teardown complete; the verify exit code is 1 because of this
+indexing lag, not because a resource exists.** Registered as VERIFY-TEARDOWN-ECS-1 (devops): the tag
+sweep should exclude INACTIVE ECS clusters/services as it excludes task definitions. `deploy/` was not
+changed now (outside this authorization). Re-running `verify-teardown.sh` later should return 0 once AWS
+purges the INACTIVE records.
 
 ## Retained by design (runbook §6)
 
