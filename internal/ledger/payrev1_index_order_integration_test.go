@@ -58,8 +58,22 @@ func flipIdempotencyKeyConstraintOrder(t *testing.T, pool *db.Pool) {
 			`ALTER TABLE ledger_transactions DROP CONSTRAINT ledger_transactions_tenant_idempotency_key_key`); err != nil {
 			return err
 		}
+		if _, err := tx.Exec(ctx,
+			`ALTER TABLE ledger_transactions ADD CONSTRAINT ledger_transactions_tenant_idempotency_key_key UNIQUE (tenant_id, idempotency_key)`); err != nil {
+			return err
+		}
+		// A same-key reversal retry ALSO violates the provider-tx index
+		// (migration 0021), which would otherwise still be older than the
+		// 0092 index and be reported first - masking the defect this test
+		// exists to catch (ledger-finance re-verification, 2026-09-26).
+		// Recreate it too, so the 0092 index is the OLDEST of the three.
+		if _, err := tx.Exec(ctx, `DROP INDEX idx_ledger_transactions_tenant_provider_tx`); err != nil {
+			return err
+		}
 		_, err := tx.Exec(ctx,
-			`ALTER TABLE ledger_transactions ADD CONSTRAINT ledger_transactions_tenant_idempotency_key_key UNIQUE (tenant_id, idempotency_key)`)
+			`CREATE UNIQUE INDEX idx_ledger_transactions_tenant_provider_tx
+			     ON ledger_transactions (tenant_id, provider_id, provider_tx_id)
+			  WHERE provider_id IS NOT NULL`)
 		return err
 	})
 	if err != nil {
@@ -111,6 +125,24 @@ func TestPost_ReversalRetry_IndexOrderIndependent(t *testing.T) {
 	}
 	if name, ok := db.UniqueViolationConstraintName(err); !ok || name != "ledger_transactions_tenant_idempotency_key_key" {
 		t.Fatalf("expected the bare duplicate to name the idempotency-key constraint, got %q (ok=%v)", name, ok)
+	}
+
+	// Confirm the order that matters: a raw row duplicating the posted
+	// reversal on ALL THREE unique indexes (idempotency key, provider tx,
+	// one-reversal-per-deposit) must now be reported as the 0092
+	// constraint. Without this, the test could pass against the pre-fix
+	// Post because another index is reported first.
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO ledger_transactions
+			     (id, tenant_id, transaction_type, idempotency_key, provider_id, provider_tx_id, correlation_id, reverses_transaction_id)
+			 SELECT $1, tenant_id, transaction_type, idempotency_key, provider_id, provider_tx_id, $2, reverses_transaction_id
+			   FROM ledger_transactions WHERE id = $3`,
+			uuid.New(), uuid.New(), first.TransactionID)
+		return err
+	})
+	if name, ok := db.UniqueViolationConstraintName(err); !ok || name != "ledger_transactions_one_deposit_reversal" {
+		t.Fatalf("after the flip, a full duplicate of the reversal must be reported as the 0092 constraint first, got %q (ok=%v, err=%v)", name, ok, err)
 	}
 
 	// Same key, same payload: an idempotent retry of the already-posted

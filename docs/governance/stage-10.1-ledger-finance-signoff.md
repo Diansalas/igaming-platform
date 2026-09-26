@@ -231,3 +231,87 @@ Required fix:
 - **PAY-WH-TENANT-1 financial aspects (item E):** **APPROVED** for payments under the `MOCK` resolver. The real resolver remains `NOT IMPLEMENTED` and `PROVIDER DEPENDENT`. CAS-WH-TENANT-1 remains open and launch-blocking.
 - **ADR 0019 matrix change:** ledger-finance **concurrence given**.
 - **No human decision is required by this review.** The contingent §R.3 decision (duplicates found in a database whose history must be kept) is unchanged.
+
+## Re-verification (2026-09-26, 3f67ac5)
+
+- **Reviewer:** `ledger-finance` specialist
+- **Scope:** re-verification only. I read `git diff 909d75b..HEAD -- internal/ledger internal/payments internal/httpserver docs/decisions/0020*`. No code was changed and nothing was committed. This section is the only edit.
+- **Working tree:** clean at `3f67ac5`. P3-9 is resolved, because `webhook_replay_duplicate_integration_test.go` is now committed and compiles.
+
+### Evidence run
+
+| Command (integration tag, local CI Postgres 16) | Result |
+|---|---|
+| `go build ./...`; `go vet -tags integration` on ledger, payments and httpserver | OK |
+| `go test -count=1 -p 1 ./internal/ledger/... ./internal/payments/... ./internal/httpserver/...` | all `ok` (ledger 16.6s, payments 3.3s, httpserver 87.5s) |
+| `go test -race -count=5 -run 'TestPayRev1_\|TestF7Payments_ConcurrentIdenticalReversalRedelivery\|TestF7Payments_ConcurrentTombstone\|TestF7Payments_SequentialReversal\|TestReceiveCallback_SecondReversal' ./internal/payments/` | `ok` |
+| `TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409`, `TestPayRev1_UniqueIndex_BackstopsBypassOfLock`, `TestPost_ReversalRetry_IndexOrderIndependent`, `TestReplay_*` | PASS |
+| Mutation probe on a scratchpad `git archive` export (details below) | see P2-A |
+
+### P2-A: index-order-independent retry classification
+
+**Verdict: the code fix is CLOSED. The required test is NOT CLOSED, because it does not detect a regression.**
+
+**The code is correct.** On any conflict, `Post` now always calls `lookupByIdempotencyKey` first. It returns `ErrReversalAlreadyExists` only when the lookup gives `pgx.ErrNoRows` and the reported constraint is `ledger_transactions_one_deposit_reversal`.
+
+I checked every conflict path against 909d75b:
+
+1. **Reported constraint is the idempotency index or `idx_ledger_transactions_tenant_provider_tx`, and a row exists.** Identical to before. The path is the type check (`ErrIdempotencyKeyReused`), then `replayPayloadDifferences` (`ErrIdempotencyPayloadMismatch`), then `AlreadyPosted`.
+2. **Reported constraint is not the 0092 index, and no row exists.** This covers, for example, a provider-tx collision under a different key. Identical to before: the wrapped lookup error. The new `ErrNoRows` branch is guarded on the 0092 name, so it cannot fire here.
+3. **Reported constraint is the 0092 index, and a row exists under this key.** This is the intended change. Before, the result was `ErrReversalAlreadyExists`. Now it follows the ordinary replay path: `AlreadyPosted`, `ErrIdempotencyPayloadMismatch` or `ErrIdempotencyKeyReused`. In every outcome nothing posts.
+4. **Reported constraint is the 0092 index, and no row exists.** Unchanged: `ErrReversalAlreadyExists`, which is the genuine distinct second reversal.
+5. **Reported constraint is the 0092 index, and the lookup fails with an error other than `ErrNoRows`.** Before, the result was `ErrReversalAlreadyExists`. Now it is the generic lookup error. It still fails closed, and it is more accurate, because a real DB error is no longer mislabelled as a business denial. The savepoint in `IdempotentInsert` was already rolled back, so the transaction can still be used for the lookup.
+
+No non-reversal caller can reach branches 3–5. The 0092 index is partial on `transaction_type = 'deposit_reversal'`, so bonus, sportsbook, withdrawal, casino and deposit callers can only reach branches 1 and 2. Those are byte-for-byte the pre-fix behaviour. The only consumer of `ErrReversalAlreadyExists` is `payments.receiveDepositReversalCallback`. The full ledger `TestReplay_*` family and every owning suite pass.
+
+**The committed test does not detect a regression.** `TestPost_ReversalRetry_IndexOrderIndependent` recreates only `ledger_transactions_tenant_idempotency_key_key`. A same-key `deposit_reversal` retry also violates `idx_ledger_transactions_tenant_provider_tx`. Its OID (4333593 on the CI database) remains lower than 0092's (4336228), so after the test's flip Postgres reports the **provider-tx** index, not 0092. The pre-fix code already routed that to the replay path.
+
+Proof:
+- I exported `3f67ac5`, replaced only `internal/ledger/ledger.go` with the 909d75b version, and ran the committed test. It **PASSES** against the pre-fix code.
+- In a second copy, the test's flip also recreates `idx_ledger_transactions_tenant_provider_tx`. That is the "drop and re-add both" construction P2-A required. I added a raw same-key dual-violation probe. The probe reports `ledger_transactions_one_deposit_reversal`. The test then **PASSES on 3f67ac5's `Post`** and **FAILS on 909d75b's `Post`**.
+
+So the fix is proven correct, but the committed test will not catch a regression.
+
+**Required to close (test-only, no production change):**
+- In `flipIdempotencyKeyConstraintOrder`, also `DROP INDEX idx_ledger_transactions_tenant_provider_tx` and recreate it identically: `CREATE UNIQUE INDEX … (tenant_id, provider_id, provider_tx_id) WHERE provider_id IS NOT NULL`.
+- Assert that a raw same-key dual-violating `deposit_reversal` INSERT now reports `ledger_transactions_one_deposit_reversal`. This proves the flip really exercises the formerly misclassified route.
+- Also correct the test's header comment. It currently claims the idempotency index becomes newer than the provider-tx index, which is true but irrelevant to which index is reported.
+
+**ADR 0020 correction: ACCEPTED.** The "No existing idempotency semantics changed" bullet is replaced by an amendment that accurately describes the index-order dependency and the lookup-first fix. The statement "proven index-order-independent by a test that forces the flipped index order" becomes true once the test change above lands. The P3-1 deferral note is acceptable.
+
+### P2-B: denial audit content
+
+**Verdict: CLOSED.**
+
+- **Typed error on both paths.** `DepositAlreadyReversedError` (with `Unwrap` giving `ErrDepositAlreadyReversed`) is constructed on both denial paths.
+  - **S4:** it now selects the existing reversal's `id` under the S2 lock. The predicate is unchanged apart from `LIMIT 1`, which is safe under INV-PAY-REV-1.
+  - **Ledger backstop:** a best-effort lookup of the existing `deposit_reversal`. If the lookup fails, the id stays nil and the denial is not blocked.
+- **Fields carried:** `DepositIntentID`, `OriginalLedgerTransactionID`, `RejectedReversalReference` (the verified reversal ref, not the deposit's) and `ExistingReversalTransactionID`.
+- **Audit record.** `RecordDepositReversalRejection` records `TargetType=deposit_intent` with `TargetID` set to the intent id. Metadata holds `deposit_intent_id`, `original_ledger_transaction_id`, `rejected_reversal_reference`, `existing_reversal_ledger_transaction_id` and `provider_id`. The IP comes from the trusted-proxy helper.
+- **Unchanged outputs.** The HTTP body and the allow-listed alert log line are unchanged.
+- **Test evidence.** `TestPaymentWebhookHandler_DepositReversalAlreadyReversed_Maps409` reads the row from a fresh transaction. It asserts every field against independently read ids, including the existing reversal's actual ledger id, and asserts that the IP is populated. PASS.
+- **No financial effect.** The denial audit stays in a separate `WithTenant` after the rollback. Nothing financial is written on either path, and reversal count = 1.
+- **P3 (new, non-blocking):** no payments-level test drives the **backstop** path (`ledger.ErrReversalAlreadyExists` → `DepositAlreadyReversedError`). It is only reachable when S2/S4 is bypassed, so a test needs a raw-SQL pre-insert. Recommended for the next touch.
+
+### Also observed in this diff (financial aspects only)
+
+- **P3-5 addressed.** A named alert `payment_webhook_integrity_alert_reversal_link` was added for `ErrDepositReversalIntegrity`. It still returns a 500 and has no financial effect.
+- **Webhook handler reorder.** The body-size and header checks now run before the tenant lookup, and the new `ErrCallbackMalformedBody` is raised only after verification. Both are security-owned. From a financial standpoint:
+  - No step before verification writes anything.
+  - Verification still precedes every ledger, intent, lock and audit write.
+  - Item E's cross-tenant no-effect tests still pass.
+- **Posting shape unchanged.** No float, no balance `UPDATE`, no historical-row mutation and no new lock was added. The reversal posting is still Dr `player_cash` / Cr `psp_clearing`, using the original's amount.
+
+### Final sign-off
+
+- **PAY-REV-1:** financial correctness is **APPROVED**, including P2-A (code) and P2-B.
+  - The ledger-finance sign-off is **conditional on one remaining item:** the P2-A test must be made to detect regressions as specified above. It is a test-only change, with no production code or schema change.
+  - Until it lands, PAY-REV-1 must not be labelled `IMPLEMENTED`. Label it `PARTIALLY IMPLEMENTED (regression test pending)`.
+  - Once it lands and passes, and fails against 909d75b's `Post` (optional to demonstrate), the sign-off becomes unconditional with no further review.
+- **SB-T1-XMIN (0093): APPROVED, unconditional.** Nothing in this diff touches it, and the previously reported P3-3/P3-4 wording and test notes still stand as non-blocking.
+- **PAY-WH-TENANT-1, financial aspects: APPROVED, unconditional,** for payments under the `MOCK` resolver. The real credential resolver remains `NOT IMPLEMENTED` / `PROVIDER DEPENDENT`. CAS-WH-TENANT-1 (casino callbacks) remains open and launch-blocking. It is outside this scope.
+- **No human decision is required.**
+
+### Orchestrator note — P2-A test fix applied (2026-09-26)
+
+The test-only fix specified above was applied by the Orchestrator: `flipIdempotencyKeyConstraintOrder` now also recreates `idx_ledger_transactions_tenant_provider_tx`, and the test asserts that a raw row duplicating the posted reversal on all three unique indexes is reported as `ledger_transactions_one_deposit_reversal` first. Verified both ways: the test **passes** on the fixed `Post` and **fails** when `internal/ledger/ledger.go` is replaced with the pre-fix version from `909d75b` (`Post failed: ledger: a deposit_reversal transaction already exists …`, i.e. the false `ErrReversalAlreadyExists`). Per this sign-off, the PAY-REV-1 condition is therefore met and the sign-off is unconditional.
