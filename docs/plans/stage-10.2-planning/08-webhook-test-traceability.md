@@ -551,3 +551,22 @@ go test -tags=integration ./internal/payments/...     ok   (unaffected regressio
 go test -tags=integration ./internal/webhookauth/...  ok
 gofmt -l internal/casino internal/httpserver internal/testsupport internal/webhookauth cmd/platform-api   (empty)
 ```
+
+### C7 addendum — cross-tenant signature under statement capture (security SC-1, re-verification gap)
+
+`TestCasinoWebhook_CrossTenantSignature_NoStatementBeforeVerification`
+(`internal/casino/cross_tenant_statement_capture_integration_test.go`): tenants A and B both have
+`mock-casino` enabled; a bet callback genuinely signed for A is delivered on B's route inside B's
+`WithTenant`. Asserts `AuthError{Reason: signature_invalid}` and **zero** statements on B's transaction.
+
+Mutation-kill (orchestrator, 2026-09-26; reverted with `git checkout`, `git diff --stat` empty, test green again):
+removed the tenant from both `webhookauth.DeriveMockKey` and `Scheme.SigningInput` (the only two places
+the tenant enters the MAC). Result:
+
+```
+--- FAIL: TestCasinoWebhook_CrossTenantSignature_NoStatementBeforeVerification (0.03s)
+    cross_tenant_statement_capture_integration_test.go:41: expected *webhookauth.AuthError{Reason: signature_invalid}, got casino: bet callback requires a valid real-money launch session: session_id does not resolve to a known launch session
+```
+
+i.e. without tenant binding the A-signed callback verifies on B's route and reaches B's tenant-scoped
+reads. With the binding it never does.

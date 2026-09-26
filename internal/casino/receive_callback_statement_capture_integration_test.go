@@ -29,10 +29,14 @@
 // Mutation-kill demonstration (recorded in docs/plans/stage-10.2-planning/
 // 08-webhook-test-traceability.md, not committed as code): moving
 // LoadCapability (or any other tenant-scoped read) to run BEFORE
-// provider.HandleCallback in ReceiveCallback makes the three negative
-// tests in this file fail immediately (a non-empty statement list is
-// captured for a callback that never verifies) - see the traceability
-// doc's transcript. The mutation was reverted immediately after capturing
+// provider.HandleCallback in ReceiveCallback makes
+// TestCasinoWebhook_BadSignature_NoStatementBeforeVerification fail (a
+// non-empty statement list is captured for a callback that never
+// verifies); the missing/foreign-credential and nil-resolver cases reject
+// earlier, before the moved read, so only the bad-signature case can
+// catch that mutation - see the traceability doc's transcript. The
+// cross-tenant shape is covered in
+// cross_tenant_statement_capture_integration_test.go. The mutation was reverted immediately after capturing
 // that failure.
 package casino
 
