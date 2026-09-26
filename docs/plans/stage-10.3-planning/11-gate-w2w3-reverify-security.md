@@ -289,3 +289,85 @@ platform configuration.**
 
 Passing this re-verification does not make `awssm` "secure" in general. It must
 be exercised in staging (STAGING REQUIRED drills) before any production use.
+
+## Addendum: N-1 fix verification (e80114b)
+
+**Verdict: N-1 CLOSED.** One new Low finding, which does not block.
+
+What I verified in the code:
+- The refusal happens before any SDK call. `ambientTuningOverrideSignal()`
+  runs inside `preflight`. `New` calls `preflight` first, before it builds the
+  credential provider and before `LoadDefaultConfig`. `NewWithSDKFake` runs the
+  same `preflight`. It refuses `AWS_DEFAULTS_MODE`, `AWS_MAX_ATTEMPTS` and
+  `AWS_RETRY_MODE` when they are set to a non-empty value, and the error names
+  the variable.
+- `pinnedLoadOptions` pins three things: `WithDefaultsMode(DefaultsModeStandard)`,
+  `WithRetryMode(RetryModeStandard)` and `WithRetryMaxAttempts(2)`. In config
+  v1.28.6, LoadOptions are consulted before EnvConfig, so the pin wins even
+  when the refusal is bypassed. `resolveDefaultsModeOptions` only builds an
+  IMDS client when the mode is `auto`, so with the pin that code path cannot
+  be reached.
+- The tests cover both layers:
+  - `TestAWSSM_N1_AmbientTuningOverridesRefused` checks that each variable
+    refuses startup and that the tripwire records zero new requests.
+  - `TestAWSSM_N1_DefaultsModeAndRetryPinnedRegardlessOfEnv` sets `auto`/`50`/`adaptive`
+    and asserts that the resulting `aws.Config` holds the pinned values.
+  Together they satisfy required tests 1 and 2 above.
+- `go test -race -count=1 ./internal/secretstore/...` passes: secretstore,
+  awssm and devfile are ok; memstore has no tests.
+
+Other environment variables and config keys I checked against the pinned SDK
+source (config v1.28.6):
+- **The only IMDS paths in `LoadDefaultConfig`** are defaults mode `auto`
+  (now pinned) and `resolveEC2IMDSRegion`. The IMDS region lookup is skipped
+  because the region is always set explicitly. Credentials are an explicit
+  lazy `CredentialsCache`, and nothing is fetched at load time. This means no
+  remaining variable or config key causes network I/O in `New`.
+- **`AWS_EC2_METADATA_DISABLED`, `AWS_EC2_METADATA_V1_DISABLED` and
+  `AWS_EC2_METADATA_SERVICE_ENDPOINT_MODE`** only configure an IMDS client.
+  That client is now never built, so these variables have no effect.
+  `AWS_EC2_METADATA_SERVICE_ENDPOINT` was already refused under S-2.
+- **`AWS_METADATA_SERVICE_TIMEOUT` and `AWS_REQUEST_CHECKSUM_CALCULATION`**
+  are not read by config v1.28.6.
+- **Shared-config keys** (for example `retry_mode`, `max_attempts`,
+  `defaults_mode`) cannot apply, because the shared config and credentials
+  file lists are pinned empty (S-1).
+- **No retry or timeout effect:**
+  - `AWS_SDK_UA_APP_ID` only appends to the User-Agent.
+  - `AWS_USE_FIPS_ENDPOINT` and `AWS_USE_DUALSTACK_ENDPOINT` only change which
+    official AWS hostname is used, still under the system trust roots, and
+    `AWS_CA_BUNDLE`/`SSL_CERT_*` are refused.
+  - `AWS_DISABLE_REQUEST_COMPRESSION`, `AWS_ENABLE_ENDPOINT_DISCOVERY` and
+    `AWS_ACCOUNT_ID_ENDPOINT_MODE` do not apply to Secrets Manager.
+  None of these is a finding.
+- **SDK upgrades:** any upgrade of the AWS SDK modules must re-run this
+  environment variable audit, because later releases add new ones (for
+  example checksum settings). This is Informational, a process note.
+
+### New finding L-N1a (Low, does not block): the rationale for `pinnedRetryMaxAttempts` is inaccurate
+
+The standard retryer's `ExponentialJitterBackoff` (aws v1.32.6
+`aws/retry/jitter_backoff.go`) computes the first retry delay as
+`rand[0,1) * 2^1`, which is uniform over [0 s, 2 s) with a mean of 1 s. The
+comment says two attempts do not "materially eat into the 2s budget". That is
+wrong. One SDK retry often uses most of `StoreCallTimeout`. When that happens,
+`Fetcher.callWithRetry` usually skips its own 50 ms retry, because it needs
+more than 100 ms of budget left.
+
+The retries are also layered. In the worst case, one Fetcher call makes up to
+4 HTTP attempts (2 from the Fetcher × 2 from the SDK). The A4 constants
+describe this as 1 retry.
+
+Why this is not a security issue:
+- The 2 s context still bounds everything.
+- The breaker still counts one failure per Fetcher call, so it trips after 3
+  failed calls as designed.
+- Ambient tuning can no longer raise any of these numbers.
+
+Fix, before the SECRETSTORE-AWS-1 close-out is final: either set
+`pinnedRetryMaxAttempts = 1`, so the Fetcher is the single retry layer as A4
+intends, or correct the comment and the ADR 0093 text to describe the
+layered behaviour honestly.
+
+Scope of this addendum: code-level review of e80114b and reading the pinned
+SDK source. It does not cover live AWS or IMDS behaviour, or CI.

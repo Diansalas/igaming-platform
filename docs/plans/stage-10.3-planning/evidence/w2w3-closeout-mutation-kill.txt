@@ -130,3 +130,6 @@ Not separately mutation-tested, with the reason:
 - NewWithSDKFake's own preflight call: it delegates to the same
   `preflight` function already covered by M39-M42 (see `sdkfake.go`); a
   distinct mutant would be redundant with those four.
+
+== L-N1a (security addendum to file 11: SDK retry attempts 2 -> 1; Fetcher is the only retry layer) ==
+M46  pinnedRetryMaxAttempts 1 -> 2   TestAWSSM_N1_DefaultsModeAndRetryPinnedRegardlessOfEnv  KILLED (test now asserts the literal 1, not the constant)

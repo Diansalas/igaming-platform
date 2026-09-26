@@ -646,9 +646,12 @@ startup (`ambientTuningOverrideEnvVars`/`ambientTuningOverrideSignal` in `awssm.
 `preflight`), the same refuse-and-name-the-variable pattern as S-2's endpoint/credential-source
 refusals. As defence in depth on top of the refusal, `New`'s `awsconfig.LoadOptions`
 (`pinnedLoadOptions`) also pin `awsconfig.WithDefaultsMode(aws.DefaultsModeStandard)`,
-`awsconfig.WithRetryMode(aws.RetryModeStandard)` and `awsconfig.WithRetryMaxAttempts(2)`
-explicitly (`pinnedRetryMaxAttempts`; 2 attempts, chosen so one call's retries cannot alone
-consume the 2s `StoreCallTimeout` budget and starve the breaker of fast failures), so a future
+`awsconfig.WithRetryMode(aws.RetryModeStandard)` and `awsconfig.WithRetryMaxAttempts(1)`
+explicitly (`pinnedRetryMaxAttempts`; 1 attempt, i.e. no SDK retry: `secretstore.Fetcher` is the
+only retry layer, as A4 describes. The first value, 2, was corrected after the security N-1 fix
+verification (L-N1a): a standard-mode SDK retry sleeps a random 0-2 s first, usually consuming the
+2 s `StoreCallTimeout` and pre-empting the Fetcher's retry, and doubled the worst-case HTTP
+attempts per Fetch), so a future
 regression of the refusal alone cannot silently reintroduce ambient tuning.
 
 New tests: `TestAWSSM_N1_AmbientTuningOverridesRefused` (refusal, zero tripwire requests before

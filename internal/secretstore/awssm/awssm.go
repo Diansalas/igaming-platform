@@ -90,18 +90,16 @@ import (
 const MaxSecretBytes = 64 << 10
 
 // pinnedRetryMaxAttempts is the fixed SDK retry budget for the Secrets
-// Manager client (security gate W2/W3 finding N-1). secretstore.Fetcher
-// bounds one store call, INCLUDING its retries, to StoreCallTimeout (2s;
-// internal/secretstore/fetcher.go), and opens the circuit breaker after
-// BreakerTripThreshold (3) consecutive failures. A larger attempt count
-// (the SDK standard-mode default is 3, and AWS_MAX_ATTEMPTS could set it far
-// higher) risks a single call's backoff alone consuming the whole
-// StoreCallTimeout budget, which would starve the breaker of the fast
-// failures it needs to trip promptly. 2 attempts (one retry) leaves retry
-// headroom without materially eating into the 2s budget at standard-mode
-// backoff, and is small enough that ambient tuning cannot make one call's
-// retries dominate the breaker's window.
-const pinnedRetryMaxAttempts = 2
+// Manager client (security gate W2/W3 findings N-1 and L-N1a): 1, i.e. the
+// SDK does not retry. secretstore.Fetcher is the only retry layer - it
+// bounds one store call, including its own single retry, to
+// StoreCallTimeout (2s; internal/secretstore/fetcher.go) and opens the
+// circuit breaker after BreakerTripThreshold (3) consecutive failures. An
+// SDK retry would first sleep a random 0-2s standard-mode backoff, usually
+// consuming most of the 2s budget and pre-empting the Fetcher's retry, and
+// would multiply the HTTP attempts per Fetch beyond what ADR 0093 A4
+// describes.
+const pinnedRetryMaxAttempts = 1
 
 // client is the narrow slice of the Secrets Manager SDK client this
 // package depends on. Production uses the real *secretsmanager.Client;
@@ -202,7 +200,7 @@ func pinnedLoadOptions(region string, creds aws.CredentialsProvider) []func(*aws
 		// forbidden by ADR 0093 §6), and AWS_MAX_ATTEMPTS/AWS_RETRY_MODE
 		// would let the environment change retry behaviour underneath the
 		// secretstore circuit breaker's fixed StoreCallTimeout budget. See
-		// pinnedRetryMaxAttempts for why 2.
+		// pinnedRetryMaxAttempts for why 1.
 		awsconfig.WithDefaultsMode(aws.DefaultsModeStandard),
 		awsconfig.WithRetryMode(aws.RetryModeStandard),
 		awsconfig.WithRetryMaxAttempts(pinnedRetryMaxAttempts),

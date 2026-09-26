@@ -275,8 +275,10 @@ func TestAWSSM_N1_DefaultsModeAndRetryPinnedRegardlessOfEnv(t *testing.T) {
 	if loadedCfg.RetryMode != aws.RetryModeStandard {
 		t.Fatalf("RetryMode = %q, want %q (AWS_RETRY_MODE=adaptive must not override the pin)", loadedCfg.RetryMode, aws.RetryModeStandard)
 	}
-	if loadedCfg.RetryMaxAttempts != pinnedRetryMaxAttempts {
-		t.Fatalf("RetryMaxAttempts = %d, want %d (AWS_MAX_ATTEMPTS=50 must not override the pin)", loadedCfg.RetryMaxAttempts, pinnedRetryMaxAttempts)
+	// The literal, never the constant (L-N1a): the SDK must not retry,
+	// since secretstore.Fetcher is the only retry layer.
+	if loadedCfg.RetryMaxAttempts != 1 {
+		t.Fatalf("RetryMaxAttempts = %d, want 1 (AWS_MAX_ATTEMPTS=50 must not override the pin; Fetcher is the only retry layer)", loadedCfg.RetryMaxAttempts)
 	}
 }
 
