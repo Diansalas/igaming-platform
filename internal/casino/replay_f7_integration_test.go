@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 type f7CasinoEnv struct {
@@ -37,10 +38,10 @@ func newF7CasinoEnv(t *testing.T, funding int64) f7CasinoEnv {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	return f7CasinoEnv{pool: pool, f: f, provider: provider, orch: NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}), sessionID: sessionID}
+	return f7CasinoEnv{pool: pool, f: f, provider: provider, orch: NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider)), sessionID: sessionID}
 }
 
-func (e f7CasinoEnv) deliver(payload []byte) (ReceiveCallbackResult, error) {
+func (e f7CasinoEnv) deliver(payload webhookauth.Inbound) (ReceiveCallbackResult, error) {
 	var res ReceiveCallbackResult
 	err := e.pool.WithTenant(context.Background(), e.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -50,7 +51,7 @@ func (e f7CasinoEnv) deliver(payload []byte) (ReceiveCallbackResult, error) {
 	return res, err
 }
 
-func (e f7CasinoEnv) mustDeliver(t *testing.T, payload []byte) ReceiveCallbackResult {
+func (e f7CasinoEnv) mustDeliver(t *testing.T, payload webhookauth.Inbound) ReceiveCallbackResult {
 	t.Helper()
 	res, err := e.deliver(payload)
 	if err != nil {
@@ -62,16 +63,16 @@ func (e f7CasinoEnv) mustDeliver(t *testing.T, payload []byte) ReceiveCallbackRe
 	return res
 }
 
-func (e f7CasinoEnv) bet(ref, round string, amount int64, session uuid.UUID) []byte {
-	return e.provider.CallbackPayload(CallbackEventBet, ref, "", round, "game-1", amount, "EUR", OutcomeSucceeded, "", e.f.playerAccountID, session)
+func (e f7CasinoEnv) bet(ref, round string, amount int64, session uuid.UUID) webhookauth.Inbound {
+	return e.provider.CallbackPayload(e.f.tenantID, CallbackEventBet, ref, "", round, "game-1", amount, "EUR", OutcomeSucceeded, "", e.f.playerAccountID, session)
 }
 
-func (e f7CasinoEnv) win(ref, round string, amount int64) []byte {
-	return e.provider.CallbackPayload(CallbackEventWin, ref, "", round, "game-1", amount, "EUR", OutcomeSucceeded, "", e.f.playerAccountID, uuid.Nil)
+func (e f7CasinoEnv) win(ref, round string, amount int64) webhookauth.Inbound {
+	return e.provider.CallbackPayload(e.f.tenantID, CallbackEventWin, ref, "", round, "game-1", amount, "EUR", OutcomeSucceeded, "", e.f.playerAccountID, uuid.Nil)
 }
 
-func (e f7CasinoEnv) rollback(ref, original, round string) []byte {
-	return e.provider.CallbackPayload(CallbackEventRollback, ref, original, round, "game-1", 0, "EUR", "", "", e.f.playerAccountID, uuid.Nil)
+func (e f7CasinoEnv) rollback(ref, original, round string) webhookauth.Inbound {
+	return e.provider.CallbackPayload(e.f.tenantID, CallbackEventRollback, ref, original, round, "game-1", 0, "EUR", "", "", e.f.playerAccountID, uuid.Nil)
 }
 
 func (e f7CasinoEnv) ledgerTxCount(t *testing.T) int {
@@ -87,7 +88,7 @@ func (e f7CasinoEnv) ledgerTxCount(t *testing.T) int {
 
 // expectRejected asserts a class-C replay is now rejected with the typed
 // error, posts nothing and leaves the balance and SUM(D)==SUM(C) intact.
-func (e f7CasinoEnv) expectRejected(t *testing.T, payload []byte) {
+func (e f7CasinoEnv) expectRejected(t *testing.T, payload webhookauth.Inbound) {
 	t.Helper()
 	before, balance := e.ledgerTxCount(t), cashBalance(t, e.pool, e.f)
 	res, err := e.deliver(payload)
@@ -110,7 +111,7 @@ func (e f7CasinoEnv) expectRejected(t *testing.T, payload []byte) {
 // #9 happy path) - the property ADR 0088 §11.2 requires per caller.
 func TestF7Casino_LegitimateRedeliveriesStillResolveToOriginal(t *testing.T) {
 	e := newF7CasinoEnv(t, 5_000)
-	for _, payload := range [][]byte{
+	for _, payload := range []webhookauth.Inbound{
 		e.bet("f7-bet-1", "f7-round-1", 1_000, e.sessionID),
 		e.win("f7-win-1", "f7-round-1", 2_500),
 		e.rollback("f7-rb-1", "f7-win-1", "f7-round-1"),

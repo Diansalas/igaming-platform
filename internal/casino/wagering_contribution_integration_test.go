@@ -162,7 +162,7 @@ func TestPostBet_CashFundedWageringContribution_CrossAssetGrantIsNeverCredited(t
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	// 1x multiplier over a 1000-satoshi granted amount: target = 1000
 	// satoshi. The EUR bet below is 1000 EUR minor units - numerically
@@ -170,7 +170,7 @@ func TestPostBet_CashFundedWageringContribution_CrossAssetGrantIsNeverCredited(t
 	co := seedWageringOfferVersion(t, pool, f.tenantID, f.brandID, 10000, nil)
 	grantID := seedActivatedWageringGrantInAsset(t, pool, f, co, "wagering-cross-asset", 1000, "BTC", 8)
 
-	payload := provider.CallbackPayload(CallbackEventBet, "bet-cross-asset", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-cross-asset", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		result, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
 		if err != nil {
@@ -225,7 +225,7 @@ func TestPostBet_CashFundedWageringContribution_UnmeasurableTargetNeverCompletes
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	co := seedWageringOfferVersion(t, pool, f.tenantID, f.brandID, 350000, nil) // 35x
 	// Reproduce the pre-migration-0067 state exactly: an activated Grant
@@ -254,7 +254,7 @@ func TestPostBet_CashFundedWageringContribution_UnmeasurableTargetNeverCompletes
 		t.Fatalf("seed grant with no granted_amount: %v", err)
 	}
 
-	payload := provider.CallbackPayload(CallbackEventBet, "bet-unmeasurable", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-unmeasurable", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		result, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
 		if err != nil {
@@ -284,14 +284,14 @@ func TestPostBet_CashFundedWageringContribution_RecordsAndCompletesGrant(t *test
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	// 1x multiplier (10000bp), unweighted (full) contribution: a single
 	// 1000-unit bet exactly satisfies a 1000-granted-amount Grant.
 	co := seedWageringOfferVersion(t, pool, f.tenantID, f.brandID, 10000, nil)
 	grantID := seedActivatedWageringGrant(t, pool, f, co, "wagering-1", 1000)
 
-	payload := provider.CallbackPayload(CallbackEventBet, "bet-wager-1", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-wager-1", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		result, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
 		if err != nil {
@@ -342,12 +342,12 @@ func TestPostBet_CashFundedWageringContribution_ExcludedGameTypeContributesNothi
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR") // seedGame always registers GameType "slot"
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	co := seedWageringOfferVersion(t, pool, f.tenantID, f.brandID, 10000, []byte(`{"excluded_game_types":["slot"]}`))
 	grantID := seedActivatedWageringGrant(t, pool, f, co, "wagering-excluded", 1000)
 
-	payload := provider.CallbackPayload(CallbackEventBet, "bet-excluded", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-excluded", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		result, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
 		if err != nil {
@@ -392,13 +392,13 @@ func TestPostBet_CashFundedWageringContribution_AmbiguousMultiGrantSkipsBoth(t *
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	co := seedWageringOfferVersion(t, pool, f.tenantID, f.brandID, 10000, nil)
 	grantA := seedActivatedWageringGrant(t, pool, f, co, "wagering-a", 1000)
 	grantB := seedActivatedWageringGrant(t, pool, f, co, "wagering-b", 1000)
 
-	payload := provider.CallbackPayload(CallbackEventBet, "bet-ambiguous", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-ambiguous", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		result, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
 		if err != nil {
@@ -438,12 +438,12 @@ func TestPostBet_CashFundedWageringContribution_RedeliveredBetIsIdempotent(t *te
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	co := seedWageringOfferVersion(t, pool, f.tenantID, f.brandID, 100000, nil) // 10x multiplier, target 10000 - one 1000-unit bet must not complete it
 	grantID := seedActivatedWageringGrant(t, pool, f, co, "wagering-redeliver", 1000)
 
-	payload := provider.CallbackPayload(CallbackEventBet, "bet-redeliver", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-redeliver", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	for i := 0; i < 2; i++ {
 		err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			result, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
@@ -508,7 +508,7 @@ func TestConcurrentStress_DuplicateBetDeliveryWithActiveWageringGrantIsIdempoten
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	// 10x multiplier, target 10000 - a single 1000-unit bet (even
 	// double-counted) must not complete the grant outright, so a defect
@@ -519,7 +519,7 @@ func TestConcurrentStress_DuplicateBetDeliveryWithActiveWageringGrantIsIdempoten
 	grantID := seedActivatedWageringGrant(t, pool, f, co, "wagering-concurrent-redeliver", 1000)
 
 	providerTxID := "bet-concurrent-redeliver"
-	payload := provider.CallbackPayload(CallbackEventBet, providerTxID, "", "round-concurrent-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, providerTxID, "", "round-concurrent-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 
 	results := make([]ReceiveCallbackResult, n)
 	errs := make([]error, n)

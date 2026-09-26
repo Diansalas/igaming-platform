@@ -2,11 +2,29 @@ package casino
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
+
+// mockCredentialFor resolves the mock's own tenant-bound webhook
+// credential for tenantID - the conformance suite's stand-in for "the
+// credential the Orchestrator would have already resolved and equality-
+// checked before calling HandleCallback" (Stage 10.2, CAS-WH-TENANT-1,
+// ADR 0091), since this suite deliberately exercises HandleCallback
+// directly, without an Orchestrator/DB in the loop. Mirrors
+// internal/payments' identical helper exactly.
+func mockCredentialFor(t *testing.T, mock *MockCasinoProvider, tenantID uuid.UUID) webhookauth.Credential {
+	t.Helper()
+	cred, err := NewMockWebhookCredentials(mock).Resolve(context.Background(), tenantID, mock.Capabilities().ProviderID, mockWebhookKeyID)
+	if err != nil {
+		t.Fatalf("resolve mock webhook credential: %v", err)
+	}
+	return cred
+}
 
 // RunProviderConformanceSuite is the parameterized test suite ADR 0025 §8
 // requires: "one parameterized test suite, run identically against
@@ -157,7 +175,11 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 		}
 	})
 
-	// J. Provider authentication (callback signature verification).
+	// J. Provider authentication (callback signature verification). Stage
+	// 10.2 (CAS-WH-TENANT-1, ADR 0091): verification runs over the raw
+	// body bytes via webhookauth.Scheme.Verify, BEFORE any parsing (design
+	// §C2 point 1) - reachable only through an Orchestrator-resolved
+	// Credential, which this suite stands in for via mockCredentialFor.
 	t.Run("HandleCallback rejects a missing or invalid signature", func(t *testing.T) {
 		provider := factory()
 		mock, ok := provider.(*MockCasinoProvider)
@@ -165,44 +187,72 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 			t.Skip("callback payload construction is mock-specific")
 		}
 		ctx := context.Background()
+		tenantID := uuid.New()
+		cred := mockCredentialFor(t, mock, tenantID)
 
-		valid := mock.CallbackPayload(CallbackEventBet, "bet-auth-1", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", uuid.New(), uuid.New())
-		if _, err := provider.HandleCallback(ctx, valid); err != nil {
+		valid := mock.CallbackPayload(tenantID, CallbackEventBet, "bet-auth-1", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", uuid.New(), uuid.New())
+		if _, err := provider.HandleCallback(ctx, valid, cred); err != nil {
 			t.Fatalf("expected a correctly-signed callback to be accepted, got %v", err)
 		}
 
-		// Tamper with the signature field specifically (not the JSON
-		// structure at large), so this proves signature verification
-		// itself rejects it, not merely that malformed JSON errors out.
-		var fields map[string]any
-		if err := json.Unmarshal(valid, &fields); err != nil {
-			t.Fatalf("unmarshal fixture: %v", err)
-		}
-		fields["signature"] = "0000000000000000000000000000000000000000000000000000000000000000"
-		tampered, err := json.Marshal(fields)
-		if err != nil {
-			t.Fatalf("remarshal fixture: %v", err)
-		}
-		if _, err := provider.HandleCallback(ctx, tampered); err != ErrCallbackSignatureInvalid {
+		// A tampered header signature is rejected even though the body
+		// itself is untouched.
+		tampered := valid
+		tampered.Header = valid.Header.Clone()
+		tampered.Header.Set(webhookauth.CasinoSignatureHeader, "v1="+"0000000000000000000000000000000000000000000000000000000000000000"[:64])
+		if _, err := provider.HandleCallback(ctx, tampered, cred); !errors.Is(err, ErrCallbackSignatureInvalid) {
 			t.Fatalf("expected ErrCallbackSignatureInvalid for a tampered signature, got %v", err)
 		}
 
-		unsigned := []byte(`{"event_type":"bet","provider_tx_id":"bet-unsigned","amount":1000,"asset_code":"EUR","outcome":"succeeded","player_account_id":"` + uuid.New().String() + `"}`)
-		if _, err := provider.HandleCallback(ctx, unsigned); err != ErrCallbackSignatureInvalid {
+		// No signature headers at all.
+		unsigned := webhookauth.Inbound{TenantID: tenantID, ProviderID: mock.Capabilities().ProviderID, Body: valid.Body}
+		if _, err := provider.HandleCallback(ctx, unsigned, cred); !errors.Is(err, ErrCallbackSignatureInvalid) {
 			t.Fatalf("expected ErrCallbackSignatureInvalid for an unsigned payload, got %v", err)
 		}
 	})
 
-	// "Malformed callbacks" (directive item 14).
+	// CAS-WH-TENANT-1 / design §C12: the tenant-binding conformance case is
+	// mandatory for the first real adapter, not mock-only - mirrors
+	// internal/payments' identical ruling (C4).
+	t.Run("a credential resolved for one tenant is rejected for another (conformance)", func(t *testing.T) {
+		provider := factory()
+		mock, ok := provider.(*MockCasinoProvider)
+		if !ok {
+			t.Skip("credential/signature construction is mock-specific; a real adapter's own conformance fixture supplies its own per-tenant credentials")
+		}
+		ctx := context.Background()
+		tenantA, tenantB := uuid.New(), uuid.New()
+		credA := mockCredentialFor(t, mock, tenantA)
+
+		// A payload signed (via credA) FOR tenantA, delivered as if it were
+		// tenantB's Inbound (TenantID overwritten to tenantB, mirroring
+		// what an Orchestrator would do when it verifies against the ROUTE
+		// tenant, never a payload-asserted one).
+		inbound := mock.CallbackPayload(tenantA, CallbackEventBet, "conformance-cross-tenant-1", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", uuid.New(), uuid.New())
+		inbound.TenantID = tenantB
+		if _, err := provider.HandleCallback(ctx, inbound, credA); !errors.Is(err, ErrCallbackSignatureInvalid) {
+			t.Fatalf("expected ErrCallbackSignatureInvalid for a tenant-A-signed callback delivered as tenant B, got %v", err)
+		}
+	})
+
+	// "Malformed callbacks" (directive item 14) - a VERIFIED callback (the
+	// sender proved knowledge of the shared credential) whose body is
+	// structurally malformed.
 	t.Run("HandleCallback rejects a malformed payload", func(t *testing.T) {
 		provider := factory()
-		ctx := context.Background()
-
-		if _, err := provider.HandleCallback(ctx, []byte(`not json`)); err == nil {
-			t.Fatal("expected an error for a non-JSON payload")
+		mock, ok := provider.(*MockCasinoProvider)
+		if !ok {
+			t.Skip("credential/signature construction is mock-specific")
 		}
-		if _, err := provider.HandleCallback(ctx, []byte(`{}`)); err == nil {
-			t.Fatal("expected an error for a payload missing provider_tx_id")
+		ctx := context.Background()
+		tenantID := uuid.New()
+		cred := mockCredentialFor(t, mock, tenantID)
+
+		if _, err := provider.HandleCallback(ctx, mock.SignRawBody(tenantID, []byte(`not json`)), cred); !errors.Is(err, ErrCallbackMalformedBody) {
+			t.Fatalf("expected ErrCallbackMalformedBody for a non-JSON payload, got %v", err)
+		}
+		if _, err := provider.HandleCallback(ctx, mock.SignRawBody(tenantID, []byte(`{}`)), cred); !errors.Is(err, ErrCallbackMalformedBody) {
+			t.Fatalf("expected ErrCallbackMalformedBody for a payload missing provider_tx_id, got %v", err)
 		}
 	})
 
@@ -217,13 +267,15 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 			t.Skip("callback payload construction is mock-specific")
 		}
 		ctx := context.Background()
+		tenantID := uuid.New()
+		cred := mockCredentialFor(t, mock, tenantID)
 
-		payload := mock.CallbackPayload(CallbackEventWin, "win-redeliver-1", "", "round-1", "game-1", 500, "EUR", OutcomeSucceeded, "", uuid.New(), uuid.Nil)
-		first, err := provider.HandleCallback(ctx, payload)
+		payload := mock.CallbackPayload(tenantID, CallbackEventWin, "win-redeliver-1", "", "round-1", "game-1", 500, "EUR", OutcomeSucceeded, "", uuid.New(), uuid.Nil)
+		first, err := provider.HandleCallback(ctx, payload, cred)
 		if err != nil {
 			t.Fatalf("first delivery: %v", err)
 		}
-		second, err := provider.HandleCallback(ctx, payload)
+		second, err := provider.HandleCallback(ctx, payload, cred)
 		if err != nil {
 			t.Fatalf("redelivered: %v", err)
 		}

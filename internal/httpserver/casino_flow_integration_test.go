@@ -11,6 +11,7 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -30,7 +31,32 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
+
+// rawPostCasinoCallback posts a webhookauth.Inbound's body to the public
+// casino webhook route with its own headers (X-Casino-Signature/
+// X-Casino-Key-Id) - CAS-WH-TENANT-1 moved the signature out of the JSON
+// body and into these headers, mirroring rawPostCallback's identical
+// payments-domain helper.
+func rawPostCasinoCallback(t *testing.T, srv *httptest.Server, path string, inbound webhookauth.Inbound) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+path, bytes.NewReader(inbound.Body))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, vs := range inbound.Header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	return resp
+}
 
 func newCasinoTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, orchestrator *casino.Orchestrator) *httptest.Server {
 	t.Helper()
@@ -51,7 +77,7 @@ func newCasinoTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer, orche
 
 func newMockCasinoOrchestrator() (*casino.Orchestrator, *casino.MockCasinoProvider) {
 	mock := casino.NewMockCasinoProvider("mock-casino", "EUR", "USD")
-	return casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}), mock
+	return casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, casino.NewMockWebhookCredentials(mock)), mock
 }
 
 func putJSON(t *testing.T, srv *httptest.Server, path, bearerToken string, body any) *http.Response {
@@ -281,7 +307,10 @@ func TestCasinoGamesList_CrossTenantAvailabilityInvisible(t *testing.T) {
 }
 
 // --- 5. Unknown tenant slug and a suspended tenant get the identical
-// not-found response from the casino webhook (enumeration resistance) ---
+// uniform 401 "callback rejected" response from the casino webhook
+// (enumeration resistance) - Stage 10.2 (CAS-WH-TENANT-1, ADR 0091, design
+// §C6): the former 404 is now folded into the shared webhookPreamble's
+// uniform pre-verification rejection, exactly like the payments webhook. ---
 
 func TestCasinoWebhook_UnknownAndSuspendedTenantIdenticalNotFound(t *testing.T) {
 	pool, issuer := testEnv(t)
@@ -290,8 +319,8 @@ func TestCasinoWebhook_UnknownAndSuspendedTenantIdenticalNotFound(t *testing.T) 
 
 	unknownResp := rawPostJSON(t, srv, "/v1/webhooks/casino/does-not-exist-"+uuid.NewString()+"/mock-casino", []byte(`{}`))
 	defer unknownResp.Body.Close()
-	if unknownResp.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404 for an unknown tenant slug, got %d", unknownResp.StatusCode)
+	if unknownResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for an unknown tenant slug, got %d", unknownResp.StatusCode)
 	}
 
 	tenant := mustCreateTenant(t, pool)
@@ -314,8 +343,8 @@ func TestCasinoWebhook_UnknownAndSuspendedTenantIdenticalNotFound(t *testing.T) 
 	}
 	suspendedResp := rawPostJSON(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", []byte(`{}`))
 	defer suspendedResp.Body.Close()
-	if suspendedResp.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404 for a suspended tenant, got %d", suspendedResp.StatusCode)
+	if suspendedResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for a suspended tenant, got %d", suspendedResp.StatusCode)
 	}
 
 	unknownBody := decodeAPIError(t, unknownResp)
@@ -337,8 +366,8 @@ func TestCasinoWebhook_UnsignedPayloadRejected(t *testing.T) {
 	unsigned := []byte(`{"event_type":"bet","provider_tx_id":"http-unsigned-1","amount":1000,"asset_code":"EUR","outcome":"succeeded","player_account_id":"` + uuid.NewString() + `"}`)
 	resp := rawPostJSON(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", unsigned)
 	defer resp.Body.Close()
-	if resp.StatusCode < 400 || resp.StatusCode >= 500 {
-		t.Fatalf("expected a 4xx for an unsigned callback, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for an unsigned callback, got %d", resp.StatusCode)
 	}
 
 	var count int
@@ -382,17 +411,17 @@ func TestCasinoWebhook_ProviderRoundOwnershipConflict_Returns409WithoutLeakingId
 
 	const conflictRoundID = "round-http-ownership-conflict"
 
-	payloadA := mock.CallbackPayload(casino.CallbackEventBet, "bet-http-conflict-a", "", conflictRoundID, game.ProviderGameID,
+	payloadA := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "bet-http-conflict-a", "", conflictRoundID, game.ProviderGameID,
 		1000, "EUR", casino.OutcomeSucceeded, "", playerA.ID, sessionA)
-	respA := rawPostJSON(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payloadA)
+	respA := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payloadA)
 	defer respA.Body.Close()
 	if respA.StatusCode != http.StatusOK {
 		t.Fatalf("expected player A's first bet on the round to succeed, got %d", respA.StatusCode)
 	}
 
-	payloadB := mock.CallbackPayload(casino.CallbackEventBet, "bet-http-conflict-b", "", conflictRoundID, game.ProviderGameID,
+	payloadB := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "bet-http-conflict-b", "", conflictRoundID, game.ProviderGameID,
 		750, "EUR", casino.OutcomeSucceeded, "", playerB.ID, sessionB)
-	respB := rawPostJSON(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payloadB)
+	respB := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payloadB)
 	defer respB.Body.Close()
 	if respB.StatusCode != http.StatusConflict {
 		t.Fatalf("expected a 409 for player B's collision with an already-bound round id, got %d", respB.StatusCode)

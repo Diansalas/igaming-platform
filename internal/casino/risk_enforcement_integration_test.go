@@ -19,6 +19,7 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/risk"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 func createCasinoRiskRule(t *testing.T, pool *db.Pool, f casinoFixture, params risk.CreateRuleParams) risk.Rule {
@@ -115,14 +116,14 @@ func TestReceiveCallback_BetDeniedByJurisdictionScopedRiskRuleViaLaunchSession(t
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSessionWithJurisdiction(t, pool, f, "mock-casino", "EUR", jurisdictionCode)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	createCasinoRiskRule(t, pool, f, risk.CreateRuleParams{
 		JurisdictionCode: jurisdictionCode, Operation: risk.OperationCasinoBet,
 		LimitKind: risk.LimitMaxAmount, TimeWindow: risk.WindowTransaction, Threshold: 50, RuleKind: risk.RuleHardLimit,
 	})
 
-	payload := provider.CallbackPayload(CallbackEventBet, "bet-jurisdiction", "", "round-1", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-jurisdiction", "", "round-1", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -147,7 +148,7 @@ func TestLaunchGame_DeniedByRiskHardLimit(t *testing.T) {
 	game := seedGame(t, pool, "mock-casino", "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	// A platform-wide hard limit that always denies casino_launch for
 	// this asset (threshold irrelevant for a launch, which carries no
@@ -190,14 +191,14 @@ func TestReceiveCallback_BetDeniedByRiskMaxAmountHardLimit(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	createCasinoRiskRule(t, pool, f, risk.CreateRuleParams{
 		Operation: risk.OperationCasinoBet, LimitKind: risk.LimitMaxAmount, TimeWindow: risk.WindowTransaction,
 		Threshold: 500, RuleKind: risk.RuleHardLimit,
 	})
 
-	payload := provider.CallbackPayload(CallbackEventBet, "bet-over-limit", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-over-limit", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -234,7 +235,7 @@ func TestReceiveCallback_PlayerRiskOverrideBeatsBrandDefault(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	createCasinoRiskRule(t, pool, f, risk.CreateRuleParams{
 		BrandID: &f.brandID, Operation: risk.OperationCasinoBet, LimitKind: risk.LimitMaxAmount, TimeWindow: risk.WindowTransaction, Threshold: 200,
@@ -243,7 +244,7 @@ func TestReceiveCallback_PlayerRiskOverrideBeatsBrandDefault(t *testing.T) {
 		PlayerAccountID: &f.playerAccountID, Operation: risk.OperationCasinoBet, LimitKind: risk.LimitMaxAmount, TimeWindow: risk.WindowTransaction, Threshold: 50,
 	})
 
-	payload := provider.CallbackPayload(CallbackEventBet, "bet-75", "", "round-1", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-75", "", "round-1", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -273,22 +274,22 @@ func TestReceiveCallback_ConcurrentBetsRespectCumulativeLimit(t *testing.T) {
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionA := mintSession(t, pool, f, "mock-casino", "EUR")
 	sessionB := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	createCasinoRiskRule(t, pool, f, risk.CreateRuleParams{
 		Operation: risk.OperationCasinoBet, LimitKind: risk.LimitCumulativeAmount, TimeWindow: risk.WindowRollingHour,
 		Threshold: 100, RuleKind: risk.RuleHardLimit,
 	})
 
-	payloadA := provider.CallbackPayload(CallbackEventBet, "bet-a", "", "round-a", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionA)
-	payloadB := provider.CallbackPayload(CallbackEventBet, "bet-b", "", "round-b", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionB)
+	payloadA := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-a", "", "round-a", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionA)
+	payloadB := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-b", "", "round-b", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionB)
 
 	results := make([]ReceiveCallbackResult, 2)
 	errs := make([]error, 2)
 	var wg sync.WaitGroup
 	wg.Add(2)
-	for i, payload := range [][]byte{payloadA, payloadB} {
-		go func(i int, payload []byte) {
+	for i, payload := range []webhookauth.Inbound{payloadA, payloadB} {
+		go func(i int, payload webhookauth.Inbound) {
 			defer wg.Done()
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 				var err error

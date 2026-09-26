@@ -54,14 +54,14 @@ func TestReceiveCallback_JurisdictionScopedRiskRuleDoesNotDenyADifferentJurisdic
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSessionWithJurisdiction(t, pool, f, "mock-casino", "EUR", sessionJurisdiction)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	createCasinoRiskRule(t, pool, f, risk.CreateRuleParams{
 		JurisdictionCode: ruleJurisdiction, Operation: risk.OperationCasinoBet,
 		LimitKind: risk.LimitMaxAmount, TimeWindow: risk.WindowTransaction, Threshold: 50, RuleKind: risk.RuleHardLimit,
 	})
 
-	payload := provider.CallbackPayload(CallbackEventBet, "bet-diff-jurisdiction", "", "round-1", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-diff-jurisdiction", "", "round-1", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -109,14 +109,14 @@ func TestReceiveCallback_SessionWithNoJurisdictionFailsClosedAgainstJurisdiction
 	// the orchestrator.go postBet comment names (TODO(jurisdiction) is
 	// still the unfixed root cause - ADR 0031 §9/§34).
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	createCasinoRiskRule(t, pool, f, risk.CreateRuleParams{
 		JurisdictionCode: ruleJurisdiction, Operation: risk.OperationCasinoBet,
 		LimitKind: risk.LimitMaxAmount, TimeWindow: risk.WindowTransaction, Threshold: 50, RuleKind: risk.RuleHardLimit,
 	})
 
-	payload := provider.CallbackPayload(CallbackEventBet, "bet-no-jurisdiction", "", "round-1", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-no-jurisdiction", "", "round-1", "game-1", 75, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error

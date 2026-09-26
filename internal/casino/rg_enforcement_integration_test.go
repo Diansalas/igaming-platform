@@ -100,7 +100,7 @@ func TestLaunchGame_DeniedWhenPlayerAccountSuspended(t *testing.T) {
 	game := seedGame(t, pool, "mock-casino", "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 	suspendAccount(t, pool, f)
 
 	var result LaunchGameResult
@@ -130,7 +130,7 @@ func TestLaunchGame_DeniedWhenSelfExcludedPlatformWide(t *testing.T) {
 	game := seedGame(t, pool, "mock-casino", "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 	selfExclude(t, pool, f)
 
 	var result LaunchGameResult
@@ -169,7 +169,7 @@ func TestLaunchGame_DeniedCrossBrandSelfExclusion(t *testing.T) {
 	game := seedGame(t, pool, "mock-casino", "EUR")
 	enableGameForTenant(t, pool, brandA, game.ID) // platform-catalogue availability is tenant-wide, covers brand B too
 	registerCasinoCapability(t, pool, brandA, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	selfExclude(t, pool, brandA)
 
@@ -199,10 +199,10 @@ func TestReceiveCallback_BetDeclinedWhenSelfExcluded_NoLedgerEffect(t *testing.T
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 	selfExclude(t, pool, f)
 
-	payload := provider.CallbackPayload(CallbackEventBet, "bet-rg-1", "", "round-rg-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-rg-1", "", "round-rg-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -234,7 +234,7 @@ func TestReceiveCallback_BetDeclinedWhenWalletFrozen_NoLedgerEffect(t *testing.T
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := tx.Exec(ctx, `UPDATE wallets SET status = 'frozen' WHERE id = $1`, f.walletID)
 		return err
@@ -243,7 +243,7 @@ func TestReceiveCallback_BetDeclinedWhenWalletFrozen_NoLedgerEffect(t *testing.T
 		t.Fatalf("freeze wallet: %v", err)
 	}
 
-	payload := provider.CallbackPayload(CallbackEventBet, "bet-rg-frozen", "", "round-rg-frozen", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-rg-frozen", "", "round-rg-frozen", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	var result ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -277,9 +277,9 @@ func TestReceiveCallback_RedeliveredBetAfterSelfExclusionStillReportsOriginalSuc
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	payload := provider.CallbackPayload(CallbackEventBet, "bet-redeliver-after-exclusion", "", "round-redeliver-after-exclusion", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-redeliver-after-exclusion", "", "round-redeliver-after-exclusion", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 
 	var first ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -349,7 +349,7 @@ func TestConcurrent_SelfExclusionDuringLaunch_Deterministic(t *testing.T) {
 		game := seedGame(t, pool, "mock-casino", "EUR")
 		enableGameForTenant(t, pool, f, game.ID)
 		registerCasinoCapability(t, pool, f, provider, 100)
-		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 		var wg sync.WaitGroup
 		var launchErr, exclusionErr error
@@ -420,9 +420,9 @@ func TestConcurrent_SelfExclusionDuringBet_Deterministic(t *testing.T) {
 		provider := NewMockCasinoProvider("mock-casino", "EUR")
 		registerCasinoCapability(t, pool, f, provider, 100)
 		sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-		payload := provider.CallbackPayload(CallbackEventBet, uuid.New().String(), "", uuid.New().String(), "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+		payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, uuid.New().String(), "", uuid.New().String(), "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 
 		var wg sync.WaitGroup
 		var betErr, exclusionErr error
@@ -483,10 +483,10 @@ func TestConcurrent_DuplicateBetDeliveryDuringSelfExclusion(t *testing.T) {
 		provider := NewMockCasinoProvider("mock-casino", "EUR")
 		registerCasinoCapability(t, pool, f, provider, 100)
 		sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+		orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 		providerTxID := uuid.New().String()
-		payload := provider.CallbackPayload(CallbackEventBet, providerTxID, "", uuid.New().String(), "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+		payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, providerTxID, "", uuid.New().String(), "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 
 		var wg sync.WaitGroup
 		var err1, err2, exclusionErr error

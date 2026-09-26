@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/payments"
@@ -46,6 +47,13 @@ func TestMockProviderWiring_Matrix(t *testing.T) {
 		// SAME field, so they cannot diverge.
 		if got.KYCWebhookEnabled != cfg.TestSupportRoutesEnabled() {
 			t.Errorf("env=%s flag=%v: KYCWebhookEnabled diverges from TestSupportRoutesEnabled()", c.env, c.flag)
+		}
+		// CAS-WH-TENANT-1 (Stage 10.2, ADR 0091, ruling C10/design §C7):
+		// the casino resolver gate must move in lockstep with the
+		// payments one and with cfg.TestSupportRoutesEnabled() - one flag
+		// derives both, so they cannot diverge.
+		if got.CasinoWebhookResolver != c.wantPayments {
+			t.Errorf("env=%s flag=%v: CasinoWebhookResolver=%v, want %v", c.env, c.flag, got.CasinoWebhookResolver, c.wantPayments)
 		}
 	}
 }
@@ -92,6 +100,44 @@ func TestKYCOrchestrator_FollowsWiring(t *testing.T) {
 	}
 	if _, err := resolver.Resolve(context.Background(), tenantID, "other", webhookauth.MockKeyID); !errors.Is(err, webhookauth.ErrCredentialUnavailable) {
 		t.Fatalf("MOCK resolver must fail closed for another provider, got %v", err)
+	}
+}
+
+// TestCasinoWebhookResolver_FollowsWiring is CAS-WH-TENANT-1's casino leg
+// of TestPaymentsWebhookResolver_FollowsWiring: a TRUE nil interface when
+// off (so the Orchestrator's nil-resolver branch rejects every callback as
+// no_resolver -> uniform 401, design §C7/C10), and a working MOCK resolver
+// bound to the mock provider when on.
+func TestCasinoWebhookResolver_FollowsWiring(t *testing.T) {
+	mock := casino.NewMockCasinoProvider("mock-casino", "EUR")
+
+	for _, cfg := range []config.Config{
+		{Environment: "production", TestSupportEndpointsEnabled: true},
+		{Environment: "production", TestSupportEndpointsEnabled: false},
+		{Environment: "staging", TestSupportEndpointsEnabled: false},
+	} {
+		if r := casinoWebhookResolver(mockProviderWiring(cfg), mock); r != nil {
+			t.Fatalf("env=%s flag=%v: expected a nil resolver interface, got %T", cfg.Environment, cfg.TestSupportEndpointsEnabled, r)
+		}
+	}
+
+	r := casinoWebhookResolver(mockProviderWiring(config.Config{Environment: "staging", TestSupportEndpointsEnabled: true}), mock)
+	if r == nil {
+		t.Fatal("expected the MOCK resolver with test support on")
+	}
+	tenantID := uuid.New()
+	cred, err := r.Resolve(context.Background(), tenantID, "mock-casino", "mock-v1")
+	if err != nil || cred.TenantID != tenantID || cred.ProviderID != "mock-casino" {
+		t.Fatalf("MOCK resolver must resolve its own provider, got %v / %v", cred, err)
+	}
+	if _, err := r.Resolve(context.Background(), tenantID, "other", "mock-v1"); !errors.Is(err, webhookauth.ErrCredentialUnavailable) {
+		t.Fatalf("MOCK resolver must fail closed for another provider, got %v", err)
+	}
+	// And a callback signed by the mock verifies under exactly this
+	// resolver's credential.
+	in := mock.CallbackPayload(tenantID, casino.CallbackEventBet, "bet-wiring-1", "", "round-1", "game-1", 1000, "EUR", casino.OutcomeSucceeded, "", uuid.New(), uuid.New())
+	if _, err := mock.HandleCallback(context.Background(), in, cred); err != nil {
+		t.Fatalf("mock callback must verify under the wired resolver, got %v", err)
 	}
 }
 

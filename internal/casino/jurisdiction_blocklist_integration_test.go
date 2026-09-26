@@ -75,7 +75,7 @@ func TestLaunchGame_EmptyBlocklist_NonRegression(t *testing.T) {
 	game := seedGame(t, pool, "mock-casino", "EUR") // no blocklist (seedGame's default)
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	var result LaunchGameResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -111,7 +111,7 @@ func TestLaunchGame_ArmedBlocklist_DeniesOnUnresolvedJurisdiction(t *testing.T) 
 	game := seedGameWithBlocklist(t, pool, "mock-casino", []string{"ANY-CODE"}, "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	var result LaunchGameResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -143,7 +143,7 @@ func TestLaunchGame_ArmedBlocklist_DeniesInDemoModeToo(t *testing.T) {
 	game := seedGameWithBlocklist(t, pool, "mock-casino", []string{"ANY-CODE"}, "EUR")
 	enableGameForTenant(t, pool, f, game.ID)
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	var result LaunchGameResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {

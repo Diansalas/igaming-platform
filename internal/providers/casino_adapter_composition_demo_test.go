@@ -33,6 +33,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/providers"
 	"github.com/Diansalas/igaming-platform/internal/providers/httpclient"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // fakeHTTPCasinoAdapter implements casino.CasinoProvider entirely by
@@ -186,7 +187,7 @@ func (a *fakeHTTPCasinoAdapter) Rollback(ctx context.Context, req casino.Rollbac
 	return casino.RollbackResult{}, errors.New("fakeHTTPCasinoAdapter: Rollback not exercised in this demo")
 }
 
-func (a *fakeHTTPCasinoAdapter) HandleCallback(ctx context.Context, rawPayload []byte) (casino.CallbackEvent, error) {
+func (a *fakeHTTPCasinoAdapter) HandleCallback(ctx context.Context, in webhookauth.Inbound, cred webhookauth.Credential) (casino.CallbackEvent, error) {
 	return casino.CallbackEvent{}, errors.New("fakeHTTPCasinoAdapter: HandleCallback not exercised in this demo")
 }
 

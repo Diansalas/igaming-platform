@@ -199,7 +199,7 @@ func TestStage9_ConcurrentDistinctBetsOneWallet_ExactlyOneAccepted(t *testing.T)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	release, blockerPID := s9Blocker(t, pool, f.tenantID, s9CashAccountID(t, pool, f))
 
@@ -211,7 +211,7 @@ func TestStage9_ConcurrentDistinctBetsOneWallet_ExactlyOneAccepted(t *testing.T)
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			payload := provider.CallbackPayload(CallbackEventBet,
+			payload := provider.CallbackPayload(f.tenantID, CallbackEventBet,
 				"s9-bet-race-"+string(rune('a'+i)), "", "s9-round-race-"+string(rune('a'+i)), "game-1",
 				1_000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -285,14 +285,14 @@ func TestStage9_ConcurrentWinAndRollbackSameRound_SerializesToALegalOrder(t *tes
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	const (
 		round = "s9-round-win-vs-rollback"
 		stake = int64(400)
 		win   = int64(500)
 	)
-	betPayload := provider.CallbackPayload(CallbackEventBet, "s9-bet-wvr", "", round, "game-1", stake, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "s9-bet-wvr", "", round, "game-1", stake, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", betPayload)
 		return err
@@ -300,8 +300,8 @@ func TestStage9_ConcurrentWinAndRollbackSameRound_SerializesToALegalOrder(t *tes
 		t.Fatalf("seed bet: %v", err)
 	}
 
-	winPayload := provider.CallbackPayload(CallbackEventWin, "s9-win-wvr", "", round, "game-1", win, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
-	rollbackPayload := provider.CallbackPayload(CallbackEventRollback, "s9-rb-wvr", "s9-bet-wvr", round, "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "s9-win-wvr", "", round, "game-1", win, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "s9-rb-wvr", "s9-bet-wvr", round, "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
 
 	release, blockerPID := s9Blocker(t, pool, f.tenantID, s9CashAccountID(t, pool, f))
 
@@ -390,7 +390,7 @@ func TestStage9_ConcurrentDistinctWinsOnLockedRound_ReleasesLockExactlyOnce(t *t
 	fundWallet(t, pool, f, 1_000)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	const (
 		round = "s9-round-locked"
@@ -411,7 +411,7 @@ func TestStage9_ConcurrentDistinctWinsOnLockedRound_ReleasesLockExactlyOnce(t *t
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			payload := provider.CallbackPayload(CallbackEventWin,
+			payload := provider.CallbackPayload(f.tenantID, CallbackEventWin,
 				"s9-win-locked-"+string(rune('a'+i)), "", round, "game-1",
 				win, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
 			errs[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -508,7 +508,7 @@ func TestStage9_ConcurrentBetAndWithdrawalOneWallet_ExactlyOneReservesTheBalance
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	// Both want the whole 1000. Only one can have it.
 	const amount = int64(1_000)
@@ -521,7 +521,7 @@ func TestStage9_ConcurrentBetAndWithdrawalOneWallet_ExactlyOneReservesTheBalance
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		payload := provider.CallbackPayload(CallbackEventBet, "s9-bet-vs-wd", "", "s9-round-bet-vs-wd", "game-1",
+		payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "s9-bet-vs-wd", "", "s9-round-bet-vs-wd", "game-1",
 			amount, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 		betErr = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error

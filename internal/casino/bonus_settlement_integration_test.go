@@ -475,14 +475,14 @@ func TestPostWin_LockAlreadyReleased(t *testing.T) {
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-lf18")
 	postLockedBonusBet(t, pool, f, "mock-casino", "bet-lf18", "round-lf18", grantID, 500)
 	drainRoundLock(t, pool, f, "mock-casino", "round-lf18", 500)
 
-	winPayload := provider.CallbackPayload(CallbackEventWin, "win-lf18", "", "round-lf18", "game-1", 300, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-lf18", "", "round-lf18", "game-1", 300, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", winPayload)
 		return err
@@ -511,13 +511,13 @@ func TestPostWin_LockedBonusOrdinary_GrantNonTerminal(t *testing.T) {
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-ordinary-1")
 	postLockedBonusBet(t, pool, f, "mock-casino", "bet-ord-1", "round-ord-1", grantID, 1000)
 
-	winPayload := provider.CallbackPayload(CallbackEventWin, "win-ord-1", "", "round-ord-1", "game-1", 300, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-ord-1", "", "round-ord-1", "game-1", 300, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -592,7 +592,7 @@ func TestPostWin_LockedBonusTerminalGrant_CapturesUnconditionally(t *testing.T) 
 			f := seedCasinoFixture(t, pool)
 			provider := NewMockCasinoProvider("mock-casino", "EUR")
 			registerCasinoCapability(t, pool, f, provider, 100)
-			orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+			orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 			co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 			grantID := seedActivatedGrant(t, pool, f, co, "trig-term-"+tc.name)
@@ -601,7 +601,7 @@ func TestPostWin_LockedBonusTerminalGrant_CapturesUnconditionally(t *testing.T) 
 			postLockedBonusBet(t, pool, f, "mock-casino", betTxID, roundID, grantID, 400)
 			tc.setup(t, pool, f.tenantID, grantID)
 
-			winPayload := provider.CallbackPayload(CallbackEventWin, "win-term-"+tc.name, "", roundID, "game-1", 250, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+			winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-term-"+tc.name, "", roundID, "game-1", 250, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
 			var result ReceiveCallbackResult
 			err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 				var err error
@@ -678,14 +678,14 @@ func TestPostRollback_PlainLockRollback_RecomputesExposure(t *testing.T) {
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-rollback-1")
 	postLockedBonusBet(t, pool, f, "mock-casino", "bet-rb-1", "round-rb-1", grantID, 700)
 	setGrantPendingSettlement(t, pool, f.tenantID, grantID, bonus.TerminalResolutionExpired)
 
-	rollbackPayload := provider.CallbackPayload(CallbackEventRollback, "rollback-rb-1", "bet-rb-1", "round-rb-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-rb-1", "bet-rb-1", "round-rb-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
 	var result ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -733,14 +733,14 @@ func TestPostRollback_HeldWinRollback_VoidsDispositionAndFinalizesGrant(t *testi
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-heldrb-1")
 	postLockedBonusBet(t, pool, f, "mock-casino", "bet-heldrb-1", "round-heldrb-1", grantID, 400)
 	setGrantPendingSettlement(t, pool, f.tenantID, grantID, bonus.TerminalResolutionExpired)
 
-	winPayload := provider.CallbackPayload(CallbackEventWin, "win-heldrb-1", "", "round-heldrb-1", "game-1", 250, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-heldrb-1", "", "round-heldrb-1", "game-1", 250, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
 	var winResult ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -754,7 +754,7 @@ func TestPostRollback_HeldWinRollback_VoidsDispositionAndFinalizesGrant(t *testi
 		t.Fatalf("expected grant to remain pending_settlement after unconditional capture (§16.21: never called from postWin's hold-capture path), got %s", status)
 	}
 
-	rollbackPayload := provider.CallbackPayload(CallbackEventRollback, "rollback-heldrb-1", "win-heldrb-1", "round-heldrb-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-heldrb-1", "win-heldrb-1", "round-heldrb-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
 	var rbResult ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -805,14 +805,14 @@ func TestPostRollback_HeldWinRollback_DuplicateIsIdempotent(t *testing.T) {
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-dup-1")
 	postLockedBonusBet(t, pool, f, "mock-casino", "bet-dup-1", "round-dup-1", grantID, 400)
 	setGrantTerminal(t, pool, f.tenantID, grantID, bonus.GrantForfeited)
 
-	winPayload := provider.CallbackPayload(CallbackEventWin, "win-dup-1", "", "round-dup-1", "game-1", 250, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-dup-1", "", "round-dup-1", "game-1", 250, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", winPayload)
 		return err
@@ -821,7 +821,7 @@ func TestPostRollback_HeldWinRollback_DuplicateIsIdempotent(t *testing.T) {
 		t.Fatalf("win: %v", err)
 	}
 
-	rollbackPayload := provider.CallbackPayload(CallbackEventRollback, "rollback-dup-1", "win-dup-1", "round-dup-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-dup-1", "win-dup-1", "round-dup-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
 	var first, second ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -887,14 +887,14 @@ func TestPostRollback_HeldWinRollback_ConcurrentDistinctRollbacks(t *testing.T) 
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-race-1")
 	postLockedBonusBet(t, pool, f, "mock-casino", "bet-race-1", "round-race-1", grantID, 400)
 	setGrantTerminal(t, pool, f.tenantID, grantID, bonus.GrantForfeited)
 
-	winPayload := provider.CallbackPayload(CallbackEventWin, "win-race-1", "", "round-race-1", "game-1", 250, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-race-1", "", "round-race-1", "game-1", 250, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", winPayload)
 		return err
@@ -911,7 +911,7 @@ func TestPostRollback_HeldWinRollback_ConcurrentDistinctRollbacks(t *testing.T) 
 		go func(i int) {
 			defer wg.Done()
 			rbTxID := fmt.Sprintf("rollback-race-%d", i)
-			payload := provider.CallbackPayload(CallbackEventRollback, rbTxID, "win-race-1", "round-race-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+			payload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, rbTxID, "win-race-1", "round-race-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
 			results[i] = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 				_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
 				return err
@@ -969,14 +969,14 @@ func TestPostRollback_HeldWinRollback_RollbackRacesDirectResolution(t *testing.T
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-race2-1")
 	postLockedBonusBet(t, pool, f, "mock-casino", "bet-race2-1", "round-race2-1", grantID, 400)
 	setGrantTerminal(t, pool, f.tenantID, grantID, bonus.GrantForfeited)
 
-	winPayload := provider.CallbackPayload(CallbackEventWin, "win-race2-1", "", "round-race2-1", "game-1", 250, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-race2-1", "", "round-race2-1", "game-1", 250, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
 	var winResult ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -994,7 +994,7 @@ func TestPostRollback_HeldWinRollback_RollbackRacesDirectResolution(t *testing.T
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		rollbackPayload := provider.CallbackPayload(CallbackEventRollback, "rollback-race2-1", "win-race2-1", "round-race2-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+		rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-race2-1", "win-race2-1", "round-race2-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
 		rollbackErr = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
 			return err
@@ -1062,14 +1062,14 @@ func TestPostRollback_HeldWinRollback_AlreadyResolved_FailsClosed(t *testing.T) 
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
 	co := seedBonusCampaignOffer(t, pool, f.tenantID, f.brandID)
 	grantID := seedActivatedGrant(t, pool, f, co, "trig-lf10-1")
 	postLockedBonusBet(t, pool, f, "mock-casino", "bet-lf10-1", "round-lf10-1", grantID, 400)
 	setGrantTerminal(t, pool, f.tenantID, grantID, bonus.GrantForfeited)
 
-	winPayload := provider.CallbackPayload(CallbackEventWin, "win-lf10-1", "", "round-lf10-1", "game-1", 250, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-lf10-1", "", "round-lf10-1", "game-1", 250, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
 	var winResult ReceiveCallbackResult
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
@@ -1097,7 +1097,7 @@ func TestPostRollback_HeldWinRollback_AlreadyResolved_FailsClosed(t *testing.T) 
 
 	balBefore := bonusBalances(t, pool, f)
 
-	rollbackPayload := provider.CallbackPayload(CallbackEventRollback, "rollback-lf10-1", "win-lf10-1", "round-lf10-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
+	rollbackPayload := provider.CallbackPayload(f.tenantID, CallbackEventRollback, "rollback-lf10-1", "win-lf10-1", "round-lf10-1", "game-1", 0, "EUR", "", "", f.playerAccountID, uuid.Nil)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", rollbackPayload)
 		return err
@@ -1136,9 +1136,9 @@ func TestPostWin_PlainCashWin_NeverTouchesBonusMachinery(t *testing.T) {
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	registerCasinoCapability(t, pool, f, provider, 100)
 	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
-	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider})
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
 
-	betPayload := provider.CallbackPayload(CallbackEventBet, "bet-native-1", "", "round-native-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-native-1", "", "round-native-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", betPayload)
 		return err
@@ -1150,7 +1150,7 @@ func TestPostWin_PlainCashWin_NeverTouchesBonusMachinery(t *testing.T) {
 	// A provider-native promo would already be baked into this amount
 	// (e.g. a free-round win multiplier) - the platform never sees it as
 	// anything but an ordinary cash win, exactly as ADR 0033 §2.1 requires.
-	winPayload := provider.CallbackPayload(CallbackEventWin, "win-native-1", "", "round-native-1", "game-1", 2500, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-native-1", "", "round-native-1", "game-1", 2500, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
 	var result ReceiveCallbackResult
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		var err error
