@@ -163,9 +163,15 @@ jobs:
         # runner image without node24 fails this step at setup.
         # The linter version is pinned (not `latest`) so results are
         # reproducible; bump it deliberately.
+        #
+        # GO-TOOLCHAIN-VULN-1: bumped v2.5.0 -> v2.6.2 (minimal bump, not
+        # latest) because v2.5.0 was built with go1.25 and refuses to run
+        # ("the Go language version used to build golangci-lint is lower
+        # than the targeted Go version") once go.mod's toolchain moved to
+        # go1.26.8; v2.6.2 is the first release built with go1.26.
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.5.0
+          version: v2.6.2
 
       - name: Dependency drift (go.mod/go.sum, QA condition)
         # `go mod tidy` must be a no-op: a diff here means go.mod/go.sum
@@ -188,8 +194,14 @@ jobs:
         # introduces the AWS SDK (internal/secretstore/awssm). Scans the
         # whole module, not just that package, since a vulnerable
         # transitive dependency anywhere is worth knowing about.
+        #
+        # GO-TOOLCHAIN-VULN-1 (docs/security/vulnerability-registry.md):
+        # pinned to an exact version (not @latest) so results are
+        # reproducible and a bump is a deliberate, reviewable diff -
+        # govulncheck v1.8.0 requires go >= 1.26, which matches the
+        # toolchain pinned in go.mod.
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
           govulncheck ./...
 
       - name: Build
