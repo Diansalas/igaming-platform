@@ -85,7 +85,7 @@ type MockProvider struct {
 // webhookauth.DeriveMockKey with the payments mock key label (Stage 10.2,
 // ADR 0091). NUL-separated so no ambiguity exists between e.g. tenant "ab"
 // + provider "c" and tenant "a" + provider "bc" - UUIDs never contain 0x00
-// and provider_id is charset-restricted (ProviderIDPattern) to exclude it
+// and provider_id is charset-restricted (webhookauth.ValidProviderID) to exclude it
 // too.
 func (m *MockProvider) deriveKey(tenantID uuid.UUID, providerID string) []byte {
 	return webhookauth.DeriveMockKey(m.masterSecret, webhookauth.PaymentsMockKeyLabel, tenantID, providerID)

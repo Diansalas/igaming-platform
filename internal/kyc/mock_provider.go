@@ -194,7 +194,11 @@ func (m *MockKYCProvider) HandleCallback(ctx context.Context, in webhookauth.Inb
 
 	// From here on the caller has proven knowledge of the resolved
 	// credential - every subsequent rejection is a POST-verification,
-	// structural failure, never one of the auth sentinels above.
+	// structural failure (ErrCallbackMalformedBody -> 400), with one
+	// deliberate carve-out: a body still carrying the legacy "signature"
+	// field is rejected as ErrCallbackSignatureInvalid (401,
+	// signature_invalid), matching payments and casino (design §B6(d),
+	// ADR 0022 §3 Stage 10.2 amendment).
 	var generic map[string]any
 	if err := json.Unmarshal(in.Body, &generic); err != nil {
 		return ProviderResult{}, fmt.Errorf("%w: parse callback: %v", ErrCallbackMalformedBody, err)

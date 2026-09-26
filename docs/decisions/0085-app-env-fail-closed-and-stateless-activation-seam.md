@@ -96,8 +96,9 @@ things in total (four direct `Deps` flags plus `mockProviderWiring`), all
 still computed from the one function.
 
 `Environment` itself remains informational elsewhere (used in
-logs/traces) and must never gate a security control outside these three
-named, reviewed exceptions — see `internal/config.Config`'s own doc
+logs/traces) and must never gate a security control outside the named,
+reviewed exceptions listed in §1 (the four `Deps` flags plus
+`mockProviderWiring`) — see `internal/config.Config`'s own doc
 comment on the `Environment` field for the exhaustive list.
 
 *Amended 2026-09-26 (Stage 10.2, ADR 0091; PAYWH-GATE-1, KYC-WH-1,

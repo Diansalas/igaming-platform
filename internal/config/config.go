@@ -89,7 +89,8 @@ type Config struct {
 	//     resolved.
 	//   - Layer 2 (TestSupportEndpointsEnabled, below): a second,
 	//     independent, explicit opt-in that must ALSO be true before any
-	//     of the three flags actually register a route.
+	//     of the flags derived from TestSupportRoutesEnabled() actually
+	//     registers a route or wires a mock provider.
 	//     cmd/platform-api/main.go now computes each flag as
 	//     `cfg.Environment != "production" && cfg.TestSupportEndpointsEnabled`
 	//     - a wrong/typoed Environment value alone can no longer register

@@ -208,7 +208,11 @@ become) a real vendor's contract before one exists.
 >   `CreateVerification` row starts a new attempt (J11). No code path may
 >   "reopen" a terminal row from a provider callback.
 > - `error` still never changes state, as in §5. It writes one failure
->   audit row, for a verified sender only.
+>   audit row per delivery, for a verified sender only, **while the
+>   verification is not terminal**. Against an already-terminal
+>   verification an `error` callback is a pure no-op: 204, no audit row
+>   (Stage 10.2 final-review ruling K5), so replaying a captured `error`
+>   callback cannot grow `audit_log` once the verification has concluded.
 > - Replay is idempotent through the existing unique
 >   `(tenant_id, provider_id, provider_reference)` plus the rank. No event
 >   id is added.

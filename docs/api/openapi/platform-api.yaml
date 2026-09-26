@@ -2741,8 +2741,10 @@ paths:
         verification, so it is reachable by anyone, verified or not; (2)
         the tenant's own CasinoProviderCapability for this provider is
         disabled/unconfigured, a deliberate POST-verification money-path
-        kill switch that only a verified caller ever observes. The
-        response body never distinguishes which of the two applies.
+        kill switch that only a verified caller ever observes. The two
+        causes carry different error messages ("casino webhooks are not
+        enabled on this deployment" vs "provider is not enabled for this
+        tenant"); cause (2) is only ever returned to a verified caller.
       parameters:
         - name: tenantSlug
           in: path
@@ -2782,9 +2784,12 @@ paths:
                   decline_reason: { type: string }
         "400":
           description: >
-            Reachable ONLY after signature verification succeeds. Two
-            classes of cause, both mapped to this same generic body -
-            never the specific field or value that failed: (1)
+            Reachable ONLY after signature verification succeeds, so the
+            message is only ever seen by the verified provider. The
+            message names the class of failure (for example "no matching
+            prior bet for this round" or "callback outcome is not
+            succeeded"), never echoing submitted values. Two classes of
+            cause: (1)
             structurally malformed (unparseable JSON, a missing required
             field, an unrecognized event_type/outcome value, or an
             event_type the orchestrator itself does not recognize even
@@ -2823,8 +2828,9 @@ paths:
             reachable by any caller, verified or not. (2) The tenant's own
             provider capability is disabled/unconfigured - a deliberate,
             POST-verification money-path kill switch, reachable ONLY after
-            signature verification succeeds. The response body never
-            distinguishes the two.
+            signature verification succeeds. The two causes carry
+            different error messages; the post-verification one is only
+            ever returned to a verified caller.
           content:
             application/json:
               schema:
