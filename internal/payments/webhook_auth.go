@@ -1,8 +1,6 @@
 package payments
 
 import (
-	"net/http"
-
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -27,13 +25,6 @@ const (
 // scheme (webhookauth package doc: never a vendor format).
 var paymentsScheme = webhookauth.PaymentsScheme()
 
-// WebhookScheme returns the payments domain's platform-defined MOCK wire
-// scheme - what the HTTP layer's shared webhook preamble checks headers
-// against.
-func WebhookScheme() webhookauth.Scheme {
-	return paymentsScheme
-}
-
 // WebhookScheme implements PaymentProvider: the payments platform MOCK
 // scheme (byte-identical to Stage 10.1/10.2) exposed as a synthetic
 // webhookauth.VerificationScheme. Never a vendor protocol.
@@ -54,18 +45,3 @@ func (m *MockProvider) WebhookScheme() webhookauth.VerificationScheme {
 // single platform component - one FORCE-RLS handle table plus a secret
 // store, keyed by (tenant_id, provider_id, key_id).
 type MultiWebhookCredentialResolver = webhookauth.MultiResolver
-
-// ParseWebhookAuthHeaders extracts and format-validates the payments
-// domain's two inbound-callback authentication headers. It never touches
-// the database or any tenant-scoped state - a pure, cheap check callers
-// run as early as possible (the HTTP handler's shared preamble, before
-// any tenant/DB work; the orchestrator again, since payments-package tests
-// exercise ReceiveCallback directly without going through the HTTP layer
-// at all).
-//
-// ok is false for every malformed/missing case; reason is
-// ReasonSignatureMissing for an absent header and ReasonSignatureInvalid
-// for a present-but-malformed one.
-func ParseWebhookAuthHeaders(h http.Header) (keyID, sigHex string, reason CallbackAuthReason, ok bool) {
-	return paymentsScheme.ParseHeaders(h)
-}

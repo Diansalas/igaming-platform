@@ -46,9 +46,14 @@ func (f UnmarkedFinding) String() string {
 // file it finds (skipping any directory literally named "testdata", the
 // same convention the go tool itself uses to exclude fixture directories
 // from ordinary package discovery), and returns one UnmarkedFinding for
-// every exported or unexported type whose name matches mockNameHeuristic
-// but for which no `func (recv T) SyntheticComponent()` (value or pointer
-// receiver) is declared anywhere in the same directory (Go package).
+// every EXPORTED type whose name matches mockNameHeuristic but for which
+// no `func (recv T) SyntheticComponent()` (value or pointer receiver) is
+// declared anywhere in the same directory (Go package). Unexported types
+// are deliberately skipped (see the loop below): this is a name-based
+// secondary net over candidate registrations, not a proof - the primary
+// control is RefuseSyntheticInProduction's positive ProductionEligible
+// marker, which refuses any unmarked component whatever its name or
+// visibility.
 //
 // This is a pure, read-only source scan: go/ast + go/parser only, no
 // go/types, no build, no network - consistent with this codebase's

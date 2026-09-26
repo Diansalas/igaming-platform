@@ -562,9 +562,13 @@ func (c Config) GuardEnvironment() string {
 // resolver's backend selection through - W1b adds only the rule itself,
 // no store implementation.
 const (
-	// SecretBackendAWSSecretsManager is the only backend permitted in
-	// every environment (staging and production both use it; W3b wires
-	// the actual AWS SDK client behind it).
+	// SecretBackendAWSSecretsManager is permitted ONLY when APP_ENV is
+	// EXPLICITLY "staging" or "production" (ADR 0093 §6 table: "awssm:
+	// staging, production"; W3b wires the actual AWS SDK client behind
+	// it). It is refused in development and when APP_ENV is missing, so a
+	// task with no APP_ENV can select no backend at all and fails closed.
+	// W3b unit-tests the backend against an SDK fake without going
+	// through this config gate.
 	SecretBackendAWSSecretsManager = "awssm"
 	// SecretBackendDevFile is a local-file-backed backend permitted ONLY
 	// when GuardEnvironment() == "development" - i.e. APP_ENV must be
@@ -587,6 +591,15 @@ const (
 func (c Config) ValidateSecretBackendScheme(scheme string) error {
 	switch scheme {
 	case SecretBackendAWSSecretsManager:
+		// Explicit staging/production only (ADR 0093 §6). GuardEnvironment
+		// alone would read a missing APP_ENV as "production" and permit
+		// awssm; the stricter rule refuses it, so an unset APP_ENV permits
+		// NO backend (fail closed).
+		if !c.EnvironmentExplicit || (c.Environment != "staging" && c.Environment != "production") {
+			return fmt.Errorf(
+				"config: secret backend %q is permitted only when APP_ENV is explicitly \"staging\" or \"production\" "+
+					"(ADR 0093 §6; refused in development and when APP_ENV is missing)", scheme)
+		}
 		return nil
 	case SecretBackendDevFile:
 		if c.GuardEnvironment() != "development" {

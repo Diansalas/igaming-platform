@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -183,9 +182,8 @@ type Orchestrator struct {
 	providers                 map[string]KYCProvider
 	webhookCredentialResolver webhookauth.Resolver
 	// webhookSchemes: every adapter's validated WebhookScheme() (Stage
-	// 10.3 W1a; webhook_verify.go). now: platform clock (nil = time.Now).
+	// 10.3 W1a; webhook_verify.go).
 	webhookSchemes *webhookauth.SchemeSet
-	now            func() time.Time
 }
 
 // NewOrchestrator constructs an Orchestrator. resolver may be nil (every

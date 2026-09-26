@@ -66,7 +66,7 @@ func TestWebhookAuthAliases_ErrorsIsAs(t *testing.T) {
 		if !errors.Is(handleErr, webhookauth.ErrSignatureInvalid) {
 			t.Fatalf("payments HandleCallback error must match webhookauth.ErrSignatureInvalid, got %v", handleErr)
 		}
-		verifyErr := WebhookScheme().Verify(cred, in)
+		verifyErr := paymentsScheme.Verify(cred, in)
 		if !errors.Is(fmt.Errorf("w: %w", verifyErr), ErrCallbackSignatureInvalid) {
 			t.Fatalf("webhookauth Scheme.Verify error must match payments.ErrCallbackSignatureInvalid, got %v", verifyErr)
 		}
@@ -84,7 +84,7 @@ func TestWebhookAuthAliases_ErrorsIsAs(t *testing.T) {
 	})
 
 	t.Run("payments scheme parameters unchanged", func(t *testing.T) {
-		s := WebhookScheme()
+		s := paymentsScheme
 		if s.Prefix != SigningInputPrefix || s.SignatureHeader != HeaderSignature || s.KeyIDHeader != HeaderKeyID ||
 			SigningInputPrefix != "igaming.payments.webhook.v1" || HeaderSignature != "X-Payments-Signature" || HeaderKeyID != "X-Payments-Key-Id" ||
 			mockWebhookKeyID != "mock-v1" {

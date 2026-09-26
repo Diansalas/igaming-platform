@@ -54,7 +54,9 @@
 //
 // The MOCK Scheme is exposed through the same interface
 // (Scheme.VerificationScheme, mock_scheme.go) as a Synthetic scheme with
-// its bytes unchanged. It is NOT the real-provider protocol: no real
+// its bytes unchanged. A domain accepts only its own canonical MOCK as
+// Synthetic, and only from an adapter that is itself a synthetic component
+// (NewAdapterSchemeSet). It is NOT the real-provider protocol: no real
 // vendor scheme exists in this repository, none is invented here, and a
 // real provider is declared supported only once its actual documentation/
 // contract is implemented and passes the conformance suite (proposal §22).
@@ -77,7 +79,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -334,7 +335,7 @@ func (s Scheme) Verify(cred Credential, in Inbound) error {
 	return nil
 }
 
-// PreambleResult is the outcome of Scheme.CheckPreamble. On failure,
+// PreambleResult is the outcome of CheckInboundPreamble. On failure,
 // Reason is set and ProviderIDValid/BodyLen carry exactly the allow-listed
 // context the caller's auth-failure log line may include.
 type PreambleResult struct {
@@ -348,23 +349,4 @@ type PreambleResult struct {
 	ProviderIDValid bool
 	// Reason is the rejection reason (only when !ok).
 	Reason Reason
-}
-
-// CheckPreamble runs the shared, tenant-independent verify-before-parse
-// preamble for this MOCK scheme, BEFORE any tenant lookup or DB work, in
-// this fixed order:
-//
-//  1. provider_id charset (ReasonProviderInvalid);
-//  2. body read bounded to maxBody bytes - an unreadable or oversized body
-//     is ReasonBodyTooLarge, folded into the same uniform rejection as
-//     every other pre-verification failure;
-//  3. authentication header format (ParseHeaders's reasons).
-//
-// It never parses the body. Stage 10.3 W1a: a thin wrapper over
-// CheckInboundPreamble with this scheme as the only registered one - the
-// HTTP layer itself now calls CheckInboundPreamble with a per-provider
-// scheme lookup.
-func (s Scheme) CheckPreamble(providerID string, h http.Header, body io.Reader, maxBody int) (PreambleResult, bool) {
-	v := s.VerificationScheme()
-	return CheckInboundPreamble(providerID, h, body, maxBody, func(string) (VerificationScheme, bool) { return v, true })
 }

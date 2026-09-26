@@ -19,28 +19,13 @@ func (m *MockKYCProvider) WebhookScheme() webhookauth.VerificationScheme {
 // nil adapter/scheme or a non-permitted declaration panics, so startup
 // fails instead of serving with a bad scheme.
 func mustKYCSchemeSet(providers map[string]KYCProvider) *webhookauth.SchemeSet {
-	schemes := make(map[string]webhookauth.VerificationScheme, len(providers))
-	for id, p := range providers {
-		if p == nil {
-			schemes[id] = nil
-			continue
-		}
-		schemes[id] = p.WebhookScheme()
-	}
-	return webhookauth.MustSchemeSet("kyc", schemes)
+	return webhookauth.MustAdapterSchemeSet("kyc", providers)
 }
 
 // WebhookScheme returns the registered adapter's validated verification
 // scheme for providerID (used by the shared HTTP preamble; no tenant input).
 func (o *Orchestrator) WebhookScheme(providerID string) (webhookauth.VerificationScheme, bool) {
 	return o.webhookSchemes.Lookup(providerID)
-}
-
-func (o *Orchestrator) clock() time.Time {
-	if o.now != nil {
-		return o.now()
-	}
-	return time.Now()
 }
 
 // verifyCallback is ReceiveCallback's pre-verification half (strict I1: it
@@ -69,7 +54,7 @@ func (o *Orchestrator) verifyCallback(ctx context.Context, in webhookauth.Inboun
 	if authErr != nil {
 		return nil, webhookauth.Credential{}, authErr
 	}
-	cred, authErr := webhookauth.VerifyInbound(scheme, creds, in, m, o.clock())
+	cred, authErr := webhookauth.VerifyInbound(scheme, creds, in, m, time.Now())
 	if authErr != nil {
 		return nil, webhookauth.Credential{}, authErr
 	}

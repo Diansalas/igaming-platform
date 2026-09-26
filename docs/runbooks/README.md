@@ -41,7 +41,9 @@ make migrate-up
 # 4. Configure environment
 cp .env.example .env   # then `set -a; source .env; set +a` or export manually
 
-# 5. Run the service
+# 5. Run the service. `make run` defaults APP_ENV=development (an exported
+#    APP_ENV wins): the synthetic-component startup guard treats a MISSING
+#    APP_ENV as production and refuses to start with the mock adapters.
 make run
 
 # 6. In another shell, exercise it

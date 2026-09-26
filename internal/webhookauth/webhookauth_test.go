@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -339,45 +340,53 @@ func TestScheme_ParseHeaders(t *testing.T) {
 	}
 }
 
+// TestScheme_CheckPreamble drives the shared preamble (CheckInboundPreamble)
+// with the payments MOCK scheme as the only registered one. (The former
+// test-only Scheme.CheckPreamble wrapper was deleted as dead code, gate
+// 10.3-W1 code review #9; its body is this local helper.)
 func TestScheme_CheckPreamble(t *testing.T) {
-	s := PaymentsScheme()
+	scheme := PaymentsScheme()
 	const maxBody = 16
 	good := make(http.Header)
-	s.SetHeaders(good, "mock-v1", strings.Repeat("a", 64))
+	scheme.SetHeaders(good, "mock-v1", strings.Repeat("a", 64))
+	v := scheme.VerificationScheme()
+	checkPreamble := func(providerID string, h http.Header, body io.Reader, maxBody int) (PreambleResult, bool) {
+		return CheckInboundPreamble(providerID, h, body, maxBody, func(string) (VerificationScheme, bool) { return v, true })
+	}
 
 	t.Run("provider id charset first, body never read", func(t *testing.T) {
 		r := &countingReader{r: strings.NewReader("{}")}
-		res, ok := s.CheckPreamble("Bad_Provider", good, r, maxBody)
+		res, ok := checkPreamble("Bad_Provider", good, r, maxBody)
 		if ok || res.Reason != ReasonProviderInvalid || res.ProviderIDValid || res.BodyLen != 0 || r.n != 0 {
 			t.Fatalf("unexpected result %+v (bytes read %d)", res, r.n)
 		}
 	})
 	t.Run("oversized body", func(t *testing.T) {
-		res, ok := s.CheckPreamble("mock-x", good, strings.NewReader(strings.Repeat("x", maxBody+10)), maxBody)
+		res, ok := checkPreamble("mock-x", good, strings.NewReader(strings.Repeat("x", maxBody+10)), maxBody)
 		if ok || res.Reason != ReasonBodyTooLarge || !res.ProviderIDValid || res.BodyLen != maxBody+1 || res.Body != nil {
 			t.Fatalf("unexpected result %+v", res)
 		}
 	})
 	t.Run("exactly max body is accepted", func(t *testing.T) {
-		res, ok := s.CheckPreamble("mock-x", good, strings.NewReader(strings.Repeat("x", maxBody)), maxBody)
+		res, ok := checkPreamble("mock-x", good, strings.NewReader(strings.Repeat("x", maxBody)), maxBody)
 		if !ok || len(res.Body) != maxBody || res.BodyLen != maxBody {
 			t.Fatalf("unexpected result %+v", res)
 		}
 	})
 	t.Run("unreadable body", func(t *testing.T) {
-		res, ok := s.CheckPreamble("mock-x", good, iotest.ErrReader(errors.New("boom")), maxBody)
+		res, ok := checkPreamble("mock-x", good, iotest.ErrReader(errors.New("boom")), maxBody)
 		if ok || res.Reason != ReasonBodyTooLarge || !res.ProviderIDValid || res.BodyLen != 0 {
 			t.Fatalf("unexpected result %+v", res)
 		}
 	})
 	t.Run("missing headers", func(t *testing.T) {
-		res, ok := s.CheckPreamble("mock-x", http.Header{}, strings.NewReader("{}"), maxBody)
+		res, ok := checkPreamble("mock-x", http.Header{}, strings.NewReader("{}"), maxBody)
 		if ok || res.Reason != ReasonSignatureMissing || !res.ProviderIDValid || res.BodyLen != 2 {
 			t.Fatalf("unexpected result %+v", res)
 		}
 	})
 	t.Run("non-JSON body with valid headers is not parsed", func(t *testing.T) {
-		res, ok := s.CheckPreamble("mock-x", good, strings.NewReader("not json"), maxBody)
+		res, ok := checkPreamble("mock-x", good, strings.NewReader("not json"), maxBody)
 		if !ok || string(res.Body) != "not json" {
 			t.Fatalf("unexpected result %+v", res)
 		}

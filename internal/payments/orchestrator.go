@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -53,9 +52,6 @@ type Orchestrator struct {
 	// webhookSchemes is every registered adapter's WebhookScheme(),
 	// validated once at construction (Stage 10.3 W1a; webhook_verify.go).
 	webhookSchemes *webhookauth.SchemeSet
-	// now is the platform clock for signed-timestamp windows; nil means
-	// time.Now. Tests in this package may set it.
-	now func() time.Time
 	// MaxCascadeDepth bounds cascade-on-decline (payment-orchestration.md
 	// §5). Defaults to defaultMaxCascadeDepth when <= 0.
 	MaxCascadeDepth int

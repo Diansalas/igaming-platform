@@ -3,6 +3,7 @@ package webhookauthtest_test
 import (
 	"net/http"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -79,6 +80,10 @@ type brokenCase struct {
 	name   string
 	scheme refScheme
 	want   string
+	// alsoRed lists other cases that legitimately catch the same defect
+	// through a different input (empty for every scheme but one; see
+	// TimestampBeforeMAC). The red set must still match EXACTLY.
+	alsoRed []string
 }
 
 func brokenSchemes() []brokenCase {
@@ -87,17 +92,27 @@ func brokenSchemes() []brokenCase {
 		return s
 	}
 	return []brokenCase{
-		{"PrefixCompareAcceptsPrefix", with(baseRef(), func(b *refBugs) { b.prefixCompare = true }), webhookauthtest.CaseSC2},
-		{"IgnoresTenant", with(baseRef(), func(b *refBugs) { b.ignoreTenant = true }), webhookauthtest.CaseSC3},
-		{"IgnoresProvider", with(baseRef(), func(b *refBugs) { b.ignoreProvider = true }), webhookauthtest.CaseSC4},
-		{"PanicsOnMalformedHeader", with(baseRef(), func(b *refBugs) { b.panicOnLongHeader = true }), webhookauthtest.CaseSC5},
-		{"MultiKeyTrialOnAbsentKeyID", with(baseRef(), func(b *refBugs) { b.trialOnAbsentKeyID = true }), webhookauthtest.CaseSC6},
-		{"IgnoresTimestamp", with(baseRef(), func(b *refBugs) { b.ignoreTimestamp = true }), webhookauthtest.CaseSC7},
-		{"IgnoresBoundAccount", with(accountRef(), func(b *refBugs) { b.ignoreAccount = true }), webhookauthtest.CaseSC8},
-		{"HonoursPreviousAfterNotAfter", with(implicitRef(), func(b *refBugs) { b.ignoreNotAfter = true }), webhookauthtest.CaseSC9},
-		{"AcceptsEmptySecret", with(baseRef(), func(b *refBugs) { b.acceptShortSecret = true }), webhookauthtest.CaseSC10},
-		{"SecretInErrorText", with(baseRef(), func(b *refBugs) { b.secretInError = true }), webhookauthtest.CaseSC11},
-		{"SignAndVerifyShareABug", with(baseRef(), func(b *refBugs) { b.swappedOrderBoth = true }), webhookauthtest.CaseKAV},
+		{"PrefixCompareAcceptsPrefix", with(baseRef(), func(b *refBugs) { b.prefixCompare = true }), webhookauthtest.CaseSC2, nil},
+		{"IgnoresTenant", with(baseRef(), func(b *refBugs) { b.ignoreTenant = true }), webhookauthtest.CaseSC3, nil},
+		{"IgnoresProvider", with(baseRef(), func(b *refBugs) { b.ignoreProvider = true }), webhookauthtest.CaseSC4, nil},
+		{"PanicsOnMalformedHeader", with(baseRef(), func(b *refBugs) { b.panicOnLongHeader = true }), webhookauthtest.CaseSC5, nil},
+		{"MultiKeyTrialOnAbsentKeyID", with(baseRef(), func(b *refBugs) { b.trialOnAbsentKeyID = true }), webhookauthtest.CaseSC6, nil},
+		{"IgnoresTimestamp", with(baseRef(), func(b *refBugs) { b.ignoreTimestamp = true }), webhookauthtest.CaseSC7, nil},
+		// Security S-2 (06-gate-w1 F2): within SC7, ONLY the stale-AND-
+		// tampered assertion catches this scheme (its MAC and window are
+		// each individually correct, so every other SC7 check passes - see
+		// TestSchemeConformanceSelfTest_TimestampBeforeMAC_OnlySC7StaleAndTampered).
+		// SC2 also goes red, and cannot be avoided: SC2 tampers the declared
+		// timestamp HEADER, and any tampered value outside the window hits
+		// the same window-before-MAC defect. The exact red-set match still
+		// makes SC7's assertion load-bearing: deleting it turns the set into
+		// [SC2] and fails this self-test.
+		{"TimestampBeforeMAC", with(baseRef(), func(b *refBugs) { b.timestampBeforeMAC = true }), webhookauthtest.CaseSC7, []string{webhookauthtest.CaseSC2}},
+		{"IgnoresBoundAccount", with(accountRef(), func(b *refBugs) { b.ignoreAccount = true }), webhookauthtest.CaseSC8, nil},
+		{"HonoursPreviousAfterNotAfter", with(implicitRef(), func(b *refBugs) { b.ignoreNotAfter = true }), webhookauthtest.CaseSC9, nil},
+		{"AcceptsEmptySecret", with(baseRef(), func(b *refBugs) { b.acceptShortSecret = true }), webhookauthtest.CaseSC10, nil},
+		{"SecretInErrorText", with(baseRef(), func(b *refBugs) { b.secretInError = true }), webhookauthtest.CaseSC11, nil},
+		{"SignAndVerifyShareABug", with(baseRef(), func(b *refBugs) { b.swappedOrderBoth = true }), webhookauthtest.CaseKAV, nil},
 	}
 }
 
@@ -105,10 +120,36 @@ func TestSchemeConformanceSelfTest_EachBrokenSchemeGoesRedOnlyInItsCase(t *testi
 	for _, bc := range brokenSchemes() {
 		t.Run(bc.name+"_GoesRed", func(t *testing.T) {
 			rep := webhookauthtest.Evaluate(newRefFixture(bc.scheme))
-			if got := rep.Failed(); !reflect.DeepEqual(got, []string{bc.want}) {
-				t.Fatalf("broken scheme %s: want exactly [%s] red, got %v\nfailures: %v", bc.name, bc.want, got, rep)
+			want := append([]string{bc.want}, bc.alsoRed...)
+			sort.Strings(want)
+			if got := rep.Failed(); !reflect.DeepEqual(got, want) {
+				t.Fatalf("broken scheme %s: want exactly %v red, got %v\nfailures: %v", bc.name, want, got, rep)
 			}
 		})
+	}
+}
+
+// TestSchemeConformanceSelfTest_TimestampBeforeMAC_OnlySC7StaleAndTampered
+// pins security S-2 precisely: for the window-before-MAC scheme, SC7's ONLY
+// failure is its stale-AND-tampered assertion (C10), and SC2's only
+// failures come from tampering the timestamp header - never from a body
+// flip or another header.
+func TestSchemeConformanceSelfTest_TimestampBeforeMAC_OnlySC7StaleAndTampered(t *testing.T) {
+	s := baseRef()
+	s.bugs.timestampBeforeMAC = true
+	rep := webhookauthtest.Evaluate(newRefFixture(s))
+	sc7 := rep[webhookauthtest.CaseSC7]
+	if len(sc7) != 1 || !strings.Contains(sc7[0], "stale AND tampered") {
+		t.Fatalf("SC7 must fail ONLY on its stale-and-tampered assertion, got %v", sc7)
+	}
+	sc2 := rep[webhookauthtest.CaseSC2]
+	if len(sc2) == 0 {
+		t.Fatal("expected SC2's timestamp-header tampering to catch the defect too")
+	}
+	for _, msg := range sc2 {
+		if !strings.Contains(msg, "auth header "+refTSHeader+" ") {
+			t.Fatalf("SC2 must fail only through the timestamp header, got %q", msg)
+		}
 	}
 }
 

@@ -3,9 +3,13 @@ package webhookauth
 // Constant-time comparison rule (Stage 10.3 W1a; security C9 "Constant
 // time", ruling R6). No black-box test can prove a MAC comparison is
 // constant-time, so this AST rule enforces it: in internal/webhookauth and
-// in every file that implements a VerificationScheme (declares an Extract
-// method returning AuthMaterial) anywhere under internal/ or cmd/,
-// signature/MAC comparison must use hmac.Equal. It fails on:
+// in EVERY non-test file of every PACKAGE (directory) under internal/ or
+// cmd/ in which any non-test file implements a VerificationScheme
+// (declares an Extract method returning AuthMaterial), signature/MAC
+// comparison must use hmac.Equal. Package scope, not file scope (gate
+// 10.3-W1 security S-3): a scheme split into scheme.go (Extract) and
+// verify.go (Verify plus a comparison helper) has verify.go scanned too.
+// It fails on:
 //
 //   - == / != where an operand names signature/MAC material (sig, mac,
 //     digest, expected...) and neither side is a literal, nil or len(...);
@@ -168,12 +172,22 @@ func repoRoot(t *testing.T) string {
 	}
 }
 
-func TestConstantTimeCompare_SchemePackages(t *testing.T) {
-	root := repoRoot(t)
-	webhookauthDir := filepath.Join(root, "internal", "webhookauth")
-	scanned := map[string]bool{}
-	var violations []ctViolation
-	for _, top := range []string{"internal", "cmd"} {
+type parsedGoFile struct {
+	rel  string
+	fset *token.FileSet
+	file *ast.File
+	src  []byte
+}
+
+// constantTimeScan applies checkConstantTime to every non-test .go file of
+// every package directory under root/tops that is in scope: any directory
+// in alwaysDirs (and below), or any directory containing a non-test file
+// that declares a VerificationScheme. It returns the scanned files (slash-
+// separated, relative to root) and the violations.
+func constantTimeScan(root string, tops, alwaysDirs []string) (map[string]bool, []ctViolation, error) {
+	byDir := map[string][]parsedGoFile{}
+	schemeDirs := map[string]bool{}
+	for _, top := range tops {
 		err := filepath.WalkDir(filepath.Join(root, top), func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -190,17 +204,46 @@ func TestConstantTimeCompare_SchemePackages(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if !strings.HasPrefix(path, webhookauthDir+string(filepath.Separator)) && !declaresScheme(file) {
-				return nil
-			}
 			rel, _ := filepath.Rel(root, path)
-			scanned[filepath.ToSlash(rel)] = true
-			violations = append(violations, checkConstantTime(fset, file, src)...)
+			dir := filepath.Dir(path)
+			byDir[dir] = append(byDir[dir], parsedGoFile{rel: filepath.ToSlash(rel), fset: fset, file: file, src: src})
+			if declaresScheme(file) {
+				schemeDirs[dir] = true
+			}
 			return nil
 		})
 		if err != nil {
-			t.Fatal(err)
+			return nil, nil, err
 		}
+	}
+	inAlways := func(dir string) bool {
+		for _, a := range alwaysDirs {
+			if dir == a || strings.HasPrefix(dir, a+string(filepath.Separator)) {
+				return true
+			}
+		}
+		return false
+	}
+	scanned := map[string]bool{}
+	var violations []ctViolation
+	for dir, files := range byDir {
+		if !schemeDirs[dir] && !inAlways(dir) {
+			continue
+		}
+		for _, f := range files {
+			scanned[f.rel] = true
+			violations = append(violations, checkConstantTime(f.fset, f.file, f.src)...)
+		}
+	}
+	return scanned, violations, nil
+}
+
+func TestConstantTimeCompare_SchemePackages(t *testing.T) {
+	root := repoRoot(t)
+	webhookauthDir := filepath.Join(root, "internal", "webhookauth")
+	scanned, violations, err := constantTimeScan(root, []string{"internal", "cmd"}, []string{webhookauthDir})
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, must := range []string{"internal/webhookauth/webhookauth.go", "internal/webhookauth/scheme.go", "internal/webhookauth/mock_scheme.go"} {
 		if !scanned[must] {
@@ -209,6 +252,48 @@ func TestConstantTimeCompare_SchemePackages(t *testing.T) {
 	}
 	for _, v := range violations {
 		t.Errorf("%s: %s", v.pos, v.what)
+	}
+}
+
+// TestConstantTimeCompare_ScopeIsWholePackage is security S-3's self-test:
+// in a package where only scheme.go declares Extract, a bytes.Equal MAC
+// comparison in a sibling verify.go is still found; a package with no
+// scheme is not scanned at all.
+func TestConstantTimeCompare_ScopeIsWholePackage(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, src string) {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("internal/vendorx/scheme.go", `package vendorx
+func (s S) Extract(in webhookauth.Inbound) (webhookauth.AuthMaterial, webhookauth.Reason, bool) { return webhookauth.AuthMaterial{}, "", false }`)
+	write("internal/vendorx/verify.go", `package vendorx
+import "bytes"
+func macMatches(expectedMAC, got []byte) bool { return bytes.Equal(expectedMAC, got) }`)
+	write("internal/vendorx/verify_test.go", `package vendorx
+import "bytes"
+func testOnly(mac, got []byte) bool { return bytes.Equal(mac, got) }`)
+	write("internal/unrelated/util.go", `package unrelated
+import "bytes"
+func same(mac, got []byte) bool { return bytes.Equal(mac, got) }`)
+
+	scanned, violations, err := constantTimeScan(root, []string{"internal"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !scanned["internal/vendorx/verify.go"] || !scanned["internal/vendorx/scheme.go"] {
+		t.Fatalf("every non-test file of a scheme package must be scanned, scanned %v", scanned)
+	}
+	if scanned["internal/unrelated/util.go"] || scanned["internal/vendorx/verify_test.go"] {
+		t.Fatalf("a package without a scheme, and test files, must not be scanned, scanned %v", scanned)
+	}
+	if len(violations) != 1 || !strings.HasSuffix(violations[0].pos.Filename, filepath.Join("vendorx", "verify.go")) {
+		t.Fatalf("want exactly one violation, in vendorx/verify.go, got %v", violations)
 	}
 }
 

@@ -14,15 +14,7 @@ import (
 // non-permitted Properties() declaration panics: NewOrchestrator runs at
 // process start, so startup fails instead of serving with a bad scheme.
 func mustPaymentsSchemeSet(providers map[string]PaymentProvider) *webhookauth.SchemeSet {
-	schemes := make(map[string]webhookauth.VerificationScheme, len(providers))
-	for id, p := range providers {
-		if p == nil {
-			schemes[id] = nil
-			continue
-		}
-		schemes[id] = p.WebhookScheme()
-	}
-	return webhookauth.MustSchemeSet("payments", schemes)
+	return webhookauth.MustAdapterSchemeSet("payments", providers)
 }
 
 // WebhookScheme returns the registered adapter's validated verification
@@ -30,13 +22,6 @@ func mustPaymentsSchemeSet(providers map[string]PaymentProvider) *webhookauth.Sc
 // format-check the request BEFORE any tenant lookup. No tenant input.
 func (o *Orchestrator) WebhookScheme(providerID string) (webhookauth.VerificationScheme, bool) {
 	return o.webhookSchemes.Lookup(providerID)
-}
-
-func (o *Orchestrator) clock() time.Time {
-	if o.now != nil {
-		return o.now()
-	}
-	return time.Now()
 }
 
 // verifyCallback is ReceiveCallback's pre-verification half, in the fixed
@@ -81,7 +66,7 @@ func (o *Orchestrator) verifyCallback(ctx context.Context, tx pgx.Tx, in Inbound
 	if authErr != nil {
 		return nil, WebhookCredential{}, authErr
 	}
-	cred, authErr := webhookauth.VerifyInbound(scheme, creds, in, m, o.clock())
+	cred, authErr := webhookauth.VerifyInbound(scheme, creds, in, m, time.Now())
 	if authErr != nil {
 		return nil, WebhookCredential{}, authErr
 	}

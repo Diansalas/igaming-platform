@@ -36,6 +36,7 @@ type refBugs struct {
 	ignoreTenant       bool // SC3
 	ignoreProvider     bool // SC4
 	ignoreTimestamp    bool // SC7
+	timestampBeforeMAC bool // SC7 (C10: window checked before the MAC; security S-2)
 	prefixCompare      bool // SC2 (accepts a truncated signature)
 	ignoreAccount      bool // SC8
 	ignoreNotAfter     bool // SC9
@@ -152,6 +153,16 @@ func (s refScheme) Verify(creds webhookauth.CredentialSet, in webhookauth.Inboun
 	mat, ok := m.Private().(refMaterial)
 	if !ok {
 		return "", s.fail(creds)
+	}
+	if s.bugs.timestampBeforeMAC {
+		// The C10 defect: the window is checked BEFORE the MAC, so an
+		// unauthenticated stale-and-tampered request yields
+		// ErrTimestampOutOfWindow instead of ErrSignatureInvalid. Only SC7's
+		// stale-and-tampered assertion can see this (security S-2).
+		d := now.Sub(time.Unix(mat.ts, 0))
+		if d > s.skew || d < -s.skew {
+			return "", webhookauth.ErrTimestampOutOfWindow
+		}
 	}
 	var candidates []webhookauth.Credential
 	switch {

@@ -66,6 +66,12 @@ func run() error {
 	if err := refuseSyntheticInProduction(cfg, buildRegistrations(cfg, providers)); err != nil {
 		return err
 	}
+	// Security S-1/I-1: every domain's webhook schemes are validated here,
+	// pre-DB, as an error (the orchestrator constructors below re-check and
+	// panic as the last line of defence).
+	if err := validateWebhookSchemes(providers); err != nil {
+		return fmt.Errorf("webhook scheme registration: %w", err)
+	}
 
 	logger := observability.NewLogger(cfg.Environment)
 	logger.Info("starting platform-api", "environment", cfg.Environment)
@@ -177,18 +183,18 @@ func run() error {
 	// db.Connect) and passed through the synthetic guard - not a second,
 	// independent construction (Stage 10.3 W1b, MOCK-ADAPTER-PROD-1
 	// coverage requirement: "all-of-main").
-	mockPaymentsProvider := providers.Payments
-	orchestrator := payments.NewOrchestrator(
-		map[string]payments.PaymentProvider{"mock-payments": mockPaymentsProvider},
-		paymentsWebhookResolver(wiring, mockPaymentsProvider),
-	)
+	//
+	// Stage 10.3 gate-W1 fix round (security S-4): the MOCK resolver is
+	// also a bundle component now (registered with the guard above);
+	// paymentsOrchestratorResolver only composes it. No file in this
+	// package other than registrations.go constructs a provider component
+	// (TestMain_ConstructsNoProviderComponentOutsideRegistrations).
+	orchestrator := payments.NewOrchestrator(providers.paymentsAdapters(), providers.paymentsOrchestratorResolver())
 
-	// KYC-WH-1 (Stage 10.2, ADR 0091; final review K11): non-nil ONLY when
-	// wiring enabled it at bundle-construction time (ADR 0085 amendment:
-	// "absent" in production/test-support-off, not merely unwired).
-	// kycOrchestrator/kycWebhookResolver below both already guard against a
-	// nil provider.
-	mockKYCProvider := providers.KYC
+	// KYC-WH-1 (Stage 10.2, ADR 0091; final review K11): providers.KYC is
+	// non-nil ONLY when wiring enabled it at bundle-construction time (ADR
+	// 0085 amendment: "absent" in production/test-support-off, not merely
+	// unwired). kycOrchestrator below guards against a nil provider.
 
 	// Stage 4A ships a mock casino adapter only (CLAUDE.md's Stage 4A
 	// scope gate) - registered exactly like a future real aggregator
@@ -213,11 +219,7 @@ func run() error {
 	// (no_resolver). The mock adapter itself stays registered for
 	// catalogue and launch (MOCK-ADAPTER-PROD-1, a pre-launch checklist
 	// item - not this stage's scope).
-	mockCasinoProvider := providers.Casino
-	casinoOrchestrator := casino.NewOrchestrator(
-		map[string]casino.CasinoProvider{"mock-casino": mockCasinoProvider},
-		casinoWebhookResolver(wiring, mockCasinoProvider),
-	)
+	casinoOrchestrator := casino.NewOrchestrator(providers.casinoAdapters(), providers.casinoOrchestratorResolver())
 
 	// Stage 6 ships a mock sportsbook provider only (CLAUDE.md's "does not
 	// integrate a real provider without a confirmed commercial
@@ -329,7 +331,7 @@ func run() error {
 		// (design §B3/§D): there is no real KYC vendor to fall back to.
 		// KYCWebhookEnabled below gates the ROUTE itself identically, so
 		// route registration and orchestrator wiring cannot diverge (K11).
-		KYCOrchestrator:   kycOrchestrator(wiring, mockKYCProvider),
+		KYCOrchestrator:   kycOrchestrator(wiring, providers),
 		KYCWebhookEnabled: wiring.KYCWebhookEnabled,
 		DocumentStorage:   providers.DocumentStorage,
 		MalwareScanner:    providers.MalwareScanner,

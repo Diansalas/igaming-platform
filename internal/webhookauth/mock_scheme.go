@@ -15,15 +15,26 @@ import (
 )
 
 // VerificationScheme returns the MOCK scheme s adapted to the per-adapter
-// VerificationScheme interface. Only this package can construct it, and it
-// is the only implementation NewSchemeSet accepts with Synthetic=true.
+// VerificationScheme interface. It is the only implementation ValidateScheme
+// accepts with Synthetic=true, but ANY package can call it with ANY Scheme
+// value - so NewSchemeSet additionally requires the wrapped Scheme to equal
+// the registering domain's canonical MOCK (PaymentsScheme/KYCScheme/
+// CasinoScheme), and NewAdapterSchemeSet requires the adapter returning it
+// to be a synthetic component itself (security review 06-gate-w1 S-1).
 func (s Scheme) VerificationScheme() VerificationScheme {
 	return mockVerificationScheme{s: s}
 }
 
 // mockVerificationScheme is comparable (Scheme is three strings), which the
-// Synthetic type check in ValidateScheme relies on.
+// canonical-MOCK equality check in NewSchemeSet relies on.
 type mockVerificationScheme struct{ s Scheme }
+
+// SyntheticComponent implements providerkind.Synthetic (MOCK-ADAPTER-PROD-1)
+// structurally: every adapter's WebhookScheme() is registered with the
+// production guard (cmd/platform-api buildRegistrations), so a MOCK scheme
+// is refused in production even if it were returned by an adapter that
+// claims ProductionEligible.
+func (mockVerificationScheme) SyntheticComponent() {}
 
 // Name is "platform-mock:<signing prefix>", e.g.
 // "platform-mock:igaming.payments.webhook.v1".

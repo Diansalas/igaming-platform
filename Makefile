@@ -19,8 +19,15 @@ TEST_ADMIN_DATABASE_URL ?= postgres://igaming_test_admin:igaming_test_admin_dev_
 build:
 	$(GO) build ./...
 
+# APP_ENV defaults to development for `make run` (gate 10.3-W1 code review
+# #8): the synthetic-component startup guard (MOCK-ADAPTER-PROD-1) treats a
+# MISSING APP_ENV as production and refuses to start with the mock
+# adapters, so the local run target sets it explicitly. Override with e.g.
+# `make run APP_ENV=staging`; never use this target for production.
+APP_ENV ?= development
+
 run:
-	DATABASE_URL=$(DATABASE_URL) $(GO) run ./cmd/platform-api
+	APP_ENV=$(APP_ENV) DATABASE_URL=$(DATABASE_URL) $(GO) run ./cmd/platform-api
 
 test:
 	$(GO) test ./...

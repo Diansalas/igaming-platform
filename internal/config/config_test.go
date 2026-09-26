@@ -360,15 +360,28 @@ func TestValidateSecretBackendScheme(t *testing.T) {
 		scheme      string
 		wantErr     bool
 	}{
+		// ADR 0093 §6: awssm only in EXPLICIT staging/production.
 		{"awssm_allowed_in_production", "production", true, SecretBackendAWSSecretsManager, false},
-		{"awssm_allowed_in_development", "development", true, SecretBackendAWSSecretsManager, false},
+		{"awssm_allowed_in_staging", "staging", true, SecretBackendAWSSecretsManager, false},
+		{"awssm_refused_in_development", "development", true, SecretBackendAWSSecretsManager, true},
+		{"awssm_refused_when_app_env_missing", "development", false, SecretBackendAWSSecretsManager, true},
+		{"awssm_refused_when_app_env_missing_even_if_environment_reads_production", "production", false, SecretBackendAWSSecretsManager, true},
 		{"devfile_allowed_in_explicit_development", "development", true, SecretBackendDevFile, false},
 		{"devfile_refused_in_staging", "staging", true, SecretBackendDevFile, true},
 		{"devfile_refused_in_production", "production", true, SecretBackendDevFile, true},
 		{"devfile_refused_when_app_env_missing", "development", false, SecretBackendDevFile, true},
 		{"memory_always_refused_in_development", "development", true, SecretBackendMemory, true},
 		{"memory_always_refused_in_production", "production", true, SecretBackendMemory, true},
+		{"memory_always_refused_in_staging", "staging", true, SecretBackendMemory, true},
+		{"memory_always_refused_when_app_env_missing", "development", false, SecretBackendMemory, true},
 		{"unknown_scheme_refused", "development", true, "s3", true},
+	}
+	// Fail-closed: with APP_ENV missing, NO backend is selectable.
+	missing := Config{Environment: "development", EnvironmentExplicit: false}
+	for _, scheme := range []string{SecretBackendAWSSecretsManager, SecretBackendDevFile, SecretBackendMemory} {
+		if err := missing.ValidateSecretBackendScheme(scheme); err == nil {
+			t.Errorf("APP_ENV missing: backend %q must be refused (no backend is selectable)", scheme)
+		}
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

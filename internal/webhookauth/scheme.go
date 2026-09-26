@@ -44,6 +44,13 @@ const MaxSkewCap = 10 * time.Minute
 // (conformance SC10: an empty or short secret is rejected). 16 bytes =
 // 128 bits. VerifyInbound enforces it before a scheme is ever called, and
 // the conformance suite proves each scheme enforces it on its own too.
+//
+// It is a FLOOR for vendor-issued secrets, not a target (security gate
+// 10.3-W1 ruling on MinSecretBytes): any secret the PLATFORM itself
+// generates or negotiates (e.g. W2a/W3b outbound or webhook secrets) must
+// be at least 32 bytes from crypto/rand, as the MOCK's derived keys
+// already are. A length check cannot measure entropy; raising this floor
+// is a constant change in a reviewed commit.
 const MinSecretBytes = 16
 
 // ErrTimestampOutOfWindow is the ONLY error besides ErrSignatureInvalid a
@@ -131,8 +138,13 @@ const (
 	// KeyImplicit: the vendor sends no key id; the active key and at most
 	// one verify_only predecessor of the SAME (tenant, provider) may be
 	// tried inside a bounded not_after window. Needs a resolver that can
-	// return that pair - NOT IMPLEMENTED until W2a (ResolveCredentials
-	// fails closed with ReasonCredentialUnavailable meanwhile).
+	// return that pair - NOT IMPLEMENTED until W2a. Until then
+	// ValidateScheme REFUSES a KeyImplicit scheme at registration (gate
+	// 10.3-W1 code review #10), so it can never register and then 401
+	// every callback; ResolveCredentials also still fails closed with
+	// ReasonCredentialUnavailable as defence in depth. The conformance
+	// suite still exercises KeyImplicit reference schemes (it validates
+	// Properties, not registration).
 	KeyImplicit
 )
 
@@ -186,17 +198,31 @@ type SchemeProperties struct {
 	// (0, MaxSkewCap] when SignedTimestamp.
 	MaxSkew time.Duration
 	Replay  ReplayDefence
-	// Synthetic marks the platform's own MOCK scheme. Only schemes built
-	// by this package (mock_scheme.go) may declare it; NewSchemeSet
-	// refuses a Synthetic declaration from any other implementation, so a
-	// real adapter cannot opt out of the timestamp rule or the
-	// conformance gate by claiming to be a mock.
+	// Synthetic marks the platform's own MOCK scheme. It exempts a scheme
+	// from the timestamp rule, the conformance manifest and the known-
+	// answer vector, so it is accepted only under three conditions
+	// (security review 06-gate-w1 S-1):
+	//   - ValidateScheme: the implementation is this package's MOCK type
+	//     (mock_scheme.go), never any other type declaring Synthetic;
+	//   - NewSchemeSet(domain, ...): its underlying wire Scheme is exactly
+	//     that domain's canonical MOCK (PaymentsScheme/KYCScheme/
+	//     CasinoScheme) - a custom prefix/header MOCK, or another domain's
+	//     MOCK, is refused, and an unknown domain accepts no Synthetic
+	//     scheme at all;
+	//   - NewAdapterSchemeSet: the adapter returning it is itself a
+	//     synthetic component (implements SyntheticComponent()), so the
+	//     scheme can only arrive on a component the MOCK-ADAPTER-PROD-1
+	//     production guard refuses.
+	// Only the last two together tie the exemption to "can never run in
+	// production"; a domain orchestrator must register its adapters
+	// through NewAdapterSchemeSet/MustAdapterSchemeSet.
 	Synthetic bool
 }
 
 // ValidateProperties reports whether p is a PERMITTED declaration (security
-// C11). It does not know which concrete type declared p; NewSchemeSet adds
-// the "Synthetic only for the platform MOCK" rule.
+// C11). It does not know which concrete type declared p; ValidateScheme,
+// NewSchemeSet and NewAdapterSchemeSet add the Synthetic rules (see
+// SchemeProperties.Synthetic).
 func ValidateProperties(p SchemeProperties) error {
 	switch p.Binding {
 	case BindingSignedTenant, BindingPerMerchantKey, BindingPerMerchantKeySignedAccount:
@@ -327,8 +353,10 @@ func ConformanceManifest() []string {
 }
 
 // ValidateScheme is the registration-time check for one scheme: a
-// well-formed Name, a PERMITTED Properties() declaration (C11), Synthetic
-// only for this package's own MOCK scheme, and - for a non-synthetic
+// well-formed Name, a PERMITTED Properties() declaration (C11), no
+// KeyImplicit until W2a (code review #10), Synthetic only for this
+// package's own MOCK scheme type (NewSchemeSet/NewAdapterSchemeSet add the
+// per-domain and per-adapter Synthetic rules), and - for a non-synthetic
 // scheme - presence in the conformance manifest (C9).
 func ValidateScheme(s VerificationScheme) error {
 	if s == nil {
@@ -342,6 +370,11 @@ func ValidateScheme(s VerificationScheme) error {
 	if err := ValidateProperties(p); err != nil {
 		return fmt.Errorf("scheme %q: %w", name, err)
 	}
+	if p.KeySelection == KeyImplicit {
+		return fmt.Errorf("webhookauth: scheme %q declares KeyImplicit, which is refused at registration until W2a "+
+			"(the active + verify_only predecessor resolver is NOT IMPLEMENTED, so every callback would fail closed as %s)",
+			name, ReasonCredentialUnavailable)
+	}
 	_, isPlatformMock := s.(mockVerificationScheme)
 	if p.Synthetic && !isPlatformMock {
 		return fmt.Errorf("webhookauth: scheme %q declares Synthetic but is not the platform MOCK scheme", name)
@@ -350,6 +383,40 @@ func ValidateScheme(s VerificationScheme) error {
 		if _, listed := conformanceManifest[name]; !listed {
 			return fmt.Errorf("webhookauth: non-synthetic scheme %q is not in the conformance manifest (it must pass webhookauthtest.RunSchemeConformance with a vendor known-answer vector first)", name)
 		}
+	}
+	return nil
+}
+
+// canonicalMockScheme returns the one platform MOCK wire Scheme a domain
+// may register as Synthetic (security review 06-gate-w1 S-1). ok is false
+// for any other domain, which therefore accepts no Synthetic scheme.
+func canonicalMockScheme(domain string) (Scheme, bool) {
+	switch domain {
+	case "payments":
+		return PaymentsScheme(), true
+	case "kyc":
+		return KYCScheme(), true
+	case "casino":
+		return CasinoScheme(), true
+	default:
+		return Scheme{}, false
+	}
+}
+
+// validateSyntheticForDomain refuses a Synthetic scheme unless it wraps
+// exactly domain's canonical MOCK wire Scheme (prefix AND both header
+// names). A non-synthetic scheme is not this function's concern.
+func validateSyntheticForDomain(domain string, s VerificationScheme) error {
+	if !s.Properties().Synthetic {
+		return nil
+	}
+	canonical, known := canonicalMockScheme(domain)
+	if !known {
+		return fmt.Errorf("webhookauth: domain %q accepts no Synthetic scheme (only payments, kyc and casino have a platform MOCK)", domain)
+	}
+	got, isMock := MockScheme(s)
+	if !isMock || got != canonical {
+		return fmt.Errorf("webhookauth: Synthetic scheme %q is not the %s domain's canonical MOCK scheme (a custom or cross-domain MOCK is refused)", s.Name(), domain)
 	}
 	return nil
 }
@@ -363,7 +430,11 @@ type SchemeSet struct {
 }
 
 // NewSchemeSet validates every (providerID, scheme) pair (ValidProviderID,
-// ValidateScheme). Any error means the process must refuse to start.
+// ValidateScheme, and - for a Synthetic scheme - that it is exactly
+// domain's canonical MOCK). Any error means the process must refuse to
+// start. It cannot see the adapters, so domain orchestrators use
+// NewAdapterSchemeSet, which adds the "Synthetic only from a synthetic
+// adapter" rule.
 func NewSchemeSet(domain string, schemes map[string]VerificationScheme) (*SchemeSet, error) {
 	set := &SchemeSet{domain: domain, schemes: make(map[string]VerificationScheme, len(schemes))}
 	ids := make([]string, 0, len(schemes))
@@ -378,6 +449,9 @@ func NewSchemeSet(domain string, schemes map[string]VerificationScheme) (*Scheme
 		if err := ValidateScheme(schemes[id]); err != nil {
 			return nil, fmt.Errorf("webhookauth: %s provider %q: %w", domain, id, err)
 		}
+		if err := validateSyntheticForDomain(domain, schemes[id]); err != nil {
+			return nil, fmt.Errorf("webhookauth: %s provider %q: %w", domain, id, err)
+		}
 		set.schemes[id] = schemes[id]
 	}
 	return set, nil
@@ -388,6 +462,61 @@ func NewSchemeSet(domain string, schemes map[string]VerificationScheme) (*Scheme
 // than serving with an unvalidated scheme.
 func MustSchemeSet(domain string, schemes map[string]VerificationScheme) *SchemeSet {
 	set, err := NewSchemeSet(domain, schemes)
+	if err != nil {
+		panic(err.Error())
+	}
+	return set
+}
+
+// SchemeSource is any domain adapter that declares its inbound-callback
+// verification scheme (every PaymentProvider, KYCProvider and
+// CasinoProvider).
+type SchemeSource interface {
+	WebhookScheme() VerificationScheme
+}
+
+// syntheticComponent is providerkind.Synthetic, restated structurally so
+// this package need not import internal/providerkind.
+type syntheticComponent interface {
+	SyntheticComponent()
+}
+
+// NewAdapterSchemeSet is NewSchemeSet over a domain's adapter registry.
+// On top of NewSchemeSet's rules it refuses a Synthetic scheme returned by
+// an adapter that is not itself a synthetic component (security review
+// 06-gate-w1 S-1, rule 2): the MOCK scheme's timestamp/conformance
+// exemption is then only reachable on a component the MOCK-ADAPTER-PROD-1
+// production guard refuses. A nil adapter registers a nil scheme, which
+// NewSchemeSet refuses.
+func NewAdapterSchemeSet[A SchemeSource](domain string, adapters map[string]A) (*SchemeSet, error) {
+	schemes := make(map[string]VerificationScheme, len(adapters))
+	ids := make([]string, 0, len(adapters))
+	for id := range adapters {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		a := adapters[id]
+		if any(a) == nil {
+			schemes[id] = nil
+			continue
+		}
+		s := a.WebhookScheme()
+		if s != nil && s.Properties().Synthetic {
+			if _, marked := any(a).(syntheticComponent); !marked {
+				return nil, fmt.Errorf("webhookauth: %s provider %q: adapter %T returns the Synthetic scheme %q but is not itself a synthetic component (a production-eligible or unmarked adapter may not use the platform MOCK scheme)", domain, id, a, s.Name())
+			}
+		}
+		schemes[id] = s
+	}
+	return NewSchemeSet(domain, schemes)
+}
+
+// MustAdapterSchemeSet is NewAdapterSchemeSet for orchestrator
+// constructors, which run at process start: any error panics, so startup
+// fails loudly rather than serving with an unvalidated scheme.
+func MustAdapterSchemeSet[A SchemeSource](domain string, adapters map[string]A) *SchemeSet {
+	set, err := NewAdapterSchemeSet(domain, adapters)
 	if err != nil {
 		panic(err.Error())
 	}

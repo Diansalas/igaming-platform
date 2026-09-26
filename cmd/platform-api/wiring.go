@@ -1,19 +1,16 @@
 package main
 
 import (
-	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
-	"github.com/Diansalas/igaming-platform/internal/payments"
-	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // mockWiring says which MOCK provider components this deployment wires
 // (Stage 10.2, ADR 0091; architect review §3, ruling J9 / PAYWH-GATE-1).
-// It is derived ONLY from cfg.TestSupportRoutesEnabled() (ADR 0085 §1), the
-// single fail-closed two-layer gate every test-support seam already uses:
-// production is structurally off (config.Load refuses the flag there, and
-// TestSupportRoutesEnabled is false for production regardless).
+// It is derived from cfg.TestSupportRoutesEnabled() (ADR 0085 §1), the
+// single fail-closed two-layer gate every test-support seam already uses,
+// AND cfg.GuardEnvironment() (see mockProviderWiring): production and a
+// missing APP_ENV are structurally off.
 type mockWiring struct {
 	// PaymentsWebhookResolver wires the payments MOCK webhook credential
 	// resolver. When false the payments Orchestrator gets a nil resolver,
@@ -43,10 +40,17 @@ type mockWiring struct {
 }
 
 // mockProviderWiring is a pure function of cfg - no I/O, no globals - so it
-// can be unit-tested for every {production, non-production} x {flag on,
-// off} combination.
+// can be unit-tested for every {production, missing APP_ENV, staging,
+// development} x {flag on, off} combination.
+//
+// Stage 10.3 gate-W1 fix round (security S-4, code review #2): on top of
+// TestSupportRoutesEnabled() it also requires GuardEnvironment() !=
+// "production", so a MISSING APP_ENV (which TestSupportRoutesEnabled alone
+// reads as "development") can never wire a MOCK resolver or the KYC mock.
+// Explicit staging/development keep the TestSupportRoutesEnabled
+// semantics unchanged.
 func mockProviderWiring(cfg config.Config) mockWiring {
-	testSupport := cfg.TestSupportRoutesEnabled()
+	testSupport := cfg.TestSupportRoutesEnabled() && cfg.GuardEnvironment() != "production"
 	return mockWiring{
 		PaymentsWebhookResolver: testSupport,
 		KYCWebhookEnabled:       testSupport,
@@ -54,59 +58,20 @@ func mockProviderWiring(cfg config.Config) mockWiring {
 	}
 }
 
-// kycWebhookResolver returns the KYC Orchestrator's single injected
-// webhook credential resolver for w: the MOCK resolver bound to mock when
-// w enables it, otherwise a true nil interface (never a typed nil), so
-// the Orchestrator's own nil-resolver branch fails every callback closed
-// as ReasonNoResolver.
-func kycWebhookResolver(w mockWiring, mock *kyc.MockKYCProvider) webhookauth.Resolver {
-	if !w.KYCWebhookEnabled || mock == nil {
-		return nil
-	}
-	return kyc.NewMockWebhookCredentials(mock)
-}
-
 // kycOrchestrator builds the KYC Orchestrator for w (design §B3): a nil
 // *kyc.Orchestrator entirely - not merely a nil resolver - when w disables
 // KYC, so player self-service KYC (POST /v1/me/kyc/verifications) is
 // itself unavailable (503) in production/test-support-off, matching the
 // design's disclosed consequence that player-initiated KYC needs the MOCK
-// provider this stage ships. mock is nil whenever w disables KYC (the
-// caller constructs it only when w.KYCWebhookEnabled, ADR 0085 amendment:
-// "absent", not merely unwired) - this function's own nil check is
-// defence in depth, not the sole gate.
-func kycOrchestrator(w mockWiring, mock *kyc.MockKYCProvider) *kyc.Orchestrator {
-	if !w.KYCWebhookEnabled || mock == nil {
+// provider this stage ships. b.KYC is nil whenever w disables KYC
+// (buildProviderBundle constructs it only when w.KYCWebhookEnabled, ADR
+// 0085 amendment: "absent", not merely unwired) - this function's own nil
+// check is defence in depth, not the sole gate. The adapter and resolver
+// are the bundle's own instances (security S-4): nothing is constructed
+// here except the orchestrator itself.
+func kycOrchestrator(w mockWiring, b providerBundle) *kyc.Orchestrator {
+	if !w.KYCWebhookEnabled || b.KYC == nil {
 		return nil
 	}
-	return kyc.NewOrchestrator(map[string]kyc.KYCProvider{mock.ID(): mock}, kycWebhookResolver(w, mock))
-}
-
-// paymentsWebhookResolver returns the payments Orchestrator's single
-// injected webhook credential resolver for w: the MOCK resolver bound to
-// mock when w enables it, otherwise a true nil interface (never a typed
-// nil or an empty map), so the Orchestrator's own nil-resolver branch
-// fails every callback closed as ReasonNoResolver.
-func paymentsWebhookResolver(w mockWiring, mock *payments.MockProvider) payments.WebhookCredentialResolver {
-	if !w.PaymentsWebhookResolver || mock == nil {
-		return nil
-	}
-	return payments.MultiWebhookCredentialResolver{
-		mock.Capabilities().ProviderID: payments.NewMockWebhookCredentials(mock),
-	}
-}
-
-// casinoWebhookResolver returns the casino Orchestrator's single injected
-// webhook credential resolver for w: the MOCK resolver bound to mock when
-// w enables it, otherwise a true nil interface (never a typed nil or an
-// empty map), so the Orchestrator's own nil-resolver branch fails every
-// callback closed as ReasonNoResolver (Stage 10.2, CAS-WH-TENANT-1, ADR
-// 0091, design §C7).
-func casinoWebhookResolver(w mockWiring, mock *casino.MockCasinoProvider) webhookauth.Resolver {
-	if !w.CasinoWebhookResolver || mock == nil {
-		return nil
-	}
-	return webhookauth.MultiResolver{
-		mock.Capabilities().ProviderID: casino.NewMockWebhookCredentials(mock),
-	}
+	return kyc.NewOrchestrator(b.kycAdapters(), b.kycOrchestratorResolver())
 }
