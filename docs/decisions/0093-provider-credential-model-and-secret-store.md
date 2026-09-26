@@ -550,7 +550,16 @@ Recorded by the W2a implementer. Labels per CLAUDE.md; nothing below is "secure"
   caller's transaction, fingerprint compared on every resolve, §5 cache/breaker constants in
   `internal/secretstore`): `IMPLEMENTED` against the `memory` (tests only) and `devfile`
   (development only) backends. `KeyImplicit` resolution: `IMPLEMENTED`; the W1 registration
-  refusal is removed. `awssm`: `NOT IMPLEMENTED` (W3b); a configuration naming it refuses startup.
+  refusal is removed. `awssm` backend code (`internal/secretstore/awssm`, ADR 0093 §6, security
+  review §4.1's recommendation to refuse static AWS credentials in every environment, not only
+  staging/production): `IMPLEMENTED` (code, fake-tested only — no test in this repository ever
+  dials a real AWS endpoint; `TestImportBoundary_NoOtherPackageImportsAWSSDK` confines the SDK
+  import to this one package). Wiring the backend into `cmd/platform-api` and running it against
+  real AWS is `STAGING REQUIRED` (ADR 0093 §8): it needs the task-role IAM permission, the VPC/
+  network path to Secrets Manager, and rotation/outage drills with a synthetic secret, none of
+  which exists yet. IAM/`deploy/` changes remain excluded from this stage (HD-10.3-2, ADR 0093
+  §9) — a configuration naming `awssm` in a process with no such wiring still refuses startup via
+  `ValidateSecretBackendScheme`/`NewRouter`, unchanged from the prior state of this line.
 - **Wiring:** the real resolver is constructed only with a fingerprint key AND a permitted
   backend, and serves non-synthetic adapters only (`webhookauth.KindSplitResolver`). No real
   adapter exists, so today no production traffic reaches it.

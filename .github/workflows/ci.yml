@@ -129,6 +129,14 @@ jobs:
             head -1 "$f" | grep -qx '//go:build integration' || { echo "$f lacks //go:build integration"; exit 1; }
           done
 
+      - name: Guard - AWS SDK confined to internal/secretstore/awssm (Stage 10.3 W3b)
+        run: |
+          # ADR 0093 §6 / security review C12.2: the AWS SDK v2 may be
+          # imported only by internal/secretstore/awssm. Mirrors
+          # TestImportBoundary_NoOtherPackageImportsAWSSDK.
+          offenders="$(grep -rl --include='*.go' '"github.com/aws/aws-sdk-go-v2/' . | grep -v '^\./internal/secretstore/awssm/' || true)"
+          if [ -n "$offenders" ]; then echo "AWS SDK imported outside internal/secretstore/awssm:"; echo "$offenders"; exit 1; fi
+
       - name: Guard - memory secret store is imported only by tests (Stage 10.3 W2a)
         run: |
           # ADR 0093 §6 / security review §4.1: the memory:// backend
@@ -158,6 +166,31 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.5.0
+
+      - name: Dependency drift (go.mod/go.sum, QA condition)
+        # `go mod tidy` must be a no-op: a diff here means go.mod/go.sum
+        # were not committed in the state `go mod tidy` produces (a stale
+        # or hand-edited entry), which `go mod verify` alone does not
+        # catch. This is required whenever a dependency is added, which
+        # Stage 10.3 W3b does for the first time (aws-sdk-go-v2).
+        run: |
+          go mod verify
+          cp go.mod go.mod.orig
+          cp go.sum go.sum.orig
+          go mod tidy
+          diff -u go.mod.orig go.mod || { echo "go.mod is not tidy - run 'go mod tidy' and commit the result"; exit 1; }
+          diff -u go.sum.orig go.sum || { echo "go.sum is not tidy - run 'go mod tidy' and commit the result"; exit 1; }
+          rm -f go.mod.orig go.sum.orig
+
+      - name: govulncheck (Stage 10.3 W3b, C12.3)
+        # ADR 0093 §6 / security review C12 condition 3: govulncheck (or
+        # equivalent) is added to CI no later than the wave that
+        # introduces the AWS SDK (internal/secretstore/awssm). Scans the
+        # whole module, not just that package, since a vulnerable
+        # transitive dependency anywhere is worth knowing about.
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
 
       - name: Build
         run: go build ./...
