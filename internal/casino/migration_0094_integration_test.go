@@ -12,6 +12,7 @@ package casino
 import (
 	"context"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,49 @@ func migration0094MigrationsDir(t *testing.T) string {
 		t.Fatalf("migration 0094 not found relative to internal/casino: %v", err)
 	}
 	return dir
+}
+
+// migration0094DirThroughSelf copies the real migrations directory into a
+// fresh t.TempDir(), INCLUDING 0094's own up/down files but EXCLUDING any
+// migration numbered ABOVE 94 (e.g. Stage 10.3's own concurrent 0095) -
+// i.e. "the chain exactly as it stood the moment 0094 landed, and no
+// later". This is what makes "roll back exactly 1 step" in
+// TestMigration0094_UpDownUpRoundTrip deterministically mean "roll back
+// 0094 itself", regardless of how many unrelated migrations have landed on
+// top of it since - mirrors internal/sportsbook/settlement_migration_0093_
+// integration_test.go's own migration0093DirThroughSelf helper.
+func migration0094DirThroughSelf(t *testing.T) string {
+	t.Helper()
+	realDir := migration0094MigrationsDir(t)
+	entries, err := os.ReadDir(realDir)
+	if err != nil {
+		t.Fatalf("read migrations dir: %v", err)
+	}
+	out := t.TempDir()
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		name := e.Name()
+		if len(name) < 4 {
+			continue
+		}
+		ver, err := strconv.Atoi(name[:4])
+		if err != nil {
+			continue
+		}
+		if ver > 94 {
+			continue
+		}
+		content, err := os.ReadFile(realDir + "/" + name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if err := os.WriteFile(out+"/"+name, content, 0o600); err != nil {
+			t.Fatalf("write %s into temp migrations dir: %v", name, err)
+		}
+	}
+	return out
 }
 
 func migration0094ScratchPool(t *testing.T, prefix string) *db.Pool {
@@ -248,10 +292,12 @@ func TestMigration0094_SucceedsOnCleanDatabaseThenEnforces(t *testing.T) {
 
 // TestMigration0094_UpDownUpRoundTrip: the down migration drops only the
 // CHECK constraint, is safe at any time, and a subsequent up re-creates
-// it.
+// it. Uses migration0094DirThroughSelf so "roll back 1 step" targets 0094
+// itself, not whatever migration (e.g. Stage 10.3's concurrent 0095) now
+// sits on top of it in the real chain at HEAD.
 func TestMigration0094_UpDownUpRoundTrip(t *testing.T) {
 	pool := migration0094ScratchPool(t, "cas0094rt_")
-	dir := migration0094MigrationsDir(t)
+	dir := migration0094DirThroughSelf(t)
 
 	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
 		t.Fatalf("migrate up through 0094: %v", err)
