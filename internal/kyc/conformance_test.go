@@ -2,6 +2,7 @@ package kyc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -104,20 +105,41 @@ func RunProviderConformanceSuite(t *testing.T, factory func() KYCProvider) {
 		if !ok {
 			t.Fatalf("reason normalization is mandatory (KYC-REASON-BOUND-1): %T must supply its own fixture proving HandleCallback returns a bounded (<=%d byte), control-character-free reason; a real adapter cannot skip it", provider, MaxReasonBytes)
 		}
-		ctx := context.Background()
-		tenantID := uuid.New()
-		cred := mockCredentialFor(t, mock, tenantID)
-
-		dirty := "\r\x1b[31mFAKE ADMIN MESSAGE\x1b[0m\u202Eevil-reversed-text" + strings.Repeat("A", 4096)
-		inbound := mock.CallbackPayload(tenantID, "conformance-reason-bound-1", ProviderRejected, dirty)
-		result, err := provider.HandleCallback(ctx, inbound, cred)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if err := reasonConformanceViolation(result.Reason); err != nil {
-			t.Fatalf("HandleCallback returned a non-conforming reason: %v (reason=%q)", err, result.Reason)
+		if err := checkReasonBoundCase(provider, mockReasonCallback(t, mock)); err != nil {
+			t.Fatal(err)
 		}
 	})
+}
+
+// reasonBoundDirtyFixture is the oversized, control/bidi-laden reason the
+// reason-bound case sends (the same shape as the pre-fix E6 evidence).
+var reasonBoundDirtyFixture = "\r\x1b[31mFAKE ADMIN MESSAGE\x1b[0m\u202Eevil-reversed-text" + strings.Repeat("A", 4096)
+
+// mockReasonCallback returns the MOCK's signed-callback hook for the
+// reason-bound case: a callback carrying rawReason, signed for a fresh
+// tenant, plus the credential the Orchestrator would have resolved.
+func mockReasonCallback(t *testing.T, mock *MockKYCProvider) func(rawReason string) (webhookauth.Inbound, webhookauth.Credential) {
+	return func(rawReason string) (webhookauth.Inbound, webhookauth.Credential) {
+		tenantID := uuid.New()
+		return mock.CallbackPayload(tenantID, "conformance-reason-bound-1", ProviderRejected, rawReason), mockCredentialFor(t, mock, tenantID)
+	}
+}
+
+// checkReasonBoundCase is the reason-bound conformance case's body, shared
+// by the suite and its self-test (gate 10.3-W1 code review #12): it drives
+// provider.HandleCallback with reasonBoundDirtyFixture through signed
+// (the adapter's signed-callback hook) and returns a non-nil error if the
+// returned reason violates KYC-REASON-BOUND-1.
+func checkReasonBoundCase(provider KYCProvider, signed func(rawReason string) (webhookauth.Inbound, webhookauth.Credential)) error {
+	inbound, cred := signed(reasonBoundDirtyFixture)
+	result, err := provider.HandleCallback(context.Background(), inbound, cred)
+	if err != nil {
+		return fmt.Errorf("unexpected HandleCallback error: %w", err)
+	}
+	if err := reasonConformanceViolation(result.Reason); err != nil {
+		return fmt.Errorf("HandleCallback returned a non-conforming reason: %w (reason=%q)", err, result.Reason)
+	}
+	return nil
 }
 
 // reasonConformanceViolation reports whether reason satisfies
@@ -127,10 +149,9 @@ func RunProviderConformanceSuite(t *testing.T, factory func() KYCProvider) {
 // NormalizeReason strips. Returns nil for a conforming reason, or a
 // descriptive error naming the violation otherwise.
 //
-// Factored out of the conformance case above so it can ALSO be exercised
-// directly by this file's own self-test
-// (TestReasonBoundConformanceSelfTest_DetectsNonConformingReason) against
-// a deliberately non-conforming raw string - proving this check actually
+// Used by checkReasonBoundCase, which this file's own self-test
+// (TestReasonBoundConformanceSelfTest_DetectsNonConformingReason) drives
+// with deliberately broken fixture ADAPTERS - proving the case actually
 // catches non-conformance, not merely that it gates on the adapter's Go
 // type (ruling J1's self-test obligation, extended to this wave's own
 // conformance addition per the QA binding test plan).
@@ -152,25 +173,63 @@ func reasonConformanceViolation(reason string) error {
 	return nil
 }
 
-// TestReasonBoundConformanceSelfTest_DetectsNonConformingReason is the
-// self-test the QA binding plan requires for this wave's new conformance
-// case: a deliberately non-conforming reason (oversized AND
-// control-character-laden - the same shape as the pre-fix E6 evidence)
-// must be detected as a violation, and an already-normalized reason must
-// not be - proving reasonConformanceViolation's assertions actually catch
-// something, not just always pass.
-func TestReasonBoundConformanceSelfTest_DetectsNonConformingReason(t *testing.T) {
-	dirty := "\r\x1b[31mFAKE ADMIN MESSAGE\x1b[0m\u202Eevil-reversed-text" + strings.Repeat("A", 4096)
-	if err := reasonConformanceViolation(dirty); err == nil {
-		t.Fatal("expected the deliberately non-conforming (oversized, control/bidi-laden) reason to be detected as a violation, got nil")
-	}
+// brokenReasonAdapter is the reason-bound self-test's deliberately
+// non-conforming fixture ADAPTER (gate 10.3-W1 code review #12: a broken
+// adapter, not a raw string). It wraps the MOCK - so verification and
+// parsing are the real ones - and then returns the callback's reason with
+// only part (or none) of KYC-REASON-BOUND-1 applied.
+type brokenReasonAdapter struct {
+	*MockKYCProvider
+	mode string // "raw", "length_only" (keeps controls), "controls_only" (no length bound)
+}
 
-	clean, truncated := NormalizeReason(dirty)
-	if !truncated {
-		t.Fatal("test precondition failed: expected NormalizeReason to have truncated the dirty fixture")
+func (a brokenReasonAdapter) HandleCallback(ctx context.Context, in webhookauth.Inbound, cred webhookauth.Credential) (ProviderResult, error) {
+	result, err := a.MockKYCProvider.HandleCallback(ctx, in, cred)
+	if err != nil {
+		return result, err
 	}
-	if err := reasonConformanceViolation(clean); err != nil {
-		t.Fatalf("expected an already-normalized reason to pass, got violation: %v (reason=%q)", err, clean)
+	var payload struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(in.Body, &payload); err != nil {
+		return ProviderResult{}, err
+	}
+	switch a.mode {
+	case "raw":
+		result.Reason = payload.Reason
+	case "length_only":
+		result.Reason = payload.Reason[:MaxReasonBytes]
+	case "controls_only":
+		var b strings.Builder
+		for _, r := range payload.Reason {
+			if !isC0OrC1Control(r) && !isBidiOrFormatControl(r) {
+				b.WriteRune(r)
+			}
+		}
+		result.Reason = b.String()
+	}
+	return result, nil
+}
+
+// TestReasonBoundConformanceSelfTest_DetectsNonConformingReason is the
+// self-test the QA binding plan requires for this wave's conformance case:
+// the SAME case body the suite runs (checkReasonBoundCase) must go red for
+// each deliberately broken adapter - unbounded raw text, length-bounded
+// but control-laden, control-stripped but oversized - and green for the
+// conforming MOCK, proving the case catches non-conformance through an
+// adapter's HandleCallback rather than merely gating on its Go type.
+func TestReasonBoundConformanceSelfTest_DetectsNonConformingReason(t *testing.T) {
+	for _, mode := range []string{"raw", "length_only", "controls_only"} {
+		t.Run(mode, func(t *testing.T) {
+			broken := brokenReasonAdapter{MockKYCProvider: NewMockKYCProvider(), mode: mode}
+			if err := checkReasonBoundCase(broken, mockReasonCallback(t, broken.MockKYCProvider)); err == nil {
+				t.Fatalf("broken adapter (%s) must be detected as non-conforming, got nil", mode)
+			}
+		})
+	}
+	mock := NewMockKYCProvider()
+	if err := checkReasonBoundCase(mock, mockReasonCallback(t, mock)); err != nil {
+		t.Fatalf("the conforming MOCK must pass the reason-bound case, got %v", err)
 	}
 }
 

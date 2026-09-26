@@ -108,6 +108,9 @@ func TestKYCVerifications_TenantIsolation_Reason(t *testing.T) {
 	playerA := mustRegisterPlayer(t, srv, brandA.Slug)
 
 	verResp := postJSON(t, srv, "/v1/me/kyc/verifications", playerA.Tokens.AccessToken, map[string]any{})
+	if verResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating tenant A's verification, got %d: %s", verResp.StatusCode, rawResponseBody(t, verResp))
+	}
 	var created playerVerificationResponse
 	decodeBody(t, verResp, &created)
 	providerReference := mustGetKYCProviderReference(t, pool, tenantA.ID, created.ID)
@@ -127,13 +130,24 @@ func TestKYCVerifications_TenantIsolation_Reason(t *testing.T) {
 	// (1) Tenant B's per-account list route: filtering by tenant A's own
 	// player_account_id must show NOTHING (RLS-scoped to tenant B), and
 	// certainly never the reason value.
+	//
+	// Gate 10.3-W1 code review #12: the status is asserted (200 - an
+	// authorized, RLS-scoped list, never a 4xx/5xx that would trivially
+	// "not leak"), and a body that is not a JSON array FAILS the test
+	// rather than silently skipping the zero-row check.
 	listResp := getJSON(t, srv, "/v1/admin/kyc/verifications?player_account_id="+playerA.ID.String(), complianceBTokens.AccessToken)
 	listBody := rawResponseBody(t, listResp)
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from tenant B's per-account list route, got %d: %s", listResp.StatusCode, listBody)
+	}
 	if strings.Contains(string(listBody), secretReason) {
 		t.Fatalf("CROSS-TENANT LEAK: tenant B's staff per-account list route exposed tenant A's reason: %s", listBody)
 	}
 	var listDecoded []map[string]any
-	if err := json.Unmarshal(listBody, &listDecoded); err == nil && len(listDecoded) != 0 {
+	if err := json.Unmarshal(listBody, &listDecoded); err != nil {
+		t.Fatalf("expected the per-account list body to be a JSON array, got %v: %s", err, listBody)
+	}
+	if len(listDecoded) != 0 {
 		t.Fatalf("expected tenant B to see zero rows for tenant A's player_account_id, got %+v", listDecoded)
 	}
 
@@ -141,8 +155,20 @@ func TestKYCVerifications_TenantIsolation_Reason(t *testing.T) {
 	// A's row or its reason at all.
 	queueResp := getJSON(t, srv, "/v1/admin/kyc/cases", complianceBTokens.AccessToken)
 	queueBody := rawResponseBody(t, queueResp)
+	if queueResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from tenant B's case queue, got %d: %s", queueResp.StatusCode, queueBody)
+	}
 	if strings.Contains(string(queueBody), secretReason) {
 		t.Fatalf("CROSS-TENANT LEAK: tenant B's staff case queue exposed tenant A's reason: %s", queueBody)
+	}
+	var queueDecoded struct {
+		Items *[]map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(queueBody, &queueDecoded); err != nil || queueDecoded.Items == nil {
+		t.Fatalf("expected the case queue body to be a paged object with an items JSON array, got err=%v: %s", err, queueBody)
+	}
+	if len(*queueDecoded.Items) != 0 {
+		t.Fatalf("expected tenant B's case queue to be empty (tenant B has no verifications), got %+v", *queueDecoded.Items)
 	}
 
 	// (3) A cross-tenant review attempt (tenant B staff guessing/
@@ -165,6 +191,13 @@ func TestKYCVerifications_TenantIsolation_Reason(t *testing.T) {
 	complianceATokens := mustLoginStaff(t, srv, tenantA.Slug, complianceA.Email, "compliance-kyc-reason-iso-2")
 	ownResp := getJSON(t, srv, "/v1/admin/kyc/verifications?player_account_id="+playerA.ID.String(), complianceATokens.AccessToken)
 	ownBody := rawResponseBody(t, ownResp)
+	if ownResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 from tenant A's own per-account list route, got %d: %s", ownResp.StatusCode, ownBody)
+	}
+	var ownDecoded []map[string]any
+	if err := json.Unmarshal(ownBody, &ownDecoded); err != nil || len(ownDecoded) != 1 {
+		t.Fatalf("expected tenant A's own list to be a JSON array with exactly its one verification, got err=%v: %s", err, ownBody)
+	}
 	if !strings.Contains(string(ownBody), secretReason) {
 		t.Fatalf("test precondition failed: expected tenant A's OWN staff to see the bounded reason, got %s", ownBody)
 	}

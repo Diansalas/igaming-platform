@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/config"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/providerkind"
 )
 
@@ -161,9 +163,31 @@ func TestBuildRegistrations_RegistersResolversAndSchemes(t *testing.T) {
 // pre-DB scheme validation (S-1) for every wiring shape main() can build.
 func TestValidateWebhookSchemes_Bundle(t *testing.T) {
 	for _, w := range []mockWiring{{}, allOnWiring} {
-		if err := validateWebhookSchemes(buildProviderBundle(w)); err != nil {
+		b := buildProviderBundle(w)
+		if err := validateWebhookSchemes(b.paymentsAdapters(), b.casinoAdapters(), b.kycAdapters()); err != nil {
 			t.Fatalf("wiring %+v: bundle schemes refused: %v", w, err)
 		}
+	}
+}
+
+// unmarkedCasinoAdapter hides the casino MOCK behind the CasinoProvider
+// interface, dropping its SyntheticComponent marker; unmarkedKYCAdapter
+// does the same for KYC.
+type unmarkedCasinoAdapter struct{ casino.CasinoProvider }
+
+type unmarkedKYCAdapter struct{ kyc.KYCProvider }
+
+// TestValidateWebhookSchemes_RefusesMockSchemeOnUnmarkedAdapter: the pre-DB
+// startup validation refuses a MOCK scheme on an unmarked adapter in every
+// domain - including casino, whose orchestrator constructor is outside this
+// fix round (security S-1 rule 2).
+func TestValidateWebhookSchemes_RefusesMockSchemeOnUnmarkedAdapter(t *testing.T) {
+	b := buildProviderBundle(allOnWiring)
+	if err := validateWebhookSchemes(b.paymentsAdapters(), map[string]casino.CasinoProvider{"mock-casino": unmarkedCasinoAdapter{b.Casino}}, b.kycAdapters()); err == nil {
+		t.Fatal("casino MOCK scheme on an unmarked adapter must be refused")
+	}
+	if err := validateWebhookSchemes(b.paymentsAdapters(), b.casinoAdapters(), map[string]kyc.KYCProvider{"mock": unmarkedKYCAdapter{b.KYC}}); err == nil {
+		t.Fatal("KYC MOCK scheme on an unmarked adapter must be refused")
 	}
 }
 

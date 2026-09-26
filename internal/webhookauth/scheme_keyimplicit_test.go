@@ -14,7 +14,9 @@ import (
 // the conformance suite can keep exercising it.
 func TestValidateScheme_KeyImplicitRefusedUntilW2a(t *testing.T) {
 	extractOK := func(Inbound) (AuthMaterial, Reason, bool) { return NewAuthMaterial("", nil), "", true }
-	verifyOK := func(c CredentialSet, _ Inbound, _ AuthMaterial, _ time.Time) (string, error) { return c.Active.KeyID, nil }
+	verifyOK := func(c CredentialSet, _ Inbound, _ AuthMaterial, _ time.Time) (string, error) {
+		return c.Active.KeyID, nil
+	}
 	implicit := spyScheme{name: "vendor-implicit-v1", props: realProps(), extract: extractOK, verify: verifyOK}
 	implicit.props.KeySelection = KeyImplicit
 	conformanceManifest["vendor-implicit-v1"] = struct{}{}

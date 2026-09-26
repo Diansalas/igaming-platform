@@ -51,3 +51,33 @@ func TestNewOrchestrator_BadWebhookSchemeFailsStartup(t *testing.T) {
 		t.Fatal("the registered adapter's scheme must be selectable by provider id")
 	}
 }
+
+// unmarkedKYCAdapter wraps the MOCK behind the KYCProvider interface only,
+// so it does NOT carry the MOCK's SyntheticComponent marker.
+type unmarkedKYCAdapter struct{ KYCProvider }
+
+// crossDomainKYCSchemeAdapter is a synthetic adapter returning the
+// payments MOCK.
+type crossDomainKYCSchemeAdapter struct{ *MockKYCProvider }
+
+func (crossDomainKYCSchemeAdapter) WebhookScheme() webhookauth.VerificationScheme {
+	return webhookauth.PaymentsScheme().VerificationScheme()
+}
+
+// TestNewOrchestrator_MockSchemeOnlyFromSyntheticAdapter is security S-1 at
+// the KYC orchestrator.
+func TestNewOrchestrator_MockSchemeOnlyFromSyntheticAdapter(t *testing.T) {
+	for name, providers := range map[string]map[string]KYCProvider{
+		"KYC MOCK scheme on an unmarked adapter":      {"vendor-x": unmarkedKYCAdapter{NewMockKYCProvider()}},
+		"payments MOCK scheme on a synthetic adapter": {"mock": crossDomainKYCSchemeAdapter{NewMockKYCProvider()}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("NewOrchestrator must refuse (panic) so startup fails")
+				}
+			}()
+			NewOrchestrator(providers, nil)
+		})
+	}
+}

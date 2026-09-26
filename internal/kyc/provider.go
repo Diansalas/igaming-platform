@@ -93,10 +93,21 @@ type SubmittedDocument struct {
 // RunProviderConformanceSuite's mandatory reason-bound case
 // (internal/kyc/conformance_test.go) fails, not skips, for any adapter
 // that does not normalize.
+//
+// Gate 10.3-W1 fix round (security S-5, identity-compliance condition 1):
+// the PLATFORM also applies NormalizeReason (idempotent) at every write
+// site that persists or audits Reason - CreateVerification, the document
+// submission path and applyCallbackOutcome - so a non-conforming adapter
+// method can no longer store control/bidi text or trip migration 0095's
+// CHECK into a 500. ReasonTruncated is how an adapter that already
+// normalized reports that ITS normalization truncated (the platform's
+// second pass cannot see that); the platform ORs it with its own signal and
+// records `reason_truncated: true` in the audit metadata.
 type ProviderResult struct {
 	ProviderReference string
 	Outcome           ProviderOutcome
 	Reason            string
+	ReasonTruncated   bool
 }
 
 // KYCProvider is the provider-neutral interface every adapter (real or
@@ -382,6 +393,10 @@ func statusForOutcome(o ProviderOutcome) (VerificationStatus, bool) {
 //     exceeded that rank: no state change and NO audit row (a 204 no-op
 //     at the HTTP layer).
 func applyCallbackOutcome(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, v Verification, result ProviderResult) (Verification, bool, error) {
+	// Security S-5: the platform bounds the adapter's reason itself before
+	// either audit row or the status UPDATE below (idempotent over an
+	// adapter that already normalized in HandleCallback).
+	result, reasonTruncated := normalizeProviderResult(result)
 	if result.Outcome == ProviderError {
 		if isTerminal(v.Status) {
 			// K5: the verification already reached a terminal status -
@@ -393,7 +408,7 @@ func applyCallbackOutcome(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, v 
 			TenantID: tenantID, ActorType: audit.ActorSystem,
 			Action: "kyc.provider_callback", TargetType: "kyc_verification", TargetID: v.ID.String(),
 			Outcome:  audit.OutcomeFailure,
-			Metadata: map[string]any{"provider_id": v.ProviderID, "provider_outcome": string(result.Outcome), "reason": result.Reason},
+			Metadata: withReasonTruncated(map[string]any{"provider_id": v.ProviderID, "provider_outcome": string(result.Outcome), "reason": result.Reason}, reasonTruncated),
 		}); err != nil {
 			return Verification{}, false, fmt.Errorf("kyc: audit callback error outcome: %w", err)
 		}
@@ -433,7 +448,7 @@ func applyCallbackOutcome(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, v 
 				TenantID: tenantID, ActorType: audit.ActorSystem,
 				Action: "kyc.provider_callback", TargetType: "kyc_verification", TargetID: current.ID.String(),
 				Outcome:  audit.OutcomeSuccess,
-				Metadata: map[string]any{"provider_id": updated.ProviderID, "provider_outcome": string(result.Outcome), "reason": result.Reason},
+				Metadata: withReasonTruncated(map[string]any{"provider_id": updated.ProviderID, "provider_outcome": string(result.Outcome), "reason": result.Reason}, reasonTruncated),
 			}); err != nil {
 				return Verification{}, false, fmt.Errorf("kyc: audit callback success: %w", err)
 			}

@@ -233,8 +233,8 @@ func (m *MockKYCProvider) HandleCallback(ctx context.Context, in webhookauth.Inb
 	if !closedOutcomeEnum[payload.Outcome] {
 		return ProviderResult{}, fmt.Errorf("%w: unrecognized outcome %q", ErrCallbackMalformedBody, payload.Outcome)
 	}
-	normalizedReason, _ := NormalizeReason(payload.Reason)
-	return ProviderResult{ProviderReference: payload.ProviderReference, Outcome: ProviderOutcome(payload.Outcome), Reason: normalizedReason}, nil
+	normalizedReason, truncated := NormalizeReason(payload.Reason)
+	return ProviderResult{ProviderReference: payload.ProviderReference, Outcome: ProviderOutcome(payload.Outcome), Reason: normalizedReason, ReasonTruncated: truncated}, nil
 }
 
 func (m *MockKYCProvider) GetCapabilities() Capabilities {

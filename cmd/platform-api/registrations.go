@@ -173,14 +173,17 @@ func buildRegistrations(_ config.Config, b providerBundle) []providerkind.Regist
 // bundle's adapters, BEFORE db.Connect, returning an error rather than
 // panicking (security I-1). The orchestrator constructors re-run the same
 // validation; this pre-DB pass is what covers every domain from one place.
-func validateWebhookSchemes(b providerBundle) error {
-	if _, err := webhookauth.NewAdapterSchemeSet("payments", b.paymentsAdapters()); err != nil {
+//
+// It takes the adapter registries (not the bundle) so a test can hand it a
+// non-conforming adapter; run() passes the bundle's own registries.
+func validateWebhookSchemes(paymentsAdapters map[string]payments.PaymentProvider, casinoAdapters map[string]casino.CasinoProvider, kycAdapters map[string]kyc.KYCProvider) error {
+	if _, err := webhookauth.NewAdapterSchemeSet("payments", paymentsAdapters); err != nil {
 		return err
 	}
-	if _, err := webhookauth.NewAdapterSchemeSet("casino", b.casinoAdapters()); err != nil {
+	if _, err := webhookauth.NewAdapterSchemeSet("casino", casinoAdapters); err != nil {
 		return err
 	}
-	if _, err := webhookauth.NewAdapterSchemeSet("kyc", b.kycAdapters()); err != nil {
+	if _, err := webhookauth.NewAdapterSchemeSet("kyc", kycAdapters); err != nil {
 		return err
 	}
 	return nil

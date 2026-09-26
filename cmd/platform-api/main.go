@@ -69,7 +69,7 @@ func run() error {
 	// Security S-1/I-1: every domain's webhook schemes are validated here,
 	// pre-DB, as an error (the orchestrator constructors below re-check and
 	// panic as the last line of defence).
-	if err := validateWebhookSchemes(providers); err != nil {
+	if err := validateWebhookSchemes(providers.paymentsAdapters(), providers.casinoAdapters(), providers.kycAdapters()); err != nil {
 		return fmt.Errorf("webhook scheme registration: %w", err)
 	}
 

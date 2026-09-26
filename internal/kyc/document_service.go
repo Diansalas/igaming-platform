@@ -202,6 +202,9 @@ func submitVerificationDocuments(ctx context.Context, tx pgx.Tx, provider KYCPro
 	if err != nil {
 		return fmt.Errorf("kyc: submit verification to provider: %w", err)
 	}
+	// Security S-5: platform-side bound before the audit row and the
+	// status UPDATE below (idempotent over an adapter that already did).
+	result, reasonTruncated := normalizeProviderResult(result)
 
 	auditOutcome := audit.OutcomeSuccess
 	if result.Outcome == ProviderError {
@@ -211,7 +214,7 @@ func submitVerificationDocuments(ctx context.Context, tx pgx.Tx, provider KYCPro
 		TenantID: v.TenantID, ActorType: audit.ActorSystem,
 		Action: "kyc.verification_submitted_to_provider", TargetType: "kyc_verification", TargetID: v.ID.String(),
 		Outcome:  auditOutcome,
-		Metadata: map[string]any{"provider_id": v.ProviderID, "document_count": len(submitted), "provider_outcome": string(result.Outcome), "reason": result.Reason},
+		Metadata: withReasonTruncated(map[string]any{"provider_id": v.ProviderID, "document_count": len(submitted), "provider_outcome": string(result.Outcome), "reason": result.Reason}, reasonTruncated),
 	}); err != nil {
 		return fmt.Errorf("kyc: audit provider submission: %w", err)
 	}

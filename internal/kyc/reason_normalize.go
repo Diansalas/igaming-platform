@@ -6,11 +6,14 @@
 // INTENT ("a real adapter must never put raw KYC evidence into
 // ProviderResult.Reason - a short, non-sensitive, machine-readable code
 // only") but nothing enforced it. NormalizeReason is the one place that
-// intent becomes an actual bound, applied once at the ingestion boundary
-// (an adapter's HandleCallback - see MockKYCProvider.HandleCallback in
-// mock_provider.go - and the staff review write path,
-// ReviewVerification in verification_service.go) rather than scattered
-// across every downstream reader.
+// intent becomes an actual bound, applied at the ingestion boundary rather
+// than by every downstream reader: by each adapter (see
+// MockKYCProvider.HandleCallback in mock_provider.go), AND - gate 10.3-W1
+// fix round, security S-5 - by the platform itself at every write site
+// that persists or audits a reason (CreateVerification, the document-
+// submission path, applyCallbackOutcome, and the staff review path
+// ReviewVerification), so the bound no longer depends on adapter
+// discipline.
 //
 // Per HD-10.3-3 (binding human ruling): a player never sees ANY provider
 // reason text, under any field name - this file bounds the value staff/
@@ -80,14 +83,16 @@ func isC0OrC1Control(r rune) bool {
 //  4. bounds the result to MaxReasonBytes (512) bytes, cutting on a rune
 //     boundary so a multi-byte character is never split in half.
 //
-// truncated reports whether step 4 actually cut anything, so a caller
-// could record that truncation occurred rather than silently discarding
-// information without any trace - this stage's schema has no separate
-// truncation-marker column, so callers are not required to act on it
-// today, but the signal is not hidden from them.
+// truncated reports whether step 4 actually cut anything. Every platform
+// write site records it as `reason_truncated: true` in the audit metadata
+// (withReasonTruncated below; identity-compliance W1 condition 1) - the
+// schema has no separate truncation-marker column.
 //
-// Applied ONCE at the ingestion boundary (see this file's own doc
-// comment) - never re-applied by every downstream reader.
+// Idempotent: NormalizeReason(NormalizeReason(x)) == NormalizeReason(x),
+// which is what lets the platform re-apply it at every write site
+// (normalizeProviderResult) on top of the adapter's own call, without ever
+// changing an already-conforming value. It is never re-applied by
+// downstream READERS.
 func NormalizeReason(raw string) (bounded string, truncated bool) {
 	valid := strings.ToValidUTF8(raw, "�")
 
@@ -109,4 +114,28 @@ func NormalizeReason(raw string) (bounded string, truncated bool) {
 		cut--
 	}
 	return cleaned[:cut], true
+}
+
+// normalizeProviderResult is the platform-side bound on an adapter's
+// ProviderResult.Reason, applied at every site that persists or audits it
+// (gate 10.3-W1 fix round, security S-5): an adapter that forgot to
+// normalize (or normalized only in HandleCallback) can no longer store
+// control/bidi characters, or an oversized value that migration 0095's
+// CHECK would turn into a 500. truncated is true when this pass OR the
+// adapter's own (ProviderResult.ReasonTruncated) cut the value.
+func normalizeProviderResult(r ProviderResult) (ProviderResult, bool) {
+	bounded, truncated := NormalizeReason(r.Reason)
+	r.Reason = bounded
+	truncated = truncated || r.ReasonTruncated
+	r.ReasonTruncated = truncated
+	return r, truncated
+}
+
+// withReasonTruncated adds `reason_truncated: true` to audit metadata m
+// when truncated (and leaves m unchanged otherwise), returning m.
+func withReasonTruncated(m map[string]any, truncated bool) map[string]any {
+	if truncated {
+		m["reason_truncated"] = true
+	}
+	return m
 }

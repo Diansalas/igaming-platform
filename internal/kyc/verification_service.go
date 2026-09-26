@@ -99,6 +99,9 @@ func CreateVerification(ctx context.Context, tx pgx.Tx, provider KYCProvider, pa
 	if err != nil {
 		return Verification{}, fmt.Errorf("kyc: create verification with provider: %w", err)
 	}
+	// Security S-5: the platform bounds the adapter's reason itself before
+	// it is persisted (idempotent over an adapter that already did).
+	result, reasonTruncated := normalizeProviderResult(result)
 
 	status, ok := statusForOutcome(result.Outcome)
 	if !ok {
@@ -123,7 +126,7 @@ func CreateVerification(ctx context.Context, tx pgx.Tx, provider KYCProvider, pa
 	if err := audit.Record(ctx, tx, audit.Entry{
 		TenantID: params.TenantID, ActorType: audit.ActorPlayer, ActorID: params.PlayerAccountID,
 		Action: "kyc.verification_submitted", TargetType: "kyc_verification", TargetID: v.ID.String(),
-		Outcome: audit.OutcomeSuccess, Metadata: map[string]any{"provider_id": v.ProviderID, "status": string(v.Status)},
+		Outcome: audit.OutcomeSuccess, Metadata: withReasonTruncated(map[string]any{"provider_id": v.ProviderID, "status": string(v.Status)}, reasonTruncated),
 	}); err != nil {
 		return Verification{}, fmt.Errorf("kyc: audit create verification: %w", err)
 	}
@@ -335,7 +338,8 @@ func ReviewVerification(ctx context.Context, tx pgx.Tx, params ReviewVerificatio
 	// (an unhelpful 500, not a validation error). Every caller of this
 	// function - the staff HTTP handler and any internal/kyc-package
 	// caller alike - gets this bound for free.
-	params.Reason, _ = NormalizeReason(params.Reason)
+	var reasonTruncated bool
+	params.Reason, reasonTruncated = NormalizeReason(params.Reason)
 
 	current, err := GetVerificationByID(ctx, tx, params.VerificationID)
 	if err != nil {
@@ -390,7 +394,7 @@ func ReviewVerification(ctx context.Context, tx pgx.Tx, params ReviewVerificatio
 		Action: "kyc.verification_status_changed", TargetType: "kyc_verification", TargetID: params.VerificationID.String(),
 		Outcome:   audit.OutcomeSuccess,
 		IPAddress: params.IPAddress, UserAgent: params.UserAgent, RequestID: params.RequestID,
-		Metadata: map[string]any{"previous_status": string(current.Status), "new_status": string(params.NewStatus), "reason": params.Reason},
+		Metadata: withReasonTruncated(map[string]any{"previous_status": string(current.Status), "new_status": string(params.NewStatus), "reason": params.Reason}, reasonTruncated),
 	}); err != nil {
 		return Verification{}, fmt.Errorf("kyc: audit review verification: %w", err)
 	}

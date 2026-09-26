@@ -59,3 +59,35 @@ func TestNewOrchestrator_BadWebhookSchemeFailsStartup(t *testing.T) {
 		t.Fatal("the registered adapter's scheme must be selectable by provider id")
 	}
 }
+
+// unmarkedPaymentsAdapter wraps the MOCK behind the PaymentProvider
+// interface only, so it does NOT carry the MOCK's SyntheticComponent
+// marker - the shape of a real adapter reusing the platform MOCK scheme.
+type unmarkedPaymentsAdapter struct{ PaymentProvider }
+
+// crossDomainSchemeAdapter is a synthetic adapter returning the casino MOCK.
+type crossDomainSchemeAdapter struct{ *MockProvider }
+
+func (crossDomainSchemeAdapter) WebhookScheme() webhookauth.VerificationScheme {
+	return webhookauth.CasinoScheme().VerificationScheme()
+}
+
+// TestNewOrchestrator_MockSchemeOnlyFromSyntheticAdapter is security S-1 at
+// the payments orchestrator: the payments MOCK scheme from an adapter that
+// is not itself a synthetic component, or another domain's MOCK scheme,
+// makes construction panic (startup fails).
+func TestNewOrchestrator_MockSchemeOnlyFromSyntheticAdapter(t *testing.T) {
+	for name, providers := range map[string]map[string]PaymentProvider{
+		"payments MOCK scheme on an unmarked adapter": {"vendor-x": unmarkedPaymentsAdapter{NewMockProvider("vendor-x")}},
+		"casino MOCK scheme on a synthetic adapter":   {"mock-psp": crossDomainSchemeAdapter{NewMockProvider("mock-psp")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("NewOrchestrator must refuse (panic) so startup fails")
+				}
+			}()
+			NewOrchestrator(providers, nil)
+		})
+	}
+}
