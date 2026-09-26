@@ -27,46 +27,110 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// recordingTx wraps a real pgx.Tx and records every SQL statement text
-// passed to Exec/Query/QueryRow, in order, before forwarding the call
-// unchanged to the embedded Tx. Every OTHER pgx.Tx method (Begin, Commit,
-// Rollback, CopyFrom, SendBatch, LargeObjects, Prepare, Conn) is inherited
-// from the embedded interface value untouched - this type is a pure
-// observer, never a behavior change, so wrapping tx cannot itself be the
-// reason a test passes or fails.
-type recordingTx struct {
-	pgx.Tx
+// sqlRecorder is the shared, mutex-guarded statement log a recordingTx and
+// every "child" recordingTx returned by its own Begin (see N4 below) all
+// append to - a single ordered log across the whole savepoint tree, not
+// one log per nesting level, so the top-level captured.Statements() call
+// in the test below sees everything regardless of how deep a savepoint a
+// statement ran inside.
+type sqlRecorder struct {
 	mu         sync.Mutex
 	statements []string
 }
 
-func (r *recordingTx) record(sql string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.statements = append(r.statements, sql)
+func (rec *sqlRecorder) record(sql string) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	rec.statements = append(rec.statements, sql)
+}
+
+func (rec *sqlRecorder) Statements() []string {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	out := make([]string, len(rec.statements))
+	copy(out, rec.statements)
+	return out
+}
+
+// recordingTx wraps a real pgx.Tx and records every SQL statement text
+// passed to Exec/Query/QueryRow, in order, before forwarding the call
+// unchanged to the embedded Tx. Every OTHER pgx.Tx method (Commit,
+// Rollback, LargeObjects, Prepare, Conn) is inherited from the embedded
+// interface value untouched - this type is a pure observer, never a
+// behavior change, so wrapping tx cannot itself be the reason a test
+// passes or fails.
+//
+// N4 (Stage 10.1 code-review re-verification, 2026-09-26): the original
+// version of this type wrapped only Exec/Query/QueryRow, so a
+// pre-verification write via db.IdempotentInsert (which opens a savepoint
+// with Begin, then writes on the returned child Tx) would run entirely
+// unobserved - the child Tx returned by the embedded Tx.Begin was a bare
+// pgx.Tx, not a recordingTx, so its Exec calls never reached record()
+// above. This test would then report a false pass on invariant I1 for
+// exactly the kind of future change it exists to catch. Begin is now
+// wrapped so a savepoint's own child is ALSO a recording observer sharing
+// this same log (via *sqlRecorder), and SendBatch/CopyFrom - which this
+// codebase currently never calls on a pre-verification path, but whose
+// statement text this technique cannot individually inspect - are recorded
+// under an explicit marker and independently asserted never to occur
+// before verification, rather than silently falling through unobserved.
+type recordingTx struct {
+	pgx.Tx
+	rec *sqlRecorder
+}
+
+func newRecordingTx(tx pgx.Tx) *recordingTx {
+	return &recordingTx{Tx: tx, rec: &sqlRecorder{}}
 }
 
 func (r *recordingTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-	r.record(sql)
+	r.rec.record(sql)
 	return r.Tx.Exec(ctx, sql, args...)
 }
 
 func (r *recordingTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	r.record(sql)
+	r.rec.record(sql)
 	return r.Tx.Query(ctx, sql, args...)
 }
 
 func (r *recordingTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	r.record(sql)
+	r.rec.record(sql)
 	return r.Tx.QueryRow(ctx, sql, args...)
 }
 
+// Begin wraps the real Tx.Begin (a SAVEPOINT under the hood) so the
+// returned child transaction is ITSELF a recordingTx sharing this same
+// *sqlRecorder - see the N4 doc comment above. Without this, any statement
+// run on the savepoint returned by an unwrapped Begin would be invisible
+// to Statements() below.
+func (r *recordingTx) Begin(ctx context.Context) (pgx.Tx, error) {
+	r.rec.record("-- recordingTx.Begin: savepoint opened")
+	child, err := r.Tx.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &recordingTx{Tx: child, rec: r.rec}, nil
+}
+
+// sendBatchOrCopyMarker prefixes a recorded entry for SendBatch/CopyFrom -
+// calls this technique cannot decompose into individual SQL text, so
+// writeOrLockPattern's textual match cannot inspect them. The test below
+// therefore treats ANY such marker as an invariant-I1 violation outright,
+// never merely pattern-matching its (nonexistent) SQL text.
+const sendBatchOrCopyMarker = "-- recordingTx: "
+
+func (r *recordingTx) SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults {
+	r.rec.record(sendBatchOrCopyMarker + "SendBatch called (opaque batch of statements, not individually recorded)")
+	return r.Tx.SendBatch(ctx, b)
+}
+
+func (r *recordingTx) CopyFrom(ctx context.Context, tableName pgx.Identifier, columnNames []string, rowSrc pgx.CopyFromSource) (int64, error) {
+	r.rec.record(sendBatchOrCopyMarker + "CopyFrom called: " + tableName.Sanitize())
+	return r.Tx.CopyFrom(ctx, tableName, columnNames, rowSrc)
+}
+
 func (r *recordingTx) Statements() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]string, len(r.statements))
-	copy(out, r.statements)
-	return out
+	return r.rec.Statements()
 }
 
 // writeOrLockPattern matches any SQL statement this suite treats as a
@@ -102,7 +166,7 @@ func TestWebhook_BadSignature_NoWriteBeforeVerification(t *testing.T) {
 
 	var captured *recordingTx
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		captured = &recordingTx{Tx: tx}
+		captured = newRecordingTx(tx)
 		_, err := orch.ReceiveCallback(ctx, captured, f.tenantID, "mock-psp", payload)
 		return err
 	})
@@ -119,6 +183,9 @@ func TestWebhook_BadSignature_NoWriteBeforeVerification(t *testing.T) {
 		t.Fatalf("expected at least one statement (ProviderAcceptsWebhook's own read-only EXISTS), got none - the harness itself may not be wired correctly")
 	}
 	for _, sql := range statements {
+		if strings.HasPrefix(sql, sendBatchOrCopyMarker) {
+			t.Fatalf("invariant I1 violated: SendBatch/CopyFrom ran before signature verification succeeded (N4): %q\nall statements: %q", sql, statements)
+		}
 		if writeOrLockPattern.MatchString(sql) {
 			t.Fatalf("invariant I1 violated: a write or row-lock statement ran before signature verification succeeded: %q\nall statements: %q", sql, statements)
 		}

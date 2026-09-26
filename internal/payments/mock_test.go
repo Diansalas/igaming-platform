@@ -403,6 +403,38 @@ func TestMockWebhookCredentials_KeyDerivation(t *testing.T) {
 			t.Fatalf("%s must never render the raw Secret bytes, got %q", label, rendered)
 		}
 	}
+
+	// Security review P3-6 (Stage 10.1 re-verification): the two checks
+	// above can never fail for "%#v" without GoString, because Go's
+	// default %#v rendering of a byte slice is "[]uint8{0x8c, 0xc4, ...}" -
+	// a comma/0x-prefixed hex-digit-pair rendering that matches neither
+	// secretHex (a contiguous, unprefixed, un-punctuated hex string) nor
+	// string(credA1.Secret) (the raw bytes reinterpreted as a string). A
+	// standalone probe confirmed both checks report "no leak" even with
+	// GoString entirely removed, so this test would have silently kept
+	// passing through the exact regression P3-1 fixed. These two
+	// assertions are the actual regression guard:
+	//   1. %#v must be routed through GoString (which delegates to the
+	//      already-redacted String()) - not Go's struct-reflection default.
+	//   2. %#v/%v/%+v must never contain fmt's own byte-slice literal
+	//      marker "[]uint8{", which is what %#v renders an UNREDACTED
+	//      Secret field as (each byte then follows as "0x.., " - the
+	//      pattern the vacuous checks above failed to catch).
+	if got, want := fmt.Sprintf("%#v", credA1), credA1.GoString(); got != want {
+		t.Fatalf("%%#v of a WebhookCredential must be exactly GoString()'s output, got %q, want %q", got, want)
+	}
+	for label, rendered := range map[string]string{
+		"%#v": fmt.Sprintf("%#v", credA1),
+		"%v":  fmt.Sprintf("%v", credA1),
+		"%+v": fmt.Sprintf("%+v", credA1),
+	} {
+		if strings.Contains(rendered, "Secret") {
+			t.Fatalf("%s must never mention the Secret field name, got %q", label, rendered)
+		}
+		if strings.Contains(rendered, "[]uint8{") {
+			t.Fatalf("%s must never render Go's default byte-slice literal (proof the Secret field leaked past GoString/String), got %q", label, rendered)
+		}
+	}
 }
 
 // slogRenderAttrs renders a slog.LogValuer's group the way a real

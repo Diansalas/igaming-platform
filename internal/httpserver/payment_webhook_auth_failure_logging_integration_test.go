@@ -293,6 +293,28 @@ func TestWebhook_AuthFailureLogging_AllowListOnly(t *testing.T) {
 			payments.ReasonSignatureInvalid, true, true, true, true)
 	})
 
+	t.Run("body_too_large", func(t *testing.T) {
+		// N5 (Stage 10.1 code-review re-verification, 2026-09-26): the
+		// only reason previously untested here. deposit_handlers.go's
+		// step 2 (body size limit) runs BEFORE any tenant lookup (ruling
+		// 5), so tenant_id must be ABSENT here exactly like
+		// signature_missing above, even against activeTenant's own valid
+		// slug - unlike every other subtest in this table, which all
+		// require the tenant lookup to have already succeeded.
+		// oversizedBody's SIGNATURE never needs to verify (or even be
+		// present) - size alone triggers the rejection, before headers are
+		// even parsed - so an entirely unsigned, headerless request is
+		// enough, mirroring TestWebhook_EnumerationOracle_
+		// IndistinguishableResponses's own oversized-body probe
+		// (payment_webhook_tenant_binding_test.go).
+		orch, mock := newMockOrchestrator()
+		mustRegisterCapability(t, pool, activeTenant.ID, mock)
+		oversizedBody := make([]byte, maxWebhookBodyBytes+1)
+		runAuthFailureLogCase(t, pool, issuer, activeTenant.ID, orch,
+			"/v1/webhooks/payments/"+activeTenant.Slug+"/mock", http.Header{}, oversizedBody,
+			payments.ReasonBodyTooLarge, false, true, false, false)
+	})
+
 	t.Run("key_material", func(t *testing.T) {
 		orch, mock := newMockOrchestrator()
 		mustRegisterCapability(t, pool, activeTenant.ID, mock)
