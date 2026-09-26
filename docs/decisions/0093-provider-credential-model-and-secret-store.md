@@ -244,6 +244,23 @@ on whether a handle exists.
 - No real casino resolver is wired anywhere until revocation has been built and its immediacy
   tested (R9 / C14).
 
+**Secret length (added at gate 10.3-W1; security review `06-gate-w1-review-security.md` §3).**
+- `webhookauth.MinSecretBytes = 16` (128 bits) is the platform **floor**. The platform checks it
+  before any scheme runs (`credentialUsable`, `internal/webhookauth/scheme.go`), and every scheme
+  must check it on its own (conformance SC10). It is accepted as a floor because the platform does
+  not choose most vendor secrets and a length check cannot measure entropy.
+- **A secret the platform itself generates or negotiates must be at least 32 random bytes.** This
+  covers outbound and webhook secrets created in W2a/W3b. W2a must enforce it where those
+  secrets are generated. The MOCK already derives 32-byte keys.
+- Disclosed residual: a vendor secret delivered as hex or base64 text and used as raw bytes
+  carries about 4–6 bits per byte. A 16-byte one may be only 64–96 bits strong. The §2
+  fingerprint is keyed (C6) because vendor secrets may be low-entropy. No further action now.
+- Raising the floor is a constant change in a reviewed commit. No schema depends on it.
+
+**`KeyImplicit` (gate 10.3-W1).** The `KeyImplicit` row-count rule above is `NOT IMPLEMENTED`.
+Until W2a builds it, the Stage 10.3 W1 fix round refuses a `KeyImplicit` scheme at registration
+(ADR 0022 §3, Stage 10.3 amendment).
+
 ### 5. Outbound credentials (PROV-OUTBOUND-CRED-1, R5 / C8)
 
 - The orchestrator reads the `outbound_api` handle row **on every call**, inside the caller's

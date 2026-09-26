@@ -267,6 +267,31 @@ become) a real vendor's contract before one exists.
 >      (U+200B–U+200F);
 >    - truncates to at most **512 bytes** without splitting a rune;
 >    - records any truncation as a flag in the audit metadata.
+>
+>    *(Gate 10.3-W1 correction; code review #4, security S-5,
+>    identity-compliance condition 1.)*
+>    - **The helper.** It is `kyc.NormalizeReason(raw) (bounded string,
+>      truncated bool)` (`internal/kyc/reason_normalize.go`). It is
+>      idempotent.
+>    - **At HEAD `bc72fe4` it is adapter discipline only.** The MOCK
+>      adapter and the staff `ReviewVerification` path call it. The
+>      platform sites that persist or audit an adapter-supplied reason
+>      store it as given: `CreateVerification` in
+>      `verification_service.go`, `SubmitVerification` in
+>      `document_service.go` and `HandleCallback` handling in
+>      `provider.go`. Every caller discards the `truncated` flag, so no
+>      audit row records truncation yet.
+>    - **Stage 10.3 W1 fix round: the platform normalises too.** The
+>      platform applies `NormalizeReason` at its own write sites, in
+>      addition to the adapter. Because the helper is idempotent, applying
+>      it twice is harmless. A real adapter that normalises in
+>      `HandleCallback` but not in `SubmitVerification` can then no longer
+>      store raw control or bidi characters, or turn an oversize reason
+>      into a 500 against the CHECK.
+>    - **The truncation flag.** In the same fix round, the audit metadata
+>      of those sites records the flag as `reason_truncated`.
+>    - The adapter-level requirement above still stands. The conformance
+>      case still checks it.
 > 2. **DB backstop.** Migration 0095 adds
 >    `CHECK (reason IS NULL OR octet_length(reason) <= 512)` to
 >    `kyc_verifications.reason`, after an in-migration normalisation of

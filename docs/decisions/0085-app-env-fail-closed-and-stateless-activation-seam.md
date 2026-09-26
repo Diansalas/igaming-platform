@@ -173,11 +173,43 @@ together with `TestSupportRoutesEnabled()`, `mockProviderWiring` and
    and again with every one set to false, and it still refuses in
    production. The only way past it is to remove the synthetic
    component.
-6. **Coverage.**
-   - `buildRegistrations(cfg)` enumerates everything that `main` wires. A
-     completeness test fails if a component is wired without passing
-     through it.
-   - The AST scan is not based on type names.
+6. **Coverage.** *(Corrected at gate 10.3-W1, code review #2 and #7 and
+   security F4. The text at acceptance said `buildRegistrations`
+   enumerates everything `main` wires and that the AST scan is not based
+   on type names. Neither was true at HEAD `bc72fe4`.)*
+   - **What `buildRegistrations` covers.** `buildRegistrations(cfg, b)`
+     (`cmd/platform-api/registrations.go`) enumerates the
+     `providerBundle`, which `buildProviderBundle` builds once before
+     `db.Connect`. The completeness test proves that every bundle field is
+     registered. It does not prove that `main` and `wiring.go` construct
+     nothing outside the bundle.
+   - **The gap at HEAD.** The three MOCK webhook credential resolvers are
+     built by helpers in `wiring.go`, called from `main.go`, outside the
+     bundle. They are never registered.
+     They are gated by `TestSupportRoutesEnabled()`, which reads
+     `Environment`, not `GuardEnvironment()`. This is not exploitable
+     today, because the MOCK adapters they are bound to are always
+     registered, so the guard refuses production startup first.
+   - **Stage 10.3 W1 fix round.** The mock webhook credential resolvers
+     move into the provider bundle and are registered. Each adapter's
+     `WebhookScheme()` is also registered in `buildRegistrations`. Both
+     completeness tests use one shared helper.
+   - **Still open.** An AST test that no non-test file in
+     `cmd/platform-api` other than `registrations.go` constructs a
+     provider component (security S-4 point 2). It binds before any type
+     implements `ProductionEligible`.
+   - **The real control is the positive marker, and it does not use
+     names.** In production, `RefuseSyntheticInProduction`
+     (`internal/providerkind/guard.go`) refuses every registered component
+     that does not implement `ProductionEligible`, or that implements
+     `Synthetic`. An unmarked component is refused whatever its name.
+   - **The AST scan is a secondary hygiene check, and it does use a name
+     heuristic.** `ScanForUnmarkedMocks`
+     (`internal/providerkind/completeness_scan.go`) flags a type only if
+     its name matches `(?i)(Mock|Fake|Stub|InMemory)` and it has no
+     `SyntheticComponent` method. It skips unexported types. It keeps the
+     `Synthetic` marker consistently applied. It is not what makes the
+     guard safe.
    - `cmd/seed-admin` and `cmd/migrate` wire no mock or provider
      component, and a test keeps it that way. Verified at `c90e591`:
      their only internal imports are `audit`, `auth`, `db` and `identity`,
@@ -197,7 +229,27 @@ registered domain has a real, production-eligible implementation or is not
 registered at all. Which verticals launch without a real provider is a
 human launch decision. The guard only makes that decision explicit.
 
+**Disclosed at gate 10.3-W1.**
+- **Today's binary refuses to start in production.** Every component in
+  the provider bundle is a MOCK. So a binary started with
+  `APP_ENV=production`, or with `APP_ENV` missing, exits at the guard
+  before `db.Connect`. This is the intended fail-closed result, not a
+  defect.
+- **`make run` sets `APP_ENV=development`.** Because a missing `APP_ENV`
+  is now treated as production by the guard, `make run` without it would
+  refuse to start. The Stage 10.3 W1 fix round makes the `run` target
+  default `APP_ENV=development`, overridable from the environment. At HEAD
+  `bc72fe4` the target does not set it (code review #8).
+
 **Status.** `NOT IMPLEMENTED` at acceptance. Target: `IMPLEMENTED` in W1b.
+
+**Status at gate 10.3-W1.** The markers, the pure guard, its placement
+right after `config.Load()`, the `GuardEnvironment()` rule and the matrix
+tests are implemented at HEAD `bc72fe4`. The coverage corrections in point
+6 (resolvers and schemes registered, shared completeness helper) are in
+progress in the Stage 10.3 W1 fix round. Security S-4 point 2 binds before
+any type implements `ProductionEligible`. No component is
+`ProductionEligible` today.
 
 ### 2. Stateless-by-construction activation seam (no shared infrastructure)
 

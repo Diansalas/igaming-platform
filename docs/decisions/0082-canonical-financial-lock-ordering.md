@@ -24,8 +24,9 @@ Partial settlement and cashout remain `NOT IMPLEMENTED` and bound by
 Amendment A2.
 
 **Amended 2026-09-26 — Amendment A6 (Stage 10.3, ADR 0092).** L0.1 is
-also taken by casino `postRollback`, keyed on the original reference.
-There is no new class and no new exception. See "Amendment A6" at the end
+also taken by casino `postRollback`, keyed on the original reference,
+and (A6's permitted extension, used in W1c) by `postWin`, keyed on its
+own reference. There is no new class and no new exception. See "Amendment A6" at the end
 of this file; the §2.1 L0.1 row is to be read with it.
 
 ## Context
@@ -132,6 +133,18 @@ to change.
 | `postRollback` (`orchestrator.go:1117`) | (1) `ledger_transactions` original row `FOR UPDATE` (:1135); (2) `bonus.AdvisoryLockGrant` (:1257, bonus-funded bets only); (3) implicit projections in `loadEntries` order — **already sorted ascending by `ledger_account_id`** (LOCK-2 fix, :1366-1371) **but generated mirror legs are appended after them**, breaking the ascending order for bonus-touching rollbacks | yes |
 | `postRollbackHeldWin` (`bonus_settlement.go:582`) | `AdvisoryLockGrant` (:594) then `bonus_held_dispositions` row `FOR UPDATE` (:597, HR-25 order); implicit projections `player_bonus_held` → `house_gaming` → generated (:684) | yes |
 | `postRollbackTombstone` (`orchestrator.go:1320`) | `ledger_transactions` key insert only — no entries, no projection locks | — |
+
+*(Inventory update, Amendment A6, Stage 10.3 W1c, recorded at gate 10.3-W1 per `ledger-finance`
+condition C8. The rows above are the Stage 9.1 inventory and are kept as written. Line numbers
+below are from HEAD `bc72fe4`.)*
+
+| Site (Stage 10.3) | L0.1 `casino_bet_delivery:<tenant>:<provider>:<ref>` (`acquireProviderTxDeliveryLock`, `orchestrator.go:587`) | What follows |
+| --- | --- | --- |
+| `postBet` (`orchestrator.go:913`) | first lock, on its **own** reference (:962); unchanged | idempotency short-circuit; E3 tombstone check (a plain read, :1016); session; capability gate (a plain read); then L0.2 and the rest of the row above |
+| `postWin` (`orchestrator.go:1388`) | **new:** first lock, on its **own** reference (:1413) | E10 tombstone check (a plain read, :1426); then L2 round rows `ORDER BY id FOR UPDATE` (:1459-1466) and the per-origin branch as above |
+| `postRollback` (`orchestrator.go:1518`) | **new:** first lock, on the **original** reference (:1540) | L2 original row `FOR UPDATE` (:1554); on no row, `postRollbackTombstone`; otherwise E-1 L0.3 grant advisory (:1676, bonus-funded only) and projections as above |
+
+Each of the three takes L0.1 exactly once per transaction, first, while holding no other lock.
 
 ### 1.4 The proven LOCK-1 cycle, stated exactly
 
@@ -1478,12 +1491,21 @@ serves is the ADR 0025 Stage 10.3 amendment.
 - R8 (advisory locks precede row locks) holds.
 - The §2.1 row for L0.1 now reads: "taken once per transaction by `postBet` (own reference) and
   `postRollback` (original reference)". It still raises no ordering question within the class.
+  *(Gate 10.3-W1: with the `postWin` extension below, it also reads "and `postWin` (own
+  reference)".)*
 
 **Why.**
 - A concurrent late original bet and its rollback now serialize on the same key.
 - Either the bet posts first and the rollback reverses it, or the tombstone is written first and
-  the bet is rejected with the named `ErrOriginalTombstoned`.
-- Today the loser of that race gets an untyped unique-violation error, which surfaces as a 500.
+  the bet is declined.
+- *(Corrected at gate 10.3-W1, code review #7. The text at acceptance said the late bet "is
+  rejected with the named `ErrOriginalTombstoned`". That is not what W1c does.)* A late bet
+  after its tombstone (E3) is a **200 `declined`** with `decline_reason = "original_rolled_back"`
+  and a `casino_bet.rejected_tombstoned` audit row, committed in the same transaction. Nothing
+  posts. `ErrOriginalTombstoned`, mapped to 409, is the **E10** case: a late win whose own
+  reference is already tombstoned. That transaction rolls back with no writes.
+- Before A6, the loser of that race got an untyped unique-violation error, which surfaced as a
+  500.
 
 **Deadlock analysis.**
 - Two transactions contend on L0.1 only for the same (tenant, provider, reference).
@@ -1496,9 +1518,31 @@ serves is the ADR 0025 Stage 10.3 amendment.
 rollback of that win, which keys L0.1 on the win's reference. That shape is within this amendment:
 one L0.1 per transaction, taken first. When implemented, it must be recorded in the §1.3 inventory.
 
+**As implemented (Stage 10.3 W1c; recorded at gate 10.3-W1, `ledger-finance` C8).**
+- L0.1 is taken in `postRollback`, on the **original** reference, as its first lock
+  (`orchestrator.go:1540` at `bc72fe4`), before the L2 original-row `FOR UPDATE`.
+- L0.1 is taken in `postWin`, on its **own** reference, as its first lock (`orchestrator.go:1413`),
+  before the E10 tombstone check and the L2 round-row `FOR UPDATE`. The extension was used.
+- **E10 evidence for the `postWin` lock** (`06-gate-w1-review-ledger-finance.md` §1.1):
+  - Without it, a win W and a rollback naming W can both see "no row". One writes the tombstone
+    and the other posts `casino_win`, both with `provider_tx_id = W`.
+  - The unique index lets only one commit. The loser gets an untyped unique-violation 500.
+  - Nothing could double-post before, so the lock buys determinism, not money safety. The outcome
+    is now either {win posted, then reversed (E7)} or {tombstone, then 409 (E10)}.
+- `ledger-finance` concurs with A6 as applied to `postRollback` and with the `postWin` extension.
+- Deadlock check: each site takes L0.1 once, first, holding nothing else. Every caller runs one
+  callback per transaction. No new edge enters the lock graph.
+- The §1.3 inventory is updated accordingly.
+
 **Tests** (`qa` binding plan, `04-review-qa.md` §4 W1c):
 - The late-original-versus-rollback race runs 50 iterations. The test asserts where the waiter
   blocks (L0.1), not only the outcome.
 - Concurrent identical rollback callbacks produce exactly one tombstone.
+- *(Gate 10.3-W1.)* At HEAD `bc72fe4` the two race tests
+  (`internal/httpserver/casino_cap_rollback1_concurrency_integration_test.go`) run 20 iterations
+  and assert outcomes only. The Stage 10.3 W1 fix round raises them to 50 iterations and adds the
+  waiter assertions.
 
 **Status.** `NOT IMPLEMENTED` at acceptance. Target: `IMPLEMENTED` in W1c.
+
+**Status at gate 10.3-W1.** `PARTIALLY IMPLEMENTED` — the L0.1 acquisitions are in code (Stage 10.3 W1c); `ledger-finance` acceptance of A6 is pending its gate-W1 conditions C1 (50-iteration race tests with waiter assertions and mutation-kill evidence), C6 (W1c integration suites green as the NOBYPASSRLS role) and C8 (this inventory), per `docs/plans/stage-10.3-planning/06-gate-w1-review-ledger-finance.md`.

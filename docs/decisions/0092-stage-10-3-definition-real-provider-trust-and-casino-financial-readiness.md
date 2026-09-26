@@ -110,7 +110,9 @@ Further binding instructions:
 - Casino items G-3 (LEDGER-REV-UNIQ), G-4 (the cross-domain provider-id namespace rule) and G-7
   (the stranded-exposure checklist).
 - Free rounds, jackpots and bonus-funded casino stakes. The only W1c work here is a conformance
-  rule that forbids mapping them to a win.
+  rule that forbids mapping them to a win. *(Gate 10.3-W1: that rule is a documented requirement
+  for the first real casino adapter. As a conformance case it is `NOT IMPLEMENTED`; see the
+  ADR 0025 Stage 10.3 amendment, item 8.)*
 - The hosted-KYC session token (KYC-HOSTED-SESSION-1) and the sanctions/PEP interface
   (KYC-SANCTIONS-IF-1).
 - A four-eyes casino "settlement freeze". Security §5.2 rejected it (R9).
@@ -152,6 +154,28 @@ Disclosures carried to the human (§19):
 | CAS-RECON-STMT-1 | `MOCK`. A real statement source is `PROVIDER DEPENDENT` |
 | SECRETSTORE-AWS-1 | `PARTIALLY IMPLEMENTED`: code plus local fake. IAM is `NOT IMPLEMENTED` (HD-10.3-2). Drills are `STAGING REQUIRED` |
 | Real PSP / KYC / casino adapters | `NOT IMPLEMENTED` (`PROVIDER DEPENDENT`) |
+
+### Status at gate 10.3-W1 (2026-09-26)
+
+- **W1a–W1d are implemented at HEAD `bc72fe4`.** That covers WH-VENDOR-SCHEME-1,
+  MOCK-ADAPTER-PROD-1, CAS-CAP-ROLLBACK-1 with G-1, and KYC-REASON-BOUND-1.
+- **The gate-W1 fix-round conditions are in progress.** They come from the reviews in
+  `docs/plans/stage-10.3-planning/06-gate-w1-review-*.md`; dispositions are in `05-gate-log.md`.
+  None of these items takes its target label from the table above until its conditions are met
+  and the gate closes. In particular, `ledger-finance` holds W1c at `PARTIALLY IMPLEMENTED`
+  until its conditions C1–C9 are met and the W1c integration suites have run green as the
+  NOBYPASSRLS role.
+- The ADR 0022, 0025, 0028, 0082, 0085 and 0093 texts were corrected at this gate to match the
+  code, and to record the fix-round changes.
+- **Unchanged:**
+  - Every real vendor scheme and every real PSP, KYC and casino adapter is `PROVIDER DEPENDENT`.
+  - `KeyImplicit` resolution is `NOT IMPLEMENTED`. The fix round refuses `KeyImplicit` at
+    registration until W2a.
+  - The domain callback-fixture hook is `NOT IMPLEMENTED`. Any non-mock adapter fails the casino,
+    payments and KYC conformance suites.
+  - The free-round/jackpot conformance case is `NOT IMPLEMENTED`.
+- **Disclosed.** Every bundled component is a MOCK, so an `APP_ENV=production` binary refuses to
+  start. This is the intended fail-closed result (ADR 0085, Stage 10.3 amendment).
 
 ## Consequences
 

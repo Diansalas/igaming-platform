@@ -399,6 +399,10 @@ already performs, reused verbatim), never asserted by the payload.
 >    - Tombstones are exempt from the correlation comparison on replay.
 > 4. **A late original after its tombstone gets a named rejection**,
 >    `ErrOriginalTombstoned`, not the current untyped unique-violation 500.
+>    *(As implemented in W1c: a late bet (E3) is a 200 `declined` with
+>    `decline_reason = "original_rolled_back"` plus a
+>    `casino_bet.rejected_tombstoned` audit row. Only a late win (E10)
+>    returns `ErrOriginalTombstoned`, mapped to 409. See ADR 0082 A6.)*
 >    - For a bet (E3), the check runs before RG, Risk and round binding, so
 >      it has no side effects.
 >    - A win whose own `provider_tx_id` is tombstoned (E10) is rejected
@@ -428,7 +432,8 @@ already performs, reused verbatim), never asserted by the payload.
 > 6. **Lock order.** `postRollback` takes L0.1 on the **original**
 >    reference before its L2 `FOR UPDATE`. A late original and its
 >    rollback therefore serialize deterministically. See ADR 0082,
->    Amendment A6 (`ledger-finance`-owned).
+>    Amendment A6 (`ledger-finance`-owned). W1c also takes L0.1 in
+>    `postWin` on its own reference (A6's permitted extension, for E10).
 > 7. **G-1: multi-bet cash rounds.**
 >    - When every un-reversed origin row is `player_cash` on one wallet and
 >      one asset, `resolveWinOrigin` resolves to that wallet instead of
@@ -441,8 +446,16 @@ already performs, reused verbatim), never asserted by the payload.
 >      `ErrBonusBetNotLocked`.
 >    - A characterization test comes first.
 > 8. **Free rounds and jackpots.** A real adapter must not map a free-round
->    or jackpot payout that has no platform bet to a win. The conformance
->    rule enforces this until a design exists (ADR 0092 out of scope).
+>    or jackpot payout that has no platform bet to a win, until a design
+>    exists (ADR 0092 out of scope).
+>    - *(Corrected at gate 10.3-W1, code review #7. The text at acceptance
+>      said "the conformance rule enforces this". No such conformance case
+>      exists at HEAD `bc72fe4`.)*
+>    - This is a **documented requirement for the first real casino
+>      adapter**. As a conformance case it is `NOT IMPLEMENTED`.
+>    - The MOCK has no free-round or jackpot event, so there is nothing to
+>      test against today. The case is written and reviewed with the first
+>      real adapter, whose callbacks can carry such payouts.
 >
 > **Emergency stop: credential revocation, not a settlement freeze
 > (R9/C14).**
