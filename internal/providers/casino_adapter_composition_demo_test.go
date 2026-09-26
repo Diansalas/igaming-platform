@@ -21,6 +21,8 @@ package providers_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -46,28 +48,34 @@ import (
 // exercised in this demo" error - this is a composition proof, not a
 // second production-quality mock, so there is no value in fleshing out
 // every method against an invented contract.
+//
+// Stage 10.3 W2a (PROV-OUTBOUND-CRED-1): the adapter holds NO credential.
+// The former static ClientConfig.AuthHeaderValue (from ProviderConfig.
+// APIKeyEnvVar) is gone; every call obtains a fresh per-call
+// httpclient.Authenticator from authFor, which stands in for the
+// orchestrator's per-call OutboundResolver.Resolve (handle read, committed,
+// then secret fetch). authFor is a function, not a stored credential.
 type fakeHTTPCasinoAdapter struct {
 	client     *httpclient.Client
+	authFor    func(ctx context.Context) (httpclient.Authenticator, error)
 	capability casino.AdapterCapability
 }
 
-func newFakeHTTPCasinoAdapter(cfg providers.ProviderConfig) (*fakeHTTPCasinoAdapter, error) {
+func newFakeHTTPCasinoAdapter(cfg providers.ProviderConfig, authFor func(ctx context.Context) (httpclient.Authenticator, error)) (*fakeHTTPCasinoAdapter, error) {
 	if !cfg.Enabled {
 		return nil, errors.New("fakeHTTPCasinoAdapter: provider disabled")
 	}
-	apiKey, err := cfg.ResolveAPIKey()
-	if err != nil {
-		return nil, err
+	if authFor == nil {
+		return nil, errors.New("fakeHTTPCasinoAdapter: no per-call credential source")
 	}
 	return &fakeHTTPCasinoAdapter{
 		client: httpclient.New(httpclient.ClientConfig{
-			ProviderName:    "fake-http-casino-demo",
-			BaseURL:         cfg.BaseURL,
-			Timeout:         cfg.Timeout,
-			MaxRetries:      cfg.MaxRetries,
-			AuthHeaderName:  "X-Api-Key",
-			AuthHeaderValue: apiKey,
+			ProviderName: "fake-http-casino-demo",
+			BaseURL:      cfg.BaseURL,
+			Timeout:      cfg.Timeout,
+			MaxRetries:   cfg.MaxRetries,
 		}),
+		authFor: authFor,
 		capability: casino.AdapterCapability{
 			ProviderID:        "fake-http-casino-demo",
 			SupportsCatalogue: true,
@@ -115,7 +123,11 @@ type fakeHealthResponseDTO struct {
 }
 
 func (a *fakeHTTPCasinoAdapter) Catalogue(ctx context.Context) ([]casino.CatalogueEntry, error) {
-	resp, err := a.client.Do(ctx, httpclient.Request{Method: http.MethodGet, Path: "/catalogue", Operation: "catalogue", Idempotent: true})
+	auth, err := a.authFor(ctx)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := a.client.Do(ctx, httpclient.Request{Method: http.MethodGet, Path: "/catalogue", Operation: "catalogue", Idempotent: true, Auth: auth})
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +153,12 @@ func (a *fakeHTTPCasinoAdapter) Launch(ctx context.Context, req casino.LaunchReq
 		"launch_token": req.LaunchToken,
 		"session_id":   req.SessionID.String(),
 	})
+	auth, err := a.authFor(ctx)
+	if err != nil {
+		return casino.LaunchResult{}, err
+	}
 	resp, err := a.client.Do(ctx, httpclient.Request{
+		Auth:   auth,
 		Method: http.MethodPost, Path: "/launch", Operation: "launch", Body: body,
 	})
 	if err != nil {
@@ -173,7 +190,11 @@ func (a *fakeHTTPCasinoAdapter) Bet(ctx context.Context, req casino.BetRequest) 
 	// unsafe to retry") - deliberately not overridden here, since this
 	// demo has no way to know whether a real provider's bet endpoint is
 	// safe to replay.
-	resp, err := a.client.Do(ctx, httpclient.Request{Method: http.MethodPost, Path: "/bet", Operation: "bet", Body: body})
+	auth, err := a.authFor(ctx)
+	if err != nil {
+		return casino.BetResult{}, err
+	}
+	resp, err := a.client.Do(ctx, httpclient.Request{Method: http.MethodPost, Path: "/bet", Operation: "bet", Body: body, Auth: auth})
 	if err != nil {
 		return casino.BetResult{}, err
 	}
@@ -227,7 +248,11 @@ func (a *fakeHTTPCasinoAdapter) Capabilities() casino.AdapterCapability {
 }
 
 func (a *fakeHTTPCasinoAdapter) HealthStatus(ctx context.Context) (casino.ProviderHealth, error) {
-	resp, err := a.client.Do(ctx, httpclient.Request{Method: http.MethodGet, Path: "/health", Operation: "health_status", Idempotent: true})
+	auth, err := a.authFor(ctx)
+	if err != nil {
+		return casino.ProviderHealth{}, err
+	}
+	resp, err := a.client.Do(ctx, httpclient.Request{Method: http.MethodGet, Path: "/health", Operation: "health_status", Idempotent: true, Auth: auth})
 	if err != nil {
 		return casino.ProviderHealth{}, err
 	}
@@ -259,8 +284,13 @@ var _ casino.CasinoProvider = (*fakeHTTPCasinoAdapter)(nil)
 // would require passing this same value wherever casino.MockCasinoProvider
 // is passed today - nothing else.
 func TestFakeHTTPCasinoAdapter_ComposesHTTPClientAgainstRealServer(t *testing.T) {
+	secretBytes := make([]byte, 32)
+	if _, err := rand.Read(secretBytes); err != nil {
+		t.Fatal(err)
+	}
+	demoSecret := hex.EncodeToString(secretBytes)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("X-Api-Key"); got != "demo-secret-value" {
+		if got := r.Header.Get("X-Api-Key"); got != demoSecret {
 			t.Errorf("server received X-Api-Key = %q, want the configured credential", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -279,17 +309,20 @@ func TestFakeHTTPCasinoAdapter_ComposesHTTPClientAgainstRealServer(t *testing.T)
 	}))
 	t.Cleanup(srv.Close)
 
-	t.Setenv("FAKE_DEMO_CASINO_API_KEY", "demo-secret-value")
-
 	cfg := providers.ProviderConfig{
-		Enabled:      true,
-		BaseURL:      srv.URL,
-		APIKeyEnvVar: "FAKE_DEMO_CASINO_API_KEY",
-		Timeout:      time.Second,
-		MaxRetries:   1,
+		Enabled:    true,
+		BaseURL:    srv.URL,
+		Timeout:    time.Second,
+		MaxRetries: 1,
 	}
 
-	adapter, err := newFakeHTTPCasinoAdapter(cfg)
+	// One resolution per call (PROV-OUTBOUND-CRED-1): the counter proves
+	// nothing is cached in the adapter or the client.
+	resolutions := 0
+	adapter, err := newFakeHTTPCasinoAdapter(cfg, func(context.Context) (httpclient.Authenticator, error) {
+		resolutions++
+		return httpclient.NewHeaderAuthenticator("X-Api-Key", demoSecret), nil
+	})
 	if err != nil {
 		t.Fatalf("newFakeHTTPCasinoAdapter: %v", err)
 	}
@@ -332,5 +365,8 @@ func TestFakeHTTPCasinoAdapter_ComposesHTTPClientAgainstRealServer(t *testing.T)
 	}
 	if health.CircuitState != casino.CircuitClosed {
 		t.Fatalf("HealthStatus().CircuitState = %v, want CircuitClosed", health.CircuitState)
+	}
+	if resolutions != 4 {
+		t.Fatalf("the credential was resolved %d times for 4 calls, want once per call", resolutions)
 	}
 }

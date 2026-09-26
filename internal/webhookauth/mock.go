@@ -2,10 +2,11 @@ package webhookauth
 
 // ============================================================================
 // MOCK. Everything in this file is a synthetic development/test double
-// (CLAUDE.md "No fake completion"). The real resolver - a FORCE-RLS handle
-// table plus an external, tenant-scoped secret store, keyed by (tenant_id,
-// provider_id, key_id) - is NOT IMPLEMENTED. Nothing here may be wired
-// outside TestSupportRoutesEnabled() deployments (ADR 0085; PAYWH-GATE-1).
+// (CLAUDE.md "No fake completion"). The real resolver - the FORCE-RLS
+// provider_credential_handles table plus an external secret store - is
+// internal/providercred (Stage 10.3 W2a) and serves NON-synthetic adapters
+// only (KindSplitResolver). Nothing here may be wired outside
+// TestSupportRoutesEnabled() deployments (ADR 0085; PAYWH-GATE-1).
 // ============================================================================
 
 import (
@@ -16,6 +17,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // MockKeyID is the only key id a MockResolver ever resolves. A future
@@ -72,8 +74,14 @@ type MockResolver struct {
 	ProviderID string
 }
 
-// Resolve implements Resolver.
-func (r MockResolver) Resolve(_ context.Context, tenantID uuid.UUID, providerID, keyID string) (Credential, error) {
+// Resolve implements Resolver (ADR 0093 §4 signature). A MOCK resolver
+// ignores tx, and resolves KeyFromHeader only (ResolveSingleKey).
+func (r MockResolver) Resolve(ctx context.Context, _ pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel KeySelection) (CredentialSet, error) {
+	return ResolveSingleKey(ctx, r, tenantID, providerID, keyID, sel)
+}
+
+// ResolveKey implements KeyResolver: the MOCK single-key lookup.
+func (r MockResolver) ResolveKey(_ context.Context, tenantID uuid.UUID, providerID, keyID string) (Credential, error) {
 	if len(r.Master) < MockMasterSize || r.Label == "" || r.ProviderID == "" {
 		return Credential{}, ErrCredentialUnavailable
 	}
@@ -114,10 +122,24 @@ type MultiResolver map[string]Resolver
 
 // Resolve implements Resolver by dispatching to the resolver registered
 // for providerID.
-func (m MultiResolver) Resolve(ctx context.Context, tenantID uuid.UUID, providerID, keyID string) (Credential, error) {
+func (m MultiResolver) Resolve(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel KeySelection) (CredentialSet, error) {
+	r, ok := m[providerID]
+	if !ok || r == nil {
+		return CredentialSet{}, ErrCredentialUnavailable
+	}
+	return r.Resolve(ctx, tx, tenantID, providerID, keyID, sel)
+}
+
+// ResolveKey implements KeyResolver by dispatching to the resolver
+// registered for providerID, as a single KeyFromHeader lookup.
+func (m MultiResolver) ResolveKey(ctx context.Context, tenantID uuid.UUID, providerID, keyID string) (Credential, error) {
 	r, ok := m[providerID]
 	if !ok || r == nil {
 		return Credential{}, ErrCredentialUnavailable
 	}
-	return r.Resolve(ctx, tenantID, providerID, keyID)
+	set, err := r.Resolve(ctx, nil, tenantID, providerID, keyID, KeyFromHeader)
+	if err != nil {
+		return Credential{}, err
+	}
+	return set.Active, nil
 }

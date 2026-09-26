@@ -334,19 +334,19 @@ func TestMockWebhookCredentials_KeyDerivation(t *testing.T) {
 	ctx := context.Background()
 	tenantA, tenantB := uuid.New(), uuid.New()
 
-	credA1, err := resolver.Resolve(ctx, tenantA, "mock-psp", mockWebhookKeyID)
+	credA1, err := resolver.ResolveKey(ctx, tenantA, "mock-psp", mockWebhookKeyID)
 	if err != nil {
 		t.Fatalf("resolve tenant A: %v", err)
 	}
-	credA2, err := resolver.Resolve(ctx, tenantA, "mock-psp", mockWebhookKeyID)
+	credA2, err := resolver.ResolveKey(ctx, tenantA, "mock-psp", mockWebhookKeyID)
 	if err != nil {
 		t.Fatalf("resolve tenant A (again): %v", err)
 	}
-	credB, err := resolver.Resolve(ctx, tenantB, "mock-psp", mockWebhookKeyID)
+	credB, err := resolver.ResolveKey(ctx, tenantB, "mock-psp", mockWebhookKeyID)
 	if err != nil {
 		t.Fatalf("resolve tenant B: %v", err)
 	}
-	credOtherInstance, err := otherResolver.Resolve(ctx, tenantA, "mock-psp", mockWebhookKeyID)
+	credOtherInstance, err := otherResolver.ResolveKey(ctx, tenantA, "mock-psp", mockWebhookKeyID)
 	if err != nil {
 		t.Fatalf("resolve tenant A on a different instance: %v", err)
 	}
@@ -364,10 +364,10 @@ func TestMockWebhookCredentials_KeyDerivation(t *testing.T) {
 	// A providerID/keyID this resolver does not own fails closed, never
 	// falling back to any other credential (conformance-relevant: this is
 	// exactly what a real resolver must also do).
-	if _, err := resolver.Resolve(ctx, tenantA, "some-other-provider", mockWebhookKeyID); !errors.Is(err, ErrWebhookCredentialUnavailable) {
+	if _, err := resolver.ResolveKey(ctx, tenantA, "some-other-provider", mockWebhookKeyID); !errors.Is(err, ErrWebhookCredentialUnavailable) {
 		t.Fatalf("expected ErrWebhookCredentialUnavailable for a foreign provider_id, got %v", err)
 	}
-	if _, err := resolver.Resolve(ctx, tenantA, "mock-psp", "mock-v2"); !errors.Is(err, ErrWebhookCredentialUnavailable) {
+	if _, err := resolver.ResolveKey(ctx, tenantA, "mock-psp", "mock-v2"); !errors.Is(err, ErrWebhookCredentialUnavailable) {
 		t.Fatalf("expected ErrWebhookCredentialUnavailable for an unknown key_id, got %v", err)
 	}
 

@@ -699,7 +699,7 @@ func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID 
 	// webhook_verify.go) - no statement of any kind runs before it
 	// succeeds (strict I1). Self-sufficient: casino-package tests call
 	// this method directly, bypassing the HTTP preamble.
-	provider, cred, err := o.verifyCallback(ctx, in)
+	provider, cred, err := o.verifyCallback(ctx, tx, in)
 	if err != nil {
 		return ReceiveCallbackResult{}, err
 	}

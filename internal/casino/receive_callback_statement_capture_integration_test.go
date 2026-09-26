@@ -74,7 +74,7 @@ type foreignCredentialResolver struct {
 	secret          []byte
 }
 
-func (r foreignCredentialResolver) Resolve(_ context.Context, _ uuid.UUID, providerID, keyID string) (webhookauth.Credential, error) {
+func (r foreignCredentialResolver) ResolveKey(_ context.Context, _ uuid.UUID, providerID, keyID string) (webhookauth.Credential, error) {
 	return webhookauth.Credential{
 		TenantID:    r.foreignTenantID, // wrong on purpose: never the tenantID the caller asked for.
 		ProviderID:  r.providerID,
@@ -82,6 +82,12 @@ func (r foreignCredentialResolver) Resolve(_ context.Context, _ uuid.UUID, provi
 		Secret:      r.secret,
 		Fingerprint: webhookauth.Fingerprint(r.secret),
 	}, nil
+}
+
+// Resolve adapts ResolveKey to the ADR 0093 §4 resolver signature (a
+// single-key test double ignores tx; KeyImplicit fails closed).
+func (r foreignCredentialResolver) Resolve(ctx context.Context, _ pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
+	return webhookauth.ResolveSingleKey(ctx, r, tenantID, providerID, keyID, sel)
 }
 
 // assertZeroStatementsBeforeVerification is this file's shared negative

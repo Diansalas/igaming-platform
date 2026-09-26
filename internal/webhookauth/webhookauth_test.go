@@ -410,14 +410,14 @@ func TestMockResolver(t *testing.T) {
 	tenantA, tenantB := uuid.New(), uuid.New()
 	r := MockResolver{Master: master, Label: PaymentsMockKeyLabel, ProviderID: "mock-x"}
 
-	a1, err := r.Resolve(ctx, tenantA, "mock-x", MockKeyID)
+	a1, err := r.ResolveKey(ctx, tenantA, "mock-x", MockKeyID)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	a2, _ := r.Resolve(ctx, tenantA, "mock-x", MockKeyID)
-	b, _ := r.Resolve(ctx, tenantB, "mock-x", MockKeyID)
-	other, _ := MockResolver{Master: otherMaster, Label: PaymentsMockKeyLabel, ProviderID: "mock-x"}.Resolve(ctx, tenantA, "mock-x", MockKeyID)
-	kyc, _ := MockResolver{Master: master, Label: KYCMockKeyLabel, ProviderID: "mock-x"}.Resolve(ctx, tenantA, "mock-x", MockKeyID)
+	a2, _ := r.ResolveKey(ctx, tenantA, "mock-x", MockKeyID)
+	b, _ := r.ResolveKey(ctx, tenantB, "mock-x", MockKeyID)
+	other, _ := MockResolver{Master: otherMaster, Label: PaymentsMockKeyLabel, ProviderID: "mock-x"}.ResolveKey(ctx, tenantA, "mock-x", MockKeyID)
+	kyc, _ := MockResolver{Master: master, Label: KYCMockKeyLabel, ProviderID: "mock-x"}.ResolveKey(ctx, tenantA, "mock-x", MockKeyID)
 
 	if !bytes.Equal(a1.Secret, a2.Secret) {
 		t.Fatal("key must be stable within one master")
@@ -430,26 +430,26 @@ func TestMockResolver(t *testing.T) {
 	}
 
 	failClosed := map[string]func() (Credential, error){
-		"foreign provider": func() (Credential, error) { return r.Resolve(ctx, tenantA, "mock-y", MockKeyID) },
-		"foreign key id":   func() (Credential, error) { return r.Resolve(ctx, tenantA, "mock-x", "mock-v2") },
+		"foreign provider": func() (Credential, error) { return r.ResolveKey(ctx, tenantA, "mock-y", MockKeyID) },
+		"foreign key id":   func() (Credential, error) { return r.ResolveKey(ctx, tenantA, "mock-x", "mock-v2") },
 		"nil master": func() (Credential, error) {
-			return MockResolver{Label: "l", ProviderID: "mock-x"}.Resolve(ctx, tenantA, "mock-x", MockKeyID)
+			return MockResolver{Label: "l", ProviderID: "mock-x"}.ResolveKey(ctx, tenantA, "mock-x", MockKeyID)
 		},
 		"short master": func() (Credential, error) {
-			return MockResolver{Master: master[:16], Label: "l", ProviderID: "mock-x"}.Resolve(ctx, tenantA, "mock-x", MockKeyID)
+			return MockResolver{Master: master[:16], Label: "l", ProviderID: "mock-x"}.ResolveKey(ctx, tenantA, "mock-x", MockKeyID)
 		},
 		"empty label": func() (Credential, error) {
-			return MockResolver{Master: master, ProviderID: "mock-x"}.Resolve(ctx, tenantA, "mock-x", MockKeyID)
+			return MockResolver{Master: master, ProviderID: "mock-x"}.ResolveKey(ctx, tenantA, "mock-x", MockKeyID)
 		},
 		"empty provider id": func() (Credential, error) {
-			return MockResolver{Master: master, Label: "l"}.Resolve(ctx, tenantA, "", MockKeyID)
+			return MockResolver{Master: master, Label: "l"}.ResolveKey(ctx, tenantA, "", MockKeyID)
 		},
-		"multi: absent": func() (Credential, error) { return MultiResolver{}.Resolve(ctx, tenantA, "mock-x", MockKeyID) },
+		"multi: absent": func() (Credential, error) { return MultiResolver{}.ResolveKey(ctx, tenantA, "mock-x", MockKeyID) },
 		"multi: nil entry": func() (Credential, error) {
-			return MultiResolver{"mock-x": nil}.Resolve(ctx, tenantA, "mock-x", MockKeyID)
+			return MultiResolver{"mock-x": nil}.ResolveKey(ctx, tenantA, "mock-x", MockKeyID)
 		},
 		"multi: other entry": func() (Credential, error) {
-			return MultiResolver{"mock-y": r}.Resolve(ctx, tenantA, "mock-x", MockKeyID)
+			return MultiResolver{"mock-y": r}.ResolveKey(ctx, tenantA, "mock-x", MockKeyID)
 		},
 	}
 	for name, f := range failClosed {
@@ -460,7 +460,7 @@ func TestMockResolver(t *testing.T) {
 			}
 		})
 	}
-	if c, err := (MultiResolver{"mock-x": r}).Resolve(ctx, tenantA, "mock-x", MockKeyID); err != nil || !bytes.Equal(c.Secret, a1.Secret) {
+	if c, err := (MultiResolver{"mock-x": r}).ResolveKey(ctx, tenantA, "mock-x", MockKeyID); err != nil || !bytes.Equal(c.Secret, a1.Secret) {
 		t.Fatalf("multi resolver must dispatch to the registered entry, got %v", err)
 	}
 }

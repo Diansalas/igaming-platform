@@ -331,7 +331,7 @@ func TestDo_DuplicateAck_CallerRetryIsNotDeduped(t *testing.T) {
 // redirect behavior forwards any header that isn't
 // Authorization/WWW-Authenticate/Cookie/Cookie2 verbatim to a
 // cross-domain redirect target - exactly the shape of
-// ClientConfig.AuthHeaderName, which is deliberately an arbitrary
+// a per-call Authenticator header, which is deliberately an arbitrary
 // vendor-defined header name (e.g. a bespoke X-API-Key). This uses two
 // distinct httptest.Servers (distinct hosts/ports) so a redirect from one
 // to the other is a genuine opportunity for Go's default client to copy
@@ -358,13 +358,11 @@ func TestDo_DoesNotFollowRedirect_CredentialNeverReachesTarget(t *testing.T) {
 	t.Cleanup(origin.Close)
 
 	c := New(ClientConfig{
-		BaseURL:         origin.URL,
-		Timeout:         time.Second,
-		AuthHeaderName:  "X-Api-Key",
-		AuthHeaderValue: secretValue,
+		BaseURL: origin.URL,
+		Timeout: time.Second,
 	})
 
-	resp, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op"})
+	resp, err := c.Do(context.Background(), Request{Auth: NewHeaderAuthenticator("X-Api-Key", secretValue), Method: "GET", Path: "/", Operation: "test_op"})
 	if err != nil {
 		t.Fatalf("Do returned unexpected error: %v", err)
 	}
@@ -488,13 +486,11 @@ func TestDo_AuthHeaderAppliedUnderConfiguredNameOnly(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := New(ClientConfig{
-		BaseURL:         srv.URL,
-		Timeout:         time.Second,
-		AuthHeaderName:  "X-Api-Key",
-		AuthHeaderValue: secretValue,
+		BaseURL: srv.URL,
+		Timeout: time.Second,
 	})
 
-	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op"})
+	_, err := c.Do(context.Background(), Request{Auth: NewHeaderAuthenticator("X-Api-Key", secretValue), Method: "GET", Path: "/", Operation: "test_op"})
 	if err != nil {
 		t.Fatalf("Do returned unexpected error: %v", err)
 	}
@@ -527,13 +523,11 @@ func TestDo_Rejected4xx_EchoedCredentialIsRedacted(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := New(ClientConfig{
-		BaseURL:         srv.URL,
-		Timeout:         time.Second,
-		AuthHeaderName:  "X-Api-Key",
-		AuthHeaderValue: secretValue,
+		BaseURL: srv.URL,
+		Timeout: time.Second,
 	})
 
-	_, err := c.Do(context.Background(), Request{Method: "POST", Path: "/", Operation: "test_op"})
+	_, err := c.Do(context.Background(), Request{Auth: NewHeaderAuthenticator("X-Api-Key", secretValue), Method: "POST", Path: "/", Operation: "test_op"})
 	var rejectedErr *RejectedError
 	if !errors.As(err, &rejectedErr) {
 		t.Fatalf("errors.As(err, *RejectedError) failed, err = %v", err)
@@ -560,13 +554,11 @@ func TestDo_5xx_EchoedCredentialIsRedacted(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c := New(ClientConfig{
-		BaseURL:         srv.URL,
-		Timeout:         time.Second,
-		AuthHeaderName:  "X-Api-Key",
-		AuthHeaderValue: secretValue,
+		BaseURL: srv.URL,
+		Timeout: time.Second,
 	})
 
-	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op", Idempotent: false})
+	_, err := c.Do(context.Background(), Request{Auth: NewHeaderAuthenticator("X-Api-Key", secretValue), Method: "GET", Path: "/", Operation: "test_op", Idempotent: false})
 	var unavailableErr *UnavailableError
 	if !errors.As(err, &unavailableErr) {
 		t.Fatalf("errors.As(err, *UnavailableError) failed, err = %v", err)
@@ -739,13 +731,11 @@ func TestDo_Rejected4xx_TruncationComposesWithRedaction_SecretStraddlesBoundary(
 	srv := conformance.NewStatusServer(t, 422, body)
 
 	c := New(ClientConfig{
-		BaseURL:         srv.URL,
-		Timeout:         time.Second,
-		AuthHeaderName:  "X-Api-Key",
-		AuthHeaderValue: secretValue,
+		BaseURL: srv.URL,
+		Timeout: time.Second,
 	})
 
-	_, err := c.Do(context.Background(), Request{Method: "GET", Path: "/", Operation: "test_op"})
+	_, err := c.Do(context.Background(), Request{Auth: NewHeaderAuthenticator("X-Api-Key", secretValue), Method: "GET", Path: "/", Operation: "test_op"})
 	var rejectedErr *RejectedError
 	if !errors.As(err, &rejectedErr) {
 		t.Fatalf("errors.As(err, *RejectedError) failed, err = %v", err)

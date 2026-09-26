@@ -62,7 +62,10 @@ func run() error {
 	// wiring decision later in this function - nothing is constructed a
 	// second time under a different name.
 	wiring := mockProviderWiring(cfg)
-	providers := buildProviderBundle(wiring)
+	providers, err := withCredentialSubsystem(cfg, buildProviderBundle(wiring))
+	if err != nil {
+		return err
+	}
 	if err := refuseSyntheticInProduction(cfg, buildRegistrations(cfg, providers)); err != nil {
 		return err
 	}
@@ -340,6 +343,11 @@ func run() error {
 		// (docs/decisions/0030 §4) - email.MockProvider records what would
 		// have been sent without any production SMTP/API credentials.
 		EmailProvider: providers.Email,
+
+		// Stage 10.3 W2a (ADR 0093): the real provider-credential
+		// subsystem, nil unless a fingerprint key AND a permitted
+		// secret-store backend are configured.
+		ProviderCredentials: providers.Credentials,
 	})
 
 	// Stage 3C directive item 4: operationalize the ledger-vs-projection

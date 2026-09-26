@@ -514,6 +514,27 @@ const (
 	PermSportsbookSettlementSimulate Permission = "sportsbook_settlement:simulate"
 )
 
+// Provider credential permissions (Stage 10.3 W2a; ADR 0093 §3 and its
+// W2a design-review amendment; security review §6). Four distinct
+// permissions, never bundled into PermTenantWrite, PermCasinoConfigWrite
+// or PermProviderConfigWrite:
+//
+//   - PermProviderCredentialRead: list handles (key_id, status, window,
+//     fingerprint, secret_ref) - never a secret value. Platform admin and
+//     tenant admin.
+//   - PermProviderCredentialRequest: file a registration, and apply an
+//     approved one. Platform admin only.
+//   - PermProviderCredentialApprove: decide a registration. Platform admin
+//     only; holding it never bypasses the DB's distinct-Person check.
+//   - PermProviderCredentialRevoke: the single-actor transitions
+//     (verify_only, shorten, revoke). Platform admin and tenant admin.
+const (
+	PermProviderCredentialRead    Permission = "provider_credential:read"
+	PermProviderCredentialRequest Permission = "provider_credential:request"
+	PermProviderCredentialApprove Permission = "provider_credential:approve"
+	PermProviderCredentialRevoke  Permission = "provider_credential:revoke"
+)
+
 // rolePermissions is a static, in-code role -> permission-set mapping.
 // Stage 2 does not make this database-driven/partner-configurable - that
 // would be a Stage 6 partner-console feature (custom roles), premature
@@ -571,6 +592,7 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// "capability nothing can actually use" CLAUDE.md's "no fake
 		// completion" rule warns against. See CreateStaffRestriction's own
 		// doc comment for the full reasoning and the recorded OPEN DECISION.
+		PermProviderCredentialRead, PermProviderCredentialRequest, PermProviderCredentialApprove, PermProviderCredentialRevoke,
 	),
 	// Stage 3D business decision #4/#5: tenant_admin (a broad
 	// administrative role that also holds PermStaffManage) deliberately
@@ -658,6 +680,7 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermSportsbookBetRead,
 		// Stage 7: see PermCasinoTransactionRead's own doc comment.
 		PermCasinoTransactionRead,
+		PermProviderCredentialRead, PermProviderCredentialRevoke,
 	),
 	RoleSupport: permSet(
 		PermPlayerRead,
@@ -817,6 +840,30 @@ func RequirePermission(perm Permission) func(http.Handler) http.Handler {
 				return
 			}
 			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// RequireAnyPermission denies a request unless the caller's role includes
+// at least one of perms (Stage 10.3 W2a: the provider-credential request
+// read routes accept provider_credential:request OR :approve). An empty
+// perms list denies everything.
+func RequireAnyPermission(perms ...Permission) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestID := observability.RequestIDFromContext(r.Context())
+			tc, err := tenant.FromContext(r.Context())
+			if err != nil {
+				apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated tenant context")
+				return
+			}
+			for _, perm := range perms {
+				if RoleHasPermission(Role(tc.Role), perm) {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			apierror.Write(w, requestID, apierror.CodeForbidden, "insufficient permissions for this operation")
 		})
 	}
 }

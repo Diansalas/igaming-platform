@@ -6,7 +6,9 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -299,6 +301,107 @@ type Config struct {
 	// true at the same time Environment == "production" - see Environment's
 	// own doc comment.
 	TestSupportEndpointsEnabled bool
+
+	// ProviderCredentialFingerprintKey is the platform fingerprint HMAC
+	// key (ADR 0093 §2 and its Stage 10.3 W2a amendment A3; security review
+	// 07-w2a-design-review-security.md §3), from
+	// PROVIDER_CREDENTIAL_FINGERPRINT_KEY. Every stored provider-credential
+	// fingerprint is fp1:hex(HMAC-SHA256(key, label||0x00||secret)).
+	//
+	// Absent means the real provider-credential subsystem is simply NOT
+	// constructed (the real resolver is nil, the request/approve/apply
+	// routes are not mounted, non-synthetic outbound calls fail closed);
+	// startup still succeeds. Present, Load refuses a key shorter than 32
+	// bytes, equal to either JWT secret, or - outside an explicit
+	// development environment - equal to the published .env.example/CI
+	// placeholder. The key must be stable per environment: changing it
+	// makes every stored fp1: fingerprint mismatch (every resolve then
+	// fails closed with credential_integrity). It is a SecretValue, so it
+	// never renders through fmt, slog or encoding/json.
+	ProviderCredentialFingerprintKey SecretValue
+
+	// SecretStoreBackends lists the secret-store backend schemes this
+	// process constructs (SECRETSTORE_BACKENDS, comma-separated, e.g.
+	// "devfile"). Every entry must pass ValidateSecretBackendScheme, so a
+	// configured backend the environment does not permit refuses startup.
+	// Empty (the default) constructs no backend, so the real credential
+	// subsystem is not built (fail closed).
+	SecretStoreBackends []string
+
+	// SecretStoreDevFileRoot is the devfile:// backend's root directory
+	// (SECRETSTORE_DEVFILE_ROOT, default ./.secrets/dev, which is listed in
+	// both .gitignore and .dockerignore). Only read when "devfile" is in
+	// SecretStoreBackends, which itself is development-only.
+	SecretStoreDevFileRoot string
+}
+
+// SecretValue is a configuration string that must never be printed: its
+// String, GoString, Format, LogValue and MarshalJSON all redact. Reveal
+// returns the value for the one consumer that needs it.
+type SecretValue struct{ v string }
+
+// NewSecretValue wraps v. For tests and for Load only.
+func NewSecretValue(v string) SecretValue { return SecretValue{v: v} }
+
+// Reveal returns the raw value.
+func (s SecretValue) Reveal() string { return s.v }
+
+// IsSet reports whether a non-empty value is present.
+func (s SecretValue) IsSet() bool { return s.v != "" }
+
+const redactedSecretValue = "[REDACTED]"
+
+// String implements fmt.Stringer.
+func (s SecretValue) String() string {
+	if s.v == "" {
+		return ""
+	}
+	return redactedSecretValue
+}
+
+// GoString implements fmt.GoStringer (so %#v also redacts).
+func (s SecretValue) GoString() string { return s.String() }
+
+// Format implements fmt.Formatter so every verb (%s, %q, %x, %v ...)
+// renders the redacted form, never the value.
+func (s SecretValue) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(s.String())) }
+
+// LogValue implements slog.LogValuer.
+func (s SecretValue) LogValue() slog.Value { return slog.StringValue(s.String()) }
+
+// MarshalJSON implements json.Marshaler.
+func (s SecretValue) MarshalJSON() ([]byte, error) { return json.Marshal(s.String()) }
+
+// Published placeholder fingerprint keys. They are NOT secrets: they are
+// the literal values in .env.example and .github/workflows/ci.yml, and
+// exist here only so Load can refuse them outside explicit development.
+const (
+	DevProviderCredentialFingerprintKeyPlaceholder = "dev-only-provider-credential-fingerprint-key-not-a-secret"
+	CIProviderCredentialFingerprintKeyPlaceholder  = "ci-only-provider-credential-fingerprint-key-not-a-secret"
+)
+
+// MinProviderCredentialFingerprintKeyBytes is the shortest accepted
+// fingerprint key (security review §3).
+const MinProviderCredentialFingerprintKeyBytes = 32
+
+// validateProviderCredentialFingerprintKey applies security review §3's
+// rules. An absent key is valid (the subsystem is then not constructed).
+func (c Config) validateProviderCredentialFingerprintKey() error {
+	k := c.ProviderCredentialFingerprintKey.Reveal()
+	if k == "" {
+		return nil
+	}
+	if len(k) < MinProviderCredentialFingerprintKeyBytes {
+		return fmt.Errorf("config: PROVIDER_CREDENTIAL_FINGERPRINT_KEY must be at least %d bytes", MinProviderCredentialFingerprintKeyBytes)
+	}
+	if k == c.JWTSigningSecret || (c.JWTPreviousSecret != "" && k == c.JWTPreviousSecret) {
+		return fmt.Errorf("config: PROVIDER_CREDENTIAL_FINGERPRINT_KEY must differ from JWT_SIGNING_SECRET and JWT_PREVIOUS_SECRET")
+	}
+	if c.GuardEnvironment() != "development" &&
+		(k == DevProviderCredentialFingerprintKeyPlaceholder || k == CIProviderCredentialFingerprintKeyPlaceholder) {
+		return fmt.Errorf("config: PROVIDER_CREDENTIAL_FINGERPRINT_KEY is a published dev/CI placeholder and is refused unless APP_ENV is explicitly \"development\"")
+	}
+	return nil
 }
 
 // Load reads configuration from the process environment. It returns an
@@ -307,31 +410,44 @@ type Config struct {
 func Load() (Config, error) {
 	_, appEnvPresent := os.LookupEnv("APP_ENV")
 	cfg := Config{
-		Environment:                   resolveAppEnv(),
-		EnvironmentExplicit:           appEnvPresent,
-		HTTPAddr:                      getEnvDefault("HTTP_ADDR", ":8080"),
-		DatabaseURL:                   os.Getenv("DATABASE_URL"),
-		DatabaseMaxConns:              10,
-		DatabaseConnTimeout:           5 * time.Second,
-		JWTActiveKID:                  getEnvDefault("JWT_ACTIVE_KID", "k1"),
-		JWTSigningSecret:              os.Getenv("JWT_SIGNING_SECRET"),
-		JWTPreviousKID:                getEnvDefault("JWT_PREVIOUS_KID", "k0"),
-		JWTPreviousSecret:             os.Getenv("JWT_PREVIOUS_SECRET"),
-		JWTIssuer:                     getEnvDefault("JWT_ISSUER", "igaming-platform"),
-		JWTAudience:                   getEnvDefault("JWT_AUDIENCE", "platform-api"),
-		AccessTokenTTL:                15 * time.Minute,
-		RefreshTokenTTL:               30 * 24 * time.Hour,
-		OTelServiceName:               getEnvDefault("OTEL_SERVICE_NAME", "platform-api"),
-		OTelExporter:                  getEnvDefault("OTEL_EXPORTER", "stdout"),
-		ReconciliationInterval:        time.Hour,
-		RGEnumerationSweepInterval:    15 * time.Minute,
-		RGEnumerationStalledThreshold: 15 * time.Minute,
-		BonusDepositSweepInterval:     5 * time.Minute,
-		BonusCashbackSweepInterval:    time.Hour,
-		BonusExpirySweepInterval:      time.Hour,
-		AuthRateLimitPerMinute:        0,
-		TrustedProxyCount:             0,
-		TestSupportEndpointsEnabled:   false,
+		Environment:                      resolveAppEnv(),
+		EnvironmentExplicit:              appEnvPresent,
+		HTTPAddr:                         getEnvDefault("HTTP_ADDR", ":8080"),
+		DatabaseURL:                      os.Getenv("DATABASE_URL"),
+		DatabaseMaxConns:                 10,
+		DatabaseConnTimeout:              5 * time.Second,
+		JWTActiveKID:                     getEnvDefault("JWT_ACTIVE_KID", "k1"),
+		JWTSigningSecret:                 os.Getenv("JWT_SIGNING_SECRET"),
+		JWTPreviousKID:                   getEnvDefault("JWT_PREVIOUS_KID", "k0"),
+		JWTPreviousSecret:                os.Getenv("JWT_PREVIOUS_SECRET"),
+		JWTIssuer:                        getEnvDefault("JWT_ISSUER", "igaming-platform"),
+		JWTAudience:                      getEnvDefault("JWT_AUDIENCE", "platform-api"),
+		AccessTokenTTL:                   15 * time.Minute,
+		RefreshTokenTTL:                  30 * 24 * time.Hour,
+		OTelServiceName:                  getEnvDefault("OTEL_SERVICE_NAME", "platform-api"),
+		OTelExporter:                     getEnvDefault("OTEL_EXPORTER", "stdout"),
+		ReconciliationInterval:           time.Hour,
+		RGEnumerationSweepInterval:       15 * time.Minute,
+		RGEnumerationStalledThreshold:    15 * time.Minute,
+		BonusDepositSweepInterval:        5 * time.Minute,
+		BonusCashbackSweepInterval:       time.Hour,
+		BonusExpirySweepInterval:         time.Hour,
+		AuthRateLimitPerMinute:           0,
+		TrustedProxyCount:                0,
+		TestSupportEndpointsEnabled:      false,
+		ProviderCredentialFingerprintKey: NewSecretValue(os.Getenv("PROVIDER_CREDENTIAL_FINGERPRINT_KEY")),
+		SecretStoreDevFileRoot:           getEnvDefault("SECRETSTORE_DEVFILE_ROOT", "./.secrets/dev"),
+	}
+	if v := os.Getenv("SECRETSTORE_BACKENDS"); v != "" {
+		seen := map[string]bool{}
+		for _, scheme := range strings.Split(v, ",") {
+			scheme = strings.TrimSpace(scheme)
+			if scheme == "" || seen[scheme] {
+				continue
+			}
+			seen[scheme] = true
+			cfg.SecretStoreBackends = append(cfg.SecretStoreBackends, scheme)
+		}
 	}
 
 	if v := os.Getenv("DATABASE_MAX_CONNS"); v != "" {
@@ -494,6 +610,16 @@ func Load() (Config, error) {
 	}
 	if cfg.JWTPreviousSecret != "" && cfg.JWTPreviousKID == cfg.JWTActiveKID {
 		return Config{}, fmt.Errorf("config: JWT_PREVIOUS_KID must differ from JWT_ACTIVE_KID")
+	}
+
+	// Stage 10.3 W2a (ADR 0093 A3; security review §3/§4.1).
+	if err := cfg.validateProviderCredentialFingerprintKey(); err != nil {
+		return Config{}, err
+	}
+	for _, scheme := range cfg.SecretStoreBackends {
+		if err := cfg.ValidateSecretBackendScheme(scheme); err != nil {
+			return Config{}, fmt.Errorf("config: SECRETSTORE_BACKENDS: %w", err)
+		}
 	}
 
 	return cfg, nil

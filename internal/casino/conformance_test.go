@@ -19,7 +19,7 @@ import (
 // internal/payments' identical helper exactly.
 func mockCredentialFor(t *testing.T, mock *MockCasinoProvider, tenantID uuid.UUID) webhookauth.Credential {
 	t.Helper()
-	cred, err := NewMockWebhookCredentials(mock).Resolve(context.Background(), tenantID, mock.Capabilities().ProviderID, mockWebhookKeyID)
+	cred, err := NewMockWebhookCredentials(mock).ResolveKey(context.Background(), tenantID, mock.Capabilities().ProviderID, mockWebhookKeyID)
 	if err != nil {
 		t.Fatalf("resolve mock webhook credential: %v", err)
 	}

@@ -55,7 +55,7 @@ func TestWebhookAuthAliases_ErrorsIsAs(t *testing.T) {
 	t.Run("signature sentinel both directions", func(t *testing.T) {
 		provider := NewMockProvider("mock-psp")
 		tenantID := uuid.New()
-		cred, err := NewMockWebhookCredentials(provider).Resolve(context.Background(), tenantID, "mock-psp", mockWebhookKeyID)
+		cred, err := NewMockWebhookCredentials(provider).ResolveKey(context.Background(), tenantID, "mock-psp", mockWebhookKeyID)
 		if err != nil {
 			t.Fatalf("resolve: %v", err)
 		}
@@ -73,11 +73,11 @@ func TestWebhookAuthAliases_ErrorsIsAs(t *testing.T) {
 	})
 
 	t.Run("credential-unavailable sentinel both directions", func(t *testing.T) {
-		_, err := webhookauth.MockResolver{Master: webhookauth.NewMockMaster(), Label: webhookauth.PaymentsMockKeyLabel, ProviderID: "a"}.Resolve(context.Background(), uuid.New(), "b", mockWebhookKeyID)
+		_, err := webhookauth.MockResolver{Master: webhookauth.NewMockMaster(), Label: webhookauth.PaymentsMockKeyLabel, ProviderID: "a"}.ResolveKey(context.Background(), uuid.New(), "b", mockWebhookKeyID)
 		if !errors.Is(err, ErrWebhookCredentialUnavailable) {
 			t.Fatalf("webhookauth resolver error must match payments sentinel, got %v", err)
 		}
-		_, err = NewMockWebhookCredentials(NewMockProvider("a")).Resolve(context.Background(), uuid.New(), "b", mockWebhookKeyID)
+		_, err = NewMockWebhookCredentials(NewMockProvider("a")).ResolveKey(context.Background(), uuid.New(), "b", mockWebhookKeyID)
 		if !errors.Is(err, webhookauth.ErrCredentialUnavailable) {
 			t.Fatalf("payments resolver error must match webhookauth sentinel, got %v", err)
 		}

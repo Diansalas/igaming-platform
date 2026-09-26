@@ -1,13 +1,18 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/email"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/providerkind"
+	"github.com/Diansalas/igaming-platform/internal/secretstore"
+	"github.com/Diansalas/igaming-platform/internal/secretstore/devfile"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
@@ -42,6 +47,67 @@ type providerBundle struct {
 	PaymentsWebhookResolver payments.WebhookCredentialResolver
 	CasinoWebhookResolver   webhookauth.Resolver
 	KYCWebhookResolver      webhookauth.Resolver
+
+	// Credentials is the REAL provider-credential subsystem (Stage 10.3
+	// W2a, ADR 0093): the handle-table resolver, outbound resolution and
+	// the four-eyes lifecycle. Nil unless BOTH a fingerprint key and a
+	// permitted secret-store backend are configured (fail closed: real
+	// callbacks get no_resolver, the request/approve/apply routes are not
+	// mounted). Set by withCredentialSubsystem, never by buildProviderBundle,
+	// so the bundle stays a pure function of the mock wiring.
+	Credentials *providercred.Subsystem
+	// SecretBackends are the constructed secret-store backends, registered
+	// with the synthetic guard individually (devfile carries no
+	// production-eligibility marker, so the guard refuses it in production
+	// even if the environment allow-list were ever bypassed).
+	SecretBackends []secretstore.Store
+}
+
+// withCredentialSubsystem builds the real credential subsystem from cfg
+// and attaches it to b (ADR 0093 §4 wiring; security review §3/§4.1):
+//
+//   - every scheme in cfg.SecretStoreBackends must pass
+//     cfg.ValidateSecretBackendScheme (config.Load already refused
+//     otherwise; checked again by secretstore.NewRouter);
+//   - devfile:// is constructed by devfile.New, which re-checks the
+//     environment itself and refuses a bad root directory;
+//   - awssm:// is the W3b backend and is NOT IMPLEMENTED in this build: a
+//     configuration naming it refuses startup rather than silently running
+//     without it;
+//   - memory:// can never be configured (test-only, import-restricted).
+//
+// With no fingerprint key or no backend, b.Credentials stays nil and
+// startup still succeeds. It makes no network or database call.
+func withCredentialSubsystem(cfg config.Config, b providerBundle) (providerBundle, error) {
+	var stores []secretstore.Store
+	for _, scheme := range cfg.SecretStoreBackends {
+		if err := cfg.ValidateSecretBackendScheme(scheme); err != nil {
+			return b, fmt.Errorf("secret store: %w", err)
+		}
+		switch scheme {
+		case config.SecretBackendDevFile:
+			st, err := devfile.New(cfg, cfg.SecretStoreDevFileRoot)
+			if err != nil {
+				return b, fmt.Errorf("secret store: %w", err)
+			}
+			stores = append(stores, st)
+		case config.SecretBackendAWSSecretsManager:
+			return b, fmt.Errorf("secret store: backend %q is NOT IMPLEMENTED in this build (Stage 10.3 W3b)", scheme)
+		default:
+			return b, fmt.Errorf("secret store: backend %q cannot be configured", scheme)
+		}
+	}
+	router, err := secretstore.NewRouter(cfg, stores...)
+	if err != nil {
+		return b, fmt.Errorf("secret store: %w", err)
+	}
+	sub, err := providercred.New(cfg, router)
+	if err != nil {
+		return b, fmt.Errorf("provider credentials: %w", err)
+	}
+	b.Credentials = sub
+	b.SecretBackends = stores
+	return b, nil
 }
 
 // buildProviderBundle constructs every mock component this binary wires,
@@ -96,30 +162,41 @@ func (b providerBundle) kycAdapters() map[string]kyc.KYCProvider {
 // to the bundle's mock adapter id, or a TRUE nil interface (never a typed
 // nil or an empty map) when wiring left it unset, so the Orchestrator's
 // own nil-resolver branch fails every callback closed as ReasonNoResolver.
+//
+// Stage 10.3 W2a (ADR 0093 §4 wiring): the result is the two-way split by
+// ADAPTER KIND - synthetic adapters to the MOCK resolver, every other
+// adapter to the real handle-table resolver (b.Credentials) - never a
+// per-vendor map. Both nil still yields a TRUE nil interface.
 func (b providerBundle) paymentsOrchestratorResolver() payments.WebhookCredentialResolver {
-	if b.PaymentsWebhookResolver == nil || b.Payments == nil {
-		return nil
+	var mock webhookauth.Resolver
+	if b.PaymentsWebhookResolver != nil && b.Payments != nil {
+		mock = payments.MultiWebhookCredentialResolver{b.Payments.Capabilities().ProviderID: b.PaymentsWebhookResolver}
 	}
-	return payments.MultiWebhookCredentialResolver{b.Payments.Capabilities().ProviderID: b.PaymentsWebhookResolver}
+	return webhookauth.NewKindSplitResolver(b.paymentsAdapters(), mock, b.Credentials.Resolver("payments"))
 }
 
 // casinoOrchestratorResolver is paymentsOrchestratorResolver's casino twin
 // (Stage 10.2, CAS-WH-TENANT-1, ADR 0091, design §C7).
+// Stage 10.3 W2a: the same kind split; the real casino resolver is wired
+// only now that revocation is built and its immediacy tested (R9/C14).
 func (b providerBundle) casinoOrchestratorResolver() webhookauth.Resolver {
-	if b.CasinoWebhookResolver == nil || b.Casino == nil {
-		return nil
+	var mock webhookauth.Resolver
+	if b.CasinoWebhookResolver != nil && b.Casino != nil {
+		mock = webhookauth.MultiResolver{b.Casino.Capabilities().ProviderID: b.CasinoWebhookResolver}
 	}
-	return webhookauth.MultiResolver{b.Casino.Capabilities().ProviderID: b.CasinoWebhookResolver}
+	return webhookauth.NewKindSplitResolver(b.casinoAdapters(), mock, b.Credentials.Resolver("casino"))
 }
 
 // kycOrchestratorResolver is the KYC Orchestrator's resolver: the bundle's
 // MOCK resolver directly (KYC wires one provider, design §B2), or a TRUE
 // nil interface when wiring left it unset.
+// Stage 10.3 W2a: the same kind split.
 func (b providerBundle) kycOrchestratorResolver() webhookauth.Resolver {
-	if b.KYCWebhookResolver == nil || b.KYC == nil {
-		return nil
+	var mock webhookauth.Resolver
+	if b.KYCWebhookResolver != nil && b.KYC != nil {
+		mock = b.KYCWebhookResolver
 	}
-	return b.KYCWebhookResolver
+	return webhookauth.NewKindSplitResolver(b.kycAdapters(), mock, b.Credentials.Resolver("kyc"))
 }
 
 // buildRegistrations enumerates every component buildProviderBundle
@@ -150,6 +227,15 @@ func buildRegistrations(_ config.Config, b providerBundle) []providerkind.Regist
 		providerkind.Registration{Domain: "casino", Name: "webhook_resolver", Component: b.CasinoWebhookResolver},
 		providerkind.Registration{Domain: "kyc", Name: "webhook_resolver", Component: b.KYCWebhookResolver},
 	)
+	// The real credential subsystem (production-eligible) and each
+	// secret-store backend (devfile has no eligibility marker, so the guard
+	// refuses it in production; memory is synthetic and never configured).
+	if b.Credentials != nil {
+		regs = append(regs, providerkind.Registration{Domain: "provider_credentials", Name: "subsystem", Component: b.Credentials})
+	}
+	for _, st := range b.SecretBackends {
+		regs = append(regs, providerkind.Registration{Domain: "provider_credentials", Name: "secret_backend:" + st.Scheme(), Component: st})
+	}
 	// Every adapter's WebhookScheme() (security S-1 / code review #6): the
 	// platform MOCK scheme is itself a synthetic component, so the guard
 	// refuses it in production even on an adapter that claims

@@ -157,11 +157,17 @@ type equalSecretResolver struct {
 	providerID string
 }
 
-func (r equalSecretResolver) Resolve(_ context.Context, tenantID uuid.UUID, providerID, keyID string) (webhookauth.Credential, error) {
+func (r equalSecretResolver) ResolveKey(_ context.Context, tenantID uuid.UUID, providerID, keyID string) (webhookauth.Credential, error) {
 	if providerID != r.providerID || keyID != webhookauth.MockKeyID {
 		return webhookauth.Credential{}, webhookauth.ErrCredentialUnavailable
 	}
 	return webhookauth.Credential{TenantID: tenantID, ProviderID: providerID, KeyID: keyID, Secret: r.secret, Fingerprint: webhookauth.Fingerprint(r.secret)}, nil
+}
+
+// Resolve adapts ResolveKey to the ADR 0093 §4 resolver signature (a
+// single-key test double ignores tx; KeyImplicit fails closed).
+func (r equalSecretResolver) Resolve(ctx context.Context, _ pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
+	return webhookauth.ResolveSingleKey(ctx, r, tenantID, providerID, keyID, sel)
 }
 
 // K4: even with a resolver that hands out an EQUAL secret for every

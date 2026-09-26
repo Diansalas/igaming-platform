@@ -131,12 +131,6 @@ func newCreateMyVerificationHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnavailable, "identity verification is temporarily unavailable")
 			return
 		}
-		provider, ok := deps.KYCOrchestrator.Provider("mock")
-		if !ok {
-			logger.Error("kyc_provider_not_registered")
-			apierror.Write(w, requestID, apierror.CodeUnavailable, "identity verification is temporarily unavailable")
-			return
-		}
 
 		tc, err := tenant.FromContext(r.Context())
 		if err != nil {
@@ -155,6 +149,13 @@ func newCreateMyVerificationHandler(deps Deps) http.HandlerFunc {
 			if err != nil {
 				return err
 			}
+			// O4 (Stage 10.3 W2a): the provider comes from the tenant's own
+			// configuration, never a hard-coded id, and selection fails
+			// closed when none is configured (kyc.SelectProvider).
+			provider, err := deps.KYCOrchestrator.SelectProvider(ctx, tx, tc.TenantID)
+			if err != nil {
+				return err
+			}
 			v, err = kyc.CreateVerification(ctx, tx, provider, kyc.CreateVerificationParams{
 				TenantID: tc.TenantID, BrandID: account.BrandID, PlayerAccountID: account.ID, PersonID: account.PersonID,
 			})
@@ -162,6 +163,11 @@ func newCreateMyVerificationHandler(deps Deps) http.HandlerFunc {
 		})
 		if errors.Is(err, identity.ErrNotFound) {
 			apierror.Write(w, requestID, apierror.CodeNotFound, "player not found")
+			return
+		}
+		if errors.Is(err, kyc.ErrNoKYCProviderConfigured) || errors.Is(err, kyc.ErrKYCProviderAmbiguous) {
+			logger.Warn("kyc_provider_not_selected", "reason", err.Error())
+			apierror.Write(w, requestID, apierror.CodeUnavailable, "identity verification is temporarily unavailable")
 			return
 		}
 		if err != nil {

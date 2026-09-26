@@ -80,7 +80,7 @@ func TestMockKYCProvider_HandleCallback_RejectsInvalidSignature(t *testing.T) {
 	in := p.CallbackPayload(tenantID, "ref-1", ProviderApproved, "ok")
 	in.Header.Set(webhookauth.KYCSignatureHeader, "v1="+"00000000000000000000000000000000000000000000000000000000000000")
 	resolver := NewMockWebhookCredentials(p)
-	cred, err := resolver.Resolve(context.Background(), tenantID, p.ID(), webhookauth.MockKeyID)
+	cred, err := resolver.ResolveKey(context.Background(), tenantID, p.ID(), webhookauth.MockKeyID)
 	if err != nil {
 		t.Fatalf("unexpected resolver error: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestMockKYCProvider_HandleCallback_AcceptsValidSignature(t *testing.T) {
 	tenantID := uuid.New()
 	in := p.CallbackPayload(tenantID, "ref-1", ProviderApproved, "ok")
 	resolver := NewMockWebhookCredentials(p)
-	cred, err := resolver.Resolve(context.Background(), tenantID, p.ID(), webhookauth.MockKeyID)
+	cred, err := resolver.ResolveKey(context.Background(), tenantID, p.ID(), webhookauth.MockKeyID)
 	if err != nil {
 		t.Fatalf("unexpected resolver error: %v", err)
 	}

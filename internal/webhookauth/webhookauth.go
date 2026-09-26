@@ -73,7 +73,6 @@
 package webhookauth
 
 import (
-	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -155,8 +154,10 @@ func (e *AuthError) Is(target error) bool {
 
 // Credential is a resolved, per-(tenant, provider, key) inbound webhook
 // verification credential. Secret is never logged, errored, or audited -
-// String()/GoString()/LogValue() redact it, and Fingerprint
-// (hex(sha256(Secret))[:16], see Fingerprint) is the only loggable form.
+// String()/GoString()/Format()/LogValue()/MarshalJSON() redact it, and
+// Fingerprint is the only loggable form: hex(sha256(Secret))[:16] for the
+// MOCK credentials (see Fingerprint), the keyed "fp1:" HMAC fingerprint of
+// ADR 0093 §2 for a real, handle-backed credential.
 type Credential struct {
 	TenantID    uuid.UUID
 	ProviderID  string
@@ -201,15 +202,6 @@ func (c Credential) GoString() string {
 func Fingerprint(secret []byte) string {
 	sum := sha256.Sum256(secret)
 	return hex.EncodeToString(sum[:])[:16]
-}
-
-// Resolver resolves the single candidate credential for (tenantID,
-// providerID, keyID) - never a cross-tenant trial (ADR 0022 §3 point 2).
-// It is the only component that ever sees inbound-callback secret
-// material. A route with no resolver fails closed (ReasonNoResolver) -
-// there is no fallback to unauthenticated verification.
-type Resolver interface {
-	Resolve(ctx context.Context, tenantID uuid.UUID, providerID, keyID string) (Credential, error)
 }
 
 // Inbound is the platform-wide inbound-provider-callback shape. Header

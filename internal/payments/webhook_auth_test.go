@@ -26,7 +26,7 @@ func TestMultiWebhookCredentialResolver_NilEntry_FailsClosed(t *testing.T) {
 		}
 	}()
 
-	_, err := resolver.Resolve(context.Background(), uuid.New(), "broken-provider", "mock-v1")
+	_, err := resolver.ResolveKey(context.Background(), uuid.New(), "broken-provider", "mock-v1")
 	if !errors.Is(err, ErrWebhookCredentialUnavailable) {
 		t.Fatalf("expected ErrWebhookCredentialUnavailable for a nil entry, got %v", err)
 	}
@@ -38,7 +38,7 @@ func TestMultiWebhookCredentialResolver_NilEntry_FailsClosed(t *testing.T) {
 // pinned side by side.
 func TestMultiWebhookCredentialResolver_AbsentEntry_FailsClosed(t *testing.T) {
 	resolver := MultiWebhookCredentialResolver{}
-	_, err := resolver.Resolve(context.Background(), uuid.New(), "never-registered", "mock-v1")
+	_, err := resolver.ResolveKey(context.Background(), uuid.New(), "never-registered", "mock-v1")
 	if !errors.Is(err, ErrWebhookCredentialUnavailable) {
 		t.Fatalf("expected ErrWebhookCredentialUnavailable for an absent entry, got %v", err)
 	}

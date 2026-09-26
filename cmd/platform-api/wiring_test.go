@@ -117,14 +117,14 @@ func TestKYCOrchestrator_FollowsWiring(t *testing.T) {
 	tenantID := uuid.New()
 	in := mock.CallbackPayload(tenantID, "some-ref", kyc.ProviderApproved, "x")
 	resolver := b.kycOrchestratorResolver()
-	cred, err := resolver.Resolve(context.Background(), tenantID, "mock", webhookauth.MockKeyID)
+	cred, err := resolveKey(resolver, tenantID, "mock", webhookauth.MockKeyID)
 	if err != nil || cred.TenantID != tenantID || cred.ProviderID != "mock" {
 		t.Fatalf("MOCK resolver must resolve its own provider, got %v / %v", cred, err)
 	}
 	if _, err := mock.HandleCallback(context.Background(), in, cred); err != nil {
 		t.Fatalf("mock callback must verify under the wired resolver, got %v", err)
 	}
-	if _, err := resolver.Resolve(context.Background(), tenantID, "other", webhookauth.MockKeyID); !errors.Is(err, webhookauth.ErrCredentialUnavailable) {
+	if _, err := resolveKey(resolver, tenantID, "other", webhookauth.MockKeyID); !errors.Is(err, webhookauth.ErrCredentialUnavailable) {
 		t.Fatalf("MOCK resolver must fail closed for another provider, got %v", err)
 	}
 }
@@ -151,11 +151,11 @@ func TestCasinoWebhookResolver_FollowsWiring(t *testing.T) {
 	}
 	mock := b.Casino
 	tenantID := uuid.New()
-	cred, err := r.Resolve(context.Background(), tenantID, "mock-casino", "mock-v1")
+	cred, err := resolveKey(r, tenantID, "mock-casino", "mock-v1")
 	if err != nil || cred.TenantID != tenantID || cred.ProviderID != "mock-casino" {
 		t.Fatalf("MOCK resolver must resolve its own provider, got %v / %v", cred, err)
 	}
-	if _, err := r.Resolve(context.Background(), tenantID, "other", "mock-v1"); !errors.Is(err, webhookauth.ErrCredentialUnavailable) {
+	if _, err := resolveKey(r, tenantID, "other", "mock-v1"); !errors.Is(err, webhookauth.ErrCredentialUnavailable) {
 		t.Fatalf("MOCK resolver must fail closed for another provider, got %v", err)
 	}
 	// And a callback signed by the mock verifies under exactly this
@@ -191,11 +191,11 @@ func TestPaymentsWebhookResolver_FollowsWiring(t *testing.T) {
 	}
 	mock := b.Payments
 	tenantID := uuid.New()
-	cred, err := r.Resolve(context.Background(), tenantID, "mock-payments", "mock-v1")
+	cred, err := resolveKey(r, tenantID, "mock-payments", "mock-v1")
 	if err != nil || cred.TenantID != tenantID || cred.ProviderID != "mock-payments" {
 		t.Fatalf("MOCK resolver must resolve its own provider, got %v / %v", cred, err)
 	}
-	if _, err := r.Resolve(context.Background(), tenantID, "other", "mock-v1"); !errors.Is(err, payments.ErrWebhookCredentialUnavailable) {
+	if _, err := resolveKey(r, tenantID, "other", "mock-v1"); !errors.Is(err, payments.ErrWebhookCredentialUnavailable) {
 		t.Fatalf("MOCK resolver must fail closed for another provider, got %v", err)
 	}
 	// And a callback signed by the mock verifies under exactly this
@@ -224,4 +224,12 @@ func TestBundleAdapters_ProviderIDsUnchanged(t *testing.T) {
 	if n := len(buildProviderBundle(mockWiring{}).kycAdapters()); n != 0 {
 		t.Fatalf("kyc adapters with KYC unwired = %d, want 0", n)
 	}
+}
+
+// resolveKey resolves one KeyFromHeader credential through the composed
+// orchestrator resolver (ADR 0093 §4 signature; a MOCK resolver ignores
+// the nil tx).
+func resolveKey(r webhookauth.Resolver, tenantID uuid.UUID, providerID, keyID string) (webhookauth.Credential, error) {
+	set, err := r.Resolve(context.Background(), nil, tenantID, providerID, keyID, webhookauth.KeyFromHeader)
+	return set.Active, err
 }

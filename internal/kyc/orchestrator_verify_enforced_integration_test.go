@@ -56,7 +56,7 @@ func TestOrchestratorVerify_KYC_EnforcedEvenIfAdapterSkipsIt(t *testing.T) {
 	forged.Header = http.Header{}
 	kycMockScheme.SetHeaders(forged.Header, webhookauth.MockKeyID, kycMockScheme.Sign(webhookauth.NewMockMaster(), f.tenantID, "mock", webhookauth.MockKeyID, forged.Body))
 
-	cred, err := resolver.Resolve(context.Background(), f.tenantID, "mock", webhookauth.MockKeyID)
+	cred, err := resolver.ResolveKey(context.Background(), f.tenantID, "mock", webhookauth.MockKeyID)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}

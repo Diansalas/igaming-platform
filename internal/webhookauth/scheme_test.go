@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // spyScheme is a configurable VerificationScheme for the platform-helper
@@ -264,14 +265,21 @@ func TestExtractInbound_PlatformGuarantees(t *testing.T) {
 }
 
 type countingResolver struct {
-	calls int
-	cred  Credential
-	err   error
+	calls   int
+	cred    Credential
+	prev    *Credential
+	err     error
+	lastKey string
+	lastSel KeySelection
 }
 
-func (r *countingResolver) Resolve(_ context.Context, _ uuid.UUID, _, _ string) (Credential, error) {
+func (r *countingResolver) Resolve(_ context.Context, _ pgx.Tx, _ uuid.UUID, _, keyID string, sel KeySelection) (CredentialSet, error) {
 	r.calls++
-	return r.cred, r.err
+	r.lastKey, r.lastSel = keyID, sel
+	if r.err != nil {
+		return CredentialSet{}, r.err
+	}
+	return CredentialSet{Active: r.cred, Previous: r.prev}, nil
 }
 
 // TestResolveCredentials_KeySelectionFromPropertiesOnly is security C3: the
@@ -286,16 +294,22 @@ func TestResolveCredentials_KeySelectionFromPropertiesOnly(t *testing.T) {
 	implicit := spyScheme{name: "x", props: implicitProps}
 
 	r := &countingResolver{cred: good}
-	if _, e := ResolveCredentials(context.Background(), fromHeader, r, in, NewAuthMaterial("", nil)); e == nil || e.Reason != ReasonSignatureMissing || r.calls != 0 {
+	if _, e := ResolveCredentials(context.Background(), nil, fromHeader, r, in, NewAuthMaterial("", nil)); e == nil || e.Reason != ReasonSignatureMissing || r.calls != 0 {
 		t.Fatalf("KeyFromHeader + empty key id must be signature_missing with NO resolver call (no multi-key trial), got %v calls=%d", e, r.calls)
 	}
-	if _, e := ResolveCredentials(context.Background(), implicit, r, in, NewAuthMaterial("", nil)); e == nil || e.Reason != ReasonCredentialUnavailable || r.calls != 0 {
-		t.Fatalf("KeyImplicit must fail closed until the W2a resolver exists, got %v calls=%d", e, r.calls)
+	// Stage 10.3 W2a: KeyImplicit is resolved (the "fail closed until W2a"
+	// rule is lifted) - through ONE resolver call with an empty key id and
+	// the KeyImplicit selection taken from Properties(), never from the
+	// request.
+	if set, e := ResolveCredentials(context.Background(), nil, implicit, r, in, NewAuthMaterial("", nil)); e != nil || r.calls != 1 ||
+		r.lastKey != "" || r.lastSel != KeyImplicit || set.Active.KeyID != "k-1" {
+		t.Fatalf("KeyImplicit must resolve through one KeyImplicit resolver call, got set=%v err=%v calls=%d key=%q sel=%v", set, e, r.calls, r.lastKey, r.lastSel)
 	}
-	if _, e := ResolveCredentials(context.Background(), fromHeader, nil, in, NewAuthMaterial("k-1", nil)); e == nil || e.Reason != ReasonNoResolver || e.KeyID != "k-1" {
+	r.calls = 0
+	if _, e := ResolveCredentials(context.Background(), nil, fromHeader, nil, in, NewAuthMaterial("k-1", nil)); e == nil || e.Reason != ReasonNoResolver || e.KeyID != "k-1" {
 		t.Fatalf("nil resolver: got %v", e)
 	}
-	if _, e := ResolveCredentials(context.Background(), fromHeader, &countingResolver{err: ErrCredentialUnavailable}, in, NewAuthMaterial("k-1", nil)); e == nil || e.Reason != ReasonCredentialUnavailable {
+	if _, e := ResolveCredentials(context.Background(), nil, fromHeader, &countingResolver{err: ErrCredentialUnavailable}, in, NewAuthMaterial("k-1", nil)); e == nil || e.Reason != ReasonCredentialUnavailable {
 		t.Fatalf("resolver error: got %v", e)
 	}
 	for name, mutate := range map[string]func(*Credential){
@@ -305,11 +319,11 @@ func TestResolveCredentials_KeySelectionFromPropertiesOnly(t *testing.T) {
 	} {
 		c := good
 		mutate(&c)
-		if _, e := ResolveCredentials(context.Background(), fromHeader, &countingResolver{cred: c}, in, NewAuthMaterial("k-1", nil)); e == nil || e.Reason != ReasonCredentialUnavailable {
+		if _, e := ResolveCredentials(context.Background(), nil, fromHeader, &countingResolver{cred: c}, in, NewAuthMaterial("k-1", nil)); e == nil || e.Reason != ReasonCredentialUnavailable {
 			t.Fatalf("%s: a mis-bound credential must fail closed, got %v", name, e)
 		}
 	}
-	set, e := ResolveCredentials(context.Background(), fromHeader, &countingResolver{cred: good}, in, NewAuthMaterial("k-1", nil))
+	set, e := ResolveCredentials(context.Background(), nil, fromHeader, &countingResolver{cred: good}, in, NewAuthMaterial("k-1", nil))
 	if e != nil || set.Active.KeyID != "k-1" || set.Previous != nil {
 		t.Fatalf("good resolve: %+v %v", set, e)
 	}
@@ -433,7 +447,8 @@ func TestVerifyInbound_PlatformGuarantees(t *testing.T) {
 // reason is added to the enum and to the allow-list log tests).
 func TestReason_ClosedEnum(t *testing.T) {
 	want := []string{"tenant_unknown", "tenant_inactive", "provider_invalid", "provider_unregistered", "provider_not_configured",
-		"no_resolver", "credential_unavailable", "signature_missing", "signature_invalid", "key_material", "body_too_large", "timestamp_out_of_window"}
+		"no_resolver", "credential_unavailable", "signature_missing", "signature_invalid", "key_material", "body_too_large", "timestamp_out_of_window",
+		"credential_store_unavailable", "credential_integrity"}
 	got := AllReasons()
 	if len(got) != len(want) {
 		t.Fatalf("AllReasons has %d members, want %d", len(got), len(want))

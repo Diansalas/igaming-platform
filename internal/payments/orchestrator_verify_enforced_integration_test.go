@@ -62,7 +62,7 @@ func TestOrchestratorVerify_Payments_EnforcedEvenIfAdapterSkipsIt(t *testing.T) 
 	paymentsScheme.SetHeaders(forged.Header, mockWebhookKeyID, paymentsScheme.Sign(webhookauth.NewMockMaster(), f.tenantID, "mock-psp", mockWebhookKeyID, forged.Body))
 
 	// Control: the adapter on its own really does accept the forgery.
-	cred, err := resolver.Resolve(context.Background(), f.tenantID, "mock-psp", mockWebhookKeyID)
+	cred, err := resolver.ResolveKey(context.Background(), f.tenantID, "mock-psp", mockWebhookKeyID)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}

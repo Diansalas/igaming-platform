@@ -21,6 +21,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/providercred"
 )
 
 // Deps are the dependencies routes need. Kept as one small struct so
@@ -176,6 +177,13 @@ type Deps struct {
 	// - one function decides both, so they cannot diverge (K11).
 	KYCWebhookEnabled bool
 
+	// ProviderCredentials is the real provider-credential subsystem (Stage
+	// 10.3 W2a, ADR 0093). Nil when it is not constructed (no fingerprint
+	// key or no permitted secret-store backend): the request, decision and
+	// apply routes are then NOT mounted, while listing and single-actor
+	// transitions (revocation) stay available.
+	ProviderCredentials *providercred.Subsystem
+
 	// EmailProvider is Stage 4F's email-delivery boundary (email
 	// verification, password reset). Nil-means-disabled for the
 	// player-facing request endpoints (they return 503) - never silently
@@ -317,6 +325,7 @@ func New(deps Deps) http.Handler {
 	registerAssetRegistryRoutes(mux, deps)
 	registerBonusRoutes(mux, deps)
 	registerJurisdictionRoutes(mux, deps)
+	registerProviderCredentialRoutes(mux, deps)
 
 	instrumented := otelhttp.NewHandler(mux, deps.ServiceName)
 

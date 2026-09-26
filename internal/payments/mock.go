@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
@@ -123,8 +124,14 @@ func NewMockWebhookCredentials(provider *MockProvider) MockWebhookCredentials {
 // package importing internal/providerkind.
 func (r MockWebhookCredentials) SyntheticComponent() {}
 
-// Resolve implements WebhookCredentialResolver.
-func (r MockWebhookCredentials) Resolve(ctx context.Context, tenantID uuid.UUID, providerID, keyID string) (WebhookCredential, error) {
+// Resolve implements WebhookCredentialResolver (ADR 0093 §4 signature).
+// A MOCK resolver ignores tx and resolves KeyFromHeader only.
+func (r MockWebhookCredentials) Resolve(ctx context.Context, _ pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
+	return webhookauth.ResolveSingleKey(ctx, r, tenantID, providerID, keyID, sel)
+}
+
+// ResolveKey implements webhookauth.KeyResolver: the MOCK single-key lookup.
+func (r MockWebhookCredentials) ResolveKey(ctx context.Context, tenantID uuid.UUID, providerID, keyID string) (WebhookCredential, error) {
 	if r.provider == nil {
 		return WebhookCredential{}, ErrWebhookCredentialUnavailable
 	}
@@ -132,7 +139,7 @@ func (r MockWebhookCredentials) Resolve(ctx context.Context, tenantID uuid.UUID,
 		Master:     r.provider.masterSecret,
 		Label:      webhookauth.PaymentsMockKeyLabel,
 		ProviderID: r.provider.providerID,
-	}.Resolve(ctx, tenantID, providerID, keyID)
+	}.ResolveKey(ctx, tenantID, providerID, keyID)
 }
 
 // Magic amounts (minor units) driving MockProvider.Deposit's synthetic

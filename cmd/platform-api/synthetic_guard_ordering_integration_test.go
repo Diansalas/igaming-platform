@@ -71,7 +71,19 @@ func runPlatformAPIOnce(t *testing.T, bin string, env []string) (stdout, stderr 
 func TestSyntheticGuard_RunsBeforeDBConnect_Subprocess(t *testing.T) {
 	bin := buildPlatformAPIBinary(t)
 
-	env := append(os.Environ(),
+	// PROVIDER_CREDENTIAL_FINGERPRINT_KEY / SECRETSTORE_* are dropped from
+	// the inherited environment (Stage 10.3 W2a): CI's job env carries the
+	// published CI placeholder key, which config.Load correctly refuses
+	// outside development - that would stop the process BEFORE the guard
+	// this test is about. They are irrelevant to guard ordering.
+	var inherited []string
+	for _, kv := range os.Environ() {
+		if strings.HasPrefix(kv, "PROVIDER_CREDENTIAL_FINGERPRINT_KEY=") || strings.HasPrefix(kv, "SECRETSTORE_") {
+			continue
+		}
+		inherited = append(inherited, kv)
+	}
+	env := append(inherited,
 		"APP_ENV=production",
 		"JWT_SIGNING_SECRET=a-secret-that-is-at-least-32-characters-long",
 		"OTEL_EXPORTER=none",

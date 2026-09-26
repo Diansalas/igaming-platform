@@ -23,7 +23,7 @@ import (
 // identical helper exactly.
 func mockCredentialFor(t *testing.T, mock *MockKYCProvider, tenantID uuid.UUID) webhookauth.Credential {
 	t.Helper()
-	cred, err := NewMockWebhookCredentials(mock).Resolve(context.Background(), tenantID, mock.ID(), webhookauth.MockKeyID)
+	cred, err := NewMockWebhookCredentials(mock).ResolveKey(context.Background(), tenantID, mock.ID(), webhookauth.MockKeyID)
 	if err != nil {
 		t.Fatalf("resolve mock webhook credential: %v", err)
 	}

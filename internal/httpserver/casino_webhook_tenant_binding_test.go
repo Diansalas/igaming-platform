@@ -120,11 +120,17 @@ type equalSecretCasinoResolver struct {
 	providerID string
 }
 
-func (r equalSecretCasinoResolver) Resolve(_ context.Context, tenantID uuid.UUID, providerID, keyID string) (webhookauth.Credential, error) {
+func (r equalSecretCasinoResolver) ResolveKey(_ context.Context, tenantID uuid.UUID, providerID, keyID string) (webhookauth.Credential, error) {
 	if providerID != r.providerID || keyID != webhookauth.MockKeyID {
 		return webhookauth.Credential{}, webhookauth.ErrCredentialUnavailable
 	}
 	return webhookauth.Credential{TenantID: tenantID, ProviderID: providerID, KeyID: keyID, Secret: r.secret, Fingerprint: webhookauth.Fingerprint(r.secret)}, nil
+}
+
+// Resolve adapts ResolveKey to the ADR 0093 §4 resolver signature (a
+// single-key test double ignores tx; KeyImplicit fails closed).
+func (r equalSecretCasinoResolver) Resolve(ctx context.Context, _ pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
+	return webhookauth.ResolveSingleKey(ctx, r, tenantID, providerID, keyID, sel)
 }
 
 // TestCasinoWebhook_EqualSecretResolver_StillTenantBound is C4: even with

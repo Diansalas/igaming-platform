@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -43,16 +46,28 @@ func unregisteredBundleFields(bundle any, regs []providerkind.Registration) []st
 				continue
 			}
 		}
-		field := fv.Interface()
-		found := false
-		for _, r := range regs {
-			if sameComponent(field, r.Component) {
-				found = true
+		// A slice field (Stage 10.3 W2a: the secret-store backends) is
+		// registered only if EVERY element is.
+		var elems []any
+		if fv.Kind() == reflect.Slice {
+			for j := 0; j < fv.Len(); j++ {
+				elems = append(elems, fv.Index(j).Interface())
+			}
+		} else {
+			elems = []any{fv.Interface()}
+		}
+		for _, field := range elems {
+			found := false
+			for _, r := range regs {
+				if sameComponent(field, r.Component) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				missing = append(missing, tv.Field(i).Name)
 				break
 			}
-		}
-		if !found {
-			missing = append(missing, tv.Field(i).Name)
 		}
 	}
 	return missing
@@ -85,14 +100,17 @@ var allOnWiring = mockWiring{PaymentsWebhookResolver: true, KYCWebhookEnabled: t
 // providerBundle without a matching entry in buildRegistrations fails
 // immediately.
 func TestSyntheticGuard_RegistrationCompletenessScan(t *testing.T) {
-	cfg := baseConfig(t, "development", true)
-	bundle := buildProviderBundle(allOnWiring)
+	cfg := credentialTestConfig(t)
+	bundle, err := withCredentialSubsystem(cfg, buildProviderBundle(allOnWiring))
+	if err != nil {
+		t.Fatalf("withCredentialSubsystem: %v", err)
+	}
 
 	// Non-vacuity: with everything wired, every field is set.
 	v := reflect.ValueOf(bundle)
 	for i := 0; i < v.NumField(); i++ {
 		fv := v.Field(i)
-		if (fv.Kind() == reflect.Ptr || fv.Kind() == reflect.Interface) && fv.IsNil() {
+		if ((fv.Kind() == reflect.Ptr || fv.Kind() == reflect.Interface) && fv.IsNil()) || (fv.Kind() == reflect.Slice && fv.Len() == 0) {
 			t.Fatalf("providerBundle field %q is nil with every wiring flag on - the completeness scan would skip it", v.Type().Field(i).Name)
 		}
 	}
@@ -252,4 +270,24 @@ func TestRefuseSyntheticInProduction_EnvironmentMatrix(t *testing.T) {
 			}
 		})
 	}
+}
+
+// credentialTestConfig is an explicit-development config with the real
+// credential subsystem enabled over a devfile backend rooted in a fresh
+// 0700 temp directory, and a fingerprint key generated at runtime.
+func credentialTestConfig(t *testing.T) config.Config {
+	t.Helper()
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := baseConfig(t, "development", true)
+	cfg.ProviderCredentialFingerprintKey = config.NewSecretValue(hex.EncodeToString(key))
+	cfg.SecretStoreBackends = []string{config.SecretBackendDevFile}
+	cfg.SecretStoreDevFileRoot = root
+	return cfg
 }

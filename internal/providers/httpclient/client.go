@@ -44,8 +44,8 @@
 //     http.ErrUseLastResponse), so a 3xx is returned to the caller as a
 //     Response rather than silently followed - closing a
 //     credential-exfiltration path a redirecting/compromised provider
-//     could otherwise use against ClientConfig.AuthHeaderName (see New's
-//     own doc comment).
+//     could otherwise use against a per-call Authenticator's header (see
+//     New's own doc comment).
 //   - Do's retry loop treats the caller's own ctx being done as a
 //     distinct condition from the provider being slow/unhealthy: it
 //     checks ctx.Err() before every iteration and short-circuits
@@ -68,6 +68,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -113,9 +114,9 @@ const (
 	//
 	// This is a Stage 9.1 (`integrations`) hardening of the residual gap
 	// ADR 0080 Decision 3 / Stage 9 addendum documented and left open: the
-	// existing redactCredential/redactCredentialHeader only scrub the ONE
-	// secret this package itself was configured with (ClientConfig.
-	// AuthHeaderValue), and do nothing for content this package has no way
+	// existing redactCredential/redactCredentialHeader only scrub the
+	// secret(s) the call's own Authenticator reports (Request.Auth.RedactionValues;
+	// before W2a, ClientConfig.AuthHeaderValue), and do nothing for content this package has no way
 	// to recognize as sensitive (a session token, a different credential,
 	// a PII fragment) that a vendor's own response might echo back - e.g.
 	// a debug endpoint reflecting the full request, or a large gateway
@@ -145,11 +146,17 @@ const (
 const truncationMarkerFmt = "...[truncated by platform, original length %d bytes]"
 
 // ClientConfig configures a Client. BaseURL, Timeout, MaxRetries, and the
-// auth header fields are all supplied by the caller at construction time
-// - this package never reads an environment variable or secret store
-// itself (see internal/providers.ProviderConfig/ResolveAPIKey, Decision
-// 4, for how a real adapter is expected to resolve AuthHeaderValue before
-// constructing a Client).
+// fields are all supplied by the caller at construction time - this
+// package never reads an environment variable or secret store itself.
+//
+// There is deliberately NO credential here (Stage 10.3 W2a,
+// PROV-OUTBOUND-CRED-1; ADR 0093 §5): the previous process-wide static
+// AuthHeaderName/AuthHeaderValue, sourced from one environment variable
+// (ProviderConfig.APIKeyEnvVar), made a shared adapter unable to use
+// per-tenant credentials and made rotation need a redeploy. A Client is
+// long-lived and credential-free; every call carries its own
+// Request.Auth, built from the credential resolved for THAT call
+// (internal/providercred.OutboundResolver).
 type ClientConfig struct {
 	// ProviderName identifies the provider for tracing only (e.g. a
 	// tenant-configured provider code) - never used to select behavior
@@ -189,34 +196,23 @@ type ClientConfig struct {
 	// place is a credential-exfiltration risk: Go's default
 	// shouldCopyHeaderOnRedirect only strips Authorization/
 	// WWW-Authenticate/Cookie/Cookie2 on a cross-domain redirect, so
-	// ClientConfig.AuthHeaderName (deliberately an arbitrary
+	// a per-call Authenticator's header (deliberately an arbitrary
 	// vendor-defined header name, e.g. a bespoke X-API-Key) would be
 	// forwarded verbatim to whatever host a redirect names - including an
 	// attacker-controlled one if the provider (or something impersonating
 	// it) is compromised or misconfigured. See ADR 0080 Decision 3.
 	HTTPClient *http.Client
-
-	// AuthHeaderName/AuthHeaderValue, if AuthHeaderName is non-empty, are
-	// set as a header on every request. The value is supplied by the
-	// caller (e.g. resolved via internal/providers.ProviderConfig.
-	// ResolveAPIKey) - this package treats it as an opaque secret: it is
-	// never logged, never added as a span/trace attribute, and never
-	// echoed back in any error.
-	AuthHeaderName  string
-	AuthHeaderValue string
 }
 
 // Client is a generic outbound HTTP client for a single provider
 // endpoint. It is safe for concurrent use by multiple goroutines (it
 // holds no mutable state after construction).
 type Client struct {
-	providerName    string
-	baseURL         string
-	timeout         time.Duration
-	maxRetries      int
-	httpClient      *http.Client
-	authHeaderName  string
-	authHeaderValue string
+	providerName string
+	baseURL      string
+	timeout      time.Duration
+	maxRetries   int
+	httpClient   *http.Client
 }
 
 // New constructs a Client from cfg, applying the documented defaults for
@@ -231,8 +227,8 @@ type Client struct {
 // (shouldCopyHeaderOnRedirect) only strips the Authorization/
 // WWW-Authenticate/Cookie/Cookie2 headers on a cross-domain redirect, and
 // forwards any other header verbatim, which is exactly the shape of
-// ClientConfig.AuthHeaderName (an arbitrary vendor-defined header, e.g.
-// X-API-Key). Refusing to follow a redirect at all is simpler and safer
+// a per-call Authenticator's header (an arbitrary vendor-defined header,
+// e.g. X-API-Key). Refusing to follow a redirect at all is simpler and safer
 // than trying to selectively strip headers, per Stage 8 §12's "no
 // cleverness" instruction (ADR 0080 Decision 3). See ClientConfig.
 // HTTPClient's own doc comment for what a caller overriding HTTPClient
@@ -256,13 +252,11 @@ func New(cfg ClientConfig) *Client {
 		}
 	}
 	return &Client{
-		providerName:    cfg.ProviderName,
-		baseURL:         strings.TrimSuffix(cfg.BaseURL, "/"),
-		timeout:         timeout,
-		maxRetries:      maxRetries,
-		httpClient:      httpClient,
-		authHeaderName:  cfg.AuthHeaderName,
-		authHeaderValue: cfg.AuthHeaderValue,
+		providerName: cfg.ProviderName,
+		baseURL:      strings.TrimSuffix(cfg.BaseURL, "/"),
+		timeout:      timeout,
+		maxRetries:   maxRetries,
+		httpClient:   httpClient,
 	}
 }
 
@@ -290,10 +284,78 @@ type Request struct {
 	// configured auth header). A caller-supplied value here is not
 	// treated as a secret by this package - callers must not put a
 	// credential here if they don't want it to end up in ordinary
-	// request logging some future transport layer might add. The
-	// configured AuthHeaderName/AuthHeaderValue is the mechanism this
-	// package guarantees never gets logged.
+	// request logging some future transport layer might add. Request.Auth
+	// is the mechanism this package guarantees never gets logged.
 	Headers map[string]string
+
+	// Auth authenticates THIS call (Stage 10.3 W2a, PROV-OUTBOUND-CRED-1):
+	// built by the caller from the credential resolved for this call and
+	// dropped when Do returns - never stored on the Client, an adapter or
+	// an SDK session. It is applied AFTER Headers, so a caller header can
+	// never overwrite it. Every value it reports in RedactionValues is
+	// scrubbed from provider error bodies and headers. nil sends no
+	// authentication.
+	Auth Authenticator
+}
+
+// Authenticator authenticates one outbound request. Implementations must
+// never log, trace or error with credential material, and must report
+// every secret value they place on the request in RedactionValues.
+type Authenticator interface {
+	Authenticate(req *http.Request) error
+	RedactionValues() []string
+}
+
+// HeaderAuthenticator sets one static header (e.g. X-Api-Key) for one
+// call. It never renders its value.
+type HeaderAuthenticator struct {
+	name  string
+	value string
+}
+
+// NewHeaderAuthenticator builds a per-call header authenticator.
+func NewHeaderAuthenticator(name, value string) *HeaderAuthenticator {
+	return &HeaderAuthenticator{name: name, value: value}
+}
+
+var errInvalidAuthenticator = errors.New("httpclient: invalid authenticator")
+
+// Authenticate implements Authenticator.
+func (a *HeaderAuthenticator) Authenticate(req *http.Request) error {
+	if a == nil || a.name == "" || a.value == "" {
+		return errInvalidAuthenticator
+	}
+	req.Header.Set(a.name, a.value)
+	return nil
+}
+
+// RedactionValues implements Authenticator.
+func (a *HeaderAuthenticator) RedactionValues() []string {
+	if a == nil || a.value == "" {
+		return nil
+	}
+	return []string{a.value}
+}
+
+const redactedAuthenticator = "HeaderAuthenticator{[REDACTED]}"
+
+// String implements fmt.Stringer.
+func (a *HeaderAuthenticator) String() string { return redactedAuthenticator }
+
+// GoString implements fmt.GoStringer.
+func (a *HeaderAuthenticator) GoString() string { return redactedAuthenticator }
+
+// Format implements fmt.Formatter.
+func (a *HeaderAuthenticator) Format(f fmt.State, _ rune) {
+	_, _ = f.Write([]byte(redactedAuthenticator))
+}
+
+// LogValue implements slog.LogValuer.
+func (a *HeaderAuthenticator) LogValue() slog.Value { return slog.StringValue(redactedAuthenticator) }
+
+// MarshalJSON implements json.Marshaler.
+func (a *HeaderAuthenticator) MarshalJSON() ([]byte, error) {
+	return json.Marshal(redactedAuthenticator)
 }
 
 // Response is the outcome of a successful (2xx) or passthrough (1xx/3xx)
@@ -439,11 +501,16 @@ func (c *Client) attempt(ctx context.Context, req Request) (resp *Response, err 
 		// dispatched, so Sent is definitely false.
 		return nil, &UnavailableError{Err: buildErr, Sent: false}, false
 	}
-	if c.authHeaderName != "" {
-		httpReq.Header.Set(c.authHeaderName, c.authHeaderValue)
-	}
 	for k, v := range req.Headers {
 		httpReq.Header.Set(k, v)
+	}
+	var redact []string
+	if req.Auth != nil {
+		if err := req.Auth.Authenticate(httpReq); err != nil {
+			// Nothing was sent: fail closed, never an unauthenticated call.
+			return nil, &UnavailableError{Err: errInvalidAuthenticator, Sent: false}, false
+		}
+		redact = req.Auth.RedactionValues()
 	}
 
 	httpResp, doErr := c.httpClient.Do(httpReq)
@@ -483,16 +550,16 @@ func (c *Client) attempt(ctx context.Context, req Request) (resp *Response, err 
 		// makes redaction and truncation compose correctly.
 		return nil, &RejectedError{
 			StatusCode: httpResp.StatusCode,
-			Body:       boundResponseBody(redactCredential(body, c.authHeaderValue)),
-			Header:     boundResponseHeader(redactCredentialHeader(httpResp.Header, c.authHeaderValue)),
+			Body:       boundResponseBody(redactCredential(body, redact)),
+			Header:     boundResponseHeader(redactCredentialHeader(httpResp.Header, redact)),
 		}, false
 	case httpResp.StatusCode >= 500:
 		// An HTTP response was received, so the provider definitely got
 		// the request - Sent is always true here.
 		return nil, &UnavailableError{
 			StatusCode: httpResp.StatusCode,
-			Body:       boundResponseBody(redactCredential(body, c.authHeaderValue)),
-			Header:     boundResponseHeader(redactCredentialHeader(httpResp.Header, c.authHeaderValue)),
+			Body:       boundResponseBody(redactCredential(body, redact)),
+			Header:     boundResponseHeader(redactCredentialHeader(httpResp.Header, redact)),
 			Sent:       true,
 		}, true
 	default:
@@ -524,7 +591,7 @@ const redactedPlaceholder = "[REDACTED-BY-PLATFORM]"
 // reflects a request back in its error body (a surprisingly common vendor
 // behavior for a 4xx "here is what you sent us" diagnostic response, or a
 // 5xx proxy/gateway error page that echoes request headers) would
-// otherwise leak ClientConfig.AuthHeaderValue - the same secret New's
+// otherwise leak the call's credential - the same secret New's
 // CheckRedirect hardening (see New's own doc comment) already protects on
 // the request path - into every place that error ends up.
 //
@@ -534,18 +601,21 @@ const redactedPlaceholder = "[REDACTED-BY-PLATFORM]"
 // error body exists purely for diagnostics, where a scrubbed credential
 // costs nothing. This is also a genuinely partial mitigation, not a
 // guarantee of no leak: it can only scrub the ONE secret this package
-// itself knows about (ClientConfig.AuthHeaderValue) - a provider echoing
+// itself knows about (the call's Authenticator.RedactionValues) - a provider echoing
 // some other sensitive value this package has no visibility into (a
 // session token issued in an earlier call, a signed URL, a second
 // credential a caller passed via Request.Headers) would not be caught
 // here. Callers still must not log a RejectedError/UnavailableError's
 // Body/Header as an unqualified assumption of safety; this only removes
 // the one leak this package's own design could otherwise directly cause.
-func redactCredential(body []byte, secret string) []byte {
-	if secret == "" || len(body) == 0 || !bytes.Contains(body, []byte(secret)) {
-		return body
+func redactCredential(body []byte, secrets []string) []byte {
+	for _, secret := range secrets {
+		if secret == "" || len(body) == 0 || !bytes.Contains(body, []byte(secret)) {
+			continue
+		}
+		body = bytes.ReplaceAll(body, []byte(secret), []byte(redactedPlaceholder))
 	}
-	return bytes.ReplaceAll(body, []byte(secret), []byte(redactedPlaceholder))
+	return body
 }
 
 // redactCredentialHeader returns a shallow copy of h with every header
@@ -557,18 +627,26 @@ func redactCredential(body []byte, secret string) []byte {
 // RejectedError.Header/UnavailableError.Header (e.g. a gateway/proxy error
 // response echoing a request header back, which some do for
 // diagnostics).
-func redactCredentialHeader(h http.Header, secret string) http.Header {
-	if secret == "" || len(h) == 0 {
+func redactCredentialHeader(h http.Header, secrets []string) http.Header {
+	var live []string
+	for _, secret := range secrets {
+		if secret != "" {
+			live = append(live, secret)
+		}
+	}
+	if len(live) == 0 || len(h) == 0 {
 		return h
 	}
 	out := make(http.Header, len(h))
 	for k, values := range h {
 		copied := make([]string, len(values))
 		for i, v := range values {
-			if strings.Contains(v, secret) {
-				copied[i] = redactedPlaceholder
-			} else {
-				copied[i] = v
+			copied[i] = v
+			for _, secret := range live {
+				if strings.Contains(v, secret) {
+					copied[i] = redactedPlaceholder
+					break
+				}
 			}
 		}
 		out[k] = copied

@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 // MaxSkewCap is the platform cap on a scheme's timestamp tolerance (ADR
@@ -89,6 +90,7 @@ func AllReasons() []Reason {
 		ReasonTenantUnknown, ReasonTenantInactive, ReasonProviderInvalid, ReasonProviderUnregistered,
 		ReasonProviderNotConfigured, ReasonNoResolver, ReasonCredentialUnavailable, ReasonSignatureMissing,
 		ReasonSignatureInvalid, ReasonKeyMaterial, ReasonBodyTooLarge, ReasonTimestampOutOfWindow,
+		ReasonCredentialStoreUnavailable, ReasonCredentialIntegrity,
 	}
 }
 
@@ -136,15 +138,13 @@ const (
 	// and a Previous credential is never passed to Verify.
 	KeyFromHeader
 	// KeyImplicit: the vendor sends no key id; the active key and at most
-	// one verify_only predecessor of the SAME (tenant, provider) may be
-	// tried inside a bounded not_after window. Needs a resolver that can
-	// return that pair - NOT IMPLEMENTED until W2a. Until then
-	// ValidateScheme REFUSES a KeyImplicit scheme at registration (gate
-	// 10.3-W1 code review #10), so it can never register and then 401
-	// every callback; ResolveCredentials also still fails closed with
-	// ReasonCredentialUnavailable as defence in depth. The conformance
-	// suite still exercises KeyImplicit reference schemes (it validates
-	// Properties, not registration).
+	// one verify_only predecessor of the SAME (tenant, domain, provider,
+	// purpose) binding may be tried, the predecessor only before its
+	// not_after (ADR 0022 §3 point 2 as amended; security C4). Resolved by
+	// the real resolver (internal/providercred, Stage 10.3 W2a), which
+	// returns exactly that pair from one handle read; a MOCK single-key
+	// resolver fails it closed. The gate 10.3-W1 "refused at registration
+	// until W2a" rule is lifted by W2a.
 	KeyImplicit
 )
 
@@ -353,8 +353,8 @@ func ConformanceManifest() []string {
 }
 
 // ValidateScheme is the registration-time check for one scheme: a
-// well-formed Name, a PERMITTED Properties() declaration (C11), no
-// KeyImplicit until W2a (code review #10), Synthetic only for this
+// well-formed Name, a PERMITTED Properties() declaration (C11), Synthetic
+// only for this
 // package's own MOCK scheme type (NewSchemeSet/NewAdapterSchemeSet add the
 // per-domain and per-adapter Synthetic rules), and - for a non-synthetic
 // scheme - presence in the conformance manifest (C9).
@@ -369,11 +369,6 @@ func ValidateScheme(s VerificationScheme) error {
 	p := s.Properties()
 	if err := ValidateProperties(p); err != nil {
 		return fmt.Errorf("scheme %q: %w", name, err)
-	}
-	if p.KeySelection == KeyImplicit {
-		return fmt.Errorf("webhookauth: scheme %q declares KeyImplicit, which is refused at registration until W2a "+
-			"(the active + verify_only predecessor resolver is NOT IMPLEMENTED, so every callback would fail closed as %s)",
-			name, ReasonCredentialUnavailable)
 	}
 	_, isPlatformMock := s.(mockVerificationScheme)
 	if p.Synthetic && !isPlatformMock {
@@ -610,17 +605,24 @@ func ExtractInbound(scheme VerificationScheme, in Inbound) (m AuthMaterial, auth
 // in.ProviderID). The mode comes from scheme.Properties().KeySelection ONLY
 // (security C3), never from whether m.KeyID is empty:
 //
-//   - KeyFromHeader: exactly Resolve(tenant, provider, m.KeyID); an empty
-//     key id is ReasonSignatureMissing (defence in depth over
-//     ExtractInbound); Previous is always nil.
-//   - KeyImplicit: needs a resolver able to return the active key and at
-//     most one verify_only predecessor - NOT IMPLEMENTED until W2a, so this
-//     fails closed with ReasonCredentialUnavailable.
+//   - KeyFromHeader: exactly Resolve(tx, tenant, provider, m.KeyID,
+//     KeyFromHeader); an empty key id is ReasonSignatureMissing (defence in
+//     depth over ExtractInbound) with NO resolver call; the set must hold
+//     exactly one credential (a Previous is refused, never passed on).
+//   - KeyImplicit: Resolve(tx, tenant, provider, "", KeyImplicit) returns the
+//     active credential plus at most one verify_only predecessor of the same
+//     binding (ADR 0093 §4, Stage 10.3 W2a); the predecessor must carry a
+//     non-zero NotAfter and a different key id.
 //
-// A nil resolver is ReasonNoResolver. A resolved credential bound to a
-// different tenant or provider is ReasonCredentialUnavailable.
-func ResolveCredentials(ctx context.Context, scheme VerificationScheme, resolver Resolver, in Inbound, m AuthMaterial) (CredentialSet, *AuthError) {
-	switch scheme.Properties().KeySelection {
+// tx is the caller's tenant-scoped transaction; the real resolver's single
+// handle read runs in it (ADR 0022 §3 point 9, as amended). A nil resolver
+// is ReasonNoResolver. A resolver error folds into a closed reason
+// (no_resolver, credential_store_unavailable, credential_integrity or
+// credential_unavailable). A resolved credential bound to a different
+// tenant, provider or key id is ReasonCredentialUnavailable.
+func ResolveCredentials(ctx context.Context, tx pgx.Tx, scheme VerificationScheme, resolver Resolver, in Inbound, m AuthMaterial) (CredentialSet, *AuthError) {
+	sel := scheme.Properties().KeySelection
+	switch sel {
 	case KeyFromHeader:
 		if m.KeyID == "" {
 			return CredentialSet{}, &AuthError{Reason: ReasonSignatureMissing}
@@ -628,24 +630,40 @@ func ResolveCredentials(ctx context.Context, scheme VerificationScheme, resolver
 		if resolver == nil {
 			return CredentialSet{}, &AuthError{Reason: ReasonNoResolver, KeyID: m.KeyID}
 		}
-		cred, err := resolver.Resolve(ctx, in.TenantID, in.ProviderID, m.KeyID)
+		set, err := resolver.Resolve(ctx, tx, in.TenantID, in.ProviderID, m.KeyID, KeyFromHeader)
 		if err != nil {
-			return CredentialSet{}, &AuthError{Reason: ReasonCredentialUnavailable, KeyID: m.KeyID}
+			return CredentialSet{}, &AuthError{Reason: reasonForResolveError(err), KeyID: m.KeyID}
 		}
-		if cred.TenantID != in.TenantID || cred.ProviderID != in.ProviderID || cred.KeyID != m.KeyID {
+		if set.Previous != nil || !boundTo(set.Active, in) || set.Active.KeyID != m.KeyID {
 			// Defence in depth only: no conforming resolver returns a
 			// credential bound to anything other than what it was asked for.
 			return CredentialSet{}, &AuthError{Reason: ReasonCredentialUnavailable, KeyID: m.KeyID}
 		}
-		return CredentialSet{Active: cred}, nil
+		return CredentialSet{Active: set.Active}, nil
 	case KeyImplicit:
 		if resolver == nil {
 			return CredentialSet{}, &AuthError{Reason: ReasonNoResolver}
 		}
-		return CredentialSet{}, &AuthError{Reason: ReasonCredentialUnavailable}
+		set, err := resolver.Resolve(ctx, tx, in.TenantID, in.ProviderID, "", KeyImplicit)
+		if err != nil {
+			return CredentialSet{}, &AuthError{Reason: reasonForResolveError(err)}
+		}
+		if !boundTo(set.Active, in) || set.Active.KeyID == "" {
+			return CredentialSet{}, &AuthError{Reason: ReasonCredentialUnavailable}
+		}
+		if p := set.Previous; p != nil {
+			if !boundTo(*p, in) || p.KeyID == "" || p.KeyID == set.Active.KeyID || p.NotAfter.IsZero() {
+				return CredentialSet{}, &AuthError{Reason: ReasonCredentialUnavailable}
+			}
+		}
+		return set, nil
 	default:
 		return CredentialSet{}, &AuthError{Reason: ReasonCredentialUnavailable}
 	}
+}
+
+func boundTo(c Credential, in Inbound) bool {
+	return c.TenantID == in.TenantID && c.ProviderID == in.ProviderID
 }
 
 // VerifyInbound is the orchestrator-enforced verification step (ADR 0022

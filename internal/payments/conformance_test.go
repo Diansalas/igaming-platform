@@ -16,7 +16,7 @@ import (
 // directly, without an Orchestrator/DB in the loop.
 func mockCredentialFor(t *testing.T, mock *MockProvider, tenantID uuid.UUID) WebhookCredential {
 	t.Helper()
-	cred, err := NewMockWebhookCredentials(mock).Resolve(context.Background(), tenantID, mock.Capabilities().ProviderID, mockWebhookKeyID)
+	cred, err := NewMockWebhookCredentials(mock).ResolveKey(context.Background(), tenantID, mock.Capabilities().ProviderID, mockWebhookKeyID)
 	if err != nil {
 		t.Fatalf("resolve mock webhook credential: %v", err)
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // sharedSecretResolver is a TEST-ONLY resolver that hands out the
@@ -31,11 +32,17 @@ type sharedSecretResolver struct {
 	providerID string
 }
 
-func (r sharedSecretResolver) Resolve(_ context.Context, tenantID uuid.UUID, providerID, keyID string) (WebhookCredential, error) {
+func (r sharedSecretResolver) ResolveKey(_ context.Context, tenantID uuid.UUID, providerID, keyID string) (WebhookCredential, error) {
 	if providerID != r.providerID || keyID != mockWebhookKeyID {
 		return WebhookCredential{}, ErrWebhookCredentialUnavailable
 	}
 	return WebhookCredential{TenantID: tenantID, ProviderID: providerID, KeyID: keyID, Secret: r.secret, Fingerprint: "test-fixture"}, nil
+}
+
+// Resolve adapts ResolveKey to the ADR 0093 §4 resolver signature (a
+// single-key test double ignores tx; KeyImplicit fails closed).
+func (r sharedSecretResolver) Resolve(ctx context.Context, _ pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel webhookauth.KeySelection) (webhookauth.CredentialSet, error) {
+	return webhookauth.ResolveSingleKey(ctx, r, tenantID, providerID, keyID, sel)
 }
 
 // assertNoFinancialEffect is the QA plan §2 six-point "no financial
@@ -286,7 +293,7 @@ func TestWebhook_SharedSecretAcrossTenants_TenantStillBound(t *testing.T) {
 	resolver := sharedSecretResolver{secret: sharedSecret, providerID: "mock-psp"}
 	orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": provider}, resolver)
 
-	credA, _ := resolver.Resolve(context.Background(), tenantA.tenantID, "mock-psp", mockWebhookKeyID)
+	credA, _ := resolver.ResolveKey(context.Background(), tenantA.tenantID, "mock-psp", mockWebhookKeyID)
 	body := []byte(`{"event_type":"deposit","provider_reference":"t5-ref","outcome":"succeeded","amount":1000,"asset_code":"EUR"}`)
 	sig := signWithKey(credA.Secret, tenantA.tenantID, "mock-psp", mockWebhookKeyID, body)
 	header := make(http.Header)

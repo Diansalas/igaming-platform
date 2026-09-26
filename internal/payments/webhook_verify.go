@@ -62,7 +62,7 @@ func (o *Orchestrator) verifyCallback(ctx context.Context, tx pgx.Tx, in Inbound
 		return nil, WebhookCredential{}, &CallbackAuthError{Reason: ReasonProviderNotConfigured, KeyID: m.KeyID}
 	}
 
-	creds, authErr := webhookauth.ResolveCredentials(ctx, scheme, o.webhookCredentialResolver, in, m)
+	creds, authErr := webhookauth.ResolveCredentials(ctx, tx, scheme, o.webhookCredentialResolver, in, m)
 	if authErr != nil {
 		return nil, WebhookCredential{}, authErr
 	}

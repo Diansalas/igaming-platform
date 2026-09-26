@@ -54,7 +54,7 @@ func TestOrchestratorVerify_Casino_EnforcedEvenIfAdapterSkipsIt(t *testing.T) {
 	forged.Header = http.Header{}
 	casinoScheme.SetHeaders(forged.Header, webhookauth.MockKeyID, casinoScheme.Sign(webhookauth.NewMockMaster(), f.tenantID, "mock-casino", webhookauth.MockKeyID, forged.Body))
 
-	cred, err := resolver.Resolve(context.Background(), f.tenantID, "mock-casino", webhookauth.MockKeyID)
+	cred, err := resolver.ResolveKey(context.Background(), f.tenantID, "mock-casino", webhookauth.MockKeyID)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}

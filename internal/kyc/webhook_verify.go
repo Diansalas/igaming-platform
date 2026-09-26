@@ -4,6 +4,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -28,8 +30,10 @@ func (o *Orchestrator) WebhookScheme(providerID string) (webhookauth.Verificatio
 	return o.webhookSchemes.Lookup(providerID)
 }
 
-// verifyCallback is ReceiveCallback's pre-verification half (strict I1: it
-// issues NO database statement at all):
+// verifyCallback is ReceiveCallback's pre-verification half (strict I1 as
+// amended by ADR 0022 §3 point 9, Stage 10.3: the ONLY statement it may
+// issue is the real resolver's single, lock-free, read-only,
+// tenant-predicated handle SELECT in tx; a MOCK resolver issues none):
 //
 //	(a) the adapter (and its validated scheme) must be registered, else
 //	    ReasonProviderUnregistered;
@@ -40,7 +44,7 @@ func (o *Orchestrator) WebhookScheme(providerID string) (webhookauth.Verificatio
 //	(c) the ORCHESTRATOR-ENFORCED scheme.Verify over the raw bytes
 //	    (webhookauth.VerifyInbound): HandleCallback is only reached once
 //	    this succeeds, so an adapter cannot skip verification.
-func (o *Orchestrator) verifyCallback(ctx context.Context, in webhookauth.Inbound) (KYCProvider, webhookauth.Credential, error) {
+func (o *Orchestrator) verifyCallback(ctx context.Context, tx pgx.Tx, in webhookauth.Inbound) (KYCProvider, webhookauth.Credential, error) {
 	provider, registered := o.providers[in.ProviderID]
 	scheme, hasScheme := o.webhookSchemes.Lookup(in.ProviderID)
 	if !registered || provider == nil || !hasScheme {
@@ -50,7 +54,7 @@ func (o *Orchestrator) verifyCallback(ctx context.Context, in webhookauth.Inboun
 	if authErr != nil {
 		return nil, webhookauth.Credential{}, authErr
 	}
-	creds, authErr := webhookauth.ResolveCredentials(ctx, scheme, o.webhookCredentialResolver, in, m)
+	creds, authErr := webhookauth.ResolveCredentials(ctx, tx, scheme, o.webhookCredentialResolver, in, m)
 	if authErr != nil {
 		return nil, webhookauth.Credential{}, authErr
 	}

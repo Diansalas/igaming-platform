@@ -35,6 +35,12 @@ var forbiddenProviderImports = []string{
 	"github.com/Diansalas/igaming-platform/internal/geolocation",
 	"github.com/Diansalas/igaming-platform/internal/providerkind",
 	"github.com/Diansalas/igaming-platform/internal/webhookauth",
+	// Stage 10.3 W2a: the provider-credential subsystem and every
+	// secret-store package (memstore is additionally test-only).
+	"github.com/Diansalas/igaming-platform/internal/providercred",
+	"github.com/Diansalas/igaming-platform/internal/secretstore",
+	"github.com/Diansalas/igaming-platform/internal/secretstore/devfile",
+	"github.com/Diansalas/igaming-platform/internal/secretstore/memstore",
 }
 
 func assertNoProviderImports(t *testing.T, mainGoPath string) {
