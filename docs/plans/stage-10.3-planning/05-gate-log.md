@@ -118,12 +118,16 @@ tree frozen.)
 
 GitHub CI: #332 (`3f9903a`) green. **#331 (`98a7f08`, same code) failed once** in `internal/db`
 `TestCatalogueRLS_DeleteAndTruncateAreRefusedLoudly/casino_games_TRUNCATE` (1.00s) — identified on first
-occurrence by the per-test annotation step added for CI-FLAKE-281. Working hypothesis: cross-package lock
-contention on the shared CI database (`TRUNCATE … CASCADE` needs ACCESS EXCLUSIVE on tables that the new W1c
-casino tests use concurrently → ~1s lock timeout instead of the asserted immutable violation). Not skipped, not
-re-run to green; a test-isolation fix and a repo-wide sweep are in progress and recorded in
-`08-ci-331-lock-contention.md`. Tracked as CI-331-LOCK; the gate is recorded as passed on the code, with this CI
-item open until its fix lands.
+occurrence by the per-test annotation step added for CI-FLAKE-281. **Root cause (proven by live
+reproduction, `evidence/ci-331-truncate-lock-repro.txt`):** `TRUNCATE … CASCADE` on the shared CI database formed
+a genuine two-way lock cycle with another package's concurrent transaction; Postgres's default deadlock detector
+(`deadlock_timeout = 1s`; no `lock_timeout` is configured anywhere) aborted it with SQLSTATE 40P01 after 1001 ms,
+matching CI's 1.00s. (The first hypothesis — a lock timeout, 55P03 — was wrong and is corrected here.) **Fix
+(`13b6407`):** the three CASCADE-TRUNCATE immutability tests (catalogue `casino_games`/`sb_sports`, ledger
+`ledger_accounts`, sportsbook `sportsbook_bets`) now run on isolated scratch databases with the full migration
+chain; isolation proven by holding conflicting locks on the shared DB while each passes. No retries, no raised
+timeouts, nothing skipped. Repo-wide sweep: `08-ci-331-lock-contention.md` §4. CI-FLAKE-281 is **not**
+reclassified — its evidence is inconclusive for this class. CI-331-LOCK: RESOLVED.
 
 **Labels at this gate** (registry, ADR 0092 status):
 - WH-VENDOR-SCHEME-1: `IMPLEMENTED` (MOCK schemes + real-scheme contract). Real vendors
