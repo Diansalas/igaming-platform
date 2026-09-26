@@ -165,14 +165,16 @@ jobs:
         # The linter version is pinned (not `latest`) so results are
         # reproducible; bump it deliberately.
         #
-        # GO-TOOLCHAIN-VULN-1: bumped v2.5.0 -> v2.6.2 (minimal bump, not
-        # latest) because v2.5.0 was built with go1.25 and refuses to run
-        # ("the Go language version used to build golangci-lint is lower
-        # than the targeted Go version") once go.mod's toolchain moved to
-        # go1.26.8; v2.6.2 is the first release built with go1.26.
+        # GO-TOOLCHAIN-VULN-1: bumped v2.5.0 -> v2.9.0. The action installs
+        # the published release binary, and golangci-lint refuses to run
+        # when that binary was built with a Go older than go.mod's
+        # toolchain ("the Go language version (go1.25) used to build
+        # golangci-lint is lower than the targeted Go version"). v2.9.0 is
+        # the first release whose linux-amd64 binary is built with go1.26
+        # (v2.6.2-v2.8.0 binaries are go1.25.x; CI run #340 failed on v2.6.2).
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.6.2
+          version: v2.9.0
 
       - name: Dependency drift (go.mod/go.sum, QA condition)
         # `go mod tidy` must be a no-op: a diff here means go.mod/go.sum
