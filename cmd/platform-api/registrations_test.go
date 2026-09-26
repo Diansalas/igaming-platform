@@ -170,6 +170,9 @@ func TestBuildRegistrations_RegistersResolversAndSchemes(t *testing.T) {
 	for _, want := range []string{
 		"payments/webhook_resolver", "casino/webhook_resolver", "kyc/webhook_resolver",
 		"payments/webhook_scheme:mock-payments", "casino/webhook_scheme:mock-casino", "kyc/webhook_scheme:mock",
+		// Stage 10.3 W3a (CAS-RECON-STMT-1): the MOCK casino statement
+		// source is refused in production like the sportsbook one.
+		"sportsbook/settlement_statement_source", "casino/statement_source",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("guard error does not name %q: %v", want, err)

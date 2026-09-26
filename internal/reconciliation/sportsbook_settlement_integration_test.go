@@ -19,6 +19,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
@@ -783,7 +784,7 @@ func TestSportsbookSettlementRecon_DriftInjectionPerKind(t *testing.T) {
 			func(ctx context.Context, tx pgx.Tx) error {
 				return execOne(ctx, tx, `UPDATE sportsbook_bets SET status = 'void' WHERE id = $1`, dirty.bets["open"].ID)
 			})
-		outcomes, err := RunSweep(context.Background(), pool, nil, time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{})
+		outcomes, err := RunSweep(context.Background(), pool, nil, time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
 		if err != nil {
 			t.Fatalf("RunSweep: %v", err)
 		}

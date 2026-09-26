@@ -1660,16 +1660,25 @@ paths:
 
   /v1/admin/casino/reconciliation/runs:
     get:
-      summary: casino_consistency reconciliation runs, tenant-wide (Stage 10.3 W2b, CAS-RECON-1)
+      summary: casino reconciliation runs, tenant-wide (Stage 10.3 W2b CAS-RECON-1, W3a CAS-RECON-STMT-1)
       description: >
         casino_reconciliation:read (tenant_admin, finance, compliance),
         tenant-scoped, read-only. Lists the tenant's casino_consistency
-        runs (checks C1-C7), newest first. A run is immutable evidence;
-        a lock-skipped attempt records no run (it is audited instead).
-        Mirrors GET /v1/admin/sportsbook/bets's chain and pagination.
+        runs (checks C1-C7) and casino_statement runs (ledger vs. casino
+        statement, by key and by totals), newest first, optionally
+        filtered by stream. A run is immutable evidence; a lock-skipped
+        attempt records no run (it is audited instead). A casino_statement
+        run against today's MOCK statement source is tautological (the
+        MOCK renders from the ledger it is matched against); real statement
+        matching is PROVIDER DEPENDENT. Mirrors GET
+        /v1/admin/sportsbook/bets's chain and pagination.
       security:
         - bearerAuth: []
       parameters:
+        - name: stream
+          in: query
+          description: Absent = both casino streams.
+          schema: { type: string, enum: [casino_consistency, casino_statement] }
         - name: limit
           in: query
           schema: { type: integer, default: 50, maximum: 200 }
@@ -1678,7 +1687,7 @@ paths:
           schema: { type: integer, default: 0 }
       responses:
         "200":
-          description: Paginated casino_consistency runs
+          description: Paginated casino reconciliation runs
           content:
             application/json:
               schema:
@@ -1689,6 +1698,8 @@ paths:
                       items:
                         type: array
                         items: { $ref: "#/components/schemas/CasinoReconciliationRun" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -1698,17 +1709,24 @@ paths:
 
   /v1/admin/casino/reconciliation/mismatches:
     get:
-      summary: casino_consistency mismatches, tenant-wide (Stage 10.3 W2b, CAS-RECON-1)
+      summary: casino reconciliation mismatches, tenant-wide (Stage 10.3 W2b CAS-RECON-1, W3a CAS-RECON-STMT-1)
       description: >
         casino_reconciliation:read, tenant-scoped, read-only. Every row is
         a P1 finding (zero tolerance). Detection only - nothing here
         resolves or compensates a finding; compensation is a human
         four-eyes action whose mechanism (LEDGER-MANUAL-ADJ-4EYES-1) is NOT
         IMPLEMENTED. Evidence-type kinds (cas_unposted_provider_event,
-        cas_tombstone_late_original) are recorded once per key.
+        cas_tombstone_late_original) are recorded once per key. The
+        casino_statement stream's kind, cas_mock_statement_mismatch, is a
+        divergence from the MOCK statement source (label carried in
+        actual_value); real statement matching is PROVIDER DEPENDENT.
       security:
         - bearerAuth: []
       parameters:
+        - name: stream
+          in: query
+          description: Absent = both casino streams.
+          schema: { type: string, enum: [casino_consistency, casino_statement] }
         - name: status
           in: query
           schema: { type: string, enum: [open, investigating, resolved] }
@@ -1720,7 +1738,7 @@ paths:
           schema: { type: integer, default: 0 }
       responses:
         "200":
-          description: Paginated casino_consistency mismatches
+          description: Paginated casino reconciliation mismatches
           content:
             application/json:
               schema:
@@ -5767,7 +5785,7 @@ components:
       type: object
       properties:
         id: { type: string, format: uuid }
-        stream: { type: string, enum: [casino_consistency] }
+        stream: { type: string, enum: [casino_consistency, casino_statement] }
         status: { type: string, enum: [clean, mismatches_found] }
         period_start: { type: string, format: date-time }
         period_end: { type: string, format: date-time }
@@ -5782,7 +5800,8 @@ components:
           type: string
           enum: [cas_round_binding_mismatch, cas_posting_shape_mismatch, cas_orphan_win,
                  cas_rollback_linkage_mismatch, cas_tombstone_conflict,
-                 cas_unposted_provider_event, cas_tombstone_late_original]
+                 cas_unposted_provider_event, cas_tombstone_late_original,
+                 cas_mock_statement_mismatch]
         reconciliation_key: { type: string }
         expected_value: { type: string }
         actual_value: { type: string }

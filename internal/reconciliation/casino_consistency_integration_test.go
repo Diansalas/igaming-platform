@@ -923,7 +923,7 @@ func TestRunSweep_CasinoStreamWiredAuditedAndP1Logged(t *testing.T) {
 
 	lc := &logCapture{}
 	logger := slog.New(slog.NewJSONHandler(lc, nil))
-	outcomes, err := RunSweep(context.Background(), pool, logger, time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{})
+	outcomes, err := RunSweep(context.Background(), pool, logger, time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
 	if err != nil {
 		t.Fatalf("RunSweep: %v", err)
 	}
@@ -959,7 +959,7 @@ func TestRunSweep_CasinoStreamFailureIsAuditedInFreshTransaction(t *testing.T) {
 	w := newCasWorld(t, pool)
 	w.buildCleanWorld(t)
 	now := time.Now()
-	outcomes, err := RunSweep(context.Background(), pool, nil, now, now.Add(-time.Hour), sportsbook.MockSettlementStatementSource{})
+	outcomes, err := RunSweep(context.Background(), pool, nil, now, now.Add(-time.Hour), sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
 	if err != nil {
 		t.Fatal(err)
 	}

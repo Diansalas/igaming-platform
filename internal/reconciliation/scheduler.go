@@ -90,6 +90,28 @@ func TryRunCasinoConsistencyForTenant(ctx context.Context, tx pgx.Tx, tenantID u
 	return run, mismatches, metrics, true, err
 }
 
+// TryRunCasinoStatementForTenant is TryRunLedgerVsProjectionForTenant for
+// the casino_statement stream (Stage 10.3 W3a, CAS-RECON-STMT-1): the same
+// transaction-scoped advisory-lock discipline under its own stream key
+// ('reconciliation:casino_statement:<tenant>'), so a concurrent sweep of
+// the SAME stream for the same tenant serializes (the loser is skipped and
+// records nothing but its audited "skipped" attempt), while the other
+// streams never contend with it. tx must be REPEATABLE READ
+// (db.Pool.WithTenantSnapshot); RunCasinoStatement enforces it.
+func TryRunCasinoStatementForTenant(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, periodStart, periodEnd time.Time, source statement.CasinoStatementSource) (run Run, mismatches []Mismatch, info CasinoStatementInfo, acquired bool, err error) {
+	if err := tx.QueryRow(ctx,
+		`SELECT pg_try_advisory_xact_lock(hashtextextended('reconciliation:casino_statement:' || $1::text, 0))`,
+		tenantID,
+	).Scan(&acquired); err != nil {
+		return Run{}, nil, CasinoStatementInfo{}, false, fmt.Errorf("reconciliation: acquire tenant casino statement advisory lock: %w", err)
+	}
+	if !acquired {
+		return Run{}, nil, CasinoStatementInfo{}, false, nil
+	}
+	run, mismatches, info, err = RunCasinoStatement(ctx, tx, tenantID, periodStart, periodEnd, source)
+	return run, mismatches, info, true, err
+}
+
 // SweepOutcome is one tenant's result from a single RunSweep tick.
 type SweepOutcome struct {
 	TenantID uuid.UUID
@@ -107,6 +129,11 @@ type SweepOutcome struct {
 	// 10.3 W2b, CAS-RECON-1), run after sportsbook_settlement in its OWN
 	// tenant-scoped transaction, for the same reason.
 	Casino StreamOutcome
+	// CasinoStatement is the same tenant's casino_statement stream result
+	// (Stage 10.3 W3a, CAS-RECON-STMT-1), run after casino_consistency in
+	// its OWN tenant-scoped REPEATABLE READ transaction, for the same
+	// reason. With today's MOCK source a clean result is tautological.
+	CasinoStatement StreamOutcome
 }
 
 // StreamOutcome is one additional stream's per-tenant result.
@@ -162,7 +189,12 @@ func allTenantIDs(ctx context.Context, pool *db.Pool) ([]uuid.UUID, error) {
 // failed) is recorded to audit_log with ActorSystem, so a sweep that ran
 // but found nothing to do is exactly as observable as one that found
 // mismatches.
-func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodStart, periodEnd time.Time, sbSource statement.SportsbookSettlementSource) ([]SweepOutcome, error) {
+//
+// casSource is the casino_statement stream's statement source (Stage 10.3
+// W3a; in production today casino.MockStatementSource - MOCK). A nil
+// casSource fails that stream's run closed (audited as a failure), never
+// "clean".
+func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodStart, periodEnd time.Time, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource) ([]SweepOutcome, error) {
 	tenantIDs, err := allTenantIDs(ctx, pool)
 	if err != nil {
 		return nil, fmt.Errorf("reconciliation: list tenants for sweep: %w", err)
@@ -241,6 +273,9 @@ func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodSta
 		// Stage 10.3 W2b (CAS-RECON-1): casino_consistency runs after
 		// sportsbook_settlement, regardless of either earlier outcome.
 		outcome.Casino = runCasinoStreamForTenant(ctx, pool, logger, tenantID, periodStart, periodEnd)
+		// Stage 10.3 W3a (CAS-RECON-STMT-1): casino_statement runs after
+		// casino_consistency, regardless of any earlier outcome.
+		outcome.CasinoStatement = runCasinoStatementStreamForTenant(ctx, pool, logger, tenantID, periodStart, periodEnd, casSource)
 		outcomes = append(outcomes, outcome)
 	}
 	return outcomes, nil
@@ -375,6 +410,81 @@ func runCasinoStreamForTenant(ctx context.Context, pool *db.Pool, logger *slog.L
 	return out
 }
 
+// runCasinoStatementStreamForTenant runs the casino_statement stream for
+// one tenant against source with exactly runSportsbookStreamForTenant's
+// audit/log discipline: every attempt (clean, mismatches found,
+// lock-skipped) is audited with the statement source label (which says
+// MOCK today) and the statement's shape; a failure (including a nil
+// source) is audited in a fresh transaction; a mismatch is logged at Error
+// level ("MISMATCH FOUND", P1) with the label. Its transaction is opened
+// with WithTenantSnapshot (REPEATABLE READ) because the statement and the
+// ledger are read in separate statements. It never corrects anything and
+// never touches a balance.
+func runCasinoStatementStreamForTenant(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantID uuid.UUID, periodStart, periodEnd time.Time, source statement.CasinoStatementSource) StreamOutcome {
+	var out StreamOutcome
+	stream := string(StreamCasinoStatement)
+	label := "<none>"
+	if source != nil {
+		label = source.Label()
+	}
+	var mismatchCount int
+
+	txErr := pool.WithTenantSnapshot(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		run, mismatches, info, acquired, err := TryRunCasinoStatementForTenant(ctx, tx, tenantID, periodStart, periodEnd, source)
+		out.Run, out.Skipped = run, !acquired
+		mismatchCount = len(mismatches)
+		if err != nil {
+			return err
+		}
+		status := string(run.Status)
+		if !acquired {
+			status = "skipped"
+		}
+		metadata := map[string]any{
+			"stream": stream, "skipped_lock_contention": !acquired, "status": status,
+			"mismatches": len(mismatches), "statement_source": label,
+		}
+		if acquired {
+			for k, v := range info.AuditMetadata() {
+				metadata[k] = v
+			}
+		}
+		return audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run",
+			TargetType: "reconciliation_run", TargetID: run.ID.String(), Outcome: audit.OutcomeSuccess,
+			Metadata: metadata,
+		})
+	})
+	out.Err = txErr
+
+	switch {
+	case txErr != nil:
+		if logger != nil {
+			logger.Error("reconciliation sweep: tenant run failed", "tenant_id", tenantID, "stream", stream,
+				"error", txErr, "statement_source", label)
+		}
+		if auditErr := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run_failed",
+				TargetType: "tenant", TargetID: tenantID.String(), Outcome: audit.OutcomeFailure,
+				Metadata: map[string]any{"stream": stream, "error": txErr.Error(), "statement_source": label},
+			})
+		}); auditErr != nil && logger != nil {
+			logger.Error("reconciliation sweep: failed to audit tenant failure", "tenant_id", tenantID, "stream", stream, "error", auditErr)
+		}
+	case out.Run.Status == StatusMismatchesFound:
+		// CLAUDE.md: any non-zero drift is a P1 incident.
+		if logger != nil {
+			logger.Error("reconciliation sweep: MISMATCH FOUND", "tenant_id", tenantID, "stream", stream,
+				"run_id", out.Run.ID, "mismatches", mismatchCount, "statement_source", label)
+		}
+	case logger != nil:
+		logger.Info("reconciliation sweep: tenant run complete", "tenant_id", tenantID, "stream", stream,
+			"skipped_lock_contention", out.Skipped, "status", string(out.Run.Status), "statement_source", label)
+	}
+	return out
+}
+
 // RunSchedulerLoop invokes RunSweep on a fixed interval until ctx is
 // canceled - the scheduler/job mechanism directive item 4 requires
 // ("the target remains hourly unless an existing approved architecture
@@ -388,7 +498,7 @@ func runCasinoStreamForTenant(ctx context.Context, pool *db.Pool, logger *slog.L
 // errors are logged and audited per-tenant inside RunSweep and never
 // crash this loop or the calling process - reconciliation failing must
 // never take down the platform it exists to protect.
-func RunSchedulerLoop(ctx context.Context, pool *db.Pool, logger *slog.Logger, interval time.Duration, sbSource statement.SportsbookSettlementSource) {
+func RunSchedulerLoop(ctx context.Context, pool *db.Pool, logger *slog.Logger, interval time.Duration, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource) {
 	runOnce := func() {
 		// Specialist review (backend, P0): this loop runs in a bare `go`
 		// statement (cmd/platform-api/main.go) with no equivalent of the
@@ -404,7 +514,7 @@ func RunSchedulerLoop(ctx context.Context, pool *db.Pool, logger *slog.Logger, i
 			}
 		}()
 		now := time.Now().UTC()
-		if _, err := RunSweep(ctx, pool, logger, now.Add(-interval), now, sbSource); err != nil && logger != nil {
+		if _, err := RunSweep(ctx, pool, logger, now.Add(-interval), now, sbSource, casSource); err != nil && logger != nil {
 			logger.Error("reconciliation sweep: failed to list tenants", "error", err)
 		}
 	}

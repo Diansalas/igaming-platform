@@ -24,6 +24,28 @@ var CasinoConsistencyMismatchKinds = []MismatchKind{
 	MismatchKindCasUnpostedEvent, MismatchKindCasTombstoneLateOrigin,
 }
 
+// CasinoStatementMismatchKinds are the kinds the casino_statement stream
+// records (Stage 10.3 W3a, CAS-RECON-STMT-1).
+var CasinoStatementMismatchKinds = []MismatchKind{MismatchKindCasMockStatement}
+
+// CasinoStreams are the casino reconciliation streams, in sweep order.
+var CasinoStreams = []Stream{StreamCasinoConsistency, StreamCasinoStatement}
+
+// CasinoMismatchKindsForStream returns the mismatch kinds of one casino
+// stream, or of both when stream is "". ok is false for any other value.
+func CasinoMismatchKindsForStream(stream Stream) (kinds []MismatchKind, ok bool) {
+	switch stream {
+	case "":
+		out := append([]MismatchKind{}, CasinoConsistencyMismatchKinds...)
+		return append(out, CasinoStatementMismatchKinds...), true
+	case StreamCasinoConsistency:
+		return CasinoConsistencyMismatchKinds, true
+	case StreamCasinoStatement:
+		return CasinoStatementMismatchKinds, true
+	}
+	return nil, false
+}
+
 // StoredMismatch is a reconciliation_mismatches row as read back.
 type StoredMismatch struct {
 	Mismatch
@@ -34,16 +56,25 @@ type StoredMismatch struct {
 // ListRunsForStream reads one page of the tenant's runs of stream, newest
 // first, plus the total count.
 func ListRunsForStream(ctx context.Context, tx pgx.Tx, stream Stream, limit, offset int) ([]Run, int, error) {
+	return ListRunsForStreams(ctx, tx, []Stream{stream}, limit, offset)
+}
+
+// ListRunsForStreams is ListRunsForStream over several streams at once.
+func ListRunsForStreams(ctx context.Context, tx pgx.Tx, streams []Stream, limit, offset int) ([]Run, int, error) {
+	s := make([]string, len(streams))
+	for i, v := range streams {
+		s[i] = string(v)
+	}
 	var total int
-	if err := tx.QueryRow(ctx, `SELECT count(*) FROM reconciliation_runs WHERE stream = $1`, string(stream)).Scan(&total); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM reconciliation_runs WHERE stream = ANY($1)`, s).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("reconciliation: count runs: %w", err)
 	}
 	rows, err := tx.Query(ctx, `
 		SELECT id, tenant_id, stream, period_start, period_end, run_at, status
 		  FROM reconciliation_runs
-		 WHERE stream = $1
+		 WHERE stream = ANY($1)
 		 ORDER BY run_at DESC, id
-		 LIMIT $2 OFFSET $3`, string(stream), limit, offset)
+		 LIMIT $2 OFFSET $3`, s, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("reconciliation: list runs: %w", err)
 	}

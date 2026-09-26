@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/Diansalas/igaming-platform/internal/reconciliation"
 )
 
 func casReconSpec(t *testing.T) string {
@@ -89,7 +91,7 @@ func TestOpenAPI_CasinoReconciliationAdmin_ContractMatchesHandlers(t *testing.T)
 		codes  []string
 		schema string
 	}{
-		{"/v1/admin/casino/reconciliation/runs", []string{`"200":`, `"401":`, `"403":`, `"500":`}, "CasinoReconciliationRun"},
+		{"/v1/admin/casino/reconciliation/runs", []string{`"200":`, `"400":`, `"401":`, `"403":`, `"500":`}, "CasinoReconciliationRun"},
 		{"/v1/admin/casino/reconciliation/mismatches", []string{`"200":`, `"400":`, `"401":`, `"403":`, `"500":`}, "CasinoReconciliationMismatch"},
 		{"/v1/admin/casino/callback-rejections", []string{`"200":`, `"401":`, `"403":`, `"500":`}, "CasinoCallbackRejection"},
 	}
@@ -113,6 +115,42 @@ func TestOpenAPI_CasinoReconciliationAdmin_ContractMatchesHandlers(t *testing.T)
 				t.Errorf("%s: OpenAPI entry missing response code %s", rt.path, code)
 			}
 		}
+	}
+
+	// Stage 10.3 W3a (CAS-RECON-STMT-1): both the runs and the mismatches
+	// view document the ?stream= filter over exactly the casino streams,
+	// and the documented enums name every casino stream and every casino
+	// mismatch kind the Go code can emit - nothing more, nothing less.
+	var streams []string
+	for _, s := range reconciliation.CasinoStreams {
+		streams = append(streams, string(s))
+	}
+	streamEnum := "enum: [" + strings.Join(streams, ", ") + "]"
+	for _, p := range []string{"/v1/admin/casino/reconciliation/runs", "/v1/admin/casino/reconciliation/mismatches"} {
+		block := casReconPathBlock(t, content, p)
+		if !strings.Contains(block, "- name: stream") || !strings.Contains(block, streamEnum) {
+			t.Errorf("%s: OpenAPI entry must document the stream filter %s", p, streamEnum)
+		}
+	}
+	if !strings.Contains(content, "        stream: { type: string, "+streamEnum+" }") {
+		t.Errorf("CasinoReconciliationRun.stream must be documented as %s", streamEnum)
+	}
+	allKinds, _ := reconciliation.CasinoMismatchKindsForStream("")
+	mm := regexp.MustCompile(`(?s)CasinoReconciliationMismatch:.*?mismatch_kind:.*?enum: \[([^\]]*)\]`).FindStringSubmatch(content)
+	if mm == nil {
+		t.Fatal("CasinoReconciliationMismatch.mismatch_kind enum not found")
+	}
+	var documented, emitted []string
+	for _, k := range strings.Split(mm[1], ",") {
+		documented = append(documented, strings.TrimSpace(k))
+	}
+	for _, k := range allKinds {
+		emitted = append(emitted, string(k))
+	}
+	sort.Strings(documented)
+	sort.Strings(emitted)
+	if !reflect.DeepEqual(documented, emitted) {
+		t.Errorf("documented mismatch kinds %v != casino stream kinds %v", documented, emitted)
 	}
 
 	for name, v := range map[string]any{

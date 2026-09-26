@@ -32,6 +32,7 @@ type providerBundle struct {
 	KYC             *kyc.MockKYCProvider // nil unless wiring.KYCWebhookEnabled (ADR 0085 "absent", not merely unwired)
 	Sportsbook      *sportsbook.MockSportsbookProvider
 	SettlementStmt  sportsbook.MockSettlementStatementSource
+	CasinoStmt      casino.MockStatementSource // Stage 10.3 W3a, CAS-RECON-STMT-1 (MOCK)
 	PersonResolver  *identityresolution.MockPersonResolver
 	DocumentStorage *kyc.MockDocumentStorageProvider
 	MalwareScanner  kyc.MockMalwareScanner
@@ -120,6 +121,7 @@ func buildProviderBundle(wiring mockWiring) providerBundle {
 		Casino:          casino.NewMockCasinoProvider("mock-casino", "EUR", "USD", "GBP", "BRL", "MXN"),
 		Sportsbook:      sportsbook.NewMockSportsbookProvider(),
 		SettlementStmt:  sportsbook.MockSettlementStatementSource{},
+		CasinoStmt:      casino.MockStatementSource{},
 		PersonResolver:  identityresolution.NewMockPersonResolver(),
 		DocumentStorage: kyc.NewMockDocumentStorageProvider(),
 		MalwareScanner:  kyc.NewMockMalwareScanner(),
@@ -212,6 +214,7 @@ func buildRegistrations(_ config.Config, b providerBundle) []providerkind.Regist
 		{Domain: "casino", Name: "provider", Component: b.Casino},
 		{Domain: "sportsbook", Name: "catalogue_provider", Component: b.Sportsbook},
 		{Domain: "sportsbook", Name: "settlement_statement_source", Component: b.SettlementStmt},
+		{Domain: "casino", Name: "statement_source", Component: b.CasinoStmt},
 		{Domain: "identity_resolution", Name: "person_resolver", Component: b.PersonResolver},
 		{Domain: "kyc", Name: "document_storage", Component: b.DocumentStorage},
 		{Domain: "kyc", Name: "malware_scanner", Component: b.MalwareScanner},

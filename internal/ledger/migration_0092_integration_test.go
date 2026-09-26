@@ -44,12 +44,13 @@ import (
 const migration0092Version = int64(92)
 
 // migration0092AlwaysHeldPrefixes holds back the unrelated in-flight
-// migrations 0093, 0094, 0095, 0096 and 0097 in every scratch database
-// this file builds (see the file header comment for why each is safe to
-// exclude; 0096 is W2a's provider credential handles and 0097 is W2b's
-// casino rejection record and reconciliation kinds - neither touches
-// ledger_transactions' reversal index).
-var migration0092AlwaysHeldPrefixes = []string{"0093_", "0094_", "0095_", "0096_", "0097_"}
+// migrations 0093, 0094, 0095, 0096, 0097 and 0098 in every scratch
+// database this file builds (see the file header comment for why each is
+// safe to exclude; 0096 is W2a's provider credential handles, 0097 is W2b's
+// casino rejection record and reconciliation kinds and 0098 is W3a's
+// casino_statement mismatch kind - none touches ledger_transactions'
+// reversal index).
+var migration0092AlwaysHeldPrefixes = []string{"0093_", "0094_", "0095_", "0096_", "0097_", "0098_"}
 
 // stagedMigrations0092 holds back 0092 itself (and, always, the unrelated
 // in-flight migrations above) so a scratch database can be brought to

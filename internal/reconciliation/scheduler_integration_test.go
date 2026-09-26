@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
 )
@@ -126,7 +127,7 @@ func TestRunSweep_FailedTenantRunDoesNotCorruptStateAndRetrySucceeds(t *testing.
 	now := time.Now()
 	invertedStart, invertedEnd := now, now.Add(-time.Hour) // end before start: violates the CHECK constraint
 
-	outcomes, err := RunSweep(context.Background(), pool, nil, invertedStart, invertedEnd, sportsbook.MockSettlementStatementSource{})
+	outcomes, err := RunSweep(context.Background(), pool, nil, invertedStart, invertedEnd, sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
 	if err != nil {
 		t.Fatalf("RunSweep itself must not fail even though one tenant's run failed: %v", err)
 	}
@@ -150,7 +151,7 @@ func TestRunSweep_FailedTenantRunDoesNotCorruptStateAndRetrySucceeds(t *testing.
 	// earlier failure left the tenant (and the advisory lock, which is
 	// transaction-scoped and therefore released on the failed tx's
 	// rollback) in a normal, reconcilable state.
-	outcomes, err = RunSweep(context.Background(), pool, nil, now.Add(-time.Hour), now, sportsbook.MockSettlementStatementSource{})
+	outcomes, err = RunSweep(context.Background(), pool, nil, now.Add(-time.Hour), now, sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
 	if err != nil {
 		t.Fatalf("RunSweep retry: %v", err)
 	}
@@ -190,7 +191,7 @@ func TestRunSweep_DetectsMismatchThenSafeRebuildResolves(t *testing.T) {
 		t.Fatalf("inject drift: %v", err)
 	}
 
-	outcomes, err := RunSweep(context.Background(), pool, nil, time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{})
+	outcomes, err := RunSweep(context.Background(), pool, nil, time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
 	if err != nil {
 		t.Fatalf("RunSweep: %v", err)
 	}
@@ -236,7 +237,7 @@ func TestRunSweep_DetectsMismatchThenSafeRebuildResolves(t *testing.T) {
 		t.Fatalf("rebuild projection row: %v", err)
 	}
 
-	outcomes, err = RunSweep(context.Background(), pool, nil, time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{})
+	outcomes, err = RunSweep(context.Background(), pool, nil, time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
 	if err != nil {
 		t.Fatalf("RunSweep after rebuild: %v", err)
 	}

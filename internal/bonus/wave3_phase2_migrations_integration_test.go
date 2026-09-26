@@ -202,10 +202,15 @@ const (
 	migration0096Version = int64(96)
 	// migration0097Version (Stage 10.3 W2b, CAS-RECON-1: the append-only
 	// casino_callback_rejections table plus the casino_consistency mismatch
-	// kinds) is now the chain's tip. This test's scenario never writes a
-	// rejection row or a casino mismatch, so its evidence-refusing down is
-	// unconditionally reversible here.
+	// kinds). This test's scenario never writes a rejection row or a
+	// casino mismatch, so its evidence-refusing down is unconditionally
+	// reversible here.
 	migration0097Version = int64(97)
+	// migration0098Version (Stage 10.3 W3a, CAS-RECON-STMT-1: the
+	// casino_statement mismatch kind) is now the chain's tip. This test's
+	// scenario never writes a casino_statement mismatch, so its
+	// evidence-refusing down is unconditionally reversible here too.
+	migration0098Version = int64(98)
 )
 
 // migrationsDir resolves the real migrations directory relative to this
@@ -360,8 +365,8 @@ func TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip(t *testing.T) {
 		t.Fatal("bonus_grants.expires_at does not exist after migrating up")
 	}
 
-	// Roll back exactly the thirty most recently applied migrations
-	// (0097, 0096, 0095, 0094, 0093, 0092, 0091, 0090, 0089, 0088, 0087, 0086, 0085, 0084, 0083, 0082, 0081, 0080,
+	// Roll back exactly the thirty-one most recently applied migrations
+	// (0098, 0097, 0096, 0095, 0094, 0093, 0092, 0091, 0090, 0089, 0088, 0087, 0086, 0085, 0084, 0083, 0082, 0081, 0080,
 	// 0079, 0078, 0077, 0076, 0075, 0074, 0073, 0072, 0071, 0070, 0069,
 	// 0068, in that order - MigrateDown orders by applied_at DESC).
 	// 0071/0072/0073/0074/0075/0076/0077/0078/0079/0080/0081/0082/0083/0084/0085/0086/0087/0088/0089/0090/0091/0092/0093/0094/0095
@@ -386,8 +391,8 @@ func TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip(t *testing.T) {
 	// trigger-body fix (0093), and Stage 10.3's parallel workstreams -
 	// casino's capability settlement-completeness CHECK (0094) and KYC's
 	// verification reason bound (0095), W2a's provider credential handles
-	// (0096), and W2b's casino rejection record and reconciliation kinds
-	// (0097))
+	// (0096), W2b's casino rejection record and reconciliation kinds
+	// (0097), and W3a's casino_statement mismatch kind (0098))
 	// but all of them are reversible here (Phase E's down
 	// migration refuses only on a non-empty policy/ceiling table, which
 	// this test's up-migration run never populates; the others carry no
@@ -395,11 +400,11 @@ func TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip(t *testing.T) {
 	// exists, which this run never creates) and sit directly on top of 0070 in the chain, so
 	// they must be rolled back first for 0070's own down migration to run
 	// at all.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 30)
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 31)
 	if err != nil {
-		t.Fatalf("migrate down 30 (0097/0096/0095/0094/0093/0092/0091/0090/0089/0088/0087/0086/0085/0084/0083/0082/0081/0080/0079/0078/0077/0076/0075/0074/0073/0072/0071/0070/0069/0068): %v", err)
+		t.Fatalf("migrate down 31 (0098/0097/0096/0095/0094/0093/0092/0091/0090/0089/0088/0087/0086/0085/0084/0083/0082/0081/0080/0079/0078/0077/0076/0075/0074/0073/0072/0071/0070/0069/0068): %v", err)
 	}
-	wantDown := []int64{migration0097Version, migration0096Version, migration0095Version, migration0094Version, migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version, migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version, migration0076Version, migration0075Version, migration0074Version, migration0073Version, migration0072Version, migration0071Version, migration0070Version, migration0069Version, migration0068Version}
+	wantDown := []int64{migration0098Version, migration0097Version, migration0096Version, migration0095Version, migration0094Version, migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version, migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version, migration0076Version, migration0075Version, migration0074Version, migration0073Version, migration0072Version, migration0071Version, migration0070Version, migration0069Version, migration0068Version}
 	if !wave3EqualVersions(rolledBack, wantDown) {
 		t.Fatalf("expected exactly migrations %v to be rolled back in that order, got %v", wantDown, rolledBack)
 	}
@@ -449,14 +454,14 @@ func TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip(t *testing.T) {
 	// Round trip: up again, cleanly.
 	reapplied, err := pool.MigrateUp(context.Background(), dir)
 	if err != nil {
-		t.Fatalf("re-applying migrations 0068/0069/0070/0071/0072/0073/0074/0075/0076/0077/0078/0079/0080/0081/0082/0083/0084/0085/0086/0087/0088/0089/0090/0091/0092/0093/0094/0095/0096/0097: %v", err)
+		t.Fatalf("re-applying migrations 0068/0069/0070/0071/0072/0073/0074/0075/0076/0077/0078/0079/0080/0081/0082/0083/0084/0085/0086/0087/0088/0089/0090/0091/0092/0093/0094/0095/0096/0097/0098: %v", err)
 	}
 	wantUp := []int64{
 		migration0068Version, migration0069Version, migration0070Version, migration0071Version, migration0072Version, migration0073Version,
 		migration0074Version, migration0075Version, migration0076Version, migration0077Version, migration0078Version, migration0079Version,
 		migration0080Version, migration0081Version, migration0082Version, migration0083Version, migration0084Version, migration0085Version,
 		migration0086Version, migration0087Version, migration0088Version, migration0089Version, migration0090Version,
-		migration0091Version, migration0092Version, migration0093Version, migration0094Version, migration0095Version, migration0096Version, migration0097Version,
+		migration0091Version, migration0092Version, migration0093Version, migration0094Version, migration0095Version, migration0096Version, migration0097Version, migration0098Version,
 	}
 	if !wave3EqualVersions(reapplied, wantUp) {
 		t.Fatalf("expected exactly migrations %v to be re-applied in that order, got %v", wantUp, reapplied)

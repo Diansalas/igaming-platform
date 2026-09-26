@@ -15,7 +15,11 @@ import (
 
 // Stage 10.3 W2b (CAS-RECON-1): read-only Back Office views of the
 // casino_consistency reconciliation evidence and the casino callback
-// rejection record. Tenant-wide, staff-scoped, paginated with the shared
+// rejection record. Stage 10.3 W3a (CAS-RECON-STMT-1) extends the runs and
+// mismatches views to the casino_statement stream (an optional ?stream=
+// filter; absent = both casino streams). A casino_statement result against
+// today's MOCK source is tautological; the MOCK label is carried in every
+// such mismatch's actual_value. Tenant-wide, staff-scoped, paginated with the shared
 // pageParams/pagedResponse convention - the newListAdminBetsHandler /
 // newListAdminCasinoRoundsHandler pattern exactly. Pure reads: nothing here
 // resolves, annotates or compensates a mismatch. Resolution and the
@@ -60,6 +64,21 @@ type casinoCallbackRejectionResponse struct {
 
 var validMismatchStatuses = map[string]bool{"": true, "open": true, "investigating": true, "resolved": true}
 
+// casinoReconciliationStreams maps the optional ?stream= filter (Stage 10.3
+// W3a, CAS-RECON-STMT-1) to the casino streams it selects: absent means
+// both casino_consistency and casino_statement.
+func casinoReconciliationStreams(v string) ([]reconciliation.Stream, bool) {
+	switch reconciliation.Stream(v) {
+	case "":
+		return reconciliation.CasinoStreams, true
+	case reconciliation.StreamCasinoConsistency, reconciliation.StreamCasinoStatement:
+		return []reconciliation.Stream{reconciliation.Stream(v)}, true
+	}
+	return nil, false
+}
+
+const casinoStreamFilterMessage = "stream must be one of casino_consistency, casino_statement"
+
 func newListCasinoReconciliationRunsHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -69,11 +88,16 @@ func newListCasinoReconciliationRunsHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeUnauthorized, "no authenticated context")
 			return
 		}
+		streams, ok := casinoReconciliationStreams(r.URL.Query().Get("stream"))
+		if !ok {
+			apierror.Write(w, requestID, apierror.CodeValidation, casinoStreamFilterMessage)
+			return
+		}
 		p := parsePageParams(r)
 		var items []casinoReconciliationRunResponse
 		var total int
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			runs, count, err := reconciliation.ListRunsForStream(ctx, tx, reconciliation.StreamCasinoConsistency, p.Limit, p.Offset)
+			runs, count, err := reconciliation.ListRunsForStreams(ctx, tx, streams, p.Limit, p.Offset)
 			if err != nil {
 				return err
 			}
@@ -111,11 +135,16 @@ func newListCasinoReconciliationMismatchesHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeValidation, "status must be one of open, investigating, resolved")
 			return
 		}
+		kinds, ok := reconciliation.CasinoMismatchKindsForStream(reconciliation.Stream(r.URL.Query().Get("stream")))
+		if !ok {
+			apierror.Write(w, requestID, apierror.CodeValidation, casinoStreamFilterMessage)
+			return
+		}
 		p := parsePageParams(r)
 		var items []casinoReconciliationMismatchResponse
 		var total int
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			ms, count, err := reconciliation.ListMismatchesOfKinds(ctx, tx, reconciliation.CasinoConsistencyMismatchKinds, status, p.Limit, p.Offset)
+			ms, count, err := reconciliation.ListMismatchesOfKinds(ctx, tx, kinds, status, p.Limit, p.Offset)
 			if err != nil {
 				return err
 			}

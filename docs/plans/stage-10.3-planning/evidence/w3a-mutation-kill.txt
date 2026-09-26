@@ -1,0 +1,62 @@
+Stage 10.3 W3a (CAS-RECON-STMT-1) - casino_statement stream, mutation-kill evidence
+==================================================================================
+
+Purpose (04-review-qa.md, W3a "Conformance self-test angle"): the MOCK casino
+statement source is tautological by construction (it renders from the ledger
+it is matched against), so its clean result proves nothing about detection.
+The test-only divergent sources in
+internal/reconciliation/casino_statement_integration_test.go are this wave's
+self-test; each mutation below breaks one part of the matcher, the sweep
+wiring, the MOCK source, the snapshot guarantee, the read-only views or
+migration 0098, and must make at least one test FAIL.
+
+Method: scratchpad driver (w3a-mutate.py, not committed) applies ONE source
+mutation at a time to the worktree, runs the named tests with
+`go test -tags integration -count=1 <pkg> -run '<regex>'` against a private
+database (igaming_w3a_local, migrated to 0098; migration tests on scratchdb
+databases), records the verdict, and ALWAYS restores the original file
+(git status verified clean of mutations after the run). "KILLED" = the test
+run failed on assertions (not a build failure). The driver would report
+SURVIVED / NOT APPLIED / BUILD FAILED; none occurred in the final run.
+
+Environment: Go toolchain from the repo, PostgreSQL local, worktree
+agent-aadc9e1df0c06b6a5 on top of the W2b merge (1d979d1).
+
+Result: 34 mutations, 34 KILLED, 0 SURVIVED.
+
+Id | Mutation | Tests run | Verdict (failing tests)
+---|----------|-----------|--------
+M1 | matcher stubbed to always match (per-key comparison loop skipped) | -run 'CasinoStatement|RunSweep_CasinoStatement' | KILLED by TestCasinoStatement_CrossTenantIsolation, TestCasinoStatement_DetectionHasNoFinancialEffect, TestCasinoStatement_DetectsEveryKeyDivergence, TestCasinoStatement_DetectsEveryKeyDivergence/amount, TestCasinoStatement_DetectsEveryKeyDivergence/asset, TestCasinoStatement_DetectsEveryKeyDivergence/extra_line, TestCasinoStatement_DetectsEveryKeyDivergence/extra_line_under_another_provider, TestCasinoStatement_DetectsEveryKeyDivergence/kind, TestCasinoStatement_DetectsEveryKeyDivergence/missing_line, TestCasinoStatement_DetectsEveryKeyDivergence/rollback_amount, TestCasinoStatement_DetectsEveryKeyDivergence/rollback_original, TestCasinoStatement_DetectsEveryKeyDivergence/round, TestCasinoStatement_DetectsEveryKeyDivergence/unknown_kind, TestCasinoStatement_DetectsEveryTotalsDivergence, TestCasinoStatement_LateOriginalAfterTombstoneIsAFinding, TestCasinoStatement_MissingWinThenRedeliveryIsClean, TestCasinoStatement_MockSeesUnboundRound, TestCasinoStatement_RerunsAreIdempotentAndStateTypeReDetects, TestCasinoStatement_RollbackPairedWithTombstoneIsAMatch, TestCasinoStatement_SnapshotPreventsFalseMismatchUnderInterleaving, TestCasinoStatement_TotalsDetectLedgerSideDrift, TestRunSweep_CasinoStatementStreamWiredAuditedAndP1Logged
+M2 | amount not compared | -run 'DetectsEveryKeyDivergence' | KILLED by TestCasinoStatement_DetectsEveryKeyDivergence, TestCasinoStatement_DetectsEveryKeyDivergence/amount, TestCasinoStatement_DetectsEveryKeyDivergence/rollback_amount
+M3 | kind not compared | -run 'DetectsEveryKeyDivergence' | KILLED by TestCasinoStatement_DetectsEveryKeyDivergence, TestCasinoStatement_DetectsEveryKeyDivergence/kind, TestCasinoStatement_DetectsEveryKeyDivergence/unknown_kind
+M4 | asset not compared | -run 'DetectsEveryKeyDivergence' | KILLED by TestCasinoStatement_DetectsEveryKeyDivergence, TestCasinoStatement_DetectsEveryKeyDivergence/asset
+M5 | rollback original not compared | -run 'DetectsEveryKeyDivergence' | KILLED by TestCasinoStatement_DetectsEveryKeyDivergence, TestCasinoStatement_DetectsEveryKeyDivergence/rollback_original
+M6 | round not compared | -run 'DetectsEveryKeyDivergence|MockSeesUnboundRound' | KILLED by TestCasinoStatement_DetectsEveryKeyDivergence, TestCasinoStatement_DetectsEveryKeyDivergence/round, TestCasinoStatement_MockSeesUnboundRound
+M7 | statement-only key (ledger lacks it) not flagged | -run 'DetectsEveryKeyDivergence|LateOriginal|MissingWin' | KILLED by TestCasinoStatement_DetectsEveryKeyDivergence, TestCasinoStatement_DetectsEveryKeyDivergence/extra_line, TestCasinoStatement_DetectsEveryKeyDivergence/extra_line_under_another_provider, TestCasinoStatement_LateOriginalAfterTombstoneIsAFinding, TestCasinoStatement_MissingWinThenRedeliveryIsClean
+M8 | ledger-only key (statement lacks it) not flagged | -run 'DetectsEveryKeyDivergence|TotalsDetectLedgerSideDrift' | KILLED by TestCasinoStatement_DetectsEveryKeyDivergence, TestCasinoStatement_DetectsEveryKeyDivergence/missing_line, TestCasinoStatement_TotalsDetectLedgerSideDrift
+M9 | duplicate statement line silently overwrites | -run 'DetectsEveryKeyDivergence' | KILLED by TestCasinoStatement_DetectsEveryKeyDivergence, TestCasinoStatement_DetectsEveryKeyDivergence/duplicate_line
+M10 | rollback/tombstone pairing removed (pairing becomes a finding) | -run 'RollbackPairedWithTombstone' | KILLED by TestCasinoStatement_RollbackPairedWithTombstoneIsAMatch
+M11 | pairing too lenient (any one-sided rollback line matches) | -run 'RollbackPairedWithTombstone' | KILLED by TestCasinoStatement_RollbackPairedWithTombstoneIsAMatch
+M12 | pairing ignores kind (a non-rollback line naming a tombstone matches) | -run 'RollbackPairedWithTombstone' | KILLED by TestCasinoStatement_RollbackPairedWithTombstoneIsAMatch
+M13 | tombstone set not restricted to casino providers (G-4) | -run 'RollbackPairedWithTombstone' | KILLED by TestCasinoStatement_RollbackPairedWithTombstoneIsAMatch
+M14 | totals match never runs | -run 'DetectsEveryTotalsDivergence|TotalsDetectLedgerSideDrift|MissingWin|NoFinancialEffect' | KILLED by TestCasinoStatement_DetectionHasNoFinancialEffect, TestCasinoStatement_DetectsEveryTotalsDivergence, TestCasinoStatement_DetectsEveryTotalsDivergence/GGR_differs, TestCasinoStatement_DetectsEveryTotalsDivergence/duplicate_total, TestCasinoStatement_DetectsEveryTotalsDivergence/extra_non-zero_total, TestCasinoStatement_DetectsEveryTotalsDivergence/missing_total, TestCasinoStatement_DetectsEveryTotalsDivergence/nil_GGR, TestCasinoStatement_MissingWinThenRedeliveryIsClean, TestCasinoStatement_TotalsDetectLedgerSideDrift
+M15 | GGR comparison removed | -run 'DetectsEveryTotalsDivergence|TotalsDetectLedgerSideDrift' | KILLED by TestCasinoStatement_DetectsEveryTotalsDivergence, TestCasinoStatement_DetectsEveryTotalsDivergence/GGR_differs, TestCasinoStatement_DetectsEveryTotalsDivergence/extra_non-zero_total, TestCasinoStatement_TotalsDetectLedgerSideDrift
+M16 | missing statement total not flagged | -run 'DetectsEveryTotalsDivergence' | KILLED by TestCasinoStatement_DetectsEveryTotalsDivergence, TestCasinoStatement_DetectsEveryTotalsDivergence/missing_total
+M17 | duplicate total silently overwrites | -run 'DetectsEveryTotalsDivergence' | KILLED by TestCasinoStatement_DetectsEveryTotalsDivergence, TestCasinoStatement_DetectsEveryTotalsDivergence/duplicate_total
+M18 | nil source treated as an empty statement (fails open) | -run 'NilOrErroringSource|NilSourceFailsClosed' | KILLED by TestCasinoStatement_NilOrErroringSourceFailsClosed, TestRunSweep_CasinoStatementNilSourceFailsClosedAndIsAudited
+M19 | snapshot isolation guard removed | -run 'ReadCommittedTransactionIsRefused' | KILLED by TestCasinoStatement_ReadCommittedTransactionIsRefused
+M20 | sweep opens the statement stream at READ COMMITTED | -run 'RunSweep_CasinoStatementStreamWired' | KILLED by TestRunSweep_CasinoStatementStreamWiredAuditedAndP1Logged
+M21 | statement stream shares casino_consistency's advisory-lock key | -run 'CasinoStatement_ConcurrentRuns' | KILLED by TestCasinoStatement_ConcurrentRunsSerializedByAdvisoryLock
+M22 | advisory lock not taken (always acquired) | -run 'CasinoStatement_ConcurrentRuns' | KILLED by TestCasinoStatement_ConcurrentRunsSerializedByAdvisoryLock
+M23 | sweep never runs the statement stream | -run 'RunSweep_CasinoStatement' | KILLED by TestRunSweep_CasinoStatementNilSourceFailsClosedAndIsAudited, TestRunSweep_CasinoStatementSourceErrorIsAuditedInFreshTransaction, TestRunSweep_CasinoStatementStreamWiredAuditedAndP1Logged
+M24 | sweep audit omits the statement source label | -run 'RunSweep_CasinoStatementStreamWired' | KILLED by TestRunSweep_CasinoStatementStreamWiredAuditedAndP1Logged
+M25 | P1 log line not emitted on mismatch | -run 'RunSweep_CasinoStatementStreamWired' | KILLED by TestRunSweep_CasinoStatementStreamWiredAuditedAndP1Logged
+M26 | failure not audited in a fresh transaction | -run 'RunSweep_CasinoStatementNilSource|RunSweep_CasinoStatementSourceError' | KILLED by TestRunSweep_CasinoStatementNilSourceFailsClosedAndIsAudited, TestRunSweep_CasinoStatementSourceErrorIsAuditedInFreshTransaction
+M27 | MOCK renders a rollback's amount as 0 | -run 'MockOverCleanWorld|MockRendersLedgerFaithfully' | KILLED by TestCasinoStatement_MockOverCleanWorldIsClean, TestCasinoStatement_MockRendersLedgerFaithfully
+M28 | MOCK renders no totals (totals path unexercised by the sweep) | -run 'MockOverCleanWorld|RunSweep_CasinoStatementStreamWired|MockRendersLedgerFaithfully' | KILLED by TestCasinoStatement_MockOverCleanWorldIsClean, TestCasinoStatement_MockRendersLedgerFaithfully, TestRunSweep_CasinoStatementStreamWiredAuditedAndP1Logged
+M29 | ledger view computes a win's amount with the bet (stake) rule | -run 'MockOverCleanWorld|DetectsEveryKeyDivergence' | KILLED by TestCasinoStatement_DetectsEveryKeyDivergence, TestCasinoStatement_MockOverCleanWorldIsClean
+M30 | 0098 down drops the evidence guard | -run 'Migration0098' | KILLED by TestMigration0098_DownRefusesOnceAStatementMismatchExists
+M31 | 0098 up omits the statement kind | -run 'Migration0098' | KILLED by TestMigration0098_CleanDatabaseDownThenUpRoundTrip, TestMigration0098_DownRefusesOnceAStatementMismatchExists
+M32 | db.WithTenantSnapshot opens a READ COMMITTED transaction | -run 'RunSweep_CasinoStatementStreamWired|MockOverCleanWorld' | KILLED by TestCasinoStatement_MockOverCleanWorldIsClean, TestRunSweep_CasinoStatementStreamWiredAuditedAndP1Logged
+M33 | admin runs view ignores the stream filter | -run 'CasinoReconciliationAdmin' | KILLED by TestCasinoReconciliationAdmin_SurfacesCasinoStatementStream
+M34 | admin mismatches view omits the casino_statement kind | -run 'CasinoReconciliationAdmin|OpenAPI_CasinoReconciliation' | KILLED by TestCasinoReconciliationAdmin_SurfacesCasinoStatementStream, TestOpenAPI_CasinoReconciliationAdmin_ContractMatchesHandlers

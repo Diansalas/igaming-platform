@@ -371,8 +371,12 @@ func run() error {
 		defer reconcilerWG.Done()
 		// The sportsbook_settlement stream's statement source is the
 		// MOCK in-house source (ADR 0088 §8.4); real provider statement
-		// matching is PROVIDER DEPENDENT (ADR 0038 §12).
-		reconciliation.RunSchedulerLoop(ctx, pool, logger, cfg.ReconciliationInterval, providers.SettlementStmt)
+		// matching is PROVIDER DEPENDENT (ADR 0038 §12). The
+		// casino_statement stream's source is likewise the MOCK in-house
+		// source (Stage 10.3 W3a, CAS-RECON-STMT-1): tautological against
+		// the ledger it renders from; real casino statement matching is
+		// PROVIDER DEPENDENT.
+		reconciliation.RunSchedulerLoop(ctx, pool, logger, cfg.ReconciliationInterval, providers.SettlementStmt, providers.CasinoStmt)
 	}()
 
 	// Stage 4H-B0-R7 directive item 4: operationalize the self-exclusion

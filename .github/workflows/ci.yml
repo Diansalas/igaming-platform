@@ -250,7 +250,8 @@ jobs:
                    TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip TestMigration0077_EnablesAndForcesRLSOnTenantsLicencesAndJurisdictions \
                    TestPCMigration_RoundTripOnCleanDatabase TestPCMigration_DownRefusesWithRows TestPCHandles_RLS_TenantIsolation \
                    TestInitAppRole_RerunKeepsProviderCredentialGrants TestPCMigration_RuntimeGrantsMinimal \
-                   TestMigration0097_DownRefusesOnceARejectionRowExists TestMigration0097_DownRefusesOnceACasinoMismatchExists; do
+                   TestMigration0097_DownRefusesOnceARejectionRowExists TestMigration0097_DownRefusesOnceACasinoMismatchExists \
+                   TestMigration0098_DownRefusesOnceAStatementMismatchExists TestMigration0098_CleanDatabaseDownThenUpRoundTrip; do
             grep -q -- "--- PASS: $t " integration-test.log || { echo "expected $t to PASS"; exit 1; }
           done
           echo "packages ok:  $(grep -cE '^ok[[:space:]]' integration-test.log)"

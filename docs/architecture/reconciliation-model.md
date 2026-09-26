@@ -170,6 +170,76 @@ migration `0097`), on the existing run/mismatch tables:
   above) is the separate `casino_statement` stream, CAS-RECON-STMT-1
   (W3a, `MOCK` source); real statement matching is `PROVIDER DEPENDENT`.
 
+**Stage 10.3 W3a status (CAS-RECON-STMT-1).** The counterparty half is
+`IMPLEMENTED — MOCK source; real statement PROVIDER DEPENDENT; pending
+gate 10.3-W3` as the `casino_statement` stream
+(`internal/reconciliation/casino_statement.go`, migration `0098`):
+
+- **Contract.** Provider-neutral `statement.CasinoStatementSource`
+  (`internal/reconciliation/statement`, the dependency-free leaf):
+  `Label()` plus `Statement(ctx, tx, tenant, periodStart, periodEnd)`
+  returning lines (`provider_id`, `provider_tx_id`, kind
+  bet/win/rollback, original reference for a rollback, round, asset,
+  minor-unit amount) and optional per-(provider, asset) GGR totals.
+- **Key match** by `(provider_id, provider_tx_id)` against every
+  `casino_bet`/`casino_win`/`casino_rollback` carrying a provider
+  reference: present on both sides with the same kind, amount, asset,
+  round (compared through the ledger correlation id) and, for a rollback,
+  original reference. Amounts: a bet's stake (debits on the player's
+  spendable accounts), a win's payout (its `house_gaming` debit - a
+  recorded deviation from paper 02 §2.5's "player-side leg sum", which
+  would include the lock-release legs of a locked win), a rollback's
+  original's amount. A duplicate statement line is a finding. A statement
+  rollback whose original the ledger holds only as a **casino** tombstone
+  is a **match** (the one one-sided pattern that is not a finding). A
+  statement line for a reference held only as a tombstone is a finding
+  that names the tombstone (the counterparty half of C7).
+- **Totals match**, when the source reports totals: per (provider, asset),
+  net `house_gaming` movement (credits - debits) over the casino
+  transactions carrying that `provider_id` equals the stated GGR; every
+  ledger (provider, asset) needs a stated total; a duplicate or nil total
+  is a finding. A source reporting no totals skips this match, and the run
+  audit says so (`statement_totals_provided: false`).
+- **One kind**, `cas_mock_statement_mismatch` (migration `0098`, additive
+  CHECK widening; down refuses once a row exists - roll forward). Every
+  row is P1, never auto-corrected; state-type (re-detected every run until
+  resolved, ADR 0023 §4). The stream never writes the ledger, a
+  projection, a round, a session, a capability or the rejection record.
+- **Snapshot.** The statement and the ledger are read in separate
+  statements, so the stream **requires** a REPEATABLE READ transaction
+  (`db.Pool.WithTenantSnapshot`) and fails closed otherwise; a posting
+  committed between the two reads can therefore never become a false P1.
+- **Sweep.** Run by `RunSweep` after `casino_consistency`, own
+  REPEATABLE READ transaction, own advisory lock
+  (`reconciliation:casino_statement:<tenant>`); every attempt audited with
+  the source label and statement shape; `Error`-level "MISMATCH FOUND"
+  (P1) with the label; a nil or erroring source fails the run closed and
+  is audited in a fresh transaction, never recorded as clean.
+- **Read-only views**: the W2b runs and mismatches routes take an optional
+  `?stream=casino_consistency|casino_statement` filter (absent = both).
+- **Honesty of the result.** The only source is
+  `casino.MockStatementSource` (`MOCK`; a synthetic component, so the
+  production startup guard refuses it; registered in the provider bundle
+  as `casino/statement_source`). It renders its lines and totals from the
+  **same casino ledger rows** the stream reads, so against it the match is
+  **tautological**: a clean run proves the plumbing (stream, sweep, lock,
+  audit, evidence rows) and **nothing** about agreement with any provider.
+  The one thing it can independently disagree on is the round binding
+  (rendered from `casino_provider_rounds`), which C1 already covers. The
+  matching logic itself is proven by test-only divergent sources that
+  exercise every detection path (`casino_statement_integration_test.go`;
+  mutation-kill evidence in
+  `docs/plans/stage-10.3-planning/evidence/w3a-mutation-kill.txt`).
+- **`PROVIDER DEPENDENT` / `NOT IMPLEMENTED`:** real statement ingestion
+  (provider API or file, append-only statement storage, idempotent
+  ingest, per-tenant credentials from the secret store), a real mismatch
+  kind, and the period **timing** window for provider cut-offs (a key on
+  one side only is a finding only if also absent from the adjacent
+  period; never an amount tolerance). Today the MOCK is all-time and
+  `period_start`/`period_end` are recorded, not used as a filter. Manual
+  statement upload stays an `OPEN DECISION` (§2.2). Compensation stays
+  LEDGER-MANUAL-ADJ-4EYES-1 (`NOT IMPLEMENTED`).
+
 ### 2.4 Wallet ↔ sportsbook provider — `BLUEPRINT`
 
 - Same shape as §2.3, additionally reconciling **open liability**: the sum
