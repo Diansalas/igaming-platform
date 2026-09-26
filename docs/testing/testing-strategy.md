@@ -3719,3 +3719,36 @@ own top-of-file comment states it, and this section is `qa`'s side of that
 same decision (Stage 10.1 post-implementation review, code review P3-7).
 Revisit if/when a schema-validation library becomes a verified dependency
 for another reason - this alone does not justify adding one.
+
+## Stage 10.1 — Results (`qa`)
+
+Binding plans: `docs/plans/stage-10.1-planning/06-review-qa-test-plan.md`
+(PAY-REV-1, SB-T1-XMIN) and `16-pay-wh-review-qa-test-plan.md`
+(PAY-WH-TENANT-1). Each defect was reproduced **before** its fix and the
+failing output is kept in `docs/plans/stage-10.1-planning/evidence/`:
+- PAY-REV-1: two distinct-reference reversals of one deposit both posted;
+- SB-T1-XMIN: savepoint and service-level composed voids rejected;
+- PAY-WH-TENANT-1: a tenant-A-signed callback wrote a tombstone in tenant B.
+
+**Rules added by this stage:**
+- A regression test must be shown to fail against the pre-fix code. The
+  ledger index-order test was corrected after review because it passed on
+  the old `Post`.
+- A mutation that removes the guarded predicate must turn at least one test
+  red. For example, the F4 test is the only test killed by replacing the
+  T-1 status check with "accept".
+- Concurrency tests assert *where* the waiter blocks, not only the outcome.
+  PAY-REV-1 test #1 checks that the waiting statement is the S2
+  `FOR UPDATE` with no projection locks held.
+- "No financial effect" means all six checks, run in a fresh transaction:
+  1. no new ledger rows;
+  2. deposit intents unchanged;
+  3. no tombstones;
+  4. no audit rows;
+  5. debit/credit totals unchanged;
+  6. projections unchanged.
+- Pre-verification invariant I1 is proven mechanically. A recording
+  transaction captures every statement, savepoint, batch and copy made
+  before verification.
+- Tests touching migrations use scratch databases, never the shared test
+  database. The chain-tip-pin tests move with every new migration (now 0093).
