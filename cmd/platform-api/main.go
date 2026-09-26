@@ -145,10 +145,19 @@ func run() error {
 	// resolver (a FORCE-RLS handle table plus an external secret store) is
 	// NOT IMPLEMENTED, and any provider without a resolver entry fails
 	// closed on every callback.
+	//
+	// PAYWH-GATE-1 (Stage 10.2, ADR 0091, ruling J9): the MOCK resolver is
+	// wired only when mockProviderWiring (derived solely from
+	// cfg.TestSupportRoutesEnabled(), ADR 0085) says so. In production or
+	// with test support off the Orchestrator gets a nil resolver, so every
+	// payments webhook fails closed with the uniform 401 (no_resolver).
+	// The mock adapter itself stays registered for initiation
+	// (MOCK-ADAPTER-PROD-1, a pre-launch checklist item).
+	wiring := mockProviderWiring(cfg)
 	mockPaymentsProvider := payments.NewMockProvider("mock-payments", "EUR", "USD", "GBP", "BRL", "MXN")
 	orchestrator := payments.NewOrchestrator(
 		map[string]payments.PaymentProvider{"mock-payments": mockPaymentsProvider},
-		payments.MultiWebhookCredentialResolver{"mock-payments": payments.NewMockWebhookCredentials(mockPaymentsProvider)},
+		paymentsWebhookResolver(wiring, mockPaymentsProvider),
 	)
 
 	// Stage 4A ships a mock casino adapter only (CLAUDE.md's Stage 4A
