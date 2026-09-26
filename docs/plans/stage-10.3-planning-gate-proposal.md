@@ -328,3 +328,28 @@ the final approved commit. No deployment is proposed here.
 HD-10.3-2..4 or accepts their defaults). On approval: record ADR 0092 as ACCEPTED, register the scope rows
 in `docs/governance/task-registry.md`, then execute W0 → W1 → W2 → W3 with per-wave gates, stopping at the
 Stage 10.3 completion gate.
+
+## 22. Human authorization (2026-09-26) — binding; supersedes conflicting text above
+
+Stage 10.3 **AUTHORIZED** by the human against baseline `207c922` ("MASTER ORCHESTRATOR — AUTHORIZE STAGE
+10.3"), full proposed scope and wave structure, gates 10.3-W0..W3.
+
+| Decision | Ruling | Effect on this proposal |
+|---|---|---|
+| HD-10.3-1 | APPROVED — full scope | W0 → W1a–d → W2 → W3 proceed; W3a is first to cut under pressure; never trade W1/W2 security or financial controls for W3 |
+| HD-10.3-2 | **EXCLUDE AWS IAM code changes** | W3b = Secrets Manager backend code behind existing boundaries + local SDK fake only; no new IAM policy/role/KMS code in `deploy/`; any new IAM architecture needs a separate human decision |
+| HD-10.3-3 | **Players see STATUS ONLY** | no player-facing `reason_code` and no provider text on any player surface; the bounded, sanitised provider reason stays available to authorized compliance/back-office workflows only. Migration 0095 = bound only (no `reason_code` column). §2/§6/§7 `reason_code` text is superseded. |
+| HD-10.3-4 | **UNCHANGED** | no new suspended-tenant settlement policy; existing behaviour preserved and documented |
+
+Further binding instructions from the authorization:
+- **PAYWH-TS-1, PAYWH-BRAND-1, PAYWH-RL-1 remain DEFERRED** unless the implementation proves one required.
+  Ruling R4's "PAYWH-TS-1 closes as superseded" is withdrawn: provider-specific timestamp/replay rules
+  are part of WH-VENDOR-SCHEME-1 (W1a) for real schemes, and TS-1 stays open in the register until
+  evidence supports closure at the 10.3 completion gate.
+- The Stage 10.2 MOCK scheme is **not** the real-provider protocol; a real provider is declared supported
+  only after its actual documentation/contract is implemented and tested.
+- Carried items stay open (ADR 0009/AUP, HDR-J-6..9, HDR-M-1/2, HDR-SB-1, OB-1, licensing/legal/vendor/
+  retail, LEDGER-MANUAL-ADJ-4EYES-1, sportsbook jurisdiction Rung 2 / HDR-J-7 — no invented evidence).
+- Bonus Engine Wave 4 and any AI implementation remain unauthorized (ADR 0089 architecture only).
+- CI-FLAKE-281: resolve if reproducible; never weaken thresholds or remove concurrency/security coverage.
+- AWS staging stays OFF; no deployment without separate explicit authorization.
