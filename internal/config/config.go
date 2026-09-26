@@ -23,8 +23,10 @@ type Config struct {
 	// informational (used in logs/traces) and must never gate a security
 	// control - environments are otherwise identically configured.
 	//
-	// Three deliberate, reviewed exceptions exist - the sentence above is
-	// the DEFAULT rule, not an invariant, and this list is exhaustive:
+	// Six deliberate, reviewed exceptions exist (corrected at Stage 10.2
+	// final review, K6/M5 - this list previously undercounted itself as
+	// "three") - the sentence above is the DEFAULT rule, not an invariant,
+	// and this list is exhaustive:
 	//
 	//  1. db.VerifyRuntimeRoleInProduction (PLAT-ROLESPLIT-1,
 	//     docs/security/runtime-role-separation.md) gates a fail-closed
@@ -42,10 +44,17 @@ type Config struct {
 	//     `POST /v1/admin/sportsbook/bets/{id}/simulate-settlement-event`
 	//     route the same way, added to the existing gate rather than a
 	//     new one.
+	//  6. cmd/platform-api/wiring.go's mockProviderWiring (Stage 10.2, ADR
+	//     0091) derives its own testSupport bool from
+	//     TestSupportRoutesEnabled() and uses it to decide whether the KYC
+	//     mock/orchestrator and the payments/casino mock webhook resolvers
+	//     are wired at all, including httpserver.Deps.KYCWebhookEnabled.
+	//     Unlike (2)-(5) it is not itself a single Deps bool field, but it
+	//     is gated by the same function and belongs on this list.
 	//
 	// (1) fails CLOSED on a mis-set value (a typo just re-enables a check
-	// production should pass anyway). (2), (3), (4) and (5) used to (or, for
-	// (5), would have) fail OPEN on a typo or an unset variable, per two
+	// production should pass anyway). (2)-(6) used to (or, for (5) and (6),
+	// would have) fail OPEN on a typo or an unset variable, per two
 	// independent Stage 9.3 security reviews - Load() computed Environment
 	// from an unvalidated, open string, and cmd/platform-api/main.go gated
 	// all of these simulation flags purely on `cfg.Environment !=
@@ -460,10 +469,16 @@ func Load() (Config, error) {
 // Stage 9.4 two-layer gate: never true in production (Load() has
 // already refused to start if TestSupportEndpointsEnabled were true
 // there), and never true unless TestSupportEndpointsEnabled was also
-// explicitly opted into. cmd/platform-api/main.go computes all three
-// flags from this one method rather than duplicating the composition
-// inline three times, so there is exactly one place this logic can be
-// gotten wrong.
+// explicitly opted into. cmd/platform-api/main.go computes all four of
+// those Deps flags directly from this one method rather than duplicating
+// the composition inline four times. Stage 10.2 (ADR 0091) adds a fifth
+// caller that is not itself a Deps flag: cmd/platform-api/wiring.go's
+// mockProviderWiring(cfg) also calls this method (once, as testSupport) to
+// decide whether to wire the KYC mock/orchestrator and the payments/casino
+// mock webhook resolvers, including Deps.KYCWebhookEnabled. Either way,
+// this is the one place the logic can be gotten wrong (see Config.
+// Environment's doc comment for the full, current, exhaustive list of
+// exceptions this method backs).
 func (c Config) TestSupportRoutesEnabled() bool {
 	return c.Environment != "production" && c.TestSupportEndpointsEnabled
 }

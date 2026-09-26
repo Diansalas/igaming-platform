@@ -65,7 +65,8 @@ duplicated per call site:
 - **Layer 2 — a second, independent, explicit opt-in.** A new field,
   `TestSupportEndpointsEnabled` (`TEST_SUPPORT_ENDPOINTS_ENABLED`),
   defaults to `false`. Both layers must independently be satisfied before
-  any of the three flags register:
+  any of the flags this ADR gates register (see the count and full list
+  below, updated at Stage 10.2 final review K6):
   `cfg.Environment != "production" && cfg.TestSupportEndpointsEnabled`.
   A wrong/typoed `Environment` value alone can no longer register
   anything (Layer 1 already rejects it at startup), and a deployment that
@@ -77,13 +78,22 @@ duplicated per call site:
   both is directly attempting something unsafe; the correct response is a
   loud failure, not an override.
 
-`cmd/platform-api/main.go` computes all three flags
+`cmd/platform-api/main.go` computes all **four** `Deps` flags
 (`CasinoPlaySimulationEnabled`, `PaymentsMockSettlementEnabled`,
-`AccountActivationTestSupportEnabled`) from
+`AccountActivationTestSupportEnabled`, and Stage 10 W1's
+`SportsbookSettlementSimulationEnabled`) directly from
 `cfg.TestSupportRoutesEnabled()` — confirmed by grep, during security
-review, to be the only place any of the three is computed from
-`Environment` at all, so there is exactly one place this logic can be
-gotten wrong.
+review (and re-confirmed at Stage 10.2 final review, K6/M5), to be the
+only place any of the four is computed from `Environment` at all, so
+there is exactly one place this logic can be gotten wrong. Stage 10.2
+(ADR 0091) adds a fifth consumer that is not itself a `Deps` field:
+`cmd/platform-api/wiring.go`'s `mockProviderWiring(cfg)` derives its own
+`testSupport` bool from the same `cfg.TestSupportRoutesEnabled()` call
+and uses it to decide whether to wire the KYC mock/orchestrator and the
+payments/casino mock webhook resolvers, including setting
+`Deps.KYCWebhookEnabled` — so `TestSupportRoutesEnabled()` gates five
+things in total (four direct `Deps` flags plus `mockProviderWiring`), all
+still computed from the one function.
 
 `Environment` itself remains informational elsewhere (used in
 logs/traces) and must never gate a security control outside these three
