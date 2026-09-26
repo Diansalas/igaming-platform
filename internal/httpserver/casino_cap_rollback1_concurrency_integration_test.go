@@ -51,6 +51,7 @@ func TestPostBet_G1_ConcurrentIdenticalBetCallbacks_PostsExactlyOnce(t *testing.
 	const n = 8
 	var wg sync.WaitGroup
 	statuses := make([]int, n)
+	ledgerTxIDs := make([]string, n)
 	wg.Add(n)
 	for i := 0; i < n; i++ {
 		i := i
@@ -58,6 +59,11 @@ func TestPostBet_G1_ConcurrentIdenticalBetCallbacks_PostsExactlyOnce(t *testing.
 			defer wg.Done()
 			resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payload)
 			statuses[i] = resp.StatusCode
+			var body map[string]any
+			_ = json.NewDecoder(resp.Body).Decode(&body)
+			if id, ok := body["ledger_transaction_id"].(string); ok {
+				ledgerTxIDs[i] = id
+			}
 			resp.Body.Close()
 		}()
 	}
@@ -73,6 +79,21 @@ func TestPostBet_G1_ConcurrentIdenticalBetCallbacks_PostsExactlyOnce(t *testing.
 	}
 	if balance := walletCashBalance(t, srv, player.Tokens.AccessToken); balance != 9000 {
 		t.Fatalf("expected exactly one bet's worth taken (10000-1000=9000), got %d", balance)
+	}
+	// gate 10.3-W1 QA condition 1 / ledger-finance C4: every loser must
+	// have received the ORIGINAL result - the SAME ledger_transaction_id,
+	// never a distinct one and never an empty body.
+	first := ledgerTxIDs[0]
+	if first == "" {
+		t.Fatalf("expected every response to carry a ledger_transaction_id, got empty for delivery 0")
+	}
+	for i, id := range ledgerTxIDs {
+		if id != first {
+			t.Fatalf("delivery %d: expected the SAME ledger_transaction_id %q as every other concurrent delivery, got %q", i, first, id)
+		}
+	}
+	if got := countCasinoAuditRowsForAction(t, pool, tenant.ID, "casino_bet.posted", betTxID); got != 1 {
+		t.Fatalf("expected exactly 1 casino_bet.posted audit row despite %d concurrent identical bet deliveries, got %d", n, got)
 	}
 }
 
@@ -110,6 +131,7 @@ func TestPostWin_ConcurrentIdenticalWinCallbacks_PostsExactlyOnce(t *testing.T) 
 	const n = 8
 	var wg sync.WaitGroup
 	statuses := make([]int, n)
+	ledgerTxIDs := make([]string, n)
 	wg.Add(n)
 	for i := 0; i < n; i++ {
 		i := i
@@ -117,6 +139,11 @@ func TestPostWin_ConcurrentIdenticalWinCallbacks_PostsExactlyOnce(t *testing.T) 
 			defer wg.Done()
 			resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", winPayload)
 			statuses[i] = resp.StatusCode
+			var body map[string]any
+			_ = json.NewDecoder(resp.Body).Decode(&body)
+			if id, ok := body["ledger_transaction_id"].(string); ok {
+				ledgerTxIDs[i] = id
+			}
 			resp.Body.Close()
 		}()
 	}
@@ -132,6 +159,18 @@ func TestPostWin_ConcurrentIdenticalWinCallbacks_PostsExactlyOnce(t *testing.T) 
 	}
 	if balance := walletCashBalance(t, srv, player.Tokens.AccessToken); balance != 10_000-1000+2500 {
 		t.Fatalf("expected exactly one win's worth credited, got %d", balance)
+	}
+	first := ledgerTxIDs[0]
+	if first == "" {
+		t.Fatalf("expected every response to carry a ledger_transaction_id, got empty for delivery 0")
+	}
+	for i, id := range ledgerTxIDs {
+		if id != first {
+			t.Fatalf("delivery %d: expected the SAME ledger_transaction_id %q as every other concurrent delivery, got %q", i, first, id)
+		}
+	}
+	if got := countCasinoAuditRowsForAction(t, pool, tenant.ID, "casino_win.posted", winTxID); got != 1 {
+		t.Fatalf("expected exactly 1 casino_win.posted audit row despite %d concurrent identical win deliveries, got %d", n, got)
 	}
 }
 
@@ -154,6 +193,7 @@ func TestPostRollback_ConcurrentIdenticalRollbackCallbacks_TombstonesExactlyOnce
 	const n = 8
 	var wg sync.WaitGroup
 	statuses := make([]int, n)
+	ledgerTxIDs := make([]string, n)
 	wg.Add(n)
 	for i := 0; i < n; i++ {
 		i := i
@@ -161,6 +201,11 @@ func TestPostRollback_ConcurrentIdenticalRollbackCallbacks_TombstonesExactlyOnce
 			defer wg.Done()
 			resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", rollbackPayload)
 			statuses[i] = resp.StatusCode
+			var body map[string]any
+			_ = json.NewDecoder(resp.Body).Decode(&body)
+			if id, ok := body["ledger_transaction_id"].(string); ok {
+				ledgerTxIDs[i] = id
+			}
 			resp.Body.Close()
 		}()
 	}
@@ -173,6 +218,18 @@ func TestPostRollback_ConcurrentIdenticalRollbackCallbacks_TombstonesExactlyOnce
 	}
 	if got := countCasinoTombstonesForTx(t, pool, tenant.ID, originalTxID); got != 1 {
 		t.Fatalf("expected exactly 1 tombstone despite %d concurrent identical rollback deliveries, got %d", n, got)
+	}
+	first := ledgerTxIDs[0]
+	if first == "" {
+		t.Fatalf("expected every response to carry a ledger_transaction_id (the tombstone's own id), got empty for delivery 0")
+	}
+	for i, id := range ledgerTxIDs {
+		if id != first {
+			t.Fatalf("delivery %d: expected the SAME ledger_transaction_id %q (the one tombstone) as every other concurrent delivery, got %q", i, first, id)
+		}
+	}
+	if got := countCasinoAuditRowsForActionMetadataKey(t, pool, tenant.ID, "casino_rollback.tombstoned", "rollback_provider_tx_id", rollbackTxID); got != 1 {
+		t.Fatalf("expected exactly 1 casino_rollback.tombstoned audit row despite %d concurrent identical rollback deliveries, got %d", n, got)
 	}
 }
 
@@ -199,7 +256,9 @@ func TestPostRollback_LateOriginalRacesRollback_SerializesOnL0_1(t *testing.T) {
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
 
-	const iterations = 20
+	// gate 10.3-W1 ledger-finance condition C1: 50 iterations (was 20),
+	// per ADR 0082 A6/QA's requirement.
+	const iterations = 50
 	for iter := 0; iter < iterations; iter++ {
 		launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 		sessionID := uuid.MustParse(launched.SessionID)
@@ -212,6 +271,22 @@ func TestPostRollback_LateOriginalRacesRollback_SerializesOnL0_1(t *testing.T) {
 			500, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
 		rollbackPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventRollback, rollbackTxID, originalTxID, roundID, "game-1",
 			0, "EUR", "", "", player.ID, uuid.Nil)
+
+		// gate 10.3-W1 condition C1: on the FIRST iteration only, prove
+		// WHERE the loser of this race blocks - the L0.1
+		// casino_bet_delivery advisory lock on originalTxID itself, not
+		// merely the eventual {bet-posted, tombstoned} outcome the rest of
+		// this loop already asserts. Manually holding the SAME lock
+		// production code takes forces whichever of postBet/postRollback
+		// starts second to queue on it, visible in pg_stat_activity as an
+		// 'advisory' wait_event, before this test ever releases the
+		// blocker and lets the real race proceed.
+		var blocker *casBlocker
+		var doneCh chan struct{}
+		if iter == 0 {
+			blocker = casHoldProviderTxDeliveryLock(t, pool, tenant.ID, "mock-casino", originalTxID)
+			doneCh = make(chan struct{})
+		}
 
 		var wg sync.WaitGroup
 		var betStatus, rollbackStatus int
@@ -228,7 +303,18 @@ func TestPostRollback_LateOriginalRacesRollback_SerializesOnL0_1(t *testing.T) {
 			rollbackStatus = resp.StatusCode
 			resp.Body.Close()
 		}()
-		wg.Wait()
+		if iter == 0 {
+			go func() { wg.Wait(); close(doneCh) }()
+			if !casWaitForAdvisoryWaiter(t, pool, doneCh) {
+				blocker.release()
+				<-doneCh
+				t.Fatalf("iteration 0: expected one of the two concurrent deliveries to queue on the L0.1 advisory lock (pg_stat_activity wait_event='advisory') while it was held externally, but neither ever did")
+			}
+			blocker.release()
+			<-doneCh
+		} else {
+			wg.Wait()
+		}
 
 		if betStatus != http.StatusOK || rollbackStatus != http.StatusOK {
 			t.Fatalf("iteration %d: expected both deliveries to return 200 (a bet+reversal or a tombstone+declined-bet are both 200 shapes), got bet=%d rollback=%d", iter, betStatus, rollbackStatus)
@@ -297,11 +383,22 @@ func TestPostWin_LateWinRacesItsOwnRollback_SerializesOnL0_1(t *testing.T) {
 	brand := mustCreateBrand(t, pool, tenant)
 	player := mustRegisterPlayer(t, srv, brand.Slug)
 	mustActivatePlayer(t, pool, tenant.ID, player.ID)
-	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
+	// gate 10.3-W1 condition C1 fix: unlike the postRollback/bet race above
+	// (where every outcome either reverses the bet or never posts it, so
+	// the wallet balance never permanently drops), THIS test's bet always
+	// stays posted every iteration - only the WIN is raced - so 500/
+	// iteration is a genuine, permanent stake. Raising iterations from 20
+	// to 50 at the OLD 10,000 funding exhausted the wallet at iteration 20
+	// (10000/500), turning every later bet into an insufficient-funds
+	// DECLINE (still HTTP 200) and then the win into a spurious
+	// ErrBetNotFound 400 - a pre-existing test-fixture bug this raise
+	// exposed, not a production defect. Funded generously above 50*500.
+	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 1_000_000)
 	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
 	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
 
-	const iterations = 20
+	// gate 10.3-W1 ledger-finance condition C1: 50 iterations (was 20).
+	const iterations = 50
 	for iter := 0; iter < iterations; iter++ {
 		launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
 		sessionID := uuid.MustParse(launched.SessionID)
@@ -324,6 +421,18 @@ func TestPostWin_LateWinRacesItsOwnRollback_SerializesOnL0_1(t *testing.T) {
 		rollbackOfWinPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventRollback, rollbackOfWinTxID, winTxID, roundID, "game-1",
 			0, "EUR", "", "", player.ID, uuid.Nil)
 
+		// gate 10.3-W1 condition C1: on the FIRST iteration, prove the E10
+		// waiter blocks on the L0.1 advisory lock itself (keyed on winTxID,
+		// which BOTH postWin - its own reference - and postRollback - its
+		// OriginalProviderTxID - take here), exactly like the postRollback
+		// race test above.
+		var blocker *casBlocker
+		var doneCh chan struct{}
+		if iter == 0 {
+			blocker = casHoldProviderTxDeliveryLock(t, pool, tenant.ID, "mock-casino", winTxID)
+			doneCh = make(chan struct{})
+		}
+
 		var wg sync.WaitGroup
 		var winStatus, rollbackStatus int
 		var winBody map[string]any
@@ -341,7 +450,18 @@ func TestPostWin_LateWinRacesItsOwnRollback_SerializesOnL0_1(t *testing.T) {
 			rollbackStatus = resp.StatusCode
 			resp.Body.Close()
 		}()
-		wg.Wait()
+		if iter == 0 {
+			go func() { wg.Wait(); close(doneCh) }()
+			if !casWaitForAdvisoryWaiter(t, pool, doneCh) {
+				blocker.release()
+				<-doneCh
+				t.Fatalf("iteration 0: expected one of the two concurrent deliveries to queue on the L0.1 advisory lock (pg_stat_activity wait_event='advisory') while it was held externally, but neither ever did")
+			}
+			blocker.release()
+			<-doneCh
+		} else {
+			wg.Wait()
+		}
 
 		if rollbackStatus != http.StatusOK {
 			t.Fatalf("iteration %d: expected the rollback delivery to return 200 (a tombstone or a real reversal), got %d", iter, rollbackStatus)

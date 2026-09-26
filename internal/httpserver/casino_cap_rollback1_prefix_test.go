@@ -52,6 +52,35 @@ func countCasinoLedgerRowsForTx(t *testing.T, pool *db.Pool, tenantID uuid.UUID,
 	return count
 }
 
+// countCasinoAuditRowsForAction counts audit_log rows for a given action
+// whose metadata->>'provider_tx_id' matches providerTxID - the shared
+// helper the concurrency (C4) and per-flow audit tests use to assert
+// "exactly one audit row" independent of the count of any OTHER audit
+// action a scenario may also produce (e.g. casino.launched).
+func countCasinoAuditRowsForAction(t *testing.T, pool *db.Pool, tenantID uuid.UUID, action, providerTxID string) int {
+	t.Helper()
+	return countCasinoAuditRowsForActionMetadataKey(t, pool, tenantID, action, "provider_tx_id", providerTxID)
+}
+
+// countCasinoAuditRowsForActionMetadataKey is countCasinoAuditRowsForAction
+// generalized to an arbitrary metadata key - the rollback-tombstone audit
+// record (casino_rollback.tombstoned) keys its OWN reference under
+// "rollback_provider_tx_id", not "provider_tx_id" (orchestrator.go's own
+// metadata shape for that action).
+func countCasinoAuditRowsForActionMetadataKey(t *testing.T, pool *db.Pool, tenantID uuid.UUID, action, metadataKey, value string) int {
+	t.Helper()
+	var count int
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT count(*) FROM audit_log WHERE tenant_id = $1 AND action = $2 AND metadata->>$3 = $4`,
+			tenantID, action, metadataKey, value).Scan(&count)
+	})
+	if err != nil {
+		t.Fatalf("count audit_log rows for action=%s %s=%s: %v", action, metadataKey, value, err)
+	}
+	return count
+}
+
 // countCasinoTombstonesForTx counts tombstone rows keyed on a given
 // original provider_tx_id.
 func countCasinoTombstonesForTx(t *testing.T, pool *db.Pool, tenantID uuid.UUID, originalProviderTxID string) int {

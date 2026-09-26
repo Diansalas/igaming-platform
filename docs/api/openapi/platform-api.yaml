@@ -2759,8 +2759,9 @@ paths:
         one correlation id now resolves a win to the shared wallet
         normally (200) instead of the pre-fix 500 - the ambiguity guard
         above remains for a genuine wallet collision or mixed-origin
-        (bonus/locked) round. 503 now has exactly ONE cause left for a
-        verified caller: (1) casino webhooks are not enabled on this
+        (bonus/locked) round. 503 now has exactly TWO causes left, one
+        pre-verification and one post-verification: (1) casino webhooks
+        are not enabled on this
         deployment at all (the casino Orchestrator is nil) - this check
         runs FIRST, before the shared preamble, before any tenant lookup,
         and before signature verification, so it is reachable by anyone,

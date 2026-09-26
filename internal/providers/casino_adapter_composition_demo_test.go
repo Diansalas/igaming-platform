@@ -203,8 +203,11 @@ func (a *fakeHTTPCasinoAdapter) HandleCallback(ctx context.Context, in webhookau
 // callbacks (see HandleCallback), so it reuses the casino platform MOCK
 // scheme only to satisfy the interface. A real adapter implements its own
 // vendor's documented scheme and must pass webhookauthtest conformance.
+// Built directly from webhookauth.CasinoScheme() (gate 10.3-W1 code review
+// #9 cleanup): the package-level casino.WebhookScheme() alias this used to
+// call had no other caller anywhere in the codebase and has been removed.
 func (a *fakeHTTPCasinoAdapter) WebhookScheme() webhookauth.VerificationScheme {
-	return casino.WebhookScheme().VerificationScheme()
+	return webhookauth.CasinoScheme().VerificationScheme()
 }
 
 func (a *fakeHTTPCasinoAdapter) Capabilities() casino.AdapterCapability {

@@ -1018,7 +1018,14 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	} else if tombstoned {
 		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_bet.rejected_tombstoned",
-			TargetType: "ledger_transaction", TargetID: event.ProviderTxID, Outcome: audit.OutcomeFailure,
+			// TargetType/TargetID name what this rejection is ABOUT - the
+			// provider's own bet reference - not a ledger_transaction row,
+			// since this decline path posts NOTHING (no transaction id
+			// exists to point at). Previously mislabelled TargetType as
+			// "ledger_transaction" while TargetID actually held a provider
+			// reference, not a ledger_transactions.id (cleanup item, gate
+			// 10.3-W1 code review #cosmetic, ledger-finance F-7).
+			TargetType: "casino_provider_tx", TargetID: providerID + ":" + event.ProviderTxID, Outcome: audit.OutcomeFailure,
 			Metadata: map[string]any{
 				"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
 				"reason": "original_rolled_back",
@@ -1717,20 +1724,28 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		}
 	}
 
-	auditAction := "casino_bet.rolled_back"
-	if originalType == ledger.TxCasinoWin {
-		auditAction = "casino_win.rolled_back"
-	}
-	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: tenantID, ActorType: audit.ActorSystem, Action: auditAction,
-		TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
-		Metadata: map[string]any{
-			"provider_id": providerID, "rollback_provider_tx_id": event.ProviderTxID,
-			"original_provider_tx_id": event.OriginalProviderTxID, "original_transaction_id": originalID.String(),
-			"already_posted": postResult.AlreadyPosted,
-		},
-	}); err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: audit rollback: %w", err)
+	// gate 10.3-W1 QA condition 1 / ledger-finance C4 (same defect as
+	// postWin's identical guard, see bonus_settlement.go's
+	// postWinDirectCash comment): a redelivery of an already-posted
+	// rollback (this generic entry-inversion path - the tombstone path a
+	// few lines above already short-circuits before ever reaching here)
+	// must not write a second audit row.
+	if !postResult.AlreadyPosted {
+		auditAction := "casino_bet.rolled_back"
+		if originalType == ledger.TxCasinoWin {
+			auditAction = "casino_win.rolled_back"
+		}
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: auditAction,
+			TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
+			Metadata: map[string]any{
+				"provider_id": providerID, "rollback_provider_tx_id": event.ProviderTxID,
+				"original_provider_tx_id": event.OriginalProviderTxID, "original_transaction_id": originalID.String(),
+				"already_posted": postResult.AlreadyPosted,
+			},
+		}); err != nil {
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: audit rollback: %w", err)
+		}
 	}
 
 	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
@@ -1754,7 +1769,19 @@ func postRollbackTombstone(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, p
 	// correlation id a first delivery picks). Existing rows written before
 	// this change keep their original (random) CorrelationID - untouched.
 	idempotencyKey := fmt.Sprintf("tombstone:%s:%s", providerID, event.OriginalProviderTxID)
-	correlationID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(idempotencyKey))
+	// Tenant-qualified (gate 10.3-W1 code review #13; ledger-finance
+	// informational note, §1's "Deterministic tombstone correlation" row):
+	// the idempotency key alone is only unique WITHIN one tenant
+	// (provider_tx_id uniqueness is a per-tenant property throughout this
+	// package - see acquireProviderTxDeliveryLock's identical rationale),
+	// so two different tenants' rollbacks of a same-named, never-seen
+	// original would otherwise compute the identical correlation id. This
+	// changes the fallback's VALUE for callers with no RoundID; it is still
+	// replay-safe because tombstones remain exempt from correlation
+	// comparison (ledger/replay.go), so the change cannot break a redelivery
+	// of an existing tombstone - confirmed against
+	// TestReplay_CorrelationComparedExceptTombstone.
+	correlationID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(tenantID.String()+":"+idempotencyKey))
 	if event.RoundID != "" {
 		correlationID = roundCorrelationID(tenantID, providerID, event.RoundID)
 	}

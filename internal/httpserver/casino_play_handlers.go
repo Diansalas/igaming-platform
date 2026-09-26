@@ -265,6 +265,29 @@ func writeCasinoCallbackError(w http.ResponseWriter, requestID string, logger in
 		apierror.Write(w, requestID, apierror.CodeConflict, "original transaction already rolled back")
 		return
 	}
+	if errors.Is(err, casino.ErrOriginalTombstoned) {
+		// Mirrors newCasinoWebhookHandler's own identical branch (Stage
+		// 10.3 CAS-CAP-ROLLBACK-1, E10; gate 10.3-W1 ledger-finance
+		// condition C10): a win naming a provider_tx_id a tombstone
+		// already covers. Deterministic, never retryable, nothing
+		// posted - a 409, never the generic 500 this used to fall
+		// through to.
+		logger.Error("casino_play_integrity_alert_original_tombstoned", "error", err, "action", action)
+		apierror.Write(w, requestID, apierror.CodeConflict, "request rejected")
+		return
+	}
+	if errors.Is(err, casino.ErrAmbiguousMultiOriginRound) || errors.Is(err, casino.ErrCorrelationWalletCollision) ||
+		errors.Is(err, casino.ErrLockAlreadyReleased) || errors.Is(err, casino.ErrMixedFundingUnsupported) ||
+		errors.Is(err, casino.ErrBonusBetNotLocked) {
+		// Mirrors newCasinoWebhookHandler's own identical G-1 branch
+		// exactly (gate 10.3-W1 ledger-finance condition C10): these
+		// §16.4 abort outcomes are integrity alerts, never a routine
+		// failure a retry could resolve - a 409, not the generic 500
+		// this route used to fall through to.
+		logger.Error("casino_play_integrity_alert_win_origin", "error", err, "action", action)
+		apierror.Write(w, requestID, apierror.CodeConflict, "request rejected")
+		return
+	}
 	if errors.Is(err, casino.ErrLaunchSessionRequired) {
 		logger.Error("casino_play_missing_session_binding", "error", err, "action", action)
 		apierror.Write(w, requestID, apierror.CodeValidation, "request rejected")

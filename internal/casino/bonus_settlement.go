@@ -193,11 +193,9 @@ func queryNetOutstandingLocked(ctx context.Context, tx pgx.Tx, tenantID, correla
 // result set before ever reaching here.
 func classifyDirectOriginRows(rows []originRow) (originRow, error) {
 	wallets := map[uuid.UUID]bool{}
-	txs := map[uuid.UUID]bool{}
 	accountTypes := map[ledger.AccountType]bool{}
 	for _, r := range rows {
 		wallets[r.WalletID] = true
-		txs[r.BetTransactionID] = true
 		accountTypes[r.AccountType] = true
 	}
 	if len(wallets) > 1 {
@@ -411,15 +409,28 @@ func (o *Orchestrator) postWinDirectCash(ctx context.Context, tx pgx.Tx, tenantI
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: post win: %w", err)
 	}
 
-	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_win.posted",
-		TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
-		Metadata: map[string]any{
-			"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
-			"amount": event.Amount, "asset_code": event.AssetCode, "already_posted": postResult.AlreadyPosted,
-		},
-	}); err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: audit win posted: %w", err)
+	// gate 10.3-W1 QA condition 1 / ledger-finance C4 (discovered during
+	// that condition's own test-writing): a redelivery of an
+	// ALREADY-POSTED win (sequential, or a concurrent delivery that lost
+	// the L0.1 race and only then re-reached ledger.Post, which is itself
+	// correctly idempotent) must NOT write a second audit row - exactly
+	// postBet's own established convention, where the idempotency
+	// short-circuit at the top of the function never reaches its audit
+	// call a second time. Before this guard, N redeliveries/concurrent
+	// deliveries of one win produced N `casino_win.posted` rows despite
+	// posting exactly once, an audit-log-bloat defect with no financial
+	// effect (the ledger stayed correctly idempotent throughout).
+	if !postResult.AlreadyPosted {
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_win.posted",
+			TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
+			Metadata: map[string]any{
+				"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
+				"amount": event.Amount, "asset_code": event.AssetCode, "already_posted": postResult.AlreadyPosted,
+			},
+		}); err != nil {
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: audit win posted: %w", err)
+		}
 	}
 
 	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
@@ -459,16 +470,21 @@ func (o *Orchestrator) postWinLockedCash(ctx context.Context, tx pgx.Tx, tenantI
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: post win (locked cash release): %w", err)
 	}
 
-	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_win.posted",
-		TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
-		Metadata: map[string]any{
-			"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
-			"amount": event.Amount, "asset_code": event.AssetCode, "already_posted": postResult.AlreadyPosted,
-			"origin_account_type": string(origin.AccountType), "released_lock_amount": origin.NetOutstandingLocked,
-		},
-	}); err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: audit win posted: %w", err)
+	// See postWinDirectCash's identical guard/comment (gate 10.3-W1
+	// condition C4): never audit a redelivery of an already-posted win a
+	// second time.
+	if !postResult.AlreadyPosted {
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_win.posted",
+			TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
+			Metadata: map[string]any{
+				"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
+				"amount": event.Amount, "asset_code": event.AssetCode, "already_posted": postResult.AlreadyPosted,
+				"origin_account_type": string(origin.AccountType), "released_lock_amount": origin.NetOutstandingLocked,
+			},
+		}); err != nil {
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: audit win posted: %w", err)
+		}
 	}
 
 	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
@@ -554,17 +570,22 @@ func (o *Orchestrator) postWinLockedBonus(ctx context.Context, tx pgx.Tx, tenant
 			return ReceiveCallbackResult{}, fmt.Errorf("casino: attribute win to grant: %w", err)
 		}
 
-		if err := audit.Record(ctx, tx, audit.Entry{
-			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_win.posted",
-			TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
-			Metadata: map[string]any{
-				"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
-				"amount": event.Amount, "asset_code": event.AssetCode, "already_posted": postResult.AlreadyPosted,
-				"origin_account_type": string(origin.AccountType), "released_lock_amount": origin.NetOutstandingLocked,
-				"grant_id": grantID.String(), "grant_status": string(grant.Status),
-			},
-		}); err != nil {
-			return ReceiveCallbackResult{}, fmt.Errorf("casino: audit win posted: %w", err)
+		// See postWinDirectCash's identical guard/comment (gate 10.3-W1
+		// condition C4): never audit a redelivery of an already-posted win
+		// a second time.
+		if !postResult.AlreadyPosted {
+			if err := audit.Record(ctx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_win.posted",
+				TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
+				Metadata: map[string]any{
+					"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
+					"amount": event.Amount, "asset_code": event.AssetCode, "already_posted": postResult.AlreadyPosted,
+					"origin_account_type": string(origin.AccountType), "released_lock_amount": origin.NetOutstandingLocked,
+					"grant_id": grantID.String(), "grant_status": string(grant.Status),
+				},
+			}); err != nil {
+				return ReceiveCallbackResult{}, fmt.Errorf("casino: audit win posted: %w", err)
+			}
 		}
 
 		return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
@@ -607,17 +628,24 @@ func (o *Orchestrator) postWinLockedBonus(ctx context.Context, tx pgx.Tx, tenant
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: resolve terminal grant credit: %w", err)
 	}
 
-	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_win.captured_pending_g2",
-		TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
-		Metadata: map[string]any{
-			"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
-			"amount": event.Amount, "asset_code": event.AssetCode, "already_posted": postResult.AlreadyPosted,
-			"released_lock_amount": origin.NetOutstandingLocked, "grant_id": grantID.String(),
-			"grant_status": string(grant.Status), "held_disposition_id": heldDispositionID.String(),
-		},
-	}); err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: audit win captured: %w", err)
+	// See postWinDirectCash's identical guard/comment (gate 10.3-W1
+	// condition C4): never audit a redelivery of an already-posted/
+	// already-captured win a second time. ResolveTerminalGrantCredit
+	// itself is still called unconditionally above (its own idempotency,
+	// not this package's, and not touched by this cleanup).
+	if !postResult.AlreadyPosted {
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_win.captured_pending_g2",
+			TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
+			Metadata: map[string]any{
+				"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
+				"amount": event.Amount, "asset_code": event.AssetCode, "already_posted": postResult.AlreadyPosted,
+				"released_lock_amount": origin.NetOutstandingLocked, "grant_id": grantID.String(),
+				"grant_status": string(grant.Status), "held_disposition_id": heldDispositionID.String(),
+			},
+		}); err != nil {
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: audit win captured: %w", err)
+		}
 	}
 
 	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
