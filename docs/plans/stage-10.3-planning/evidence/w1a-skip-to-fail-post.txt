@@ -1,0 +1,15 @@
+W1a (WH-VENDOR-SCHEME-1) post-conversion evidence: the 7 converted conformance cases FAIL (never SKIP) for a non-mock adapter
+HEAD: 82cdf98ed50d32eb0bc3d0e1fb3f2d6f2b05db47
+Command: go test -count=1 ./internal/payments ./internal/casino -run 'SkipToFail' -v
+Expected: GREEN (the parent assertions pass because every converted case is reported as FAIL in the child run).
+Pre-conversion red run: w1a-skip-to-fail-pre.txt. Restoring any one skip turns it red again (w1a-mutation-kill.txt, M22).
+---
+=== RUN   TestPaymentsConformance_W1a_SkipToFail_NonMockAdapterFailsNotSkips
+--- PASS: TestPaymentsConformance_W1a_SkipToFail_NonMockAdapterFailsNotSkips (0.01s)
+ok  	github.com/Diansalas/igaming-platform/internal/payments	0.013s
+=== RUN   TestCasinoConformance_W1a_SkipToFail_NonMockAdapterFailsNotSkips
+--- PASS: TestCasinoConformance_W1a_SkipToFail_NonMockAdapterFailsNotSkips (0.01s)
+ok  	github.com/Diansalas/igaming-platform/internal/casino	0.013s
+
+Remaining-skip scan (grep 't.Skip' / 'Skip(' over internal/{payments,casino,kyc}/conformance_test.go and
+internal/providers/httpclient/conformance/): none left.

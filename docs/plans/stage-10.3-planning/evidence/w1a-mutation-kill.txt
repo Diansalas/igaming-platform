@@ -1,0 +1,54 @@
+W1a (WH-VENDOR-SCHEME-1) mutation-kill record (Stage 10.2 rule: every new guard must go red on its own assertion)
+HEAD: 82cdf98ed50d32eb0bc3d0e1fb3f2d6f2b05db47
+Method: each mutation edits one source file in place, runs only the named guarding test(s) (integration-tagged
+where the guard needs Postgres, NOBYPASSRLS runtime role), records the result, and restores the original bytes.
+"KILLED (red)" = the test failed on its own assertion (quoted), not a build error. 22/22 killed, 0 survived.
+In addition, the conformance self-test (TestSchemeConformanceSelfTest_EachBrokenSchemeGoesRedOnlyInItsCase)
+runs 11 deliberately broken reference schemes, each red in exactly its own case (SC2, SC3, SC4, SC5, SC6,
+SC7, SC8, SC9, SC10, SC11, KAV) and in no other - a green run of that test is itself the mutation proof for
+the suite's cases.
+---
+M1 ValidateProperties: MaxSkew cap removed                                       KILLED (red)
+    --- FAIL: TestValidateProperties_Matrix (0.00s) | --- FAIL: TestValidateProperties_Matrix/MaxSkew_above_the_cap (0.00s) | scheme_test.go:83: want the declaration refused, got nil | --- FAIL: TestValidateScheme_RegistrationRules (0.00s)
+M2 ValidateProperties: non-synthetic without signed timestamp allowed            KILLED (red)
+    --- FAIL: TestValidateProperties_Matrix (0.00s) | --- FAIL: TestValidateProperties_Matrix/real_scheme_without_signed_timestamp (0.00s) | scheme_test.go:83: want the declaration refused, got nil
+M3 ValidateScheme: Synthetic accepted from any implementation                    KILLED (red)
+    --- FAIL: TestValidateScheme_RegistrationRules (0.00s) | scheme_test.go:105: a non-platform scheme declaring Synthetic must be refused, got <nil> | --- FAIL: TestNewOrchestrator_BadWebhookSchemeFailsStartup (0.00s) | --- FAIL: TestNewOrchestrator_BadWebhookSchemeFailsStartup/non-MOCK_scheme_declaring_Synthetic (0.00s)
+M4 ValidateScheme: conformance-manifest gate removed                             KILLED (red)
+    --- FAIL: TestValidateScheme_RegistrationRules (0.00s) | scheme_test.go:110: a non-synthetic scheme outside the conformance manifest must be refused, got <nil>
+M5 MustSchemeSet: validation error ignored (startup not refused)                 KILLED (red)
+    --- FAIL: TestNewSchemeSet_BadDeclarationFailsStartup (0.00s) | scheme_test.go:147: MustSchemeSet must panic (fail startup) on a bad declaration | --- FAIL: TestNewOrchestrator_BadWebhookSchemeFailsStartup (0.00s) | --- FAIL: TestNewOrchestrator_BadWebhookSchemeFailsStartup/unlisted_real_scheme_with_MaxSkew_above_cap (0.00s)
+M6 ExtractInbound: KeyFromHeader empty key id tolerated (C3)                     KILLED (red)
+    --- FAIL: TestExtractInbound_PlatformGuarantees (0.00s) | --- FAIL: TestExtractInbound_PlatformGuarantees/C3:_KeyFromHeader_ok_with_empty_key_id_is_signature_missing (0.00s) | scheme_test.go:257: ok=false, authErr=<nil>
+M7 ResolveCredentials: empty key id resolved instead of signature_missing (C3)   KILLED (red)
+    --- FAIL: TestResolveCredentials_KeySelectionFromPropertiesOnly (0.00s) | scheme_test.go:290: KeyFromHeader + empty key id must be signature_missing with NO resolver call (no multi-key trial), got webhookauth: callback authentication failed: credential_unavailable calls=1
+M8 VerifyInbound: Previous passed to a KeyFromHeader scheme (C4)                 KILLED (red)
+    --- FAIL: TestVerifyInbound_PlatformGuarantees (0.00s) | --- FAIL: TestVerifyInbound_PlatformGuarantees/KeyFromHeader_never_receives_Previous (0.00s) | scheme_test.go:346: a KeyFromHeader scheme was handed a Previous credential (C4)
+M9 VerifyInbound: timestamp_out_of_window folded to signature_invalid (C10)      KILLED (red)
+    --- FAIL: TestVerifyInbound_PlatformGuarantees (0.00s) | --- FAIL: TestVerifyInbound_PlatformGuarantees/timestamp_window (0.00s) | scheme_test.go:409: got webhookauth: callback authentication failed: signature_invalid, want reason timestamp_out_of_window
+M10 VerifyInbound: credential usability (secret floor/binding) not enforced      KILLED (red)
+    --- FAIL: TestVerifyInbound_PlatformGuarantees (0.00s) | --- FAIL: TestVerifyInbound_PlatformGuarantees/short_secret_never_reaches_the_scheme (0.00s) | scheme_test.go:391: got <nil> runs=1 | --- FAIL: TestVerifyInbound_PlatformGuarantees/empty_secret_never_reaches_the_scheme (0.00s)
+M11 CheckInboundPreamble: scheme lookup bypassed (hard-coded MOCK scheme)        KILLED (red)
+    --- FAIL: TestCheckInboundPreamble_Order (0.00s) | scheme_test.go:193: an unregistered provider is provider_unregistered BEFORE header checks: got {Body:[] BodyLen:2 ProviderIDValid:true Reason:signature_missing} | --- FAIL: TestCheckInboundPreamble_UsesTheProvidersOwnScheme (0.00s) | scheme_test.go:223: vendor headers rejected by the preamble: {Body:[] BodyLen:2 ProviderIDValid:true Reason:signature_missing}
+M12 AllReasons: timestamp_out_of_window dropped from the closed enum             KILLED (red)
+    --- FAIL: TestReason_ClosedEnum (0.00s) | scheme_test.go:439: AllReasons has 11 members, want 12
+M13 MOCK VerificationScheme: MinSecretBytes floor removed                        KILLED (red)
+    --- FAIL: TestSchemeConformance_PlatformMockPayments (0.00s) | --- FAIL: TestSchemeConformance_PlatformMockPayments/SC10_EmptyOrShortSecretRejected (0.00s) | --- FAIL: TestSchemeConformance_PlatformMockKYC (0.00s) | --- FAIL: TestSchemeConformance_PlatformMockKYC/SC10_EmptyOrShortSecretRejected (0.00s)
+M14 Constant-time: MOCK Verify uses == instead of hmac.Equal                     KILLED (red)
+    --- FAIL: TestConstantTimeCompare_SchemePackages (0.11s) | constant_time_lint_test.go:211: internal/webhookauth/webhookauth.go:331:5: non-constant-time comparison: expectedHex != sigHex
+M15 Registry: a non-synthetic scheme added to the manifest without a fixture     KILLED (red)
+    --- FAIL: TestEveryRegisteredNonSyntheticSchemeRunsConformance (0.00s) | registry_test.go:30: non-synthetic schemes registered in the conformance manifest without a conformance fixture (and known-answer vector): [vendor-x-v1]
+M16 Suite: KAV no longer required for non-synthetic schemes                      KILLED (red)
+    --- FAIL: TestSchemeConformance_NonSyntheticWithoutKAVFails (0.00s) | conformance_test.go:169: want exactly [KAV_KnownAnswerVectors] red for a non-synthetic scheme with no known-answer vector, got []
+M17 Suite: SC7 skips (instead of failing) for a non-synthetic scheme             KILLED (red)
+    --- FAIL: TestSchemeConformance_NonSyntheticWithoutTimestampFails (0.00s) | conformance_test.go:181: a non-synthetic scheme declaring no signed timestamp must fail SC7 and P0, got [P0_FixtureAndPropertiesValid]
+M18 Payments orchestrator: Verify call deleted (adapter solely responsible)      KILLED (red)
+    --- FAIL: TestOrchestratorVerify_Payments_EnforcedEvenIfAdapterSkipsIt (0.05s) | orchestrator_verify_enforced_integration_test.go:83: the orchestrator must reject a forged callback itself (signature_invalid), got <nil>
+M19 KYC orchestrator: Verify call deleted (adapter solely responsible)           KILLED (red)
+    --- FAIL: TestOrchestratorVerify_KYC_EnforcedEvenIfAdapterSkipsIt (0.05s) | orchestrator_verify_enforced_integration_test.go:77: the orchestrator must reject a forged callback itself (signature_invalid), got <nil>
+M20 Casino orchestrator: Verify call deleted (adapter solely responsible)        KILLED (red)
+    --- FAIL: TestOrchestratorVerify_Casino_EnforcedEvenIfAdapterSkipsIt (0.03s) | orchestrator_verify_enforced_integration_test.go:75: the orchestrator must reject a forged callback itself (signature_invalid), got <nil>
+M21 HTTP preamble: scheme selection returns no scheme (provider lookup broken)   KILLED (red)
+    --- FAIL: TestCasinoWebhook_AuthFailureLogging_AllowListOnly (0.09s) | --- FAIL: TestCasinoWebhook_AuthFailureLogging_AllowListOnly/tenant_unknown (0.00s) | casino_webhook_auth_failure_logging_integration_test.go:133: expected reason="tenant_unknown", got "provider_unregistered" | --- FAIL: TestCasinoWebhook_AuthFailureLogging_AllowListOnly/tenant_inactive (0.00s)
+M22 Conformance: a converted skip restored (casino malformed-payload case)       KILLED (red)
+    --- FAIL: TestCasinoConformance_W1a_SkipToFail_NonMockAdapterFailsNotSkips (0.01s) | conformance_skip_to_fail_test.go:62: conformance case "HandleCallback_rejects_a_malformed_payload" still SKIPs for a non-mock adapter; it must fail (ADR 0022 §6) | conformance_skip_to_fail_test.go:65: conformance case "HandleCallback_rejects_a_malformed_payload" did not FAIL for a non-mock adapter | conformance_skip_to_fail_test.go:69: child output:
