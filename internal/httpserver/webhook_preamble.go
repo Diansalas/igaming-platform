@@ -15,9 +15,12 @@ import (
 // architect R2 / ruling J4: every webhook domain uses this one preamble -
 // never a second, subtly different copy).
 type webhookRoute struct {
-	// scheme is the domain's platform-defined MOCK wire scheme, whose
-	// header names the preamble format-checks.
-	scheme webhookauth.Scheme
+	// schemeFor selects the verification scheme of the adapter registered
+	// for providerID in this domain's orchestrator (Stage 10.3 W1a,
+	// WH-VENDOR-SCHEME-1): the preamble no longer hard-codes the MOCK
+	// header format, so a real adapter's own headers reach its own
+	// scheme. Process-global adapter registry only - no tenant input.
+	schemeFor func(deps Deps, providerID string) (webhookauth.VerificationScheme, bool)
 	// maxBody bounds the raw body read.
 	maxBody int
 	// authFailedEvent is the allow-listed auth-failure log event, e.g.
@@ -34,12 +37,14 @@ type webhookRoute struct {
 //
 //  0. tenantSlug/providerID path values present (else 400 validation);
 //  1. provider_id charset;                          } webhookauth
-//  2. body read bounded to route.maxBody;           } Scheme.CheckPreamble,
-//  3. authentication header format;                 } no tenant/DB work
-//  4. platform-wide GetTenantBySlug (unknown -> uniform 401);
-//  5. tenant status == "active" (else uniform 401).
+//  2. body read bounded to route.maxBody;           } CheckInboundPreamble,
+//  3. scheme lookup by provider id                  } no tenant/DB work
+//     (provider_unregistered - Stage 10.3 W1a);     }
+//  4. the provider's own scheme.Extract;            }
+//  5. platform-wide GetTenantBySlug (unknown -> uniform 401);
+//  6. tenant status == "active" (else uniform 401).
 //
-// Every rejection in 1-5 writes the IDENTICAL 401 "callback rejected"
+// Every rejection in 1-6 writes the IDENTICAL 401 "callback rejected"
 // response and one allow-listed route.authFailedEvent log line. ok is false
 // once a response has been written; the caller must then return.
 func webhookPreamble(w http.ResponseWriter, r *http.Request, deps Deps, route webhookRoute) (t identity.Tenant, providerID string, body []byte, ok bool) {
@@ -53,7 +58,12 @@ func webhookPreamble(w http.ResponseWriter, r *http.Request, deps Deps, route we
 		return identity.Tenant{}, "", nil, false
 	}
 
-	pre, ok := route.scheme.CheckPreamble(providerID, r.Header, r.Body, route.maxBody)
+	pre, ok := webhookauth.CheckInboundPreamble(providerID, r.Header, r.Body, route.maxBody, func(id string) (webhookauth.VerificationScheme, bool) {
+		if route.schemeFor == nil {
+			return nil, false
+		}
+		return route.schemeFor(deps, id)
+	})
 	if !ok {
 		logWebhookAuthFailure(logger, route.authFailedEvent, r, requestID, pre.Reason, nil, providerID, pre.ProviderIDValid, "", "", pre.BodyLen)
 		apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")

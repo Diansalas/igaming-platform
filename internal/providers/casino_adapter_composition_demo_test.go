@@ -191,6 +191,14 @@ func (a *fakeHTTPCasinoAdapter) HandleCallback(ctx context.Context, in webhookau
 	return casino.CallbackEvent{}, errors.New("fakeHTTPCasinoAdapter: HandleCallback not exercised in this demo")
 }
 
+// WebhookScheme (Stage 10.3 W1a): this demo never exercises inbound
+// callbacks (see HandleCallback), so it reuses the casino platform MOCK
+// scheme only to satisfy the interface. A real adapter implements its own
+// vendor's documented scheme and must pass webhookauthtest conformance.
+func (a *fakeHTTPCasinoAdapter) WebhookScheme() webhookauth.VerificationScheme {
+	return casino.WebhookScheme().VerificationScheme()
+}
+
 func (a *fakeHTTPCasinoAdapter) Capabilities() casino.AdapterCapability {
 	return a.capability
 }

@@ -662,6 +662,11 @@ type CasinoProvider interface {
 	// ErrCallbackSignatureInvalid; a post-verification structural failure
 	// returns ErrCallbackMalformedBody.
 	HandleCallback(ctx context.Context, in webhookauth.Inbound, cred webhookauth.Credential) (CallbackEvent, error)
+	// WebhookScheme returns this adapter's inbound-callback verification
+	// scheme (Stage 10.3 W1a, WH-VENDOR-SCHEME-1): validated at
+	// registration, selected by provider id in the shared HTTP preamble,
+	// and run by the Orchestrator ITSELF before HandleCallback.
+	WebhookScheme() webhookauth.VerificationScheme
 	// Capabilities returns this adapter's own declared, static layer only
 	// - never tenant/brand/priority/status (ADR 0025 §4).
 	Capabilities() AdapterCapability

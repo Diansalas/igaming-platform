@@ -43,6 +43,10 @@ type Orchestrator struct {
 	// verification - this is what forces explicit wiring (cmd/platform-
 	// api/wiring.go) rather than an accidental always-on mock.
 	webhookCredentialResolver webhookauth.Resolver
+	// webhookSchemes: every adapter's validated WebhookScheme() (Stage
+	// 10.3 W1a; webhook_verify.go). now: platform clock (nil = time.Now).
+	webhookSchemes *webhookauth.SchemeSet
+	now            func() time.Time
 }
 
 // NewOrchestrator constructs an Orchestrator over the given adapter
@@ -51,8 +55,11 @@ type Orchestrator struct {
 // nil resolver is valid and deliberate (fails every callback closed) -
 // mirrors internal/payments.NewOrchestrator's identical parameter shape
 // (Stage 10.2, ruling J14/C1).
+//
+// Stage 10.3 W1a: every adapter's WebhookScheme() is validated here - a bad
+// declaration panics, so the process refuses to start.
 func NewOrchestrator(providers map[string]CasinoProvider, resolver webhookauth.Resolver) *Orchestrator {
-	return &Orchestrator{providers: providers, webhookCredentialResolver: resolver}
+	return &Orchestrator{providers: providers, webhookCredentialResolver: resolver, webhookSchemes: mustCasinoSchemeSet(providers)}
 }
 
 // Provider returns the registered adapter for providerID - used by
@@ -585,9 +592,12 @@ type ReceiveCallbackResult struct {
 //	    (tenantID, providerID, keyID), then re-check cred.TenantID/
 //	    cred.ProviderID equal what was just resolved for - a mismatch
 //	    fails closed, never falling back to any other credential;
-//	(c) HMAC/signature verification, inside the adapter's own
-//	    HandleCallback, over the raw bytes BEFORE any parsing (point 7),
-//	    followed by parsing.
+//	(c) HMAC/signature verification over the raw bytes BEFORE any parsing
+//	    (point 7), run by THIS orchestrator via the adapter's
+//	    WebhookScheme() (Stage 10.3 W1a, WH-VENDOR-SCHEME-1: the
+//	    orchestrator, not the adapter, is the mandatory verifier;
+//	    webhook_verify.go), followed by the adapter's HandleCallback
+//	    parsing the verified bytes.
 //
 // Only AFTER (c) succeeds does the existing, UNCHANGED post-verification
 // capability check ((d) below) run - the casino capability stays a
@@ -603,40 +613,20 @@ func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID 
 	in.TenantID = tenantID
 	in.ProviderID = providerID
 
-	// Header format validation is redundant with the HTTP handler's own
-	// pre-tenant-lookup check, but this method must be self-sufficient:
-	// casino-package tests call it directly, bypassing the HTTP layer
-	// entirely.
-	keyID, _, reason, ok := ParseWebhookAuthHeaders(in.Header)
-	if !ok {
-		return ReceiveCallbackResult{}, &webhookauth.AuthError{Reason: reason}
-	}
-
-	// (a) the adapter must be registered.
-	provider, ok := o.providers[providerID]
-	if !ok {
-		return ReceiveCallbackResult{}, &webhookauth.AuthError{Reason: webhookauth.ReasonProviderUnregistered, KeyID: keyID}
-	}
-
-	// (b) resolve the single candidate credential and re-check its
-	// binding. A nil resolver fails closed - never a fallback to
-	// unauthenticated verification.
-	if o.webhookCredentialResolver == nil {
-		return ReceiveCallbackResult{}, &webhookauth.AuthError{Reason: webhookauth.ReasonNoResolver, KeyID: keyID}
-	}
-	cred, err := o.webhookCredentialResolver.Resolve(ctx, tenantID, providerID, keyID)
+	// (a)+(b)+verify: adapter registered, its scheme's Extract, single-
+	// credential resolution, and the ORCHESTRATOR-ENFORCED scheme.Verify
+	// over the raw bytes (Stage 10.3 W1a, WH-VENDOR-SCHEME-1;
+	// webhook_verify.go) - no statement of any kind runs before it
+	// succeeds (strict I1). Self-sufficient: casino-package tests call
+	// this method directly, bypassing the HTTP preamble.
+	provider, cred, err := o.verifyCallback(ctx, in)
 	if err != nil {
-		return ReceiveCallbackResult{}, &webhookauth.AuthError{Reason: webhookauth.ReasonCredentialUnavailable, KeyID: keyID}
+		return ReceiveCallbackResult{}, err
 	}
-	if cred.TenantID != tenantID || cred.ProviderID != providerID {
-		// Defense in depth only: no conforming resolver should ever return
-		// a credential bound to a different tenant/provider than it was
-		// asked to resolve for - fail closed if one somehow does.
-		return ReceiveCallbackResult{}, &webhookauth.AuthError{Reason: webhookauth.ReasonCredentialUnavailable, KeyID: keyID}
-	}
+	keyID := cred.KeyID
 
-	// (c) HMAC verification then parsing, both inside the adapter's own
-	// HandleCallback. Every failure BEFORE verification succeeds is
+	// (c) the adapter's HandleCallback parses the now-VERIFIED bytes (it
+	// may re-verify as defence in depth). A re-verification failure is
 	// ErrCallbackSignatureInvalid (== webhookauth.ErrSignatureInvalid) -
 	// never any other error type - so this switch is exhaustive for
 	// pre-verification failures. ErrCallbackMalformedBody (checked last,

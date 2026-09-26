@@ -780,7 +780,8 @@ func caseSC11(r *reporter, e *env) {
 	}
 	forbidden := []string{string(marker), "body-marker-7f3a9c", hex.EncodeToString(c.Secret), c.Fingerprint}
 	for _, h := range e.f.AuthHeaders {
-		if v := genuine.Header.Get(h); len(v) >= 8 && !(e.keyFromHeader() && http.CanonicalHeaderKey(h) == http.CanonicalHeaderKey(e.f.KeyIDHeader)) {
+		isKeyID := e.keyFromHeader() && http.CanonicalHeaderKey(h) == http.CanonicalHeaderKey(e.f.KeyIDHeader)
+		if v := genuine.Header.Get(h); len(v) >= 8 && !isKeyID {
 			forbidden = append(forbidden, v)
 		}
 	}

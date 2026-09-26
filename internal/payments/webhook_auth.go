@@ -34,6 +34,13 @@ func WebhookScheme() webhookauth.Scheme {
 	return paymentsScheme
 }
 
+// WebhookScheme implements PaymentProvider: the payments platform MOCK
+// scheme (byte-identical to Stage 10.1/10.2) exposed as a synthetic
+// webhookauth.VerificationScheme. Never a vendor protocol.
+func (m *MockProvider) WebhookScheme() webhookauth.VerificationScheme {
+	return paymentsScheme.VerificationScheme()
+}
+
 // MultiWebhookCredentialResolver composes several per-provider resolvers
 // behind the single WebhookCredentialResolver the Orchestrator is
 // constructed with (ruling C2/C3). An alias of webhookauth.MultiResolver

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -105,6 +106,11 @@ type KYCProvider interface {
 	// structural failure (missing provider_reference, an outcome outside
 	// the closed enum, unparseable JSON).
 	HandleCallback(ctx context.Context, in webhookauth.Inbound, cred webhookauth.Credential) (ProviderResult, error)
+	// WebhookScheme returns this adapter's inbound-callback verification
+	// scheme (Stage 10.3 W1a, WH-VENDOR-SCHEME-1): validated at
+	// registration, selected by provider id in the shared HTTP preamble,
+	// and run by the Orchestrator ITSELF before HandleCallback.
+	WebhookScheme() webhookauth.VerificationScheme
 	GetCapabilities() Capabilities
 	HealthStatus(ctx context.Context) error
 }
@@ -160,14 +166,21 @@ type CallbackAuthError = webhookauth.AuthError
 type Orchestrator struct {
 	providers                 map[string]KYCProvider
 	webhookCredentialResolver webhookauth.Resolver
+	// webhookSchemes: every adapter's validated WebhookScheme() (Stage
+	// 10.3 W1a; webhook_verify.go). now: platform clock (nil = time.Now).
+	webhookSchemes *webhookauth.SchemeSet
+	now            func() time.Time
 }
 
 // NewOrchestrator constructs an Orchestrator. resolver may be nil (every
 // callback then fails closed as ReasonNoResolver) - callers wire a real
 // resolver only where cfg.TestSupportRoutesEnabled() (ADR 0085), see
 // cmd/platform-api/wiring.go's mockProviderWiring.
+//
+// Stage 10.3 W1a: every adapter's WebhookScheme() is validated here - a bad
+// declaration panics, so the process refuses to start.
 func NewOrchestrator(providers map[string]KYCProvider, resolver webhookauth.Resolver) *Orchestrator {
-	return &Orchestrator{providers: providers, webhookCredentialResolver: resolver}
+	return &Orchestrator{providers: providers, webhookCredentialResolver: resolver, webhookSchemes: mustKYCSchemeSet(providers)}
 }
 
 func (o *Orchestrator) Provider(id string) (KYCProvider, bool) {
@@ -199,9 +212,11 @@ func (o *Orchestrator) Provider(id string) (KYCProvider, bool) {
 //	    this (tenantID, providerID) (else ReasonCredentialUnavailable,
 //	    defense in depth - no conforming resolver should ever return a
 //	    mismatched credential);
-//	(c) provider.HandleCallback verifies the raw bytes against that
-//	    credential BEFORE any parsing (ReasonSignatureInvalid on failure),
-//	    then parses the now-authenticated body (ErrCallbackMalformedBody on
+//	(c) this Orchestrator runs the adapter's WebhookScheme().Verify over
+//	    the raw bytes against that credential (Stage 10.3 W1a: the
+//	    orchestrator, not the adapter, is the mandatory verifier;
+//	    ReasonSignatureInvalid / ReasonTimestampOutOfWindow on failure),
+//	    then provider.HandleCallback parses the now-authenticated body (ErrCallbackMalformedBody on
 //	    a structural failure - a DIFFERENT, POST-verification error class
 //	    the caller maps to 400, never the uniform 401);
 //	(d) the verification is looked up by an EXPLICIT
@@ -234,44 +249,23 @@ func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID 
 	in.TenantID = tenantID
 	in.ProviderID = providerID
 
-	// Header format validation is redundant with the HTTP handler's own
-	// pre-tenant-lookup check (the shared webhookPreamble), but this
-	// method must be self-sufficient: kyc-package tests call it directly,
-	// bypassing the HTTP layer entirely (mirrors payments.Orchestrator.
-	// ReceiveCallback's identical rationale).
-	keyID, _, reason, ok := webhookauth.KYCScheme().ParseHeaders(in.Header)
-	if !ok {
-		return Verification{}, false, &CallbackAuthError{Reason: reason}
-	}
-
-	// (a) the adapter must be registered.
-	provider, ok := o.providers[providerID]
-	if !ok {
-		return Verification{}, false, &CallbackAuthError{Reason: webhookauth.ReasonProviderUnregistered, KeyID: keyID}
-	}
-
-	// (b) resolve the single candidate credential and re-check its
-	// binding. A nil resolver fails closed - never a fallback to
-	// unauthenticated verification.
-	if o.webhookCredentialResolver == nil {
-		return Verification{}, false, &CallbackAuthError{Reason: webhookauth.ReasonNoResolver, KeyID: keyID}
-	}
-	cred, err := o.webhookCredentialResolver.Resolve(ctx, tenantID, providerID, keyID)
+	// (a)+(b)+verify: adapter registered, its scheme's Extract, single-
+	// credential resolution, and the ORCHESTRATOR-ENFORCED scheme.Verify
+	// over the raw bytes (Stage 10.3 W1a, WH-VENDOR-SCHEME-1;
+	// webhook_verify.go) - no statement of any kind runs before it
+	// succeeds (strict I1). Self-sufficient: kyc-package tests call this
+	// method directly, bypassing the HTTP preamble.
+	provider, cred, err := o.verifyCallback(ctx, in)
 	if err != nil {
-		return Verification{}, false, &CallbackAuthError{Reason: webhookauth.ReasonCredentialUnavailable, KeyID: keyID}
+		return Verification{}, false, err
 	}
-	if cred.TenantID != tenantID || cred.ProviderID != providerID {
-		// Defense in depth only: no conforming resolver should ever return
-		// a credential bound to a different tenant/provider than it was
-		// asked to resolve for (I3).
-		return Verification{}, false, &CallbackAuthError{Reason: webhookauth.ReasonCredentialUnavailable, KeyID: keyID}
-	}
+	keyID := cred.KeyID
 
-	// (c) verify (over the raw bytes, before any parsing) then parse -
-	// both inside the adapter's own HandleCallback. Every failure BEFORE
-	// verification succeeds is ErrCallbackSignatureInvalid; every failure
-	// after is ErrCallbackMalformedBody - never confused with one
-	// another, since that would break the uniform-401 contract (point 7).
+	// (c) the adapter's HandleCallback parses the now-VERIFIED bytes (it
+	// may re-verify as defence in depth). A re-verification failure is
+	// ErrCallbackSignatureInvalid; every post-verification failure is
+	// ErrCallbackMalformedBody - never confused with one another, since
+	// that would break the uniform-401 contract (point 7).
 	providerResult, err := provider.HandleCallback(ctx, in, cred)
 	if errors.Is(err, ErrCallbackSignatureInvalid) {
 		return Verification{}, false, &CallbackAuthError{Reason: webhookauth.ReasonSignatureInvalid, KeyID: keyID, CredentialFingerprint: cred.Fingerprint}

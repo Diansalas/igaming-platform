@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -13,6 +14,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/rg"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // defaultMaxCascadeDepth bounds how many distinct providers a single
@@ -48,6 +50,12 @@ type Orchestrator struct {
 	// fails closed (ReasonNoResolver/ReasonCredentialUnavailable) - there
 	// is no fallback to unauthenticated verification.
 	webhookCredentialResolver WebhookCredentialResolver
+	// webhookSchemes is every registered adapter's WebhookScheme(),
+	// validated once at construction (Stage 10.3 W1a; webhook_verify.go).
+	webhookSchemes *webhookauth.SchemeSet
+	// now is the platform clock for signed-timestamp windows; nil means
+	// time.Now. Tests in this package may set it.
+	now func() time.Time
 	// MaxCascadeDepth bounds cascade-on-decline (payment-orchestration.md
 	// §5). Defaults to defaultMaxCascadeDepth when <= 0.
 	MaxCascadeDepth int
@@ -60,8 +68,15 @@ type Orchestrator struct {
 // resolver may be nil - every provider then fails closed on every callback
 // (ReasonNoResolver, the T14 conformance case), never falling back to
 // unauthenticated verification.
+//
+// Stage 10.3 W1a: every adapter's WebhookScheme() is validated here
+// (webhookauth.MustSchemeSet) - a bad scheme declaration panics, so the
+// process refuses to start rather than serving with it.
 func NewOrchestrator(providers map[string]PaymentProvider, resolver WebhookCredentialResolver) *Orchestrator {
-	return &Orchestrator{providers: providers, webhookCredentialResolver: resolver, MaxCascadeDepth: defaultMaxCascadeDepth}
+	return &Orchestrator{
+		providers: providers, webhookCredentialResolver: resolver, MaxCascadeDepth: defaultMaxCascadeDepth,
+		webhookSchemes: mustPaymentsSchemeSet(providers),
+	}
 }
 
 // Provider returns the registered adapter for providerID, per
@@ -838,15 +853,17 @@ type ReceiveCallbackResult struct {
 //	    (tenantID, providerID, keyID), then re-check cred.TenantID/
 //	    cred.ProviderID equal what was just resolved for - a mismatch
 //	    fails closed, never falling back to any other credential;
-//	(d) HMAC/signature verification, inside the adapter's own
-//	    HandleCallback, over content that includes tenantID/providerID -
-//	    never trusted from the payload - followed by (e) a key-material
-//	    scan of the now-parsed body, run only once (d) has succeeded
-//	    (docs/decisions/0022 §3 amendment point 7, added Stage 10.1
-//	    security review P2-1/code review F1/architect PW-1: any body
-//	    parsing needed for the scan must happen AFTER verification, so an
-//	    unauthenticated non-JSON body can never be distinguished from any
-//	    other pre-verification failure).
+//	(d) HMAC/signature verification over content that includes
+//	    tenantID/providerID - never trusted from the payload - run by THIS
+//	    orchestrator via the adapter's WebhookScheme() (Stage 10.3 W1a,
+//	    WH-VENDOR-SCHEME-1: the orchestrator, not the adapter, is the
+//	    mandatory verifier; webhook_verify.go), followed by (e) the
+//	    adapter's HandleCallback, which parses the verified bytes and runs
+//	    the key-material scan (docs/decisions/0022 §3 amendment point 7,
+//	    added Stage 10.1 security review P2-1/code review F1/architect
+//	    PW-1: any body parsing needed for the scan must happen AFTER
+//	    verification, so an unauthenticated non-JSON body can never be
+//	    distinguished from any other pre-verification failure).
 //
 // Every failure before (e) succeeds returns a *CallbackAuthError wrapping
 // ErrCallbackAuthFailed with a closed, allow-listed reason - the caller
@@ -857,55 +874,25 @@ func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID 
 	in.TenantID = tenantID
 	in.ProviderID = providerID
 
-	// Header format validation is redundant with the HTTP handler's own
-	// pre-tenant-lookup check (ruling 5), but this method must be
-	// self-sufficient: payments-package tests call it directly, bypassing
-	// the HTTP layer entirely.
-	keyID, _, reason, ok := ParseWebhookAuthHeaders(in.Header)
-	if !ok {
-		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: reason}
-	}
-
-	// (a) the adapter must be registered.
-	provider, ok := o.providers[providerID]
-	if !ok {
-		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonProviderUnregistered, KeyID: keyID}
-	}
-
-	// (b) the provider must be configured for this tenant to accept
-	// webhooks. Read-only EXISTS, no lock, no write - the only statement
-	// permitted before (e) succeeds (invariant I1).
-	accepts, err := ProviderAcceptsWebhook(ctx, tx, tenantID, providerID)
+	// (a)-(d): adapter registered, its scheme's Extract, the read-only
+	// ProviderAcceptsWebhook EXISTS (the only statement before
+	// verification, I1), single-credential resolution, and the
+	// ORCHESTRATOR-ENFORCED scheme.Verify (Stage 10.3 W1a,
+	// WH-VENDOR-SCHEME-1; webhook_verify.go). Every failure is a
+	// *CallbackAuthError with a closed reason. Self-sufficient: payments-
+	// package tests call ReceiveCallback directly, bypassing the HTTP
+	// preamble.
+	provider, cred, err := o.verifyCallback(ctx, tx, in)
 	if err != nil {
 		return ReceiveCallbackResult{}, err
 	}
-	if !accepts {
-		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonProviderNotConfigured, KeyID: keyID}
-	}
+	keyID := cred.KeyID
 
-	// (c) resolve the single candidate credential and re-check its
-	// binding. A nil resolver fails closed (the T14 conformance case) -
-	// never a fallback to unauthenticated verification.
-	if o.webhookCredentialResolver == nil {
-		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonNoResolver, KeyID: keyID}
-	}
-	cred, err := o.webhookCredentialResolver.Resolve(ctx, tenantID, providerID, keyID)
-	if err != nil {
-		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonCredentialUnavailable, KeyID: keyID}
-	}
-	if cred.TenantID != tenantID || cred.ProviderID != providerID {
-		// Defense in depth only: no conforming resolver should ever return
-		// a credential bound to a different tenant/provider than it was
-		// asked to resolve for - fail closed if one somehow does (I3).
-		return ReceiveCallbackResult{}, &CallbackAuthError{Reason: ReasonCredentialUnavailable, KeyID: keyID}
-	}
-
-	// (d)+(e): HMAC verification then key-material scan, both inside the
-	// adapter's own HandleCallback, over content that includes tenantID/
-	// providerID (never trusted from in.Body). Every failure BEFORE (d)
-	// succeeds is one of the two auth sentinels below (docs/decisions/0022
-	// §3 amendment point 7) - never any other error type - so this switch
-	// is exhaustive for pre-verification failures. ErrCallbackMalformedBody
+	// (e): the adapter's HandleCallback parses the now-VERIFIED bytes (it
+	// may re-verify as defence in depth) and runs the key-material scan. A
+	// re-verification failure is still one of the two auth sentinels below
+	// (docs/decisions/0022 §3 amendment point 7) - never any other error
+	// type - so this switch is exhaustive for pre-verification failures. ErrCallbackMalformedBody
 	// (checked last, falling into the generic branch) is a POST-
 	// verification, distinct error class the HTTP layer maps to a 4xx, not
 	// the uniform 401.

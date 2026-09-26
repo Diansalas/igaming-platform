@@ -90,7 +90,7 @@ func AllReasons() []Reason {
 type TenantBinding int
 
 const (
-	bindingUnspecified TenantBinding = iota
+	_ TenantBinding = iota // the zero value is deliberately invalid (ValidateProperties refuses it)
 	// BindingSignedTenant: the platform's tenant id is inside the signed
 	// input (only possible for platform-defined schemes, i.e. the MOCK).
 	BindingSignedTenant
@@ -123,7 +123,7 @@ func (b TenantBinding) String() string {
 type KeySelection int
 
 const (
-	keySelectionUnspecified KeySelection = iota
+	_ KeySelection = iota // the zero value is deliberately invalid (ValidateProperties refuses it)
 	// KeyFromHeader: the vendor names its key id on every request. An
 	// absent key id is ReasonSignatureMissing, never a multi-key trial,
 	// and a Previous credential is never passed to Verify.
@@ -151,7 +151,7 @@ func (k KeySelection) String() string {
 type ReplayDefence int
 
 const (
-	replayUnspecified ReplayDefence = iota
+	_ ReplayDefence = iota // the zero value is deliberately invalid (ValidateProperties refuses it)
 	// ReplayTimestampWindow: a signed timestamp must be within MaxSkew of
 	// the platform clock; replays inside the window are absorbed by each
 	// domain's database-enforced idempotency (provider_tx_id uniqueness).

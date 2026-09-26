@@ -37,8 +37,11 @@ func TestWebhookAuthAliases_ErrorsIsAs(t *testing.T) {
 
 	t.Run("payments-produced CallbackAuthError via webhookauth names", func(t *testing.T) {
 		// A real payments-produced error: ReceiveCallback's header check
-		// fails before any tx use, so a nil tx is never touched.
-		orch := NewOrchestrator(map[string]PaymentProvider{}, nil)
+		// fails before any tx use, so a nil tx is never touched. Stage 10.3
+		// W1a: the provider must be REGISTERED for the header check to run
+		// at all - an unregistered provider has no scheme and is now
+		// provider_unregistered before any header is examined.
+		orch := NewOrchestrator(map[string]PaymentProvider{"mock-psp": NewMockProvider("mock-psp")}, nil)
 		_, err := orch.ReceiveCallback(context.Background(), nil, uuid.New(), "mock-psp", InboundCallback{Header: http.Header{}})
 		if !errors.Is(err, webhookauth.ErrAuthFailed) {
 			t.Fatalf("errors.Is(payments error, webhookauth.ErrAuthFailed) failed: %v", err)

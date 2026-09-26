@@ -582,6 +582,15 @@ type PaymentProvider interface {
 	// ErrCallbackMalformedBody) that a caller maps to a 4xx, never to the
 	// uniform pre-verification 401.
 	HandleCallback(ctx context.Context, req InboundCallback, cred WebhookCredential) (CallbackEvent, error)
+	// WebhookScheme returns this adapter's own inbound-callback
+	// verification scheme (Stage 10.3 W1a, WH-VENDOR-SCHEME-1). The
+	// Orchestrator validates it at registration (a bad declaration fails
+	// startup), the shared HTTP preamble selects it by provider id, and
+	// ReceiveCallback runs its Verify ITSELF before HandleCallback - so
+	// HandleCallback only ever sees already-verified bytes (it may
+	// re-verify as defence in depth). A real adapter implements its
+	// vendor's documented scheme; the mock returns the platform MOCK scheme.
+	WebhookScheme() webhookauth.VerificationScheme
 	// Capabilities returns this adapter's own declared, static layer only
 	// - never tenant/brand/priority/status (docs/decisions/0022 §2).
 	Capabilities() AdapterCapability

@@ -229,9 +229,15 @@ func TestWebhook_AuthFailureLogging_AllowListOnly(t *testing.T) {
 		orch, mock := newMockOrchestrator()
 		mustRegisterCapability(t, pool, activeTenant.ID, mock)
 		genuine := mock.CallbackPayload(activeTenant.ID, payments.CallbackEventDeposit, "t12-ref", "", payments.OutcomeSucceeded, 1000, "EUR", "", false)
+		// Stage 10.3 W1a (WH-VENDOR-SCHEME-1, 01-provider-trust-analysis.md
+		// §1.1): the shared preamble selects the scheme by provider id, so
+		// an unregistered provider is rejected BEFORE the tenant lookup and
+		// before any header is parsed - tenant_id and key_id are therefore
+		// now correctly ABSENT (previously present, since the lookup ran
+		// after the tenant lookup inside ReceiveCallback).
 		runAuthFailureLogCase(t, pool, issuer, activeTenant.ID, orch,
 			"/v1/webhooks/payments/"+activeTenant.Slug+"/not-a-real-provider", genuine.Header, genuineBody,
-			payments.ReasonProviderUnregistered, true, true, true, false)
+			payments.ReasonProviderUnregistered, false, true, false, false)
 	})
 
 	t.Run("provider_not_configured", func(t *testing.T) {

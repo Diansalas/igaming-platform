@@ -411,7 +411,12 @@ const maxKYCWebhookBodyBytes = 256 * 1024
 // preamble (webhook_preamble.go) - Stage 10.2, ADR 0091, architect ruling
 // R2/J4: every webhook domain uses the ONE shared preamble.
 var kycWebhookRoute = webhookRoute{
-	scheme:                  webhookauth.KYCScheme(),
+	schemeFor: func(deps Deps, providerID string) (webhookauth.VerificationScheme, bool) {
+		if deps.KYCOrchestrator == nil {
+			return nil, false
+		}
+		return deps.KYCOrchestrator.WebhookScheme(providerID)
+	},
 	maxBody:                 maxKYCWebhookBodyBytes,
 	authFailedEvent:         "kyc_webhook_auth_failed",
 	tenantLookupFailedEvent: "kyc_webhook_tenant_lookup_failed",

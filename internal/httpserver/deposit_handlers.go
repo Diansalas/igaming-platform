@@ -16,6 +16,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // maxWebhookBodyBytes bounds an inbound provider callback body - a
@@ -26,10 +27,16 @@ import (
 const maxWebhookBodyBytes = 1 << 20 // 1 MiB
 
 // paymentWebhookRoute is the payments domain's parameter set for the shared
-// webhook preamble (webhook_preamble.go). The scheme, event names and body
-// limit are exactly Stage 10.1's.
+// webhook preamble (webhook_preamble.go). The event names and body limit
+// are exactly Stage 10.1's; the scheme is the registered adapter's own
+// (Stage 10.3 W1a) - for the mock, the unchanged payments MOCK scheme.
 var paymentWebhookRoute = webhookRoute{
-	scheme:                  payments.WebhookScheme(),
+	schemeFor: func(deps Deps, providerID string) (webhookauth.VerificationScheme, bool) {
+		if deps.PaymentOrchestrator == nil {
+			return nil, false
+		}
+		return deps.PaymentOrchestrator.WebhookScheme(providerID)
+	},
 	maxBody:                 maxWebhookBodyBytes,
 	authFailedEvent:         "payment_webhook_auth_failed",
 	tenantLookupFailedEvent: "payment_webhook_tenant_lookup_failed",

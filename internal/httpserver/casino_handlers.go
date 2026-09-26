@@ -28,7 +28,12 @@ const maxCasinoWebhookBodyBytes = 1 << 20 // 1 MiB
 // webhook preamble (webhook_preamble.go). Stage 10.2, CAS-WH-TENANT-1, ADR
 // 0091, design §C6.
 var casinoWebhookRoute = webhookRoute{
-	scheme:                  casino.WebhookScheme(),
+	schemeFor: func(deps Deps, providerID string) (webhookauth.VerificationScheme, bool) {
+		if deps.CasinoOrchestrator == nil {
+			return nil, false
+		}
+		return deps.CasinoOrchestrator.WebhookScheme(providerID)
+	},
 	maxBody:                 maxCasinoWebhookBodyBytes,
 	authFailedEvent:         "casino_webhook_auth_failed",
 	tenantLookupFailedEvent: "casino_webhook_tenant_lookup_failed",
