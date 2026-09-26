@@ -349,7 +349,7 @@ The KYC webhook has the same flaw as S-6, and it is worse:
   tenant from the slug only.
 - `internal/kyc/mock_provider.go:138-141` uses one HMAC over the body, with no tenant.
 - The secret is a **constant committed to the repo**
-  (`cmd/platform-api/main.go:43`, `"dev-mock-kyc-webhook-secret-not-for-production"`).
+  (`cmd/platform-api/main.go:43`, `"[REDACTED — literal KYC mock secret; compromised, removed in Stage 10.2 (KYC-WH-1)]"`).
 - The mock and the route are registered **unconditionally** (`main.go:261-263`,
   `kyc_routes.go:42`). No environment gate exists; only the runbook
   (`production-configuration-checklist.md:103`) warns.
