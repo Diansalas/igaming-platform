@@ -1,25 +1,25 @@
-// Stage 10.2 pre-fix evidence; retired or inverted by the fix commit.
+// Stage 10.2 KYC-WH-1 fix verification: G7 guard, permanently kept per the
+// binding QA test plan (docs/plans/stage-10.2-planning/03-review-qa-test-
+// plan.md: "E2 is inverted, not deleted, into
+// TestG7_NoConstStringFeedsWebhookCredential"), a direct descendant of the
+// Stage 10.2 pre-fix evidence E2
+// (TestKYCWH1_PreFix_SecretIsCompileTimeConstant).
 //
-// KYC-WH-1 (design doc §0, §H E2): TestKYCWH1_PreFix_SecretIsCompileTimeConstant
-// uses go/ast (not go/types, not any reflection over the running binary)
-// to assert that the single argument passed to kyc.NewMockKYCProvider in
-// this package's main.go is an identifier bound to a package-level string
-// constant. This is a KIND-only assertion (token.STRING), proving the
-// argument is a compile-time literal wired through a named const, never
-// anything derived at runtime (an env var, a secret-store lookup, a
-// randomly generated value, etc).
+// Pre-fix, that test used go/ast to assert kyc.NewMockKYCProvider's sole
+// argument in this package's main.go was an identifier resolving to a
+// top-level string const - proving a literal secret was structurally
+// reachable. Post-fix, kyc.NewMockKYCProvider takes ZERO arguments, so
+// there is no parameter through which any const string (or any other
+// value) could ever reach a webhook credential again. This guard asserts
+// exactly that, structurally, forever - so a future change accidentally
+// reintroducing a parameter (and wiring a literal into it) fails this
+// test immediately.
 //
-// SECRET-SAFETY (mechanical no-print rule, binding per
-// docs/plans/stage-10.2-planning/03-review-qa-test-plan.md): this file
-// NEVER reads, logs, prints, formats, or otherwise surfaces the literal's
-// .Value anywhere - not in a t.Log/t.Errorf/t.Fatalf message, not in a
-// comment, not in an intermediate variable that could later be printed.
-// Every assertion below inspects only: the number of call arguments, the
-// AST node TYPE (*ast.Ident vs. something else), the resolved
-// declaration's token.Token KIND (token.CONST), and the literal's
-// token.Token KIND (token.STRING). If any of these ever needs debugging,
-// the fix is to assert a different structural property - never to print
-// the value.
+// SECRET-SAFETY (mechanical no-print rule, binding per the QA test plan):
+// this file never reads, logs, prints, formats, or otherwise surfaces any
+// credential/secret value - it inspects only function signatures (go/ast
+// KIND facts: argument count, AST node types) and source text for the
+// ABSENCE of certain call shapes, never any literal's .Value.
 package main
 
 import (
@@ -30,99 +30,104 @@ import (
 	"testing"
 )
 
-// findNewMockKYCProviderCall walks file's AST and returns the single
-// argument expression passed to a call whose selector is
-// "NewMockKYCProvider" (e.g. kyc.NewMockKYCProvider(...)). It fails the
-// test (via t.Fatalf, which never touches the argument's value - only
-// structural facts) if it finds zero or more than one such call, or a
-// call with argument count != 1.
-func findNewMockKYCProviderCall(t *testing.T, file *ast.File) ast.Expr {
-	t.Helper()
-	var found []ast.Expr
+// findCallsTo walks file's AST and returns every *ast.CallExpr whose
+// selector or identifier matches name (e.g. "NewMockKYCProvider").
+func findCallsTo(file *ast.File, name string) []*ast.CallExpr {
+	var found []*ast.CallExpr
 	ast.Inspect(file, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel == nil || sel.Sel.Name != "NewMockKYCProvider" {
-			return true
+		switch fn := call.Fun.(type) {
+		case *ast.SelectorExpr:
+			if fn.Sel != nil && fn.Sel.Name == name {
+				found = append(found, call)
+			}
+		case *ast.Ident:
+			if fn.Name == name {
+				found = append(found, call)
+			}
 		}
-		if len(call.Args) != 1 {
-			t.Fatalf("expected exactly 1 argument to NewMockKYCProvider, found %d", len(call.Args))
-		}
-		found = append(found, call.Args[0])
 		return true
 	})
-	if len(found) != 1 {
-		t.Fatalf("expected exactly 1 call to NewMockKYCProvider in this file, found %d", len(found))
-	}
-	return found[0]
+	return found
 }
 
-// resolveTopLevelConstStringLit finds a top-level `const <name> = "..."`
-// (or `const ( <name> = "..." )`) declaration in file matching name, and
-// returns the KIND of its value literal only - never the literal itself.
-// Returns ok=false if name is not bound to any top-level const at all, or
-// if that const's value is not a single *ast.BasicLit.
-func resolveTopLevelConstStringLit(file *ast.File, name string) (kind token.Token, ok bool) {
-	for _, decl := range file.Decls {
-		gen, isGen := decl.(*ast.GenDecl)
-		if !isGen || gen.Tok != token.CONST {
+// TestG7_NoConstStringFeedsWebhookCredential asserts, by structure only:
+//
+//  1. kyc.NewMockKYCProvider is declared (in internal/kyc/mock_provider.go)
+//     with ZERO parameters - so no caller anywhere in the tree can pass it
+//     an argument at all, let alone a compile-time literal;
+//  2. every call site to NewMockKYCProvider in this package's own source
+//     (main.go, wiring.go, and every _test.go file) passes ZERO arguments,
+//     matching that signature;
+//  3. git grep for the exact historical compile-time constant NAME
+//     ("kycMockWebhookSecret") returns nothing in this package's tree -
+//     the constant itself (name AND declaration) was deleted, not merely
+//     stopped being passed.
+func TestG7_NoConstStringFeedsWebhookCredential(t *testing.T) {
+	fset := token.NewFileSet()
+
+	// (1) the function declaration itself, in internal/kyc.
+	kycMockProviderPath := filepath.Join("..", "..", "internal", "kyc", "mock_provider.go")
+	kycFile, err := parser.ParseFile(fset, kycMockProviderPath, nil, 0)
+	if err != nil {
+		t.Fatalf("failed to parse %s: %v", kycMockProviderPath, err)
+	}
+	var decl *ast.FuncDecl
+	ast.Inspect(kycFile, func(n ast.Node) bool {
+		fd, ok := n.(*ast.FuncDecl)
+		if ok && fd.Recv == nil && fd.Name.Name == "NewMockKYCProvider" {
+			decl = fd
+		}
+		return true
+	})
+	if decl == nil {
+		t.Fatal("expected to find a top-level func NewMockKYCProvider declaration")
+	}
+	if n := decl.Type.Params.NumFields(); n != 0 {
+		t.Fatalf("expected NewMockKYCProvider to take 0 parameters, found %d field group(s)", n)
+	}
+
+	// (2) every call site in this package (main.go and any _test.go file)
+	// passes 0 arguments.
+	matches, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("failed to glob *.go: %v", err)
+	}
+	totalCalls := 0
+	for _, path := range matches {
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("failed to parse %s: %v", path, err)
+		}
+		for _, call := range findCallsTo(file, "NewMockKYCProvider") {
+			totalCalls++
+			if len(call.Args) != 0 {
+				t.Fatalf("%s: expected NewMockKYCProvider to be called with 0 arguments, found %d", path, len(call.Args))
+			}
+		}
+	}
+	if totalCalls == 0 {
+		t.Fatal("expected at least one NewMockKYCProvider call site in this package")
+	}
+
+	// (3) the historical constant's NAME must not appear anywhere in this
+	// package's source - name only, never any value.
+	for _, path := range matches {
+		file, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+		if err != nil {
 			continue
 		}
-		for _, spec := range gen.Specs {
-			vs, isVS := spec.(*ast.ValueSpec)
-			if !isVS {
-				continue
+		ast.Inspect(file, func(n ast.Node) bool {
+			id, ok := n.(*ast.Ident)
+			if ok && id.Name == "kycMockWebhookSecret" {
+				t.Fatalf("%s: found a reference to the historical constant name kycMockWebhookSecret - it must be fully removed, not merely unused", path)
 			}
-			for i, ident := range vs.Names {
-				if ident.Name != name {
-					continue
-				}
-				if i >= len(vs.Values) {
-					// iota-style / no explicit value for this name.
-					return 0, false
-				}
-				lit, isLit := vs.Values[i].(*ast.BasicLit)
-				if !isLit {
-					return 0, false
-				}
-				return lit.Kind, true
-			}
-		}
-	}
-	return 0, false
-}
-
-func TestKYCWH1_PreFix_SecretIsCompileTimeConstant(t *testing.T) {
-	fset := token.NewFileSet()
-	mainGoPath := filepath.Join(".", "main.go")
-	file, err := parser.ParseFile(fset, mainGoPath, nil, parser.ParseComments)
-	if err != nil {
-		t.Fatalf("failed to parse %s: %v", mainGoPath, err)
+			return true
+		})
 	}
 
-	arg := findNewMockKYCProviderCall(t, file)
-
-	// KIND only: the argument AST node type must be a plain identifier
-	// (a name reference), never a literal spelled out inline, a function
-	// call, an environment/config lookup, or any other expression shape.
-	ident, isIdent := arg.(*ast.Ident)
-	if !isIdent {
-		t.Fatalf("expected NewMockKYCProvider's argument to be a plain identifier (*ast.Ident), got %T", arg)
-	}
-
-	// The identifier must resolve to a top-level `const` declaration
-	// whose value is a string literal (token.STRING) - kind only, value
-	// never read.
-	kind, ok := resolveTopLevelConstStringLit(file, ident.Name)
-	if !ok {
-		t.Fatalf("expected identifier %q to resolve to a top-level const with an explicit literal value, found none", ident.Name)
-	}
-	if kind != token.STRING {
-		t.Fatalf("expected identifier %q's const declaration to be a STRING literal kind, got %v", ident.Name, kind)
-	}
-
-	t.Log("PRE-FIX EVIDENCE: NewMockKYCProvider's sole argument is an identifier bound to a package-level string constant (kind asserted only; literal value never read, logged, or printed)")
+	t.Log("PASS: NewMockKYCProvider takes 0 parameters; every call site in this package passes 0 arguments; the historical const name is gone")
 }

@@ -32,27 +32,78 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/identityresolution"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 func newKYCTestServer(t *testing.T, pool *db.Pool, issuer *auth.Issuer) (*httptest.Server, *kyc.MockKYCProvider, *email.MockProvider) {
 	t.Helper()
-	mockProvider := kyc.NewMockKYCProvider("test-webhook-secret")
+	// Stage 10.2 (ADR 0091, KYC-WH-1): NewMockKYCProvider takes no
+	// argument (a per-process crypto/rand master, never an injectable
+	// literal) - the resolver is the SAME kyc.NewMockWebhookCredentials
+	// wiring cmd/platform-api/wiring.go's kycWebhookResolver uses when
+	// test support is enabled.
+	mockProvider := kyc.NewMockKYCProvider()
 	mockEmail := email.NewMockProvider()
 	srv := httptest.NewServer(New(Deps{
-		Logger:          slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
-		DB:              pool,
-		AuthIssuer:      issuer,
-		ServiceName:     "platform-api-test",
-		AccessTokenTTL:  5 * time.Minute,
-		RefreshTokenTTL: time.Hour,
-		PersonResolver:  identityresolution.NewMockPersonResolver(),
-		KYCOrchestrator: kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mockProvider}),
-		DocumentStorage: kyc.NewMockDocumentStorageProvider(),
-		MalwareScanner:  kyc.NewMockMalwareScanner(),
-		EmailProvider:   mockEmail,
+		Logger:            slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError})),
+		DB:                pool,
+		AuthIssuer:        issuer,
+		ServiceName:       "platform-api-test",
+		AccessTokenTTL:    5 * time.Minute,
+		RefreshTokenTTL:   time.Hour,
+		PersonResolver:    identityresolution.NewMockPersonResolver(),
+		KYCOrchestrator:   kyc.NewOrchestrator(map[string]kyc.KYCProvider{"mock": mockProvider}, kyc.NewMockWebhookCredentials(mockProvider)),
+		KYCWebhookEnabled: true,
+		DocumentStorage:   kyc.NewMockDocumentStorageProvider(),
+		MalwareScanner:    kyc.NewMockMalwareScanner(),
+		EmailProvider:     mockEmail,
 	}))
 	t.Cleanup(srv.Close)
 	return srv, mockProvider, mockEmail
+}
+
+// mustGetKYCProviderReference reads a verification's provider_reference
+// directly, tenant-scoped - the K15 replacement for reading it off the
+// player-facing JSON response, which no longer carries it (Stage 10.2
+// design §B5: a player has no legitimate need to see or echo it, and it
+// is no longer a bearer capability once the webhook is tenant-bound and
+// signature-verified).
+func mustGetKYCProviderReference(t *testing.T, pool *db.Pool, tenantID uuid.UUID, verificationID string) string {
+	t.Helper()
+	id, err := uuid.Parse(verificationID)
+	if err != nil {
+		t.Fatalf("invalid verification id %q: %v", verificationID, err)
+	}
+	var ref string
+	err = pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT provider_reference FROM kyc_verifications WHERE id = $1`, id).Scan(&ref)
+	})
+	if err != nil {
+		t.Fatalf("failed to read provider_reference for verification %s: %v", verificationID, err)
+	}
+	return ref
+}
+
+// rawPostKYCCallback posts a webhookauth.Inbound's body to the KYC public
+// webhook route with its own headers (X-KYC-Signature/X-KYC-Key-Id) - the
+// KYC counterpart of financial_flow_integration_test.go's rawPostCallback.
+func rawPostKYCCallback(t *testing.T, srv *httptest.Server, path string, in webhookauth.Inbound) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+path, bytes.NewReader(in.Body))
+	if err != nil {
+		t.Fatalf("failed to build request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	for k, vs := range in.Header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	return resp
 }
 
 // tinyPNG is a minimal valid 1x1 PNG - real PNG magic bytes so
@@ -714,45 +765,46 @@ func TestKYC_WebhookCallbackAuthentication(t *testing.T) {
 	verResp := postJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken, map[string]any{})
 	var verification map[string]any
 	decodeBody(t, verResp, &verification)
-	providerReference := verification["provider_reference"].(string)
-
-	body, sig := mockProvider.MockCallbackPayload(providerReference, kyc.ProviderApproved, "auto_approved")
-	signed := kyc.MockSignedCallbackBody(body, sig)
-	resp := rawPostJSON(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", signed)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 for a validly-signed callback, got %d", resp.StatusCode)
+	if _, present := verification["provider_reference"]; present {
+		t.Fatal("K10: player-facing verification response must never carry provider_reference")
 	}
-	var result map[string]any
-	decodeBody(t, resp, &result)
-	if result["status"] != "approved" {
-		t.Fatalf("expected status approved after callback, got %+v", result["status"])
+	verificationID := verification["id"].(string)
+	providerReference := mustGetKYCProviderReference(t, pool, tenant.ID, verificationID)
+
+	in := mockProvider.CallbackPayload(tenant.ID, providerReference, kyc.ProviderApproved, "auto_approved")
+	resp := rawPostKYCCallback(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", in)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 for a validly-signed callback, got %d", resp.StatusCode)
 	}
 
-	tamperedBody, _ := mockProvider.MockCallbackPayload(providerReference, kyc.ProviderRejected, "tampered")
-	tamperedSigned := kyc.MockSignedCallbackBody(tamperedBody, "0000000000000000000000000000000000000000000000000000000000000000")
-	badSigResp := rawPostJSON(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", tamperedSigned)
+	// K1/direct descendant of E1: a signature the caller (a player) could
+	// compute on its own - a tampered/garbage signature - is rejected.
+	tamperedIn := mockProvider.CallbackPayload(tenant.ID, providerReference, kyc.ProviderRejected, "tampered")
+	tamperedIn.Header.Set(webhookauth.KYCSignatureHeader, "v1="+"0000000000000000000000000000000000000000000000000000000000000000"[:64])
+	badSigResp := rawPostKYCCallback(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", tamperedIn)
 	defer badSigResp.Body.Close()
-	if badSigResp.StatusCode == http.StatusOK {
-		t.Fatal("expected an invalid signature to be rejected, got 200")
+	if badSigResp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for an invalid signature, got %d", badSigResp.StatusCode)
 	}
 
-	// Idempotent: a repeat of the ORIGINAL, validly-signed callback for an
-	// already-terminal (approved) verification is a no-op, not an error,
-	// and never flips it to rejected.
-	repeat := rawPostJSON(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", signed)
+	// K8: a repeat of the ORIGINAL, validly-signed callback for an
+	// already-terminal (approved) verification is a no-op (204), never
+	// flips it to rejected, and does not resurrect it.
+	repeat := rawPostKYCCallback(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", in)
 	defer repeat.Body.Close()
-	if repeat.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 replaying an already-applied callback, got %d", repeat.StatusCode)
+	if repeat.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 replaying an already-applied callback, got %d", repeat.StatusCode)
 	}
-	var repeatResult map[string]any
-	decodeBody(t, repeat, &repeatResult)
-	if repeatResult["status"] != "approved" {
-		t.Fatalf("expected status to remain approved after a redelivered callback, got %+v", repeatResult["status"])
+	listResp := getJSON(t, srv, "/v1/me/kyc/verifications", player.Tokens.AccessToken)
+	var list []map[string]any
+	decodeBody(t, listResp, &list)
+	if len(list) != 1 || list[0]["status"] != "approved" {
+		t.Fatalf("expected status to remain approved after a redelivered callback, got %+v", list)
 	}
 
-	unknownRefBody, unknownSig := mockProvider.MockCallbackPayload("no-such-reference", kyc.ProviderApproved, "x")
-	unknownSigned := kyc.MockSignedCallbackBody(unknownRefBody, unknownSig)
-	unknownResp := rawPostJSON(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", unknownSigned)
+	unknownIn := mockProvider.CallbackPayload(tenant.ID, "no-such-reference", kyc.ProviderApproved, "x")
+	unknownResp := rawPostKYCCallback(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", unknownIn)
 	defer unknownResp.Body.Close()
 	if unknownResp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 for an unknown provider_reference, got %d", unknownResp.StatusCode)
@@ -820,16 +872,15 @@ func TestKYCCases_TenantWideQueueAuthorizedAndPaginated(t *testing.T) {
 	verBResp := postJSON(t, srv, "/v1/me/kyc/verifications", playerB.Tokens.AccessToken, map[string]any{})
 	var verB map[string]any
 	decodeBody(t, verBResp, &verB)
-	providerReferenceB := verB["provider_reference"].(string)
+	providerReferenceB := mustGetKYCProviderReference(t, pool, tenant.ID, verB["id"].(string))
 
 	// Move playerB's verification to approved via the (already-tested)
 	// provider callback path, so the two cases have different statuses to
 	// filter on.
-	body, sig := mockProvider.MockCallbackPayload(providerReferenceB, kyc.ProviderApproved, "auto_approved")
-	signed := kyc.MockSignedCallbackBody(body, sig)
-	cbResp := rawPostJSON(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", signed)
-	if cbResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 applying callback, got %d", cbResp.StatusCode)
+	in := mockProvider.CallbackPayload(tenant.ID, providerReferenceB, kyc.ProviderApproved, "auto_approved")
+	cbResp := rawPostKYCCallback(t, srv, "/v1/webhooks/kyc/"+tenant.Slug+"/mock", in)
+	if cbResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("expected 204 applying callback, got %d", cbResp.StatusCode)
 	}
 	cbResp.Body.Close()
 
