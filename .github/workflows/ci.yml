@@ -252,7 +252,22 @@ jobs:
       - name: Integration tests (RLS, HTTP foundation, race detector)
         run: |
           set -o pipefail
-          go test -race -tags=integration -v ./... 2>&1 | tee integration-test.log
+          # CI-342-STOREOUTAGE: the wall-clock security bounds of
+          # TestStoreOutage_DoesNotPinPool (review §5: <=4 tx held >250 ms,
+          # unrelated query <500 ms) are measured in the next step, alone,
+          # not while every other package's -race binary competes for the
+          # runner's CPUs (CI #347: scheduler delay, not the resolver, pushed
+          # fast callers past the bound). It still runs on every CI run and
+          # still blocks; no bound is changed.
+          go test -race -tags=integration -v -skip '^TestStoreOutage_DoesNotPinPool$' ./... 2>&1 | tee integration-test.log
+
+      - name: Timing-sensitive security tests, run alone (CI-342-STOREOUTAGE)
+        run: |
+          set -o pipefail
+          go test -race -tags=integration -v -count=1 -run '^TestStoreOutage_DoesNotPinPool$' ./internal/providercred/ 2>&1 | tee -a integration-test.log | tee timing-tests.log
+          # Fail if the test was renamed or removed: -run matching nothing
+          # passes silently.
+          grep -q -- '--- PASS: TestStoreOutage_DoesNotPinPool' timing-tests.log
 
       - name: Summarize integration failures
         # Stage 10.1: job logs are only retrievable by their last lines,
