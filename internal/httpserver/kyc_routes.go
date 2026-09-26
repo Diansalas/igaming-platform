@@ -39,5 +39,11 @@ func registerKYCRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("GET /v1/admin/kyc/documents/{id}/content",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermVerificationRead)(newGetDocumentContentHandler(deps)))))
 
-	mux.HandleFunc("POST /v1/webhooks/kyc/{tenantSlug}/{providerID}", newKYCWebhookHandler(deps))
+	// KYC-WH-1 (Stage 10.2, ADR 0091, ruling J7): registered only when
+	// BOTH conditions hold - see Deps.KYCWebhookEnabled's own doc comment.
+	// Absent means the mux returns a genuine 404, never a 503 from inside
+	// a registered handler (K11).
+	if deps.KYCWebhookEnabled && deps.KYCOrchestrator != nil {
+		mux.HandleFunc("POST /v1/webhooks/kyc/{tenantSlug}/{providerID}", newKYCWebhookHandler(deps))
+	}
 }

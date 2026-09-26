@@ -160,6 +160,22 @@ type Deps struct {
 	DocumentStorage kyc.DocumentStorageProvider
 	MalwareScanner  kyc.MalwareScanner
 
+	// KYCWebhookEnabled gates registration of the KYC provider-callback
+	// route (POST /v1/webhooks/kyc/{tenantSlug}/{providerID}) - Stage
+	// 10.2, ADR 0091, architect ruling R5/J7: KYC-WH-1 found this route
+	// registered unconditionally regardless of KYCOrchestrator's origin.
+	// registerKYCRoutes registers the route only when this AND
+	// KYCOrchestrator != nil both hold (mirrors
+	// SportsbookSettlementSimulationEnabled's identical two-layer,
+	// fail-closed gate exactly) - false means the mux never has this
+	// pattern at all, so an unauthenticated caller gets a genuine 404,
+	// not a 503 from inside a registered handler. cmd/platform-api/main.go
+	// sets this to the SAME cfg.TestSupportRoutesEnabled() value that
+	// decided whether KYCOrchestrator itself got a MOCK provider/resolver
+	// in the first place (cmd/platform-api/wiring.go's mockProviderWiring)
+	// - one function decides both, so they cannot diverge (K11).
+	KYCWebhookEnabled bool
+
 	// EmailProvider is Stage 4F's email-delivery boundary (email
 	// verification, password reset). Nil-means-disabled for the
 	// player-facing request endpoints (they return 503) - never silently

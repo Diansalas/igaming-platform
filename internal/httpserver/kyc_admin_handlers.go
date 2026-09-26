@@ -7,7 +7,6 @@ package httpserver
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -15,11 +14,11 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/audit"
-	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // kycCaseResponse is the Stage 5 Back Office operator queue's per-row
@@ -404,6 +403,36 @@ func newGetDocumentContentHandler(deps Deps) http.HandlerFunc {
 
 // --- Provider webhook ---
 
+// maxKYCWebhookBodyBytes bounds an inbound KYC provider callback body
+// (design §G OpenAPI: "at most 256 KiB").
+const maxKYCWebhookBodyBytes = 256 * 1024
+
+// kycWebhookRoute is the KYC domain's parameter set for the shared webhook
+// preamble (webhook_preamble.go) - Stage 10.2, ADR 0091, architect ruling
+// R2/J4: every webhook domain uses the ONE shared preamble.
+var kycWebhookRoute = webhookRoute{
+	scheme:                  webhookauth.KYCScheme(),
+	maxBody:                 maxKYCWebhookBodyBytes,
+	authFailedEvent:         "kyc_webhook_auth_failed",
+	tenantLookupFailedEvent: "kyc_webhook_tenant_lookup_failed",
+}
+
+// newKYCWebhookHandler receives a provider callback and dispatches it via
+// kyc.Orchestrator.ReceiveCallback. There is no bearer-token middleware on
+// this route - a provider webhook is not an authenticated platform
+// principal. Tenant binding is per docs/decisions/0022 §3 as amended by
+// Stage 10.2 (ADR 0091, KYC-WH-1): the tenant slug in the URL is only a
+// LOOKUP HINT, selecting one candidate credential, which must then verify
+// a signature whose input includes the route-resolved tenant_id/
+// provider_id - never any field inside the body. Every pre-verification
+// failure gets the IDENTICAL 401 "callback rejected" response, so an
+// unauthenticated caller can never enumerate which one is true.
+//
+// This route is registered ONLY when deps.KYCWebhookEnabled &&
+// deps.KYCOrchestrator != nil (registerKYCRoutes) - it is never reachable
+// with test support off, so the deps.KYCOrchestrator==nil branch below is
+// defense in depth only, mirroring newPaymentWebhookHandler's identical
+// belt-and-braces check.
 func newKYCWebhookHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -414,70 +443,56 @@ func newKYCWebhookHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		tenantSlug := r.PathValue("tenantSlug")
-		providerID := r.PathValue("providerID")
-		if tenantSlug == "" || providerID == "" {
-			apierror.Write(w, requestID, apierror.CodeValidation, "tenant slug and provider id are required")
-			return
-		}
-
-		t, err := identity.GetTenantBySlug(r.Context(), deps.DB, tenantSlug)
-		if errors.Is(err, identity.ErrNotFound) {
-			// Same enumeration-resistance rationale as
-			// newCasinoWebhookHandler/newPaymentWebhookHandler: an
-			// unrecognized slug and a suspended tenant get the identical
-			// not-found response.
-			apierror.Write(w, requestID, apierror.CodeNotFound, "not found")
-			return
-		}
-		if err != nil {
-			logger.Error("kyc_webhook_tenant_lookup_failed", "error", err)
-			apierror.Write(w, requestID, apierror.CodeInternal, "failed to process callback")
-			return
-		}
-		if t.Status != "active" {
-			apierror.Write(w, requestID, apierror.CodeNotFound, "not found")
-			return
-		}
-
-		body, err := io.ReadAll(io.LimitReader(r.Body, maxKYCWebhookBodyBytes+1))
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "failed to read request body")
-			return
-		}
-		if len(body) > maxKYCWebhookBodyBytes {
-			apierror.Write(w, requestID, apierror.CodeValidation, "request body too large")
+		// Steps 1-5 (provider_id charset, bounded body read, header format
+		// - all before any tenant/DB work - then the platform-wide tenant
+		// lookup and active check) are the shared webhook preamble. Every
+		// rejection there is the IDENTICAL 401 "callback rejected" with one
+		// allow-listed kyc_webhook_auth_failed line.
+		t, providerID, body, ok := webhookPreamble(w, r, deps, kycWebhookRoute)
+		if !ok {
 			return
 		}
 
 		var result kyc.Verification
-		err = deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
+		err := deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			result, err = deps.KYCOrchestrator.ReceiveCallback(ctx, tx, t.ID, providerID, body)
+			result, err = deps.KYCOrchestrator.ReceiveCallback(ctx, tx, t.ID, providerID, webhookauth.Inbound{Header: r.Header, Body: body})
 			return err
 		})
-		if errors.Is(err, kyc.ErrUnknownProvider) {
-			apierror.Write(w, requestID, apierror.CodeNotFound, "not found")
+
+		var authErr *kyc.CallbackAuthError
+		if errors.As(err, &authErr) {
+			logWebhookAuthFailure(logger, kycWebhookRoute.authFailedEvent, r, requestID, authErr.Reason, &t.ID, providerID, true, authErr.KeyID, authErr.CredentialFingerprint, len(body))
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")
 			return
 		}
 		if errors.Is(err, kyc.ErrNotFound) {
 			// A callback for a provider_reference this platform never
-			// created - never a platform failure (ADR 0025's identical
-			// "provider callback forgery/mismatch" precedent).
+			// created - never a platform failure. Reachable only by a
+			// VERIFIED caller (never an enumeration oracle for an
+			// unauthenticated one - see ReceiveCallback's own doc
+			// comment).
 			apierror.Write(w, requestID, apierror.CodeNotFound, "verification not found")
 			return
 		}
-		if err != nil {
-			// Includes a signature-verification failure surfaced from the
-			// adapter's own HandleCallback - never distinguished from any
-			// other callback-processing failure at this layer (avoids
-			// giving an attacker an oracle for "signature was close").
-			logger.Error("kyc_webhook_failed", "error", err)
-			apierror.Write(w, requestID, apierror.CodeValidation, "failed to process callback")
+		if errors.Is(err, kyc.ErrCallbackMalformedBody) {
+			// A VERIFIED callback (the sender proved knowledge of the
+			// resolved credential) whose body is structurally malformed -
+			// unparseable JSON, a missing provider_reference, or an
+			// outcome outside the closed enum. A real 4xx, not the
+			// uniform pre-verification 401 (no audit row).
+			apierror.Write(w, requestID, apierror.CodeValidation, "callback rejected")
 			return
 		}
-		writeJSON(w, http.StatusOK, toVerificationResponse(result))
+		if err != nil {
+			logger.Error("kyc_webhook_failed", "error", err)
+			apierror.Write(w, requestID, apierror.CodeInternal, "failed to process callback")
+			return
+		}
+		// 204: never echo the verification (id, player_account_id,
+		// provider_reference) back to the external caller - design §G
+		// fixes the pre-fix 200-with-full-body leak.
+		_ = result
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
-
-const maxKYCWebhookBodyBytes = 256 * 1024
