@@ -410,9 +410,13 @@ func (m *MockCasinoProvider) signRawBody(tenantID uuid.UUID, body []byte) webhoo
 // (Stage 10.2, CAS-WH-TENANT-1, ADR 0091, design §C2 point 1) - a caller
 // who does not know cred.Secret cannot get past this line regardless of
 // body shape, so a non-JSON body is indistinguishable from any other
-// pre-verification failure. Every rejection after this line is a POST-
-// verification, structural failure (ErrCallbackMalformedBody), never one
-// of the pre-verification auth sentinels.
+// pre-verification failure. Every rejection after this line has proven
+// knowledge of cred.Secret - it is a POST-verification failure. Almost all
+// of them are the structural ErrCallbackMalformedBody, with one deliberate
+// carve-out (Stage 10.2 final review, K7/F-8): a body still carrying the
+// legacy `signature` field returns ErrCallbackSignatureInvalid (401), even
+// though the sender already verified. That is a known, accepted false
+// forgery-alert signal for a verified sender - see ADR 0022 §3 amendment.
 func (m *MockCasinoProvider) HandleCallback(_ context.Context, in webhookauth.Inbound, cred webhookauth.Credential) (CallbackEvent, error) {
 	if err := casinoScheme.Verify(cred, in); err != nil {
 		return CallbackEvent{}, ErrCallbackSignatureInvalid
