@@ -363,21 +363,102 @@ the tenant's RLS, reading the parent bet and its existing history rows:
 > earlier-committed transaction) — see
 > `TestSBT1XMIN_ReconstructionGuard_NullAndErrorCasesRejectClosed` and the
 > service-level `TestSettlementScenario_ComposedVoid_InsideOuterSavepoint_ServiceLevel`
-> (`internal/sportsbook`). This deviation from R-2's literal construction
-> requires architect and ledger-finance re-review before SB-T1-XMIN is
-> closed in the task registry as fully reviewed; the fail-closed guards
-> (G1 NULL-safety, G2 error-safety, G3 immutability dependency) and every
-> other property R-2/P2-2 required (accept the current transaction's own
-> tree, reject an earlier committed transaction, reject NULL/error) are
-> unchanged and independently verified.
+> (`internal/sportsbook`); the fail-closed guards (G1 NULL-safety, G2
+> error-safety, G3 immutability dependency) and every other property
+> R-2/P2-2 required (accept the current transaction's own tree, reject an
+> earlier committed transaction, reject NULL/error) are unchanged and
+> independently verified.
+>
+> **Re-review outcome (Stage 10.1 close-out) — the deviation from R-2 is
+> RATIFIED.** Both required re-reviews are complete and both concur the
+> deviation is correct, not merely acceptable:
+> - `architect` (`docs/governance/stage-10.1-architecture-review.md` §1,
+>   "ACCEPTED"): `pg_snapshot_xmax`'s documented semantics ("one past the
+>   highest **completed** xid", not the highest **assigned** one) make the
+>   planning-gate's `pg_snapshot_xmax` anchor wrong for exactly the
+>   released-savepoint case the fix exists for; `pg_current_xact_id()`
+>   anchoring is correct instead.
+> - `ledger-finance` (`docs/governance/stage-10.1-ledger-finance-signoff.md`
+>   §3, "APPROVED; I withdraw my P2-2 construction"): independently
+>   reproduces the same empirical result (a released-savepoint row's xmin
+>   exceeding `pg_snapshot_xmax`) and confirms the correctness-by-case
+>   analysis.
+>
+> This closes the "requires architect and ledger-finance re-review before
+> SB-T1-XMIN is closed" condition above. `SB-T1-XMIN` is closed in the task
+> registry as fully reviewed.
+>
+> **Corrections to this note's own prior claims** (architect finding X-1,
+> `stage-10.1-architecture-review.md` §1; ledger-finance finding P3-3,
+> `stage-10.1-ledger-finance-signoff.md` §4). These correct wording only —
+> migration 0093 itself is checksum-immutable once applied and is not
+> edited; this ADR note is the authoritative record of the corrected
+> claims:
+> - **"A single transaction cannot itself span an epoch wraparound" is
+>   FALSE, not out of scope.** A transaction whose top-level xid is
+>   assigned just before the 32-bit counter wraps can have a
+>   subtransaction assigned just after it. In that case the reconstruction
+>   yields an id one epoch too low, so the row is **rejected** — the
+>   composed void gets a 409, no money moves, and a retry in a new
+>   transaction succeeds. This is fail-closed and acceptable; only the
+>   "cannot span" framing was wrong, not the outcome. It can happen at
+>   most once per ~4.29 billion xids, only for a composed void written
+>   under a savepoint that straddles the boundary, and is accepted as a
+>   documented residual, tracked as `SB-T1-XMIN-STRADDLE` (P3, deferred —
+>   see below).
+> - **The ancient-row/wraparound edge does not uniformly "fail CLOSED".**
+>   A visible, committed rollback row for the *same bet*, at least 2^32
+>   xids old, whose reconstructed low 32 bits happen to collide with the
+>   xid of a *different, currently in-progress* transaction assigned
+>   during the checking transaction's lifetime, is **accepted**: that xid
+>   genuinely reports `'in progress'`, so `pg_xact_status` does not raise.
+>   The only thing that can go wrong is the void's `causation_record_id`
+>   provenance link — every money-bearing precondition (`has_void`,
+>   `has_unreversed`, ledger type/correlation match, tenant/asset match)
+>   is checked independently and is unaffected. This is the same aliasing
+>   class 0091's plain xmin-equality check already had (a row whose low
+>   bits equal the top-level xid was accepted there too), so it is not a
+>   regression introduced by 0093. **Accepted as a documented residual:
+>   provenance-only, no ledger effect, negligible probability
+>   (requires ≥2^32 xids of age AND a coincident low-32-bit collision
+>   against a transaction the checker's own transaction happens to be
+>   concurrent with).**
+>
+> **Deferred: `SB-T1-XMIN-STRADDLE` (P3, not undertaken here).** Handling
+> the "current transaction's own subxids straddle an epoch boundary"
+> false-reject case (above) so it is accepted rather than rejected would
+> require reconstructing against both the current epoch and epoch+1 and
+> accepting either match — itself a further migration, since it changes
+> T-1's body again. Not implemented: the existing behavior already fails
+> closed (a 409, not a wrong post), the case is vanishingly rare, and a
+> caller-visible retry in a fresh transaction succeeds. Recorded here as a
+> deferred future consideration per CLAUDE.md's "no uncontrolled scope
+> expansion" — pick it up only if a real driver's operational profile
+> makes the false-reject rate large enough to matter.
 >
 > Tests: `SavepointRollbackIsAccepted`, `NestedSavepointIsAccepted`,
 > `RollbackToSavepointFailsFK` (rejected via the void's own `has_unreversed`
 > precondition, not the xmin-specific message — the discarded row makes the
 > settlement unreversed again before the causation branch is reached),
-> `RejectsEarlierTransactionRollback`, `AcceptsSameTransaction`, the NULL/
-> error-path reconstruction-guard test, and the service-level savepoint
-> test (all `internal/sportsbook`).
+> `RejectsEarlierTransactionRollback`, `AcceptsSameTransaction`,
+> `RejectsLaterCommittedTransactionRollback` (SB-T1-XMIN F4 — a two-
+> connection test proving the `pg_xact_status` check itself is load-
+> bearing: a transaction that starts and commits its rollback row AFTER
+> the checking transaction has already been assigned its own top-level
+> xid, so `xact_full >= xact_ref` alone would wrongly accept it — only the
+> `pg_xact_status(...) = 'committed'` result catches and rejects it),
+> `TestSBT1XMIN_GuardExpressionMatchesInstalledTrigger` (pins the guard's
+> literal text against the installed function via `pg_get_functiondef`, so
+> the hand-copied probe used for the NULL/error cases cannot silently
+> drift from the real trigger), and the service-level savepoint test
+> (all `internal/sportsbook`). The probe's "NULL-status" case (`raw=3`)
+> does not reach `pg_xact_status` at all — it is rejected earlier by
+> `xact_full < xact_ref` — and `xact_full IS NULL` is dead code (`INTO
+> STRICT` cannot yield NULL). G1's NULL-status path is therefore
+> defensive and, on current PostgreSQL semantics, unreachable in the
+> real trigger; it is not claimed as tested end-to-end, only as present
+> and inert (see `docs/governance/stage-10.1-code-review.md` F4/P3-3 and
+> `stage-10.1-security-review.md` P3-3).
 
 **T-2 `sportsbook_bets_status_transition` (BEFORE INSERT OR UPDATE OF
 status, row).** INSERT requires `status = 'open'`. UPDATE requires

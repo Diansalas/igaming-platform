@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -738,5 +739,145 @@ func TestDBConstraints_T1_ComposedVoidCausation_RollbackToSavepointFailsFK(t *te
 	if !strings.Contains(err.Error(), "void requires no un-reversed settlement") {
 		t.Fatalf("unexpected error (expected T-1's has_unreversed void-precondition message, since the "+
 			"discarded rollback leaves the settlement unreversed again): %v", err)
+	}
+}
+
+// TestDBConstraints_T1_ComposedVoidCausation_RejectsLaterCommittedTransactionRollback
+// is SB-T1-XMIN finding F4 (docs/governance/stage-10.1-code-review.md):
+// proof that the pg_xact_status(...) IS NOT DISTINCT FROM 'in progress'
+// check ITSELF is load-bearing, not merely the "xact_full >= xact_ref"
+// epoch-reconstruction arithmetic around it.
+//
+// Every OTHER test in this file that rejects a cross-transaction citation
+// (RejectsEarlierTransactionRollback) uses a rollback row from a
+// transaction that COMMITTED BEFORE the checking transaction (T1) even
+// began, so its reconstructed xid is < xact_ref and the "< xact_ref"
+// branch alone rejects it - pg_xact_status is never reached. If the
+// status predicate were mutated to a hardcoded "accept" (or to the
+// fail-open "<> 'in progress'" NULL-is-not-true form), every existing
+// test in this file would still pass, because none of them ever asks
+// pg_xact_status to reject a VISIBLE, committed row.
+//
+// This test closes that gap. It drives two REAL, concurrent database
+// connections against the real, migrated trigger (no probe, no replica):
+//   - T1 begins first and has its top-level xid assigned
+//     (SELECT pg_current_xact_id()) BEFORE T2 is allowed to start, so
+//     T2's eventual xid is guaranteed to be NUMERICALLY GREATER than
+//     T1's (T2 "started later" in xid-assignment order).
+//   - T2 then inserts a rollback row for the SAME bet's settlement and
+//     COMMITS - a transaction that is unambiguously "later than and
+//     independent from" T1, exactly like RejectsEarlierTransactionRollback
+//     except on the other side of T1's own xid.
+//   - T1 (still open, READ COMMITTED) then inserts a composed void
+//     citing that now-committed row. Because T2's xid is greater than
+//     T1's xact_ref, "xact_full >= xact_ref" is TRUE (the arithmetic
+//     alone would accept it) - only pg_xact_status(...) = 'committed'
+//     (never 'in progress') catches and rejects it.
+//
+// This is precisely the cross-transaction citation SB-T1-XMIN's fix
+// exists to stop (0093's own comment: "never an earlier, already-
+// committed transaction's rollback" - here "earlier" is in wall-clock/
+// commit order, not xid order, which is the exact distinction the
+// pg_xact_status check (rather than a raw xid comparison) is needed for).
+//
+// Empirical confirmation that ONLY the status check catches this
+// (docs/governance/stage-10.1-code-review.md F4's required manual
+// verification, performed once at authoring time - not re-run by CI):
+// a disposable, one-off scratch database (created directly with `createdb`
+// / migrated with `cmd/migrate`, NOT the shared TEST_DATABASE_URL database
+// and NOT migrations/0093 itself, which were never touched) was migrated
+// through the full chain including 0093, then had
+// sportsbook_bet_settlements_validate() CREATE OR REPLACE-d with the
+// causation guard's `pg_xact_status(xact_full::text::xid8) IS DISTINCT
+// FROM 'in progress'` clause replaced by the literal `false` (i.e. the
+// status check no longer contributes to rejection at all - acceptance
+// then reduces to the bare `xact_full >= xact_ref` arithmetic). Pointing
+// TEST_DATABASE_URL at that mutated database and re-running this
+// package's existing composed-void-causation tests gave exactly the
+// predicted result:
+//   - TestDBConstraints_T1_ComposedVoidCausation_RejectsEarlierTransactionRollback: PASS (still correctly
+//     rejects - its cited row has xact_full < xact_ref, so it never reaches the mutated clause)
+//   - TestDBConstraints_T1_ComposedVoidCausation_SavepointRollbackIsAccepted: PASS (still correctly accepts -
+//     an accept-leaning mutation cannot make an already-expected-accept case fail)
+//   - THIS test (RejectsLaterCommittedTransactionRollback): FAILED with "expected T1 to REJECT ... " -
+//     i.e. under the mutation the void insert WRONGLY SUCCEEDED, proving this is the only test in the
+//     suite whose pass/fail outcome depends on the status predicate itself, not merely on the
+//     xact_full >= xact_ref arithmetic around it.
+//
+// See docs/decisions/0088-sportsbook-settlement-implementation-contract.md
+// (§3.3 follow-up note) and docs/governance/stage-10-w1-mutation-and-sql-
+// branch-coverage.md (the corrected mutation-kill-pair entry) for the
+// recorded result.
+func TestDBConstraints_T1_ComposedVoidCausation_RejectsLaterCommittedTransactionRollback(t *testing.T) {
+	pool := testPool(t)
+	f, actor, betID := newStdBet(t, pool)
+	mustSimulate(t, pool, f.tenantID, settleEvent(betID, actor, 1, SettlementOutcomeWon, stdPayout))
+	settlementRowID := settlementHistory(t, pool, f.tenantID, betID)[0].ID
+
+	t1MayProceed := make(chan struct{})        // T1 -> test driver: my top-level xid is assigned
+	t2RollbackRowID := make(chan uuid.UUID, 1) // test driver -> T1: T2 committed this row
+	t1Result := make(chan error, 1)
+
+	go func() {
+		t1Result <- pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			// Force T1's own top-level xid to be assigned NOW, strictly
+			// before T2 is allowed to open, so T2's xid is guaranteed
+			// greater than T1's (T2 "started later").
+			var discard int64
+			if err := tx.QueryRow(ctx, `SELECT pg_current_xact_id()::text::bigint`).Scan(&discard); err != nil {
+				return fmt.Errorf("assign T1's top-level xid: %w", err)
+			}
+			close(t1MayProceed)
+
+			var rollbackRowID uuid.UUID
+			select {
+			case rollbackRowID = <-t2RollbackRowID:
+			case <-time.After(5 * time.Second):
+				return fmt.Errorf("timed out waiting for T2 to commit its rollback row")
+			}
+
+			voidTxID, err := postRawLedgerTxOnTx(ctx, tx, f.tenantID, f.walletID, ledger.TxSportsbookVoid, betID,
+				"t1-composed-later-void-"+uuid.NewString())
+			if err != nil {
+				return fmt.Errorf("post void ledger tx: %w", err)
+			}
+			_, err = tx.Exec(ctx, insertVoidWithCausationSQL, f.tenantID, betID, "data_error", rollbackRowID, voidTxID)
+			return err
+		})
+	}()
+
+	select {
+	case <-t1MayProceed:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for T1 to assign its top-level xid")
+	}
+
+	// T2: a genuinely separate, later-started transaction that inserts and
+	// COMMITS a rollback row for the same bet before T1's void insert runs.
+	var rollbackRowID uuid.UUID
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		rollbackTxID, err := postRawLedgerTxOnTx(ctx, tx, f.tenantID, f.walletID, ledger.TxSportsbookRollback, betID,
+			"t1-composed-later-rollback-"+uuid.NewString())
+		if err != nil {
+			return fmt.Errorf("post rollback ledger tx: %w", err)
+		}
+		return tx.QueryRow(ctx, insertRollbackSQL, f.tenantID, betID, 1, settlementRowID, rollbackTxID).Scan(&rollbackRowID)
+	})
+	if err != nil {
+		t.Fatalf("T2 (later, committed rollback) failed: %v", err)
+	}
+	// Only send this AFTER T2 has fully committed (pool.WithTenant already
+	// returned above), so T1 can never observe an uncommitted row.
+	t2RollbackRowID <- rollbackRowID
+
+	t1Err := <-t1Result
+	if t1Err == nil {
+		t.Fatalf("SB-T1-XMIN F4: expected T1 to REJECT a void citing a rollback row inserted and COMMITTED " +
+			"by a transaction that started LATER than T1 (higher xid) - the raw \"xact_full >= xact_ref\" " +
+			"arithmetic alone would ACCEPT this (T2's xid is greater), so only " +
+			"pg_xact_status(...) = 'committed' (never 'in progress') can and must catch it")
+	}
+	if !strings.Contains(t1Err.Error(), "may cite only a rollback of this bet inserted by the same transaction") {
+		t.Fatalf("unexpected error (expected T-1's same-transaction causation message): %v", t1Err)
 	}
 }

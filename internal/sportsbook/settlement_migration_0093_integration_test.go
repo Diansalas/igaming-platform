@@ -14,6 +14,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -336,15 +337,36 @@ func TestMigration0093_UpChangesOnlyFunctionBody(t *testing.T) {
 
 // TestSBT1XMIN_ReconstructionGuard_NullAndErrorCasesRejectClosed isolates
 // the causation branch's xid8 reconstruction + pg_xact_status guard logic
-// (G1/G2, security review X-2) from the trigger machinery, so the two
-// fail-closed edge cases genuine trigger fixtures cannot deterministically
-// reach (a truly clog-truncated "too old" xid needs real vacuum-freeze
-// history; a "future" xid needs a value beyond any Postgres has actually
-// assigned) can be tested directly and deterministically. It replicates
-// EXACTLY the expression migration 0093 uses
-// (docs/plans/stage-10.1-planning-gate-proposal.md §J "+" row: NULL-status
-// and failed-reconstruction cases must both reject), as a standalone SQL
-// function on a scratch database - never touching the real trigger.
+// (G1/G2, security review X-2) from the trigger machinery, so the "future"
+// / unconstructible-xid8 error case (a value beyond any Postgres has
+// actually assigned) can be tested directly and deterministically. It
+// replicates the expression migration 0093 uses
+// (docs/plans/stage-10.1-planning-gate-proposal.md §J "+" row), as a
+// standalone SQL function on a scratch database - never touching the real
+// trigger. See TestSBT1XMIN_GuardExpressionMatchesInstalledTrigger below,
+// which pins this probe's text against the REAL installed trigger so the
+// two cannot silently drift apart (code review F4/P3-3, security review
+// P3-3, ledger-finance P3-4).
+//
+// IMPORTANT, corrected claim (code review F4/P3-3; the previous version of
+// this comment overstated coverage): the "NULL-status" case below
+// (raw=3) does NOT exercise pg_xact_status returning NULL. It is rejected
+// earlier, by the "reconstructed < ref" branch, before pg_xact_status is
+// ever called - and `xact_full IS NULL` in the real trigger is dead code,
+// because `SELECT ... INTO STRICT` cannot itself yield NULL (it raises
+// NO_DATA_FOUND/TOO_MANY_ROWS instead, both caught by the surrounding
+// EXCEPTION WHEN OTHERS). On current PostgreSQL versions, G1's NULL-status
+// path (a genuinely clog-truncated xid whose reconstruction nonetheless
+// passes ">= xact_ref") is understood to be unreachable in practice: any
+// xid >= the current transaction's own xid was assigned very recently and
+// is never clog-truncated. G1 is retained as defensive, redundant
+// belt-and-braces coverage (IS NOT DISTINCT FROM, not a bare inequality,
+// so a hypothetical future NULL would still reject rather than silently
+// accept) - it is not claimed as reachable or as tested end-to-end here.
+// The name "NullAndErrorCases" is kept for continuity with the planning
+// document's §J row naming; the case actually exercised below is the
+// "reconstructs below ref" reject, run through pg_xact_status's own error
+// path for the separate "future xid" probe underneath it.
 func TestSBT1XMIN_ReconstructionGuard_NullAndErrorCasesRejectClosed(t *testing.T) {
 	pool := migration0093ScratchPool(t, "sb0093guard_")
 	ctx := context.Background()
@@ -398,24 +420,29 @@ $$ LANGUAGE plpgsql;`
 		t.Fatal("SB-T1-XMIN G2: a future/unconstructible xid8 must be REJECTED (pg_xact_status errors), not accepted")
 	}
 
-	// NULL-status case (G1): xid8 value 3 is FrozenTransactionId territory
-	// (below FirstNormalTransactionId) - on some databases pg_xact_status
-	// reports 'committed' for it (still a REJECT, since committed <> 'in
-	// progress'); on a database whose clog has been truncated past it,
-	// pg_xact_status returns NULL. Either way the guard's IS DISTINCT FROM
-	// 'in progress' predicate must reject it, never accept it via a
-	// NULL-is-not-true bug (the exact defect an IF ... <> 'in progress'
-	// formulation would have).
+	// "Old xid" case - CORRECTED (code review F4/P3-3): this does NOT
+	// exercise pg_xact_status returning NULL, and does not exercise G1's
+	// NULL-status branch at all. raw=3 reconstructs to
+	// (ref & ~4294967295) | 3, which is < ref (the current top-level xid
+	// is never that small in a live test run), so this is rejected by the
+	// EARLIER "reconstructed < ref" branch, before pg_xact_status is ever
+	// called. It is a (redundant, with RejectsEarlierTransactionRollback)
+	// exercise of that branch, not a G1/NULL-status probe. Kept as a
+	// belt-and-braces check that a tiny raw value is rejected outright; it
+	// is not relied on for G1 coverage. See the doc comment above this
+	// function, and TestSBT1XMIN_GuardExpressionMatchesInstalledTrigger,
+	// for why G1's actual NULL-status path is treated as defensive/
+	// unreachable rather than tested.
 	var oldOK bool
 	err = pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `SELECT sb_t1_xmin_guard_probe($1, $2)`,
 			int64(3), currentTop).Scan(&oldOK)
 	})
 	if err != nil {
-		t.Fatalf("call probe (old/NULL-status xid case): %v", err)
+		t.Fatalf("call probe (old/below-ref xid case): %v", err)
 	}
 	if oldOK {
-		t.Fatal("SB-T1-XMIN G1: an old xid whose status is 'committed' or NULL must be REJECTED, never accepted")
+		t.Fatal("SB-T1-XMIN: an old xid that reconstructs below the reference xid must be REJECTED, never accepted")
 	}
 
 	// Positive control: the current top-level transaction's own id must be
@@ -430,5 +457,64 @@ $$ LANGUAGE plpgsql;`
 	}
 	if !selfOK {
 		t.Fatal("positive control failed: the guard rejected the current transaction's own in-progress xid - the probe does not mirror migration 0093's real logic")
+	}
+}
+
+// sbT1xminGuardVerbatimText is the causation-branch guard, copied
+// character-for-character from migrations/0093_sportsbook_settlement_
+// causation_xact_status.up.sql (the reconstruction assignment plus the
+// IF/OR/RAISE guard, using the REAL trigger's own variable names -
+// xact_ref, xact_full, cause_xmin_raw - not the probe function's renamed
+// ref/raw/reconstructed). Migration 0093 is checksum-immutable once
+// applied, so this constant is the only thing that should ever need to
+// change here, and only in lockstep with a NEW migration that replaces
+// 0093's CREATE OR REPLACE body again.
+const sbT1xminGuardVerbatimText = `xact_full := (xact_ref & ~4294967295) | cause_xmin_raw;
+            IF xact_full IS NULL
+                OR xact_full < xact_ref
+                OR pg_xact_status(xact_full::text::xid8) IS DISTINCT FROM 'in progress' THEN`
+
+// TestSBT1XMIN_GuardExpressionMatchesInstalledTrigger addresses code
+// review F4/P3-3, security review P3-3 and ledger-finance P3-4: the
+// NULL/error guard test above (TestSBT1XMIN_ReconstructionGuard_
+// NullAndErrorCasesRejectClosed) necessarily exercises a hand-copied
+// REPLICA of the guard expression, because a genuinely clog-truncated
+// "too old" xid and a "future" xid cannot be deterministically produced
+// through the real trigger with ordinary fixture rows. That leaves a
+// drift risk: if a future migration edits 0093's guard wording without
+// updating the probe, the probe test would keep passing while silently
+// testing the WRONG expression.
+//
+// This test closes that drift risk directly, without needing to drive
+// the trigger end-to-end: it reads the REAL, installed, currently-active
+// sportsbook_bet_settlements_validate() definition via
+// pg_get_functiondef (not a hand-transcribed copy) and asserts that the
+// exact reconstruction-plus-guard text above appears in it VERBATIM. If
+// a future body-only migration changes the reconstruction arithmetic or
+// the guard predicate (for example weakening "IS DISTINCT FROM" back to
+// "<>", or changing the reconstruction formula), this test fails even
+// though the hand-copied probe in the test above would not notice.
+//
+// This is a textual pin, not a behavioral one - it cannot substitute for
+// the probe's actual accept/reject assertions, only guarantee the two
+// stay in sync. It runs against the SAME already-migrated shared test
+// database every other trigger-level test in this package uses (no
+// scratch database needed: this only reads pg_proc, it changes nothing).
+func TestSBT1XMIN_GuardExpressionMatchesInstalledTrigger(t *testing.T) {
+	pool := testPool(t)
+	var def string
+	err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT pg_get_functiondef('sportsbook_bet_settlements_validate'::regproc)`).Scan(&def)
+	})
+	if err != nil {
+		t.Fatalf("read installed sportsbook_bet_settlements_validate definition via pg_get_functiondef: %v", err)
+	}
+	if !strings.Contains(def, sbT1xminGuardVerbatimText) {
+		t.Fatalf("the installed trigger's causation-branch reconstruction/guard text has DRIFTED from "+
+			"migration 0093's expected text - the hand-copied probe in "+
+			"TestSBT1XMIN_ReconstructionGuard_NullAndErrorCasesRejectClosed may now be testing a "+
+			"stale expression.\nexpected to find (verbatim):\n%s\n\nactual installed definition:\n%s",
+			sbT1xminGuardVerbatimText, def)
 	}
 }
