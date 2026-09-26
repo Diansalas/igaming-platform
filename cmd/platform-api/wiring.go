@@ -14,10 +14,6 @@ import (
 // single fail-closed two-layer gate every test-support seam already uses:
 // production is structurally off (config.Load refuses the flag there, and
 // TestSupportRoutesEnabled is false for production regardless).
-//
-// Later Stage 10.2 steps extend this struct (KYC mock provider/resolver/
-// route, casino mock webhook resolver) so every mock-wiring decision comes
-// from this one, unit-tested value.
 type mockWiring struct {
 	// PaymentsWebhookResolver wires the payments MOCK webhook credential
 	// resolver. When false the payments Orchestrator gets a nil resolver,
@@ -75,10 +71,10 @@ func kycWebhookResolver(w mockWiring, mock *kyc.MockKYCProvider) webhookauth.Res
 // KYC, so player self-service KYC (POST /v1/me/kyc/verifications) is
 // itself unavailable (503) in production/test-support-off, matching the
 // design's disclosed consequence that player-initiated KYC needs the MOCK
-// provider this stage ships. mock is still constructed by the caller and
-// passed in unconditionally purely so callers that need a *MockKYCProvider
-// reference for other purposes have one; this function is what decides
-// whether it is ever wired into anything reachable.
+// provider this stage ships. mock is nil whenever w disables KYC (the
+// caller constructs it only when w.KYCWebhookEnabled, ADR 0085 amendment:
+// "absent", not merely unwired) - this function's own nil check is
+// defence in depth, not the sole gate.
 func kycOrchestrator(w mockWiring, mock *kyc.MockKYCProvider) *kyc.Orchestrator {
 	if !w.KYCWebhookEnabled || mock == nil {
 		return nil

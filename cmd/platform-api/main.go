@@ -153,11 +153,16 @@ func run() error {
 		paymentsWebhookResolver(wiring, mockPaymentsProvider),
 	)
 
-	// KYC-WH-1 (Stage 10.2, ADR 0091): constructed unconditionally (a
-	// per-process crypto/rand master with no argument to inject a literal
-	// into - see MockKYCProvider's own doc comment), but kycOrchestrator
-	// below decides whether it is ever wired into anything reachable.
-	mockKYCProvider := kyc.NewMockKYCProvider()
+	// KYC-WH-1 (Stage 10.2, ADR 0091; final review K11): constructed ONLY
+	// when wiring enables it (ADR 0085 amendment: "absent" in production/
+	// test-support-off, not merely unwired) - a per-process crypto/rand
+	// master with no argument to inject a literal into, when it exists at
+	// all (see MockKYCProvider's own doc comment). kycOrchestrator/
+	// kycWebhookResolver below both already guard against a nil provider.
+	var mockKYCProvider *kyc.MockKYCProvider
+	if wiring.KYCWebhookEnabled {
+		mockKYCProvider = kyc.NewMockKYCProvider()
+	}
 
 	// Stage 4A ships a mock casino adapter only (CLAUDE.md's Stage 4A
 	// scope gate) - registered exactly like a future real aggregator

@@ -232,32 +232,24 @@ func (m *MockKYCProvider) HealthStatus(ctx context.Context) error {
 	return nil
 }
 
-// MockWebhookCredentials is the MOCK webhookauth.Resolver for the KYC
-// domain (design §B2). It resolves ONLY KeyID=="mock-v1" for provider
-// "mock" - any other providerID or keyID is
-// webhookauth.ErrCredentialUnavailable, which the Orchestrator folds into
-// ReasonCredentialUnavailable (fail closed, never a fallback to
-// unauthenticated verification).
+// NewMockWebhookCredentials returns the MOCK webhookauth.Resolver for the
+// KYC domain (design §B2, Stage 10.2 final review K11): the shared
+// webhookauth.MockResolver bound to p's own master/label/provider id,
+// directly - not a KYC-local wrapper type around it (the earlier
+// MockWebhookCredentials duplicated MockResolver's exact Resolve logic for
+// no reason). It resolves ONLY KeyID=="mock-v1" for provider "mock" - any
+// other providerID or keyID is webhookauth.ErrCredentialUnavailable, which
+// the Orchestrator folds into ReasonCredentialUnavailable (fail closed,
+// never a fallback to unauthenticated verification). Every caller of this
+// constructor already guards against a nil p before calling it (see
+// cmd/platform-api/wiring.go's kycWebhookResolver).
 //
 // MOCK ONLY: the real resolver (a FORCE-RLS handle table plus an external,
 // tenant-scoped secret store) is NOT IMPLEMENTED.
-type MockWebhookCredentials struct {
-	provider *MockKYCProvider
-}
-
-// NewMockWebhookCredentials constructs the resolver bound to p.
-func NewMockWebhookCredentials(p *MockKYCProvider) MockWebhookCredentials {
-	return MockWebhookCredentials{provider: p}
-}
-
-// Resolve implements webhookauth.Resolver.
-func (r MockWebhookCredentials) Resolve(ctx context.Context, tenantID uuid.UUID, providerID, keyID string) (webhookauth.Credential, error) {
-	if r.provider == nil {
-		return webhookauth.Credential{}, webhookauth.ErrCredentialUnavailable
-	}
+func NewMockWebhookCredentials(p *MockKYCProvider) webhookauth.MockResolver {
 	return webhookauth.MockResolver{
-		Master:     r.provider.master,
+		Master:     p.master,
 		Label:      webhookauth.KYCMockKeyLabel,
-		ProviderID: r.provider.ID(),
-	}.Resolve(ctx, tenantID, providerID, keyID)
+		ProviderID: p.ID(),
+	}
 }
