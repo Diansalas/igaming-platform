@@ -66,8 +66,9 @@ func TestQAAdversarial_FailedDirtyRollbackLeavesRLSEnabledAndForced(t *testing.T
 		t.Fatalf("seed a ceiling row: %v", err)
 	}
 
-	// The down-migration must fail (dirty database). Roll back 19 steps:
-	// migrations 0098 (Stage 10.3 W3a), 0097 (Stage 10.3 W2b), 0095 (Stage 10.3), 0094 (Stage 10.3), 0093 (Stage 10.1), 0092 (Stage 10.1), 0091 (Stage 10 W1), 0090 (Stage 9.2 fix round), 0089
+	// The down-migration must fail (dirty database). Roll back 22 steps:
+	// migrations 0098 (Stage 10.3 W3a), 0097 (Stage 10.3 W2b), 0096 (Stage
+	// 10.3 W2a), 0095 (Stage 10.3), 0094 (Stage 10.3), 0093 (Stage 10.1), 0092 (Stage 10.1), 0091 (Stage 10 W1), 0090 (Stage 9.2 fix round), 0089
 	// (Stage 9.2 fix round), 0088 (Stage 9.2), 0087 (Stage 9.2), 0086
 	// (Stage 9.2), 0085 (Stage 9.1), 0084 (Stage 9.1), 0083 (Stage 9.1),
 	// 0082 (Stage 9), 0081 (Stage 8), 0080 (Stage 8), 0079 (Stage 7), 0078
@@ -77,8 +78,8 @@ func TestQAAdversarial_FailedDirtyRollbackLeavesRLSEnabledAndForced(t *testing.T
 	// test never creates), so they succeed on their own before the overall
 	// call fails once it reaches 0076's own guard - mirrors
 	// migration_0076_integration_test.go's own migration0077Version
-	// through migration0095Version precedent.
-	if _, err := pool.MigrateDown(context.Background(), dir, 22); err == nil {
+	// through migration0098Version precedent.
+	if _, err := pool.MigrateDown(context.Background(), dir, 23); err == nil {
 		t.Fatal("expected migration 0076's down migration to fail on a dirty database")
 	}
 
