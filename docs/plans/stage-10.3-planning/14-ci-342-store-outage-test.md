@@ -1,5 +1,20 @@
 # CI #342/#347 — `TestStoreOutage_DoesNotPinPool` flake (`qa`)
 
+> **Final resolution (orchestrator, after `security` ruling `15-ci-342-security-ruling.md`) — supersedes
+> the fix described below.** The 64-connection test pool (`9df5869`, §3/§6 of this document) was
+> **REJECTED** by security: with more connections than the 51 concurrent callers the unrelated-query
+> bound can no longer detect pool starvation, so it removed coverage; the "strictly more precise" claim
+> below is **withdrawn**. Security also could not reproduce this document's §6b claim that the
+> unrelated query crossed 500 ms under the 8-slot mutation with the 64 pool (it stayed ~19 ms). The
+> test is back on the shared 20-connection fixture pool with every bound unchanged (slack 400 ms,
+> 4 / 4 / 500 ms) and keeps the added failure diagnostics. Instead CI runs this one test **alone**
+> in its own blocking step (`25a3537`; ruling B: ACCEPT WITH CONDITIONS — blocking, no retries, grep
+> guard on the test name, nothing else joins that lane without its own ruling, failures investigated
+> not re-run). Alone at pool 20 the unrelated query measures ~210 ms against the 500 ms bound; 5/5 local
+> isolated runs green. Security's measurements also produced a new design finding, **F-POOL-1
+> (Medium)**: at the production pool size (10) the §5 property does not hold (unrelated query ~1.4 s) —
+> registered in the task registry, launch-blocking unless fixed or explicitly accepted.
+
 **Amended.** The first version of this document (kept, for the record, in
 git history at commit `c5f05a9`) concluded the flake was the "held > 250
 ms" bucket assertion and fixed it by widening that bucket's slack constant
