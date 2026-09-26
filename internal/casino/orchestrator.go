@@ -684,7 +684,14 @@ func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID 
 		}
 		return mapReplayPayloadMismatch(o.postRollback(ctx, tx, tenantID, providerID, event))
 	default:
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: unsupported callback event type %q", event.EventType)
+		// Stage 10.2 final review (K10/L6): an unknown event type reaching
+		// this point is a verified-but-malformed callback (the adapter's own
+		// parsing is expected to reject it first, as MockCasinoProvider's
+		// does - this is defense in depth for a future adapter that doesn't).
+		// It must map to ErrCallbackMalformedBody -> 400 like every other
+		// post-verification structural failure, never an unwrapped error
+		// that falls through to a 500 for a verified caller.
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: unsupported callback event type %q", ErrCallbackMalformedBody, event.EventType)
 	}
 }
 
