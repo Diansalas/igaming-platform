@@ -205,6 +205,23 @@ jobs:
           grep -E -A12 -- '--- FAIL' integration-test.log | grep -E '_test\.go:[0-9]+' | head -30 |
             while IFS= read -r line; do echo "::error title=failure detail::${line}"; done
 
+      - name: Upload integration test log (CI-FLAKE-281)
+        # The check-run annotations above (444e6e1) are a summary capped at a
+        # handful of lines; the job's own log is only retrievable as its last
+        # 5,000 lines via the API, and direct log-URL download is blocked in
+        # some environments (e.g. an egress-restricted proxy). Uploading the
+        # full integration-test.log as a build artifact gives a complete,
+        # directly downloadable record of a failing run, independent of log
+        # retention/tail limits. Diagnostics only - this does not affect the
+        # pass/fail gate above and never runs on a green step.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-log
+          path: integration-test.log
+          retention-days: 14
+          if-no-files-found: warn
+
       - name: Assert integration evidence (Stage 10 W0 gate)
         run: |
           # A skipped test is green, so a green step alone does not prove the
