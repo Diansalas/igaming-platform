@@ -2,7 +2,9 @@ package main
 
 import (
 	"github.com/Diansalas/igaming-platform/internal/config"
+	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/payments"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // mockWiring says which MOCK provider components this deployment wires
@@ -21,6 +23,17 @@ type mockWiring struct {
 	// so every payments webhook fails closed with a uniform 401
 	// (reason no_resolver) - the real resolver is NOT IMPLEMENTED.
 	PaymentsWebhookResolver bool
+
+	// KYCWebhookEnabled is Stage 10.2's KYC-WH-1 fix (ADR 0091, architect
+	// ruling R5/J7): the KYC mock provider, its webhook credential
+	// resolver, and the webhook ROUTE ITSELF are all wired from this one
+	// field, so route registration and credential resolution can never
+	// diverge (K11) - unlike payments (whose webhook route stays
+	// registered unconditionally per the design's environment matrix),
+	// the KYC webhook route is ABSENT (404) when this is false, since
+	// there is no legitimate reason to expose a public callback route for
+	// a provider that was never wired.
+	KYCWebhookEnabled bool
 }
 
 // mockProviderWiring is a pure function of cfg - no I/O, no globals - so it
@@ -30,7 +43,36 @@ func mockProviderWiring(cfg config.Config) mockWiring {
 	testSupport := cfg.TestSupportRoutesEnabled()
 	return mockWiring{
 		PaymentsWebhookResolver: testSupport,
+		KYCWebhookEnabled:       testSupport,
 	}
+}
+
+// kycWebhookResolver returns the KYC Orchestrator's single injected
+// webhook credential resolver for w: the MOCK resolver bound to mock when
+// w enables it, otherwise a true nil interface (never a typed nil), so
+// the Orchestrator's own nil-resolver branch fails every callback closed
+// as ReasonNoResolver.
+func kycWebhookResolver(w mockWiring, mock *kyc.MockKYCProvider) webhookauth.Resolver {
+	if !w.KYCWebhookEnabled || mock == nil {
+		return nil
+	}
+	return kyc.NewMockWebhookCredentials(mock)
+}
+
+// kycOrchestrator builds the KYC Orchestrator for w (design §B3): a nil
+// *kyc.Orchestrator entirely - not merely a nil resolver - when w disables
+// KYC, so player self-service KYC (POST /v1/me/kyc/verifications) is
+// itself unavailable (503) in production/test-support-off, matching the
+// design's disclosed consequence that player-initiated KYC needs the MOCK
+// provider this stage ships. mock is still constructed by the caller and
+// passed in unconditionally purely so callers that need a *MockKYCProvider
+// reference for other purposes have one; this function is what decides
+// whether it is ever wired into anything reachable.
+func kycOrchestrator(w mockWiring, mock *kyc.MockKYCProvider) *kyc.Orchestrator {
+	if !w.KYCWebhookEnabled || mock == nil {
+		return nil
+	}
+	return kyc.NewOrchestrator(map[string]kyc.KYCProvider{mock.ID(): mock}, kycWebhookResolver(w, mock))
 }
 
 // paymentsWebhookResolver returns the payments Orchestrator's single

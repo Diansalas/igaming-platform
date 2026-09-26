@@ -35,13 +35,6 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
 )
 
-// kycMockWebhookSecret is MockKYCProvider's dev/test-only HMAC signing
-// key - never a real credential, since no real KYC vendor is integrated
-// (docs/decisions/0028 §1). A real vendor's own webhook secret would come
-// from cfg (internal/config), provisioned per environment, never
-// hardcoded like this.
-const kycMockWebhookSecret = "dev-mock-kyc-webhook-secret-not-for-production"
-
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "platform-api: fatal:", err)
@@ -160,6 +153,12 @@ func run() error {
 		paymentsWebhookResolver(wiring, mockPaymentsProvider),
 	)
 
+	// KYC-WH-1 (Stage 10.2, ADR 0091): constructed unconditionally (a
+	// per-process crypto/rand master with no argument to inject a literal
+	// into - see MockKYCProvider's own doc comment), but kycOrchestrator
+	// below decides whether it is ever wired into anything reachable.
+	mockKYCProvider := kyc.NewMockKYCProvider()
+
 	// Stage 4A ships a mock casino adapter only (CLAUDE.md's Stage 4A
 	// scope gate) - registered exactly like a future real aggregator
 	// would be, via the same CasinoProvider interface and provider_id-
@@ -272,16 +271,22 @@ func run() error {
 		// Stage 4F: no real KYC/identity-verification vendor is contracted
 		// yet (docs/decisions/0028 §1) - MockKYCProvider is the only
 		// implementation registered, exactly mirroring the mock casino/
-		// payment adapters' identical role. KYC verification is a
-		// genuinely optional/deferred flow (unlike PersonResolver above),
-		// so nil-means-disabled would also be a legitimate choice for a
-		// deployment that doesn't want it exposed yet - this deployment
-		// enables it.
-		KYCOrchestrator: kyc.NewOrchestrator(map[string]kyc.KYCProvider{
-			"mock": kyc.NewMockKYCProvider(kycMockWebhookSecret),
-		}),
-		DocumentStorage: kyc.NewMockDocumentStorageProvider(),
-		MalwareScanner:  kyc.NewMockMalwareScanner(),
+		// payment adapters' identical role.
+		//
+		// KYC-WH-1 (Stage 10.2, ADR 0091, design §B3, ruling J7): the mock
+		// provider, its webhook credential resolver, AND the Orchestrator
+		// itself are now wired from the SAME mockWiring value that decided
+		// the payments resolver above - kycOrchestrator returns a true nil
+		// when cfg.TestSupportRoutesEnabled() is false, which makes player
+		// self-service KYC (POST /v1/me/kyc/verifications) unavailable
+		// (503) in production/test-support-off, a disclosed consequence
+		// (design §B3/§D): there is no real KYC vendor to fall back to.
+		// KYCWebhookEnabled below gates the ROUTE itself identically, so
+		// route registration and orchestrator wiring cannot diverge (K11).
+		KYCOrchestrator:   kycOrchestrator(wiring, mockKYCProvider),
+		KYCWebhookEnabled: wiring.KYCWebhookEnabled,
+		DocumentStorage:   kyc.NewMockDocumentStorageProvider(),
+		MalwareScanner:    kyc.NewMockMalwareScanner(),
 
 		// Stage 4F: no real email-delivery vendor is contracted yet
 		// (docs/decisions/0030 §4) - email.MockProvider records what would
