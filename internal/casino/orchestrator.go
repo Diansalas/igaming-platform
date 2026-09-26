@@ -298,6 +298,15 @@ func (o *Orchestrator) LaunchGame(ctx context.Context, tx pgx.Tx, params LaunchG
 	if !containsString(capability.SupportedAssets, params.AssetCode) {
 		return LaunchGameResult{}, ErrProviderUnavailable
 	}
+	// Stage 10.3 CAS-CAP-ROLLBACK-1 (§1.4 step 7, launch coherence): a
+	// real-money launch must also require supports_bet - otherwise a
+	// player could obtain a usable real-money session in which every bet
+	// callback then 503s at postBet's own capability gate. Demo launches
+	// are unaffected (no financial exposure to gate); this has no ledger
+	// effect either way.
+	if params.Mode == ModeReal && !capability.SupportsBet {
+		return LaunchGameResult{}, ErrProviderUnavailable
+	}
 
 	provider, registered := o.providers[game.ProviderID]
 	if !registered {
@@ -557,6 +566,52 @@ func roundCorrelationID(tenantID uuid.UUID, providerID, roundID string) uuid.UUI
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(tenantID.String()+":"+providerID+":"+roundID))
 }
 
+// acquireProviderTxDeliveryLock takes the L0.1 casino bet-delivery
+// advisory lock, keyed on (tenantID, providerID, ref). Shared by postBet
+// (ref = its own provider_tx_id), postWin (ref = its own provider_tx_id -
+// ADR 0082 Amendment A6's E10 extension, closing the race between a win
+// and a concurrent rollback of that SAME still-unseen reference), and
+// postRollback (ref = the ORIGINAL provider_tx_id being rolled back - ADR
+// 0082 Amendment A6 itself). Factored out so every caller uses the
+// IDENTICAL key string postBet originally defined - see postBet's own
+// original doc comment (still on the postBet call site) for the full
+// deadlock/collision rationale (hashtextextended over the tenant-
+// qualified key; a tenant component is required, never optional, because
+// provider_tx_id uniqueness is only guaranteed WITHIN one tenant).
+//
+// Deadlock analysis (ADR 0082 Amendment A6): two transactions contend on
+// this lock only for the SAME (tenant, provider, ref) triple, and neither
+// holds any other lock when it requests it (it is always the first lock
+// each of postBet/postWin/postRollback takes) - so no cycle through this
+// lock is possible. It is taken at most once per transaction.
+func acquireProviderTxDeliveryLock(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, ref string) error {
+	if _, err := tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended('casino_bet_delivery:' || $1::text || ':' || $2 || ':' || $3, 0))`,
+		tenantID, providerID, ref,
+	); err != nil {
+		return fmt.Errorf("casino: acquire provider-tx delivery lock: %w", err)
+	}
+	return nil
+}
+
+// isProviderTxTombstoned reports whether a tombstone already exists for
+// (tenantID, providerID, providerTxID) - the shared E3 (postBet)/E10
+// (postWin) check (§1.3). A plain SELECT; the caller is expected to have
+// already taken acquireProviderTxDeliveryLock on the SAME ref, which is
+// what makes this read race-free against a concurrent postRollback
+// writing that exact tombstone (ADR 0082 Amendment A6).
+func isProviderTxTombstoned(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID, providerTxID string) (bool, error) {
+	var found bool
+	err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM ledger_transactions WHERE tenant_id = $1 AND provider_id = $2 AND provider_tx_id = $3 AND transaction_type = $4)`,
+		tenantID, providerID, providerTxID, ledger.TxTombstone,
+	).Scan(&found)
+	if err != nil {
+		return false, fmt.Errorf("casino: check provider_tx_id tombstone: %w", err)
+	}
+	return found, nil
+}
+
 // ReceiveCallbackResult is what ReceiveCallback returns for a caller
 // (an HTTP handler) that needs to know the outcome without exposing the
 // full ledger internals - mirrors internal/payments.ReceiveCallbackResult.
@@ -599,10 +654,14 @@ type ReceiveCallbackResult struct {
 //	    webhook_verify.go), followed by the adapter's HandleCallback
 //	    parsing the verified bytes.
 //
-// Only AFTER (c) succeeds does the existing, UNCHANGED post-verification
-// capability check ((d) below) run - the casino capability stays a
-// deliberate money-path kill switch (design §C3), unlike payments' I4
-// pre-verification ProviderAcceptsWebhook read.
+// Only AFTER (c) succeeds does dispatch happen at all - see (d) below for
+// the Stage 10.3 CAS-CAP-ROLLBACK-1 change to what "dispatch" now means:
+// the capability check that used to run HERE, for every event type,
+// before dispatch, was deleted and replaced with a NEW-BET-ONLY gate
+// inside postBet, resolved for the session's own brand (ADR 0025 Stage
+// 10.3 amendment). The casino capability remains a deliberate money-path
+// kill switch on NEW EXPOSURE (design §C3); it is no longer a kill switch
+// on settling exposure that already exists.
 //
 // Every failure before (c) succeeds returns a *webhookauth.AuthError
 // wrapping webhookauth.ErrAuthFailed with a closed, allow-listed reason -
@@ -642,36 +701,36 @@ func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID 
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: handle callback: %w", err)
 	}
 
-	// (d) Enforce the tenant's own CasinoProviderCapability as an actual kill
-	// switch on the money path, not just at launch time (specialist review
-	// finding: a tenant disabling this provider's capability, or never
-	// configuring one at all, previously had NO effect here - the process-
-	// global adapter registry alone decided whether a callback was
-	// accepted). Checked tenant-wide (brand_id NULL) - the same capability
-	// row LaunchGame itself resolves for a tenant-wide route.
-	capability, found, err := LoadCapability(ctx, tx, tenantID, uuid.Nil, providerID)
-	if err != nil {
-		return ReceiveCallbackResult{}, err
-	}
-	if !found || capability.Status != CapabilityActive {
-		return ReceiveCallbackResult{}, ErrProviderUnavailable
-	}
-
+	// (d) Stage 10.3 CAS-CAP-ROLLBACK-1 (docs/plans/stage-10.3-planning/
+	// 02-casino-financial-analysis.md §1.3/§1.4, ADR 0025 Stage 10.3
+	// amendment): the tenant-wide (brand_id NULL) pre-dispatch capability/
+	// status check that used to run HERE, for every event type, is
+	// DELETED. It made the capability a kill switch on SETTLEMENT as well
+	// as on new exposure: disabling it 503'd a verified win (withholding
+	// winnings on an already-taken stake), 503'd a verified rollback
+	// (stranding that stake), and - worst - 503'd a rollback of an unseen
+	// original before it could ever write its tombstone, breaking
+	// CLAUDE.md's late-arrival guarantee purely as a function of tenant
+	// configuration (F1-F4). The ledger-finance ruling (§1.3): capability
+	// and status gate NEW EXPOSURE ONLY; settlement of existing exposure
+	// is NEVER blocked by capability, status, a missing flag, or a missing
+	// row.
+	//
+	// A verified win/rollback therefore now dispatches directly,
+	// UNCONDITIONALLY with respect to capability - postWin and postRollback
+	// each still resolve/act on the round's own ledger truth, never a
+	// capability row. The ONLY event this package still gates by
+	// capability is a NEW bet (E1), and that gate moved to postBet itself
+	// (see its own doc comment), where it can resolve the capability for
+	// the SESSION's OWN brand - fixing F4 (a tenant-wide, brandID=uuid.Nil
+	// lookup could never match a brand-only row) by resolving it exactly
+	// the way LaunchGame already does.
 	switch event.EventType {
 	case CallbackEventBet:
-		if !capability.SupportsBet {
-			return ReceiveCallbackResult{}, ErrProviderUnavailable
-		}
 		return mapReplayPayloadMismatch(o.postBet(ctx, tx, tenantID, providerID, event))
 	case CallbackEventWin:
-		if !capability.SupportsWin {
-			return ReceiveCallbackResult{}, ErrProviderUnavailable
-		}
 		return mapReplayPayloadMismatch(o.postWin(ctx, tx, tenantID, providerID, event))
 	case CallbackEventRollback:
-		if !capability.SupportsRollback {
-			return ReceiveCallbackResult{}, ErrProviderUnavailable
-		}
 		return mapReplayPayloadMismatch(o.postRollback(ctx, tx, tenantID, providerID, event))
 	default:
 		// Stage 10.2 final review (K10/L6): an unknown event type reaching
@@ -900,11 +959,8 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	// other. Otherwise scoped narrowly enough (one specific bet, one
 	// specific tenant) that it adds no contention beyond the exact case
 	// it exists to fix.
-	if _, err := tx.Exec(ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended('casino_bet_delivery:' || $1::text || ':' || $2 || ':' || $3, 0))`,
-		tenantID, providerID, event.ProviderTxID,
-	); err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: acquire bet delivery lock: %w", err)
+	if err := acquireProviderTxDeliveryLock(ctx, tx, tenantID, providerID, event.ProviderTxID); err != nil {
+		return ReceiveCallbackResult{}, err
 	}
 
 	// Idempotency short-circuit, BEFORE session/RG/balance evaluation:
@@ -937,6 +993,42 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &existingID}, nil
 	}
 
+	// Stage 10.3 CAS-CAP-ROLLBACK-1, E3 (§1.3/§1.4 step 2): a rollback for
+	// THIS exact provider_tx_id was already accepted while this reference
+	// itself had never been posted (F8's late-original-after-tombstone
+	// defect - previously an untyped unique-violation error surfacing as
+	// an unhelpful, endlessly-retried 500). L0.1 above is taken on this
+	// SAME reference, so this plain SELECT cannot race a concurrent
+	// postRollback's own tombstone-write path for the identical reference
+	// (ADR 0082 Amendment A6) - either this bet's transaction commits
+	// first and the rollback later finds a real casino_bet to reverse
+	// (E7), or the tombstone commits first and is visible here.
+	//
+	// Reported as a DECLINE, never a Go error (postBet's own established
+	// insufficient-funds/RG-denial convention just below) - not "the
+	// platform could not decide", but a genuine, deterministic, non-
+	// retryable business outcome: the stake was never taken because this
+	// exact reference is already known to have been rolled back. Using the
+	// decline path (rather than a returned error) lets its own audit
+	// record commit in THIS transaction, closing F12's disclosed gap for
+	// this one case (note B, §1.3) - a returned error would roll the whole
+	// transaction back, including its own audit row.
+	if tombstoned, err := isProviderTxTombstoned(ctx, tx, tenantID, providerID, event.ProviderTxID); err != nil {
+		return ReceiveCallbackResult{}, err
+	} else if tombstoned {
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_bet.rejected_tombstoned",
+			TargetType: "ledger_transaction", TargetID: event.ProviderTxID, Outcome: audit.OutcomeFailure,
+			Metadata: map[string]any{
+				"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
+				"reason": "original_rolled_back",
+			},
+		}); err != nil {
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: audit bet rejected tombstoned: %w", err)
+		}
+		return ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason: "original_rolled_back"}, nil
+	}
+
 	if event.SessionID == uuid.Nil {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: session_id is required", ErrLaunchSessionRequired)
 	}
@@ -958,6 +1050,46 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 	}
 	if session.AssetCode != event.AssetCode {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: asset_code does not match the launch session", ErrInvalidInput)
+	}
+
+	// Stage 10.3 CAS-CAP-ROLLBACK-1 (§1.3/§1.4 step 2.5): the ONLY capability
+	// gate a callback ever passes through, and it applies to a NEW BET
+	// only - never to a win, rollback, replay (E2, handled above), or
+	// tombstone (E3, handled above). Resolved for the SESSION's OWN brand
+	// (session.BrandID), never brandID=uuid.Nil - this is what fixes F4: a
+	// tenant-wide lookup could never match a brand-only capability row,
+	// while LaunchGame itself always resolved the real brand. A plain
+	// SELECT (LoadCapability takes no lock class), positioned BEFORE the
+	// L0.2 advisory lock below, so a rejected bet never takes the player
+	// lock - the ADR 0082 order is unchanged.
+	//
+	// Capability states, resolved once here (§1.3):
+	//   - S-none (no row at all for tenant/brand/provider): reject. A
+	//     brand with no capability row configured is treated identically
+	//     to an explicitly disabled one - "no configuration" is never
+	//     silently "allowed" for a money-moving gate.
+	//   - S-off (status=disabled): reject.
+	//   - S-nobet (status=active, supports_bet=false): reject.
+	//   - S-on (status=active, supports_bet=true; migration 0094's CHECK
+	//     guarantees this implies supports_win AND supports_rollback):
+	//     proceed to the normal Flow 5 checks below.
+	//   - Additionally: the session's own asset_code must still be in the
+	//     capability's supported_assets - the capability may have narrowed
+	//     since this session was launched.
+	//
+	// The rejection shape is UNCHANGED (ErrProviderUnavailable -> 503):
+	// financially a 503 and a definitive decline are equivalent (neither
+	// posts), and keeping 503 here means no API/OpenAPI change for the bet
+	// path itself (§1.3 note A). A provider that retries after re-enable is
+	// safe (E2 idempotency); a provider that cancels instead sends a
+	// rollback, which hits E8 (always tombstones, regardless of capability
+	// state - see postRollback).
+	capability, found, err := LoadCapability(ctx, tx, tenantID, session.BrandID, providerID)
+	if err != nil {
+		return ReceiveCallbackResult{}, err
+	}
+	if !found || capability.Status != CapabilityActive || !capability.SupportsBet || !containsString(capability.SupportedAssets, event.AssetCode) {
+		return ReceiveCallbackResult{}, ErrProviderUnavailable
 	}
 
 	// ADR 0082 §3.3/§4.2, class L0.2 - closes finding LOCK-1d. This bet
@@ -1258,6 +1390,45 @@ func (o *Orchestrator) postWin(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		return ReceiveCallbackResult{}, err
 	}
 
+	// ADR 0082 Amendment A6 extension (Stage 10.3 W1c, architect-directed
+	// W0 code check): L0.1 on THIS WIN's OWN provider_tx_id, taken first -
+	// before anything else in this function, including the tombstone check
+	// immediately below. Closes E10's own race: a win and a rollback that
+	// names this SAME win's provider_tx_id as its OriginalProviderTxID (a
+	// rollback of a win the ledger has not posted yet) can arrive
+	// concurrently. postRollback's own L0.1 (Amendment A6) is keyed on the
+	// SAME ref string for its original reference, so the two calls
+	// serialize deterministically on this exact key: whichever transaction
+	// commits first decides the outcome for the other - either this win
+	// posts first and the rollback later finds a real casino_win to
+	// reverse (E7), or the tombstone commits first and is visible to the
+	// isProviderTxTombstoned check below (E10). Without this lock, both
+	// could observe "no tombstone yet" concurrently and each proceed,
+	// letting a win post AFTER its own rollback already tombstoned that
+	// exact reference.
+	//
+	// No new lock class, no new exception, R8 unaffected: this is the
+	// SAME L0.1 class postBet/postRollback already take, just a new call
+	// site sharing the identical key format (acquireProviderTxDeliveryLock).
+	if err := acquireProviderTxDeliveryLock(ctx, tx, tenantID, providerID, event.ProviderTxID); err != nil {
+		return ReceiveCallbackResult{}, err
+	}
+
+	// Stage 10.3 CAS-CAP-ROLLBACK-1, E10 (§1.3 table): a rollback for THIS
+	// exact provider_tx_id already committed a tombstone before this win
+	// was ever posted (a rollback of a win the ledger has not seen yet).
+	// Rejected with a named, typed error (ErrOriginalTombstoned -> 409) -
+	// postWin has no established decline-without-error convention (unlike
+	// postBet), so this is reported as an error, aborting the transaction
+	// with zero writes; F12's rejection-record gap for this specific case
+	// is disclosed, not fixed here (Item 2/W2b's rejection record covers
+	// it later).
+	if tombstoned, err := isProviderTxTombstoned(ctx, tx, tenantID, providerID, event.ProviderTxID); err != nil {
+		return ReceiveCallbackResult{}, err
+	} else if tombstoned {
+		return ReceiveCallbackResult{}, fmt.Errorf("%w: provider_tx_id=%s", ErrOriginalTombstoned, event.ProviderTxID)
+	}
+
 	correlationID := roundCorrelationID(tenantID, providerID, event.RoundID)
 
 	// Stage 9 §10 (adversarial concurrency re-audit, ledger-finance):
@@ -1350,6 +1521,24 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 	}
 	if event.OriginalProviderTxID == "" {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: original_provider_tx_id is required for a rollback", ErrInvalidInput)
+	}
+
+	// ADR 0082 Amendment A6 (Stage 10.3 W1c, CAS-CAP-ROLLBACK-1): L0.1 on
+	// the ORIGINAL reference (event.OriginalProviderTxID), taken first -
+	// before the FOR UPDATE lookup below, and before anything else in this
+	// function. This is the SAME key string postBet takes on its own
+	// reference and postWin now also takes on its own reference - so a
+	// late-arriving original bet/win for this exact reference, racing this
+	// rollback, serializes deterministically: either the original commits
+	// first and this rollback finds a real casino_bet/casino_win to
+	// reverse below (E7), or this rollback's tombstone commits first and
+	// the late original is rejected by postBet's E3 check (or postWin's
+	// E10 check). Before this lock, the loser of that race got an untyped
+	// unique-violation error surfacing as an unhelpful 500 (F8) - never a
+	// financial correctness issue (nothing double-posts either way), but a
+	// named, deterministic outcome now replaces it.
+	if err := acquireProviderTxDeliveryLock(ctx, tx, tenantID, providerID, event.OriginalProviderTxID); err != nil {
+		return ReceiveCallbackResult{}, err
 	}
 
 	// FOR UPDATE: two concurrent rollback requests naming the SAME
@@ -1548,15 +1737,36 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 }
 
 func postRollbackTombstone(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, event CallbackEvent) (uuid.UUID, error) {
+	// Stage 10.3 CAS-CAP-ROLLBACK-1 (§1.4 step 5, F7): the tombstone's own
+	// CorrelationID is now DETERMINISTIC, not uuid.New() - the SAME
+	// roundCorrelationID a bet/win of this round would use, when the
+	// rollback event names a RoundID (as every one of the platform's own
+	// test/mock payloads and every real casino round does). This is
+	// replay-safe because tombstones are exempt from correlation
+	// comparison entirely (replay.go's own comment on this) - it exists
+	// only so Item 2's reconciliation stream can later JOIN a tombstone to
+	// its round. When no RoundID is present (a rollback that never names
+	// one), fall back to a deterministic v5 UUID of the tombstone's own
+	// idempotency key - still never a random uuid.New(), so two identical
+	// deliveries of a rollback with no RoundID always compute the SAME
+	// value (ledger.Post's own idempotency key is what actually guards
+	// against a duplicate post either way; this is only about which
+	// correlation id a first delivery picks). Existing rows written before
+	// this change keep their original (random) CorrelationID - untouched.
+	idempotencyKey := fmt.Sprintf("tombstone:%s:%s", providerID, event.OriginalProviderTxID)
+	correlationID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(idempotencyKey))
+	if event.RoundID != "" {
+		correlationID = roundCorrelationID(tenantID, providerID, event.RoundID)
+	}
 	// ReasonCode left nil - ledger_transactions' CHECK constraint
 	// (migration 0021) forbids it for any type other than
 	// manual_adjustment. The human-readable reason lives in this
 	// function's caller's audit record instead.
 	result, err := ledger.Post(ctx, tx, ledger.TransactionInput{
 		TenantID: tenantID, TransactionType: ledger.TxTombstone,
-		IdempotencyKey: fmt.Sprintf("tombstone:%s:%s", providerID, event.OriginalProviderTxID),
+		IdempotencyKey: idempotencyKey,
 		ProviderID:     &providerID, ProviderTxID: &event.OriginalProviderTxID,
-		CorrelationID: uuid.New(),
+		CorrelationID: correlationID,
 	})
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("casino: post rollback tombstone: %w", err)

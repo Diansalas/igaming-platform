@@ -107,6 +107,16 @@ func WriteCapability(ctx context.Context, tx pgx.Tx, provider CasinoProvider, te
 	if err := validateNarrowing(declared, cfg); err != nil {
 		return uuid.Nil, err
 	}
+	// Stage 10.3 CAS-CAP-ROLLBACK-1 step 6 (M-CAS-1, migration 0094's own
+	// CHECK constraint enforces the identical invariant at the database
+	// layer as a backstop): a configuration that asserts SupportsBet
+	// without SupportsWin AND SupportsRollback would open new exposure
+	// this tenant/brand could never settle - refused here, before the row
+	// is ever written, rather than only caught by the CHECK at commit
+	// time.
+	if cfg.SupportsBet && (!cfg.SupportsWin || !cfg.SupportsRollback) {
+		return uuid.Nil, fmt.Errorf("%w: provider %s", ErrCapabilitySettlementIncomplete, declared.ProviderID)
+	}
 
 	assets := nonNilStrings(cfg.SupportedAssets)
 	gameTypes := nonNilStrings(cfg.SupportedGameTypes)
@@ -198,6 +208,21 @@ func validateNarrowing(declared AdapterCapability, cfg CapabilityConfig) error {
 	}
 	if !isSubset(cfg.SupportedGameTypes, declared.SupportedGameTypes) {
 		return fmt.Errorf("%w: supported_game_types exceeds adapter %s's declared set", ErrCapabilityWidensAdapter, declared.ProviderID)
+	}
+	return nil
+}
+
+// ValidateAdapterCapabilityDeclaration is the conformance suite's own
+// enforcement of M-CAS-1 (Stage 10.3 CAS-CAP-ROLLBACK-1 step 6): an
+// adapter that DECLARES SupportsBet must also declare SupportsWin and
+// SupportsRollback. This is the same invariant WriteCapability enforces
+// on a tenant's configuration and migration 0094's CHECK enforces at the
+// database layer - checked here one layer up, against the adapter's own
+// Capabilities(), so a non-conforming adapter is caught before any tenant
+// ever configures it 1:1 with what the adapter declares.
+func ValidateAdapterCapabilityDeclaration(declared AdapterCapability) error {
+	if declared.SupportsBet && (!declared.SupportsWin || !declared.SupportsRollback) {
+		return fmt.Errorf("%w: adapter %s declares SupportsBet without SupportsWin and SupportsRollback", ErrCapabilitySettlementIncomplete, declared.ProviderID)
 	}
 	return nil
 }

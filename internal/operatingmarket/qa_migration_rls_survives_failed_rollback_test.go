@@ -78,7 +78,7 @@ func TestQAAdversarial_FailedDirtyRollbackLeavesRLSEnabledAndForced(t *testing.T
 	// call fails once it reaches 0076's own guard - mirrors
 	// migration_0076_integration_test.go's own migration0077Version
 	// through migration0093Version precedent.
-	if _, err := pool.MigrateDown(context.Background(), dir, 18); err == nil {
+	if _, err := pool.MigrateDown(context.Background(), dir, 19); err == nil {
 		t.Fatal("expected migration 0076's down migration to fail on a dirty database")
 	}
 
@@ -223,12 +223,12 @@ func TestQAAdversarial_PartialRollbackLeavesRegistryRLSDisabledButReapplyRestore
 	// sportsbook settlement evidence exists - tenants/licences/jurisdictions are core tables that will
 	// always hold rows), and the OVERALL call only THEN fails once it
 	// reaches migration 0076's own dirty-database guard.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 18)
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 19)
 	if err == nil {
 		t.Fatal("expected the -steps=18 down to fail on a dirty database")
 	}
 	wantDown := []int64{
-		migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
+		migration0094Version, migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
 		migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version,
 	}
 	if len(rolledBack) != len(wantDown) {

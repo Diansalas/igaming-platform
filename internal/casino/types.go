@@ -161,6 +161,30 @@ var (
 	// tenant-configured row would assert more than the adapter's own
 	// declared capability (mirrors docs/decisions/0022 §2.1).
 	ErrCapabilityWidensAdapter = errors.New("casino: capability configuration widens beyond the adapter's declared capability")
+	// ErrCapabilitySettlementIncomplete is returned by WriteCapability
+	// (admin 400) and by ValidateAdapterCapabilityDeclaration (conformance
+	// suite) when a configuration/declaration asserts SupportsBet without
+	// asserting BOTH SupportsWin and SupportsRollback - Stage 10.3
+	// CAS-CAP-ROLLBACK-1 (docs/plans/stage-10.3-planning/
+	// 02-casino-financial-analysis.md §1.4 step 6). Capability/status now
+	// gate NEW exposure only (postBet); settlement of existing exposure
+	// (win/rollback) is never gated, so a tenant/adapter that can open
+	// exposure but declares it cannot settle it must be rejected before it
+	// ever takes a bet - migration 0094's CHECK constraint is the same
+	// invariant enforced at the database layer, as a backstop against a
+	// writer that bypasses this application-level check.
+	ErrCapabilitySettlementIncomplete = errors.New("casino: supports_bet requires supports_win and supports_rollback (a capability that can open exposure must be able to settle it)")
+	// ErrOriginalTombstoned is returned when a verified callback names a
+	// provider_tx_id (postBet, E3) or is itself a provider_tx_id (postWin,
+	// E10) that a tombstone already covers - a rollback for that exact
+	// reference was already accepted while the reference itself had never
+	// been posted. Deterministic, not retryable, and never posts anything
+	// - see the §1.3 table's E3/E10 rows. postBet reports E3 through the
+	// established decline-without-error convention instead (see postBet's
+	// own tombstone-check doc comment) so its rejection audit row survives
+	// in a committing transaction; this sentinel is used only where no
+	// such decline convention exists (postWin, E10).
+	ErrOriginalTombstoned = errors.New("casino: this provider_tx_id is already covered by a tombstone (its rollback was accepted before it was ever posted)")
 	// ErrRiskOutcomeUnrecognized is returned when risk.Evaluate returns a
 	// RiskDecision whose Outcome is none of allow/deny/review. Unreachable
 	// through risk.Evaluate itself (which self-checks its own output), and

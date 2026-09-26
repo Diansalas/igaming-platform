@@ -69,13 +69,21 @@ func newFakeHTTPCasinoAdapter(cfg providers.ProviderConfig) (*fakeHTTPCasinoAdap
 			AuthHeaderValue: apiKey,
 		}),
 		capability: casino.AdapterCapability{
-			ProviderID:           "fake-http-casino-demo",
-			SupportsCatalogue:    true,
-			SupportsLaunch:       true,
-			SupportsBalance:      false,
+			ProviderID:        "fake-http-casino-demo",
+			SupportsCatalogue: true,
+			SupportsLaunch:    true,
+			SupportsBalance:   false,
+			// Stage 10.3 CAS-CAP-ROLLBACK-1 (M-CAS-1): an adapter declaring
+			// SupportsBet must also declare SupportsWin and
+			// SupportsRollback - a capability that can open exposure must
+			// be able to settle it. Previously false/false here, which
+			// ValidateAdapterCapabilityDeclaration/migration 0094's CHECK
+			// would now reject; this demo fixture is not itself exercised
+			// against either, but is kept conformant so it never becomes a
+			// stale, misleading example of a non-conforming declaration.
+			SupportsWin:          true,
+			SupportsRollback:     true,
 			SupportsBet:          true,
-			SupportsWin:          false,
-			SupportsRollback:     false,
 			SupportedAssets:      []string{"EUR"},
 			SupportedGameTypes:   []string{"slot"},
 			CallbackCapabilities: casino.CallbackWebhookOnly,

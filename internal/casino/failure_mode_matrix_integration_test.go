@@ -682,22 +682,17 @@ func TestFailureModeMatrix_D_WinBeforeBetIsRejectedAndTheRoundStillRecovers(t *t
 // original is rejected." The rollback arrives first (tombstone written),
 // then the bet it reverses finally shows up.
 //
-// FINDING (behavior verified, deliberately NOT changed): the late original
-// IS rejected and posts nothing - the financial guarantee holds - but the
-// rejection surfaces as an undifferentiated wrapped error from
-// ledger.Post's conflict path ("look up existing transaction for
-// idempotency key: no rows in result set"), not as a named sentinel such
-// as a hypothetical ErrTombstonedOriginal. The reason is structural:
-// postBet's idempotency key is `provider:tx` while the tombstone's is
-// `tombstone:provider:tx`, so the collision is caught by the
-// (tenant_id, provider_id, provider_tx_id) UNIQUE INDEX rather than by the
-// (tenant_id, idempotency_key) constraint ledger.Post's conflict branch
-// then looks up - and db.IdempotentInsert reports every unique violation
-// identically. This test asserts the financial outcome (zero effect) and
-// pins the CURRENT error shape without asserting a specific message, so it
-// keeps passing if ledger-finance later decides to classify this case
-// explicitly. Raised to the orchestrator as a diagnosability gap rather
-// than fixed here: it is a change to shared financial code.
+// Stage 10.3 CAS-CAP-ROLLBACK-1 (E3, §1.3): this used to surface as an
+// undifferentiated wrapped error from ledger.Post's conflict path (F8) -
+// diagnosability-poor and, at the HTTP layer, an untyped 500 inviting
+// endless provider retries. It is now a NAMED, deterministic decline
+// (postBet's own established decline-without-error convention, the same
+// shape as an insufficient-funds decline): ReceiveCallback returns
+// (ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason:
+// "original_rolled_back"}, nil), not a Go error - checked BEFORE ever
+// reaching ledger.Post, via the tombstone check postBet now runs right
+// after its idempotency short-circuit. The financial outcome (zero
+// effect) is unchanged; only the outcome's SHAPE improved.
 func TestFailureModeMatrix_D_LateOriginalAfterTombstoneIsRejectedWithNoLedgerEffect(t *testing.T) {
 	pool := testPool(t)
 	f := seedCasinoFixture(t, pool)
@@ -724,14 +719,17 @@ func TestFailureModeMatrix_D_LateOriginalAfterTombstoneIsRejectedWithNoLedgerEff
 	}
 
 	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, betRef, "", roundID, "game-1", 700, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
-	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
-		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", betPayload)
+	var lateResult ReceiveCallbackResult
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		lateResult, err = orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", betPayload)
 		return err
-	})
-	if err == nil {
-		t.Fatal("a late-arriving original whose rollback already tombstoned it must be REJECTED, not posted")
+	}); err != nil {
+		t.Fatalf("a late-arriving original whose rollback already tombstoned it must be a named DECLINE, not a Go error: %v", err)
 	}
-	t.Logf("late-original rejection currently surfaces as: %v", err)
+	if lateResult.Outcome != OutcomeDeclined || lateResult.DeclineReason != "original_rolled_back" {
+		t.Fatalf("expected outcome=declined, decline_reason=original_rolled_back for a late-arriving tombstoned original, got %+v", lateResult)
+	}
 
 	// The only row for this reference is the tombstone itself - no bet was
 	// posted, and the tombstone carries no entries, so there is no debit

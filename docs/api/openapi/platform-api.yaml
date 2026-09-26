@@ -2731,22 +2731,44 @@ paths:
         `succeeded`), `ErrInvalidInput` (any other structurally-invalid
         field combination), or an event_type that HandleCallback itself
         accepted as verified but the orchestrator does not recognize
-        (Stage 10.2 final review K10 - also 400, never a 500). 409
-        covers a provider_tx_id already posted with a different payload, a
-        provider_round_id already bound to a different session, or a
-        rollback naming an already-reversed original - intentionally
-        collapsed to one generic body that never echoes the round id or
-        any player identity. 503 has two distinct causes: (1) casino
-        webhooks are not enabled on this deployment at all (the casino
-        Orchestrator is nil) - this check runs FIRST, before the shared
-        preamble, before any tenant lookup, and before signature
-        verification, so it is reachable by anyone, verified or not; (2)
-        the tenant's own CasinoProviderCapability for this provider is
-        disabled/unconfigured, a deliberate POST-verification money-path
-        kill switch that only a verified caller ever observes. The two
-        causes carry different error messages ("casino webhooks are not
-        enabled on this deployment" vs "provider is not enabled for this
-        tenant"); cause (2) is only ever returned to a verified caller.
+        (Stage 10.2 final review K10 - also 400, never a 500).
+
+        **Stage 10.3 CAS-CAP-ROLLBACK-1** (docs/plans/stage-10.3-planning/
+        02-casino-financial-analysis.md §1.3): capability/status now gate
+        NEW BETS ONLY. A win or rollback of exposure the ledger already
+        holds is NEVER blocked by a disabled or missing capability - it
+        settles unconditionally. A rollback of a provider_tx_id the ledger
+        has never posted a bet/win for ALWAYS writes a tombstone
+        (`tombstoned: true` in the 200 body), regardless of capability
+        state. A late-arriving original (a bet or win) whose exact
+        provider_tx_id a tombstone already covers is a deterministic,
+        named rejection, never a 500: for a bet, this is reported as a 200
+        decline (`outcome: "declined"`, `decline_reason:
+        "original_rolled_back"`) via the SAME shape as an
+        insufficient-funds decline; for a win, it is a 409 (the reference
+        was already tombstoned by an earlier rollback of that win). 409
+        also covers a provider_tx_id already posted with a different
+        payload, a provider_round_id already bound to a different session,
+        a rollback naming an already-reversed original, or a win whose
+        round resolves to a genuinely ambiguous/mixed funding origin
+        (`ErrAmbiguousMultiOriginRound`, `ErrCorrelationWalletCollision`,
+        `ErrLockAlreadyReleased`, `ErrMixedFundingUnsupported`,
+        `ErrBonusBetNotLocked`) - intentionally collapsed to one generic
+        body that never echoes the round id or any player identity. **G-1**
+        (§3): a round with two or more un-reversed plain-cash bets under
+        one correlation id now resolves a win to the shared wallet
+        normally (200) instead of the pre-fix 500 - the ambiguity guard
+        above remains for a genuine wallet collision or mixed-origin
+        (bonus/locked) round. 503 now has exactly ONE cause left for a
+        verified caller: (1) casino webhooks are not enabled on this
+        deployment at all (the casino Orchestrator is nil) - this check
+        runs FIRST, before the shared preamble, before any tenant lookup,
+        and before signature verification, so it is reachable by anyone,
+        verified or not; (2) a verified NEW BET while the tenant/brand
+        capability is not active, does not support bet, or no longer
+        supports the session's own asset - resolved for the bet's OWN
+        session brand, never a tenant-wide-only lookup. Cause (2) is never
+        returned for a win or rollback.
       parameters:
         - name: tenantSlug
           in: path
@@ -2799,7 +2821,10 @@ paths:
             though HandleCallback accepted it as verified - Stage 10.2
             final review K10); (2) a well-formed but domain-invalid
             callback: `ErrBetNotFound`, `ErrLaunchSessionRequired`,
-            `ErrOutcomeNotSucceeded`, or `ErrInvalidInput`.
+            `ErrOutcomeNotSucceeded`, or `ErrInvalidInput`. A late-arriving
+            original bet whose reference a tombstone already covers is
+            NOT a 400 (Stage 10.3 CAS-CAP-ROLLBACK-1): it is a 200 decline
+            (`decline_reason: "original_rolled_back"`).
           content:
             application/json:
               schema:
@@ -2828,12 +2853,17 @@ paths:
             not enabled on this deployment at all (the casino Orchestrator
             is nil) - this is checked FIRST, before the shared preamble
             even runs, so it PRECEDES signature verification and is
-            reachable by any caller, verified or not. (2) The tenant's own
-            provider capability is disabled/unconfigured - a deliberate,
-            POST-verification money-path kill switch, reachable ONLY after
-            signature verification succeeds. The two causes carry
-            different error messages; the post-verification one is only
-            ever returned to a verified caller.
+            reachable by any caller, verified or not. (2) A verified NEW
+            BET while the tenant/brand's own capability is not active,
+            does not support bet, or no longer supports the session's own
+            asset - a deliberate, POST-verification kill switch on NEW
+            EXPOSURE ONLY (Stage 10.3 CAS-CAP-ROLLBACK-1), reachable ONLY
+            after signature verification succeeds. Cause (2) is NEVER
+            returned for a win or rollback callback - settlement of
+            exposure the ledger already holds is never blocked by
+            capability/status. The two causes carry different error
+            messages; the post-verification one is only ever returned to a
+            verified caller.
           content:
             application/json:
               schema:

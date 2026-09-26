@@ -162,11 +162,16 @@ const migration0091Version = int64(91)
 const migration0092Version = int64(92)
 
 // migration0093Version (Stage 10.1: sportsbook settlement causation check
-// via xact status) is now the chain's tip. It only replaces a trigger
-// function body and its down restores the prior body, so it is
-// unconditionally reversible in every scenario this file exercises and
-// never blocks the round-trips below.
+// via xact status). It only replaces a trigger function body and its down
+// restores the prior body, so it is unconditionally reversible in every
+// scenario this file exercises and never blocks the round-trips below.
 const migration0093Version = int64(93)
+
+// migration0094Version (Stage 10.3, CAS-CAP-ROLLBACK-1/M-CAS-1: the
+// casino_provider_capabilities settlement-completeness CHECK) is now the
+// chain's tip. It only adds one CHECK constraint on a table no scenario in
+// this file writes a row to, so it is unconditionally reversible here too.
+const migration0094Version = int64(94)
 
 func migration0076MigrationsDir(t *testing.T) string {
 	t.Helper()
@@ -234,12 +239,12 @@ func TestMigration0076_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 	// (a) Clean database: rolling migrations 0093, 0092, 0091, 0090, 0089, 0088, 0087,
 	// 0086, 0085, 0084, 0083, 0082, 0081, 0080, 0079, 0078, 0077, then 0076
 	// back succeeds.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 18)
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 19)
 	if err != nil {
 		t.Fatalf("down migration must succeed on an empty database: %v", err)
 	}
 	wantDown := []int64{
-		migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
+		migration0094Version, migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
 		migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version,
 		migration0077Version, migration0076Version,
 	}
@@ -260,7 +265,7 @@ func TestMigration0076_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 		migration0076Version, migration0077Version, migration0078Version, migration0079Version, migration0080Version,
 		migration0081Version, migration0082Version, migration0083Version, migration0084Version, migration0085Version,
 		migration0086Version, migration0087Version, migration0088Version, migration0089Version, migration0090Version,
-		migration0091Version, migration0092Version, migration0093Version,
+		migration0091Version, migration0092Version, migration0093Version, migration0094Version,
 	}
 	if len(rolledUpAgain) != len(wantUp) {
 		t.Fatalf("expected exactly migrations %v to be re-applied in that order, got %v", wantUp, rolledUpAgain)
@@ -289,12 +294,12 @@ func TestMigration0076_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 	// holds any rows of its own in this scenario; 0091 refuses only once
 	// sportsbook settlement evidence exists), and the overall call
 	// then fails once it reaches 0076's own guard.
-	rolledBackDirty, err := pool.MigrateDown(context.Background(), dir, 18)
+	rolledBackDirty, err := pool.MigrateDown(context.Background(), dir, 19)
 	if err == nil {
 		t.Fatal("migration 0076's down migration must FAIL once a licence_country_ceilings row exists")
 	}
 	wantDirty := []int64{
-		migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
+		migration0094Version, migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
 		migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version,
 	}
 	if len(rolledBackDirty) != len(wantDirty) {
@@ -340,7 +345,7 @@ func TestMigration0076_RestoresPreMigrationRLSPostureAndRefusesNonNullCountryCod
 	// 0081, 0080, 0079, 0078, 0077, then 0076 - see migration0077Version's
 	// through migration0093Version's own comments for why all seventeen
 	// must be accounted for explicitly here.
-	if _, err := pool.MigrateDown(context.Background(), dir, 18); err != nil {
+	if _, err := pool.MigrateDown(context.Background(), dir, 19); err != nil {
 		t.Fatalf("down migration on a clean database: %v", err)
 	}
 
@@ -396,12 +401,12 @@ func TestMigration0076_RestoresPreMigrationRLSPostureAndRefusesNonNullCountryCod
 	// Roll back 18: 0093, 0092, 0091, 0090, 0089, 0088, 0087, 0086, 0085, 0084, 0083,
 	// 0082, 0081, 0080, 0079, 0078, and 0077 all succeed on their own, and
 	// the overall call then fails once it reaches 0076's own guard.
-	rolledBackDirty, err := pool.MigrateDown(context.Background(), dir, 18)
+	rolledBackDirty, err := pool.MigrateDown(context.Background(), dir, 19)
 	if err == nil {
 		t.Fatal("migration 0076's down migration must FAIL once a jurisdictions row has a non-NULL country_code")
 	}
 	wantDirty := []int64{
-		migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
+		migration0094Version, migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
 		migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version,
 	}
 	if len(rolledBackDirty) != len(wantDirty) {

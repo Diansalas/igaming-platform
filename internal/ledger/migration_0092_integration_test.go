@@ -10,11 +10,16 @@
 // test database is never polluted with seeded duplicate reversals
 // (ledger-finance review P2-4).
 //
-// Migration 0093 (a different, in-flight workstream - SB-T1-XMIN) is
-// deliberately held back in every scratch database this file builds: it
-// has no dependency on 0092 (the two "are independent and commute" per
-// the planning gate's architect ruling), and excluding it keeps these
-// tests about 0092 alone.
+// Migration 0093 (a different, in-flight workstream - SB-T1-XMIN) and
+// migration 0094 (Stage 10.3 CAS-CAP-ROLLBACK-1, casino capability
+// settlement-completeness CHECK) are deliberately held back in every
+// scratch database this file builds: neither has any dependency on 0092
+// (0093 is sportsbook-only; 0094 only touches
+// casino_provider_capabilities), and excluding both keeps these tests
+// about 0092 alone - in particular, it keeps 0092 the MOST RECENTLY
+// applied migration in TestMigration0092_DownRestoresPriorState's
+// scenario, so MigrateDown(dir, 1) targets 0092 itself, not whatever
+// migration happens to sit above it in the real chain at HEAD.
 package ledger
 
 import (
@@ -37,7 +42,7 @@ const migration0092Version = int64(92)
 // exactly "chain applied through 0091" before seeding data that a
 // migration 0021-shaped ledger_transactions table permits today but 0092
 // will no longer permit once applied.
-var migration0092HeldPrefixes = []string{"0092_", "0093_"}
+var migration0092HeldPrefixes = []string{"0092_", "0093_", "0094_"}
 
 func stagedMigrations0092(t *testing.T, includeMigration0092 bool) (dir string, addMigration0092 func()) {
 	t.Helper()
@@ -53,7 +58,7 @@ func stagedMigrations0092(t *testing.T, includeMigration0092 bool) (dir string, 
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
 			continue
 		}
-		heldBack := strings.HasPrefix(e.Name(), "0093_")
+		heldBack := strings.HasPrefix(e.Name(), "0093_") || strings.HasPrefix(e.Name(), "0094_")
 		if !includeMigration0092 && strings.HasPrefix(e.Name(), "0092_") {
 			heldBack = true
 		}

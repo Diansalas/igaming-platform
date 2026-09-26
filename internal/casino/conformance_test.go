@@ -332,6 +332,22 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 		}
 	})
 
+	// Stage 10.3 CAS-CAP-ROLLBACK-1 step 6 (M-CAS-1): an adapter declaring
+	// SupportsBet must also declare SupportsWin and SupportsRollback - a
+	// capability that can open exposure must be able to settle it. The
+	// SAME invariant migration 0094's CHECK enforces at the database layer
+	// for every tenant configuration; checked here one layer up against
+	// the adapter's own declaration. See
+	// TestCasinoConformance_BetWithoutRollback_FailsSuite for this check's
+	// own self-test (a deliberately non-conforming fixture must fail it,
+	// and a deliberately compliant one must still pass).
+	t.Run("an adapter declaring SupportsBet also declares SupportsWin and SupportsRollback (M-CAS-1)", func(t *testing.T) {
+		provider := factory()
+		if err := ValidateAdapterCapabilityDeclaration(provider.Capabilities()); err != nil {
+			t.Fatal(err)
+		}
+	})
+
 	t.Run("HealthStatus returns a well-formed value", func(t *testing.T) {
 		provider := factory()
 		health, err := provider.HealthStatus(context.Background())
@@ -342,6 +358,37 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 			t.Fatalf("HealthStatus: invalid circuit_state %q", health.CircuitState)
 		}
 	})
+}
+
+// TestCasinoConformance_BetWithoutRollback_FailsSuite is the self-test
+// obligation for the M-CAS-1 conformance case above: a deliberately
+// non-conforming declaration (SupportsBet without SupportsWin/
+// SupportsRollback) must be REJECTED by ValidateAdapterCapabilityDeclaration,
+// and a deliberately COMPLIANT one must still PASS - proving the check is
+// neither vacuously green nor vacuously red.
+func TestCasinoConformance_BetWithoutRollback_FailsSuite(t *testing.T) {
+	nonConforming := AdapterCapability{
+		ProviderID:  "conformance-broken-bet-only",
+		SupportsBet: true, SupportsWin: false, SupportsRollback: false,
+	}
+	if err := ValidateAdapterCapabilityDeclaration(nonConforming); err == nil {
+		t.Fatal("expected ValidateAdapterCapabilityDeclaration to reject SupportsBet without SupportsWin/SupportsRollback")
+	}
+
+	compliant := AdapterCapability{
+		ProviderID:  "conformance-compliant",
+		SupportsBet: true, SupportsWin: true, SupportsRollback: true,
+	}
+	if err := ValidateAdapterCapabilityDeclaration(compliant); err != nil {
+		t.Fatalf("expected a compliant declaration to pass, got %v", err)
+	}
+
+	// A declaration that never asserts SupportsBet at all is unaffected
+	// (e.g. a catalogue-only adapter).
+	betless := AdapterCapability{ProviderID: "conformance-betless"}
+	if err := ValidateAdapterCapabilityDeclaration(betless); err != nil {
+		t.Fatalf("expected a bet-less declaration to pass, got %v", err)
+	}
 }
 
 func TestMockCasinoProvider_ConformsToCasinoProvider(t *testing.T) {

@@ -412,6 +412,36 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			apierror.Write(w, requestID, apierror.CodeConflict, "original transaction already rolled back")
 			return
 		}
+		if errors.Is(err, casino.ErrOriginalTombstoned) {
+			// Stage 10.3 CAS-CAP-ROLLBACK-1, E10: a win naming a
+			// provider_tx_id a tombstone already covers (its own rollback
+			// was accepted before it was ever posted). Deterministic,
+			// never retryable, nothing posted - a 409 with a generic body,
+			// never echoing the reference.
+			logger.Error("casino_webhook_integrity_alert_original_tombstoned", "error", err, "provider_id", providerID, "tenant_id", t.ID.String())
+			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
+			return
+		}
+		if errors.Is(err, casino.ErrAmbiguousMultiOriginRound) || errors.Is(err, casino.ErrCorrelationWalletCollision) ||
+			errors.Is(err, casino.ErrLockAlreadyReleased) || errors.Is(err, casino.ErrMixedFundingUnsupported) ||
+			errors.Is(err, casino.ErrBonusBetNotLocked) {
+			// Stage 10.3 G-1 (docs/plans/stage-10.3-planning/
+			// 02-casino-financial-analysis.md §3): these §16.4 abort
+			// outcomes are integrity alerts (a provider protocol violation
+			// or a platform posting-layer defect), never a routine
+			// failure - previously fell through to the generic 500
+			// branch below, which invites endless provider retries for a
+			// condition a retry can never resolve. A 409 with a generic
+			// body, never echoing the round id or any player identity.
+			// G-1 itself (a genuine multi-cash-bet round) no longer
+			// reaches here at all - resolveWinOrigin resolves it to the
+			// shared wallet instead (see classifyDirectOriginRows); this
+			// branch is now reached only for a GENUINELY ambiguous
+			// bonus/mixed-origin round or a wallet collision.
+			logger.Error("casino_webhook_integrity_alert_win_origin", "error", err, "provider_id", providerID, "tenant_id", t.ID.String())
+			apierror.Write(w, requestID, apierror.CodeConflict, "callback rejected")
+			return
+		}
 		if errors.Is(err, casino.ErrLaunchSessionRequired) {
 			logger.Error("casino_webhook_missing_session_binding", "provider_id", providerID, "tenant_id", t.ID.String())
 			apierror.Write(w, requestID, apierror.CodeValidation, "callback rejected")

@@ -256,7 +256,19 @@ func newWriteCasinoCapabilityHandler(deps Deps) http.HandlerFunc {
 		subjectID, _ := uuid.Parse(tc.Subject)
 		var capabilityID uuid.UUID
 		err = deps.DB.WithTenant(r.Context(), tc.TenantID, func(ctx context.Context, tx pgx.Tx) error {
-			var err error
+			// Stage 10.3 CAS-CAP-ROLLBACK-1 step 8 (F6/G-5, CLAUDE.md's
+			// "every mutating administrative/financial action writes an
+			// audit record ... before/after state"): this capability row
+			// now controls new exposure exclusively (settlement is never
+			// gated by it), so its own audit trail must show what changed,
+			// not just the new state. before is the tenant-wide row as it
+			// stood immediately before this write, if any (found=false is
+			// itself recorded, not treated as "nothing to report").
+			beforeCap, beforeFound, err := casino.LoadCapability(ctx, tx, tc.TenantID, uuid.Nil, providerID)
+			if err != nil {
+				return err
+			}
+
 			capabilityID, err = casino.WriteCapability(ctx, tx, provider, tc.TenantID, nil, casino.CapabilityConfig{
 				SupportsCatalogue: req.SupportsCatalogue, SupportsLaunch: req.SupportsLaunch, SupportsBalance: req.SupportsBalance,
 				SupportsBet: req.SupportsBet, SupportsWin: req.SupportsWin, SupportsRollback: req.SupportsRollback,
@@ -266,14 +278,35 @@ func newWriteCasinoCapabilityHandler(deps Deps) http.HandlerFunc {
 			if err != nil {
 				return err
 			}
+
+			metadata := map[string]any{
+				"provider_id": providerID,
+				"after": map[string]any{
+					"status": req.Status, "priority": req.Priority,
+					"supports_catalogue": req.SupportsCatalogue, "supports_launch": req.SupportsLaunch, "supports_balance": req.SupportsBalance,
+					"supports_bet": req.SupportsBet, "supports_win": req.SupportsWin, "supports_rollback": req.SupportsRollback,
+					"supported_assets": req.SupportedAssets,
+				},
+			}
+			if beforeFound {
+				metadata["before"] = map[string]any{
+					"status": string(beforeCap.Status), "priority": beforeCap.Priority,
+					"supports_catalogue": beforeCap.SupportsCatalogue, "supports_launch": beforeCap.SupportsLaunch, "supports_balance": beforeCap.SupportsBalance,
+					"supports_bet": beforeCap.SupportsBet, "supports_win": beforeCap.SupportsWin, "supports_rollback": beforeCap.SupportsRollback,
+					"supported_assets": beforeCap.SupportedAssets,
+				}
+			} else {
+				metadata["before"] = nil
+			}
+
 			return audit.Record(ctx, tx, audit.Entry{
 				TenantID: tc.TenantID, ActorType: audit.ActorStaff, ActorID: subjectID,
 				Action: "casino_provider_capability.configured", TargetType: "casino_provider_capability", TargetID: capabilityID.String(),
 				Outcome: audit.OutcomeSuccess, IPAddress: clientIP(r), UserAgent: r.UserAgent(), RequestID: requestID,
-				Metadata: map[string]any{"provider_id": providerID, "status": req.Status, "priority": req.Priority},
+				Metadata: metadata,
 			})
 		})
-		if errors.Is(err, casino.ErrCapabilityWidensAdapter) {
+		if errors.Is(err, casino.ErrCapabilityWidensAdapter) || errors.Is(err, casino.ErrCapabilitySettlementIncomplete) {
 			apierror.Write(w, requestID, apierror.CodeValidation, err.Error())
 			return
 		}

@@ -25,6 +25,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 func testPool(t *testing.T) *db.Pool {
@@ -1361,20 +1362,25 @@ func TestReceiveCallback_NonSucceededOutcomeRejected(t *testing.T) {
 	}
 }
 
-// A tenant's own CasinoProviderCapability is an actual kill switch on the
-// money path, not just at launch time - multi-tenancy specialist review
-// finding: previously, disabling (or never configuring) a tenant's own
-// capability row had NO effect on whether bet/win/rollback callbacks
-// posted.
-func TestReceiveCallback_DisabledCapabilityBlocksCallback(t *testing.T) {
+// TestReceiveCallback_DisabledCapabilityBlocksNewBetsOnly is Stage 10.3
+// CAS-CAP-ROLLBACK-1's own rewrite of this test (04-review-qa.md §3's
+// binding instruction), narrowing its scope to what the fixed contract
+// actually specifies: capability/status gate NEW BETS ONLY (§1.3). A
+// tenant's own CasinoProviderCapability is still a kill switch on the
+// money path for a bet - but no longer for anything else. See
+// TestReceiveCallback_DisabledCapabilityStillSettlesExistingExposure below
+// for the win/rollback half of the same contract, which used to be
+// covered (incorrectly) by this same test.
+func TestReceiveCallback_DisabledCapabilityBlocksNewBetsOnly(t *testing.T) {
 	pool := testPool(t)
 	f := seedCasinoFixture(t, pool)
 	fundWallet(t, pool, f, 5000)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
 	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
 
-	// No capability row registered at all - must behave as disabled.
-	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-no-capability", "", "round-no-capability", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	// S-none: no capability row registered at all - a new bet is rejected.
+	payload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-no-capability", "", "round-no-capability", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", payload)
 		return err
@@ -1383,8 +1389,8 @@ func TestReceiveCallback_DisabledCapabilityBlocksCallback(t *testing.T) {
 		t.Fatalf("expected ErrProviderUnavailable with no capability row, got %v", err)
 	}
 
-	// Register, then explicitly disable - a tenant turning off a provider
-	// mid-dispute must actually stop new callbacks from posting.
+	// Register, then explicitly disable (S-off) - a tenant turning off a
+	// provider mid-dispute must still stop NEW bets from posting.
 	registerCasinoCapability(t, pool, f, provider, 100)
 	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := WriteCapability(ctx, tx, provider, f.tenantID, nil, CapabilityConfig{
@@ -1409,6 +1415,67 @@ func TestReceiveCallback_DisabledCapabilityBlocksCallback(t *testing.T) {
 	if balance := cashBalance(t, pool, f); balance != 5000 {
 		t.Fatalf("expected balance unchanged at 5000, got %d", balance)
 	}
+}
+
+// TestReceiveCallback_DisabledCapabilityStillSettlesExistingExposure is
+// Stage 10.3 CAS-CAP-ROLLBACK-1's own requirement: with the SAME disabled
+// capability that just blocked a new bet above, a win/rollback of a bet
+// posted BEFORE the capability was disabled still settles normally -
+// capability/status never gate settlement of existing exposure.
+func TestReceiveCallback_DisabledCapabilityStillSettlesExistingExposure(t *testing.T) {
+	pool := testPool(t)
+	f := seedCasinoFixture(t, pool)
+	fundWallet(t, pool, f, 5000)
+	provider := NewMockCasinoProvider("mock-casino", "EUR")
+	orch := NewOrchestrator(map[string]CasinoProvider{"mock-casino": provider}, NewMockWebhookCredentials(provider))
+	registerCasinoCapability(t, pool, f, provider, 100)
+	sessionID := mintSession(t, pool, f, "mock-casino", "EUR")
+
+	betPayload := provider.CallbackPayload(f.tenantID, CallbackEventBet, "bet-settles-disabled", "", "round-settles-disabled", "game-1", 1000, "EUR", OutcomeSucceeded, "", f.playerAccountID, sessionID)
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock-casino", betPayload)
+		return err
+	}); err != nil {
+		t.Fatalf("bet while enabled: %v", err)
+	}
+
+	if err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, err := WriteCapability(ctx, tx, provider, f.tenantID, nil, CapabilityConfig{
+			SupportsCatalogue: true, SupportsLaunch: true, SupportsBalance: true,
+			SupportsBet: true, SupportsWin: true, SupportsRollback: true,
+			SupportedAssets: []string{"EUR"}, SupportedGameTypes: []string{"slot", "table", "live"},
+			Priority: 100, Status: CapabilityDisabled,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("disable capability: %v", err)
+	}
+
+	winPayload := provider.CallbackPayload(f.tenantID, CallbackEventWin, "win-settles-disabled", "", "round-settles-disabled", "game-1", 2000, "EUR", OutcomeSucceeded, "", f.playerAccountID, uuid.Nil)
+	winResult, err := doReceiveCallback(t, pool, f.tenantID, orch, winPayload)
+	if err != nil {
+		t.Fatalf("expected the win to settle even though the capability is disabled, got %v", err)
+	}
+	if winResult.Outcome != OutcomeSucceeded {
+		t.Fatalf("expected the win to succeed, got outcome %v", winResult.Outcome)
+	}
+	if balance := cashBalance(t, pool, f); balance != 5000-1000+2000 {
+		t.Fatalf("expected the win to credit the player (balance %d), got %d", 5000-1000+2000, balance)
+	}
+}
+
+// doReceiveCallback is a small helper returning ReceiveCallback's own
+// result value (not just its error), for tests that need to assert on
+// Outcome/Tombstoned/LedgerTransactionID.
+func doReceiveCallback(t *testing.T, pool *db.Pool, tenantID uuid.UUID, orch *Orchestrator, payload webhookauth.Inbound) (ReceiveCallbackResult, error) {
+	t.Helper()
+	var result ReceiveCallbackResult
+	err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		result, err = orch.ReceiveCallback(ctx, tx, tenantID, "mock-casino", payload)
+		return err
+	})
+	return result, err
 }
 
 // --- Concurrency tests (CLAUDE.md's mandatory financial-test list;

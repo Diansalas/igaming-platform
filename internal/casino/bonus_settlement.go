@@ -168,6 +168,61 @@ func queryNetOutstandingLocked(ctx context.Context, tx pgx.Tx, tenantID, correla
 	return net, nil
 }
 
+// classifyDirectOriginRows is classifyOriginRows' G-1 counterpart for the
+// DIRECT (cash/bonus-debit) branch only (Stage 10.3, docs/plans/
+// stage-10.3-planning/02-casino-financial-analysis.md §3 G-1; F9).
+// `classifyOriginRows` treated ANY correlation id resolving more than one
+// un-reversed casino_bet as ErrAmbiguousMultiOriginRound - including two
+// or more plain player_cash bets on one wallet, which is a normal
+// multi-debit round (side bets, multi-hand table games, feature buys,
+// re-bets), not an integrity problem: postWinDirectCash never uses
+// BetTransactionID, so which specific bet row this function returns has
+// NO financial effect for a cash origin. LF-8's original restriction (08
+// §16.4a) was scoped to bonus-funded wagering; applying it to cash was
+// unjustified.
+//
+// Every other outcome is UNCHANGED from classifyOriginRows: a wallet
+// collision is still ErrCorrelationWalletCollision, entries spanning more
+// than one funding origin (account_type) are still
+// ErrMixedFundingUnsupported, and any other multi-row shape (for example,
+// more than one bare player_bonus debit leg with no lock - itself already
+// a structural inconsistency §16.10.1 says should never exist) still
+// falls back to ErrAmbiguousMultiOriginRound rather than guessing. rows
+// must be non-empty (the same precondition as classifyOriginRows) - the
+// caller (resolveWinOrigin) already returns ErrBetNotFound for an empty
+// result set before ever reaching here.
+func classifyDirectOriginRows(rows []originRow) (originRow, error) {
+	wallets := map[uuid.UUID]bool{}
+	txs := map[uuid.UUID]bool{}
+	accountTypes := map[ledger.AccountType]bool{}
+	for _, r := range rows {
+		wallets[r.WalletID] = true
+		txs[r.BetTransactionID] = true
+		accountTypes[r.AccountType] = true
+	}
+	if len(wallets) > 1 {
+		return originRow{}, ErrCorrelationWalletCollision
+	}
+	if len(accountTypes) > 1 {
+		return originRow{}, ErrMixedFundingUnsupported
+	}
+	if len(rows) == 1 {
+		return rows[0], nil
+	}
+	// len(rows) > 1, one wallet, one account_type: a genuine multi-bet
+	// round. Safe to resolve arbitrarily (rows[0]) ONLY for the
+	// player_cash account type - postWinDirectCash never dereferences
+	// BetTransactionID, so no financial decision depends on which row is
+	// returned. Any other account_type sharing this exact shape (e.g. two
+	// un-locked player_bonus debits) stays ambiguous - §16.10.1 says a
+	// bonus-funded bet must always lock, so this branch is not this
+	// stage's cash-round fix and must not silently start resolving it too.
+	if rows[0].AccountType == ledger.AccountPlayerCash {
+		return rows[0], nil
+	}
+	return originRow{}, ErrAmbiguousMultiOriginRound
+}
+
 // resolveWinOrigin is §16.4 in full: Step 1 (locked identity), Step 1b
 // (LF-18's outstanding-amount fix, run only once identity is
 // unambiguous), Step 2 (direct-absorb fallback when no lock exists), and
@@ -208,7 +263,12 @@ func resolveWinOrigin(ctx context.Context, tx pgx.Tx, tenantID, correlationID uu
 	if len(directRows) == 0 {
 		return winOrigin{}, ErrBetNotFound
 	}
-	row, err := classifyOriginRows(directRows)
+	// G-1 (Stage 10.3): the direct/cash branch uses its OWN classifier -
+	// classifyDirectOriginRows, not classifyOriginRows - because a
+	// multi-bet CASH round is normal here (see its own doc comment); the
+	// locked branch above is untouched and keeps classifyOriginRows'
+	// stricter, unmodified behavior.
+	row, err := classifyDirectOriginRows(directRows)
 	if err != nil {
 		return winOrigin{}, err
 	}

@@ -17,10 +17,42 @@ import (
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/casino"
+	"github.com/Diansalas/igaming-platform/internal/db"
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/testsupport/noeffect"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
+
+// mustMintCasinoLaunchSessionDirect mints a real casino_launch_sessions
+// row DIRECTLY via casino.CreateLaunchSession, bypassing LaunchGame's own
+// checks entirely (including its OWN capability requirement) - the
+// httpserver-package equivalent of internal/casino's own mintSession test
+// helper. Stage 10.3 CAS-CAP-ROLLBACK-1 moved postBet's capability gate to
+// run AFTER session resolution, so a test proving the S-none/S-off
+// capability states at the callback layer needs a genuinely resolvable
+// session to reach that gate at all - a fabricated uuid.New() session id
+// now fails earlier, at ErrLaunchSessionRequired, which is not what these
+// tests are about.
+func mustMintCasinoLaunchSessionDirect(t *testing.T, pool *db.Pool, tenant identity.Tenant, brandID, playerID, walletID, gameID uuid.UUID, providerID, providerGameID, assetCode string) uuid.UUID {
+	t.Helper()
+	var sessionID uuid.UUID
+	err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		session, _, err := casino.CreateLaunchSession(ctx, tx, casino.CreateLaunchSessionParams{
+			TenantID: tenant.ID, BrandID: brandID, PlayerAccountID: playerID, WalletID: walletID,
+			GameID: gameID, ProviderID: providerID, ProviderGameID: providerGameID,
+			AssetCode: assetCode, Mode: casino.ModeReal,
+		})
+		if err != nil {
+			return err
+		}
+		sessionID = session.ID
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("mint casino launch session directly: %v", err)
+	}
+	return sessionID
+}
 
 // TestCasinoWebhook_CrossTenantBet_Rejected is C3: a bet signed for tenant
 // A, delivered to tenant B's slug - even naming a session id that
@@ -274,6 +306,12 @@ func TestCasinoWebhook_EnumerationOracle_IndistinguishableResponses(t *testing.T
 
 	unconfiguredTenant := mustCreateTenant(t, pool)
 	// No mock-casino capability row at all for this tenant.
+	unconfiguredBrand := mustCreateBrand(t, pool, unconfiguredTenant)
+	unconfiguredPlayer := mustRegisterPlayer(t, srv, unconfiguredBrand.Slug)
+	mustActivatePlayer(t, pool, unconfiguredTenant.ID, unconfiguredPlayer.ID)
+	unconfiguredWallet := fundWallet(t, pool, unconfiguredTenant.ID, unconfiguredBrand.ID, unconfiguredPlayer.ID, "EUR", 10_000)
+	unconfiguredGame := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
+	unconfiguredSessionID := mustMintCasinoLaunchSessionDirect(t, pool, unconfiguredTenant, unconfiguredBrand.ID, unconfiguredPlayer.ID, unconfiguredWallet.ID, unconfiguredGame.ID, "mock-casino", unconfiguredGame.ProviderGameID, "EUR")
 
 	genuineSigned := mock.CallbackPayload(activeTenant.ID, casino.CallbackEventBet, "enum-ref", "", "round-enum", "game-1",
 		1000, "EUR", casino.OutcomeSucceeded, "", uuid.New(), uuid.New())
@@ -335,8 +373,8 @@ func TestCasinoWebhook_EnumerationOracle_IndistinguishableResponses(t *testing.T
 	// check (503) is distinct from the pre-verification 401 family, not
 	// folded into it.
 	t.Run("unconfigured_tenant_gets_503_not_401", func(t *testing.T) {
-		payload := mock.CallbackPayload(unconfiguredTenant.ID, casino.CallbackEventBet, "enum-unconfigured-1", "", "round-x", "game-1",
-			1000, "EUR", casino.OutcomeSucceeded, "", uuid.New(), uuid.New())
+		payload := mock.CallbackPayload(unconfiguredTenant.ID, casino.CallbackEventBet, "enum-unconfigured-1", "", "round-x", unconfiguredGame.ProviderGameID,
+			1000, "EUR", casino.OutcomeSucceeded, "", unconfiguredPlayer.ID, unconfiguredSessionID)
 		resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+unconfiguredTenant.Slug+"/mock-casino", payload)
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusServiceUnavailable {
@@ -427,8 +465,19 @@ func TestCasinoWebhook_DisabledCapability_ValidSignatureGets503(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	payload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "cas-c9-bet-1", "", "round-c9", "game-1",
-		1000, "EUR", casino.OutcomeSucceeded, "", uuid.New(), uuid.New())
+	// A genuinely resolvable session is required to reach postBet's own
+	// capability gate at all (Stage 10.3 CAS-CAP-ROLLBACK-1 moved that gate
+	// to run AFTER session resolution) - minted directly since LaunchGame
+	// itself would refuse while the capability is disabled.
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	mustActivatePlayer(t, pool, tenant.ID, player.ID)
+	wl := fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
+	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
+	sessionID := mustMintCasinoLaunchSessionDirect(t, pool, tenant, brand.ID, player.ID, wl.ID, game.ID, "mock-casino", game.ProviderGameID, "EUR")
+
+	payload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "cas-c9-bet-1", "", "round-c9", game.ProviderGameID,
+		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
 	before := noeffect.CaptureCasino(t, pool, []uuid.UUID{tenant.ID})
 	callbackResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payload)
 	defer callbackResp.Body.Close()
@@ -449,24 +498,20 @@ func TestCasinoWebhook_DisabledCapability_ValidSignatureGets503(t *testing.T) {
 	noeffect.AssertNoCasinoEffect(t, pool, []uuid.UUID{tenant.ID}, before)
 }
 
-// TestCasinoWebhook_CAS_CAP_ROLLBACK_1_DisabledCapabilityBlocksRollbackOfAlreadyPostedBet
-// CHARACTERISES today's behaviour for the open follow-up CAS-CAP-ROLLBACK-1
-// (design §H, ruling J16: "a disabled casino capability 503s a verified
-// rollback; follow-up for casino + ledger-finance") - it is NOT an
-// assertion that this is the DESIRED long-term behaviour. It records what
-// the code does today: once a bet has genuinely posted (real ledger
-// effect, capability enabled at the time), disabling the tenant's WHOLE
-// casino_provider_capabilities row afterward makes even a fully verified,
+// TestCasinoWebhook_CAS_CAP_ROLLBACK_1_DisabledCapabilityStillAllowsRollbackOfAlreadyPostedBet
+// is CAS-CAP-ROLLBACK-1's own resolution (Stage 10.3,
+// docs/plans/stage-10.3-planning/02-casino-financial-analysis.md §1.3),
+// flipped from a pre-fix CHARACTERIZATION to a REQUIREMENT (04-review-qa.md
+// §3's binding instruction: "flip ... from a characterization to a
+// requirement"). It used to record that once a bet had genuinely posted
+// (capability enabled at the time), disabling the tenant's WHOLE
+// casino_provider_capabilities row afterward made even a fully verified,
 // otherwise-legitimate ROLLBACK of that SAME already-posted bet 503
-// ("provider unavailable") - the already-posted bet's ledger effect is
-// left standing, un-reversed, with no way through this route to correct
-// it while the capability stays disabled. Whether a rollback of
-// already-committed money SHOULD be exempt from this same kill switch
-// that (correctly) blocks NEW bets/wins is the open policy question
-// CAS-CAP-ROLLBACK-1 names for casino + ledger-finance to resolve - this
-// test only pins down what happens today, so a future behaviour change is
-// a deliberate, visible diff against this test, not a silent regression.
-func TestCasinoWebhook_CAS_CAP_ROLLBACK_1_DisabledCapabilityBlocksRollbackOfAlreadyPostedBet(t *testing.T) {
+// ("provider unavailable") - stranding the stake with no way to correct
+// it. The ledger-finance ruling closes that: capability/status gate NEW
+// EXPOSURE ONLY; settlement of existing exposure (a rollback of an
+// already-posted bet) is NEVER blocked by a disabled/missing capability.
+func TestCasinoWebhook_CAS_CAP_ROLLBACK_1_DisabledCapabilityStillAllowsRollbackOfAlreadyPostedBet(t *testing.T) {
 	pool, issuer := testEnv(t)
 	orchestrator, mock := newMockCasinoOrchestrator()
 	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
@@ -525,26 +570,29 @@ func TestCasinoWebhook_CAS_CAP_ROLLBACK_1_DisabledCapabilityBlocksRollbackOfAlre
 		0, "EUR", "", "", player.ID, uuid.Nil)
 	rollbackResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", rollbackPayload)
 	defer rollbackResp.Body.Close()
-	// CHARACTERISATION, not a requirement: today this is 503, exactly like
-	// C9's disabled-capability-blocks-a-NEW-bet case - the capability check
-	// (d) in ReceiveCallback's own doc comment runs identically for every
-	// event type, bet/win/rollback alike, with no special case for
-	// "reversing money already on the books".
-	if rollbackResp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("CAS-CAP-ROLLBACK-1 characterisation: expected TODAY's behaviour (503) for a rollback of an already-posted bet while the capability is disabled, got %d - if this changed on purpose, update this test AND close CAS-CAP-ROLLBACK-1's follow-up, do not just widen the assertion", rollbackResp.StatusCode)
+	// REQUIREMENT (Stage 10.3 CAS-CAP-ROLLBACK-1): a rollback of an
+	// already-posted bet settles (200) even though the capability is
+	// disabled - settlement of existing exposure is never gated by
+	// capability/status.
+	if rollbackResp.StatusCode != http.StatusOK {
+		t.Fatalf("Stage 10.3 CAS-CAP-ROLLBACK-1: expected 200 for a rollback of an already-posted bet EVEN THOUGH the capability is disabled, got %d", rollbackResp.StatusCode)
 	}
 
-	// No ledger effect from the rollback attempt itself: the original bet's
-	// ONE row is still exactly one row (never reversed, never duplicated),
-	// and no tombstone or second transaction was written for the rollback.
-	var ledgerCountAfterRollbackAttempt int
+	// The rollback genuinely reversed the original bet: two rows now exist
+	// (the original bet plus its reversal), and the reversal names the
+	// original.
+	var ledgerCountAfterRollback int
 	err = pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE provider_id = 'mock-casino' AND provider_tx_id IN ($1, $2)`, originalTxID, "cas-caprb1-rollback").Scan(&ledgerCountAfterRollbackAttempt)
+		return tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE provider_id = 'mock-casino' AND provider_tx_id IN ($1, $2)`, originalTxID, "cas-caprb1-rollback").Scan(&ledgerCountAfterRollback)
 	})
 	if err != nil {
-		t.Fatalf("query ledger_transactions after rollback attempt: %v", err)
+		t.Fatalf("query ledger_transactions after rollback: %v", err)
 	}
-	if ledgerCountAfterRollbackAttempt != 1 {
-		t.Fatalf("expected still exactly 1 ledger_transactions row (the original bet, un-reversed, no tombstone) after the blocked rollback attempt, got %d", ledgerCountAfterRollbackAttempt)
+	if ledgerCountAfterRollback != 2 {
+		t.Fatalf("expected exactly 2 ledger_transactions rows (the original bet plus its reversal) after the rollback settled, got %d", ledgerCountAfterRollback)
+	}
+	balance := walletCashBalance(t, srv, player.Tokens.AccessToken)
+	if balance != 10_000 {
+		t.Fatalf("expected the stake to be returned by the rollback (balance back to 10000), got %d", balance)
 	}
 }

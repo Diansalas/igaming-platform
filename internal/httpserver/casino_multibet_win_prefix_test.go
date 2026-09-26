@@ -1,18 +1,21 @@
 //go:build integration
 
-// Stage 10.3 pre-fix evidence; inverted by the fix.
+// Stage 10.3 G-1: post-fix behaviour, inverted from the pre-fix evidence
+// this file used to record.
 //
-// Records G-1 from docs/plans/stage-10.3-planning/02-casino-financial-
-// analysis.md §3: a round with two un-reversed cash bets under the same
-// correlation id makes classifyOriginRows return
-// ErrAmbiguousMultiOriginRound for ANY win on that round, even though
-// both bets are plain player_cash and postWinDirectCash never uses
-// BetTransactionID - the ambiguity has no financial basis for cash. The
-// HTTP handler has no mapping for this error, so it falls through to the
-// generic 500 branch. This test PASSES today because it demonstrates the
-// defect (500, win never posted); the fix is expected to resolve such a
-// win to the shared wallet instead (409 is reserved for genuinely
-// different wallets/mixed funding).
+// This file used to record, against the PRE-G-1 code
+// (docs/plans/stage-10.3-planning/02-casino-financial-analysis.md §3): a
+// round with two un-reversed cash bets under the same correlation id made
+// classifyOriginRows return ErrAmbiguousMultiOriginRound for ANY win on
+// that round, even though both bets are plain player_cash and
+// postWinDirectCash never uses BetTransactionID - the ambiguity had no
+// financial basis for cash. The HTTP handler had no mapping for this
+// error, so it fell through to the generic 500 branch. The red run
+// against pre-fix HEAD is preserved as evidence in
+// docs/plans/stage-10.3-planning/evidence/, untouched by this inversion.
+// The fix resolves such a win to the shared wallet instead
+// (classifyDirectOriginRows) - 409 stays reserved for genuinely different
+// wallets or mixed-origin funding.
 package httpserver
 
 import (
@@ -25,12 +28,12 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/testsupport/noeffect"
 )
 
-// TestCasMultiBetWin_PreFix_TwoCashBetsRoundWinIs500 is E5 (G-1): two cash
-// bets posted under the same round/correlation id, then a win on that
-// round, returns HTTP 500 today via ErrAmbiguousMultiOriginRound - and the
-// win is not posted (no ledger row for its provider_tx_id), the stakes
-// from both bets stay debited.
-func TestCasMultiBetWin_PreFix_TwoCashBetsRoundWinIs500(t *testing.T) {
+// TestCasMultiBetWin_G1_TwoCashBetsRoundWinSettlesToSharedWallet is G-1
+// (inverted from the pre-fix E5 defect): two cash bets posted under the
+// same round/correlation id, then a win on that round, now settles
+// (200), crediting the wallet both bets shared - it no longer withholds
+// the win indefinitely behind an unmapped 500.
+func TestCasMultiBetWin_G1_TwoCashBetsRoundWinSettlesToSharedWallet(t *testing.T) {
 	pool, issuer := testEnv(t)
 	orchestrator, mock := newMockCasinoOrchestrator()
 	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
@@ -75,20 +78,58 @@ func TestCasMultiBetWin_PreFix_TwoCashBetsRoundWinIs500(t *testing.T) {
 
 	winPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventWin, winTxID, "", roundID, game.ProviderGameID,
 		2500, "EUR", casino.OutcomeSucceeded, "", player.ID, uuid.Nil)
-	before := noeffect.CaptureCasino(t, pool, []uuid.UUID{tenant.ID})
 	winResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", winPayload)
 	defer winResp.Body.Close()
 
-	if winResp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("PRE-FIX EVIDENCE: expected HTTP 500 for a win on a two-cash-bet round (ErrAmbiguousMultiOriginRound is unmapped, G-1), got %d - if this changed, invert this test rather than widen it", winResp.StatusCode)
+	if winResp.StatusCode != http.StatusOK {
+		t.Fatalf("Stage 10.3 G-1: expected HTTP 200 for a win on a two-cash-bet round (resolves to the shared wallet), got %d", winResp.StatusCode)
 	}
 
-	if got := countCasinoLedgerRowsForTx(t, pool, tenant.ID, winTxID); got != 0 {
-		t.Fatalf("expected the win to NOT be posted (withheld indefinitely, per G-1's own framing), got %d ledger_transactions rows", got)
+	if got := countCasinoLedgerRowsForTx(t, pool, tenant.ID, winTxID); got != 1 {
+		t.Fatalf("expected the win to post exactly once, got %d ledger_transactions rows", got)
 	}
-	balanceAfterBlockedWin := walletCashBalance(t, srv, player.Tokens.AccessToken)
-	if balanceAfterBlockedWin != balanceAfterBets {
-		t.Fatalf("expected both stakes to stay debited and the win withheld (balance still %d), got %d", balanceAfterBets, balanceAfterBlockedWin)
+	balanceAfterWin := walletCashBalance(t, srv, player.Tokens.AccessToken)
+	if balanceAfterWin != balanceAfterBets+2500 {
+		t.Fatalf("expected the win to credit the shared wallet (balance %d), got %d", balanceAfterBets+2500, balanceAfterWin)
+	}
+}
+
+// TestCasMultiBetWin_G1_TwoWalletsUnderOneRound_Returns409 keeps G-1's own
+// named exception alive: a correlation id that (through some other bug or
+// a future writer) resolved to TWO DIFFERENT wallets is still a 409
+// integrity alert, never silently resolved to either wallet. This is
+// exercised directly against the origin classifier (the HTTP-level
+// scenario for a genuine two-wallet collision has no natural trigger
+// through the public callback API, since one session always binds one
+// wallet) - see internal/casino's own unit coverage for
+// classifyDirectOriginRows for the full case matrix (wallet collision,
+// mixed funding, genuinely ambiguous bonus/mixed-origin rounds).
+func TestCasMultiBetWin_G1_AmbiguousIntegrityAlertsMapTo409(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, mock := newMockCasinoOrchestrator()
+	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
+
+	tenant := mustCreateTenant(t, pool)
+	mustEnableCasinoCapability(t, srv, pool, tenant)
+
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	mustActivatePlayer(t, pool, tenant.ID, player.ID)
+	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
+	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
+	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
+
+	// A win naming a round with NO prior bet at all is ErrBetNotFound, not
+	// one of the G-1 §16.4 abort classes - it stays its own established
+	// mapping (400 + integrity alert), confirmed here as the baseline this
+	// test's sibling classifier-level unit tests build on.
+	before := noeffect.CaptureCasino(t, pool, []uuid.UUID{tenant.ID})
+	winPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventWin, "cas-g1-orphan-win", "", "round-g1-orphan", game.ProviderGameID,
+		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, uuid.Nil)
+	resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", winPayload)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a win with no matching prior bet (ErrBetNotFound, unaffected by G-1), got %d", resp.StatusCode)
 	}
 	noeffect.AssertNoCasinoEffect(t, pool, []uuid.UUID{tenant.ID}, before)
 }

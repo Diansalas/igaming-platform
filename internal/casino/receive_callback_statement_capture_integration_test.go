@@ -22,9 +22,19 @@
 //     cred.TenantID/cred.ProviderID re-check
 //     (TestCasinoWebhook_ForeignCredential_NoStatementBeforeVerification).
 //
-// and the positive half: on a verified callback, the first (and only
-// pre-posting) statement is LoadCapability's own read
-// (TestCasinoWebhook_VerifiedCallback_LoadCapabilityIsFirstStatement).
+// and the positive half: on a verified callback, the first statement is
+// the L0.1 bet-delivery advisory lock - dispatch happens IMMEDIATELY
+// after verification, with no intervening tenant-scoped statement
+// (TestCasinoWebhook_VerifiedCallback_AdvisoryLockIsFirstStatement).
+// Stage 10.3 CAS-CAP-ROLLBACK-1 deleted ReceiveCallback's own pre-dispatch
+// LoadCapability read entirely (capability/status now gate NEW BETS ONLY,
+// resolved inside postBet for the session's own brand, after L0.1/
+// idempotency/tombstone) - so this test's assertion moved from "the first
+// statement is LoadCapability" to "the first statement is L0.1", which is
+// the new, stricter thing that is actually invariant across bet/win/
+// rollback dispatch (win and rollback take the SAME advisory lock as
+// their own very first statement too - see orchestrator.go's
+// acquireProviderTxDeliveryLock).
 //
 // Mutation-kill demonstration (recorded in docs/plans/stage-10.2-planning/
 // 08-webhook-test-traceability.md, not committed as code): moving
@@ -199,13 +209,13 @@ func TestCasinoWebhook_NilResolver_NoStatementBeforeVerification(t *testing.T) {
 	assertZeroStatementsBeforeVerification(t, captured, err, webhookauth.ReasonNoResolver)
 }
 
-// TestCasinoWebhook_VerifiedCallback_LoadCapabilityIsFirstStatement is
-// C7's positive half: once (c) verification succeeds, the very FIRST
-// tenant-scoped statement ReceiveCallback issues is LoadCapability's own
-// read over casino_provider_capabilities ((d) in ReceiveCallback's doc
-// comment) - proving the capability check runs immediately after
-// verification and never any earlier, session/ledger/round read.
-func TestCasinoWebhook_VerifiedCallback_LoadCapabilityIsFirstStatement(t *testing.T) {
+// TestCasinoWebhook_VerifiedCallback_AdvisoryLockIsFirstStatement is C7's
+// positive half, updated for Stage 10.3 CAS-CAP-ROLLBACK-1: once (c)
+// verification succeeds, the very FIRST tenant-scoped statement
+// ReceiveCallback issues is postBet's own L0.1 bet-delivery advisory
+// lock - proving dispatch runs immediately after verification, with no
+// earlier session/ledger/round/capability read.
+func TestCasinoWebhook_VerifiedCallback_AdvisoryLockIsFirstStatement(t *testing.T) {
 	pool := testPool(t)
 	f := seedCasinoFixture(t, pool)
 	provider := NewMockCasinoProvider("mock-casino", "EUR")
@@ -234,10 +244,10 @@ func TestCasinoWebhook_VerifiedCallback_LoadCapabilityIsFirstStatement(t *testin
 
 	statements := captured.Statements()
 	if len(statements) == 0 {
-		t.Fatal("expected at least one statement (LoadCapability's own read), got none")
+		t.Fatal("expected at least one statement (the L0.1 advisory lock), got none")
 	}
 	first := statements[0]
-	if !strings.Contains(first, "casino_provider_capabilities") {
-		t.Fatalf("expected the FIRST statement to be LoadCapability's read over casino_provider_capabilities, got %q\nall statements: %q", first, statements)
+	if !strings.Contains(first, "pg_advisory_xact_lock") || !strings.Contains(first, "casino_bet_delivery") {
+		t.Fatalf("expected the FIRST statement to be the L0.1 casino_bet_delivery advisory lock, got %q\nall statements: %q", first, statements)
 	}
 }
