@@ -62,6 +62,11 @@ func NewMockKYCProvider() *MockKYCProvider {
 
 func (m *MockKYCProvider) ID() string { return "mock" }
 
+// SyntheticComponent implements providerkind.Synthetic (Stage 10.3,
+// MOCK-ADAPTER-PROD-1) - a structural marker only, satisfied without this
+// package importing internal/providerkind.
+func (m *MockKYCProvider) SyntheticComponent() {}
+
 // SetOutcome configures GetVerification and CallbackPayload to
 // report result for providerReference - a test-only configuration hook,
 // mirroring MockCasinoProvider's SetGameConfig/MockPersonResolver's

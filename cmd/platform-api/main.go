@@ -24,10 +24,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/db"
-	"github.com/Diansalas/igaming-platform/internal/email"
 	"github.com/Diansalas/igaming-platform/internal/httpserver"
-	"github.com/Diansalas/igaming-platform/internal/identityresolution"
-	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/payments"
 	"github.com/Diansalas/igaming-platform/internal/reconciliation"
@@ -49,6 +46,25 @@ func run() error {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+
+	// MOCK-ADAPTER-PROD-1 (Stage 10.3, ADR 0085's Stage 10.3 amendment;
+	// security condition C13, ruling R8): the synthetic-component startup
+	// guard runs IMMEDIATELY after config.Load() - before the logger,
+	// before tracing, before db.Connect, and before the sportsbook
+	// catalogue sync below. buildProviderBundle constructs every mock
+	// component this binary ever wires (no I/O, no database), so this
+	// guard's placement, not merely its logic, is what proves refusal
+	// happens before any side effect - see
+	// TestSyntheticGuard_RunsBeforeDBConnect_Subprocess.
+	//
+	// wiring/bundle computed here are the SAME values used for every
+	// wiring decision later in this function - nothing is constructed a
+	// second time under a different name.
+	wiring := mockProviderWiring(cfg)
+	providers := buildProviderBundle(wiring)
+	if err := refuseSyntheticInProduction(cfg, buildRegistrations(cfg, providers)); err != nil {
+		return err
 	}
 
 	logger := observability.NewLogger(cfg.Environment)
@@ -91,7 +107,16 @@ func run() error {
 	// not a non-owning runtime role) - see db.VerifyRuntimeRoleInProduction's
 	// own doc comment for exactly why this is scoped to production only
 	// and does not apply to development/CI/staging.
-	if err := db.VerifyRuntimeRoleInProduction(ctx, cfg.Environment, pool); err != nil {
+	//
+	// Stage 10.3 W1b (found by `architect`'s W0 code check, same class of
+	// gap as security condition C13): this now passes cfg.GuardEnvironment()
+	// rather than cfg.Environment directly, so a production task deployed
+	// with APP_ENV missing entirely is no longer silently exempted from
+	// this check either. VerifyRuntimeRoleInProduction ITSELF is
+	// unchanged - it still gates on the literal string "production" and
+	// has no knowledge of GuardEnvironment; only the value passed in here
+	// changed. See config.Config.GuardEnvironment's own doc comment.
+	if err := db.VerifyRuntimeRoleInProduction(ctx, cfg.GuardEnvironment(), pool); err != nil {
 		return err
 	}
 
@@ -145,24 +170,25 @@ func run() error {
 	// with test support off the Orchestrator gets a nil resolver, so every
 	// payments webhook fails closed with the uniform 401 (no_resolver).
 	// The mock adapter itself stays registered for initiation
-	// (MOCK-ADAPTER-PROD-1, a pre-launch checklist item).
-	wiring := mockProviderWiring(cfg)
-	mockPaymentsProvider := payments.NewMockProvider("mock-payments", "EUR", "USD", "GBP", "BRL", "MXN")
+	// (MOCK-ADAPTER-PROD-1, closed in W1b via the guard above).
+	//
+	// mockPaymentsProvider/mockCasinoProvider/mockKYCProvider below are the
+	// SAME instances buildProviderBundle already constructed above (before
+	// db.Connect) and passed through the synthetic guard - not a second,
+	// independent construction (Stage 10.3 W1b, MOCK-ADAPTER-PROD-1
+	// coverage requirement: "all-of-main").
+	mockPaymentsProvider := providers.Payments
 	orchestrator := payments.NewOrchestrator(
 		map[string]payments.PaymentProvider{"mock-payments": mockPaymentsProvider},
 		paymentsWebhookResolver(wiring, mockPaymentsProvider),
 	)
 
-	// KYC-WH-1 (Stage 10.2, ADR 0091; final review K11): constructed ONLY
-	// when wiring enables it (ADR 0085 amendment: "absent" in production/
-	// test-support-off, not merely unwired) - a per-process crypto/rand
-	// master with no argument to inject a literal into, when it exists at
-	// all (see MockKYCProvider's own doc comment). kycOrchestrator/
-	// kycWebhookResolver below both already guard against a nil provider.
-	var mockKYCProvider *kyc.MockKYCProvider
-	if wiring.KYCWebhookEnabled {
-		mockKYCProvider = kyc.NewMockKYCProvider()
-	}
+	// KYC-WH-1 (Stage 10.2, ADR 0091; final review K11): non-nil ONLY when
+	// wiring enabled it at bundle-construction time (ADR 0085 amendment:
+	// "absent" in production/test-support-off, not merely unwired).
+	// kycOrchestrator/kycWebhookResolver below both already guard against a
+	// nil provider.
+	mockKYCProvider := providers.KYC
 
 	// Stage 4A ships a mock casino adapter only (CLAUDE.md's Stage 4A
 	// scope gate) - registered exactly like a future real aggregator
@@ -187,7 +213,7 @@ func run() error {
 	// (no_resolver). The mock adapter itself stays registered for
 	// catalogue and launch (MOCK-ADAPTER-PROD-1, a pre-launch checklist
 	// item - not this stage's scope).
-	mockCasinoProvider := casino.NewMockCasinoProvider("mock-casino", "EUR", "USD", "GBP", "BRL", "MXN")
+	mockCasinoProvider := providers.Casino
 	casinoOrchestrator := casino.NewOrchestrator(
 		map[string]casino.CasinoProvider{"mock-casino": mockCasinoProvider},
 		casinoWebhookResolver(wiring, mockCasinoProvider),
@@ -219,7 +245,7 @@ func run() error {
 	// binary must not serve traffic with a half-synced catalogue, so the
 	// existing fail-the-startup wrap below is unchanged.
 	if err := pool.WithPlatformService(ctx, db.ServiceSportsbookCatalogueSync, func(ctx context.Context, tx pgx.Tx) error {
-		return sportsbook.SyncCatalogue(ctx, tx, sportsbook.NewMockSportsbookProvider())
+		return sportsbook.SyncCatalogue(ctx, tx, providers.Sportsbook)
 	}); err != nil {
 		return fmt.Errorf("sync sportsbook catalogue: %w", err)
 	}
@@ -286,7 +312,7 @@ func run() error {
 		// identity evidence today) preserves Stage 2's original
 		// registration behavior while ensuring every registration now
 		// goes through the resolution boundary, never bypassing it.
-		PersonResolver: identityresolution.NewMockPersonResolver(),
+		PersonResolver: providers.PersonResolver,
 
 		// Stage 4F: no real KYC/identity-verification vendor is contracted
 		// yet (docs/decisions/0028 §1) - MockKYCProvider is the only
@@ -305,13 +331,13 @@ func run() error {
 		// route registration and orchestrator wiring cannot diverge (K11).
 		KYCOrchestrator:   kycOrchestrator(wiring, mockKYCProvider),
 		KYCWebhookEnabled: wiring.KYCWebhookEnabled,
-		DocumentStorage:   kyc.NewMockDocumentStorageProvider(),
-		MalwareScanner:    kyc.NewMockMalwareScanner(),
+		DocumentStorage:   providers.DocumentStorage,
+		MalwareScanner:    providers.MalwareScanner,
 
 		// Stage 4F: no real email-delivery vendor is contracted yet
 		// (docs/decisions/0030 §4) - email.MockProvider records what would
 		// have been sent without any production SMTP/API credentials.
-		EmailProvider: email.NewMockProvider(),
+		EmailProvider: providers.Email,
 	})
 
 	// Stage 3C directive item 4: operationalize the ledger-vs-projection
@@ -336,7 +362,7 @@ func run() error {
 		// The sportsbook_settlement stream's statement source is the
 		// MOCK in-house source (ADR 0088 §8.4); real provider statement
 		// matching is PROVIDER DEPENDENT (ADR 0038 §12).
-		reconciliation.RunSchedulerLoop(ctx, pool, logger, cfg.ReconciliationInterval, sportsbook.MockSettlementStatementSource{})
+		reconciliation.RunSchedulerLoop(ctx, pool, logger, cfg.ReconciliationInterval, providers.SettlementStmt)
 	}()
 
 	// Stage 4H-B0-R7 directive item 4: operationalize the self-exclusion

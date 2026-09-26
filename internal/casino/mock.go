@@ -70,6 +70,11 @@ func (m *MockCasinoProvider) deriveKey(tenantID uuid.UUID, providerID string) []
 	return webhookauth.DeriveMockKey(m.masterSecret, webhookauth.CasinoMockKeyLabel, tenantID, providerID)
 }
 
+// SyntheticComponent implements providerkind.Synthetic (Stage 10.3,
+// MOCK-ADAPTER-PROD-1) - a structural marker only, satisfied without this
+// package importing internal/providerkind.
+func (m *MockCasinoProvider) SyntheticComponent() {}
+
 // NewMockWebhookCredentials constructs the casino domain's MOCK inbound-
 // webhook credential resolver bound to provider (design §C2). It resolves
 // ONLY KeyID=="mock-v1" for provider's own bound provider id - any other

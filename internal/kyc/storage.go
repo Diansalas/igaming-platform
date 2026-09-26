@@ -64,6 +64,11 @@ func NewMockDocumentStorageProvider() *MockDocumentStorageProvider {
 	return &MockDocumentStorageProvider{objects: make(map[string]storedContent)}
 }
 
+// SyntheticComponent implements providerkind.Synthetic (Stage 10.3,
+// MOCK-ADAPTER-PROD-1) - a structural marker only, satisfied without this
+// package importing internal/providerkind.
+func (m *MockDocumentStorageProvider) SyntheticComponent() {}
+
 func (m *MockDocumentStorageProvider) ID() string { return "mock_memory" }
 
 func (m *MockDocumentStorageProvider) Store(ctx context.Context, contentType string, content []byte) (StoredObject, error) {

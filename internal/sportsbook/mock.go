@@ -37,6 +37,14 @@ func NewMockSportsbookProvider() *MockSportsbookProvider {
 	return &MockSportsbookProvider{now: time.Now}
 }
 
+// SyntheticComponent implements providerkind.Synthetic (Stage 10.3,
+// MOCK-ADAPTER-PROD-1) - a structural marker only, satisfied without this
+// package importing internal/providerkind. This is the sportsbook mock
+// catalogue named explicitly in 01-provider-trust-analysis.md §3: its
+// catalogue is written to the database at every startup, in every
+// environment, until W1b's guard exists.
+func (m *MockSportsbookProvider) SyntheticComponent() {}
+
 // Catalogue implements Provider.
 func (m *MockSportsbookProvider) Catalogue() CatalogueResult {
 	now := m.now().UTC()
@@ -155,6 +163,11 @@ var _ SettlementStatementSource = MockSettlementStatementSource{}
 
 // Label implements SettlementStatementSource.
 func (MockSettlementStatementSource) Label() string { return MockSettlementStatementLabel }
+
+// SyntheticComponent implements providerkind.Synthetic (Stage 10.3,
+// MOCK-ADAPTER-PROD-1) - a structural marker only, satisfied without this
+// package importing internal/providerkind.
+func (MockSettlementStatementSource) SyntheticComponent() {}
 
 // StatementLines implements SettlementStatementSource. Read-only.
 func (MockSettlementStatementSource) StatementLines(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) ([]SettlementStatementLine, error) {

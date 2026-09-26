@@ -30,6 +30,11 @@ func NewMockLocationProvider(id string) *MockLocationProvider {
 
 func (m *MockLocationProvider) ID() string { return m.id }
 
+// SyntheticComponent implements providerkind.Synthetic (Stage 10.3,
+// MOCK-ADAPTER-PROD-1) - a structural marker only, satisfied without this
+// package importing internal/providerkind.
+func (m *MockLocationProvider) SyntheticComponent() {}
+
 // SetSignal configures the canned result GetSignal returns when called
 // with a SignalRequest whose PlayerAccountID stringifies to key - a
 // test-only configuration hook, mirroring MockKYCProvider.SetOutcome's

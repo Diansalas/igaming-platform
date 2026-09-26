@@ -50,6 +50,13 @@ func NewMockProvider() *MockProvider {
 	return &MockProvider{}
 }
 
+// SyntheticComponent implements providerkind.Synthetic (Stage 10.3,
+// MOCK-ADAPTER-PROD-1) - a structural marker only, satisfied without this
+// package importing internal/providerkind. It is what makes
+// RefuseSyntheticInProduction refuse to start a production binary that has
+// this mock registered.
+func (m *MockProvider) SyntheticComponent() {}
+
 func (m *MockProvider) Send(ctx context.Context, msg Message) error {
 	if msg.To == "" {
 		return fmt.Errorf("email: message has no recipient")

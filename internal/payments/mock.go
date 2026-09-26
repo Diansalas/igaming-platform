@@ -91,6 +91,11 @@ func (m *MockProvider) deriveKey(tenantID uuid.UUID, providerID string) []byte {
 	return webhookauth.DeriveMockKey(m.masterSecret, webhookauth.PaymentsMockKeyLabel, tenantID, providerID)
 }
 
+// SyntheticComponent implements providerkind.Synthetic (Stage 10.3,
+// MOCK-ADAPTER-PROD-1) - a structural marker only, satisfied without this
+// package importing internal/providerkind.
+func (m *MockProvider) SyntheticComponent() {}
+
 // MockWebhookCredentials is the MOCK WebhookCredentialResolver
 // (docs/decisions/0022 §3 amendment; design §6). It resolves ONLY
 // KeyID=="mock-v1" for its own bound provider id - any other providerID or
@@ -112,6 +117,11 @@ type MockWebhookCredentials struct {
 func NewMockWebhookCredentials(provider *MockProvider) MockWebhookCredentials {
 	return MockWebhookCredentials{provider: provider}
 }
+
+// SyntheticComponent implements providerkind.Synthetic (Stage 10.3,
+// MOCK-ADAPTER-PROD-1) - a structural marker only, satisfied without this
+// package importing internal/providerkind.
+func (r MockWebhookCredentials) SyntheticComponent() {}
 
 // Resolve implements WebhookCredentialResolver.
 func (r MockWebhookCredentials) Resolve(ctx context.Context, tenantID uuid.UUID, providerID, keyID string) (WebhookCredential, error) {

@@ -66,6 +66,16 @@ func NewInMemoryBus() *InMemoryBus {
 	return &InMemoryBus{handlers: map[string][]func(context.Context, Event) error{}}
 }
 
+// SyntheticComponent implements providerkind.Synthetic (Stage 10.3,
+// MOCK-ADAPTER-PROD-1) - satisfied structurally, without importing
+// internal/providerkind. InMemoryBus is a Stage 1 STUB (see the type's own
+// doc comment) with none of the durability/ordering properties a
+// production event bus needs; it is not currently wired by
+// cmd/platform-api, but is marked for the same reason every synthetic
+// double in this codebase is: so a future caller cannot register it in
+// production by accident without RefuseSyntheticInProduction catching it.
+func (b *InMemoryBus) SyntheticComponent() {}
+
 func (b *InMemoryBus) Subscribe(eventType string, handler func(context.Context, Event) error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

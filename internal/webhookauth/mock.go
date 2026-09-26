@@ -90,6 +90,14 @@ func (r MockResolver) Resolve(_ context.Context, tenantID uuid.UUID, providerID,
 	}, nil
 }
 
+// SyntheticComponent implements providerkind.Synthetic (Stage 10.3,
+// MOCK-ADAPTER-PROD-1) - a structural marker only, satisfied without this
+// package importing internal/providerkind. MockResolver is shared by the
+// payments, casino and KYC mock adapters' own webhook credential resolvers
+// (via NewMockWebhookCredentials in each package) - marking it here covers
+// all three call sites in one place.
+func (r MockResolver) SyntheticComponent() {}
+
 // MultiResolver composes several per-provider resolvers behind the single
 // Resolver a domain orchestrator is constructed with. A providerID absent
 // from the map - or mapped to a nil entry, a construction mistake that must

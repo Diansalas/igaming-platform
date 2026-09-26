@@ -42,6 +42,11 @@ func NewMockPersonResolver() *MockPersonResolver {
 	}
 }
 
+// SyntheticComponent implements providerkind.Synthetic (Stage 10.3,
+// MOCK-ADAPTER-PROD-1) - a structural marker only, satisfied without this
+// package importing internal/providerkind.
+func (m *MockPersonResolver) SyntheticComponent() {}
+
 // SetMatch configures Resolve to return Match/personID for any input
 // whose VerifiedAttributes.GovernmentIDReference equals govIDRef.
 func (m *MockPersonResolver) SetMatch(govIDRef string, personID uuid.UUID) {

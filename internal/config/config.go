@@ -51,6 +51,26 @@ type Config struct {
 	//     are wired at all, including httpserver.Deps.KYCWebhookEnabled.
 	//     Unlike (2)-(5) it is not itself a single Deps bool field, but it
 	//     is gated by the same function and belongs on this list.
+	//  7. MOCK-ADAPTER-PROD-1's synthetic-component startup guard
+	//     (internal/providerkind.RefuseSyntheticInProduction, cmd/
+	//     platform-api's own refuseSyntheticInProduction wrapper) and the
+	//     secret-store backend allow-list (ValidateSecretBackendScheme,
+	//     below) - Stage 10.3, ADR 0085's Stage 10.3 amendment, security
+	//     condition C13/ruling R8. Both gate on GuardEnvironment(), below,
+	//     rather than on Environment directly, specifically BECAUSE a
+	//     missing APP_ENV must be treated as production for these two
+	//     checks only (see GuardEnvironment's own doc comment) - the one
+	//     deliberate departure, in this list, from "environment must never
+	//     gate a security control", same as exception (1).
+	//  8. db.VerifyRuntimeRoleInProduction's call site in cmd/platform-api/
+	//     main.go now passes cfg.GuardEnvironment() rather than
+	//     cfg.Environment directly (found by `architect`'s Stage 10.3 W0
+	//     code check as the same class of gap as C13) - so a production
+	//     task deployed with APP_ENV missing entirely is no longer silently
+	//     exempted from the role-ownership check either. The function
+	//     itself (db/production_safety.go) is UNCHANGED: it still gates on
+	//     the literal string "production" and has no knowledge of
+	//     GuardEnvironment - only the value main.go passes in changed.
 	//
 	// (1) fails CLOSED on a mis-set value (a typo just re-enables a check
 	// production should pass anyway). (2)-(6) used to (or, for (5) and (6),
@@ -109,6 +129,21 @@ type Config struct {
 	// `TEST_SUPPORT_ENDPOINTS_ENABLED` rows for the operator-facing
 	// version of this.
 	Environment string
+
+	// EnvironmentExplicit records whether APP_ENV was genuinely present in
+	// the process environment (os.LookupEnv's ok == true) at Load() time,
+	// as distinct from Environment's own "development" default for a
+	// genuinely absent variable. It exists solely so GuardEnvironment
+	// (below) can tell "an operator explicitly chose development" apart
+	// from "APP_ENV was never set at all" - Environment's own value is
+	// identical ("development") in both cases, which is exactly the
+	// ambiguity ADR 0085's Consequences section disclosed and Stage 10.3
+	// (security condition C13, ruling R8) requires closing for the
+	// synthetic-component guard and the secret-store backend allow-list.
+	// Nothing outside GuardEnvironment/ValidateSecretBackendScheme should
+	// read this field - every other consumer of Environment keeps treating
+	// an absent APP_ENV as "development", unchanged.
+	EnvironmentExplicit bool
 
 	HTTPAddr string
 
@@ -270,8 +305,10 @@ type Config struct {
 // error rather than panicking so callers (including tests) can handle a
 // misconfigured environment explicitly.
 func Load() (Config, error) {
+	_, appEnvPresent := os.LookupEnv("APP_ENV")
 	cfg := Config{
 		Environment:                   resolveAppEnv(),
+		EnvironmentExplicit:           appEnvPresent,
 		HTTPAddr:                      getEnvDefault("HTTP_ADDR", ":8080"),
 		DatabaseURL:                   os.Getenv("DATABASE_URL"),
 		DatabaseMaxConns:              10,
@@ -482,6 +519,87 @@ func Load() (Config, error) {
 // exceptions this method backs).
 func (c Config) TestSupportRoutesEnabled() bool {
 	return c.Environment != "production" && c.TestSupportEndpointsEnabled
+}
+
+// GuardEnvironment is the environment value MOCK-ADAPTER-PROD-1's
+// synthetic-component startup guard and the secret-store backend
+// allow-list (ValidateSecretBackendScheme, below) must use INSTEAD of
+// Environment directly (Stage 10.3, ADR 0085's Stage 10.3 amendment;
+// security condition C13, ruling R8 - "a missing APP_ENV is treated as
+// production by the synthetic guard and the secret-backend allow-list,
+// even though resolveAppEnv defaults to development elsewhere").
+//
+// It returns "production" when EITHER:
+//   - Environment is already the literal string "production", or
+//   - APP_ENV was never explicitly present in the process environment at
+//     all (EnvironmentExplicit is false) - resolveAppEnv's own
+//     "development" default for this case is INTENDED for every other
+//     consumer of Environment (existing tests and local dev flows rely on
+//     never having to set it), but is exactly the ambiguity these two
+//     specific fail-closed checks must not inherit: a real production
+//     task that is missing APP_ENV entirely must never be treated as
+//     "deliberately development".
+//
+// In every other case (APP_ENV explicitly set to "development" or
+// "staging") it returns Environment unchanged - Layer 1 (Load(), above)
+// has already rejected any other explicit value, so by the time a Config
+// exists at all, Environment is one of the three closed-set values.
+//
+// This is a NEW, additional, reviewed exception to "Environment must
+// never gate a security control" (see Environment's own doc comment,
+// exceptions 7-8) - it does not change resolveAppEnv, Load()'s own
+// validation, or TestSupportRoutesEnabled's behavior in any way.
+func (c Config) GuardEnvironment() string {
+	if c.Environment == "production" || !c.EnvironmentExplicit {
+		return "production"
+	}
+	return c.Environment
+}
+
+// Secret-store backend schemes (ADR 0093 §6; security condition C13/
+// ruling R8's "small function that W2/W3 will consume"). This is the
+// allow-list placeholder those later waves wire the real credential
+// resolver's backend selection through - W1b adds only the rule itself,
+// no store implementation.
+const (
+	// SecretBackendAWSSecretsManager is the only backend permitted in
+	// every environment (staging and production both use it; W3b wires
+	// the actual AWS SDK client behind it).
+	SecretBackendAWSSecretsManager = "awssm"
+	// SecretBackendDevFile is a local-file-backed backend permitted ONLY
+	// when GuardEnvironment() == "development" - i.e. APP_ENV must be
+	// EXPLICITLY present and equal to "development"; a missing APP_ENV is
+	// refused exactly like production is, per C13/R8.
+	SecretBackendDevFile = "devfile"
+	// SecretBackendMemory backs the in-process fake used by tests. It is
+	// deliberately NOT part of this allow-list at all, in any
+	// environment - ADR 0093 §6 requires it be constructible only from
+	// test code (Go's own `_test.go` compilation boundary), never
+	// selectable through configuration. ValidateSecretBackendScheme
+	// always refuses it for exactly that reason.
+	SecretBackendMemory = "memory"
+)
+
+// ValidateSecretBackendScheme refuses a secret-store backend scheme that
+// cfg's environment does not permit (ADR 0093 §6; C13/R8). It is pure and
+// has no side effects - the real store construction (W2a/W3b) is expected
+// to call this before constructing any backend client.
+func (c Config) ValidateSecretBackendScheme(scheme string) error {
+	switch scheme {
+	case SecretBackendAWSSecretsManager:
+		return nil
+	case SecretBackendDevFile:
+		if c.GuardEnvironment() != "development" {
+			return fmt.Errorf(
+				"config: secret backend %q is development-only - APP_ENV must be explicitly \"development\" "+
+					"(a missing APP_ENV is treated as production for this check, per C13/R8)", scheme)
+		}
+		return nil
+	case SecretBackendMemory:
+		return fmt.Errorf("config: secret backend %q is test-only and must never be selected via configuration", scheme)
+	default:
+		return fmt.Errorf("config: unknown secret backend scheme %q", scheme)
+	}
 }
 
 func getEnvDefault(key, def string) string {

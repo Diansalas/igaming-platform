@@ -258,6 +258,132 @@ func TestLoad_UnsetAppEnvStillDefaultsToDevelopment(t *testing.T) {
 	}
 }
 
+// --- Stage 10.3 W1b, MOCK-ADAPTER-PROD-1: EnvironmentExplicit and
+// GuardEnvironment (security condition C13, ruling R8; ADR 0085's Stage
+// 10.3 amendment). ---
+
+func TestLoad_EnvironmentExplicit_UnsetIsFalse(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.EnvironmentExplicit {
+		t.Error("expected EnvironmentExplicit to be false when APP_ENV was never set")
+	}
+	if cfg.Environment != "development" {
+		t.Errorf("expected Environment to still default to development, got %q", cfg.Environment)
+	}
+}
+
+func TestLoad_EnvironmentExplicit_TrueWhenSet(t *testing.T) {
+	for _, env := range []string{"development", "staging", "production"} {
+		t.Run(env, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("DATABASE_URL", "postgres://localhost/test")
+			t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+			t.Setenv("APP_ENV", env)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !cfg.EnvironmentExplicit {
+				t.Errorf("expected EnvironmentExplicit to be true when APP_ENV=%q was explicitly set", env)
+			}
+		})
+	}
+}
+
+// TestGuardEnvironment_Matrix is the required W1b matrix: {production,
+// missing, staging, development}. "missing" (EnvironmentExplicit == false)
+// must resolve identically to "production" for this method ONLY - every
+// other consumer of Environment (TestSupportRoutesEnabled, logging, etc.)
+// is untouched and still sees "development" for that same Config value,
+// which TestLoad_EnvironmentExplicit_UnsetIsFalse and
+// TestLoad_UnsetAppEnvStillDefaultsToDevelopment above both confirm.
+func TestGuardEnvironment_Matrix(t *testing.T) {
+	cases := []struct {
+		name        string
+		environment string
+		explicit    bool
+		want        string
+	}{
+		{"production_explicit", "production", true, "production"},
+		{"missing_app_env", "development", false, "production"},
+		{"staging_explicit", "staging", true, "staging"},
+		{"development_explicit", "development", true, "development"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{Environment: tc.environment, EnvironmentExplicit: tc.explicit}
+			if got := cfg.GuardEnvironment(); got != tc.want {
+				t.Errorf("GuardEnvironment() = %q, want %q (environment=%q explicit=%v)", got, tc.want, tc.environment, tc.explicit)
+			}
+		})
+	}
+}
+
+func TestGuardEnvironment_DoesNotChangeEnvironmentOrTestSupportRoutesEnabled(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://localhost/test")
+	t.Setenv("JWT_SIGNING_SECRET", "a-secret-that-is-at-least-32-characters-long")
+	t.Setenv("TEST_SUPPORT_ENDPOINTS_ENABLED", "true")
+	// APP_ENV left unset entirely.
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Environment != "development" {
+		t.Errorf("Environment must remain 'development' for a missing APP_ENV - GuardEnvironment must not mutate Config, got %q", cfg.Environment)
+	}
+	if cfg.GuardEnvironment() != "production" {
+		t.Errorf("expected GuardEnvironment() to treat a missing APP_ENV as production, got %q", cfg.GuardEnvironment())
+	}
+	if !cfg.TestSupportRoutesEnabled() {
+		t.Error("TestSupportRoutesEnabled() must be unaffected by GuardEnvironment's stricter rule - it still uses Environment directly, per ADR 0085's own scope")
+	}
+}
+
+// --- ValidateSecretBackendScheme (ADR 0093 §6 placeholder; C13/R8's "small
+// function that W2/W3 will consume"). ---
+
+func TestValidateSecretBackendScheme(t *testing.T) {
+	cases := []struct {
+		name        string
+		environment string
+		explicit    bool
+		scheme      string
+		wantErr     bool
+	}{
+		{"awssm_allowed_in_production", "production", true, SecretBackendAWSSecretsManager, false},
+		{"awssm_allowed_in_development", "development", true, SecretBackendAWSSecretsManager, false},
+		{"devfile_allowed_in_explicit_development", "development", true, SecretBackendDevFile, false},
+		{"devfile_refused_in_staging", "staging", true, SecretBackendDevFile, true},
+		{"devfile_refused_in_production", "production", true, SecretBackendDevFile, true},
+		{"devfile_refused_when_app_env_missing", "development", false, SecretBackendDevFile, true},
+		{"memory_always_refused_in_development", "development", true, SecretBackendMemory, true},
+		{"memory_always_refused_in_production", "production", true, SecretBackendMemory, true},
+		{"unknown_scheme_refused", "development", true, "s3", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Config{Environment: tc.environment, EnvironmentExplicit: tc.explicit}
+			err := cfg.ValidateSecretBackendScheme(tc.scheme)
+			if tc.wantErr && err == nil {
+				t.Fatalf("expected error for scheme %q (environment=%q explicit=%v), got nil", tc.scheme, tc.environment, tc.explicit)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected no error for scheme %q (environment=%q explicit=%v), got: %v", tc.scheme, tc.environment, tc.explicit, err)
+			}
+		})
+	}
+}
+
 // A typo'd, wrongly-cased, or whitespace-padded APP_ENV value must FAIL
 // Load() outright - the exact vector two independent Stage 9.3 security
 // reviews flagged as failing OPEN (a mis-set value silently resolved to
