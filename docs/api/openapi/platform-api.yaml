@@ -4572,7 +4572,296 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # --- Stage 10.3 W2a: provider credentials (ADR 0093; security review
+  # docs/plans/stage-10.3-planning/07-w2a-design-review-security.md §6) ---
+  /v1/admin/tenants/{tenantID}/provider-credentials:
+    get:
+      summary: List the tenant's provider credential handles (never a secret value)
+      description: >
+        Requires provider_credential:read (platform_admin, tenant_admin).
+        The tenant comes from the path only (canActOnTenant: a tenant-scoped
+        caller may name only its own tenant; 403 otherwise, with no data).
+        A handle is a reference to a secret held in an external store: the
+        response carries key_id, status, window, fingerprint and secret_ref,
+        never the secret itself. Read in a tenant-scoped transaction.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderCredentialTenantID"
+      responses:
+        "200":
+          description: The tenant's handles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  handles:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ProviderCredentialHandle"
+                required: [handles]
+        "400":
+          $ref: "#/components/responses/ProviderCredentialInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/provider-credential-requests:
+    post:
+      summary: File a four-eyes registration request for a provider credential
+      description: >
+        Requires provider_credential:request (platform_admin only). Enabling
+        a key takes two people: this request must be approved by a DIFFERENT
+        platform administrator who is a DIFFERENT Person (enforced by the
+        database), within 24 hours, and then applied. The server fetches the
+        secret by secret_ref, compares the operator's transient
+        `confirmation` (sha256 of the secret bytes) in constant time, and
+        computes the keyed fingerprint itself. The confirmation value is
+        never persisted, logged, audited or echoed. The body never carries
+        a tenant; unknown fields are refused. Every semantic failure (ref
+        not found, access denied, confirmation mismatch, namespace mismatch,
+        backend not allowed, missing versionId, duplicate fingerprint,
+        duplicate key_id, store unavailable) is the SAME 409
+        credential_registration_rejected; only the application log carries
+        the specific class. Not mounted when the provider-credential
+        subsystem is not configured (no fingerprint key or backend).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderCredentialTenantID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderCredentialRegistrationRequest"
+      responses:
+        "201":
+          description: Request filed (state pending); content_hash is what an approver echoes back
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderCredentialChangeRequest"
+        "400":
+          $ref: "#/components/responses/ProviderCredentialInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: credential_registration_rejected (one byte-identical body for every semantic failure)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      summary: List the tenant's provider credential change requests with their decisions
+      description: Requires provider_credential:request or provider_credential:approve (platform_admin only).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderCredentialTenantID"
+      responses:
+        "200":
+          description: Requests, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ProviderCredentialChangeRequest"
+                required: [requests]
+        "400":
+          $ref: "#/components/responses/ProviderCredentialInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/provider-credential-requests/{requestID}:
+    get:
+      summary: Get one provider credential change request with its decisions
+      description: Requires provider_credential:request or provider_credential:approve (platform_admin only).
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderCredentialTenantID"
+        - $ref: "#/components/parameters/ProviderCredentialRequestID"
+      responses:
+        "200":
+          description: The request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderCredentialChangeRequest"
+        "400":
+          $ref: "#/components/responses/ProviderCredentialInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/provider-credential-requests/{requestID}/decisions:
+    post:
+      summary: Approve or reject a provider credential change request
+      description: >
+        Requires provider_credential:approve (platform_admin only). The
+        decision carries the content_hash the approver saw. The database
+        refuses self-approval, a second account of the same Person, an
+        ineligible (tenant-scoped, unlinked or suspended) approver, a hash
+        mismatch and a non-pending request: all 409 approval_rejected. Any
+        rejection blocks the request. There is no cancel route. Not mounted
+        when the subsystem is not configured.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderCredentialTenantID"
+        - $ref: "#/components/parameters/ProviderCredentialRequestID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderCredentialDecisionRequest"
+      responses:
+        "201":
+          description: Decision recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderCredentialApproval"
+        "400":
+          $ref: "#/components/responses/ProviderCredentialInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: approval_rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/provider-credential-requests/{requestID}/apply:
+    post:
+      summary: Apply an approved provider credential change request
+      description: >
+        Requires provider_credential:request (platform_admin only). The
+        applier, the requester and every approver are re-checked (active,
+        platform-scoped, person-linked); the secret is re-fetched and its
+        fingerprint re-checked; then, in one tenant-scoped transaction, the
+        predecessor (if any) is moved to verify_only (inbound, with its
+        approved not_after) or revoked (outbound), the handle is inserted
+        and the database consumes the approval (unexpired, content-bound,
+        single-use). Any failure is 409 credential_activation_rejected. The
+        body is empty. Not mounted when the subsystem is not configured.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderCredentialTenantID"
+        - $ref: "#/components/parameters/ProviderCredentialRequestID"
+      responses:
+        "201":
+          description: The activated handle
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderCredentialHandle"
+        "400":
+          $ref: "#/components/responses/ProviderCredentialInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: credential_activation_rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /v1/admin/tenants/{tenantID}/provider-credentials/{handleID}/transitions:
+    post:
+      summary: Single-actor transition of a provider credential handle (verify_only, shorten, revoke)
+      description: >
+        Requires provider_credential:revoke (platform_admin, tenant_admin).
+        Disabling takes one person, with a mandatory reason code; revocation
+        never waits for a second approver and takes effect on the very next
+        callback or outbound call. No transition ever leads back to active;
+        not_after may only shrink (never extended, cleared or set in the
+        past); a verify_only overlap is at most 7 days and inbound only; a
+        revoked handle is terminal. A missing or unknown action/reason is
+        400 invalid_request; a refused transition is 409
+        credential_transition_rejected. Always mounted.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ProviderCredentialTenantID"
+        - name: handleID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProviderCredentialTransitionRequest"
+      responses:
+        "200":
+          description: The handle after the transition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProviderCredentialHandle"
+        "400":
+          $ref: "#/components/responses/ProviderCredentialInvalidRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: credential_transition_rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
 components:
+  parameters:
+    ProviderCredentialTenantID:
+      name: tenantID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ProviderCredentialRequestID:
+      name: requestID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
   securitySchemes:
     bearerAuth:
       type: http
@@ -5515,6 +5804,123 @@ components:
         approval_state: { type: string, enum: [not_required, pending, approved, rejected, expired, consumed, revoked] }
         status: { type: string, enum: [open, exhausted, completed, aborted, superseded] }
       required: [operation_id, root_operation_id, operation_type, approval_state, status]
+    ProviderCredentialHandle:
+      type: object
+      description: >
+        A provider credential HANDLE (allow-listed fields only). Never a
+        secret value: secret_ref names a pinned version in the external
+        store; fingerprint is the keyed fp1: HMAC. Examples are synthetic.
+      properties:
+        id: { type: string, format: uuid }
+        domain: { type: string, enum: [payments, kyc, casino] }
+        provider_id: { type: string, example: "example-psp" }
+        purpose: { type: string, enum: [webhook_verify, outbound_api] }
+        key_id: { type: string, example: "k-2026-09" }
+        status: { type: string, enum: [active, verify_only, revoked] }
+        not_before: { type: string, format: date-time }
+        not_after: { type: string, format: date-time, nullable: true }
+        status_changed_at: { type: string, format: date-time }
+        fingerprint: { type: string, pattern: "^fp1:[0-9a-f]{64}$", example: "fp1:0000000000000000000000000000000000000000000000000000000000000000" }
+        secret_ref: { type: string, example: "awssm://prefix/provider-creds/00000000-0000-0000-0000-000000000000/payments/example-psp/api-key?versionId=00000000-0000-0000-0000-000000000000" }
+        vendor_account_id: { type: string, nullable: true }
+        activation_request_id: { type: string, format: uuid }
+        revoked_at: { type: string, format: date-time }
+        revoked_by: { type: string, format: uuid }
+        revoke_reason:
+          type: string
+          enum: [rotation_complete, suspected_compromise, confirmed_compromise, vendor_offboarded, misregistration, tenant_request]
+      required: [id, domain, provider_id, purpose, key_id, status, not_before, status_changed_at, fingerprint, secret_ref, activation_request_id]
+    ProviderCredentialRegistrationRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        No tenant field (the tenant comes from the path). `confirmation` is
+        the operator's transient sha256 of the secret bytes; it is never
+        stored or echoed. A predecessor is disposed of as verify_only
+        (inbound only, predecessor_not_after required, at most 7 days after
+        apply) or revoked.
+      properties:
+        domain: { type: string, enum: [payments, kyc, casino] }
+        provider_id: { type: string, pattern: "^[a-z0-9][a-z0-9-]{0,62}$" }
+        purpose: { type: string, enum: [webhook_verify, outbound_api] }
+        key_id: { type: string, pattern: "^[A-Za-z0-9._-]{1,64}$" }
+        secret_ref: { type: string, maxLength: 512 }
+        confirmation: { type: string, pattern: "^sha256:[0-9a-f]{64}$" }
+        vendor_account_id: { type: string, maxLength: 128, nullable: true }
+        not_before: { type: string, format: date-time }
+        not_after: { type: string, format: date-time, nullable: true }
+        predecessor_handle_id: { type: string, format: uuid, nullable: true }
+        predecessor_disposition: { type: string, enum: [none, verify_only, revoked] }
+        predecessor_not_after: { type: string, format: date-time, nullable: true }
+        reason_code: { type: string, enum: [initial_registration, scheduled_rotation, compromise_replacement, vendor_migration] }
+      required: [domain, provider_id, purpose, key_id, secret_ref, confirmation, not_before, predecessor_disposition, reason_code]
+    ProviderCredentialApproval:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        approver_principal_id: { type: string, format: uuid }
+        decision: { type: string, enum: [approve, reject] }
+        content_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        reason_code: { type: string, nullable: true }
+        decided_at: { type: string, format: date-time }
+      required: [id, approver_principal_id, decision, content_hash, decided_at]
+    ProviderCredentialChangeRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        domain: { type: string, enum: [payments, kyc, casino] }
+        provider_id: { type: string }
+        purpose: { type: string, enum: [webhook_verify, outbound_api] }
+        key_id: { type: string }
+        secret_ref: { type: string }
+        fingerprint: { type: string }
+        vendor_account_id: { type: string, nullable: true }
+        not_before: { type: string, format: date-time }
+        not_after: { type: string, format: date-time, nullable: true }
+        predecessor_handle_id: { type: string, format: uuid, nullable: true }
+        predecessor_disposition: { type: string, enum: [none, verify_only, revoked] }
+        predecessor_not_after: { type: string, format: date-time, nullable: true }
+        content_hash:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: Computed by the database only; an approver echoes it back.
+        reason_code: { type: string }
+        requested_by_principal_id: { type: string, format: uuid }
+        requested_at: { type: string, format: date-time }
+        state: { type: string, enum: [pending, applied] }
+        applied_at: { type: string, format: date-time, nullable: true }
+        applied_by_principal_id: { type: string, format: uuid, nullable: true }
+        applied_handle_id: { type: string, format: uuid, nullable: true }
+        approvals:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProviderCredentialApproval"
+      required: [id, domain, provider_id, purpose, key_id, secret_ref, fingerprint, not_before, predecessor_disposition, content_hash, reason_code, requested_by_principal_id, requested_at, state, approvals]
+    ProviderCredentialDecisionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        decision: { type: string, enum: [approve, reject] }
+        content_hash: { type: string, pattern: "^[0-9a-f]{64}$" }
+        reason_code: { type: string, pattern: "^[a-z0-9_]{1,64}$", description: Required for reject }
+      required: [decision, content_hash]
+    ProviderCredentialTransitionRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        action: { type: string, enum: [verify_only, shorten, revoke] }
+        not_after:
+          type: string
+          format: date-time
+          description: Required for verify_only and shorten; refused for revoke.
+        reason_code:
+          type: string
+          description: >
+            verify_only: rotation. shorten: overlap_shortened,
+            suspected_compromise, vendor_instruction. revoke:
+            rotation_complete, suspected_compromise, confirmed_compromise,
+            vendor_offboarded, misregistration, tenant_request.
+      required: [action, reason_code]
     Error:
       type: object
       description: Platform-wide error envelope (internal/apierror.Error).
@@ -5531,12 +5937,25 @@ components:
             - service_unavailable
             - tenant_mismatch
             - rate_limited
+            - invalid_request
+            - credential_registration_rejected
+            - approval_rejected
+            - credential_activation_rejected
+            - credential_transition_rejected
         message:
           type: string
         request_id:
           type: string
       required: [code, message]
   responses:
+    ProviderCredentialInvalidRequest:
+      description: >
+        400 invalid_request - syntactic errors only (malformed JSON, unknown
+        field, missing field, value outside an enum, key_id charset).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
     ValidationError:
       description: Request failed validation
       content:
