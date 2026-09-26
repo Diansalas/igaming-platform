@@ -31,8 +31,19 @@ func (p *Pool) WithTenant(ctx context.Context, tenantID uuid.UUID, fn TxFunc) er
 	if tenantID == uuid.Nil {
 		return fmt.Errorf("db: WithTenant called with nil tenant id")
 	}
+	return p.withTenantTx(ctx, tenantID, pgx.TxOptions{}, fn)
+}
 
-	tx, err := p.pool.Begin(ctx)
+// withTenantTx is the single place that opens a tenant-scoped transaction
+// and sets "app.tenant_id" on it. WithTenant and WithTenantSnapshot
+// (tenant_snapshot.go) are both thin wrappers around this with different
+// pgx.TxOptions, so any future change to how tenant session state is
+// established (another GUC, a statement_timeout, a role switch) is made
+// exactly once and applies identically to both. Callers must validate
+// tenantID themselves so the error message names the public function the
+// caller actually invoked.
+func (p *Pool) withTenantTx(ctx context.Context, tenantID uuid.UUID, txOpts pgx.TxOptions, fn TxFunc) error {
+	tx, err := p.pool.BeginTx(ctx, txOpts)
 	if err != nil {
 		return fmt.Errorf("db: begin tx: %w", err)
 	}

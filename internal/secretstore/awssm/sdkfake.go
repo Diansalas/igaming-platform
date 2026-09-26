@@ -24,6 +24,20 @@ import (
 // Its only permitted callers are _test.go files;
 // TestNewWithSDKFake_OnlyFromTests enforces that with an AST check. It
 // serves no secret, so even a misuse would fail closed.
+//
+// CODE-HYGIENE-10.3-1 item 5 (N-A): this stays in a regular (non-_test.go)
+// file, not behind a build tag or an export_test.go seam, on purpose.
+// cmd/platform-api/awssm_wiring_test.go (a different package, with no
+// build tag of its own - it runs in plain `go test ./...`) is a real
+// caller and needs an ordinary importable symbol: Go does not compile a
+// package's _test.go files into what another package can import, and
+// gating this file behind e.g. "//go:build integration" would force that
+// consuming test behind the same tag too, turning an ordinary fast unit
+// test that exists specifically to avoid needing real AWS infrastructure
+// into something that only runs under -tags=integration. Both moves are
+// net negatives for what is already a fail-closed, AST-guarded fake (see
+// the doc comment above) - see gate 10.3-W2/W3's code re-verification (N-A)
+// for the residual risk accepted here.
 func NewWithSDKFake(_ context.Context, cfg config.Config, region string) (*Store, error) {
 	if _, err := preflight(cfg, region); err != nil {
 		return nil, err

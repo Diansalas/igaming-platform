@@ -26,23 +26,5 @@ func (p *Pool) WithTenantSnapshot(ctx context.Context, tenantID uuid.UUID, fn Tx
 	if tenantID == uuid.Nil {
 		return fmt.Errorf("db: WithTenantSnapshot called with nil tenant id")
 	}
-
-	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
-	if err != nil {
-		return fmt.Errorf("db: begin repeatable-read tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }() // no-op if already committed
-
-	if _, err := tx.Exec(ctx, `SELECT set_config('app.tenant_id', $1, true)`, tenantID.String()); err != nil {
-		return fmt.Errorf("db: set tenant context: %w", err)
-	}
-
-	if err := fn(ctx, tx); err != nil {
-		return err // deferred Rollback cleans up
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("db: commit tx: %w", err)
-	}
-	return nil
+	return p.withTenantTx(ctx, tenantID, pgx.TxOptions{IsoLevel: pgx.RepeatableRead}, fn)
 }

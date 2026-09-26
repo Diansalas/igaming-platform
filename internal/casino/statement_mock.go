@@ -18,6 +18,12 @@ import (
 // dependency-free leaf so neither package imports the other), aliased here
 // for the casino domain's own use - the sportsbook.SettlementStatement*
 // precedent.
+//
+// CODE-HYGIENE-10.3-1 item 3: kept, not dead code - all three are used
+// throughout this file's own signatures below (Statement, MockStatementSource)
+// for brevity, exactly matching the sportsbook.mock.go precedent; no
+// external caller needs them under the casino name, which is why they
+// don't show up outside this package.
 type (
 	StatementLine   = statement.CasinoStatementLine
 	StatementTotal  = statement.CasinoStatementTotal
