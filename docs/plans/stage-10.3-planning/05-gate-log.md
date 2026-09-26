@@ -110,7 +110,20 @@ agent edited the working tree mid-run. That failure was an artefact of concurren
 of the code; the replay was re-run clean. Agents must not edit the tree while a CI replay runs
 (this close-out was docs-only for that reason).
 
-Local CI replay: <pending>
+Local CI replay (at `98a7f08` code; only docs changed after): gofmt, vet, golangci-lint (0 issues), build,
+migrate up + verify, race unit (31 packages), **3× race integration: 36 packages ok, 0 skips each**,
+reversibility on a fresh DB (down 4 / up 4 / verify clean) — ALL LOCAL CI STEPS PASSED. (A first replay's run 3
+failed to build because an agent edited the tree mid-run; that run was discarded and the replay re-run with the
+tree frozen.)
+
+GitHub CI: #332 (`3f9903a`) green. **#331 (`98a7f08`, same code) failed once** in `internal/db`
+`TestCatalogueRLS_DeleteAndTruncateAreRefusedLoudly/casino_games_TRUNCATE` (1.00s) — identified on first
+occurrence by the per-test annotation step added for CI-FLAKE-281. Working hypothesis: cross-package lock
+contention on the shared CI database (`TRUNCATE … CASCADE` needs ACCESS EXCLUSIVE on tables that the new W1c
+casino tests use concurrently → ~1s lock timeout instead of the asserted immutable violation). Not skipped, not
+re-run to green; a test-isolation fix and a repo-wide sweep are in progress and recorded in
+`08-ci-331-lock-contention.md`. Tracked as CI-331-LOCK; the gate is recorded as passed on the code, with this CI
+item open until its fix lands.
 
 **Labels at this gate** (registry, ADR 0092 status):
 - WH-VENDOR-SCHEME-1: `IMPLEMENTED` (MOCK schemes + real-scheme contract). Real vendors
