@@ -2609,7 +2609,13 @@ paths:
         compare-and-set update; an equal-or-backward transition, a replay,
         or anything arriving after a terminal status or after a staff
         decision is a no-op (204, no state change, no audit row). A
-        provider `outcome: error` never changes verification state.
+        provider `outcome: error` never changes verification state, but is
+        NOT always audit-free: delivered against a NON-terminal
+        verification it writes exactly one failure audit row (still 204,
+        still no state change); delivered against an ALREADY-terminal
+        verification (or any other replay/backward case) it is a pure
+        no-op with no audit row at all, keeping replay-after-terminal
+        genuinely inert.
       parameters:
         - name: tenantSlug
           in: path
@@ -2638,11 +2644,16 @@ paths:
       responses:
         "204":
           description: >
-            Callback processed - EITHER a forward status transition was
-            applied, OR the callback was a no-op (an equal/backward-rank
-            replay, a callback after a terminal status, or a provider
-            `outcome: error`). No response body, so no identifier is ever
-            echoed to the external caller.
+            Callback processed. Three cases share this status: (1) a
+            forward status transition was applied; (2) the callback was a
+            true no-op with NO audit row (an equal/backward-rank replay, or
+            anything - including a provider `outcome: error` - arriving
+            after the verification is already terminal or after a staff
+            decision); (3) a provider `outcome: error` delivered against a
+            NON-terminal verification, which does NOT change verification
+            state but DOES write exactly one failure audit row. No response
+            body in any case, so no identifier is ever echoed to the
+            external caller.
         "400":
           description: >
             Reachable ONLY after signature verification succeeds: a
@@ -2707,16 +2718,31 @@ paths:
         the adapter verifies the raw signature BEFORE ever parsing the
         body. 400 is reachable ONLY after verification succeeds: a
         verified body that is still structurally malformed (a required
-        field missing, or an unrecognized event_type/outcome value). 409
+        field missing, an unrecognized event_type/outcome value, or a
+        legacy top-level `signature` field, which instead maps to 401 -
+        see below), OR a verified body that is well-formed but fails a
+        casino domain-logic check: `ErrBetNotFound` (a win/rollback naming
+        a round with no matching prior bet), `ErrLaunchSessionRequired` (a
+        bet callback's session_id does not resolve to a valid, non-revoked,
+        real-money launch session for this provider),
+        `ErrOutcomeNotSucceeded` (a bet/win callback whose outcome is not
+        `succeeded`), `ErrInvalidInput` (any other structurally-invalid
+        field combination), or an event_type that HandleCallback itself
+        accepted as verified but the orchestrator does not recognize
+        (Stage 10.2 final review K10 - also 400, never a 500). 409
         covers a provider_tx_id already posted with a different payload, a
         provider_round_id already bound to a different session, or a
         rollback naming an already-reversed original - intentionally
         collapsed to one generic body that never echoes the round id or
-        any player identity. 503 means either casino webhooks are not
-        enabled on this deployment, or the tenant's own
-        CasinoProviderCapability for this provider is disabled/unconfigured
-        (a deliberate, POST-verification money-path kill switch - only a
-        verified caller ever observes it).
+        any player identity. 503 has two distinct causes: (1) casino
+        webhooks are not enabled on this deployment at all (the casino
+        Orchestrator is nil) - this check runs FIRST, before the shared
+        preamble, before any tenant lookup, and before signature
+        verification, so it is reachable by anyone, verified or not; (2)
+        the tenant's own CasinoProviderCapability for this provider is
+        disabled/unconfigured, a deliberate POST-verification money-path
+        kill switch that only a verified caller ever observes. The
+        response body never distinguishes which of the two applies.
       parameters:
         - name: tenantSlug
           in: path
@@ -2756,11 +2782,16 @@ paths:
                   decline_reason: { type: string }
         "400":
           description: >
-            Reachable ONLY after signature verification succeeds: a
-            verified body that is structurally malformed (unparseable
-            JSON, a missing required field, or an unrecognized event_type/
-            outcome value). Generic body only - never the specific field
-            or value that failed.
+            Reachable ONLY after signature verification succeeds. Two
+            classes of cause, both mapped to this same generic body -
+            never the specific field or value that failed: (1)
+            structurally malformed (unparseable JSON, a missing required
+            field, an unrecognized event_type/outcome value, or an
+            event_type the orchestrator itself does not recognize even
+            though HandleCallback accepted it as verified - Stage 10.2
+            final review K10); (2) a well-formed but domain-invalid
+            callback: `ErrBetNotFound`, `ErrLaunchSessionRequired`,
+            `ErrOutcomeNotSucceeded`, or `ErrInvalidInput`.
           content:
             application/json:
               schema:
@@ -2785,9 +2816,15 @@ paths:
           $ref: "#/components/responses/InternalError"
         "503":
           description: >
-            Casino webhooks are not enabled on this deployment, or the
-            tenant's own provider capability is disabled/unconfigured -
-            reachable ONLY after signature verification succeeds.
+            Two distinct causes share this status. (1) Casino webhooks are
+            not enabled on this deployment at all (the casino Orchestrator
+            is nil) - this is checked FIRST, before the shared preamble
+            even runs, so it PRECEDES signature verification and is
+            reachable by any caller, verified or not. (2) The tenant's own
+            provider capability is disabled/unconfigured - a deliberate,
+            POST-verification money-path kill switch, reachable ONLY after
+            signature verification succeeds. The response body never
+            distinguishes the two.
           content:
             application/json:
               schema:

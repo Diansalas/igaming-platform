@@ -76,8 +76,23 @@ func TestOpenAPI_CasinoWebhook_ContractMatchesHandler(t *testing.T) {
 	if strings.Contains(block400, "1 MiB") {
 		t.Error(`the "400" response must NOT claim an oversized body - that is part of the uniform 401 family, not a distinguishable 400`)
 	}
-	if !strings.Contains(block, `oversized`) {
-		t.Error(`the "401" response must document that an oversized (>1 MiB) body is part of the uniform pre-verification 401 family`)
+	// Stage 10.2 final review (K8/L3): scope the "oversized" check to the
+	// "401" response block SPECIFICALLY, not the whole path entry - the
+	// top-of-path description also happens to mention "oversized" (in
+	// prose explaining the design), so a bare block-wide substring check
+	// would stay green even if the "401" response object's OWN
+	// description dropped the word entirely. This is proven by
+	// construction below: idx409 bounds block401 to end exactly where the
+	// "401" response object ends and the "409" one begins, so text living
+	// only in the shared top-of-path description (before idx401) can never
+	// satisfy this assertion.
+	idx409 := strings.Index(block[idx401:], `"409":`)
+	if idx409 < 0 {
+		t.Fatalf(`expected a %q response block after %q`, `"409":`, responses401Marker)
+	}
+	block401 := block[idx401 : idx401+idx409]
+	if !strings.Contains(block401, `oversized`) {
+		t.Error(`the "401" response block ITSELF must document that an oversized (>1 MiB) body is part of the uniform pre-verification 401 family`)
 	}
 	// The 503 branch is post-verification (the casino capability kill
 	// switch), unlike payments' unconditional 503 - the spec text must say
