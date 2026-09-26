@@ -415,3 +415,18 @@ The human is asked to:
    `devfile` store under four-eyes activation. Production credentials stay out of scope.
 9. **Whether** vendor sandbox callbacks may reach us before a staging deployment is authorized
    (default: no; recorded fixtures only).
+
+---
+
+## Product-owner review
+
+Verdict: **P-W1 should be trimmed to the first chosen category; the rest of the plan is right-sized.** No security/compliance/ledger requirement is deferred here — good.
+
+1. **Overbuild flags in §14.** `PROV-KILLSWITCH-RUNBOOK-1` ("one operator runbook per category") builds for all four future categories before a single vendor exists; that is speculative, not vendor-independent prep. **Recommend:** scope the first runbook (and the first capability-manifest/metric instruments under `PROV-CAP-MATRIX-1`/`PROV-OBS-1`) to the category chosen in §5 step 2 only; write the others when each category gets its first real adapter — the same pattern the doc already applies correctly to the callback-fixture hook (WH-VENDOR-SCHEME-1 row). Not built now; recorded as a future item, not dropped.
+2. **`PROV-CONTRACT-HARNESS-1` and `PAY-RECON-STMT-1` are justified**, not gold-plating — reconciliation-per-integration and provider-agnostic contract testing are `CLAUDE.md` non-negotiables. Keep as-is.
+3. **Payments-first reasoning is sound**: matches BLUEPRINT §9 P1 and §1, correctly labeled `RECOMMENDATION` rather than a Blueprint mandate, and the KYC-first fallback is honestly scoped (states what it does/doesn't prove). No objection.
+4. **§14's ARCH-OK/NEW-ADR/HUMAN tagging is right-sized** — it separates genuinely vendor-independent, launch-blocking debt (PROV-OUTBOUND-CRED-1, F-POOL-1, PROVIDER-REF-BOUND-1) from speculative framework-building instead of building all of it under one banner. Keep.
+5. **Minor label-clarity gap (not a mislabel):** §9's closing sentence "the platform never emulates a missing capability silently" sits right after a `RECOMMENDATION`-tagged rule with no tag of its own — a reader skimming could mistake it for Blueprint text. **Recommend:** tag it explicitly as `RECOMMENDATION` for consistency with the rest of §9. Cosmetic; not a Blueprint-vs-recommendation violation found elsewhere in the document.
+6. **§19 info list is close to minimal.** Item 6 (gathering per-candidate API docs/sandbox terms) is P-W0 execution work, not a decision only the human can make. **Recommend:** move it to P-W0's exit criteria and keep §19 to pure decisions (category, rail, markets, currencies, shortlist, licensing shape, sandbox-credential permission, callback-reachability policy). Non-blocking wording cleanup.
+
+No security, compliance, ledger, or audit requirement is weakened by this review; all deferred items stay recorded in §14/§4, not dropped.
