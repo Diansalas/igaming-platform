@@ -19,6 +19,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/risk"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // Orchestrator is the casino integration's routing/dispatch layer (ADR
@@ -34,12 +35,24 @@ type Orchestrator struct {
 	// actually is, mirroring internal/payments.Orchestrator's identical
 	// registry/authority split (docs/decisions/0022 §2.1).
 	providers map[string]CasinoProvider
+	// webhookCredentialResolver is the single injected inbound-webhook
+	// credential resolver (Stage 10.2, CAS-WH-TENANT-1, ADR 0091, design
+	// §C1) - the only component that ever sees inbound-callback secret
+	// material. A nil resolver fails every callback closed
+	// (ReasonNoResolver), never falling back to unauthenticated
+	// verification - this is what forces explicit wiring (cmd/platform-
+	// api/wiring.go) rather than an accidental always-on mock.
+	webhookCredentialResolver webhookauth.Resolver
 }
 
 // NewOrchestrator constructs an Orchestrator over the given adapter
-// registry (provider_id -> CasinoProvider implementation).
-func NewOrchestrator(providers map[string]CasinoProvider) *Orchestrator {
-	return &Orchestrator{providers: providers}
+// registry (provider_id -> CasinoProvider implementation) and the single
+// inbound-webhook credential resolver every callback verifies against. A
+// nil resolver is valid and deliberate (fails every callback closed) -
+// mirrors internal/payments.NewOrchestrator's identical parameter shape
+// (Stage 10.2, ruling J14/C1).
+func NewOrchestrator(providers map[string]CasinoProvider, resolver webhookauth.Resolver) *Orchestrator {
+	return &Orchestrator{providers: providers, webhookCredentialResolver: resolver}
 }
 
 // Provider returns the registered adapter for providerID - used by
@@ -549,28 +562,97 @@ type ReceiveCallbackResult struct {
 	Tombstoned bool
 }
 
-// ReceiveCallback dispatches a verified provider callback: parses it via
+// ReceiveCallback dispatches a verified provider callback: verifies it via
 // the named adapter's HandleCallback, then posts Flow 5 (bet), Flow 6
 // (win), or Flow 7 (rollback) via ledger.Post.
 //
-// tenantID is resolved by the caller (an HTTP handler, from a per-tenant
-// webhook path) BEFORE opening tx and BEFORE calling this function -
-// never from rawPayload, mirroring internal/payments.Orchestrator.
-// ReceiveCallback's identical, already-reviewed signature choice and
-// rationale (payment-orchestration.md §3).
-func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, rawPayload []byte) (ReceiveCallbackResult, error) {
-	provider, ok := o.providers[providerID]
+// tenantID/providerID are resolved by the caller (an HTTP handler, from a
+// per-tenant webhook path) BEFORE opening tx and BEFORE calling this
+// function - never from in.Body. This function OVERWRITES
+// in.TenantID/in.ProviderID from its own parameters first (architect
+// ruling J5/R3: one tenant id flows from route -> RLS -> resolver ->
+// signing input -> credential check -> writes), mirroring
+// internal/payments.Orchestrator.ReceiveCallback's identical, already-
+// reviewed signature choice and rationale (payment-orchestration.md §3).
+//
+// Verification order (Stage 10.2, CAS-WH-TENANT-1, ADR 0091, design §C3),
+// strictly BEFORE any ledger/session/round read, lock, write, tombstone,
+// or audit row (invariant I1 - no tenant-scoped statement runs here before
+// (c) succeeds):
+//
+//	(a) the adapter must be registered;
+//	(b) resolve the single candidate credential for
+//	    (tenantID, providerID, keyID), then re-check cred.TenantID/
+//	    cred.ProviderID equal what was just resolved for - a mismatch
+//	    fails closed, never falling back to any other credential;
+//	(c) HMAC/signature verification, inside the adapter's own
+//	    HandleCallback, over the raw bytes BEFORE any parsing (point 7),
+//	    followed by parsing.
+//
+// Only AFTER (c) succeeds does the existing, UNCHANGED post-verification
+// capability check ((d) below) run - the casino capability stays a
+// deliberate money-path kill switch (design §C3), unlike payments' I4
+// pre-verification ProviderAcceptsWebhook read.
+//
+// Every failure before (c) succeeds returns a *webhookauth.AuthError
+// wrapping webhookauth.ErrAuthFailed with a closed, allow-listed reason -
+// the caller (an HTTP handler) maps every one of them to the SAME uniform
+// 401 response, so an unauthenticated caller can never distinguish
+// "unknown provider" from "bad signature" by status code or body.
+func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, in webhookauth.Inbound) (ReceiveCallbackResult, error) {
+	in.TenantID = tenantID
+	in.ProviderID = providerID
+
+	// Header format validation is redundant with the HTTP handler's own
+	// pre-tenant-lookup check, but this method must be self-sufficient:
+	// casino-package tests call it directly, bypassing the HTTP layer
+	// entirely.
+	keyID, _, reason, ok := ParseWebhookAuthHeaders(in.Header)
 	if !ok {
-		return ReceiveCallbackResult{}, fmt.Errorf("%w: %s", ErrUnknownProvider, providerID)
+		return ReceiveCallbackResult{}, &webhookauth.AuthError{Reason: reason}
 	}
 
-	event, err := provider.HandleCallback(ctx, rawPayload)
+	// (a) the adapter must be registered.
+	provider, ok := o.providers[providerID]
+	if !ok {
+		return ReceiveCallbackResult{}, &webhookauth.AuthError{Reason: webhookauth.ReasonProviderUnregistered, KeyID: keyID}
+	}
+
+	// (b) resolve the single candidate credential and re-check its
+	// binding. A nil resolver fails closed - never a fallback to
+	// unauthenticated verification.
+	if o.webhookCredentialResolver == nil {
+		return ReceiveCallbackResult{}, &webhookauth.AuthError{Reason: webhookauth.ReasonNoResolver, KeyID: keyID}
+	}
+	cred, err := o.webhookCredentialResolver.Resolve(ctx, tenantID, providerID, keyID)
 	if err != nil {
-		// Never wrap rawPayload's bytes into this error.
+		return ReceiveCallbackResult{}, &webhookauth.AuthError{Reason: webhookauth.ReasonCredentialUnavailable, KeyID: keyID}
+	}
+	if cred.TenantID != tenantID || cred.ProviderID != providerID {
+		// Defense in depth only: no conforming resolver should ever return
+		// a credential bound to a different tenant/provider than it was
+		// asked to resolve for - fail closed if one somehow does.
+		return ReceiveCallbackResult{}, &webhookauth.AuthError{Reason: webhookauth.ReasonCredentialUnavailable, KeyID: keyID}
+	}
+
+	// (c) HMAC verification then parsing, both inside the adapter's own
+	// HandleCallback. Every failure BEFORE verification succeeds is
+	// ErrCallbackSignatureInvalid (== webhookauth.ErrSignatureInvalid) -
+	// never any other error type - so this switch is exhaustive for
+	// pre-verification failures. ErrCallbackMalformedBody (checked last,
+	// falling into the generic branch) is a POST-verification, distinct
+	// error class the HTTP layer maps to a 4xx, not the uniform 401.
+	event, err := provider.HandleCallback(ctx, in, cred)
+	if errors.Is(err, ErrCallbackSignatureInvalid) {
+		return ReceiveCallbackResult{}, &webhookauth.AuthError{Reason: webhookauth.ReasonSignatureInvalid, KeyID: keyID, CredentialFingerprint: cred.Fingerprint}
+	}
+	if err != nil {
+		// Covers ErrCallbackMalformedBody and any other post-verification
+		// structural failure. Never wrap in.Body's bytes into THIS error.
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: handle callback: %w", err)
 	}
 
-	// Enforce the tenant's own CasinoProviderCapability as an actual kill
+	// (d) Enforce the tenant's own CasinoProviderCapability as an actual kill
 	// switch on the money path, not just at launch time (specialist review
 	// finding: a tenant disabling this provider's capability, or never
 	// configuring one at all, previously had NO effect here - the process-

@@ -28,6 +28,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // Outcome is the canonical result state shared by LaunchResult,
@@ -170,8 +172,21 @@ var (
 	ErrRiskOutcomeUnrecognized = errors.New("casino: risk evaluation returned an unrecognized outcome")
 	// ErrCallbackSignatureInvalid is returned by a CasinoProvider's
 	// HandleCallback when the payload's authentication does not verify.
-	// Never wrapped with the raw payload or any field from it.
-	ErrCallbackSignatureInvalid = errors.New("casino: callback signature verification failed")
+	// Never wrapped with the raw payload or any field from it. Stage 10.2
+	// (CAS-WH-TENANT-1, ADR 0091, design §C1): the same sentinel value as
+	// internal/webhookauth and internal/payments, so errors.Is behaves
+	// identically across every webhook domain.
+	ErrCallbackSignatureInvalid = webhookauth.ErrSignatureInvalid
+	// ErrCallbackMalformedBody is returned by a CasinoProvider's
+	// HandleCallback for a VERIFIED callback (the sender proved knowledge
+	// of the shared credential) whose body is structurally malformed -
+	// missing a required field, an unrecognized event_type/outcome, or an
+	// unparseable player_account_id/session_id UUID. A DIFFERENT sentinel
+	// class from ErrCallbackSignatureInvalid/webhookauth.ErrAuthFailed:
+	// only reachable once verification has already succeeded, so the HTTP
+	// layer maps it to 400, never the uniform pre-verification 401
+	// (design §C2 point 2; mirrors payments.ErrCallbackMalformedBody).
+	ErrCallbackMalformedBody = errors.New("casino: malformed callback body")
 
 	// ErrLaunchSessionNotFound is returned when a launch token resolves to
 	// no casino_launch_sessions row at all.
@@ -634,13 +649,19 @@ type CasinoProvider interface {
 	Bet(ctx context.Context, req BetRequest) (BetResult, error)
 	Win(ctx context.Context, req WinRequest) (WinResult, error)
 	Rollback(ctx context.Context, req RollbackRequest) (RollbackResult, error)
-	// HandleCallback verifies an inbound provider callback's signature
-	// and parses it into a canonical CallbackEvent - the orchestrator's
-	// actual entry point (ADR 0025 §1), regardless of whether a given
-	// provider's own transport shape is push (webhook) or the
-	// Bet/Win/Rollback methods above being called synchronously by the
-	// provider's own game server.
-	HandleCallback(ctx context.Context, rawPayload []byte) (CallbackEvent, error)
+	// HandleCallback verifies an inbound provider callback's signature -
+	// over the raw bytes, strictly BEFORE any parsing (ADR 0022 §3 point
+	// 7 / Stage 10.2 CAS-WH-TENANT-1, design §C1) - and only then parses
+	// it into a canonical CallbackEvent. The orchestrator's actual entry
+	// point (ADR 0025 §1), regardless of whether a given provider's own
+	// transport shape is push (webhook) or the Bet/Win/Rollback methods
+	// above being called synchronously by the provider's own game server.
+	// cred is the single candidate credential the orchestrator already
+	// resolved for (in.TenantID, in.ProviderID, key id) - never a
+	// cross-tenant trial. A verification failure returns exactly
+	// ErrCallbackSignatureInvalid; a post-verification structural failure
+	// returns ErrCallbackMalformedBody.
+	HandleCallback(ctx context.Context, in webhookauth.Inbound, cred webhookauth.Credential) (CallbackEvent, error)
 	// Capabilities returns this adapter's own declared, static layer only
 	// - never tenant/brand/priority/status (ADR 0025 §4).
 	Capabilities() AdapterCapability
