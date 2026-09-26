@@ -36,14 +36,38 @@
 //     credential verified, never a payload-asserted value;
 //  7. verification runs over the raw bytes before any parsing.
 //
+// # Per-adapter verification schemes (Stage 10.3 W1a, WH-VENDOR-SCHEME-1)
+//
+// A real adapter never uses Scheme. It supplies its own VerificationScheme
+// (scheme.go: Name/Extract/Verify/Properties) implementing its vendor's
+// DOCUMENTED algorithm, and the platform - not the adapter - runs it:
+// the shared HTTP preamble selects the scheme by provider id
+// (CheckInboundPreamble), and every domain orchestrator's ReceiveCallback
+// calls ExtractInbound, ResolveCredentials and VerifyInbound itself before
+// the adapter's HandleCallback parses anything, so an adapter cannot skip
+// verification. Properties() is validated when the adapter registers
+// (NewSchemeSet; a bad declaration fails startup); a real scheme must sign
+// a timestamp with MaxSkew <= MaxSkewCap, and must be listed in the
+// conformance manifest, which the registry-driven test in
+// internal/webhookauth/webhookauthtest only allows once the scheme passes
+// RunSchemeConformance (SC1-SC13) with a vendor known-answer vector.
+//
+// The MOCK Scheme is exposed through the same interface
+// (Scheme.VerificationScheme, mock_scheme.go) as a Synthetic scheme with
+// its bytes unchanged. It is NOT the real-provider protocol: no real
+// vendor scheme exists in this repository, none is invented here, and a
+// real provider is declared supported only once its actual documentation/
+// contract is implemented and passes the conformance suite (proposal §22).
+//
 // # Domain separation (ADR 0022 §3 point 8)
 //
 // Each domain (payments, KYC, casino) has its own Prefix, its own header
 // names and its own mock key label (domains.go), so a signature valid in
 // one domain never verifies in another, even under an equal key.
 //
-// This package deliberately has no orchestrator, provider registry, or
-// vendor plug-in model, and imports no domain package.
+// This package deliberately has no orchestrator and no vendor
+// implementation, and imports no domain package. Its only registry is the
+// per-domain SchemeSet each orchestrator builds from its own adapters.
 package webhookauth
 
 import (
@@ -58,6 +82,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -137,6 +162,14 @@ type Credential struct {
 	KeyID       string
 	Secret      []byte
 	Fingerprint string
+	// BoundAccountID is the vendor merchant account id this credential is
+	// bound to, for BindingPerMerchantKeySignedAccount schemes (ADR 0022
+	// §3 point 3; conformance SC8). "" for every other binding. Not secret.
+	BoundAccountID string
+	// NotAfter bounds a verify_only (Previous) credential's rotation-overlap
+	// window (security C4; conformance SC9). Zero for an active credential;
+	// a Previous credential with a zero NotAfter is never used.
+	NotAfter time.Time
 }
 
 // String implements fmt.Stringer so %v/%+v/Println of a Credential
@@ -318,8 +351,8 @@ type PreambleResult struct {
 }
 
 // CheckPreamble runs the shared, tenant-independent verify-before-parse
-// preamble every webhook route runs BEFORE any tenant lookup or DB work,
-// in this fixed order:
+// preamble for this MOCK scheme, BEFORE any tenant lookup or DB work, in
+// this fixed order:
 //
 //  1. provider_id charset (ReasonProviderInvalid);
 //  2. body read bounded to maxBody bytes - an unreadable or oversized body
@@ -327,20 +360,11 @@ type PreambleResult struct {
 //     every other pre-verification failure;
 //  3. authentication header format (ParseHeaders's reasons).
 //
-// It never parses the body.
+// It never parses the body. Stage 10.3 W1a: a thin wrapper over
+// CheckInboundPreamble with this scheme as the only registered one - the
+// HTTP layer itself now calls CheckInboundPreamble with a per-provider
+// scheme lookup.
 func (s Scheme) CheckPreamble(providerID string, h http.Header, body io.Reader, maxBody int) (PreambleResult, bool) {
-	if !ValidProviderID(providerID) {
-		return PreambleResult{Reason: ReasonProviderInvalid}, false
-	}
-	raw, err := io.ReadAll(io.LimitReader(body, int64(maxBody)+1))
-	if err != nil {
-		return PreambleResult{ProviderIDValid: true, Reason: ReasonBodyTooLarge}, false
-	}
-	if len(raw) > maxBody {
-		return PreambleResult{ProviderIDValid: true, BodyLen: len(raw), Reason: ReasonBodyTooLarge}, false
-	}
-	if _, _, reason, ok := s.ParseHeaders(h); !ok {
-		return PreambleResult{ProviderIDValid: true, BodyLen: len(raw), Reason: reason}, false
-	}
-	return PreambleResult{Body: raw, BodyLen: len(raw), ProviderIDValid: true}, true
+	v := s.VerificationScheme()
+	return CheckInboundPreamble(providerID, h, body, maxBody, func(string) (VerificationScheme, bool) { return v, true })
 }
