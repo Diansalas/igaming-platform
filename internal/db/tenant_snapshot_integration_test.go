@@ -10,16 +10,19 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// TestWithTenantAndWithTenantSnapshot_SetIdenticalTenantSessionState proves
-// CODE-HYGIENE-10.3-1 item 1: since WithTenant and WithTenantSnapshot are
-// both thin wrappers around the shared withTenantTx helper
-// (tenant_rls.go), they must set byte-identical tenant session state -
-// the same "app.tenant_id" GUC value, visible to the same RLS policies -
-// and differ ONLY in transaction isolation level. If a future change to
-// tenant session setup (another GUC, a statement_timeout, a role switch)
-// were made to one path but not the other, this test would catch the
-// divergence because it drives both paths through the same assertions
-// against the same tenant and table.
+// TestWithTenantAndWithTenantSnapshot_SetIdenticalTenantSessionState is
+// CODE-HYGIENE-10.3-1 item 1's own regression test: WithTenant and
+// WithTenantSnapshot are both thin wrappers around the shared withTenantTx
+// helper (tenant_rls.go), and this test proves what that sharing actually
+// gives them today - the same "app.tenant_id" GUC value, the same RLS
+// enforcement (both are blocked from seeing another tenant's row, both
+// read their own row identically), and a difference in transaction
+// isolation level only. What PREVENTS a future divergence is the shared
+// helper itself, not this test (code review F-5): this test only reads
+// app.tenant_id, RLS visibility on tenant_jurisdiction_configs, and
+// transaction_isolation, so a hypothetical future change that adds a GUC
+// (a statement_timeout, a role switch) to one path only, without touching
+// any of those three things, would not be caught here.
 func TestWithTenantAndWithTenantSnapshot_SetIdenticalTenantSessionState(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()
