@@ -1,0 +1,165 @@
+W2a (Stage 10.3, real provider-credential lookup) mutation-kill record.
+Worktree branch: worktree-agent-ac658903858b3c0e1 (based on claude/focused-wright-jw88w9 @ 6e3d74c).
+Code under test: HEAD 35eb46a plus the test-only follow-up that pins the security review §5
+constants (TestStoreConstants_PinnedToSecurityReview) and replaces constant-relative bounds with
+the review's literal 4 - the re-run of M19 (anchor corrected: the first form did not compile) and
+M22 (first run NOT KILLED: the pool-pinning tests compared against the mutated constant itself)
+is recorded below as the final result.
+
+Method: scratchpad harness mutate.py. Each mutation edits ONE file with a single anchored string
+replacement (anchor must match exactly once), runs ONLY the named killing test(s) with
+-tags=integration against a PRIVATE database (igaming_w2a_local, never the shared CI DB) as the
+NOBYPASSRLS runtime role (TEST_RUNTIME_DATABASE_URL = igaming_runtime) and, for scratch-DB tests,
+fresh databases created by internal/testsupport/scratchdb. SQL mutations edit
+migrations/0096_provider_credential_handles.up.sql and rebuild the private DB from the mutated
+file before the test (scratch DBs migrate from the same mutated file); the original bytes are
+restored and the DB rebuilt again afterwards. "KILLED" = the named test failed on its own
+assertion (FAIL lines quoted), not a build error.
+
+Required by 07-w2a-design-review-security.md §1.6 (qa): M1 expiry predicate, M2 Person check,
+M3 reject check, M4 tenant_consume_apply widened to FOR ALL, M5 player-unset clause, M6 B4 EXISTS,
+M7 decided_at forcing. Required by 04-review-qa.md W2a: M8 tenant predicate in the lookup,
+M9 fingerprint check, M10 not_after predicate, M11 WithoutTenant-readable policy.
+Additional: M12-M24.
+
+Result: 24/24 killed, 0 survived.
+
+---
+M1 KILLED: drop the 24h expiry predicate (consume step 5)
+    file: migrations/0096_provider_credential_handles.up.sql
+    tests: TestPCConsume_ExpiryBoundary
+    --- FAIL: TestPCConsume_ExpiryBoundary (2.75s)
+
+M2 KILLED: drop the distinct-Person check (approvals trigger)
+    file: migrations/0096_provider_credential_handles.up.sql
+    tests: TestPCApproval_SamePersonSecondAccountRefused
+    --- FAIL: TestPCApproval_SamePersonSecondAccountRefused (0.06s)
+
+M3 KILLED: drop the reject check (consume step 6)
+    file: migrations/0096_provider_credential_handles.up.sql
+    tests: TestPCConsume_AnyRejectBlocks
+    --- FAIL: TestPCConsume_AnyRejectBlocks (0.07s)
+
+M4 KILLED: widen tenant_consume_apply to FOR ALL
+    file: migrations/0096_provider_credential_handles.up.sql
+    tests: TestPCGovernance_BridgePoliciesSelectUpdateOnly|TestPCGovernance_TenantScopeCannotInsertRequestOrApproval
+    --- FAIL: TestPCGovernance_BridgePoliciesSelectUpdateOnly (0.06s)
+
+M5 KILLED: drop the player-unset clause from the request bridge read policy
+    file: migrations/0096_provider_credential_handles.up.sql
+    tests: TestPCGovernance_PlayerScopeSeesNothing|TestPCGovernance_BridgePoliciesSelectUpdateOnly
+    --- FAIL: TestPCGovernance_BridgePoliciesSelectUpdateOnly (0.06s)
+    --- FAIL: TestPCGovernance_PlayerScopeSeesNothing (0.07s)
+
+M6 KILLED: drop B4's EXISTS (a request marked applied without a handle pointing back)
+    file: migrations/0096_provider_credential_handles.up.sql
+    tests: TestPCGovernance_PlatformScopeCannotMarkApplied|TestPCGovernance_TenantScopeCannotMarkAppliedWithoutHandle
+    --- FAIL: TestPCGovernance_PlatformScopeCannotMarkApplied (0.05s)
+    --- FAIL: TestPCGovernance_TenantScopeCannotMarkAppliedWithoutHandle (0.05s)
+
+M7 KILLED: remove the decided_at forcing
+    file: migrations/0096_provider_credential_handles.up.sql
+    tests: TestPCApproval_DecidedAtClientValueIgnored
+    --- FAIL: TestPCApproval_DecidedAtClientValueIgnored (0.04s)
+
+M8 KILLED: remove the explicit tenant predicate from the handle read (QA)
+    file: internal/providercred/resolver.go
+    tests: TestResolver_HandleReadIsTheOnlyStatement
+    --- FAIL: TestResolver_HandleReadIsTheOnlyStatement (0.06s)
+
+M9 KILLED: remove the fingerprint check (QA)
+    file: internal/secretstore/fetcher.go
+    tests: TestResolver_FingerprintMismatchFailsClosed|TestStoreCache_FingerprintComparedOnHit
+    --- FAIL: TestResolver_FingerprintMismatchFailsClosed (0.07s)
+    --- FAIL: TestStoreCache_FingerprintComparedOnHit (0.00s)
+
+M10 KILLED: remove the not_after predicate from the handle read (QA)
+    file: internal/providercred/resolver.go
+    tests: TestResolver_Expiry
+    --- FAIL: TestResolver_Expiry (3.36s)
+
+M11 KILLED: give the handle table a WithoutTenant-readable policy (QA)
+    file: migrations/0096_provider_credential_handles.up.sql
+    tests: TestPCHandles_RLS_TenantIsolation|TestPCHandles_NoPlatformOrDualScopePolicy
+    --- FAIL: TestPCHandles_RLS_TenantIsolation (0.09s)
+    --- FAIL: TestPCHandles_NoPlatformOrDualScopePolicy (0.03s)
+
+M12 KILLED: allow a transition back to active (verify_only -> active)
+    file: migrations/0096_provider_credential_handles.up.sql
+    tests: TestPCHandleTransition_Rules
+    --- FAIL: TestPCHandleTransition_Rules (0.19s)
+    --- FAIL: TestPCHandleTransition_Rules/backward_verify_only_->_active_refused (0.03s)
+
+M13 KILLED: remove the 7-day verify_only cap
+    file: migrations/0096_provider_credential_handles.up.sql
+    tests: TestPCHandleTransition_Rules
+    --- FAIL: TestPCHandleTransition_Rules (0.21s)
+    --- FAIL: TestPCHandleTransition_Rules/7-day_cap:_7d+1s_refused (0.01s)
+
+M14 KILLED: allow not_after to be extended
+    file: migrations/0096_provider_credential_handles.up.sql
+    tests: TestPCHandleTransition_Rules
+    --- FAIL: TestPCHandleTransition_Rules (0.23s)
+    --- FAIL: TestPCHandleTransition_Rules/not_after_extend_refused (0.01s)
+
+M15 KILLED: drop the namespace CHECK on the handle table
+    file: migrations/0096_provider_credential_handles.up.sql
+    tests: TestPCRef_NamespaceCheck
+    --- FAIL: TestPCRef_NamespaceCheck (0.08s)
+    --- FAIL: TestPCRef_NamespaceCheck/handles/foreign_tenant (0.00s)
+    --- FAIL: TestPCRef_NamespaceCheck/handles/namespace_in_query (0.00s)
+    --- FAIL: TestPCRef_NamespaceCheck/handles/namespace_in_fragment (0.00s)
+    --- FAIL: TestPCRef_NamespaceCheck/handles/foreign_domain (0.00s)
+    --- FAIL: TestPCRef_NamespaceCheck/handles/two_namespace_markers (0.00s)
+
+M16 KILLED: drop the provider_credential_handles block from deploy/init-app-role.sql
+    file: deploy/init-app-role.sql
+    tests: TestInitAppRole_RerunKeepsProviderCredentialGrants
+    --- FAIL: TestInitAppRole_RerunKeepsProviderCredentialGrants (1.46s)
+
+M17 KILLED: stop checking the KeyImplicit predecessor binding in ResolveCredentials
+    file: internal/webhookauth/scheme.go
+    tests: TestResolveCredentials_KeyImplicitPairRules
+    --- FAIL: TestResolveCredentials_KeyImplicitPairRules (0.00s)
+    --- FAIL: TestResolveCredentials_KeyImplicitPairRules/predecessor_other_tenant (0.00s)
+    --- FAIL: TestResolveCredentials_KeyImplicitPairRules/predecessor_other_provider (0.00s)
+    --- FAIL: TestResolveCredentials_KeyImplicitPairRules/predecessor_same_key_id (0.00s)
+    --- FAIL: TestResolveCredentials_KeyImplicitPairRules/predecessor_zero_not_after (0.00s)
+
+M18 KILLED: skip canActOnTenant in the admin API
+    file: internal/httpserver/provider_credential_handlers.go
+    tests: TestProviderCredentialAPI_TenantAdminCannotTargetOtherTenant
+    --- FAIL: TestProviderCredentialAPI_TenantAdminCannotTargetOtherTenant (0.07s)
+
+M19 KILLED: skip the apply-time principal recheck
+    file: internal/providercred/service.go
+    tests: TestProviderCredentialAPI_ApplyRechecksPrincipals
+    --- FAIL: TestProviderCredentialAPI_ApplyRechecksPrincipals (0.07s)
+
+M20 KILLED: serve a stale entry after an integrity mismatch is detected on the cache hit
+    file: internal/secretstore/fetcher.go
+    tests: TestStoreCache_FingerprintComparedOnHit
+    --- FAIL: TestStoreCache_FingerprintComparedOnHit (0.00s)
+
+M21 KILLED: let the breaker admit every caller while half-open (no single probe)
+    file: internal/secretstore/fetcher.go
+    tests: TestStoreBreaker_HalfOpenSingleProbe
+    --- FAIL: TestStoreBreaker_HalfOpenSingleProbe (2.00s)
+
+M22 KILLED: raise the store-call concurrency bound
+    file: internal/secretstore/fetcher.go
+    tests: TestStoreOutage_DoesNotPinPool|TestStoreFetch_ConcurrencyBoundedAtFour|TestStoreConstants_PinnedToSecurityReview
+    --- FAIL: TestStoreOutage_DoesNotPinPool (2.16s)
+    --- FAIL: TestStoreFetch_ConcurrencyBoundedAtFour (0.50s)
+    --- FAIL: TestStoreConstants_PinnedToSecurityReview (0.00s)
+
+M23 KILLED: revocation read skipped when the cache is warm (resolver serves from cache)
+    file: internal/providercred/resolver.go
+    tests: TestResolver_RevocationImmediate|TestResolver_RevokeImmediateWhileBreakerOpen
+    --- FAIL: TestResolver_RevocationImmediate (0.06s)
+    --- FAIL: TestResolver_RevokeImmediateWhileBreakerOpen (0.08s)
+
+M24 KILLED: O4: fall back to the lone registered adapter even when it is not synthetic / configured
+    file: internal/kyc/provider_selection.go
+    tests: TestO4_KYCProviderSelectionFromTenantConfiguration
+    --- FAIL: TestO4_KYCProviderSelectionFromTenantConfiguration (0.12s)

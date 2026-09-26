@@ -421,12 +421,12 @@ func TestStoreFetch_ConcurrencyBoundedAtFour(t *testing.T) {
 		}()
 	}
 	time.Sleep(500 * time.Millisecond)
-	if m := h.mem.MaxConcurrent(); m > secretstore.MaxConcurrentStoreCalls {
-		t.Fatalf("at most %d store calls may be in flight, saw %d", secretstore.MaxConcurrentStoreCalls, m)
+	if m := h.mem.MaxConcurrent(); m > 4 {
+		t.Fatalf("at most 4 store calls may be in flight (security review §5), saw %d", m)
 	}
 	h.mem.Unblock()
 	wg.Wait()
-	if failedFast.Load() < n-secretstore.MaxConcurrentStoreCalls {
+	if failedFast.Load() < n-4 {
 		t.Fatalf("callers beyond the slot limit must fail fast after the slot wait, only %d did", failedFast.Load())
 	}
 }
@@ -492,5 +492,35 @@ func TestStoreFetch_NoBackendFailsClosed(t *testing.T) {
 	}
 	if _, err := h.fetch(ref, "fp1:"+hex.EncodeToString(randBytes(t, 32))); classOf(err) != secretstore.ClassNoBackend {
 		t.Fatalf("a scheme with no backend must be no_backend, got %v", err)
+	}
+}
+
+// TestStoreConstants_PinnedToSecurityReview pins every platform constant to
+// the security review §5 values; changing one needs a security review.
+func TestStoreConstants_PinnedToSecurityReview(t *testing.T) {
+	for name, pair := range map[string][2]time.Duration{
+		"StoreCallTimeout":       {secretstore.StoreCallTimeout, 2 * time.Second},
+		"SlotWait":               {secretstore.SlotWait, 250 * time.Millisecond},
+		"BreakerInitialCooldown": {secretstore.BreakerInitialCooldown, 15 * time.Second},
+		"BreakerMaxCooldown":     {secretstore.BreakerMaxCooldown, 60 * time.Second},
+		"NegativeTTLCounting":    {secretstore.NegativeTTLCounting, 5 * time.Second},
+		"NegativeTTLPerRef":      {secretstore.NegativeTTLPerRef, 30 * time.Second},
+		"IntegrityAlertInterval": {secretstore.IntegrityAlertInterval, 5 * time.Minute},
+		"CacheTTL":               {secretstore.CacheTTL, 10 * time.Minute},
+		"CacheMaxStale":          {secretstore.CacheMaxStale, 60 * time.Minute},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%s = %s, security review §5 says %s", name, pair[0], pair[1])
+		}
+	}
+	for name, pair := range map[string][2]int{
+		"StoreMaxRetries":         {secretstore.StoreMaxRetries, 1},
+		"MaxConcurrentStoreCalls": {secretstore.MaxConcurrentStoreCalls, 4},
+		"BreakerTripThreshold":    {secretstore.BreakerTripThreshold, 3},
+		"CacheMaxEntries":         {secretstore.CacheMaxEntries, 1024},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("%s = %d, security review §5 says %d", name, pair[0], pair[1])
+		}
 	}
 }

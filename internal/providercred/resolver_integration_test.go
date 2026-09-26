@@ -538,8 +538,11 @@ func TestStoreOutage_DoesNotPinPool(t *testing.T) {
 		t.Fatalf("an unrelated tenant query took %s during the store outage", d)
 	}
 	wg.Wait()
-	if m := f.mem.MaxConcurrent(); m > secretstore.MaxConcurrentStoreCalls {
-		t.Fatalf("%d concurrent store calls, want <= %d", m, secretstore.MaxConcurrentStoreCalls)
+	// The review's literal bound (4), never the constant itself: a changed
+	// constant must fail here.
+	const reviewBound = 4
+	if m := f.mem.MaxConcurrent(); m > reviewBound {
+		t.Fatalf("%d concurrent store calls, want <= %d", m, reviewBound)
 	}
 	long := 0
 	for _, d := range durations {
@@ -547,8 +550,8 @@ func TestStoreOutage_DoesNotPinPool(t *testing.T) {
 			long++
 		}
 	}
-	if long > secretstore.MaxConcurrentStoreCalls {
-		t.Fatalf("%d transactions were held on the store for > 250 ms, want <= %d", long, secretstore.MaxConcurrentStoreCalls)
+	if long > reviewBound {
+		t.Fatalf("%d transactions were held on the store for > 250 ms, want <= %d", long, reviewBound)
 	}
 }
 
