@@ -101,7 +101,8 @@ func (m *MockKYCProvider) CreateVerification(ctx context.Context, input CreateVe
 	// sharing one database (e.g. two different test runs).
 	ref := "mock-ref-" + uuid.NewString()
 	m.created[ref] = true
-	return ProviderResult{ProviderReference: ref, Outcome: ProviderPending, Reason: "created"}, nil
+	reason, _ := NormalizeReason("created")
+	return ProviderResult{ProviderReference: ref, Outcome: ProviderPending, Reason: reason}, nil
 }
 
 func (m *MockKYCProvider) GetVerification(ctx context.Context, providerReference string) (ProviderResult, error) {
@@ -116,7 +117,8 @@ func (m *MockKYCProvider) GetVerification(ctx context.Context, providerReference
 	if !m.created[providerReference] {
 		return ProviderResult{}, fmt.Errorf("kyc: unknown provider reference %q", providerReference)
 	}
-	return ProviderResult{ProviderReference: providerReference, Outcome: ProviderPending, Reason: "awaiting_submission"}, nil
+	reason, _ := NormalizeReason("awaiting_submission")
+	return ProviderResult{ProviderReference: providerReference, Outcome: ProviderPending, Reason: reason}, nil
 }
 
 func (m *MockKYCProvider) SubmitVerification(ctx context.Context, providerReference string, documents []SubmittedDocument) (ProviderResult, error) {
@@ -132,13 +134,15 @@ func (m *MockKYCProvider) SubmitVerification(ctx context.Context, providerRefere
 		return r, nil
 	}
 	if len(documents) == 0 {
-		return ProviderResult{ProviderReference: providerReference, Outcome: ProviderReviewRequired, Reason: "no_documents_submitted"}, nil
+		reason, _ := NormalizeReason("no_documents_submitted")
+		return ProviderResult{ProviderReference: providerReference, Outcome: ProviderReviewRequired, Reason: reason}, nil
 	}
 	// Default, honest behavior with no test configuration: a real vendor
 	// would actually inspect the documents; this mock has none to
 	// inspect, so it reports review_required rather than fabricating an
 	// approval.
-	return ProviderResult{ProviderReference: providerReference, Outcome: ProviderReviewRequired, Reason: "manual_review_default"}, nil
+	reason, _ := NormalizeReason("manual_review_default")
+	return ProviderResult{ProviderReference: providerReference, Outcome: ProviderReviewRequired, Reason: reason}, nil
 }
 
 // mockCallbackPayload is the platform's OWN minimal callback shape (see
@@ -192,6 +196,13 @@ func (m *MockKYCProvider) CallbackPayload(tenantID uuid.UUID, providerReference 
 //     failure here is ErrCallbackMalformedBody, a DIFFERENT, POST-
 //     verification sentinel the Orchestrator/HTTP layer maps to 400, never
 //     to the uniform 401.
+//
+// KYC-REASON-BOUND-1 (Stage 10.3): the raw payload's "reason" field is run
+// through NormalizeReason before it is ever returned in ProviderResult -
+// every future real adapter's own HandleCallback MUST do the same to its
+// own vendor-specific status/reason text before returning (see
+// ProviderResult's doc comment and RunProviderConformanceSuite's mandatory
+// reason-bound case, internal/kyc/conformance_test.go).
 func (m *MockKYCProvider) HandleCallback(ctx context.Context, in webhookauth.Inbound, cred webhookauth.Credential) (ProviderResult, error) {
 	if err := kycMockScheme.Verify(cred, in); err != nil {
 		return ProviderResult{}, ErrCallbackSignatureInvalid
@@ -222,7 +233,8 @@ func (m *MockKYCProvider) HandleCallback(ctx context.Context, in webhookauth.Inb
 	if !closedOutcomeEnum[payload.Outcome] {
 		return ProviderResult{}, fmt.Errorf("%w: unrecognized outcome %q", ErrCallbackMalformedBody, payload.Outcome)
 	}
-	return ProviderResult{ProviderReference: payload.ProviderReference, Outcome: ProviderOutcome(payload.Outcome), Reason: payload.Reason}, nil
+	normalizedReason, _ := NormalizeReason(payload.Reason)
+	return ProviderResult{ProviderReference: payload.ProviderReference, Outcome: ProviderOutcome(payload.Outcome), Reason: normalizedReason}, nil
 }
 
 func (m *MockKYCProvider) GetCapabilities() Capabilities {

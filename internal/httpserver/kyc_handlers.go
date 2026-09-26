@@ -58,21 +58,24 @@ func toVerificationResponse(v kyc.Verification) verificationResponse {
 	return resp
 }
 
-// playerVerificationResponse is the PLAYER-facing shape (Stage 10.2,
-// ADR 0091, KYC-WH-1 design §B5) - deliberately omits provider_reference:
-// once the webhook is tenant-bound and signature-verified (this stage's
-// fix), the reference is no longer a bearer capability an attacker could
-// forge a callback with, but a player still has no legitimate need to see
-// or echo it, and never trusting a player-supplied provider reference is
-// this endpoint's own discipline. The staff-facing shape
-// (verificationResponse, kyc_admin_handlers.go) keeps it. Used ONLY by
+// playerVerificationResponse is the PLAYER-facing shape (Stage 10.2, ADR
+// 0091, KYC-WH-1 design §B5; Stage 10.3, KYC-REASON-BOUND-1, HD-10.3-3) -
+// deliberately omits provider_reference (once the webhook is tenant-bound
+// and signature-verified, the reference is no longer a bearer capability
+// an attacker could forge a callback with, but a player still has no
+// legitimate need to see or echo it) AND omits reason/reason_code
+// entirely: HD-10.3-3 (binding human ruling) is that a player sees STATUS
+// ONLY - no provider free text and no reason_code on any player-facing
+// surface, under any field name. The bounded, sanitized provider reason
+// (NormalizeReason, reason_normalize.go) stays available only through the
+// staff-facing shape (verificationResponse/kycCaseResponse,
+// kyc_admin_handlers.go). Used ONLY by
 // newCreateMyVerificationHandler/newListMyVerificationsHandler below.
 type playerVerificationResponse struct {
 	ID              string `json:"id"`
 	PlayerAccountID string `json:"player_account_id"`
 	Status          string `json:"status"`
 	ProviderID      string `json:"provider_id"`
-	Reason          string `json:"reason,omitempty"`
 	ReviewedAt      string `json:"reviewed_at,omitempty"`
 	CreatedAt       string `json:"created_at"`
 }
@@ -80,7 +83,7 @@ type playerVerificationResponse struct {
 func toPlayerVerificationResponse(v kyc.Verification) playerVerificationResponse {
 	resp := playerVerificationResponse{
 		ID: v.ID.String(), PlayerAccountID: v.PlayerAccountID.String(), Status: string(v.Status),
-		ProviderID: v.ProviderID, Reason: v.Reason, CreatedAt: v.CreatedAt.Format(rfc3339),
+		ProviderID: v.ProviderID, CreatedAt: v.CreatedAt.Format(rfc3339),
 	}
 	if v.ReviewedAt != nil {
 		resp.ReviewedAt = v.ReviewedAt.Format(rfc3339)

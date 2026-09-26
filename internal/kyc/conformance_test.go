@@ -3,7 +3,10 @@ package kyc
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -88,6 +91,87 @@ func RunProviderConformanceSuite(t *testing.T, factory func() KYCProvider) {
 			t.Fatalf("expected ErrCallbackSignatureInvalid at the MAC comparison itself (not merely the TenantID metadata check) for a credential carrying tenant A's key material mislabeled as tenant B, got %v", err)
 		}
 	})
+
+	// KYC-REASON-BOUND-1 (Stage 10.3, security review C16): mandatory,
+	// fail-not-skip, exactly like the tenant-binding case above - a real
+	// adapter's own HandleCallback must return a bounded (<=512 byte),
+	// control-character/bidi-control-free reason, never raw vendor text
+	// verbatim. The mock proves this via its own CallbackPayload fixture
+	// hook; any other provider type must supply its own equivalent proof.
+	t.Run("HandleCallback returns a bounded, control-character-free reason (conformance)", func(t *testing.T) {
+		provider := factory()
+		mock, ok := provider.(*MockKYCProvider)
+		if !ok {
+			t.Fatalf("reason normalization is mandatory (KYC-REASON-BOUND-1): %T must supply its own fixture proving HandleCallback returns a bounded (<=%d byte), control-character-free reason; a real adapter cannot skip it", provider, MaxReasonBytes)
+		}
+		ctx := context.Background()
+		tenantID := uuid.New()
+		cred := mockCredentialFor(t, mock, tenantID)
+
+		dirty := "\r\x1b[31mFAKE ADMIN MESSAGE\x1b[0m\u202Eevil-reversed-text" + strings.Repeat("A", 4096)
+		inbound := mock.CallbackPayload(tenantID, "conformance-reason-bound-1", ProviderRejected, dirty)
+		result, err := provider.HandleCallback(ctx, inbound, cred)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if err := reasonConformanceViolation(result.Reason); err != nil {
+			t.Fatalf("HandleCallback returned a non-conforming reason: %v (reason=%q)", err, result.Reason)
+		}
+	})
+}
+
+// reasonConformanceViolation reports whether reason satisfies
+// KYC-REASON-BOUND-1's bound (mirroring NormalizeReason's own rules,
+// reason_normalize.go): at most MaxReasonBytes bytes, valid UTF-8, and
+// free of C0/C1 controls and the Unicode bidi/format controls
+// NormalizeReason strips. Returns nil for a conforming reason, or a
+// descriptive error naming the violation otherwise.
+//
+// Factored out of the conformance case above so it can ALSO be exercised
+// directly by this file's own self-test
+// (TestReasonBoundConformanceSelfTest_DetectsNonConformingReason) against
+// a deliberately non-conforming raw string - proving this check actually
+// catches non-conformance, not merely that it gates on the adapter's Go
+// type (ruling J1's self-test obligation, extended to this wave's own
+// conformance addition per the QA binding test plan).
+func reasonConformanceViolation(reason string) error {
+	if !utf8.ValidString(reason) {
+		return fmt.Errorf("reason is not valid UTF-8")
+	}
+	if len(reason) > MaxReasonBytes {
+		return fmt.Errorf("reason is %d bytes, exceeds the %d byte bound", len(reason), MaxReasonBytes)
+	}
+	for _, r := range reason {
+		if isC0OrC1Control(r) {
+			return fmt.Errorf("reason contains a C0/C1 control character %U", r)
+		}
+		if isBidiOrFormatControl(r) {
+			return fmt.Errorf("reason contains a bidi/format control character %U", r)
+		}
+	}
+	return nil
+}
+
+// TestReasonBoundConformanceSelfTest_DetectsNonConformingReason is the
+// self-test the QA binding plan requires for this wave's new conformance
+// case: a deliberately non-conforming reason (oversized AND
+// control-character-laden - the same shape as the pre-fix E6 evidence)
+// must be detected as a violation, and an already-normalized reason must
+// not be - proving reasonConformanceViolation's assertions actually catch
+// something, not just always pass.
+func TestReasonBoundConformanceSelfTest_DetectsNonConformingReason(t *testing.T) {
+	dirty := "\r\x1b[31mFAKE ADMIN MESSAGE\x1b[0m\u202Eevil-reversed-text" + strings.Repeat("A", 4096)
+	if err := reasonConformanceViolation(dirty); err == nil {
+		t.Fatal("expected the deliberately non-conforming (oversized, control/bidi-laden) reason to be detected as a violation, got nil")
+	}
+
+	clean, truncated := NormalizeReason(dirty)
+	if !truncated {
+		t.Fatal("test precondition failed: expected NormalizeReason to have truncated the dirty fixture")
+	}
+	if err := reasonConformanceViolation(clean); err != nil {
+		t.Fatalf("expected an already-normalized reason to pass, got violation: %v (reason=%q)", err, clean)
+	}
 }
 
 func TestMockKYCProvider_ConformsToKYCProvider(t *testing.T) {

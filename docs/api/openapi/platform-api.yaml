@@ -4929,7 +4929,14 @@ components:
           enum: [unverified, pending, review_required, approved, rejected, expired]
         provider_id: { type: string, example: mock }
         provider_reference: { type: string }
-        reason: { type: string }
+        reason:
+          type: string
+          description: >
+            STAFF-ONLY. The provider's bounded, sanitized reason/status
+            text (Stage 10.3, KYC-REASON-BOUND-1) - at most 512 bytes,
+            control characters and Unicode bidi/format controls stripped
+            at ingestion (internal/kyc.NormalizeReason). Never returned on
+            any player-facing schema (see PlayerVerification, HD-10.3-3).
         reviewed_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
         # Stage 5 (Operator Back Office MVP) additions - additive, optional,
@@ -4944,12 +4951,16 @@ components:
       type: object
       description: >
         The PLAYER-facing shape of a verification (Stage 10.2, ADR 0091,
-        KYC-WH-1 design §B5) - used ONLY by
-        /v1/me/kyc/verifications (POST/GET). Deliberately omits the
+        KYC-WH-1 design §B5; Stage 10.3, KYC-REASON-BOUND-1) - used ONLY
+        by /v1/me/kyc/verifications (POST/GET). Deliberately omits the
         provider reference field - a player has no legitimate need to see
         or echo it, and a player-supplied provider reference is never
-        trusted anywhere in this API. The staff-facing Verification schema
-        (used by every /v1/admin/kyc/* route) keeps that field.
+        trusted anywhere in this API. HD-10.3-3 (binding human ruling):
+        also deliberately omits `reason`/`reason_code` entirely - a
+        player sees STATUS ONLY, never any provider free text or
+        reason code, under any field name. The staff-facing Verification
+        schema (used by every /v1/admin/kyc/* route) keeps the bounded,
+        sanitized provider reason.
       properties:
         id: { type: string, format: uuid }
         player_account_id: { type: string, format: uuid }
@@ -4957,7 +4968,6 @@ components:
           type: string
           enum: [unverified, pending, review_required, approved, rejected, expired]
         provider_id: { type: string, example: mock }
-        reason: { type: string }
         reviewed_at: { type: string, format: date-time }
         created_at: { type: string, format: date-time }
       required: [id, player_account_id, status, provider_id, created_at]

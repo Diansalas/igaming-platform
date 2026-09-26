@@ -111,6 +111,12 @@ func TestOpenAPI_KYCWebhook_ContractMatchesHandler(t *testing.T) {
 	if strings.Contains(pvBlock, "provider_reference:") {
 		t.Error("PlayerVerification schema must never declare a provider_reference property (K10/design §B5)")
 	}
+	// HD-10.3-3 (binding human ruling, KYC-REASON-BOUND-1): a player sees
+	// STATUS ONLY - no provider reason and no reason_code, under any
+	// field name.
+	if strings.Contains(pvBlock, "reason:") || strings.Contains(pvBlock, "reason_code:") {
+		t.Error("PlayerVerification schema must never declare a reason or reason_code property (HD-10.3-3: players see status only)")
+	}
 	for _, field := range []string{"id", "player_account_id", "status", "provider_id"} {
 		if !strings.Contains(pvBlock, field) {
 			t.Errorf("PlayerVerification schema missing field %q", field)

@@ -78,6 +78,22 @@ type SubmittedDocument struct {
 // non-sensitive, machine-readable code (never raw evidence - directive
 // §10/§17), mirroring internal/identityresolution.ResolutionResult's
 // identical "Reason must never contain evidence" contract (ADR 0027).
+//
+// KYC-REASON-BOUND-1 (Stage 10.3, security review C16): that intent is
+// now an enforced bound, not just a convention. Every adapter's own
+// HandleCallback (and any other method populating Reason) MUST run its
+// raw vendor status/reason text through NormalizeReason
+// (reason_normalize.go) before returning - bounding it to
+// MaxReasonBytes (512 bytes) and stripping C0/C1 controls and Unicode
+// bidi/format controls. Reason is staff/compliance-only: HD-10.3-3
+// (binding human ruling) is that a player never sees ANY provider
+// reason text, under any field name - only a closed VerificationStatus.
+// The database enforces the length half of this bound independently
+// (migration 0095's CHECK on kyc_verifications.reason), but a
+// non-conforming adapter must not rely on that as its only defense -
+// RunProviderConformanceSuite's mandatory reason-bound case
+// (internal/kyc/conformance_test.go) fails, not skips, for any adapter
+// that does not normalize.
 type ProviderResult struct {
 	ProviderReference string
 	Outcome           ProviderOutcome

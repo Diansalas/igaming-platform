@@ -14,6 +14,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -73,6 +74,51 @@ func migration0093DirExcludingSelf(t *testing.T) string {
 	return out
 }
 
+// migration0093DirThroughSelf copies the real migrations directory into a
+// fresh t.TempDir(), INCLUDING 0093's own up/down files but EXCLUDING any
+// migration numbered ABOVE 93 (e.g. Stage 10.3's 0095) - i.e. "the chain
+// exactly as it stood the moment 0093 landed, and no later". This is what
+// makes "roll back exactly 1 step" in
+// TestMigration0093_DownRestoresExactPriorFunctionBody deterministically
+// mean "roll back 0093 itself", regardless of how many unrelated
+// migrations have landed on top of it since (this file's own header
+// comment already disclaims assuming a specific total count - this
+// helper is what keeps that disclaimer true for a DOWN-migration test,
+// not just an up-only one).
+func migration0093DirThroughSelf(t *testing.T) string {
+	t.Helper()
+	realDir := migration0093Dir(t)
+	entries, err := os.ReadDir(realDir)
+	if err != nil {
+		t.Fatalf("read migrations dir: %v", err)
+	}
+	out := t.TempDir()
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if len(name) < 4 {
+			continue
+		}
+		ver, err := strconv.Atoi(name[:4])
+		if err != nil {
+			continue
+		}
+		if ver > 93 {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(realDir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(out, name), content, 0o600); err != nil {
+			t.Fatalf("write %s into temp migrations dir: %v", name, err)
+		}
+	}
+	return out
+}
+
 func migration0093ScratchPool(t *testing.T, prefix string) *db.Pool {
 	t.Helper()
 	url := scratchdb.New(t, prefix)
@@ -109,7 +155,7 @@ func t1FunctionProsrc(t *testing.T, pool *db.Pool) string {
 // back down one step (the "after a revert" state).
 func TestMigration0093_DownRestoresExactPriorFunctionBody(t *testing.T) {
 	dirWithout93 := migration0093DirExcludingSelf(t)
-	dirWith93 := migration0093Dir(t)
+	dirWith93 := migration0093DirThroughSelf(t)
 
 	before := migration0093ScratchPool(t, "sb0093before_")
 	if _, err := before.MigrateUp(context.Background(), dirWithout93); err != nil {

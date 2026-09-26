@@ -324,6 +324,19 @@ func ReviewVerification(ctx context.Context, tx pgx.Tx, params ReviewVerificatio
 		return Verification{}, fmt.Errorf("%w: verified_residence_country must be a valid ISO-3166-1 alpha-2 code", ErrInvalidTransition)
 	}
 
+	// KYC-REASON-BOUND-1 (Stage 10.3, W0 architect code-check addendum):
+	// a staff reviewer's own free-text reason writes to the SAME
+	// kyc_verifications.reason column migration 0095's CHECK
+	// (octet_length(reason) <= 512) now bounds - this is this write
+	// path's own ingestion boundary (mirroring MockKYCProvider.
+	// HandleCallback's identical call for the provider-callback path),
+	// so an oversized staff reason is normalized here, once, rather than
+	// ever reaching the database as a raw CHECK-constraint violation
+	// (an unhelpful 500, not a validation error). Every caller of this
+	// function - the staff HTTP handler and any internal/kyc-package
+	// caller alike - gets this bound for free.
+	params.Reason, _ = NormalizeReason(params.Reason)
+
 	current, err := GetVerificationByID(ctx, tx, params.VerificationID)
 	if err != nil {
 		return Verification{}, err

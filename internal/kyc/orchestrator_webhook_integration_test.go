@@ -792,6 +792,65 @@ func TestKYCWebhook_OutcomeErrorAgainstTerminal_NoAuditRow(t *testing.T) {
 	noeffect.AssertNoEffect(t, pool, []uuid.UUID{f.tenantID}, []noeffect.Verification{{TenantID: f.tenantID, ID: verificationID}}, before)
 }
 
+// TestKYCWebhook_OversizedControlCharacterReason_NormalizedInDBAndAudit is
+// KYC-REASON-BOUND-1's binding integration case (QA W1d plan): a verified
+// callback carrying an oversized, control/bidi-character-laden reason (the
+// same shape as the E6 pre-fix evidence) is normalized BEFORE it reaches
+// the DB row and the audit trail - the STORED value is asserted, not just
+// the in-memory ProviderResult.
+func TestKYCWebhook_OversizedControlCharacterReason_NormalizedInDBAndAudit(t *testing.T) {
+	pool := testPool(t)
+	f, provider, orch, verificationID := newWebhookFixture(t, pool)
+	var ref string
+	_ = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT provider_reference FROM kyc_verifications WHERE id = $1`, verificationID).Scan(&ref)
+	})
+
+	controlLaden := "\r\x1b[31mFAKE ADMIN MESSAGE\x1b[0m\u202Eevil-reversed-text"
+	hugeReason := controlLaden + strings.Repeat("A", 4096) + controlLaden
+
+	in := provider.CallbackPayload(f.tenantID, ref, ProviderRejected, hugeReason)
+	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		_, _, err := orch.ReceiveCallback(ctx, tx, f.tenantID, "mock", in)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var storedReason string
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT reason FROM kyc_verifications WHERE id = $1`, verificationID).Scan(&storedReason)
+	})
+	if err != nil {
+		t.Fatalf("read stored reason: %v", err)
+	}
+	if storedReason == hugeReason {
+		t.Fatal("expected the stored reason to be normalized (bounded/cleaned), got the raw value verbatim")
+	}
+	if len(storedReason) > MaxReasonBytes {
+		t.Fatalf("expected the stored reason to be at most %d bytes, got %d", MaxReasonBytes, len(storedReason))
+	}
+	for _, bad := range []string{"\r", "\x1b", "\u202E"} {
+		if strings.Contains(storedReason, bad) {
+			t.Fatalf("expected control/bidi character %q stripped from the stored reason, got %q", bad, storedReason)
+		}
+	}
+
+	var auditReason string
+	err = pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT metadata->>'reason' FROM audit_log WHERE action = 'kyc.provider_callback' AND target_id = $1 ORDER BY created_at DESC LIMIT 1`,
+			verificationID.String()).Scan(&auditReason)
+	})
+	if err != nil {
+		t.Fatalf("read audit metadata reason: %v", err)
+	}
+	if auditReason != storedReason {
+		t.Fatalf("expected audit_log.metadata to carry the SAME normalized reason as the DB row, got %q vs %q", auditReason, storedReason)
+	}
+}
+
 // K13-adjacent (package-level): keys differ per tenant, per instance, and
 // per domain label; stable within one instance.
 func TestMockKYCProvider_KeyDerivation_PerTenantAndInstance(t *testing.T) {
