@@ -546,3 +546,30 @@ Reviews recorded verbatim in this folder: `03-review-qa-test-plan.md` (qa),
 
 **Disagreements.** None substantive. The only divergence was PAYWH-GATE-1 (the design
 left it optional); backend and architect both recommended inclusion, ruled in J9.
+
+## K. Final-review findings: Orchestrator rulings (2026-09-26)
+
+Sources: `09-review-security-final.md` (security, APPROVE WITH CONDITIONS SC-1..SC-4, F-4..F-9),
+`10-review-ledger-finance.md` (CONCUR WITH CONDITIONS), `11-review-code.md` (M1–M5, L1–L8).
+No finding requires a human decision. Casino test items (M1 casino half, L4, SC-1, SC-2, SC-3,
+conformance MAC sub-case) were closed in `ab70570`.
+
+| # | Finding | Ruling |
+|---|---|---|
+| K1 | M1 (KYC half) legacy-field test never reaches the guard; K5 does not assert `Reason` | FIX: sign the legacy-shaped body with the real derived key; assert `Reason` in every K5 subtest; mutation-kill recorded. |
+| K2 | M2 R4 mutation record failed for the wrong reason | FIX: match the lookup statement structurally; rerun the mutation with renumbered placeholders; replace the record. |
+| K3 | M3 / F-9 KYC has no conformance suite; ADR claims it | FIX: add `internal/kyc/conformance_test.go` with the tenant-binding case (MAC-level sub-case too). For all three domains the tenant-binding conformance case must FAIL, not skip, for any non-mock adapter (ADR 0022 amendment text says so; make code match). |
+| K4 | M4 `kyc_webhook_noop` log not implemented | FIX: `ReceiveCallback` reports applied vs no-op; handler logs allow-listed `kyc_webhook_noop` (request_id, tenant_id, provider_id); remove `_ = result`; test. |
+| K5 | L2 / F-5 replayed `outcome: error` audits every time | FIX: no failure audit row when the verification is already terminal (keeps §E's "replay is inert" true); test. Non-terminal `error` still audits once per delivery (bounded by the verification's life; disclosed). |
+| K6 | M5 ADR 0085 §1 / config.go "three flags" drift (pre-existing, not corrected by the 10.2 amendment) | FIX docs: name all four Deps flags plus `mockProviderWiring`. |
+| K7 | L1 / F-8 comments and ADR 0022 scope sentence contradict the legacy-field 401 | FIX text only; behaviour stays (design §B6(d), §C2.3, payments precedent). Disclose the false-forgery-alert effect in ADR 0022. |
+| K8 | L3 OpenAPI mismatches | FIX spec + tighten the casino contract test's `oversized` check to the 401 block. |
+| K9 | L5 dead code; exported reassignable `ProviderIDPattern` | FIX: delete dead symbols; unexport the pattern (keep `ValidProviderID`). |
+| K10 | L6 casino unknown verified event type → 500 | FIX: wrap as `ErrCallbackMalformedBody` → 400; test. |
+| K11 | L7 duplication / stale comments | FIX the cheap parts: KYC returns `webhookauth.MockResolver` directly (design §B2); remove stale `mockWiring`/`kycOrchestrator` comments; construct the KYC mock only when wired (ADR 0085 amendment says "absent"). A shared Sign+SetHeaders helper is optional; the three-bool `mockWiring` stays (explicit per domain, documented). |
+| K12 | L8 preamble binds the MOCK header format | RECORD as a known constraint on the first real adapter in ADR 0022 §3 amendment and register **WH-VENDOR-SCHEME-1** (architect; pre-condition for the first real adapter). Not 10.2 scope. |
+| K13 | F-6 duplicate signature headers not rejected | ACCEPT (Info): first value used, not exploitable; noted in security review. |
+| K14 | F-7 provider `reason` text unbounded (pre-existing) | REGISTER **KYC-REASON-BOUND-1** (identity-compliance), not 10.2 scope. |
+| K15 | F-4 unknown-slug timing gap | ACCEPTED residual carried from Stage 10.1. |
+| K16 | Security §7 hard-coded test fixture key | FIX: generate with `webhookauth.NewMockMaster()`. |
+| K17 | SC-4 / J17 disclosures; ledger-finance condition 3 | Completion report. |
