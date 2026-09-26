@@ -296,7 +296,7 @@ tenant-agnostic key (S-6). Status after 10.1:*
 - *the sportsbook provider-callback entitlement remains unimplemented.*
 
 *Amended 2026-09-26 (Stage 10.2, ADR 0091, CAS-WH-TENANT-1; `ledger-finance`
-concurrence: **PENDING — recorded at Stage 10.2 final review**). The
+concurrence: **GIVEN** (with conditions, recorded in docs/plans/stage-10.2-planning/10-review-ledger-finance.md)). The
 casino entitlement in this row no longer depends on a follow-up. Casino
 callbacks now originate postings only for the tenant bound into the
 verified signature (docs/decisions/0022 §3 as amended, points 1–9; ADR
@@ -344,7 +344,7 @@ The binding refinement, enforced at the posting API boundary:
    payment-provider callbacks are disjoint originator sets; a payments
    credential never originates gaming postings and vice versa.
    *Added 2026-09-26 (Stage 10.2, ADR 0091; `ledger-finance` concurrence:
-   PENDING — recorded at Stage 10.2 final review):* KYC-provider callbacks
+   **GIVEN** (with conditions, recorded in docs/plans/stage-10.2-planning/10-review-ledger-finance.md)):* KYC-provider callbacks
    originate **no** `LedgerTransaction` of any type. Each platform-defined
    (MOCK) scheme carries a domain-unique signing prefix, domain-unique
    headers and a domain-unique mock key label (docs/decisions/0022 §3
