@@ -305,7 +305,7 @@ func TestPostRollback_LateOriginalRacesRollback_SerializesOnL0_1(t *testing.T) {
 		}()
 		if iter == 0 {
 			go func() { wg.Wait(); close(doneCh) }()
-			if !casWaitForAdvisoryWaiter(t, pool, doneCh) {
+			if !casWaitForAdvisoryWaiter(t, pool, doneCh, blocker.pid) {
 				blocker.release()
 				<-doneCh
 				t.Fatalf("iteration 0: expected one of the two concurrent deliveries to queue on the L0.1 advisory lock (pg_stat_activity wait_event='advisory') while it was held externally, but neither ever did")
@@ -452,7 +452,7 @@ func TestPostWin_LateWinRacesItsOwnRollback_SerializesOnL0_1(t *testing.T) {
 		}()
 		if iter == 0 {
 			go func() { wg.Wait(); close(doneCh) }()
-			if !casWaitForAdvisoryWaiter(t, pool, doneCh) {
+			if !casWaitForAdvisoryWaiter(t, pool, doneCh, blocker.pid) {
 				blocker.release()
 				<-doneCh
 				t.Fatalf("iteration 0: expected one of the two concurrent deliveries to queue on the L0.1 advisory lock (pg_stat_activity wait_event='advisory') while it was held externally, but neither ever did")

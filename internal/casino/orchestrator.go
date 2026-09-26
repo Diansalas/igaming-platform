@@ -621,6 +621,28 @@ type ReceiveCallbackResult struct {
 	// Tombstoned is true only for a rollback whose original bet/win was
 	// never seen (financial-transaction-flows.md §7's tombstone case).
 	Tombstoned bool
+	// EventType is the dispatched CallbackEvent's own EventType (bet/win/
+	// rollback), set once, in one place, by ReceiveCallback's own dispatch
+	// switch below - never by postBet/postWin/postRollback themselves, so
+	// every one of their return sites (including every short-circuit) gets
+	// it uniformly. Exists solely so the webhook handler's
+	// "casino_callback_replayed" log line (Replayed, below) can name which
+	// kind of callback replayed without re-deriving it from the response
+	// shape.
+	EventType CallbackEventType
+	// Replayed is true whenever THIS delivery short-circuited on an
+	// already-recorded fact rather than newly posting/writing one -
+	// ledger-finance's R1 recommendation (gate 10.3-W1 re-verification):
+	// postBet's E2 idempotency short-circuit, the E9 tombstone
+	// short-circuit (both the first-tombstone-write and a later replay of
+	// it), postWin/postRollback's ledger.Post AlreadyPosted gate, and
+	// postRollbackHeldWin's voided-by-same-reference short-circuit all set
+	// it. It never affects outcome, response shape, or any ledger/audit
+	// effect - it exists only so the webhook handler can log
+	// "casino_callback_replayed" and a first delivery can be told apart
+	// from a redelivery without a database join (see webhook_verify.go's
+	// caller in internal/httpserver).
+	Replayed bool
 }
 
 // ReceiveCallback dispatches a verified provider callback: verifies it via
@@ -726,11 +748,17 @@ func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID 
 	// the way LaunchGame already does.
 	switch event.EventType {
 	case CallbackEventBet:
-		return mapReplayPayloadMismatch(o.postBet(ctx, tx, tenantID, providerID, event))
+		result, err := mapReplayPayloadMismatch(o.postBet(ctx, tx, tenantID, providerID, event))
+		result.EventType = event.EventType
+		return result, err
 	case CallbackEventWin:
-		return mapReplayPayloadMismatch(o.postWin(ctx, tx, tenantID, providerID, event))
+		result, err := mapReplayPayloadMismatch(o.postWin(ctx, tx, tenantID, providerID, event))
+		result.EventType = event.EventType
+		return result, err
 	case CallbackEventRollback:
-		return mapReplayPayloadMismatch(o.postRollback(ctx, tx, tenantID, providerID, event))
+		result, err := mapReplayPayloadMismatch(o.postRollback(ctx, tx, tenantID, providerID, event))
+		result.EventType = event.EventType
+		return result, err
 	default:
 		// Stage 10.2 final review (K10/L6): an unknown event type reaching
 		// this point is a verified-but-malformed callback (the adapter's own
@@ -989,7 +1017,7 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		if err := verifyPostedBetMatchesEvent(ctx, tx, tenantID, providerID, existingID, event); err != nil {
 			return ReceiveCallbackResult{}, err
 		}
-		return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &existingID}, nil
+		return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &existingID, Replayed: true}, nil
 	}
 
 	// Stage 10.3 CAS-CAP-ROLLBACK-1, E3 (§1.3/§1.4 step 2): a rollback for
@@ -1316,15 +1344,27 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		return ReceiveCallbackResult{}, fmt.Errorf("casino: post bet: %w", err)
 	}
 
-	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_bet.posted",
-		TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
-		Metadata: map[string]any{
-			"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
-			"amount": event.Amount, "asset_code": event.AssetCode, "already_posted": postResult.AlreadyPosted,
-		},
-	}); err != nil {
-		return ReceiveCallbackResult{}, fmt.Errorf("casino: audit bet posted: %w", err)
+	// R2 (ledger-finance re-verification after fix round A, gate 10.3-W1):
+	// gated on !AlreadyPosted for structural consistency with postWin/
+	// postRollback's identical guard, even though AlreadyPosted is
+	// unreachable here today - L0.1 (acquireProviderTxDeliveryLock) plus
+	// the E2 idempotency short-circuit above both return long before this
+	// line on any redelivery, so ledger.Post never sees a second attempt
+	// at the same provider_tx_id. Gating anyway makes "postings are
+	// audited once per fact" a property of every posting site, not one
+	// that depends on an upstream short-circuit never being removed or
+	// reordered by a future change.
+	if !postResult.AlreadyPosted {
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_bet.posted",
+			TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
+			Metadata: map[string]any{
+				"provider_id": providerID, "provider_tx_id": event.ProviderTxID, "round_id": event.RoundID,
+				"amount": event.Amount, "asset_code": event.AssetCode, "already_posted": postResult.AlreadyPosted,
+			},
+		}); err != nil {
+			return ReceiveCallbackResult{}, fmt.Errorf("casino: audit bet posted: %w", err)
+		}
 	}
 
 	// Stage 4H-B1 Wave 3 Phase 3 (ledger-accounting-model.md §7.18.3.3):
@@ -1358,7 +1398,7 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 		}
 	}
 
-	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
+	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID, Replayed: postResult.AlreadyPosted}, nil
 }
 
 // postWin implements Flow 6 (financial-transaction-flows.md §6): resolves
@@ -1591,7 +1631,7 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		// rule). Report the same idempotent tombstone result again,
 		// rather than the generic "expected casino_bet or casino_win"
 		// error this used to fall through to.
-		return ReceiveCallbackResult{Tombstoned: true, LedgerTransactionID: &originalID}, nil
+		return ReceiveCallbackResult{Tombstoned: true, LedgerTransactionID: &originalID, Replayed: true}, nil
 	}
 	if originalType != ledger.TxCasinoBet && originalType != ledger.TxCasinoWin {
 		return ReceiveCallbackResult{}, fmt.Errorf("%w: original transaction %s has type %q, expected casino_bet or casino_win",
@@ -1747,7 +1787,7 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		}
 	}
 
-	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
+	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID, Replayed: postResult.AlreadyPosted}, nil
 }
 
 func postRollbackTombstone(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, event CallbackEvent) (uuid.UUID, error) {

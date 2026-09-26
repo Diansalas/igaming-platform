@@ -464,6 +464,25 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
+		// R1 (ledger-finance re-verification after fix round A, gate
+		// 10.3-W1): a structured, allow-listed Info line marking every
+		// replay short-circuit (postBet's E2 idempotency short-circuit, the
+		// E9 tombstone replay, the postWin/postRollback AlreadyPosted gate,
+		// and postRollbackHeldWin's voided-by-same-reference short-circuit -
+		// see casino.ReceiveCallbackResult.Replayed's own doc comment for
+		// the full list). Deliberately carries only request_id, tenant_id,
+		// provider_id and event_type - never provider_tx_id or any other
+		// caller-supplied value, matching this handler's existing "never
+		// echo caller-supplied identifiers" discipline for every other log
+		// line above. Lets a first delivery be told apart from a
+		// redelivery without a database join; it is not itself a durable
+		// record (W2b's callback/rejection record is the durable answer).
+		if result.Replayed {
+			logger.Info("casino_callback_replayed",
+				"request_id", requestID, "tenant_id", t.ID.String(), "provider_id", providerID,
+				"event_type", string(result.EventType))
+		}
+
 		resp := map[string]any{"outcome": string(result.Outcome), "tombstoned": result.Tombstoned}
 		if result.LedgerTransactionID != nil {
 			resp["ledger_transaction_id"] = result.LedgerTransactionID.String()

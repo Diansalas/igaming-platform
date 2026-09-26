@@ -117,3 +117,30 @@ Cross-check: after all 8 mutations were individually applied, tested, and revert
 tree was confirmed clean (`git status --short` empty) and the full casino + httpserver
 integration suites were re-run green (see this fix round's own commit message and C6's separate
 NOBYPASSRLS run) - no mutation was left in place.
+
+---
+C11 (gate 10.3-W1 ledger-finance re-verification after fix round A): postRollback's
+generic (non-tombstone) audit gate had no killing test - added
+TestPostRollback_C11_GenericPathAuditGate_RedeliverySequentialThenConcurrent.
+    File: internal/casino/orchestrator.go (the `if !postResult.AlreadyPosted { ... }` block
+    guarding the casino_bet.rolled_back/casino_win.rolled_back audit write, immediately after
+    the generic entry-inversion ledger.Post call)
+    Date: 2026-09-26. Branch claude/focused-wright-jw88w9, gate 10.3-W1 follow-up round.
+    Mutation: replaced `if !postResult.AlreadyPosted {` with an unconditional `{` (the guard's
+    condition removed; the audit write always runs).
+    Test: -count=1 -tags=integration ./internal/httpserver/ -run
+    TestPostRollback_C11_GenericPathAuditGate_RedeliverySequentialThenConcurrent
+    KILLED (red)
+    --- FAIL: TestPostRollback_C11_GenericPathAuditGate_RedeliverySequentialThenConcurrent
+        casino_c11_rollback_audit_gate_integration_test.go:138: expected exactly 1
+        casino_bet.rolled_back audit row despite 10 deliveries of the identical rollback, got 10
+    Without the guard, every one of the 10 deliveries (1 first + 1 sequential redelivery + 8
+    concurrent redeliveries of the identical rollback reference) writes its own
+    casino_bet.rolled_back row despite ledger.Post correctly posting the reversal exactly once -
+    an audit-log-bloat defect with no financial effect, the same defect shape postWin's own C4
+    guard (bonus_settlement.go) already covers, but which nothing previously proved for this
+    generic rollback path.
+    Restored: yes (byte-identical to pre-mutation internal/casino/orchestrator.go, confirmed via
+    a clean `git diff` limited to this fix round's own already-committed changes). Re-ran the
+    same test after restoring: PASS (owner role and, separately, as igaming_runtime - see
+    docs/plans/stage-10.3-planning/evidence/w1c-c11-runtime-role.txt).

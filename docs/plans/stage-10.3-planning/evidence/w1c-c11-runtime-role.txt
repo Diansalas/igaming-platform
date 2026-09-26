@@ -1,0 +1,40 @@
+Gate 10.3-W1 follow-up: C11 (postRollback generic-path audit gate) runtime-role run.
+Date: 2026-09-26. Branch claude/focused-wright-jw88w9 at commit "test/fix: gate 10.3-W1
+follow-ups (casino adapter-rule test, NormalizeReason idempotency, casino Orchestrator.now
+removed)" (parent e45831c) plus this follow-up round's second commit.
+
+Purpose: ledger-finance's re-verification after fix round A (docs/plans/stage-10.3-planning/
+06-gate-w1-review-ledger-finance.md, "Re-verification after fix round A", condition C11)
+required a killing test for postRollback's generic (non-tombstone) `!postResult.AlreadyPosted`
+audit gate, AND that it be run as the NOBYPASSRLS `igaming_runtime` role (closing the same
+record gap noted under condition C6, since CI's own TEST_DATABASE_URL is the owner role
+`igaming`).
+
+Test: TestPostRollback_C11_GenericPathAuditGate_RedeliverySequentialThenConcurrent
+File: internal/httpserver/casino_c11_rollback_audit_gate_integration_test.go
+
+Command (TEST_DATABASE_URL pointed at the igaming_runtime role, per this package's own
+testEnv() convention - it reads TEST_DATABASE_URL only, so "run as igaming_runtime" means
+setting TEST_DATABASE_URL to that role's connection string for the run; DATABASE_URL stays
+the owner role, unused by this HTTP-level test):
+
+  export DATABASE_URL="postgres://igaming:igaming_ci_password@127.0.0.1:5432/igaming_platform_ci_local?sslmode=disable"
+  export TEST_DATABASE_URL="postgres://igaming_runtime:igaming_runtime_ci_password@127.0.0.1:5432/igaming_platform_ci_local?sslmode=disable"
+  export JWT_SIGNING_SECRET=ci-signing-secret-at-least-32-characters-long
+  go test -tags=integration -run TestPostRollback_C11_GenericPathAuditGate_RedeliverySequentialThenConcurrent ./internal/httpserver/... -v -count=1
+
+Output:
+=== RUN   TestPostRollback_C11_GenericPathAuditGate_RedeliverySequentialThenConcurrent
+--- PASS: TestPostRollback_C11_GenericPathAuditGate_RedeliverySequentialThenConcurrent (0.58s)
+PASS
+ok  	github.com/Diansalas/igaming-platform/internal/httpserver	0.600s
+
+Result: PASS as igaming_runtime (NOBYPASSRLS). The test posts a real bet, rolls it back
+(the GENERIC entry-inversion path - not the tombstone path, which short-circuits before
+ever reaching the `!AlreadyPosted` guard), then redelivers the identical rollback once
+sequentially and 8 times concurrently, asserting: exactly one reversal row
+(countCasinoLedgerRowsForTx == 1 across all 10 deliveries), the same ledger_transaction_id
+in every one of the 10 responses, and exactly one casino_bet.rolled_back audit row
+(countCasinoAuditRowsForActionMetadataKey == 1). See
+docs/plans/stage-10.3-planning/evidence/w1-fixround-b-mutation-kill.txt's C11 entry for the
+accompanying mutation-kill record (removing the guard turns this same test red).

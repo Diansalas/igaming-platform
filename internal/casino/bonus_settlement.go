@@ -433,7 +433,7 @@ func (o *Orchestrator) postWinDirectCash(ctx context.Context, tx pgx.Tx, tenantI
 		}
 	}
 
-	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
+	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID, Replayed: postResult.AlreadyPosted}, nil
 }
 
 // postWinLockedCash is §16.4's destination-map row for a
@@ -487,7 +487,7 @@ func (o *Orchestrator) postWinLockedCash(ctx context.Context, tx pgx.Tx, tenantI
 		}
 	}
 
-	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
+	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID, Replayed: postResult.AlreadyPosted}, nil
 }
 
 // postWinLockedBonus is §16.4's destination-map rows for a
@@ -588,7 +588,7 @@ func (o *Orchestrator) postWinLockedBonus(ctx context.Context, tx pgx.Tx, tenant
 			}
 		}
 
-		return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
+		return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID, Replayed: postResult.AlreadyPosted}, nil
 	}
 
 	// Terminal/pending_settlement (§16.5/§16.7 sub-branch 2, §16.9's
@@ -648,7 +648,7 @@ func (o *Orchestrator) postWinLockedBonus(ctx context.Context, tx pgx.Tx, tenant
 		}
 	}
 
-	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
+	return ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID, Replayed: postResult.AlreadyPosted}, nil
 }
 
 // --- postRollback's two new §16.21 call sites ---
@@ -724,7 +724,7 @@ func (o *Orchestrator) postRollbackHeldWin(ctx context.Context, tx pgx.Tx, tenan
 			}
 			if resolutionProviderTxID != nil && *resolutionProviderTxID == event.ProviderTxID {
 				resolutionTxID := *disposition.ResolutionLedgerTransactionID
-				return true, ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &resolutionTxID}, nil
+				return true, ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &resolutionTxID, Replayed: true}, nil
 			}
 		}
 		return true, ReceiveCallbackResult{}, fmt.Errorf("%w: disposition=%s", ErrHeldDispositionAlreadyVoided, disposition.ID)
@@ -823,16 +823,25 @@ func (o *Orchestrator) postRollbackHeldWin(ctx context.Context, tx pgx.Tx, tenan
 		}
 	}
 
-	if err := audit.Record(ctx, tx, audit.Entry{
-		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_win.rolled_back",
-		TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
-		Metadata: map[string]any{
-			"provider_id": providerID, "rollback_provider_tx_id": event.ProviderTxID,
-			"original_provider_tx_id": event.OriginalProviderTxID, "original_transaction_id": originalID.String(),
-			"already_posted": postResult.AlreadyPosted, "held_disposition_id": disposition.ID.String(), "grant_id": disposition.GrantID.String(),
-		},
-	}); err != nil {
-		return true, ReceiveCallbackResult{}, fmt.Errorf("casino: audit held-win rollback: %w", err)
+	// R2 (ledger-finance re-verification after fix round A, gate 10.3-W1):
+	// gated on !AlreadyPosted, mirroring the generic postRollback path's
+	// identical guard (orchestrator.go, C11). AlreadyPosted is unreachable
+	// here today - a same-reference redelivery returns at the
+	// VoidedByRollback short-circuit above, before ever reaching
+	// ledger.Post - but gating makes "postings are audited once per fact"
+	// structural rather than dependent on that short-circuit.
+	if !postResult.AlreadyPosted {
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "casino_win.rolled_back",
+			TargetType: "ledger_transaction", TargetID: postResult.TransactionID.String(), Outcome: audit.OutcomeSuccess,
+			Metadata: map[string]any{
+				"provider_id": providerID, "rollback_provider_tx_id": event.ProviderTxID,
+				"original_provider_tx_id": event.OriginalProviderTxID, "original_transaction_id": originalID.String(),
+				"already_posted": postResult.AlreadyPosted, "held_disposition_id": disposition.ID.String(), "grant_id": disposition.GrantID.String(),
+			},
+		}); err != nil {
+			return true, ReceiveCallbackResult{}, fmt.Errorf("casino: audit held-win rollback: %w", err)
+		}
 	}
 
 	return true, ReceiveCallbackResult{Outcome: OutcomeSucceeded, LedgerTransactionID: &postResult.TransactionID}, nil
