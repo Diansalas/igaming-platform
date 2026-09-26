@@ -769,7 +769,7 @@ func TestRunSweep_CasinoStatementStreamWiredAuditedAndP1Logged(t *testing.T) {
 	w.buildCleanWorld(t)
 
 	// MOCK source: clean, audited with the MOCK label and statement shape.
-	outcomes, err := RunSweep(context.Background(), pool, nil, time.Now().Add(-time.Hour), time.Now(),
+	outcomes, err := RunSweepTenants(context.Background(), pool, nil, []uuid.UUID{w.f.tenantID}, time.Now().Add(-time.Hour), time.Now(),
 		sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
 	if err != nil {
 		t.Fatalf("RunSweep: %v", err)
@@ -801,7 +801,7 @@ func TestRunSweep_CasinoStatementStreamWiredAuditedAndP1Logged(t *testing.T) {
 	// A divergent source: P1 log line carrying the label.
 	lc := &logCapture{}
 	logger := slog.New(slog.NewJSONHandler(lc, nil))
-	outcomes, err = RunSweep(context.Background(), pool, logger, time.Now().Add(-time.Hour), time.Now(),
+	outcomes, err = RunSweepTenants(context.Background(), pool, logger, []uuid.UUID{w.f.tenantID}, time.Now().Add(-time.Hour), time.Now(),
 		sportsbook.MockSettlementStatementSource{}, casMutateLine("b1", func(l *statement.CasinoStatementLine) { l.Amount = 3 }))
 	if err != nil {
 		t.Fatalf("RunSweep: %v", err)
@@ -826,7 +826,7 @@ func TestRunSweep_CasinoStatementNilSourceFailsClosedAndIsAudited(t *testing.T) 
 	pool := testPool(t)
 	w := newCasWorld(t, pool)
 	w.buildCleanWorld(t)
-	outcomes, err := RunSweep(context.Background(), pool, nil, time.Now().Add(-time.Hour), time.Now(),
+	outcomes, err := RunSweepTenants(context.Background(), pool, nil, []uuid.UUID{w.f.tenantID}, time.Now().Add(-time.Hour), time.Now(),
 		sportsbook.MockSettlementStatementSource{}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -858,7 +858,7 @@ func TestRunSweep_CasinoStatementSourceErrorIsAuditedInFreshTransaction(t *testi
 	pool := testPool(t)
 	w := newCasWorld(t, pool)
 	w.buildCleanWorld(t)
-	outcomes, err := RunSweep(context.Background(), pool, nil, time.Now().Add(-time.Hour), time.Now(),
+	outcomes, err := RunSweepTenants(context.Background(), pool, nil, []uuid.UUID{w.f.tenantID}, time.Now().Add(-time.Hour), time.Now(),
 		sportsbook.MockSettlementStatementSource{}, casDivergentSource{err: errors.New("statement fetch timed out")})
 	if err != nil {
 		t.Fatal(err)

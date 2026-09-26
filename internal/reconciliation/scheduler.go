@@ -143,7 +143,17 @@ type StreamOutcome struct {
 	Err     error
 }
 
-// allTenantIDs reads every tenant id via a platform-scoped connection.
+// allTenantIDs reads every ACTIVE tenant id via a platform-scoped
+// connection (activeTenantIDs with no restriction).
+func allTenantIDs(ctx context.Context, pool *db.Pool) ([]uuid.UUID, error) {
+	return activeTenantIDs(ctx, pool, nil)
+}
+
+// activeTenantIDs reads the ids of active tenants via a platform-scoped
+// connection, restricted to only when only is non-nil (a nil only means
+// "every active tenant"; an empty non-nil only means "none"). Result
+// order is deterministic (by id).
+//
 // This is the one legitimate cross-tenant read in this package: the
 // sweep exists to iterate tenants so it can reconcile each one
 // individually, and it never reads a tenant-owned row without first
@@ -151,14 +161,21 @@ type StreamOutcome struct {
 // "RLS and tenancy shape" - reconciliation_runs/reconciliation_mismatches
 // themselves are tenant-scoped-only, no dual-scope policy, matching
 // migration 0027's own comment).
-func allTenantIDs(ctx context.Context, pool *db.Pool) ([]uuid.UUID, error) {
+func activeTenantIDs(ctx context.Context, pool *db.Pool, only []uuid.UUID) ([]uuid.UUID, error) {
+	if only != nil && len(only) == 0 {
+		return nil, nil
+	}
 	var ids []uuid.UUID
 	err := pool.WithoutTenant(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		// Specialist review (architect): a suspended/closed tenant has no
 		// legitimate reason to be swept - reconciling a closed tenant's
 		// (presumably frozen) books every hour forever is pure waste, not
-		// a safety measure.
-		rows, err := tx.Query(ctx, `SELECT id FROM tenants WHERE status = 'active'`)
+		// a safety measure. The same filter applies to a tenant-scoped
+		// sweep (RunSweepTenants): naming a suspended/closed tenant does
+		// not sweep it.
+		rows, err := tx.Query(ctx,
+			`SELECT id FROM tenants WHERE status = 'active' AND ($1::uuid[] IS NULL OR id = ANY($1::uuid[])) ORDER BY id`,
+			only)
 		if err != nil {
 			return err
 		}
@@ -194,12 +211,45 @@ func allTenantIDs(ctx context.Context, pool *db.Pool) ([]uuid.UUID, error) {
 // W3a; in production today casino.MockStatementSource - MOCK). A nil
 // casSource fails that stream's run closed (audited as a failure), never
 // "clean".
+//
+// Cost: serial, O(active tenants x each tenant's full history) per call -
+// every stream recomputes its whole population. Registered as
+// CAS-RECON-SCALE-1 (docs/governance/task-registry.md); not redesigned
+// here. RunSweepTenants runs the same body for named tenants only.
 func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodStart, periodEnd time.Time, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource) ([]SweepOutcome, error) {
 	tenantIDs, err := allTenantIDs(ctx, pool)
 	if err != nil {
 		return nil, fmt.Errorf("reconciliation: list tenants for sweep: %w", err)
 	}
+	return sweepTenants(ctx, pool, logger, tenantIDs, periodStart, periodEnd, sbSource, casSource), nil
+}
 
+// RunSweepTenants is RunSweep restricted to the named tenants: exactly the
+// same per-tenant streams, locks, audit records, logging and failure
+// isolation, over the ACTIVE tenants among tenantIDs only (a suspended,
+// closed or unknown id is not swept and yields no SweepOutcome; duplicates
+// are swept once). It is the operational entry point for an on-demand
+// re-run of one tenant's reconciliation (for example after a provider
+// redelivery, or to confirm a P1 is resolved) without paying for every
+// other tenant's full sweep, and it is what the integration tests use so
+// their runtime does not grow with every tenant other tests have left on
+// the shared database. tenantIDs is a server-side, internal input - it is
+// never taken from a client request. A nil or empty tenantIDs sweeps
+// nothing (it never means "all"; that is RunSweep).
+func RunSweepTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantIDs []uuid.UUID, periodStart, periodEnd time.Time, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource) ([]SweepOutcome, error) {
+	if len(tenantIDs) == 0 {
+		return []SweepOutcome{}, nil
+	}
+	ids, err := activeTenantIDs(ctx, pool, tenantIDs)
+	if err != nil {
+		return nil, fmt.Errorf("reconciliation: list tenants for scoped sweep: %w", err)
+	}
+	return sweepTenants(ctx, pool, logger, ids, periodStart, periodEnd, sbSource, casSource), nil
+}
+
+// sweepTenants is the per-tenant body shared by RunSweep and
+// RunSweepTenants.
+func sweepTenants(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantIDs []uuid.UUID, periodStart, periodEnd time.Time, sbSource statement.SportsbookSettlementSource, casSource statement.CasinoStatementSource) []SweepOutcome {
 	outcomes := make([]SweepOutcome, 0, len(tenantIDs))
 	for _, tenantID := range tenantIDs {
 		outcome := SweepOutcome{TenantID: tenantID}
@@ -278,7 +328,7 @@ func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodSta
 		outcome.CasinoStatement = runCasinoStatementStreamForTenant(ctx, pool, logger, tenantID, periodStart, periodEnd, casSource)
 		outcomes = append(outcomes, outcome)
 	}
-	return outcomes, nil
+	return outcomes
 }
 
 // runSportsbookStreamForTenant runs the sportsbook_settlement stream for

@@ -784,7 +784,7 @@ func TestSportsbookSettlementRecon_DriftInjectionPerKind(t *testing.T) {
 			func(ctx context.Context, tx pgx.Tx) error {
 				return execOne(ctx, tx, `UPDATE sportsbook_bets SET status = 'void' WHERE id = $1`, dirty.bets["open"].ID)
 			})
-		outcomes, err := RunSweep(context.Background(), pool, nil, time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
+		outcomes, err := RunSweepTenants(context.Background(), pool, nil, []uuid.UUID{clean.f.tenantID, dirty.f.tenantID}, time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
 		if err != nil {
 			t.Fatalf("RunSweep: %v", err)
 		}

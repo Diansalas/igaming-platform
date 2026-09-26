@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/casino"
@@ -20,9 +21,13 @@ import (
 )
 
 // findOutcome returns the SweepOutcome for tenantID, failing the test if
-// RunSweep's result set (which, on this shared dev database, also
-// contains every tenant left behind by other integration tests across
-// this whole session) does not include it.
+// the sweep's result set does not include it. The tests sweep through
+// RunSweepTenants scoped to their own tenant(s): RunSweep over the shared
+// dev database would iterate every tenant every other integration test
+// has ever left behind (thousands, each with four streams), making each
+// call cost minutes (CAS-RECON-SCALE-1). RunSweep's only difference - the
+// unrestricted tenant enumeration - is covered directly by
+// TestSweepTenantSelection_ActiveOnlyScopedAndUnscoped.
 func findOutcome(t *testing.T, outcomes []SweepOutcome, f fixture) SweepOutcome {
 	t.Helper()
 	for _, o := range outcomes {
@@ -127,7 +132,7 @@ func TestRunSweep_FailedTenantRunDoesNotCorruptStateAndRetrySucceeds(t *testing.
 	now := time.Now()
 	invertedStart, invertedEnd := now, now.Add(-time.Hour) // end before start: violates the CHECK constraint
 
-	outcomes, err := RunSweep(context.Background(), pool, nil, invertedStart, invertedEnd, sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
+	outcomes, err := RunSweepTenants(context.Background(), pool, nil, []uuid.UUID{f.tenantID}, invertedStart, invertedEnd, sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
 	if err != nil {
 		t.Fatalf("RunSweep itself must not fail even though one tenant's run failed: %v", err)
 	}
@@ -151,7 +156,7 @@ func TestRunSweep_FailedTenantRunDoesNotCorruptStateAndRetrySucceeds(t *testing.
 	// earlier failure left the tenant (and the advisory lock, which is
 	// transaction-scoped and therefore released on the failed tx's
 	// rollback) in a normal, reconcilable state.
-	outcomes, err = RunSweep(context.Background(), pool, nil, now.Add(-time.Hour), now, sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
+	outcomes, err = RunSweepTenants(context.Background(), pool, nil, []uuid.UUID{f.tenantID}, now.Add(-time.Hour), now, sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
 	if err != nil {
 		t.Fatalf("RunSweep retry: %v", err)
 	}
@@ -191,7 +196,7 @@ func TestRunSweep_DetectsMismatchThenSafeRebuildResolves(t *testing.T) {
 		t.Fatalf("inject drift: %v", err)
 	}
 
-	outcomes, err := RunSweep(context.Background(), pool, nil, time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
+	outcomes, err := RunSweepTenants(context.Background(), pool, nil, []uuid.UUID{f.tenantID}, time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
 	if err != nil {
 		t.Fatalf("RunSweep: %v", err)
 	}
@@ -237,7 +242,7 @@ func TestRunSweep_DetectsMismatchThenSafeRebuildResolves(t *testing.T) {
 		t.Fatalf("rebuild projection row: %v", err)
 	}
 
-	outcomes, err = RunSweep(context.Background(), pool, nil, time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
+	outcomes, err = RunSweepTenants(context.Background(), pool, nil, []uuid.UUID{f.tenantID}, time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
 	if err != nil {
 		t.Fatalf("RunSweep after rebuild: %v", err)
 	}
@@ -247,5 +252,77 @@ func TestRunSweep_DetectsMismatchThenSafeRebuildResolves(t *testing.T) {
 	}
 	if clean.Run.Status != StatusClean {
 		t.Fatalf("expected StatusClean after rebuild, got %s", clean.Run.Status)
+	}
+}
+
+// TestSweepTenantSelection_ActiveOnlyScopedAndUnscoped pins the tenant
+// enumeration RunSweep and RunSweepTenants share (activeTenantIDs): the
+// unrestricted list RunSweep uses includes every active tenant and never a
+// suspended/closed one, and a scoped sweep reconciles exactly the active
+// tenants it names - a suspended, unknown or duplicated id is not swept
+// (and writes nothing), and an empty list sweeps nothing rather than
+// everything.
+func TestSweepTenantSelection_ActiveOnlyScopedAndUnscoped(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+	active := seedFixture(t, pool)
+	suspended := seedFixture(t, pool)
+	closed := seedFixture(t, pool)
+	for id, status := range map[uuid.UUID]string{suspended.tenantID: "suspended", closed.tenantID: "closed"} {
+		if err := pool.WithPlatformAdmin(ctx, uuid.New(), func(ctx context.Context, tx pgx.Tx) error {
+			return execOne(ctx, tx, `UPDATE tenants SET status = $2 WHERE id = $1`, id, status)
+		}); err != nil {
+			t.Fatalf("set tenant %s %s: %v", id, status, err)
+		}
+	}
+
+	// RunSweep's unrestricted enumeration.
+	all, err := allTenantIDs(ctx, pool)
+	if err != nil {
+		t.Fatalf("allTenantIDs: %v", err)
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, id := range all {
+		seen[id] = true
+	}
+	if !seen[active.tenantID] {
+		t.Fatalf("the unrestricted sweep enumeration must include active tenant %s", active.tenantID)
+	}
+	if seen[suspended.tenantID] || seen[closed.tenantID] {
+		t.Fatal("the unrestricted sweep enumeration must exclude suspended/closed tenants")
+	}
+
+	// Empty scope sweeps nothing (never "all").
+	for _, ids := range [][]uuid.UUID{nil, {}} {
+		outcomes, err := RunSweepTenants(ctx, pool, nil, ids, time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
+		if err != nil || len(outcomes) != 0 {
+			t.Fatalf("empty scope %v: expected no outcomes, got %d (err %v)", ids, len(outcomes), err)
+		}
+	}
+
+	// Scoped: exactly the active named tenant, once.
+	outcomes, err := RunSweepTenants(ctx, pool, nil,
+		[]uuid.UUID{suspended.tenantID, active.tenantID, uuid.New(), active.tenantID, closed.tenantID},
+		time.Now().Add(-time.Hour), time.Now(), sportsbook.MockSettlementStatementSource{}, casino.MockStatementSource{})
+	if err != nil {
+		t.Fatalf("RunSweepTenants: %v", err)
+	}
+	if len(outcomes) != 1 || outcomes[0].TenantID != active.tenantID {
+		t.Fatalf("expected exactly one outcome for the active tenant, got %+v", outcomes)
+	}
+	o := outcomes[0]
+	if o.Err != nil || o.Run.Status != StatusClean || o.Sportsbook.Err != nil || o.Casino.Err != nil || o.CasinoStatement.Err != nil {
+		t.Fatalf("unexpected outcome for the active tenant: %+v", o)
+	}
+	for _, f := range []fixture{suspended, closed} {
+		var runs int
+		if err := pool.WithTenant(ctx, f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT count(*) FROM reconciliation_runs WHERE tenant_id = $1`, f.tenantID).Scan(&runs)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if runs != 0 {
+			t.Fatalf("a non-active tenant %s must not be swept, found %d runs", f.tenantID, runs)
+		}
 	}
 }
