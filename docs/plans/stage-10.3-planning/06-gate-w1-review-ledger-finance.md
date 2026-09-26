@@ -130,3 +130,117 @@ This holds. The branch writes exactly one `audit_records` row (`casino_bet.rejec
 - **G-1 code:** financially approved. The deliverable is `PARTIALLY IMPLEMENTED` until C3 is done.
 - **Migration 0094:** approved. It is `IMPLEMENTED` subject to C6, because its integration tests have not run in this review.
 - **ADR 0082 A6:** concurred, including the `postWin` extension. It stays `NOT IMPLEMENTED` on paper until C8.
+
+---
+
+## Re-verification after fix round A
+
+- **Reviewer:** `ledger-finance`.
+- **HEAD:** `e45831c` on `claude/focused-wright-jw88w9`.
+- **Commits reviewed:** `5f98e23` (fix round A), `a94e610` (scheme-set routing, with no ledger effect), `e45831c` (evidence), and the ADR 0082 edit in `575f9c6`.
+- **Executed:**
+  - `go vet` passed for `internal/{casino,httpserver,ledger,providers}` under both the default and `integration` tags.
+  - Unit tests passed for `internal/{casino,httpserver,ledger,providers,webhookauth}/...`. They ran with `TEST_DATABASE_URL`/`DATABASE_URL` unset, so no DB was touched.
+- **Not executed:** integration tests, per instruction, because a CI replay is recreating the DB. Every integration-level claim below comes from reading the tests or from the implementer's attestation, and says which.
+- **Evidence file provenance.** `w1c-mutation-kill.txt` names HEAD `a56f00d`. That commit is not on the branch; it is the pre-rebase twin of `a94e610` (same message). `git diff a56f00d a94e610` is empty, so the evidence applies to the code at HEAD.
+
+### Verdict: **CONDITIONS MET for C1–C6, C8 and C10, and for both cleanup items. One new binding condition, C11, arises from the fix itself.**
+
+- **A6** may move to `IMPLEMENTED` now. Its conditions are C1, C6 and C8, and all three are met.
+- **W1c** moves to `IMPLEMENTED (MOCK provider only)` once C11 is met. C11 is small and test-only.
+- **C7** stays with `security`.
+- **C9** is W2b scope.
+
+### Ruling on the disclosed replay-audit defect
+
+**1. The fix is correct.**
+- `ledger.Post` returns `AlreadyPosted = true` only when the stored transaction's canonical payload equals the request (Stage 10 F-7, `ledger.go:264-296`).
+- A divergent redelivery errors instead (`ErrIdempotencyPayloadMismatch` or `ErrIdempotencyKeyReused` → 409 plus an integrity-alert log). The gate therefore cannot swallow a conflicting attempt.
+- The original posting's audit row is written in the same DB transaction as the posting. So `AlreadyPosted` implies the fact already has exactly one committed audit row, and none is lost.
+- `postWin` needs this gate because, unlike `postBet`, it has no idempotency short-circuit before `Post`. `postRollback`'s generic path deliberately lets a same-reference redelivery fall through to `Post`. The gate on the Post result is the right place in both.
+- The fix has no ledger effect.
+- The side effects are unchanged:
+  - `postWinLockedBonus` still calls `AttributeGrantLedgerTransactionIdempotent` and `ResolveTerminalGrantCredit` unconditionally, and both are idempotent in their own right.
+  - `postRollback`'s grant attribution and recheck were already gated on `!AlreadyPosted`.
+- Cosmetic: the `"already_posted"` metadata key on these rows is now always `false`. Keep it for schema stability, or drop it later. It does not matter.
+
+**2. It is consistent with CLAUDE.md auditability.**
+- CLAUDE.md requires an audit record for every mutating financial action. A byte-identical redelivery that resolves to `AlreadyPosted` mutates nothing, and the fact it describes is already audited exactly once.
+- One row per fact is the correct audit semantics and matches `postBet` (E2) and the tombstone replay (E9).
+- The one intentional exception is the E3 per-attempt `casino_bet.rejected_tombstoned` row. That row records a rejection decision made on this delivery, not a posting, and my original review concurred with it. Rule: **postings are audited once per fact; rejections are audited once per verified attempt.**
+- No durable redelivery record is required by CLAUDE.md, and I do not require one for W1c.
+- Today a replay leaves only the generic `http_request` log line (method, path, status, duration, request id). It cannot be told apart from a first delivery without a join.
+- **Recommendation R1 (non-blocking):** add a structured `Info` log such as `casino_callback_replayed` carrying callback type, `provider_id`, `provider_tx_id` and `ledger_transaction_id`.
+  - Emit it for every replay short-circuit: the `AlreadyPosted` gate, `postBet`'s E2 short-circuit, the E9 tombstone short-circuit, and `postRollbackHeldWin`'s voided-by-same-reference short-circuit.
+  - This needs a `Replayed bool` on `ReceiveCallbackResult`.
+  - Any durable per-delivery record belongs in W2b's callback/rejection record, not in `audit_log`.
+
+**3. Scope: complete for every reachable path.** I checked each redelivery audit site in `internal/casino`:
+
+| Path | Replay behaviour | Audit on replay |
+|---|---|---|
+| `postBet` E2 (`orchestrator.go:984-993`) | Short-circuit under L0.1 before `Post` | none (correct) |
+| `postBet` audit (`:1320`) | Ungated, but `AlreadyPosted` is unreachable there: L0.1 plus the E2 short-circuit | none reachable |
+| `postWin` ×4 branches (`bonus_settlement.go:423,476,576,636`) | Gated (the fix) | none |
+| `postRollback` generic inversion (`orchestrator.go:1733`) | Gated (the fix) | none |
+| `postRollback` first tombstone (`:1569`) | Written once. A concurrent identical rollback serializes on L0.1(original) and then sees the tombstone row | once (asserted by the concurrent-identical rollback test) |
+| **E9** tombstone replay or a second reference (`:1584-1596`) | Returns at the `TxTombstone` check, before any audit | none (correct) |
+| `postRollbackHeldWin` (`bonus_settlement.go:826`) | Ungated, but a same-reference replay returns at the `VoidedByRollback` short-circuit before `Post`. The void commits atomically with the reversal, so `AlreadyPosted` is unreachable | none reachable |
+| E3 (`orchestrator.go:1019`) | One row per verified attempt, by design | per attempt (intended) |
+| E10, and `ErrAlreadyRolledBack` for a distinct second reference | Transaction rolls back or 409, log only | none (W2b, C9) |
+
+- **R2 (non-blocking hygiene):** gate `postBet:1320` and `postRollbackHeldWin:826` on `!AlreadyPosted` as well. Both are unreachable today, but gating makes the one-row-per-fact rule structural rather than dependent on upstream short-circuits.
+- **C9 extension (W2b):** an E9 *distinct second reference* to a tombstoned original is acknowledged 200 with no ledger, audit or log record of its own. W2b's rejection/callback record must capture it, together with E10 and the G-1 409 classes.
+- **Outside casino, not verified, flagged to the owners:** `sportsbook/orchestrator.go:484` and `payments/orchestrator.go:796` use the same ungated `"already_posted"` audit pattern. Their owners should confirm that an upstream short-circuit makes `AlreadyPosted` unreachable at those sites.
+
+**New binding condition from the fix:**
+- **C11.** The `postRollback` generic-path audit gate has **no killing test**.
+  - The only concurrent-identical rollback test exercises the tombstone path, which was already short-circuited before this fix.
+  - No test counts `casino_bet.rolled_back` or `casino_win.rolled_back` rows after a redelivery. Removing the `!postResult.AlreadyPosted` guard at `orchestrator.go:1733` would survive the suite.
+  - **Required:** add a test that posts a bet and rolls it back, then redelivers the identical rollback both sequentially and concurrently (N=8). It must assert:
+    - exactly one reversal row;
+    - the same `ledger_transaction_id` in every response;
+    - **exactly one** `casino_bet.rolled_back` audit row.
+  - Record a mutation kill for removing that guard. The direct-cash `postWin` guard is already killed by `TestPostWin_ConcurrentIdenticalWinCallbacks_PostsExactlyOnce`, which asserts one row.
+  - **Recommended, not blocking:** a locked-branch replay case in `internal/casino/bonus_settlement_integration_test.go`. The locked branches are unreachable from real callbacks while `postBet` is cash-only (G-6).
+  - Run it as `igaming_runtime` and append the run output to `evidence/`. That also closes the record gap noted under C6.
+
+### Conditions
+
+| # | Status | Basis |
+|---|---|---|
+| C1 | **Met** | Both race tests run `iterations = 50`. Iteration 0 of each holds the exact production L0.1 key externally (`casHoldProviderTxDeliveryLock`, same `hashtextextended` key) and asserts a real delivery queues on an advisory lock (`pg_stat_activity` `wait_event_type='Lock', wait_event='advisory'`). That is equivalent to my `pg_locks` not-granted wording. Mutation kills M1 (L0.1 removed from `postRollback`) and M2 (removed from `postWin`) are recorded with quoted failing assertions. **H1 (non-blocking hardening):** the poll is cluster-wide and unfiltered. CI runs `go test -tags=integration ./...` with packages in parallel against one DB, so another package's advisory wait could satisfy it spuriously. Filter on `datname = current_database()` and `pid <> <blocker pid>`, and ideally require ≥2 waiters, since both racers queue. |
+| C2 | **Met** | `TestCasCapRollback1_E3_AuditRowAndBoundedEffect` asserts exactly one `casino_bet.rejected_tombstoned` row with `target_type = casino_provider_tx`, `target_id = mock-casino:<ref>` and `outcome = failure`. It also runs the six-point no-effect check with an audit delta of exactly 1. `TestCasinoWebhook_E10_SequentialWinAfterTombstone` checks the 409, the unmodified `AssertNoCasinoEffect`, that the bet is untouched, and the balance. M3 and M4 kill both checks. |
+| C3 | **Met** | `_Replay` (same id, one row, balance unchanged), `_ConcurrentWins` (N=8, one row, one credit), `_RollbackOneThenWin` (credits the surviving bet's wallet), and `TestCasMultiBetWin_G1_HTTPLevel409Mappings` (wallet collision, mixed funding and ambiguous bare bonus, each seeded and delivered through the real webhook, with 409 plus `AssertNoCasinoEffect`). The mislabelled test is now `TestCasMultiBetWin_OrphanWin_MapsTo400NotG1`. M8 kills the G-1 special case. |
+| C4 | **Met** | All three concurrent-identical tests assert one row, the same `ledger_transaction_id` across all 8 responses, and exactly one audit row (`casino_bet.posted`, `casino_win.posted`, `casino_rollback.tombstoned`). See C11 for the generic rollback path this did not reach. |
+| C5 | **Met** | S-nobet (killed by M6); brand-B does not authorize brand-A (M5 note accepted: the positive brand-only test is the kill); capability disabled concurrently with an in-flight bet; 503 → re-enable → retry posts once; E2 replay while disabled returns the original; rollback of a posted win while disabled (balance −2500, one win row); ledger-vs-projection sweep `StatusClean` with zero mismatches. The partial-failure test injects the error **after** `ReceiveCallback` returns rather than literally between the tombstone and audit statements. That is accepted: both writes share the caller's one transaction and neither function commits, so every in-transaction failure point is equivalent. It asserts zero tombstone and zero audit rows after the failure, then exactly one of each after redelivery. |
+| C6 | **Met on attestation** | I could not run it (DB off-limits). The implementer attests that the full W1c suites are green as `igaming_runtime` (NOBYPASSRLS), in the `5f98e23` message and the evidence file. Migration tests need the owner role for `CREATE DATABASE`, which is acceptable because they test DDL, not RLS-scoped access. CI's `TEST_DATABASE_URL` is the owner role `igaming`, so the running CI replay does **not** independently confirm C6. The record is a single line with no log. Closing C11 with a recorded runtime-role run covers this. |
+| C7 | Not mine | `security`. |
+| C8 | **Met** | The ADR 0082 §1.3 Stage 10.3 inventory table lists `postBet`/`postWin`/`postRollback` with L0.1 first, and its line numbers match `bc72fe4` exactly (checked: `:587, :913, :962, :1016, :1388, :1413, :1426, :1463, :1518, :1540, :1554, :1676`). The §2.1 L0.1 row note, the "As implemented" block and the corrected E3/E10 wording are all accurate. **Architect action:** flip "Status at gate 10.3-W1" to `IMPLEMENTED`, and update the Tests parenthetical ("the fix round raises them…") to past tense, citing `w1c-mutation-kill.txt` M1/M2. |
+| C9 | Carried to W2b | Extended by the E9 distinct-reference item above. |
+| C10 | **Met** | `writeCasinoCallbackError` now maps `ErrOriginalTombstoned` and the five G-1 abort classes to 409 with the same `errors.Is` set as the webhook mapper, with generic bodies. Two integration tests were added. |
+
+**Cleanup items:**
+- **E3 audit target: met.** `TargetType = "casino_provider_tx"` and `TargetID = "<provider>:<provider_tx_id>"`, and the E3 test asserts both. No `ledger_transaction` id is fabricated.
+- **Tombstone correlation fallback: met and replay-safe.** The fallback is now `uuid.NewSHA1(OID, tenantID + ":" + "tombstone:<provider>:<ref>")` (`orchestrator.go:1784`), and the `RoundID` path is unchanged.
+  - Replay safety: `TestReplay_CorrelationComparedExceptTombstone` (`ledger/replay_integration_test.go:238`) proves that a tombstone redelivered with a *different* correlation id returns `AlreadyPosted`. Pre-change tombstones therefore still replay cleanly under the new value.
+  - The provider reference is still compared.
+  - `correlation_id` has no uniqueness constraint, and every correlation-keyed casino read filters on `casino_bet` or is entry-based.
+- **Dead `txs` map:** removed.
+
+### Pre-existing observation (not introduced by W1c; no money effect; carry forward)
+
+- **F-9 (Medium, follow-up item):** `postWin` has no `postBet`-style "already posted → verify match → return original" short-circuit before `resolveWinOrigin`. So a redelivery of a posted win does **not** return the original result in two cases, although by reading it never double-pays:
+  - **Direct cash:** bet, then win, then rollback of the bet, then a win redelivery gives `ErrBetNotFound` → 400.
+  - **Locked branches:** a win redelivery after the stake release appears to hit `ErrLockAlreadyReleased` → 409, or a payload mismatch, because `NetOutstandingLocked` is now 0.
+- Both contradict §1.3 row E6 ("idempotent") for those sequences.
+- **Fix:** after L0.1 and the E10 check, look up `(tenant, provider, provider_tx_id)` for a `casino_win`, verify it matches the event, and return the original. This would also make the new audit gate structural.
+- Must be resolved before bonus-funded or locked casino stakes (G-6) ship. It is not a W1c blocker.
+
+### Status labels after this re-verification
+
+| Item | Status |
+|---|---|
+| **ADR 0082 A6** | `IMPLEMENTED` (C1, C6, C8 met). Architect to edit the status line. |
+| **Migration 0094** | `IMPLEMENTED`, subject to C6's attested runtime-role run |
+| **CAS-CAP-ROLLBACK-1 and G-1 (W1c)** | `PARTIALLY IMPLEMENTED`. Becomes `IMPLEMENTED (MOCK provider only)` once C11 lands. It is `MOCK` because the only registered casino provider is `mock-casino`, and no real aggregator integration exists. |
