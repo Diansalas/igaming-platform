@@ -169,9 +169,24 @@ func run() error {
 	// player can launch it - registering the adapter here does not itself
 	// enable it for any tenant. See the payments registration above for
 	// why this provider_id must differ from it.
-	casinoOrchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{
-		"mock-casino": casino.NewMockCasinoProvider("mock-casino", "EUR", "USD", "GBP", "BRL", "MXN"),
-	})
+	// CAS-WH-TENANT-1 (Stage 10.2, ADR 0091): bind the mock adapter to a
+	// variable so its own MockWebhookCredentials resolver can be wired
+	// into the same Orchestrator - the ONLY component that ever sees
+	// inbound-webhook credential secret material. This is a MOCK
+	// resolver; the real resolver (a FORCE-RLS handle table plus an
+	// external secret store) is NOT IMPLEMENTED. The resolver is wired
+	// only when mockProviderWiring (derived solely from
+	// cfg.TestSupportRoutesEnabled(), ADR 0085) says so - in production
+	// or with test support off the Orchestrator gets a nil resolver, so
+	// every casino webhook fails closed with the uniform 401
+	// (no_resolver). The mock adapter itself stays registered for
+	// catalogue and launch (MOCK-ADAPTER-PROD-1, a pre-launch checklist
+	// item - not this stage's scope).
+	mockCasinoProvider := casino.NewMockCasinoProvider("mock-casino", "EUR", "USD", "GBP", "BRL", "MXN")
+	casinoOrchestrator := casino.NewOrchestrator(
+		map[string]casino.CasinoProvider{"mock-casino": mockCasinoProvider},
+		casinoWebhookResolver(wiring, mockCasinoProvider),
+	)
 
 	// Stage 6 ships a mock sportsbook provider only (CLAUDE.md's "does not
 	// integrate a real provider without a confirmed commercial

@@ -3,7 +3,6 @@ package httpserver
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 
 	"github.com/google/uuid"
@@ -17,12 +16,23 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // maxCasinoWebhookBodyBytes mirrors maxWebhookBodyBytes's identical
 // rationale in deposit_handlers.go - a casino provider callback has no
 // session/auth to rate-limit by.
 const maxCasinoWebhookBodyBytes = 1 << 20 // 1 MiB
+
+// casinoWebhookRoute is the casino domain's parameter set for the shared
+// webhook preamble (webhook_preamble.go). Stage 10.2, CAS-WH-TENANT-1, ADR
+// 0091, design §C6.
+var casinoWebhookRoute = webhookRoute{
+	scheme:                  casino.WebhookScheme(),
+	maxBody:                 maxCasinoWebhookBodyBytes,
+	authFailedEvent:         "casino_webhook_auth_failed",
+	tenantLookupFailedEvent: "casino_webhook_tenant_lookup_failed",
+}
 
 type casinoGameResponse struct {
 	ID              string   `json:"id"`
@@ -293,10 +303,20 @@ func writeCasinoLaunchDenial(w http.ResponseWriter, requestID string, result cas
 // and dispatches it via Orchestrator.ReceiveCallback. No bearer-token
 // middleware - a provider webhook is not an authenticated platform
 // principal, exactly mirroring newPaymentWebhookHandler's identical
-// rationale: tenant resolution is this handler's own responsibility, via
-// the URL's tenant slug, never any field inside rawPayload; payload
-// signature verification happens inside the named adapter's own
-// HandleCallback, before any payload field is used (ADR 0025 §5/§7).
+// rationale.
+//
+// Stage 10.2 (CAS-WH-TENANT-1, ADR 0091, design §C6): tenant binding is
+// per docs/decisions/0022 §3 as amended - the tenant slug in the URL is
+// only a LOOKUP HINT, selecting one candidate credential, which must then
+// verify a signature whose input includes the route-resolved tenant_id/
+// provider_id, never any field inside the body. Every pre-verification
+// failure (unknown tenant, inactive tenant, bad provider_id, unregistered
+// provider, no resolver, no credential, bad signature) gets the IDENTICAL
+// 401 "callback rejected" response via the shared webhookPreamble, so an
+// unauthenticated caller can never enumerate which of those is true. The
+// route STAYS REGISTERED even with test support off/in production - the
+// resolver is then nil, so every callback fails closed with 401
+// (reason no_resolver); no real aggregator exists yet (design §C7).
 func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestID := observability.RequestIDFromContext(r.Context())
@@ -307,57 +327,38 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 
-		tenantSlug := r.PathValue("tenantSlug")
-		providerID := r.PathValue("providerID")
-		if tenantSlug == "" || providerID == "" {
-			apierror.Write(w, requestID, apierror.CodeValidation, "tenant slug and provider id are required")
-			return
-		}
-
-		t, err := identity.GetTenantBySlug(r.Context(), deps.DB, tenantSlug)
-		if errors.Is(err, identity.ErrNotFound) {
-			// Same enumeration-resistance rationale as
-			// newPaymentWebhookHandler: an unrecognized slug and a
-			// suspended tenant get the identical not-found response.
-			apierror.Write(w, requestID, apierror.CodeNotFound, "not found")
-			return
-		}
-		if err != nil {
-			logger.Error("casino_webhook_tenant_lookup_failed", "error", err)
-			apierror.Write(w, requestID, apierror.CodeInternal, "failed to process callback")
-			return
-		}
-		if t.Status != "active" {
-			apierror.Write(w, requestID, apierror.CodeNotFound, "not found")
-			return
-		}
-
-		body, err := io.ReadAll(io.LimitReader(r.Body, maxCasinoWebhookBodyBytes+1))
-		if err != nil {
-			apierror.Write(w, requestID, apierror.CodeValidation, "failed to read request body")
-			return
-		}
-		if len(body) > maxCasinoWebhookBodyBytes {
-			apierror.Write(w, requestID, apierror.CodeValidation, "request body too large")
+		// Steps 1-5 (provider_id charset, bounded body read, header format
+		// - all before any tenant/DB work - then the platform-wide tenant
+		// lookup and active check) are the shared webhook preamble every
+		// webhook domain uses (Stage 10.2, ADR 0091, architect R2 / ruling
+		// J4). Every rejection there is the IDENTICAL 401
+		// "callback rejected" with one allow-listed
+		// casino_webhook_auth_failed line.
+		t, providerID, body, ok := webhookPreamble(w, r, deps, casinoWebhookRoute)
+		if !ok {
 			return
 		}
 
 		var result casino.ReceiveCallbackResult
-		err = deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
+		err := deps.DB.WithTenant(r.Context(), t.ID, func(ctx context.Context, tx pgx.Tx) error {
 			var err error
-			result, err = deps.CasinoOrchestrator.ReceiveCallback(ctx, tx, t.ID, providerID, body)
+			result, err = deps.CasinoOrchestrator.ReceiveCallback(ctx, tx, t.ID, providerID, webhookauth.Inbound{Header: r.Header, Body: body})
 			return err
 		})
-		if errors.Is(err, casino.ErrCallbackSignatureInvalid) {
-			// A 4xx, not a 500 - an unsigned/mis-signed callback is a
-			// caller/authentication error, not a platform failure (ADR
-			// 0025 §12: "provider callback forgery").
-			logger.Error("casino_webhook_signature_invalid", "provider_id", providerID, "tenant_id", t.ID.String())
-			apierror.Write(w, requestID, apierror.CodeValidation, "callback rejected")
+
+		var authErr *webhookauth.AuthError
+		if errors.As(err, &authErr) {
+			logWebhookAuthFailure(logger, casinoWebhookRoute.authFailedEvent, r, requestID, authErr.Reason, &t.ID, providerID, true, authErr.KeyID, authErr.CredentialFingerprint, len(body))
+			apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")
 			return
 		}
-		if errors.Is(err, casino.ErrUnknownProvider) {
-			apierror.Write(w, requestID, apierror.CodeNotFound, "not found")
+		if errors.Is(err, casino.ErrCallbackMalformedBody) {
+			// A VERIFIED callback (the sender proved knowledge of the
+			// shared credential) whose body is structurally malformed -
+			// a real 4xx, not the uniform pre-verification 401 (design
+			// §C2 point 2).
+			logger.Warn("casino_webhook_malformed_body_after_verification", "provider_id", providerID, "tenant_id", t.ID.String(), "request_id", requestID)
+			apierror.Write(w, requestID, apierror.CodeValidation, "callback rejected")
 			return
 		}
 		if errors.Is(err, casino.ErrProviderUnavailable) {

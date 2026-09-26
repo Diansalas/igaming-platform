@@ -17,6 +17,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/tenant"
 	"github.com/Diansalas/igaming-platform/internal/validation"
+	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
 // Stage 7 §6/§7/§9/§10/§11: there is no real, hosted casino-provider game
@@ -222,6 +223,20 @@ func writeCasinoCallbackResult(w http.ResponseWriter, status int, providerTxID s
 func writeCasinoCallbackError(w http.ResponseWriter, requestID string, logger interface {
 	Error(string, ...any)
 }, err error, action string) {
+	var authErr *webhookauth.AuthError
+	if errors.As(err, &authErr) {
+		// Stage 10.2 (CAS-WH-TENANT-1, design §C8): this route signs
+		// in-process for the authenticated player's own tc.TenantID - a
+		// verification failure here can only mean the mock/resolver wiring
+		// itself is broken (e.g. a nil resolver, mirroring the route-kind
+		// rule at payment_callback_errors.go's own callbackRouteSimulate
+		// branch), never a caller forgery attempt. 503, never the uniform
+		// 401 the public webhook route uses - and the signed bytes
+		// themselves are never returned to the client.
+		logger.Error("casino_play_webhook_auth_misconfigured", "reason", string(authErr.Reason), "action", action)
+		apierror.Write(w, requestID, apierror.CodeUnavailable, "simulated play is misconfigured")
+		return
+	}
 	if errors.Is(err, casino.ErrBetNotFound) {
 		logger.Error("casino_play_integrity_alert_bet_not_found", "error", err, "action", action)
 		apierror.Write(w, requestID, apierror.CodeValidation, "no matching prior bet for this round")
@@ -334,7 +349,7 @@ func newWagerCasinoRoundHandler(deps Deps) http.HandlerFunc {
 				return &apierror.Error{Code: apierror.CodeUnavailable, Message: "simulated play is only available for the mock provider"}
 			}
 			providerTxID = deterministicSimulatedProviderTxID(session.ID, "wager", req.IdempotencyKey)
-			payload := mock.CallbackPayload(casino.CallbackEventBet, providerTxID, "", session.ID.String(), session.ProviderGameID,
+			payload := mock.CallbackPayload(tc.TenantID, casino.CallbackEventBet, providerTxID, "", session.ID.String(), session.ProviderGameID,
 				req.StakeAmount, session.AssetCode, casino.OutcomeSucceeded, "", session.PlayerAccountID, session.ID)
 			result, err = deps.CasinoOrchestrator.ReceiveCallback(ctx, tx, tc.TenantID, session.ProviderID, payload)
 			if err != nil {
@@ -427,7 +442,7 @@ func newWinCasinoRoundHandler(deps Deps) http.HandlerFunc {
 				return &apierror.Error{Code: apierror.CodeUnavailable, Message: "simulated play is only available for the mock provider"}
 			}
 			providerTxID = deterministicSimulatedProviderTxID(session.ID, "win", req.IdempotencyKey)
-			payload := mock.CallbackPayload(casino.CallbackEventWin, providerTxID, "", session.ID.String(), session.ProviderGameID,
+			payload := mock.CallbackPayload(tc.TenantID, casino.CallbackEventWin, providerTxID, "", session.ID.String(), session.ProviderGameID,
 				req.WinAmount, session.AssetCode, casino.OutcomeSucceeded, "", session.PlayerAccountID, uuid.Nil)
 			result, err = deps.CasinoOrchestrator.ReceiveCallback(ctx, tx, tc.TenantID, session.ProviderID, payload)
 			if err != nil {
@@ -567,7 +582,7 @@ func newRollbackCasinoRoundHandler(deps Deps) http.HandlerFunc {
 				return &apierror.Error{Code: apierror.CodeUnavailable, Message: "simulated play is only available for the mock provider"}
 			}
 			providerTxID = mock.NextProviderTxID()
-			payload := mock.CallbackPayload(casino.CallbackEventRollback, providerTxID, req.OriginalProviderTxID, session.ID.String(),
+			payload := mock.CallbackPayload(tc.TenantID, casino.CallbackEventRollback, providerTxID, req.OriginalProviderTxID, session.ID.String(),
 				session.ProviderGameID, 0, session.AssetCode, "", "", session.PlayerAccountID, uuid.Nil)
 			result, err = deps.CasinoOrchestrator.ReceiveCallback(ctx, tx, tc.TenantID, session.ProviderID, payload)
 			if err != nil {

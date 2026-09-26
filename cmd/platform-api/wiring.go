@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 	"github.com/Diansalas/igaming-platform/internal/payments"
@@ -34,6 +35,15 @@ type mockWiring struct {
 	// there is no legitimate reason to expose a public callback route for
 	// a provider that was never wired.
 	KYCWebhookEnabled bool
+
+	// CasinoWebhookResolver wires the casino MOCK webhook credential
+	// resolver (Stage 10.2, CAS-WH-TENANT-1, ADR 0091, design §C7).
+	// When false the casino Orchestrator gets a nil resolver, so every
+	// casino webhook fails closed with a uniform 401 (reason
+	// no_resolver) - no real aggregator exists, so this is correct, not
+	// merely a placeholder. The mock adapter itself stays registered for
+	// catalogue and launch (MOCK-ADAPTER-PROD-1, out of this scope).
+	CasinoWebhookResolver bool
 }
 
 // mockProviderWiring is a pure function of cfg - no I/O, no globals - so it
@@ -44,6 +54,7 @@ func mockProviderWiring(cfg config.Config) mockWiring {
 	return mockWiring{
 		PaymentsWebhookResolver: testSupport,
 		KYCWebhookEnabled:       testSupport,
+		CasinoWebhookResolver:   testSupport,
 	}
 }
 
@@ -86,5 +97,20 @@ func paymentsWebhookResolver(w mockWiring, mock *payments.MockProvider) payments
 	}
 	return payments.MultiWebhookCredentialResolver{
 		mock.Capabilities().ProviderID: payments.NewMockWebhookCredentials(mock),
+	}
+}
+
+// casinoWebhookResolver returns the casino Orchestrator's single injected
+// webhook credential resolver for w: the MOCK resolver bound to mock when
+// w enables it, otherwise a true nil interface (never a typed nil or an
+// empty map), so the Orchestrator's own nil-resolver branch fails every
+// callback closed as ReasonNoResolver (Stage 10.2, CAS-WH-TENANT-1, ADR
+// 0091, design §C7).
+func casinoWebhookResolver(w mockWiring, mock *casino.MockCasinoProvider) webhookauth.Resolver {
+	if !w.CasinoWebhookResolver || mock == nil {
+		return nil
+	}
+	return webhookauth.MultiResolver{
+		mock.Capabilities().ProviderID: casino.NewMockWebhookCredentials(mock),
 	}
 }
