@@ -1,0 +1,119 @@
+W1c (CAS-CAP-ROLLBACK-1 / G-1) mutation-kill record - gate 10.3-W1 fix round, part A
+(ledger-finance condition C1's mutation-kill obligation).
+HEAD: a56f00dca0995f21de16a5f0b09d1320bfa2ef28
+Method: each mutation edits ONE source file in place (a mechanical string replacement removing
+exactly the named guard/check/branch, leaving everything else byte-identical), runs only the
+test(s) that specification says must catch it (integration-tagged, against TEST_DATABASE_URL =
+the "igaming" owner role - the same role the rest of this fix round's suites were developed
+against; C6 separately re-runs the full suite as the NOBYPASSRLS igaming_runtime role and it is
+green there too), records the exact failing assertion, then restores the original bytes via
+`git checkout -- <file>` (the working tree was committed clean, at this same HEAD, before every
+mutation in this file - never left dirty between mutations). "KILLED (red)" = the named test
+failed on its own assertion (quoted below), not a build error or an unrelated panic. 8/8 killed,
+0 survived.
+
+---
+M1 postRollback: L0.1 (acquireProviderTxDeliveryLock on event.OriginalProviderTxID) removed
+    File: internal/casino/orchestrator.go
+    Test: TestPostRollback_LateOriginalRacesRollback_SerializesOnL0_1
+    KILLED (red)
+    --- FAIL: TestPostRollback_LateOriginalRacesRollback_SerializesOnL0_1
+        casino_cap_rollback1_concurrency_integration_test.go:320: iteration 1: expected both
+        deliveries to return 200 (a bet+reversal or a tombstone+declined-bet are both 200
+        shapes), got bet=500 rollback=200
+    Without the lock, the late-arriving original bet and its concurrent rollback both observe
+    "no row yet" and race ledger.Post's own unique index instead of serializing deterministically -
+    the loser gets an untyped 500 (F8's original defect), exactly what this mutation reproduces.
+
+M2 postWin: L0.1 (acquireProviderTxDeliveryLock on event.ProviderTxID) removed
+    File: internal/casino/orchestrator.go
+    Test: TestPostWin_LateWinRacesItsOwnRollback_SerializesOnL0_1
+    KILLED (red)
+    --- FAIL: TestPostWin_LateWinRacesItsOwnRollback_SerializesOnL0_1
+        casino_cap_rollback1_concurrency_integration_test.go:470: iteration 0: expected the win
+        delivery to return 200 (posted) or 409 (E10, rejected as tombstoned) - never a 500, got
+        500
+    Reproduces ADR 0082 Amendment A6's own stated defect: without this lock a win and a
+    concurrent rollback naming that same win's reference can both observe "no tombstone yet" and
+    race, instead of one deterministically winning E7 or E10.
+
+M3 postBet: E3 check (isProviderTxTombstoned + the rejected_tombstoned decline) removed
+    File: internal/casino/orchestrator.go
+    Tests: TestCasCapRollback1_LateOriginalAfterTombstoneIsNamedRejectionNot500,
+           TestCasCapRollback1_E3_AuditRowAndBoundedEffect
+    KILLED (red) - both
+    --- FAIL: TestCasCapRollback1_LateOriginalAfterTombstoneIsNamedRejectionNot500
+        casino_cap_rollback1_prefix_test.go:261: Stage 10.3 CAS-CAP-ROLLBACK-1: expected 200 (a
+        named decline, not an error) for a late original after its own tombstone, got 500
+    --- FAIL: TestCasCapRollback1_E3_AuditRowAndBoundedEffect
+        casino_e3_e10_audit_integration_test.go:100: expected 200 (named decline) for the late
+        original, got 500
+    Without the check, a late original after its own tombstone falls straight through to
+    ledger.Post, which rejects it with an untyped unique-violation 500 - F8's original defect.
+
+M4 postWin: E10 check (isProviderTxTombstoned + ErrOriginalTombstoned) removed
+    File: internal/casino/orchestrator.go
+    Test: TestCasinoWebhook_E10_SequentialWinAfterTombstone
+    KILLED (red)
+    --- FAIL: TestCasinoWebhook_E10_SequentialWinAfterTombstone
+        casino_e3_e10_audit_integration_test.go:188: Stage 10.3 E10 (sequential): expected 409
+        for a win whose own reference is already tombstoned, got 500
+    Without the check, a win whose own reference is already tombstoned falls through to
+    ledger.Post and hits the same untyped unique-violation 500.
+
+M5 postBet: brand-scoped capability gate removed (LoadCapability resolved for uuid.Nil instead
+    of session.BrandID)
+    File: internal/casino/orchestrator.go
+    Test: TestCasCapRollback1_BrandOnlyCapabilityNowResolvesAndAcceptsCallbacks
+    KILLED (red)
+    --- FAIL: TestCasCapRollback1_BrandOnlyCapabilityNowResolvesAndAcceptsCallbacks
+        casino_cap_rollback1_prefix_test.go:349: Stage 10.3 CAS-CAP-ROLLBACK-1 (F4): expected
+        200 for a bet when only a brand-scoped capability row exists and it matches the
+        session's own brand, got 503
+    Reproduces F4: a tenant-wide (brand_id=uuid.Nil) lookup can never match a brand-only
+    capability row, so every bet under a brand-scoped-only configuration 503s.
+    Note: TestCasCapRollback1_C5_BrandBCapabilityDoesNotAuthorizeBrandABet does NOT itself catch
+    this specific mutation (with no tenant-wide row registered for that tenant either, a
+    uuid.Nil lookup and a brand-B-only lookup both still correctly find nothing for brand A, so
+    that test's own 503 expectation is coincidentally still satisfied) - it is the
+    BrandOnlyCapabilityNowResolvesAndAcceptsCallbacks test, not the C5 negative test, that is
+    this mutation's actual kill.
+
+M6 postBet: S-nobet branch (the `!capability.SupportsBet` clause) removed from the gate
+    File: internal/casino/orchestrator.go
+    Test: TestCasCapRollback1_C5_SnobetActiveCapabilityRejectsBet
+    KILLED (red)
+    --- FAIL: TestCasCapRollback1_C5_SnobetActiveCapabilityRejectsBet
+        casino_c5_missing_cases_integration_test.go:63: S-nobet: expected 503 for a new bet
+        when the capability is active but supports_bet=false, got 200
+    Without this clause, an active capability with supports_bet=false lets a new bet post -
+    exactly the CAS-CAP-ROLLBACK-1 gate this stage exists to enforce.
+
+M7 LaunchGame: real-mode `!capability.SupportsBet` requirement removed
+    File: internal/casino/orchestrator.go
+    Test: TestLaunchGame_CodeReview3_RealModeRequiresSupportsBet
+    KILLED (red)
+    --- FAIL: TestLaunchGame_CodeReview3_RealModeRequiresSupportsBet
+        casino_launch_supports_bet_and_asset_narrowing_test.go:56: expected 503 for a REAL-mode
+        launch under S-nobet (LaunchGame's own supports_bet requirement), got 201
+    Without this check, a real-money session can be minted under a capability that will then
+    503 every bet at postBet's own gate - "launch coherence" (§1.4 step 7) restored by the
+    mutation's removal.
+
+M8 classifyDirectOriginRows: the G-1 cash-multibet special case removed (always
+    ErrAmbiguousMultiOriginRound for >1 row)
+    File: internal/casino/bonus_settlement.go
+    Test: TestCasMultiBetWin_G1_TwoCashBetsRoundWinSettlesToSharedWallet
+    KILLED (red)
+    --- FAIL: TestCasMultiBetWin_G1_TwoCashBetsRoundWinSettlesToSharedWallet
+        casino_multibet_win_prefix_test.go:89: Stage 10.3 G-1: expected HTTP 200 for a win on a
+        two-cash-bet round (resolves to the shared wallet), got 409
+    Reproduces F9/G-1's own pre-fix characterization: a round with two or more un-reversed
+    plain-cash bets is treated as a genuine ambiguity and its win is rejected (409) instead of
+    resolving normally to the shared wallet.
+---
+
+Cross-check: after all 8 mutations were individually applied, tested, and reverted, the working
+tree was confirmed clean (`git status --short` empty) and the full casino + httpserver
+integration suites were re-run green (see this fix round's own commit message and C6's separate
+NOBYPASSRLS run) - no mutation was left in place.
