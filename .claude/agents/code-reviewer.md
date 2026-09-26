@@ -37,6 +37,15 @@ severity discipline: confirmed correctness bugs first, then genuine
 simplification/efficiency opportunities, never padded with nitpicks to
 look thorough.
 
+## Standing checklist items
+- Signature/MAC comparison in webhook verification scheme packages uses
+  `hmac.Equal` (constant time) only — never `==`, `bytes.Equal`,
+  `strings.EqualFold` or similar on secret-derived values (ADR 0022 §3
+  amendment, conformance item 5). The enforcing control is
+  `internal/webhookauth/constant_time_lint_test.go`; the reviewer still
+  checks new scheme code by reading it, and checks that any new scheme
+  package is covered by that lint test.
+
 ## Testing responsibility
 Does not write tests, but checks that claimed test coverage actually
 exists and actually exercises the failure modes it claims to.

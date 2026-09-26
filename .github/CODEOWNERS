@@ -1,0 +1,19 @@
+# Code owners for governance-, security- and money-critical paths.
+#
+# CODEOWNERS is only enforced when branch protection on `main` has
+# "Require review from Code Owners" enabled. As of 2026-09-26 `main` is NOT
+# protected (GitHub API: protected=false, no required status checks); enabling
+# it is a repository-admin action recorded as BRANCH-PROTECTION-1 in
+# docs/governance/task-registry.md.
+
+# CI, deployment and infrastructure
+/.github/           @Diansalas
+/deploy/            @Diansalas
+
+# Schema (RLS, ledger, append-only triggers)
+/migrations/        @Diansalas
+
+# Agent configuration and project rules
+/.claude/           @Diansalas
+/CLAUDE.md          @Diansalas
+/MASTER-BUILD-PROMPT.md @Diansalas

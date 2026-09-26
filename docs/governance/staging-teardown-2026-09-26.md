@@ -118,3 +118,12 @@ Per the human's instruction, there will be **one** deliberate governed staging d
 approved commit (`deploy.sh up`, fresh environment, all migrations, full acceptance). It is not scheduled
 and needs separate human authorization. Until then staging is OFF and items needing AWS are marked
 **STAGING REQUIRED** (`docs/plans/stage-10.3-planning/00-roadmap-reconciliation.md` §8).
+
+## Access Analyzer re-check (2026-09-26, Stage 10.3 close-out)
+
+Re-attempted read-only from this environment at the human's request ("Access Analyzer account-admin
+verification where possible"): the only credential available is the deployer IAM user, and
+`accessanalyzer list-analyzers` is denied in both eu-central-1 and us-east-1 (`AccessDeniedException`: no
+identity-based policy allows `access-analyzer:ListAnalyzers`). **Still not performed; needs the account
+admin** (IAM console → Access Analyzer → findings, both regions). No policy, user or credential was
+changed to work around it. Registered as ACCESS-ANALYZER-CHECK-1.
