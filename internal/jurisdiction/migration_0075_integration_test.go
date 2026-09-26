@@ -233,15 +233,13 @@ func migrationFileVersion(name string) (int64, error) {
 }
 
 // migrationsFromVersion counts the distinct migration versions >= from that
-// exist as an up-migration in dir. This test rolls back "from 0075's own
-// version up to the chain's current tip" every time it calls
-// pool.MigrateDown, so the depth to request is exactly this count - derived
-// from the migrations directory itself (CODE-HYGIENE-10.3-1 item 4,
-// following the same fix Gate 10.3-W2/W3 code review finding #9 applied to
-// internal/ledger/migration_0092_integration_test.go's stagedMigrations0092)
-// rather than a hand-maintained literal that silently goes stale, and fails
-// loudly (via migrationFileVersion) rather than silently miscounting, every
-// time a new migration lands above 0098.
+// exist as an up-migration in dir. Used against stagedMigrations0075's
+// self-contained staged directory (never the real migrations directory
+// directly), so it always returns the same count - the depth to request in
+// pool.MigrateDown to roll back "from 0075's own version up to 0098" -
+// regardless of how many migrations accumulate in the real directory above
+// 0098 later. It still fails loudly (via migrationFileVersion) on a
+// malformed filename rather than silently miscounting.
 func migrationsFromVersion(t *testing.T, dir string, from int64) int {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -274,6 +272,66 @@ func migration0075MigrationsDir(t *testing.T) string {
 		t.Fatalf("migration 0075 not found in %s: %v", dir, err)
 	}
 	return dir
+}
+
+// stagedMigrations0075 copies the real migrations into a fresh temp
+// directory, holding back every migration numbered ABOVE migration0098Version
+// - this file's own fix for code review finding F-1 (16-code-hygiene-
+// review.md): deriving MigrateDown's depth from the migrations directory
+// (migrationsFromVersion) is not enough on its own, because these tests'
+// wantDown/wantDirty assertions describe an EXACT ordered list of versions
+// (0098 down through 0075/0076) that is only valid for a chain that ends at
+// 0098. Migrating up the full REAL chain (as this file did before the F-1
+// fix) means that list silently goes stale the moment a 0099 lands. Staging
+// a directory that never contains anything above 0098 - exactly
+// internal/ledger/migration_0092_integration_test.go's stagedMigrations0092
+// pattern (itself following migration_0048_integration_test.go's
+// stagedMigrations/copyMigrationFile shape) - keeps wantDown/wantDirty (and
+// every per-migration reversibility comment they depend on) correct
+// indefinitely: a 0099 is simply never copied into dir, so it can never
+// appear in MigrateUp/MigrateDown's return value here, no matter how many
+// such migrations land in the real directory later. Ordering detection
+// itself is untouched - MigrateDown's actual returned order is still
+// compared, element by element, against wantDown/wantDirty.
+func stagedMigrations0075(t *testing.T) string {
+	t.Helper()
+	src := migration0075MigrationsDir(t)
+	dir := t.TempDir()
+
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("read migrations dir: %v", err)
+	}
+	var copied int
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		v, err := migrationFileVersion(e.Name())
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		if v > migration0098Version {
+			continue // held back: this test's scenario ends at 0098
+		}
+		copyMigrationFile0075(t, src, dir, e.Name())
+		copied++
+	}
+	if copied == 0 {
+		t.Fatal("expected to stage at least one migration file, staged 0")
+	}
+	return dir
+}
+
+func copyMigrationFile0075(t *testing.T, src, dst, name string) {
+	t.Helper()
+	content, err := os.ReadFile(filepath.Join(src, name))
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, name), content, 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
 }
 
 func migration0075ScratchDatabase(t *testing.T) string {
@@ -382,10 +440,10 @@ func countPolicyRowsUnscoped(t *testing.T, pool *db.Pool) int {
 func TestMigration0075_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) {
 	scratchURL := migration0075ScratchDatabase(t)
 	pool := migration0075ScratchPool(t, scratchURL)
-	dir := migration0075MigrationsDir(t)
+	dir := stagedMigrations0075(t)
 
 	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
-		t.Fatalf("migrate up the full chain: %v", err)
+		t.Fatalf("migrate up the staged chain (0075 through 0098): %v", err)
 	}
 	if !migration0075AppliedVersions(t, pool)[migration0075Version] {
 		t.Fatal("expected migration 0075 to be applied")
@@ -405,12 +463,14 @@ func TestMigration0075_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 	// top of 0075 in the chain and is reversible in this scenario (0091
 	// refuses only once sportsbook settlement evidence exists, which this
 	// test never creates), so they must be rolled back first for 0075's
-	// own down migration to run at all. The count is derived from the
-	// migrations directory (migrationsFromVersion), not hand-maintained,
-	// so it never goes stale as new migrations land above 0098
-	// (CODE-HYGIENE-10.3-1 item 4) - and still fails loudly, via
-	// migrationFileVersion, on a malformed filename rather than silently
-	// miscounting.
+	// own down migration to run at all. dir is stagedMigrations0075's
+	// staged directory, which never contains anything above 0098, so the
+	// count (migrationsFromVersion) is always 24 here regardless of how
+	// many migrations exist in the real directory - this and wantDown
+	// below stay correct indefinitely, rather than going stale the moment
+	// a 0099 lands (CODE-HYGIENE-10.3-1 item 4; code review F-1). It still
+	// fails loudly, via migrationFileVersion, on a malformed filename
+	// rather than silently miscounting.
 	rolledBack, err := pool.MigrateDown(context.Background(), dir, migrationsFromVersion(t, dir, migration0075Version))
 	if err != nil {
 		t.Fatalf("down migration must succeed on a database with zero jurisdiction_precedence_configs rows: %v", err)
@@ -647,10 +707,10 @@ func TestMigration0075_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 func TestMigration0075_DownMigrationRestoresPreMigrationRLSPosture(t *testing.T) {
 	scratchURL := migration0075ScratchDatabase(t)
 	pool := migration0075ScratchPool(t, scratchURL)
-	dir := migration0075MigrationsDir(t)
+	dir := stagedMigrations0075(t)
 
 	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
-		t.Fatalf("migrate up the full chain: %v", err)
+		t.Fatalf("migrate up the staged chain (0075 through 0098): %v", err)
 	}
 	// Roll back every migration from the chain's tip down through 0075
 	// itself (0098, then 0097, then 0096, then 0095, then 0094, then 0093,
@@ -659,9 +719,10 @@ func TestMigration0075_DownMigrationRestoresPreMigrationRLSPosture(t *testing.T)
 	// then 0080, then 0079, then 0078, then 0077, then 0076, then 0075) -
 	// see this file's own header/migration0076Version through
 	// migration0098Version comments for why every one of them must be
-	// accounted for explicitly here. The count is derived
-	// (migrationsFromVersion), not hand-maintained, so it does not go
-	// stale as new migrations land above 0098 (CODE-HYGIENE-10.3-1 item 4).
+	// accounted for explicitly here. dir is stagedMigrations0075's staged
+	// directory (never anything above 0098), so this count is always 24
+	// and does not go stale as new migrations land above 0098 in the real
+	// directory (CODE-HYGIENE-10.3-1 item 4; code review F-1).
 	if _, err := pool.MigrateDown(context.Background(), dir, migrationsFromVersion(t, dir, migration0075Version)); err != nil {
 		t.Fatalf("down migration on a clean database: %v", err)
 	}

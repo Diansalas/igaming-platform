@@ -10,9 +10,13 @@ import (
 
 // WithTenantSnapshot is WithTenant with the transaction opened at
 // REPEATABLE READ, so every statement fn issues reads ONE snapshot (taken
-// at the first statement, the tenant set_config below). The tenant scoping
-// is identical to WithTenant's: app.tenant_id is set for the lifetime of
-// the transaction via set_config(..., true), and nothing else is set.
+// at the first statement, the tenant set_config that withTenantTx issues in
+// tenant_rls.go). The tenant scoping is identical to WithTenant's:
+// app.tenant_id is set for the lifetime of the transaction via
+// set_config(..., true), and nothing else is set - both go through the
+// same shared withTenantTx helper (code review F-4 on CODE-HYGIENE-10.3-1
+// item 1: this comment used to say "below", which stopped being true once
+// that set_config call moved into the shared helper).
 //
 // It exists for read-mostly jobs that must compare the results of several
 // statements with each other and therefore cannot tolerate a commit landing

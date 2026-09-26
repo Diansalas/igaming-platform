@@ -198,11 +198,80 @@ type derivedKey struct {
 	fingerprint string
 }
 
+// redactedDerivedToken is what derivedTokenBytes prints instead of its
+// bytes, on every formatting path.
+const redactedDerivedToken = "[REDACTED-DERIVED-TOKEN]"
+
+// derivedTokenBytes holds one derived token's own copy of its raw bytes and
+// redacts them on every rendering path (String/GoString/Format), mirroring
+// secretstore.Secret's redaction contract for the outbound secret itself -
+// so a derivedEntry accidentally formatted with %v/%+v/%#v (a debug helper,
+// a failed assertion's t.Logf, a future slog call) prints
+// "[REDACTED-DERIVED-TOKEN]", never the token (code review F-2 on
+// CODE-HYGIENE-10.3-1 item 2). It also exposes an in-place zero() for
+// eviction, which secretstore.Secret does not: this stays a small,
+// cache-local type - rather than adding that operation to
+// secretstore.Secret - because internal/secretstore is being changed
+// elsewhere (F-POOL-1) and must not be touched here.
+type derivedTokenBytes []byte
+
+// newDerivedTokenBytes copies b so the cache's own copy can never be
+// mutated by a caller that still holds the slice it passed to Put.
+func newDerivedTokenBytes(b []byte) derivedTokenBytes {
+	out := make(derivedTokenBytes, len(b))
+	copy(out, b)
+	return out
+}
+
+// bytes returns a fresh copy, so a caller of Get can never mutate what the
+// cache holds, and zeroing the cache's copy later can never corrupt a copy
+// a caller is still using.
+func (b derivedTokenBytes) bytes() []byte {
+	out := make([]byte, len(b))
+	copy(out, b)
+	return out
+}
+
+// zero overwrites b's bytes in place (used on eviction), so evicted
+// derived-secret material does not linger in the Go heap for an
+// indeterminate time before GC reclaims it.
+func (b derivedTokenBytes) zero() {
+	for i := range b {
+		b[i] = 0
+	}
+}
+
+func (derivedTokenBytes) String() string { return redactedDerivedToken }
+
+func (derivedTokenBytes) GoString() string { return redactedDerivedToken }
+
+func (derivedTokenBytes) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(redactedDerivedToken)) }
+
 type derivedEntry struct {
 	key     derivedKey
-	token   []byte
+	token   derivedTokenBytes
 	expires time.Time
 }
+
+// String/GoString/Format on derivedEntry itself (not just on
+// derivedTokenBytes) matter because Go's fmt package only consults a
+// FIELD's own String/GoString/Format methods when that field is exported;
+// derivedEntry.token is unexported, so formatting a *derivedEntry or
+// derivedEntry directly (e.g. a debug helper, or a failed assertion's
+// t.Logf("%+v", *el.Value.(*derivedEntry))) would otherwise fall through to
+// fmt's default reflection-based struct dump, which DOES print an
+// unexported []byte-kind field's raw byte values (as a list of numbers) -
+// fully reconstructable plaintext, not just an unredacted display. Defining
+// these directly on derivedEntry closes that gap (code review F-2 on
+// CODE-HYGIENE-10.3-1 item 2).
+func (e derivedEntry) String() string {
+	return fmt.Sprintf("derivedEntry{tenant:%s handle:%s fingerprint:%s expires:%s token:%s}",
+		e.key.tenant, e.key.handle, e.key.fingerprint, e.expires, redactedDerivedToken)
+}
+
+func (e derivedEntry) GoString() string { return e.String() }
+
+func (e derivedEntry) Format(f fmt.State, _ rune) { _, _ = f.Write([]byte(e.String())) }
 
 // NewDerivedTokenCache builds an empty, bounded cache (now nil means
 // time.Now).
@@ -222,19 +291,11 @@ func keyFor(c OutboundCredential) derivedKey {
 	return derivedKey{tenant: c.TenantID, handle: c.HandleID, fingerprint: c.Fingerprint}
 }
 
-// zeroBytes overwrites b in place so evicted secret material does not
-// linger in the Go heap for an indeterminate time before GC reclaims it.
-func zeroBytes(b []byte) {
-	for i := range b {
-		b[i] = 0
-	}
-}
-
 // removeElementLocked drops el from both the entries map and the order
 // list, zeroing its token bytes first. Callers must hold d.mu.
 func (d *DerivedTokenCache) removeElementLocked(el *list.Element) {
 	e := el.Value.(*derivedEntry)
-	zeroBytes(e.token)
+	e.token.zero()
 	delete(d.entries, e.key)
 	d.order.Remove(el)
 }
@@ -253,9 +314,7 @@ func (d *DerivedTokenCache) Get(c OutboundCredential) ([]byte, bool) {
 		d.removeElementLocked(el)
 		return nil, false
 	}
-	out := make([]byte, len(e.token))
-	copy(out, e.token)
-	return out, true
+	return e.token.bytes(), true
 }
 
 // Put stores token derived from c until vendorExpiry (the vendor's own
@@ -280,9 +339,7 @@ func (d *DerivedTokenCache) Put(c OutboundCredential, token []byte, vendorExpiry
 		d.removeElementLocked(el)
 	}
 
-	tok := make([]byte, len(token))
-	copy(tok, token)
-	el := d.order.PushBack(&derivedEntry{key: key, token: tok, expires: vendorExpiry})
+	el := d.order.PushBack(&derivedEntry{key: key, token: newDerivedTokenBytes(token), expires: vendorExpiry})
 	d.entries[key] = el
 
 	for d.order.Len() > d.maxSize {
