@@ -1,0 +1,36 @@
+Stage 10.2 pre-fix evidence — KYC-WH-1, E3
+Commit SHA: 215fd666e1ed29017c1e2d9d5aadfaf212d541fc (design-doc pin e059dc7 + 2 docs/CI-only commits;
+  no production code differs from e059dc7 — see e1 evidence file for the
+  git diff --stat)
+Date: 2026-09-26T09:05:05Z
+Command: source env.sh && go test -tags=integration -v -count=1 -run '^TestKYCWH1_PreFix_UngatedWithTestSupportOff$' ./internal/httpserver/...
+Test file: internal/httpserver/kyc_prefix_e3_ungated_test.go
+
+What this proves, precisely (see the test file's header comment for the
+full argument): cmd/platform-api/main.go's KYC wiring
+(kyc.NewOrchestrator(...) at main.go:271-273, fed into
+httpserver.Deps.KYCOrchestrator) has NO cfg.TestSupportRoutesEnabled()
+gate at all, unlike its four sibling simulation flags in the same Deps
+literal (CasinoPlaySimulationEnabled, PaymentsMockSettlementEnabled,
+AccountActivationTestSupportEnabled, SportsbookSettlementSimulationEnabled),
+which all ARE gated by it. Because that wiring is inline inside main()'s
+own body (not an independently callable function), this test reproduces
+main()'s exact KYCOrchestrator construction at the httpserver.Deps level
+(same unconditional shape, runtime-random secret, never the repo's
+literal), builds a real config.Config with Environment="staging" and
+TestSupportEndpointsEnabled=false, confirms
+cfg.TestSupportRoutesEnabled() == false for it, and shows the KYC webhook
+route still processes a request (non-404) with that cfg value never
+consulted anywhere in the path. It does NOT prove main()'s actual
+compiled binary behaves this way without also inspecting main.go's source
+(done separately, above) — it proves the internal/httpserver route/handler
+layer (registerKYCRoutes, newKYCWebhookHandler) contains no such gate,
+which is what would have to exist for main.go's unconditional wiring to be
+harmless.
+
+=== RUN   TestKYCWH1_PreFix_UngatedWithTestSupportOff
+time=2026-09-26T09:05:06.929Z level=ERROR msg=kyc_webhook_failed request_id=ff823ba1-0d5f-4396-9966-642b2e225754 error="kyc: handle callback: kyc: mock callback missing signature"
+    kyc_prefix_e3_ungated_test.go:122: PRE-FIX EVIDENCE: KYC webhook route reachable with TestSupportRoutesEnabled()==false: status=400 body={"code":"validation_error","message":"failed to process callback","request_id":"ff823ba1-0d5f-4396-9966-642b2e225754"}
+--- PASS: TestKYCWH1_PreFix_UngatedWithTestSupportOff (0.03s)
+PASS
+ok  	github.com/Diansalas/igaming-platform/internal/httpserver	0.046s

@@ -1,0 +1,14 @@
+Stage 10.2 pre-fix evidence — CAS-WH-TENANT-1, E4
+Commit SHA: 215fd666e1ed29017c1e2d9d5aadfaf212d541fc (design-doc pin e059dc7 + 2 docs/CI-only commits;
+  no production code differs from e059dc7 — see e1 evidence file for the
+  git diff --stat)
+Date: 2026-09-26T09:05:14Z
+Command: source env.sh && go test -tags=integration -v -count=1 -run '^TestCasWH_PreFix_CrossTenantCallbackSucceeds$' ./internal/httpserver/...
+Test file: internal/httpserver/casino_prefix_e4_defect_test.go
+
+=== RUN   TestCasWH_PreFix_CrossTenantCallbackSucceeds
+    casino_prefix_e4_defect_test.go:76: PRE-FIX EVIDENCE: cross-tenant rollback callback (delivered to tenant B, t-d1ad4bff-3957-49b6-9b79-b9a46575f9c5) succeeded: {Outcome: Tombstoned:true}
+    casino_prefix_e4_defect_test.go:95: PRE-FIX EVIDENCE: tombstone confirmed present in tenant B's ledger (tenant_id=8549e350-6491-4891-83d4-a935184f84c0) for original_provider_tx_id=cas-e4-unseen-original-1d4d1f9a-41c8-4cc0-ad7c-43e20195f281
+--- PASS: TestCasWH_PreFix_CrossTenantCallbackSucceeds (0.48s)
+PASS
+ok  	github.com/Diansalas/igaming-platform/internal/httpserver	0.502s
