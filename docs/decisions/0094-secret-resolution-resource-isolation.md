@@ -504,7 +504,116 @@ Each check is run by hand. Record the result in the implementing review, then re
       real payment adapter is wired. That is a Stage 10.3-W3b or later decision for the
       orchestrator.
 
-## 11. Human decisions
+## 11. QA test-plan review
+
+**Reviewer:** `qa`. **Scope:** §9 (test plan) and §9.4 (mutation checks) only, against
+the human's adversarial/concurrency list (normal operation, one tenant's outage, multiple
+affected tenants, recovery, connection exhaustion, cross-tenant isolation, financial requests
+while a tenant is degraded, `TestStoreOutage_DoesNotPinPool` not weakened) and CLAUDE.md's
+financial test list, for the paths this ADR touches (payments/casino callback money paths).
+No implementation code reviewed; none exists yet (label `NOT IMPLEMENTED` stands).
+
+**Verdict: CONFIRMED WITH CHANGES.**
+
+Mapping of the human's list to named tests, all present with a measurable pass criterion:
+
+| Requirement | Test(s) |
+|---|---|
+| Normal operation | `TestResolutionIsolation_NormalOperation` (9.3 #1) |
+| One tenant's outage | `TestResolutionIsolation_OneTenantStoreOutage` (#2) |
+| Multiple affected tenants | `TestResolutionIsolation_MultipleTenantsOutage` (#3), `..._SimultaneousOnset_Bounded` (#3b) |
+| Recovery | `TestResolutionIsolation_Recovery` (#4) |
+| Connection exhaustion | `TestResolutionIsolation_ConnectionExhaustion` (#5) |
+| Cross-tenant isolation | `TestResolutionIsolation_CrossTenant` (#6), plus `TestFetcher_TenantBreakerIsolated` (9.2) |
+| Financial requests while a tenant is degraded | `TestResolutionIsolation_FinancialDuringOutage` (#7) |
+| Starvation test not weakened | §9.1 kept test: same three literal assertions retained, two added, pool reverted to 20 per the `security` ruling §3 replacement. **Confirmed not weakened** — the call-shape change (no outer transaction) is the fix itself, not a relaxation of what is measured. |
+
+`TestStoreOutage_DoesNotPinPool_ProductionPoolSize` (pool 10) and §9.3's shared pool-10 fixture
+together give the pool-10 coverage the `security` ruling's F-POOL-1 follow-up asked for.
+
+CLAUDE.md's financial list, for the callback money paths this ADR touches: duplicates and
+idempotency are covered (redelivery in #4 and #7); concurrency is covered (nearly every test);
+retries are covered (redelivery = retries here); authorization is covered (#6, test 8, test 10);
+auditability is covered for the negative case (global post-condition: 0 audit/ledger/tombstone
+rows for a rejected callback) — the positive case (audit row written on a successful post) is
+unchanged domain logic and is assumed to already be covered by the existing per-domain financial
+suites, not re-tested here; that assumption should be stated, not implicit. Rollback is covered
+by test 8's revoked-between-verify-and-domain-tx case. **Partial failure and reconciliation are
+under-specified** — see items 5 and 6 below.
+
+### Required changes
+
+1. **Pool-size self-check for §9.3.** §9.1 requires each pool-10 test to assert
+   `config.DefaultDatabaseMaxConns == 10`, so a change to the default forces this ADR to be
+   revisited. §9.3's shared fixture states pool 10 once in prose but does not carry the same
+   assertion. Add it to the §9.3 fixture, run once per test via the shared setup, so the same
+   forcing-function applies to the adversarial suite.
+
+2. **State `-race` explicitly for §9.3.** §9.1's suite is known to run under `-race` (per the
+   `security` ruling's measurements). §9.3 introduces new concurrent access to the per-(scheme,
+   tenant) breaker map and admission counters under real goroutine concurrency, and the plan
+   never states the race detector is on for it. Add `-race` as an explicit requirement for the
+   whole §9.3 suite (both [T] and non-[T] rows), not just an assumed inheritance from the package.
+
+3. **CI time budget for `internal/httpserver`.** §9.3 adds 12 test names to `internal/httpserver`
+   integration (6 are [T] and run in the isolated blocking step; the remaining ones — #4, #6, the
+   3 domain variants of #8, the 3 domain variants of #9, #10, #11, #12, 11 test functions total —
+   land in the main integration step, which is already ~300 s against a 10-minute `go test`
+   timeout). The plan states no estimated added cost and no budget. Required: (a) state a target
+   budget for what these 11 tests may add to the main step, measured in the implementing PR; (b)
+   if the measured total risks the 10-minute ceiling, move the resolution-isolation suite into
+   its own test file (e.g. `internal/httpserver/resolution_isolation_test.go`) that can be timed
+   and, if needed, split into its own CI step — separate from the existing named isolated lane,
+   per `security` ruling B condition 3 ("no other test may be added to this... lane... without a
+   ruling specific to that test"). Do not fold new tests into the existing isolated lane to solve
+   a budget problem without that ruling.
+
+4. **Missing mutation proving the financial-during-outage regression.** §9.4's ten mutations map
+   to specific tests, but none is uniquely tied to `TestResolutionIsolation_FinancialDuringOutage`
+   (#7) — the human's explicit "financial requests while the degraded tenant is failing"
+   requirement. Add a mutation (e.g., bypass the `(provider_id, provider_tx_id)` idempotency
+   constraint on redelivery, or let `ReceiveVerifiedCallback` post before the re-check completes)
+   that only #7 (or #7 combined with the global post-conditions) is shown to kill.
+
+5. **Mutations for tests 3b, 4, 6, 11.** §9.4 has no mutation uniquely killed by
+   `..._SimultaneousOnset_Bounded` (#3b), `..._Recovery` (#4), `..._CrossTenant` (#6), or
+   `TestSimulationHandlers_SessionRevalidatedInDomainTx` (#11). Each is a distinct, named
+   regression surface (onset bound, breaker-close-after-cooldown, per-tenant cache/breaker
+   isolation, and the TOCTOU re-validation window respectively). Add one mutation per test (e.g.,
+   for #6: key the positive cache without the tenant in the key; for #11: skip the phase-3
+   re-validation) so the review's "would this test actually catch the regression it claims to
+   catch" question has evidence for all named tests, not a subset.
+
+6. **Partial failure at the re-check, distinct from a clean miss.** §7's table lists "a DB error"
+   at the re-check as a branch with the same fail-closed outcome as a 0-row miss, but §9's test 8
+   only exercises the 0-row (revoked) case. CLAUDE.md requires "partial failure" coverage for
+   financial code. Add a named test (e.g.
+   `TestReceiveVerified_RecheckDBErrorRollsBack`) that injects a DB error on `HandleRecheckSQL`
+   (not a clean miss) and asserts the domain transaction rolls back with 0 rows written, same as
+   the revoked case, so the DB-error branch in §7 has its own proof rather than sharing test 8's
+   coverage by inference.
+
+7. **State the reconciliation scope explicitly.** CLAUDE.md's "reconciliation" item is currently
+   satisfied only implicitly, via the §9.3 global post-condition (`SUM(debits) == SUM(credits)`
+   and balance == projection, checked after each scenario). That is adequate for this ADR's
+   money-path change, but the ADR should say so explicitly: this covers point-in-time
+   reconciliation after each concurrency scenario, not the scheduled hourly drift job, which is
+   out of this ADR's scope and already owned by the ledger-finance test suite. Otherwise this can
+   later be read as "no reconciliation test" or, conversely, as if this ADR were asserting
+   coverage of the scheduled job.
+
+8. **Confirm the pool/fixture is shared across the domain-parameterized rows.** Tests 8 and 9 are
+   written "(each domain)" / "`_{Payments,KYC,Casino}`", i.e., three test functions each. Confirm
+   in the implementing PR that all three per test share the same pool-10 fixture and its
+   self-check assertion (item 1), rather than each domain variant standing up its own fixture at
+   a different, undocumented pool size.
+
+None of these changes touch the chosen design (§3–§8) or the invariants (§2); they are additions
+to the test plan and CI wiring. Once items 1–8 are applied, this reviewer's verdict is
+`CONFIRMED`. `security` co-signature on the constants and the isolated-lane test list (§11) is
+still required independently of this review.
+
+## 12. Human decisions
 
 **None required.** Every choice here is a reversible engineering decision within the approved
 Stage 10.3 scope. The following are not human decisions but still have to happen:
