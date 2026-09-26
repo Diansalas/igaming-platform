@@ -23,12 +23,18 @@
 // enforced behaviourally.
 //
 // Mutation-kill demonstration (recorded here, not committed): with the
-// predicate removed from verification_service.go's query text (`WHERE
-// provider_id = $2 AND provider_reference = $3`, dropping `tenant_id = $1
-// AND`), this test fails immediately (no captured statement contains
-// "tenant_id = $1"), independently of the fact that RLS still returns the
-// same row behaviourally - see docs/plans/stage-10.2-planning/
-// 08-webhook-test-traceability.md for the recorded pre-revert failure output.
+// predicate removed from verification_service.go's query text AND its
+// placeholders renumbered (`WHERE provider_id = $1 AND provider_reference =
+// $2`, dropping `tenant_id = $1 AND` and passing only providerID/
+// providerReference at the call site, never tenantID), this test fails on
+// this test's OWN tenant-predicate assertion ("no explicit tenant_id = $1
+// predicate"), not on a SQL error - see docs/plans/stage-10.2-planning/
+// 08-webhook-test-traceability.md for the recorded pre-revert failure
+// output (Stage 10.2 final review, K2/M2: an earlier version of this test
+// matched the lookup statement by the literal substring "provider_id =
+// $2", which a renumbering alone defeats before the mutation ever reaches
+// this assertion - fixed by matching structurally, on "FROM
+// kyc_verifications" + "provider_reference", instead).
 package kyc
 
 import (
@@ -103,7 +109,7 @@ func TestGetVerificationByProviderReference_CarriesExplicitTenantIDPredicate(t *
 	var captured *argRecordingTx
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
 		captured = newArgRecordingTx(tx)
-		_, err := orch.ReceiveCallback(ctx, captured, f.tenantID, "mock", in)
+		_, _, err := orch.ReceiveCallback(ctx, captured, f.tenantID, "mock", in)
 		return err
 	})
 	if err != nil {
@@ -112,14 +118,27 @@ func TestGetVerificationByProviderReference_CarriesExplicitTenantIDPredicate(t *
 
 	var found bool
 	for _, call := range captured.Calls() {
-		if !strings.Contains(call.sql, "FROM kyc_verifications") || !strings.Contains(call.sql, "provider_reference") {
-			continue
-		}
 		// This is the reference-lookup statement (as opposed to the later
 		// GetVerificationByID/UPDATE statements the same callback also
-		// issues) - the one getVerificationByProviderReference issues.
-		if !strings.Contains(call.sql, "provider_id = $2") {
-			continue // not the lookup-by-reference statement (defence in depth against a future unrelated query matching the first two substrings).
+		// issues) - the one getVerificationByProviderReference issues. It
+		// is matched STRUCTURALLY, by "FROM kyc_verifications" (a SELECT,
+		// unlike the UPDATE...kyc_verifications statement, which never
+		// contains "FROM kyc_verifications" as a substring) plus a WHERE
+		// clause EQUALITY on provider_reference ("provider_reference =
+		// $") - never by a literal placeholder number like "provider_id =
+		// $2", which a harmless renumbering of the query's OWN
+		// placeholders would silently stop matching (Stage 10.2 final
+		// review, K2/M2: the earlier version of this test was killed by a
+		// mutation for the wrong reason - a SQL type-inference error, not
+		// this predicate assertion). Matching on the bare substring
+		// "provider_reference" alone is NOT enough - verificationColumns
+		// selects that column by name in every one of this package's
+		// queries (GetVerificationByID included), so that alone would also
+		// match the wrong statement; "provider_reference = $" only ever
+		// appears in a WHERE-clause equality, and survives any
+		// renumbering of which placeholder index it binds to.
+		if !strings.Contains(call.sql, "FROM kyc_verifications") || !strings.Contains(call.sql, "provider_reference = $") {
+			continue
 		}
 		found = true
 		if !strings.Contains(call.sql, "tenant_id = $1") {
