@@ -580,8 +580,8 @@ All values are platform constants in `internal/secretstore`. Changing them needs
 | Parameter | Value |
 |---|---|
 | Store call timeout | **2 s** total, including SDK retries. At most 1 retry, with backoff capped so the total stays within 2 s. The call runs under `singleflight` per (tenant, ref, fingerprint), with a context detached from the first caller's cancellation but bounded by 2 s. |
-| Concurrent store calls per process | **4** (a semaphore). A caller waits at most **250 ms** for a slot, then fails fast. This bounds how many pooled DB connections can be held waiting on the store. |
-| Breaker scope | One breaker per backend instance, per process. |
+| Concurrent store calls per process | **4** (a semaphore). A caller waits at most **250 ms** for a slot, then fails fast. This bounds how many pooled DB connections can be held waiting on the store. **Superseded (F-POOL-1, `15-ci-342-security-ruling.md` §2; ADR 0094):** that bound did not hold, because callers waiting for a slot or a flight held their transaction. After ADR 0094 no pooled connection is held across any store call or wait (INV-POOL). The 4-slot bound now protects only the store and the process. It is complemented by per-(backend, tenant) caps: P = 2 per tenant, D = 2 for degraded tenants together. |
+| Breaker scope | One breaker per backend instance, per process. **Amended by ADR 0094 §4.2:** one breaker per (backend, tenant), with the same thresholds, so one tenant's outage cannot open another tenant's breaker. |
 | Failures that count | Timeout or deadline, network or transport errors, 5xx, throttling. |
 | Failures that do not count | Not found, access denied, invalid version, `store_config`, fingerprint mismatch. These are per-ref problems and use the negative cache instead. |
 | Trip threshold | **3 consecutive** counting failures. |
@@ -619,6 +619,10 @@ Tests:
   - at most 4 store calls are in flight;
   - at most 4 connections are held for more than 250 ms;
   - an unrelated tenant query completes in under 500 ms.
+  - ADR 0094 adds two stricter criteria: no pre-verification transaction is held for more than
+    250 ms (400 ms measurement slack), and no store call runs with a transaction held.
+  - ADR 0094 also adds a production-pool-size variant,
+    `TestStoreOutage_DoesNotPinPool_ProductionPoolSize`, at 10 connections.
 - `TestResolver_UnknownKeyIDNoStoreCall`
 - `TestResolver_RevokeImmediateWhileBreakerOpen`
 

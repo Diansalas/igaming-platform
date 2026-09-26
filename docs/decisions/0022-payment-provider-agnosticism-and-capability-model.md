@@ -559,6 +559,26 @@ never *asserts* the tenant.
 > - This resolves the conflict for a DB-backed resolver between point 4
 >   ("credential-handle lookups") and point 9.
 >
+> **Point 9 allowance, amended by ADR 0094 §4.1 (2026-09-26).**
+> - The allowed pre-verification statements are unchanged: payments'
+>   `ProviderAcceptsWebhook` EXISTS plus `HandleReadSQL`; KYC and casino
+>   `HandleReadSQL` only.
+> - They now run in their own short `READ ONLY` transactions, which
+>   commit before any secret-store fetch. They no longer run in the
+>   domain transaction.
+> - The domain transaction opens only after verification succeeds. Its
+>   first statement is the post-verification `HandleRecheckSQL`, which is
+>   lock-free, tenant-predicated, and pinned by the capture tests.
+> - The statement-capture tests (`TestPointNineCapture_*`) remain the
+>   **primary** I1 control. `READ ONLY` is defence in depth only.
+>   PostgreSQL refuses writes, `nextval` and `SELECT … FOR UPDATE/SHARE`
+>   in it, but it does **not** refuse advisory locks
+>   (`pg_advisory_xact_lock`) or read-only function calls.
+> - The tenant id still has one source. `VerifyCallback` overwrites
+>   `in.TenantID`/`in.ProviderID` from the route values.
+>   `ReceiveVerifiedCallback` rejects a `VerifiedCallback` sealed for a
+>   different domain, tenant or provider.
+>
 > **New point 10: timestamp and replay rules.**
 > - Every real (non-synthetic) scheme declares its provider-specific
 >   signed-timestamp and replay rules, taken from the vendor's own

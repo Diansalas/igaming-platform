@@ -1,9 +1,13 @@
 # ADR 0094 — Secret Resolution Resource Isolation (F-POOL-1 fix)
 
-- **Status:** PROPOSED 2026-09-26. Design only. Accepting it needs a `security` co-signature,
-  because it changes platform constants and behaviour that ADR 0093 A4 and security review
-  `07-w2a-design-review-security.md` §5 put under `security` review.
-  Implementation label until the tests in §9 pass: `NOT IMPLEMENTED`.
+- **Status:** ACCEPTED — IMPLEMENTED 2026-09-26.
+  - Design co-signed by `security` with conditions C1–C11 and confirmed by `qa` with changes 1–8
+    (sections below).
+  - All conditions and changes are applied. Every test in §9 passes, and the mutations are
+    recorded (see "Implementation record" at the end).
+  - **F-POOL-1 stays OPEN until `security` reviews the implementing diff**, as the co-signature
+    requires. This status records that the implementation exists and passes its tests; it is
+    not a security sign-off.
 - **Decision type:** architecture (cross-domain: `db`, `secretstore`, `providercred`,
   `webhookauth`, `payments`, `kyc`, `casino`, `httpserver`).
 - **Owner:** `architect`. **Co-owner:** `security`.
@@ -215,9 +219,9 @@ Accounting is per **(scheme, tenant)**, under the existing `Fetcher.mu`.
 | Constant | Value | Status |
 |---|---|---|
 | `MaxConcurrentStoreCalls` (S) | 4 | unchanged |
-| `MaxConcurrentStoreCallsPerTenant` (P) | **1** | new |
+| `MaxConcurrentStoreCallsPerTenant` (P) | **2** (security C8: P = 1 failed the cold-start test; P = 2 was pre-approved) | new |
 | `MaxDegradedStoreCalls` (D) | **2** | new |
-| Healthy reserve H = S − D | 2 | derived; `NewFetcher` panics unless 0 < P ≤ D < S |
+| Healthy reserve H = S − D | 2 | derived; the `secretstore` package `init` panics unless 0 < P ≤ D < S |
 
 1. **Breaker scope** changes from per scheme to **per (scheme, tenant)**. Thresholds are
    unchanged: trip at 3 consecutive counting failures, cooldown 15 s doubling to a 60 s cap, one
@@ -281,9 +285,13 @@ part of F-POOL-1.
   -- HandleRecheckSQL (pinned by the capture tests; lock-free, read-only, tenant-predicated)
   SELECT 1 FROM provider_credential_handles
   WHERE tenant_id = $1 AND id = $2 AND fingerprint = $3
+    AND domain = $4 AND provider_id = $5 AND purpose = $6
     AND status IN ('active', 'verify_only')
     AND not_before <= now() AND (not_after IS NULL OR not_after > now())
   ```
+
+  (As implemented: the domain, provider and purpose predicates were added to the design's
+  text. They are strictly narrower.)
 
   Zero rows means `credential_unavailable`, and the transaction rolls back, so nothing is
   written.
@@ -328,7 +336,7 @@ connection quota. Connection starvation from pure request volume is generic over
 | Constant | Reason for the value |
 |---|---|
 | S = 4 | Security constant. It protects the store and the process, and no evidence justifies changing it. |
-| P = 1 | A tenant's working set is a handful of refs (3 domains × few providers × ≤ 2 keys). Single-flight already collapses duplicates. A healthy fetch takes roughly 50–200 ms, so a tenant's cold start of k refs serializes in k × ~100 ms. The second distinct ref waits ≤ `SlotWait` for the token. Result: a single tenant's outage holds **at most 1 of 4** slots. |
+| P = 2 | A tenant's working set is a handful of refs (3 domains × few providers × ≤ 2 keys). Single-flight already collapses duplicates. The design proposed P = 1. Security condition C8's test (4 distinct cold refs of one tenant, 150 ms store latency, 0 rejections) **fails at P = 1**: the third ref waits 300 ms, which is more than `SlotWait` (evidence `f-pool-1-mutation-kill.txt`, C8). It **passes at P = 2**: refs 3 and 4 get tokens at 150 ms. P = 2 was pre-approved by security. `SlotWait` was not widened. Result: a single tenant's outage holds **at most 2 of 4** slots. |
 | D = 2 | Any number of degraded tenants together hold at most 2 slots. That leaves **H = 2 always reserved for healthy tenants** once the failures have been observed. D = 1 would slow recovery across many degraded tenants (probes serialize). D = 3 would leave only 1 healthy slot. |
 | Healthy capacity | H = 2 slots at about 100 ms each gives about 20 cold fetches per second. Demand is about (number of refs) / 10 min of refresh, plus cold starts. The margin is several orders of magnitude. |
 
@@ -336,12 +344,13 @@ Guarantees for healthy tenants:
 
 | Situation | Healthy slots available |
 |---|---|
-| One tenant's outage, including its onset | ≥ S − P = **3** |
+| One tenant's outage, including its onset | ≥ S − P = **2** |
 | Any number of degraded tenants, after onset | ≥ **2** |
-| k tenants whose failures begin at the same moment and are not yet observed | ≥ S − min(k, S) for at most `StoreCallTimeout` (2 s), then ≥ 2 |
+| k tenants whose failures begin at the same moment and are not yet observed | ≥ S − min(k·P, S) for at most `StoreCallTimeout` (2 s), then ≥ 2 |
 
-**Disclosed onset residual:** the table's last row is 0 only when k ≥ 4 simultaneous outages
-start at the same instant. Even then:
+**Disclosed onset residual (with P = 2):** the table's last row reaches 0 when k ≥ 2 tenants'
+outages start at the same instant and each has at least 2 distinct cold refs in flight.
+`TestResolutionIsolation_SimultaneousOnset_Bounded` pins this with k = 5. Even then:
 - It affects healthy **cold** fetches only. Cache hits take no slot.
 - Those fetches fail fast with a retryable uniform 401 or with stale data.
 - It lasts ≤ 2 s.
@@ -350,10 +359,25 @@ start at the same instant. Even then:
 It cannot be closed without pre-empting in-flight calls. It is equivalent to a backend-wide
 outage.
 
-**Global outage** (no backend-wide breaker any more):
-- Store concurrency is ≤ S at onset and ≤ D = 2 after it.
-- Each tenant opens its own breaker after 3 sequential calls (P = 1).
-- Load on a dead store is therefore ≤ 2 concurrent calls, which is lower than today's 4.
+**Global outage** (no backend-wide breaker any more). This was corrected per security condition
+C9. The earlier claim "lower than today's 4" was misleading.
+- **Concurrency** is bounded: ≤ S = 4 at onset and ≤ D = 2 after it. The process and the store
+  are protected against a stampede.
+- **Rate** is **linear in the number of tenants N**. That is higher than today, where one
+  backend breaker brings the load down to about one probe per 15–60 s.
+  - To trip every tenant's breaker costs at most N × 3 × (1 + `StoreMaxRetries`) attempts.
+  - After that, each tenant is allowed one probe per cooldown, and each probe is at most
+    1 + `StoreMaxRetries` attempts.
+  - Over 120 s the cooldown schedule is 15 s, 30 s and 60 s, which allows 3 probes.
+  - The bound over 120 s is therefore N × 3 × 2 + N × 3 × 2 = 12 N attempts. That is 600 for
+    N = 50.
+  - In steady state this is about N / 60 probe calls per second at the 60 s cooldown cap: about
+    17–33 req/s for N = 1000.
+  - `TestFetcher_GlobalOutageRateBound` pins it. It measured exactly 600 attempts against the
+    computed bound of 600: every allowed attempt was made, and none more.
+- **Visibility:** when at least 3 distinct tenants on one backend are degraded at the same time,
+  one rate-limited `warn` line, `secret_store_multi_tenant_degraded`, is logged at most once
+  a minute per backend. A real backend-wide outage is therefore visible as one event.
 
 **Goroutines and HTTP.** Owners wait ≤ 2 s, healthy followers and losers ≤ 250 ms, degraded
 callers 0. This is the same or less than today, and none of it holds a connection.
@@ -903,3 +927,146 @@ they measure pool admission. Adding any other test to the lane still needs its o
 
 Co-signing this design does not make the resolver path "secure" in general. The implementing diff
 needs its own `security` review against C1–C11.
+
+## Implementation record (2026-09-26)
+
+**Label: IMPLEMENTED.**
+- All security conditions C1–C11 and QA changes 1–8 are applied. Every §9 test passes locally
+  under `-race`.
+- **F-POOL-1 remains OPEN until `security` reviews the implementing diff.** This record is not a
+  security sign-off.
+- It has not been run on GitHub CI. The workflow change was validated only locally (YAML parse and
+  the equivalent local commands).
+
+**Commits** (branch `claude/focused-wright-jw88w9`):
+
+| Commit | Content |
+|---|---|
+| `7773649` | db: txscope marking and `WithTenantReadOnly` |
+| `4779958` | the fix: two-phase webhooks, `VerifiedCallback`, `Recheck`, Fetcher fairness, guards, handlers, test migration |
+| `8d973ef` | §9.3 suite and re-check tests |
+| `18a57b8` | CI lanes |
+| `2354475` | NormalOperation load profile and the `VerifyCallback` guard test |
+| `1c5fb7e` | tightened #3b |
+| the docs commit | this record, the ADR amendments, the registry and the evidence |
+
+**Where the implementation differs from the design text** (for the security implementation
+review):
+1. **P = 2, not 1.** Condition C8 required it: P = 1 fails the cold-start test (evidence C8-P1).
+   §4.2 and §6 are updated. With P = 2, a single tenant's outage leaves at least 2 healthy slots,
+   not 3. The simultaneous-onset residual starts at k ≥ 2 tenants.
+2. **`HandleRecheckSQL` also binds `domain`, `provider_id` and `purpose`.** This is narrower than
+   the design (§5).
+3. **One token type for all domains.** `VerifiedCallback` is a single type,
+   `webhookauth.VerifiedCallback`. Each domain exposes it as a type alias and seals it with its
+   domain tag (`WebhookDomain`). `Redeem` fails closed on a domain mismatch, and
+   `TestVerifiedCallback_ZeroOrMismatchRejected` covers "other domain".
+   - Security (3) described "each domain has its own type" as a compile-time property. Here it is a
+     runtime check. Forgery from outside is still impossible: the fields are unexported, and the
+     only constructor, `VerifyAndSeal`, runs `VerifyInbound`.
+   - **Flagged for the security implementation review.**
+4. **The constant check runs at package init.** It panics unless 0 < P ≤ D < S. The design said
+   `NewFetcher` would panic.
+5. **Test-only bridge.** `receiveCallbackInTx` (in `receive_bridge_test.go`, in each domain
+   package) runs both phases on the caller's transaction.
+   - About 40 existing domain test files that assert domain behaviour (ledger, idempotency, locks,
+     audit) use it, with MOCK resolvers only.
+   - It deliberately does what production must not do, and it can reach no store.
+   - Every real-resolver test and every test that pins an ADR 0094 property uses the real
+     two-phase shape.
+6. **`simulationBetweenPhasesHook`.** This is an unexported package variable in
+   `internal/httpserver/casino_play_handlers.go`. It is nil in production and set only by
+   `TestSimulationHandlers_SessionRevalidatedInDomainTx`. It is a disclosed test seam.
+7. **How the HTTP suite measures "no transaction held longer than `longSlack`".**
+   - The design assumed a wrapper around the reader. The handlers use `*db.Pool` directly, so no
+     wrapper can be inserted on that path.
+   - Instead, `phasecapture.XactAgeSampler` samples `pg_stat_activity` for the oldest open
+     transaction of the pool under test (a unique `application_name`) on a separate connection.
+     This is the F-POOL-1 symptom measured on the real handler path.
+   - The kept `providercred` test still uses the reader wrapper, as designed.
+8. **Test 1 load profile.** `NormalOperation` still sends 30 callbacks per tenant. At most 10 are in
+   flight per tenant, and each (tenant, i) uses its own seeded player and wallet.
+   - With all 60 chains in flight at once, `-race` p100 was 400–590 ms at pool 10, and 3 of 5
+     alone runs failed the unchanged 500 ms bound. That is pool throughput (about 4 short
+     transactions per callback), not a resolution effect.
+   - After the change, p100 is 231–300 ms. The 500 ms bound is unchanged.
+   - Flagged for the security implementation review, because test 1 was admitted to the lane for
+     its p100 bound.
+9. **#3b is stricter than first written.** The healthy onset callback must finish within
+   `SlotWait` + 150 ms whatever the outcome. This was prompted by the survivor M15.
+10. **#6 is stronger.** It opens A's own breaker, and B makes a cold fetch while A's breaker is open.
+    The evidence mutation for #6 is M5. QA's suggested mutation, M17, is equivalent for #6 (see the
+    evidence notes).
+
+**§9 tests to files and lanes.** All run under `-race` (QA item 2). Every §9.3 test uses the
+pool-10 fixture (`phasecapture.Pool10`, which asserts `config.DefaultDatabaseMaxConns == 10`). That
+includes the test-8 and test-9 domain variants, which share the fixture (QA items 1 and 8).
+
+| Tests | File | Lane |
+|---|---|---|
+| `TestStoreOutage_DoesNotPinPool` (pool 20), `_ProductionPoolSize` (pool 10), `_ResolveInsideTenantTxRefused` | `internal/providercred/resolver_integration_test.go` | the first two in the timing lane |
+| 9.2 unit tests, plus C8 `TestFetcher_ColdStartFourRefs_NoRejection` and C9 `TestFetcher_GlobalOutageRateBound` | `internal/secretstore/fetcher_fairness_test.go` | main |
+| #1–#7, #11 | `internal/httpserver/resolution_isolation_integration_test.go` | #1, #2, #3, #3b, #5, #7 in the timing lane; #4, #6, #11 main |
+| #8 per domain, QA-6 `TestReceiveVerified_RecheckDBErrorRollsBack`, #10 casino plus C5 variants, C3 body mutation, `VerifyCallback` guard | `internal/{casino,payments,kyc}/resolution_recheck_integration_test.go` | main |
+| #9 `TestPointNineCapture_*` | the existing domain capture files, rewritten to the two-phase shape | main |
+| #10 unit plus C1/C2/C3/C4 | `internal/webhookauth/verified_test.go` | main |
+| C4/C5 predecessor, #12 outbound | `internal/providercred/recheck_integration_test.go` | main |
+| C6 | `internal/db/txscope_marking_integration_test.go`, `internal/db/raw_guard_test.go` | main |
+
+**Results.**
+- `go test -race ./...`: pass.
+- `go test -race -tags=integration` on the main lane (everything except the 8 timing-lane tests):
+  pass, 334 s wall-clock for the whole repository on 4 vCPU.
+- Final re-run on the final code:
+  - The main lane of the touched packages passes. That is `httpserver`, `payments`, `casino`,
+    `kyc`, `providercred`, `db`, `secretstore/...`, `webhookauth/...` and `reconciliation`, in
+    295 s; `internal/httpserver` took 293 s of it.
+  - **Each of the 8 timing-lane tests was run alone 5 times: 40/40 PASS.**
+
+  | Timing-lane measurement over those runs | Range |
+  |---|---|
+  | `NormalOperation` worst callback latency | 226–287 ms |
+  | Oldest pooled transaction in the outage scenarios | at most about 86 ms, against the 400 ms `longSlack` |
+  | Kept test and its pool-10 variant, duration | 2.16–2.26 s |
+
+- The earlier 5× run on the pre-fix `NormalOperation` was 2/5, which led to item 8 above.
+- `gofmt`, `go vet ./...` and `go vet -tags=integration ./...` are clean.
+- `golangci-lint run ./...` (v2.9.0) reports 0 issues.
+- With `--build-tags integration`, `golangci-lint` still reports the pre-existing repository
+  findings; none of them are in files this change touches.
+
+**CI time budget (QA item 3).**
+
+| Item | Value |
+|---|---|
+| Budget for the main-lane additions | ≤ 15 s |
+| Measured main-lane additions | #4 0.9 s, #6 about 3.5 s, #11 0.7 s, test-8/-10/-12, C-series about 6 s total; `internal/httpserver` went from about 300 s (the same machine at `103b033`) to 310 s |
+| `internal/httpserver` against the 10-minute `go test` timeout | about 52% |
+| New timing-lane step | about 20 s (`httpserver`) plus about 5 s (`providercred`) |
+
+The suite is in its own file, as QA asked. No separate main-lane step is needed.
+
+**Reconciliation scope (QA item 7).** The §9.3 global post-conditions are point-in-time checks
+after each scenario:
+- `SUM(debits) == SUM(credits)` per tenant;
+- every ledger account's projection equals its rebuild from `ledger_entries`.
+
+They are **not** the scheduled hourly drift job, which the ledger-finance suite owns. The positive
+audit case (an audit row written on a successful posting) is unchanged domain logic. The existing
+per-domain financial suites cover it, and they still run through the test bridge.
+
+**Mutations (C10, QA items 4–5).** See `docs/plans/stage-10.3-planning/evidence/f-pool-1-mutation-kill.txt`.
+- 28 mutations were run. 27 were killed by at least one named test.
+- **M1**, the root cause re-introduced, fails `TestStoreOutage_DoesNotPinPool_ProductionPoolSize`:
+  the unrelated query took 1.17 s. That is the mandatory evidence.
+- **M14** (casino idempotency key) is a recorded survivor. It is equivalent on the redelivery path
+  because redelivery short-circuits earlier. QA item 4's financial mutation is **M14b** instead:
+  verification moved back into the domain transaction at the casino handler. #7 kills it.
+- **M17** is equivalent for #6. #6's evidence mutation is M5.
+
+**Not satisfied / open:**
+- The `security` implementation review is still owed, so F-POOL-1 stays open.
+- The workflow has not been executed on GitHub CI.
+- F-POOL-2 is registered but not started.
+- PAYWH-RL-1 is not started.
+

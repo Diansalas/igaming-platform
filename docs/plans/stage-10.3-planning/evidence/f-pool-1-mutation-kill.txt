@@ -1,0 +1,273 @@
+F-POOL-1 / ADR 0094 - mutation-kill evidence (security condition C10, QA §11 items 4-5)
+=====================================================================================
+
+Branch claude/focused-wright-jw88w9. The mutations were applied one at a time to the implementation
+commits by an automated runner:
+  1. Apply the edit. The runner refuses to apply an edit whose pattern does not match exactly once.
+  2. Run the listed tests with `go test -race [-tags=integration] -count=1 -run '^Name$' <pkg>`
+     against the local PostgreSQL CI database.
+  3. Revert with `git checkout -- <files>` and assert that `git diff` is empty.
+
+"KILLED" means at least one listed test failed. The failure lines shown are the assertion that
+failed, taken from the test output. A connection or build failure does not count: the first
+automated pass had a runner environment bug (TEST_DATABASE_URL was not expanded), so every
+integration result in it was discarded and the whole set was re-run. Those discarded results are
+not reported below.
+
+Human requirement: M1 must fail the pool-10 variant of the kept test, which is evidence that the new
+call shape is not vacuous. It does. The unrelated-tenant query waited 1.17 s at pool 10, the same
+geometry as the original F-POOL-1 measurement of 1.42 s.
+
+Summary
+-------
+  M1     KILLED
+  M2a    KILLED
+  M2b    KILLED
+  M2c    KILLED
+  M2d    KILLED
+  M2e    KILLED
+  M3     KILLED
+  M4     KILLED
+  M5     KILLED
+  M6     KILLED
+  M7     KILLED
+  M8     KILLED
+  M9a    KILLED
+  M9b    KILLED
+  M10    KILLED
+  M11    KILLED
+  M12    KILLED
+  M13    KILLED
+  M14    SURVIVED (see notes)
+  M14b   KILLED
+  M15    KILLED (after tightening #3b; survived the first run, see notes)
+  M16    KILLED
+  M17    KILLED by TestStoreCache_NoCrossTenantHit; SURVIVED #6 (equivalent mutant there, see notes)
+  M18    KILLED
+  M19    KILLED
+  M20    KILLED
+  M21    KILLED
+  C8-P1  KILLED
+
+
+M1  KILLED  - Resolve fetches the secret INSIDE its read-only transaction (root cause re-introduced)
+     files: internal/providercred/resolver.go
+     TestStoreOutage_DoesNotPinPool_ProductionPoolSize                  FAIL (killed)    (./internal/providercred/, 5.3 s)
+         resolver_integration_test.go:591: an unrelated tenant query took 1.167594493s (connection acquire took 1.167019351s) during the store outage, want < 500ms; maxConcurrent=4 longSlack=400ms durations=[562.164749ms 2.036673
+     TestStoreOutage_DoesNotPinPool                                     FAIL (killed)    (./internal/providercred/, 3.3 s)
+         resolver_integration_test.go:581: 50 resolves waited on the store for > 250 ms (longSlack=400ms), want <= 4; over-bound durations=[600.421233ms 600.488761ms 2.096210068s 604.093078ms 608.632723ms 2.088304494s 606.707108m
+     TestResolutionIsolation_OneTenantStoreOutage                       FAIL (killed)    (./internal/httpserver/, 4.2 s)
+         resolution_isolation_integration_test.go:642: an unrelated tenant query took 1.069236064s during A's outage, want < 500ms
+     TestResolutionIsolation_ConnectionExhaustion                       FAIL (killed)    (./internal/httpserver/, 4.7 s)
+         resolution_isolation_integration_test.go:862: B bet 0 during A's 500-callback burst took 2.194356423s, want < 500ms
+
+M2a  KILLED  - remove the txscope guard in Fetcher.Fetch
+     files: internal/secretstore/fetcher.go
+     TestFetcher_FetchRefusedWithTxHeld                                 FAIL (killed)    (./internal/secretstore/, 0.5 s)
+         fetcher_fairness_test.go:305: a Fetch with a transaction held must fail closed as store_config, got <nil>
+     TestStoreOutage_ResolveInsideTenantTxRefused                       FAIL (killed)    (./internal/providercred/, 3.1 s)
+         resolver_integration_test.go:737: Fetch inside a held transaction must fail closed with no store call, got secretstore: store_unavailable
+
+M2b  KILLED  - remove the txscope guard in providercred.Resolver.Resolve
+     files: internal/providercred/resolver.go
+     TestStoreOutage_ResolveInsideTenantTxRefused                       FAIL (killed)    (./internal/providercred/, 1.1 s)
+         resolver_integration_test.go:712: a refused Resolve acquired 1 nested connections (no read may start)
+
+M2c  KILLED  - remove the txscope guard in OutboundResolver.Resolve
+     files: internal/providercred/outbound.go
+     TestOutboundResolve_InsideTenantTxRefused                          FAIL (killed)    (./internal/providercred/, 1.1 s)
+         recheck_integration_test.go:95: a refused outbound resolve must not acquire a nested connection: 1 acquisitions
+
+M2d  KILLED  - remove the txscope guard in payments VerifyCallback
+     files: internal/payments/webhook_verify.go
+     TestVerifyCallback_InsideTxRefused                                 FAIL (killed)    (./internal/payments/, 1.2 s)
+         resolution_recheck_integration_test.go:190: a refused VerifyCallback acquired 1 nested connections
+
+M2e  KILLED  - remove the txscope guard in Router.GetDirect
+     files: internal/secretstore/router.go
+     TestRouter_GetDirectRefusedWithTxHeld                              FAIL (killed)    (./internal/secretstore/, 0.4 s)
+         fetcher_fairness_test.go:330: GetDirect with a transaction held must fail closed as store_config, got <nil>
+
+M3  KILLED  - per-tenant cap not enforced (admission ignores inFlightTenant)
+     files: internal/secretstore/fetcher.go
+     TestFetcher_PerTenantCap                                           FAIL (killed)    (./internal/secretstore/, 2.4 s)
+         fetcher_fairness_test.go:81: a caller over the per-tenant cap reached the store
+
+M4  KILLED  - degraded budget D not enforced
+     files: internal/secretstore/fetcher.go
+     TestFetcher_DegradedBudget_HealthyReserve                          FAIL (killed)    (./internal/secretstore/, 2.4 s)
+         fetcher_fairness_test.go:122: timed out waiting for the degraded budget to fill
+     TestResolutionIsolation_MultipleTenantsOutage                      FAIL (killed)    (./internal/httpserver/, 4.1 s)
+         resolution_isolation_integration_test.go:722: healthy cold bet during 5 degraded tenants' outage: status 401 err <nil>
+
+M5  KILLED  - breaker (and admission) keyed by scheme only
+     files: internal/secretstore/fetcher.go
+     TestFetcher_TenantBreakerIsolated                                  FAIL (killed)    (./internal/secretstore/, 0.4 s)
+         fetcher_fairness_test.go:160: A's breaker = closed, want open
+     TestResolutionIsolation_OneTenantStoreOutage                       FAIL (killed)    (./internal/httpserver/, 3.1 s)
+         resolution_isolation_integration_test.go:644: B cold bet during A's outage: status 401 err <nil>
+     TestResolutionIsolation_CrossTenant                                FAIL (killed)    (./internal/httpserver/, 2.4 s)
+         resolution_isolation_integration_test.go:915: A's breaker = closed, want open
+
+M6  KILLED  - degraded callers wait SlotWait like healthy ones
+     files: internal/secretstore/fetcher.go
+     TestFetcher_DegradedCallersFailFast                                FAIL (killed)    (./internal/secretstore/, 0.7 s)
+         fetcher_fairness_test.go:247: a degraded owner waited 250.892592ms, want < 125ms
+
+M7  KILLED  - Redeem skips the re-check
+     files: internal/webhookauth/verified.go
+     TestReceiveVerified_RevokedBetweenVerifyAndDomainTx_Casino         FAIL (killed)    (./internal/casino/, 3.1 s)
+         resolution_recheck_integration_test.go:143: want the uniform credential_unavailable, got <nil>
+         resolution_recheck_integration_test.go:171: want the uniform credential_unavailable, got <nil>
+     TestReceiveVerified_RevokedBetweenVerifyAndDomainTx_Payments       FAIL (killed)    (./internal/payments/, 1.3 s)
+         resolution_recheck_integration_test.go:113: want credential_unavailable, got <nil>
+     TestReceiveVerified_RevokedBetweenVerifyAndDomainTx_KYC            FAIL (killed)    (./internal/kyc/, 1.1 s)
+         resolution_recheck_integration_test.go:54: want credential_unavailable, got <nil>
+     TestRecheck_KeyImplicitPredecessorRevokedBetweenPhases             FAIL (killed)    (./internal/providercred/, 1.3 s)
+         recheck_integration_test.go:63: a revoked predecessor must fail the re-check, got <nil>
+
+M8  KILLED  - WithTenantReadOnly opens a read-write transaction
+     files: internal/db/tenant_snapshot.go
+     TestPointNineCapture_Casino_AllowsExactlyOneHandleRead             FAIL (killed)    (./internal/casino/, 1.1 s)
+         point_nine_capture_integration_test.go:101: pre-verification transactions = [{Statements:[SELECT id, key_id, secret_ref, fingerprint, vendor_account_id, status, not_after FROM provider_credential_handles WHERE tenant_id 
+         point_nine_capture_integration_test.go:112: pre-verification transactions = [{Statements:[SELECT id, key_id, secret_ref, fingerprint, vendor_account_id, status, not_after FROM provider_credential_handles WHERE tenant_id 
+     TestPointNineCapture_Payments_AllowsExactlyOneHandleRead           FAIL (killed)    (./internal/payments/, 1.1 s)
+         w2a_real_resolver_integration_test.go:106: a pre-verification transaction was not READ ONLY: {Statements:[SELECT EXISTS(
+         w2a_real_resolver_integration_test.go:106: a pre-verification transaction was not READ ONLY: {Statements:[SELECT EXISTS(
+     TestPointNineCapture_KYC_AllowsExactlyOneHandleRead                FAIL (killed)    (./internal/kyc/, 1.1 s)
+         w2a_real_resolver_integration_test.go:106: pre-verification transactions = [{Statements:[SELECT id, key_id, secret_ref, fingerprint, vendor_account_id, status, not_after FROM provider_credential_handles WHERE tenant_id =
+         w2a_real_resolver_integration_test.go:106: pre-verification transactions = [{Statements:[SELECT id, key_id, secret_ref, fingerprint, vendor_account_id, status, not_after FROM provider_credential_handles WHERE tenant_id =
+     TestWithTenantReadOnly_RefusesWrites                               FAIL (killed)    (./internal/db/, 0.8 s)
+         txscope_marking_integration_test.go:87: read_only=off app.tenant_id=b170e7eb-f706-4084-926f-bc6759a1b558, want on/b170e7eb-f706-4084-926f-bc6759a1b558
+
+M9a  KILLED  - SlotWait 250 ms -> 350 ms
+     files: internal/secretstore/fetcher.go
+     TestStoreOutage_DoesNotPinPool                                     FAIL (killed)    (./internal/providercred/, 3.3 s)
+         resolver_integration_test.go:581: 50 resolves waited on the store for > 250 ms (longSlack=400ms), want <= 4; over-bound durations=[429.803334ms 427.196959ms 2.052651844s 2.076127114s 464.600019ms 438.152604ms 429.287581m
+     TestStoreConstants_PinnedToSecurityReview                          FAIL (killed)    (./internal/secretstore/, 0.4 s)
+         fetcher_test.go:516: SlotWait = 350ms, security review §5 says 250ms
+
+M9b  KILLED  - MaxConcurrentStoreCalls 4 -> 8
+     files: internal/secretstore/fetcher.go
+     TestStoreOutage_DoesNotPinPool                                     FAIL (killed)    (./internal/providercred/, 3.4 s)
+         resolver_integration_test.go:581: 8 concurrent store calls, want <= 4; durations=[347.756209ms 365.712203ms 365.978402ms 354.7662ms 371.221806ms 2.009664631s 363.086705ms 364.592566ms 358.900761ms 369.398733ms 349.780208
+     TestStoreOutage_DoesNotPinPool_ProductionPoolSize                  FAIL (killed)    (./internal/providercred/, 3.3 s)
+         resolver_integration_test.go:591: 8 concurrent store calls, want <= 4; durations=[2.034776664s 314.520626ms 309.304843ms 301.381288ms 303.370952ms 310.526075ms 310.520355ms 312.579516ms 312.734314ms 317.49738ms 314.87313
+
+M10  KILLED  - an admission loss writes a 5 s negative-cache entry
+     files: internal/secretstore/fetcher.go
+     TestFetcher_AdmissionLossNotNegativeCached                         FAIL (killed)    (./internal/secretstore/, 0.7 s)
+         fetcher_fairness_test.go:297: an admission loss must not be negative-cached: the next fetch must reach the store and succeed (secretstore: store_unavailable, calls 0)
+
+M11  KILLED  - VerifiedCallback reuse allowed (C1)
+     files: internal/webhookauth/verified.go
+     TestVerifiedCallback_SingleUse                                     FAIL (killed)    (./internal/webhookauth/, 0.7 s)
+         verified_test.go:160: want credential_unavailable, got <nil>
+     TestVerifiedCallback_ZeroOrMismatchRejected_Casino                 FAIL (killed)    (./internal/casino/, 1.2 s)
+         resolution_recheck_integration_test.go:254: want the uniform credential_unavailable, got <nil>
+
+M12  KILLED  - the re-check uses Active, not the credential that verified (C4)
+     files: internal/webhookauth/verified.go
+     TestRecheck_KeyImplicitPredecessorRevokedBetweenPhases             FAIL (killed)    (./internal/providercred/, 1.2 s)
+         recheck_integration_test.go:63: a revoked predecessor must fail the re-check, got <nil>
+     TestVerifiedCallback_PredecessorHandleRechecked                    FAIL (killed)    (./internal/webhookauth/, 0.7 s)
+         verified_test.go:223: Recheck must be about the predecessor's handle 3ba1ef12-3c86-4486-9415-c134d067410d, got [WebhookCredential{TenantID:18b2415e-9f65-4056-8d5f-c486179e1cf7 ProviderID:vendor-a KeyID:k-new Fingerprint:
+
+M13  KILLED  - WithPlayerScope forgets txscope.Mark (C6)
+     files: internal/db/tenant_rls.go
+     TestWithScopes_MarkTxscope                                         FAIL (killed)    (./internal/db/, 0.8 s)
+         txscope_marking_integration_test.go:64: WithPlayerScope must pass a txscope-marked context to fn (ADR 0094 INV-POOL guard)
+
+M14  SURVIVED  - casino bet posting idempotency key not stable on redelivery (QA item 4)
+     files: internal/casino/orchestrator.go
+     TestResolutionIsolation_FinancialDuringOutage                      PASS (survived)  (./internal/httpserver/, 5.2 s)
+
+M14b  KILLED  - the casino webhook handler verifies INSIDE the domain transaction again (QA item 4: the human's 'financial requests while the degraded tenant is failing')
+     files: internal/httpserver/casino_handlers.go
+     TestResolutionIsolation_FinancialDuringOutage                      FAIL (killed)    (./internal/httpserver/, 40.9 s)
+         resolution_isolation_integration_test.go:996: a pooled transaction stayed open 29.961671s (> 400ms) while callers waited on the store: a connection is held across the store wait (INV-POOL)
+
+M15  KILLED  - healthy owners wait StoreCallTimeout for admission instead of SlotWait (QA item 5, #3b)
+     files: internal/secretstore/fetcher.go
+     TestResolutionIsolation_SimultaneousOnset_Bounded                  FAIL (killed)    (./internal/httpserver/, 13.7 s)
+         resolution_isolation_integration_test.go:774: H's cold callback at onset took 2.009634261s (status 200), want <= SlotWait+150ms whatever the outcome
+
+M16  KILLED  - a successful half-open probe does not close the breaker (QA item 5, #4)
+     files: internal/secretstore/fetcher.go
+     TestResolutionIsolation_Recovery                                   FAIL (killed)    (./internal/httpserver/, 2.4 s)
+         resolution_isolation_integration_test.go:819: a successful probe must close A's breaker, got open
+
+M17  KILLED  - positive-cache key without the tenant (QA item 5's suggestion for #6)
+     files: internal/secretstore/fetcher.go
+     TestResolutionIsolation_CrossTenant                                PASS (survived)  (./internal/httpserver/, 3.6 s)
+     TestStoreCache_NoCrossTenantHit                                    FAIL (killed)    (./internal/secretstore/, 0.4 s)
+         fetcher_test.go:370: another tenant must miss the cache and go to the store: <nil> calls 1 -> 1
+
+M18  KILLED  - the casino simulation skips the step-3 session re-validation (QA item 5, #11)
+     files: internal/httpserver/casino_play_handlers.go
+     TestSimulationHandlers_SessionRevalidatedInDomainTx                FAIL (killed)    (./internal/httpserver/, 2.4 s)
+         resolution_isolation_integration_test.go:1035: a session that expired between verification and the domain transaction must not post (status 200)
+
+M19  KILLED  - a DB error on the re-check is treated as success (QA item 6)
+     files: internal/providercred/resolver.go
+     TestReceiveVerified_RecheckDBErrorRollsBack                        FAIL (killed)    (./internal/casino/, 1.2 s)
+         resolution_recheck_integration_test.go:198: want the uniform credential_unavailable, got <nil>
+
+M20  KILLED  - payments VerifyCallback keeps the caller's slices (no clone, C3)
+     files: internal/payments/webhook_verify.go
+     TestVerifyCallback_BodyMutationBetweenPhases                       FAIL (killed)    (./internal/payments/, 1.1 s)
+         resolution_recheck_integration_test.go:160: phase 2 must handle the verified copy, not the mutated caller bytes: webhookauth: callback authentication failed: signature_invalid
+
+M21  KILLED  - no age bound on redemption (C2)
+     files: internal/webhookauth/verified.go
+     TestVerifiedCallback_ZeroOrMismatchRejected                        FAIL (killed)    (./internal/webhookauth/, 1.9 s)
+         verified_test.go:137: want credential_unavailable, got <nil>
+
+C8-P1  KILLED  - C8 experiment: P = 1 (the design's original value)
+     files: internal/secretstore/fetcher.go
+     TestFetcher_ColdStartFourRefs_NoRejection                          FAIL (killed)    (./internal/secretstore/, 0.7 s)
+         fetcher_fairness_test.go:363: 2 of 4 cold refs of one healthy tenant were rejected at 150 ms store latency (P=1), want 0
+     TestResolutionIsolation_NormalOperation                            FAIL (killed)    (./internal/httpserver/, 4.3 s)
+         resolution_isolation_integration_test.go:564: worst callback latency under normal operation: 313.198043ms
+         resolution_isolation_integration_test.go:610: 2 of 4 cold refs rejected under healthy 150ms latency (P=1)
+
+Notes on the survivors and the equivalent mutants
+-------------------------------------------------
+
+- M14 (casino bet ledger idempotency key made non-stable) SURVIVED
+  TestResolutionIsolation_FinancialDuringOutage. The reason:
+  - A redelivered bet never reaches ledger.Post. `findPostedBetTransaction` short-circuits
+    redelivery on (provider_id, provider_tx_id) first, and the ledger also has the UNIQUE
+    (provider_id, provider_tx_id) constraint behind it.
+  - So the mutation is equivalent on the redelivery path. It is kept here as a recorded survivor,
+    not removed.
+  - QA item 4 asked for a mutation that only #7 is shown to kill. That is M14b: the casino webhook
+    handler verifies inside the domain transaction again, which is the regression the human's
+    "financial requests while the degraded tenant is failing" requirement is about. #7 kills it.
+    A pooled transaction stayed open for about 30 s. With pool 10 and 50 blocked A callbacks, each
+    held connection waits for a nested read-only acquisition, so B's financial requests starve.
+
+- M15 (healthy owners wait StoreCallTimeout for admission) SURVIVED #3b on the first run.
+  - #3b bounded only a failing onset callback, not a slow success.
+  - The test was tightened (commit "onset test bounds the healthy caller's latency for either
+    outcome"): the callback must finish within SlotWait + 150 ms whatever the outcome, as ADR 0094
+    §9.3 3b says.
+  - Re-run after the fix: KILLED (H's cold callback took 2.01 s). That run is the one shown above.
+    The tightened test then passed 5/5 when run alone.
+
+- M17 (positive-cache key without the tenant; QA item 5's suggestion for #6) SURVIVED
+  TestResolutionIsolation_CrossTenant. It is KILLED by TestStoreCache_NoCrossTenantHit.
+  - This is an equivalent mutant for #6. Every secret_ref sits in its own tenant's namespace: the
+    migration 0096 CHECK, ParseRef, and InNamespace in both registration and the resolver enforce
+    that. So two tenants can never share a cache key through the webhook path.
+  - The #6 evidence is M5 instead: a breaker keyed by scheme only. #6 kills it at "A's breaker =
+    closed, want open".
+
+C8 decision (P = 1 vs the pre-approved P = 2)
+---------------------------------------------
+- C8-P1 sets MaxConcurrentStoreCallsPerTenant back to the design's 1. It fails
+  TestFetcher_ColdStartFourRefs_NoRejection: 2 of 4 cold refs were rejected at 150 ms latency.
+- It also fails TestResolutionIsolation_NormalOperation. That failure is its C8 subtest, which runs
+  after the main scenario's latency log line shown above.
+- The committed value is P = 2, which security pre-approved. SlotWait was not widened.
+

@@ -197,12 +197,32 @@ row.
 Resolve(ctx, tx pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel KeySelection) (CredentialSet, error)
 ```
 
+> **Amended by ADR 0094 §4.1 (2026-09-26).** The signature is now:
+>
+> ```go
+> Resolve(ctx, r TenantReader, tenantID, providerID, keyID, sel) (CredentialSet, error)
+> Recheck(ctx, tx, tenantID, cred) error
+> ```
+>
+> - `Resolve` takes no transaction. It must be called with none held; a txscope-marked context
+>   fails closed.
+> - `Recheck` runs in the domain transaction after verification.
+
 - The domain is fixed when the resolver is constructed.
 - `sel` always comes from the scheme's `Properties().KeySelection`. It never comes from the
   request (ADR 0022 §3, Stage 10.3 amendment).
 - Mock resolvers ignore `tx`.
 
-**Per-request handle read inside the caller's transaction.**
+**Per-request handle read inside the caller's transaction.** *Amended by ADR 0094 §4.1/§5:*
+- The read now runs in its own short `READ ONLY` transaction (`TenantReader.WithTenantReadOnly`).
+  That transaction commits before any secret-store fetch, so no pooled connection is held while
+  waiting on the store (INV-POOL).
+- The domain transaction then re-checks the handle of the credential that verified
+  (`HandleRecheckSQL`) as its first statement.
+- The in-flight exposure becomes [re-check, commit]. That is narrower than the original
+  [read, commit].
+
+The original text follows.
 - There is exactly one read: a plain, lock-free `SELECT` with an explicit `tenant_id = $1` in
   addition to RLS.
 - Its SQL is pinned by the statement-capture tests.
@@ -224,6 +244,11 @@ Resolve(ctx, tx pgx.Tx, tenantID uuid.UUID, providerID, keyID string, sel KeySel
 - A **circuit breaker / negative cache** makes calls fail fast (uniform 401,
   `credential_store_unavailable`) during a cool-down after a store error. A store outage
   therefore never holds pooled DB connections behind a 2-second wait.
+  - *Corrected by ADR 0094 (F-POOL-1):* this was not true as built. Callers waiting for a slot
+    or a flight held their transaction.
+  - It is now true by construction: no store call or store wait happens while a connection is
+    held.
+  - The breaker is per (backend, tenant), with per-tenant and degraded-tenant admission caps.
 - When the TTL expires the entry is refreshed, not evicted. A cached pinned version may be served
   up to a bounded max-stale while the store is failing.
 - Only refs that exist as handle rows ever reach the store. A caller cycling through key ids
@@ -266,8 +291,10 @@ Until W2a builds it, the Stage 10.3 W1 fix round refuses a `KeyImplicit` scheme 
 
 ### 5. Outbound credentials (PROV-OUTBOUND-CRED-1, R5 / C8)
 
-- The orchestrator reads the `outbound_api` handle row **on every call**, inside the caller's
-  transaction.
+- The orchestrator reads the `outbound_api` handle row **on every call**.
+  - *Corrected by ADR 0094 §4.1:* the read runs in the resolver's own short transaction, which
+    commits before the fetch. It is not inside the caller's transaction.
+  - A call made while the caller holds a transaction fails closed (txscope guard).
 - It passes an `OutboundCredential` to the adapter, and the HTTP client authenticates through a
   per-call `Authenticator`.
 - The credential is **never cached** in the adapter, the `Authenticator`, a long-lived HTTP
@@ -487,8 +514,8 @@ need `security` review). Refines §4 "Store and cache":
 | Parameter | Value |
 |---|---|
 | Store call timeout | 2 s total incl. SDK retries (≤ 1 retry); `singleflight` per (tenant, ref, fingerprint) |
-| Concurrent store calls | 4 per process; slot wait ≤ 250 ms, then fail fast |
-| Breaker scope | per backend instance, per process |
+| Concurrent store calls | 4 per process; slot wait ≤ 250 ms, then fail fast. *ADR 0094:* also at most 2 per (backend, tenant) and at most 2 held by degraded tenants together. A degraded tenant never waits. |
+| Breaker scope | per backend instance, per process. *ADR 0094:* now **per (backend, tenant)**, with the same thresholds. |
 | Counting failures | timeout, transport, 5xx, throttling (not-found, access-denied, bad version, `store_config`, fingerprint mismatch do not count) |
 | Trip | 3 consecutive counting failures |
 | Cooldown | 15 s, doubling per failed probe, cap 60 s; one half-open probe |
@@ -664,3 +691,29 @@ real EC2 IMDS call.
 
 N-2 (Secrets Manager client honours `HTTPS_PROXY`) and N-3 (ARN account not pinned against
 platform configuration) remain open, tracked under HD-10.3-2 as before; this closes only N-1.
+
+## Amendment (ADR 0094, 2026-09-26): secret-resolution resource isolation (F-POOL-1)
+
+ADR 0094 replaces the "handle read inside the caller's transaction" shape of §4, the outbound
+wording of §5, and the A4 rows "Concurrent store calls" and "Breaker scope". Summary:
+
+- **INV-POOL.** No pooled DB connection is held across a secret-store call or any wait for one.
+  - The handle read runs in its own `READ ONLY` transaction, which commits before the fetch.
+  - `db.Pool.With*` marks the context (`internal/txscope`).
+  - `Fetcher.Fetch`, `Router.GetDirect`, both resolvers and each domain's `VerifyCallback` fail
+    closed on a marked context.
+- **Two-phase webhooks.** Each domain splits into two calls:
+  - `VerifyCallback`: no transaction held. It returns a single-use `VerifiedCallback` that
+    expires after 30 s and holds a private copy of the verified bytes.
+  - `ReceiveVerifiedCallback`: runs in the domain transaction. Its first statement is
+    `HandleRecheckSQL` on the handle that verified.
+- **Fetcher fairness.**
+  - The breaker is per (backend, tenant).
+  - A tenant may have at most P = 2 store calls in flight, and degraded tenants together at most
+    D = 2. That leaves at least 2 of the 4 slots for healthy tenants once failures are observed.
+  - A degraded tenant's callers never wait.
+  - Losing admission is never negative-cached.
+- The constants S = 4, `SlotWait` 250 ms, `StoreCallTimeout` 2 s, the cache values and the
+  negative-cache values are unchanged.
+- Normative detail, rationale and tests: `docs/decisions/0094-secret-resolution-resource-isolation.md`.
+
