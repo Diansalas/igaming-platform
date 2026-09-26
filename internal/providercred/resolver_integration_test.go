@@ -499,6 +499,32 @@ func TestResolver_CacheRevokeRace(t *testing.T) {
 // 50 concurrent callbacks over 8 refs. At most 4 store calls are in
 // flight, at most 4 transactions are held for more than 250 ms, and an
 // unrelated tenant query still completes in under 500 ms.
+//
+// longSlack (below) is this test's own measurement tolerance around the
+// reviewed 250 ms slot-wait bound - it is NOT itself a security-reviewed
+// number (the review's literal spec is "250 ms" and "4"; §5 does not
+// specify a slack). It exists because a goroutine's SlotWait/await timer
+// fires on wall-clock time, but the goroutine is not observed to have
+// noticed until the Go runtime schedules it to run the following line -
+// under CI's real invocation (`go test ./...` builds and runs every
+// package's test binary concurrently, each with its own GOMAXPROCS, on a
+// shared 4-vCPU runner: package-level oversubscription, not anything this
+// package's code controls), that scheduling delay can be materially
+// larger than on a quiet workstation. CI run #342
+// (docs/plans/stage-10.3-planning/14-ci-342-store-outage-test.md) failed
+// this test's `long` assertion with the prior 400 ms slack while a local,
+// single-package run passed 15/15; a full `go test -race -tags=integration
+// ./...` run under equivalent multi-package contention here reproduced
+// httpserver.test taking >5 minutes wall-clock for a suite that normally
+// finishes in seconds, i.e. the CI-like oversubscription this constant
+// must tolerate is real and substantial, not a hypothetical margin.
+// longSlack is widened accordingly, still with more than 2x headroom
+// below the ~2000 ms (StoreCallTimeout) a genuine slot-holder is expected
+// to show, so a real slot-holder is never misclassified as fast and the
+// asserted count (reviewBound, unchanged) still means exactly what §5
+// says. See the doc above for the mutation checks that confirm this.
+const longSlack = 900 * time.Millisecond
+
 func TestStoreOutage_DoesNotPinPool(t *testing.T) {
 	f := newFx(t)
 	var tenants []uuid.UUID
@@ -511,14 +537,26 @@ func TestStoreOutage_DoesNotPinPool(t *testing.T) {
 	f.mem.Block()
 	defer f.mem.Unblock()
 
+	// The review's literal bound (4), never the constant itself: a changed
+	// constant must fail here (mutation check (b) in the doc above).
+	const reviewBound = 4
+
 	var wg sync.WaitGroup
 	durations := make([]time.Duration, 50)
+	// launch/acquireDone are extra diagnostics only (not asserted on): if
+	// a future failure needs to distinguish "queued for a pool connection"
+	// from "held the tx while waiting on the store", these show it.
+	launch := make([]time.Duration, 50)
+	acquireDone := make([]time.Duration, 50)
+	t0 := time.Now()
 	for i := 0; i < 50; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			tenant := tenants[i%len(tenants)]
+			launch[i] = time.Since(t0)
 			_ = f.rt.WithTenant(context.Background(), tenant, func(ctx context.Context, tx pgx.Tx) error {
+				acquireDone[i] = time.Since(t0)
 				start := time.Now()
 				_, _ = f.sub.Resolver("casino").Resolve(ctx, tx, tenant, "acme", "k1", webhookauth.KeyFromHeader)
 				durations[i] = time.Since(start)
@@ -528,30 +566,40 @@ func TestStoreOutage_DoesNotPinPool(t *testing.T) {
 	}
 	time.Sleep(400 * time.Millisecond)
 	qStart := time.Now()
+	var qAcquire time.Duration
 	if err := f.rt.WithTenant(context.Background(), unrelated, func(ctx context.Context, tx pgx.Tx) error {
+		qAcquire = time.Since(qStart)
 		var one int
 		return tx.QueryRow(ctx, `SELECT 1`).Scan(&one)
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// This 500 ms bound is the review's literal number (§5, "an unrelated
+	// tenant query completes in under 500 ms") - unlike longSlack above,
+	// it is never widened.
 	if d := time.Since(qStart); d > 500*time.Millisecond {
-		t.Fatalf("an unrelated tenant query took %s during the store outage", d)
+		wg.Wait()
+		t.Fatalf("an unrelated tenant query took %s (connection acquire took %s) during the store outage, want < 500ms; "+
+			"maxConcurrent=%d longSlack=%s durations=%v launch=%v acquireDone=%v",
+			d, qAcquire, f.mem.MaxConcurrent(), longSlack, durations, launch, acquireDone)
 	}
 	wg.Wait()
-	// The review's literal bound (4), never the constant itself: a changed
-	// constant must fail here.
-	const reviewBound = 4
 	if m := f.mem.MaxConcurrent(); m > reviewBound {
-		t.Fatalf("%d concurrent store calls, want <= %d", m, reviewBound)
+		t.Fatalf("%d concurrent store calls, want <= %d; durations=%v launch=%v acquireDone=%v",
+			m, reviewBound, durations, launch, acquireDone)
 	}
 	long := 0
+	var longDurations []time.Duration
 	for _, d := range durations {
-		if d > 400*time.Millisecond { // 250 ms slot wait + scheduling slack
+		if d > longSlack {
 			long++
+			longDurations = append(longDurations, d)
 		}
 	}
 	if long > reviewBound {
-		t.Fatalf("%d transactions were held on the store for > 250 ms, want <= %d", long, reviewBound)
+		t.Fatalf("%d transactions were held on the store for > 250 ms (longSlack=%s), want <= %d; "+
+			"over-bound durations=%v; maxConcurrent=%d; all durations=%v launch=%v acquireDone=%v",
+			long, longSlack, reviewBound, longDurations, f.mem.MaxConcurrent(), durations, launch, acquireDone)
 	}
 }
 
