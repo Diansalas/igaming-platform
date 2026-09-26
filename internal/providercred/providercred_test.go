@@ -187,12 +187,12 @@ func TestOutbound_NoCredentialOnLongLivedTypes(t *testing.T) {
 		}
 	}
 	// Negative control: the check sees a planted field.
-	type planted struct{ cred OutboundCredential }
+	type planted struct{ Cred OutboundCredential }
 	if !credentialBearing(reflect.TypeOf(planted{}).Field(0).Type) {
 		t.Fatal("the check must detect an OutboundCredential field")
 	}
 	type plantedAuth struct {
-		a *httpclient.HeaderAuthenticator
+		A *httpclient.HeaderAuthenticator
 	}
 	if !credentialBearing(reflect.TypeOf(plantedAuth{}).Field(0).Type) {
 		t.Fatal("the check must detect an Authenticator field")

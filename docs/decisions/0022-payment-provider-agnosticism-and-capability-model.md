@@ -727,6 +727,21 @@ never *asserts* the tenant.
 >     still exercises `KeyImplicit` reference schemes directly.
 >   - W2a lifts the refusal when it implements `KeyImplicit` resolution
 >     (ADR 0093 §4), with its tests.
+>   - **Lifted in W2a (2026-09-26).** `ValidateScheme` no longer refuses
+>     `KeyImplicit`; `ResolveCredentials` asks the resolver once with an
+>     empty key id and `KeyImplicit`, and requires the active credential and
+>     any predecessor to be bound to the callback's tenant and provider, the
+>     predecessor with its own key id and a non-zero `not_after`. The real
+>     resolver returns exactly one active row plus at most one in-window
+>     `verify_only` row; a MOCK single-key resolver fails `KeyImplicit`
+>     closed. Tests: `TestValidateScheme_KeyImplicitRegistersSinceW2a`,
+>     `TestResolveCredentials_KeyImplicitPairRules`,
+>     `TestResolver_KeyImplicit_Selection`,
+>     `TestResolver_KeyImplicit_VerifiesThroughPlatform`.
+>   - **Point 9 in code (W2a).** The one allowed pre-verification statement
+>     is `providercred.HandleReadSQL`; the capture tests
+>     `TestPointNineCapture_{Payments,KYC,Casino}_AllowsExactlyOneHandleRead`
+>     pin it.
 >
 > **Secret length (security §3 ruling).**
 > - `MinSecretBytes = 16` (128 bits) is the **floor**, not a target. The

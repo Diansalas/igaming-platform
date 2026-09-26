@@ -80,7 +80,7 @@ func (o *Orchestrator) SelectProvider(ctx context.Context, tx pgx.Tx, tenantID u
 	}
 	if len(o.providers) == 1 {
 		for _, p := range o.providers {
-			if _, synthetic := p.(syntheticKYCComponent); synthetic && p != nil {
+			if _, synthetic := p.(syntheticKYCComponent); synthetic {
 				return p, nil
 			}
 		}

@@ -247,7 +247,9 @@ jobs:
             echo "integration tests were skipped for a missing database URL"; exit 1
           fi
           for t in TestMigration0048_PreflightGuardFiresOnBarePlayerLocked TestMigrateUp_RecordsCorrectChecksum \
-                   TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip TestMigration0077_EnablesAndForcesRLSOnTenantsLicencesAndJurisdictions; do
+                   TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip TestMigration0077_EnablesAndForcesRLSOnTenantsLicencesAndJurisdictions \
+                   TestPCMigration_RoundTripOnCleanDatabase TestPCMigration_DownRefusesWithRows TestPCHandles_RLS_TenantIsolation \
+                   TestInitAppRole_RerunKeepsProviderCredentialGrants TestPCMigration_RuntimeGrantsMinimal; do
             grep -q -- "--- PASS: $t " integration-test.log || { echo "expected $t to PASS"; exit 1; }
           done
           echo "packages ok:  $(grep -cE '^ok[[:space:]]' integration-test.log)"

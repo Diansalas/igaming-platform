@@ -398,6 +398,16 @@ inbound-key-material / shared-credential rules in ADR 0022 §4.1–§4.2.
 provider's API in fact returns key material, custodian contract terms, and
 — as before — any code or migration, none of which exists.
 
+**Amendment (Stage 10.3 W2a, ADR 0093 §1): `provider_credential_handles` added to the
+enumerated table list.** Migration 0096 creates it with `tenant_id NOT NULL`, `ENABLE` +
+`FORCE ROW LEVEL SECURITY`, tenant-only read/insert/update policies that also require
+`app.player_account_id` to be unset, and no platform, dual-scope or DELETE policy (ADR 0022
+§2.2: a `WithoutTenant` connection must never become a cross-tenant read path of which provider
+credentials a tenant holds). It holds handles, never secret material, and is excluded from CDC.
+Its two governance tables (`provider_credential_change_requests`/`_approvals`) are
+platform-scoped four-eyes tables with a narrow tenant bridge (SELECT, plus the pending -> applied
+UPDATE on requests), per ADR 0093's W2a amendment.
+
 ## Owner
 
 `ledger-finance`, RLS design co-owned with `security`.

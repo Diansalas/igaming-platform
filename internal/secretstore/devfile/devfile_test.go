@@ -222,7 +222,7 @@ func TestDevFile_TraversalRefused(t *testing.T) {
 	}
 	for _, raw := range []string{
 		fmt.Sprintf("devfile://provider-creds/%s/casino/acme/..?version=1", tenant),
-		fmt.Sprintf("devfile://provider-creds/../casino/acme/n?version=1"),
+		"devfile://provider-creds/../casino/acme/n?version=1",
 		fmt.Sprintf("devfile://x/provider-creds/%s/casino/acme/n?version=1", tenant),
 		fmt.Sprintf("devfile://provider-creds/%s/casino/acme/a/n?version=1", tenant),
 		fmt.Sprintf("devfile://provider-creds/%s/files/acme/n?version=1", tenant),

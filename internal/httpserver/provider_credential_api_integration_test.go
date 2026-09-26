@@ -211,7 +211,7 @@ func (a *pcAPI) do(method, path, token string, body any) apiResp {
 	if err != nil {
 		a.t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	raw, _ := io.ReadAll(resp.Body)
 	return apiResp{status: resp.StatusCode, body: raw}
 }

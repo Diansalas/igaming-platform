@@ -207,16 +207,6 @@ func (f *fx) tenantStaff(tenantID uuid.UUID, role string) uuid.UUID {
 	return id
 }
 
-func (f *fx) setStaffStatus(id uuid.UUID, status string) {
-	f.t.Helper()
-	if err := f.rt.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `UPDATE staff_users SET status = $2 WHERE id = $1`, id, status)
-		return err
-	}); err != nil {
-		f.t.Fatalf("set staff status: %v", err)
-	}
-}
-
 func (f *fx) tenant() uuid.UUID {
 	f.t.Helper()
 	id := uuid.New()

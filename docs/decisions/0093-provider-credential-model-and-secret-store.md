@@ -258,7 +258,9 @@ on whether a handle exists.
   fingerprint is keyed (C6) because vendor secrets may be low-entropy. No further action now.
 - Raising the floor is a constant change in a reviewed commit. No schema depends on it.
 
-**`KeyImplicit` (gate 10.3-W1).** The `KeyImplicit` row-count rule above is `NOT IMPLEMENTED`.
+**`KeyImplicit` (gate 10.3-W1; implemented in W2a, see "W2a implementation status" below).**
+*Superseded by W2a:* the row-count rule is implemented in `internal/providercred` and the
+registration refusal is lifted. Historical text: the `KeyImplicit` row-count rule above is `NOT IMPLEMENTED`.
 Until W2a builds it, the Stage 10.3 W1 fix round refuses a `KeyImplicit` scheme at registration
 (ADR 0022 §3, Stage 10.3 amendment).
 
@@ -530,3 +532,43 @@ always the single 409.
 - Also accepted, not graded: any tenant-T-scoped connection can consume an approved request for T
   (timing only; content is what two Persons approved), and tenant-T scope can read T's requests
   and approvals, the same exposure as T's handle rows (review §1.1).
+
+## W2a implementation status (2026-09-26; pending the W2a code review by `security`)
+
+Recorded by the W2a implementer. Labels per CLAUDE.md; nothing below is "secure" until the
+`security` W2a code review (review §9) has run.
+
+- **Migration 0096** (`provider_credential_handles`, `provider_credential_change_requests`,
+  `provider_credential_change_approvals`): `IMPLEMENTED` per review §1 (B1-B7, namespace CHECK,
+  pinned-version CHECKs, global fingerprint key, forced timestamps, DB content hash, PC0nn
+  consume/transition triggers, minimal runtime grants mirrored in `deploy/init-app-role.sql`,
+  refusing down migration). Two additive tightenings beyond the review: the requester and the
+  approver must equal the session's `app.platform_admin_principal_id` (`PC031`), and composite
+  foreign keys bind a handle's activation request, and a request's predecessor/applied handle,
+  to the same tenant.
+- **Resolver** (`internal/providercred`, ADR 0093 §4 signature, one pinned handle read in the
+  caller's transaction, fingerprint compared on every resolve, §5 cache/breaker constants in
+  `internal/secretstore`): `IMPLEMENTED` against the `memory` (tests only) and `devfile`
+  (development only) backends. `KeyImplicit` resolution: `IMPLEMENTED`; the W1 registration
+  refusal is removed. `awssm`: `NOT IMPLEMENTED` (W3b); a configuration naming it refuses startup.
+- **Wiring:** the real resolver is constructed only with a fingerprint key AND a permitted
+  backend, and serves non-synthetic adapters only (`webhookauth.KindSplitResolver`). No real
+  adapter exists, so today no production traffic reaches it.
+- **Admin API** (six routes, four permissions, audit, error mapping, OpenAPI): `IMPLEMENTED`.
+- **PROV-OUTBOUND-CRED-1:** `PARTIALLY IMPLEMENTED`. Implemented: per-call
+  `OutboundResolver` (own tenant transaction, committed before the HTTP call), per-call
+  `httpclient.Authenticator` replacing the static key, `APIKeyEnvVar` removed,
+  `DerivedTokenCache`. **Not implemented:** passing the tenant and the resolved credential
+  through the payments/casino/KYC adapter request types. Every existing outbound adapter call
+  (`provider.Deposit`, `Withdraw`, `QueryStatus`, `Launch`, `CreateVerification`) runs INSIDE a
+  domain DB transaction (the withdrawal submit deliberately holds a row lock across it), so
+  review §2 precision 1 ("no outbound HTTP call while a DB transaction is held open") cannot be
+  met without restructuring those financial flows - a payments/casino/identity-compliance and
+  `ledger-finance` design decision. Until then no non-synthetic adapter may make an outbound
+  call; the mocks make none.
+- **O4:** `IMPLEMENTED` - player self-service KYC selects the provider from the tenant's
+  active outbound KYC credential (fails closed when none or several are configured; a lone
+  synthetic adapter is used without one in test-support deployments).
+- **Not implemented:** logging the matched `key_id` of a successful `KeyImplicit` verification
+  (the domain orchestrators have no success log line; no `KeyImplicit` scheme is registered).
+- Mutation-kill record: `docs/plans/stage-10.3-planning/evidence/w2a-mutation-kill.txt`.
