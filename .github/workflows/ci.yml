@@ -55,6 +55,11 @@ jobs:
       # created OWNER igaming and every assertion still runs as igaming.
       TEST_ADMIN_DATABASE_URL: postgres://igaming_test_admin:igaming_test_admin_ci_password@localhost:5432/igaming_platform_test?sslmode=disable
       JWT_SIGNING_SECRET: ci-signing-secret-at-least-32-characters-long
+      # Stage 10.3 W2a (ADR 0093 A3; security review §3): the published,
+      # CI-only fingerprint-key placeholder. config.Load refuses it unless
+      # APP_ENV is explicitly "development"; tests that construct the
+      # credential subsystem set their own runtime-generated key.
+      PROVIDER_CREDENTIAL_FINGERPRINT_KEY: ci-only-provider-credential-fingerprint-key-not-a-secret
 
     steps:
       - name: Checkout
@@ -123,6 +128,16 @@ jobs:
           for f in internal/testsupport/scratchdb/*.go; do
             head -1 "$f" | grep -qx '//go:build integration' || { echo "$f lacks //go:build integration"; exit 1; }
           done
+
+      - name: Guard - memory secret store is imported only by tests (Stage 10.3 W2a)
+        run: |
+          # ADR 0093 §6 / security review §4.1: the memory:// backend
+          # (internal/secretstore/memstore) is test-only. Mirrors
+          # TestSecretStore_MemstoreImportedOnlyByTests.
+          offenders="$(grep -rl --include='*.go' '"github.com/Diansalas/igaming-platform/internal/secretstore/memstore"' . | grep -v '_test\.go$' || true)"
+          if [ -n "$offenders" ]; then echo "memstore imported outside tests:"; echo "$offenders"; exit 1; fi
+          offenders="$(grep -rl --include='*.go' 'NewRouterUnvalidated' . | grep -v '_test\.go$' | grep -v '^\./internal/secretstore/router\.go$' | grep -v '^\./internal/secretstore/memstore/' || true)"
+          if [ -n "$offenders" ]; then echo "NewRouterUnvalidated used outside test support:"; echo "$offenders"; exit 1; fi
 
       - name: Verify gofmt
         run: |

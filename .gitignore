@@ -43,3 +43,9 @@ terraform.rc
 # Reusable modules are not roots: only the root modules
 # (deploy/aws/environments/*, deploy/aws/bootstrap) commit a lock file.
 deploy/aws/modules/*/.terraform.lock.hcl
+
+# Stage 10.3 W2a (ADR 0093 §6; security review §4.2): the devfile://
+# secret-store root (SECRETSTORE_DEVFILE_ROOT, default ./.secrets/dev).
+# Development-only provider credential secrets live here and must never be
+# committed.
+.secrets/

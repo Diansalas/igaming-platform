@@ -27,3 +27,7 @@
 **/*.tfvars
 **/*.tfvars.json
 !**/*.tfvars.example
+
+# Stage 10.3 W2a (ADR 0093 §6; security review §4.2): the devfile://
+# secret-store root never enters a build context or an image layer.
+.secrets/
