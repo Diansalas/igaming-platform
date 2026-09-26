@@ -191,6 +191,20 @@ jobs:
           set -o pipefail
           go test -race -tags=integration -v ./... 2>&1 | tee integration-test.log
 
+      - name: Summarize integration failures
+        # Stage 10.1: job logs are only retrievable by their last lines,
+        # and the Postgres container log printed on shutdown pushes the
+        # failing test's output out of that window. Emitting each failure
+        # as an annotation keeps the test name and location readable from
+        # the check run.
+        if: failure()
+        run: |
+          test -f integration-test.log || exit 0
+          grep -E -- '--- FAIL|^FAIL|^panic:|WARNING: DATA RACE' integration-test.log | head -50 |
+            while IFS= read -r line; do echo "::error title=integration failure::${line}"; done
+          grep -E -A12 -- '--- FAIL' integration-test.log | grep -E '_test\.go:[0-9]+' | head -30 |
+            while IFS= read -r line; do echo "::error title=failure detail::${line}"; done
+
       - name: Assert integration evidence (Stage 10 W0 gate)
         run: |
           # A skipped test is green, so a green step alone does not prove the
