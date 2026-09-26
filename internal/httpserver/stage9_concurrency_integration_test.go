@@ -164,6 +164,66 @@ func stage9RawGetJSON(srv *httptest.Server, path, bearerToken string) (*http.Res
 	return http.DefaultClient.Do(req)
 }
 
+// stage9MinCeiling is this file's ORIGINAL fixed hang/deadlock-guard
+// ceiling (CI-FLAKE-281). It is preserved as a floor, never lowered:
+// stage9Ceiling only ever raises the bound above this value.
+const stage9MinCeiling = 30 * time.Second
+
+// stage9MaxCeiling bounds how far stage9Ceiling may scale up, so a
+// genuine deadlock/pool-exhaustion still fails in a bounded, CI-reasonable
+// time instead of only at `go test`'s own overall timeout.
+const stage9MaxCeiling = 3 * time.Minute
+
+// stage9SafetyFactor converts one SERIAL, uncontended calibration hash
+// into a per-operation budget that accounts for shared-CPU degradation
+// under real concurrency (n goroutines here, plus every other package
+// `go test ./...` runs at the same time in CI). Derived from this file's
+// own CI-FLAKE-281 investigation stress measurement (docs/plans/
+// stage-10.3-planning/13-ci-flake-281-disposition.md): ~0.74s observed per
+// login under heavy artificial contention against a typical uncontended
+// Argon2id-64MiB hash of tens of milliseconds - roughly an order of
+// magnitude, so 15x keeps comfortable margin without being unbounded.
+const stage9SafetyFactor = 15
+
+// stage9CalibrateArgon2Cost times ONE real call to auth.HashPassword -
+// the exact function, with the exact configured Argon2id parameters
+// (internal/auth/password.go's defaultArgon2Params), that every
+// register/login in this file actually invokes - immediately before a
+// burst, so the derived ceiling reflects the ACTUAL cost on the machine
+// running the suite right now, never a hardcoded guess.
+func stage9CalibrateArgon2Cost(t *testing.T) time.Duration {
+	t.Helper()
+	start := time.Now()
+	if _, err := auth.HashPassword("stage9-calibration-password-not-a-real-account"); err != nil {
+		t.Fatalf("calibrate argon2 cost: %v", err)
+	}
+	return time.Since(start)
+}
+
+// stage9Ceiling derives this file's stage9AwaitAll hang/deadlock-guard
+// ceiling for n concurrent operations, scaling with the Argon2id cost
+// measured on THIS run (stage9CalibrateArgon2Cost) rather than a fixed
+// 30s guess that CI-FLAKE-281 found could be consumed up to ~74% by
+// runner CPU contention alone, with no code defect. This changes ONLY the
+// wall-clock hang-detection bound - concurrency counts, assertions and
+// Argon2 parameters are all untouched (per CI-FLAKE-281 disposition:
+// never weaken a threshold or remove concurrency/security coverage to
+// make CI green). Floored at stage9MinCeiling (the original fixed value -
+// never lowered) and capped at stage9MaxCeiling (so a genuine hang still
+// fails in bounded time).
+func stage9Ceiling(t *testing.T, n int) time.Duration {
+	t.Helper()
+	cost := stage9CalibrateArgon2Cost(t)
+	scaled := time.Duration(int64(n)) * stage9SafetyFactor * cost
+	if scaled < stage9MinCeiling {
+		return stage9MinCeiling
+	}
+	if scaled > stage9MaxCeiling {
+		return stage9MaxCeiling
+	}
+	return scaled
+}
+
 // stage9AwaitAll runs n goroutines (bodies indexed 0..n-1) and fails with
 // a clear message if they have not ALL finished within timeout - the
 // explicit, never-rely-on-go-test's-own-timeout deadlock check every test
@@ -252,7 +312,7 @@ func TestStage9_ConcurrentLogins_SameAccount_NoDeadlockAndCorrectSessionCount(t 
 
 	const n = 30
 	statuses := make([]int, n)
-	elapsed := stage9AwaitAll(t, 30*time.Second, n, func(i int) {
+	elapsed := stage9AwaitAll(t, stage9Ceiling(t, n), n, func(i int) {
 		resp, err := stage9RawPostJSON(srv, "/v1/auth/login", "", map[string]string{
 			"brand_slug": brand.Slug, "email": email, "password": password,
 		})
@@ -323,7 +383,7 @@ func TestStage9_ConcurrentLogins_DifferentAccounts_NoPoolExhaustionOrHang(t *tes
 	}
 
 	statuses := make([]int, n)
-	elapsed := stage9AwaitAll(t, 30*time.Second, n, func(i int) {
+	elapsed := stage9AwaitAll(t, stage9Ceiling(t, n), n, func(i int) {
 		resp, err := stage9RawPostJSON(srv, "/v1/auth/login", "", map[string]string{
 			"brand_slug": brand.Slug, "email": emails[i], "password": password,
 		})
@@ -375,7 +435,7 @@ func TestStage9_ConcurrentCatalogueReads_ReadHeavyNoContention(t *testing.T) {
 		n = 60
 	}
 	statuses := make([]int, n)
-	elapsed := stage9AwaitAll(t, 30*time.Second, n, func(i int) {
+	elapsed := stage9AwaitAll(t, stage9Ceiling(t, n), n, func(i int) {
 		var resp *http.Response
 		var err error
 		if i%2 == 0 {
@@ -437,7 +497,7 @@ func TestStage9_ConcurrentCasinoLaunch_DistinctPlayers_NoContention(t *testing.T
 		sessionID string
 	}
 	results := make([]launchResult, n)
-	elapsed := stage9AwaitAll(t, 30*time.Second, n, func(i int) {
+	elapsed := stage9AwaitAll(t, stage9Ceiling(t, n), n, func(i int) {
 		resp, err := stage9RawPostJSON(srv, "/v1/me/casino/games/"+game.ID.String()+"/launch", tokens[i], map[string]string{
 			"asset_code": "EUR", "mode": "real",
 		})
@@ -516,7 +576,7 @@ func TestStage9_ConcurrentCasinoLaunch_SamePlayerManySessions(t *testing.T) {
 		sessionID string
 	}
 	results := make([]launchResult, n)
-	elapsed := stage9AwaitAll(t, 30*time.Second, n, func(i int) {
+	elapsed := stage9AwaitAll(t, stage9Ceiling(t, n), n, func(i int) {
 		resp, err := stage9RawPostJSON(srv, "/v1/me/casino/games/"+game.ID.String()+"/launch", player.Tokens.AccessToken, map[string]string{
 			"asset_code": "EUR", "mode": "real",
 		})
@@ -583,7 +643,7 @@ func TestStage9_ConcurrentBackOfficeQueueReads_PureReadsNoContention(t *testing.
 	}
 
 	statuses := make([]int, n)
-	elapsed := stage9AwaitAll(t, 30*time.Second, n, func(i int) {
+	elapsed := stage9AwaitAll(t, stage9Ceiling(t, n), n, func(i int) {
 		resp, err := stage9RawGetJSON(srv, "/v1/admin/bonus/change-requests", tokens[i%staffCount])
 		if err != nil {
 			statuses[i] = -1
