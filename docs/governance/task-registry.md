@@ -396,15 +396,17 @@ coverage is sufficient before Wave 1 closes.
 | ID | Owner | Status | Dependencies | Files owned | Workstream | Blockers |
 |---|---|---|---|---|---|---|
 | 4HB1-01 | Orchestrator | Done | none | `docs/governance/*` | Governance setup | none |
-| 4HB1-02 | bonus-engine | In progress | none | `docs/architecture/10-bonus-engine-architecture.md` | Wave 1: domain model + full bonus catalogue + campaign/offer/grant/segmentation/coded-bonus/bulk/suggestion design | none |
-| 4HB1-03 | ledger-finance | In progress | none | `docs/architecture/ledger-accounting-model.md` | Wave 1: financial/ledger integration contract (bonus_expense, Rule B2 generator, conversion flow) | none |
-| 4HB1-04 | risk | In progress | none | ADR 0031 addendum | Wave 1: Risk integration contract | none |
-| 4HB1-05 | identity-compliance | In progress | none | ADR 0034 addendum | Wave 1: RG + identity/multi-account contract | none |
-| 4HB1-06 | sportsbook | In progress | none | doc 09 addendum (review only) | Wave 1: provider-native bonus coexistence contract | none |
-| 4HB1-07 | casino | In progress | none | doc 08 addendum (review only) | Wave 1: casino event-consumption contract | none |
-| 4HB1-08 | security | In progress | none | `docs/security/security-architecture.md` addendum | Wave 1: RBAC/audit/tenancy/RLS contract | none |
-| 4HB1-09 | architect | In progress | none | new cross-domain implementation-contract doc | Wave 1: master architecture→ADR→object→service→API→event→ledger→audit→test mapping | none |
-| 4HB1-10 | qa | In progress | none | `docs/testing/testing-strategy.md` addendum | Wave 1: full test-matrix design | none |
+| 4HB1-02 | bonus-engine | Done | none | `docs/architecture/10-bonus-engine-architecture.md` | Wave 1: domain model + full bonus catalogue + campaign/offer/grant/segmentation/coded-bonus/bulk/suggestion design | none |
+| 4HB1-03 | ledger-finance | Done | none | `docs/architecture/ledger-accounting-model.md` | Wave 1: financial/ledger integration contract (bonus_expense, Rule B2 generator, conversion flow) | none |
+| 4HB1-04 | risk | Done | none | ADR 0031 addendum | Wave 1: Risk integration contract | none |
+| 4HB1-05 | identity-compliance | Done | none | ADR 0034 addendum | Wave 1: RG + identity/multi-account contract | none |
+| 4HB1-06 | sportsbook | Done | none | doc 09 addendum (review only) | Wave 1: provider-native bonus coexistence contract | none |
+| 4HB1-07 | casino | Done | none | doc 08 addendum (review only) | Wave 1: casino event-consumption contract | none |
+| 4HB1-08 | security | Done | none | `docs/security/security-architecture.md` addendum | Wave 1: RBAC/audit/tenancy/RLS contract | none |
+| 4HB1-09 | architect | Done | none | new cross-domain implementation-contract doc | Wave 1: master architecture→ADR→object→service→API→event→ledger→audit→test mapping | none |
+| 4HB1-10 | qa | Done | none | `docs/testing/testing-strategy.md` addendum | Wave 1: full test-matrix design | none |
+
+*Status note 2026-09-26: rows 4HB1-02..10 corrected from "In progress" to "Done" per the Wave 1 status line directly below.*
 
 **Wave 1 status: COMPLETE, all 9 dispatches reported back, reviewed, and
 committed** (`41c029f`, `0171e02`, `39be4af`, `b0442b1`, `5b7e7ed`,
@@ -450,11 +452,13 @@ Roster adaptation, disclosed per this project's standing practice (mirrors the "
 
 | ID | Owner | Status | Deliverable |
 |---|---|---|---|
-| 4HB1W15-01 | casino | In progress | Casino postWin financial source/destination resolution design, G-2 boundary specification (not selecting G-2), adversarial scenarios (§A) |
-| 4HB1W15-02 | bonus-engine | In progress | Grant terminal-state invariant + proof (§A.9), bonus targeting/bulk-assignment validation (§C), Bonus Suggestion full spec (§D), bonus catalogue validation (§H) |
-| 4HB1W15-03 | architect | In progress | Segmentation Engine architecture doc (§B), CRM Engine architecture doc (§E), Affiliate Engine architecture doc (§F), canonical cross-domain relationship diagrams (§G), updated ownership map + dependency graph |
-| 4HB1W15-04 | sportsbook | In progress | Provider-native bonus coexistence re-confirmation against the new CRM/Affiliate/Segmentation additions (§I) |
-| 4HB1W15-05 | qa | In progress | Cross-domain test matrix covering all new domains + §A.10's adversarial scenarios |
+| 4HB1W15-01 | casino | Done | Casino postWin financial source/destination resolution design, G-2 boundary specification (not selecting G-2), adversarial scenarios (§A) |
+| 4HB1W15-02 | bonus-engine | Done | Grant terminal-state invariant + proof (§A.9), bonus targeting/bulk-assignment validation (§C), Bonus Suggestion full spec (§D), bonus catalogue validation (§H) |
+| 4HB1W15-03 | architect | Done | Segmentation Engine architecture doc (§B), CRM Engine architecture doc (§E), Affiliate Engine architecture doc (§F), canonical cross-domain relationship diagrams (§G), updated ownership map + dependency graph |
+| 4HB1W15-04 | sportsbook | Done | Provider-native bonus coexistence re-confirmation against the new CRM/Affiliate/Segmentation additions (§I) |
+| 4HB1W15-05 | qa | Done | Cross-domain test matrix covering all new domains + §A.10's adversarial scenarios |
+
+*Status note 2026-09-26: rows 4HB1W15-01..05 corrected from "In progress" to "Done" per "Phase 1 status: COMPLETE, all 5 dispatches committed" below.*
 
 **Phase 2 — Independent review (parallel, after Phase 1, none reviewing own work)** — to be dispatched once Phase 1 reports back:
 - `ledger-finance` — casino's postWin design, bonus-engine's terminal-invariant, G-2 boundary spec (financial-correctness angle, §J)
@@ -677,7 +681,9 @@ chain. Full reasoning in this Phase's completion report to the human.
 
 **Final certification (Phase 11, independent financial sign-off): READY.** Every real posting shape traced against actual call sites (not re-derived from design docs) and confirmed balanced; `ACTION_ROUTE_TO_CASH`'s 4-leg posting shape (via Rule B2 firing unconditionally, since `player_bonus_held` is a BONUS_SET member) given a final, closing ruling — correct, no further ambiguity. Idempotency and reconciliation confirmed end to end. Both dependency-request fixes confirmed to carry no residual financial-correctness angle.
 
-## Stage 4H-B1, Wave 3 — Bonus Engine Completion, Integration Hardening & Final Financial Gate (Phase 10 of 11 — `architect`, IN PROGRESS)
+## Stage 4H-B1, Wave 3 — Bonus Engine Completion, Integration Hardening & Final Financial Gate (Phase 10 of 11 — `architect`, COMPLETE)
+
+*Status note 2026-09-26: header corrected from "IN PROGRESS". Phase 10 is Done (W3-P10 row and verdict below); Phase 11 is recorded COMPLETE in the next section; `docs/governance/wave-3-report.md` records Wave 3 as READY. The "Phase 11 … has not run" sentence below is historical.*
 
 Commits `9d857dc`..`8c6ab7a` are Phases 0-9 (reconnaissance through `qa`).
 This entry records **Phase 10 only** (`architect`, cross-domain
@@ -3807,8 +3813,8 @@ Planning report: `docs/plans/stage-10.1-planning-gate-proposal.md`; stage defini
 | PAY-REV-1 | payments (+ ledger-finance for `ledger.Post` routing) | **IMPLEMENTED** (`e9e0ad8`, fixes `3f67ac5`, `009c6d0`, `2704bdd`) | L2 lock + re-check; migration 0092 tenant-leading `deposit_reversal` partial unique index; `ErrReversalAlreadyExists` (key-first classification); 409 + allow-listed alert + separately committed denial audit naming intent/original/rejected reference/existing reversal | plan §J #1–#12 + defect repro (pre-fix: 2 reversals posted) + index-order test (fails on pre-fix Post) | none | Integrated |
 | SB-T1-XMIN | sportsbook (+ ledger-finance review) | **IMPLEMENTED** (`e9e0ad8`, `2cb3600`) | migration 0093 body-only fail-closed `pg_xact_status` check, epoch anchored to `pg_current_xact_id()` (deviation from ruling R-2, RATIFIED by architect and ledger-finance) | plan §J #13–#19 + F4 status-check test (mutation-killed) | none; residuals SB-T1-XMIN-STRADDLE (P3, deferred) | Integrated |
 | PAY-WH-TENANT-1 | payments + security | **IMPLEMENTED — MOCK resolver only** (`250828b`, tests `505a311`, fixes `3f67ac5`); security re-verification CLEARED; real resolver NOT IMPLEMENTED (launch-blocking for any real PSP) | route tenant selects the single per-(tenant, provider) credential; HMAC over v1 prefix + tenant + provider + key id + raw body; verify before any parse/read/lock/write; uniform 401; ADR 0022 §3 amendment (contract points 1–7), ADR 0019 wording (ledger-finance concurrence given) | QA plan paper 16 incl. T8/T11a/T12/T13; pre-fix cross-tenant tombstone evidence | real `WebhookCredentialResolver` + secret store (future, human-authorized); PAYWH-TS-1 | Integrated |
-| KYC-WH-1 | identity-compliance + security | **Registered — High, pre-existing (present at staging commit `9190d5d`); needs a human scope ruling; NOT fixed in Stage 10.1** | KYC webhook: literal HMAC constant in `cmd/platform-api/main.go`, mock KYC provider + route registered with no environment gate, `provider_reference` returned to the player ⇒ a player can forge an "approved" KYC callback. No payment/withdrawal path consults KYC status today (immediate harm: false compliance record; latent bypass). Verification: `docs/plans/stage-10.1-planning/12-kyc-wh-1-verification.md` | — | human scope ruling | n/a |
-| CAS-WH-TENANT-1 | casino + security | Registered — Medium, pre-existing; outside 10.1 | casino webhook tenant from URL slug; per-process key; no tenant in signature | — | — | n/a |
+| KYC-WH-1 | identity-compliance + security | **Superseded — resolved by ADR 0091, implemented in Stage 10.2 (see Stage 10.2 section)** (status note 2026-09-26). Original status: **Registered — High, pre-existing (present at staging commit `9190d5d`); needs a human scope ruling; NOT fixed in Stage 10.1** | KYC webhook: literal HMAC constant in `cmd/platform-api/main.go`, mock KYC provider + route registered with no environment gate, `provider_reference` returned to the player ⇒ a player can forge an "approved" KYC callback. No payment/withdrawal path consults KYC status today (immediate harm: false compliance record; latent bypass). Verification: `docs/plans/stage-10.1-planning/12-kyc-wh-1-verification.md` | — | human scope ruling | n/a |
+| CAS-WH-TENANT-1 | casino + security | **Superseded — resolved by ADR 0091, implemented in Stage 10.2 (see Stage 10.2 section)** (status note 2026-09-26). Original status: Registered — Medium, pre-existing; outside 10.1 | casino webhook tenant from URL slug; per-process key; no tenant in signature | — | — | n/a |
 | PAYWH-BRAND-1 / PAYWH-RL-1 / PAYWH-TS-1 | payments + security | Registered — deferred | webhook capability check has no brand scoping; webhook rate limiting; signed-timestamp replay window | — | — | n/a |
 | CI-FLAKE-281 | qa + devops | **Open — not root-caused** | one intermittent integration-step failure in CI run #281 (`a2a0981`, documentation-only commit); same code green in #280/#282 and 6/6 local runs; failing test not identifiable (log tail window, proxy-blocked download); failure annotations added to CI (`444e6e1`) | next occurrence names the test | — | n/a |
 | LEDGER-REV-UNIQ | ledger-finance | Deferred | cross-type, amount-aware "one reversal per original" | — | — | n/a |
@@ -3828,6 +3834,16 @@ Planning report: `docs/plans/stage-10.1-planning-gate-proposal.md`; stage defini
 | CAS-CAP-ROLLBACK-1 | casino + ledger-finance | Registered — follow-up, not 10.2 scope; **HARD PRE-CONDITION for wiring any real casino webhook resolver or going live with a real aggregator** (ledger-finance condition, Stage 10.2) | A disabled casino capability (or `supports_rollback=false`) returns 503 to a *verified* callback before settlement. Scope per ledger-finance review (docs/plans/stage-10.2-planning/10-review-ledger-finance.md §5): (a) a verified rollback of a posted bet leaves the stake debited; (b) a verified win for a posted bet is withheld; (c) a rollback of an unseen original writes **no tombstone**, so a late original arriving after re-enable posts unreversed (breaks the late-arrival guarantee for that window); (d) `supports_rollback` defaults false with no CHECK tying it to `supports_bet` (migration 0035:112); (e) no casino provider reconciliation exists to detect any of this; (f) callbacks load the tenant-wide capability row (`brandID = uuid.Nil`), so brand-only capability rows 503 every callback. Diverges from ADR 0022 §3 "status governs routing only". Pre-existing (ADR 0025 review P1); no ledger invariant violated (nothing is written). Recorded in ADR 0025 Stage 10.2 amendment (architect review §4; ruling J16). ledger-finance position: capability/status gates new exposure (bets) only, never settlement of existing exposure; an unseen-original rollback always writes its tombstone. | — | ledger-finance ruling given (see §5 of the review) | n/a |
 | WH-VENDOR-SCHEME-1 | architect | Registered — pre-condition for the first real adapter in any domain (not 10.2 scope) | Final-review finding K12/L8 (`docs/plans/stage-10.2-planning/01-webhook-trust-design.md` §K, `11-review-code.md` L8): `internal/httpserver`'s shared `webhookPreamble` and every domain's `Orchestrator.ReceiveCallback` hard-require the platform-defined MOCK `Scheme.ParseHeaders` wire format (fixed header names, `v1=<64 lowercase hex>` signature, `mock-v1`-shaped key ids) before the adapter's own `HandleCallback`/`Verify` ever runs. A real vendor's own header names or signature encoding cannot survive that parse and would 401 before reaching adapter-level verification. Header parsing must become an adapter/`Scheme` capability, not a shared hard-coded preamble step, before payments, KYC or casino can wire in a first real adapter. Recorded in ADR 0022 §3 Stage 10.2 amendment. | — | none (design work, no code change in 10.2) | n/a |
 | KYC-REASON-BOUND-1 | identity-compliance | Registered — follow-up, not 10.2 scope | Security final review F-7 (`docs/plans/stage-10.2-planning/09-review-security-final.md`): the verified sender's `reason` string (up to ~256 KiB, pre-existing, unbounded length/charset) reaches both `kyc_verifications.reason`/audit metadata (DB) and the player-facing verification response (`internal/kyc/mock_provider.go:216`, `internal/httpserver/kyc_handlers.go:81-82`). ADR 0028 intends a short machine-readable code. When the first real KYC adapter lands, bound `reason` (length and charset) in the adapter's normalisation before it reaches the DB or the player. | — | none (no real adapter yet) | n/a |
+
+### Records hygiene 2026-09-26
+
+Records-only entries from the Stage 10.3 planning reconciliation (`docs/plans/stage-10.3-planning/00-roadmap-reconciliation.md` "Discrepancies" items 9–11). No code, migration or deployment change.
+
+| ID | Owner | Status | Scope | Sources | Blockers | Integration |
+|---|---|---|---|---|---|---|
+| ACC-EVIDENCE-1 | Orchestrator + devops (human supplies results) | **Open — STAGING REQUIRED; to be produced for the single future governed staging deployment** | Planning finding F-6 / Stage 10 W0 item 7: a staging acceptance-evidence checklist (test IDs, no credentials) was planned for `docs/runbooks/stage-9-4-staging-lifecycle-runbook.md` but has no W0 registry row, no mention in the Stage 10 completion report, and no checklist in the runbook. The Stage 9.4 acceptance remains human-attested only. | `docs/plans/stage-10-planning-gate-proposal.md` §2.4 F-6, §8.H W0 item 7, §10 risk 10; `docs/progress.md` "Stage 9.4 — AWS staging deployment + acceptance (human-executed)"; `docs/governance/stage-10-completion-report.md` | next governed staging deployment | n/a |
+| STAGING-9.4-VERIFY-1 | devops + security | **Unrecorded — results not in repository; re-run at the next governed staging deployment (STAGING REQUIRED)** | Stage 9.4 runbook §12 "First real apply" verifications items 1–10 and the §5 temporary multi-replica test. The runbook says to record results; none are recorded. No claim is made here that they passed or failed. | `docs/runbooks/stage-9-4-staging-lifecycle-runbook.md` §5, §12; `docs/progress.md` "Stage 9.4 — AWS staging deployment + acceptance (human-executed)" | next governed staging deployment | n/a |
+| STAGE-NAMING-1 | human (architect records the decision) | **Open — needs a recorded human decision** | `MASTER-BUILD-PROMPT.md` stage map not revised via a recorded decision; stages 8–10.x added by stage-definition ADRs 0087/0090/0091; needs a recorded decision (human) to revise the master stage map. (`MASTER-BUILD-PROMPT.md` defines Stages 0–7 and says it is revised only through a recorded decision; Stages 8–9.4 have stage ADRs such as 0080/0084/0086 but none of decision type "stage definition".) | `MASTER-BUILD-PROMPT.md` "Stages"; `docs/decisions/0087-*.md`, `0090-*.md`, `0091-*.md`; `docs/governance/stage-10-completion-report.md` header | human decision | n/a |
 
 ## How to use this registry (for future stages)
 

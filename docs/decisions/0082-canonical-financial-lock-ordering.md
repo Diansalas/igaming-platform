@@ -2,6 +2,8 @@
 
 ## Status
 
+*Status note 2026-09-26: "design only" below is historical. §4 was implemented in Stage 9.1 (LOCK-1 closed; task S91-07: `internal/ledger/lockorder.go` and call sites — Go only, no migration), and Amendment A4 was applied in Stage 10 W1 with sportsbook settlement (migration `0091_sportsbook_settlement`). See `docs/progress.md` "Stage 9.1" and "Stage 10 — W1", `docs/governance/task-registry.md` S91-07, and `docs/governance/stage-10-completion-report.md`.*
+
 Accepted — **design only**. No Go source file and no migration is changed
 by this ADR's own dispatch. Implementation is delegated to
 `ledger-finance` (with `bonus-engine` for Workstream C), who must

@@ -4,6 +4,8 @@ Last updated: 2026-09-26 (Stage 10.2 implemented; stopped at the deployment gate
 
 ## Status: Stage 10.2 IMPLEMENTED (KYC-WH-1, CAS-WH-TENANT-1, PAYWH-GATE-1 — MOCK providers only); stopped at the deployment gate (`docs/governance/stage-10.2-completion-report.md`). Stage 10.1 also awaits the same staging refresh.
 
+*Status note 2026-09-26: the "(approved-pending)" labels on the Stage 3C, 3D, 4A, 4D-RG, 4E, 4F, 4G, 4G-FINAL, 4H-B0-R7 and Stage 7 headers below are historical, recorded at the time each stage stopped for review. Later stages proceeded on explicit human authorization recorded in the subsequent stage sections (for example Stage 4H-B1 Wave 2 "human-authorized", Stage 9.1 "authorized by the human", and ADRs 0087/0090/0091 for Stages 10, 10.1 and 10.2). The headers are left unedited. Source: `docs/plans/stage-10.3-planning/00-roadmap-reconciliation.md` "Discrepancies" item 12.*
+
 ## Stage 0 — complete (approved)
 
 Governance (`CLAUDE.md`, `MASTER-BUILD-PROMPT.md`), 17 specialist agents,

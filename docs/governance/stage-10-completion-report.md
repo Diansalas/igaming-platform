@@ -5,6 +5,7 @@
 - **Contract:** ADR 0088 (ACCEPTED; §13 amendments applied)
 - **Branch:** `claude/focused-wright-jw88w9`
 - **Status:** Stage 10 **COMPLETE**. All seven gates passed; one validation item is isolated and BLOCKED on an external credential (item 9). The Orchestrator **stops here**: Stage 11 is not started without explicit human authorization.
+- *Status note 2026-09-26: the next stage was named Stage 10.1, not "Stage 11" (stage definition `docs/decisions/0090-stage-10-1-definition-payment-reversal-and-settlement-trigger-remediation.md`; `docs/governance/stage-10.1-completion-report.md`). The master stage map naming is registered as STAGE-NAMING-1 in `docs/governance/task-registry.md` "Records hygiene 2026-09-26".*
 
 Labels follow CLAUDE.md "No fake completion". Sportsbook settlement is **IN-HOUSE MOCK MODE**: the only driver is a non-production, test-support staff route. It is **not** a real sportsbook provider integration. Real provider settlement and statement matching are **PROVIDER DEPENDENT**.
 

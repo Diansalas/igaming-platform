@@ -3,6 +3,9 @@
 **2026-09-21 renumbering note (backend-engineer, implementing wave):** a parallel Stage 9.1 devops workstream (`PLAT-MIGDRIFT-1`) landed `migrations/0083_migration_checksum_tracking` first, so every "migration `0083`" reference below that names the migration this ADR specifies is corrected to "migration `0084`" throughout this document - a pure renumbering pass, no design content changed.
 
 Status: **Accepted (design ruling only — NOT IMPLEMENTED).**
+
+*Status note 2026-09-26: this header is historical. The ruling was implemented in Stage 9.1 (ARCH-DB-2 closed) by migration `0084_catalogue_write_authorization` with fix-round migration `0085_casino_games_require_platform_principal`; §5.2 (casino four-eyes) was implemented in Stage 9.2 by migrations `0086_casino_catalogue_dual_control` and `0089_casino_catalogue_governance_hardening`. See `docs/progress.md` "Stage 9.1" and "Stage 9.2".*
+
 Owner: `architect`. Requires `security` review before the implementing
 wave's output is marked complete (CLAUDE.md, "Security"). Financial
 invariants touched are read-only observations about `sb_selections.odds_*`

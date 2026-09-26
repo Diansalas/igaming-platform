@@ -1,6 +1,9 @@
 # ADR 0038 — Sportsbook Accounting and Ledger Integration
 
 Status: Proposed (Stage 4H-B0-R4, architecture only — **`NOT IMPLEMENTED`**).
+
+*Status note 2026-09-26: this header is historical. Parts of this ADR are now implemented: bet placement (`TxSportsbookBet`, migration `0078_sportsbook_foundation`, Stage 6); the `player_locked` origin split (migration `0048_ledger_locked_account_origin_split`, Stage 4H-B0-R7; see §15's status amendment); and cash-funded single-bet settlement, void and rollback in **in-house MOCK mode** (migration `0091_sportsbook_settlement`, Stage 10 W1, contract ADR 0088). Bonus/mixed-funded wagering and cashout remain NOT IMPLEMENTED. See `docs/progress.md` "Stage 6" and "Stage 10 — W1", and `docs/governance/stage-10-completion-report.md`.*
+
 No migration, no Go code, and no `transaction_type`/`account_type` value in
 this document exists yet. Owner: `ledger-finance`. This ADR is the detailed
 financial/ledger-integration companion `docs/architecture/09-sportsbook-

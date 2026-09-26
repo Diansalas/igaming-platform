@@ -1,5 +1,7 @@
 # Active Stage
 
+> **Current stage:** see ["## Current stage"](#current-stage-stage-102--webhook-trust-hardening--implemented-mock-providers-stopped-at-the-stage-102-deployment-gate) section (Stage 10.2 complete; Stage 10.3 planning). Sections below are kept in their historical order.
+
 ## Stage 4H-B0-R7 — Final Financial/Bonus Implementation Gate — Complete
 
 Status: **Complete. Workstream A (`player_locked` ledger-account origin
@@ -10,6 +12,8 @@ Grant settlement-credit resolution, `OpenBetSelfExclusionPolicy` default,
 mixed/bonus-funded cashout policy) remain unmade and are NOT selected by
 any agent. Stage 4H-B1 (Bonus Engine) NOT started. No automatic
 progression — explicit human authorization required.**
+
+*Status note 2026-09-26: the three decisions above were answered by the human in `docs/decisions/0042-human-decision-response.md` Part 2 — G-2: all three treatments configurable per brand, default (b) route to `player_cash`; `OpenBetSelfExclusionPolicy` platform-wide fallback: `VOID_ON_SELF_EXCLUSION`; mixed/bonus-funded cashout: "Not cashout-eligible". Implementation remains outstanding: ADR 0042 records G-2 brand-level configurability and the (c) manual-review workflow as NOT IMPLEMENTED, and the self-exclusion default is not seeded with no auto-void consumer (`docs/plans/stage-10-planning-gate-proposal.md` §5).*
 
 Purpose: close the implementation-blocking financial dependencies Stage
 4H-B0-R6 discovered — `player_locked` phase 2, gate G-3 (bonus-funded
@@ -1480,6 +1484,8 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
+*Status note 2026-09-26: all four items were answered by the human in `docs/decisions/0042-human-decision-response.md` Part 2 — G-2: configurable per brand, default (b) route to `player_cash`; `OpenBetSelfExclusionPolicy` default: `VOID_ON_SELF_EXCLUSION`; mixed/bonus-funded cashout: "Not cashout-eligible"; FD-1: "Nullifying" (inactive while bonus-funded bets are not cashout-eligible). Implementation of G-2 brand configurability and of the self-exclusion default/auto-void consumer remains outstanding (ADR 0042 G-2 notes; `docs/plans/stage-10-planning-gate-proposal.md` §5).*
+
 ## Current stage: Stage 10.2 — Webhook trust hardening — IMPLEMENTED (MOCK providers); STOPPED at the Stage 10.2 deployment gate
 
 KYC-WH-1 and CAS-WH-TENANT-1 implemented for the MOCK providers on the shared
@@ -1493,6 +1499,8 @@ human authorizes the governed `deploy.sh down` / `deploy.sh up` refresh (report
 ## Prior stage: Stage 10.1 — PAY-REV-1 + SB-T1-XMIN + PAY-WH-TENANT-1 — IMPLEMENTED; STOPPED at the staging-deployment gate
 
 Approved by the human against `8561ac2` (ADR 0090 ACCEPTED) with PAY-WH-TENANT-1 added. All three workstreams implemented and reviewed (completion report: `docs/governance/stage-10.1-completion-report.md`). Staging deployment requires separate human authorization. Open human rulings: KYC-WH-1 scope.
+
+*Status note 2026-09-26: the KYC-WH-1 scope ruling was resolved by `docs/decisions/0091-stage-10-2-definition-webhook-trust-hardening.md` (ACCEPTED) and implemented in Stage 10.2 — see "Current stage" above and `docs/governance/stage-10.2-completion-report.md`.*
 
 ### Planning gate record (below)
 

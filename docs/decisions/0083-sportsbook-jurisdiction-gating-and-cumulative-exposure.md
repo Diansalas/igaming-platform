@@ -2,6 +2,8 @@
 
 ## Status
 
+*Status note 2026-09-26: "design only" below is historical. Stage 9.2 implemented this ADR: migration `0087_sportsbook_jurisdiction_restrictions`, `0088_sportsbook_exposure_limits` and fix-round `0090_sb_jurisdiction_restrictions_require_platform_principal`; Stage 10 W1 amended it (ADR 0088 §13) alongside migration `0091_sportsbook_settlement`. Jurisdiction rung 2 (§5.3.3) remains NOT IMPLEMENTED — BLOCKED on HDR-J-7. See `docs/progress.md` "Stage 9.2" and "Stage 10 — W1".*
+
 Accepted — **design only**. No Go source file, no `.sql` migration and no
 OpenAPI document is changed by this ADR's own dispatch. Implementation is
 delegated to a later wave (`sportsbook` with `risk` for Part B, `security`

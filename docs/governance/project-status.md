@@ -48,8 +48,14 @@ stage detail), and the ADRs cited below.
 | 10 planning gate | State reconstruction + Stage 10 proposal (`docs/plans/stage-10-planning-gate-proposal.md`) | Complete; Stage 10 approved by the human |
 | 10 | CI evidence restoration (W0) + sportsbook settlement lifecycle, in-house MOCK mode (W1; ADRs 0087/0088); F-7 remediation | Complete (`docs/governance/stage-10-completion-report.md`) |
 | 10.1 planning gate | PAY-REV-1 + SB-T1-XMIN plan (`docs/plans/stage-10.1-planning-gate-proposal.md`, ADR 0090 PROPOSED); ADR 0089 future AI-agent boundary | Complete; awaiting human approval |
+| 10.1 | PAY-REV-1 + SB-T1-XMIN + PAY-WH-TENANT-1 (ADR 0090 ACCEPTED; migrations 0092/0093; PAY-WH-TENANT-1 with a MOCK credential resolver only) | Implemented; stopped at the staging-deployment gate (`docs/governance/stage-10.1-completion-report.md`) |
+| 10.2 | Webhook trust hardening: KYC-WH-1, CAS-WH-TENANT-1, PAYWH-GATE-1; CI-FLAKE-281 investigated (ADR 0091 ACCEPTED) | Implemented for the MOCK providers; stopped at the Stage 10.2 deployment gate (`docs/governance/stage-10.2-completion-report.md`) |
+
+*Status note 2026-09-26: rows 10.1 and 10.2 added. The "10.1 planning gate" row's "awaiting human approval" is historical — ADR 0090 was ACCEPTED on the human's approval of `8561ac2` (`docs/governance/stage-10.1-completion-report.md` header), and ADR 0091 records the human's acceptance of the Stage 10.1 completion report.*
 
 ## Active stage
+
+*Status note 2026-09-26: the paragraph below is superseded. Stages 10.1 and 10.2 followed Stage 10. Latest executed stage: **Stage 10.2 — Webhook trust hardening — IMPLEMENTED (MOCK providers); stopped at the Stage 10.2 deployment gate** (`docs/governance/stage-10.2-completion-report.md`; `docs/active-stage.md` "Current stage"). The next stage is in planning only (`docs/plans/stage-10.3-planning/`); no stage-definition ADR or human authorization for it is recorded.*
 
 **Stage 10 — CI Evidence Restoration + Sportsbook Settlement Lifecycle —
 COMPLETE**; the next stage awaits explicit human authorization. See
@@ -174,6 +180,7 @@ P1 recorded: **PAY-REV-1** (payments deposit-reversal race). Staging
     progress-farming vector — the fix design is specified but not yet
     built). Cash-only cases and the schema widening itself have no
     remaining objection from any specialist.
+  - *Status note 2026-09-26: "Sportsbook: not started" and "`player_locked` phase 2 … NOT STARTED" above are superseded. `player_locked` phase 2 was implemented in Stage 4H-B0-R7 (migration `0048_ledger_locked_account_origin_split`; see the Stage 4H-B0-R7 section below). Sportsbook placement (singles, mock provider) shipped in Stage 6/6.1, risk + jurisdiction enforcement in Stage 9.2 (migrations `0087`/`0088`), and cash-funded single-bet settlement in **in-house MOCK mode** in Stage 10 W1 (migration `0091_sportsbook_settlement`; `docs/governance/stage-10-completion-report.md`). No real sportsbook provider is integrated. G-2 and the `OpenBetSelfExclusionPolicy` default are now decided in `docs/decisions/0042-human-decision-response.md` (G-2 default (b) route to `player_cash`; `VOID_ON_SELF_EXCLUSION`); G-2 brand configurability and the self-exclusion auto-void consumer remain NOT IMPLEMENTED (`docs/plans/stage-10-planning-gate-proposal.md` §5).*
 - **Asset/Currency Registry + FX/Conversion**: **Part A/C (Asset
   Authorization) IMPLEMENTED as of Stage 4H-B0-R6** —
   `internal/assetregistry`, migrations `0044`/`0045`/`0047`. All 7 layers
@@ -498,7 +505,8 @@ P1 recorded: **PAY-REV-1** (payments deposit-reversal race). Staging
   **RESOLVED as of Stage 4H-B0-R3** — see `docs/decisions/
   0021-multi-asset-accounting.md`'s "Rounding and precision — RESOLVED"
   section; retained in the register per its own append-only convention.
-- **Whether an open, unsettled sportsbook bet should settle normally or
+- **ANSWERED — ADR 0042 (`docs/decisions/0042-human-decision-response.md`): `VOID_ON_SELF_EXCLUSION` as the platform-wide fallback; jurisdiction policy may override; legal/compliance review required before production use (status note 2026-09-26; see open decision 8 above). Original text follows.**
+  **Whether an open, unsettled sportsbook bet should settle normally or
   be voided/refunded if the player self-excludes while it remains open**
   (Stage 4H-B0-R4) — a jurisdiction-dependent RG/compliance question
   `identity-compliance` explicitly declined to decide unilaterally; see
