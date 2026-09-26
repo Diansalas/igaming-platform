@@ -110,11 +110,6 @@ type KYCProvider interface {
 }
 
 var (
-	// ErrUnknownProvider is returned when a caller (an HTTP webhook route,
-	// a verification-creation call) names a provider_id the Orchestrator
-	// has no adapter registered for.
-	ErrUnknownProvider = errors.New("kyc: unknown provider")
-
 	// ErrCallbackSignatureInvalid is returned by a KYCProvider's
 	// HandleCallback for any authentication failure over the raw body -
 	// an alias of the single shared webhookauth sentinel (Stage 10.2, ADR
@@ -223,7 +218,19 @@ func (o *Orchestrator) Provider(id string) (KYCProvider, bool) {
 // (an HTTP handler) maps every one of them to the SAME uniform 401
 // response, so an unauthenticated caller can never distinguish "unknown
 // provider" from "bad signature" by status code or body.
-func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, in webhookauth.Inbound) (Verification, error) {
+//
+// applied (Stage 10.2 final review, K4) reports whether this call actually
+// wrote anything: true for a forward status transition (with its one
+// success audit row) and for a non-terminal outcome=error (with its one
+// failure audit row, B7/K5); false for every no-op - a replay, anything
+// arriving at or behind the verification's current rank (including after a
+// terminal status or a staff decision), and an outcome=error delivered
+// against an ALREADY-TERMINAL verification (K5: no audit row in that one
+// case, since replaying it must stay inert like every other replay). The
+// caller (an HTTP handler) uses applied==false to log a single allow-listed
+// kyc_webhook_noop info line - never to change the response itself, which
+// stays 204 either way.
+func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, providerID string, in webhookauth.Inbound) (result Verification, applied bool, err error) {
 	in.TenantID = tenantID
 	in.ProviderID = providerID
 
@@ -234,30 +241,30 @@ func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID 
 	// ReceiveCallback's identical rationale).
 	keyID, _, reason, ok := webhookauth.KYCScheme().ParseHeaders(in.Header)
 	if !ok {
-		return Verification{}, &CallbackAuthError{Reason: reason}
+		return Verification{}, false, &CallbackAuthError{Reason: reason}
 	}
 
 	// (a) the adapter must be registered.
 	provider, ok := o.providers[providerID]
 	if !ok {
-		return Verification{}, &CallbackAuthError{Reason: webhookauth.ReasonProviderUnregistered, KeyID: keyID}
+		return Verification{}, false, &CallbackAuthError{Reason: webhookauth.ReasonProviderUnregistered, KeyID: keyID}
 	}
 
 	// (b) resolve the single candidate credential and re-check its
 	// binding. A nil resolver fails closed - never a fallback to
 	// unauthenticated verification.
 	if o.webhookCredentialResolver == nil {
-		return Verification{}, &CallbackAuthError{Reason: webhookauth.ReasonNoResolver, KeyID: keyID}
+		return Verification{}, false, &CallbackAuthError{Reason: webhookauth.ReasonNoResolver, KeyID: keyID}
 	}
 	cred, err := o.webhookCredentialResolver.Resolve(ctx, tenantID, providerID, keyID)
 	if err != nil {
-		return Verification{}, &CallbackAuthError{Reason: webhookauth.ReasonCredentialUnavailable, KeyID: keyID}
+		return Verification{}, false, &CallbackAuthError{Reason: webhookauth.ReasonCredentialUnavailable, KeyID: keyID}
 	}
 	if cred.TenantID != tenantID || cred.ProviderID != providerID {
 		// Defense in depth only: no conforming resolver should ever return
 		// a credential bound to a different tenant/provider than it was
 		// asked to resolve for (I3).
-		return Verification{}, &CallbackAuthError{Reason: webhookauth.ReasonCredentialUnavailable, KeyID: keyID}
+		return Verification{}, false, &CallbackAuthError{Reason: webhookauth.ReasonCredentialUnavailable, KeyID: keyID}
 	}
 
 	// (c) verify (over the raw bytes, before any parsing) then parse -
@@ -265,28 +272,28 @@ func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID 
 	// verification succeeds is ErrCallbackSignatureInvalid; every failure
 	// after is ErrCallbackMalformedBody - never confused with one
 	// another, since that would break the uniform-401 contract (point 7).
-	result, err := provider.HandleCallback(ctx, in, cred)
+	providerResult, err := provider.HandleCallback(ctx, in, cred)
 	if errors.Is(err, ErrCallbackSignatureInvalid) {
-		return Verification{}, &CallbackAuthError{Reason: webhookauth.ReasonSignatureInvalid, KeyID: keyID, CredentialFingerprint: cred.Fingerprint}
+		return Verification{}, false, &CallbackAuthError{Reason: webhookauth.ReasonSignatureInvalid, KeyID: keyID, CredentialFingerprint: cred.Fingerprint}
 	}
 	if err != nil {
 		// Covers ErrCallbackMalformedBody and any other post-verification
 		// structural failure. Never wrap in.Body's bytes into this error
 		// (directive §17) - only reachable once verification has already
 		// succeeded, so the sender is authenticated, just wrong.
-		return Verification{}, err
+		return Verification{}, false, err
 	}
 
 	// (d) explicit tenant-scoped lookup (architect R4/J6) - reachable only
 	// by a VERIFIED caller.
-	v, err := getVerificationByProviderReference(ctx, tx, tenantID, providerID, result.ProviderReference)
+	v, err := getVerificationByProviderReference(ctx, tx, tenantID, providerID, providerResult.ProviderReference)
 	if err != nil {
-		return Verification{}, err
+		return Verification{}, false, err
 	}
 
 	// (e) forward-only rank transition + audit, all in this same
 	// transaction (B7/J6/J11).
-	return applyCallbackOutcome(ctx, tx, tenantID, v, result)
+	return applyCallbackOutcome(ctx, tx, tenantID, v, providerResult)
 }
 
 // statusRank is the forward-only monotonic order B7/J11 require:
@@ -333,12 +340,26 @@ func statusForOutcome(o ProviderOutcome) (VerificationStatus, bool) {
 
 // applyCallbackOutcome is B7's forward-only replay/idempotency rule,
 // applied to an already-verified, already-tenant-scoped-looked-up
-// verification v.
+// verification v. The returned bool reports whether this call actually
+// wrote anything (K4/K5, Stage 10.2 final review) - the caller uses it only
+// to decide whether to log an informational no-op line, never to change the
+// response.
 //
-//   - outcome "error": no state change ever, but ONE failure audit row is
-//     written (a verified sender reporting a provider-side failure is
-//     still an auditable event) - directive §10's "an error must never
-//     corrupt platform state".
+//   - outcome "error" against an ALREADY-TERMINAL verification (K5, L2/F-5,
+//     Stage 10.2 final review): no state change and NO audit row - an
+//     outcome=error callback is otherwise the one exception to "a replay
+//     writes no audit row" (see the non-terminal case below), and closing
+//     THAT exception for the terminal case keeps §E's "replay is inert"
+//     true without bound: a captured error callback replayed after the
+//     verification has already reached a terminal status must not be able
+//     to grow audit_log without limit.
+//   - outcome "error" against a NON-terminal verification: no state change,
+//     but ONE failure audit row is written (a verified sender reporting a
+//     provider-side failure is still an auditable event) - directive §10's
+//     "an error must never corrupt platform state". This one still writes
+//     an audit row per delivery (bounded by the verification's own life:
+//     once it reaches a terminal status, the case above takes over and it
+//     stops) - a disclosed, narrower exception than before, not a new one.
 //   - rank(new) > rank(current): a compare-and-set UPDATE (tenant_id AND
 //     id AND status=current in the WHERE clause) applies the transition
 //     and writes exactly one success audit row, in this same transaction.
@@ -352,22 +373,28 @@ func statusForOutcome(o ProviderOutcome) (VerificationStatus, bool) {
 //     anything arriving after a staff decision that already reached or
 //     exceeded that rank: no state change and NO audit row (a 204 no-op
 //     at the HTTP layer).
-func applyCallbackOutcome(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, v Verification, result ProviderResult) (Verification, error) {
+func applyCallbackOutcome(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, v Verification, result ProviderResult) (Verification, bool, error) {
 	if result.Outcome == ProviderError {
+		if isTerminal(v.Status) {
+			// K5: the verification already reached a terminal status -
+			// never write a second (or Nth) failure audit row for a
+			// replayed or late-arriving error callback against it.
+			return v, false, nil
+		}
 		if err := audit.Record(ctx, tx, audit.Entry{
 			TenantID: tenantID, ActorType: audit.ActorSystem,
 			Action: "kyc.provider_callback", TargetType: "kyc_verification", TargetID: v.ID.String(),
 			Outcome:  audit.OutcomeFailure,
 			Metadata: map[string]any{"provider_id": v.ProviderID, "provider_outcome": string(result.Outcome), "reason": result.Reason},
 		}); err != nil {
-			return Verification{}, fmt.Errorf("kyc: audit callback error outcome: %w", err)
+			return Verification{}, false, fmt.Errorf("kyc: audit callback error outcome: %w", err)
 		}
-		return v, nil
+		return v, true, nil
 	}
 
 	newStatus, ok := statusForOutcome(result.Outcome)
 	if !ok {
-		return Verification{}, fmt.Errorf("%w: unrecognized outcome %q", ErrCallbackMalformedBody, result.Outcome)
+		return Verification{}, false, fmt.Errorf("%w: unrecognized outcome %q", ErrCallbackMalformedBody, result.Outcome)
 	}
 	newRank := statusRank(newStatus)
 
@@ -379,7 +406,7 @@ func applyCallbackOutcome(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, v 
 			// replay, and every callback arriving after a terminal status
 			// or after a staff decision that already reached/exceeded this
 			// rank (J11).
-			return current, nil
+			return current, false, nil
 		}
 		tag, err := tx.Exec(ctx,
 			`UPDATE kyc_verifications SET status = $1, reason = NULLIF($2, ''), updated_at = now()
@@ -387,12 +414,12 @@ func applyCallbackOutcome(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, v 
 			newStatus, result.Reason, current.ID, tenantID, current.Status,
 		)
 		if err != nil {
-			return Verification{}, fmt.Errorf("kyc: update verification status: %w", err)
+			return Verification{}, false, fmt.Errorf("kyc: update verification status: %w", err)
 		}
 		if tag.RowsAffected() == 1 {
 			updated, err := GetVerificationByID(ctx, tx, current.ID)
 			if err != nil {
-				return Verification{}, err
+				return Verification{}, false, err
 			}
 			if err := audit.Record(ctx, tx, audit.Entry{
 				TenantID: tenantID, ActorType: audit.ActorSystem,
@@ -400,18 +427,18 @@ func applyCallbackOutcome(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, v 
 				Outcome:  audit.OutcomeSuccess,
 				Metadata: map[string]any{"provider_id": updated.ProviderID, "provider_outcome": string(result.Outcome), "reason": result.Reason},
 			}); err != nil {
-				return Verification{}, fmt.Errorf("kyc: audit callback success: %w", err)
+				return Verification{}, false, fmt.Errorf("kyc: audit callback success: %w", err)
 			}
-			return updated, nil
+			return updated, true, nil
 		}
 		// Lost race: re-read the row (RLS-scoped, mirroring
 		// updateVerificationStatus's own post-update re-read) and
 		// re-evaluate on the next iteration.
 		reread, err := GetVerificationByID(ctx, tx, current.ID)
 		if err != nil {
-			return Verification{}, err
+			return Verification{}, false, err
 		}
 		current = reread
 	}
-	return Verification{}, fmt.Errorf("kyc: exhausted retries applying callback status transition for verification %s", v.ID)
+	return Verification{}, false, fmt.Errorf("kyc: exhausted retries applying callback status transition for verification %s", v.ID)
 }
