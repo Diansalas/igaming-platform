@@ -136,11 +136,17 @@ func RunProviderConformanceSuite(t *testing.T, factory func() PaymentProvider) {
 	// must pass them too - not mock-only tests. T5 (same secret, still
 	// tenant-bound) is the one exception left mock-only, since a real
 	// vendor cannot MAC our tenant id at all.
+	//
+	// Stage 10.2 final review (K3, ADR 0022 §3 amendment): this case is
+	// mandatory for the first real adapter, not skip-eligible. A provider
+	// that is not *MockProvider must fail here, not skip, until it supplies
+	// its own per-tenant signed-fixture hook proving tenant binding the
+	// same way the mock's does.
 	t.Run("a credential resolved for one tenant is rejected for another (conformance)", func(t *testing.T) {
 		provider := factory()
 		mock, ok := provider.(*MockProvider)
 		if !ok {
-			t.Skip("credential/signature construction is mock-specific; a real adapter's own conformance fixture supplies its own per-tenant credentials")
+			t.Fatalf("tenant-binding conformance is mandatory (ADR 0022 §3 amendment): %T must supply its own per-tenant signed-fixture hook for this case; a real adapter cannot skip it", provider)
 		}
 		ctx := context.Background()
 		tenantA, tenantB := uuid.New(), uuid.New()

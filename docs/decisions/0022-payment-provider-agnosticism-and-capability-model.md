@@ -340,11 +340,11 @@ never *asserts* the tenant.
 >   (`ErrWebhookCredentialUnavailable`), it never panics.
 > - **The C4 tenant-binding conformance case
 >   (`internal/payments/conformance_test.go`) is mandatory for the first
->   real adapter** (Stage 10.1 review PW-4): today it `t.Skip`s for any
->   non-mock adapter, because none exists yet. Once a real adapter is
->   added, this case must supply that adapter's own per-tenant
->   signed-fixture hook and become a hard failure, not a skip, if tenant
->   binding cannot be proven the same way the mock's is.
+>   real adapter** (Stage 10.1 review PW-4; hardened Stage 10.2 final
+>   review K3): it FAILS, not skips, for any provider that is not
+>   `*MockProvider`. A real adapter must supply its own per-tenant
+>   signed-fixture hook and pass this case to prove tenant binding the
+>   same way the mock's is proven; it cannot get a pass by skipping.
 >
 > The Consequences clause "§3 leaves open *how* the right key is
 > selected" is superseded by this amendment.
@@ -378,7 +378,18 @@ never *asserts* the tenant.
 > sentinel is `webhookauth.ErrSignatureInvalid` (the casino alias is
 > `casino.ErrCallbackSignatureInvalid`). The key-material sentinel is
 > payments-only. A verified-but-malformed body is the domain's own
-> `ErrCallbackMalformedBody` and maps to 400, never to the uniform 401.
+> `ErrCallbackMalformedBody` and maps to 400, never to the uniform 401 -
+> **except one deliberate carve-out** (Stage 10.2 final review, K7/F-8): a
+> body that has already passed verification but still carries the legacy
+> top-level `signature` field is rejected with
+> `ErrSignatureInvalid`/`ErrCallbackSignatureInvalid` (401
+> `signature_invalid`), not `ErrCallbackMalformedBody`, in every domain
+> (KYC, casino, and payments' pre-existing identical rule). **Disclosure:**
+> because that sender has, by construction, already proven knowledge of
+> the shared credential, this is a benign false-positive on the
+> `signature_invalid` forgery-alert signal (§G "Audit and alerting" in the
+> Stage 10.2 design) - it is not evidence of an actual forgery attempt, and
+> alerting on it should account for that.
 >
 > 8. **Domain separation.** Each platform-defined (MOCK) scheme is
 >    HMAC-SHA256 over
@@ -427,8 +438,26 @@ never *asserts* the tenant.
 >   in the same way as the payments resolver (secret-store ADR plus
 >   human-authorized provisioning).
 > - The KYC and casino tenant-binding conformance cases are mandatory for
->   the first real adapter in each domain. They start as skips and must
->   become hard failures, exactly as the payments C4 case does.
+>   the first real adapter in each domain, in all three domains including
+>   payments (Stage 10.2 final review, K3): the case FAILS, not skips, for
+>   any provider that is not the package's own mock type - it no longer
+>   merely skips today with a plan to turn into a failure "once a real
+>   adapter exists." A non-mock adapter must supply its own per-tenant
+>   signed-fixture hook to pass this case at all.
+> - **Known constraint on the first real adapter, in every domain** (Stage
+>   10.2 final review, K12/L8): `internal/httpserver`'s shared
+>   `webhookPreamble` and every domain's `Orchestrator.ReceiveCallback`
+>   parse inbound headers with that domain's platform-defined MOCK
+>   `Scheme.ParseHeaders` (fixed header names, `v1=<hex>` signature
+>   format, `mock-v1`-shaped key ids). A real vendor's own header names or
+>   signature encoding will not survive that parse and is rejected with
+>   the uniform 401 before the adapter's own verification ever runs. Per
+>   point 8, `Scheme` is not a vendor wire format, so this is expected, not
+>   a defect - but header parsing must become an adapter/Scheme capability
+>   (not a shared, hard-coded preamble step) before the first real adapter
+>   can be wired in any domain. Tracked as **`WH-VENDOR-SCHEME-1`**
+>   (`docs/governance/task-registry.md`, Stage 10.2 section; owner
+>   `architect`; pre-condition for the first real adapter in any domain).
 > - The Stage 10.1 status bullet "Casino (CAS-WH-TENANT-1) and KYC
 >   (KYC-WH-1) callbacks do not yet conform" is **superseded** by this
 >   amendment.

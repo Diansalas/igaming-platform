@@ -214,11 +214,17 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 	// CAS-WH-TENANT-1 / design §C12: the tenant-binding conformance case is
 	// mandatory for the first real adapter, not mock-only - mirrors
 	// internal/payments' identical ruling (C4).
+	//
+	// Stage 10.2 final review (K3, ADR 0022 §3 amendment): mandatory means
+	// this case must FAIL, not skip, for any non-mock adapter. A provider
+	// that is not *MockCasinoProvider must fail here until it supplies its
+	// own per-tenant signed-fixture hook proving tenant binding the same
+	// way the mock's does.
 	t.Run("a credential resolved for one tenant is rejected for another (conformance)", func(t *testing.T) {
 		provider := factory()
 		mock, ok := provider.(*MockCasinoProvider)
 		if !ok {
-			t.Skip("credential/signature construction is mock-specific; a real adapter's own conformance fixture supplies its own per-tenant credentials")
+			t.Fatalf("tenant-binding conformance is mandatory (ADR 0022 §3 amendment): %T must supply its own per-tenant signed-fixture hook for this case; a real adapter cannot skip it", provider)
 		}
 		ctx := context.Background()
 		tenantA, tenantB := uuid.New(), uuid.New()
