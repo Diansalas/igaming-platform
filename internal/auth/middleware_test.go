@@ -196,6 +196,154 @@ func TestRequirePermission_UnknownRoleIsDeniedByDefault(t *testing.T) {
 	}
 }
 
+// TestRequireAnyPermission table-driven suite (Gate 10.3-W2/W3 code review
+// finding #8): RequireAnyPermission had zero unit-test coverage even though
+// it guards the provider-credential request-read routes
+// (internal/httpserver/provider_credential_handlers.go). PermWithdrawalApprove
+// is granted to RoleFinance ONLY and PermProviderConfigWrite is granted to
+// RoleTenantAdmin ONLY (see TestRoleHasPermission_Stage3BWithdrawalAndProvider
+// ConfigPermissions above) - no role holds both, and RoleSupport holds
+// neither - which is exactly the fixture needed to prove "any of N", not
+// "the first one", and not "all of them".
+func TestRequireAnyPermission(t *testing.T) {
+	handler := RequireAnyPermission(PermWithdrawalApprove, PermProviderConfigWrite)(okHandler())
+
+	tests := []struct {
+		name       string
+		ctx        *tenant.Context
+		wantStatus int
+	}{
+		{
+			name: "principal holding only the first permission passes",
+			ctx: &tenant.Context{
+				TenantID: uuid.New(),
+				Role:     string(RoleFinance), // holds PermWithdrawalApprove only
+				Subject:  "staff-1",
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "principal holding only the second permission passes",
+			ctx: &tenant.Context{
+				TenantID: uuid.New(),
+				Role:     string(RoleTenantAdmin), // holds PermProviderConfigWrite only
+				Subject:  "staff-2",
+			},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "principal holding neither permission is denied",
+			ctx: &tenant.Context{
+				TenantID: uuid.New(),
+				Role:     string(RoleSupport), // holds neither
+				Subject:  "staff-3",
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "unauthenticated request is denied",
+			ctx:        nil,
+			wantStatus: http.StatusUnauthorized,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v1/admin/provider-credentials/requests", nil)
+			if tt.ctx != nil {
+				req = req.WithContext(tenant.WithContext(req.Context(), *tt.ctx))
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tt.wantStatus {
+				t.Errorf("expected status %d, got %d (body: %s)", tt.wantStatus, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+// TestRequireAnyPermission_DenialMatchesRequirePermission proves the "no
+// permission -> same denial status/body as RequirePermission" half of
+// finding #8: a caller with neither listed permission must get an
+// indistinguishable 403 (same code/message) from a single-permission check,
+// so a client can't fingerprint "any" vs "single" checks from the response.
+func TestRequireAnyPermission_DenialMatchesRequirePermission(t *testing.T) {
+	anyHandler := RequireAnyPermission(PermWithdrawalApprove, PermProviderConfigWrite)(okHandler())
+	singleHandler := RequirePermission(PermWithdrawalApprove)(okHandler())
+
+	newReq := func() *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/v1/admin/x", nil)
+		return req.WithContext(tenant.WithContext(req.Context(), tenant.Context{
+			TenantID: uuid.New(),
+			Role:     string(RoleSupport), // holds neither permission either handler checks
+			Subject:  "staff-1",
+		}))
+	}
+
+	anyRec := httptest.NewRecorder()
+	anyHandler.ServeHTTP(anyRec, newReq())
+
+	singleRec := httptest.NewRecorder()
+	singleHandler.ServeHTTP(singleRec, newReq())
+
+	if anyRec.Code != singleRec.Code {
+		t.Errorf("expected matching status codes, got RequireAnyPermission=%d RequirePermission=%d", anyRec.Code, singleRec.Code)
+	}
+	if anyRec.Body.String() != singleRec.Body.String() {
+		t.Errorf("expected matching denial bodies, got RequireAnyPermission=%q RequirePermission=%q", anyRec.Body.String(), singleRec.Body.String())
+	}
+}
+
+// TestRequireAnyPermission_IsAnyOfNotAllOf proves the "any-of" semantics
+// directly: if RequireAnyPermission were accidentally rewritten to require
+// ALL listed permissions (an "all-of" bug), this test would fail, because
+// RoleFinance holds PermWithdrawalApprove but not
+// PermRGRestrictionWrite (a permission it never holds - see
+// TestRoleHasPermission_Stage4DRGRestrictionPermissions).
+func TestRequireAnyPermission_IsAnyOfNotAllOf(t *testing.T) {
+	handler := RequireAnyPermission(PermWithdrawalApprove, PermRGRestrictionWrite)(okHandler())
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/x", nil)
+	req = req.WithContext(tenant.WithContext(req.Context(), tenant.Context{
+		TenantID: uuid.New(),
+		Role:     string(RoleFinance),
+		Subject:  "staff-1",
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200: RoleFinance holds one of the two listed permissions, an any-of check must pass; got %d (an all-of rewrite would produce 403)", rec.Code)
+	}
+}
+
+// TestRequireAnyPermission_EmptyListDeniesEverything documents and proves
+// the fail-closed behaviour finding #8 called out: RequireAnyPermission()
+// with zero permissions must deny every authenticated caller, including
+// roles that hold every other permission in the system (RolePlatformAdmin).
+// The implementation already achieves this structurally - the for-range
+// loop over an empty perms slice never runs, so every request falls through
+// to the terminal "insufficient permissions" response - this test pins that
+// behaviour so a future refactor (e.g. "if len(perms) == 0 { allow }")
+// cannot silently regress it.
+func TestRequireAnyPermission_EmptyListDeniesEverything(t *testing.T) {
+	handler := RequireAnyPermission()(okHandler())
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/x", nil)
+	req = req.WithContext(tenant.WithContext(req.Context(), tenant.Context{
+		TenantID: uuid.New(),
+		Role:     string(RolePlatformAdmin),
+		Subject:  "admin-1",
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for an empty permission list (fail closed), got %d", rec.Code)
+	}
+}
+
 func TestRequireTenantScope_AllowsNonNilTenant(t *testing.T) {
 	handler := RequireTenantScope(okHandler())
 

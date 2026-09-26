@@ -10,20 +10,20 @@
 // test database is never polluted with seeded duplicate reversals
 // (ledger-finance review P2-4).
 //
-// Migration 0093 (a different, in-flight workstream - SB-T1-XMIN),
-// migration 0094 (Stage 10.3 CAS-CAP-ROLLBACK-1, casino capability
-// settlement-completeness CHECK), and migration 0095 (Stage 10.3
-// KYC-REASON-BOUND-1, kyc_verifications.reason CHECK), migration 0096
-// (Stage 10.3 W2a, provider credential handles), and migration 0097 (Stage
-// 10.3 W2b, casino rejection record and reconciliation kinds) are
-// deliberately held back in every scratch database this file builds: none
-// has any dependency on 0092 (0093 is sportsbook-only; 0094 only touches
-// casino_provider_capabilities; 0095 only touches kyc_verifications; 0096
-// only touches provider_credential_handles; 0097 only touches
-// casino_callback_rejections and reconciliation kinds), and excluding all
-// five keeps these tests about 0092 alone - in particular,
-// it keeps 0092 the MOST RECENTLY applied migration in
-// TestMigration0092_DownRestoresPriorState's scenario, so
+// Every migration numbered above 0092 is a different, in-flight or later
+// workstream with no dependency on 0092 (as of this writing: 0093
+// SB-T1-XMIN sportsbook-only, 0094 Stage 10.3 CAS-CAP-ROLLBACK-1 touching
+// only casino_provider_capabilities, 0095 Stage 10.3 KYC-REASON-BOUND-1
+// touching only kyc_verifications, 0096 Stage 10.3 W2a provider credential
+// handles, 0097 Stage 10.3 W2b casino rejection record and reconciliation
+// kinds, 0098 Stage 10.3 W3a casino_statement mismatch kind, and anything
+// landing after them) - none of it touches ledger_transactions' reversal
+// index, so this file holds ALL of it back by version number rather than
+// naming each one, which keeps these tests about 0092 alone without
+// needing an update every time a later migration lands (see
+// stagedMigrations0092's own doc comment). In particular, holding
+// back everything above 0092 keeps 0092 the MOST RECENTLY applied
+// migration in TestMigration0092_DownRestoresPriorState's scenario, so
 // MigrateDown(dir, 1) targets 0092 itself, not whatever migration happens
 // to sit above it in the real chain at HEAD.
 package ledger
@@ -32,6 +32,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -43,20 +44,33 @@ import (
 
 const migration0092Version = int64(92)
 
-// migration0092AlwaysHeldPrefixes holds back the unrelated in-flight
-// migrations 0093, 0094, 0095, 0096, 0097 and 0098 in every scratch
-// database this file builds (see the file header comment for why each is
-// safe to exclude; 0096 is W2a's provider credential handles, 0097 is W2b's
-// casino rejection record and reconciliation kinds and 0098 is W3a's
-// casino_statement mismatch kind - none touches ledger_transactions'
-// reversal index).
-var migration0092AlwaysHeldPrefixes = []string{"0093_", "0094_", "0095_", "0096_", "0097_", "0098_"}
+// migrationFileVersion parses the 4-digit numeric version prefix off a
+// migration filename (e.g. "0098_casino_statement_mismatch_kind.up.sql" ->
+// 98). Any name too short or non-numeric to have a version prefix is
+// reported as an error rather than silently treated as version 0 - a
+// malformed/misnamed file must fail loudly here, not be miscategorized as
+// something to hold back or include.
+func migrationFileVersion(name string) (int64, error) {
+	if len(name) < 4 {
+		return 0, fmt.Errorf("migration filename %q is too short to carry a version prefix", name)
+	}
+	v, err := strconv.ParseInt(name[:4], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("migration filename %q has no numeric version prefix: %w", name, err)
+	}
+	return v, nil
+}
 
-// stagedMigrations0092 holds back 0092 itself (and, always, the unrelated
-// in-flight migrations above) so a scratch database can be brought to
-// exactly "chain applied through 0091" before seeding data that a
-// migration 0021-shaped ledger_transactions table permits today but 0092
-// will no longer permit once applied.
+// stagedMigrations0092 holds back 0092 itself (when includeMigration0092 is
+// false) and, always, every migration numbered ABOVE 0092 - dynamically,
+// by parsing each file's version prefix, rather than a hand-maintained
+// list of specific version numbers. A hand-maintained list silently goes
+// stale every time a new migration lands above 0092 (Gate 10.3-W2/W3 code
+// review finding #9): it would need editing at every 0099, 0100, ... this
+// derives the cutoff from the migrations directory itself instead, so a
+// migration inserted, reordered, or removed above 0092 is still governed
+// correctly with no edit required here, while still guaranteeing a scratch
+// database ends the chain exactly at 0091 (or 0092) as these tests need.
 func stagedMigrations0092(t *testing.T, includeMigration0092 bool) (dir string, addMigration0092 func()) {
 	t.Helper()
 	src := migrationsDir(t)
@@ -71,14 +85,12 @@ func stagedMigrations0092(t *testing.T, includeMigration0092 bool) (dir string, 
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
 			continue
 		}
-		heldBack := false
-		for _, prefix := range migration0092AlwaysHeldPrefixes {
-			if strings.HasPrefix(e.Name(), prefix) {
-				heldBack = true
-				break
-			}
+		version, err := migrationFileVersion(e.Name())
+		if err != nil {
+			t.Fatalf("%v", err)
 		}
-		if !includeMigration0092 && strings.HasPrefix(e.Name(), "0092_") {
+		heldBack := version > migration0092Version
+		if !includeMigration0092 && version == migration0092Version {
 			heldBack = true
 		}
 		if heldBack {
