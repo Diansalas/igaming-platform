@@ -265,7 +265,10 @@ jobs:
           test -f integration-test.log || exit 0
           grep -E -- '--- FAIL|^FAIL|^panic:|WARNING: DATA RACE' integration-test.log | head -50 |
             while IFS= read -r line; do echo "::error title=integration failure::${line}"; done
-          grep -E -A12 -- '--- FAIL' integration-test.log | grep -E '_test\.go:[0-9]+' | head -30 |
+          # -B as well as -A: under `go test -v` a test's t.Fatalf/t.Errorf
+          # line is printed BEFORE its `--- FAIL` line (CI #342/#347 showed
+          # no detail with -A alone).
+          grep -E -B40 -A12 -- '--- FAIL' integration-test.log | grep -E '_test\.go:[0-9]+' | head -30 |
             while IFS= read -r line; do echo "::error title=failure detail::${line}"; done
 
       - name: Upload integration test log (CI-FLAKE-281)
