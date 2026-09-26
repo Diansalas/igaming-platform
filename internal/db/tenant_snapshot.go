@@ -28,3 +28,22 @@ func (p *Pool) WithTenantSnapshot(ctx context.Context, tenantID uuid.UUID, fn Tx
 	}
 	return p.withTenantTx(ctx, tenantID, pgx.TxOptions{IsoLevel: pgx.RepeatableRead}, fn)
 }
+
+// WithTenantReadOnly is WithTenant with the transaction opened READ ONLY
+// (ADR 0094 §4.1). PostgreSQL refuses every write, nextval and
+// SELECT ... FOR UPDATE/SHARE in it; it does NOT refuse advisory locks or
+// read-only function calls, so it is defence in depth, never a substitute
+// for statement-level review. The tenant scoping is identical to
+// WithTenant's (set_config is permitted in a read-only transaction).
+//
+// It exists for the webhook pre-verification reads (the payments
+// capability EXISTS and the provider-credential handle read), which run in
+// their own short transaction that COMMITS before any secret-store fetch,
+// so no pooled connection is ever held while waiting on the store
+// (INV-POOL).
+func (p *Pool) WithTenantReadOnly(ctx context.Context, tenantID uuid.UUID, fn TxFunc) error {
+	if tenantID == uuid.Nil {
+		return fmt.Errorf("db: WithTenantReadOnly called with nil tenant id")
+	}
+	return p.withTenantTx(ctx, tenantID, pgx.TxOptions{AccessMode: pgx.ReadOnly}, fn)
+}

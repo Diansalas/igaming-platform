@@ -6,6 +6,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/txscope"
 )
 
 // TxFunc is application code that runs inside a tenant-scoped
@@ -53,7 +55,7 @@ func (p *Pool) withTenantTx(ctx context.Context, tenantID uuid.UUID, txOpts pgx.
 		return fmt.Errorf("db: set tenant context: %w", err)
 	}
 
-	if err := fn(ctx, tx); err != nil {
+	if err := fn(txscope.Mark(ctx), tx); err != nil {
 		return err // deferred Rollback cleans up
 	}
 
@@ -76,7 +78,7 @@ func (p *Pool) WithoutTenant(ctx context.Context, fn TxFunc) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := fn(ctx, tx); err != nil {
+	if err := fn(txscope.Mark(ctx), tx); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -122,7 +124,7 @@ func (p *Pool) WithPlatformAdmin(ctx context.Context, principalID uuid.UUID, fn 
 		return fmt.Errorf("db: set platform admin context: %w", err)
 	}
 
-	if err := fn(ctx, tx); err != nil {
+	if err := fn(txscope.Mark(ctx), tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -158,7 +160,7 @@ func (p *Pool) WithSessionLookup(ctx context.Context, hash string, fn TxFunc) er
 		return fmt.Errorf("db: set session lookup context: %w", err)
 	}
 
-	if err := fn(ctx, tx); err != nil {
+	if err := fn(txscope.Mark(ctx), tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -197,7 +199,7 @@ func (p *Pool) WithPrincipalScope(ctx context.Context, tenantID, principalID uui
 		return fmt.Errorf("db: set principal context: %w", err)
 	}
 
-	if err := fn(ctx, tx); err != nil {
+	if err := fn(txscope.Mark(ctx), tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -249,7 +251,7 @@ func (p *Pool) WithPlayerScope(ctx context.Context, tenantID, playerAccountID uu
 		return fmt.Errorf("db: set player account context: %w", err)
 	}
 
-	if err := fn(ctx, tx); err != nil {
+	if err := fn(txscope.Mark(ctx), tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -283,7 +285,7 @@ func (p *Pool) WithCredentialTokenLookup(ctx context.Context, hash string, fn Tx
 		return fmt.Errorf("db: set credential token lookup context: %w", err)
 	}
 
-	if err := fn(ctx, tx); err != nil {
+	if err := fn(txscope.Mark(ctx), tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {

@@ -393,6 +393,11 @@ const (
 // fingerprint key (security review §3).
 const MinProviderCredentialFingerprintKeyBytes = 32
 
+// DefaultDatabaseMaxConns is the production default pool size
+// (DATABASE_MAX_CONNS unset). ADR 0094's pool-size tests pin it: a change
+// forces that ADR's resource-allocation rationale to be revisited.
+const DefaultDatabaseMaxConns int32 = 10
+
 // validateProviderCredentialFingerprintKey applies security review §3's
 // rules. An absent key is valid (the subsystem is then not constructed).
 func (c Config) validateProviderCredentialFingerprintKey() error {
@@ -423,7 +428,7 @@ func Load() (Config, error) {
 		EnvironmentExplicit:              appEnvPresent,
 		HTTPAddr:                         getEnvDefault("HTTP_ADDR", ":8080"),
 		DatabaseURL:                      os.Getenv("DATABASE_URL"),
-		DatabaseMaxConns:                 10,
+		DatabaseMaxConns:                 DefaultDatabaseMaxConns,
 		DatabaseConnTimeout:              5 * time.Second,
 		JWTActiveKID:                     getEnvDefault("JWT_ACTIVE_KID", "k1"),
 		JWTSigningSecret:                 os.Getenv("JWT_SIGNING_SECRET"),

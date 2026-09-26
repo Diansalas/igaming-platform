@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/txscope"
 )
 
 // PlatformService is the closed vocabulary of non-human, non-request-scoped
@@ -78,7 +80,7 @@ func (p *Pool) WithPlatformService(ctx context.Context, service PlatformService,
 		return fmt.Errorf("db: set platform service context: %w", err)
 	}
 
-	if err := fn(ctx, tx); err != nil {
+	if err := fn(txscope.Mark(ctx), tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
