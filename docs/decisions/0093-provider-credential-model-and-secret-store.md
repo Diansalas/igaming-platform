@@ -1,7 +1,8 @@
 # ADR 0093 — Provider Credential Model and Secret Store
 
 - **Status:** ACCEPTED 2026-09-26 (Stage 10.3 W0, ADR 0092). Binding for W2a (handles, resolver,
-  admin API, outbound credentials) and W3b (the `awssm` backend code).
+  admin API, outbound credentials) and W3b (the `awssm` backend code). Tightened by the
+  "Amendment (Stage 10.3 W2a design review, 2026-09-26)" section at the end.
 - **Decision type:** architecture. This is the "secret-store ADR" named by the ADR 0022 §3
   Stage 10.1 and Stage 10.2 amendments. Choosing AWS Secrets Manager is an engineering decision:
   it is already the accepted platform store (ADRs 0084 and 0086).
@@ -363,3 +364,169 @@ Consequences:
   the backstop. Revoking a casino credential strands open exposure. Both effects are accepted
   (R9).
 - PROV-REVOKE-ALL-1 (a cross-tenant revoke for one provider) is registered and not built.
+
+## Amendment (Stage 10.3 W2a design review, 2026-09-26)
+
+- **Source:** `docs/plans/stage-10.3-planning/07-w2a-design-review-security.md` (the "review"),
+  verdict "concur with the bridge, with binding refinements". This amendment records the three
+  §7 items and summarizes the other binding parts. **The review is the normative detail**; where
+  this section is terser, the review governs.
+- **Effect:** additive tightening only. Every rule in §1–§9 above stays in force. W2a does not
+  merge until it meets review §1–§6. No human decision is required (review §8).
+
+### A1. Activation request binding (review §1)
+
+**New handle column** (added to the §1 table):
+
+| Column | Rule |
+|---|---|
+| `activation_request_id` | `UUID NOT NULL UNIQUE REFERENCES provider_credential_change_requests(id)`. Immutable: not in the runtime `UPDATE` column grant, and compared `IS DISTINCT FROM` by the transition trigger. Records the approval that activated the row. |
+
+Also on the handle table: `created_by UUID NOT NULL`; `tenant_id` FK has **no** `ON DELETE
+CASCADE`; the `revoke_reason` enum CHECK and the `revoked` ⇔ all `revoked_*` set CHECK; the three
+tenant policies (read/insert/update) also require `app.player_account_id` unset. A handle row is
+only ever **inserted** as `active` (BEFORE INSERT trigger), with `created_at`/`status_changed_at`
+forced to `now()`. Transition rules are in review §1.5; they only tighten §1 above (e.g.
+`not_after` may not be set in the past; no transition ever leads to `active`).
+
+**Governance tables** (shapes in review §1.2; hardened 0047/0089 shape per §3 above):
+- `provider_credential_change_requests`: `target_tenant_id`, every handle content column (same
+  CHECKs as the handle table; `fingerprint` computed by the server), `predecessor_handle_id` /
+  `predecessor_disposition` (`none|verify_only|revoked`) / `predecessor_not_after`,
+  `content_hash`, `reason_code` (closed enum), requester, `requested_at`, `state`
+  (`pending|applied`), `applied_at` / `applied_by_principal_id` / `applied_handle_id`, with the
+  table-level consistency CHECKs in the review (an outbound predecessor is never `verify_only`).
+- `provider_credential_change_approvals`: `request_id`, `approver_principal_id`, `decision`
+  (`approve|reject`), the `content_hash` the approver echoed, `reason_code` (required on reject),
+  `decided_at`; `UNIQUE (request_id, approver_principal_id)`; immutable.
+- **Content hash:** computed only in the DB by one `STABLE` SQL function
+  (`provider_credential_content_hash`, label `pcr-v1|`, length-prefixed fields, UTC timestamps,
+  sha256 hex). Go never computes it.
+- The circular FKs are added with `ALTER TABLE … ADD CONSTRAINT` after both tables exist.
+
+**Bridge conditions B1–B7** (binding; they replace nothing in §3 point 3, they constrain it):
+
+| # | Condition |
+|---|---|
+| B1 | Tenant bridge policies are `FOR SELECT` on both governance tables plus `FOR UPDATE` (`pending`→`applied`) on requests only. Never `FOR ALL`, `INSERT` or `DELETE`. |
+| B2 | Every bridge policy also requires `app.player_account_id` unset. |
+| B3 | Consume selects the request by the explicit `activation_request_id` on the handle row, never by content search. |
+| B4 | A request can become `applied` only if a handle row with the same tenant points back to it (`activation_request_id = id`), checked in the request's own BEFORE UPDATE trigger. Platform scope therefore cannot mark `applied`. |
+| B5 | `requested_at`, `decided_at`, `content_hash`, `state`, `created_at`, `status_changed_at` (and `applied_at`) are forced by triggers; client values are ignored. |
+| B6 | The consume function never reads `staff_users`. |
+| B7 | No function created by the migration is `SECURITY DEFINER` (introspection test). |
+
+`staff_users` and `provider_credential_handles` receive no new or changed policy (tested against
+0011's exact policy text).
+
+**Consume trigger** (`AFTER INSERT` on handles; plain `INSERT` only, `ON CONFLICT` forbidden).
+Checks run in this order, each raising a dedicated `ERRCODE` (`PC0nn`) on failure:
+1. `SELECT … FOR UPDATE` the request by `NEW.activation_request_id`; `NOT FOUND` raises (covers
+   another tenant's invisible request).
+2. `state = 'pending'` and `target_tenant_id = NEW.tenant_id`.
+3. Each content column `IS NOT DISTINCT FROM` the request.
+4. Recomputed content hash equals `r.content_hash`.
+5. An `approve` exists from a principal other than the requester, with matching `content_hash` and
+   `now() - 24h < decided_at <= now()`.
+6. No `reject` exists.
+7. Predecessor disposition matches (`none`: no other active row; `verify_only`: the named row was
+   demoted in this transaction with `not_after = r.predecessor_not_after`; `revoked`: it is revoked).
+8. `UPDATE` the request to `applied` with `applied_handle_id = NEW.id`.
+
+Requester/approver liveness is not re-checked by the DB at consume; the apply handler re-resolves
+applier, requester and every approver in one `WithPlatformAdmin` transaction first (review §1.1).
+The apply transaction order is: predecessor transition, handle insert, one audit row per changed
+row.
+
+### A2. `secret_ref` namespace and version pinning (review §1.2)
+
+- **DB namespace CHECK** on `secret_ref` in both the handle and request tables, via an
+  `IMMUTABLE` SQL function `provider_credential_ref_in_namespace(ref, tenant, domain, provider)`:
+  after stripping query and fragment, the path contains `/provider-creds/` exactly once and the
+  tail has exactly four segments — tenant id (`target_tenant_id` on requests), `domain`,
+  `provider_id`, and a name matching `^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$` (refuses `.`/`..`).
+  Implemented by segment splitting, never by building a regex from column values. This is
+  defence in depth alongside the §1 API and resolver checks, which remain.
+- Also: `length <= 512`, no control or whitespace characters, scheme in `awssm|devfile|memory`.
+- **`awssm` refs pin `versionId` in every environment** (not only staging and production as §1
+  stated): `?versionId=[A-Za-z0-9-]{32,64}` with an optional `#jsonKey`, enforced by DB CHECK.
+  Stage labels such as `AWSCURRENT` are always refused. `devfile` refs require `?version=`.
+- `vendor_account_id`, when present, is non-empty, at most 128 bytes, and has no control
+  characters.
+
+### A3. Fingerprint key and confirmation value (review §3)
+
+Additions to §2:
+- **Stability.** The fingerprint key must not change within an environment. Changing it makes
+  every stored `fp1:` fingerprint mismatch, so every resolve fails closed with
+  `credential_integrity` (the safe direction). Rotating the key requires an `fp2:` scheme and an
+  amendment to this ADR.
+- **Confirmation value.** The operator supplies `sha256:<hex>`, an unkeyed hash of the secret
+  bytes. It is transient: the server fetches the secret by ref, compares in constant time, then
+  computes `fp1:` itself. The confirmation value is never persisted, logged, audited or echoed,
+  and request-body logging stays off on these routes.
+- **Local source.** `PROVIDER_CREDENTIAL_FINGERPRINT_KEY` → `Config.ProviderCredentialFingerprintKey`
+  via `internal/config.Load` (the `JWT_SIGNING_SECRET` path): `.env.example` dev-only value in
+  development, `ci.yml` job env in CI. `Load()` refuses a key shorter than 32 bytes, equal to
+  `JWT_SIGNING_SECRET` or `JWT_PREVIOUS_SECRET`, or equal to the `.env.example`/CI literal when
+  `GuardEnvironment() != "development"`. The value is redacted wherever `Config` is printed.
+- **Absent key fails closed.** The real credential subsystem is not constructed: the real
+  resolver is nil (callbacks get 401 `no_resolver`), non-synthetic outbound calls fail closed,
+  and the request/approve/apply routes are not mounted. Absence does not refuse startup; MOCK
+  paths are unaffected.
+- AWS delivery of the key remains **DEPLOY-FPKEY-1**, a registered future human decision outside
+  Stage 10.3 (see §8/§9).
+
+### A4. Also recorded (detail in the review)
+
+**Circuit breaker and cache** (review §5; platform constants in `internal/secretstore`, changes
+need `security` review). Refines §4 "Store and cache":
+
+| Parameter | Value |
+|---|---|
+| Store call timeout | 2 s total incl. SDK retries (≤ 1 retry); `singleflight` per (tenant, ref, fingerprint) |
+| Concurrent store calls | 4 per process; slot wait ≤ 250 ms, then fail fast |
+| Breaker scope | per backend instance, per process |
+| Counting failures | timeout, transport, 5xx, throttling (not-found, access-denied, bad version, `store_config`, fingerprint mismatch do not count) |
+| Trip | 3 consecutive counting failures |
+| Cooldown | 15 s, doubling per failed probe, cap 60 s; one half-open probe |
+| Negative cache | 5 s (counting), 30 s (per-ref); mismatch P1 alert ≤ 1 per ref per 5 min |
+| Positive cache | LRU 1024, TTL 10 min refresh-not-evict, max-stale 60 min, fingerprint compared on every hit |
+
+Fail-closed: no fallback credential and no unauthenticated call; the per-call handle read happens
+in every breaker state, so revocation stays immediate. Outbound (review §2): the handle read
+transaction ends before the network call; derived tokens are cached only keyed by (tenant, handle
+id, fingerprint) after an `active` read; mTLS client certificates are out of 10.3 scope.
+
+**Admin API** (review §6). Target tenant from the path via `canActOnTenant`; no tenant in the
+body; `DisallowUnknownFields`.
+
+| Route (under `/v1/admin/tenants/{tenantID}/`) | Permission | Scope |
+|---|---|---|
+| `GET provider-credentials` | `:read` | `WithTenant` |
+| `POST provider-credential-requests` | `:request` | `WithPlatformAdmin` |
+| `GET provider-credential-requests[/{id}]` | `:request` or `:approve` | `WithPlatformAdmin` |
+| `POST provider-credential-requests/{id}/decisions` | `:approve` | `WithPlatformAdmin` |
+| `POST provider-credential-requests/{id}/apply` | `:request` | principal recheck in `WithPlatformAdmin`, then `WithTenant` |
+| `POST provider-credentials/{handleID}/transitions` | `:revoke` | `WithTenant` |
+
+Role grants are unchanged from §3. There is no cancel route. Audit actions and metadata are in
+review §6.
+
+**Error mapping** (classified by `ERRCODE`; trigger text is never returned): 401
+unauthenticated; 403 missing permission or foreign tenant; 404 not visible; 400
+`invalid_request` for syntactic errors and missing/unknown transition reason only; one
+byte-identical 409 `credential_registration_rejected` for every semantic registration failure;
+409 `approval_rejected`, `credential_activation_rejected`, `credential_transition_rejected`;
+500 without detail. This narrows §3's "one generic 400/409": semantic registration errors are
+always the single 409.
+
+**Accepted Low residuals:**
+- A requester/approver suspension committing between the apply handler's platform recheck and
+  the tenant-scoped insert is not seen (review §1.1).
+- Reason codes for `verify_only` and `not_after` shrink are enforced by
+  `providercred.TransitionHandle` (the only UPDATE path, auditing in the same transaction), not
+  by a DB column; only `revoke_reason` is DB-enforced (review §1.5).
+- Also accepted, not graded: any tenant-T-scoped connection can consume an approved request for T
+  (timing only; content is what two Persons approved), and tenant-T scope can read T's requests
+  and approvals, the same exposure as T's handle rows (review §1.1).
