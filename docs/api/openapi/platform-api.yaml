@@ -2515,11 +2515,12 @@ paths:
         - name: X-Payments-Signature
           in: header
           required: true
-          description: "hex(HMAC-SHA256(credential_secret, signing_input)), lowercase"
+          description: "Authentication headers are provider-defined (Stage 10.3 WH-VENDOR-SCHEME-1): each adapter's own verification scheme is selected by providerID. This entry documents the platform MOCK scheme only (never a vendor protocol): v1= + lowercase hex(HMAC-SHA256(credential_secret, signing_input)). A real provider's headers are documented per provider when its adapter lands."
           schema: { type: string, pattern: "^v1=[0-9a-f]{64}$" }
         - name: X-Payments-Key-Id
           in: header
           required: true
+          description: "Platform MOCK scheme key id (provider-defined for real adapters)."
           schema: { type: string, pattern: "^[a-z0-9-]{1,32}$" }
       requestBody:
         required: true
@@ -2629,11 +2630,12 @@ paths:
         - name: X-KYC-Signature
           in: header
           required: true
-          description: "hex(HMAC-SHA256(credential_secret, signing_input)), lowercase"
+          description: "Authentication headers are provider-defined (Stage 10.3 WH-VENDOR-SCHEME-1): each adapter's own verification scheme is selected by providerID. This entry documents the platform MOCK scheme only (never a vendor protocol): v1= + lowercase hex(HMAC-SHA256(credential_secret, signing_input)). A real provider's headers are documented per provider when its adapter lands."
           schema: { type: string, pattern: "^v1=[0-9a-f]{64}$" }
         - name: X-KYC-Key-Id
           in: header
           required: true
+          description: "Platform MOCK scheme key id (provider-defined for real adapters)."
           schema: { type: string, pattern: "^[a-z0-9-]{1,32}$" }
       requestBody:
         required: true
@@ -2758,11 +2760,12 @@ paths:
         - name: X-Casino-Signature
           in: header
           required: true
-          description: "hex(HMAC-SHA256(credential_secret, signing_input)), lowercase"
+          description: "Authentication headers are provider-defined (Stage 10.3 WH-VENDOR-SCHEME-1): each adapter's own verification scheme is selected by providerID. This entry documents the platform MOCK scheme only (never a vendor protocol): v1= + lowercase hex(HMAC-SHA256(credential_secret, signing_input)). A real provider's headers are documented per provider when its adapter lands."
           schema: { type: string, pattern: "^v1=[0-9a-f]{64}$" }
         - name: X-Casino-Key-Id
           in: header
           required: true
+          description: "Platform MOCK scheme key id (provider-defined for real adapters)."
           schema: { type: string, pattern: "^[a-z0-9-]{1,32}$" }
       requestBody:
         required: true
