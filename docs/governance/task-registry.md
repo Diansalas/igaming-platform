@@ -3861,3 +3861,31 @@ Records-only entries from the Stage 10.3 planning reconciliation (`docs/plans/st
 5. This table is never deleted across stages — completed stages' rows
    remain as the historical record; a new stage adds a new `## Stage NN`
    section below the most recent one.
+
+## Stage 10.3 — Real Provider Trust & Casino Financial Readiness — PLANNING GATE (not approved; nothing started)
+
+Proposal: `docs/plans/stage-10.3-planning-gate-proposal.md`. All rows are **Proposed** until the human
+approves HD-10.3-1.
+
+| ID | Owner | Status | Scope | Wave |
+|---|---|---|---|---|
+| WH-VENDOR-SCHEME-1 | architect + security (+ payments, casino, identity-compliance) | Proposed (Stage 10.3) | per-adapter VerificationScheme, orchestrator-enforced verify, conformance suite SC1–SC13 | W1a |
+| MOCK-ADAPTER-PROD-1 | architect + devops + security | Proposed (Stage 10.3) | synthetic marker + production startup guard (missing APP_ENV = production) | W1b |
+| CAS-CAP-ROLLBACK-1 | casino + ledger-finance | Proposed (Stage 10.3) | capability gates new bets only; tombstone always; late-original named rejection; CHECK migration | W1c |
+| CAS-MULTIBET-WIN-1 (G-1) | casino + ledger-finance | Proposed (Stage 10.3) — new finding | two-cash-bet round returns 500 on any win; characterise then fix | W1c |
+| KYC-REASON-BOUND-1 | identity-compliance | Proposed (Stage 10.3) | bounded staff-only raw reason; player reason_code (wording = HD-10.3-3) | W1d |
+| PROV-CRED-RESOLVER-1 | architect + security + payments | Proposed (Stage 10.3) | provider_credential_handles (FORCE RLS, tenant-namespaced refs), resolver, four-eyes activation, admin API | W2a |
+| PROV-OUTBOUND-CRED-1 | payments + security | Proposed (Stage 10.3) — new finding | outbound calls carry tenant + resolved credential; per-call resolution | W2a |
+| KYC-PROVIDER-SELECT-1 (O4) | identity-compliance | Proposed (Stage 10.3) | remove hard-coded Provider("mock") in kyc_handlers.go | W2a |
+| CAS-RECON-1 | ledger-finance + casino | Proposed (Stage 10.3) | casino_consistency C1–C7 + rejection record | W2b |
+| CAS-RECON-STMT-1 | ledger-finance + casino | Proposed (Stage 10.3) — first to cut | casino_statement with MOCK source; real source PROVIDER DEPENDENT | W3a |
+| SECRETSTORE-AWS-1 | devops + security | Proposed (Stage 10.3) | awssm backend code + local fake; IAM/apply = HD-10.3-2 + STAGING REQUIRED | W3b |
+| CI-FLAKE-281 | devops + qa | Proposed fix in 10.3 (ruling R12) | raise/scale Stage 9 concurrent-login ceiling as a reviewed test change | W1 |
+| PAYWH-TS-1 | payments + security | To close as superseded when the W0 ADR 0022 point-10 amendment is recorded (R4) | — | W0 |
+| PAYWH-BRAND-1 | payments | Deferred (trigger: tenant with per-brand merchant accounts at one provider) | — | — |
+| PAYWH-RL-1 | payments + devops | Deferred (pre-launch) | — | — |
+| LEDGER-MANUAL-ADJ-4EYES-1 | ledger-finance + security | Registered — blocks real-money go-live; own later stage | four-eyes manual adjustment / mismatch resolution API | — |
+| CAS-WIN-ANOMALY-1 | casino + risk | Registered — before real-money casino go-live | detection-only large-win alert | — |
+| PROV-REVOKE-ALL-1 | security + architect | Registered — needed once two tenants share a provider | cross-tenant "revoke all handles for provider P" | — |
+| KYC-HOSTED-SESSION-1 | identity-compliance | Registered (J12) | vendor short-lived hosted-KYC session token | — |
+| KYC-SANCTIONS-IF-1 | identity-compliance | Registered | sanctions/PEP vendor interface (does not exist) | — |

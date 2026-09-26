@@ -1,6 +1,6 @@
 # Active Stage
 
-> **Current stage:** see ["## Current stage"](#current-stage-stage-102--webhook-trust-hardening--implemented-mock-providers-stopped-at-the-stage-102-deployment-gate) section (Stage 10.2 complete; Stage 10.3 planning). Sections below are kept in their historical order.
+> **Current stage:** see ["## Current stage"](#current-stage-stage-103--real-provider-trust--casino-financial-readiness--planning-gate-awaiting-human-approval-not-started) section (Stage 10.3 planning gate; staging OFF). Sections below are kept in their historical order.
 
 ## Stage 4H-B0-R7 — Final Financial/Bonus Implementation Gate — Complete
 
@@ -1486,15 +1486,22 @@ none authorized for implementation yet.
 
 *Status note 2026-09-26: all four items were answered by the human in `docs/decisions/0042-human-decision-response.md` Part 2 — G-2: configurable per brand, default (b) route to `player_cash`; `OpenBetSelfExclusionPolicy` default: `VOID_ON_SELF_EXCLUSION`; mixed/bonus-funded cashout: "Not cashout-eligible"; FD-1: "Nullifying" (inactive while bonus-funded bets are not cashout-eligible). Implementation of G-2 brand configurability and of the self-exclusion default/auto-void consumer remains outstanding (ADR 0042 G-2 notes; `docs/plans/stage-10-planning-gate-proposal.md` §5).*
 
-## Current stage: Stage 10.2 — Webhook trust hardening — IMPLEMENTED (MOCK providers); STOPPED at the Stage 10.2 deployment gate
+## Current stage: Stage 10.3 — Real Provider Trust & Casino Financial Readiness — PLANNING GATE (awaiting human approval; NOT started)
 
-KYC-WH-1 and CAS-WH-TENANT-1 implemented for the MOCK providers on the shared
-`internal/webhookauth` contract; PAYWH-GATE-1 included; CI-FLAKE-281 investigated
-(not reproduced, diagnostics added). All specialist reviews complete, conditions
-met. Completion report: `docs/governance/stage-10.2-completion-report.md`.
-No AWS action; staging stays on `9190d5d` (still exposed to KYC-WH-1) until the
-human authorizes the governed `deploy.sh down` / `deploy.sh up` refresh (report
-§16). No next-stage work started.
+- Planning gate: `docs/plans/stage-10.3-planning-gate-proposal.md` (specialist papers and
+  reviews in `docs/plans/stage-10.3-planning/`; rulings R1–R15 in §19). Implementation does
+  not start until the human approves HD-10.3-1 (and rules on HD-10.3-2..4 or accepts defaults).
+- Roadmap reconciliation: `docs/plans/stage-10.3-planning/00-roadmap-reconciliation.md`.
+- **AWS staging: OFF.** Torn down 2026-09-26 by the governed `deploy.sh down`
+  (`docs/governance/staging-teardown-2026-09-26.md`). Development continues locally; items
+  needing AWS are marked STAGING REQUIRED and deferred to the single future governed staging
+  deployment from the final approved commit.
+
+## Prior stage: Stage 10.2 — Webhook trust hardening — COMPLETE (IMPLEMENTED for MOCK providers)
+
+Completion report: `docs/governance/stage-10.2-completion-report.md` (final commit `957a3e8`).
+Its staging deployment plan (§16) was superseded by the human's 2026-09-26 decision to tear
+staging down and perform one governed deployment later from the final approved commit.
 
 ## Prior stage: Stage 10.1 — PAY-REV-1 + SB-T1-XMIN + PAY-WH-TENANT-1 — IMPLEMENTED; STOPPED at the staging-deployment gate
 

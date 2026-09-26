@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-26 (Stage 10.2 implemented; stopped at the deployment gate)
+Last updated: 2026-09-26 (staging torn down; Stage 10.3 planning gate prepared)
 
-## Status: Stage 10.2 IMPLEMENTED (KYC-WH-1, CAS-WH-TENANT-1, PAYWH-GATE-1 — MOCK providers only); stopped at the deployment gate (`docs/governance/stage-10.2-completion-report.md`). Stage 10.1 also awaits the same staging refresh.
+## Status: Stage 10.2 COMPLETE (MOCK providers). AWS staging OFF (torn down 2026-09-26, `docs/governance/staging-teardown-2026-09-26.md`). Stage 10.3 planning gate prepared (`docs/plans/stage-10.3-planning-gate-proposal.md`) — awaiting human approval; not started.
 
 *Status note 2026-09-26: the "(approved-pending)" labels on the Stage 3C, 3D, 4A, 4D-RG, 4E, 4F, 4G, 4G-FINAL, 4H-B0-R7 and Stage 7 headers below are historical, recorded at the time each stage stopped for review. Later stages proceeded on explicit human authorization recorded in the subsequent stage sections (for example Stage 4H-B1 Wave 2 "human-authorized", Stage 9.1 "authorized by the human", and ADRs 0087/0090/0091 for Stages 10, 10.1 and 10.2). The headers are left unedited. Source: `docs/plans/stage-10.3-planning/00-roadmap-reconciliation.md` "Discrepancies" item 12.*
 
@@ -8178,3 +8178,30 @@ permission probes.
   for real casino resolvers), WH-VENDOR-SCHEME-1, KYC-REASON-BOUND-1.
 - AWS/staging untouched; staging `9190d5d` stays exposed to KYC-WH-1 until the
   human-authorized refresh. **Stop: deployment gate.**
+
+## Staging teardown — 2026-09-26 (human-authorized)
+
+- Governed `./deploy/aws/scripts/deploy.sh down` against account 765578795051 / eu-central-1 as
+  `claude-staging-deployer`; destroy plan reviewed first (0 add, 0 change, 74 destroy, all
+  staging modules). Result: 74 destroyed; Terraform state empty. Previous staging commit
+  `9190d5d`; `957a3e8` was never deployed.
+- Verification, retained infrastructure, the access-analyzer check the deployer cannot run, and
+  the tooling note: `docs/governance/staging-teardown-2026-09-26.md`.
+- **Staging OFF.** Next: one governed staging deployment from the final approved commit, when the
+  human authorizes it.
+
+## Stage 10.3 planning gate — Real Provider Trust & Casino Financial Readiness (PLANNING ONLY)
+
+- Roadmap reconciliation (`docs/plans/stage-10.3-planning/00-roadmap-reconciliation.md`) and
+  records hygiene (stale statuses corrected; ACC-EVIDENCE-1, STAGING-9.4-VERIFY-1,
+  STAGE-NAMING-1 registered).
+- Specialist papers: provider trust (architect), casino financial readiness (ledger-finance),
+  KYC reason bound (identity-compliance). Reviews: product-owner-proxy, qa, security — all
+  APPROVE WITH CONDITIONS; rulings R1–R15 (security's four-eyes on credential activation adopted).
+- Proposed waves W0 (ADRs) → W1a–d (vendor schemes, synthetic guard, casino capability contract
+  + G-1, KYC reason bound) → W2a–b (credential resolver + four-eyes, outbound credentials, casino
+  consistency reconciliation) → W3a–b (casino statement MOCK, Secrets Manager backend code).
+  Migrations 0094–0097 provisional.
+- Human decisions: HD-10.3-1 (scope), HD-10.3-2 (deploy/ IAM code), HD-10.3-3 (player KYC reason
+  wording), HD-10.3-4 (suspended-tenant casino settlement). Carried HDRs unchanged.
+- **Stop: Stage 10.3 implementation gate.** Nothing implemented.
