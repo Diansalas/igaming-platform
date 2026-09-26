@@ -67,10 +67,7 @@ func stagedMigrations0095(t *testing.T) (dir string, addMigration0095 func()) {
 			held = append(held, e.Name())
 			continue
 		}
-		if migrationAfter0095(e.Name()) {
-			// Later, unrelated migrations (0096+, Stage 10.3 W2a onward) are
-			// never part of this test's scenario: keeping them out keeps
-			// 0095 the chain's tip here whatever lands after it.
+		if migration0095IsLater(e.Name()) {
 			continue
 		}
 		copyMigration0095File(t, src, dir, e.Name())
@@ -85,9 +82,11 @@ func stagedMigrations0095(t *testing.T) (dir string, addMigration0095 func()) {
 	}
 }
 
-// migrationAfter0095 reports whether a migration file's version is above
-// 0095.
-func migrationAfter0095(name string) bool {
+// migration0095IsLater reports whether a migration file is numbered above
+// 0095 (Stage 10.3's later 0096/0097, and anything after). Those are held
+// out of every chain this file builds, so "roll back 1 step" always means
+// 0095 itself (the migration0094DirThroughSelf precedent).
+func migration0095IsLater(name string) bool {
 	if len(name) < 4 {
 		return false
 	}
@@ -95,9 +94,8 @@ func migrationAfter0095(name string) bool {
 	return err == nil && v > 95
 }
 
-// migrationsThrough0095 copies every migration up to and including 0095
-// into a temp directory, so MigrateDown(dir, 1) targets 0095 itself.
-func migrationsThrough0095(t *testing.T) string {
+// migration0095DirThroughSelf copies the chain up to and including 0095.
+func migration0095DirThroughSelf(t *testing.T) string {
 	t.Helper()
 	src := migration0095MigrationsDir(t)
 	dir := t.TempDir()
@@ -106,7 +104,7 @@ func migrationsThrough0095(t *testing.T) string {
 		t.Fatalf("read migrations dir: %v", err)
 	}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") || migrationAfter0095(e.Name()) {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") || migration0095IsLater(e.Name()) {
 			continue
 		}
 		copyMigration0095File(t, src, dir, e.Name())
@@ -284,7 +282,7 @@ func TestMigration0095_PreflightNormalizesOversizedRowsAcrossTenantsBeforeConstr
 func TestMigration0095_UpDownUpRoundTrip(t *testing.T) {
 	scratchURL := scratchdb.New(t, "kyc095rt_")
 	pool := migration0095ScratchPool(t, scratchURL)
-	dir := migrationsThrough0095(t)
+	dir := migration0095DirThroughSelf(t)
 
 	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
 		t.Fatalf("migrate up the chain through 0095: %v", err)

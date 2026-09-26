@@ -391,6 +391,10 @@ func newWagerCasinoRoundHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if err != nil {
+			// Stage 10.3 W2b (CAS-RECON-1): same separately-committed
+			// rejection record as the public webhook route (this is the
+			// same verify-then-post pipeline).
+			recordCasinoCallbackRejection(r.Context(), deps, logger, tc.TenantID, requestID, err)
 			writeCasinoCallbackError(w, requestID, logger, err, "wager")
 			return
 		}
@@ -484,6 +488,10 @@ func newWinCasinoRoundHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if err != nil {
+			// Stage 10.3 W2b (CAS-RECON-1): same separately-committed
+			// rejection record as the public webhook route (this is the
+			// same verify-then-post pipeline).
+			recordCasinoCallbackRejection(r.Context(), deps, logger, tc.TenantID, requestID, err)
 			writeCasinoCallbackError(w, requestID, logger, err, "win")
 			return
 		}
@@ -624,6 +632,10 @@ func newRollbackCasinoRoundHandler(deps Deps) http.HandlerFunc {
 			return
 		}
 		if err != nil {
+			// Stage 10.3 W2b (CAS-RECON-1): same separately-committed
+			// rejection record as the public webhook route (this is the
+			// same verify-then-post pipeline).
+			recordCasinoCallbackRejection(r.Context(), deps, logger, tc.TenantID, requestID, err)
 			writeCasinoCallbackError(w, requestID, logger, err, "rollback")
 			return
 		}

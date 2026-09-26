@@ -1,0 +1,26 @@
+W2b (CAS-RECON-1) test-run record. Database: private fully-migrated igaming_w2b_local (chain
+0001-0095 + 0097; W2a's 0096 not present in this branch), scratch databases for migration tests.
+
+1. Full integration suites of the touched packages, owner role igaming (NOBYPASSRLS, FORCE RLS),
+   `go test -tags=integration -count=1 -p 4 ./internal/casino/... ./internal/reconciliation/... ./internal/httpserver/...`:
+   ok  	github.com/Diansalas/igaming-platform/internal/casino	17.990s
+   ok  	github.com/Diansalas/igaming-platform/internal/reconciliation	32.845s
+   ok  	github.com/Diansalas/igaming-platform/internal/httpserver	71.285s
+   EXIT=0
+
+2. W2b tests with the race detector, three times (`-race -count=3`), owner role:
+   # W2b tests, -race -count=3 - 2026-09-26T17:54:31Z
+   ok  	github.com/Diansalas/igaming-platform/internal/casino	3.335s
+   ok  	github.com/Diansalas/igaming-platform/internal/reconciliation	83.719s
+   ok  	github.com/Diansalas/igaming-platform/internal/httpserver	43.307s
+   EXIT=0
+
+3. Every migration/chain-tip test package after the 0097 pin updates (bonus, casino, jurisdiction,
+   kyc, ledger, operatingmarket incl. the QA rollback test, sportsbook, db, reconciliation,
+   identity, payments), `-run 'Migration|Migrations|QAAdversarial'`: all ok.
+
+4. The same W2b tests as the NOBYPASSRLS runtime role: see w2b-runtime-role.txt.
+
+5. Known, expected until merge: `go run ./cmd/migrate verify` reports
+   "GAP missing migration version 96 (gap between 95 and 97)" on this branch alone, because W2a's
+   0096 is not in it. It resolves when 0096 merges.

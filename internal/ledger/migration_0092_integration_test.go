@@ -13,12 +13,15 @@
 // Migration 0093 (a different, in-flight workstream - SB-T1-XMIN),
 // migration 0094 (Stage 10.3 CAS-CAP-ROLLBACK-1, casino capability
 // settlement-completeness CHECK), and migration 0095 (Stage 10.3
-// KYC-REASON-BOUND-1, kyc_verifications.reason CHECK), and migration 0096
-// (Stage 10.3 W2a, provider credential handles) are deliberately
-// held back in every scratch database this file builds: none has any
-// dependency on 0092 (0093 is sportsbook-only; 0094 only touches
-// casino_provider_capabilities; 0095 only touches kyc_verifications), and
-// excluding all three keeps these tests about 0092 alone - in particular,
+// KYC-REASON-BOUND-1, kyc_verifications.reason CHECK), migration 0096
+// (Stage 10.3 W2a, provider credential handles), and migration 0097 (Stage
+// 10.3 W2b, casino rejection record and reconciliation kinds) are
+// deliberately held back in every scratch database this file builds: none
+// has any dependency on 0092 (0093 is sportsbook-only; 0094 only touches
+// casino_provider_capabilities; 0095 only touches kyc_verifications; 0096
+// only touches provider_credential_handles; 0097 only touches
+// casino_callback_rejections and reconciliation kinds), and excluding all
+// five keeps these tests about 0092 alone - in particular,
 // it keeps 0092 the MOST RECENTLY applied migration in
 // TestMigration0092_DownRestoresPriorState's scenario, so
 // MigrateDown(dir, 1) targets 0092 itself, not whatever migration happens
@@ -41,9 +44,12 @@ import (
 const migration0092Version = int64(92)
 
 // migration0092AlwaysHeldPrefixes holds back the unrelated in-flight
-// migrations 0093, 0094, 0095 and 0096 in every scratch database this file
-// builds (see the file header comment for why each is safe to exclude).
-var migration0092AlwaysHeldPrefixes = []string{"0093_", "0094_", "0095_", "0096_"}
+// migrations 0093, 0094, 0095, 0096 and 0097 in every scratch database
+// this file builds (see the file header comment for why each is safe to
+// exclude; 0096 is W2a's provider credential handles and 0097 is W2b's
+// casino rejection record and reconciliation kinds - neither touches
+// ledger_transactions' reversal index).
+var migration0092AlwaysHeldPrefixes = []string{"0093_", "0094_", "0095_", "0096_", "0097_"}
 
 // stagedMigrations0092 holds back 0092 itself (and, always, the unrelated
 // in-flight migrations above) so a scratch database can be brought to

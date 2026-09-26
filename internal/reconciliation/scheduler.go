@@ -69,6 +69,27 @@ func TryRunSportsbookSettlementForTenant(ctx context.Context, tx pgx.Tx, tenantI
 	return run, mismatches, true, err
 }
 
+// TryRunCasinoConsistencyForTenant is TryRunLedgerVsProjectionForTenant for
+// the casino_consistency stream (Stage 10.3 W2b, CAS-RECON-1): the same
+// transaction-scoped advisory-lock discipline under its own stream key
+// ('reconciliation:casino_consistency:<tenant>'), so a concurrent sweep of
+// the SAME stream for the same tenant serializes (the loser is skipped and
+// records nothing but its audited "skipped" attempt), while the other
+// streams never contend with it.
+func TryRunCasinoConsistencyForTenant(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, periodStart, periodEnd time.Time) (run Run, mismatches []Mismatch, metrics CasinoMetrics, acquired bool, err error) {
+	if err := tx.QueryRow(ctx,
+		`SELECT pg_try_advisory_xact_lock(hashtextextended('reconciliation:casino_consistency:' || $1::text, 0))`,
+		tenantID,
+	).Scan(&acquired); err != nil {
+		return Run{}, nil, CasinoMetrics{}, false, fmt.Errorf("reconciliation: acquire tenant casino advisory lock: %w", err)
+	}
+	if !acquired {
+		return Run{}, nil, CasinoMetrics{}, false, nil
+	}
+	run, mismatches, metrics, err = RunCasinoConsistency(ctx, tx, tenantID, periodStart, periodEnd)
+	return run, mismatches, metrics, true, err
+}
+
 // SweepOutcome is one tenant's result from a single RunSweep tick.
 type SweepOutcome struct {
 	TenantID uuid.UUID
@@ -82,6 +103,10 @@ type SweepOutcome struct {
 	// tenant-scoped transaction so one stream's failure never discards the
 	// other's recorded evidence.
 	Sportsbook StreamOutcome
+	// Casino is the same tenant's casino_consistency stream result (Stage
+	// 10.3 W2b, CAS-RECON-1), run after sportsbook_settlement in its OWN
+	// tenant-scoped transaction, for the same reason.
+	Casino StreamOutcome
 }
 
 // StreamOutcome is one additional stream's per-tenant result.
@@ -213,6 +238,9 @@ func RunSweep(ctx context.Context, pool *db.Pool, logger *slog.Logger, periodSta
 		// ADR 0088 §8: the sportsbook stream runs after
 		// ledger_vs_projection, regardless of its outcome.
 		outcome.Sportsbook = runSportsbookStreamForTenant(ctx, pool, logger, tenantID, periodStart, periodEnd, sbSource)
+		// Stage 10.3 W2b (CAS-RECON-1): casino_consistency runs after
+		// sportsbook_settlement, regardless of either earlier outcome.
+		outcome.Casino = runCasinoStreamForTenant(ctx, pool, logger, tenantID, periodStart, periodEnd)
 		outcomes = append(outcomes, outcome)
 	}
 	return outcomes, nil
@@ -276,6 +304,73 @@ func runSportsbookStreamForTenant(ctx context.Context, pool *db.Pool, logger *sl
 	case logger != nil:
 		logger.Info("reconciliation sweep: tenant run complete", "tenant_id", tenantID, "stream", stream,
 			"skipped_lock_contention", out.Skipped, "status", string(out.Run.Status), "statement_source", label)
+	}
+	return out
+}
+
+// runCasinoStreamForTenant runs the casino_consistency stream for one
+// tenant with exactly runSportsbookStreamForTenant's audit/log discipline:
+// every attempt (clean, mismatches found, lock-skipped) is audited with
+// the run's metrics (ageing cash rounds, tombstones, rejections - metrics,
+// never mismatches); a failure is audited in a fresh transaction; a
+// mismatch is logged at Error level ("MISMATCH FOUND", P1). It never
+// corrects anything and never touches a balance.
+func runCasinoStreamForTenant(ctx context.Context, pool *db.Pool, logger *slog.Logger, tenantID uuid.UUID, periodStart, periodEnd time.Time) StreamOutcome {
+	var out StreamOutcome
+	stream := string(StreamCasinoConsistency)
+	var mismatchCount int
+
+	txErr := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		run, mismatches, metrics, acquired, err := TryRunCasinoConsistencyForTenant(ctx, tx, tenantID, periodStart, periodEnd)
+		out.Run, out.Skipped = run, !acquired
+		mismatchCount = len(mismatches)
+		if err != nil {
+			return err
+		}
+		status := string(run.Status)
+		if !acquired {
+			status = "skipped"
+		}
+		metadata := map[string]any{
+			"stream": stream, "skipped_lock_contention": !acquired, "status": status,
+			"mismatches": len(mismatches),
+		}
+		if acquired {
+			for k, v := range metrics.AuditMetadata() {
+				metadata[k] = v
+			}
+		}
+		return audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run",
+			TargetType: "reconciliation_run", TargetID: run.ID.String(), Outcome: audit.OutcomeSuccess,
+			Metadata: metadata,
+		})
+	})
+	out.Err = txErr
+
+	switch {
+	case txErr != nil:
+		if logger != nil {
+			logger.Error("reconciliation sweep: tenant run failed", "tenant_id", tenantID, "stream", stream, "error", txErr)
+		}
+		if auditErr := pool.WithTenant(ctx, tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			return audit.Record(ctx, tx, audit.Entry{
+				TenantID: tenantID, ActorType: audit.ActorSystem, Action: "reconciliation.sweep_run_failed",
+				TargetType: "tenant", TargetID: tenantID.String(), Outcome: audit.OutcomeFailure,
+				Metadata: map[string]any{"stream": stream, "error": txErr.Error()},
+			})
+		}); auditErr != nil && logger != nil {
+			logger.Error("reconciliation sweep: failed to audit tenant failure", "tenant_id", tenantID, "stream", stream, "error", auditErr)
+		}
+	case out.Run.Status == StatusMismatchesFound:
+		// CLAUDE.md: any non-zero drift is a P1 incident.
+		if logger != nil {
+			logger.Error("reconciliation sweep: MISMATCH FOUND", "tenant_id", tenantID, "stream", stream,
+				"run_id", out.Run.ID, "mismatches", mismatchCount)
+		}
+	case logger != nil:
+		logger.Info("reconciliation sweep: tenant run complete", "tenant_id", tenantID, "stream", stream,
+			"skipped_lock_contention", out.Skipped, "status", string(out.Run.Status))
 	}
 	return out
 }

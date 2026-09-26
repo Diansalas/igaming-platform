@@ -1658,6 +1658,129 @@ paths:
         "503":
           description: Casino is not enabled on this deployment
 
+  /v1/admin/casino/reconciliation/runs:
+    get:
+      summary: casino_consistency reconciliation runs, tenant-wide (Stage 10.3 W2b, CAS-RECON-1)
+      description: >
+        casino_reconciliation:read (tenant_admin, finance, compliance),
+        tenant-scoped, read-only. Lists the tenant's casino_consistency
+        runs (checks C1-C7), newest first. A run is immutable evidence;
+        a lock-skipped attempt records no run (it is audited instead).
+        Mirrors GET /v1/admin/sportsbook/bets's chain and pagination.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated casino_consistency runs
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/CasinoReconciliationRun" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Internal error
+
+  /v1/admin/casino/reconciliation/mismatches:
+    get:
+      summary: casino_consistency mismatches, tenant-wide (Stage 10.3 W2b, CAS-RECON-1)
+      description: >
+        casino_reconciliation:read, tenant-scoped, read-only. Every row is
+        a P1 finding (zero tolerance). Detection only - nothing here
+        resolves or compensates a finding; compensation is a human
+        four-eyes action whose mechanism (LEDGER-MANUAL-ADJ-4EYES-1) is NOT
+        IMPLEMENTED. Evidence-type kinds (cas_unposted_provider_event,
+        cas_tombstone_late_original) are recorded once per key.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [open, investigating, resolved] }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated casino_consistency mismatches
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/CasinoReconciliationMismatch" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Internal error
+
+  /v1/admin/casino/callback-rejections:
+    get:
+      summary: Casino callback rejection record, tenant-wide (Stage 10.3 W2b, CAS-RECON-1)
+      description: >
+        casino_reconciliation:read, tenant-scoped, read-only. The
+        append-only record of provider callbacks that passed signature
+        verification and were then rejected (late original after its
+        tombstone, the G-1 409 classes, bet not found, already rolled back,
+        payload mismatch, round ownership conflict, a second distinct
+        rollback reference for a tombstoned original). Nothing rejected
+        before verification is ever recorded. Once per (provider, event
+        type, provider_tx_id, reason class).
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 50, maximum: 200 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        "200":
+          description: Paginated rejection record
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/CasinoCallbackRejection" }
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          description: Internal error
+
   # --- Audit trail (read-only) ---
   /v1/admin/audit-log:
     get:
@@ -5640,6 +5763,52 @@ components:
               items: { type: string, format: uuid }
             provider_round_id: { type: string, description: "Empty when no casino_provider_rounds binding exists yet for this round's session." }
           required: [player_account_id, brand_id, decimal_exponent, ledger_transaction_ids, provider_round_id]
+    CasinoReconciliationRun:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        stream: { type: string, enum: [casino_consistency] }
+        status: { type: string, enum: [clean, mismatches_found] }
+        period_start: { type: string, format: date-time }
+        period_end: { type: string, format: date-time }
+        run_at: { type: string, format: date-time }
+      required: [id, stream, status, period_start, period_end, run_at]
+    CasinoReconciliationMismatch:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        run_id: { type: string, format: uuid }
+        mismatch_kind:
+          type: string
+          enum: [cas_round_binding_mismatch, cas_posting_shape_mismatch, cas_orphan_win,
+                 cas_rollback_linkage_mismatch, cas_tombstone_conflict,
+                 cas_unposted_provider_event, cas_tombstone_late_original]
+        reconciliation_key: { type: string }
+        expected_value: { type: string }
+        actual_value: { type: string }
+        investigation_status: { type: string, enum: [open, investigating, resolved] }
+        created_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time, nullable: true }
+      required: [id, run_id, mismatch_kind, reconciliation_key, expected_value, actual_value, investigation_status, created_at, resolved_at]
+    CasinoCallbackRejection:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        provider_id: { type: string }
+        event_type: { type: string, enum: [bet, win, rollback] }
+        provider_tx_id: { type: string }
+        original_provider_tx_id: { type: string, nullable: true, description: "Rollback only." }
+        round_id: { type: string, nullable: true }
+        asset_code: { type: string, nullable: true }
+        amount: { type: string, nullable: true, description: "Provider-asserted minor units as a decimal string (NUMERIC(38,0)); null for a rollback." }
+        reason_class:
+          type: string
+          enum: [original_tombstoned, ambiguous_round, wallet_collision, mixed_funding,
+                 lock_already_released, bonus_bet_not_locked, bet_not_found,
+                 already_rolled_back, payload_mismatch, round_ownership_conflict,
+                 rollback_of_tombstoned_original]
+        first_seen_at: { type: string, format: date-time }
+      required: [id, provider_id, event_type, provider_tx_id, original_provider_tx_id, round_id, asset_code, amount, reason_class, first_seen_at]
     CasinoPlayResult:
       type: object
       description: Response envelope shared by the wager/win/rollback play-simulation endpoints.

@@ -115,6 +115,61 @@ flowchart LR
   by-transaction using the `(provider_id, provider_tx_id)` key, same
   missed-event-vs-integrity-issue triage as §2.2.
 
+**Stage 10.3 W2b status (CAS-RECON-1, ADR 0092; design:
+`docs/plans/stage-10.3-planning/02-casino-financial-analysis.md` §2).**
+The platform-internal half of this stream is `IMPLEMENTED` as the
+`casino_consistency` stream (`internal/reconciliation/casino_consistency.go`,
+migration `0097`), on the existing run/mismatch tables:
+
+- Checks C1 round binding, C2 posting shape, C3 orphan win, C4 rollback
+  linkage, C5 tombstone conflict (backstop), C6 provider-asserted event
+  the ledger lacks, C7 tombstone later matched by an original. Kinds
+  `cas_round_binding_mismatch`, `cas_posting_shape_mismatch`,
+  `cas_orphan_win`, `cas_rollback_linkage_mismatch`,
+  `cas_tombstone_conflict`, `cas_unposted_provider_event`,
+  `cas_tombstone_late_original`. C6/C7 are evidence-type (recorded once
+  per key); C1–C5 are state-type (re-detected every run, ADR 0023 §4).
+- Input for C6/C7: the append-only, FORCE-RLS, verified-only
+  `casino_callback_rejections` record (migration `0097`). A rejection is
+  written in the callback's own transaction when the callback commits (E3
+  declined bet; E9 second distinct rollback reference), and in a separate
+  freshly-opened transaction after the callback's rollback otherwise
+  (E10, the G-1 409 classes, bet not found, already rolled back, payload
+  mismatch, round ownership conflict) - the PAY-REV-1 separately
+  committed denial pattern. Nothing rejected before signature
+  verification is ever recorded.
+- Run by `RunSweep` after `sportsbook_settlement`, own transaction, own
+  advisory lock (`reconciliation:casino_consistency:<tenant>`), every
+  attempt audited with metrics, `Error`-level "MISMATCH FOUND" (P1) on
+  drift. Detection only; it never corrects and never writes money.
+- Ageing cash rounds (loss-by-silence) are a metric in the run audit
+  (`unresolved_cash_rounds_older_than_window`, window 24h, reporting
+  only), never a mismatch. `cas_locked_unresolved` stays dormant until
+  bonus-funded casino stakes ship (the settlement window W is an open
+  human decision, 08 §16.5a).
+- Deviations from paper 02 §2.4, recorded by its author: C3's
+  "win posted after its bet was reversed" order sub-check is
+  `NOT IMPLEMENTED` (the ledger has no commit-order evidence; `posted_at`
+  is transaction start time, so a zero-tolerance P1 would fire on a
+  legitimate interleaving - the guarantee is enforced at write time by the
+  L2 lock); C4's exact-inverse comparison covers cash rollbacks only
+  (BONUS_SET held-disposition rollbacks are intentionally not inverses);
+  no `internal_error` rejection class (a 500 is retryable and is not a
+  rejection decision).
+- Read-only staff views: `GET /v1/admin/casino/reconciliation/runs`,
+  `GET /v1/admin/casino/reconciliation/mismatches`,
+  `GET /v1/admin/casino/callback-rejections`
+  (`casino_reconciliation:read`: tenant_admin, finance, compliance).
+- **Compensation stays a human, four-eyes action. Its mechanism,
+  LEDGER-MANUAL-ADJ-4EYES-1 (manual-adjustment API, four-eyes approval,
+  mismatch resolution route), is `NOT IMPLEMENTED`** and blocks real-money
+  go-live. Until it exists the only corrections are provider redelivery
+  or a provider-issued rollback through the normal idempotent callback
+  path.
+- The counterparty half (matching a provider statement, the GGR totals
+  above) is the separate `casino_statement` stream, CAS-RECON-STMT-1
+  (W3a, `MOCK` source); real statement matching is `PROVIDER DEPENDENT`.
+
 ### 2.4 Wallet ↔ sportsbook provider — `BLUEPRINT`
 
 - Same shape as §2.3, additionally reconciling **open liability**: the sum

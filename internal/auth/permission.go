@@ -85,6 +85,21 @@ const (
 	// reason PermSportsbookBetRead excludes it.
 	PermCasinoTransactionRead Permission = "casino_transaction:read"
 
+	// PermCasinoReconciliationRead gates STAFF, tenant-wide, READ-ONLY
+	// visibility into the casino_consistency reconciliation evidence
+	// (runs, mismatches) and the casino callback rejection record (Stage
+	// 10.3 W2b, CAS-RECON-1). Read-only by construction: no route gated by
+	// it resolves, annotates or compensates anything - resolution and
+	// compensation are LEDGER-MANUAL-ADJ-4EYES-1 (NOT IMPLEMENTED).
+	// Granted to the roles that own financial/regulatory investigation of
+	// a tenant's books: RoleTenantAdmin, RoleFinance and RoleCompliance.
+	// Deliberately NOT RoleSupport (player-support visibility does not
+	// extend to reconciliation evidence, which names provider references
+	// and amounts across every player) and NOT RolePlatformAdmin
+	// (PermSportsbookBetRead's reasoning: the routes are tenant-scoped and a
+	// platform-admin token carries no tenant).
+	PermCasinoReconciliationRead Permission = "casino_reconciliation:read"
+
 	// PermWithdrawalPolicyWrite gates the Stage 3D withdrawal_policies
 	// admin API (docs/decisions/0024 §5). Deliberately its own
 	// permission, never bundled with PermWithdrawalApprove: the role
@@ -681,6 +696,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// Stage 7: see PermCasinoTransactionRead's own doc comment.
 		PermCasinoTransactionRead,
 		PermProviderCredentialRead, PermProviderCredentialRevoke,
+		// Stage 10.3 W2b: see PermCasinoReconciliationRead's own doc comment.
+		PermCasinoReconciliationRead,
 	),
 	RoleSupport: permSet(
 		PermPlayerRead,
@@ -727,6 +744,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		PermSportsbookBetRead,
 		// Stage 7: see PermCasinoTransactionRead's own doc comment.
 		PermCasinoTransactionRead,
+		// Stage 10.3 W2b: see PermCasinoReconciliationRead's own doc comment.
+		PermCasinoReconciliationRead,
 	),
 	// finance is Stage 3B's own role, dedicated solely to withdrawal
 	// governance - it holds all four withdrawal permissions and nothing
@@ -742,6 +761,8 @@ var rolePermissions = map[Role]map[Permission]bool{
 		// Stage 7: see PermCasinoTransactionRead's own doc comment - the
 		// same reasoning applies to a casino round.
 		PermCasinoTransactionRead,
+		// Stage 10.3 W2b: see PermCasinoReconciliationRead's own doc comment.
+		PermCasinoReconciliationRead,
 	),
 	// Stage 4G: risk_manager is dedicated solely to Risk & Limits
 	// configuration - it holds both risk_config permissions and nothing

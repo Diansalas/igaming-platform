@@ -351,6 +351,14 @@ func newCasinoWebhookHandler(deps Deps) http.HandlerFunc {
 			return err
 		})
 
+		// Stage 10.3 W2b (CAS-RECON-1): a verified-but-rejected callback
+		// gets its durable rejection record here, in a separately
+		// committed transaction (the callback's own one has rolled back).
+		// A no-op for every error that is not a *casino.CallbackRejectedError,
+		// including every pre-verification AuthError (I1). Never changes
+		// the response below.
+		recordCasinoCallbackRejection(r.Context(), deps, logger, t.ID, requestID, err)
+
 		var authErr *webhookauth.AuthError
 		if errors.As(err, &authErr) {
 			logWebhookAuthFailure(logger, casinoWebhookRoute.authFailedEvent, r, requestID, authErr.Reason, &t.ID, providerID, true, authErr.KeyID, authErr.CredentialFingerprint, len(body))

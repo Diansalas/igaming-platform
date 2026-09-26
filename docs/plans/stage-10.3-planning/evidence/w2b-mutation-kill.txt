@@ -1,0 +1,183 @@
+W2b (CAS-RECON-1) mutation-kill record - Stage 10.3 W2b, casino_consistency C1-C7 and the
+casino callback rejection record. Author: ledger-finance.
+Base: branch claude/focused-wright-jw88w9 at 6e3d74c67820a56983c8bbede967a74d9942e0f1 plus the (then uncommitted) W2b change set.
+Database: a private, fully migrated database (igaming_w2b_local, owner igaming, runtime grants
+applied) so migration 0097 never touched the shared CI database; C5 and the migration tests use
+scratch databases (internal/testsupport/scratchdb).
+Method: scratchpad harness mutate.py. Each mutation edits ONE source file with a mechanical string
+replacement that removes or weakens exactly the named rule, runs only the named killing test(s)
+(`go test -tags=integration -count=1 -run <pattern>`, TEST_DATABASE_URL = owner role igaming, which
+is NOBYPASSRLS and subject to FORCE RLS), records the first failing assertion, then restores the
+original bytes. "KILLED" = the named test failed on its own assertion, not a build error. Every
+entry below is a real run's output, unedited.
+
+Result: 25/25 killed, 0 survived (after one test was strengthened - see M-C4a note).
+
+M-C4a note (disclosed, not hidden): on the first pass M-C4a ("C4 reverses-a-casino-original rule
+removed") SURVIVED against the then-only linkage test, which reversed a psp deposit under a
+DIFFERENT provider - the provider rule still caught it, so the type rule had no killing test. The
+test was strengthened with two isolating subtests (rollback_of_a_same_provider_tombstone for the
+type rule, rollback_under_a_different_provider for the provider rule, new mutation M-C4d); both
+mutations were then re-run and are killed. First-pass record:
+M-C4a: C4 reverses-a-casino-original rule removed
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C4_RollbackLinkageMismatch/rollback_of_a_non_casino_original
+  result: SURVIVED
+  first failing assertion: 
+
+Deny-trigger kill control (QA 04 §W2b): TestMigration0097_DenyTriggerBindsEvenWithAPermissiveUpdatePolicy
+adds a permissive FOR ALL policy on a scratch database, proves UPDATE/DELETE/TRUNCATE are still
+refused by the deny triggers (the owner holds every privilege, so the refusal is not the REVOKE),
+then drops the row trigger and proves the same UPDATE now succeeds - the kill control runs inside
+the test on every execution.
+
+---
+M-C1a: C1 bet_has_round finding dropped
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C1_RoundBindingMismatch/bet_without_round
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:359: expected exactly 1 cas_round_binding_mismatch mismatch, got 0: [] (all: [])
+
+M-C1b: C1 round_has_bet condition inverted
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C1_RoundBindingMismatch/round_without_bet
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:371: expected exactly 1 cas_round_binding_mismatch mismatch, got 0: [] (all: [])
+
+M-C1c: C1 round player comparison removed (IS DISTINCT FROM -> false)
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C1_RoundBindingMismatch/round_player
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:390: expected exactly 1 cas_round_binding_mismatch mismatch, got 0: [] (all: [])
+
+M-C1d: C1 derived round correlation check removed
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C1_RoundBindingMismatch/round_correlation
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:413: expected exactly 1 cas_round_binding_mismatch mismatch, got 0: [] (all: [])
+
+M-C2a: C2 win wallet check removed
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C2_PostingShapeMismatch/win_credits_a_wallet_no_round_bet_debited
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:452: expected exactly 1 cas_posting_shape_mismatch mismatch, got 0: [] (all: [])
+
+M-C2b: C2 single-wallet rule weakened (!= 1 -> > 2)
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C2_PostingShapeMismatch/bet_touching_two_wallets
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:475: expected exactly 1 cas_posting_shape_mismatch mismatch, got 0: [] (all: [{ID:2ca92efa-af2b-4863-89cb-1579f0e926c7 TenantID:70fca837-8128-42fa-83d7-631c2366a16b RunID:e7053de8-7301-402a-bf02-16c3d96035d2 ReconciliationKey:ledger_transaction=d440752a-e362-44c4-a134-d1c44bdcf12e round=94954e6f-56ac-4498-a5e7-44572572b83c check=round_player ExpectedValue:debited wallet player=9eecad8d-fee0-4613-ae43-a9e416077fbb ActualValue:debited wallet player=2d1dbda1-220d-490b-a5fe-b621f070d06a MismatchKind:cas_round_binding_mismatch InvestigationStatus:open}])
+
+M-C3: C3 orphan-win predicate removed
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C3_OrphanWin
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:513: expected exactly 1 cas_orphan_win mismatch, got 0: [] (all: [])
+
+M-C4a: C4 reverses-a-casino-original rule removed
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C4_RollbackLinkageMismatch/rollback_of_a_same_provider_tombstone
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:563: expected exactly 1 cas_rollback_linkage_mismatch mismatch, got 0: [] (all: [])
+
+M-C4d: C4 same-provider rule removed
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C4_RollbackLinkageMismatch/rollback_under_a_different_provider
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:580: expected exactly 1 cas_rollback_linkage_mismatch mismatch, got 0: [] (all: [])
+
+M-C4b: C4 exact-inverse comparison removed
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C4_RollbackLinkageMismatch/not_the_exact_inverse
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:561: expected exactly 1 cas_rollback_linkage_mismatch mismatch, got 0: [] (all: [])
+
+M-C4c: C4 one-reversal-per-original rule weakened (> 1 -> > 2)
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C4_RollbackLinkageMismatch/second_reversal_of_one_original
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:574: expected exactly 1 cas_rollback_linkage_mismatch mismatch, got 0: [] (all: [])
+
+M-C5: C5 tombstone-conflict join disabled
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C5_TombstoneConflict
+  result: KILLED
+  first failing assertion: migration_0097_integration_test.go:255: expected exactly 1 cas_tombstone_conflict mismatch, got 0: [] (all: [])
+
+M-C6a: C6 "ledger holds nothing" predicate removed (a posted key is reported)
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C6_UnpostedProviderEvent
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:605: expected exactly 1 cas_unposted_provider_event mismatch, got 2: [{ID:05ea72d9-ce5f-4018-a04d-2d30c9b0abf2 TenantID:63130d42-3ec1-4cf7-ab7e-61fb90fdde0d RunID:74be7ead-5eac-48ae-831b-ffe156379c1e ReconciliationKey:provider=mock-casino event=win provider_tx_id=c6-win reason=bet_not_found ExpectedValue:ledger holds the provider-asserted win ActualValue:rejected (bet_not_found); ledger holds nothing under this reference; round=c6-no-bet asset=EUR amount=800 MismatchKind:cas_unposted_provider_event InvestigationStatus:open} {ID:c81443c1-17f9-41ee-94da-05c9fddf5212 TenantID:63130d42-3ec1-4cf7-ab7e-61fb90fdde0d RunID:74be7ead-5eac-48ae-831b-ffe156379c1e ReconciliationKey:provider=mock-casino event=bet provider_tx_id=b1 reason=payload_mismatch ExpectedValue:ledger holds the provider-asserted bet ActualValue:rejected (payload_mismatch); ledger holds nothing under this reference; round=r1 asset=EUR amount=1001 MismatchKind:cas_unposted_provider_event InvestigationStatus:open}] (all: [{ID:05ea72d9-ce5f-4018-a04d-2d30c9b0abf2 TenantID:63130d42-3ec1-4cf7-ab7e-61fb90fdde0d RunID:74be7ead-5eac-48ae-831b-ffe156379c1e ReconciliationKey:provider=mock-casino event=win provider_tx_id=c6-win reason=bet_not_found ExpectedValue:ledger holds the provider-asserted win ActualValue:rejected (bet_not_found); ledger holds nothing under this reference; round=c6-no-bet asset=EUR amount=800 MismatchKind:cas_unposted_provider_event InvestigationStatus:open} {ID:c81443c1-17f9-41ee-94da-05c9fddf5212 TenantID:63130d42-3ec1-4cf7-ab7e-61fb90fdde0d RunID:74be7ead-5eac-48ae-831b-ffe156379c1e ReconciliationKey:provider=mock-casino event=bet provider_tx_id=b1 reason=payload_mismatch ExpectedValue:ledger holds the provider-asserted bet ActualValue:rejected (payload_mismatch); ledger holds nothing under this reference; round=r1 asset=EUR amount=1001 MismatchKind:cas_unposted_provider_event InvestigationStatus:open}])
+
+M-C6b: C6/C7 evidence dedup removed (re-raised every run)
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C6_UnpostedProviderEvent|TestCasinoConsistency_C7_TombstoneLaterMatchedByOriginal
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:613: expected a clean casino_consistency run, got mismatches_found with 1 mismatches: [{ID:1752d5d8-2591-49c2-bbe2-a1729aa8786e TenantID:1cd55728-1f0e-4748-9a2b-d6e64abbf541 RunID:cc6be73b-c65b-4b18-bf8f-de71c06cfaf5 ReconciliationKey:provider=mock-casino event=win provider_tx_id=c6-win reason=bet_not_found ExpectedValue:ledger holds the provider-asserted win ActualValue:rejected (bet_not_found); ledger holds nothing under this reference; round=c6-no-bet asset=EUR amount=800 MismatchKind:cas_unposted_provider_event InvestigationStatus:open}]
+
+M-C7: C7 finding dropped
+  file: internal/reconciliation/casino_consistency.go
+  test: TestCasinoConsistency_C7_TombstoneLaterMatchedByOriginal
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:671: expected exactly two C7 findings and nothing else, got []
+
+M-LOCK: advisory lock replaced by an always-acquired constant
+  file: internal/reconciliation/scheduler.go
+  test: TestCasinoConsistency_ConcurrentRunsSerializedByAdvisoryLock
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:714: second concurrent run must skip: acquired=true err=<nil>
+
+M-SWEEP: casino stream not wired into RunSweep
+  file: internal/reconciliation/scheduler.go
+  test: TestRunSweep_CasinoStreamWiredAuditedAndP1Logged|TestRunSweep_CasinoStreamFailureIsAuditedInFreshTransaction
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:898: unexpected casino outcome: {Skipped:false Run:{ID:00000000-0000-0000-0000-000000000000 TenantID:00000000-0000-0000-0000-000000000000 Stream: PeriodStart:0001-01-01 00:00:00 +0000 UTC PeriodEnd:0001-01-01 00:00:00 +0000 UTC RunAt:0001-01-01 00:00:00 +0000 UTC Status:} Err:<nil>}
+
+M-P1LOG: P1 Error log line on casino drift removed
+  file: internal/reconciliation/scheduler.go
+  test: TestRunSweep_CasinoStreamWiredAuditedAndP1Logged
+  result: KILLED
+  first failing assertion: casino_consistency_integration_test.go:907: expected a P1 'MISMATCH FOUND' log line for the casino_consistency stream
+
+M-REJ-E3: E3 in-transaction rejection write removed
+  file: internal/casino/orchestrator.go
+  test: TestCallbackRejection_E3_LateBetRecordedInSameTransactionOncePerKey
+  result: KILLED
+  first failing assertion: rejections_integration_test.go:149: expected exactly 1 rejection row after 2 deliveries, got 0: []
+
+M-REJ-E9a: E9 distinct-reference record never written
+  file: internal/casino/orchestrator.go
+  test: TestCallbackRejection_E9_DistinctReferenceRecordedSameReferenceNot
+  result: KILLED
+  first failing assertion: rejections_integration_test.go:245: expected 1 row for the distinct reference, got []
+
+M-REJ-E9b: E9 recorded even for a same-reference redelivery
+  file: internal/casino/orchestrator.go
+  test: TestCallbackRejection_E9_DistinctReferenceRecordedSameReferenceNot
+  result: KILLED
+  first failing assertion: rejections_integration_test.go:234: a same-reference redelivery must record nothing, got [{eventType:rollback providerTxID:rb-e9-1 reasonClass:rollback_of_tombstoned_original original:0xc00004f970 round:0xc00004f980 asset:0xc00004f990 amount:<nil>}]
+
+M-REJ-WRAP: dispatch results no longer wrapped (no rejection identifiers)
+  file: internal/casino/rejections.go
+  test: TestCallbackRejection_E10_WrappedErrorCarriesVerifiedEventAndRecordsOnce
+  result: KILLED
+  first failing assertion: rejections_integration_test.go:192: expected a *CallbackRejectedError, got *fmt.wrapError
+
+M-REJ-IDEM: ON CONFLICT DO NOTHING removed (redelivery duplicates / errors)
+  file: internal/casino/rejections.go
+  test: TestCallbackRejection_E3_LateBetRecordedInSameTransactionOncePerKey|TestCallbackRejection_E10_WrappedErrorCarriesVerifiedEventAndRecordsOnce
+  result: KILLED
+  first failing assertion: rejections_integration_test.go:141: E3 delivery 1: casino: record callback rejection: ERROR: duplicate key value violates unique constraint "casino_callback_rejections_once_per_key" (SQLSTATE 23505)
+
+M-REJ-CLASS: G-1 wallet-collision class not recorded
+  file: internal/casino/rejections.go
+  test: TestCasinoRejectionRecord_EveryClassViaWebhook/G1_wallet_collision
+  result: KILLED
+  first failing assertion: casino_rejection_record_integration_test.go:317: delivery 0: expected exactly one row {eventType:win ref:col-win class:wallet_collision}, got []
+
+M-REJ-HANDLER: webhook handler never writes the separately-committed row
+  file: internal/httpserver/casino_handlers.go
+  test: TestCasinoRejectionRecord_EveryClassViaWebhook/E10_late_win_after_tombstone
+  result: KILLED
+  first failing assertion: casino_rejection_record_integration_test.go:317: delivery 0: expected exactly one row {eventType:win ref:e10-win class:original_tombstoned}, got []

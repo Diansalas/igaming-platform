@@ -249,7 +249,8 @@ jobs:
           for t in TestMigration0048_PreflightGuardFiresOnBarePlayerLocked TestMigrateUp_RecordsCorrectChecksum \
                    TestWave3Phase2Migrations_FullChainUpDownUpRoundTrip TestMigration0077_EnablesAndForcesRLSOnTenantsLicencesAndJurisdictions \
                    TestPCMigration_RoundTripOnCleanDatabase TestPCMigration_DownRefusesWithRows TestPCHandles_RLS_TenantIsolation \
-                   TestInitAppRole_RerunKeepsProviderCredentialGrants TestPCMigration_RuntimeGrantsMinimal; do
+                   TestInitAppRole_RerunKeepsProviderCredentialGrants TestPCMigration_RuntimeGrantsMinimal \
+                   TestMigration0097_DownRefusesOnceARejectionRowExists TestMigration0097_DownRefusesOnceACasinoMismatchExists; do
             grep -q -- "--- PASS: $t " integration-test.log || { echo "expected $t to PASS"; exit 1; }
           done
           echo "packages ok:  $(grep -cE '^ok[[:space:]]' integration-test.log)"

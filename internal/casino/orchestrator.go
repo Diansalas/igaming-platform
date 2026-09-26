@@ -16,6 +16,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/identity"
 	"github.com/Diansalas/igaming-platform/internal/jurisdiction"
 	"github.com/Diansalas/igaming-platform/internal/ledger"
+	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/rg"
 	"github.com/Diansalas/igaming-platform/internal/risk"
 	"github.com/Diansalas/igaming-platform/internal/wallet"
@@ -746,17 +747,26 @@ func (o *Orchestrator) ReceiveCallback(ctx context.Context, tx pgx.Tx, tenantID 
 	// the SESSION's OWN brand - fixing F4 (a tenant-wide, brandID=uuid.Nil
 	// lookup could never match a brand-only row) by resolving it exactly
 	// the way LaunchGame already does.
+	//
+	// Stage 10.3 W2b (CAS-RECON-1): every dispatch result passes through
+	// wrapRejection (rejections.go). A verified callback rejected with one
+	// of the recorded financial rejection classes comes back as a
+	// *CallbackRejectedError carrying the verified event's identifiers, so
+	// the caller can write the rejection record in a separately-committed
+	// transaction after this one rolls back. errors.Is on the wrapped
+	// error is unchanged. This is the only place the wrapper is applied,
+	// and it is reached only after verification succeeded (I1).
 	switch event.EventType {
 	case CallbackEventBet:
-		result, err := mapReplayPayloadMismatch(o.postBet(ctx, tx, tenantID, providerID, event))
+		result, err := wrapRejection(providerID, event)(mapReplayPayloadMismatch(o.postBet(ctx, tx, tenantID, providerID, event)))
 		result.EventType = event.EventType
 		return result, err
 	case CallbackEventWin:
-		result, err := mapReplayPayloadMismatch(o.postWin(ctx, tx, tenantID, providerID, event))
+		result, err := wrapRejection(providerID, event)(mapReplayPayloadMismatch(o.postWin(ctx, tx, tenantID, providerID, event)))
 		result.EventType = event.EventType
 		return result, err
 	case CallbackEventRollback:
-		result, err := mapReplayPayloadMismatch(o.postRollback(ctx, tx, tenantID, providerID, event))
+		result, err := wrapRejection(providerID, event)(mapReplayPayloadMismatch(o.postRollback(ctx, tx, tenantID, providerID, event)))
 		result.EventType = event.EventType
 		return result, err
 	default:
@@ -1059,6 +1069,16 @@ func (o *Orchestrator) postBet(ctx context.Context, tx pgx.Tx, tenantID uuid.UUI
 			},
 		}); err != nil {
 			return ReceiveCallbackResult{}, fmt.Errorf("casino: audit bet rejected tombstoned: %w", err)
+		}
+		// Stage 10.3 W2b (CAS-RECON-1): the durable rejection record, in
+		// THIS committing transaction (the decline commits, so the row
+		// commits with it). Once per key - a redelivered E3 adds a second
+		// audit row (per-attempt, by rule) but never a second rejection
+		// row. A failure here rolls the decline back too, exactly like a
+		// failure of the audit write above.
+		if _, err := RecordCallbackRejection(ctx, tx, tenantID, providerID,
+			newCallbackRejection(RejectionOriginalTombstoned, event), observability.RequestIDFromContext(ctx)); err != nil {
+			return ReceiveCallbackResult{}, err
 		}
 		return ReceiveCallbackResult{Outcome: OutcomeDeclined, DeclineReason: "original_rolled_back"}, nil
 	}
@@ -1631,6 +1651,29 @@ func (o *Orchestrator) postRollback(ctx context.Context, tx pgx.Tx, tenantID uui
 		// rule). Report the same idempotent tombstone result again,
 		// rather than the generic "expected casino_bet or casino_win"
 		// error this used to fall through to.
+		//
+		// Stage 10.3 W2b (CAS-RECON-1; gate 10.3-W1 ledger-finance C9
+		// extension): when THIS delivery's own rollback reference differs
+		// from the one that wrote the tombstone, it is a second, distinct
+		// rollback reference for an original that was never posted - still
+		// acknowledged with the idempotent tombstone result (unchanged), but
+		// now durably recorded in this committing transaction. The first
+		// reference is read from the tombstone's own
+		// casino_rollback.tombstoned audit row (same transaction as the
+		// tombstone). If that row is not visible the reference cannot be
+		// proven equal, and the delivery is recorded rather than silently
+		// dropped (fail toward evidence; a human resolves it). A
+		// same-reference redelivery records nothing.
+		firstRef, known, err := firstTombstoningRollbackReference(ctx, tx, tenantID, originalID)
+		if err != nil {
+			return ReceiveCallbackResult{}, err
+		}
+		if !known || firstRef != event.ProviderTxID {
+			if _, err := RecordCallbackRejection(ctx, tx, tenantID, providerID,
+				newCallbackRejection(RejectionRollbackOfTombstonedOriginal, event), observability.RequestIDFromContext(ctx)); err != nil {
+				return ReceiveCallbackResult{}, err
+			}
+		}
 		return ReceiveCallbackResult{Tombstoned: true, LedgerTransactionID: &originalID, Replayed: true}, nil
 	}
 	if originalType != ledger.TxCasinoBet && originalType != ledger.TxCasinoWin {

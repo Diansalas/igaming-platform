@@ -190,17 +190,23 @@ const migration0093Version = int64(93)
 const migration0094Version = int64(94)
 
 // migration0095Version (Stage 10.3, KYC-REASON-BOUND-1: the
-// kyc_verifications.reason CHECK plus its pre-flight normalization) is now
-// the chain's tip. It only adds one CHECK constraint on a table this
-// test's own scenario never writes a row to, so it is unconditionally
-// reversible here too.
+// kyc_verifications.reason CHECK plus its pre-flight normalization). It
+// only adds one CHECK constraint on a table this test's own scenario never
+// writes a row to, so it is unconditionally reversible here too.
 const migration0095Version = int64(95)
 
 // migration0096Version (Stage 10.3 W2a, provider credential handles and
-// four-eyes governance) is now the chain's tip. Its down migration refuses
-// only once provider credential history exists, which this test's own
-// scenario never creates, so it is unconditionally reversible here.
+// four-eyes governance). Its down migration refuses only once provider
+// credential history exists, which this test's own scenario never
+// creates, so it is unconditionally reversible here.
 const migration0096Version = int64(96)
+
+// migration0097Version (Stage 10.3 W2b, CAS-RECON-1: the append-only
+// casino_callback_rejections table plus the casino_consistency mismatch
+// kinds) is now the chain's tip. This test's scenario never writes a
+// rejection row or a casino mismatch, so its evidence-refusing down is
+// unconditionally reversible here.
+const migration0097Version = int64(97)
 
 func migration0075MigrationsDir(t *testing.T) string {
 	t.Helper()
@@ -329,23 +335,23 @@ func TestMigration0075_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 		t.Fatal("expected migration 0075 to be applied")
 	}
 
-	// (a) Clean database: rolling back the twenty-one most recently applied
-	// migrations (0096, then 0095, then 0094, then 0093, then 0092, then 0091, then 0090, then 0089, then 0088, then 0087, then 0086, then
+	// (a) Clean database: rolling back the twenty-three most recently applied
+	// migrations (0097, then 0096, then 0095, then 0094, then 0093, then 0092, then 0091, then 0090, then 0089, then 0088, then 0087, then 0086, then
 	// 0085, then 0084, then 0083, then 0082, then 0081, then 0080, then
 	// 0079, then 0078, then 0077, then 0076, then 0075) succeeds. None of
-	// 0095, 0094, 0093, 0092, 0091, 0090, 0089, 0088, 0087, 0086, 0085, 0084, 0083, 0082, 0081,
+	// 0096, 0095, 0094, 0093, 0092, 0091, 0090, 0089, 0088, 0087, 0086, 0085, 0084, 0083, 0082, 0081,
 	// 0080, 0079, 0078, 0077, nor 0076 is this test's own subject (Stage
-	// 10.3 x2, Stage 10.1 x2, Stage 10 W1, Stage 9.2 fix round x2, Stage 9.2, Stage 9.1, Stage 9, Stage
-	// 8, Stage 7, Stage 6, Stage 4I Phase E/E-SECURITY) but all twenty of
+	// 10.3 x3, Stage 10.1 x2, Stage 10 W1, Stage 9.2 fix round x2, Stage 9.2, Stage 9.1, Stage 9, Stage
+	// 8, Stage 7, Stage 6, Stage 4I Phase E/E-SECURITY) but all twenty-one of
 	// them sit directly on top of 0075 in the chain and are reversible in
 	// this scenario (0091 refuses only once sportsbook settlement evidence
 	// exists, which this test never creates), so they must be rolled back first for 0075's own down
 	// migration to run at all.
-	rolledBack, err := pool.MigrateDown(context.Background(), dir, 22)
+	rolledBack, err := pool.MigrateDown(context.Background(), dir, 23)
 	if err != nil {
 		t.Fatalf("down migration must succeed on a database with zero jurisdiction_precedence_configs rows: %v", err)
 	}
-	wantDown := []int64{migration0096Version, migration0095Version, migration0094Version, migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version, migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version, migration0076Version, migration0075Version}
+	wantDown := []int64{migration0097Version, migration0096Version, migration0095Version, migration0094Version, migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version, migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version, migration0076Version, migration0075Version}
 	if len(rolledBack) != len(wantDown) {
 		t.Fatalf("expected exactly migrations %v to be rolled back in that order, got %v", wantDown, rolledBack)
 	}
@@ -417,17 +423,23 @@ func TestMigration0075_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 	if migration0075AppliedVersions(t, pool)[migration0095Version] {
 		t.Fatal("migration 0095 must no longer be recorded as applied after a successful rollback")
 	}
+	if migration0075AppliedVersions(t, pool)[migration0096Version] {
+		t.Fatal("migration 0096 must no longer be recorded as applied after a successful rollback")
+	}
+	if migration0075AppliedVersions(t, pool)[migration0097Version] {
+		t.Fatal("migration 0097 must no longer be recorded as applied after a successful rollback")
+	}
 
 	// Round trip: up again.
 	rolledUpAgain, err := pool.MigrateUp(context.Background(), dir)
 	if err != nil {
-		t.Fatalf("re-applying migrations 0075/0076/0077/0078/0079/0080/0081/0082/0083/0084/0085/0086/0087/0088/0089/0090/0091/0092/0093/0094/0095/0096 after a clean rollback: %v", err)
+		t.Fatalf("re-applying migrations 0075/0076/0077/0078/0079/0080/0081/0082/0083/0084/0085/0086/0087/0088/0089/0090/0091/0092/0093/0094/0095/0096/0097 after a clean rollback: %v", err)
 	}
 	wantUp := []int64{
 		migration0075Version, migration0076Version, migration0077Version, migration0078Version, migration0079Version, migration0080Version,
 		migration0081Version, migration0082Version, migration0083Version, migration0084Version, migration0085Version, migration0086Version, migration0087Version,
 		migration0088Version, migration0089Version, migration0090Version, migration0091Version,
-		migration0092Version, migration0093Version, migration0094Version, migration0095Version, migration0096Version,
+		migration0092Version, migration0093Version, migration0094Version, migration0095Version, migration0096Version, migration0097Version,
 	}
 	if len(rolledUpAgain) != len(wantUp) {
 		t.Fatalf("expected exactly migrations %v to be re-applied in that order, got %v", wantUp, rolledUpAgain)
@@ -500,26 +512,26 @@ func TestMigration0075_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 		t.Fatalf("expected exactly 1 row before the rollback attempt, got %d", got)
 	}
 
-	// Roll back 21 (0096, then 0095, then 0094, then 0093, then 0092, then 0091, then 0090, then 0089, then 0088, then 0087, then
+	// Roll back 22 (0097, then 0096, then 0095, then 0094, then 0093, then 0092, then 0091, then 0090, then 0089, then 0088, then 0087, then
 	// 0086, then 0085, then 0084, then 0083, then 0082, then 0081, then
-	// 0080, then 0079, then 0078, then 0077, then 0076, then 0075): 0095,
+	// 0080, then 0079, then 0078, then 0077, then 0076, then 0075): 0096, 0095,
 	// 0094, 0093, 0092, 0091, 0090, 0089, 0088, 0087, 0086, 0085, 0084, 0083, 0082, 0081, 0080,
 	// 0079, 0078, 0077, and 0076 all succeed (none holds any rows of its
-	// own in this scenario - 0092, 0093, 0094, and 0095 carry no such guard, 0091 refuses only once sportsbook settlement
+	// own in this scenario - 0092, 0093, 0094, 0095, and 0096 carry no such guard, 0097 refuses only once casino reconciliation evidence exists, 0091 refuses only once sportsbook settlement
 	// evidence exists, and the rest carry no "refuse if rows exist" guard
 	// at all, per each one's own down.sql header comment), and the overall call
 	// then fails once it reaches 0075's own guard - MigrateDown processes
 	// one migration per transaction and returns the partial rolledBack
 	// list plus the error from whichever one failed, so
-	// 0096/0095/0094/0093/0092/0091/0090/0089/0088/0087/0086/0085/0084/0083/0082/0081/0080/0079/0078/0077/0076
+	// 0097/0096/0095/0094/0093/0092/0091/0090/0089/0088/0087/0086/0085/0084/0083/0082/0081/0080/0079/0078/0077/0076
 	// stay rolled back while 0075 stays applied.
-	rolledBackDirty, err := pool.MigrateDown(context.Background(), dir, 22)
+	rolledBackDirty, err := pool.MigrateDown(context.Background(), dir, 23)
 	if err == nil {
 		t.Fatal("migration 0075's down migration must FAIL once a jurisdiction_precedence_configs row exists - silently " +
 			"dropping columns that hold policy-authoring history would destroy audit-relevant provenance")
 	}
 	wantDirty := []int64{
-		migration0096Version, migration0095Version, migration0094Version, migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
+		migration0097Version, migration0096Version, migration0095Version, migration0094Version, migration0093Version, migration0092Version, migration0091Version, migration0090Version, migration0089Version, migration0088Version, migration0087Version, migration0086Version, migration0085Version, migration0084Version, migration0083Version,
 		migration0082Version, migration0081Version, migration0080Version, migration0079Version, migration0078Version, migration0077Version, migration0076Version,
 	}
 	if len(rolledBackDirty) != len(wantDirty) {
@@ -557,7 +569,7 @@ func TestMigration0075_DownMigrationCleanThenFailsOnDirtyDatabase(t *testing.T) 
 		t.Fatalf("expected the row to survive the failed rollback untouched, got %d rows", got)
 	}
 	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
-		t.Fatalf("re-applying migrations 0076/0077/0078/0079/0080/0081/0082/0083/0084/0085/0086/0087/0088/0089/0090/0091/0092/0093/0094/0095/0096 after the aborted rollback: %v", err)
+		t.Fatalf("re-applying migrations 0076/0077/0078/0079/0080/0081/0082/0083/0084/0085/0086/0087/0088/0089/0090/0091/0092/0093/0094/0095/0096/0097 after the aborted rollback: %v", err)
 	}
 }
 
@@ -574,13 +586,13 @@ func TestMigration0075_DownMigrationRestoresPreMigrationRLSPosture(t *testing.T)
 	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
 		t.Fatalf("migrate up the full chain: %v", err)
 	}
-	// Roll back 22 (0096, then 0095, then 0094, then 0093, then 0092, then 0091, then 0090, then 0089, then 0088, then 0087, then
+	// Roll back 23 (0097, then 0096, then 0095, then 0094, then 0093, then 0092, then 0091, then 0090, then 0089, then 0088, then 0087, then
 	// 0086, then 0085, then 0084, then 0083, then 0082, then 0081, then
 	// 0080, then 0079, then 0078, then 0077, then 0076, then 0075) - see
 	// this file's own header/migration0076Version through
-	// migration0095Version comments for why all twenty must be accounted
+	// migration0097Version comments for why all twenty-one must be accounted
 	// for explicitly here.
-	if _, err := pool.MigrateDown(context.Background(), dir, 22); err != nil {
+	if _, err := pool.MigrateDown(context.Background(), dir, 23); err != nil {
 		t.Fatalf("down migration on a clean database: %v", err)
 	}
 

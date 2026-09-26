@@ -48,6 +48,18 @@ func registerCasinoRoutes(mux *http.ServeMux, deps Deps) {
 	mux.Handle("GET /v1/admin/casino/rounds",
 		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoTransactionRead)(newListAdminCasinoRoundsHandler(deps)))))
 
+	// Stage 10.3 W2b (CAS-RECON-1): read-only casino reconciliation
+	// evidence and the callback rejection record - tenant-scoped, staff
+	// only, the GET /v1/admin/sportsbook/bets chain exactly. No write,
+	// resolve or compensate route exists (LEDGER-MANUAL-ADJ-4EYES-1 is NOT
+	// IMPLEMENTED).
+	mux.Handle("GET /v1/admin/casino/reconciliation/runs",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoReconciliationRead)(newListCasinoReconciliationRunsHandler(deps)))))
+	mux.Handle("GET /v1/admin/casino/reconciliation/mismatches",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoReconciliationRead)(newListCasinoReconciliationMismatchesHandler(deps)))))
+	mux.Handle("GET /v1/admin/casino/callback-rejections",
+		auth.Middleware(deps.AuthIssuer)(auth.RequireTenantScope(auth.RequirePermission(auth.PermCasinoReconciliationRead)(newListCasinoCallbackRejectionsHandler(deps)))))
+
 	// Provider callback (bet/win/rollback) - no bearer-token middleware (a
 	// provider webhook is not an authenticated platform principal); the
 	// handler resolves tenant scope from the URL's tenant slug and
