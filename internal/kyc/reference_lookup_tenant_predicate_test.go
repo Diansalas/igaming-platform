@@ -28,7 +28,7 @@
 // AND`), this test fails immediately (no captured statement contains
 // "tenant_id = $1"), independently of the fact that RLS still returns the
 // same row behaviourally - see docs/plans/stage-10.2-planning/
-// 08-kyc-test-traceability.md for the recorded pre-revert failure output.
+// 08-webhook-test-traceability.md for the recorded pre-revert failure output.
 package kyc
 
 import (

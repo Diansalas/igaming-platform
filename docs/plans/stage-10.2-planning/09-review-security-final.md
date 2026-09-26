@@ -8,7 +8,7 @@ working tree is out of scope and was not reviewed. That work is `casino_prefix_e
 `internal/casino/recording_tx_integration_test.go`.
 
 Binding references checked: CLAUDE.md; ADR 0091; `01-webhook-trust-design.md` including §J (J1–J17);
-`07-review-architect-db.md` (R1–R5, §2–§6); `08-kyc-test-traceability.md`; the ADR 0022 §3 Stage 10.2
+`07-review-architect-db.md` (R1–R5, §2–§6); `08-webhook-test-traceability.md`; the ADR 0022 §3 Stage 10.2
 amendment (e69c2e9, points 8–9 and the Status update).
 
 ## Verdict: **APPROVE WITH CONDITIONS**

@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/casino"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/noeffect"
 )
 
 func TestCasinoWebhook_CrossTenantRollback_Rejected(t *testing.T) {
@@ -54,6 +55,8 @@ func TestCasinoWebhook_CrossTenantRollback_Rejected(t *testing.T) {
 	payload := mock.CallbackPayload(tenantA.ID, casino.CallbackEventRollback,
 		rollbackProviderTxID, originalProviderTxID, "", "", 0, "EUR",
 		casino.OutcomeSucceeded, "", uuid.New(), uuid.Nil)
+
+	before := noeffect.CaptureCasino(t, pool, []uuid.UUID{tenantA.ID, tenantB.ID})
 
 	// Posted to tenant B's slug - never tenant A's. The signing input
 	// includes tenant A's own tenant_id (deriveKey/SigningInput), so this
@@ -101,4 +104,8 @@ func TestCasinoWebhook_CrossTenantRollback_Rejected(t *testing.T) {
 			t.Fatalf("expected zero audit_log rows naming this callback under tenant %s, got %d", tn.name, auditCount)
 		}
 	}
+
+	// Full six-point checklist (both tenants), on top of the targeted
+	// ledger/audit checks above.
+	noeffect.AssertNoCasinoEffect(t, pool, []uuid.UUID{tenantA.ID, tenantB.ID}, before)
 }

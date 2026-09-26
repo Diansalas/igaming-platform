@@ -124,6 +124,155 @@ func Capture(t *testing.T, pool *db.Pool, tenantIDs []uuid.UUID, verifications [
 	return snap
 }
 
+// CasinoSnapshot is the casino-side six-point checklist's observable
+// state, keyed per tenant (CAS-WH-TENANT-1, Stage 10.2). It fills in the
+// two points KYC's own Snapshot leaves out-of-scope (see the package doc
+// above): point 3 (tombstones) and point 6 (the wallet_balance_projection
+// projection), plus the shared points 1/2/4/5 re-expressed over casino's
+// own tables (ledger_transactions rather than kyc_verifications).
+type CasinoSnapshot struct {
+	LedgerTransactionCount map[uuid.UUID]int
+	LedgerEntryCount       map[uuid.UUID]int
+	// TombstoneCount counts ledger_transactions rows whose idempotency_key
+	// carries the "tombstone:<provider>:<original>" shape ReceiveCallback's
+	// postRollbackTombstone writes for a rollback of a never-seen original
+	// (financial-transaction-flows.md §7) - point 3 of the checklist.
+	TombstoneCount     map[uuid.UUID]int
+	AuditLogCount      map[uuid.UUID]int
+	DebitsEqualCredits map[uuid.UUID]bool
+	// ProjectionDebitTotal/ProjectionCreditTotal sum
+	// wallet_balance_projection's own debit_total/credit_total columns
+	// across every ledger_account under the tenant - point 6. A rejection
+	// that posts nothing changes neither sum, independent of whichever
+	// individual account it would have touched had it posted.
+	ProjectionDebitTotal  map[uuid.UUID]int64
+	ProjectionCreditTotal map[uuid.UUID]int64
+	// CasinoProviderRoundCount is casino_provider_rounds' own row count -
+	// postBet's ONLY casino_* insert on the money path (BindProviderRound) -
+	// so a rejection must never add one (security review SC-2's "no
+	// casino_* rows").
+	CasinoProviderRoundCount map[uuid.UUID]int
+	// LaunchSessionStatusFingerprint is a per-tenant, deterministic
+	// fingerprint of every casino_launch_sessions row's (id, status) pair -
+	// catches a session being silently consumed/revoked by a rejected
+	// callback even though inserting/deleting a launch session is not
+	// itself part of ReceiveCallback (SC-2: a plain row COUNT would miss a
+	// same-row status UPDATE, e.g. active -> consumed, so this checks the
+	// full projection of id/status pairs instead of just count()).
+	LaunchSessionStatusFingerprint map[uuid.UUID]string
+}
+
+// CaptureCasino reads the casino checklist's state for every tenant in
+// tenantIDs, each inside its own fresh transaction (never the transaction
+// the rejected callback ran in).
+func CaptureCasino(t *testing.T, pool *db.Pool, tenantIDs []uuid.UUID) CasinoSnapshot {
+	t.Helper()
+	snap := CasinoSnapshot{
+		LedgerTransactionCount:         map[uuid.UUID]int{},
+		LedgerEntryCount:               map[uuid.UUID]int{},
+		TombstoneCount:                 map[uuid.UUID]int{},
+		AuditLogCount:                  map[uuid.UUID]int{},
+		DebitsEqualCredits:             map[uuid.UUID]bool{},
+		ProjectionDebitTotal:           map[uuid.UUID]int64{},
+		ProjectionCreditTotal:          map[uuid.UUID]int64{},
+		CasinoProviderRoundCount:       map[uuid.UUID]int{},
+		LaunchSessionStatusFingerprint: map[uuid.UUID]string{},
+	}
+
+	for _, tenantID := range tenantIDs {
+		var ledgerTxCount, ledgerEntryCount, tombstoneCount, auditCount, roundCount int
+		var debits, credits, projDebit, projCredit int64
+		var sessionFingerprint string
+		err := pool.WithTenant(context.Background(), tenantID, func(ctx context.Context, tx pgx.Tx) error {
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1`, tenantID).Scan(&ledgerTxCount); err != nil {
+				return err
+			}
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM ledger_entries WHERE tenant_id = $1`, tenantID).Scan(&ledgerEntryCount); err != nil {
+				return err
+			}
+			if err := tx.QueryRow(ctx,
+				`SELECT count(*) FROM ledger_transactions WHERE tenant_id = $1 AND idempotency_key LIKE 'tombstone:%'`, tenantID).Scan(&tombstoneCount); err != nil {
+				return err
+			}
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE tenant_id = $1`, tenantID).Scan(&auditCount); err != nil {
+				return err
+			}
+			if err := tx.QueryRow(ctx,
+				`SELECT COALESCE(SUM(amount) FILTER (WHERE direction = 'debit'), 0),
+				        COALESCE(SUM(amount) FILTER (WHERE direction = 'credit'), 0)
+				 FROM ledger_entries WHERE tenant_id = $1`, tenantID).Scan(&debits, &credits); err != nil {
+				return err
+			}
+			if err := tx.QueryRow(ctx,
+				`SELECT COALESCE(SUM(p.debit_total), 0), COALESCE(SUM(p.credit_total), 0)
+				   FROM wallet_balance_projection p
+				   JOIN ledger_accounts la ON la.id = p.ledger_account_id
+				  WHERE la.tenant_id = $1`, tenantID).Scan(&projDebit, &projCredit); err != nil {
+				return err
+			}
+			if err := tx.QueryRow(ctx, `SELECT count(*) FROM casino_provider_rounds WHERE tenant_id = $1`, tenantID).Scan(&roundCount); err != nil {
+				return err
+			}
+			if err := tx.QueryRow(ctx,
+				`SELECT COALESCE(string_agg(id::text || ':' || status, ',' ORDER BY id), '')
+				   FROM casino_launch_sessions WHERE tenant_id = $1`, tenantID).Scan(&sessionFingerprint); err != nil {
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("noeffect: capture casino tenant %s: %v", tenantID, err)
+		}
+		snap.LedgerTransactionCount[tenantID] = ledgerTxCount
+		snap.LedgerEntryCount[tenantID] = ledgerEntryCount
+		snap.TombstoneCount[tenantID] = tombstoneCount
+		snap.AuditLogCount[tenantID] = auditCount
+		snap.DebitsEqualCredits[tenantID] = debits == credits
+		snap.ProjectionDebitTotal[tenantID] = projDebit
+		snap.ProjectionCreditTotal[tenantID] = projCredit
+		snap.CasinoProviderRoundCount[tenantID] = roundCount
+		snap.LaunchSessionStatusFingerprint[tenantID] = sessionFingerprint
+	}
+	return snap
+}
+
+// AssertNoCasinoEffect re-captures the identical casino checklist and
+// fails the test on any divergence from before - the single call every
+// casino rejection test needs, covering every tenant the caller named
+// (typically BOTH tenants in a cross-tenant scenario).
+func AssertNoCasinoEffect(t *testing.T, pool *db.Pool, tenantIDs []uuid.UUID, before CasinoSnapshot) {
+	t.Helper()
+	after := CaptureCasino(t, pool, tenantIDs)
+
+	for _, tenantID := range tenantIDs {
+		if before.LedgerTransactionCount[tenantID] != after.LedgerTransactionCount[tenantID] {
+			t.Errorf("noeffect: tenant %s: ledger_transactions count changed %d -> %d", tenantID, before.LedgerTransactionCount[tenantID], after.LedgerTransactionCount[tenantID])
+		}
+		if before.LedgerEntryCount[tenantID] != after.LedgerEntryCount[tenantID] {
+			t.Errorf("noeffect: tenant %s: ledger_entries count changed %d -> %d", tenantID, before.LedgerEntryCount[tenantID], after.LedgerEntryCount[tenantID])
+		}
+		if before.TombstoneCount[tenantID] != after.TombstoneCount[tenantID] {
+			t.Errorf("noeffect: tenant %s: tombstone count changed %d -> %d", tenantID, before.TombstoneCount[tenantID], after.TombstoneCount[tenantID])
+		}
+		if before.AuditLogCount[tenantID] != after.AuditLogCount[tenantID] {
+			t.Errorf("noeffect: tenant %s: audit_log count changed %d -> %d", tenantID, before.AuditLogCount[tenantID], after.AuditLogCount[tenantID])
+		}
+		if !after.DebitsEqualCredits[tenantID] {
+			t.Errorf("noeffect: tenant %s: SUM(debits) != SUM(credits) after the rejection", tenantID)
+		}
+		if before.ProjectionDebitTotal[tenantID] != after.ProjectionDebitTotal[tenantID] || before.ProjectionCreditTotal[tenantID] != after.ProjectionCreditTotal[tenantID] {
+			t.Errorf("noeffect: tenant %s: wallet_balance_projection totals changed (debit %d -> %d, credit %d -> %d)",
+				tenantID, before.ProjectionDebitTotal[tenantID], after.ProjectionDebitTotal[tenantID], before.ProjectionCreditTotal[tenantID], after.ProjectionCreditTotal[tenantID])
+		}
+		if before.CasinoProviderRoundCount[tenantID] != after.CasinoProviderRoundCount[tenantID] {
+			t.Errorf("noeffect: tenant %s: casino_provider_rounds count changed %d -> %d", tenantID, before.CasinoProviderRoundCount[tenantID], after.CasinoProviderRoundCount[tenantID])
+		}
+		if before.LaunchSessionStatusFingerprint[tenantID] != after.LaunchSessionStatusFingerprint[tenantID] {
+			t.Errorf("noeffect: tenant %s: casino_launch_sessions (id,status) set changed %q -> %q", tenantID, before.LaunchSessionStatusFingerprint[tenantID], after.LaunchSessionStatusFingerprint[tenantID])
+		}
+	}
+}
+
 // AssertNoEffect re-captures the identical checklist and fails the test on
 // any divergence from before - the single call every rejection test needs,
 // covering every tenant/verification the caller named (typically BOTH

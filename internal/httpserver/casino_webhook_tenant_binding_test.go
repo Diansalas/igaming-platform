@@ -18,6 +18,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/casino"
 	"github.com/Diansalas/igaming-platform/internal/identity"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/noeffect"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -49,6 +50,7 @@ func TestCasinoWebhook_CrossTenantBet_Rejected(t *testing.T) {
 	payload := mock.CallbackPayload(tenantA.ID, casino.CallbackEventBet, "cas-c3-bet-1", "", "round-c3", game.ProviderGameID,
 		1000, "EUR", casino.OutcomeSucceeded, "", playerB.ID, sessionB)
 
+	before := noeffect.CaptureCasino(t, pool, []uuid.UUID{tenantA.ID, tenantB.ID})
 	resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenantB.Slug+"/mock-casino", payload)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
@@ -69,16 +71,48 @@ func TestCasinoWebhook_CrossTenantBet_Rejected(t *testing.T) {
 	if count != 0 {
 		t.Fatalf("expected zero ledger effect for the rejected cross-tenant bet, got %d rows", count)
 	}
+	noeffect.AssertNoCasinoEffect(t, pool, []uuid.UUID{tenantA.ID, tenantB.ID}, before)
 }
 
-// TestCasinoWebhook_EqualSecretResolver_StillTenantBound is C4: even if a
-// test resolver deliberately hands out the SAME underlying secret for two
-// different tenants, the signature still fails to verify across tenants -
-// the tenant id is part of what is signed (the signing input), not merely
-// which secret happens to be looked up.
+// equalSecretCasinoResolver returns the SAME credential secret regardless
+// of tenantID - L4 fix (code review, Stage 10.2), ported from KYC's own
+// equalSecretResolver (internal/kyc/orchestrator_webhook_integration_
+// test.go). Proves the tenant binding lives in the SIGNING INPUT (which
+// includes tenant_id, per webhookauth.Scheme.SigningInput), not merely in
+// "which secret happens to be looked up" - unlike the ORIGINAL (buggy)
+// version of this test, which reused newMockCasinoOrchestrator's own
+// resolver (webhookauth.DeriveMockKey, which already derives a genuinely
+// DIFFERENT key per tenant) and so was indistinguishable from C3.
+type equalSecretCasinoResolver struct {
+	secret     []byte
+	providerID string
+}
+
+func (r equalSecretCasinoResolver) Resolve(_ context.Context, tenantID uuid.UUID, providerID, keyID string) (webhookauth.Credential, error) {
+	if providerID != r.providerID || keyID != webhookauth.MockKeyID {
+		return webhookauth.Credential{}, webhookauth.ErrCredentialUnavailable
+	}
+	return webhookauth.Credential{TenantID: tenantID, ProviderID: providerID, KeyID: keyID, Secret: r.secret, Fingerprint: webhookauth.Fingerprint(r.secret)}, nil
+}
+
+// TestCasinoWebhook_EqualSecretResolver_StillTenantBound is C4: even with
+// a resolver that hands out the SAME secret for every tenant (unlike C3,
+// where each tenant's own per-tenant-derived key already differs), an
+// A-signed callback delivered to B is still rejected, because the tenant
+// id is bound into the signing input itself, not merely a side effect of
+// which secret got looked up.
+//
+// Mutation-kill demonstration (recorded in docs/plans/stage-10.2-planning/
+// 08-webhook-test-traceability.md, not committed as code): with tenant_id
+// dropped from webhookauth.Scheme.SigningInput (leaving provider_id/key_id/
+// body only), this test goes red - a B-delivered, A-signed callback under
+// this SAME equal-secret resolver now verifies and posts.
 func TestCasinoWebhook_EqualSecretResolver_StillTenantBound(t *testing.T) {
 	pool, issuer := testEnv(t)
-	orchestrator, mock := newMockCasinoOrchestrator()
+	mock := casino.NewMockCasinoProvider("mock-casino", "EUR", "USD")
+	secret := []byte("equal-secret-shared-by-every-casino-tenant-32b!")
+	resolver := equalSecretCasinoResolver{secret: secret, providerID: "mock-casino"}
+	orchestrator := casino.NewOrchestrator(map[string]casino.CasinoProvider{"mock-casino": mock}, resolver)
 	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
 
 	tenantA := mustCreateTenant(t, pool)
@@ -86,18 +120,46 @@ func TestCasinoWebhook_EqualSecretResolver_StillTenantBound(t *testing.T) {
 	mustEnableCasinoCapability(t, srv, pool, tenantA)
 	mustEnableCasinoCapability(t, srv, pool, tenantB)
 
-	// A payload correctly signed for tenant A...
-	payload := mock.CallbackPayload(tenantA.ID, casino.CallbackEventBet, "cas-c4-bet-1", "", "round-c4", "game-1",
-		1000, "EUR", casino.OutcomeSucceeded, "", uuid.New(), uuid.New())
-	// ...delivered to tenant B's own URL. Even though both tenants' mock
-	// capability rows share the SAME process-global master secret (the
-	// resolver derives a genuinely distinct per-tenant key from it - see
-	// webhookauth.DeriveMockKey), the tenant id is part of the signing
-	// input itself, so this can never verify for tenant B.
+	brandA := mustCreateBrand(t, pool, tenantA)
+	playerA := mustRegisterPlayer(t, srv, brandA.Slug)
+	mustActivatePlayer(t, pool, tenantA.ID, playerA.ID)
+	fundWallet(t, pool, tenantA.ID, brandA.ID, playerA.ID, "EUR", 10_000)
+	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
+	mustEnableCasinoGameForTenant(t, pool, tenantA.ID, game.ID)
+	launchedA := mustLaunchCasinoGame(t, srv, playerA.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	sessionA := uuid.MustParse(launchedA.SessionID)
+
+	scheme := webhookauth.CasinoScheme()
+	body := []byte(`{"event_type":"bet","provider_tx_id":"cas-c4-bet-1","round_id":"round-c4","provider_game_id":"` + game.ProviderGameID + `","amount":1000,"asset_code":"EUR","outcome":"succeeded","player_account_id":"` + playerA.ID.String() + `","session_id":"` + sessionA.String() + `"}`)
+	sigForA := scheme.Sign(secret, tenantA.ID, "mock-casino", webhookauth.MockKeyID, body)
+	header := make(http.Header)
+	scheme.SetHeaders(header, webhookauth.MockKeyID, sigForA)
+	payload := webhookauth.Inbound{TenantID: tenantA.ID, ProviderID: "mock-casino", Header: header, Body: body}
+
+	before := noeffect.CaptureCasino(t, pool, []uuid.UUID{tenantA.ID, tenantB.ID})
+	// Delivered to B: the header/body bytes are byte-identical to what
+	// verified for A under this SAME shared secret, but B's own tenant id
+	// gets substituted into the signing input the orchestrator recomputes -
+	// it will not match.
 	resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenantB.Slug+"/mock-casino", payload)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("expected 401 (the tenant id is bound into the MAC), got %d", resp.StatusCode)
+		t.Fatalf("expected 401 under an equal-secret resolver (the tenant id is bound into the MAC), got %d", resp.StatusCode)
+	}
+	body2 := decodeAPIError(t, resp)
+	if body2.Message != "callback rejected" {
+		t.Fatalf("expected the uniform 'callback rejected' message, got %q", body2.Message)
+	}
+	noeffect.AssertNoCasinoEffect(t, pool, []uuid.UUID{tenantA.ID, tenantB.ID}, before)
+
+	// Sanity check that the SAME payload correctly verifies for its OWN
+	// tenant (A) under this equal-secret resolver - proving the 401 above
+	// is genuinely about the tenant mismatch, not merely a malformed
+	// request this resolver could never accept from anyone.
+	resp2 := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenantA.Slug+"/mock-casino", payload)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for the SAME payload delivered to its own tenant A, got %d", resp2.StatusCode)
 	}
 }
 
@@ -154,14 +216,26 @@ func TestCasinoWebhook_TamperMatrix_Rejected(t *testing.T) {
 			return in
 		}, "callback rejected"},
 		{"legacy_signature_field_in_body", func() webhookauth.Inbound {
-			in := genuine
-			in.Body = []byte(strings.TrimSuffix(string(genuine.Body), "}") + `,"signature":"deadbeef"}`)
-			return in
+			// M1 fix (code review, Stage 10.2): the legacy-shaped body must
+			// be GENUINELY, correctly signed with the real derived key -
+			// otherwise this case never reaches HandleCallback's own
+			// hasLegacySignatureField guard at all (it would already be
+			// rejected earlier, by Verify, for the unrelated reason that
+			// the body changed after signing). mock.SignRawBody signs
+			// EXACTLY the bytes handed to it, so this is the one payload in
+			// the matrix whose signature is valid over a body containing
+			// a "signature" field - the guard this case exists to prove is
+			// the ONLY thing standing between it and acceptance (see the
+			// mutation-kill record in docs/plans/stage-10.2-planning/
+			// 08-webhook-test-traceability.md).
+			legacyBody := []byte(strings.TrimSuffix(string(genuine.Body), "}") + `,"signature":"deadbeef"}`)
+			return mock.SignRawBody(tenant.ID, legacyBody)
 		}, "callback rejected"},
 	}
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			before := noeffect.CaptureCasino(t, pool, []uuid.UUID{tenant.ID})
 			resp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", c.mutate())
 			defer resp.Body.Close()
 			if resp.StatusCode != http.StatusUnauthorized {
@@ -171,6 +245,7 @@ func TestCasinoWebhook_TamperMatrix_Rejected(t *testing.T) {
 			if body.Message != c.wantMsg {
 				t.Fatalf("expected message %q, got %q", c.wantMsg, body.Message)
 			}
+			noeffect.AssertNoCasinoEffect(t, pool, []uuid.UUID{tenant.ID}, before)
 		})
 	}
 }
@@ -200,7 +275,6 @@ func TestCasinoWebhook_EnumerationOracle_IndistinguishableResponses(t *testing.T
 	unconfiguredTenant := mustCreateTenant(t, pool)
 	// No mock-casino capability row at all for this tenant.
 
-	genuineBody := []byte(`{"event_type":"bet","provider_tx_id":"enum-ref","amount":1000,"asset_code":"EUR","outcome":"succeeded"}`)
 	genuineSigned := mock.CallbackPayload(activeTenant.ID, casino.CallbackEventBet, "enum-ref", "", "round-enum", "game-1",
 		1000, "EUR", casino.OutcomeSucceeded, "", uuid.New(), uuid.New())
 
@@ -229,7 +303,6 @@ func TestCasinoWebhook_EnumerationOracle_IndistinguishableResponses(t *testing.T
 		{"non_json_body_active_tenant", "/v1/webhooks/casino/" + activeTenant.Slug + "/mock-casino", genuineSigned.Header, nonJSONBody},
 		{"oversized_body_active_tenant", "/v1/webhooks/casino/" + activeTenant.Slug + "/mock-casino", genuineSigned.Header, oversizedBody},
 	}
-	_ = genuineBody // documents the body genuineSigned actually wraps; kept for readability only
 
 	var referenceBody string
 	for _, p := range probes {
@@ -356,6 +429,7 @@ func TestCasinoWebhook_DisabledCapability_ValidSignatureGets503(t *testing.T) {
 
 	payload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, "cas-c9-bet-1", "", "round-c9", "game-1",
 		1000, "EUR", casino.OutcomeSucceeded, "", uuid.New(), uuid.New())
+	before := noeffect.CaptureCasino(t, pool, []uuid.UUID{tenant.ID})
 	callbackResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", payload)
 	defer callbackResp.Body.Close()
 	if callbackResp.StatusCode != http.StatusServiceUnavailable {
@@ -371,5 +445,106 @@ func TestCasinoWebhook_DisabledCapability_ValidSignatureGets503(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected zero ledger effect while the capability is disabled, got %d rows", count)
+	}
+	noeffect.AssertNoCasinoEffect(t, pool, []uuid.UUID{tenant.ID}, before)
+}
+
+// TestCasinoWebhook_CAS_CAP_ROLLBACK_1_DisabledCapabilityBlocksRollbackOfAlreadyPostedBet
+// CHARACTERISES today's behaviour for the open follow-up CAS-CAP-ROLLBACK-1
+// (design §H, ruling J16: "a disabled casino capability 503s a verified
+// rollback; follow-up for casino + ledger-finance") - it is NOT an
+// assertion that this is the DESIRED long-term behaviour. It records what
+// the code does today: once a bet has genuinely posted (real ledger
+// effect, capability enabled at the time), disabling the tenant's WHOLE
+// casino_provider_capabilities row afterward makes even a fully verified,
+// otherwise-legitimate ROLLBACK of that SAME already-posted bet 503
+// ("provider unavailable") - the already-posted bet's ledger effect is
+// left standing, un-reversed, with no way through this route to correct
+// it while the capability stays disabled. Whether a rollback of
+// already-committed money SHOULD be exempt from this same kill switch
+// that (correctly) blocks NEW bets/wins is the open policy question
+// CAS-CAP-ROLLBACK-1 names for casino + ledger-finance to resolve - this
+// test only pins down what happens today, so a future behaviour change is
+// a deliberate, visible diff against this test, not a silent regression.
+func TestCasinoWebhook_CAS_CAP_ROLLBACK_1_DisabledCapabilityBlocksRollbackOfAlreadyPostedBet(t *testing.T) {
+	pool, issuer := testEnv(t)
+	orchestrator, mock := newMockCasinoOrchestrator()
+	srv := newCasinoTestServer(t, pool, issuer, orchestrator)
+
+	tenant := mustCreateTenant(t, pool)
+	staff := mustCreateStaff(t, pool, tenant.ID, identity.StaffRoleTenantAdmin, "cas-caprb1-pw-1")
+	tokens := mustLoginStaff(t, srv, tenant.Slug, staff.Email, "cas-caprb1-pw-1")
+
+	// Enable the capability, post a genuine bet (a real ledger effect),
+	// THEN disable the capability - mirroring a tenant turning a provider
+	// off mid-operation, with an already-open round.
+	enableResp := putJSON(t, srv, "/v1/admin/casino/providers/mock-casino/capability", tokens.AccessToken, validCasinoCapabilityBody())
+	if enableResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 enabling the mock-casino capability, got %d", enableResp.StatusCode)
+	}
+	enableResp.Body.Close()
+
+	brand := mustCreateBrand(t, pool, tenant)
+	player := mustRegisterPlayer(t, srv, brand.Slug)
+	mustActivatePlayer(t, pool, tenant.ID, player.ID)
+	fundWallet(t, pool, tenant.ID, brand.ID, player.ID, "EUR", 10_000)
+	game := mustSeedCasinoGame(t, pool, "mock-casino", "EUR")
+	mustEnableCasinoGameForTenant(t, pool, tenant.ID, game.ID)
+	launched := mustLaunchCasinoGame(t, srv, player.Tokens.AccessToken, game.ID.String(), "EUR", "real")
+	sessionID := uuid.MustParse(launched.SessionID)
+
+	const originalTxID = "cas-caprb1-original-bet"
+	betPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventBet, originalTxID, "", "round-caprb1", game.ProviderGameID,
+		1000, "EUR", casino.OutcomeSucceeded, "", player.ID, sessionID)
+	betResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", betPayload)
+	if betResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 posting the original bet while the capability is enabled, got %d", betResp.StatusCode)
+	}
+	betResp.Body.Close()
+
+	var ledgerCountAfterBet int
+	err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE provider_id = 'mock-casino' AND provider_tx_id = $1`, originalTxID).Scan(&ledgerCountAfterBet)
+	})
+	if err != nil {
+		t.Fatalf("query ledger_transactions after bet: %v", err)
+	}
+	if ledgerCountAfterBet != 1 {
+		t.Fatalf("expected the original bet to have genuinely posted (1 ledger_transactions row), got %d", ledgerCountAfterBet)
+	}
+
+	disabledBody := validCasinoCapabilityBody()
+	disabledBody["status"] = "disabled"
+	disableResp := putJSON(t, srv, "/v1/admin/casino/providers/mock-casino/capability", tokens.AccessToken, disabledBody)
+	if disableResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 disabling the mock-casino capability, got %d", disableResp.StatusCode)
+	}
+	disableResp.Body.Close()
+
+	rollbackPayload := mock.CallbackPayload(tenant.ID, casino.CallbackEventRollback, "cas-caprb1-rollback", originalTxID, "", "",
+		0, "EUR", "", "", player.ID, uuid.Nil)
+	rollbackResp := rawPostCasinoCallback(t, srv, "/v1/webhooks/casino/"+tenant.Slug+"/mock-casino", rollbackPayload)
+	defer rollbackResp.Body.Close()
+	// CHARACTERISATION, not a requirement: today this is 503, exactly like
+	// C9's disabled-capability-blocks-a-NEW-bet case - the capability check
+	// (d) in ReceiveCallback's own doc comment runs identically for every
+	// event type, bet/win/rollback alike, with no special case for
+	// "reversing money already on the books".
+	if rollbackResp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("CAS-CAP-ROLLBACK-1 characterisation: expected TODAY's behaviour (503) for a rollback of an already-posted bet while the capability is disabled, got %d - if this changed on purpose, update this test AND close CAS-CAP-ROLLBACK-1's follow-up, do not just widen the assertion", rollbackResp.StatusCode)
+	}
+
+	// No ledger effect from the rollback attempt itself: the original bet's
+	// ONE row is still exactly one row (never reversed, never duplicated),
+	// and no tombstone or second transaction was written for the rollback.
+	var ledgerCountAfterRollbackAttempt int
+	err = pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM ledger_transactions WHERE provider_id = 'mock-casino' AND provider_tx_id IN ($1, $2)`, originalTxID, "cas-caprb1-rollback").Scan(&ledgerCountAfterRollbackAttempt)
+	})
+	if err != nil {
+		t.Fatalf("query ledger_transactions after rollback attempt: %v", err)
+	}
+	if ledgerCountAfterRollbackAttempt != 1 {
+		t.Fatalf("expected still exactly 1 ledger_transactions row (the original bet, un-reversed, no tombstone) after the blocked rollback attempt, got %d", ledgerCountAfterRollbackAttempt)
 	}
 }

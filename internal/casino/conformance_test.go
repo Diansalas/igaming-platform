@@ -233,6 +233,25 @@ func RunProviderConformanceSuite(t *testing.T, factory func() CasinoProvider) {
 		if _, err := provider.HandleCallback(ctx, inbound, credA); !errors.Is(err, ErrCallbackSignatureInvalid) {
 			t.Fatalf("expected ErrCallbackSignatureInvalid for a tenant-A-signed callback delivered as tenant B, got %v", err)
 		}
+
+		// Code-review finding (2026-09-26): the sub-case immediately above
+		// is rejected by webhookauth.Scheme.Verify's OWN early
+		// cred.TenantID != in.TenantID check (webhookauth.go's Verify,
+		// before it ever recomputes the HMAC) - it never actually exercises
+		// the MAC comparison itself. This sub-case closes that gap: a
+		// credential deliberately RE-BOUND to claim tenantB (so the early
+		// check passes) while still carrying tenantA's own derived secret -
+		// exactly the shape a broken resolver that mislabels a credential's
+		// TenantID field but forgets to re-derive Secret would produce.
+		// Verify must then fail at the ACTUAL HMAC comparison, not merely
+		// on the metadata check.
+		credAKeyMaterialClaimingB := credA
+		credAKeyMaterialClaimingB.TenantID = tenantB
+		inboundForB := mock.CallbackPayload(tenantA, CallbackEventBet, "conformance-cross-tenant-2", "", "round-1", "game-1", 1000, "EUR", OutcomeSucceeded, "", uuid.New(), uuid.New())
+		inboundForB.TenantID = tenantB
+		if _, err := provider.HandleCallback(ctx, inboundForB, credAKeyMaterialClaimingB); !errors.Is(err, ErrCallbackSignatureInvalid) {
+			t.Fatalf("expected ErrCallbackSignatureInvalid at the MAC comparison itself (not merely the TenantID metadata check) for a credential carrying tenant A's key material mislabeled as tenant B, got %v", err)
+		}
 	})
 
 	// "Malformed callbacks" (directive item 14) - a VERIFIED callback (the
