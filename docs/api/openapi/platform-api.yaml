@@ -2678,6 +2678,121 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /v1/webhooks/casino/{tenantSlug}/{providerID}:
+    post:
+      summary: Casino provider callback (bet / win / rollback)
+      security: []
+      description: >
+        No bearer-token middleware - a casino provider webhook is not an
+        authenticated platform principal. CAS-WH-TENANT-1 (Stage 10.2,
+        ADR 0091; docs/decisions/0022 §3 as amended): {tenantSlug} is a
+        LOOKUP HINT only, never the source of authorization - the tenant is
+        established by verifying a signature whose input includes the
+        ROUTE-resolved tenant_id, and the tenant is NEVER read from the
+        request body. The platform-defined (MOCK-only; a real adapter uses
+        its own vendor scheme) signing_input is exactly:
+        `"igaming.casino.webhook.v1" 0x00 tenant_id 0x00 provider_id 0x00
+        key_id 0x00 <raw request body bytes>`, HMAC-SHA256'd with the
+        credential resolved for (tenant_id, provider_id, key_id) and hex-
+        encoded into X-Casino-Signature. The wire body shape below
+        (`CasinoMockCallback`) is platform-invented for the MOCK adapter
+        only - it models no real vendor's webhook format; a real
+        aggregator integration maps that vendor's own callback shape onto
+        the canonical `CallbackEvent` inside its own adapter. Every
+        pre-verification failure (unknown/inactive tenant,
+        invalid/unregistered provider, no credential resolver,
+        missing/malformed/invalid signature, an UNPARSEABLE body, an
+        oversized (>1 MiB) body) returns the IDENTICAL 401 response below,
+        so an unauthenticated caller can never distinguish which is true -
+        the adapter verifies the raw signature BEFORE ever parsing the
+        body. 400 is reachable ONLY after verification succeeds: a
+        verified body that is still structurally malformed (a required
+        field missing, or an unrecognized event_type/outcome value). 409
+        covers a provider_tx_id already posted with a different payload, a
+        provider_round_id already bound to a different session, or a
+        rollback naming an already-reversed original - intentionally
+        collapsed to one generic body that never echoes the round id or
+        any player identity. 503 means either casino webhooks are not
+        enabled on this deployment, or the tenant's own
+        CasinoProviderCapability for this provider is disabled/unconfigured
+        (a deliberate, POST-verification money-path kill switch - only a
+        verified caller ever observes it).
+      parameters:
+        - name: tenantSlug
+          in: path
+          required: true
+          schema: { type: string }
+        - name: providerID
+          in: path
+          required: true
+          description: "Charset: ^[a-z0-9][a-z0-9-]{0,62}$"
+          schema: { type: string, pattern: "^[a-z0-9][a-z0-9-]{0,62}$" }
+        - name: X-Casino-Signature
+          in: header
+          required: true
+          description: "hex(HMAC-SHA256(credential_secret, signing_input)), lowercase"
+          schema: { type: string, pattern: "^v1=[0-9a-f]{64}$" }
+        - name: X-Casino-Key-Id
+          in: header
+          required: true
+          schema: { type: string, pattern: "^[a-z0-9-]{1,32}$" }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CasinoMockCallback"
+      responses:
+        "200":
+          description: Callback processed (or safely absorbed as an idempotent replay/no-op)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  outcome: { type: string }
+                  tombstoned: { type: boolean }
+                  ledger_transaction_id: { type: string, format: uuid }
+                  decline_reason: { type: string }
+        "400":
+          description: >
+            Reachable ONLY after signature verification succeeds: a
+            verified body that is structurally malformed (unparseable
+            JSON, a missing required field, or an unrecognized event_type/
+            outcome value). Generic body only - never the specific field
+            or value that failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: >
+            Callback rejected - EVERY pre-verification failure reason
+            (unknown/inactive tenant, invalid/unregistered provider, no
+            resolver, no credential, missing/malformed/invalid signature,
+            an unparseable body, an oversized (>1 MiB) body) maps to this
+            SAME generic body, deliberately indistinguishable from any
+            other, with the SAME status code regardless of whether the
+            tenant/provider named in the path actually exist or are
+            configured.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          description: >
+            Casino webhooks are not enabled on this deployment, or the
+            tenant's own provider capability is disabled/unconfigured -
+            reachable ONLY after signature verification succeeds.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   # --- Stage 4G: Risk & Limits admin API (docs/decisions/0031) ---
   /v1/admin/risk/rules:
     get:
@@ -4440,6 +4555,40 @@ components:
           enum: [approved, rejected, pending, review_required, expired, error]
         reason: { type: string }
       required: [provider_reference, outcome]
+    CasinoMockCallback:
+      type: object
+      description: >
+        The MOCK casino adapter's own wire shape (platform-invented, not
+        modeled on any real vendor - CAS-WH-TENANT-1). The signature
+        covers these RAW BODY BYTES, never a re-serialization, so field
+        order/whitespace are significant to verification even though not
+        semantically. There is deliberately no "signature" field in the
+        body (moved to the X-Casino-Signature header) - a body that still
+        carries one is rejected.
+      properties:
+        event_type: { type: string, enum: [bet, win, rollback] }
+        provider_tx_id: { type: string }
+        original_provider_tx_id:
+          type: string
+          description: Set only for event_type=rollback - the reference of the bet/win being reversed.
+        round_id: { type: string }
+        provider_game_id: { type: string }
+        amount:
+          type: integer
+          format: int64
+          description: Minor units at the asset's own exponent - never a float.
+        asset_code: { type: string }
+        outcome: { type: string, enum: [succeeded, declined, ambiguous, pending] }
+        decline_reason: { type: string }
+        player_account_id: { type: string, format: uuid }
+        session_id:
+          type: string
+          format: uuid
+          description: >
+            The platform's own casino_launch_sessions id issued at launch
+            time, echoed back on this callback - required for
+            event_type=bet.
+      required: [event_type, provider_tx_id, amount, asset_code]
     Asset:
       type: object
       description: >
