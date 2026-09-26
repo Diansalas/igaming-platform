@@ -1,0 +1,168 @@
+Gate 10.3-W1 fix round, part B - mutation-kill record (Stage 10.2 rule: every new guard must go red on its own assertion)
+Code under test: branch worktree-agent-a6819458bbdcbf9ea at 3834a6f (base bc72fe4, fix-round commits 956f27d, c6bce92, 3834a6f).
+Date: 2026-09-26.
+Method: each Go mutation edits ONE source file in place (exact-anchor string replacement, anchor must match exactly once),
+runs only the named guarding test(s) with -count=1 (integration-tagged where the guard needs Postgres; TEST_DATABASE_URL =
+the NOBYPASSRLS "igaming" role on igaming_platform_ci_local), records the result, and restores the original bytes.
+"KILLED" = the named test failed on its own assertion; no entry below is a build failure (checked: zero "[build failed]"
+lines in the final run). The Go mutations were run by a scratch script; the backoffice mutation (M33) was run by hand.
+Result: 35 guards mutated, 35 killed. One additional probe (M7b) SURVIVED as an equivalent mutant - see its note.
+Findings covered: security S-1..S-6, code review #2, #4, #6, #10, #12 (KYC), identity-compliance conditions 1 and 2,
+ADR 0093 §6 (awssm allow-list). Not mutation-tested because they are not guards: #8 (Makefile; checked with `make -n run`),
+#9 (dead-code deletion; checked by build + vet in both tag sets), MinSecretBytes comment, the ScanForUnmarkedMocks doc fix.
+---
+M1 KILLED: S-1 rule 1: validateSyntheticForDomain accepts everything
+    file: internal/webhookauth/scheme.go
+    test: -count=1 ./internal/webhookauth/ -run TestNewSchemeSet_SyntheticOnlyTheDomainsCanonicalMock
+    evidence: --- FAIL: TestNewSchemeSet_SyntheticOnlyTheDomainsCanonicalMock (0.00s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/internal/webhookauth	0.007s
+M2 KILLED: S-1 rule 1: compare prefix only, not header names
+    file: internal/webhookauth/scheme.go
+    test: -count=1 ./internal/webhookauth/ -run TestNewSchemeSet_SyntheticOnlyTheDomainsCanonicalMock
+    evidence: --- FAIL: TestNewSchemeSet_SyntheticOnlyTheDomainsCanonicalMock (0.00s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/internal/webhookauth	0.015s
+M3 KILLED: S-1 rule 1: unknown domain falls back to the payments MOCK
+    file: internal/webhookauth/scheme.go
+    test: -count=1 ./internal/webhookauth/ -run TestNewSchemeSet_SyntheticOnlyTheDomainsCanonicalMock
+    evidence: --- FAIL: TestNewSchemeSet_SyntheticOnlyTheDomainsCanonicalMock (0.00s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/internal/webhookauth	0.008s
+M4 KILLED: S-1 rule 2: NewAdapterSchemeSet skips the SyntheticComponent check
+    file: internal/webhookauth/scheme.go
+    test: -count=1 ./internal/webhookauth/ -run TestNewAdapterSchemeSet_SyntheticSchemeOnlyFromSyntheticAdapter
+    evidence: --- FAIL: TestNewAdapterSchemeSet_SyntheticSchemeOnlyFromSyntheticAdapter (0.00s) |     scheme_synthetic_test.go:109: MustAdapterSchemeSet must panic (fail startup) for a MOCK scheme on an unmarked adapter | FAIL
+M5 KILLED: S-1 rule 2 at payments: mustPaymentsSchemeSet reverts to scheme-only MustSchemeSet
+    file: internal/payments/webhook_verify.go
+    test: -count=1 ./internal/payments/ -run TestNewOrchestrator_MockSchemeOnlyFromSyntheticAdapter
+    evidence: --- FAIL: TestNewOrchestrator_MockSchemeOnlyFromSyntheticAdapter (0.00s) |     --- FAIL: TestNewOrchestrator_MockSchemeOnlyFromSyntheticAdapter/payments_MOCK_scheme_on_an_unmarked_adapter (0.00s) |         webhook_scheme_test.go:87: NewOrchestrator must refuse (panic) so startup fails
+M6 KILLED: S-1 rule 2 at KYC: mustKYCSchemeSet reverts to scheme-only MustSchemeSet
+    file: internal/kyc/webhook_verify.go
+    test: -count=1 ./internal/kyc/ -run TestNewOrchestrator_MockSchemeOnlyFromSyntheticAdapter
+    evidence: --- FAIL: TestNewOrchestrator_MockSchemeOnlyFromSyntheticAdapter (0.00s) |     --- FAIL: TestNewOrchestrator_MockSchemeOnlyFromSyntheticAdapter/KYC_MOCK_scheme_on_an_unmarked_adapter (0.00s) |         webhook_scheme_test.go:77: NewOrchestrator must refuse (panic) so startup fails
+M7 KILLED: #6: mockVerificationScheme loses its SyntheticComponent marker
+    file: internal/webhookauth/mock_scheme.go
+    test: -count=1 ./internal/webhookauth/ -run TestMockVerificationScheme_IsSyntheticComponent
+    evidence: --- FAIL: TestMockVerificationScheme_IsSyntheticComponent (0.00s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/internal/webhookauth	0.005s
+M7b SURVIVED: #6: same mutation, observed at the production guard
+    file: internal/webhookauth/mock_scheme.go
+    test: -count=1 ./cmd/platform-api/ -run TestBuildRegistrations_RegistersResolversAndSchemes
+    evidence: (none)
+M8 KILLED: #6: buildRegistrations stops registering webhook schemes
+    file: cmd/platform-api/registrations.go
+    test: -count=1 ./cmd/platform-api/ -run TestBuildRegistrations_RegistersResolversAndSchemes
+    evidence: --- FAIL: TestBuildRegistrations_RegistersResolversAndSchemes (0.00s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/cmd/platform-api	0.006s
+M9 KILLED: S-4.1: buildRegistrations stops registering the payments MOCK resolver
+    file: cmd/platform-api/registrations.go
+    test: -count=1 ./cmd/platform-api/ -run TestSyntheticGuard_RegistrationCompletenessScan$
+    evidence: --- FAIL: TestSyntheticGuard_RegistrationCompletenessScan (0.00s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/cmd/platform-api	0.006s
+M10 KILLED: S-4 / #2: mockProviderWiring ignores GuardEnvironment (missing APP_ENV wires MOCKs)
+    file: cmd/platform-api/wiring.go
+    test: -count=1 ./cmd/platform-api/ -run TestMockProviderWiring_Matrix|FollowsWiring
+    evidence: --- FAIL: TestMockProviderWiring_Matrix (0.00s) | --- FAIL: TestKYCOrchestrator_FollowsWiring (0.00s) | --- FAIL: TestCasinoWebhookResolver_FollowsWiring (0.00s)
+M11 KILLED: S-4.2: main.go constructs a MOCK resolver itself (outside the bundle)
+    file: cmd/platform-api/main.go
+    test: -count=1 ./cmd/platform-api/ -run TestMain_ConstructsNoProviderComponentOutsideRegistrations
+    evidence: --- FAIL: TestMain_ConstructsNoProviderComponentOutsideRegistrations (0.00s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/cmd/platform-api	0.014s
+M12 KILLED: #2: shared completeness helper matches any component (vacuous)
+    file: cmd/platform-api/registrations_test.go
+    test: -count=1 ./cmd/platform-api/ -run TestSyntheticGuard_RegistrationCompletenessScan_CatchesUnregisteredMock
+    evidence: --- FAIL: TestSyntheticGuard_RegistrationCompletenessScan_CatchesUnregisteredMock (0.00s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/cmd/platform-api	0.006s
+M13 KILLED: S-1/I-1: validateWebhookSchemes skips casino
+    file: cmd/platform-api/registrations.go
+    test: -count=1 ./cmd/platform-api/ -run TestValidateWebhookSchemes_RefusesMockSchemeOnUnmarkedAdapter
+    evidence: --- FAIL: TestValidateWebhookSchemes_RefusesMockSchemeOnUnmarkedAdapter (0.00s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/cmd/platform-api	0.007s
+M14 KILLED: S-1/I-1: run() validates schemes only after db.Connect
+    file: cmd/platform-api/main.go
+    test: -count=1 ./cmd/platform-api/ -run TestRun_GuardAndSchemeValidationPrecedeDBConnect
+    evidence: --- FAIL: TestRun_GuardAndSchemeValidationPrecedeDBConnect (0.00s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/cmd/platform-api	0.007s
+M15 KILLED: S-2: SC7 stale-and-tampered assertion deleted
+    file: internal/webhookauth/webhookauthtest/webhookauthtest.go
+    test: -count=1 ./internal/webhookauth/webhookauthtest/ -run SelfTest
+    evidence: --- FAIL: TestSchemeConformanceSelfTest_EachBrokenSchemeGoesRedOnlyInItsCase (0.03s) |     --- FAIL: TestSchemeConformanceSelfTest_EachBrokenSchemeGoesRedOnlyInItsCase/TimestampBeforeMAC_GoesRed (0.00s) | --- FAIL: TestSchemeConformanceSelfTest_TimestampBeforeMAC_OnlySC7StaleAndTampered (0.00s)
+M16 KILLED: S-2: SC7 stale-and-tampered weakened to errors.Is(ErrSignatureInvalid) (the F2 scenario)
+    file: internal/webhookauth/webhookauthtest/webhookauthtest.go
+    test: -count=1 ./internal/webhookauth/webhookauthtest/ -run SelfTest
+    evidence: --- FAIL: TestSchemeConformanceSelfTest_EachBrokenSchemeGoesRedOnlyInItsCase (0.03s) |     --- FAIL: TestSchemeConformanceSelfTest_EachBrokenSchemeGoesRedOnlyInItsCase/TimestampBeforeMAC_GoesRed (0.00s) | --- FAIL: TestSchemeConformanceSelfTest_TimestampBeforeMAC_OnlySC7StaleAndTampered (0.00s)
+M17 KILLED: S-3: constant-time scope back to per-file (only files declaring Extract)
+    file: internal/webhookauth/constant_time_lint_test.go
+    test: -count=1 ./internal/webhookauth/ -run TestConstantTimeCompare_ScopeIsWholePackage
+    evidence: --- FAIL: TestConstantTimeCompare_ScopeIsWholePackage (0.00s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/internal/webhookauth	0.009s
+M18 KILLED: #10: KeyImplicit refusal at registration removed
+    file: internal/webhookauth/scheme.go
+    test: -count=1 ./internal/webhookauth/ -run TestValidateScheme_KeyImplicitRefusedUntilW2a
+    evidence: --- FAIL: TestValidateScheme_KeyImplicitRefusedUntilW2a (0.00s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/internal/webhookauth	0.006s
+M19 KILLED: ADR 0093 §6: awssm allowed everywhere again
+    file: internal/config/config.go
+    test: -count=1 ./internal/config/ -run TestValidateSecretBackendScheme
+    evidence: --- FAIL: TestValidateSecretBackendScheme (0.00s) |     --- FAIL: TestValidateSecretBackendScheme/awssm_refused_in_development (0.00s) |     --- FAIL: TestValidateSecretBackendScheme/awssm_refused_when_app_env_missing (0.00s)
+M20 KILLED: ADR 0093 §6: awssm uses GuardEnvironment (missing APP_ENV permitted)
+    file: internal/config/config.go
+    test: -count=1 ./internal/config/ -run TestValidateSecretBackendScheme
+    evidence: --- FAIL: TestValidateSecretBackendScheme (0.00s) |     --- FAIL: TestValidateSecretBackendScheme/awssm_refused_when_app_env_missing (0.00s) |     --- FAIL: TestValidateSecretBackendScheme/awssm_refused_when_app_env_missing_even_if_environment_reads_production (0.00s)
+M21 KILLED: S-5: CreateVerification no longer normalizes
+    file: internal/kyc/verification_service.go
+    test: -count=1 -tags=integration ./internal/kyc/ -run TestPlatformNormalizesReason_CreateVerification
+    evidence: --- FAIL: TestPlatformNormalizesReason_CreateVerification (0.04s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/internal/kyc	0.048s
+M22 KILLED: S-5: document submission no longer normalizes
+    file: internal/kyc/document_service.go
+    test: -count=1 -tags=integration ./internal/kyc/ -run TestPlatformNormalizesReason_SubmitVerification
+    evidence: --- FAIL: TestPlatformNormalizesReason_SubmitVerification (0.03s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/internal/kyc	0.044s
+M23 KILLED: S-5: applyCallbackOutcome no longer normalizes
+    file: internal/kyc/provider.go
+    test: -count=1 -tags=integration ./internal/kyc/ -run TestPlatformNormalizesReason_Callback
+    evidence: --- FAIL: TestPlatformNormalizesReason_CallbackStatusUpdate (0.04s) | --- FAIL: TestPlatformNormalizesReason_CallbackProviderError (0.03s) | FAIL
+M23b KILLED: S-5: same mutation, observed over HTTP
+    file: internal/kyc/provider.go
+    test: -count=1 -tags=integration ./internal/httpserver/ -run TestKYC_UnnormalizedAdapterReason
+    evidence: --- FAIL: TestKYC_UnnormalizedAdapterReason_NoServerError_StaffSeesBounded (0.60s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/internal/httpserver	0.610s
+M24 KILLED: IC-1: withReasonTruncated never sets the flag
+    file: internal/kyc/reason_normalize.go
+    test: -count=1 -tags=integration ./internal/kyc/ -run TestPlatformNormalizesReason
+    evidence: --- FAIL: TestPlatformNormalizesReason_CreateVerification (0.04s) | --- FAIL: TestPlatformNormalizesReason_SubmitVerification (0.10s) | --- FAIL: TestPlatformNormalizesReason_CallbackStatusUpdate (0.09s)
+M25 KILLED: IC-1: withReasonTruncated always sets the flag (false positive)
+    file: internal/kyc/reason_normalize.go
+    test: -count=1 -tags=integration ./internal/kyc/ -run TestPlatformNormalizesReason_ShortCleanReasonNotFlagged
+    evidence: --- FAIL: TestPlatformNormalizesReason_ShortCleanReasonNotFlagged (0.06s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/internal/kyc	0.069s
+M26 KILLED: IC-1: adapter's ReasonTruncated not ORed in
+    file: internal/kyc/reason_normalize.go
+    test: -count=1 -tags=integration ./internal/kyc/ -run TestPlatformNormalizesReason_MockTruncationFlagSurvives
+    evidence: --- FAIL: TestPlatformNormalizesReason_MockTruncationFlagSurvives (0.04s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/internal/kyc	0.042s
+M27 KILLED: IC-1: MOCK HandleCallback drops its truncation flag
+    file: internal/kyc/mock_provider.go
+    test: -count=1 -tags=integration ./internal/kyc/ -run TestPlatformNormalizesReason_MockTruncationFlagSurvives
+    evidence: --- FAIL: TestPlatformNormalizesReason_MockTruncationFlagSurvives (0.04s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/internal/kyc	0.045s
+M28 KILLED: IC-1: staff review drops its truncation flag
+    file: internal/kyc/verification_service.go
+    test: -count=1 -tags=integration ./internal/kyc/ -run TestPlatformNormalizesReason_StaffReviewFlagged
+    evidence: --- FAIL: TestPlatformNormalizesReason_StaffReviewFlagged (0.04s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/internal/kyc	0.046s
+M29 KILLED: #12: KYC reason-bound case body always passes
+    file: internal/kyc/conformance_test.go
+    test: -count=1 ./internal/kyc/ -run TestReasonBoundConformanceSelfTest_DetectsNonConformingReason
+    evidence: --- FAIL: TestReasonBoundConformanceSelfTest_DetectsNonConformingReason (0.00s) |     --- FAIL: TestReasonBoundConformanceSelfTest_DetectsNonConformingReason/raw (0.00s) |     --- FAIL: TestReasonBoundConformanceSelfTest_DetectsNonConformingReason/length_only (0.00s)
+M30 KILLED: #12: reasonConformanceViolation ignores control characters
+    file: internal/kyc/conformance_test.go
+    test: -count=1 ./internal/kyc/ -run TestReasonBoundConformanceSelfTest_DetectsNonConformingReason
+    evidence: --- FAIL: TestReasonBoundConformanceSelfTest_DetectsNonConformingReason (0.00s) |     --- FAIL: TestReasonBoundConformanceSelfTest_DetectsNonConformingReason/keeps_c0 (0.00s) | FAIL
+M30b KILLED: #12: reasonConformanceViolation ignores bidi/format controls
+    file: internal/kyc/conformance_test.go
+    test: -count=1 ./internal/kyc/ -run TestReasonBoundConformanceSelfTest_DetectsNonConformingReason
+    evidence: --- FAIL: TestReasonBoundConformanceSelfTest_DetectsNonConformingReason (0.00s) |     --- FAIL: TestReasonBoundConformanceSelfTest_DetectsNonConformingReason/keeps_bidi (0.00s) | FAIL
+M31 KILLED: #12: staff per-account list returns a paged object instead of a JSON array
+    file: internal/httpserver/kyc_admin_handlers.go
+    test: -count=1 -tags=integration ./internal/httpserver/ -run TestKYCVerifications_TenantIsolation_Reason
+    evidence: --- FAIL: TestKYCVerifications_TenantIsolation_Reason (0.44s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/internal/httpserver	0.457s
+M32 KILLED: #12: staff per-account list returns 403 (a non-leaking error would pass the old test)
+    file: internal/httpserver/kyc_admin_handlers.go
+    test: -count=1 -tags=integration ./internal/httpserver/ -run TestKYCVerifications_TenantIsolation_Reason
+    evidence: --- FAIL: TestKYCVerifications_TenantIsolation_Reason (0.57s) | FAIL | FAIL	github.com/Diansalas/igaming-platform/internal/httpserver	0.592s
+M33 KILLED: S-6 / IC-2: KycCaseDetail renders the reason with dangerouslySetInnerHTML instead of JSX text
+    file: backoffice/src/features/kyc/KycCaseDetail.tsx (Field's <dd>{value}</dd> -> <dd dangerouslySetInnerHTML={{ __html: value }} />)
+    test: npx vitest run src/features/kyc/KycCaseDetail.test.tsx (existing vitest + @testing-library/react + jsdom setup)
+    evidence: x KycCaseDetail > renders the staff KYC reason as escaped text, never as HTML | Unable to find an element with the text: <img src=x onerror=alert(1)><script>window.__kycXss=1</script>. | Tests 1 failed (1)
+---
+Note on M7b (SURVIVED, equivalent mutant): removing mockVerificationScheme.SyntheticComponent() does not change the
+production guard's outcome, because RefuseSyntheticInProduction is a POSITIVE-marker guard - a component that is not
+ProductionEligible is refused whether or not it is also Synthetic, and no scheme type implements ProductionEligible.
+TestBuildRegistrations_RegistersResolversAndSchemes therefore still sees every webhook scheme named in the refusal. The
+marker itself is pinned by M7 (TestMockVerificationScheme_IsSyntheticComponent); what the guard needs - that every
+adapter's scheme is REGISTERED - is pinned by M8.
+Note on S-2 (M15/M16): SC2 also goes red for the timestampBeforeMAC scheme (SC2 tampers the declared timestamp header,
+and any tampered value outside the window hits the same window-before-MAC defect). Within SC7, only the stale-and-
+tampered assertion fails for it (TestSchemeConformanceSelfTest_TimestampBeforeMAC_OnlySC7StaleAndTampered). Because the
+self-test pins the red set exactly ([SC2, SC7]), deleting or weakening that assertion changes the set and fails it.
