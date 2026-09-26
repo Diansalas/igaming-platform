@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -474,6 +476,114 @@ func TestCasinoConsistency_C2_PostingShapeMismatch(t *testing.T) {
 		_, ms, _ := w.run(t)
 		mustOneOfKind(t, ms, MismatchKindCasPostingShape, "ledger_transaction="+id.String(), "check=single_wallet")
 	})
+
+	// Gate 10.3-W2/W3 code review #3: before the positive house_gaming
+	// rules, a bet whose stake landed on any non-player account, or a win
+	// paid from one, passed every C2 check (all were negative rules). Each
+	// subtest asserts the positive rule is the ONLY finding, which proves
+	// nothing else would have caught it.
+	betOffHouse := func(t *testing.T, round string, houseAmt, otherAmt int64) {
+		w := newCasWorld(t, testPool(t))
+		w.mustRunClean(t)
+		cash, house := w.accounts(t, w.f.walletID)
+		other := w.acct(t, nil, ledger.AccountManualAdjustment)
+		w.bindRound(t, round)
+		entries := []ledger.EntryInput{{LedgerAccountID: cash, Direction: ledger.Debit, Amount: houseAmt + otherAmt},
+			{LedgerAccountID: other, Direction: ledger.Credit, Amount: otherAmt}}
+		if houseAmt > 0 {
+			entries = append(entries, ledger.EntryInput{LedgerAccountID: house, Direction: ledger.Credit, Amount: houseAmt})
+		}
+		id := w.post(t, ledger.TransactionInput{TransactionType: ledger.TxCasinoBet,
+			ProviderID: strp(casProvider), ProviderTxID: strp(round + "-bet"), CorrelationID: corr(w.f.tenantID, round), Entries: entries})
+		_, ms, _ := w.run(t)
+		m := mustOneOfKind(t, ms, MismatchKindCasPostingShape, "ledger_transaction="+id.String(), "check=bet_house_credit")
+		if len(ms) != 1 || !strings.Contains(m.ActualValue, fmt.Sprintf("house_gaming credits=%d stake=%d", houseAmt, houseAmt+otherAmt)) {
+			t.Fatalf("expected only the bet_house_credit finding with exact evidence, got %+v", ms)
+		}
+	}
+	t.Run("bet_stake_not_credited_to_house", func(t *testing.T) { betOffHouse(t, "c2h-r1", 0, 100) })
+	t.Run("bet_stake_partly_credited_to_house", func(t *testing.T) { betOffHouse(t, "c2h-r2", 60, 40) })
+
+	winOffHouse := func(t *testing.T, round string, houseAmt, otherAmt int64) {
+		w := newCasWorld(t, testPool(t))
+		w.mustDeliver(t, casino.CallbackEventBet, round+"-bet", "", round, 1000)
+		w.mustRunClean(t)
+		cash, house := w.accounts(t, w.f.walletID)
+		other := w.acct(t, nil, ledger.AccountManualAdjustment)
+		entries := []ledger.EntryInput{{LedgerAccountID: other, Direction: ledger.Debit, Amount: otherAmt},
+			{LedgerAccountID: cash, Direction: ledger.Credit, Amount: houseAmt + otherAmt}}
+		if houseAmt > 0 {
+			entries = append(entries, ledger.EntryInput{LedgerAccountID: house, Direction: ledger.Debit, Amount: houseAmt})
+		}
+		id := w.post(t, ledger.TransactionInput{TransactionType: ledger.TxCasinoWin,
+			ProviderID: strp(casProvider), ProviderTxID: strp(round + "-win"), CorrelationID: corr(w.f.tenantID, round), Entries: entries})
+		_, ms, _ := w.run(t)
+		m := mustOneOfKind(t, ms, MismatchKindCasPostingShape, "ledger_transaction="+id.String(), "check=win_house_debit")
+		if len(ms) != 1 || !strings.Contains(m.ActualValue, fmt.Sprintf("house_gaming debits=%d wallet credits=%d lock-release debits=0", houseAmt, houseAmt+otherAmt)) {
+			t.Fatalf("expected only the win_house_debit finding with exact evidence, got %+v", ms)
+		}
+	}
+	t.Run("win_payout_not_debited_from_house", func(t *testing.T) { winOffHouse(t, "c2w-r1", 0, 900) })
+	t.Run("win_payout_partly_debited_from_house", func(t *testing.T) { winOffHouse(t, "c2w-r2", 500, 400) })
+}
+
+// Clean controls for the positive house_gaming rules: every shape the
+// platform legitimately writes stays clean. The real-path shapes (cash
+// bet, direct-cash win, multi-bet round, rollbacks) are the clean world;
+// the locked-cash win (payout + lock release, postWinLockedCash's exact
+// entry set) is written directly because no casino bet path creates a
+// lock today. It proves the lock-release legs are subtracted, not counted
+// as payout.
+func TestCasinoConsistency_C2_PositiveHouseRulesCleanControls(t *testing.T) {
+	t.Run("clean_world", func(t *testing.T) {
+		w := newCasWorld(t, testPool(t))
+		w.buildCleanWorld(t)
+		w.mustRunClean(t)
+	})
+	t.Run("locked_cash_win_with_lock_release", func(t *testing.T) {
+		w := newCasWorld(t, testPool(t))
+		w.mustDeliver(t, casino.CallbackEventBet, "c2l-bet", "", "c2l-r", 1000)
+		cash, house := w.accounts(t, w.f.walletID)
+		locked := w.acct(t, &w.f.walletID, ledger.AccountPlayerLockedCash)
+		w.post(t, ledger.TransactionInput{TransactionType: ledger.TxCasinoWin,
+			ProviderID: strp(casProvider), ProviderTxID: strp("c2l-win"), CorrelationID: corr(w.f.tenantID, "c2l-r"),
+			Entries: []ledger.EntryInput{
+				{LedgerAccountID: house, Direction: ledger.Debit, Amount: 250},
+				{LedgerAccountID: cash, Direction: ledger.Credit, Amount: 250},
+				{LedgerAccountID: locked, Direction: ledger.Debit, Amount: 100},
+				{LedgerAccountID: cash, Direction: ledger.Credit, Amount: 100},
+			}})
+		w.mustRunClean(t)
+	})
+}
+
+// acct resolves (creating if needed) one ledger account of this tenant;
+// walletID nil means a tenant-level account.
+func (w *casWorld) acct(t *testing.T, walletID *uuid.UUID, typ ledger.AccountType) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		ids, err := ledger.GetOrCreateAccounts(ctx, tx, w.f.tenantID, ledger.AccountSpec{WalletID: walletID, AccountType: typ, AssetCode: "EUR"})
+		if err != nil {
+			return err
+		}
+		id = ids[0]
+		return nil
+	}); err != nil {
+		t.Fatalf("account %s: %v", typ, err)
+	}
+	return id
+}
+
+// bindRound writes the round binding a real postBet would, so an injected
+// bet is not also a C1 finding.
+func (w *casWorld) bindRound(t *testing.T, round string) {
+	t.Helper()
+	if err := w.pool.WithTenant(context.Background(), w.f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
+		return casino.BindProviderRound(ctx, tx, w.f.tenantID, w.f.brandID, w.f.playerAccountID, w.sessionID, w.game.ID, casProvider, round, nil)
+	}); err != nil {
+		t.Fatalf("bind round %s: %v", round, err)
+	}
 }
 
 // sbFundAccount credits a player_cash account via a reason-coded
@@ -594,6 +704,50 @@ func TestCasinoConsistency_C4_RollbackLinkageMismatch(t *testing.T) {
 		_, ms, _ := w.run(t)
 		mustOneOfKind(t, ms, MismatchKindCasRollbackLinkage, "ledger_transaction="+id.String(), "check=exact_inverse")
 	})
+	// Gate 10.3-W2/W3 code review #2, the exact failure shape: a CASH bet
+	// whose casino_rollback credits player_bonus instead of player_cash.
+	// The exemption used to key on "rollback OR original touches
+	// BONUS_SET", so the corrupt rollback exempted itself. It is now
+	// decided by the original alone.
+	t.Run("cash_bet_rollback_credits_player_bonus", func(t *testing.T) {
+		w := newCasWorld(t, testPool(t))
+		w.mustDeliver(t, casino.CallbackEventBet, "c4x-bet", "", "c4x-r", 1000)
+		w.mustRunClean(t)
+		orig := w.betTxID(t, "c4x-bet")
+		_, house := w.accounts(t, w.f.walletID)
+		bonus := w.acct(t, &w.f.walletID, ledger.AccountPlayerBonus)
+		id := w.post(t, ledger.TransactionInput{TransactionType: ledger.TxCasinoRollback,
+			ProviderID: strp(casProvider), ProviderTxID: strp("c4x-rb"), CorrelationID: corr(w.f.tenantID, "c4x-r"), ReversesTransactionID: &orig,
+			BonusCost: &ledger.BonusCostAttribution{Funding: ledger.FundingOperator},
+			Entries:   []ledger.EntryInput{{LedgerAccountID: house, Direction: ledger.Debit, Amount: 1000}, {LedgerAccountID: bonus, Direction: ledger.Credit, Amount: 1000}}})
+		_, ms, _ := w.run(t)
+		m := mustOneOfKind(t, ms, MismatchKindCasRollbackLinkage, "ledger_transaction="+id.String(), "check=exact_inverse")
+		if len(ms) != 1 || !strings.Contains(m.ActualValue, bonus.String()) {
+			t.Fatalf("expected only the exact_inverse finding naming the player_bonus leg, got %+v", ms)
+		}
+	})
+	// Control: an original that touched BONUS_SET stays exempt (the
+	// §16.15 held-disposition reversal is deliberately not an inverse),
+	// so the fix narrows the exemption without removing it.
+	t.Run("bonus_original_rollback_stays_exempt", func(t *testing.T) {
+		w := newCasWorld(t, testPool(t))
+		w.mustRunClean(t)
+		_, house := w.accounts(t, w.f.walletID)
+		bonus := w.acct(t, &w.f.walletID, ledger.AccountPlayerBonus)
+		held := w.acct(t, &w.f.walletID, ledger.AccountPlayerBonusHeld)
+		w.bindRound(t, "c4y-r")
+		op := &ledger.BonusCostAttribution{Funding: ledger.FundingOperator}
+		orig := w.post(t, ledger.TransactionInput{TransactionType: ledger.TxCasinoBet,
+			ProviderID: strp(casProvider), ProviderTxID: strp("c4y-bet"), CorrelationID: corr(w.f.tenantID, "c4y-r"), BonusCost: op,
+			Entries: []ledger.EntryInput{{LedgerAccountID: bonus, Direction: ledger.Debit, Amount: 100}, {LedgerAccountID: house, Direction: ledger.Credit, Amount: 100}}})
+		w.post(t, ledger.TransactionInput{TransactionType: ledger.TxCasinoRollback,
+			ProviderID: strp(casProvider), ProviderTxID: strp("c4y-rb"), CorrelationID: corr(w.f.tenantID, "c4y-r"), ReversesTransactionID: &orig, BonusCost: op,
+			Entries: []ledger.EntryInput{{LedgerAccountID: house, Direction: ledger.Debit, Amount: 100}, {LedgerAccountID: held, Direction: ledger.Credit, Amount: 100}}})
+		_, ms, _ := w.run(t)
+		if got := ofKind(ms, MismatchKindCasRollbackLinkage); len(got) != 0 {
+			t.Fatalf("a rollback of a BONUS_SET original must stay exempt from the exact-inverse rule, got %+v", got)
+		}
+	})
 	t.Run("second_reversal_of_one_original", func(t *testing.T) {
 		w := newCasWorld(t, testPool(t))
 		w.mustDeliver(t, casino.CallbackEventBet, "c4c-bet", "", "c4c-r", 1000)
@@ -661,27 +815,179 @@ func TestCasinoConsistency_C6_UnpostedProviderEvent(t *testing.T) {
 	}
 }
 
-func TestCasinoConsistency_C6_EveryRecordedClassWithoutAPosting(t *testing.T) {
+// casAllRejectionClasses is every internal/casino RejectionClass constant.
+// Listed by hand on purpose: the partition test below compares it both
+// with migration 0097's CHECK and with the C6 ruling, so a class added in
+// one place and not the others fails.
+var casAllRejectionClasses = []casino.RejectionClass{
+	casino.RejectionOriginalTombstoned, casino.RejectionAmbiguousRound, casino.RejectionWalletCollision,
+	casino.RejectionMixedFunding, casino.RejectionLockAlreadyReleased, casino.RejectionBonusBetNotLocked,
+	casino.RejectionBetNotFound, casino.RejectionAlreadyRolledBack, casino.RejectionPayloadMismatch,
+	casino.RejectionRoundOwnershipConflict, casino.RejectionRollbackOfTombstonedOriginal,
+}
+
+// casRuledC6Classes / casRuledEvidenceOnlyClasses restate the ledger-finance
+// ruling (paper 02 §2.19) in the test, independently of the code's sets.
+var (
+	casRuledC6Classes = []casino.RejectionClass{
+		casino.RejectionBetNotFound, casino.RejectionAmbiguousRound, casino.RejectionWalletCollision,
+		casino.RejectionMixedFunding, casino.RejectionLockAlreadyReleased, casino.RejectionBonusBetNotLocked,
+	}
+	casRuledEvidenceOnlyClasses = []casino.RejectionClass{
+		casino.RejectionOriginalTombstoned, casino.RejectionPayloadMismatch, casino.RejectionAlreadyRolledBack,
+		casino.RejectionRoundOwnershipConflict, casino.RejectionRollbackOfTombstonedOriginal,
+	}
+)
+
+// The C6 ruling (paper 02 §2.19) partitions every recorded class: the
+// union of the two sets equals migration 0097's reason_class CHECK and
+// internal/casino's constants, and the sets are disjoint. A new rejection
+// class therefore cannot ship without a ruling.
+func TestCasinoConsistency_C6_ClassRulingPartitionsEveryRecordedClass(t *testing.T) {
+	pool := testPool(t)
+	var def string
+	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c
+			 WHERE c.conrelid = 'casino_callback_rejections'::regclass AND c.contype = 'c'
+			   AND pg_get_constraintdef(c.oid) LIKE '%reason_class%'`).Scan(&def)
+	}); err != nil {
+		t.Fatalf("read reason_class CHECK: %v", err)
+	}
+	inCheck := map[string]bool{}
+	for _, m := range regexp.MustCompile(`'([a-z_]+)'`).FindAllStringSubmatch(def, -1) {
+		inCheck[m[1]] = true
+	}
+	ruled := map[string]bool{}
+	for _, c := range append(CasinoUnpostedEventReasonClasses(), CasinoEvidenceOnlyReasonClasses()...) {
+		if ruled[c] {
+			t.Fatalf("class %q is ruled twice", c)
+		}
+		ruled[c] = true
+	}
+	constants := map[string]bool{}
+	for _, c := range casAllRejectionClasses {
+		constants[string(c)] = true
+	}
+	asSet := func(xs []string) map[string]bool {
+		out := map[string]bool{}
+		for _, x := range xs {
+			out[x] = true
+		}
+		return out
+	}
+	asSetRC := func(xs []casino.RejectionClass) map[string]bool {
+		out := map[string]bool{}
+		for _, x := range xs {
+			out[string(x)] = true
+		}
+		return out
+	}
+	if fmt.Sprint(sortedKeys(asSet(CasinoUnpostedEventReasonClasses()))) != fmt.Sprint(sortedKeys(asSetRC(casRuledC6Classes))) ||
+		fmt.Sprint(sortedKeys(asSet(CasinoEvidenceOnlyReasonClasses()))) != fmt.Sprint(sortedKeys(asSetRC(casRuledEvidenceOnlyClasses))) {
+		t.Fatalf("the code's class sets diverge from the recorded ruling:\n C6 code %v\n evidence code %v", CasinoUnpostedEventReasonClasses(), CasinoEvidenceOnlyReasonClasses())
+	}
+	if len(inCheck) != 11 || fmt.Sprint(sortedKeys(inCheck)) != fmt.Sprint(sortedKeys(ruled)) ||
+		fmt.Sprint(sortedKeys(inCheck)) != fmt.Sprint(sortedKeys(constants)) {
+		t.Fatalf("class sets diverge:\n CHECK     %v\n ruling    %v\n constants %v", sortedKeys(inCheck), sortedKeys(ruled), sortedKeys(constants))
+	}
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// One detection subtest per ruled C6 class, one no-finding subtest per
+// evidence-only class. Every row has no ledger transaction under its
+// reference, so the class alone decides. The excluded classes stay visible
+// as metrics (rejections_by_class, rejections_evidence_only).
+func TestCasinoConsistency_C6_OnlyRuledClassesAreFindings(t *testing.T) {
 	w := newCasWorld(t, testPool(t))
 	w.mustRunClean(t)
-	classes := []casino.RejectionClass{
-		casino.RejectionAmbiguousRound, casino.RejectionWalletCollision, casino.RejectionMixedFunding,
-		casino.RejectionLockAlreadyReleased, casino.RejectionBonusBetNotLocked, casino.RejectionBetNotFound,
-		casino.RejectionAlreadyRolledBack, casino.RejectionRoundOwnershipConflict, casino.RejectionRollbackOfTombstonedOriginal,
-	}
-	for i, c := range classes {
-		rej := casino.CallbackRejection{Class: c, EventType: casino.CallbackEventWin, ProviderTxID: fmt.Sprintf("c6all-%d", i), RoundID: "r", AssetCode: "EUR", Amount: 5}
-		if c == casino.RejectionAlreadyRolledBack || c == casino.RejectionRollbackOfTombstonedOriginal {
+	ref := func(c string) string { return "c6cls-" + c }
+	for _, c := range casAllRejectionClasses {
+		rej := casino.CallbackRejection{Class: c, EventType: casino.CallbackEventWin, ProviderTxID: ref(string(c)), RoundID: "r", AssetCode: "EUR", Amount: 5}
+		switch c {
+		case casino.RejectionAlreadyRolledBack, casino.RejectionRollbackOfTombstonedOriginal:
 			rej.EventType, rej.OriginalProviderTxID, rej.Amount = casino.CallbackEventRollback, "o", 0
-		}
-		if c == casino.RejectionRoundOwnershipConflict {
+		case casino.RejectionRoundOwnershipConflict, casino.RejectionOriginalTombstoned, casino.RejectionPayloadMismatch:
 			rej.EventType = casino.CallbackEventBet
 		}
 		w.recordRejection(t, rej)
 	}
-	_, ms, _ := w.run(t)
-	if got := ofKind(ms, MismatchKindCasUnpostedEvent); len(got) != len(classes) {
-		t.Fatalf("expected %d C6 findings, got %d: %+v", len(classes), len(got), ms)
+	_, ms, m := w.run(t)
+	c6 := ofKind(ms, MismatchKindCasUnpostedEvent)
+	has := func(c string) bool {
+		for _, f := range c6 {
+			if strings.Contains(f.ReconciliationKey, "provider_tx_id="+ref(c)+" ") && strings.HasSuffix(f.ReconciliationKey, "reason="+c) {
+				return true
+			}
+		}
+		return false
+	}
+	// The ruling (paper 02 §2.19), stated independently of the code's own
+	// sets so that dropping or adding a class in the code fails a
+	// per-class subtest, not only the partition test.
+	for _, c := range casRuledC6Classes {
+		c := string(c)
+		t.Run("finding/"+c, func(t *testing.T) {
+			if !has(c) {
+				t.Fatalf("ruled class %s must be a C6 finding; got %+v", c, c6)
+			}
+		})
+	}
+	for _, c := range casRuledEvidenceOnlyClasses {
+		c := string(c)
+		t.Run("no_finding/"+c, func(t *testing.T) {
+			if has(c) {
+				t.Fatalf("evidence-only class %s must not be a C6 finding", c)
+			}
+			if m.RejectionsByClass[c] != 1 {
+				t.Fatalf("evidence-only class %s must stay visible as a metric: %+v", c, m.RejectionsByClass)
+			}
+		})
+	}
+	if len(c6) != len(casRuledC6Classes) {
+		t.Fatalf("expected exactly %d C6 findings, got %d: %+v", len(casRuledC6Classes), len(c6), c6)
+	}
+	// original_tombstoned without a tombstone is synthetic here; C7 still
+	// records it (C7 keys on the class, not on the ledger).
+	if len(ms) != len(c6)+1 || len(ofKind(ms, MismatchKindCasTombstoneLateOrigin)) != 1 {
+		t.Fatalf("unexpected other findings: %+v", ms)
+	}
+	if m.RejectionsTotal != 11 || m.RejectionsUnposted != 11 || m.RejectionsEvidenceOnly != 5 || len(m.RejectionsByClass) != 11 {
+		t.Fatalf("unexpected metrics: %+v", m)
+	}
+}
+
+// The two evidence-only classes a conformant provider can trigger on
+// purpose, through the real callback path: E9 (a second, distinct
+// rollback reference naming a tombstoned original; acknowledged 200,
+// net zero, a MATCH in casino_statement) and E7 (a second, distinct
+// rollback reference naming an already-reversed bet; 409, the ledger
+// holds the one reversal). Neither is a P1; both are counted.
+func TestCasinoConsistency_C6_EvidenceOnlyRejectionsThroughTheRealPath(t *testing.T) {
+	w := newCasWorld(t, testPool(t))
+	w.buildCleanWorld(t)                                                                   // rb5 tombstoned never-5
+	res := w.mustDeliver(t, casino.CallbackEventRollback, "rb5-again", "never-5", "r5", 0) // E9 different reference
+	if !res.Tombstoned {
+		t.Fatalf("E9 must return the idempotent tombstone result, got %+v", res)
+	}
+	if _, err := w.deliver(t, casino.CallbackEventRollback, "rb2-again", "b2", "r2", 0); err == nil { // E7
+		t.Fatal("expected E7 already_rolled_back")
+	}
+	_, ms, m := w.run(t)
+	if len(ms) != 0 {
+		t.Fatalf("E9/E7 rejections are correct platform behaviour, not findings: %+v", ms)
+	}
+	if m.RejectionsByClass["rollback_of_tombstoned_original"] != 1 || m.RejectionsByClass["already_rolled_back"] != 1 ||
+		m.RejectionsEvidenceOnly != 2 || m.RejectionsUnposted != 2 {
+		t.Fatalf("both must be visible as metrics: %+v", m)
 	}
 }
 
@@ -947,7 +1253,7 @@ func TestRunSweep_CasinoStreamWiredAuditedAndP1Logged(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("casino sweep audit row: %v", err)
 	}
-	for _, k := range []string{"tombstones_total", "rejections_total", "rejections_unposted", "unresolved_cash_rounds_older_than_window", "ageing_metric_window_seconds"} {
+	for _, k := range []string{"tombstones_total", "rejections_total", "rejections_unposted", "rejections_evidence_only", "rejections_by_class", "unresolved_cash_rounds_older_than_window", "ageing_metric_window_seconds"} {
 		if !strings.Contains(string(meta), `"`+k+`"`) {
 			t.Fatalf("audit metadata missing metric %s: %s", k, meta)
 		}

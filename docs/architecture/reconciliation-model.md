@@ -156,6 +156,48 @@ migration `0097`), on the existing run/mismatch tables:
   (BONUS_SET held-disposition rollbacks are intentionally not inverses);
   no `internal_error` rejection class (a 500 is retryable and is not a
   rejection decision).
+- **Gate 10.3-W2/W3 fix round (ledger-finance).**
+  - **C4 exemption narrowed.** The exact-inverse comparison is skipped
+    only when the **original** touches BONUS_SET (`player_bonus`,
+    `player_locked_bonus`, `player_bonus_held`), never because the
+    rollback does. A cash bet whose `casino_rollback` credits
+    `player_bonus` is a `cas_rollback_linkage_mismatch`.
+  - **C2 positive `house_gaming` rules.** A bet with no BONUS_SET leg
+    credits `house_gaming` exactly the stake (debits on the player's
+    spendable accounts, the same stake definition `casino_statement`
+    uses). A win debits `house_gaming` exactly the wallet credit minus the
+    lock-release legs (debits on `player_locked_cash`/
+    `player_locked_bonus`); for today's cash-only wins that is simply
+    "house debit == wallet credit". Recorded deviation: the bet rule does
+    not cover BONUS_SET bets, because the bonus-funded casino bet shape is
+    not implemented (G-6); it activates with that change, and jackpot
+    contributions (G-6) will extend it to "house_gaming +
+    jackpot_contribution credits == stake".
+  - **C6 class ruling** (paper 02 §2.19). C6 raises
+    `cas_unposted_provider_event` only for the classes where a verified
+    provider asserted a **settlement of existing exposure** that the
+    ledger does not hold: `bet_not_found`, `ambiguous_round`,
+    `wallet_collision`, `mixed_funding`, `lock_already_released`,
+    `bonus_bet_not_locked`. The other five are correct platform behaviour
+    and are **evidence only**: `original_tombstoned` (net zero by design;
+    C7 records it), `payload_mismatch` (the ledger holds the posted fact),
+    `already_rolled_back` (the ledger holds the one reversal),
+    `round_ownership_conflict` (a refused bet, i.e. refused new exposure;
+    nothing was owed) and `rollback_of_tombstoned_original` (E9 different
+    reference: acknowledged 200, net zero, and a match in
+    `casino_statement`). They stay visible in the run audit as
+    `rejections_by_class` and `rejections_evidence_only`. An integration
+    test pins that the two sets partition migration 0097's `reason_class`
+    CHECK and `internal/casino`'s constants, so a new class cannot ship
+    without a ruling.
+  - **Rejection-record write detached from the request (security R-1).**
+    The separate write runs on `context.WithoutCancel` with a 2 s bound,
+    so a provider that disconnects no longer erases the evidence. This
+    applies to the webhook route and the play-simulation routes (one
+    shared helper).
+  - **Provider reference length is unbounded** (security R-2):
+    registered as PROVIDER-REF-BOUND-1, platform-wide; no migration in
+    this round.
 - Read-only staff views: `GET /v1/admin/casino/reconciliation/runs`,
   `GET /v1/admin/casino/reconciliation/mismatches`,
   `GET /v1/admin/casino/callback-rejections`
@@ -194,6 +236,27 @@ gate 10.3-W3` as the `casino_statement` stream
   is a **match** (the one one-sided pattern that is not a finding). A
   statement line for a reference held only as a tombstone is a finding
   that names the tombstone (the counterparty half of C7).
+- **Tombstone pairing, disclosed (gate 10.3-W2/W3 code review #7).**
+  - An **unpaired** casino tombstone (no statement rollback names its
+    original) is **not** flagged. A tombstone has no entries and moves no
+    money, so the totals match is unaffected. The MOCK can never list the
+    rollback (the ledger keeps only the original's reference on a
+    tombstone), so flagging it would make every MOCK run with a tombstone
+    a permanent P1. The money-moving case (the provider still counts the
+    original) is flagged, as above.
+  - **Many** statement rollbacks naming **one** tombstoned original **all
+    match**. This mirrors E9: a second distinct rollback reference for a
+    tombstoned original is acknowledged idempotently and is net zero;
+    `casino_consistency` counts it as the evidence-only
+    `rollback_of_tombstoned_original` metric.
+  - A **real** statement source may want to flag both: an unpaired
+    tombstone (the provider never reported the rollback the platform acted
+    on) and a second rollback line for the same original (a provider-side
+    duplicate). That depends on the real statement's semantics for
+    rollbacks of unseen rounds (`PROVIDER DEPENDENT`) and is decided with
+    the first real source and its own mismatch kind.
+    `TestCasinoStatement_TombstonePairingDisclosedBehaviour` pins today's
+    behaviour, so any change is deliberate.
 - **Totals match**, when the source reports totals: per (provider, asset),
   net `house_gaming` movement (credits - debits) over the casino
   transactions carrying that `provider_id` equals the stated GGR; every

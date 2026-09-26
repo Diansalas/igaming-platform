@@ -1,0 +1,122 @@
+Gate 10.3-W2/W3 fix round - casino reconciliation + rejection record: mutation-kill record.
+Author: ledger-finance. Findings covered: code review #2 (C4 exemption), #3 (C2 positive house_gaming
+rules), #4 (C6 class ruling), #7 (tombstone pairing disclosure); security R-1 (detached rejection write).
+Base: branch claude/focused-wright-jw88w9 at 3f77254 (contains d712a96) plus this fix round's
+(then uncommitted) change set.
+Database: the shared local CI database (igaming_platform_ci_local, already migrated through 0098);
+tests create their own tenants. No DDL, TRUNCATE or LOCK was run against it.
+Method: scratchpad harness fixround-mutate.py. Each mutation edits ONE source file with a mechanical
+string replacement that removes or weakens exactly the named rule, runs only the named killing
+test(s) (`go test -tags=integration -count=1 -run <pattern>`, TEST_DATABASE_URL = owner role
+igaming, which is NOBYPASSRLS and subject to FORCE RLS), records the first failing assertion, then
+restores the original bytes. "KILLED" = the named test failed on its own assertion, not a build
+error. Every entry below is a real run's output, unedited.
+
+Result: 15/15 killed, 0 survived (final run).
+
+First-pass note (disclosed, not hidden): on the first pass M-C6b ("a ruled class dropped from
+C6") was killed ONLY by the partition test. The per-class detection subtests iterated the code's
+own CasinoUnpostedEventReasonClasses(), so dropping a class also dropped its subtest. The test was
+strengthened: the ruling is now restated in the test (casRuledC6Classes /
+casRuledEvidenceOnlyClasses), the subtests iterate that, and the partition test also compares the
+code's sets with it. After the fix M-C6b is killed by finding/wallet_collision as well.
+
+Not covered by a killing test (disclosed): the `!bonusSet` guard on the C2 bet rule. It limits the
+bet rule to bets with no BONUS_SET leg (the recorded deviation). No bonus-funded casino bet shape
+exists (G-6), so a test "a BONUS_SET bet whose house_gaming credit differs from its stake is not a
+finding" would pin an invented shape and a non-detection. On every shape the platform writes today,
+removing the guard is an equivalent mutant (cash bets have bonusSet = false).
+
+M-C4a reproduces the exact review #2 bug (exemption keyed on "rollback OR original"); M-R1a
+reproduces the exact R-1 bug (the write on the request context).
+
+M-C4a: C4 exemption reverted to 'rollback OR original touches BONUS_SET' (the review #2 bug)
+  file: internal/reconciliation/casino_consistency.go
+  test: -run 'TestCasinoConsistency_C4_RollbackLinkageMismatch/cash_bet_rollback_credits_player_bonus'
+  result: KILLED by TestCasinoConsistency_C4_RollbackLinkageMismatch, TestCasinoConsistency_C4_RollbackLinkageMismatch/cash_bet_rollback_credits_player_bonus
+  first failing assertion: casino_consistency_integration_test.go:724: expected exactly 1 cas_rollback_linkage_mismatch mismatch, got 0: [] (all: [])
+
+M-C4b: C4 exemption removed entirely (BONUS_SET originals compared as inverses)
+  file: internal/reconciliation/casino_consistency.go
+  test: -run 'TestCasinoConsistency_C4_RollbackLinkageMismatch/bonus_original_rollback_stays_exempt'
+  result: KILLED by TestCasinoConsistency_C4_RollbackLinkageMismatch, TestCasinoConsistency_C4_RollbackLinkageMismatch/bonus_original_rollback_stays_exempt
+  first failing assertion: casino_consistency_integration_test.go:748: a rollback of a BONUS_SET original must stay exempt from the exact-inverse rule, got [{ID:f81b5696-f14f-486c-acd4-570a85af682f TenantID:1189dc6d-a6ad-4daa-b1c8-cf0ad37dc282 RunID:9f450368-b91c-4642-a286-2fa0a3d72c81 ReconciliationKey:ledger_transaction=f08ce8f2-0470-442d-afcc-1f0ecc413887 check=exact_inverse ExpectedValue:caller legs are the exact inverse of the original's ActualValue:[6b365cf7-3e51-4a08-a1c6-1aa79605c55b credit 100: expected=1 actual=0 ed7452bf-30e1-48ce-aecd-ddccccd32660 credit 100: expected=0 actual=1] MismatchKind:cas_rollback_linkage_mismatch InvestigationStatus:open}]
+
+M-C2a: C2 bet positive house_gaming rule removed
+  file: internal/reconciliation/casino_consistency.go
+  test: -run 'TestCasinoConsistency_C2_PostingShapeMismatch/bet_stake'
+  result: KILLED by TestCasinoConsistency_C2_PostingShapeMismatch, TestCasinoConsistency_C2_PostingShapeMismatch/bet_stake_not_credited_to_house, TestCasinoConsistency_C2_PostingShapeMismatch/bet_stake_partly_credited_to_house
+  first failing assertion: casino_consistency_integration_test.go:499: expected exactly 1 cas_posting_shape_mismatch mismatch, got 0: [] (all: [])
+
+M-C2b: C2 bet rule weakened to 'house_gaming credited at all'
+  file: internal/reconciliation/casino_consistency.go
+  test: -run 'TestCasinoConsistency_C2_PostingShapeMismatch/bet_stake_partly'
+  result: KILLED by TestCasinoConsistency_C2_PostingShapeMismatch, TestCasinoConsistency_C2_PostingShapeMismatch/bet_stake_partly_credited_to_house
+  first failing assertion: casino_consistency_integration_test.go:499: expected exactly 1 cas_posting_shape_mismatch mismatch, got 0: [] (all: [])
+
+M-C2c: C2 win positive house_gaming rule removed
+  file: internal/reconciliation/casino_consistency.go
+  test: -run 'TestCasinoConsistency_C2_PostingShapeMismatch/win_payout'
+  result: KILLED by TestCasinoConsistency_C2_PostingShapeMismatch, TestCasinoConsistency_C2_PostingShapeMismatch/win_payout_not_debited_from_house, TestCasinoConsistency_C2_PostingShapeMismatch/win_payout_partly_debited_from_house
+  first failing assertion: casino_consistency_integration_test.go:521: expected exactly 1 cas_posting_shape_mismatch mismatch, got 0: [] (all: [])
+
+M-C2d: C2 win rule weakened to 'house_gaming debited at all'
+  file: internal/reconciliation/casino_consistency.go
+  test: -run 'TestCasinoConsistency_C2_PostingShapeMismatch/win_payout_partly'
+  result: KILLED by TestCasinoConsistency_C2_PostingShapeMismatch, TestCasinoConsistency_C2_PostingShapeMismatch/win_payout_partly_debited_from_house
+  first failing assertion: casino_consistency_integration_test.go:521: expected exactly 1 cas_posting_shape_mismatch mismatch, got 0: [] (all: [])
+
+M-C2e: C2 win rule counts lock-release legs as payout
+  file: internal/reconciliation/casino_consistency.go
+  test: -run 'TestCasinoConsistency_C2_PositiveHouseRulesCleanControls/locked_cash_win_with_lock_release'
+  result: KILLED by TestCasinoConsistency_C2_PositiveHouseRulesCleanControls, TestCasinoConsistency_C2_PositiveHouseRulesCleanControls/locked_cash_win_with_lock_release
+  first failing assertion: casino_consistency_integration_test.go:556: expected a clean casino_consistency run, got mismatches_found with 1 mismatches: [{ID:c0f5ce42-1f36-4e55-a89f-2e21bd21fde9 TenantID:f4880626-3b88-4bf7-8e98-a511de9a502f RunID:bfb536c0-1c5c-4d3a-9794-f1cfdcdfd2a6 ReconciliationKey:ledger_transaction=2d0c84dd-1ac9-48dd-b94d-c34c228aea7e type=casino_win check=win_house_debit ExpectedValue:house_gaming debits == wallet credits - lock-release debits ActualValue:house_gaming debits=250 wallet credits=350 lock-release debits=100 MismatchKind:cas_posting_shape_mismatch InvestigationStatus:open}]
+
+M-C6a: C6 class filter bypassed (every class is a finding again)
+  file: internal/reconciliation/casino_consistency.go
+  test: -run 'TestCasinoConsistency_C6_OnlyRuledClassesAreFindings|TestCasinoConsistency_C6_EvidenceOnlyRejectionsThroughTheRealPath'
+  result: KILLED by TestCasinoConsistency_C6_EvidenceOnlyRejectionsThroughTheRealPath, TestCasinoConsistency_C6_OnlyRuledClassesAreFindings, TestCasinoConsistency_C6_OnlyRuledClassesAreFindings/no_finding/already_rolled_back, TestCasinoConsistency_C6_OnlyRuledClassesAreFindings/no_finding/original_tombstoned, TestCasinoConsistency_C6_OnlyRuledClassesAreFindings/no_finding/payload_mismatch, TestCasinoConsistency_C6_OnlyRuledClassesAreFindings/no_finding/rollback_of_tombstoned_original, TestCasinoConsistency_C6_OnlyRuledClassesAreFindings/no_finding/round_ownership_conflict
+  first failing assertion: casino_consistency_integration_test.go:948: evidence-only class original_tombstoned must not be a C6 finding
+
+M-C6b: a ruled class (wallet_collision) dropped from C6
+  file: internal/reconciliation/casino_consistency.go
+  test: -run 'TestCasinoConsistency_C6_OnlyRuledClassesAreFindings|TestCasinoConsistency_C6_ClassRulingPartitionsEveryRecordedClass'
+  result: KILLED by TestCasinoConsistency_C6_ClassRulingPartitionsEveryRecordedClass, TestCasinoConsistency_C6_OnlyRuledClassesAreFindings, TestCasinoConsistency_C6_OnlyRuledClassesAreFindings/finding/wallet_collision
+  first failing assertion: casino_consistency_integration_test.go:888: the code's class sets diverge from the recorded ruling:
+
+M-C6c: E9 different-reference class promoted into C6
+  file: internal/reconciliation/casino_consistency.go
+  test: -run 'TestCasinoConsistency_C6_OnlyRuledClassesAreFindings|TestCasinoConsistency_C6_EvidenceOnlyRejectionsThroughTheRealPath|TestCasinoConsistency_C6_ClassRulingPartitionsEveryRecordedClass'
+  result: KILLED by TestCasinoConsistency_C6_ClassRulingPartitionsEveryRecordedClass, TestCasinoConsistency_C6_EvidenceOnlyRejectionsThroughTheRealPath, TestCasinoConsistency_C6_OnlyRuledClassesAreFindings, TestCasinoConsistency_C6_OnlyRuledClassesAreFindings/no_finding/rollback_of_tombstoned_original
+  first failing assertion: casino_consistency_integration_test.go:864: class "rollback_of_tombstoned_original" is ruled twice
+
+M-C6d: evidence-only classes not counted in the metric
+  file: internal/reconciliation/casino_consistency.go
+  test: -run 'TestCasinoConsistency_C6_OnlyRuledClassesAreFindings|TestCasinoConsistency_C6_EvidenceOnlyRejectionsThroughTheRealPath'
+  result: KILLED by TestCasinoConsistency_C6_EvidenceOnlyRejectionsThroughTheRealPath, TestCasinoConsistency_C6_OnlyRuledClassesAreFindings
+  first failing assertion: casino_consistency_integration_test.go:964: unexpected metrics: {UnresolvedCashRoundsOlderThanWindow:0 TombstonesTotal:0 RejectionsTotal:11 RejectionsUnposted:11 RejectionsEvidenceOnly:0 RejectionsByClass:map[already_rolled_back:1 ambiguous_round:1 bet_not_found:1 bonus_bet_not_locked:1 lock_already_released:1 mixed_funding:1 original_tombstoned:1 payload_mismatch:1 rollback_of_tombstoned_original:1 round_ownership_conflict:1 wallet_collision:1]}
+
+M-C6e: rejections_by_class omitted from the run audit
+  file: internal/reconciliation/casino_consistency.go
+  test: -run 'TestRunSweep_CasinoStreamWiredAuditedAndP1Logged|TestCasinoMetrics_AuditMetadataCarriesEveryMetric'
+  result: KILLED by TestCasinoMetrics_AuditMetadataCarriesEveryMetric, TestRunSweep_CasinoStreamWiredAuditedAndP1Logged
+  first failing assertion: casino_consistency_integration_test.go:1258: audit metadata missing metric rejections_by_class: {"status": "mismatches_found", "stream": "casino_consistency", "mismatches": 1, "rejections_total": 0, "tombstones_total": 1, "rejections_unposted": 0, "rejections_by_class_x": {}, "skipped_lock_contention": false, "rejections_evidence_only": 0, "ageing_metric_window_seconds": 86400, "unresolved_cash_rounds_older_than_window": 0}
+
+M-7: a tombstone pairs with only ONE statement rollback (many-to-one no longer all-match)
+  file: internal/reconciliation/casino_statement.go
+  test: -run 'TestCasinoStatement_TombstonePairingDisclosedBehaviour'
+  result: KILLED by TestCasinoStatement_TombstonePairingDisclosedBehaviour
+  first failing assertion: casino_statement_integration_test.go:446: expected a clean casino_statement run, got mismatches_found with 1 mismatches: [{ID:5a56ad79-f977-48a3-9ee3-eb595b827531 TenantID:79aa74cd-05d6-426a-9094-1cb6127fe22b RunID:4b4593b4-c46c-4e63-9952-60081744923b ReconciliationKey:statement: provider=mock-casino provider_tx_id=rb5-again check=key ExpectedValue:ledger: no matching casino posting ActualValue:[MOCK divergent test statement (test-only; injected divergence over the MOCK casino statement)] kind=rollback amount=0 asset=EUR original=never-5 round=r5 MismatchKind:cas_mock_statement_mismatch InvestigationStatus:open}]
+
+M-R1a: rejection write uses the request context again (R-1 bug)
+  file: internal/httpserver/casino_callback_rejection.go
+  test: -run 'TestCasinoRejectionRecord_CommitsWhenRequestContextIsCancelled'
+  result: KILLED by TestCasinoRejectionRecord_CommitsWhenRequestContextIsCancelled
+  first failing assertion: casino_rejection_record_integration_test.go:407: the detached write must succeed, got a failure line: "{\"time\":\"2026-09-26T20:21:31.514034839Z\",\"level\":\"ERROR\",\"msg\":\"casino_callback_rejection_record_failed\",\"tenant_id\":\"29c2e3e5-f90a-4af7-b4af-d0222da05813\",\"provider_id\":\"mock-casino\",\"reason_class\":\"bet_not_found\",\"request_id\":\"req-1\"}\n{\"time\":\"2026-09-26T20:21:31.514167212Z\",\"level\":\"ERROR\",\"msg\":\"casino_callback_rejection_record_failed\",\"tenant_id\":\"29c2e3e5-f90a-4af7-b4af-d0222da05813\",\"provider_id\":\"mock-casino\",\"reason_class\":\"bet_not_found\",\"request_id\":\"req-1\"}\n"
+
+M-R1b: detached rejection write is unbounded (timeout dropped)
+  file: internal/httpserver/casino_callback_rejection.go
+  test: -run 'TestCasinoRejectionRecord_WriteFailureIsLoggedNotPropagated'
+  result: KILLED by TestCasinoRejectionRecord_WriteFailureIsLoggedNotPropagated
+  first failing assertion: casino_rejection_record_integration_test.go:432: expected the allow-listed failure line, got ""
+

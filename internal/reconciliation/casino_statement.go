@@ -51,6 +51,35 @@ import (
 // DEPENDENT: it needs a contracted provider's statement format, append-only
 // statement storage and per-tenant credentials, all NOT IMPLEMENTED.
 //
+// Tombstone pairing, disclosed (gate 10.3-W2/W3 code review #7). Two
+// properties of the rollback/tombstone rule are deliberate and are NOT
+// findings today:
+//
+//   - An UNPAIRED casino tombstone (no statement rollback names its
+//     original) is not flagged. A tombstone has no entries, so it moves no
+//     money and the totals match is unaffected. A statement line cannot be
+//     expected for it either: the MOCK never renders one (the ledger keeps
+//     only the original's reference on a tombstone, not the rollback's
+//     own), so flagging it would make every MOCK run with a tombstone a
+//     permanent P1, breaking the severity rule. The one tombstone case that
+//     does move money in the provider's books - the provider still counts
+//     the original - is flagged, as a statement line under the tombstoned
+//     reference ("late original counted by the provider", C7's
+//     counterparty half).
+//   - MANY statement rollbacks may pair with ONE tombstone, and all of them
+//     match. That mirrors E9: a second, distinct rollback reference naming
+//     a tombstoned original is acknowledged with the idempotent tombstone
+//     result and is net zero on both sides; casino_consistency keeps it
+//     visible as the rollback_of_tombstoned_original metric (evidence only,
+//     paper 02 §2.19).
+//
+// A REAL statement source may want to flag both: an unpaired tombstone
+// (the provider never reported the rollback the platform acted on) and a
+// second rollback line naming the same original (a provider-side
+// duplicate). Both need the real statement's semantics for rollbacks of
+// unseen rounds, which are PROVIDER DEPENDENT; they are to be decided with
+// the first real source, together with its own mismatch kind.
+//
 // Period semantics: like sportsbook_settlement, the MOCK source is
 // all-time and the stream compares the whole casino population on every
 // run; periodStart/periodEnd are recorded on the run row and passed to the

@@ -14,6 +14,7 @@ package httpserver
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -382,19 +383,50 @@ func TestCasinoRejectionRecord_PlaySimulationRouteRecords(t *testing.T) {
 	}
 }
 
+// Security review R-1 (gate 10.3-W2/W3): the rejection row is
+// reconciliation evidence, so a provider that disconnects (its request
+// context cancelled, or past its deadline, right after the callback
+// transaction rolled back) must not erase it. Before the fix this test
+// asserted the opposite (a cancelled context gave no row).
+func TestCasinoRejectionRecord_CommitsWhenRequestContextIsCancelled(t *testing.T) {
+	pool, _ := testEnv(t)
+	tenant := mustCreateTenant(t, pool)
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	expired, cancel2 := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel2()
+	for i, ctx := range []context.Context{cancelled, expired} {
+		err := &casino.CallbackRejectedError{ProviderID: "mock-casino",
+			Rejection: casino.CallbackRejection{Class: casino.RejectionBetNotFound, EventType: casino.CallbackEventWin, ProviderTxID: fmt.Sprintf("r1-ref-%d", i), Amount: 5},
+			Err:       casino.ErrBetNotFound}
+		recordCasinoCallbackRejection(ctx, Deps{DB: pool}, logger, tenant.ID, "req-1", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("the detached write must succeed, got a failure line: %q", buf.String())
+	}
+	var n int
+	if err := pool.WithTenant(context.Background(), tenant.ID, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM casino_callback_rejections WHERE reason_class = 'bet_not_found'`).Scan(&n)
+	}); err != nil || n != 2 {
+		t.Fatalf("both rows must commit despite the cancelled/expired request context: n=%d err=%v", n, err)
+	}
+}
+
 // A failed record write is logged (allow-listed fields only) and never
-// changes the response: the helper swallows it.
+// changes the response: the helper swallows it. The failure is induced by
+// the write's own bound (an already-expired timeout), which also proves the
+// detached write is bounded rather than unbounded.
 func TestCasinoRejectionRecord_WriteFailureIsLoggedNotPropagated(t *testing.T) {
 	pool, _ := testEnv(t)
 	tenant := mustCreateTenant(t, pool)
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 	err := &casino.CallbackRejectedError{ProviderID: "mock-casino",
 		Rejection: casino.CallbackRejection{Class: casino.RejectionBetNotFound, EventType: casino.CallbackEventWin, ProviderTxID: "secret-ref-123", Amount: 5},
 		Err:       casino.ErrBetNotFound}
-	recordCasinoCallbackRejection(ctx, Deps{DB: pool}, logger, tenant.ID, "req-1", err)
+	recordCasinoCallbackRejectionWithin(context.Background(), time.Nanosecond, Deps{DB: pool}, logger, tenant.ID, "req-1", err)
 	out := buf.String()
 	if !strings.Contains(out, "casino_callback_rejection_record_failed") || !strings.Contains(out, `"reason_class":"bet_not_found"`) {
 		t.Fatalf("expected the allow-listed failure line, got %q", out)

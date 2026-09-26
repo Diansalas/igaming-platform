@@ -424,6 +424,30 @@ func TestCasinoStatement_RollbackPairedWithTombstoneIsAMatch(t *testing.T) {
 	mustOneStmt(t, ms, "provider=mock-payments provider_tx_id=rb-pay ")
 }
 
+// Disclosed behaviour (gate 10.3-W2/W3 code review #7), pinned so a change
+// is deliberate: an unpaired casino tombstone is not a finding (the clean
+// world holds one and the MOCK lists no rollback for it), and several
+// statement rollbacks naming ONE tombstoned original all match (the E9
+// many-to-one shape). A real source may want to flag both; see
+// casino_statement.go.
+func TestCasinoStatement_TombstonePairingDisclosedBehaviour(t *testing.T) {
+	w := newCasWorld(t, testPool(t))
+	w.buildCleanWorld(t) // rb5 -> tombstone under never-5, unpaired under the MOCK
+	if info := w.mustStmtClean(t, casino.MockStatementSource{}); info.TombstonePairings != 0 {
+		t.Fatalf("unpaired tombstone: expected a clean run with no pairing, got %+v", info)
+	}
+	rb := func(ref string) statement.CasinoStatementLine {
+		return statement.CasinoStatementLine{ProviderID: casProvider, ProviderTxID: ref, Kind: "rollback",
+			OriginalProviderTxID: "never-5", RoundID: "r5", AssetCode: "EUR"}
+	}
+	two := casDivergentSource{mutate: func(lines []statement.CasinoStatementLine, totals []statement.CasinoStatementTotal) ([]statement.CasinoStatementLine, []statement.CasinoStatementTotal) {
+		return append(lines, rb("rb5"), rb("rb5-again")), totals
+	}}
+	if info := w.mustStmtClean(t, two); info.TombstonePairings != 2 {
+		t.Fatalf("many-to-one: expected both rollback lines to pair with the one tombstone, got %+v", info)
+	}
+}
+
 // C7's counterparty half: the provider still counts an original the
 // platform tombstoned. The finding names the tombstone.
 func TestCasinoStatement_LateOriginalAfterTombstoneIsAFinding(t *testing.T) {

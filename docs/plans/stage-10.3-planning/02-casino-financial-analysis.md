@@ -376,6 +376,38 @@ The streams are read-only with respect to money: **no posting, no projection wri
   - (iii) whether operators may **upload** statements manually (`reconciliation-model.md` §2.2 `OPEN DECISION`).
   - (iv) the statement cadence and cut-off per real provider. That is contractual (`PROVIDER DEPENDENT`), not a decision to make now.
 
+### 2.19 Addendum (gate 10.3-W2/W3 fix round, 2026-09-26): C6 reason-class ruling
+
+**Source.** Code review `10-gate-w2w3-review-code.md` finding #4: C6 fired on every recorded class (9 of the 11 can fire; `original_tombstoned` and `payload_mismatch` always have a ledger row under their key), against §2.4's five-class list. E9 with a different reference was a P1 in C6 but a match in `casino_statement`. This addendum is the ledger-finance ruling. It **supersedes §2.4's C6 class list**; the rest of §2.4 stands.
+
+**Test for membership.** A class belongs to C6 only if the refusal means that a verified provider asserted a **settlement of existing exposure** (a win, or a rollback that did not become a tombstone) that the ledger does not hold. If the ledger then holds nothing under that reference, the provider believes money moved that the platform never booked. That is always wrong, whoever is at fault, so it meets §2.3's severity rule. A refusal of **new exposure** (a bet), or a refusal where the ledger already holds the correct fact under the key, is correct platform behaviour. It is evidence only: visible in the run audit, never a P1.
+
+| Class | Event | Ruling | Rationale |
+|---|---|---|---|
+| `bet_not_found` | win (E5) | **C6** | The provider paid a win on a round the ledger holds no un-reversed bet for. §2.4 already listed it; "integrity alert" in `financial-transaction-flows.md` §6. |
+| `ambiguous_round` | win (G-1 409) | **C6** | The win could not be attributed to one bet and was not posted. The player is unpaid in the ledger; the sentinel itself says "routed to manual reconciliation". §2.4 already listed it. |
+| `wallet_collision` | win (G-1 409, LF-7) | **C6** | The round resolves to more than one wallet, so the win was not posted. It is an unposted settlement plus a structural anomaly. It was named after §2.4 was written. |
+| `mixed_funding` | win (G-1 409, HR-2) | **C6** | The bet's own legs span funding origins, so the win was not posted. It is the same unposted-settlement shape. |
+| `lock_already_released` | win (LF-18) | **C6** | A win arrived after the round's lock was released, and it was not posted. The provider counts a payout the ledger lacks. §2.4 already listed it. |
+| `bonus_bet_not_locked` | win (G-1 409) | **C6** | A bonus debit with no lock means the win was not posted. It is an unposted settlement on top of a structural inconsistency. |
+| `original_tombstoned` | bet (E3) / win (E10) | **evidence only** | The original arrived after its tombstone. The platform is correct and net zero by design (the CLAUDE.md tombstone rule), and the ledger holds the tombstone under the key, so C6 could never fire on it anyway. The finding belongs to **C7** (once per tombstone), and `casino_statement` shows whether the provider still counts the original. §2.4 had listed it; it is moved to C7. |
+| `payload_mismatch` | any (F-7 409) | **evidence only** | A redelivery diverged from the posted fact. The ledger holds the original posting under the key, and refusing the divergent copy is the idempotency guarantee working. An amount the provider disagrees on is a statement finding, not a missing event. |
+| `already_rolled_back` | rollback (E7 409) | **evidence only** | A second distinct reference tried to reverse an already-reversed original. The ledger holds the one reversal (at most one per original, C4), so nothing is missing on the platform side. If the provider counts two reversals, the statement shows it. |
+| `round_ownership_conflict` | bet (409) | **evidence only** | A bet was refused because its round id belongs to another player or session. That is a refusal of new exposure: no stake was taken and nothing was owed, like any other declined bet (which is not recorded at all). It is a security signal for the provider relationship, not a ledger gap. |
+| `rollback_of_tombstoned_original` | rollback (E9, different reference) | **evidence only** | Acknowledged with 200 and the idempotent tombstone result. It is net zero on both sides and a **match** in `casino_statement` (many rollbacks may pair with one tombstone). A P1 here would contradict the statement stream and page on correct behaviour. |
+
+**Resulting C6 set:** `bet_not_found`, `ambiguous_round`, `wallet_collision`, `mixed_funding`, `lock_already_released`, `bonus_bet_not_locked`. Every one is a win-path refusal today. The set is keyed on the class, not the event type, so a future rollback-path use of one of these classes would still be caught.
+
+**What stays visible.** Every class is counted in the run's audit metadata (`rejections_by_class`), plus `rejections_evidence_only` for the five excluded classes. The existing `rejections_total` and `rejections_unposted` are unchanged. Rows are never deleted: the rejection record is append-only evidence whichever way it is ruled.
+
+**Enforcement of the ruling.** `reconciliation.CasinoUnpostedEventReasonClasses()` and `CasinoEvidenceOnlyReasonClasses()` are functions returning fresh slices, so no code can truncate the set. `TestCasinoConsistency_C6_ClassRulingPartitionsEveryRecordedClass` pins that the two sets partition migration 0097's `reason_class` CHECK and `internal/casino`'s constants, so a new class cannot ship without a ruling. `TestCasinoConsistency_C6_OnlyRuledClassesAreFindings` has one detection subtest per ruled class and one no-finding subtest per excluded class. `TestCasinoConsistency_C6_EvidenceOnlyRejectionsThroughTheRealPath` drives E9 and E7 through the real callback path and gets a clean run with both counted.
+
+**Same fix round, same owner (recorded here for traceability; the details are in `casino_consistency.go` and `reconciliation-model.md` §2.3):**
+- C4: the exact-inverse exemption is decided by the **original** only (review #2).
+- C2: positive `house_gaming` rules for bets (cash only; recorded deviation for BONUS_SET bets, G-6) and wins (all shapes) (review #3).
+- `casino_statement`: the unpaired-tombstone and many-to-one pairing behaviour is disclosed and pinned (review #7).
+- The rejection-record write is detached from the request context with a 2 s bound (security R-1). The provider reference length bound is registered as PROVIDER-REF-BOUND-1 (security R-2).
+
 ---
 
 ## 3. Item 3 — Other casino financial-readiness gaps (only the ones actually found)
