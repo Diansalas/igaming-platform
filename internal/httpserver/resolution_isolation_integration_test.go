@@ -739,9 +739,9 @@ func TestResolutionIsolation_MultipleTenantsOutage(t *testing.T) {
 // TestResolutionIsolation_SimultaneousOnset_Bounded [lane] is ADR 0094
 // §9.3 test 3b: five never-observed outages start at the same instant.
 // At +50 ms a healthy tenant's cold callback either succeeds or fails
-// FAST (<= SlotWait + 150 ms) as credential_store_unavailable - the
-// disclosed onset residual - holding no connection; at +2.3 s it succeeds;
-// a warm healthy callback always succeeds.
+// (credential_store_unavailable - the disclosed onset residual), and
+// either way within SlotWait + 150 ms, holding no connection; at +2.3 s it
+// succeeds; a warm healthy callback always succeeds.
 func TestResolutionIsolation_SimultaneousOnset_Bounded(t *testing.T) {
 	w := newIsoWorld(t)
 	var as []*isoTenant
@@ -768,8 +768,10 @@ func TestResolutionIsolation_SimultaneousOnset_Bounded(t *testing.T) {
 	if early.err != nil || (!okStatus(early.status) && early.status != http.StatusUnauthorized) {
 		t.Fatalf("H's cold callback at onset: status %d err %v", early.status, early.err)
 	}
-	if early.status == http.StatusUnauthorized && early.latency > secretstore.SlotWait+150*time.Millisecond {
-		t.Fatalf("H's cold callback at onset failed after %s, want fail-fast <= SlotWait+150ms", early.latency)
+	// Either outcome must be FAST: a healthy caller never waits longer than
+	// SlotWait for admission, so it succeeds or fails within SlotWait+150ms.
+	if early.latency > secretstore.SlotWait+150*time.Millisecond {
+		t.Fatalf("H's cold callback at onset took %s (status %d), want <= SlotWait+150ms whatever the outcome", early.latency, early.status)
 	}
 	w.wantOK("H warm bet during the onset", w.bet(h, "s-h-1", 10))
 	time.Sleep(2300*time.Millisecond - 50*time.Millisecond - early.latency)
