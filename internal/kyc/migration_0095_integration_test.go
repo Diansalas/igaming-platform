@@ -17,6 +17,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -66,6 +67,12 @@ func stagedMigrations0095(t *testing.T) (dir string, addMigration0095 func()) {
 			held = append(held, e.Name())
 			continue
 		}
+		if migrationAfter0095(e.Name()) {
+			// Later, unrelated migrations (0096+, Stage 10.3 W2a onward) are
+			// never part of this test's scenario: keeping them out keeps
+			// 0095 the chain's tip here whatever lands after it.
+			continue
+		}
 		copyMigration0095File(t, src, dir, e.Name())
 	}
 	if len(held) != 2 {
@@ -76,6 +83,35 @@ func stagedMigrations0095(t *testing.T) (dir string, addMigration0095 func()) {
 			copyMigration0095File(t, src, dir, name)
 		}
 	}
+}
+
+// migrationAfter0095 reports whether a migration file's version is above
+// 0095.
+func migrationAfter0095(name string) bool {
+	if len(name) < 4 {
+		return false
+	}
+	v, err := strconv.Atoi(name[:4])
+	return err == nil && v > 95
+}
+
+// migrationsThrough0095 copies every migration up to and including 0095
+// into a temp directory, so MigrateDown(dir, 1) targets 0095 itself.
+func migrationsThrough0095(t *testing.T) string {
+	t.Helper()
+	src := migration0095MigrationsDir(t)
+	dir := t.TempDir()
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		t.Fatalf("read migrations dir: %v", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") || migrationAfter0095(e.Name()) {
+			continue
+		}
+		copyMigration0095File(t, src, dir, e.Name())
+	}
+	return dir
 }
 
 func copyMigration0095File(t *testing.T, src, dst, name string) {
@@ -248,10 +284,10 @@ func TestMigration0095_PreflightNormalizesOversizedRowsAcrossTenantsBeforeConstr
 func TestMigration0095_UpDownUpRoundTrip(t *testing.T) {
 	scratchURL := scratchdb.New(t, "kyc095rt_")
 	pool := migration0095ScratchPool(t, scratchURL)
-	dir := migration0095MigrationsDir(t)
+	dir := migrationsThrough0095(t)
 
 	if _, err := pool.MigrateUp(context.Background(), dir); err != nil {
-		t.Fatalf("migrate up the full chain: %v", err)
+		t.Fatalf("migrate up the chain through 0095: %v", err)
 	}
 	if !constraintExists(t, pool, "kyc_verifications_reason_bound") {
 		t.Fatal("expected the kyc_verifications_reason_bound CHECK to exist after migrating up")
