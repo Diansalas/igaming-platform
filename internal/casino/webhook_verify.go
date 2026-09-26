@@ -17,17 +17,13 @@ func (m *MockCasinoProvider) WebhookScheme() webhookauth.VerificationScheme {
 
 // mustCasinoSchemeSet validates every registered adapter's WebhookScheme();
 // a nil adapter/scheme or a non-permitted declaration panics, so startup
-// fails instead of serving with a bad scheme.
+// fails instead of serving with a bad scheme. Stage 10.3-W1 fix round B:
+// routed through webhookauth.MustAdapterSchemeSet, exactly like payments
+// and KYC, so casino also enforces "a Synthetic scheme is accepted only
+// from an adapter that implements SyntheticComponent()" in its own
+// constructor, not merely by convention.
 func mustCasinoSchemeSet(providers map[string]CasinoProvider) *webhookauth.SchemeSet {
-	schemes := make(map[string]webhookauth.VerificationScheme, len(providers))
-	for id, p := range providers {
-		if p == nil {
-			schemes[id] = nil
-			continue
-		}
-		schemes[id] = p.WebhookScheme()
-	}
-	return webhookauth.MustSchemeSet("casino", schemes)
+	return webhookauth.MustAdapterSchemeSet("casino", providers)
 }
 
 // WebhookScheme returns the registered adapter's validated verification

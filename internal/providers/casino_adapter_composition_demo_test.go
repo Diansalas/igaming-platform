@@ -210,6 +210,18 @@ func (a *fakeHTTPCasinoAdapter) WebhookScheme() webhookauth.VerificationScheme {
 	return webhookauth.CasinoScheme().VerificationScheme()
 }
 
+// SyntheticComponent marks this demo adapter as synthetic (providerkind.
+// Synthetic), required as of gate 10.3-W1 fix round B: webhookauth.
+// NewAdapterSchemeSet now refuses to register ANY adapter whose
+// WebhookScheme() returns a Synthetic-declaring scheme (the platform MOCK
+// scheme is one) unless the adapter itself implements this marker method -
+// otherwise a production-eligible-looking adapter could reuse the MOCK
+// scheme's timestamp/conformance exemption. This demo adapter is already,
+// by its own package-level doc comment, "NOT a real vendor adapter... NOT
+// wired into cmd/platform-api/main.go" - genuinely synthetic - so this is
+// a correct declaration, not a workaround.
+func (a *fakeHTTPCasinoAdapter) SyntheticComponent() {}
+
 func (a *fakeHTTPCasinoAdapter) Capabilities() casino.AdapterCapability {
 	return a.capability
 }
