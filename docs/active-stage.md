@@ -1,6 +1,6 @@
 # Active Stage
 
-> **Current stage:** see ["## Current stage"](#current-stage-stage-103--authorized-2026-09-26-adr-0092--w0-in-progress) section (Stage 10.3 authorized, W0 in progress; staging OFF). Sections below are kept in their historical order.
+> **Current stage:** see ["## Current stage"](#current-stage-stage-103--w1-complete-gate-103-w1-passed-w2-next) section (Stage 10.3 authorized; W1 complete, gate 10.3-W1 passed; W2 next; staging OFF). Sections below are kept in their historical order.
 
 ## Stage 4H-B0-R7 — Final Financial/Bonus Implementation Gate — Complete
 
@@ -1486,10 +1486,10 @@ none authorized for implementation yet.
 
 *Status note 2026-09-26: all four items were answered by the human in `docs/decisions/0042-human-decision-response.md` Part 2 — G-2: configurable per brand, default (b) route to `player_cash`; `OpenBetSelfExclusionPolicy` default: `VOID_ON_SELF_EXCLUSION`; mixed/bonus-funded cashout: "Not cashout-eligible"; FD-1: "Nullifying" (inactive while bonus-funded bets are not cashout-eligible). Implementation of G-2 brand configurability and of the self-exclusion default/auto-void consumer remains outstanding (ADR 0042 G-2 notes; `docs/plans/stage-10-planning-gate-proposal.md` §5).*
 
-## Current stage: Stage 10.3 — AUTHORIZED 2026-09-26 (ADR 0092) — W0 in progress
+## Current stage: Stage 10.3 — W1 complete (gate 10.3-W1 passed); W2 next
 
-Real Provider Trust & Casino Financial Readiness. The human authorized the full scope against
-baseline `207c922`. The authorization is recorded in
+Real Provider Trust & Casino Financial Readiness, AUTHORIZED 2026-09-26 (ADR 0092). The human
+authorized the full scope against baseline `207c922`. The authorization is recorded in
 `docs/plans/stage-10.3-planning-gate-proposal.md` §22 and supersedes conflicting text in that
 proposal.
 
@@ -1505,14 +1505,31 @@ proposal.
     documented in the ADR 0025 Stage 10.3 amendment.
 - **Deferred:** PAYWH-TS-1, PAYWH-BRAND-1 and PAYWH-RL-1 remain deferred. Timestamp rules for real
   schemes land in W1a.
-- **W0 (docs only), in progress:**
+- **W0 (docs only): done.** Gate 10.3-W0 PASSED (`docs/plans/stage-10.3-planning/05-gate-log.md`):
   - ADR 0092 and ADR 0093;
   - "Amendment (Stage 10.3, ADR 0092)" sections in ADR 0022 §3, ADR 0085 §1, ADR 0025,
     ADR 0082 (A6) and ADR 0028;
   - a pointer in `docs/architecture/08-casino-integration-architecture.md` §9a;
   - the task registry "Stage 10.3" section.
-- **Nothing is implemented yet.** Every Stage 10.3 deliverable is `NOT IMPLEMENTED`, except
-  KYC-REASON-BOUND-1, which is `PARTIALLY IMPLEMENTED`: the model exists, the bound does not.
+- **W1 (W1a–W1d): done.** Gate 10.3-W1 PASSED (`05-gate-log.md`; reviews in
+  `docs/plans/stage-10.3-planning/06-gate-w1-review-*.md`). Labels:
+  - WH-VENDOR-SCHEME-1 (W1a): `IMPLEMENTED` — MOCK schemes plus the real-scheme contract. Real
+    vendor schemes `PROVIDER DEPENDENT`; `KeyImplicit` resolution `NOT IMPLEMENTED` until W2a;
+    domain callback-fixture hook `NOT IMPLEMENTED`.
+  - MOCK-ADAPTER-PROD-1 (W1b): `IMPLEMENTED`. By design, today's all-mock production binary
+    refuses to start.
+  - CAS-CAP-ROLLBACK-1 and CAS-MULTIBET-WIN-1 (W1c): `IMPLEMENTED — MOCK provider only`. ADR 0082
+    A6 `IMPLEMENTED`.
+  - KYC-REASON-BOUND-1 (W1d): `IMPLEMENTED`.
+  - Carried forward: CAS-WIN-IDEMP-1 (Medium, before G-6), PAY-SB-REPLAY-AUDIT-1 (Low),
+    CR-CHECKLIST-HMAC-1 (**needs the human**: an edit to agent configuration), CI-FLAKE-281
+    (proposed for W3), the C9 rejection-record scope in CAS-RECON-1 (W2b).
+- **Next: W2** (W2a credential resolver / outbound credentials / KYC provider select, design
+  already reviewed in `07-w2a-design-review-security.md` and the ADR 0093 amendment; W2b
+  CAS-RECON-1), then gate 10.3-W2. W2 is inside the authorized Stage 10.3 scope.
+- **Still `NOT IMPLEMENTED`:** every W2/W3 deliverable (PROV-CRED-RESOLVER-1,
+  PROV-OUTBOUND-CRED-1, KYC-PROVIDER-SELECT-1, CAS-RECON-1, CAS-RECON-STMT-1, SECRETSTORE-AWS-1)
+  and every real PSP, KYC or casino adapter (`PROVIDER DEPENDENT`).
 - **Specialist inputs:**
   - the planning papers and reviews are in `docs/plans/stage-10.3-planning/`;
   - rulings R1–R15 are in the proposal's §19;

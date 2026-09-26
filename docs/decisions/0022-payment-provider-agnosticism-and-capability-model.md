@@ -644,10 +644,21 @@ never *asserts* the tenant.
 >    - It also fails on `==`/`!=` where an operand names signature or MAC
 >      material, and on `bytes.Equal`, `bytes.Compare`,
 >      `strings.Compare` and `strings.EqualFold`.
->    - Outside `internal/webhookauth` the lint currently selects files,
->      not packages. Widening it to whole packages is security condition
->      S-3, which binds before the first non-synthetic scheme.
->    - This is also a `code-reviewer` checklist item (S-3).
+>    - **Scope (security S-3, landed in `1a6287e`).** The lint scans every
+>      non-test file of any package that contains a scheme, not only the
+>      file that declares it. `TestConstantTimeCompare_ScopeIsWholePackage`
+>      is its temp-dir self-test (a `bytes.Equal` in a sibling file of a
+>      scheme package is found; a package with no scheme, and test files,
+>      are not scanned).
+>    - **`code-reviewer` checklist item: `NOT IMPLEMENTED`.** *(Corrected
+>      at gate 10.3-W1 close-out. The earlier text said "this is also a
+>      `code-reviewer` checklist item". It is not:
+>      `.claude/agents/code-reviewer.md` contains no "`hmac.Equal` only"
+>      item.)* S-3 asks for it. Adding it is an edit to agent
+>      configuration, which no specialist may make on its own authority;
+>      it needs the human, raised via the orchestrator. Tracked as
+>      `CR-CHECKLIST-HMAC-1`. The lint above is the enforcing control
+>      meanwhile; the checklist item is a second line of review.
 >
 > **Domain callback-fixture hook: `NOT IMPLEMENTED`.** *(Corrected at gate
 > 10.3-W1, code review #5. The text at acceptance said the domain suites'
@@ -682,16 +693,38 @@ never *asserts* the tenant.
 >     ADR 0085 production guard refuses. A production-eligible adapter
 >     cannot register the platform MOCK scheme, whether its own domain's
 >     or another's.
->   - At HEAD `bc72fe4`, `ValidateScheme` only checks that the scheme's
->     concrete type is the platform MOCK type. It does not check the
->     domain or the adapter's marker. The narrower rule is the fix-round
->     change.
+>   - **Landed.** At HEAD `bc72fe4`, `ValidateScheme` only checked that the
+>     scheme's concrete type was the platform MOCK type. The domain rule
+>     (`NewSchemeSet` → `validateSyntheticForDomain`) and the adapter rule
+>     (`NewAdapterSchemeSet`/`MustAdapterSchemeSet`) landed in `1a6287e`
+>     for payments and KYC, together with the pre-DB
+>     `validateWebhookSchemes` in `cmd/platform-api` for all three domains
+>     and the `SyntheticComponent()` marker on `mockVerificationScheme`.
+>     Casino's own constructor (`mustCasinoSchemeSet`) was routed through
+>     `MustAdapterSchemeSet` in `a94e610`; its killing test
+>     `TestNewOrchestrator_MockSchemeOnlyFromSyntheticAdapter` landed in
+>     `8516951` (mutation M34,
+>     `evidence/w1-fixround-b-mutation-kill.txt`).
+> - **A real scheme type must implement `MarkProductionEligible()`.**
+>   Since the fix round, `buildRegistrations` registers every adapter's
+>   `WebhookScheme()` value with the ADR 0085 production guard as its own
+>   component (`webhook_scheme:<provider>`), separately from the adapter.
+>   The guard refuses any registered component that does not implement
+>   `providerkind.ProductionEligible`. So the first real (non-synthetic)
+>   scheme will make production startup fail unless **its scheme type**
+>   (not only its adapter type) implements `MarkProductionEligible()` and
+>   does not implement `SyntheticComponent()`. This is intended: adding
+>   the marker is the explicit, reviewed act of declaring a scheme
+>   production-eligible, and it follows passing SC1–SC13 with a vendor
+>   known-answer vector. See ADR 0085 §1 amendment, point 6.
 > - **`KeyImplicit` is refused at registration until W2a.**
->   - Resolution for `KeyImplicit` is `NOT IMPLEMENTED`. At HEAD it fails
->     closed per request as `credential_unavailable`.
->   - With the fix round, a scheme that declares `KeyImplicit` makes the
->     process refuse to start, instead of registering and then returning
->     401 for every callback.
+>   - Resolution for `KeyImplicit` is `NOT IMPLEMENTED`. At HEAD `bc72fe4`
+>     it failed closed per request as `credential_unavailable`.
+>   - **Landed in `1a6287e`:** `ValidateScheme`
+>     (`internal/webhookauth/scheme.go`) refuses a scheme that declares
+>     `KeyImplicit`, so the process refuses to start instead of registering
+>     it and then returning 401 for every callback. The conformance suite
+>     still exercises `KeyImplicit` reference schemes directly.
 >   - W2a lifts the refusal when it implements `KeyImplicit` resolution
 >     (ADR 0093 §4), with its tests.
 >
@@ -711,12 +744,30 @@ never *asserts* the tenant.
 > `IMPLEMENTED` in W1a (contract, suite, MOCK schemes). Every real vendor
 > scheme is `PROVIDER DEPENDENT`.
 >
-> **Status at gate 10.3-W1.** The W1a contract, suite (SC1–SC13 with the
-> broken reference schemes) and MOCK schemes are implemented at HEAD
-> `bc72fe4`. The gate-W1 fix-round conditions above (S-1, #6, #10) are in
-> progress. S-2 and S-3 bind before the first non-synthetic scheme. The
-> domain callback-fixture hook and `KeyImplicit` resolution are
-> `NOT IMPLEMENTED`. Every real vendor scheme is `PROVIDER DEPENDENT`.
+> **Status at gate 10.3-W1 (PASSED; see `05-gate-log.md`).**
+> `IMPLEMENTED` for the contract, the suite (SC1–SC13 with the broken
+> reference schemes), the MOCK schemes and the registration-time
+> restrictions. Detail:
+> - The W1a contract, suite and MOCK schemes landed in `45c3ca1`/`2059b56`.
+> - The gate-W1 fix-round conditions landed: S-1, code review #6 and #10 in
+>   `1a6287e` (casino constructor `a94e610`, its test `8516951`); S-3's
+>   whole-package lint scope in `1a6287e`.
+> - **S-2 landed with a disclosed overlap.** The `timestampBeforeMAC`
+>   broken reference scheme exists
+>   (`webhookauthtest/refscheme_test.go`). Security asked for it to be red
+>   in SC7 only. Within SC7 only the stale-and-tampered assertion catches
+>   it, as intended, but **SC2 also goes red**: SC2 tampers every declared
+>   header, including the timestamp header, and a scheme that checks the
+>   window before the MAC rejects that tampering for the wrong reason. The
+>   overlap cannot be avoided without weakening SC2. The self-test pins
+>   the red set exactly as {SC7, SC2} and asserts that SC2 fails only
+>   through the timestamp header (`webhookauthtest/conformance_test.go`).
+> - `NOT IMPLEMENTED`: the `code-reviewer` checklist item
+>   (`CR-CHECKLIST-HMAC-1`, needs the human); the domain callback-fixture
+>   hook (first real adapter); `KeyImplicit` resolution (W2a; refused at
+>   registration until then).
+> - Every real vendor scheme is `PROVIDER DEPENDENT`. The first one needs
+>   its scheme type to implement `MarkProductionEligible()` (above).
 
 ### 4. Crypto Payment Provider is not the same object as Crypto Custodian
 

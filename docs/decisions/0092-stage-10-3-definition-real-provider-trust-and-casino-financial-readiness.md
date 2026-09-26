@@ -155,27 +155,35 @@ Disclosures carried to the human (§19):
 | SECRETSTORE-AWS-1 | `PARTIALLY IMPLEMENTED`: code plus local fake. IAM is `NOT IMPLEMENTED` (HD-10.3-2). Drills are `STAGING REQUIRED` |
 | Real PSP / KYC / casino adapters | `NOT IMPLEMENTED` (`PROVIDER DEPENDENT`) |
 
-### Status at gate 10.3-W1 (2026-09-26)
+### Status at gate 10.3-W1 (2026-09-26) — GATE 10.3-W1 PASSED
 
-- **W1a–W1d are implemented at HEAD `bc72fe4`.** That covers WH-VENDOR-SCHEME-1,
-  MOCK-ADAPTER-PROD-1, CAS-CAP-ROLLBACK-1 with G-1, and KYC-REASON-BOUND-1.
-- **The gate-W1 fix-round conditions are in progress.** They come from the reviews in
-  `docs/plans/stage-10.3-planning/06-gate-w1-review-*.md`; dispositions are in `05-gate-log.md`.
-  None of these items takes its target label from the table above until its conditions are met
-  and the gate closes. In particular, `ledger-finance` holds W1c at `PARTIALLY IMPLEMENTED`
-  until its conditions C1–C9 are met and the W1c integration suites have run green as the
-  NOBYPASSRLS role.
-- The ADR 0022, 0025, 0028, 0082, 0085 and 0093 texts were corrected at this gate to match the
-  code, and to record the fix-round changes.
-- **Unchanged:**
+Gate record: `docs/plans/stage-10.3-planning/05-gate-log.md`, "GATE 10.3-W1 — PASSED". Reviews:
+`docs/plans/stage-10.3-planning/06-gate-w1-review-*.md` (security, ledger-finance including its
+"Re-verification after fix round A", identity-compliance, code). All fix-round conditions that bind
+at this gate are met; the code landed in `1a6287e`, `8324aa0`, `f275298`, `5f98e23`, `a94e610`,
+`8516951` and `98a7f08`.
+
+| Deliverable | Label at gate 10.3-W1 |
+|---|---|
+| W1a WH-VENDOR-SCHEME-1 | `IMPLEMENTED` (platform contract, SC1–SC13 suite, MOCK schemes, registration-time restrictions). Real vendor schemes `PROVIDER DEPENDENT`. `KeyImplicit` resolution `NOT IMPLEMENTED` until W2a (refused at registration). Domain callback-fixture hook `NOT IMPLEMENTED`. `code-reviewer` "`hmac.Equal` only" checklist item `NOT IMPLEMENTED` (CR-CHECKLIST-HMAC-1, needs the human) |
+| W1b MOCK-ADAPTER-PROD-1 | `IMPLEMENTED`. By design, an all-mock production binary (today's) refuses to start |
+| W1c CAS-CAP-ROLLBACK-1, CAS-MULTIBET-WIN-1 (G-1) | `IMPLEMENTED — MOCK provider only`. `ledger-finance` C1–C6, C8, C10 met (re-verification), C11 met in `98a7f08`; C7 is `security`'s and its gate review accepted credential revocation as the emergency stop (§7, C14); C9 carried to W2b (CAS-RECON-1) |
+| ADR 0082 A6 | `IMPLEMENTED` (C1, C6, C8 met) |
+| W1d KYC-REASON-BOUND-1 | `IMPLEMENTED` (bound and staff-only; players see status only; platform-side normalization and `reason_truncated` audit flag; staff-UI escaping test) |
+
+- **Unchanged / carried forward:**
   - Every real vendor scheme and every real PSP, KYC and casino adapter is `PROVIDER DEPENDENT`.
-  - `KeyImplicit` resolution is `NOT IMPLEMENTED`. The fix round refuses `KeyImplicit` at
-    registration until W2a.
+    The first real scheme type and adapter type must each implement `MarkProductionEligible()`
+    or production startup fails (ADR 0085 §1 point 6; ADR 0022 §3).
   - The domain callback-fixture hook is `NOT IMPLEMENTED`. Any non-mock adapter fails the casino,
     payments and KYC conformance suites.
   - The free-round/jackpot conformance case is `NOT IMPLEMENTED`.
+  - CAS-WIN-IDEMP-1 (F-9, Medium): `postWin` lacks a `postBet`-style already-posted
+    short-circuit; must be fixed before bonus-funded/locked casino stakes (G-6) ship.
+  - PAY-SB-REPLAY-AUDIT-1 (Low); CI-FLAKE-281 (W3).
 - **Disclosed.** Every bundled component is a MOCK, so an `APP_ENV=production` binary refuses to
   start. This is the intended fail-closed result (ADR 0085, Stage 10.3 amendment).
+- W2 (W2a design-reviewed: `07-w2a-design-review-security.md`, ADR 0093 amendment) is next.
 
 ## Consequences
 

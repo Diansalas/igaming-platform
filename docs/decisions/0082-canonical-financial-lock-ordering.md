@@ -1539,10 +1539,20 @@ one L0.1 per transaction, taken first. When implemented, it must be recorded in 
   blocks (L0.1), not only the outcome.
 - Concurrent identical rollback callbacks produce exactly one tombstone.
 - *(Gate 10.3-W1.)* At HEAD `bc72fe4` the two race tests
-  (`internal/httpserver/casino_cap_rollback1_concurrency_integration_test.go`) run 20 iterations
-  and assert outcomes only. The Stage 10.3 W1 fix round raises them to 50 iterations and adds the
-  waiter assertions.
+  (`internal/httpserver/casino_cap_rollback1_concurrency_integration_test.go`) ran 20 iterations
+  and asserted outcomes only. The Stage 10.3 W1 fix round A (`5f98e23`) raised them to 50
+  iterations and added the waiter assertion: iteration 0 of each holds the production L0.1 key
+  externally and asserts that a real delivery queues on an advisory lock
+  (`pg_stat_activity`, `wait_event_type = 'Lock'`, `wait_event = 'advisory'`). The follow-up
+  `98a7f08` (H1) filters that poll to the current database, excludes the blocker's own backend
+  and matches the casino delivery-lock statement, so a parallel package's advisory wait cannot
+  satisfy it. Removing L0.1 from `postRollback` (mutation M1) and from `postWin` (M2) turns the
+  tests red, recorded in `docs/plans/stage-10.3-planning/evidence/w1c-mutation-kill.txt`.
 
 **Status.** `NOT IMPLEMENTED` at acceptance. Target: `IMPLEMENTED` in W1c.
 
-**Status at gate 10.3-W1.** `PARTIALLY IMPLEMENTED` — the L0.1 acquisitions are in code (Stage 10.3 W1c); `ledger-finance` acceptance of A6 is pending its gate-W1 conditions C1 (50-iteration race tests with waiter assertions and mutation-kill evidence), C6 (W1c integration suites green as the NOBYPASSRLS role) and C8 (this inventory), per `docs/plans/stage-10.3-planning/06-gate-w1-review-ledger-finance.md`.
+**Status at gate 10.3-W1.** `IMPLEMENTED`. `ledger-finance`'s re-verification after fix round A
+(`docs/plans/stage-10.3-planning/06-gate-w1-review-ledger-finance.md`) records its A6 conditions
+met: C1 (50-iteration race tests with the waiter assertion; M1/M2 killed), C6 (W1c integration
+suites green as the NOBYPASSRLS role, on attestation, and independently recorded for C11 in
+`evidence/w1c-c11-runtime-role.txt`) and C8 (the §1.3 inventory).

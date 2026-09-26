@@ -190,14 +190,31 @@ together with `TestSupportRoutesEnabled()`, `mockProviderWiring` and
      `Environment`, not `GuardEnvironment()`. This is not exploitable
      today, because the MOCK adapters they are bound to are always
      registered, so the guard refuses production startup first.
-   - **Stage 10.3 W1 fix round.** The mock webhook credential resolvers
-     move into the provider bundle and are registered. Each adapter's
-     `WebhookScheme()` is also registered in `buildRegistrations`. Both
-     completeness tests use one shared helper.
-   - **Still open.** An AST test that no non-test file in
-     `cmd/platform-api` other than `registrations.go` constructs a
-     provider component (security S-4 point 2). It binds before any type
-     implements `ProductionEligible`.
+   - **Stage 10.3 W1 fix round (landed in `1a6287e`).** The mock webhook
+     credential resolvers are built in the provider bundle and registered.
+     Each adapter's `WebhookScheme()` is also registered in
+     `buildRegistrations` (as `webhook_scheme:<provider>`). Both
+     completeness tests use one shared helper
+     (`unregisteredBundleFields`). `mockProviderWiring`
+     (`cmd/platform-api/wiring.go`) now requires `GuardEnvironment() !=
+     "production"` on top of `TestSupportRoutesEnabled()`, so a missing
+     `APP_ENV` never wires a MOCK resolver or the KYC mock.
+   - **AST test (security S-4 point 2, landed in `1a6287e`).**
+     `TestMain_ConstructsNoProviderComponentOutsideRegistrations`
+     (`cmd/platform-api/main_construction_ast_test.go`) fails if any
+     non-test file in `cmd/platform-api` other than `registrations.go`
+     constructs a provider component (allow-list: the three
+     `NewOrchestrator` calls and `sportsbook.SyncCatalogue`). It asserts
+     that `main.go` and `wiring.go` are actually scanned, and
+     `TestProviderConstructionsIn_CatchesConstructionOutsideBundle` is its
+     negative control.
+   - **Consequence for the first real scheme and adapter.** Because
+     schemes are registered as components in their own right, a real
+     (non-synthetic) `VerificationScheme` must itself implement
+     `MarkProductionEligible()`, not only its adapter. Otherwise the guard
+     lists it as `<domain>/webhook_scheme:<provider>` and production
+     startup fails. This is intended and fail-closed; see ADR 0022 §3,
+     Stage 10.3 amendment.
    - **The real control is the positive marker, and it does not use
      names.** In production, `RefuseSyntheticInProduction`
      (`internal/providerkind/guard.go`) refuses every registered component
@@ -237,19 +254,22 @@ human launch decision. The guard only makes that decision explicit.
   defect.
 - **`make run` sets `APP_ENV=development`.** Because a missing `APP_ENV`
   is now treated as production by the guard, `make run` without it would
-  refuse to start. The Stage 10.3 W1 fix round makes the `run` target
-  default `APP_ENV=development`, overridable from the environment. At HEAD
-  `bc72fe4` the target does not set it (code review #8).
+  refuse to start. The `run` target now defaults `APP_ENV ?= development`,
+  overridable from the environment (`Makefile`, landed in `1a6287e`; code
+  review #8). At HEAD `bc72fe4` it did not set it.
 
 **Status.** `NOT IMPLEMENTED` at acceptance. Target: `IMPLEMENTED` in W1b.
 
-**Status at gate 10.3-W1.** The markers, the pure guard, its placement
-right after `config.Load()`, the `GuardEnvironment()` rule and the matrix
-tests are implemented at HEAD `bc72fe4`. The coverage corrections in point
-6 (resolvers and schemes registered, shared completeness helper) are in
-progress in the Stage 10.3 W1 fix round. Security S-4 point 2 binds before
-any type implements `ProductionEligible`. No component is
-`ProductionEligible` today.
+**Status at gate 10.3-W1 (PASSED; see `05-gate-log.md`).** `IMPLEMENTED`.
+The markers, the pure guard, its placement right after `config.Load()`,
+the `GuardEnvironment()` rule and the matrix tests landed in W1b
+(`4932c80`). The point-6 coverage corrections (resolvers and schemes
+registered, shared completeness helper, `mockProviderWiring` on
+`GuardEnvironment()`) and the S-4 AST test landed in `1a6287e`. By design,
+a binary whose bundle is all MOCK (today's) refuses to start in
+production. No component is `ProductionEligible` today; the first real
+adapter and its real scheme type must each implement
+`MarkProductionEligible()` (point 6).
 
 ### 2. Stateless-by-construction activation seam (no shared infrastructure)
 

@@ -273,23 +273,43 @@ become) a real vendor's contract before one exists.
 >    - **The helper.** It is `kyc.NormalizeReason(raw) (bounded string,
 >      truncated bool)` (`internal/kyc/reason_normalize.go`). It is
 >      idempotent.
->    - **At HEAD `bc72fe4` it is adapter discipline only.** The MOCK
->      adapter and the staff `ReviewVerification` path call it. The
+>    - **At HEAD `bc72fe4` it was adapter discipline only.** The MOCK
+>      adapter and the staff `ReviewVerification` path called it. The
 >      platform sites that persist or audit an adapter-supplied reason
->      store it as given: `CreateVerification` in
->      `verification_service.go`, `SubmitVerification` in
->      `document_service.go` and `HandleCallback` handling in
->      `provider.go`. Every caller discards the `truncated` flag, so no
->      audit row records truncation yet.
->    - **Stage 10.3 W1 fix round: the platform normalises too.** The
->      platform applies `NormalizeReason` at its own write sites, in
->      addition to the adapter. Because the helper is idempotent, applying
->      it twice is harmless. A real adapter that normalises in
->      `HandleCallback` but not in `SubmitVerification` can then no longer
+>      stored it as given, and every caller discarded the `truncated`
+>      flag.
+>    - **Landed in `8324aa0` (fix round B): the platform normalises too.**
+>      The platform applies `NormalizeReason` at every site that persists
+>      or audits an adapter reason, in addition to the adapter:
+>      `CreateVerification` (`verification_service.go`), the
+>      document-submission path that stores the provider's
+>      `SubmitVerification` reason (`document_service.go`), and
+>      `applyCallbackOutcome` (`provider.go`: both audit rows and the
+>      status update). The staff `ReviewVerification` path keeps its own
+>      normalisation (`identity-compliance`'s decision under item 3:
+>      normalise, not reject). Because the helper is idempotent
+>      (`TestNormalizeReason_IdempotentOverHostileInputs`, `8516951`),
+>      applying it twice is harmless, and a second pass never itself
+>      reports truncation. A real adapter that normalises in
+>      `HandleCallback` but not in `SubmitVerification` can no longer
 >      store raw control or bidi characters, or turn an oversize reason
 >      into a 500 against the CHECK.
->    - **The truncation flag.** In the same fix round, the audit metadata
->      of those sites records the flag as `reason_truncated`.
+>    - **The truncation flag (landed in `8324aa0`).** Every one of those
+>      sites, and the staff review audit row, records
+>      `reason_truncated: true` in `audit_log.metadata` when the value was
+>      cut (`withReasonTruncated`, `internal/kyc/reason_normalize.go`); the
+>      key is absent otherwise.
+>    - **`ProviderResult.ReasonTruncated` (new field, `8324aa0`).**
+>      `kyc.ProviderResult` (`internal/kyc/provider.go`) gains
+>      `ReasonTruncated bool`. An adapter that already normalised its
+>      reason sets it when **its own** normalisation truncated the value,
+>      because the platform's idempotent second pass sees an
+>      already-bounded string and cannot detect that cut. The platform
+>      ORs it with its own signal (`normalizeProviderResult`) before
+>      writing the audit flag. The MOCK adapter sets it. A real adapter
+>      that truncates and does not set it under-reports truncation in
+>      the audit trail; the stored value is still bounded. Setting it is
+>      part of the adapter contract from Stage 10.3 onward.
 >    - The adapter-level requirement above still stands. The conformance
 >      case still checks it.
 > 2. **DB backstop.** Migration 0095 adds
@@ -303,7 +323,9 @@ become) a real vendor's contract before one exists.
 >    - The staff path must validate its input at the API boundary, so that
 >      the CHECK never surfaces as a 500.
 >    - Whether an oversize staff reason is rejected or normalised is
->      `identity-compliance`'s decision in W1d.
+>      `identity-compliance`'s decision in W1d. *(Decided: normalised,
+>      never a 500; `ReviewVerification` calls `NormalizeReason` before
+>      the write.)*
 > 4. **Players see status only (HD-10.3-3).**
 >    - Remove `reason` from `playerVerificationResponse` and from the
 >      `PlayerVerification` OpenAPI schema.
@@ -314,6 +336,10 @@ become) a real vendor's contract before one exists.
 >    - `verificationResponse.Reason` and the `Verification` schema keep
 >      it, documented as "bounded to 512 bytes, sanitised".
 >    - Staff UIs must HTML-escape it, and a test must prove they do.
+>      *(Landed in `8324aa0`:
+>      `backoffice/src/features/kyc/KycCaseDetail.test.tsx` proves the
+>      staff reason renders as escaped text and creates no `img`/`script`
+>      element; security S-6, identity-compliance condition 2.)*
 >    - Access stays behind the existing staff KYC permissions and tenant
 >    RLS.
 > 6. **Logs are redacted.**
@@ -343,8 +369,17 @@ become) a real vendor's contract before one exists.
 > - Sanctions/PEP interface (KYC-SANCTIONS-IF-1).
 > - F-5 `error`-callback audit dedupe, with the first real KYC adapter.
 >
-> **Status.** `PARTIALLY IMPLEMENTED` today: the model exists but no bound
-> is enforced. Target: `IMPLEMENTED` in W1d.
+> **Status.** `PARTIALLY IMPLEMENTED` at acceptance: the model existed but
+> no bound was enforced. Target: `IMPLEMENTED` in W1d.
+>
+> **Status at gate 10.3-W1 (PASSED; see
+> `docs/plans/stage-10.3-planning/05-gate-log.md`).** `IMPLEMENTED`:
+> W1d (`ee2192f`) plus fix round B (`8324aa0`, `f275298`) and the
+> idempotency test (`8516951`). `identity-compliance` conditions 1
+> (truncation flag) and 2 (escaping test) and security S-5/S-6 are met.
+> Real KYC adapters remain `PROVIDER DEPENDENT`; each must pass the
+> mandatory reason-bound conformance case and set
+> `ProviderResult.ReasonTruncated` when it truncates.
 
 ### 7. Cross-tenant reuse and Person-resolution integration — OPEN DECISIONS
 

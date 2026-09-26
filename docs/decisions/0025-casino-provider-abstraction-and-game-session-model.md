@@ -456,6 +456,69 @@ already performs, reused verbatim), never asserted by the payload.
 >    - The MOCK has no free-round or jackpot event, so there is nothing to
 >      test against today. The case is written and reviewed with the first
 >      real adapter, whose callbacks can carry such payouts.
+> 9. **Redelivery audit rule and replay logging** *(added at gate
+>    10.3-W1 close-out; `ledger-finance` ruling in its "Re-verification
+>    after fix round A")*.
+>    - **Rule: postings are audited once per fact; E3 rejections are
+>      audited once per verified attempt.** A byte-identical redelivery
+>      that resolves to `AlreadyPosted` mutates nothing, and the fact it
+>      describes already has exactly one audit row, committed in the same
+>      transaction as the posting. The one intentional exception is the
+>      E3 `casino_bet.rejected_tombstoned` row, which records a rejection
+>      decided on that delivery. A divergent redelivery still errors
+>      (`ErrIdempotencyPayloadMismatch`/`ErrIdempotencyKeyReused` → 409
+>      plus an integrity-alert log), so the gate cannot swallow a
+>      conflicting attempt.
+>    - **The audit-bloat defect, found and fixed in fix round A
+>      (`5f98e23`).** Before the fix, `postWin` (all four branches) and
+>      `postRollback`'s generic entry-inversion path wrote a new audit row
+>      on every redelivery of an already-posted win or rollback. There was
+>      no financial effect. Those writes are now gated on
+>      `!postResult.AlreadyPosted`. The `postRollback` gate's killing test
+>      is `TestPostRollback_C11_GenericPathAuditGate_RedeliverySequentialThenConcurrent`
+>      (`98a7f08`, `ledger-finance` C11; mutation-killed and run as
+>      `igaming_runtime`, `evidence/w1c-mutation-kill.txt`,
+>      `evidence/w1c-c11-runtime-role.txt`). In `98a7f08` (R2) the
+>      `casino_bet.posted` write in `postBet` and the
+>      `casino_win.rolled_back` write in `postRollbackHeldWin` are gated
+>      the same way. Both were unreachable on replay because of upstream
+>      short-circuits; the gate makes the rule structural. The
+>      `"already_posted"` metadata key on these rows is now always
+>      `false` and is kept for schema stability.
+>    - **R1, `casino_callback_replayed` (landed in `98a7f08`).**
+>      `casino.ReceiveCallbackResult` gains `Replayed bool` and
+>      `EventType`. `Replayed` is set at every replay short-circuit:
+>      `postBet`'s E2 idempotency short-circuit, the E9 tombstone replay,
+>      the `postWin`/`postRollback` `AlreadyPosted` gate, and
+>      `postRollbackHeldWin`'s voided-by-same-reference short-circuit. On
+>      a replay the casino webhook handler logs one structured `Info` line,
+>      `casino_callback_replayed`, carrying only `request_id`,
+>      `tenant_id`, `provider_id` and `event_type`. It deliberately omits
+>      `provider_tx_id` and `ledger_transaction_id` (the R1 wording
+>      suggested them), matching the handler's rule of never echoing
+>      caller-supplied identifiers into logs; `request_id` joins it to the
+>      request. Test:
+>      `TestCasinoWebhook_ReplayedLogging_AbsentOnFirstDeliveryPresentOnRedelivery`.
+>      This is a log line, not a durable record. A durable per-delivery
+>      record belongs in W2b's callback/rejection record, never in
+>      `audit_log`.
+>    - **Not covered by this rule, carried forward:**
+>      - E10, the G-1 409 classes, and an E9 rollback that names an
+>        already-tombstoned original under a *different* reference (200,
+>        with no ledger, audit or log record of its own) are captured only
+>        by W2b's rejection record (`ledger-finance` C9 and its extension;
+>        CAS-RECON-1).
+>      - CAS-WIN-IDEMP-1 (F-9, Medium, pre-existing): `postWin` has no
+>        `postBet`-style "already posted → verify match → return original"
+>        short-circuit. A win redelivered after a rollback of its bet
+>        returns 400 (`ErrBetNotFound`, direct cash) or 409
+>        (`ErrLockAlreadyReleased`, locked branches) instead of the
+>        original result. It never pays twice. It must be fixed before
+>        bonus-funded or locked casino stakes (G-6) ship.
+>    - The tombstone correlation fallback (item 3) is tenant-qualified
+>      since `5f98e23`: `uuid.NewSHA1(OID, tenantID + ":" +
+>      "tombstone:<provider>:<ref>")`. Replay stays safe because
+>      tombstones are exempt from the correlation comparison.
 >
 > **Emergency stop: credential revocation, not a settlement freeze
 > (R9/C14).**
@@ -533,6 +596,18 @@ already performs, reused verbatim), never asserted by the payload.
 > **Status.** `NOT IMPLEMENTED` at acceptance. Target:
 > `IMPLEMENTED — MOCK provider only` (W1c). A real aggregator resolver
 > remains `NOT IMPLEMENTED`.
+>
+> **Status at gate 10.3-W1 (PASSED; see
+> `docs/plans/stage-10.3-planning/05-gate-log.md`).** CAS-CAP-ROLLBACK-1
+> and G-1 (CAS-MULTIBET-WIN-1): `IMPLEMENTED — MOCK provider only`.
+> `ledger-finance` conditions C1–C6, C8 and C10 are met (re-verification
+> after fix round A) and C11 is met in `98a7f08`. C7 (the security side of
+> losing the settlement kill switch) is `security`'s: its gate review
+> accepted credential revocation as the emergency stop (review §7, C14).
+> C9 is W2b scope. Item 8's free-round/jackpot conformance case is
+> `NOT IMPLEMENTED`. A real aggregator resolver and adapter remain
+> `NOT IMPLEMENTED` (`PROVIDER DEPENDENT`), and are not wired until W2a
+> revocation exists.
 
 ### 6. Bet / Win / Rollback — no second balance system, existing ledger only
 
