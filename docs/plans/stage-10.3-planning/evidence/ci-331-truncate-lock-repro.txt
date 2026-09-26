@@ -1,0 +1,90 @@
+CI run #331 repro - internal/db TestCatalogueRLS_DeleteAndTruncateAreRefusedLoudly/casino_games_TRUNCATE
+==========================================================================================================
+
+Environment
+-----------
+- postgres:16.13 (matches CI's postgres:16 service image), migrations applied via cmd/migrate up.
+- Confirmed live GUC values on this database (no app code or CI step sets either):
+    lock_timeout       = 0    (disabled)
+    deadlock_timeout    = 1s   (Postgres default, unmodified)
+    statement_timeout   = 0    (disabled)
+- grep for "lock_timeout" across internal/db, migrations/, deploy/, and .github/workflows/ci.yml
+  finds NO occurrence that sets it. The only two hits in the whole repo are both comments in
+  internal/ledger/lockorder_harness_test.go referring to Postgres's *deadlock_timeout* default,
+  not lock_timeout. See that file's line ~67.
+- Conclusion: the "1s lock_timeout" premise in the task brief does not hold for this codebase -
+  there is no lock_timeout configured anywhere, so SQLSTATE 55P03 (lock_not_available) cannot be
+  produced by a lock-wait timeout here. What IS configured (via Postgres's own unmodified default)
+  is deadlock_timeout = 1s, which produces SQLSTATE 40P01 (deadlock_detected) when two sessions
+  wait on each other's locks. See "Actual repro" below - it reproduces a ~1.00s failure exactly
+  matching CI run #331's reported subtest duration, with SQLSTATE 40P01, not 55P03.
+
+Actual repro (two concurrent sessions, no code changes)
+---------------------------------------------------------
+Session 1 (backend pid 12928) simulates another package's test transaction that:
+  1. Locks casino_game_availability (as if it had just inserted/updated a row referencing a game -
+     the same kind of open transaction internal/casino and internal/httpserver integration tests
+     hold while seeding/asserting against casino_games + casino_game_availability together).
+  2. Later, still inside the same transaction, touches casino_games too (a very ordinary shape:
+     e.g. re-reading or re-validating the game row the availability row was just written for).
+
+Session 2 (backend pid 12927) runs exactly the code under test:
+    BEGIN;
+    SELECT set_config('app.platform_admin_principal_id', <uuid>, true);
+    TRUNCATE casino_games CASCADE;
+
+Sequence:
+    T+0.0s  Session 1: BEGIN; LOCK TABLE casino_game_availability IN ROW EXCLUSIVE MODE;
+    T+0.3s  Session 2: BEGIN; set_config(...); TRUNCATE casino_games CASCADE;
+              -> acquires ACCESS EXCLUSIVE on casino_games immediately (nothing else holds it yet)
+              -> then blocks acquiring ACCESS EXCLUSIVE on casino_game_availability (held by S1)
+    T+0.8s  Session 1: LOCK TABLE casino_games IN ACCESS SHARE MODE;
+              -> blocks: casino_games is already ACCESS EXCLUSIVE-locked by S2
+              -> this closes the cycle: S2 waits on S1 (casino_game_availability),
+                 S1 waits on S2 (casino_games)
+    T+~1.0s Postgres's deadlock detector (deadlock_timeout=1s) fires and aborts one participant.
+
+Actual output (verbatim, session 2 = the TRUNCATE):
+    BEGIN
+    6c8f0f3c-b331-4ffb-85a8-7ed552522c76
+    2026-09-26 17:19:03.155684+00
+    Timing is on.
+    ERROR:  deadlock detected
+    DETAIL:  Process 12927 waits for AccessExclusiveLock on relation 7983986 of database 7983203; blocked by process 12928.
+    Process 12928 waits for AccessShareLock on relation 7983967 of database 7983203; blocked by process 12927.
+    HINT:  See server log for query details.
+    Time: 1001.581 ms (00:01.002)
+    ROLLBACK
+
+Session 1's own output for correlation:
+    12928
+    BEGIN
+    LOCK TABLE
+    LOCK TABLE
+    2026-09-26 17:19:04.15776+00
+    ROLLBACK
+
+Interpretation
+--------------
+- The TRUNCATE transaction (session 2, playing the role of
+  TestCatalogueRLS_DeleteAndTruncateAreRefusedLoudly/casino_games_TRUNCATE) fails after
+  almost exactly 1.00s (1001.581 ms) - matching CI run #331's reported "1.00s" duration for the
+  failing subtest to the millisecond scale.
+- The error is SQLSTATE 40P01 (deadlock_detected) with message "deadlock detected", NOT
+  SQLSTATE P0001 (the deny-truncate trigger's raise_exception) that
+  TestCatalogueRLS_DeleteAndTruncateAreRefusedLoudly/casino_games_TRUNCATE asserts via
+  assertImmutableViolation. assertImmutableViolation would fail on the SQLSTATE check
+  ("expected SQLSTATE P0001 ... got 40P01").
+- This CONFIRMS the general class of failure the task brief hypothesized (shared-DB lock
+  contention from concurrently running packages breaking a DDL-heavy assertion in
+  internal/db), but the specific mechanism is Postgres's deadlock detector
+  (deadlock_timeout, 1s default, unmodified anywhere in this repo), not a lock_timeout GUC.
+  No lock_timeout is configured anywhere in this codebase, so SQLSTATE 55P03 is not
+  reachable here; 40P01 is.
+- Whether SQLSTATE 40P01 rather than 55P03 exactly, the root cause and the fix are the same:
+  TRUNCATE against tables that other concurrently-running integration test packages can hold
+  open-transaction locks on (directly or transitively via a referencing table + CASCADE) is
+  exposed to the shared CI database no matter which specific SQLSTATE Postgres happens to
+  surface for the contention. The fix (isolating these subtests onto a scratch database with
+  no other package attached) removes the exposure regardless of which SQLSTATE would have
+  fired.

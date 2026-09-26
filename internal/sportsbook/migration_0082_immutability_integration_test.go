@@ -27,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
 // seedPlacedBet returns the id of one genuinely placed bet.
@@ -192,8 +193,21 @@ func TestMigration0082_SportsbookBetsProviderReferenceWriteOnce(t *testing.T) {
 	}
 }
 
+// TestMigration0082_SportsbookBetsDenyTruncate runs on an isolated scratch
+// database (internal/testsupport/scratchdb), NOT the shared testPool()
+// database - the CASCADE variant below must take an ACCESS EXCLUSIVE lock
+// on sportsbook_bet_settlements too (it references sportsbook_bets since
+// migration 0091), a table this package's own settlement-flow integration
+// tests and internal/reconciliation/internal/risk write to concurrently
+// on a full whole-repo run. This is the same shared-database lock-
+// contention class as CI run #331
+// (docs/plans/stage-10.3-planning/08-ci-331-lock-contention.md) and as
+// internal/jurisdiction's registry_rls_integration_test.go (tenants/
+// licences/jurisdictions TRUNCATE, already isolated for the identical,
+// live-observed reason: SQLSTATE 40P01 "deadlock detected" against the
+// shared database).
 func TestMigration0082_SportsbookBetsDenyTruncate(t *testing.T) {
-	pool := testPool(t)
+	pool := sportsbookImmutabilityScratchPool(t)
 	f := seedFixture(t, pool)
 	seedPlacedBet(t, pool, f, "mig0082-truncate")
 
@@ -218,4 +232,21 @@ func TestMigration0082_SportsbookBetsDenyTruncate(t *testing.T) {
 	if !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("expected ledger_deny_mutation's own append-only message, got: %v", err)
 	}
+}
+
+// sportsbookImmutabilityScratchPool creates an isolated scratch database
+// with the full migration chain applied, for TestMigration0082_
+// SportsbookBetsDenyTruncate (see its comment above).
+func sportsbookImmutabilityScratchPool(t *testing.T) *db.Pool {
+	t.Helper()
+	url := scratchdb.New(t, "sbimm_truncate_")
+	pool, err := db.Connect(context.Background(), url, 5, 5_000_000_000)
+	if err != nil {
+		t.Fatalf("connect to scratch database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.MigrateUp(context.Background(), "../../migrations"); err != nil {
+		t.Fatalf("migrate scratch database: %v", err)
+	}
+	return pool
 }

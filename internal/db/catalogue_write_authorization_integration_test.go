@@ -29,6 +29,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
 // catalogueChain is a full, valid sport -> competition -> event -> market
@@ -504,7 +506,34 @@ func assertImmutableViolation(t *testing.T, err error, wantColumnSubstr string) 
 }
 
 // --- Item 9: DELETE and TRUNCATE are refused loudly ---
-
+//
+// The TRUNCATE subtests used to live here too, against the shared
+// TEST_DATABASE_URL database. CI run #331 (docs/plans/stage-10.3-planning/
+// 08-ci-331-lock-contention.md) failed
+// casino_games_TRUNCATE intermittently: TRUNCATE casino_games CASCADE
+// takes ACCESS EXCLUSIVE locks on casino_games and every table that
+// (transitively, via CASCADE) references it - casino_game_availability,
+// casino_launch_sessions, risk_rules, casino_provider_rounds,
+// casino_catalogue_change_requests for casino_games; sb_competitions etc.
+// for sb_sports. On the shared database, other packages' integration
+// tests (internal/casino, internal/httpserver, ...) run concurrently
+// against those same tables. A repro
+// (docs/plans/stage-10.3-planning/evidence/ci-331-truncate-lock-repro.txt)
+// confirmed this reliably reproduces a ~1.00s failure - matching CI run
+// #331's reported duration - via Postgres's own deadlock detector
+// (SQLSTATE 40P01, deadlock_timeout=1s, unmodified default; NOT a
+// lock_timeout, which is not configured anywhere in this codebase) once
+// another session holds a lock on a referencing table and later also
+// waits on casino_games itself. That is a real SQLSTATE the deny-truncate
+// trigger never gets a chance to raise, so assertImmutableViolation
+// (which requires P0001) correctly fails - the trigger did not get to
+// run, a lock conflict aborted the statement first.
+//
+// TestCatalogueRLS_TruncateIsRefusedLoudly (below) proves the same
+// invariant on an isolated scratch database (internal/testsupport/
+// scratchdb, full migration chain applied) that no other package's test
+// can ever hold a lock on, removing the exposure entirely rather than
+// masking it with a retry or a longer timeout.
 func TestCatalogueRLS_DeleteAndTruncateAreRefusedLoudly(t *testing.T) {
 	pool := testPool(t)
 	c := seedCatalogueChain(t, pool)
@@ -516,6 +545,34 @@ func TestCatalogueRLS_DeleteAndTruncateAreRefusedLoudly(t *testing.T) {
 		})
 		assertImmutableViolation(t, err, "DELETE")
 	})
+
+	t.Run("sb_selections DELETE", func(t *testing.T) {
+		err := pool.WithPlatformService(context.Background(), ServiceSportsbookCatalogueSync, func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `DELETE FROM sb_selections WHERE id = $1`, c.selectionID)
+			return err
+		})
+		assertImmutableViolation(t, err, "DELETE")
+	})
+}
+
+// TestCatalogueRLS_TruncateIsRefusedLoudly is
+// TestCatalogueRLS_DeleteAndTruncateAreRefusedLoudly's TRUNCATE coverage,
+// moved (CI run #331, see the comment above) onto a scratch database
+// created by internal/testsupport/scratchdb with the full migration chain
+// applied via Pool.MigrateUp - not the shared TEST_DATABASE_URL database
+// every other package's integration test also runs against. No other
+// package can ever attach to this database, so no concurrently-running
+// test can hold a lock on casino_games, sb_sports, or anything CASCADE
+// would touch, and the deny-truncate trigger is always the thing that
+// aborts the statement - never a lock conflict racing it. This is the
+// real migrated schema (same migrations/ directory, same triggers, same
+// RLS policies) - only the database instance is private to this test.
+func TestCatalogueRLS_TruncateIsRefusedLoudly(t *testing.T) {
+	pool := catalogueScratchPool(t)
+	// Only the referencing rows this seeds matter here (they are what
+	// makes CASCADE necessary below) - neither subtest reads any of the
+	// returned ids.
+	seedCatalogueChain(t, pool)
 
 	t.Run("casino_games TRUNCATE", func(t *testing.T) {
 		// CASCADE is required here only to get past Postgres's own
@@ -532,14 +589,6 @@ func TestCatalogueRLS_DeleteAndTruncateAreRefusedLoudly(t *testing.T) {
 		assertImmutableViolation(t, err, "TRUNCATE")
 	})
 
-	t.Run("sb_selections DELETE", func(t *testing.T) {
-		err := pool.WithPlatformService(context.Background(), ServiceSportsbookCatalogueSync, func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, `DELETE FROM sb_selections WHERE id = $1`, c.selectionID)
-			return err
-		})
-		assertImmutableViolation(t, err, "DELETE")
-	})
-
 	t.Run("sb_sports TRUNCATE", func(t *testing.T) {
 		// CASCADE for the same reason as casino_games above (sb_sports is
 		// referenced by sb_competitions).
@@ -549,6 +598,25 @@ func TestCatalogueRLS_DeleteAndTruncateAreRefusedLoudly(t *testing.T) {
 		})
 		assertImmutableViolation(t, err, "TRUNCATE")
 	})
+}
+
+// catalogueScratchPool creates an isolated scratch database (see
+// TestCatalogueRLS_TruncateIsRefusedLoudly's comment) with the full
+// migration chain applied, and connects to it exactly like testPool
+// connects to the shared database (same Connect call, same non-superuser/
+// non-BYPASSRLS enforcement in db.Connect's verifyNotPrivileged).
+func catalogueScratchPool(t *testing.T) *Pool {
+	t.Helper()
+	url := scratchdb.New(t, "catrls_truncate_")
+	pool, err := Connect(context.Background(), url, 5, 5_000_000_000)
+	if err != nil {
+		t.Fatalf("connect to scratch database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.MigrateUp(context.Background(), "../../migrations"); err != nil {
+		t.Fatalf("migrate scratch database: %v", err)
+	}
+	return pool
 }
 
 // --- Item 10 (fix round, SEC-S91-3): casino_games writes require the

@@ -26,6 +26,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Diansalas/igaming-platform/internal/db"
+	"github.com/Diansalas/igaming-platform/internal/testsupport/scratchdb"
 )
 
 func TestMigration0082_LedgerAccountsImmutableFields(t *testing.T) {
@@ -126,8 +129,22 @@ func TestMigration0082_LedgerAccountsStatusStaysMutable(t *testing.T) {
 // already records: row-level triggers never fire on TRUNCATE at all, so
 // the BEFORE UPDATE guard above would not stop a TRUNCATE from erasing
 // every account the (immutable) ledger_entries rows point at.
+//
+// Runs on an isolated scratch database (internal/testsupport/scratchdb),
+// NOT the shared testPool() database every other package's integration
+// test also writes against - the same CI-331 lock-contention class
+// (docs/plans/stage-10.3-planning/08-ci-331-lock-contention.md) applies
+// here, arguably with a larger blast radius: TRUNCATE ledger_accounts
+// CASCADE must take ACCESS EXCLUSIVE locks on ledger_accounts,
+// ledger_entries AND wallet_balance_projection - tables every financial
+// package's integration suite (casino, sportsbook, bonus, payments,
+// reconciliation, risk) writes to concurrently. internal/jurisdiction's
+// registry_rls_integration_test.go documents this exact mechanism
+// (SQLSTATE 40P01, "deadlock detected") already having been observed live
+// for its own tenants/licences/jurisdictions TRUNCATE tests, which is why
+// those moved to a scratch database first.
 func TestMigration0082_LedgerAccountsDenyTruncate(t *testing.T) {
-	pool := testPool(t)
+	pool := ledgerImmutabilityScratchPool(t)
 	f := seedFixture(t, pool)
 
 	err := pool.WithTenant(context.Background(), f.tenantID, func(ctx context.Context, tx pgx.Tx) error {
@@ -140,4 +157,22 @@ func TestMigration0082_LedgerAccountsDenyTruncate(t *testing.T) {
 	if !strings.Contains(err.Error(), "append-only") {
 		t.Fatalf("expected ledger_deny_mutation's own append-only message, got: %v", err)
 	}
+}
+
+// ledgerImmutabilityScratchPool creates an isolated scratch database with
+// the full migration chain applied, for TRUNCATE-class tests in this file
+// that must not run against the shared database (see
+// TestMigration0082_LedgerAccountsDenyTruncate's comment above).
+func ledgerImmutabilityScratchPool(t *testing.T) *db.Pool {
+	t.Helper()
+	url := scratchdb.New(t, "ledgerimm_truncate_")
+	pool, err := db.Connect(context.Background(), url, 5, 5_000_000_000)
+	if err != nil {
+		t.Fatalf("connect to scratch database: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if _, err := pool.MigrateUp(context.Background(), "../../migrations"); err != nil {
+		t.Fatalf("migrate scratch database: %v", err)
+	}
+	return pool
 }
