@@ -409,3 +409,50 @@ falls under ADR 0019's "verified provider callback" row instead.
 
 **Not covered:** code (none yet), volumetric DoS, real vendor schemes, secret-store design, and
 the casino/KYC fixes.
+
+---
+
+## Review record and Orchestrator rulings (2026-09-26)
+
+| Reviewer | Verdict | Paper |
+|---|---|---|
+| `payments` | APPROVE with 3 changes | `13-pay-wh-review-payments.md` |
+| `backend` | APPROVE with 4 required changes | `14-pay-wh-review-backend.md` |
+| `architect` (+ database/RLS) | APPROVED WITH CHANGES C1–C7 | `15-pay-wh-review-architect-db.md` |
+| `qa` | Binding 17-test plan | `16-pay-wh-review-qa-test-plan.md` |
+| `identity-compliance` | KYC-WH-1 CONFIRMED (read-only) | `12-kyc-wh-1-verification.md` |
+
+**Binding rulings for implementation** (these supersede conflicting text above):
+
+1. **ADR 0022 §3 is closed by this design** (engineering item owned by security/payments; not in the Human Decision Register). The mechanism is candidate 1: the URL tenant only *selects* the single per-(tenant, provider) credential, which must verify a signature over content that includes the tenant. Candidate 2 (provider account id selecting the tenant) is not adopted. The architect's amendment text (paper 15) is applied to ADR 0022, and ADR 0019's matrix wording is corrected (with `ledger-finance` concurrence recorded).
+2. **C1:** ADR 0009 is Accepted, with its pre-production confirmations still open. Choosing the real secret store is a future engineering ADR, and provisioning it needs human authorization. Stage 10.1 ships a **MOCK resolver only**; the real resolver is NOT IMPLEMENTED, and S-6 remains launch-blocking for any real PSP until it exists.
+3. **C2/C3:** a single injected `WebhookCredentialResolver`, not a per-provider map. No `MerchantAccountID` field in 10.1.
+4. **Merge order (payments):** PAY-REV-1 lands first. PAY-WH-TENANT-1 is implemented on top of it, and the "verify, then lock" ordering is re-verified against the merged code.
+5. **Backend changes:**
+   - one shared error mapper with a route-kind flag: an authentication failure is 401 `callback rejected` on the public webhook and 503 on the simulate route;
+   - the `ErrUnknownProvider` → 404 branch is folded into the uniform 401;
+   - header format validation (`X-Payments-Signature`, `X-Payments-Key-Id`) happens in the HTTP handler, before any tenant or database work;
+   - a 404 remains only for the post-verification `ErrDepositIntentNotFound`.
+6. **Invariants I1–I3 (architect) are binding for `qa`/`code-reviewer`:**
+   - before verification, only the platform tenant lookup and read-only tenant-scoped config/credential reads run: no ledger, intent, wallet or projection reads, no locks, no writes, no audit rows;
+   - credential lookup is scoped to the route tenant, with no cross-tenant key attempts;
+   - after verification, one tenant id is used for RLS, the signature input and the credential, and any mismatch fails closed.
+7. **I4:** `status='disabled'` capability rows gate routing only, and callbacks for them are still accepted (payments co-signed). Cutting off callbacks is done by revoking the credential.
+8. **C5:** a key-material rejection before verification still raises the ADR 0022 §4.1 security alert (allow-listed fields).
+9. **Tests (QA plan, paper 16):**
+   - pre-fix evidence `TestPayWH_S6_CrossTenant_PreFix_AttackSucceeds`, run against the unfixed code and saved under `evidence/`, then retired;
+   - the six-point "no financial effect" checklist;
+   - tamper tests corrupt the signature headers (payments change 1);
+   - existing 404/400 webhook assertions re-verified individually, not by blind replace;
+   - an OpenAPI contract test for the payments webhook entry.
+10. **C4:** the tenant-binding tests are written as ADR 0022 §6 conformance tests, so every future real adapter must pass them; T5 stays mock-only.
+11. **Registered, not built:**
+    - **PAYWH-BRAND-1:** no brand scoping in `ProviderAcceptsWebhook`.
+    - **PAYWH-RL-1:** webhook rate limiting.
+    - **PAYWH-TS-1:** signed-timestamp replay window.
+    - **KYC-WH-1** (High) and **CAS-WH-TENANT-1** (Medium): registered in the task registry. KYC-WH-1 is raised to the human for a scope ruling. The shared callback contract is recorded once, in the ADR 0022 amendment, with no shared Go package in 10.1.
+12. **Doc updates (C7):**
+    - `07-payments-architecture.md`;
+    - `payment-orchestration.md` §5 and §10;
+    - stale comments in `deposit_handlers.go` and `orchestrator.go`;
+    - the payments webhook entry in OpenAPI (API-DOC-PAYWH).

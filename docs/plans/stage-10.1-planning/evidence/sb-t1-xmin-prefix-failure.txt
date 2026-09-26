@@ -1,0 +1,26 @@
+SB-T1-XMIN pre-fix evidence (docs/plans/stage-10.1-planning-gate-proposal.md
+§J, test #17 + the renamed #13). Recorded 2026-09-26 against schema state
+migration 0091 (schema_migrations tip = 91; migration 0093 file existed on
+disk but had NOT been applied to this database at the time this run was
+captured - confirmed via `SELECT version FROM schema_migrations ORDER BY
+version DESC LIMIT 3` immediately before this run, showing 91/90/89).
+Command:
+  go test -tags=integration -race -count=1 -v \
+    -run 'TestDBConstraints_T1_ComposedVoidCausation_SavepointRollbackIsAccepted$|TestSettlementScenario_ComposedVoid_InsideOuterSavepoint_ServiceLevel$' \
+    ./internal/sportsbook/...
+
+Both tests FAIL, as required (both assert the fixed, accepting behavior;
+the unfixed trigger still rejects a composed void whose rollback row was
+inserted under a released SAVEPOINT). No database URL, credential or
+connection string appears in the output below.
+
+---8<--- raw test output ---8<---
+=== RUN   TestSettlementScenario_ComposedVoid_InsideOuterSavepoint_ServiceLevel
+    settlement_composed_void_savepoint_integration_test.go:74: SB-T1-XMIN: expected a composed void driven inside an outer SAVEPOINT to succeed end-to-end (migration 0093), got: simulate composed void inside savepoint: sportsbook: settlement integrity failure: insert void history row: ERROR: sportsbook_bet_settlements: a void may cite only a rollback of this bet inserted by the same transaction (SQLSTATE P0001)
+--- FAIL: TestSettlementScenario_ComposedVoid_InsideOuterSavepoint_ServiceLevel (2.11s)
+=== RUN   TestDBConstraints_T1_ComposedVoidCausation_SavepointRollbackIsAccepted
+    settlement_db_constraints_integration_test.go:633: SB-T1-XMIN: expected T-1 to accept a composed void whose rollback row was inserted under a released savepoint (migration 0093), got: ERROR: sportsbook_bet_settlements: a void may cite only a rollback of this bet inserted by the same transaction (SQLSTATE P0001)
+--- FAIL: TestDBConstraints_T1_ComposedVoidCausation_SavepointRollbackIsAccepted (0.48s)
+FAIL
+FAIL	github.com/Diansalas/igaming-platform/internal/sportsbook	2.711s
+FAIL
