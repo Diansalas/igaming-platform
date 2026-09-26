@@ -3,6 +3,7 @@ package reconciliation
 import (
 	"context"
 	"fmt"
+	"math/big"
 	"sort"
 	"time"
 
@@ -31,10 +32,13 @@ import (
 //	                     (debits == credits), uses one asset and touches
 //	                     exactly one player wallet; a bet debits a player
 //	                     spendable account, never debits house_gaming and
-//	                     never credits a player spendable account; a win
-//	                     credits a player account, never credits
-//	                     house_gaming, and credits a wallet that one of its
-//	                     round's bets debited.
+//	                     never credits a player spendable account, and
+//	                     (no BONUS_SET leg) credits house_gaming exactly
+//	                     the stake; a win credits a player account, never
+//	                     credits house_gaming, debits house_gaming exactly
+//	                     the wallet credit minus the lock-release legs,
+//	                     and credits a wallet that one of its round's bets
+//	                     debited.
 //	C3 orphan win        every casino_win's round (tenant, provider,
 //	                     correlation id) has a casino_bet.
 //	C4 rollback linkage  every casino_rollback reverses a casino_bet or
@@ -46,11 +50,16 @@ import (
 //	                     (provider_id, provider_tx_id) with a casino
 //	                     tombstone (a backstop: structurally impossible
 //	                     under the unique index).
-//	C6 unposted provider event  a rejection-record row whose
+//	C6 unposted provider event  a rejection-record row of a class in
+//	                     CasinoUnpostedEventReasonClasses whose
 //	                     (provider_id, provider_tx_id) the ledger holds no
 //	                     transaction for (not even a tombstone): a provider
-//	                     asserted a financial event the ledger lacks.
-//	                     Evidence-type: recorded once per key.
+//	                     asserted a settlement of existing exposure that the
+//	                     ledger lacks. The other classes are correct
+//	                     platform behaviour and are metrics only
+//	                     (CasinoEvidenceOnlyReasonClasses; ledger-finance
+//	                     ruling, paper 02 §2.19). Evidence-type: recorded
+//	                     once per key.
 //	C7 tombstone late original  a rejection-record row of class
 //	                     original_tombstoned: an original arrived after its
 //	                     tombstone. Platform net is zero (correct); only a
@@ -86,15 +95,42 @@ import (
 //     break the severity rule. The guarantee is enforced at write time
 //     (postWin's L2 FOR UPDATE + resolveWinOrigin); orphan wins are still
 //     detected.
-//   - C4's exact-inverse comparison applies to cash rollbacks only. A
-//     rollback whose original or itself touches BONUS_SET
+//   - C4's exact-inverse comparison applies to rollbacks of CASH
+//     originals only. A rollback whose ORIGINAL touches BONUS_SET
 //     (player_bonus/player_locked_bonus/player_bonus_held) follows the
 //     §16.15 held-disposition shapes, which are deliberately not inverses;
-//     bonus-funded casino stakes are not implemented (G-6). Linkage, the
-//     one-per-original rule and C2's balance/asset/wallet checks still apply
-//     to them.
+//     bonus-funded casino stakes are not implemented (G-6). The exemption
+//     is decided by the original alone, never by the rollback: a cash
+//     original's rollback that touches BONUS_SET is a finding (gate
+//     10.3-W2/W3 code review #2). Linkage, the one-per-original rule and
+//     C2's balance/asset/wallet checks still apply to exempt rollbacks.
+//   - C2's positive house_gaming rule for BETS covers bets with no
+//     BONUS_SET leg only. The bonus-funded casino bet shape (08 §16.10.1)
+//     is not implemented (G-6), so a positive rule for it would be
+//     invented, not derived; it activates with the change that ships
+//     bonus-funded casino bets. The stake is the sum of debits on the
+//     player's spendable accounts, the same definition casino_statement
+//     uses for a bet's amount, so the two streams cannot disagree about
+//     what "the stake" is. When jackpot contributions ship (G-6) the rule
+//     becomes "house_gaming + jackpot_contribution credits == stake", in
+//     that same change.
+//   - C2's positive rule for WINS applies to every win shape: house_gaming
+//     debits == wallet credits - lock-release legs (debits on
+//     player_locked_cash/player_locked_bonus). That is exact for all four
+//     postWin branches (direct cash has no lock legs; locked cash, locked
+//     bonus and held credit the released lock back to the wallet beside
+//     the payout). Rule B2 mirror/recognition legs are tenant-level (no
+//     wallet) and never house_gaming, so they sit outside both sides.
+//     Today only the direct-cash shape is reachable (postBet is
+//     cash-only), where the rule is simply house_gaming debits == wallet
+//     credits.
 //   - C6 does not include an "internal_error" class: a generic 500 is not a
 //     rejection decision, is retryable, and is not recorded.
+//   - C6's class set is the ledger-finance ruling of paper 02 §2.19, which
+//     supersedes §2.4's five-class list: the G-1 win-attribution classes
+//     wallet_collision, mixed_funding and bonus_bet_not_locked (named after
+//     §2.4 was written) are added; original_tombstoned is C7's, not C6's
+//     (the ledger holds its tombstone). Five classes are evidence only.
 
 // StreamCasinoConsistency is the stream name on reconciliation_runs.
 const StreamCasinoConsistency Stream = "casino_consistency"
@@ -110,6 +146,49 @@ const (
 	MismatchKindCasTombstoneLateOrigin MismatchKind = "cas_tombstone_late_original"
 )
 
+// C6 reason-class ruling (ledger-finance, gate 10.3-W2/W3 fix round;
+// paper 02 §2.19, reconciliation-model.md §2.3). The two sets partition
+// every casino_callback_rejections.reason_class of migration 0097; an
+// integration test pins the partition against the table's CHECK
+// constraint, so a new class cannot ship without a ruling. The values
+// duplicate internal/casino's RejectionClass constants (this package must
+// not import casino); the same test pins them to those constants.
+//
+// CasinoUnpostedEventReasonClasses are the classes where a verified
+// provider asserted a SETTLEMENT of existing exposure (a win, or a
+// rollback that is not a tombstone) and the platform could not post it.
+// If the ledger holds nothing under that reference, the provider believes
+// money moved that the ledger does not hold. That is always wrong, so it
+// is a C6 finding (P1).
+//
+// Functions returning a fresh slice, not package-level vars (the ledger
+// bonusSetAccountTypes / security S-3 precedent): a slice var could be
+// truncated by any code in this package, silently narrowing C6.
+func CasinoUnpostedEventReasonClasses() []string {
+	return []string{
+		"bet_not_found",         // E5: win (or rollback) for a round with no un-reversed bet
+		"ambiguous_round",       // G-1 409: win cannot be attributed to one bet
+		"wallet_collision",      // G-1 409: round resolves more than one wallet
+		"mixed_funding",         // G-1 409: bet spans more than one funding origin
+		"lock_already_released", // G-1 409 / LF-18: second release of a locked stake
+		"bonus_bet_not_locked",  // G-1 409: bonus debit with no lock
+	}
+}
+
+// CasinoEvidenceOnlyReasonClasses are the classes where the refusal is
+// correct platform behaviour and the ledger is right as it stands. Each is
+// counted in the run's audit metadata (rejections_by_class,
+// rejections_evidence_only), never raised as a mismatch.
+func CasinoEvidenceOnlyReasonClasses() []string {
+	return []string{
+		"original_tombstoned",             // E3/E10: net zero by design; C7 records it once per tombstone
+		"payload_mismatch",                // F-7: the ledger holds the posted fact under the key
+		"already_rolled_back",             // E7: the ledger holds the original's one reversal
+		"round_ownership_conflict",        // bet refused (new exposure, 409); nothing was owed
+		"rollback_of_tombstoned_original", // E9 different reference: acknowledged 200, net zero
+	}
+}
+
 // CasinoAgeingMetricWindow is the age past which an unresolved cash round
 // is counted in the unresolved_cash_rounds_older_than_window METRIC. It is
 // a reporting parameter only - never a tolerance and never a mismatch
@@ -124,17 +203,30 @@ type CasinoMetrics struct {
 	UnresolvedCashRoundsOlderThanWindow int64
 	TombstonesTotal                     int64
 	RejectionsTotal                     int64
-	RejectionsUnposted                  int64
+	// RejectionsUnposted counts rejection rows of ANY class with no ledger
+	// transaction under their reference (C6 raises only the ruled subset).
+	RejectionsUnposted int64
+	// RejectionsEvidenceOnly counts rows in CasinoEvidenceOnlyReasonClasses:
+	// correct refusals kept visible, never mismatches.
+	RejectionsEvidenceOnly int64
+	// RejectionsByClass counts every rejection row per reason_class.
+	RejectionsByClass map[string]int64
 }
 
 // AuditMetadata renders m for the run's audit record.
 func (m CasinoMetrics) AuditMetadata() map[string]any {
+	byClass := map[string]int64{}
+	for k, v := range m.RejectionsByClass {
+		byClass[k] = v
+	}
 	return map[string]any{
 		"unresolved_cash_rounds_older_than_window": m.UnresolvedCashRoundsOlderThanWindow,
 		"ageing_metric_window_seconds":             int64(CasinoAgeingMetricWindow / time.Second),
 		"tombstones_total":                         m.TombstonesTotal,
 		"rejections_total":                         m.RejectionsTotal,
 		"rejections_unposted":                      m.RejectionsUnposted,
+		"rejections_evidence_only":                 m.RejectionsEvidenceOnly,
+		"rejections_by_class":                      byClass,
 	}
 }
 
@@ -340,7 +432,15 @@ func casCheckPostingShape(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, r 
 		       COALESCE(bool_or(e.direction = 'credit' AND la.wallet_id IS NOT NULL
 		                        AND la.account_type IN ('player_cash', 'player_bonus')), false),
 		       COALESCE(bool_or(e.direction = 'credit' AND la.wallet_id IS NOT NULL), false),
-		       COALESCE(bool_or(e.direction = 'credit' AND la.account_type = 'house_gaming'), false)
+		       COALESCE(bool_or(e.direction = 'credit' AND la.account_type = 'house_gaming'), false),
+		       COALESCE(bool_or(la.account_type IN ('player_bonus', 'player_locked_bonus', 'player_bonus_held')), false),
+		       COALESCE(SUM(e.amount) FILTER (WHERE e.direction = 'debit' AND la.wallet_id IS NOT NULL
+		                                        AND la.account_type IN ('player_cash', 'player_bonus')), 0)::text,
+		       COALESCE(SUM(e.amount) FILTER (WHERE e.direction = 'credit' AND la.account_type = 'house_gaming'), 0)::text,
+		       COALESCE(SUM(e.amount) FILTER (WHERE e.direction = 'debit' AND la.account_type = 'house_gaming'), 0)::text,
+		       COALESCE(SUM(e.amount) FILTER (WHERE e.direction = 'credit' AND la.wallet_id IS NOT NULL), 0)::text,
+		       COALESCE(SUM(e.amount) FILTER (WHERE e.direction = 'debit' AND la.wallet_id IS NOT NULL
+		                                        AND la.account_type IN ('player_locked_cash', 'player_locked_bonus')), 0)::text
 		  FROM ledger_transactions t
 		  LEFT JOIN ledger_entries e ON e.ledger_transaction_id = t.id
 		  LEFT JOIN ledger_accounts la ON la.id = e.ledger_account_id
@@ -352,11 +452,12 @@ func casCheckPostingShape(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, r 
 	}
 	for rows.Next() {
 		var id uuid.UUID
-		var txType, dr, cr string
-		var missingProvider, playerSpendDebit, houseDebit, playerSpendCredit, walletCredit, houseCredit bool
+		var txType, dr, cr, stakeS, houseCrS, houseDrS, walletCrS, lockRelS string
+		var missingProvider, playerSpendDebit, houseDebit, playerSpendCredit, walletCredit, houseCredit, bonusSet bool
 		var entries, assets, wallets int64
 		if err := rows.Scan(&id, &txType, &missingProvider, &entries, &dr, &cr, &assets, &wallets,
-			&playerSpendDebit, &houseDebit, &playerSpendCredit, &walletCredit, &houseCredit); err != nil {
+			&playerSpendDebit, &houseDebit, &playerSpendCredit, &walletCredit, &houseCredit,
+			&bonusSet, &stakeS, &houseCrS, &houseDrS, &walletCrS, &lockRelS); err != nil {
 			rows.Close()
 			return err
 		}
@@ -384,6 +485,14 @@ func casCheckPostingShape(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, r 
 		if debits.Cmp(credits) != 0 {
 			add("balance", "debits == credits", fmt.Sprintf("debits=%s credits=%s", debits, credits))
 		}
+		var sums [5]*big.Int
+		for i, s := range []string{stakeS, houseCrS, houseDrS, walletCrS, lockRelS} {
+			if sums[i], err = parseBig(s); err != nil {
+				rows.Close()
+				return err
+			}
+		}
+		stake, houseCr, houseDr, walletCr, lockRel := sums[0], sums[1], sums[2], sums[3], sums[4]
 		if assets != 1 {
 			add("single_asset", "1 asset", fmt.Sprintf("%d assets", assets))
 		}
@@ -401,12 +510,27 @@ func casCheckPostingShape(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, r 
 			if playerSpendCredit {
 				add("bet_player_side", "player_cash/player_bonus never credited by a bet", "credited")
 			}
+			// Positive rule (gate 10.3-W2/W3 code review #3): the whole
+			// stake lands on house_gaming. Bets with no BONUS_SET leg
+			// only; see the file comment's recorded deviation.
+			if !bonusSet && houseCr.Cmp(stake) != 0 {
+				add("bet_house_credit", "house_gaming credits == stake",
+					fmt.Sprintf("house_gaming credits=%s stake=%s", houseCr, stake))
+			}
 		case "casino_win":
 			if !walletCredit {
 				add("win_credits_player", "a credit on a player wallet account", "none")
 			}
 			if houseCredit {
 				add("win_house_side", "house_gaming never credited by a win", "house_gaming credited")
+			}
+			// Positive rule (gate 10.3-W2/W3 code review #3): the payout
+			// comes from house_gaming. Lock-release legs move the
+			// player's own locked stake back to the wallet and are not
+			// payout.
+			if payout := new(big.Int).Sub(walletCr, lockRel); houseDr.Cmp(payout) != 0 {
+				add("win_house_debit", "house_gaming debits == wallet credits - lock-release debits",
+					fmt.Sprintf("house_gaming debits=%s wallet credits=%s lock-release debits=%s", houseDr, walletCr, lockRel))
 			}
 		}
 	}
@@ -557,8 +681,14 @@ func casCheckRollbackLinkage(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 	}
 
 	// (c) cash rollback caller legs == exact inverse multiset of the
-	// original's (mirror/recognition legs excluded; BONUS_SET rollbacks
-	// exempt - see the file comment).
+	// original's (mirror/recognition legs excluded). The exemption keys
+	// on the ORIGINAL only (e.ledger_transaction_id = o.id): an original
+	// that touched BONUS_SET may be reversed by a §16.15 held-disposition
+	// shape, but a CASH original is always reversed by its exact inverse.
+	// So a cash original's rollback that itself touches BONUS_SET (e.g.
+	// credits player_bonus instead of player_cash) is exactly the
+	// corruption this check exists to catch (gate 10.3-W2/W3 code review
+	// #2). Never exempt because the rollback touches BONUS_SET.
 	rows, err = tx.Query(ctx, `
 		WITH rb AS (
 		    SELECT r.id AS rid, r.reverses_transaction_id AS oid
@@ -567,7 +697,7 @@ func casCheckRollbackLinkage(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 		     WHERE r.tenant_id = $1 AND r.transaction_type = 'casino_rollback'
 		       AND o.transaction_type IN ('casino_bet', 'casino_win')
 		       AND NOT EXISTS (SELECT 1 FROM ledger_entries e JOIN ledger_accounts la ON la.id = e.ledger_account_id
-		                        WHERE e.ledger_transaction_id IN (r.id, o.id)
+		                        WHERE e.ledger_transaction_id = o.id
 		                          AND la.account_type IN ('player_bonus', 'player_locked_bonus', 'player_bonus_held'))),
 		legs AS (
 		    SELECT rb.rid, e.ledger_account_id AS acct,
@@ -685,18 +815,21 @@ func casCheckRejectionRecord(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID,
 		r.add(kind, key, expected, actual)
 	}
 
-	// C6: provider asserted an event under a reference the ledger holds
-	// nothing for - not a posting, not a tombstone.
+	// C6: provider asserted a settlement under a reference the ledger
+	// holds nothing for - not a posting, not a tombstone. Only the ruled
+	// classes (CasinoUnpostedEventReasonClasses); every other class is
+	// correct platform behaviour and is a metric (casLoadMetrics).
 	rows, err := tx.Query(ctx, `
 		SELECT cr.provider_id, cr.event_type, cr.provider_tx_id, cr.reason_class,
 		       COALESCE(cr.original_provider_tx_id, ''), COALESCE(cr.round_id, ''),
 		       COALESCE(cr.asset_code, ''), COALESCE(cr.amount::text, '')
 		  FROM casino_callback_rejections cr
 		 WHERE cr.tenant_id = $1
+		   AND cr.reason_class = ANY($2)
 		   AND NOT EXISTS (SELECT 1 FROM ledger_transactions t
 		                    WHERE t.tenant_id = cr.tenant_id AND t.provider_id = cr.provider_id
 		                      AND t.provider_tx_id = cr.provider_tx_id)
-		 ORDER BY cr.first_seen_at, cr.id`, tenantID)
+		 ORDER BY cr.first_seen_at, cr.id`, tenantID, CasinoUnpostedEventReasonClasses())
 	if err != nil {
 		return err
 	}
@@ -775,5 +908,31 @@ func casLoadMetrics(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID) (CasinoM
 		                       WHERE t.tenant_id = cr.tenant_id AND t.provider_id = cr.provider_id
 		                         AND t.provider_tx_id = cr.provider_tx_id))`,
 		tenantID, cutoff).Scan(&m.UnresolvedCashRoundsOlderThanWindow, &m.TombstonesTotal, &m.RejectionsTotal, &m.RejectionsUnposted)
-	return m, err
+	if err != nil {
+		return CasinoMetrics{}, err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT reason_class, count(*) FROM casino_callback_rejections
+		 WHERE tenant_id = $1 GROUP BY reason_class ORDER BY reason_class`, tenantID)
+	if err != nil {
+		return CasinoMetrics{}, err
+	}
+	defer rows.Close()
+	evidenceOnly := map[string]bool{}
+	for _, c := range CasinoEvidenceOnlyReasonClasses() {
+		evidenceOnly[c] = true
+	}
+	m.RejectionsByClass = map[string]int64{}
+	for rows.Next() {
+		var class string
+		var n int64
+		if err := rows.Scan(&class, &n); err != nil {
+			return CasinoMetrics{}, err
+		}
+		m.RejectionsByClass[class] = n
+		if evidenceOnly[class] {
+			m.RejectionsEvidenceOnly += n
+		}
+	}
+	return m, rows.Err()
 }
