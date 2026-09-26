@@ -1,6 +1,7 @@
 package providercred
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -154,15 +155,34 @@ func (o *OutboundResolver) Resolve(ctx context.Context, pool TenantTxRunner, ten
 	return c, nil
 }
 
+// derivedTokenCacheMaxEntries bounds DerivedTokenCache so an unbounded
+// number of rotations/tenants cannot grow it forever. It is generous
+// relative to any realistic per-process count of (tenant, handle,
+// fingerprint) triples live at once; eviction is FIFO-by-insertion once
+// the bound is hit (CODE-HYGIENE-10.3-1 item 2).
+const derivedTokenCacheMaxEntries = 4096
+
 // DerivedTokenCache holds credentials DERIVED from an outbound secret
 // (security review §2 precision 3). An entry is keyed on (tenant, handle
 // id, fingerprint) and is served only for an OutboundCredential that THIS
 // call's handle read just returned, so a revoked or rotated handle can
 // never reach its token. Its TTL never exceeds the vendor's own expiry.
+//
+// The cache is bounded (derivedTokenCacheMaxEntries) with FIFO-by-
+// insertion eviction once full, and a Put for a rotated fingerprint
+// proactively evicts every other entry sharing the same (tenant, handle)
+// pair - a stale fingerprint can never be served again (the key no longer
+// matches an OutboundCredential a live read would return), so there is no
+// reason to keep its derived bytes in memory until it ages out or the
+// cache happens to fill up. Evicted entries have their token bytes
+// zeroed before being dropped, so no derived secret material is retained
+// past eviction.
 type DerivedTokenCache struct {
 	mu      sync.Mutex
 	now     func() time.Time
-	entries map[derivedKey]derivedEntry
+	maxSize int
+	order   *list.List // list of *derivedEntry; front = oldest
+	entries map[derivedKey]*list.Element
 }
 
 type derivedKey struct {
@@ -172,20 +192,44 @@ type derivedKey struct {
 }
 
 type derivedEntry struct {
-	token   secretstore.Secret
+	key     derivedKey
+	token   []byte
 	expires time.Time
 }
 
-// NewDerivedTokenCache builds an empty cache (now nil means time.Now).
+// NewDerivedTokenCache builds an empty, bounded cache (now nil means
+// time.Now).
 func NewDerivedTokenCache(now func() time.Time) *DerivedTokenCache {
 	if now == nil {
 		now = time.Now
 	}
-	return &DerivedTokenCache{now: now, entries: map[derivedKey]derivedEntry{}}
+	return &DerivedTokenCache{
+		now:     now,
+		maxSize: derivedTokenCacheMaxEntries,
+		order:   list.New(),
+		entries: map[derivedKey]*list.Element{},
+	}
 }
 
 func keyFor(c OutboundCredential) derivedKey {
 	return derivedKey{tenant: c.TenantID, handle: c.HandleID, fingerprint: c.Fingerprint}
+}
+
+// zeroBytes overwrites b in place so evicted secret material does not
+// linger in the Go heap for an indeterminate time before GC reclaims it.
+func zeroBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}
+
+// removeElementLocked drops el from both the entries map and the order
+// list, zeroing its token bytes first. Callers must hold d.mu.
+func (d *DerivedTokenCache) removeElementLocked(el *list.Element) {
+	e := el.Value.(*derivedEntry)
+	zeroBytes(e.token)
+	delete(d.entries, e.key)
+	d.order.Remove(el)
 }
 
 // Get returns the token derived from exactly this credential, if still
@@ -193,21 +237,48 @@ func keyFor(c OutboundCredential) derivedKey {
 func (d *DerivedTokenCache) Get(c OutboundCredential) ([]byte, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	e, ok := d.entries[keyFor(c)]
-	if !ok || !d.now().Before(e.expires) {
-		delete(d.entries, keyFor(c))
+	el, ok := d.entries[keyFor(c)]
+	if !ok {
 		return nil, false
 	}
-	return e.token.Bytes(), true
+	e := el.Value.(*derivedEntry)
+	if !d.now().Before(e.expires) {
+		d.removeElementLocked(el)
+		return nil, false
+	}
+	out := make([]byte, len(e.token))
+	copy(out, e.token)
+	return out, true
 }
 
 // Put stores token derived from c until vendorExpiry (the vendor's own
-// expiry is the maximum TTL).
+// expiry is the maximum TTL). Any existing entry for a different
+// fingerprint of the same (tenant, handle) pair - i.e. a rotation - is
+// evicted first, and the cache is trimmed back to its bound afterwards.
 func (d *DerivedTokenCache) Put(c OutboundCredential, token []byte, vendorExpiry time.Time) {
 	if c.HandleID == uuid.Nil || c.TenantID == uuid.Nil || !d.now().Before(vendorExpiry) {
 		return
 	}
+	key := keyFor(c)
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.entries[keyFor(c)] = derivedEntry{token: secretstore.NewSecret(token), expires: vendorExpiry}
+
+	for k, el := range d.entries {
+		if k.tenant == key.tenant && k.handle == key.handle && k.fingerprint != key.fingerprint {
+			d.removeElementLocked(el)
+		}
+	}
+	if el, ok := d.entries[key]; ok {
+		d.removeElementLocked(el)
+	}
+
+	tok := make([]byte, len(token))
+	copy(tok, token)
+	el := d.order.PushBack(&derivedEntry{key: key, token: tok, expires: vendorExpiry})
+	d.entries[key] = el
+
+	for d.order.Len() > d.maxSize {
+		d.removeElementLocked(d.order.Front())
+	}
 }

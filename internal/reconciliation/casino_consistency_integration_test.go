@@ -846,11 +846,23 @@ var (
 func TestCasinoConsistency_C6_ClassRulingPartitionsEveryRecordedClass(t *testing.T) {
 	pool := testPool(t)
 	var def string
+	// Matched by Postgres's own auto-generated name for migration 0097's
+	// inline, unnamed "reason_class TEXT NOT NULL CHECK (reason_class IN
+	// (...))" column constraint (the standard "<table>_<column>_check"
+	// pattern), not by a LIKE '%reason_class%' scan of every CHECK's
+	// definition text (CODE-HYGIENE-10.3-1 item 6 / N-B) - the two other
+	// CHECKs on this table (casino_callback_rejections_rollback_shape,
+	// casino_callback_rejections_rollback_amount) are named explicitly and
+	// don't reference reason_class, but a LIKE scan would silently start
+	// matching the wrong constraint (or fail with an ambiguous "more than
+	// one row" error) the day a second CHECK mentioning reason_class is
+	// added; matching by name fails as loudly as possible instead (no rows
+	// - a Scan error) if this constraint is ever renamed or dropped.
 	if err := pool.WithoutTenant(context.Background(), func(ctx context.Context, tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
 			SELECT pg_get_constraintdef(c.oid) FROM pg_constraint c
 			 WHERE c.conrelid = 'casino_callback_rejections'::regclass AND c.contype = 'c'
-			   AND pg_get_constraintdef(c.oid) LIKE '%reason_class%'`).Scan(&def)
+			   AND c.conname = 'casino_callback_rejections_reason_class_check'`).Scan(&def)
 	}); err != nil {
 		t.Fatalf("read reason_class CHECK: %v", err)
 	}
