@@ -168,14 +168,14 @@ status and Tests text. ADR 0092 status.
 is an edit to agent configuration, which needs the human. It does not block W2 (the lint is the
 enforcing control).
 
-## GATE 10.3-W2/W3 — [PENDING CI-342] (DRAFT 2026-09-26)
+## GATE 10.3-W2/W3 — PASSED 2026-09-26 (open findings carried)
 
-Branch `claude/focused-wright-jw88w9`; gate range `6e3d74c..00f02ef` (W2a merged at `3ef18f2`; W2b
-`a41acdf`; W3a `8a69412`; W3b `becc5c2`; close-out and fix rounds `cf775ef`..`00f02ef`). Close-out
-drafted by the orchestrator's documentation agent (docs only). **Verdict withheld: this gate is not
-recorded as PASSED until CI-342-STOREOUTAGE has a root cause, a fix and a green CI run on the fixed
-head.** W2 and W3 are recorded together because the W2 security condition closure and the W3
-reviews landed in the same close-out.
+Branch `claude/focused-wright-jw88w9`; gate range `6e3d74c..103b033` (W2a merged at `3ef18f2`; W2b
+`a41acdf`; W3a `8a69412`; W3b `becc5c2`; close-out and fix rounds `cf775ef`..`103b033`). Close-out
+recorded by the orchestrator's documentation agent (docs only; first drafted pending CI-342 in
+`b10c6df`, finalized after CI-342-STOREOUTAGE was resolved). W2 and W3 are recorded together because
+the W2 security condition closure and the W3 reviews landed in the same close-out. Passing this gate
+carries open findings forward (below), notably **F-POOL-1 (Medium, launch-blocking)**.
 
 **Waves (merged).**
 - W2a PROV-CRED-RESOLVER-1 / PROV-OUTBOUND-CRED-1 / KYC-PROVIDER-SELECT-1: `8ce70ec`..`3ef18f2`
@@ -214,9 +214,11 @@ reviews landed in the same close-out.
   `AWS_RETRY_MODE` — IMDS calls at `New`, retries under the breaker), N-2 (Info; Secrets Manager
   client honours `HTTPS_PROXY`), N-3 (Info; ARN account not pinned against platform
   configuration). **N-1 fixed in `e80114b`** (refused at startup plus pinned defaults mode, retry
-  mode and 2 attempts; 7/7 mutants killed). The N-1 fix has **not** had a separate `security`
-  re-verification; `code-reviewer` checked only that its tests exist and pass. **N-2 and N-3
-  remain open under HD-10.3-2.**
+  mode and 2 attempts; 7/7 mutants killed). `security` verified the fix: **N-1 CLOSED** (addendum
+  to `11-gate-w2w3-reverify-security.md`). The addendum raised **L-N1a** (Low; the rationale for
+  the pinned retry count was inaccurate), fixed in `99bb5b2`: `awssm` SDK retry attempts 2 → 1, so
+  the `secretstore` Fetcher is the only retry layer; mutant M46 killed; ADR 0093 updated. **N-2 and
+  N-3 remain open under HD-10.3-2.**
 - `code-reviewer` re-verification (`12-gate-w2w3-reverify-code.md`, at `e80114b`, committed in
   `302433d`): **READY WITH FOLLOW-UPS.** #1–#9 CLOSED (two mutants run by the reviewer, both
   killed); #10 OPEN, accepted as one Low follow-up **CODE-HYGIENE-10.3-1**; of its items,
@@ -231,7 +233,13 @@ reviews landed in the same close-out.
   at ~2m17s; no recurrence in CI #331–#342. *(Discrepancy in that paper's §3 table: it lists
   #340 as a `govulncheck` failure. The GitHub job record shows #340 failed at the `golangci-lint`
   step, with govulncheck and every later step skipped. The registry row GO-TOOLCHAIN-VULN-1 is
-  correct. Paper 13's §3 row was corrected by the orchestrator at close-out.)*
+  correct. Paper 13's §3 row was corrected by the orchestrator in `b10c6df`.)*
+- `qa`, CI-342-STOREOUTAGE (`14-ci-342-store-outage-test.md`) and `security` ruling
+  (`15-ci-342-security-ruling.md`): ruling A **REJECT** (`9df5869`, 64-connection test pool —
+  removes the pool-starvation coverage); ruling B **ACCEPT WITH CONDITIONS** (`25a3537`, the test
+  runs alone in its own blocking CI step: blocking, no retries, name guard, nothing else joins that
+  step without its own ruling, failures are investigated, never re-run to green). New design
+  finding **F-POOL-1 (Medium)**, below.
 
 **Fix rounds.**
 - **Close-out `040329a` (merged `c3bc313`):** W2A-SEC-1 (registry precondition + tripwire
@@ -258,7 +266,24 @@ reviews landed in the same close-out.
 - **`294e0a0`:** code review #8 (`RequireAnyPermission` unit tests) and #9 (0092 hold-back derived
   from migration version). Mutation-tested per the commit message (all-of rewrite, empty-list
   allow, disabled cutoff: each fails a test); no separate evidence file.
-- **`e80114b`:** N-1 (above). **`302433d`:** dead code removed; CODE-HYGIENE-10.3-1 registered.
+- **`e80114b`:** N-1 (above). **`99bb5b2`:** L-N1a (above). **`302433d`:** dead code removed;
+  CODE-HYGIENE-10.3-1 registered.
+- **CI-342-STOREOUTAGE (`c5f05a9`, `fea3b8d`, `9df5869`, `25a3537`, `103b033`).**
+  `TestStoreOutage_DoesNotPinPool` (`internal/providercred`) failed in CI #342 (1.27 s, the
+  unrelated-query bound) and #347 (`99bb5b2`, 2.66 s, the held-long count). **Root cause:** CPU
+  scheduling delay while every package's `-race` test binary runs concurrently on the 4-vCPU
+  runner; not a product defect in the bounded paths the test measures. History, recorded as it
+  happened: `qa`'s first fix `c5f05a9` (slack 400 → 900 ms) was **rejected by the orchestrator** as
+  a timing weakening; the second, `9df5869` (64-connection test pool), was **rejected by `security`**
+  (ruling A). Both commits remain in history and are **superseded**. **Final:** `103b033` returns
+  to the shared 20-connection pool with every bound unchanged (4 slots / 4 / 500 ms / slack 400 ms)
+  and richer failure diagnostics; `25a3537` runs the test alone in its own blocking CI step (ruling
+  B); `fea3b8d` makes the CI annotation step capture the lines printed before `--- FAIL`.
+- **F-POOL-1 (Medium, `security`, found while measuring CI-342): `NOT IMPLEMENTED`.** ADR 0093 §5's
+  property "a store outage does not pin the pool" does **not** hold at the production pool size of
+  10: an unrelated query waits about 1.4 s until the breaker opens. Launch-blocking unless fixed or
+  explicitly accepted by the human; needs an `architect` + `security` decision (ADR / §5
+  amendment).
 
 **Mutation evidence (all `docs/plans/stage-10.3-planning/evidence/`).** `w2a-mutation-kill.txt`
 24/24 (M22 first NOT KILLED, test corrected, re-run killed); `w2b-mutation-kill.txt` 25/25 (M-C4a
@@ -288,15 +313,17 @@ never by weakening the mutant.
 - #341 (`0fbd0dc`): **green**, including govulncheck (the S-3 CI evidence the security
   re-verification asked for).
 - #342 (`1138062`, docs-only commit on top of `294e0a0`): **FAILED** —
-  `TestStoreOutage_DoesNotPinPool` in `internal/providercred` (the 4-slot store-outage bound that
-  security W2a O-7 relies on). Under investigation as **CI-342-STOREOUTAGE**.
-  **[PENDING: CI-342 root cause + fix]**
-- #343 (`e80114b`): green. #344 (`302433d`): green. #345 (`00f02ef`): in progress when this entry
-  was drafted.
-- Green runs after #342 do not dispose of it: it is an unexplained failure of a security-relevant
-  test until the root cause is recorded.
-- No local 3× CI replay is recorded for this gate range (gate W1 had one). Evidence is the per-wave
-  and per-fix test runs recorded in the reviews and mutation files, plus the GitHub runs above.
+  `TestStoreOutage_DoesNotPinPool` (CI-342-STOREOUTAGE; root cause and fix above).
+- #343 (`e80114b`), #344 (`302433d`), #345 (`00f02ef`), #346 (`b10c6df`): green.
+- #347 (`99bb5b2`): **FAILED** — the same test (CI-342, second mechanism).
+- #348 (`25a3537`) and #349 (`103b033`): **green, all jobs**, including govulncheck and the isolated
+  timing step.
+- **Local CI replay at `103b033`** (scratchpad `ci-local.sh` mirroring the CI split, golangci-lint
+  v2.9.0): gofmt, vet, lint (0 issues), build; migrate up to 98 + verify; race unit tests 36
+  packages ok; **3× race integration: 40 packages ok, 0 skips each**, plus the isolated timing test
+  3/3; reversibility 98 → 94 → 98, verify clean — ALL PASSED. `qa`'s earlier local
+  `internal/httpserver` failures were caused by concurrent agents sharing the local database; the
+  clean replay passed 3/3.
 
 **Labels at this gate** (registry Stage 10.3 section; ADRs 0092/0093):
 - PROV-CRED-RESOLVER-1: `IMPLEMENTED` (`memory` tests only, `devfile` development only; `awssm`
@@ -312,7 +339,8 @@ never by weakening the mutant.
   IAM/KMS/`deploy/` `NOT IMPLEMENTED` (HD-10.3-2); real-AWS use and drills `STAGING REQUIRED`.
 - CI-FLAKE-281: `IMPLEMENTED` (disposition).
 
-**Open items carried forward.** CI-342-STOREOUTAGE (gate-blocking);
+**Open items carried forward.** **F-POOL-1** (Medium; launch-blocking unless fixed or accepted by
+the human; architect + security); the ruling-B conditions on the isolated CI step;
 CODE-HYGIENE-10.3-1 (Low; includes the `DerivedTokenCache` bound, which is a precondition for its
 first production caller); PROVIDER-REF-BOUND-1 (Low, before real-provider go-live);
 CAS-RECON-SCALE-1 (Medium, before real-money multi-tenant load); N-2/N-3 and the IAM/KMS,
@@ -320,10 +348,10 @@ CAS-RECON-SCALE-1 (Medium, before real-money multi-tenant load); N-2/N-3 and the
 rendering); W2A-SEC-2 residual (`matched_predecessor` bool, Info); branch protection + CODEOWNERS
 on `.github/` (security S-4 "CI step integrity"; not verifiable from the repository); all W1
 carry-forwards not closed here (CAS-WIN-IDEMP-1, PAY-SB-REPLAY-AUDIT-1, CR-CHECKLIST-HMAC-1).
-Stale record to refresh: the SECRETSTORE-AWS-1 registry row still says "`awssm` must be
-re-reviewed by `security` now that it is wired"; `11-gate-w2w3-reverify-security.md` reviewed the
-wiring (`040329a`) and approved it — only the N-1 fix postdates that review.
+(The stale SECRETSTORE-AWS-1 registry text about an outstanding `awssm` re-review has been
+corrected.)
 
-**Gate verdict: [PENDING CI-342].** On a recorded root cause and fix for CI-342-STOREOUTAGE and a
-green GitHub CI run on the fixed head, this entry may be amended to PASSED. Stage 10.3 completion
-report: `docs/governance/stage-10.3-completion-report.md` (draft).
+**Gate verdict: PASSED 2026-09-26**, with the open findings above carried (F-POOL-1 is
+launch-blocking, not gate-blocking). Stage 10.3 completion report:
+`docs/governance/stage-10.3-completion-report.md`. **Stop: the next stage requires explicit human
+authorization.**

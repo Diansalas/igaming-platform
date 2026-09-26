@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-26 (Stage 10.3 W0–W3 delivered; completion gate pending CI-342)
+Last updated: 2026-09-26 (Stage 10.3 complete; awaiting human authorization)
 
-## Status: Stage 10.3 COMPLETE-PENDING-GATE (MOCK providers / local backends only). Gate 10.3-W2/W3 [PENDING CI-342]; completion report draft `docs/governance/stage-10.3-completion-report.md`. AWS staging OFF (torn down 2026-09-26, `docs/governance/staging-teardown-2026-09-26.md`). Next stage NOT started — awaiting human authorization.
+## Status: Stage 10.3 COMPLETE (MOCK providers / local backends only); awaiting human authorization. Gate 10.3-W2/W3 PASSED with open findings carried (F-POOL-1 Medium, launch-blocking); completion report `docs/governance/stage-10.3-completion-report.md`. AWS staging OFF (torn down 2026-09-26, `docs/governance/staging-teardown-2026-09-26.md`). Next stage NOT started — awaiting human authorization.
 
 *Status note 2026-09-26: the "(approved-pending)" labels on the Stage 3C, 3D, 4A, 4D-RG, 4E, 4F, 4G, 4G-FINAL, 4H-B0-R7 and Stage 7 headers below are historical, recorded at the time each stage stopped for review. Later stages proceeded on explicit human authorization recorded in the subsequent stage sections (for example Stage 4H-B1 Wave 2 "human-authorized", Stage 9.1 "authorized by the human", and ADRs 0087/0090/0091 for Stages 10, 10.1 and 10.2). The headers are left unedited. Source: `docs/plans/stage-10.3-planning/00-roadmap-reconciliation.md` "Discrepancies" item 12.*
 
@@ -8206,13 +8206,13 @@ permission probes.
   wording), HD-10.3-4 (suspended-tenant casino settlement). Carried HDRs unchanged.
 - **Stop: Stage 10.3 implementation gate.** Nothing implemented.
 
-## Stage 10.3 — Real Provider Trust & Casino Financial Readiness — implemented (MOCK / local); completion gate [PENDING CI-342]
+## Stage 10.3 — Real Provider Trust & Casino Financial Readiness — complete (MOCK / local); awaiting human authorization
 
 - Authorized 2026-09-26 (ADR 0092 ACCEPTED; credential model ADR 0093). Rulings: HD-10.3-1 full
   scope; HD-10.3-2 AWS IAM code excluded (`awssm` behind existing boundaries, local SDK fake only);
   HD-10.3-3 players see status only; HD-10.3-4 suspended-tenant casino settlement unchanged
   (documented in the ADR 0025 amendment).
-- Gates: 10.3-W0 PASSED; 10.3-W1 PASSED; **10.3-W2/W3 [PENDING CI-342]**
+- Gates: 10.3-W0 PASSED; 10.3-W1 PASSED; **10.3-W2/W3 PASSED** (open findings carried)
   (`docs/plans/stage-10.3-planning/05-gate-log.md`).
 - **W1 (IMPLEMENTED, MOCK providers):** WH-VENDOR-SCHEME-1, MOCK-ADAPTER-PROD-1 (all-mock
   production binary refuses to start, by design), CAS-CAP-ROLLBACK-1 + CAS-MULTIBET-WIN-1 (MOCK
@@ -8231,12 +8231,20 @@ permission probes.
   **GO-TOOLCHAIN-VULN-1:** resolved (go1.26.8, x/text v0.42.0, otel v1.46.0, govulncheck@v1.8.0,
   golangci-lint v2.9.0).
 - Reviews: security W2a and W2b/W3a/W3b APPROVE WITH CONDITIONS → re-verification APPROVE WITH
-  CONDITIONS (all prior conditions closed; N-1 fixed in `e80114b`; N-2/N-3 Info open under
-  HD-10.3-2); code-reviewer NOT READY → READY WITH FOLLOW-UPS (CODE-HYGIENE-10.3-1). Mutation
-  evidence: 24/24, 25/25, 34/34, 38/38 + 7/7, 15/15 killed.
-- CI: #341 green incl. govulncheck; **#342 FAILED `TestStoreOutage_DoesNotPinPool`
-  (CI-342-STOREOUTAGE) — [PENDING: CI-342 root cause + fix]**; #343, #344 green.
-- New registered items: CAS-RECON-SCALE-1, PROVIDER-REF-BOUND-1, CODE-HYGIENE-10.3-1,
+  CONDITIONS (all prior conditions closed; N-1 fixed in `e80114b` and verified CLOSED; L-N1a fixed
+  in `99bb5b2`, SDK retries 1; N-2/N-3 Info open under HD-10.3-2); code-reviewer NOT READY → READY WITH FOLLOW-UPS (CODE-HYGIENE-10.3-1). Mutation
+  evidence: 24/24, 25/25, 34/34, 38/38 + 7/7 + M46, 15/15 killed.
+- CI: #341 green incl. govulncheck; #342 and #347 FAILED `TestStoreOutage_DoesNotPinPool`
+  (CI-342-STOREOUTAGE: CPU scheduling delay under concurrent `-race` package binaries on the
+  4-vCPU runner). First two fixes superseded (`c5f05a9` slack increase rejected by the orchestrator;
+  `9df5869` 64-conn pool rejected by `security`, ruling A). Final: shared 20-conn pool, bounds
+  unchanged, richer diagnostics (`103b033`); test isolated in its own blocking CI step (`25a3537`,
+  ruling B). #343–#346, #348, #349 green (all jobs). Local 3× CI replay at `103b033`: ALL PASSED
+  (40 integration packages, 0 skips).
+- **New finding F-POOL-1 (Medium, `security`): `NOT IMPLEMENTED`** — ADR 0093 §5 "store outage does
+  not pin the pool" does not hold at production pool size 10; launch-blocking unless fixed or
+  accepted by the human (architect + security decision).
+- New registered items: F-POOL-1, CAS-RECON-SCALE-1, PROVIDER-REF-BOUND-1, CODE-HYGIENE-10.3-1,
   CAS-WIN-IDEMP-1, PAY-SB-REPLAY-AUDIT-1, CR-CHECKLIST-HMAC-1 (human), DEPLOY-FPKEY-1.
 - AWS/staging untouched; staging OFF. No real provider supported; no production or provider
   readiness claimed. **Stop: Stage 10.3 completion gate — next stage requires explicit human

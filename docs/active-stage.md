@@ -1,6 +1,6 @@
 # Active Stage
 
-> **Current stage:** see ["## Current stage"](#current-stage-stage-103--complete-pending-gate-gate-103-w2w3-pending-ci-342) section (Stage 10.3 W0–W3 delivered, MOCK/local only; gate 10.3-W2/W3 pending CI-342; stopped for human authorization; staging OFF). Sections below are kept in their historical order.
+> **Current stage:** see ["## Current stage"](#current-stage-stage-103--complete-awaiting-human-authorization) section (Stage 10.3 complete, MOCK/local only; all gates passed with open findings carried; awaiting human authorization; staging OFF). Sections below are kept in their historical order.
 
 ## Stage 4H-B0-R7 — Final Financial/Bonus Implementation Gate — Complete
 
@@ -1486,12 +1486,12 @@ none authorized for implementation yet.
 
 *Status note 2026-09-26: all four items were answered by the human in `docs/decisions/0042-human-decision-response.md` Part 2 — G-2: configurable per brand, default (b) route to `player_cash`; `OpenBetSelfExclusionPolicy` default: `VOID_ON_SELF_EXCLUSION`; mixed/bonus-funded cashout: "Not cashout-eligible"; FD-1: "Nullifying" (inactive while bonus-funded bets are not cashout-eligible). Implementation of G-2 brand configurability and of the self-exclusion default/auto-void consumer remains outstanding (ADR 0042 G-2 notes; `docs/plans/stage-10-planning-gate-proposal.md` §5).*
 
-## Current stage: Stage 10.3 — complete-pending-gate (gate 10.3-W2/W3 pending CI-342)
+## Current stage: Stage 10.3 — complete; awaiting human authorization
 
 Real Provider Trust & Casino Financial Readiness, AUTHORIZED 2026-09-26 (ADR 0092). The human
 authorized the full scope against baseline `207c922` (proposal §22). W0–W3 are delivered for MOCK
-providers and local backends only. **The stage is stopped at its completion gate**; gate
-10.3-W2/W3 is **[PENDING CI-342]** and the completion report is a draft:
+providers and local backends only. **The stage is complete and stopped at its completion
+gate**; gate 10.3-W2/W3 PASSED with open findings carried. Completion report:
 `docs/governance/stage-10.3-completion-report.md`.
 
 - **Stage definition:** `docs/decisions/0092-stage-10-3-definition-real-provider-trust-and-casino-financial-readiness.md`.
@@ -1504,7 +1504,7 @@ providers and local backends only. **The stage is stopped at its completion gate
   - HD-10.3-4: suspended-tenant casino settlement **unchanged**, documented in the ADR 0025
     Stage 10.3 amendment.
 - **Gates** (`docs/plans/stage-10.3-planning/05-gate-log.md`): 10.3-W0 PASSED; 10.3-W1 PASSED;
-  **10.3-W2/W3 [PENDING CI-342]**.
+  **10.3-W2/W3 PASSED** (open findings carried).
 - **Labels** (registry "Stage 10.3" section):
   - WH-VENDOR-SCHEME-1, MOCK-ADAPTER-PROD-1, KYC-REASON-BOUND-1: `IMPLEMENTED`.
   - CAS-CAP-ROLLBACK-1, CAS-MULTIBET-WIN-1: `IMPLEMENTED — MOCK provider only`.
@@ -1515,15 +1515,21 @@ providers and local backends only. **The stage is stopped at its completion gate
   - SECRETSTORE-AWS-1: `PARTIALLY IMPLEMENTED` (IAM `NOT IMPLEMENTED`; drills `STAGING REQUIRED`).
   - Every real PSP, KYC or casino adapter: `NOT IMPLEMENTED` (`PROVIDER DEPENDENT`).
 - **Reviews:** security re-verification APPROVE WITH CONDITIONS (all prior conditions closed; N-1
-  fixed in `e80114b`; N-2/N-3 Info open under HD-10.3-2); code-reviewer re-verification READY WITH
+  fixed in `e80114b` and verified CLOSED; L-N1a fixed in `99bb5b2`; N-2/N-3 Info open under
+  HD-10.3-2); code-reviewer re-verification READY WITH
   FOLLOW-UPS (CODE-HYGIENE-10.3-1).
-- **Open before the gate can pass:** CI-342-STOREOUTAGE (`TestStoreOutage_DoesNotPinPool`,
-  `internal/providercred`, failed in CI #342). **[PENDING: CI-342 root cause + fix]**
-- **Launch-blocking preconditions carried:** PROV-OUTBOUND-CRED-1, PROVIDER-REF-BOUND-1,
+- **CI-342-STOREOUTAGE: resolved.** CPU scheduling delay under concurrent `-race` binaries; bounds
+  unchanged, shared 20-conn pool (`103b033`), test isolated in its own blocking CI step
+  (`25a3537`, security ruling B); superseded attempts `c5f05a9` and `9df5869` remain in history.
+  CI #348/#349 green; local 3× replay at `103b033` passed.
+- **Launch-blocking preconditions carried:** **F-POOL-1** (Medium, `NOT IMPLEMENTED`: store outage
+  pins the pool at production pool size 10; fix or explicit human acceptance, architect +
+  security), PROV-OUTBOUND-CRED-1, PROVIDER-REF-BOUND-1,
   `DerivedTokenCache` bound (CODE-HYGIENE-10.3-1), DEPLOY-FPKEY-1.
 - **Still deferred / not authorized:** PAYWH-BRAND-1, PAYWH-RL-1, PAYWH-TS-1; Bonus Engine Wave 4;
   any AI/agent implementation (ADR 0089 architecture only).
-- **Needs the human** (full list in the completion report §11 and its STOP section): ADR 0009/AUP;
+- **Needs the human** (full list in the completion report §11 and its STOP section): F-POOL-1 fix or
+  acceptance; ADR 0009/AUP;
   HDR-J-6/7/8/9; HDR-M-1/2; HDR-SB-1; OB-1; licensing/legal/vendor/retail;
   LEDGER-MANUAL-ADJ-4EYES-1; sportsbook jurisdiction Rung 2; HD-10.3-2 follow-ups (IAM/KMS,
   `HTTPS_PROXY`, IRSA); CR-CHECKLIST-HMAC-1 (edit of `.claude/agents/code-reviewer.md`); branch

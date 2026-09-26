@@ -1,15 +1,13 @@
 # Stage 10.3 completion report — Real Provider Trust & Casino Financial Readiness
 
-**DRAFT — gate 10.3-W2/W3 verdict [PENDING CI-342].** This report must not be treated as final until
-CI-342-STOREOUTAGE is root-caused and fixed and GitHub CI is green on the fixed head (§6).
-
 Stage definition: ADR 0092 (ACCEPTED 2026-09-26). Credential model: ADR 0093. Branch
 `claude/focused-wright-jw88w9`. Planning papers, reviews, gate log and evidence:
 `docs/plans/stage-10.3-planning/` (gate log `05-gate-log.md`; mutation and red-before-green evidence
 in `evidence/`). Registry: `docs/governance/task-registry.md`, section "Stage 10.3".
 
 **Status: W0–W3 delivered for the MOCK providers and local backends only; stopped at the Stage 10.3
-completion gate, with the final CI item pending.** No AWS action was taken. Staging is OFF. No real
+completion gate: Stage 10.3 complete; awaiting human authorization.** All gates PASSED, with open
+findings carried, including **F-POOL-1 (Medium, launch-blocking)**. No AWS action was taken. Staging is OFF. No real
 provider is supported, and no production, provider, licensing or regulatory readiness is claimed.
 
 ## Gates
@@ -18,7 +16,7 @@ provider is supported, and no production, provider, licensing or regulatory read
 |---|---|---|
 | 10.3-W0 ADR / stage-definition consistency | PASSED 2026-09-26 | `05-gate-log.md` "GATE 10.3-W0"; ADR 0092, ADR 0093, amendments to ADRs 0022 §3, 0025, 0028, 0082 (A6), 0085 §1 |
 | 10.3-W1 (W1a–W1d) | PASSED 2026-09-26 | `05-gate-log.md` "GATE 10.3-W1"; `06-gate-w1-*.md` |
-| 10.3-W2/W3 (W2a, W2b, W3a, W3b, CI-FLAKE-281) | **[PENDING CI-342]** — all reviews at APPROVE WITH CONDITIONS / READY WITH FOLLOW-UPS; one unexplained CI failure open | `05-gate-log.md` "GATE 10.3-W2/W3"; `09`–`13` papers; §5, §6 |
+| 10.3-W2/W3 (W2a, W2b, W3a, W3b, CI-FLAKE-281) | PASSED 2026-09-26 (open findings carried) — reviews at APPROVE WITH CONDITIONS / READY WITH FOLLOW-UPS; CI-342 resolved; CI #348/#349 green; local 3× replay passed | `05-gate-log.md` "GATE 10.3-W2/W3"; `09`–`15` papers; §5, §6 |
 
 ## 1. Scope authorized (human rulings, ADR 0092 §"Human decisions")
 
@@ -51,7 +49,8 @@ One label per item, taken from the registry "Stage 10.3" section and ADRs 0092/0
 | W2a | KYC-PROVIDER-SELECT-1 (O4) | `IMPLEMENTED` | Fails closed when none or several handles; lone synthetic adapter only in test-support deployments |
 | W2b | CAS-RECON-1 | `IMPLEMENTED` | Migration 0097, `casino_consistency` C1–C7 with the C6 class ruling (paper 02 §2.19), verified-only rejection record (11 classes), read-only admin views. C3 order sub-check `NOT IMPLEMENTED` (recorded, sound per review). BONUS_SET bets outside the C2 positive rule (recorded deviation; G-6 unshipped). Compensation mechanism (LEDGER-MANUAL-ADJ-4EYES-1) `NOT IMPLEMENTED`. Reconciliation writes no money |
 | W3a | CAS-RECON-STMT-1 | `MOCK` | Migration 0098, provider-neutral `CasinoStatementSource`, key + totals match, REPEATABLE READ snapshot. Against the MOCK source the match is **tautological** (plumbing only); detection proven with test-only divergent sources. Real statement ingestion `PROVIDER DEPENDENT` |
-| W3b | SECRETSTORE-AWS-1 | `PARTIALLY IMPLEMENTED` | Backend code, wiring into `cmd/platform-api` and SDK-fake tests `IMPLEMENTED`; security S-1/S-2/S-5 and N-1 fixed. IAM/KMS/`deploy/` `NOT IMPLEMENTED` (HD-10.3-2). Real-AWS use, latency, cold cache, rotation/outage drills `STAGING REQUIRED` |
+| W3b | SECRETSTORE-AWS-1 | `PARTIALLY IMPLEMENTED` | Backend code, wiring into `cmd/platform-api` and SDK-fake tests `IMPLEMENTED`; security S-1/S-2/S-5, N-1 and L-N1a fixed (SDK retry attempts 1; the Fetcher is the only retry layer). IAM/KMS/`deploy/` `NOT IMPLEMENTED` (HD-10.3-2). Real-AWS use, latency, cold cache, rotation/outage drills `STAGING REQUIRED` |
+| W3 (security finding) | F-POOL-1 — store outage must not pin the pool at production pool size | `NOT IMPLEMENTED` | ADR 0093 §5's property does not hold at pool size 10 (unrelated query ~1.4 s until the breaker opens). Medium; launch-blocking unless fixed or explicitly accepted by the human; architect + security decision needed |
 | W3 | CI-FLAKE-281 | `IMPLEMENTED` | Stage 9 hang guard scaled by calibrated Argon2 cost (floor 30 s never lowered, cap 3 min); no recurrence in CI #331–#342 (`13-ci-flake-281-disposition.md`) |
 | — | GO-TOOLCHAIN-VULN-1 (found by the new govulncheck step) | `IMPLEMENTED` | go1.26.8; `golang.org/x/text` v0.42.0; otel v1.46.0; govulncheck@v1.8.0; golangci-lint v2.9.0; CI #341 govulncheck green |
 | — | Real PSP / KYC / casino adapters | `NOT IMPLEMENTED` (`PROVIDER DEPENDENT`) | |
@@ -74,19 +73,18 @@ PROV-REVOKE-ALL-1, CAS-WIN-ANOMALY-1, KYC-HOSTED-SESSION-1, KYC-SANCTIONS-IF-1.
 | W2a code: security | APPROVE WITH CONDITIONS W2A-SEC-1 (Medium), W2A-SEC-2 (Low) — both CLOSED | `09-gate-w2-review-security-w2a.md` |
 | W2b/W3a/W3b: security | APPROVE WITH CONDITIONS (S-1/S-2 Medium blocking `awssm` wiring; S-3 Medium; S-4/S-5, R-1/R-2 Low; R-3 Info) | `10-gate-w2w3-review-security.md` |
 | W2/W3: code-reviewer | NOT READY — 10 findings, no money-path bug | `10-gate-w2w3-review-code.md` |
-| W2/W3 re-verification: security | **APPROVE WITH CONDITIONS** — all prior conditions CLOSED; N-1 Low (fixed later in `e80114b`); N-2, N-3 Info, open under HD-10.3-2 | `11-gate-w2w3-reverify-security.md` |
+| W2/W3 re-verification: security | **APPROVE WITH CONDITIONS** — all prior conditions CLOSED; N-1 Low (fixed in `e80114b`, verified CLOSED in the addendum); N-2, N-3 Info, open under HD-10.3-2 | `11-gate-w2w3-reverify-security.md` |
 | W2/W3 re-verification: code-reviewer | **READY WITH FOLLOW-UPS** — #1–#9 CLOSED; #10 → CODE-HYGIENE-10.3-1 (`Router.Backends`, `ListRunsForStream` removed in `302433d`) | `12-gate-w2w3-reverify-code.md` |
 | CI-FLAKE-281: qa | disposition `IMPLEMENTED` | `13-ci-flake-281-disposition.md` |
+| N-1 fix verification: security | **N-1 CLOSED**; new L-N1a (Low) fixed in `99bb5b2` | addendum to `11-gate-w2w3-reverify-security.md` |
+| CI-342-STOREOUTAGE: qa + security ruling | ruling A REJECT (`9df5869`); ruling B ACCEPT WITH CONDITIONS (`25a3537`); new F-POOL-1 (Medium) | `14-ci-342-store-outage-test.md`, `15-ci-342-security-ruling.md` |
 | C6 class ruling: ledger-finance | 6 finding classes, 5 evidence-only | paper `02-casino-financial-analysis.md` §2.19; fix `dd30350` |
 
 Review gaps stated plainly:
-- The N-1 fix (`e80114b`) postdates the security re-verification; it has no separate `security`
-  sign-off (the code re-verification only confirmed its tests exist and pass).
 - The `security` reviews did not run integration tests or govulncheck themselves (egress blocked);
   CI #341 supplies the govulncheck evidence.
-- The SECRETSTORE-AWS-1 registry row still says `awssm` "must be re-reviewed by `security` now that
-  it is wired"; `11-gate-w2w3-reverify-security.md` did review and approve the wiring. The row is
-  stale (it is not edited by this report).
+- The stale SECRETSTORE-AWS-1 registry text about an outstanding `awssm` re-review has been
+  corrected (the wiring was reviewed and approved in `11-gate-w2w3-reverify-security.md`).
 
 ## 4. Mutation evidence
 
@@ -99,7 +97,7 @@ assertion, not on a build error.
 | `w2a-mutation-kill.txt` | 24/24 | M22 first NOT KILLED (test compared against the mutated constant); fixed |
 | `w2b-mutation-kill.txt` | 25/25 | M-C4a first SURVIVED; test strengthened, M-C4d added |
 | `w3a-mutation-kill.txt` | 34/34 | none in the final run |
-| `w2w3-closeout-mutation-kill.txt` | 38/38 + 7/7 (N-1) | M34 first did not compile; M36 first SURVIVED; two defence-in-depth lines not mutated, with reasons |
+| `w2w3-closeout-mutation-kill.txt` | 38/38 + 7/7 (N-1) + M46 (L-N1a) killed | M34 first did not compile; M36 first SURVIVED; two defence-in-depth lines not mutated, with reasons |
 | `w2w3-fixround-recon-mutation-kill.txt` | 15/15 | — |
 | `294e0a0` (commit message only, no evidence file) | 3 mutants, all failing a test | — |
 | `13-ci-flake-281-disposition.md` §4 | injected 5-minute hang fails at ~2m17s | — |
@@ -116,7 +114,12 @@ assertion, not on a build error.
 - Reconciliation (C1–C7, `casino_statement`) inserts only run, mismatch and audit rows; never
   auto-corrects; any drift is P1. No ledger write, balance update or compensation was added.
 - `awssm`: credentials only from the ECS task-role endpoint; trust-root, endpoint, credential-source
-  and ambient-tuning overrides refused; refs must be full ARNs; no network at `New`.
+  and ambient-tuning overrides refused; refs must be full ARNs; no network at `New`; SDK retries 1
+  (the Fetcher is the only retry layer).
+- **Known gap — F-POOL-1:** ADR 0093 §5's "a store outage does not pin the pool" does not hold at the
+  production pool size of 10 (an unrelated query waits ~1.4 s until the breaker opens). The test
+  bounds were not loosened to hide it (security ruling A); it is `NOT IMPLEMENTED` and
+  launch-blocking.
 - Passing these reviews does not make any component "secure" in a certification sense; they are
   code-level development-stage reviews.
 
@@ -129,16 +132,34 @@ GitHub Actions, branch `claude/focused-wright-jw88w9` (verified against the Acti
 | #337–#339 | W3b / review docs | failure — first `govulncheck` findings (GO-TOOLCHAIN-VULN-1; per registry) |
 | #340 | `e5b6e17` | **failure** at `golangci-lint` (v2.6.2 binary built with go1.25); fixed by `0fbd0dc` |
 | #341 | `0fbd0dc` | **green**, all steps incl. dependency drift, govulncheck, the AWS-SDK and memory-store import guards, golangci-lint, race unit, race integration, migration reversibility |
-| #342 | `1138062` | **FAILED** — `TestStoreOutage_DoesNotPinPool` (`internal/providercred`). CI-342-STOREOUTAGE, under investigation. **[PENDING: CI-342 root cause + fix]** |
+| #342 | `1138062` | **FAILED** — `TestStoreOutage_DoesNotPinPool` (`internal/providercred`), 1.27 s on the unrelated-query bound (CI-342-STOREOUTAGE) |
 | #343 | `e80114b` | green |
 | #344 | `302433d` | green |
-| #345 | `00f02ef` | in progress when drafted — result to be recorded |
+| #345 | `00f02ef` | green |
+| #346 | `b10c6df` | green |
+| #347 | `99bb5b2` | **FAILED** — same test, 2.66 s on the held-long count (CI-342) |
+| #348 | `25a3537` | **green, all jobs**, incl. govulncheck and the isolated timing step |
+| #349 | `103b033` | **green, all jobs**, incl. govulncheck and the isolated timing step |
 
-`TestStoreOutage_DoesNotPinPool` is the test that security W2a observation O-7 relies on (the inbound
-secret fetch bounded by the 4-slot semaphore while a callback transaction is open). Later green runs
-do not dispose of #342; it stays an open, gate-blocking item until explained.
+**CI-342-STOREOUTAGE — resolved.** `TestStoreOutage_DoesNotPinPool` is the test that security W2a
+observation O-7 relies on. Root cause: CPU scheduling delay while every package's `-race` binary ran
+concurrently on the 4-vCPU runner. History, recorded honestly: `qa`'s first fix `c5f05a9` (slack
+400 → 900 ms) was rejected by the orchestrator as a timing weakening; the second, `9df5869`
+(64-connection test pool), was rejected by `security` (ruling A: it removes the pool-starvation
+coverage). Both remain in history and are superseded. Final state: shared 20-connection pool, all
+bounds unchanged (4 / 4 / 500 ms / slack 400 ms) with richer diagnostics (`103b033`); the test runs
+alone in its own blocking CI step (`25a3537`; ruling B ACCEPT WITH CONDITIONS: blocking, no retries,
+name guard, nothing else joins without its own ruling, failures investigated, never re-run to
+green); the CI annotation step captures the lines printed before `--- FAIL` (`fea3b8d`). The
+measurements behind the ruling produced F-POOL-1 (§5, §8).
 
-No 3× local CI replay is recorded for the W2/W3 range. Toolchain: go1.26.8 (`go.mod` toolchain line,
+**Local CI replay at `103b033`** (scratchpad `ci-local.sh` mirroring the CI split, golangci-lint
+v2.9.0): gofmt, vet, lint (0 issues), build; migrate up to 98 + verify; race unit tests 36 packages
+ok; **3× race integration: 40 packages ok, 0 skips each**, plus the isolated timing test 3/3;
+reversibility 98 → 94 → 98, verify clean — ALL PASSED. `qa`'s earlier local `internal/httpserver`
+failures came from concurrent agents sharing the local database; the clean replay passed 3/3.
+
+Toolchain: go1.26.8 (`go.mod` toolchain line,
 CI, Dockerfile builder), `golang.org/x/text` v0.42.0, otel v1.46.0, govulncheck@v1.8.0,
 golangci-lint v2.9.0.
 
@@ -164,10 +185,12 @@ golangci-lint v2.9.0.
 
 ## 8. Remaining blockers
 
-**Gate-blocking (this stage):**
-- CI-342-STOREOUTAGE. **[PENDING: CI-342 root cause + fix]**
+**Gate-blocking (this stage):** none. CI-342-STOREOUTAGE is resolved (§6).
 
 **Launch-blocking preconditions (no real provider may go live before these):**
+- **F-POOL-1** (Medium, `security`) — ADR 0093 §5's "store outage does not pin the pool" does not
+  hold at production pool size 10. `NOT IMPLEMENTED`. Launch-blocking unless fixed or explicitly
+  accepted by the human; needs an `architect` + `security` decision (ADR / §5 amendment).
 - **PROV-OUTBOUND-CRED-1** — no non-synthetic payments, casino or KYC adapter may be registered or
   make an outbound call until outbound calls run outside any domain DB transaction (owners
   architect + ledger-finance + domain specialists; tripwire
@@ -229,6 +252,8 @@ Added by Stage 10.3 (ADR 0093 §8, registry):
   client (N-2; recommendation on record: VPC endpoint, proxy not honoured); IRSA/web identity as a
   credential source (refused until decided); account pinning (N-3; scope the task-role policy to
   the platform account and `provider-creds/` prefix).
+- **F-POOL-1:** fix (ADR 0093 §5 amendment; architect + security) or explicitly accept the pool-pinning
+  gap at production pool size before launch.
 - **CR-CHECKLIST-HMAC-1:** a human edit of `.claude/agents/code-reviewer.md` to add the
   "`hmac.Equal` only" item (the lint is the enforcing control meanwhile).
 - **Branch protection + CODEOWNERS on `.github/`:** confirm that CI is a required status check and
@@ -254,26 +279,28 @@ Added by Stage 10.3 (ADR 0093 §8, registry):
 
 ## 13. Final commit
 
-Last code/test commit at drafting time: `00f02ef`. The final Stage 10.3 commit will be the one
-carrying the CI-342 fix and this report's final version; its SHA and CI result are to be recorded
-here. **[PENDING: CI-342 root cause + fix]**
+Last code/test commit: `103b033` (CI #349 green, all jobs; local 3× replay passed). The final Stage
+10.3 commit is the one carrying this report's final version; its SHA and CI result are stated in the
+orchestrator's final message.
 
 ## STOP — awaiting human authorization for the next stage
 
 Nothing beyond Stage 10.3 has been started. Decisions requested from the human:
 
-1. Accept Stage 10.3 as complete once CI-342-STOREOUTAGE is closed (or direct otherwise).
-2. Choose the next stage. Candidates on record, none started: the PROV-OUTBOUND-CRED-1 restructuring
+1. Accept Stage 10.3 as complete, with the carried open findings (or direct otherwise).
+2. **F-POOL-1:** authorize an `architect` + `security` fix (ADR 0093 §5 amendment), or explicitly
+   accept the gap — it is launch-blocking until one of the two happens.
+3. Choose the next stage. Candidates on record, none started: the PROV-OUTBOUND-CRED-1 restructuring
    (outbound calls out of DB transactions) with PROVIDER-REF-BOUND-1 and the `DerivedTokenCache`
-   bound; CAS-RECON-SCALE-1; LEDGER-MANUAL-ADJ-4EYES-1; or the governed staging deployment.
-3. Authorize (or not) the single governed staging deployment from the final approved commit, and
+   bound; F-POOL-1; CAS-RECON-SCALE-1; LEDGER-MANUAL-ADJ-4EYES-1; or the governed staging deployment.
+4. Authorize (or not) the single governed staging deployment from the final approved commit, and
    decide DEPLOY-FPKEY-1 for it.
-4. Decide HD-10.3-2 follow-ups: IAM/KMS for `awssm`, `HTTPS_PROXY` / VPC endpoint, IRSA, account
+5. Decide HD-10.3-2 follow-ups: IAM/KMS for `awssm`, `HTTPS_PROXY` / VPC endpoint, IRSA, account
    pinning.
-5. Make the CR-CHECKLIST-HMAC-1 edit to `.claude/agents/code-reviewer.md` (or decline it).
-6. Confirm branch protection (required CI check) and CODEOWNERS on `.github/`.
-7. Run the Access Analyzer session-end check left open by the teardown.
-8. Vendor selection (KYC/AML, PSP, casino aggregator, sportsbook, custodian) — the gate to any real
+6. Make the CR-CHECKLIST-HMAC-1 edit to `.claude/agents/code-reviewer.md` (or decline it).
+7. Confirm branch protection (required CI check) and CODEOWNERS on `.github/`.
+8. Run the Access Analyzer session-end check left open by the teardown.
+9. Vendor selection (KYC/AML, PSP, casino aggregator, sportsbook, custodian) — the gate to any real
    adapter.
-9. The carried decisions in §11 (ADR 0009/AUP, HDR-J-6/7/8/9, HDR-M-1/2, HDR-SB-1, OB-1, licensing,
+10. The carried decisions in §11 (ADR 0009/AUP, HDR-J-6/7/8/9, HDR-M-1/2, HDR-SB-1, OB-1, licensing,
    legal, retail, STAGE-NAMING-1).
