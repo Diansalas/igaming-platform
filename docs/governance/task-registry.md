@@ -3816,6 +3816,14 @@ Planning report: `docs/plans/stage-10.1-planning-gate-proposal.md`; stage defini
 | API-DOC-PAYWH | backend | IMPLEMENTED | payments webhook path documented in `docs/api/openapi/platform-api.yaml` (headers, `PaymentsMockCallback` schema, 200/400/401/404/409/500/503) | `TestOpenAPI_PaymentsWebhook_ContractMatchesHandler` (structural check; no full JSON-Schema conformance test - no verified YAML-parsing dependency in go.sum, per task constraint not to add one) | — | n/a |
 | AI-ARCH-FUTURE | architect (+ security, identity-compliance, bonus-engine, ledger-finance, risk, qa) | **Future requirement — NOT IMPLEMENTED** | ADR 0089 boundary: agents read/propose/simulate; deterministic core validates and executes | ADR 0089 §9 invariants I-1..I-6 when built | future human-authorized stage; future human decisions in ADR 0089 §8 | n/a |
 
+## Stage 10.2 — Webhook trust hardening — APPROVED 2026-09-26 (ADR 0091) — IN PROGRESS
+
+| ID | Owner | Status | Scope | Tests | Blockers | Integration |
+|---|---|---|---|---|---|---|
+| KYC-WH-1 | identity-compliance + security (+ backend, architect, qa) | In progress (design) | remove committed secret; env-gate mock KYC; no player-supplied provider reference trust; tenant binding; verify-first | per design | — | n/a |
+| CAS-WH-TENANT-1 | casino + security (+ backend, architect, qa) | In progress (design) | tenant binding via the shared ADR 0022 §3 callback contract; verify-first; no financial effect on rejection | per design | — | n/a |
+| CI-FLAKE-281 | devops + qa | In progress (investigation) | identify/reproduce run #281 failure; disposition | — | — | n/a |
+
 ## How to use this registry (for future stages)
 
 1. At stage start, the Orchestrator breaks the directive into tasks and
