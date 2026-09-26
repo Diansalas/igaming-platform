@@ -1,6 +1,8 @@
 package main
 
 import (
+	"log/slog"
+
 	"github.com/Diansalas/igaming-platform/internal/config"
 	"github.com/Diansalas/igaming-platform/internal/kyc"
 )
@@ -68,10 +70,13 @@ func mockProviderWiring(cfg config.Config) mockWiring {
 // 0085 amendment: "absent", not merely unwired) - this function's own nil
 // check is defence in depth, not the sole gate. The adapter and resolver
 // are the bundle's own instances (security S-4): nothing is constructed
-// here except the orchestrator itself.
-func kycOrchestrator(w mockWiring, b providerBundle) *kyc.Orchestrator {
+// here except the orchestrator itself. logger receives the matched-key_id
+// line (W2A-SEC-2); nil means slog.Default().
+func kycOrchestrator(w mockWiring, b providerBundle, logger *slog.Logger) *kyc.Orchestrator {
 	if !w.KYCWebhookEnabled || b.KYC == nil {
 		return nil
 	}
-	return kyc.NewOrchestrator(b.kycAdapters(), b.kycOrchestratorResolver())
+	o := kyc.NewOrchestrator(b.kycAdapters(), b.kycOrchestratorResolver())
+	o.SetWebhookLogger(logger)
+	return o
 }

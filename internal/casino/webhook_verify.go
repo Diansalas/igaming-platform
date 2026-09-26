@@ -2,10 +2,12 @@ package casino
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/observability"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
 )
 
@@ -58,13 +60,35 @@ func (o *Orchestrator) verifyCallback(ctx context.Context, tx pgx.Tx, in webhook
 	if authErr != nil {
 		return nil, webhookauth.Credential{}, authErr
 	}
-	creds, authErr := webhookauth.ResolveCredentials(ctx, tx, scheme, o.webhookCredentialResolver, in, m)
-	if authErr != nil {
-		return nil, webhookauth.Credential{}, authErr
-	}
-	cred, authErr := webhookauth.VerifyInbound(scheme, creds, in, m, time.Now())
+	cred, authErr := o.resolveAndVerify(ctx, tx, scheme, in, m)
 	if authErr != nil {
 		return nil, webhookauth.Credential{}, authErr
 	}
 	return provider, cred, nil
 }
+
+// resolveAndVerify is verifyCallback's credential half, split out only so
+// the matched-key log can be tested with a KeyImplicit test scheme that is
+// never registered (security gate W2 condition W2A-SEC-2): resolve the
+// single credential binding, run the ORCHESTRATOR-ENFORCED VerifyInbound,
+// and on success log which key_id verified (webhookauth.LogVerifiedKey:
+// KeyImplicit schemes only; request_id, tenant_id, provider_id and key_id
+// only - never the secret or its fingerprint). verifyCallback is its only
+// production caller, after the registration lookup and Extract.
+func (o *Orchestrator) resolveAndVerify(ctx context.Context, tx pgx.Tx, scheme webhookauth.VerificationScheme, in webhookauth.Inbound, m webhookauth.AuthMaterial) (webhookauth.Credential, *webhookauth.AuthError) {
+	creds, authErr := webhookauth.ResolveCredentials(ctx, tx, scheme, o.webhookCredentialResolver, in, m)
+	if authErr != nil {
+		return webhookauth.Credential{}, authErr
+	}
+	cred, authErr := webhookauth.VerifyInbound(scheme, creds, in, m, time.Now())
+	if authErr != nil {
+		return webhookauth.Credential{}, authErr
+	}
+	webhookauth.LogVerifiedKey(ctx, o.webhookLogger, observability.RequestIDFromContext(ctx), scheme, in, cred)
+	return cred, nil
+}
+
+// SetWebhookLogger sets the logger for the matched-key_id line
+// (resolveAndVerify). Unset, slog.Default() is used. Call it once at
+// startup, before the Orchestrator serves callbacks.
+func (o *Orchestrator) SetWebhookLogger(l *slog.Logger) { o.webhookLogger = l }

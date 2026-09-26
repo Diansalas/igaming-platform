@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -195,6 +196,10 @@ type Orchestrator struct {
 	// webhookSchemes: every adapter's validated WebhookScheme() (Stage
 	// 10.3 W1a; webhook_verify.go).
 	webhookSchemes *webhookauth.SchemeSet
+	// webhookLogger receives the matched-key_id line after a successful
+	// callback verification (webhook_verify.go, W2A-SEC-2). Nil means
+	// slog.Default().
+	webhookLogger *slog.Logger
 }
 
 // NewOrchestrator constructs an Orchestrator. resolver may be nil (every

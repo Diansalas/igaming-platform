@@ -1,0 +1,77 @@
+Stage 10.3 W2/W3 close-out - mutation-kill evidence
+==================================================
+
+Scope: security gate W2 conditions W2A-SEC-1 (outbound-precondition tripwire)
+and W2A-SEC-2 (matched key_id log for KeyImplicit verification); the W3b awssm
+wiring into cmd/platform-api (config region, construction, refusal,
+registration); security gate W2/W3 findings S-1 (credential allow-list),
+S-2 (endpoint/trust-root/credential-source refusals, full-ARN refs) and S-5
+(widened AWS import guard); code review #6 (hanging-store bound through
+Fetcher.Fetch, never-dials tripwire, New success path, AST guards on
+New/NewWithSDKFake callers).
+
+Method: a scratchpad driver (mutate.py, not committed) applies ONE source
+mutation at a time to the working tree, runs the named tests with
+`go test -count=1 -run '<regex>' <pkgs>` (unit tests; no database needed),
+records the verdict and ALWAYS restores the original file (`git diff --stat`
+was unchanged after the run). "KILLED" means the test run failed on
+assertions, not on a build failure. The driver reports SURVIVED /
+NOT APPLIED / BUILD FAILED otherwise; none occurred in the final run.
+
+During development two mutants needed correction, recorded for honesty:
+- M34 was first written so that it did not compile (BUILD FAILED); it was
+  rewritten as a compiling mutant.
+- M36 SURVIVED at first, because the test's bound read the mutated
+  constant. The test now uses the section 5 literal (2 s), and M36 is killed.
+
+Not mutation-tested, with the reason:
+- Removing WithSharedConfigFiles([]string{}) / WithSharedCredentialsFiles(
+  []string{}) from awssm.New. This has no observable effect while
+  staticCredentialSignal refuses every shared-file source at startup. It is
+  defence in depth behind that refusal.
+- Removing the `awsCfg.Credentials != creds` identity check. This is
+  equivalent under the pinned SDK, which returns a *CredentialsCache
+  unchanged. Dropping the provider option instead (M24) is killed.
+
+Result: 38 mutations, 38 KILLED, 0 SURVIVED.
+
+Id | Mutation | Verdict | Failing tests
+---|----------|---------|--------------
+M1 | payments: matched-key log call removed | KILLED | TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit, TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit/active_key_signed, TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit/predecessor_key_signed
+M2 | kyc: matched-key log call removed | KILLED | TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit, TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit/active_key_signed, TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit/predecessor_key_signed
+M3 | casino: matched-key log call removed | KILLED | TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit, TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit/active_key_signed, TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit/predecessor_key_signed
+M4 | payments: logs the ACTIVE key instead of the matched one | KILLED | TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit, TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit/predecessor_key_signed
+M5 | kyc: logs the ACTIVE key instead of the matched one | KILLED | TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit, TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit/predecessor_key_signed
+M6 | casino: logs the ACTIVE key instead of the matched one | KILLED | TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit, TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit/predecessor_key_signed
+M7 | helper: KeyImplicit-only condition removed (logs for every scheme) | KILLED | TestLogVerifiedKey_KeyImplicitOnlyAndAllowListedFields
+M8 | helper: fingerprint added to the line | KILLED | TestLogVerifiedKey_KeyImplicitOnlyAndAllowListedFields, TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit, TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit/active_key_signed, TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit/predecessor_key_signed
+M9 | helper: logs the credential's provider/tenant instead of the request's (still passes) -> key_id replaced by provider | KILLED | TestLogVerifiedKey_KeyImplicitOnlyAndAllowListedFields, TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit, TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit/active_key_signed, TestResolveAndVerify_LogsMatchedKeyIDForKeyImplicit/predecessor_key_signed
+M10 | W2A-SEC-1: payments mock adapter loses its synthetic marker (simulates a first real adapter) | KILLED | TestOutboundPrecondition_EveryWiredAdapterIsSynthetic
+M11 | wiring: awssm case refuses startup (pre-W3b behaviour) | KILLED | TestWiring_AWSSM_EnvironmentMatrix, TestWiring_AWSSM_EnvironmentMatrix/production/awssm_configured, TestWiring_AWSSM_EnvironmentMatrix/staging/awssm_configured, TestWiring_AWSSM_RefusalsPropagate, TestWiring_AWSSM_RefusalsPropagate/malformed_region, TestWiring_AWSSM_RefusalsPropagate/missing_region, TestWiring_AWSSM_RefusalsPropagate/no_container_credential_source, TestWiring_AWSSM_RefusalsPropagate/static_AWS_ACCESS_KEY_ID, TestWiring_AWSSM_RefusalsPropagate/static_alias_AWS_ACCESS_KEY, TestWiring_AWSSM_RegisteredAsProductionEligible
+M12 | wiring: awssm built but not added to the router/bundle | KILLED | TestWiring_AWSSM_EnvironmentMatrix, TestWiring_AWSSM_EnvironmentMatrix/production/awssm_configured, TestWiring_AWSSM_EnvironmentMatrix/staging/awssm_configured, TestWiring_AWSSM_RegisteredAsProductionEligible
+M13 | wiring: awssm constructor error swallowed | KILLED | TestWiring_AWSSM_RefusalsPropagate, TestWiring_AWSSM_RefusalsPropagate/no_container_credential_source, TestWiring_AWSSM_RefusalsPropagate/static_AWS_ACCESS_KEY_ID, TestWiring_AWSSM_RefusalsPropagate/static_alias_AWS_ACCESS_KEY
+M14 | wiring: region format not validated | KILLED | TestWiring_AWSSM_RefusalsPropagate, TestWiring_AWSSM_RefusalsPropagate/malformed_region
+M15 | config: region not validated in Load | KILLED | TestConfig_SecretStoreAWSRegion_RequiredAndWellFormedOnlyWithAWSSM, TestConfig_SecretStoreAWSRegion_RequiredAndWellFormedOnlyWithAWSSM/awssm/malformed, TestConfig_SecretStoreAWSRegion_RequiredAndWellFormedOnlyWithAWSSM/awssm/missing, TestConfig_SecretStoreAWSRegion_RequiredAndWellFormedOnlyWithAWSSM/awssm/no_number, TestConfig_SecretStoreAWSRegion_RequiredAndWellFormedOnlyWithAWSSM/awssm/not_a_region
+M16 | config: AWS_REGION fallback removed | KILLED | TestConfig_SecretStoreAWSRegion_Sources, TestConfig_SecretStoreAWSRegion_Sources/falls_back_to_AWS_REGION
+M17 | config: region validated even without awssm | KILLED | TestConfig_SecretStoreAWSRegion_RequiredAndWellFormedOnlyWithAWSSM, TestConfig_SecretStoreAWSRegion_RequiredAndWellFormedOnlyWithAWSSM/no_awssm/malformed, TestConfig_SecretStoreAWSRegion_RequiredAndWellFormedOnlyWithAWSSM/no_awssm/missing, TestConfig_SecretStoreAWSRegion_RequiredAndWellFormedOnlyWithAWSSM/no_awssm/no_number, TestConfig_SecretStoreAWSRegion_RequiredAndWellFormedOnlyWithAWSSM/no_awssm/not_a_region
+M18 | S-1: AWS_ACCESS_KEY alias not refused | KILLED | TestAWSSM_S1_StaticCredentialAliasesRefused, TestAWSSM_S1_StaticCredentialAliasesRefused/map[AWS_ACCESS_KEY:AKIDEXAMPLE]
+M19 | S-1: AWS_SECRET_KEY alias not refused | KILLED | TestAWSSM_S1_StaticCredentialAliasesRefused, TestAWSSM_S1_StaticCredentialAliasesRefused/map[AWS_SECRET_KEY:not-a-real-secret]
+M20 | S-1: AWS_DEFAULT_PROFILE alias not refused | KILLED | TestAWSSM_S1_StaticCredentialAliasesRefused, TestAWSSM_S1_StaticCredentialAliasesRefused/map[AWS_DEFAULT_PROFILE:default]
+M21 | S-1: credential Source check removed | KILLED | TestAWSSM_S1_UnauthorizedCredentialSourceRefused
+M22 | S-1: missing container endpoint tolerated | KILLED | TestAWSSM_S1_ContainerProviderRequired, TestAWSSM_S1_ContainerProviderRequired/#00, TestNewWithSDKFake_RunsPreflightAndFailsClosed
+M23 | S-1: relative-URI shape check removed | KILLED | TestAWSSM_S1_ContainerProviderRequired, TestAWSSM_S1_ContainerProviderRequired///evil.example/x, TestAWSSM_S1_ContainerProviderRequired//_x, TestAWSSM_S1_ContainerProviderRequired//x:1, TestAWSSM_S1_ContainerProviderRequired//x@evil.example
+M24 | S-1: explicit credential provider dropped (SDK default chain) | KILLED | TestAWSSM_New_SuccessPathMakesNoNetworkCall
+M25 | S-1: credential HTTP client override ignored (would dial the real ECS agent) | KILLED | TestAWSSM_New_SuccessPathMakesNoNetworkCall
+M26 | S-2: SSL_CERT_FILE not refused | KILLED | TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/SSL_CERT_FILE
+M27 | S-2: SSL_CERT_DIR not refused | KILLED | TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/SSL_CERT_DIR
+M28 | S-2: AWS_ENDPOINT_URL_<SERVICE> prefix scan removed | KILLED | TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/AWS_ENDPOINT_URL_KMS, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/AWS_ENDPOINT_URL_SSO
+M29 | S-2: credential-source override check not called | KILLED | TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/AWS_CONTAINER_CREDENTIALS_FULL_URI, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/AWS_EC2_METADATA_SERVICE_ENDPOINT, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/AWS_ROLE_ARN, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/AWS_WEB_IDENTITY_TOKEN_FILE
+M30 | S-2: AWS_ROLE_ARN not refused | KILLED | TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/AWS_ROLE_ARN
+M31 | S-2: ParseRef accepts a bare secret name again | KILLED | TestStoreRef_ParseMirrorsMigrationChecks
+M32 | S-2: ARN account not pinned to 12 digits | KILLED | TestStoreRef_ParseMirrorsMigrationChecks
+M33 | S-5: import guard narrowed back to aws-sdk-go-v2 | KILLED | TestImportBoundary_CoversSmithyAndV1SDK
+M34 | #6: NewWithSDKFake skips preflight | KILLED | TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/AWS_CONTAINER_CREDENTIALS_FULL_URI, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/AWS_EC2_METADATA_SERVICE_ENDPOINT, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/AWS_ENDPOINT_URL_KMS, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/AWS_ENDPOINT_URL_SSO, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/AWS_ENDPOINT_URL_STS, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/AWS_ROLE_ARN, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/AWS_WEB_IDENTITY_TOKEN_FILE, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/SSL_CERT_DIR, TestAWSSM_S2_EndpointTrustRootAndCredentialSourceOverridesRefused/SSL_CERT_FILE, TestNewWithSDKFake_RunsPreflightAndFailsClosed
+M35 | #6: Secrets Manager client override not applied | KILLED | TestAWSSM_New_SuccessPathMakesNoNetworkCall
+M36 | #6: Fetcher store-call budget widened (StoreCallTimeout 2s -> 20s) | KILLED | TestAWSSM_HangingStoreBoundedThroughFetcher
+M37 | #6: production wiring uses the SDK-fake constructor | KILLED | TestNewWithSDKFake_OnlyFromTests
+M38 | #6: a cmd/platform-api test builds a real AWS client via awssm.New | KILLED | TestAWSSM_NewNeverCalledFromTestsOutsideThisPackage

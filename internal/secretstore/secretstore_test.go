@@ -24,12 +24,14 @@ import (
 func TestStoreRef_ParseMirrorsMigrationChecks(t *testing.T) {
 	tenant := uuid.New()
 	ns := fmt.Sprintf("/provider-creds/%s/casino/acme/name", tenant)
+	const arn = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:igaming"
 	good := []string{
 		"memory://v" + ns + "?version=v1",
 		"memory://v" + ns,
 		"devfile:/" + ns + "?version=2026-09",
-		"awssm://prefix" + ns + "?versionId=" + uuid.NewString(),
-		"awssm://prefix" + ns + "?versionId=" + uuid.NewString() + "#apiKey",
+		"awssm://" + arn + ns + "?versionId=" + uuid.NewString(),
+		"awssm://" + arn + ns + "-AbCdEf?versionId=" + uuid.NewString() + "#apiKey",
+		"awssm://arn:aws-us-gov:secretsmanager:us-gov-west-1:123456789012:secret:igaming" + ns + "?versionId=" + uuid.NewString(),
 	}
 	for _, raw := range good {
 		ref, err := secretstore.ParseRef(raw)
@@ -44,8 +46,18 @@ func TestStoreRef_ParseMirrorsMigrationChecks(t *testing.T) {
 		}
 	}
 	bad := []string{
-		"", "file:/" + ns, "awssm://prefix" + ns, "awssm://prefix" + ns + "?versionId=AWSCURRENT",
-		"awssm://prefix" + ns + "?versionStage=AWSCURRENT", "devfile:/" + ns, "devfile:/" + ns + "?version=1#x",
+		"", "file:/" + ns, "awssm://" + arn + ns, "awssm://" + arn + ns + "?versionId=AWSCURRENT",
+		"awssm://" + arn + ns + "?versionStage=AWSCURRENT",
+		// S-2 (gate W2/W3): a bare secret NAME is refused - the ref must be
+		// a full ARN pinning partition, region and account.
+		"awssm://prefix" + ns + "?versionId=" + uuid.NewString(),
+		"awssm://arn:aws:secretsmanager:eu-west-1:12345678901:secret:igaming" + ns + "?versionId=" + uuid.NewString(),
+		"awssm://arn:aws:secretsmanager:eu-west-1:123456789012:igaming" + ns + "?versionId=" + uuid.NewString(),
+		"awssm://arn:aws:s3:eu-west-1:123456789012:secret:igaming" + ns + "?versionId=" + uuid.NewString(),
+		"awssm://arn:evil:secretsmanager:eu-west-1:123456789012:secret:igaming" + ns + "?versionId=" + uuid.NewString(),
+		"awssm://arn:aws:secretsmanager::123456789012:secret:igaming" + ns + "?versionId=" + uuid.NewString(),
+		"awssm://arn:aws:secretsmanager:eu-west-1:123456789012:secret:a:b" + ns + "?versionId=" + uuid.NewString(),
+		"devfile:/" + ns, "devfile:/" + ns + "?version=1#x",
 		"memory://v" + ns + "?a=b", "memory://v" + ns + " ", "memory://v" + ns + "\n",
 		"memory://v" + ns + "?version=1?version=2", "memory://" + strings.Repeat("a", 600),
 	}

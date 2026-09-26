@@ -191,10 +191,18 @@ const MaxRefBytes = 512
 
 var (
 	refControlOrSpace = regexp.MustCompile(`[[:cntrl:][:space:]]`)
-	awssmRef          = regexp.MustCompile(`^awssm://([^?#]+)\?versionId=([A-Za-z0-9-]{32,64})(?:#([A-Za-z0-9._-]{1,64}))?$`)
-	devfileRef        = regexp.MustCompile(`^devfile://([^?#]+)\?version=([A-Za-z0-9._-]{1,64})$`)
-	memoryRef         = regexp.MustCompile(`^memory://([^?#]+)(?:\?version=([A-Za-z0-9._-]{1,64}))?$`)
-	refNameSegment    = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$`)
+	// awssmRef requires the path to be a full Secrets Manager secret ARN
+	// (security gate W2/W3 finding S-2): the ARN pins the partition, region
+	// and 12-digit account, so a ref can never resolve as a bare secret
+	// NAME in whatever account the process's credentials happen to belong
+	// to. Stricter than migration 0096's pccr_awssm_pinned/pch_awssm_pinned
+	// CHECKs (which accept any path); every ARN they accept this accepts
+	// only if it is an ARN, so registration (service.go) and every resolve
+	// (resolver.go) refuse a bare name even if a row carries one.
+	awssmRef       = regexp.MustCompile(`^awssm://(arn:aws(?:-cn|-us-gov)?:secretsmanager:[a-z]{2}(?:-[a-z]+)+-[0-9]{1,2}:[0-9]{12}:secret:[^?#:]+)\?versionId=([A-Za-z0-9-]{32,64})(?:#([A-Za-z0-9._-]{1,64}))?$`)
+	devfileRef     = regexp.MustCompile(`^devfile://([^?#]+)\?version=([A-Za-z0-9._-]{1,64})$`)
+	memoryRef      = regexp.MustCompile(`^memory://([^?#]+)(?:\?version=([A-Za-z0-9._-]{1,64}))?$`)
+	refNameSegment = regexp.MustCompile(`^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$`)
 )
 
 // ParseRef parses raw. Any violation is ClassInvalidRef.
@@ -231,7 +239,8 @@ func (r Ref) String() string { return r.raw }
 // Scheme is the backend scheme.
 func (r Ref) Scheme() string { return r.scheme }
 
-// Path is everything between "<scheme>://" and the query string.
+// Path is everything between "<scheme>://" and the query string (for
+// awssm, the full secret ARN - the SecretId sent to Secrets Manager).
 func (r Ref) Path() string { return r.path }
 
 // Version is the pinned version (awssm versionId, devfile/memory version).

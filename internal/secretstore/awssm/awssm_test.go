@@ -40,7 +40,7 @@ func (f *fakeClient) GetSecretValue(_ context.Context, in *secretsmanager.GetSec
 func validRef(t *testing.T, fragment string) secretstore.Ref {
 	t.Helper()
 	tenant := uuid.New()
-	raw := "awssm://prefix/provider-creds/" + tenant.String() + "/casino/acme/name?versionId=" + strings.Repeat("a", 32)
+	raw := "awssm://" + testARNPrefix + "/provider-creds/" + tenant.String() + "/casino/acme/name?versionId=" + strings.Repeat("a", 32)
 	if fragment != "" {
 		raw += "#" + fragment
 	}
@@ -52,6 +52,10 @@ func validRef(t *testing.T, fragment string) secretstore.Ref {
 }
 
 func strPtr(s string) *string { return &s }
+
+// testARNPrefix is a synthetic secret-ARN prefix (account 123456789012 is
+// AWS's documentation placeholder); awssm refs must be full ARNs (S-2).
+const testARNPrefix = "arn:aws:secretsmanager:us-east-1:123456789012:secret:prefix"
 
 // TestAWSSM_VersionPinning: Get always calls GetSecretValue with VersionId
 // set from the ref, and VersionStage is NEVER set (ADR 0093 §6; the ref
@@ -88,9 +92,9 @@ func TestAWSSM_StageLabelRefusal(t *testing.T) {
 	tenant := uuid.New()
 	ns := "/provider-creds/" + tenant.String() + "/casino/acme/name"
 	for _, raw := range []string{
-		"awssm://prefix" + ns, // no versionId at all
-		"awssm://prefix" + ns + "?versionId=AWSCURRENT",
-		"awssm://prefix" + ns + "?versionStage=AWSCURRENT",
+		"awssm://" + testARNPrefix + ns, // no versionId at all
+		"awssm://" + testARNPrefix + ns + "?versionId=AWSCURRENT",
+		"awssm://" + testARNPrefix + ns + "?versionStage=AWSCURRENT",
 	} {
 		if _, err := secretstore.ParseRef(raw); secretstore.ClassOf(err) != secretstore.ClassInvalidRef {
 			t.Fatalf("%q: expected ClassInvalidRef from ParseRef, got %v", raw, err)
@@ -149,17 +153,19 @@ func TestAWSSM_StaticCredentialRefusal(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			stagingCfg = permittedEnv(t)
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
 			_, err := New(context.Background(), stagingCfg, "us-east-1")
-			if err == nil {
-				t.Fatal("expected refusal, got nil error")
+			if err == nil || !strings.Contains(err.Error(), "static AWS credential signal") {
+				t.Fatalf("expected the static-credential refusal, got %v", err)
 			}
 		})
 	}
 
 	t.Run("shared_credentials_file", func(t *testing.T) {
+		stagingCfg = permittedEnv(t)
 		dir := t.TempDir()
 		path := dir + "/credentials"
 		if err := writeFile(path, "[default]\n"); err != nil {
@@ -167,15 +173,15 @@ func TestAWSSM_StaticCredentialRefusal(t *testing.T) {
 		}
 		t.Setenv("AWS_SHARED_CREDENTIALS_FILE", path)
 		_, err := New(context.Background(), stagingCfg, "us-east-1")
-		if err == nil {
-			t.Fatal("expected refusal, got nil error")
+		if err == nil || !strings.Contains(err.Error(), "AWS_SHARED_CREDENTIALS_FILE") {
+			t.Fatalf("expected the shared-credentials refusal, got %v", err)
 		}
 	})
 
 	t.Run("no_static_signal_passes_this_guard", func(t *testing.T) {
 		// Clear every AWS_* env var this process might have inherited so
 		// the test is deterministic regardless of the host.
-		clearAWSEnv(t)
+		stagingCfg = permittedEnv(t)
 		if _, found := staticCredentialSignal(); found {
 			t.Skip("host environment carries a real AWS credential file; skipping the positive case")
 		}
@@ -195,6 +201,7 @@ func TestAWSSM_StaticCredentialRefusal(t *testing.T) {
 // §4.1's binding recommendation, tightening ADR 0093 §6 condition 4 which
 // named only staging/production).
 func TestAWSSM_StaticCredentialRefusal_EveryEnvironment(t *testing.T) {
+	permittedEnv(t)
 	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE")
 	for _, cfg := range []config.Config{
 		{Environment: "development", EnvironmentExplicit: true},
@@ -202,8 +209,8 @@ func TestAWSSM_StaticCredentialRefusal_EveryEnvironment(t *testing.T) {
 		{Environment: "production", EnvironmentExplicit: true},
 	} {
 		_, err := New(context.Background(), cfg, "us-east-1")
-		if err == nil {
-			t.Fatalf("%s: expected refusal", cfg.Environment)
+		if err == nil || (cfg.Environment != "development" && !strings.Contains(err.Error(), "AWS_ACCESS_KEY_ID")) {
+			t.Fatalf("%s: expected refusal, got %v", cfg.Environment, err)
 		}
 	}
 }
@@ -211,10 +218,9 @@ func TestAWSSM_StaticCredentialRefusal_EveryEnvironment(t *testing.T) {
 // TestAWSSM_EndpointOverrideRefusal: New refuses an endpoint or CA bundle
 // override, in every environment.
 func TestAWSSM_EndpointOverrideRefusal(t *testing.T) {
-	clearAWSEnv(t)
-	stagingCfg := config.Config{Environment: "staging", EnvironmentExplicit: true}
 	for _, k := range []string{"AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_SECRETS_MANAGER", "AWS_CA_BUNDLE"} {
 		t.Run(k, func(t *testing.T) {
+			stagingCfg := permittedEnv(t)
 			t.Setenv(k, "https://evil.example.com")
 			_, err := New(context.Background(), stagingCfg, "us-east-1")
 			if err == nil || !strings.Contains(err.Error(), "endpoint/CA override") {
@@ -458,11 +464,16 @@ func writeFile(path, content string) error {
 // deterministic regardless of the host/CI environment.
 func clearAWSEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{
-		"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE",
-		"AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE",
-		"AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_SECRETS_MANAGER", "AWS_CA_BUNDLE",
-	} {
+	keys := []string{"AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"}
+	keys = append(keys, staticCredentialViolationEnvVars...)
+	keys = append(keys, endpointOverrideEnvVars...)
+	keys = append(keys, credentialSourceOverrideEnvVars...)
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, endpointOverridePrefix) {
+			keys = append(keys, k)
+		}
+	}
+	for _, k := range keys {
 		t.Setenv(k, "")
 	}
 	t.Setenv("HOME", t.TempDir())

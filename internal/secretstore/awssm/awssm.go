@@ -11,21 +11,29 @@
 // Scope note (HD-10.3-2): this package contains NO IAM, KMS or `deploy/`
 // change. It cannot run against real AWS until a task role exists; see the
 // STAGING REQUIRED list in ADR 0093 §8 and the stage-10.3 W3b delivery
-// report. It is wired into no binary by this change — cmd/platform-api is
-// untouched.
+// report. cmd/platform-api constructs it only when SECRETSTORE_BACKENDS
+// names awssm in an explicit staging/production environment.
 //
-// Credentials: task-role / default container credential chain ONLY. New
-// refuses to construct if any static-credential signal is present
-// (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN,
-// AWS_PROFILE, a shared credentials/config file) — in EVERY environment,
-// per the security review §4.1 recommendation that W3b apply the
-// staging/production static-credential refusal (ADR 0093 §6 condition 4)
-// everywhere, so `awssm` cannot be used with a personal AWS profile
-// locally either. Endpoint overrides
-// (AWS_ENDPOINT_URL/AWS_ENDPOINT_URL_SECRETS_MANAGER) and a custom CA
-// bundle (AWS_CA_BUNDLE) are refused the same way (ADR 0093 §6 condition
-// 5); the fingerprint check remains the backstop against a redirected
-// store even if this refusal were ever bypassed.
+// Credentials: ECS container (task-role) credentials ONLY, by allow-list
+// (security gate W2/W3 finding S-1). New sets the container endpoint
+// provider explicitly (AWS_CONTAINER_CREDENTIALS_RELATIVE_URI against the
+// fixed ECS agent address, no proxy), loads with empty shared config/
+// credentials file lists, and wraps the provider so a credential whose
+// Source is not that provider is refused on every retrieval; the SDK's
+// default chain is never consulted. On top of that, New refuses - in
+// EVERY environment - any static-credential signal (AWS_ACCESS_KEY_ID,
+// AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, AWS_PROFILE and the SDK
+// aliases AWS_ACCESS_KEY, AWS_SECRET_KEY, AWS_DEFAULT_PROFILE, or a shared
+// credentials/config file), any endpoint/CA/trust-root override
+// (AWS_ENDPOINT_URL, every AWS_ENDPOINT_URL_<SERVICE>, AWS_CA_BUNDLE,
+// SSL_CERT_FILE, SSL_CERT_DIR), and any credential-source redirection
+// (AWS_CONTAINER_CREDENTIALS_FULL_URI, AWS_EC2_METADATA_SERVICE_ENDPOINT,
+// AWS_WEB_IDENTITY_TOKEN_FILE, AWS_ROLE_ARN) (finding S-2). awssm:// refs
+// must be full secret ARNs (secretstore.ParseRef), pinning the account.
+// The fingerprint check remains the backstop against a redirected store.
+// NOT decided here (open under HD-10.3-2): HTTPS_PROXY handling for the
+// Secrets Manager client itself, and whether IRSA/web identity is ever an
+// authorized source.
 //
 // Reads always pin an exact Secrets Manager VersionId. GetSecretValueInput
 // never carries VersionStage, so a stage label ("AWSCURRENT" etc.) can
@@ -46,11 +54,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials/endpointcreds"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/aws/smithy-go"
@@ -94,29 +108,50 @@ func (s *Store) Scheme() string { return secretstore.SchemeAWSSecretsManager }
 // from configuration (ADR 0093 §6: "the region comes explicitly from
 // configuration") — never inferred from the ambient environment.
 func New(ctx context.Context, cfg config.Config, region string) (*Store, error) {
-	if err := cfg.ValidateSecretBackendScheme(config.SecretBackendAWSSecretsManager); err != nil {
-		return nil, fmt.Errorf("awssm: %w", err)
-	}
-	if region == "" {
-		return nil, errors.New("awssm: region must be set explicitly")
-	}
-	if reason, found := staticCredentialSignal(); found {
-		return nil, fmt.Errorf("awssm: refusing to start: static AWS credential signal present (%s); "+
-			"task-role credentials only, in every environment", reason)
-	}
-	if reason, found := endpointOverrideSignal(); found {
-		return nil, fmt.Errorf("awssm: refusing to start: endpoint/CA override present (%s)", reason)
+	credEndpoint, err := preflight(cfg, region)
+	if err != nil {
+		return nil, err
 	}
 
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx,
+	// Credentials by ALLOW-LIST (security gate W2/W3 finding S-1): the ONLY
+	// provider is the ECS container (task-role) endpoint, set explicitly,
+	// so the SDK's default chain (env keys and their aliases, shared
+	// files, SSO, process, web identity, IMDS) is never consulted. Its
+	// HTTP client has no proxy: the endpoint is the link-local ECS agent,
+	// and routing task-role credentials through a proxy is never correct.
+	// containerOnlyProvider refuses any retrieved credential whose Source
+	// is not that provider.
+	var credHTTP endpointcreds.HTTPClient = awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) { tr.Proxy = nil })
+	if httpClientOverride != nil {
+		credHTTP = httpClientOverride
+	}
+	creds := aws.NewCredentialsCache(containerOnlyProvider{inner: endpointcreds.New(credEndpoint, func(o *endpointcreds.Options) {
+		o.HTTPClient = credHTTP
+	})})
+
+	loadOpts := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(region),
 		// SDK logging off (ADR 0093 §6; C12.6). The zero value already
 		// means "no logging"; this is explicit so a later default change
 		// upstream cannot silently turn logging on.
 		awsconfig.WithClientLogMode(aws.ClientLogMode(0)),
-	)
+		// No shared config/credentials file is ever read (S-1).
+		awsconfig.WithSharedConfigFiles([]string{}),
+		awsconfig.WithSharedCredentialsFiles([]string{}),
+		awsconfig.WithCredentialsProvider(creds),
+	}
+	if httpClientOverride != nil {
+		loadOpts = append(loadOpts, awsconfig.WithHTTPClient(httpClientOverride))
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("awssm: load AWS config: %w", err)
+	}
+	// The SDK keeps a *CredentialsCache as given; anything else means the
+	// allow-list did not take effect, so refuse rather than run with an
+	// unknown source.
+	if awsCfg.Credentials != aws.CredentialsProvider(creds) {
+		return nil, errors.New("awssm: refusing to start: credential provider is not the authorized container provider")
 	}
 
 	sm := secretsmanager.NewFromConfig(awsCfg, func(o *secretsmanager.Options) {
@@ -127,6 +162,95 @@ func New(ctx context.Context, cfg config.Config, region string) (*Store, error) 
 	return newStore(sm), nil
 }
 
+// preflight is every refusal New applies before it touches the SDK: the
+// environment allow-list, an explicit region, no static-credential signal,
+// no endpoint/CA/trust-root override, no credential-source redirection,
+// and a well-formed ECS task-role credential endpoint (returned). None of
+// it makes a network call. NewWithSDKFake runs exactly the same checks.
+func preflight(cfg config.Config, region string) (string, error) {
+	if err := cfg.ValidateSecretBackendScheme(config.SecretBackendAWSSecretsManager); err != nil {
+		return "", fmt.Errorf("awssm: %w", err)
+	}
+	if region == "" {
+		return "", errors.New("awssm: region must be set explicitly")
+	}
+	if reason, found := staticCredentialSignal(); found {
+		return "", fmt.Errorf("awssm: refusing to start: static AWS credential signal present (%s); "+
+			"task-role credentials only, in every environment", reason)
+	}
+	if reason, found := endpointOverrideSignal(); found {
+		return "", fmt.Errorf("awssm: refusing to start: endpoint/CA override present (%s)", reason)
+	}
+	if reason, found := credentialSourceOverrideSignal(); found {
+		return "", fmt.Errorf("awssm: refusing to start: credential-source override present (%s); "+
+			"only the ECS container task-role endpoint is authorized", reason)
+	}
+	return containerCredentialsEndpoint()
+}
+
+// ecsCredentialsHost is the fixed, link-local ECS agent address the
+// container credential provider talks to (the SDK's own
+// ecsContainerEndpoint). Only the RELATIVE URI comes from the environment.
+const ecsCredentialsHost = "169.254.170.2"
+
+// ecsRelativeURIPattern bounds AWS_CONTAINER_CREDENTIALS_RELATIVE_URI to a
+// plain absolute path (the agent sets "/v2/credentials/<id>"): no scheme,
+// host, userinfo, port, query or fragment can be smuggled in.
+var ecsRelativeURIPattern = regexp.MustCompile(`^/[A-Za-z0-9._~-][A-Za-z0-9._~/-]{0,511}$`)
+
+// containerCredentialsEndpoint returns the ECS task-role credential URL,
+// or refuses: the container provider is the only authorized credential
+// source (S-1), so without it awssm cannot run and startup is refused
+// rather than falling back to anything else.
+func containerCredentialsEndpoint() (string, error) {
+	rel, _ := lookupEnv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
+	if rel == "" {
+		return "", errors.New("awssm: refusing to start: AWS_CONTAINER_CREDENTIALS_RELATIVE_URI is not set; " +
+			"the ECS container (task-role) credential provider is the only authorized source")
+	}
+	if !ecsRelativeURIPattern.MatchString(rel) {
+		return "", errors.New("awssm: refusing to start: AWS_CONTAINER_CREDENTIALS_RELATIVE_URI is not a plain path")
+	}
+	u, err := url.Parse("http://" + ecsCredentialsHost + rel)
+	if err != nil || u.Host != ecsCredentialsHost || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("awssm: refusing to start: AWS_CONTAINER_CREDENTIALS_RELATIVE_URI does not resolve to the ECS agent")
+	}
+	return u.String(), nil
+}
+
+// errUnauthorizedCredentialSource is returned by containerOnlyProvider for
+// a credential from any provider other than the container endpoint.
+var errUnauthorizedCredentialSource = errors.New("awssm: credential from an unauthorized source")
+
+// containerOnlyProvider wraps the credential provider and refuses every
+// retrieved credential whose Source is not the container endpoint
+// provider (S-1: "refuse unless the resolved Credentials.Source is that
+// provider"). The check runs on every retrieval, not at New, because New
+// makes no network call (ADR 0093 §6).
+type containerOnlyProvider struct {
+	inner aws.CredentialsProvider
+}
+
+func (p containerOnlyProvider) Retrieve(ctx context.Context) (aws.Credentials, error) {
+	c, err := p.inner.Retrieve(ctx)
+	if err != nil {
+		return aws.Credentials{}, err
+	}
+	if c.Source != endpointcreds.ProviderName {
+		return aws.Credentials{}, errUnauthorizedCredentialSource
+	}
+	return c, nil
+}
+
+// httpClientOverride is nil in production. This package's tests set it
+// (TestMain) to a tripwire client that refuses every request, and New then
+// uses it for BOTH the credential endpoint and Secrets Manager, so no test
+// in this package can ever reach the network through a Store built by New
+// (code review #6).
+var httpClientOverride interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
 // newStore builds a Store over any client (real or the test fake). Kept
 // unexported: production code must go through New, which enforces the
 // guards above.
@@ -135,19 +259,50 @@ func newStore(c client) *Store { return &Store{c: c} }
 // staticCredentialViolationEnvVars are refused in EVERY environment
 // (security review §4.1's recommendation to W3b, tightening ADR 0093 §6
 // condition 4 which named only staging/production).
+// The SDK also reads the aliases AWS_ACCESS_KEY, AWS_SECRET_KEY and
+// AWS_DEFAULT_PROFILE (security gate W2/W3 finding S-1). With the
+// allow-listed provider they are never used, but they are refused anyway so
+// an operator sees the misconfiguration at startup.
 var staticCredentialViolationEnvVars = []string{
 	"AWS_ACCESS_KEY_ID",
 	"AWS_SECRET_ACCESS_KEY",
 	"AWS_SESSION_TOKEN",
 	"AWS_PROFILE",
+	"AWS_ACCESS_KEY",
+	"AWS_SECRET_KEY",
+	"AWS_DEFAULT_PROFILE",
 }
 
 // endpointOverrideEnvVars are refused in every environment (ADR 0093 §6
-// condition 5).
+// condition 5; gate W2/W3 finding S-2): endpoint overrides, a custom AWS
+// CA bundle, and Go's own system trust-root overrides (crypto/x509 honours
+// SSL_CERT_FILE/SSL_CERT_DIR on Linux, which would re-open exactly the TLS
+// interception AWS_CA_BUNDLE is refused for). Every other
+// AWS_ENDPOINT_URL_<SERVICE> variable is refused by prefix
+// (endpointOverrideSignal).
 var endpointOverrideEnvVars = []string{
 	"AWS_ENDPOINT_URL",
 	"AWS_ENDPOINT_URL_SECRETS_MANAGER",
+	"AWS_ENDPOINT_URL_STS",
 	"AWS_CA_BUNDLE",
+	"SSL_CERT_FILE",
+	"SSL_CERT_DIR",
+}
+
+// endpointOverridePrefix covers every service-specific endpoint override.
+const endpointOverridePrefix = "AWS_ENDPOINT_URL_"
+
+// credentialSourceOverrideEnvVars redirect where the SDK obtains
+// credentials (S-2). The allow-listed container provider never reads them;
+// they are refused so that nothing configured to hand the process another
+// account's credentials is silently accepted. Whether IRSA/web identity
+// is ever an authorized source is an open HD-10.3-2 decision; until it is
+// made, it is refused.
+var credentialSourceOverrideEnvVars = []string{
+	"AWS_CONTAINER_CREDENTIALS_FULL_URI",
+	"AWS_EC2_METADATA_SERVICE_ENDPOINT",
+	"AWS_WEB_IDENTITY_TOKEN_FILE",
+	"AWS_ROLE_ARN",
 }
 
 // lookupEnv/statPath are indirections so tests can simulate a shared
@@ -155,6 +310,7 @@ var endpointOverrideEnvVars = []string{
 // filesystem or environment of the test process outside t.Setenv.
 var (
 	lookupEnv = os.LookupEnv
+	environ   = os.Environ
 	statPath  = os.Stat
 	userHome  = os.UserHomeDir
 )
@@ -189,10 +345,27 @@ func staticCredentialSignal() (string, bool) {
 	return "", false
 }
 
-// endpointOverrideSignal reports the first endpoint/CA override env var
-// found, if any.
+// endpointOverrideSignal reports the first endpoint/CA/trust-root override
+// env var found, if any, including any AWS_ENDPOINT_URL_<SERVICE>.
 func endpointOverrideSignal() (string, bool) {
 	for _, k := range endpointOverrideEnvVars {
+		if v, ok := lookupEnv(k); ok && v != "" {
+			return k, true
+		}
+	}
+	for _, kv := range environ() {
+		k, v, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(k, endpointOverridePrefix) && v != "" {
+			return k, true
+		}
+	}
+	return "", false
+}
+
+// credentialSourceOverrideSignal reports the first credential-source
+// redirection env var found, if any.
+func credentialSourceOverrideSignal() (string, bool) {
+	for _, k := range credentialSourceOverrideEnvVars {
 		if v, ok := lookupEnv(k); ok && v != "" {
 			return k, true
 		}

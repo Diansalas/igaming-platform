@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/Diansalas/igaming-platform/internal/casino"
@@ -12,6 +13,7 @@ import (
 	"github.com/Diansalas/igaming-platform/internal/providercred"
 	"github.com/Diansalas/igaming-platform/internal/providerkind"
 	"github.com/Diansalas/igaming-platform/internal/secretstore"
+	"github.com/Diansalas/igaming-platform/internal/secretstore/awssm"
 	"github.com/Diansalas/igaming-platform/internal/secretstore/devfile"
 	"github.com/Diansalas/igaming-platform/internal/sportsbook"
 	"github.com/Diansalas/igaming-platform/internal/webhookauth"
@@ -58,11 +60,19 @@ type providerBundle struct {
 	// so the bundle stays a pure function of the mock wiring.
 	Credentials *providercred.Subsystem
 	// SecretBackends are the constructed secret-store backends, registered
-	// with the synthetic guard individually (devfile carries no
-	// production-eligibility marker, so the guard refuses it in production
-	// even if the environment allow-list were ever bypassed).
+	// with the synthetic guard individually: awssm is ProductionEligible;
+	// devfile carries no production-eligibility marker, so the guard
+	// refuses it in production even if the environment allow-list were ever
+	// bypassed.
 	SecretBackends []secretstore.Store
 }
+
+// awssmConstructor builds the awssm:// backend. Production uses awssm.New
+// (withCredentialSubsystem); the wiring tests pass awssm.NewWithSDKFake,
+// which runs the same preflight refusals over an in-process SDK fake (no
+// network). Both return the concrete *awssm.Store, which is
+// ProductionEligible.
+type awssmConstructor func(ctx context.Context, cfg config.Config, region string) (*awssm.Store, error)
 
 // withCredentialSubsystem builds the real credential subsystem from cfg
 // and attaches it to b (ADR 0093 §4 wiring; security review §3/§4.1):
@@ -72,14 +82,26 @@ type providerBundle struct {
 //     otherwise; checked again by secretstore.NewRouter);
 //   - devfile:// is constructed by devfile.New, which re-checks the
 //     environment itself and refuses a bad root directory;
-//   - awssm:// is the W3b backend and is NOT IMPLEMENTED in this build: a
-//     configuration naming it refuses startup rather than silently running
-//     without it;
+//   - awssm:// (Stage 10.3 W3b) is constructed by awssm.New ONLY when the
+//     operator configured it AND the environment permits it (explicit
+//     staging/production). It needs cfg.SecretStoreAWSRegion, and awssm.New
+//     re-checks the environment and refuses static credentials and
+//     endpoint/CA overrides. If awssm was configured and cannot be built,
+//     startup is refused - never silently continued without it. Not
+//     configured, it is never constructed;
 //   - memory:// can never be configured (test-only, import-restricted).
 //
 // With no fingerprint key or no backend, b.Credentials stays nil and
-// startup still succeeds. It makes no network or database call.
-func withCredentialSubsystem(cfg config.Config, b providerBundle) (providerBundle, error) {
+// startup still succeeds. It makes no database call. awssm.New makes no
+// network call either: it resolves configuration only, and the SDK fetches
+// task-role credentials lazily on the first secret read.
+func withCredentialSubsystem(ctx context.Context, cfg config.Config, b providerBundle) (providerBundle, error) {
+	return withCredentialSubsystemUsing(ctx, cfg, b, awssm.New)
+}
+
+// withCredentialSubsystemUsing is withCredentialSubsystem with the awssm
+// constructor injected (tests pass awssm.NewWithSDKFake).
+func withCredentialSubsystemUsing(ctx context.Context, cfg config.Config, b providerBundle, newAWSSM awssmConstructor) (providerBundle, error) {
 	var stores []secretstore.Store
 	for _, scheme := range cfg.SecretStoreBackends {
 		if err := cfg.ValidateSecretBackendScheme(scheme); err != nil {
@@ -93,7 +115,17 @@ func withCredentialSubsystem(cfg config.Config, b providerBundle) (providerBundl
 			}
 			stores = append(stores, st)
 		case config.SecretBackendAWSSecretsManager:
-			return b, fmt.Errorf("secret store: backend %q is NOT IMPLEMENTED in this build (Stage 10.3 W3b)", scheme)
+			if err := cfg.ValidateSecretStoreAWSRegion(); err != nil {
+				return b, fmt.Errorf("secret store: %w", err)
+			}
+			if newAWSSM == nil {
+				return b, fmt.Errorf("secret store: backend %q has no constructor", scheme)
+			}
+			st, err := newAWSSM(ctx, cfg, cfg.SecretStoreAWSRegion)
+			if err != nil {
+				return b, fmt.Errorf("secret store: %w", err)
+			}
+			stores = append(stores, st)
 		default:
 			return b, fmt.Errorf("secret store: backend %q cannot be configured", scheme)
 		}
@@ -231,8 +263,9 @@ func buildRegistrations(_ config.Config, b providerBundle) []providerkind.Regist
 		providerkind.Registration{Domain: "kyc", Name: "webhook_resolver", Component: b.KYCWebhookResolver},
 	)
 	// The real credential subsystem (production-eligible) and each
-	// secret-store backend (devfile has no eligibility marker, so the guard
-	// refuses it in production; memory is synthetic and never configured).
+	// secret-store backend: awssm is ProductionEligible (W3b); devfile has
+	// no eligibility marker, so the guard refuses it in production; memory
+	// is synthetic and never configured.
 	if b.Credentials != nil {
 		regs = append(regs, providerkind.Registration{Domain: "provider_credentials", Name: "subsystem", Component: b.Credentials})
 	}

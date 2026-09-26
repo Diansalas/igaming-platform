@@ -62,7 +62,7 @@ func run() error {
 	// wiring decision later in this function - nothing is constructed a
 	// second time under a different name.
 	wiring := mockProviderWiring(cfg)
-	providers, err := withCredentialSubsystem(cfg, buildProviderBundle(wiring))
+	providers, err := withCredentialSubsystem(ctx, cfg, buildProviderBundle(wiring))
 	if err != nil {
 		return err
 	}
@@ -193,6 +193,7 @@ func run() error {
 	// package other than registrations.go constructs a provider component
 	// (TestMain_ConstructsNoProviderComponentOutsideRegistrations).
 	orchestrator := payments.NewOrchestrator(providers.paymentsAdapters(), providers.paymentsOrchestratorResolver())
+	orchestrator.SetWebhookLogger(logger) // W2A-SEC-2 matched-key_id line
 
 	// KYC-WH-1 (Stage 10.2, ADR 0091; final review K11): providers.KYC is
 	// non-nil ONLY when wiring enabled it at bundle-construction time (ADR
@@ -223,6 +224,7 @@ func run() error {
 	// catalogue and launch (MOCK-ADAPTER-PROD-1, a pre-launch checklist
 	// item - not this stage's scope).
 	casinoOrchestrator := casino.NewOrchestrator(providers.casinoAdapters(), providers.casinoOrchestratorResolver())
+	casinoOrchestrator.SetWebhookLogger(logger) // W2A-SEC-2 matched-key_id line
 
 	// Stage 6 ships a mock sportsbook provider only (CLAUDE.md's "does not
 	// integrate a real provider without a confirmed commercial
@@ -334,7 +336,7 @@ func run() error {
 		// (design §B3/§D): there is no real KYC vendor to fall back to.
 		// KYCWebhookEnabled below gates the ROUTE itself identically, so
 		// route registration and orchestrator wiring cannot diverge (K11).
-		KYCOrchestrator:   kycOrchestrator(wiring, providers),
+		KYCOrchestrator:   kycOrchestrator(wiring, providers, logger),
 		KYCWebhookEnabled: wiring.KYCWebhookEnabled,
 		DocumentStorage:   providers.DocumentStorage,
 		MalwareScanner:    providers.MalwareScanner,

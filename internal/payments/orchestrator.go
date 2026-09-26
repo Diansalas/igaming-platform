@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 
 	"github.com/google/uuid"
@@ -52,6 +53,10 @@ type Orchestrator struct {
 	// webhookSchemes is every registered adapter's WebhookScheme(),
 	// validated once at construction (Stage 10.3 W1a; webhook_verify.go).
 	webhookSchemes *webhookauth.SchemeSet
+	// webhookLogger receives the matched-key_id line after a successful
+	// callback verification (webhook_verify.go, W2A-SEC-2). Nil means
+	// slog.Default().
+	webhookLogger *slog.Logger
 	// MaxCascadeDepth bounds cascade-on-decline (payment-orchestration.md
 	// §5). Defaults to defaultMaxCascadeDepth when <= 0.
 	MaxCascadeDepth int

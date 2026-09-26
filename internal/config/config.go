@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -333,6 +334,14 @@ type Config struct {
 	// both .gitignore and .dockerignore). Only read when "devfile" is in
 	// SecretStoreBackends, which itself is development-only.
 	SecretStoreDevFileRoot string
+
+	// SecretStoreAWSRegion is the AWS Secrets Manager region the awssm://
+	// backend uses (Stage 10.3 W3b wiring; ADR 0093 §6 "the region comes
+	// explicitly from configuration"). Read from AWS_SECRETSMANAGER_REGION,
+	// falling back to AWS_REGION. Only read, and only validated
+	// (ValidateSecretStoreAWSRegion), when "awssm" is in
+	// SecretStoreBackends; otherwise it is ignored. Not secret.
+	SecretStoreAWSRegion string
 }
 
 // SecretValue is a configuration string that must never be printed: its
@@ -437,6 +446,7 @@ func Load() (Config, error) {
 		TestSupportEndpointsEnabled:      false,
 		ProviderCredentialFingerprintKey: NewSecretValue(os.Getenv("PROVIDER_CREDENTIAL_FINGERPRINT_KEY")),
 		SecretStoreDevFileRoot:           getEnvDefault("SECRETSTORE_DEVFILE_ROOT", "./.secrets/dev"),
+		SecretStoreAWSRegion:             getEnvDefault("AWS_SECRETSMANAGER_REGION", os.Getenv("AWS_REGION")),
 	}
 	if v := os.Getenv("SECRETSTORE_BACKENDS"); v != "" {
 		seen := map[string]bool{}
@@ -620,6 +630,11 @@ func Load() (Config, error) {
 		if err := cfg.ValidateSecretBackendScheme(scheme); err != nil {
 			return Config{}, fmt.Errorf("config: SECRETSTORE_BACKENDS: %w", err)
 		}
+		if scheme == SecretBackendAWSSecretsManager {
+			if err := cfg.ValidateSecretStoreAWSRegion(); err != nil {
+				return Config{}, err
+			}
+		}
 	}
 
 	return cfg, nil
@@ -739,6 +754,25 @@ func (c Config) ValidateSecretBackendScheme(scheme string) error {
 	default:
 		return fmt.Errorf("config: unknown secret backend scheme %q", scheme)
 	}
+}
+
+// awsRegionPattern is the shape of an AWS region name (e.g. "eu-west-1",
+// "us-gov-west-1"). It is a format check only; whether the region exists
+// is AWS's answer, not ours.
+var awsRegionPattern = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-[0-9]{1,2}$`)
+
+// ValidateSecretStoreAWSRegion refuses a missing or malformed
+// SecretStoreAWSRegion. Load calls it only when "awssm" is configured, and
+// cmd/platform-api calls it again before constructing the awssm backend;
+// with awssm not selected the region is never read.
+func (c Config) ValidateSecretStoreAWSRegion() error {
+	if c.SecretStoreAWSRegion == "" {
+		return fmt.Errorf("config: secret backend %q needs a region: set AWS_SECRETSMANAGER_REGION (or AWS_REGION)", SecretBackendAWSSecretsManager)
+	}
+	if !awsRegionPattern.MatchString(c.SecretStoreAWSRegion) {
+		return fmt.Errorf("config: AWS_SECRETSMANAGER_REGION/AWS_REGION %q is not an AWS region name", c.SecretStoreAWSRegion)
+	}
+	return nil
 }
 
 func getEnvDefault(key, def string) string {

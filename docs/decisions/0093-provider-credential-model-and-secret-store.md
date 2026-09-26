@@ -550,16 +550,8 @@ Recorded by the W2a implementer. Labels per CLAUDE.md; nothing below is "secure"
   caller's transaction, fingerprint compared on every resolve, §5 cache/breaker constants in
   `internal/secretstore`): `IMPLEMENTED` against the `memory` (tests only) and `devfile`
   (development only) backends. `KeyImplicit` resolution: `IMPLEMENTED`; the W1 registration
-  refusal is removed. `awssm` backend code (`internal/secretstore/awssm`, ADR 0093 §6, security
-  review §4.1's recommendation to refuse static AWS credentials in every environment, not only
-  staging/production): `IMPLEMENTED` (code, fake-tested only — no test in this repository ever
-  dials a real AWS endpoint; `TestImportBoundary_NoOtherPackageImportsAWSSDK` confines the SDK
-  import to this one package). Wiring the backend into `cmd/platform-api` and running it against
-  real AWS is `STAGING REQUIRED` (ADR 0093 §8): it needs the task-role IAM permission, the VPC/
-  network path to Secrets Manager, and rotation/outage drills with a synthetic secret, none of
-  which exists yet. IAM/`deploy/` changes remain excluded from this stage (HD-10.3-2, ADR 0093
-  §9) — a configuration naming `awssm` in a process with no such wiring still refuses startup via
-  `ValidateSecretBackendScheme`/`NewRouter`, unchanged from the prior state of this line.
+  refusal is removed. `awssm` backend: see "W2/W3 close-out status" below (`PARTIALLY
+  IMPLEMENTED`).
 - **Wiring:** the real resolver is constructed only with a fingerprint key AND a permitted
   backend, and serves non-synthetic adapters only (`webhookauth.KindSplitResolver`). No real
   adapter exists, so today no production traffic reaches it.
@@ -578,6 +570,60 @@ Recorded by the W2a implementer. Labels per CLAUDE.md; nothing below is "secure"
 - **O4:** `IMPLEMENTED` - player self-service KYC selects the provider from the tenant's
   active outbound KYC credential (fails closed when none or several are configured; a lone
   synthetic adapter is used without one in test-support deployments).
-- **Not implemented:** logging the matched `key_id` of a successful `KeyImplicit` verification
-  (the domain orchestrators have no success log line; no `KeyImplicit` scheme is registered).
+- **Matched `key_id` log (security W2A-SEC-2):** `IMPLEMENTED` in the W2/W3 close-out, see
+  below. (At W2a it was not implemented.)
 - Mutation-kill record: `docs/plans/stage-10.3-planning/evidence/w2a-mutation-kill.txt`.
+
+## W2/W3 close-out status (2026-09-26)
+
+Recorded by the `security` specialist while closing gate W2 conditions W2A-SEC-1/-2 and the gate
+W2/W3 security findings S-1, S-2 and S-5 (`docs/plans/stage-10.3-planning/10-gate-w2w3-review-security.md`).
+Labels per CLAUDE.md.
+
+- **`awssm` backend: `PARTIALLY IMPLEMENTED`.**
+  - Backend code, wiring into `cmd/platform-api` and local SDK-fake tests: `IMPLEMENTED`.
+    `awssm.New` is constructed only when `SECRETSTORE_BACKENDS` names `awssm` and
+    `ValidateSecretBackendScheme("awssm")` passes (explicit `APP_ENV` staging or production).
+    The region is `SecretStoreAWSRegion` (`AWS_SECRETSMANAGER_REGION`, falling back to
+    `AWS_REGION`), validated only when `awssm` is selected. If `awssm` is configured and cannot be
+    built, startup is refused. The backend is registered with the ADR 0085 synthetic guard as
+    `ProductionEligible`. `New` makes no network call.
+  - IAM, KMS and `deploy/`: `NOT IMPLEMENTED` (HD-10.3-2, §9).
+  - Real-AWS use, latency, cold cache and rotation/outage drills: `STAGING REQUIRED` (§8).
+- **Credentials by allow-list (S-1), replacing §6's deny-list as the control.** The only
+  credential provider is the ECS container (task-role) endpoint, set explicitly: the fixed agent
+  address `169.254.170.2` plus a path-only `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, with no
+  proxy. Shared config and credentials file lists are empty, so the SDK's default chain is never
+  consulted. Every retrieved credential whose `Source` is not that provider is refused. The check
+  runs on retrieval, not at `New`, because `New` makes no network call. Without the relative URI,
+  `New` refuses. The §6 static-credential refusal is kept as a startup check and extended to the
+  SDK aliases `AWS_ACCESS_KEY`, `AWS_SECRET_KEY` and `AWS_DEFAULT_PROFILE`. It applies in every
+  environment.
+- **Endpoint, trust-root and credential-source refusals (S-2).** Refused in every environment:
+  `AWS_ENDPOINT_URL` and every `AWS_ENDPOINT_URL_<SERVICE>` (including `_STS`), `AWS_CA_BUNDLE`,
+  `SSL_CERT_FILE`, `SSL_CERT_DIR`, `AWS_CONTAINER_CREDENTIALS_FULL_URI`,
+  `AWS_EC2_METADATA_SERVICE_ENDPOINT`, `AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`.
+- **`awssm://` refs must be full secret ARNs (S-2; tightens §1 and A2).** `secretstore.ParseRef`
+  requires `arn:<aws|aws-cn|aws-us-gov>:secretsmanager:<region>:<12-digit account>:secret:<name>`,
+  which pins the account. Registration and every resolve go through `ParseRef`. The migration
+  0096 CHECKs still accept a bare name; no migration was changed. A row with a bare name
+  therefore fails closed at resolve.
+- **Import guards (S-5)** cover every `github.com/aws/` module, in both the AST test and the CI
+  grep.
+- **Open, not decided here (HD-10.3-2):**
+  - `HTTPS_PROXY` handling for the Secrets Manager client (the recommendation on record is the
+    VPC endpoint, with the proxy not honoured for this client);
+  - whether IRSA/web identity is ever an authorized source (refused until decided);
+  - the SDK's own retry policy (3 attempts) underneath the `secretstore` breaker. The whole call
+    is bounded by `StoreCallTimeout`
+    (`TestAWSSM_HangingStoreBoundedThroughFetcher`).
+- **Matched `key_id` log (W2A-SEC-2): `IMPLEMENTED`.** After a successful verification, the
+  payments, KYC and casino orchestrators call `webhookauth.LogVerifiedKey`. For a `KeyImplicit`
+  scheme it logs one Info line, `webhook_key_verified`, with only `request_id`, `tenant_id`,
+  `provider_id` and `key_id`. It never logs a secret or fingerprint.
+- **PROV-OUTBOUND-CRED-1** stays `PARTIALLY IMPLEMENTED`. Its launch-blocking precondition is
+  registered in `docs/governance/task-registry.md` and enforced by the tripwire
+  `TestOutboundPrecondition_EveryWiredAdapterIsSynthetic` (W2A-SEC-1).
+- Mutation-kill record: `docs/plans/stage-10.3-planning/evidence/w2w3-closeout-mutation-kill.txt`.
+- `awssm` must be reviewed again by `security` now that it is wired. This entry is not that
+  review.

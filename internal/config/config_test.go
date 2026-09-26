@@ -11,7 +11,9 @@ func clearEnv(t *testing.T) {
 	for _, k := range []string{"APP_ENV", "HTTP_ADDR", "DATABASE_URL", "DATABASE_MAX_CONNS", "JWT_SIGNING_SECRET", "OTEL_SERVICE_NAME", "OTEL_EXPORTER", "CORS_ALLOWED_ORIGINS", "TEST_SUPPORT_ENDPOINTS_ENABLED",
 		// Stage 10.3 W2a: CI's job env carries the published CI fingerprint-key
 		// placeholder, which Load refuses outside explicit development.
-		"PROVIDER_CREDENTIAL_FINGERPRINT_KEY", "SECRETSTORE_BACKENDS", "SECRETSTORE_DEVFILE_ROOT", "JWT_PREVIOUS_SECRET"} {
+		"PROVIDER_CREDENTIAL_FINGERPRINT_KEY", "SECRETSTORE_BACKENDS", "SECRETSTORE_DEVFILE_ROOT", "JWT_PREVIOUS_SECRET",
+		// Stage 10.3 W3b wiring: the awssm region sources.
+		"AWS_SECRETSMANAGER_REGION", "AWS_REGION"} {
 		t.Setenv(k, "")
 		_ = os.Unsetenv(k)
 	}

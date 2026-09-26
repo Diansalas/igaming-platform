@@ -505,9 +505,20 @@ already performs, reused verbatim), never asserted by the payload.
 >    - **Not covered by this rule, carried forward:**
 >      - E10, the G-1 409 classes, and an E9 rollback that names an
 >        already-tombstoned original under a *different* reference (200,
->        with no ledger, audit or log record of its own) are captured only
->        by W2b's rejection record (`ledger-finance` C9 and its extension;
->        CAS-RECON-1).
+>        with no ledger, audit or log record of its own) are captured in
+>        the verified-only, append-only `casino_callback_rejections` table
+>        (migration `0097_casino_callback_rejections_and_casino_recon`;
+>        `ledger-finance` C9 and its extension; CAS-RECON-1, W2b). Its
+>        `reason_class` is `original_tombstoned` for E10 (and E3); one of
+>        `ambiguous_round`, `wallet_collision`, `mixed_funding`,
+>        `lock_already_released` or `bonus_bet_not_locked` for the G-1 409
+>        classes; and `rollback_of_tombstoned_original` for the E9
+>        different-reference case, whose row is its only durable trace.
+>        Written by `internal/casino/rejections.go`; tests in
+>        `internal/casino/rejections_integration_test.go`
+>        (`TestCallbackRejection_E10_*`, `TestCallbackRejection_E9_*`)
+>        and `rejections_test.go`
+>        (`TestRejectionClassFor_EveryClassAndNothingElse`).
 >      - CAS-WIN-IDEMP-1 (F-9, Medium, pre-existing): `postWin` has no
 >        `postBet`-style "already posted → verify match → return original"
 >        short-circuit. A win redelivered after a rollback of its bet

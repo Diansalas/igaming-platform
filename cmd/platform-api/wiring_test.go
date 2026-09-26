@@ -90,7 +90,7 @@ func TestKYCOrchestrator_FollowsWiring(t *testing.T) {
 		if b.KYC != nil || b.KYCWebhookResolver != nil {
 			t.Fatalf("env=%s explicit=%v flag=%v: expected no KYC mock and no KYC resolver in the bundle", cfg.Environment, cfg.EnvironmentExplicit, cfg.TestSupportEndpointsEnabled)
 		}
-		if orch := kycOrchestrator(w, b); orch != nil {
+		if orch := kycOrchestrator(w, b, nil); orch != nil {
 			t.Fatalf("env=%s explicit=%v flag=%v: expected a nil *kyc.Orchestrator, got %v", cfg.Environment, cfg.EnvironmentExplicit, cfg.TestSupportEndpointsEnabled, orch)
 		}
 		if r := b.kycOrchestratorResolver(); r != nil {
@@ -99,13 +99,13 @@ func TestKYCOrchestrator_FollowsWiring(t *testing.T) {
 	}
 	// Defence in depth: a wiring value that enables KYC with a bundle that
 	// has no KYC mock still yields no orchestrator.
-	if orch := kycOrchestrator(mockWiring{KYCWebhookEnabled: true}, providerBundle{}); orch != nil {
+	if orch := kycOrchestrator(mockWiring{KYCWebhookEnabled: true}, providerBundle{}, nil); orch != nil {
 		t.Fatal("expected a nil *kyc.Orchestrator for a bundle without a KYC mock")
 	}
 
 	w := mockProviderWiring(wiringOnConfig)
 	b := buildProviderBundle(w)
-	orch := kycOrchestrator(w, b)
+	orch := kycOrchestrator(w, b, nil)
 	if orch == nil {
 		t.Fatal("expected a working *kyc.Orchestrator with test support on")
 	}

@@ -11,8 +11,11 @@ import (
 )
 
 // awsSDKImportPrefix is the module path condition C12.2 (04-review-
-// security.md §3) and ADR 0093 §6 confine to this one package.
-const awsSDKImportPrefix = "github.com/aws/aws-sdk-go-v2/"
+// security.md §3) and ADR 0093 §6 confine to this one package. Widened
+// from "github.com/aws/aws-sdk-go-v2/" to every github.com/aws/ module
+// (gate W2/W3 security finding S-5), so smithy-go and the v1 SDK
+// (github.com/aws/aws-sdk-go) are covered too: no other runtime AWS path.
+const awsSDKImportPrefix = "github.com/aws/"
 
 // repoRoot locates the repository root relative to this test file's own
 // source location (mirrors internal/secretstore/secretstore_test.go's
@@ -143,5 +146,35 @@ func TestImportBoundary_ASTNotStringMatch(t *testing.T) {
 	}
 	if got := awsSDKImportersIn(t, dir); len(got) != 0 {
 		t.Fatalf("expected no offenders from a mere text mention, got %v", got)
+	}
+}
+
+// TestImportBoundary_CoversSmithyAndV1SDK (S-5): smithy-go and the v1 SDK
+// are caught by the widened prefix, and a non-AWS module is not.
+func TestImportBoundary_CoversSmithyAndV1SDK(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{filepath.Join("internal", "secretstore", "awssm"), filepath.Join("internal", "a"), filepath.Join("internal", "b"), filepath.Join("internal", "c")} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := map[string]string{
+		filepath.Join("internal", "a", "smithy.go"): "package a\n\nimport _ \"github.com/aws/smithy-go\"\n",
+		filepath.Join("internal", "b", "v1.go"):     "package b\n\nimport _ \"github.com/aws/aws-sdk-go/aws\"\n",
+		filepath.Join("internal", "c", "other.go"):  "package c\n\nimport _ \"github.com/awslabs/other\"\n",
+	}
+	for rel, src := range files {
+		if err := os.WriteFile(filepath.Join(dir, rel), []byte(src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := awsSDKImportersIn(t, dir)
+	if len(got) != 2 {
+		t.Fatalf("expected exactly the smithy-go and v1 SDK importers, got %v", got)
+	}
+	for _, g := range got {
+		if strings.HasSuffix(g, "other.go") {
+			t.Fatalf("a non-AWS module must not be flagged: %v", got)
+		}
 	}
 }

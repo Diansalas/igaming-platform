@@ -101,7 +101,7 @@ var allOnWiring = mockWiring{PaymentsWebhookResolver: true, KYCWebhookEnabled: t
 // immediately.
 func TestSyntheticGuard_RegistrationCompletenessScan(t *testing.T) {
 	cfg := credentialTestConfig(t)
-	bundle, err := withCredentialSubsystem(cfg, buildProviderBundle(allOnWiring))
+	bundle, err := withCredentialsForTest(cfg, buildProviderBundle(allOnWiring))
 	if err != nil {
 		t.Fatalf("withCredentialSubsystem: %v", err)
 	}

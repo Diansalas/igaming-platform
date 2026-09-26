@@ -23,7 +23,7 @@ func TestWiring_NoFingerprintKey_RealCredentialSubsystemAbsent(t *testing.T) {
 	noBackend := credentialTestConfig(t)
 	noBackend.SecretStoreBackends = nil
 	for name, cfg := range map[string]config.Config{"no key": noKey, "no backend": noBackend} {
-		b, err := withCredentialSubsystem(cfg, buildProviderBundle(allOnWiring))
+		b, err := withCredentialsForTest(cfg, buildProviderBundle(allOnWiring))
 		if err != nil {
 			t.Fatalf("%s: startup must succeed, got %v", name, err)
 		}
@@ -37,7 +37,7 @@ func TestWiring_NoFingerprintKey_RealCredentialSubsystemAbsent(t *testing.T) {
 	// Production, no key, no backend: startup succeeds with no resolver at
 	// all (every real callback fails closed as no_resolver).
 	prod := baseConfig(t, "production", true)
-	b, err := withCredentialSubsystem(prod, buildProviderBundle(mockProviderWiring(prod)))
+	b, err := withCredentialsForTest(prod, buildProviderBundle(mockProviderWiring(prod)))
 	if err != nil || b.Credentials != nil || b.casinoOrchestratorResolver() != nil || b.paymentsOrchestratorResolver() != nil {
 		t.Fatalf("production without the subsystem: err=%v creds=%v", err, b.Credentials)
 	}
@@ -51,7 +51,7 @@ func TestWiring_NoFingerprintKey_RealCredentialSubsystemAbsent(t *testing.T) {
 // adapter).
 func TestWiring_RealResolverServesNonSyntheticAdaptersOnly(t *testing.T) {
 	cfg := credentialTestConfig(t)
-	on, err := withCredentialSubsystem(cfg, buildProviderBundle(allOnWiring))
+	on, err := withCredentialsForTest(cfg, buildProviderBundle(allOnWiring))
 	if err != nil || on.Credentials == nil {
 		t.Fatalf("subsystem: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestWiring_RealResolverServesNonSyntheticAdaptersOnly(t *testing.T) {
 	if cred, err := resolveKey(on.casinoOrchestratorResolver(), tenant, "mock-casino", webhookauth.MockKeyID); err != nil || cred.TenantID != tenant {
 		t.Fatalf("a synthetic adapter must be served by the MOCK resolver: %v", err)
 	}
-	off, err := withCredentialSubsystem(cfg, buildProviderBundle(mockWiring{}))
+	off, err := withCredentialsForTest(cfg, buildProviderBundle(mockWiring{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,12 +74,11 @@ func TestWiring_RealResolverServesNonSyntheticAdaptersOnly(t *testing.T) {
 
 // TestWiring_SecretBackendsAndProductionGuard: devfile is development-only
 // (and carries no production-eligibility marker, so the ADR 0085 guard
-// refuses it in production); awssm is NOT IMPLEMENTED in this build and a
-// configuration naming it refuses startup; the real subsystem itself is
-// production-eligible.
+// refuses it in production); the real subsystem itself is
+// production-eligible. awssm is covered by awssm_wiring_test.go.
 func TestWiring_SecretBackendsAndProductionGuard(t *testing.T) {
 	cfg := credentialTestConfig(t)
-	b, err := withCredentialSubsystem(cfg, buildProviderBundle(mockWiring{}))
+	b, err := withCredentialsForTest(cfg, buildProviderBundle(mockWiring{}))
 	if err != nil || len(b.SecretBackends) != 1 {
 		t.Fatalf("devfile in development: %v", err)
 	}
@@ -106,18 +105,13 @@ func TestWiring_SecretBackendsAndProductionGuard(t *testing.T) {
 
 	prodDevfile := cfg
 	prodDevfile.Environment = "production"
-	if _, err := withCredentialSubsystem(prodDevfile, buildProviderBundle(mockWiring{})); err == nil {
+	if _, err := withCredentialsForTest(prodDevfile, buildProviderBundle(mockWiring{})); err == nil {
 		t.Fatal("devfile must refuse startup in production")
 	}
-	awssm := baseConfig(t, "production", true)
-	awssm.ProviderCredentialFingerprintKey = cfg.ProviderCredentialFingerprintKey
-	awssm.SecretStoreBackends = []string{config.SecretBackendAWSSecretsManager}
-	if _, err := withCredentialSubsystem(awssm, buildProviderBundle(mockWiring{})); err == nil || !strings.Contains(err.Error(), "NOT IMPLEMENTED") {
-		t.Fatalf("awssm must refuse startup until W3b, got %v", err)
-	}
+	// awssm (W3b) is covered by awssm_wiring_test.go.
 	memory := cfg
 	memory.SecretStoreBackends = []string{"memory"}
-	if _, err := withCredentialSubsystem(memory, buildProviderBundle(mockWiring{})); err == nil {
+	if _, err := withCredentialsForTest(memory, buildProviderBundle(mockWiring{})); err == nil {
 		t.Fatal("memory must never be configurable")
 	}
 }

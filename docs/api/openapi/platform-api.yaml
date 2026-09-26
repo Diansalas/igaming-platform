@@ -6009,7 +6009,7 @@ components:
         not_after: { type: string, format: date-time, nullable: true }
         status_changed_at: { type: string, format: date-time }
         fingerprint: { type: string, pattern: "^fp1:[0-9a-f]{64}$", example: "fp1:0000000000000000000000000000000000000000000000000000000000000000" }
-        secret_ref: { type: string, example: "awssm://prefix/provider-creds/00000000-0000-0000-0000-000000000000/payments/example-psp/api-key?versionId=00000000-0000-0000-0000-000000000000" }
+        secret_ref: { type: string, example: "awssm://arn:aws:secretsmanager:eu-west-1:000000000000:secret:prefix/provider-creds/00000000-0000-0000-0000-000000000000/payments/example-psp/api-key?versionId=00000000-0000-0000-0000-000000000000" }
         vendor_account_id: { type: string, nullable: true }
         activation_request_id: { type: string, format: uuid }
         revoked_at: { type: string, format: date-time }

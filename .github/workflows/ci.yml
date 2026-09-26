@@ -131,10 +131,11 @@ jobs:
 
       - name: Guard - AWS SDK confined to internal/secretstore/awssm (Stage 10.3 W3b)
         run: |
-          # ADR 0093 §6 / security review C12.2: the AWS SDK v2 may be
-          # imported only by internal/secretstore/awssm. Mirrors
-          # TestImportBoundary_NoOtherPackageImportsAWSSDK.
-          offenders="$(grep -rl --include='*.go' '"github.com/aws/aws-sdk-go-v2/' . | grep -v '^\./internal/secretstore/awssm/' || true)"
+          # ADR 0093 §6 / security review C12.2: AWS modules may be
+          # imported only by internal/secretstore/awssm. Widened to every
+          # github.com/aws/ module (gate W2/W3 S-5: smithy-go, the v1 SDK).
+          # Mirrors TestImportBoundary_NoOtherPackageImportsAWSSDK.
+          offenders="$(grep -rl --include='*.go' '"github.com/aws/' . | grep -v '^\./internal/secretstore/awssm/' || true)"
           if [ -n "$offenders" ]; then echo "AWS SDK imported outside internal/secretstore/awssm:"; echo "$offenders"; exit 1; fi
 
       - name: Guard - memory secret store is imported only by tests (Stage 10.3 W2a)
