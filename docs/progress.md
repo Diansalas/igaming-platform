@@ -1,8 +1,8 @@
 # Project Progress
 
-Last updated: 2026-09-25 (Stage 10.1 planning gate complete; awaiting human approval)
+Last updated: 2026-09-26 (Stage 10.1 implemented; stopped at the staging-deployment gate)
 
-## Status: Stage 10 COMPLETE; Stage 10.1 planning gate complete — PLANNING ONLY, awaiting human approval (`docs/plans/stage-10.1-planning-gate-proposal.md`)
+## Status: Stage 10.1 IMPLEMENTED (PAY-REV-1, SB-T1-XMIN, PAY-WH-TENANT-1 with MOCK resolver); stopped at the staging-deployment gate (`docs/governance/stage-10.1-completion-report.md`)
 
 ## Stage 0 — complete (approved)
 
@@ -8129,4 +8129,27 @@ permission probes.
   10.1 pending a human ruling.
 - ADR 0090 (Stage 10.1 definition) PROPOSED. No code, no implementation
   migration, no AWS action. **Stop at gate G0.**
+
+## Stage 10.1 — PAY-REV-1 + SB-T1-XMIN + PAY-WH-TENANT-1 — implemented; stopped at the staging-deployment gate
+
+- Approved 2026-09-26 (ADR 0090 ACCEPTED) with PAY-WH-TENANT-1 added by
+  the human.
+- **PAY-REV-1 (IMPLEMENTED):** L2 lock + re-check, migration 0092 unique
+  index with RLS-proof refusal, key-first `ErrReversalAlreadyExists`, 409 +
+  allow-listed alert + separately committed denial audit. Defect
+  reproduced before the fix (two reversals posted).
+- **SB-T1-XMIN (IMPLEMENTED):** migration 0093 fail-closed `pg_xact_status`
+  check; epoch-anchor deviation from ruling R-2 ratified by architect and
+  ledger-finance.
+- **PAY-WH-TENANT-1 (IMPLEMENTED — MOCK resolver only):** route tenant
+  selects the single per-(tenant, provider) credential; signature binds
+  tenant/provider/key/body; verify-before-parse; uniform 401; OpenAPI
+  documents the payments webhook. Cross-tenant attack reproduced before the
+  fix. Real resolver NOT IMPLEMENTED — launch-blocking for any real PSP.
+- Reviews: security, ledger-finance, code-review and architecture reviews
+  plus re-verifications; every P2 closed; residual P3s recorded.
+- New pre-existing findings registered for a human ruling: **KYC-WH-1**
+  (High, affects staging `9190d5d`), CAS-WH-TENANT-1 (Medium).
+- AWS/staging untouched. **Stop: staging deployment requires separate
+  human authorization.**
 

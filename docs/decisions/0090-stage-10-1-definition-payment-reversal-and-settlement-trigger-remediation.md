@@ -90,3 +90,38 @@ implementation (ADR 0089), any AWS/staging change, OB-1.
   L2 lock and a type-scoped unique index.
 - ADR 0088 §3.3 gains a follow-up note closing SB-T1-XMIN.
 - Human decisions that remain OPEN are untouched (report §Q).
+
+## Implementation record (2026-09-26)
+
+Stage 10.1 was implemented and reviewed; details and evidence are in
+`docs/governance/stage-10.1-completion-report.md`. Deviations from the
+accepted text above, each reviewed and ratified:
+
+1. **SB-T1-XMIN epoch anchor.** Decision item 2 specifies reconstructing
+   the xid8 relative to `pg_snapshot_xmax(pg_current_snapshot())`. That
+   construction was shown empirically to mis-place the current
+   transaction's own open savepoint xids (they exceed the snapshot xmax,
+   which counts only completed transactions) and so to reproduce the very
+   rejection being fixed. Migration 0093 anchors the epoch to
+   `pg_current_xact_id()` instead, keeping every fail-closed guard.
+   Ratified by `architect` (`docs/governance/stage-10.1-architecture-review.md`
+   §1) and `ledger-finance` (`docs/governance/stage-10.1-ledger-finance-signoff.md`,
+   which withdrew its own planning construction). Residuals, both
+   documented in ADR 0088 §3.3: an epoch-straddling transaction is
+   rejected (fail closed; SB-T1-XMIN-STRADDLE, deferred P3); an ancient-row
+   alias (≥ 2^32 xids, low-bit collision with an in-progress xid) can be
+   accepted — provenance only, no ledger effect, same class as 0091.
+2. **PAY-REV-1 classification.** `ledger.Post` looks up the idempotency key
+   before classifying a violation of the 0092 index, so a legitimate retry
+   replays regardless of index order (ledger-finance P2-A).
+3. **PAY-REV-1 denial error.** `ErrDepositAlreadyReversed` is returned as
+   the typed `DepositAlreadyReversedError` so the denial audit can name the
+   deposit intent, original transaction, rejected reference and existing
+   reversal (security P2-2 / ledger-finance P2-B).
+4. **PAY-WH-TENANT-1 key-material scan** runs after signature verification
+   (adapters never parse an unverified body — ADR 0022 §3 amendment point
+   7); accepted by `security` (re-verification P3-7).
+5. **Resolver wiring.** Production wiring uses `MultiWebhookCredentialResolver`
+   composing the single MOCK resolver; ADR 0022 records it as mock/test
+   wiring only, not a template for the real resolver.
+

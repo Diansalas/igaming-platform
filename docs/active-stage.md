@@ -1480,9 +1480,9 @@ none authorized for implementation yet.
    default, mixed/bonus-funded cashout policy, FD-1) remain unmade —
    none of this round's work required or selected one.
 
-## Current stage: Stage 10.1 — PAY-REV-1 + SB-T1-XMIN + PAY-WH-TENANT-1 — APPROVED 2026-09-26, IN PROGRESS
+## Current stage: Stage 10.1 — PAY-REV-1 + SB-T1-XMIN + PAY-WH-TENANT-1 — IMPLEMENTED; STOPPED at the staging-deployment gate
 
-Approved by the human against `8561ac2` (ADR 0090 ACCEPTED) with PAY-WH-TENANT-1 added. Stop point: before any AWS/staging deployment (human gate).
+Approved by the human against `8561ac2` (ADR 0090 ACCEPTED) with PAY-WH-TENANT-1 added. All three workstreams implemented and reviewed (completion report: `docs/governance/stage-10.1-completion-report.md`). Staging deployment requires separate human authorization. Open human rulings: KYC-WH-1 scope.
 
 ### Planning gate record (below)
 
