@@ -515,3 +515,34 @@ The rest is reversible engineering in scope:
   index.
 - **Not covered:** code (none yet); real vendor schemes; secret-store design; volumetric DoS;
   CI-FLAKE-281; the AWS/staging state (not inspected).
+
+## J. Review record and Orchestrator rulings (binding for implementation)
+
+Reviews recorded verbatim in this folder: `03-review-qa-test-plan.md` (qa),
+`04-review-backend.md` (backend), `05-review-identity-compliance.md`
+(identity-compliance), `06-review-casino.md` (casino), `07-review-architect-db.md`
+(architect + DB/RLS). `02-ci-flake-281-investigation.md` is the CI-FLAKE-281 paper
+(devops). No reviewer raised a blocking objection or a human decision.
+
+| # | Source | Ruling |
+|---|---|---|
+| J1 | qa | The QA test plan (name map, mutation checks, payments regression guarantee, mechanical no-print check for E2) is adopted as binding for G1/G2/G4. Every guard claimed as "required" must be shown to go red when the guard is removed. |
+| J2 | backend | Required: an `errors.Is`/`errors.As` regression test proving the `internal/payments` aliases and sentinels still match values produced by `internal/webhookauth`. |
+| J3 | architect R1 | `webhookauth.Scheme` is the platform-defined MOCK wire scheme only; the package doc says so. Real adapters verify with the vendor scheme and still obey contract points 1–7. |
+| J4 | architect R2 | Payments MUST adopt the shared preamble (not optional). If byte-identity tests fail, fix the shared code, never fork. Only if byte-identity is provably impossible: register `WH-PREAMBLE-1` and disclose. |
+| J5 | architect R3 | `ReceiveCallback(tenantID, providerID, in)` overwrites `in.TenantID`/`in.ProviderID` from its parameters first, as payments does. One tenant id from route → RLS → resolver → signing input → credential check → writes. |
+| J6 | architect R4 | KYC reference lookup is `tenant_id AND provider_id AND provider_reference`. Status change is a compare-and-set including `tenant_id` and the current status; at most 3 re-reads on a lost race, then error; audit row in the same transaction. |
+| J7 | architect R5 | KYC route registration and the KYC resolver come from one `mockProviderWiring` result; a test (K11) proves they cannot diverge. |
+| J8 | architect §2 | Strict I1 for KYC and casino: before verification only `GetTenantBySlug` (platform-wide) and `WithTenant`'s `set_config` run. K7/C7 statement capture is G3 evidence. |
+| J9 | backend + architect | **PAYWH-GATE-1 is INCLUDED in 10.2**, as a separate commit after the extraction, inside `mockProviderWiring`. Condition: payments tests pass without edits other than wiring tests; otherwise the commit is dropped and PAYWH-GATE-1 registered as deferred. |
+| J10 | architect §4 | PAYWH-BRAND-1, PAYWH-RL-1, PAYWH-TS-1 stay deferred (all reviewers agree). |
+| J11 | identity-compliance | Forward-only rank approved. Added to B6/B7: a callback never resurrects a terminal verification; only a new `CreateVerification` row starts a new attempt. |
+| J12 | identity-compliance | Forward note for B9: a future hosted-KYC vendor must issue its own short-lived session token for player redirect and must not repurpose `provider_reference`. |
+| J13 | identity-compliance | Add K16: `POST /v1/me/kyc/verifications` returns 503 (not 404) when the KYC orchestrator is nil (production / test support off). K5 names the cross-verification `provider_reference` substitution case explicitly. |
+| J14 | casino | Approved without change. Call-site counts corrected: `CallbackPayload` = 119, `NewOrchestrator` = 91; re-grep at implementation. |
+| J15 | architect §5 | ADR amendments A (0022 §3, points 8–9), B (0028), C (0025), D (0019, needs `ledger-finance` concurrence), E (0085 §1), and updates to `docs/architecture/08-casino-integration-architecture.md` (trust-model steps) and a pointer in `payment-orchestration.md` §10, using the architect's draft text. ADR 0091 is not amended. |
+| J16 | architect §3/§4 | New registry items (not 10.2 scope): **MOCK-ADAPTER-PROD-1** (mock payments/casino adapters remain registered in production for initiation, catalogue and launch; pre-launch checklist) and **CAS-CAP-ROLLBACK-1** (a disabled casino capability 503s a verified rollback; follow-up for `casino` + `ledger-finance`). |
+| J17 | architect §6 | Completion report must disclose: staging stays forgeable until the human-authorised refresh and its KYC rows are untrusted synthetic data; both fixes are MOCK-only; MOCK-ADAPTER-PROD-1; CAS-CAP-ROLLBACK-1. |
+
+**Disagreements.** None substantive. The only divergence was PAYWH-GATE-1 (the design
+left it optional); backend and architect both recommended inclusion, ruled in J9.
