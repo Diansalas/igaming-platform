@@ -180,7 +180,32 @@ func reasonConformanceViolation(reason string) error {
 // only part (or none) of KYC-REASON-BOUND-1 applied.
 type brokenReasonAdapter struct {
 	*MockKYCProvider
-	mode string // "raw", "length_only" (keeps controls), "controls_only" (no length bound)
+	// mode: "raw"; "length_only" (keeps every control); "controls_only"
+	// (no length bound); "keeps_c0" (bounded, bidi stripped, C0/C1 kept);
+	// "keeps_bidi" (bounded, C0/C1 stripped, bidi kept) - the last two make
+	// each half of reasonConformanceViolation's character check
+	// load-bearing on its own.
+	mode string
+}
+
+// stripAndBound keeps a rune unless drop(r), then bounds to MaxReasonBytes
+// on a rune boundary.
+func stripAndBound(raw string, drop func(rune) bool) string {
+	var b strings.Builder
+	for _, r := range raw {
+		if !drop(r) {
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	if len(out) <= MaxReasonBytes {
+		return out
+	}
+	cut := MaxReasonBytes
+	for cut > 0 && !utf8.RuneStart(out[cut]) {
+		cut--
+	}
+	return out[:cut]
 }
 
 func (a brokenReasonAdapter) HandleCallback(ctx context.Context, in webhookauth.Inbound, cred webhookauth.Credential) (ProviderResult, error) {
@@ -207,6 +232,10 @@ func (a brokenReasonAdapter) HandleCallback(ctx context.Context, in webhookauth.
 			}
 		}
 		result.Reason = b.String()
+	case "keeps_c0":
+		result.Reason = stripAndBound(payload.Reason, isBidiOrFormatControl)
+	case "keeps_bidi":
+		result.Reason = stripAndBound(payload.Reason, isC0OrC1Control)
 	}
 	return result, nil
 }
@@ -215,11 +244,12 @@ func (a brokenReasonAdapter) HandleCallback(ctx context.Context, in webhookauth.
 // self-test the QA binding plan requires for this wave's conformance case:
 // the SAME case body the suite runs (checkReasonBoundCase) must go red for
 // each deliberately broken adapter - unbounded raw text, length-bounded
-// but control-laden, control-stripped but oversized - and green for the
+// but control-laden, control-stripped but oversized, bounded with only C0/
+// C1 controls left, bounded with only bidi controls left - and green for the
 // conforming MOCK, proving the case catches non-conformance through an
 // adapter's HandleCallback rather than merely gating on its Go type.
 func TestReasonBoundConformanceSelfTest_DetectsNonConformingReason(t *testing.T) {
-	for _, mode := range []string{"raw", "length_only", "controls_only"} {
+	for _, mode := range []string{"raw", "length_only", "controls_only", "keeps_c0", "keeps_bidi"} {
 		t.Run(mode, func(t *testing.T) {
 			broken := brokenReasonAdapter{MockKYCProvider: NewMockKYCProvider(), mode: mode}
 			if err := checkReasonBoundCase(broken, mockReasonCallback(t, broken.MockKYCProvider)); err == nil {
