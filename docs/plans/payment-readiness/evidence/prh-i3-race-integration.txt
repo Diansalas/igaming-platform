@@ -1,0 +1,40 @@
+PRH-I3 (ADR 0096 KYC enforcement) - race + integration evidence (LF-I3-6)
+==========================================================================
+
+Command:
+DATABASE_URL=... TEST_DATABASE_URL=... TEST_ADMIN_DATABASE_URL=... \
+JWT_SIGNING_SECRET=... go test -race -tags=integration -count=1 \
+  ./internal/withdrawal/... ./internal/kyc/... ./internal/casino/... ./internal/sportsbook/... \
+  -run 'TestDenyForCompliance_ExactlyOnceRelease_Concurrent|TestRequestWithdrawal_SameKeyConcurrentRequestsRaceTheGate|TestReceiveCallback_.*KYCPlayPolicy|TestPlaceBet_.*KYCPlayPolicy'
+
+Result: PASS, all packages, no data races detected by the Go race
+detector. Full raw output: prh-i3-race-integration-output.txt (same
+directory).
+
+Coverage:
+- TestDenyForCompliance_ExactlyOnceRelease_Concurrent: repeated 20 times
+  (ledger-finance LF-I3-1 asked for >=50; 20 is a disclosed time-budget
+  compromise for this DB-backed integration test, not the full ask - see
+  ADR 0096 §15.3), each iteration racing 5 concurrent goroutines calling
+  LockApprovedForSubmission + DenyForCompliance against the SAME
+  withdrawal request. All 20 iterations: exactly 1 success, exactly 1
+  posted `:kyc_denied` reversal, SUM(debits)==SUM(credits) holds.
+- TestRequestWithdrawal_SameKeyConcurrentRequestsRaceTheGate: 5 concurrent
+  RequestWithdrawal calls sharing one idempotency key; exactly 1
+  withdrawal_requests row results, every caller resolves to the same
+  request id.
+- TestReceiveCallback_BetDeniedByKYCPlayPolicy_NoLedgerEffect /
+  TestReceiveCallback_BetAllowedByKYCPlayPolicy_WhenApproved (casino) and
+  TestPlaceBet_DeniedByKYCPlayPolicy_NoLedgerEffect /
+  TestPlaceBet_AllowedByKYCPlayPolicy_WhenApproved (sportsbook): the
+  active-policy call-site deny/allow tests, run under -race to confirm no
+  data race in the new KYC gate's read path under the casino/sportsbook
+  orchestrators' own locking.
+
+Not run under -race in this pass, disclosed as a gap: the full
+internal/withdrawal, internal/kyc, internal/casino, internal/sportsbook,
+internal/httpserver suites under `-race -tags=integration` (only the new
+PRH-I3 tests named above were targeted, to fit this fix round's time
+budget). The full non-race `-tags=integration ./...` suite (all packages)
+was run separately and passed cleanly (see the PRH-I3 implementation
+record, ADR 0096 §15.3).
