@@ -559,49 +559,29 @@ func applyCallbackOutcome(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, v 
 	if !ok {
 		return Verification{}, false, fmt.Errorf("%w: unrecognized outcome %q", ErrCallbackMalformedBody, result.Outcome)
 	}
-	newRank := statusRank(newStatus)
 
-	current := v
-	const maxAttempts = 3
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		if newRank <= statusRank(current.Status) {
-			// Equal or backward - a no-op, no audit row (B7). Covers every
-			// replay, and every callback arriving after a terminal status
-			// or after a staff decision that already reached/exceeded this
-			// rank (J11).
-			return current, false, nil
-		}
-		tag, err := tx.Exec(ctx,
-			`UPDATE kyc_verifications SET status = $1, reason = NULLIF($2, ''), updated_at = now()
-			 WHERE id = $3 AND tenant_id = $4 AND status = $5`,
-			newStatus, result.Reason, current.ID, tenantID, current.Status,
-		)
-		if err != nil {
-			return Verification{}, false, fmt.Errorf("kyc: update verification status: %w", err)
-		}
-		if tag.RowsAffected() == 1 {
-			updated, err := GetVerificationByID(ctx, tx, current.ID)
-			if err != nil {
-				return Verification{}, false, err
-			}
-			if err := audit.Record(ctx, tx, audit.Entry{
-				TenantID: tenantID, ActorType: audit.ActorSystem,
-				Action: "kyc.provider_callback", TargetType: "kyc_verification", TargetID: current.ID.String(),
-				Outcome:  audit.OutcomeSuccess,
-				Metadata: withReasonTruncated(map[string]any{"provider_id": updated.ProviderID, "provider_outcome": string(result.Outcome), "reason": result.Reason}, reasonTruncated),
-			}); err != nil {
-				return Verification{}, false, fmt.Errorf("kyc: audit callback success: %w", err)
-			}
-			return updated, true, nil
-		}
-		// Lost race: re-read the row (RLS-scoped, mirroring
-		// applyForwardOnlyStatus's own post-update re-read) and
-		// re-evaluate on the next iteration.
-		reread, err := GetVerificationByID(ctx, tx, current.ID)
-		if err != nil {
-			return Verification{}, false, err
-		}
-		current = reread
+	// N6 (RV-PRH-I2 KYC code review): this is now the SAME shared loop
+	// SubmitVerification's own phase C uses (applyForwardOnlyStatus,
+	// provider.go) - previously a second, hand-maintained copy of the
+	// identical forward-only rank/CAS logic lived here, which could have
+	// drifted from the other one over time. Equal-or-backward (a replay,
+	// or any callback arriving after a terminal status or after a staff
+	// decision that already reached/exceeded this rank, J11) is
+	// applied==false: no audit row (B7).
+	updated, applied, err := applyForwardOnlyStatus(ctx, tx, tenantID, v.ID, v.Status, newStatus, result.Reason)
+	if err != nil {
+		return Verification{}, false, fmt.Errorf("kyc: update verification status: %w", err)
 	}
-	return Verification{}, false, fmt.Errorf("kyc: exhausted retries applying callback status transition for verification %s", v.ID)
+	if !applied {
+		return updated, false, nil
+	}
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: tenantID, ActorType: audit.ActorSystem,
+		Action: "kyc.provider_callback", TargetType: "kyc_verification", TargetID: updated.ID.String(),
+		Outcome:  audit.OutcomeSuccess,
+		Metadata: withReasonTruncated(map[string]any{"provider_id": updated.ProviderID, "provider_outcome": string(result.Outcome), "reason": result.Reason}, reasonTruncated),
+	}); err != nil {
+		return Verification{}, false, fmt.Errorf("kyc: audit callback success: %w", err)
+	}
+	return updated, true, nil
 }

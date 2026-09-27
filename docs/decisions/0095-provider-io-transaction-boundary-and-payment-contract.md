@@ -2325,6 +2325,38 @@ own pre-flight guard, an unrelated, pre-existing data-hygiene issue - see ADR 00
 identical note). Mutation evidence (corrected, superseding §15.3.2's original file):
 `docs/plans/payment-readiness/evidence/prh-i2-kyc-mutation-kill.txt`.
 
+#### 15.3.4 Fix record (second code re-review + security re-verification, 2026-09-27)
+
+Full record of this round in ADR 0096 §20 (KYC enforcement's own ADR is the fuller home for
+most of this round's findings, since N-1/the mirror race are enforcement/staff-decision
+concerns, not transaction-boundary concerns per se). Two items belong here, in §15.3, because
+they correct/extend this section's own phase-C description:
+
+- **Phase C is forward-only for the callback path too, not only for `SubmitVerification`'s own
+  phase C.** §15.3.3's R1 fix (`applyForwardOnlyStatus`) already applied to `SubmitVerification`;
+  the callback path (`applyCallbackOutcome`, `internal/kyc/provider.go`) had always carried the
+  identical forward-only rank rule, but as a SECOND, separately hand-maintained copy of the same
+  loop rather than a shared call. Code re-review's N6 consolidated both onto the one shared
+  `applyForwardOnlyStatus` function - no behavioural change (both copies already implemented the
+  identical rank rule; verified by the full pre-existing callback suite passing unchanged after
+  the refactor), but this removes the risk of the two copies silently drifting apart in a future
+  change. Stated explicitly for this section's own record: a `review_required` decision, once
+  written by either path, is never demoted back to `pending` by a later submission result OR a
+  later callback - both paths only ever move a verification's status forward along
+  `statusRank` (unverified < pending < review_required < terminal), silently no-op'ing (not
+  erroring) on a would-be backward or same-rank write.
+- **`ReviewVerification` (staff review - approve/reject/require-more-documents) now also CAS's,
+  but with different failure semantics than the provider/callback paths' own silent no-op.** This
+  function sits outside §15.2/§15.3's own phase A/B/C shape (it has no provider call of its own),
+  but shares the SAME underlying hazard the forward-only CAS above addresses: a concurrent
+  provider submission or callback landing between `ReviewVerification`'s own read and its
+  `UPDATE` could previously overwrite, or be overwritten by, the staff decision with no error to
+  either side. Fixed with its own CAS against the status `ReviewVerification`'s own read observed
+  and a new sentinel, `ErrVerificationStatusConflict`, on a lost race - **deliberately NOT a
+  silent no-op like `applyForwardOnlyStatus`**: a staff decision is a deliberate, one-time human
+  judgment call, not a replayable provider transition, so a lost race must surface as a visible
+  conflict the staff member can see and retry with fresh information. Full record: ADR 0096 §20.3.
+
 ---
 
 ## 16. Failure injection and required tests
