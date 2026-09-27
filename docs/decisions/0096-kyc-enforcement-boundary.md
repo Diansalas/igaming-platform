@@ -680,11 +680,6 @@ CREATE POLICY kyc_enforcement_policies_platform_update ON kyc_enforcement_polici
         AND NULLIF(current_setting('app.player_account_id', true), '') IS NULL
     );
 
--- created_by_actor_id is NOT NULL (moved here from the earlier sketch's
--- nullable column) precisely so the INSERT policy's provenance check
--- above is always evaluable.
-ALTER TABLE kyc_enforcement_policies ALTER COLUMN created_by_actor_id SET NOT NULL;
-
 -- Required tests (security condition 2): a tenant-scoped `compliance`
 -- connection's INSERT/UPDATE is rejected at the database; a tenant-scoped
 -- `platform_admin`-role-but-tenant-bound connection is rejected; a
@@ -741,8 +736,47 @@ record (staff/SAR-adjacent tooling reads it directly), whereas
 enforcement point ALSO writes to (one `audit.Record` call per decision,
 `Action: "kyc.enforcement_denied"` / `"kyc.enforcement_allowed"`,
 mirroring the existing `payments.deposit_denied_by_rg` pattern exactly).
-Both are written in the same transaction as the decision itself, never
-after the fact.
+
+**Commit discipline, corrected (security condition 5 / ledger-finance
+C1).** The original sketch said both rows are "written in the same
+transaction as the domain effect it gated" — which, for a **denial**,
+directly contradicts §7's own original test-plan wording ("the
+transaction rolls back") and is a real defect: a caller that rolls back
+its whole transaction on a KYC deny would silently discard the very
+decision/audit rows this ADR exists to make durable, exactly the class
+of bug `internal/casino/orchestrator.go:757`'s own doc comment already
+documents finding and fixing once for RG denials, and the identical
+class `payments.InitiateDeposit`'s own comment records for the deposit
+RG check. The corrected, uniform rule for every enforcement point in
+this ADR:
+
+- **On `allow` (`not_required`/`passed`):** the decision row and the
+  `audit.Record` call are written in, and commit with, the **same**
+  transaction as the domain effect (the ledger posting, the state
+  transition) they gated — exactly as the original text described. This
+  case was never the problem.
+- **On `deny` (`pending`/`failed`/`unavailable`):** the transaction that
+  commits contains the decision row and the audit record and **no
+  domain effect** — no ledger posting, no state-machine INSERT/UPDATE
+  beyond what a pure read requires. This is achieved per call site
+  exactly as `internal/casino`'s own established pattern already does it
+  (a query first, before any state-changing statement runs, so a denial
+  path never needs to undo anything): §5's and §12.2 C1's per-call-site
+  designs (deposit, withdrawal request, withdrawal payout dispatch, play)
+  each place the KYC evaluation **before** the first state-changing
+  statement of their respective transaction, so a deny simply never
+  reaches the point where anything would need to be rolled back — the
+  transaction that commits is, by construction, "decision + audit only."
+  Where a call site's existing structure makes that awkward (withdrawal,
+  see §12.2 C1's exact required shape), the enforcement point returns a
+  distinguished, typed result that its caller commits explicitly, rather
+  than a Go `error` that would trigger the domain's ordinary rollback
+  path.
+- **Required test (added to §7):** for every one of the five enforcement
+  points, a denial leaves exactly one `kyc_enforcement_decisions` row and
+  one `audit_log` row committed, and zero ledger effect and zero
+  unintended state-machine transition — proving durability empirically,
+  not just asserting it in prose.
 
 ### 3.7 No test-only or production default values
 
@@ -790,6 +824,17 @@ registry's KYC-ENFORCE-1 row already states).
   domain's own RG coverage, not to KYC-ENFORCE-1's scope. Recording it
   here so it is not mistaken for something this ADR silently declined to
   fix: **flagged for the orchestrator to register as its own item.**
+  **Exact withdrawal placement (revised per ledger-finance C1/C2, §12.2):**
+  in `RequestWithdrawal`, the KYC evaluation runs immediately after the
+  existing idempotency-replay lookup and before `ledger.
+  GetOrCreateAccounts`/`LockProjectionsForPosting` — i.e. before the first
+  statement that could need undoing. In the payout-dispatch path, the KYC
+  evaluation runs inside the **same** L1 (`lockRequestForUpdate`)
+  transaction `LockApprovedForSubmission` already holds, before that
+  transaction commits, and therefore before ADR 0095's `T1p`
+  (`approved→submitted`, the withdrawal claim) ever runs — see §12.2 C5
+  and the ADR 0095 coordination note below for exactly why that
+  transaction is the one that matters once ADR 0095 lands.
 - **Tenant isolation.** `kyc_enforcement_decisions` carries `tenant_id`
   and standard `tenant_isolation` RLS, identical to `kyc_verifications`
   (migration 0040). `kyc_enforcement_policies` is platform-wide, exactly

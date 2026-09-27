@@ -1775,3 +1775,164 @@ requiring resequencing: the migration-0082 mirror-invariant regression (I1-d/e, 
 None of these conditions require a redesign of §4–§12; all four are documentation or test
 additions to sections already inside this ADR's scope. Payments sign-off is granted on that
 basis, conditional on P95-C1–C3 landing in PRH-I1/I1-f/I1-h as described.
+
+
+## 22. Security review
+
+- **Reviewer:** `security`, 2026-09-27, against HEAD `eb15ac6` (design review of this PROPOSED
+  ADR; no code exists to review).
+- **Verdict: APPROVE WITH CONDITIONS.** The D1 boundary, INV-IO-1/-2/-11, the refusal to treat
+  a statement line as posting authority (§12.6), and "success only on verified, matching
+  evidence" (INV-IO-6) are sound and are the right shape. The ADR may move to ACCEPTED on the
+  security side once the conditions below are written into it (text only). **S95-C1 is a
+  design defect with a concrete credit-without-funds scenario; PRH-I1 must not start without
+  it.** Every condition is also an implementation-review item for PRH-I1/I2/I5.
+- **In scope:** §6 (callbacks, receipts, dispositions), §9 (contract, `CallContext`), §10
+  (manifest, kill switch), §11 (PROV-OUTBOUND-CRED-1), §12 fetch/ingest, §13 table shapes as
+  they bear on isolation, secrets and PII, the new and changed staff routes, and the ruling on
+  LF-C1 option (a).
+- **Not in scope:** ledger correctness of T13/A7 (`ledger-finance`), sweeper tuning
+  (`payments`), any real vendor behaviour, ADR 0097's own mechanisms (reviewed there), and any
+  penetration test. Passing this review does not make the implementation secure; PRH-I1, I2
+  and I5 each need their own `security` code review, and the outbound tripwire stays until
+  then (§11 "Tripwire", agreed).
+
+### 22.1 S-Q1 — kill-switch authority: RULED
+
+**Engage: single actor with a mandatory reason code. Release: four-eyes, as proposed. Not
+relaxed.** Engage is the money-safe direction (it only stops *new* submissions and never stops
+settlement, §10.3), so it must never wait for a second person; that mirrors ADR 0093 §3.
+Release re-opens outbound money movement, often after a credential compromise or a
+misbehaving provider. A single compromised or coerced staff account must not be able to undo
+an incident containment. The operational cost (a second person to resume after an outage) is
+accepted.
+
+Conditions: S95-C5, S95-C6, S95-C7.
+
+### 22.2 S-Q2 — `deferred_unresolved` → 200 after a durable receipt: ACCEPTABLE, with conditions
+
+**Oracle.** No new oracle. The disposition is reached only after `VerifyCallback`, the
+post-verification re-check and PROVIDER-REF-BOUND-1 validation, so an unauthenticated caller
+still sees only ADR 0091's uniform 401 or ADR 0097's pre-verification 429/503. For a
+*verified* sender, the change removes an oracle that exists today: 404 says "this reference is
+unknown to the platform"; a uniform 200 does not. This holds only if all 200 dispositions are
+byte-identical (S95-C4).
+
+**Why a 200 is correct.** A 404 may be terminal for a vendor, which is silent loss of a real
+payment event. ADR 0097 §6.1 forbids a 2xx for an *unprocessed* event; a durably receipted,
+deferred event is processed (INV-IO-10), so there is no conflict.
+
+**Replay.** An exact redelivery collapses on `UNIQUE (tenant_id, provider_id,
+event_fingerprint)`, and then applies idempotently. Freshness (timestamp windows, nonces)
+stays with ADR 0091 and the adapter scheme. The fingerprint is not a replay control by
+itself: its protection lasts only as long as the row. So PAY-ATTEMPT-RETENTION-1 must not
+purge receipts of non-terminal attempts, or any receipt younger than the longest vendor
+redelivery window (S95-C3).
+
+**Abuse by a verified sender.** This means a compromised provider credential, a hostile
+provider, or a buggy vendor. Today, an unresolvable callback writes nothing. After this ADR,
+each distinct fingerprint writes one bounded row, and it *stays pending* until something
+claims its reference. Two concrete risks follow:
+
+- **Storage growth.** The size of each row is bounded by PROVIDER-REF-BOUND-1 and the §13.1
+  CHECKs. The row *count* is bounded only by ADR 0097 B1's rate multiplied by time, because
+  retention is deferred. B1 limits the rate; it does not limit the backlog. → S95-C2.
+- **Pre-planting.** A sender can store a `succeeded` receipt for a `provider_reference` it
+  expects to be assigned to a future attempt. T4 applies it in the same transaction that
+  learns the reference. That gives no more power than the same sender posting after T4 (it is
+  the same trust principal, and amount and asset must still match). However, a receipt that
+  *predates the submission it claims to describe* cannot be legitimate. Refusing to apply it
+  costs nothing and closes the reference-recycling case. → S95-C3.
+
+**Interaction with ADR 0097.** Correct as specified: B1/B2 run on the `VerifiedCallback`
+before the domain transaction, so a receipt is never written for a limited request (ORD-3). A
+deferred 200 is still counted by B1 like any admitted request.
+
+**Interaction with PROVIDER-REF-BOUND-1.**
+- Oversized references are rejected at step 3, before the receipt insert. That is
+  deterministic, non-retryable, and writes no row.
+- The §13.1 CHECKs are the backstop. If a CHECK violation is ever reached (the application
+  bound and the DB bound disagree), it surfaces as a 5xx. That fails safe (redelivery, no
+  silent loss), but it must alert, because it means the adapter validation has drifted.
+  → S95-C2.
+
+### 22.3 S-Q3 — LF-C1 option (a): RULED — APPROVED, narrowly, additive to (b)
+
+A DB error during the **post-verification** re-check (`HandleRecheckSQL` inside
+`ReceiveVerifiedCallback`, ADR 0094 §5) may return a **retryable 503**, instead of today's
+uniform 401. The constraints are:
+
+1. **Only a transport or DB failure qualifies:** a connection error, a serialization or
+   statement failure, or a context deadline at the re-check. A *definitive* result, meaning
+   the handle is not found, not active, revoked, expired, or its fingerprint or key id does
+   not match, stays the uniform 401 with `credential_unavailable`, exactly as today. The
+   classification is typed: a new `RecheckUnavailableError`, distinct from `AuthError`. It
+   is never derived from error strings. Anything unclassified defaults to **401**. That keeps
+   the fail-closed direction: an unknown error is never a retry invitation that could mask a
+   revocation.
+2. **No oracle.** The re-check runs only after a valid signature, so the 401/503 split is
+   visible only to a verified sender, and it reveals only "our DB was unhealthy". It is
+   independent of signature validity; ADR 0091 T9 is unaffected. The 503 body and headers
+   are ADR 0097 §6.1's generic 503 (with `Retry-After`). There is no reason text.
+3. **Nothing is written.** The domain transaction rolls back: no receipt, ledger entry,
+   tombstone, audit row or casino rejection record. ADR 0094 review item 6's test
+   (`TestReceiveVerified_RecheckDBErrorRollsBack`) is extended to assert the 503 as well as
+   the zero rows.
+4. **Bounded and observable.** A metric plus an alert on the re-check-unavailable rate per
+   (domain, tenant, provider). A persistent non-transient DB fault (for example a broken
+   grant or RLS policy) would otherwise turn into indefinite vendor retries.
+5. **Additive, not a replacement.** The §6.6 startup rule, option (b), still applies to every
+   production-eligible adapter whose `RedeliveryOn401` is `terminal` or `unknown`: a
+   revocation 401 is still terminal for such a vendor.
+6. **Scope.**
+   - It applies to all three webhook domains, through the shared `ReceiveVerifiedCallback`
+     error typing: payments in PRH-I1, and casino and KYC in PRH-I2.
+   - It does **not** extend to *pre-verification* DB errors, which stay uniform 401. That
+     extension would need its own review against ADR 0091's uniformity tests, and it is not
+     approved here.
+
+### 22.4 Findings and conditions
+
+| # | Sev. (once reachable) | Finding / failure scenario | Condition |
+|---|---|---|---|
+| **S95-C1** | **High** (design defect; blocks PRH-I1 start) | §6.1 step 5(b) resolves an attempt by `(tenant, merchant_reference)` without binding it to the **verified provider**. Tenant T routes a player's deposit to provider B. The player abandons the redirect, so no funds move. Provider A's verified credential for T (compromised, or a hostile PSP) then sends `succeeded` with that attempt's merchant reference and the player-chosen amount and asset. T7 credits `player_cash` with no money received. The merchant reference is an attempt UUID and can reach the player via the redirect, so it is not a secret. In the same way, a callback naming a `created`/`rejected` attempt of another provider triggers T15, and any provider of the tenant can then push other providers' attempts into `disputed` (a P1 flood and a denial of service on deposits). | Merchant-reference resolution matches only `attempt.provider_id = VerifiedCallback.provider_id`. The provider id always comes from the verified identity, never the payload. A merchant reference that matches an attempt with a different or NULL `provider_id` changes **no** state. It is receipted as `anomaly` with an alert, and T15 is **not** taken. T15 applies only when `attempt.provider_id` equals the verified provider. The same binding applies to §6.4's deferred application, the sweeper backstop and §12 matching (a statement line resolves only attempts of its own provider). Test: a cross-provider, same-tenant merchant-reference callback yields no posting and no state change. Mutation: dropping the predicate must fail that test. |
+| S95-C2 | Medium | Receipt backlog is unbounded under a verified sender (§22.2), and a reached CHECK is silent drift. | (i) A per-(tenant, provider) cap on **unapplied** receipts, checked in the callback transaction with a bounded probe (`LIMIT cap+1` on the partial index; `RECOMMENDATION` 10 000). Above the cap, a `deferred_unresolved` event returns a retryable **503** plus a P1 alert. It never returns a 200 without storing, and never a 404. (ii) A deferred receipt that no attempt has claimed after the manifest `SettlementWindow` (24 h if undeclared) is surfaced as a P1 alert/metric ("unmatched verified callback"). It never creates an attempt (§6.5 agreed). (iii) The application-level bounds equal the §13.1 CHECKs (one constant per field). A CHECK violation reached at insert maps to 5xx plus an alert. |
+| S95-C3 | Medium | A pre-planted or stale receipt is applied to a later attempt that reuses a reference, and retention could weaken replay suppression. | Deferred application (T4/T9 and the sweeper backstop) applies a receipt only if `received_at >= attempt.submitted_at` of the **first** claim. Both values come from the DB clock. An earlier receipt is marked `anomaly`, not applied, and alerts. PAY-ATTEMPT-RETENTION-1 must not delete receipts of non-terminal attempts, or receipts younger than the longest declared vendor redelivery window. `security` reviews that design. |
+| S95-C4 | Low | Response-body variance between `applied`, `duplicate_effect`, `deferred_unresolved` and `anomaly` would re-create the reference-existence oracle for a verified sender. | All 200 dispositions return an identical body, apart from the request id. The disposition is recorded only in the receipt, audit and metrics. Test: byte comparison across the four dispositions. |
+| S95-C5 | Medium | Kill-switch release bypass. Nothing in §13.2 prevents a single actor from releasing via `UPDATE … SET engaged=false`, or by `DELETE` (missing row = not engaged, §10.3). Either one silently defeats the four-eyes release. | A DB trigger on `payment_kill_switches` enforces three things. (1) `DELETE` is rejected. (2) `engaged` true→false is allowed only in the same transaction that moves a `payment_kill_switch_release_requests` row `open→approved`, with `expected_version = OLD.version` and an approver distinct from the requester, following the ADR 0093 A1 binding shape. (3) `version` is strictly monotonic. The release request is one-shot and has an expiry (`RECOMMENDATION` 24 h). A re-engage between request and approval invalidates the request through the version. Tenant policies on both tables require `app.player_account_id` unset (the ADR 0093 A1 pattern). |
+| S95-C6 | Medium | The "missing row = not engaged" encoding fails open if the switch is read under the wrong or unset tenant context (FORCE RLS returns zero rows). | The switch predicate is evaluated **inside** the T2/T1p CAS statement, as a `NOT EXISTS` subquery with an explicit `tenant_id = payment_attempts.tenant_id`, both under the same RLS context. A misbound context then claims zero attempts, and the claim can never succeed with the switch skipped. Test: running the claim under another tenant's context claims nothing and calls nothing. A switch-read error aborts the claim (agreed, §10.3). |
+| S95-C7 | Medium | Tenant-scoped release of a platform-engaged switch. Under the hybrid model a B2B operator's staff could release a switch that platform security engaged (for example after a credential compromise). | Record `engaged_by_scope ∈ {platform, tenant}`. A switch engaged by a platform principal (interim PROV-REVOKE-ALL-1 form, via the existing `WithPlatformAdmin` pattern with audit) can be released only by platform principals, requester and approver both. Every engage emits an alert, not only an audit row. |
+| S95-C8 | Medium | PROV-OUTBOUND-CRED-1 leak paths not covered by §11. (a) A Go `*url.Error` from the transport embeds the full request URL, and vendors that take an API key in the query string would leak it into logs and errors. (b) The adapter-side binding check is per-adapter discipline. (c) The reflection test is type- and name-based and misses closures, interfaces, maps, package-level variables and unexported nested values. | (a) The gate maps transport errors to `ErrorClass` plus an allow-listed reason. Where any URL is logged it is logged without its query string and userinfo. A test uses a secret-in-query MOCK and asserts the secret is absent from logs, errors, audit and receipts. (b) The **gate** checks `Credential.TenantID/ProviderID/Domain` against the `CallContext` before calling the adapter, as well as the adapter's own check (§9.1), so neither alone is load-bearing. The domain is `payments`, `casino` or `kyc` per caller. (c) The reflection test walks **constructed** registered adapter values recursively (pointers, structs, slices, maps, interfaces and unexported fields). It fails on any `OutboundCredential`, `secretstore.Secret`, `httpclient.Authenticator` or derived token. It forbids func-typed fields unless allow-listed. A static test forbids package-level variables of those types in adapter packages, and forbids adapter packages importing `secretstore` or the Fetcher. `CallContext` has its own `String/GoString/Format/LogValue/MarshalJSON` that render only the credential's existing redacted form. |
+| S95-C9 | Low | Credential resolution timing and scope. | Agreed as specified: `Resolve` runs in phase B only; its own short transaction commits before the fetch; it is refused under `txscope.Held`; there is no fallback credential and no unauthenticated call; an outage is `NotSent` with no breaker count and no cascade; derived tokens are cached only in `DerivedTokenCache` after this call's handle read; the in-flight exposure is one call. Additions: (i) the `CallContext` tenant is taken only from the attempt row returned by *this* tenant's claim transaction, never from a payload, cache or earlier attempt; (ii) the sweeper runs under the ordinary app role with RLS, with no BYPASSRLS, and its audit actor is a named system principal; (iii) an alert fires on the `ErrOutboundCredentialUnavailable` rate per (tenant, provider). |
+| S95-C10 | Low | Receipt and attempt text fields could carry vendor free text. That text may echo PII or cardholder fragments into `decline_reason`/`terminal_reason`, which would pull PCI or GDPR data into our store. | `decline_reason` and `terminal_reason` hold canonical, allow-listed codes, never vendor text. The adapter conformance suite asserts that no payer-identifying vendor field (name, email, IBAN, PAN or masked PAN, wallet address) maps into `CallbackEvent`, `StatusResult` or a statement line. The receipt contents in §13.1 are otherwise accepted: references, outcome, amount, asset and fingerprint; no raw body, headers, signature, key id or credential; bounded; FORCE RLS; excluded from CDC. The vendor-intake item "the reference format contains no cardholder data" is added to the §6 intake checklist. |
+| S95-C11 | Low | §9.5/§13.3 statement ingestion is unbounded. `merchant_reference`, `original_provider_reference`, `asset_code` and `source_label` have no length CHECK. There is no line-count or body cap, so a faulty or hostile source can exhaust memory or storage. `CallContextLike` is looser than `CallContext`. | CHECKs mirror §13.1 (`merchant_reference ≤ 64`, `original_provider_reference ≤ PROVIDER_REF_MAX`, bounded `asset_code`/`source_label`). The source response body is capped, and a per-import `line_count` cap applies (`RECOMMENDATION` 1 000 000; above it the import is refused and a P1 alert fires). `Fetch` takes the real `CallContext`, with the credential resolved per §11 and the same gate. The §12 fetch-outside-tx design and the "detection only" rule (INV-IO-12, §12.6) are agreed. |
+| S95-C12 | Low | Capability manifest fail-closed. | Agreed as specified: code-declared, never tenant-editable, refused at registration and new activity, never at settlement. Additions: (i) unknown enum values and a missing manifest on a non-MOCK adapter refuse registration; (ii) each `NotProcessed` code cites its vendor-documentation source in the intake; registration refuses `NotProcessed` for payouts without `IdempotentSubmission`; (iii) ADR 0097 §6.3's interim per-provider config key for `WebhookRetrySemantics` moves into this code manifest in PRH-I1, so no retry-safety property stays config-editable. |
+| S95-C13 | Medium | New and changed staff routes: kill switch engage, release request and release approve (plus list), T17 re-verify, M3 abandon, the rewritten withdrawal submit and resolve, and any attempt or receipt read. | Each route is on the staff admin API only; the route-table test asserts none is reachable with a player principal or on a player or public route. Permissions are enforced server-side and tenant-scoped from the authenticated context, with no tenant id taken from the path or body: `payments_kill_switch:engage`/`:release`, `payments_attempt:reverify`, `payments_attempt:read`, and M3 with today's resolve eligibility plus a reason code. Object lookups run under RLS, and another tenant's id returns 404, never data (test for each route). Every mutation writes audit (actor, tenant, entity, before/after, IP, UA, reason code). T17 only sets `next_action_at` and never calls a provider inline, so staff cannot use it to bypass the sweeper caps (agreed). The M3 CAS requires `state='created' AND NOT ever_possibly_sent` in SQL and in the trigger. |
+
+### 22.5 Required authorization and tenant-isolation tests (for `qa`, added to §16)
+
+1. A tenant A staff token against each new route with tenant B's switch, attempt or
+   withdrawal id returns 404 or 403 and never data, and B's rows are unchanged.
+2. A player token gets 401 or 403 on every new route (the route-table test, plus one live
+   request per route).
+3. The release requester approving their own request is refused by the application **and** by
+   the CHECK. A direct `UPDATE engaged=false` or `DELETE` is refused by the trigger (S95-C5).
+4. A platform-engaged switch cannot be released by tenant principals (S95-C7).
+5. Cross-provider merchant-reference callbacks give no posting and no state change (S95-C1).
+   Cross-tenant callbacks are impossible by construction (a verified tenant), and a test pins
+   it.
+6. The claim under a misbound tenant context claims nothing (S95-C6).
+7. The secret-in-query leak test and the recursive adapter reflection test (S95-C8).
+8. The re-check DB error gives a 503 with zero rows, and a re-check revoked result gives a 401
+   with zero rows (S-Q3).
+9. The deferred-receipt cap gives a 503 above the cap, and a pre-submission receipt is not
+   applied (S95-C2/C3).
+10. The four 200 bodies are identical (S95-C4).
+
+### 22.6 Launch relevance
+
+S95-C1, C5, C6, C8 and C13 are **launch-blocking for the first non-MOCK payments adapter**,
+together with the existing PROV-OUTBOUND-CRED-1 and F-POOL-2 rows. The rest must be closed in
+PRH-I1/I2/I5 before their respective `security` code reviews. None of this is a claim that the
+platform is secure or launch-ready; production launch authorization remains the human's
+decision.
