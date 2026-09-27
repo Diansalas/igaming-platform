@@ -21,6 +21,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Diansalas/igaming-platform/internal/audit"
+	"github.com/Diansalas/igaming-platform/internal/ledger"
 	"github.com/Diansalas/igaming-platform/internal/providerref"
 )
 
@@ -128,7 +130,13 @@ func insertReceiptDeduped(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, pr
 	fingerprint := computeEventFingerprint(ev)
 	var declineStage, declineReason *string
 	var cascadable *bool
-	if ev.Outcome == OutcomeDeclined {
+	// decline_stage/cascadable are §4.4 deposit-ATTEMPT-decline concepts
+	// (the CHECK constraint only accepts 'at_submission'/'after_acceptance',
+	// never an empty string) - a deposit_reversal event reuses the wire
+	// Outcome field for historical reasons (some callers still send
+	// "declined" as a chargeback-reason carrier) but is never itself a
+	// §4.4 decline cell, so it must never populate these columns.
+	if ev.Outcome == OutcomeDeclined && ev.EventType == string(CallbackEventDeposit) {
 		ds := string(ev.DeclineStage)
 		declineStage = &ds
 		if ev.DeclineReason != "" {
@@ -275,6 +283,18 @@ func ApplyReceiptEvidence(ctx context.Context, tx pgx.Tx, o *Orchestrator, tenan
 	// this verified boundary before any read or write below.
 	if err := validateReceiptReferences(ev); err != nil {
 		return "", fmt.Errorf("%w: %w", ErrProviderReferenceInvalid, err)
+	}
+
+	// PRH-payments-callback-cutover / ADR 0095 §5.4, LF95-C6(b): a
+	// deposit_reversal event is a fact about the ORIGINAL deposit attempt's
+	// ledger posting, never a transition of that attempt's own state
+	// machine (§4.4 has no reversal column). It is therefore resolved and
+	// applied by its own dedicated function, keyed on
+	// OriginalProviderReference - NEVER on ev.ProviderReference (the
+	// reversal's own reference) or ev.MerchantReference, which the deposit
+	// matrix below uses instead.
+	if ev.EventType == string(CallbackEventDepositReversal) {
+		return applyReversalReceiptEvidence(ctx, tx, tenantID, verifiedProviderID, ev)
 	}
 
 	resolved, err := ResolveAttemptForEvidence(ctx, tx, verifiedProviderID, ev.ProviderReference, ev.MerchantReference)
@@ -500,6 +520,253 @@ func applyDepositSuccessAndPost(ctx context.Context, tx pgx.Tx, o *Orchestrator,
 	return ApplySuccess(ctx, tx, attempt.ID, SuccessEvidence{
 		Evidence: EvidenceCallback, ProviderReference: ev.ProviderReference, LedgerTransactionID: &postedTxID,
 	})
+}
+
+// applyReversalReceiptEvidence implements ADR 0095 §5.4 and LF95-C6(b)/(d):
+// a deposit_reversal event's ORIGINAL deposit attempt is resolved by
+// (verifiedProviderID, ev.OriginalProviderReference) - never by the
+// reversal's own ev.ProviderReference or by ev.MerchantReference - and the
+// ledger link used is THAT ATTEMPT's own ledger_transaction_id, never the
+// parent deposit_intent's. Reversing the intent's (possibly first-capture)
+// ledger_transaction_id instead of the resolved attempt's own would let a
+// reversal of a SECOND capture (T13) incorrectly reverse the FIRST.
+//
+// No matching attempt, or a matching attempt that has never posted
+// (LedgerTransactionID is nil - e.g. still submitting, or declined with no
+// T13 success yet), takes the tombstone branch: a ledger TxTombstone is
+// written on (provider_id, original_provider_reference) so a
+// late-arriving original deposit success for that reference is rejected
+// by the ledger's own uniqueness rather than posted after the fact
+// (financial-transaction-flows.md Flow 2, CLAUDE.md's rollback rule).
+//
+// Typed reversal rejections (ErrDepositAlreadyReversed via
+// *DepositAlreadyReversedError, ErrCallbackPayloadMismatch,
+// ErrDepositReversalIntegrity, ErrCallbackProviderMismatch) are returned as
+// plain Go errors and are UNCHANGED by this cutover (§6.2 "typed reversal
+// rejections... unchanged: 409, with the existing separate-tx evidence
+// record"): the caller's transaction (including any receipt insert this
+// function attempted) rolls back, and the HTTP layer records the denial in
+// a SEPARATE, freshly-opened transaction via RecordDepositReversalRejection
+// exactly as it did before the cutover.
+func applyReversalReceiptEvidence(ctx context.Context, tx pgx.Tx, tenantID uuid.UUID, verifiedProviderID string, ev ReceiptEvidence) (ReceiptDisposition, error) {
+	// Normalize the stored/fingerprinted outcome to 'succeeded' for every
+	// deposit_reversal receipt this function actually persists (both the
+	// tombstone and posting branches below). A reversal's wire Outcome
+	// field is not a §4.4 attempt-decline signal - some callers reuse it
+	// as a carrier for a chargeback/refund REASON (see
+	// payment_provider_events_check1's outcome='declined' requiring
+	// cascadable+decline_stage, which is a deposit-ATTEMPT-decline concept
+	// a reversal never has) - so persisting the raw wire value here would
+	// either violate that CHECK or misrepresent a successfully-applied
+	// reversal as a "declined" evidence row. This normalization runs
+	// BEFORE every insertReceiptDeduped call in this function (so the
+	// fingerprint used for dedup is consistent across redeliveries of the
+	// identical wire payload) and never before the typed-rejection checks
+	// above, which do not persist a receipt at all.
+	ev.Outcome = OutcomeSucceeded
+	original, err := GetAttemptByProviderReference(ctx, tx, verifiedProviderID, ev.OriginalProviderReference)
+	if err != nil && !errors.Is(err, ErrAttemptNotFound) {
+		return "", err
+	}
+	unresolved := errors.Is(err, ErrAttemptNotFound)
+
+	if unresolved || original.LedgerTransactionID == nil {
+		txID, err := postDepositReversalTombstone(ctx, tx, tenantID, verifiedProviderID, ev.OriginalProviderReference)
+		if err != nil {
+			return "", err
+		}
+		if err := audit.Record(ctx, tx, audit.Entry{
+			TenantID: tenantID, ActorType: audit.ActorSystem, Action: "deposit.reversal_tombstoned",
+			TargetType: "ledger_transaction", TargetID: txID.String(), Outcome: audit.OutcomeSuccess,
+			Metadata: map[string]any{
+				"provider_id": verifiedProviderID, "original_provider_reference": ev.OriginalProviderReference,
+				"reversal_provider_reference": ev.ProviderReference,
+			},
+		}); err != nil {
+			return "", fmt.Errorf("payments: audit reversal tombstone: %w", err)
+		}
+		_, duplicate, err := insertReceiptDeduped(ctx, tx, tenantID, verifiedProviderID, ev, DispositionApplied)
+		if err != nil {
+			return "", err
+		}
+		if duplicate {
+			return DispositionDuplicateEffect, nil
+		}
+		return DispositionApplied, nil
+	}
+
+	if original.Operation != AttemptOperationDeposit || original.DepositIntentID == nil {
+		// A reversal can only ever describe a deposit attempt. Resolving to
+		// a payout (or a deposit attempt row with no parent, which should
+		// be impossible by construction) is data corruption, never a
+		// legitimate late/duplicate reversal - never routed to the
+		// tombstone branch above, which is for "nothing was ever posted"
+		// (a different, legitimate case), and never posts anything.
+		return "", fmt.Errorf("%w: attempt %s resolved by a deposit_reversal event is not a deposit attempt with a parent intent",
+			ErrDepositReversalIntegrity, original.ID)
+	}
+
+	// ADR 0095 §14 lock order: parent (deposit_intents) FOR UPDATE, then
+	// the attempt, then re-read under the lock - mirrors the deposit
+	// branch's own ordering in ApplyReceiptEvidence above, and Stage 10.1
+	// PAY-REV-1's S2 step (docs/plans/stage-10.1-planning-gate-proposal.md
+	// §E): two distinct-reference reversal callbacks for the SAME original
+	// deposit must serialize on this lock, or both could observe
+	// "not yet reversed" and both post, over-debiting player_cash.
+	if _, err := tx.Exec(ctx, `SELECT id FROM deposit_intents WHERE id = $1 FOR UPDATE`, *original.DepositIntentID); err != nil {
+		return "", fmt.Errorf("payments: lock deposit intent for reversal: %w", err)
+	}
+	original, err = GetAttemptByID(ctx, tx, original.ID)
+	if err != nil {
+		return "", err
+	}
+
+	// A missing ledger_transactions row, or one whose type is not
+	// 'deposit', is an INTEGRITY failure - reaching here at all means the
+	// attempt already POINTS AT a specific ledger_transactions id via
+	// LedgerTransactionID; if that row does not exist, or is not a
+	// deposit, the data is corrupted, not merely a late/duplicate
+	// reversal, and posting anything against it would be worse than
+	// failing closed.
+	var lockedType ledger.TransactionType
+	err = tx.QueryRow(ctx,
+		`SELECT transaction_type FROM ledger_transactions WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+		*original.LedgerTransactionID, tenantID,
+	).Scan(&lockedType)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("%w: attempt %s names ledger transaction %s, which does not exist for tenant %s",
+			ErrDepositReversalIntegrity, original.ID, *original.LedgerTransactionID, tenantID)
+	}
+	if err != nil {
+		return "", fmt.Errorf("payments: lock original deposit transaction: %w", err)
+	}
+	if lockedType != ledger.TxDeposit {
+		return "", fmt.Errorf("%w: ledger transaction %s has type %q, expected %q",
+			ErrDepositReversalIntegrity, *original.LedgerTransactionID, lockedType, ledger.TxDeposit)
+	}
+
+	// A reversal callback's amount/asset are payload-controlled facts
+	// about a debit the platform is about to post (CLAUDE.md's
+	// authorization rule applies here exactly as it does to a tenant_id).
+	// Whole-deposit reversal only, never a partial refund: the only
+	// legitimate value is the resolved ATTEMPT's own amount/asset (not the
+	// parent intent's, in case of a T13 second capture).
+	if ev.Amount > 0 && ev.Amount != original.Amount {
+		return "", fmt.Errorf("%w: reversal amount %d does not match original deposit amount %d",
+			ErrCallbackProviderMismatch, ev.Amount, original.Amount)
+	}
+	if ev.AssetCode != "" && ev.AssetCode != original.AssetCode {
+		return "", fmt.Errorf("%w: reversal asset %q does not match original deposit asset %q",
+			ErrCallbackProviderMismatch, ev.AssetCode, original.AssetCode)
+	}
+	amount := original.Amount
+
+	// Reject a second reversal of the same original deposit under a NEW
+	// provider_reference of its own; a REDELIVERY of the same reversal
+	// (same provider_reference) falls through to ledger.Post, whose
+	// idempotency check applies it idempotently. Run AFTER the lock above
+	// is held (Stage 10.1 PAY-REV-1 S4): READ COMMITTED gives this
+	// statement a fresh snapshot, so a concurrent distinct-reference
+	// reversal that committed while this call queued on the lock is
+	// visible here. IS DISTINCT FROM still counts a reversal row with a
+	// NULL provider reference; LIMIT 1 is sufficient because
+	// INV-PAY-REV-1 (migration 0092) guarantees at most one exists.
+	var existingReversalID uuid.UUID
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM ledger_transactions WHERE reverses_transaction_id = $1
+		           AND (provider_id IS DISTINCT FROM $2 OR provider_tx_id IS DISTINCT FROM $3)
+		 LIMIT 1`,
+		original.LedgerTransactionID, verifiedProviderID, ev.ProviderReference,
+	).Scan(&existingReversalID)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return "", fmt.Errorf("payments: check existing reversal: %w", err)
+	}
+	if err == nil {
+		existingID := existingReversalID
+		return "", &DepositAlreadyReversedError{
+			DepositIntentID:               *original.DepositIntentID,
+			OriginalLedgerTransactionID:   *original.LedgerTransactionID,
+			RejectedReversalReference:     ev.ProviderReference,
+			ExistingReversalTransactionID: &existingID,
+		}
+	}
+
+	intent, err := GetDepositIntentByID(ctx, tx, *original.DepositIntentID)
+	if err != nil {
+		return "", err
+	}
+	accounts, err := ledger.GetOrCreateAccounts(ctx, tx, tenantID,
+		ledger.AccountSpec{WalletID: &intent.WalletID, AccountType: ledger.AccountPlayerCash, AssetCode: original.AssetCode},
+		ledger.AccountSpec{AccountType: ledger.AccountPSPClearing, AssetCode: original.AssetCode},
+	)
+	if err != nil {
+		return "", fmt.Errorf("payments: resolve deposit reversal ledger accounts: %w", err)
+	}
+	cashAccountID, clearingAccountID := accounts[0], accounts[1]
+
+	reversalRef := ev.ProviderReference
+	postResult, err := ledger.Post(ctx, tx, ledger.TransactionInput{
+		TenantID: tenantID, TransactionType: ledger.TxDepositReversal, IdempotencyKey: verifiedProviderID + ":" + reversalRef,
+		ProviderID: &verifiedProviderID, ProviderTxID: &reversalRef, CorrelationID: intent.ID,
+		ReversesTransactionID: original.LedgerTransactionID,
+		Entries: []ledger.EntryInput{
+			{LedgerAccountID: cashAccountID, Direction: ledger.Debit, Amount: amount},
+			{LedgerAccountID: clearingAccountID, Direction: ledger.Credit, Amount: amount},
+		},
+	})
+	if errors.Is(err, ledger.ErrIdempotencyPayloadMismatch) {
+		// This reversal reference is already posted with a different
+		// payload (typically: it reversed a DIFFERENT deposit). Nothing is
+		// posted; the caller gets an integrity failure.
+		return "", fmt.Errorf("%w: post deposit reversal: %w", ErrCallbackPayloadMismatch, err)
+	}
+	if errors.Is(err, ledger.ErrReversalAlreadyExists) {
+		// The S4 re-check above did not catch this (a writer bypassed the
+		// lock, or a vanishingly unlikely timing gap), but the ledger's own
+		// partial unique index still refused the INSERT. Mapped to the
+		// SAME typed sentinel S4 uses, so there is exactly one denial code
+		// path with exactly one shape.
+		var existingID *uuid.UUID
+		var id uuid.UUID
+		if lookupErr := tx.QueryRow(ctx,
+			`SELECT id FROM ledger_transactions
+			  WHERE reverses_transaction_id = $1 AND transaction_type = 'deposit_reversal'
+			  LIMIT 1`,
+			original.LedgerTransactionID,
+		).Scan(&id); lookupErr == nil {
+			existingID = &id
+		}
+		return "", &DepositAlreadyReversedError{
+			DepositIntentID:               *original.DepositIntentID,
+			OriginalLedgerTransactionID:   *original.LedgerTransactionID,
+			RejectedReversalReference:     reversalRef,
+			ExistingReversalTransactionID: existingID,
+		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("payments: post deposit reversal: %w", err)
+	}
+
+	if err := audit.Record(ctx, tx, audit.Entry{
+		TenantID: tenantID, ActorType: audit.ActorSystem, Action: "deposit.reversed",
+		TargetType: "deposit_intent", TargetID: original.DepositIntentID.String(), Outcome: audit.OutcomeSuccess,
+		Metadata: map[string]any{
+			"provider_id": verifiedProviderID, "reversal_provider_reference": reversalRef,
+			"original_ledger_transaction_id": original.LedgerTransactionID.String(),
+			"reversal_ledger_transaction_id": postResult.TransactionID.String(), "amount": amount,
+		},
+	}); err != nil {
+		return "", fmt.Errorf("payments: audit deposit reversal: %w", err)
+	}
+
+	_, duplicate, err := insertReceiptDeduped(ctx, tx, tenantID, verifiedProviderID, ev, DispositionApplied)
+	if err != nil {
+		return "", err
+	}
+	if duplicate {
+		return DispositionDuplicateEffect, nil
+	}
+	return DispositionApplied, nil
 }
 
 // tombstoneExists reports whether a reversal tombstone already occupies
