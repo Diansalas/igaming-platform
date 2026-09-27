@@ -258,3 +258,78 @@ truncate to payment_attempts/payment_provider_events and lets the deny
 trigger on deposit_intents itself fire and refuse the whole statement -
 verified directly via psql before editing the test. The assertion (the
 trigger's own append-only message) is unchanged and unweakened.
+
+================================================================================
+PAYOUT DISPATCH (ADR 0095 T1p/phase-B/phase-C, internal/payments/payout.go +
+payout_sweep.go). Manual, anchored mutations against the private scratch
+database (internal/payments/migration_0101_integration_test.go's harness,
+via depositV2ScratchPool), each reverted to byte-identical source
+(verified via `git diff --stat` / `git status --short` showing no diff)
+before the next one. Environment: Go, TEST_DATABASE_URL/TEST_ADMIN_DATABASE_URL
+against the local CI Postgres. Date: 2026-09-27.
+
+PM-PAYOUT-1: T1p KYC gate removed (ClaimForDispatch's
+`if !decision.Allowed` guarded with `false &&`, so DenyForCompliance is
+never called regardless of the gate's outcome).
+    go test -tags=integration -run TestClaimForDispatch_KYCDeny_NoAttemptRowHoldReleased ./internal/payments/...
+KILLED:
+    payout_dispatch_integration_test.go:203: expected the payout KYC gate
+    to deny (no passed verification)
+Restored: internal/payments/payout.go byte-identical (git diff clean).
+
+PM-PAYOUT-2: T2/T12 re-claim KYC gate removed (gateAndEscalateOnDeny's
+`if decision.Allowed` replaced with `if true`, so a DENY is never
+escalated and the re-claim always proceeds as if allowed) - this is the
+ONE shared function both the T2 (reclaimPayoutCreated) and T12
+(resubmitPayoutAmbiguous) re-claim paths call, so one mutation covers
+both per item 8's "one shared code path" design.
+    go test -tags=integration -run TestSweeper_T2Reclaim_KYCDeny_EscalatesNeverResends ./internal/payments/...
+KILLED:
+    payout_dispatch_integration_test.go:523: expected the attempt to
+    remain created (no resend), got pending
+Restored: internal/payments/payout_sweep.go byte-identical (git diff clean).
+
+PM-PAYOUT-3: provider-reference-invalid parking removed (ApplyPayoutResult's
+`if gr.Class == ErrorClassProviderRefInvalid` guarded with `false &&`, so
+an over-bound provider reference falls through to the ordinary switch
+instead of being parked as disputed).
+    go test -tags=integration -run TestPayoutDispatch_OversizeProviderReference_Parks ./internal/payments/...
+KILLED:
+    payout_dispatch_integration_test.go:352: expected the attempt to be
+    parked as disputed, got ambiguous
+(ErrorClassProviderRefInvalid does not match any of the switch's other
+named cases, so the mutant falls to `default` (ambiguous) rather than
+`succeeded` - the withdrawal itself would have stayed `submitted` either
+way, so the test's own attempt-state assertion is what proves this
+mutant's removal of the dedicated park path, not the withdrawal-state
+assertion above it.)
+Restored: internal/payments/payout.go byte-identical (git diff clean).
+
+PM-PAYOUT-4: payout failed without a definite decline (ApplyPayoutResult's
+ambiguous/default branch mutated to also call `withdrawal.Fail` before
+its normal MarkAmbiguousFromSubmitting - i.e. an ambiguous/timeout outcome
+now fails the withdrawal, violating task item 4).
+    go test -tags=integration -run TestPayoutDispatch_NoDefiniteDeclineNeverFails ./internal/payments/...
+KILLED:
+    payout_dispatch_integration_test.go:383: expected the withdrawal to
+    remain submitted on an ambiguous outcome, got failed
+Restored: internal/payments/payout.go byte-identical (git diff clean).
+
+Not re-tested here (already covered by this file's/PRH-I3's own existing
+mutation suites, reused unmodified by payout dispatch): the payment_attempts
+CAS transitions themselves (ClaimCreatedForSubmission/ResubmitAmbiguous/
+MarkNotSent/ApplyDisputeFromNonTerminal, attempt.go) and
+withdrawal.DenyForCompliance's own Allowed/Operation re-validation
+(withdrawal.go) - both are shared primitives this task's own instruction
+(item 8) says to compose, not re-implement; their own CAS-conflict/guard-
+trigger mutation coverage predates this change and is unmodified by it.
+
+Full-suite confirmation after all four reverts: internal/payments/...
+(-run 'TestSweeper_T2|TestClaimForDispatch|TestPayoutDispatch|TestPayoutEnforcementParams')
+and internal/withdrawal/... both pass under `-tags=integration`; the
+concurrency test (TestPayoutDispatch_NotSent_ReclaimNeverDoubleSends) was
+additionally run with `-race -count=50` and passed. Not yet re-run: the
+full internal/payments/internal/withdrawal/internal/httpserver/internal/kyc
+suites together under `-race` on GitHub CI (CI-BILLING-1 still open per
+prior evidence files in this directory) - only local runs are recorded
+here, per this task's own instruction to record local evidence.
