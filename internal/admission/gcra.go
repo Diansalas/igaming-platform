@@ -51,10 +51,24 @@ func NewGCRALimiter(rate float64, burst, maxKeys int, idleEvict time.Duration, o
 	}
 }
 
-// Allow reports whether a request for key is admitted now. On rejection
-// it returns the caller's suggested Retry-After, clamped to [1s, 60s]
-// (ADR 0097 §5.1).
+// Allow reports whether a request for key is admitted now, using this
+// limiter's configured rate/burst. On rejection it returns the caller's
+// suggested Retry-After, clamped to [1s, 60s] (ADR 0097 §5.1).
 func (g *GCRALimiter) Allow(key string) (admitted bool, retryAfter time.Duration) {
+	return g.AllowWithParams(key, g.rate, g.burst)
+}
+
+// AllowWithParams is Allow with an explicit (rate, burst) instead of this
+// limiter's configured default - it lets one GCRALimiter instance serve
+// several operator overrides (ADR 0097 §9.2: an override is scoped to one
+// (domain, provider_id[, tenant]) key, not the whole domain), while still
+// sharing the same bounded key table, eviction and overflow behaviour.
+// The (rate, burst) used for a given key is whatever the caller passes at
+// the moment the key is FIRST created; a later call with different
+// params does not retroactively rescale an existing key's TAT - overrides
+// are static configuration set once at startup, so this is not reached in
+// practice.
+func (g *GCRALimiter) AllowWithParams(key string, rate float64, burst int) (admitted bool, retryAfter time.Duration) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -66,8 +80,8 @@ func (g *GCRALimiter) Allow(key string) (admitted bool, retryAfter time.Duration
 	}
 
 	now := g.clock.Now()
-	emissionInterval := time.Duration(float64(time.Second) / g.rate)
-	tau := emissionInterval * time.Duration(g.burst-1)
+	emissionInterval := time.Duration(float64(time.Second) / rate)
+	tau := emissionInterval * time.Duration(burst-1)
 
 	prevTAT, present := g.tat[key]
 	if !present || prevTAT.Before(now) {

@@ -3,6 +3,7 @@ package httpserver
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/Diansalas/igaming-platform/internal/apierror"
 	"github.com/Diansalas/igaming-platform/internal/identity"
@@ -23,6 +24,9 @@ type webhookRoute struct {
 	schemeFor func(deps Deps, providerID string) (webhookauth.VerificationScheme, bool)
 	// maxBody bounds the raw body read.
 	maxBody int
+	// domain is this route's ADR 0097 admission domain tag ("payments",
+	// "casino" or "kyc") - fixed by the route, never derived from input.
+	domain webhookDomain
 	// authFailedEvent is the allow-listed auth-failure log event, e.g.
 	// "payment_webhook_auth_failed".
 	authFailedEvent string
@@ -58,6 +62,27 @@ func webhookPreamble(w http.ResponseWriter, r *http.Request, deps Deps, route we
 		return identity.Tenant{}, "", nil, false
 	}
 
+	// ADR 0097 A5: a declared Content-Length over the route's own cap is
+	// rejected WITHOUT reading any byte of the body (T10 ORD-2) - the
+	// IDENTICAL uniform 401/body_too_large response as today, so this is
+	// not a new oracle. A best-effort per-request read deadline is set
+	// regardless (BodyReadTimeout defaults conservatively when admission
+	// is disabled) so a slow/stalled sender cannot hold the goroutine (and,
+	// when admission is enabled, its A4a slot) indefinitely; ignored on a
+	// ResponseWriter that doesn't support it (e.g. httptest.ResponseRecorder
+	// in unit tests) - SetReadDeadline is best-effort exactly like every
+	// other caller of http.NewResponseController in this codebase.
+	if r.ContentLength > 0 && r.ContentLength > int64(route.maxBody) {
+		logWebhookAuthFailure(logger, route.authFailedEvent, r, requestID, webhookauth.ReasonBodyTooLarge, nil, providerID, webhookauth.ValidProviderID(providerID), "", "", 0)
+		apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")
+		return identity.Tenant{}, "", nil, false
+	}
+	bodyReadTimeout := 10 * time.Second
+	if deps.webhookAdmission != nil {
+		bodyReadTimeout = deps.webhookAdmission.settings.BodyReadTimeout
+	}
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(bodyReadTimeout))
+
 	pre, ok := webhookauth.CheckInboundPreamble(providerID, r.Header, r.Body, route.maxBody, func(id string) (webhookauth.VerificationScheme, bool) {
 		if route.schemeFor == nil {
 			return nil, false
@@ -71,7 +96,25 @@ func webhookPreamble(w http.ResponseWriter, r *http.Request, deps Deps, route we
 	}
 	body = pre.Body
 
-	t, err := identity.GetTenantBySlug(r.Context(), deps.DB, tenantSlug)
+	// ADR 0097 A4b/§5.3: GetTenantBySlug is gated by the pre-verification
+	// DB bulkhead, keyed exactly like the A3 preKey. A gate timeout maps to
+	// 503 (capacity), never the uniform 401 (auth) - errDBGateUnavailable is
+	// distinguished below.
+	tenantKey, providerKey := unknownComponent, unknownComponent
+	if deps.webhookAdmission != nil {
+		tenantKey, providerKey = deps.webhookAdmission.preAuthKeys(tenantSlug, providerID, func(id string) bool {
+			if route.schemeFor == nil {
+				return false
+			}
+			_, ok := route.schemeFor(deps, id)
+			return ok
+		})
+	}
+	t, err := deps.webhookAdmission.gatedTenantLookup(r.Context(), deps.DB, route.domain, tenantKey, providerKey, tenantSlug)
+	if errors.Is(err, errDBGateUnavailable) {
+		apierror.Write(w, requestID, apierror.CodeUnavailable, "service temporarily unavailable; retry later")
+		return identity.Tenant{}, "", nil, false
+	}
 	if errors.Is(err, identity.ErrNotFound) {
 		logWebhookAuthFailure(logger, route.authFailedEvent, r, requestID, webhookauth.ReasonTenantUnknown, nil, providerID, true, "", "", len(body))
 		apierror.Write(w, requestID, apierror.CodeUnauthorized, "callback rejected")

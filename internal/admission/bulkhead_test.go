@@ -7,40 +7,40 @@ import (
 )
 
 func TestBulkheadTryAcquireCaps(t *testing.T) {
-	b := NewBulkhead(3, 2, 1, "_unknown")
-	r1, ok := b.TryAcquire("a")
+	b := NewBulkhead(3)
+	r1, ok := b.TryAcquire("a", 2)
 	if !ok {
 		t.Fatal("first acquire for a must succeed")
 	}
-	r2, ok := b.TryAcquire("a")
+	r2, ok := b.TryAcquire("a", 2)
 	if !ok {
 		t.Fatal("second acquire for a (within perKeyCap=2) must succeed")
 	}
-	if _, ok := b.TryAcquire("a"); ok {
+	if _, ok := b.TryAcquire("a", 2); ok {
 		t.Fatal("third acquire for a must fail (perKeyCap=2)")
 	}
-	if _, ok := b.TryAcquire("_unknown"); !ok {
+	if _, ok := b.TryAcquire("_unknown", 1); !ok {
 		t.Fatal("first acquire for _unknown (within unknownCap=1) must succeed")
 	}
-	if _, ok := b.TryAcquire("_unknown"); ok {
+	if _, ok := b.TryAcquire("_unknown", 1); ok {
 		t.Fatal("second acquire for _unknown must fail (unknownCap=1)")
 	}
 	// global cap 3 now fully consumed (2 for a, 1 for _unknown); a
 	// DIFFERENT key must also fail even though its own per-key cap isn't
 	// hit, because the global cap governs first.
-	if _, ok := b.TryAcquire("b"); ok {
+	if _, ok := b.TryAcquire("b", 2); ok {
 		t.Fatal("global cap must be enforced across keys")
 	}
 	r1()
-	if _, ok := b.TryAcquire("b"); !ok {
+	if _, ok := b.TryAcquire("b", 2); !ok {
 		t.Fatal("releasing a slot must free the global cap for another key")
 	}
 	r2()
 }
 
 func TestBulkheadReleaseIdempotent(t *testing.T) {
-	b := NewBulkhead(1, 1, 1, "_unknown")
-	release, ok := b.TryAcquire("a")
+	b := NewBulkhead(1)
+	release, ok := b.TryAcquire("a", 1)
 	if !ok {
 		t.Fatal("acquire must succeed")
 	}
@@ -51,7 +51,7 @@ func TestBulkheadReleaseIdempotent(t *testing.T) {
 	if global != 0 || forKey != 0 {
 		t.Fatalf("double release corrupted counts: global=%d forKey=%d", global, forKey)
 	}
-	if _, ok := b.TryAcquire("a"); !ok {
+	if _, ok := b.TryAcquire("a", 1); !ok {
 		t.Fatal("slot must be available exactly once after idempotent release")
 	}
 }
@@ -61,15 +61,15 @@ func TestBulkheadReleaseIdempotent(t *testing.T) {
 // assertions").
 func TestBulkheadAcquireWaitsAndTimesOut(t *testing.T) {
 	clock := NewFakeClock(time.Unix(0, 0))
-	b := NewBulkhead(1, 1, 1, "_unknown")
-	release, ok := b.TryAcquire("a")
+	b := NewBulkhead(1)
+	release, ok := b.TryAcquire("a", 1)
 	if !ok {
 		t.Fatal("first acquire must succeed")
 	}
 
 	done := make(chan bool, 1)
 	go func() {
-		_, ok := b.Acquire("a", clock, 2*time.Second)
+		_, ok := b.Acquire("a", 1, clock, 2*time.Second)
 		done <- ok
 	}()
 
@@ -87,15 +87,15 @@ func TestBulkheadAcquireWaitsAndTimesOut(t *testing.T) {
 // slot frees, without waiting for its full timeout.
 func TestBulkheadAcquireWakesOnRelease(t *testing.T) {
 	clock := NewFakeClock(time.Unix(0, 0))
-	b := NewBulkhead(1, 1, 1, "_unknown")
-	release, ok := b.TryAcquire("a")
+	b := NewBulkhead(1)
+	release, ok := b.TryAcquire("a", 1)
 	if !ok {
 		t.Fatal("first acquire must succeed")
 	}
 
 	done := make(chan bool, 1)
 	go func() {
-		_, ok := b.Acquire("a", clock, time.Hour)
+		_, ok := b.Acquire("a", 1, clock, time.Hour)
 		done <- ok
 	}()
 	waitForTimerRegistered(t, clock)
@@ -130,7 +130,7 @@ func waitForTimerRegistered(t *testing.T, clock *FakeClock) {
 // that InUse never goes negative (T8).
 func TestBulkheadRaces(t *testing.T) {
 	const globalCap = 8
-	b := NewBulkhead(globalCap, 4, 2, "_unknown")
+	b := NewBulkhead(globalCap)
 	var wg sync.WaitGroup
 	keys := []string{"a", "b", "c", "_unknown"}
 	for i := 0; i < 200; i++ {
@@ -138,7 +138,7 @@ func TestBulkheadRaces(t *testing.T) {
 		key := keys[i%len(keys)]
 		go func(key string) {
 			defer wg.Done()
-			if release, ok := b.TryAcquire(key); ok {
+			if release, ok := b.TryAcquire(key, 4); ok {
 				release()
 				release() // double release under race
 			}

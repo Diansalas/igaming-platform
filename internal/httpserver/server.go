@@ -8,6 +8,7 @@
 package httpserver
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"time"
@@ -298,12 +299,79 @@ type Deps struct {
 	// deliberately: a caller configures the POLICY (above), never hands in
 	// its own limiter instance.
 	authLimiter *fixedWindowLimiter
+
+	// WebhookAdmission is ADR 0097's (PAYWH-RL-1) transport-layer webhook
+	// admission/rate-limiting configuration for the three provider-facing
+	// webhook routes. The zero value (Enabled: false) is a complete no-op -
+	// every existing test/deployment that doesn't set this field keeps
+	// today's behaviour exactly. cmd/platform-api/main.go maps
+	// config.WebhookAdmissionConfig into this field by field (internal/
+	// httpserver never imports internal/config, per architect review AC1
+	// "internal/config produces plain values; httpserver maps them to
+	// admission types").
+	WebhookAdmission WebhookAdmissionSettings
+
+	// webhookAdmission is the constructed runtime (limiters, bulkheads,
+	// tenant directory) New builds from WebhookAdmission. Unexported: a
+	// caller configures policy, never hands in its own runtime. Exposed to
+	// cmd/platform-api/main.go (for the synchronous initial directory load,
+	// the background refresher, and /readyz gating) via WebhookAdmissionRuntime,
+	// below.
+	webhookAdmission *webhookAdmissionRuntime
+}
+
+// WebhookAdmissionRuntime is the subset of the constructed ADR 0097
+// runtime cmd/platform-api/main.go needs: the synchronous initial
+// directory load (§7), the background refresher (wired to the same
+// shutdown context as http.Server.Shutdown - devops condition 2), and
+// readiness gating. New returns this alongside the handler so main.go
+// never constructs its own, second copy of the admission state.
+type WebhookAdmissionRuntime struct {
+	rt *webhookAdmissionRuntime
+}
+
+// LoadDirectory performs the synchronous initial tenant-directory load.
+// No-op if admission is disabled.
+func (r WebhookAdmissionRuntime) LoadDirectory(ctx context.Context) error {
+	return r.rt.LoadDirectory(ctx)
+}
+
+// RunDirectoryRefresh runs the background refresher until ctx is
+// cancelled. Call this in its own goroutine. No-op if admission is
+// disabled.
+func (r WebhookAdmissionRuntime) RunDirectoryRefresh(ctx context.Context) {
+	r.rt.RunDirectoryRefresh(ctx)
+}
+
+// DirectoryReady reports whether the tenant directory has completed at
+// least one successful load (used by /readyz). Always true if admission
+// is disabled (nothing to gate on).
+func (r WebhookAdmissionRuntime) DirectoryReady() bool {
+	d := r.rt.Directory()
+	if d == nil {
+		return r.rt == nil // disabled -> nothing to wait for; enabled-but-no-pool -> not ready
+	}
+	return d.Loaded()
 }
 
 // New builds the fully-wired http.Handler for platform-api: global
 // middleware (request id -> logging -> panic recovery -> OTel span) then
-// the route table.
+// the route table. Callers that need the ADR 0097 webhook-admission
+// runtime (the synchronous initial directory load, its background
+// refresher, and /readyz gating - cmd/platform-api/main.go) use
+// NewWithAdmission instead; New itself is unchanged so every existing
+// caller/test keeps compiling and behaving identically.
 func New(deps Deps) http.Handler {
+	h, _ := NewWithAdmission(deps)
+	return h
+}
+
+// NewWithAdmission is New, additionally returning the constructed webhook-
+// admission runtime so the caller can perform the synchronous initial
+// tenant-directory load, start its background refresher (wired to the
+// caller's own shutdown context - devops condition 2), and gate /readyz
+// on it.
+func NewWithAdmission(deps Deps) (http.Handler, WebhookAdmissionRuntime) {
 	mux := http.NewServeMux()
 
 	// Stage 9 §21: one limiter shared by every rate-limited route, built
@@ -311,8 +379,15 @@ func New(deps Deps) http.Handler {
 	// runs without it. See ratelimit.go.
 	deps.authLimiter = newFixedWindowLimiter(rateLimitWindow, deps.AuthRateLimitPerMinute, deps.TrustedProxyCount)
 
+	// ADR 0097 PRH-I4: built once, shared by every webhook route. nil
+	// (WebhookAdmission.Enabled == false, the zero value) makes every
+	// admission call in this package a no-op, preserving pre-PRH-I4
+	// behaviour exactly.
+	deps.webhookAdmission = newWebhookAdmission(deps.WebhookAdmission, deps.DB, deps.Logger)
+	admissionRuntime := WebhookAdmissionRuntime{rt: deps.webhookAdmission}
+
 	mux.HandleFunc("GET /healthz", livezHandler)
-	mux.HandleFunc("GET /readyz", readyzHandler(deps.DB))
+	mux.HandleFunc("GET /readyz", readyzHandler(deps.DB, admissionRuntime))
 
 	registerIdentityRoutes(mux, deps)
 	registerFinancialRoutes(mux, deps)
@@ -334,5 +409,5 @@ func New(deps Deps) http.Handler {
 		requestIDMiddleware,
 		loggingMiddleware(deps.Logger),
 		recoverMiddleware(deps.Logger),
-	)
+	), admissionRuntime
 }

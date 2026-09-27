@@ -27,7 +27,14 @@ func livezHandler(w http.ResponseWriter, r *http.Request) {
 // checked against the database, since every foundation endpoint depends
 // on it. Used by orchestrators to gate traffic routing, not to decide
 // whether to restart the process.
-func readyzHandler(db HealthChecker) http.HandlerFunc {
+//
+// ADR 0097 §7 (PRH-I4): also not-ready until the webhook tenant directory
+// has completed its first successful load - a webhook route that ran
+// before that would have to key every request "_unknown", which this ADR
+// treats as a fail-closed startup state, not a normal one. admission is
+// always "ready" on this axis when the admission layer itself is
+// disabled (WebhookAdmissionRuntime.DirectoryReady()'s own doc comment).
+func readyzHandler(db HealthChecker, admission WebhookAdmissionRuntime) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()
@@ -36,6 +43,11 @@ func readyzHandler(db HealthChecker) http.HandlerFunc {
 		if err := db.HealthCheck(ctx); err != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "unavailable", "reason": "database unreachable"})
+			return
+		}
+		if !admission.DirectoryReady() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "unavailable", "reason": "webhook tenant directory not loaded"})
 			return
 		}
 		w.WriteHeader(http.StatusOK)

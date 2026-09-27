@@ -8,17 +8,22 @@ import (
 
 // Bulkhead is the one counting-semaphore primitive ADR 0097 §5.2 uses for
 // A4a (webhook in-flight), A4b (the pre-verification DB gate) and B2 (the
-// per-tenant domain-transaction cap): a global cap G, a per-key cap K<=G,
-// and a separate cap U for one designated "unknown" key. Per-key counters
-// exist only while > 0 (bounded cardinality <= G). Release is idempotent
-// (sync.Once per acquisition) - a double Release is a no-op, never a
-// negative count.
+// per-tenant domain-transaction cap): a global cap G and a per-key cap
+// chosen by the caller at acquisition time (<=G is the caller's
+// responsibility - ADR 0097 §9.3 validates this at config load). The
+// per-call cap parameter is what lets one Bulkhead instance serve several
+// domains that each need their own "known key" vs "_unknown" cap (ADR
+// 0097 §4.2/§4.4): the caller passes InFlightPerKey for a known preKey and
+// InFlightUnknown for a domain's collapsed "_unknown" key - the Bulkhead
+// itself only ever enforces "this key's own count vs the cap given for
+// THIS call" plus the shared global count.
+//
+// Per-key counters exist only while > 0 (bounded cardinality <= number of
+// concurrently-held keys, itself <= G). Release is idempotent (sync.Once
+// per acquisition) - a double Release is a no-op, never a negative count.
 type Bulkhead struct {
-	mu         sync.Mutex
-	globalCap  int
-	perKeyCap  int
-	unknownCap int
-	unknownKey string
+	mu        sync.Mutex
+	globalCap int
 
 	global int
 	perKey map[string]int
@@ -30,30 +35,16 @@ type Bulkhead struct {
 	highWater int64 // atomic high-water mark of concurrently-held slots
 }
 
-// NewBulkhead constructs a Bulkhead. globalCap bounds total concurrently
-// held slots; perKeyCap bounds any one key (including derived pre-auth
-// keys); unknownCap separately bounds unknownKey (ADR 0097 §4.2's single
-// shared "_unknown" bucket per domain). unknownKey == "" disables the
-// separate unknown cap (every key uses perKeyCap).
-func NewBulkhead(globalCap, perKeyCap, unknownCap int, unknownKey string) *Bulkhead {
-	return &Bulkhead{
-		globalCap: globalCap, perKeyCap: perKeyCap, unknownCap: unknownCap, unknownKey: unknownKey,
-		perKey: make(map[string]int), notify: make(chan struct{}),
-	}
+// NewBulkhead constructs a Bulkhead with the given global cap.
+func NewBulkhead(globalCap int) *Bulkhead {
+	return &Bulkhead{globalCap: globalCap, perKey: make(map[string]int), notify: make(chan struct{})}
 }
 
-func (b *Bulkhead) capFor(key string) int {
-	if b.unknownKey != "" && key == b.unknownKey {
-		return b.unknownCap
-	}
-	return b.perKeyCap
-}
-
-func (b *Bulkhead) tryAcquireLocked(key string) bool {
+func (b *Bulkhead) tryAcquireLocked(key string, perKeyCap int) bool {
 	if b.global >= b.globalCap {
 		return false
 	}
-	if b.perKey[key] >= b.capFor(key) {
+	if b.perKey[key] >= perKeyCap {
 		return false
 	}
 	b.global++
@@ -89,10 +80,11 @@ func (b *Bulkhead) releaseFunc(key string) func() {
 }
 
 // TryAcquire is A4a's non-blocking acquire: it returns ok=false
-// immediately if the global or per-key cap is exhausted, never waiting.
-func (b *Bulkhead) TryAcquire(key string) (release func(), ok bool) {
+// immediately if the global cap or this key's own perKeyCap is
+// exhausted, never waiting.
+func (b *Bulkhead) TryAcquire(key string, perKeyCap int) (release func(), ok bool) {
 	b.mu.Lock()
-	ok = b.tryAcquireLocked(key)
+	ok = b.tryAcquireLocked(key, perKeyCap)
 	b.mu.Unlock()
 	if !ok {
 		return nil, false
@@ -104,11 +96,11 @@ func (b *Bulkhead) TryAcquire(key string) (release func(), ok bool) {
 // a slot. It returns ok=false if wait elapses first. Waiting never holds
 // mu, and never holds any resource the caller isn't itself responsible
 // for (ADR 0097 §5.2 "waiting is goroutine time only").
-func (b *Bulkhead) Acquire(key string, clock Clock, wait time.Duration) (release func(), ok bool) {
+func (b *Bulkhead) Acquire(key string, perKeyCap int, clock Clock, wait time.Duration) (release func(), ok bool) {
 	deadline := clock.Now().Add(wait)
 	for {
 		b.mu.Lock()
-		if b.tryAcquireLocked(key) {
+		if b.tryAcquireLocked(key, perKeyCap) {
 			b.mu.Unlock()
 			return b.releaseFunc(key), true
 		}
